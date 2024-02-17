@@ -1,0 +1,12 @@
+package("ext_eigen")
+    set_sourcedir(path.join(os.scriptdir(), "eigen"))
+    set_kind("library", {headeronly = true})
+    add_deps("cmake")
+    add_includedirs("include/eigen3")
+    on_install(function(package)
+        local configs = {}
+        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
+        table.insert(configs, "-DBUILD_TESTING=OFF")
+        import("package.tools.cmake").install(package, configs)
+    end)
+package_end()

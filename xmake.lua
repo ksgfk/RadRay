@@ -34,4 +34,5 @@ rule_end()
 
 add_rules("mode.debug", "mode.release")
 
+includes("ext")
 includes("src")
