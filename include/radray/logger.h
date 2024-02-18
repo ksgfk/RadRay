@@ -29,6 +29,11 @@ void LogWarn(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
 template <typename... Args>
 void LogError(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
     GetDefaultLogger().error(fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogAbort(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
+    GetDefaultLogger().error(fmt, std::forward<Args>(args)...);
     std::abort();
 }
 
@@ -42,12 +47,14 @@ void LogError(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
 #define RADRAY_LOG_DEBUG_AT_SRC(fmt, ...) RADRAY_LOG_DEBUG("[{}:{}] " fmt, __FILE__, __LINE__ __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_LOG_INFO_AT_SRC(fmt, ...) RADRAY_LOG_INFO("[{}:{}] " fmt, __FILE__, __LINE__ __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_LOG_WARN_AT_SRC(fmt, ...) RADRAY_LOG_WARN("[{}:{}] " fmt, __FILE__, __LINE__ __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ERROR(fmt, ...) RADRAY_LOG_ERROR(fmt "\n  at {}:{}" __VA_OPT__(, ) __VA_ARGS__, __FILE__, __LINE__)
+#define RADRAY_LOG_ERROR_AT_SRC(fmt, ...) RADRAY_LOG_ERROR("[{}:{}] " fmt, __FILE__, __LINE__ __VA_OPT__(, ) __VA_ARGS__)
+
+#define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(fmt "\n  at {}:{}" __VA_OPT__(, ) __VA_ARGS__, __FILE__, __LINE__)
 
 #define RADRAY_ASSERT(x, f, ...)                                    \
     do {                                                            \
         if (!(x)) {                                                 \
             auto msg = ::fmt::format(f __VA_OPT__(, ) __VA_ARGS__); \
-            RADRAY_ERROR("assertion '{}' failed: {}", #x, msg);     \
+            RADRAY_ABORT("assertion '{}' failed: {}", #x, msg);     \
         }                                                           \
     } while (false)

@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+ext/DirectXTK12/d3dx12.h linguist-vendored
