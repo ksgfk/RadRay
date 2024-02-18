@@ -1,0 +1,6 @@
+target("test_logger")
+    add_rules("radray_basic_setting")
+    set_kind("binary")
+    add_files("test_logger.cpp")
+    add_deps("radray_core")
+target_end()
