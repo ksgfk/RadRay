@@ -46,6 +46,58 @@ Device::Device() noexcept {
         std::wstring s{desc.Description};
         RADRAY_LOG_INFO("d3d12 select device: {}", Utf8ToString(s));
     }
+    globalResHeap = std::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 500000, false);
+
+    staticSamplerDescs.reserve(16);
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            D3D12_SAMPLER_DESC v{};
+            v.MaxAnisotropy = 0;
+            switch (j) {
+                case 0:
+                    v.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                    break;
+                case 1:
+                    v.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+                    break;
+                case 2:
+                    v.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                    break;
+                case 3:
+                    v.MaxAnisotropy = 16;
+                    v.Filter = D3D12_FILTER_ANISOTROPIC;
+                    break;
+                default: RADRAY_ABORT("impossible"); break;
+            }
+            D3D12_TEXTURE_ADDRESS_MODE address = [&] {
+                switch (i) {
+                    case 0:
+                        return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                    case 1:
+                        return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+                    case 2:
+                        return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+                    default:
+                        v.BorderColor[0] = 0;
+                        v.BorderColor[1] = 0;
+                        v.BorderColor[2] = 0;
+                        v.BorderColor[3] = 0;
+                        return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+                }
+            }();
+            v.AddressU = address;
+            v.AddressV = address;
+            v.AddressW = address;
+            v.MipLODBias = 0;
+            v.MinLOD = 0;
+            v.MaxLOD = 16;
+            staticSamplerDescs.emplace_back(v);
+        }
+    }
+    globalSamplerHeap = std::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, staticSamplerDescs.size(), true);
+    for (size_t i = 0; i < staticSamplerDescs.size(); i++) {
+        device->CreateSampler(&staticSamplerDescs[i], globalSamplerHeap->HandleCPU(i));
+    }
 }
 
 }  // namespace radray::d3d12

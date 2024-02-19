@@ -1,6 +1,10 @@
 #pragma once
 
+#include <vector>
+#include <memory>
+
 #include <radray/d3d12/utility.h>
+#include <radray/d3d12/descriptor_heap.h>
 
 namespace radray::d3d12 {
 
@@ -17,6 +21,9 @@ public:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
     ComPtr<IDXGIFactory6> dxgiFactory;
+    std::unique_ptr<DescriptorHeap> globalResHeap;
+    std::unique_ptr<DescriptorHeap> globalSamplerHeap;
+    std::vector<D3D12_SAMPLER_DESC> staticSamplerDescs;
 };
 
 }  // namespace radray::d3d12
