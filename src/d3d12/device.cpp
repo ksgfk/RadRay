@@ -98,6 +98,7 @@ Device::Device() noexcept {
     for (size_t i = 0; i < staticSamplerDescs.size(); i++) {
         device->CreateSampler(&staticSamplerDescs[i], globalSamplerHeap->HandleCPU(i));
     }
+    shaderCompiler = std::make_unique<ShaderCompiler>();
 }
 
 }  // namespace radray::d3d12

@@ -5,6 +5,7 @@
 
 #include <radray/d3d12/utility.h>
 #include <radray/d3d12/descriptor_heap.h>
+#include <radray/d3d12/shader_compiler.h>
 
 namespace radray::d3d12 {
 
@@ -24,6 +25,7 @@ public:
     std::unique_ptr<DescriptorHeap> globalResHeap;
     std::unique_ptr<DescriptorHeap> globalSamplerHeap;
     std::vector<D3D12_SAMPLER_DESC> staticSamplerDescs;
+    std::unique_ptr<ShaderCompiler> shaderCompiler;
 };
 
 }  // namespace radray::d3d12

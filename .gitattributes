@@ -2,3 +2,8 @@
 * text=auto
 
 ext/DirectXTK12/d3dx12.h linguist-vendored
+
+ext/dxc/inc/d3d12shader.h linguist-vendored
+ext/dxc/inc/dxcapi.h linguist-vendored
+ext/dxc/inc/dxcerrors.h linguist-vendored
+ext/dxc/inc/dxcisense.h linguist-vendored
