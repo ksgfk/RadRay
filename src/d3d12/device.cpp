@@ -46,8 +46,8 @@ Device::Device() noexcept {
         std::wstring s{desc.Description};
         RADRAY_LOG_INFO("d3d12 select device: {}", Utf8ToString(s));
     }
+    globalAlloc = IGpuHeapAllocator::MakeDefaultAllocator(this);
     globalResHeap = std::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 500000, false);
-
     staticSamplerDescs.reserve(16);
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {

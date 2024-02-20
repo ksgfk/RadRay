@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <radray/d3d12/utility.h>
 
 namespace radray::d3d12 {
@@ -7,36 +8,26 @@ namespace radray::d3d12 {
 class Device;
 class IGpuHeapAllocator;
 
-class GpuHeapAllocation {
+struct GpuHeapInfo {
+    ID3D12Heap* heap;
+    uint64 offset;
+};
+
+class IGpuHeapAllocation {
 public:
-    ~GpuHeapAllocation() noexcept;
+    virtual ~IGpuHeapAllocation() noexcept = default;
 
-private:
-    GpuHeapAllocation(IGpuHeapAllocator* alloc, uint64 handle) noexcept;
-
-    IGpuHeapAllocator* _alloc;
-    uint64 _handle;
-
-    friend class IGpuHeapAllocator;
+    virtual GpuHeapInfo GetHeap() noexcept = 0;
 };
 
 class IGpuHeapAllocator {
 public:
     virtual ~IGpuHeapAllocator() noexcept = default;
 
-    virtual GpuHeapAllocation AllocBufferHeap(
-        Device* device,
-        uint64_t byteSize,
-        D3D12_HEAP_TYPE heapType,
-        D3D12_HEAP_FLAGS extraFlags = D3D12_HEAP_FLAG_NONE) = 0;
+    virtual std::shared_ptr<IGpuHeapAllocation> AllocBufferHeap(uint64_t byteSize, D3D12_HEAP_TYPE heapType, D3D12_HEAP_FLAGS extraFlags = D3D12_HEAP_FLAG_NONE) noexcept = 0;
+    virtual std::shared_ptr<IGpuHeapAllocation> AllocTextureHeap(uint64_t byteSize, bool isRenderTexture, D3D12_HEAP_FLAGS extraFlags = D3D12_HEAP_FLAG_NONE) noexcept = 0;
 
-    virtual GpuHeapAllocation AllocTextureHeap(
-        Device* device,
-        uint64_t byteSize,
-        bool isRenderTexture,
-        D3D12_HEAP_FLAGS extraFlags = D3D12_HEAP_FLAG_NONE) = 0;
-
-    virtual void FreeHeap(GpuHeapAllocation& alloc) = 0;
+    static std::unique_ptr<IGpuHeapAllocator> MakeDefaultAllocator(Device* device) noexcept;
 };
 
 class Resource {

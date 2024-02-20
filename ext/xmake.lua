@@ -22,3 +22,13 @@ package("ext_spdlog")
         import("package.tools.cmake").install(package, configs)
     end)
 package_end()
+
+package("ext_d3d12ma")
+    set_sourcedir(path.join(os.scriptdir(), "D3D12MemoryAllocator"))
+    add_deps("cmake")
+    on_install(function(package)
+        local configs = {}
+        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
+        import("package.tools.cmake").install(package, configs)
+    end)
+package_end()

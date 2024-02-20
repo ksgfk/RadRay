@@ -41,6 +41,10 @@ constexpr uint64 CalcConstantBufferByteSize(uint64 byteSize) noexcept {
     return (byteSize + (D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1)) & ~(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1);
 }
 
+constexpr uint64 CalcPlacedOffsetAlignment(uint64 offset) {
+    return (offset + (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT - 1)) & ~(D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT - 1);
+}
+
 const char* GetErrorName(HRESULT hr) noexcept;
 
 #ifndef ThrowIfFailed

@@ -1,3 +1,5 @@
+add_requires("ext_d3d12ma", _radray_default_require_config())
+
 target("radray_d3d12")
     add_rules("radray_basic_setting")
     set_kind("static")
@@ -5,6 +7,7 @@ target("radray_d3d12")
     add_files("*.cpp")
     add_deps("radray_core")
     add_syslinks("dxgi", "d3d12")
+    add_packages("ext_d3d12ma", {public = true})
     on_load(function(target) 
         local lib_dir = path.join(os.projectdir(), "ext", "dxc", "lib")
         local inc_dir = path.join(os.projectdir(), "ext", "dxc", "inc")
