@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_map>
+
 #include <radray/d3d12/shader.h>
 
 namespace radray::d3d12 {
@@ -18,6 +20,16 @@ struct RasterPipelineStateInfo {
 static_assert(std::is_trivially_copyable_v<RasterPipelineStateInfo>, "raster pso info must be trivially copyable");
 static_assert(std::is_standard_layout_v<RasterPipelineStateInfo>, "raster pso info must be standard layout");
 
+struct RasterPipelineStateInfoHash {
+    size_t operator()(const RasterPipelineStateInfo& v) const noexcept;
+};
+
+struct RasterPipelineStateInfoEqual {
+    bool operator()(const RasterPipelineStateInfo& l, const RasterPipelineStateInfo& r) const noexcept;
+};
+
+using PsoMap = std::unordered_map<RasterPipelineStateInfo, ComPtr<ID3D12PipelineState>, RasterPipelineStateInfoHash, RasterPipelineStateInfoEqual>;
+
 class RasterShader : public Shader {
 public:
     ~RasterShader() noexcept override = default;
@@ -26,6 +38,7 @@ public:
     std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
     std::vector<uint8> vertexBinary;
     std::vector<uint8> pixelBinary;
+    PsoMap psoCache;
 };
 
 }  // namespace radray::d3d12
