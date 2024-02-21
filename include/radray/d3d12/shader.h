@@ -9,10 +9,10 @@ enum class ShaderVariableType {
     ConstantBuffer,
     StructuredBuffer,
     RWStructuredBuffer,
+    SamplerHeap,
     CBVBufferHeap,
     SRVBufferHeap,
     UAVBufferHeap,
-    SamplerHeap,
     SRVTextureHeap,
     UAVTextureHeap
 };
@@ -30,16 +30,6 @@ public:
 
 public:
     std::vector<ShaderProperty> properties;
-};
-
-class RasterShader : public Shader {
-public:
-    ~RasterShader() noexcept override = default;
-
-public:
-    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
-    std::vector<uint8> vertBinary;
-    std::vector<uint8> pixelBinary;
 };
 
 }  // namespace radray::d3d12
