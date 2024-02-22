@@ -68,3 +68,25 @@ package("ext_xxhash")
         assert(package:has_cfuncs("XXH_versionNumber", {includes = "xxhash.h"}))
     end)
 package_end()
+
+package("ext_glfw")
+    set_sourcedir(path.join(os.scriptdir(), "glfw"))
+    if is_plat("macosx") then
+        add_frameworks("Cocoa", "IOKit")
+    elseif is_plat("windows") then
+        add_syslinks("user32", "shell32", "gdi32")
+    elseif is_plat("linux") then
+        add_deps("libx11", "libxrandr", "libxrender", "libxinerama", "libxfixes", "libxcursor", "libxi", "libxext")
+        add_syslinks("dl", "pthread")
+        add_defines("_GLFW_X11")
+    end
+    add_deps("cmake")
+    on_install(function(package)
+        local configs = {}
+        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
+        table.insert(configs, "-DGLFW_BUILD_EXAMPLES=OFF")
+        table.insert(configs, "-DGLFW_BUILD_TESTS=OFF")
+        table.insert(configs, "-DBUILD_SHARED_LIBS=OFF")
+        import("package.tools.cmake").install(package, configs)
+    end)
+package_end()
