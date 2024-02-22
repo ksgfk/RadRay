@@ -5,6 +5,8 @@
 
 namespace radray::d3d12 {
 
+class Device;
+
 enum class ShaderVariableType {
     ConstantBuffer,
     StructuredBuffer,
@@ -26,9 +28,11 @@ struct ShaderProperty {
 
 class Shader {
 public:
+    Shader(Device* device) noexcept;
     virtual ~Shader() noexcept = default;
 
 public:
+    Device* device;
     std::vector<ShaderProperty> properties;
 };
 

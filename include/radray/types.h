@@ -28,5 +28,21 @@ struct ArrayTrait<T[N]> {
 template <typename T>
 requires(std::is_bounded_array_v<T>)
 constexpr auto array_length_v = ArrayTrait<T>::Length;
+template <typename T>
+requires(std::is_bounded_array_v<T>)
+constexpr auto ArrayLength(const T& arr) { return ArrayTrait<T>::Length; }
+template <typename T>
+requires(std::is_bounded_array_v<T>)
+constexpr auto ArrayFirst(const T& arr) {
+    static_assert(ArrayTrait<T>::Length != 0, "array length cannot be 0");
+    return &arr[0];
+}
+template <typename T>
+requires(std::is_bounded_array_v<T>)
+constexpr auto ArrayLast(const T& arr) {
+    constexpr auto length = ArrayTrait<T>::Length;
+    static_assert(length != 0, "array length cannot be 0");
+    return &arr[length - 1];
+}
 
 }  // namespace radray

@@ -6,8 +6,38 @@
 
 namespace radray::d3d12 {
 
+enum class InputElementSemantic {
+    POSITION,
+    NORMAL,
+    TEXCOORD,
+    TANGENT,
+    COLOR,
+    PSIZE,
+    BINORMAL,
+    BLENDINDICES,
+    BLENDWEIGHT,
+    POSITIONT,
+    FOG,
+    TESSFACTOR
+};
+
+const char* EnumSemanticToString(InputElementSemantic e) noexcept;
+
+struct InputElementInfo {
+    InputElementSemantic Semantic;
+    uint32 SemanticIndex;
+    DXGI_FORMAT Format;
+    uint32 InputSlot;
+    uint32 AlignedByteOffset;
+    D3D12_INPUT_CLASSIFICATION InputSlotClass;
+    uint32 InstanceDataStepRate;
+};
+
 struct RasterPipelineStateInfo {
+    static constexpr size_t MaxInputLayout = 16;
+
     D3D12_BLEND_DESC BlendState;
+    uint32 SampleMask;
     D3D12_RASTERIZER_DESC RasterizerState;
     D3D12_DEPTH_STENCIL_DESC DepthStencilState;
     D3D12_PRIMITIVE_TOPOLOGY_TYPE PrimitiveTopologyType;
@@ -15,6 +45,8 @@ struct RasterPipelineStateInfo {
     DXGI_FORMAT RtvFormats[8];
     DXGI_FORMAT DSVFormat;
     DXGI_SAMPLE_DESC SampleDesc;
+    uint32 NumInputs;
+    InputElementInfo InputLayouts[MaxInputLayout];
 };
 
 static_assert(std::is_trivially_copyable_v<RasterPipelineStateInfo>, "raster pso info must be trivially copyable");
@@ -32,12 +64,15 @@ using PsoMap = std::unordered_map<RasterPipelineStateInfo, ComPtr<ID3D12Pipeline
 
 class RasterShader : public Shader {
 public:
+    RasterShader(Device* device) noexcept;
     ~RasterShader() noexcept override = default;
 
+    ComPtr<ID3D12PipelineState> GetOrCreatePso(const RasterPipelineStateInfo&) noexcept;
+
 public:
-    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
-    std::vector<uint8> vertexBinary;
-    std::vector<uint8> pixelBinary;
+    ComPtr<ID3D12RootSignature> rootSig;
+    std::vector<uint8> vsBinary;
+    std::vector<uint8> psBinary;
     PsoMap psoCache;
 };
 
