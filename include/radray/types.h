@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <type_traits>
 
+#include <tuple>
+
 namespace radray {
 
 using uint8 = std::uint8_t;
@@ -44,5 +46,47 @@ constexpr auto ArrayLast(const T& arr) {
     static_assert(length != 0, "array length cannot be 0");
     return &arr[length - 1];
 }
+
+template <typename... Args>
+struct has_rvalue_reference {
+    static constexpr bool value = false;
+};
+template <typename T, typename... Args>
+struct has_rvalue_reference<T, Args...> {
+    static constexpr bool value = std::is_rvalue_reference<T>::value || has_rvalue_reference<Args...>::value;
+};
+template <typename... Args>
+constexpr auto has_rvalue_reference_v = has_rvalue_reference<Args...>::value;
+
+template <typename T>
+struct CallableTrait;
+template <typename Type, typename Return, typename... Args>
+struct CallableTrait<Return (Type::*)(Args...) const> {
+    static constexpr bool IsMemberFunction = true;
+    static constexpr bool IsPureFunction = false;
+    static constexpr size_t ArgumentCount = sizeof...(Args);
+    using ReturnType = Return;
+    using Arguments = std::tuple<Args...>;
+    template <size_t N>
+    struct Argument {
+        static_assert(N < ArgumentCount, "index out of range");
+        using type = typename std::tuple_element_t<N, std::tuple<Args...>>;
+    };
+};
+template <typename Type>
+struct CallableTrait : public CallableTrait<decltype(&Type::operator())> {};
+template <typename Return, typename... Args>
+struct CallableTrait<Return (&)(Args...)> {
+    static constexpr bool IsMemberFunction = false;
+    static constexpr bool IsPureFunction = true;
+    static constexpr size_t ArgumentCount = sizeof...(Args);
+    using ReturnType = Return;
+    using Arguments = std::tuple<Args...>;
+    template <size_t N>
+    struct Argument {
+        static_assert(N < ArgumentCount, "index out of range");
+        using type = typename std::tuple_element_t<N, std::tuple<Args...>>;
+    };
+};
 
 }  // namespace radray
