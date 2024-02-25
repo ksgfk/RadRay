@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
-
 #include <tuple>
 
 namespace radray {
@@ -59,12 +58,33 @@ template <typename... Args>
 constexpr auto has_rvalue_reference_v = has_rvalue_reference<Args...>::value;
 
 template <typename T>
-concept is_functor = requires(T t) { t.operator()(); };
+struct remove_all_cvref {
+    using type = std::remove_cvref_t<T>;
+};
+template <typename T>
+struct remove_all_cvref<T*> {
+    using type = typename remove_all_cvref<T>::type;
+};
+template <typename T>
+struct remove_all_cvref<T&> {
+    using type = typename remove_all_cvref<T>::type;
+};
+template <typename T>
+struct remove_all_cvref<T&&> {
+    using type = typename remove_all_cvref<T>::type;
+};
+template <class T>
+using remove_all_cvref_t = typename remove_all_cvref<T>::type;
 
-template <typename... Args>
+template <typename T>
+requires std::is_function_v<T>
+struct FunctionTrait;
+
+template <typename Return, typename... Args>
 struct CallableParameterTrait {
     static constexpr size_t ParameterCount = sizeof...(Args);
     using Parameters = std::tuple<Args...>;
+    using ReturnType = Return;
     template <size_t N>
     struct Parameter {
         static_assert(N < ParameterCount, "index out of range");
@@ -74,74 +94,50 @@ struct CallableParameterTrait {
 template <typename T>
 struct CallableTrait;
 template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...)> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (Type::*)(Args...)> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = true;
     static constexpr bool IsConst = false;
     static constexpr bool IsNoExcept = false;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) noexcept> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (Type::*)(Args...) noexcept> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = true;
     static constexpr bool IsConst = false;
     static constexpr bool IsNoExcept = true;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) const> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (Type::*)(Args...) const> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = true;
     static constexpr bool IsConst = true;
     static constexpr bool IsNoExcept = false;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) const noexcept> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (Type::*)(Args...) const noexcept> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = true;
     static constexpr bool IsConst = true;
     static constexpr bool IsNoExcept = true;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 template <typename Type>
 struct CallableTrait : public CallableTrait<decltype(&Type::operator())> {
     static constexpr bool IsFunctor = true;
 };
-template <typename T>
-struct CallableTrait;
 template <typename Return, typename... Args>
-struct CallableTrait<Return (*)(Args...)> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (*)(Args...)> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = false;
     static constexpr bool IsConst = false;
     static constexpr bool IsNoExcept = false;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 template <typename Return, typename... Args>
-struct CallableTrait<Return (*)(Args...) noexcept> : public CallableParameterTrait<Args...> {
+struct CallableTrait<Return (*)(Args...) noexcept> : public CallableParameterTrait<Return, Args...> {
     static constexpr bool IsMember = false;
     static constexpr bool IsConst = false;
     static constexpr bool IsNoExcept = true;
     static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
-};
-template <typename Return, typename... Args>
-struct CallableTrait<Return (&)(Args...)> : public CallableParameterTrait<Args...> {
-    static constexpr bool IsMember = false;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = false;
-    static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
-};
-template <typename Return, typename... Args>
-struct CallableTrait<Return (&)(Args...) noexcept> : public CallableParameterTrait<Args...> {
-    static constexpr bool IsMember = false;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = true;
-    static constexpr bool IsFunctor = false;
-    using ReturnType = Return;
 };
 
 }  // namespace radray

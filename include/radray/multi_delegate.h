@@ -18,9 +18,18 @@ auto MakePureFunctionDelegateImpl(Functor&& functor, std::index_sequence<Index..
 }
 template <typename Functor>
 auto MakeDelegate(Functor&& functor) {
-    using Trait = CallableTrait<Functor>;
-    static_assert(!Trait::IsMember || Trait::IsFunctor, "only functor or pure function can match this overload");
-    return MakePureFunctionDelegateImpl(std::forward<Functor>(functor), std::make_index_sequence<Trait::ParameterCount>());
+    constexpr auto isFunction = std::is_function_v<remove_all_cvref_t<decltype(functor)>>;
+    if constexpr (isFunction) {
+        using Original = std::add_pointer_t<remove_all_cvref_t<decltype(functor)>>;
+        using Trait = CallableTrait<Original>;
+        return MakePureFunctionDelegateImpl<Original>(std::forward<Original>(functor), std::make_index_sequence<Trait::ParameterCount>());
+    } else {
+        using Trait = CallableTrait<Functor>;
+        constexpr auto isMember = Trait::IsMember;
+        constexpr auto isFunctor = Trait::IsFunctor;
+        static_assert(!isMember || isFunctor, "only functor or pure function can match this overload");
+        return MakePureFunctionDelegateImpl(std::forward<Functor>(functor), std::make_index_sequence<Trait::ParameterCount>());
+    }
 }
 
 template <typename Function, typename Instance, typename Return, typename... Args>
