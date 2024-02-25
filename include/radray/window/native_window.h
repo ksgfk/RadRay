@@ -37,16 +37,16 @@ public:
     bool ShouldClose() const noexcept;
     void Destroy() noexcept;
 
-    void AddMouseButtonCallback(std::weak_ptr<Delegate<MouseButtonCallback>> callback) noexcept;
-    void AddCursorPositionCallback(std::weak_ptr<Delegate<CursorPositionCallback>> callback) noexcept;
-    void AddKeyCallback(std::weak_ptr<Delegate<KeyCallback>> callback) noexcept;
-    void AddScrollCallback(std::weak_ptr<Delegate<ScrollCallback>> callback) noexcept;
-    void AddWindowResizeCallback(std::weak_ptr<Delegate<WindowResizeCallback>> callback) noexcept;
-    void RemoveMouseButtonCallback(std::weak_ptr<Delegate<MouseButtonCallback>> callback) noexcept;
-    void RemoveCursorPositionCallback(std::weak_ptr<Delegate<CursorPositionCallback>> callback) noexcept;
-    void RemoveKeyCallback(std::weak_ptr<Delegate<KeyCallback>> callback) noexcept;
-    void RemoveScrollCallback(std::weak_ptr<Delegate<ScrollCallback>> callback) noexcept;
-    void RemoveWindowResizeCallback(std::weak_ptr<Delegate<WindowResizeCallback>> callback) noexcept;
+    void AddMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept;
+    void AddCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept;
+    void AddKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept;
+    void AddScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept;
+    void AddWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept;
+    void RemoveMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept;
+    void RemoveCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept;
+    void RemoveKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept;
+    void RemoveScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept;
+    void RemoveWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept;
 
 private:
     std::unique_ptr<Impl> _impl;

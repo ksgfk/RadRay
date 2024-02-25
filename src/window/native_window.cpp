@@ -107,34 +107,34 @@ void NativeWindow::Destroy() noexcept {
     _impl = nullptr;
 }
 
-void NativeWindow::AddMouseButtonCallback(std::weak_ptr<Delegate<MouseButtonCallback>> callback) noexcept {
+void NativeWindow::AddMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_mouseButtonCb.Add(callback);
 }
-void NativeWindow::AddCursorPositionCallback(std::weak_ptr<Delegate<CursorPositionCallback>> callback) noexcept {
+void NativeWindow::AddCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_cursorPositionCb.Add(callback);
 }
-void NativeWindow::AddKeyCallback(std::weak_ptr<Delegate<KeyCallback>> callback) noexcept {
+void NativeWindow::AddKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_keyCb.Add(callback);
 }
-void NativeWindow::AddScrollCallback(std::weak_ptr<Delegate<ScrollCallback>> callback) noexcept {
+void NativeWindow::AddScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_scrollCb.Add(callback);
 }
-void NativeWindow::AddWindowResizeCallback(std::weak_ptr<Delegate<WindowResizeCallback>> callback) noexcept {
+void NativeWindow::AddWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_windowResizeCb.Add(callback);
 }
-void NativeWindow::RemoveMouseButtonCallback(std::weak_ptr<Delegate<MouseButtonCallback>> callback) noexcept {
+void NativeWindow::RemoveMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_mouseButtonCb.Remove(callback);
 }
-void NativeWindow::RemoveCursorPositionCallback(std::weak_ptr<Delegate<CursorPositionCallback>> callback) noexcept {
+void NativeWindow::RemoveCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_cursorPositionCb.Remove(callback);
 }
-void NativeWindow::RemoveKeyCallback(std::weak_ptr<Delegate<KeyCallback>> callback) noexcept {
+void NativeWindow::RemoveKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_keyCb.Remove(callback);
 }
-void NativeWindow::RemoveScrollCallback(std::weak_ptr<Delegate<ScrollCallback>> callback) noexcept {
+void NativeWindow::RemoveScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_scrollCb.Remove(callback);
 }
-void NativeWindow::RemoveWindowResizeCallback(std::weak_ptr<Delegate<WindowResizeCallback>> callback) noexcept {
+void NativeWindow::RemoveWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept {
     static_cast<NativeWindowImpl*>(_impl.get())->_windowResizeCb.Remove(callback);
 }
 

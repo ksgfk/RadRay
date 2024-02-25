@@ -10,45 +10,43 @@
 
 namespace radray {
 
-template <typename T>
-class Delegate;
-template <typename Return, typename... Args>
-class Delegate<Return(Args...)> {
-public:
-    using FunctionType = Return(Args...);
-
-    virtual ~Delegate() noexcept = default;
-
-    virtual Return Invoke(Args... args) const = 0;
-
-    Return operator()(Args... args) const { return this->Invoke(std::forward<Args>(args)...); }
-};
-
-template <typename T>
-class FunctionDelegate {};
-template <typename Return, typename... Args>
-class FunctionDelegate<Return(Args...)> : public Delegate<Return(Args...)> {
-public:
-    explicit FunctionDelegate(std::function<Return(Args...)>&& f) : _f(std::move(f)) {}
-    template <typename Functor>
-    explicit FunctionDelegate(Functor&& functor) : _f(std::forward<Functor>(functor)) {}
-    ~FunctionDelegate() noexcept override = default;
-
-    Return Invoke(Args... args) const override { return _f(std::forward<Args>(args)...); }
-
-private:
-    std::function<Return(Args...)> _f;
-};
 template <typename Functor, size_t... Index>
-auto MakeFuncDelegateHelper(Functor&& functor, std::index_sequence<Index...>) {
+auto MakePureFunctionDelegateImpl(Functor&& functor, std::index_sequence<Index...>) {
     using Trait = CallableTrait<Functor>;
     using Return = typename Trait::ReturnType;
-    return std::make_shared<FunctionDelegate<Return(typename Trait::template Argument<Index>::type...)>>(std::forward<Functor>(functor));
+    return std::make_shared<std::function<Return(typename Trait::template Parameter<Index>::type...)>>(std::forward<Functor>(functor));
 }
 template <typename Functor>
-auto MakeFuncDelegate(Functor&& functor) {
+auto MakeDelegate(Functor&& functor) {
     using Trait = CallableTrait<Functor>;
-    return MakeFuncDelegateHelper(std::forward<Functor>(functor), std::make_index_sequence<Trait::ArgumentCount>());
+    static_assert(!Trait::IsMember || Trait::IsFunctor, "only functor or pure function can match this overload");
+    return MakePureFunctionDelegateImpl(std::forward<Functor>(functor), std::make_index_sequence<Trait::ParameterCount>());
+}
+
+template <typename Function, typename Instance, typename Return, typename... Args>
+auto GenerateMemberFunctionCallImpl(Function&& func, Instance* ins) {
+    if constexpr (std::is_void_v<Return>) {
+        return [=](Args... args) {
+            (ins->*func)(std::forward<Args>(args)...);
+        };
+    } else {
+        return [=](Args... args) {
+            return (ins->*func)(std::forward<Args>(args)...);
+        };
+    }
+}
+template <typename Function, typename Instance, size_t... Index>
+auto MakeMemberFunctionDelegateImpl(Function&& func, Instance* ins, std::index_sequence<Index...>) {
+    using Trait = CallableTrait<Function>;
+    using Return = typename Trait::ReturnType;
+    auto impl = GenerateMemberFunctionCallImpl<Function, Instance, Return, typename Trait::template Parameter<Index>::type...>(std::forward<Function>(func), ins);
+    return std::make_shared<std::function<Return(typename Trait::template Parameter<Index>::type...)>>(std::move(impl));
+}
+template <typename Function, typename Instance>
+auto MakeDelegate(Function&& func, Instance* ins) {
+    using Trait = CallableTrait<Function>;
+    static_assert(Trait::IsMember && !Trait::IsFunctor, "only member function can match this overload");
+    return MakeMemberFunctionDelegateImpl(std::forward<Function>(func), ins, std::make_index_sequence<Trait::ParameterCount>());
 }
 
 template <typename T>
@@ -60,7 +58,7 @@ class MultiDelegate<Return(Args...)> {
 template <typename... Args>
 class MultiDelegate<void(Args...)> {
 public:
-    using DelegateType = Delegate<void(Args...)>;
+    using DelegateType = std::function<void(Args...)>;
 
     void Add(std::weak_ptr<DelegateType> delegate) {
         ClearExpired();
@@ -87,7 +85,7 @@ public:
         ClearExpired();
         for (const std::weak_ptr<DelegateType>& i : _list) {
             std::shared_ptr<DelegateType> t = i.lock();
-            t->Invoke(std::forward<Args>(args)...);
+            t->operator()(std::forward<Args>(args)...);
         }
     }
 
