@@ -49,6 +49,11 @@ public:
 #if defined(RADRAY_PLATFORM_WINDOWS)
         nativeHandle = reinterpret_cast<size_t>(glfwGetWin32Window(window));
 #endif
+        _mouseButtonCb = std::make_shared<MultiDelegate<MouseButtonCallback>>();
+        _cursorPositionCb = std::make_shared<MultiDelegate<CursorPositionCallback>>();
+        _keyCb = std::make_shared<MultiDelegate<KeyCallback>>();
+        _scrollCb = std::make_shared<MultiDelegate<ScrollCallback>>();
+        _windowResizeCb = std::make_shared<MultiDelegate<WindowResizeCallback>>();
         glfwSetWindowUserPointer(window, this);
         glfwSetMouseButtonCallback(window, [](GLFWwindow* window, int button, int action, int mods) {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
@@ -56,23 +61,23 @@ public:
             auto y = 0.0;
             glfwGetCursorPos(self->window, &x, &y);
             Eigen::Vector2f xy{static_cast<float>(x), static_cast<float>(y)};
-            self->_mouseButtonCb(xy, static_cast<MouseButton>(button), static_cast<Action>(action), static_cast<KeyModifiers>(mods));
+            self->_mouseButtonCb->Invoke(xy, static_cast<MouseButton>(button), static_cast<Action>(action), static_cast<KeyModifiers>(mods));
         });
         glfwSetCursorPosCallback(window, [](GLFWwindow* window, double x, double y) noexcept {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
-            self->_cursorPositionCb(Eigen::Vector2f{static_cast<float>(x), static_cast<float>(y)});
+            self->_cursorPositionCb->Invoke(Eigen::Vector2f{static_cast<float>(x), static_cast<float>(y)});
         });
         glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
-            self->_keyCb(static_cast<Key>(key), static_cast<Action>(action), static_cast<KeyModifiers>(mods));
+            self->_keyCb->Invoke(static_cast<Key>(key), static_cast<Action>(action), static_cast<KeyModifiers>(mods));
         });
         glfwSetScrollCallback(window, [](GLFWwindow* window, double dx, double dy) {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
-            self->_scrollCb(Eigen::Vector2f{static_cast<float>(dx), static_cast<float>(dy)});
+            self->_scrollCb->Invoke(Eigen::Vector2f{static_cast<float>(dx), static_cast<float>(dy)});
         });
         glfwSetWindowSizeCallback(window, [](GLFWwindow* window, int width, int height) noexcept {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
-            self->_windowResizeCb(Eigen::Vector2i{width, height});
+            self->_windowResizeCb->Invoke(Eigen::Vector2i{width, height});
         });
     }
     ~NativeWindowImpl() noexcept override {
@@ -84,11 +89,11 @@ public:
 
     GLFWwindow* window{nullptr};
     size_t nativeHandle{0};
-    MultiDelegate<MouseButtonCallback> _mouseButtonCb;
-    MultiDelegate<CursorPositionCallback> _cursorPositionCb;
-    MultiDelegate<KeyCallback> _keyCb;
-    MultiDelegate<ScrollCallback> _scrollCb;
-    MultiDelegate<WindowResizeCallback> _windowResizeCb;
+    std::shared_ptr<MultiDelegate<MouseButtonCallback>> _mouseButtonCb;
+    std::shared_ptr<MultiDelegate<CursorPositionCallback>> _cursorPositionCb;
+    std::shared_ptr<MultiDelegate<KeyCallback>> _keyCb;
+    std::shared_ptr<MultiDelegate<ScrollCallback>> _scrollCb;
+    std::shared_ptr<MultiDelegate<WindowResizeCallback>> _windowResizeCb;
 };
 
 NativeWindow::NativeWindow(std::string name, uint32 width, uint32 height, bool resizable, bool fullScreen) noexcept {
@@ -107,35 +112,24 @@ void NativeWindow::Destroy() noexcept {
     _impl = nullptr;
 }
 
-void NativeWindow::AddMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_mouseButtonCb.Add(callback);
+std::shared_ptr<MultiDelegate<MouseButtonCallback>> NativeWindow::EventMouseButtonCall() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->_mouseButtonCb;
 }
-void NativeWindow::AddCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_cursorPositionCb.Add(callback);
+
+std::shared_ptr<MultiDelegate<CursorPositionCallback>> NativeWindow::EventCursorPosition() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->_cursorPositionCb;
 }
-void NativeWindow::AddKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_keyCb.Add(callback);
+
+std::shared_ptr<MultiDelegate<KeyCallback>> NativeWindow::EventKey() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->_keyCb;
 }
-void NativeWindow::AddScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_scrollCb.Add(callback);
+
+std::shared_ptr<MultiDelegate<ScrollCallback>> NativeWindow::EventScroll() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->_scrollCb;
 }
-void NativeWindow::AddWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_windowResizeCb.Add(callback);
-}
-void NativeWindow::RemoveMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_mouseButtonCb.Remove(callback);
-}
-void NativeWindow::RemoveCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_cursorPositionCb.Remove(callback);
-}
-void NativeWindow::RemoveKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_keyCb.Remove(callback);
-}
-void NativeWindow::RemoveScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_scrollCb.Remove(callback);
-}
-void NativeWindow::RemoveWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept {
-    static_cast<NativeWindowImpl*>(_impl.get())->_windowResizeCb.Remove(callback);
+
+std::shared_ptr<MultiDelegate<WindowResizeCallback>> NativeWindow::EventWindwResize() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->_windowResizeCb;
 }
 
 }  // namespace radray::window

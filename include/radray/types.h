@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
-#include <tuple>
 
 namespace radray {
 
@@ -75,69 +74,5 @@ struct remove_all_cvref<T&&> {
 };
 template <class T>
 using remove_all_cvref_t = typename remove_all_cvref<T>::type;
-
-template <typename T>
-requires std::is_function_v<T>
-struct FunctionTrait;
-
-template <typename Return, typename... Args>
-struct CallableParameterTrait {
-    static constexpr size_t ParameterCount = sizeof...(Args);
-    using Parameters = std::tuple<Args...>;
-    using ReturnType = Return;
-    template <size_t N>
-    struct Parameter {
-        static_assert(N < ParameterCount, "index out of range");
-        using type = typename std::tuple_element_t<N, std::tuple<Args...>>;
-    };
-};
-template <typename T>
-struct CallableTrait;
-template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...)> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = true;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = false;
-    static constexpr bool IsFunctor = false;
-};
-template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) noexcept> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = true;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = true;
-    static constexpr bool IsFunctor = false;
-};
-template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) const> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = true;
-    static constexpr bool IsConst = true;
-    static constexpr bool IsNoExcept = false;
-    static constexpr bool IsFunctor = false;
-};
-template <typename Type, typename Return, typename... Args>
-struct CallableTrait<Return (Type::*)(Args...) const noexcept> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = true;
-    static constexpr bool IsConst = true;
-    static constexpr bool IsNoExcept = true;
-    static constexpr bool IsFunctor = false;
-};
-template <typename Type>
-struct CallableTrait : public CallableTrait<decltype(&Type::operator())> {
-    static constexpr bool IsFunctor = true;
-};
-template <typename Return, typename... Args>
-struct CallableTrait<Return (*)(Args...)> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = false;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = false;
-    static constexpr bool IsFunctor = false;
-};
-template <typename Return, typename... Args>
-struct CallableTrait<Return (*)(Args...) noexcept> : public CallableParameterTrait<Return, Args...> {
-    static constexpr bool IsMember = false;
-    static constexpr bool IsConst = false;
-    static constexpr bool IsNoExcept = true;
-    static constexpr bool IsFunctor = false;
-};
 
 }  // namespace radray

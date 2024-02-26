@@ -37,16 +37,11 @@ public:
     bool ShouldClose() const noexcept;
     void Destroy() noexcept;
 
-    void AddMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept;
-    void AddCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept;
-    void AddKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept;
-    void AddScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept;
-    void AddWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept;
-    void RemoveMouseButtonCallback(std::weak_ptr<std::function<MouseButtonCallback>> callback) noexcept;
-    void RemoveCursorPositionCallback(std::weak_ptr<std::function<CursorPositionCallback>> callback) noexcept;
-    void RemoveKeyCallback(std::weak_ptr<std::function<KeyCallback>> callback) noexcept;
-    void RemoveScrollCallback(std::weak_ptr<std::function<ScrollCallback>> callback) noexcept;
-    void RemoveWindowResizeCallback(std::weak_ptr<std::function<WindowResizeCallback>> callback) noexcept;
+    std::shared_ptr<MultiDelegate<MouseButtonCallback>> EventMouseButtonCall() const noexcept;
+    std::shared_ptr<MultiDelegate<CursorPositionCallback>> EventCursorPosition() const noexcept;
+    std::shared_ptr<MultiDelegate<KeyCallback>> EventKey() const noexcept;
+    std::shared_ptr<MultiDelegate<ScrollCallback>> EventScroll() const noexcept;
+    std::shared_ptr<MultiDelegate<WindowResizeCallback>> EventWindwResize() const noexcept;
 
 private:
     std::unique_ptr<Impl> _impl;
