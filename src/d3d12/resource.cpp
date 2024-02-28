@@ -84,4 +84,67 @@ std::unique_ptr<IGpuHeapAllocator> IGpuHeapAllocator::MakeDefaultAllocator(Devic
 
 Resource::Resource(Device* device) noexcept : device(device) {}
 
+void ResourceStateTracker::Track(const Resource* resource, D3D12_RESOURCE_STATES state) {
+    auto&& [iter, isInsert] = _stateMap.try_emplace(resource, State{});
+    if (isInsert) {
+        auto&& s = iter->second;
+        s.lastState = resource->GetInitState();
+        s.currState = state;
+    } else {
+        auto&& s = iter->second;
+        s.currState = state;
+    }
+}
+
+void ResourceStateTracker::Update(ID3D12GraphicsCommandList* cmd) {
+    ExecuteStateMap();
+    if (!_states.empty()) {
+        cmd->ResourceBarrier(_states.size(), _states.data());
+        _states.clear();
+    }
+}
+
+void ResourceStateTracker::Restore(ID3D12GraphicsCommandList* cmd) {
+    RestoreStateMap();
+    if (!_states.empty()) {
+        cmd->ResourceBarrier(_states.size(), _states.data());
+        _states.clear();
+    }
+}
+
+void ResourceStateTracker::ExecuteStateMap() {
+    for (auto&& i : _stateMap) {
+        auto res = i.first;
+        auto&& s = i.second;
+        if (s.currState != s.lastState) {
+            D3D12_RESOURCE_BARRIER& transBarrier = _states.emplace_back();
+            transBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            transBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            transBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            transBarrier.Transition.pResource = res->GetResource();
+            transBarrier.Transition.StateBefore = s.lastState;
+            transBarrier.Transition.StateAfter = s.currState;
+        }
+        s.lastState = s.currState;
+    }
+}
+
+void ResourceStateTracker::RestoreStateMap() {
+    for (auto&& i : _stateMap) {
+        auto res = i.first;
+        auto&& s = i.second;
+        s.currState = res->GetInitState();
+        if (s.currState != s.lastState) {
+            D3D12_RESOURCE_BARRIER& transBarrier = _states.emplace_back();
+            transBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            transBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            transBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            transBarrier.Transition.pResource = res->GetResource();
+            transBarrier.Transition.StateBefore = s.lastState;
+            transBarrier.Transition.StateAfter = s.currState;
+        }
+    }
+    _stateMap.clear();
+}
+
 }  // namespace radray::d3d12

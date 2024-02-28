@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <vector>
+#include <unordered_map>
 #include <radray/d3d12/utility.h>
 
 namespace radray::d3d12 {
@@ -44,6 +46,25 @@ public:
 
 public:
     Device* device;
+};
+
+class ResourceStateTracker {
+public:
+    void Track(const Resource* resource, D3D12_RESOURCE_STATES state);
+    void Update(ID3D12GraphicsCommandList* cmd);
+    void Restore(ID3D12GraphicsCommandList* cmd);
+
+private:
+    struct State {
+        D3D12_RESOURCE_STATES lastState;
+        D3D12_RESOURCE_STATES currState;
+    };
+
+    void ExecuteStateMap();
+    void RestoreStateMap();
+
+    std::vector<D3D12_RESOURCE_BARRIER> _states;
+    std::unordered_map<const Resource*, State> _stateMap;
 };
 
 }  // namespace radray::d3d12
