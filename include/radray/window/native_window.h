@@ -35,6 +35,8 @@ public:
 
     bool IsValid() const noexcept;
     bool ShouldClose() const noexcept;
+    size_t GetNativeHandle() const noexcept;
+
     void Destroy() noexcept;
 
     std::shared_ptr<MultiDelegate<MouseButtonCallback>> EventMouseButtonCall() const noexcept;

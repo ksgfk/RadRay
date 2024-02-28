@@ -19,6 +19,8 @@ public:
     Device(const Device&) = delete;
     Device& operator=(const Device&) = delete;
 
+    void WaitFence(ID3D12Fence* fence, uint64 fenceIndex);
+
 public:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;

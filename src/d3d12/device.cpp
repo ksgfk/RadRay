@@ -101,4 +101,18 @@ Device::Device() noexcept {
     shaderCompiler = std::make_unique<ShaderCompiler>();
 }
 
+void Device::WaitFence(ID3D12Fence* fence, uint64 fenceIndex) {
+    class EventHandleGuard {
+    public:
+        EventHandleGuard() noexcept { handle = CreateEventEx(nullptr, nullptr, false, EVENT_ALL_ACCESS); }
+        ~EventHandleGuard() noexcept { CloseHandle(handle); }
+        HANDLE handle;
+    };
+    EventHandleGuard event{};
+    if (fence->GetCompletedValue() < fenceIndex) {
+        ThrowIfFailed(fence->SetEventOnCompletion(fenceIndex, event.handle));
+        WaitForSingleObject(event.handle, INFINITE);
+    }
+}
+
 }  // namespace radray::d3d12
