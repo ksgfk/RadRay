@@ -18,8 +18,10 @@ public:
 
     ID3D12Resource* GetResource() const noexcept override;
     D3D12_RESOURCE_STATES GetInitState() const noexcept override;
+    D3D12_RENDER_TARGET_VIEW_DESC GetRtvDesc() const noexcept;
 
     ComPtr<ID3D12Resource> rt;
+    DXGI_FORMAT format;
 };
 
 class SwapChain {

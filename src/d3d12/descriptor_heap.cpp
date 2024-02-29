@@ -23,13 +23,37 @@ DescriptorHeap::DescriptorHeap(Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, 
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGPU(uint64 index) const noexcept {
-    if (index >= _desc.NumDescriptors) index = _desc.NumDescriptors - 1;
+    if (index >= _desc.NumDescriptors) {
+        RADRAY_ABORT("index out of range {}", index);
+    }
     return CD3DX12_GPU_DESCRIPTOR_HANDLE(_gpuHeapStart, index, _handleIncrementSize);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleCPU(uint64 index) const noexcept {
-    if (index >= _desc.NumDescriptors) index = _desc.NumDescriptors - 1;
+    if (index >= _desc.NumDescriptors) {
+        RADRAY_ABORT("index out of range {}", index);
+    }
     return CD3DX12_CPU_DESCRIPTOR_HANDLE(_cpuHeapStart, index, _handleIncrementSize);
+}
+
+void DescriptorHeap::CreateUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& pDesc, uint64 index) const noexcept {
+    _device->device->CreateUnorderedAccessView(resource, nullptr, &pDesc, HandleCPU(index));
+}
+
+void DescriptorHeap::CreateSrv(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& pDesc, uint64 index) const noexcept {
+    _device->device->CreateShaderResourceView(resource, &pDesc, HandleCPU(index));
+}
+
+void DescriptorHeap::CreateRtv(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& pDesc, uint64 index) const noexcept {
+    _device->device->CreateRenderTargetView(resource, &pDesc, HandleCPU(index));
+}
+
+void DescriptorHeap::CreateDsv(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& pDesc, uint64 index) const noexcept {
+    _device->device->CreateDepthStencilView(resource, &pDesc, HandleCPU(index));
+}
+
+void DescriptorHeap::CreateSampler(const D3D12_SAMPLER_DESC& desc, uint64 index) const noexcept {
+    _device->device->CreateSampler(&desc, HandleCPU(index));
 }
 
 }  // namespace radray::d3d12

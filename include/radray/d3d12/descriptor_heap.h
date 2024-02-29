@@ -24,6 +24,11 @@ public:
     ID3D12DescriptorHeap* GetHeap() const noexcept { return _descHeap.Get(); }
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGPU(uint64 index) const noexcept;
     D3D12_CPU_DESCRIPTOR_HANDLE HandleCPU(uint64 index) const noexcept;
+    void CreateUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& pDesc, uint64 index) const noexcept;
+    void CreateSrv(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& pDesc, uint64 index) const noexcept;
+    void CreateRtv(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& pDesc, uint64 index) const noexcept;
+    void CreateDsv(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& pDesc, uint64 index) const noexcept;
+    void CreateSampler(const D3D12_SAMPLER_DESC& desc, uint64 index) const noexcept;
 
 private:
     Device* _device;

@@ -15,6 +15,16 @@ D3D12_RESOURCE_STATES SwapChainRenderTarget::GetInitState() const noexcept {
     return D3D12_RESOURCE_STATE_PRESENT;
 }
 
+D3D12_RENDER_TARGET_VIEW_DESC SwapChainRenderTarget::GetRtvDesc() const noexcept {
+    D3D12_RENDER_TARGET_VIEW_DESC desc{
+        .Format = format,
+        .ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D};
+    desc.Texture2D = {
+        .MipSlice = 0,
+        .PlaneSlice = 0};
+    return desc;
+}
+
 SwapChain::SwapChain(
     Device* device,
     CommandQueue* queue,
@@ -25,8 +35,9 @@ SwapChain::SwapChain(
     bool vsync)
     : backBufferIndex(0),
       isVsync(vsync) {
-    bool canTearing = true;
+    BOOL canTearing = true;
     ThrowIfFailed(device->dxgiFactory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &canTearing, sizeof(decltype(canTearing))));
+    RADRAY_LOG_INFO("DXGI_FEATURE_PRESENT_ALLOW_TEARING: {}", (bool)canTearing);
     if (!canTearing) {
         isVsync = true;
     }
@@ -57,7 +68,8 @@ SwapChain::SwapChain(
     for (uint32_t n = 0; n < desc.BufferCount; n++) {
         ComPtr<ID3D12Resource> rt;
         ThrowIfFailed(swapChain->GetBuffer(n, IID_PPV_ARGS(rt.GetAddressOf())));
-        renderTargets.emplace_back(SwapChainRenderTarget{device, std::move(rt)});
+        auto&& rtRes = renderTargets.emplace_back(SwapChainRenderTarget{device, std::move(rt)});
+        rtRes.format = desc.Format;
     }
     backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 }

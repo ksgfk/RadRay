@@ -18,6 +18,8 @@ using CursorPositionCallback = void(const Eigen::Vector2f& xy);
 using KeyCallback = void(Key key, Action action, KeyModifiers modifiers);
 using ScrollCallback = void(const Eigen::Vector2f& dxdy);
 using WindowResizeCallback = void(const Eigen::Vector2i& size);
+using FrameResizeCallback = void(const Eigen::Vector2i& size);
+using WindowRefreshCallback = void();
 
 class NativeWindow {
 public:
@@ -44,6 +46,8 @@ public:
     std::shared_ptr<MultiDelegate<KeyCallback>> EventKey() const noexcept;
     std::shared_ptr<MultiDelegate<ScrollCallback>> EventScroll() const noexcept;
     std::shared_ptr<MultiDelegate<WindowResizeCallback>> EventWindwResize() const noexcept;
+    std::shared_ptr<MultiDelegate<FrameResizeCallback>> EventFrameResize() const noexcept;
+    std::shared_ptr<MultiDelegate<WindowRefreshCallback>> EventWindowRefresh() const noexcept;
 
 private:
     std::unique_ptr<Impl> _impl;

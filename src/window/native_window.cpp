@@ -54,6 +54,8 @@ public:
         keyCb = std::make_shared<MultiDelegate<KeyCallback>>();
         scrollCb = std::make_shared<MultiDelegate<ScrollCallback>>();
         windowResizeCb = std::make_shared<MultiDelegate<WindowResizeCallback>>();
+        frameResizeCb = std::make_shared<MultiDelegate<FrameResizeCallback>>();
+        windowRefreshCb = std::make_shared<MultiDelegate<WindowRefreshCallback>>();
         glfwSetWindowUserPointer(window, this);
         glfwSetMouseButtonCallback(window, [](GLFWwindow* window, int button, int action, int mods) {
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
@@ -79,6 +81,14 @@ public:
             auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
             self->windowResizeCb->Invoke(Eigen::Vector2i{width, height});
         });
+        glfwSetFramebufferSizeCallback(window, [](GLFWwindow* window, int width, int height) {
+            auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
+            self->frameResizeCb->Invoke(Eigen::Vector2i{width, height});
+        });
+        glfwSetWindowRefreshCallback(window, [](GLFWwindow* window) {
+            auto self = static_cast<NativeWindowImpl*>(glfwGetWindowUserPointer(window));
+            self->windowRefreshCb->Invoke();
+        });
     }
     ~NativeWindowImpl() noexcept override {
         if (window != nullptr) {
@@ -94,6 +104,8 @@ public:
     std::shared_ptr<MultiDelegate<KeyCallback>> keyCb;
     std::shared_ptr<MultiDelegate<ScrollCallback>> scrollCb;
     std::shared_ptr<MultiDelegate<WindowResizeCallback>> windowResizeCb;
+    std::shared_ptr<MultiDelegate<FrameResizeCallback>> frameResizeCb;
+    std::shared_ptr<MultiDelegate<WindowRefreshCallback>> windowRefreshCb;
 };
 
 NativeWindow::NativeWindow(std::string name, uint32 width, uint32 height, bool resizable, bool fullScreen) noexcept {
@@ -134,6 +146,14 @@ std::shared_ptr<MultiDelegate<ScrollCallback>> NativeWindow::EventScroll() const
 
 std::shared_ptr<MultiDelegate<WindowResizeCallback>> NativeWindow::EventWindwResize() const noexcept {
     return static_cast<NativeWindowImpl*>(_impl.get())->windowResizeCb;
+}
+
+std::shared_ptr<MultiDelegate<FrameResizeCallback>> NativeWindow::EventFrameResize() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->frameResizeCb;
+}
+
+std::shared_ptr<MultiDelegate<WindowRefreshCallback>> NativeWindow::EventWindowRefresh() const noexcept {
+    return static_cast<NativeWindowImpl*>(_impl.get())->windowRefreshCb;
 }
 
 }  // namespace radray::window
