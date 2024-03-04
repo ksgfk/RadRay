@@ -3,6 +3,8 @@
 #include <cmath>
 #include <Eigen/Dense>
 #include <radray/types.h>
+#include <radray/logger.h>
+#include <spdlog/fmt/ostr.h>
 
 namespace radray {
 
@@ -17,14 +19,36 @@ typename Eigen::ScalarBinaryOpTraits<typename LhsDerived::Scalar, typename RhsDe
     return std::abs(lhs.dot(rhs));
 }
 
-using Vector2f = Eigen::Vector<float, 2>;
-using Vector3f = Eigen::Vector<float, 3>;
-using Vector4f = Eigen::Vector<float, 4>;
-using Vector2d = Eigen::Vector<double, 2>;
-using Vector3d = Eigen::Vector<double, 3>;
-using Vector4d = Eigen::Vector<double, 4>;
-using Vector2i = Eigen::Vector<int, 2>;
-using Vector3i = Eigen::Vector<int, 3>;
-using Vector4i = Eigen::Vector<int, 4>;
-
 }  // namespace radray
+
+template <typename T>
+requires(std::is_base_of_v<Eigen::DenseBase<T>, T>)
+struct fmt::formatter<T> : fmt::ostream_formatter {};
+
+template <typename T>
+struct fmt::formatter<Eigen::WithFormat<T>> : fmt::ostream_formatter {};
+
+template <typename T, int Rows, int Cols>
+struct fmt::formatter<Eigen::Matrix<T, Rows, Cols>> : fmt::formatter<std::string> {
+  auto format(Eigen::Matrix<T, Rows, Cols> const& val, format_context& ctx) const -> decltype(ctx.out()) {
+    Eigen::IOFormat matFmt{Eigen::FullPrecision, 0, ", ", "\n", "", "", "[", "]"};
+    fmt::formatter<Eigen::WithFormat<Eigen::Matrix<T, Rows, Cols>>> fmtIns{};
+    return fmtIns.format(val.format(matFmt), ctx);
+  }
+};
+
+template <typename T, int Size>
+struct fmt::formatter<Eigen::Vector<T, Size>> : fmt::formatter<std::string> {
+  auto format(Eigen::Vector<T, Size> const& val, format_context& ctx) const -> decltype(ctx.out()) {
+    Eigen::IOFormat matFmt{Eigen::FullPrecision, Eigen::DontAlignCols, "", ", ", "", "", "<", ">"};
+    fmt::formatter<Eigen::WithFormat<Eigen::Vector<T, Size>>> fmtIns{};
+    return fmtIns.format(val.format(matFmt), ctx);
+  }
+};
+
+template <typename T>
+struct fmt::formatter<Eigen::Quaternion<T>> : fmt::formatter<std::string> {
+  auto format(Eigen::Quaternion<T> const& val, format_context& ctx) const -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "<{}, {}, {}, {}>", val.x(), val.y(), val.z(), val.w());
+  }
+};

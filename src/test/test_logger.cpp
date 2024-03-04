@@ -1,5 +1,6 @@
 #include <radray/logger.h>
 #include <radray/types.h>
+#include <radray/basic_math.h>
 
 struct E {
     void A(int c) {
@@ -46,5 +47,9 @@ int main() {
     auto t = std::bind(&E::A, e, std::placeholders::_1);
     a(t);
     RADRAY_LOG_DEBUG("---------------------");
+
+    RADRAY_LOG_DEBUG("{}", Eigen::Vector3f{0,0,0});
+    Eigen::Matrix4f z = Eigen::Matrix4f::Identity();
+    RADRAY_LOG_DEBUG("\n{}", z);
     return 0;
 }
