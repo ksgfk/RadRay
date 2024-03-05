@@ -13,6 +13,7 @@ public:
 
     void Execute(CommandAllocator* alloc);
     void WaitFrame(uint64 frameIndex);
+    void Flush();
 
     Device* device;
     D3D12_COMMAND_LIST_TYPE type;

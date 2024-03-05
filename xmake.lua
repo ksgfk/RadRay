@@ -26,7 +26,7 @@ rule("radray_basic_setting")
             target:add("cxflags", "/GL", {tools = {"clang_cl", "cl", public = true}})
             target:add("ldflags", "/LTCG", {tools = {"clang_cl", "cl", public = true}})
         end
-        target:add("cxflags", "/utf-8", "/Gd", {tools = {"clang_cl", "cl"}})
+        target:add("cxflags", "/utf-8", "/Gd", "/EHsc", {tools = {"clang_cl", "cl"}})
         target:add("cxflags", "/Zc:preprocessor", "/Zc:__cplusplus", {tools = {"cl"}})
         if target:is_plat("windows") then
             target:add("defines", "RADRAY_PLATFORM_WINDOWS", {public = true})

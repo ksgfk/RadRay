@@ -26,14 +26,14 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGPU(uint64 index) const noexce
     if (index >= _desc.NumDescriptors) {
         RADRAY_ABORT("index out of range {}", index);
     }
-    return CD3DX12_GPU_DESCRIPTOR_HANDLE(_gpuHeapStart, index, _handleIncrementSize);
+    return CD3DX12_GPU_DESCRIPTOR_HANDLE(_gpuHeapStart, (INT)index, _handleIncrementSize);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleCPU(uint64 index) const noexcept {
     if (index >= _desc.NumDescriptors) {
         RADRAY_ABORT("index out of range {}", index);
     }
-    return CD3DX12_CPU_DESCRIPTOR_HANDLE(_cpuHeapStart, index, _handleIncrementSize);
+    return CD3DX12_CPU_DESCRIPTOR_HANDLE(_cpuHeapStart, (INT)index, _handleIncrementSize);
 }
 
 void DescriptorHeap::CreateUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& pDesc, uint64 index) const noexcept {

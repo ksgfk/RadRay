@@ -99,7 +99,7 @@ void ResourceStateTracker::Track(const Resource* resource, D3D12_RESOURCE_STATES
 void ResourceStateTracker::Update(ID3D12GraphicsCommandList* cmd) {
     ExecuteStateMap();
     if (!_states.empty()) {
-        cmd->ResourceBarrier(_states.size(), _states.data());
+        cmd->ResourceBarrier((UINT)_states.size(), _states.data());
         _states.clear();
     }
 }
@@ -107,7 +107,7 @@ void ResourceStateTracker::Update(ID3D12GraphicsCommandList* cmd) {
 void ResourceStateTracker::Restore(ID3D12GraphicsCommandList* cmd) {
     RestoreStateMap();
     if (!_states.empty()) {
-        cmd->ResourceBarrier(_states.size(), _states.data());
+        cmd->ResourceBarrier((UINT)_states.size(), _states.data());
         _states.clear();
     }
 }

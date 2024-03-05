@@ -2,6 +2,7 @@
 
 #include <radray/allocator.h>
 #include <radray/d3d12/command_list.h>
+#include <radray/d3d12/resource.h>
 
 namespace radray::d3d12 {
 
@@ -37,6 +38,10 @@ private:
 public:
     LinearAllocator<DescriptorHeap*> rtvHeap;
     LinearAllocator<DescriptorHeap*> dsvHeap;
+
+public:
+    uint64 lastExecuteFenceIndex;
+    ResourceStateTracker stateTracker;
 };
 
 }  // namespace radray::d3d12

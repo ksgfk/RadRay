@@ -18,11 +18,18 @@ void CommandQueue::Execute(CommandAllocator* alloc) {
 }
 
 void CommandQueue::WaitFrame(uint64 frameIndex) {
-    if (frameIndex > lastFrame) {
+    if (frameIndex > lastFrame || frameIndex == 0) {
         return;
     }
     device->WaitFence(fence.Get(), frameIndex);
     executedFrame = frameIndex;
+}
+
+void CommandQueue::Flush() {
+    auto currFrame = ++lastFrame;
+    queue->Signal(fence.Get(), currFrame);
+    device->WaitFence(fence.Get(), currFrame);
+    executedFrame = currFrame;
 }
 
 }  // namespace radray::d3d12

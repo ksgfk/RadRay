@@ -14,7 +14,8 @@ CommandAllocator::CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type)
       _rtvAllocator(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
       _dsvAllocator(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV),
       rtvHeap(&_rtvAllocator, 64),
-      dsvHeap(&_dsvAllocator, 64) {
+      dsvHeap(&_dsvAllocator, 64),
+      lastExecuteFenceIndex(0) {
     ThrowIfFailed(device->device->CreateCommandAllocator(type, IID_PPV_ARGS(alloc.GetAddressOf())));
     cmd = std::make_unique<CommandList>(device, this);
 }
@@ -24,6 +25,7 @@ void CommandAllocator::Execute(CommandQueue* queue, ID3D12Fence* fence, uint64 f
     ID3D12CommandQueue* cmdQueue = queue->queue.Get();
     cmdQueue->ExecuteCommandLists(1, &cmdList);
     ThrowIfFailed(cmdQueue->Signal(fence, fenceIndex));
+    lastExecuteFenceIndex = fenceIndex;
 }
 
 void CommandAllocator::Reset() {

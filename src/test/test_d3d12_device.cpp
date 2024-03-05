@@ -28,18 +28,29 @@ public:
     void Run() {
         while (!window->ShouldClose()) {
             window::GlobalPollEvents();
+
             uint32 nowBackBufferIndex = swapChain->backBufferIndex;
             d3d12::SwapChainRenderTarget* swapChainRt = &swapChain->renderTargets[nowBackBufferIndex];
             d3d12::CommandAllocator* cmdAlloc = cmdAllocs[nowBackBufferIndex].get();
             d3d12::CommandList* cmdList = cmdAlloc->cmd.get();
             ID3D12GraphicsCommandList* cmd = cmdList->cmd.Get();
+
+            directQueue->WaitFrame(cmdAlloc->lastExecuteFenceIndex);
             cmdAlloc->Reset();
             auto rtDesc = cmdAlloc->rtvHeap.Allocate(1);
             rtDesc.handle->CreateRtv(swapChainRt->GetResource(), swapChainRt->GetRtvDesc(), rtDesc.offset);
             auto rtv = rtDesc.handle->HandleCPU(rtDesc.offset);
+            cmdAlloc->stateTracker.Track(swapChainRt, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdAlloc->stateTracker.Update(cmd);
             cmd->OMSetRenderTargets(1, &rtv, false, nullptr);
+            float c[] = {0.5f, 0.5f, 0.5f, 1};
+            cmd->ClearRenderTargetView(rtv, c, 0, nullptr);
+            cmdAlloc->stateTracker.Restore(cmd);
             cmdList->Close();
+            directQueue->Execute(cmdAlloc);
+            swapChain->Present();
         }
+        directQueue->Flush();
     }
 
     std::unique_ptr<window::NativeWindow> window;
