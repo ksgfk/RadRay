@@ -22,6 +22,7 @@ template <typename T>
 struct ArrayTrait;
 template <typename T, size_t N>
 struct ArrayTrait<T[N]> {
+    using ElementType = T;
     static constexpr size_t Length = N;
     static constexpr size_t ByteSize = N * sizeof(T);
 };
@@ -31,6 +32,9 @@ constexpr auto array_length_v = ArrayTrait<T>::Length;
 template <typename T>
 requires(std::is_bounded_array_v<T>)
 constexpr auto ArrayLength(const T& arr) { return ArrayTrait<T>::Length; }
+template <typename T>
+requires(std::is_bounded_array_v<T>)
+constexpr auto ArrayByteSize(const T& arr) { return ArrayTrait<T>::ByteSize; }
 template <typename T>
 requires(std::is_bounded_array_v<T>)
 constexpr auto ArrayFirst(const T& arr) {

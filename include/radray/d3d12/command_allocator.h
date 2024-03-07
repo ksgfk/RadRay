@@ -9,6 +9,7 @@ namespace radray::d3d12 {
 class Device;
 class CommandQueue;
 class DescriptorHeap;
+class UploadBuffer;
 
 class CommandAllocator {
 public:
@@ -27,17 +28,27 @@ private:
     public:
         CpuDescriptorHeapAllocator(Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type) noexcept;
         ~CpuDescriptorHeapAllocator() noexcept override = default;
-        virtual DescriptorHeap* Allocate(uint64 size) noexcept override;
-        virtual void Destroy(DescriptorHeap* handle) noexcept override;
+        DescriptorHeap* Allocate(uint64 size) noexcept override;
+        void Destroy(DescriptorHeap* handle) noexcept override;
         Device* device;
         D3D12_DESCRIPTOR_HEAP_TYPE type;
     };
+    class GpuUploadBufferAllocator : public IAllocator<UploadBuffer*> {
+    public:
+        GpuUploadBufferAllocator(Device* device) noexcept;
+        ~GpuUploadBufferAllocator() noexcept override = default;
+        UploadBuffer* Allocate(uint64 size) noexcept override;
+        void Destroy(UploadBuffer* handle) noexcept override;
+        Device* device;
+    };
     CpuDescriptorHeapAllocator _rtvAllocator;
     CpuDescriptorHeapAllocator _dsvAllocator;
+    GpuUploadBufferAllocator _uploadAllocator;
 
 public:
     LinearAllocator<DescriptorHeap*> rtvHeap;
     LinearAllocator<DescriptorHeap*> dsvHeap;
+    LinearAllocator<UploadBuffer*> uploadAlloc;
 
 public:
     uint64 lastExecuteFenceIndex;

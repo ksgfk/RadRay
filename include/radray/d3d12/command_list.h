@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include <radray/d3d12/utility.h>
 
 namespace radray::d3d12 {
@@ -13,6 +15,8 @@ public:
 
     void Reset();
     void Close();
+
+    void Upload(ID3D12Resource* dst, uint64 dstOffset, std::span<const uint8> src);
 
     Device* device;
     ComPtr<ID3D12GraphicsCommandList> cmd;

@@ -5,6 +5,7 @@
 #include <radray/d3d12/device.h>
 #include <radray/d3d12/command_list.h>
 #include <radray/d3d12/command_queue.h>
+#include <radray/d3d12/upload_buffer.h>
 
 namespace radray::d3d12 {
 
@@ -13,8 +14,10 @@ CommandAllocator::CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type)
       type(type),
       _rtvAllocator(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV),
       _dsvAllocator(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV),
+      _uploadAllocator(device),
       rtvHeap(&_rtvAllocator, 64),
       dsvHeap(&_dsvAllocator, 64),
+      uploadAlloc(&_uploadAllocator, 1024 * 1024),
       lastExecuteFenceIndex(0) {
     ThrowIfFailed(device->device->CreateCommandAllocator(type, IID_PPV_ARGS(alloc.GetAddressOf())));
     cmd = std::make_unique<CommandList>(device, this);
@@ -31,6 +34,7 @@ void CommandAllocator::Execute(CommandQueue* queue, ID3D12Fence* fence, uint64 f
 void CommandAllocator::Reset() {
     rtvHeap.Clear();
     dsvHeap.Clear();
+    uploadAlloc.Reset();
     ThrowIfFailed(alloc->Reset());
     cmd->Reset();
 }
@@ -49,6 +53,16 @@ DescriptorHeap* CommandAllocator::CpuDescriptorHeapAllocator::Allocate(uint64 si
 }
 
 void CommandAllocator::CpuDescriptorHeapAllocator::Destroy(DescriptorHeap* handle) noexcept {
+    delete handle;
+}
+
+CommandAllocator::GpuUploadBufferAllocator::GpuUploadBufferAllocator(Device* device) noexcept : device(device) {}
+
+UploadBuffer* CommandAllocator::GpuUploadBufferAllocator::Allocate(uint64 size) noexcept {
+    return new UploadBuffer(device, size, device->globalAlloc.get());
+}
+
+void CommandAllocator::GpuUploadBufferAllocator::Destroy(UploadBuffer* handle) noexcept {
     delete handle;
 }
 

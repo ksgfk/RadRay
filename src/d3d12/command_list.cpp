@@ -2,6 +2,7 @@
 
 #include <radray/d3d12/device.h>
 #include <radray/d3d12/command_allocator.h>
+#include <radray/d3d12/upload_buffer.h>
 
 namespace radray::d3d12 {
 
@@ -31,6 +32,12 @@ void CommandList::Close() {
         return;
     }
     ThrowIfFailed(cmd->Close());
+}
+
+void CommandList::Upload(ID3D12Resource* dst, uint64 dstOffset, std::span<const uint8> src) {
+    auto&& view = alloc->uploadAlloc.Allocate(src.size());
+    view.handle->CopyData(view.offset, src);
+    cmd->CopyBufferRegion(dst, dstOffset, view.handle->GetResource(), view.offset, src.size());
 }
 
 }  // namespace radray::d3d12

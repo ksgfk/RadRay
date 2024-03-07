@@ -11,7 +11,7 @@ public:
         uint64 byteSize,
         IGpuHeapAllocator* allocator = nullptr,
         D3D12_RESOURCE_STATES initState = D3D12_RESOURCE_STATE_COMMON) noexcept;
-    ~DefaultBuffer() noexcept override;
+    ~DefaultBuffer() noexcept override = default;
     DefaultBuffer(DefaultBuffer&&) noexcept = default;
     DefaultBuffer(const DefaultBuffer&) noexcept = delete;
     DefaultBuffer& operator=(DefaultBuffer&&) noexcept = default;
@@ -21,6 +21,7 @@ public:
     uint64 GetByteSize() const noexcept override;
     ID3D12Resource* GetResource() const noexcept override;
     D3D12_RESOURCE_STATES GetInitState() const noexcept override;
+    void SetInitState(D3D12_RESOURCE_STATES state) noexcept { _initState = state; }
 
 private:
     ComPtr<ID3D12Resource> _resource;

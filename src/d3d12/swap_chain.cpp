@@ -75,7 +75,7 @@ SwapChain::SwapChain(
 }
 
 void SwapChain::Present() {
-    swapChain->Present(isVsync, isVsync ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+    swapChain->Present(isVsync, isVsync ? 0 : DXGI_PRESENT_ALLOW_TEARING);
     backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 }
 

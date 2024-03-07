@@ -72,7 +72,7 @@ private:
 };
 
 template <typename... Args>
-class MultiDelegate<void(Args...)> : public std::enable_shared_from_this<MultiDelegate<void(Args...)>> {
+class MultiDelegate<void(Args...)> {
 public:
     using CallableType = void(Args...);
     using DataType = std::function<CallableType>;

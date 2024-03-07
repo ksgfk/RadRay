@@ -89,12 +89,24 @@ public:
         }
     }
 
-    void TrimExcess() noexcept {
+    void Reset() noexcept {
         _capacity = _initCapacity;
-        for (auto&& i : _buffers) {
-            _proxy->Destroy(i.handle);
+        if (_buffers.empty()) {
+            return;
         }
-        _buffers.clear();
+        if (_buffers.size() > 1) {
+            for (size_t i = 1; i < _buffers.size(); i++) {
+                _proxy->Destroy(_buffers[i].handle);
+            }
+            _buffers.resize(1);
+        }
+        Buffer& first = _buffers[0];
+        if (first.capacity > _capacity) {
+            _proxy->Destroy(first.handle);
+            first.handle = _proxy->Allocate(_capacity);
+            first.capacity = _capacity;
+        }
+        first.count = 0;
     }
 
 private:
