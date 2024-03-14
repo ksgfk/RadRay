@@ -14,6 +14,34 @@ const float c[] = {
     2, 2, 2,
     3, 3, 3};
 
+const char* vs = R"(
+cbuffer cbPreObject : register(b0) {
+  float4x4 g_Model;
+  float4x4 g_MVP;
+  float4x4 g_InvM;
+};
+
+cbuffer cbGlobal : register(b1) {
+  float4x4 g_View;
+  float4x4 g_Proj;
+  float4x4 g_VP;
+};
+
+struct VSIn {
+  float3 Pos : POSITION;
+};
+
+struct VSOut {
+  float4 PosClip : SV_POSITION;
+};
+
+VSOut VSMain(VSIn vin) {
+  VSOut v;
+  v.PosClip = mul(g_MVP, float4(vin.Pos, 1.0f));
+  return v;
+}
+)";
+
 class App {
 public:
     App() { window::GlobalInit(); }
@@ -25,6 +53,10 @@ public:
     void Init() {
         window = std::make_unique<window::NativeWindow>("test d3d12", 1280, 720);
         device = std::make_unique<d3d12::Device>();
+        d3d12::ShaderCompileResult vsResult = device->shaderCompiler->Compile(vs, "VSMain", "vs_6_1", false);
+        if (!vsResult.data) {
+            RADRAY_LOG_DEBUG("compile vs error\n{}", vsResult.error);
+        }
         directQueue = std::make_unique<d3d12::CommandQueue>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
         for (int i = 0; i < 3; i++) {
             cmdAllocs[i] = std::make_unique<d3d12::CommandAllocator>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
