@@ -67,8 +67,8 @@ ShaderCompileResult ShaderCompiler::Compile(std::string_view code, std::span<LPC
     } else {
         ComPtr<IDxcBlobEncoding> errBuffer;
         ThrowIfFailed(compileResult->GetErrorBuffer(errBuffer.GetAddressOf()));
-        std::wstring_view errStr{reinterpret_cast<wchar_t const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
-        return {nullptr, Utf8ToString(std::wstring{errStr})};
+        std::string errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize() - 1};
+        return {nullptr, errStr};
     }
 }
 
