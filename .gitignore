@@ -3,4 +3,6 @@
 build
 bin
 
+scripts/options.lua
+
 !ext/dxc/bin

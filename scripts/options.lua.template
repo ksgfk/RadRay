@@ -1,0 +1,3 @@
+radray_toolchain = {
+	-- toolchain = "clang-cl"
+}

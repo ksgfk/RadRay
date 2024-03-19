@@ -1,97 +1,72 @@
-package("ext_eigen")
-    add_versions("3.4.0", "")
-    set_sourcedir(path.join(os.scriptdir(), "eigen"))
-    add_deps("cmake")
-    add_includedirs("include/eigen3")
-    on_install(function(package)
-        local configs = {}
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
-        table.insert(configs, "-DBUILD_TESTING=OFF")
-        import("package.tools.cmake").install(package, configs)
-    end)
-package_end()
-
-package("ext_spdlog")
-    add_versions("1.13.0", "")
-    set_sourcedir(path.join(os.scriptdir(), "spdlog"))
-    add_deps("cmake")
-    on_install(function(package)
-        local configs = {}
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
-        table.insert(configs, "-DSPDLOG_BUILD_SHARED=OFF")
-        table.insert(configs, "-DSPDLOG_DISABLE_DEFAULT_LOGGER=ON")
-        table.insert(configs, "-DSPDLOG_NO_THREAD_ID=ON")
-        import("package.tools.cmake").install(package, configs)
-    end)
-package_end()
-
-package("ext_d3d12ma")
-    add_versions("2.0.1", "")
-    set_sourcedir(path.join(os.scriptdir(), "D3D12MemoryAllocator"))
-    add_deps("cmake")
-    on_install(function(package)
-        local configs = {}
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
-        import("package.tools.cmake").install(package, configs)
-    end)
-package_end()
-
-package("ext_xxhash")
-    add_versions("0.8.2", "")
-    local dir = path.join(os.scriptdir(), "xxHash")
-    set_sourcedir(dir)
-    on_install(function (package)
-        local function rm_cache()
-            if os.exists(path.join(dir, "build")) then
-               os.rmdir(path.join(dir, "build")) 
-            end
-            if os.exists(path.join(dir, ".xmake")) then
-               os.rmdir(path.join(dir, ".xmake")) 
-            end
-            if os.exists(path.join(dir, "xmake.lua")) then
-                os.rm(path.join(dir, "xmake.lua"))
-            end
+target("eigen")
+    local libDir = path.join(os.scriptdir(), "eigen")
+    set_languages("cxx20")
+    set_kind("headeronly")
+    add_includedirs(libDir, {public = true})
+    for _, filepath in ipairs(os.files(path.join(libDir, "Eigen", "**"))) do
+        if os.isfile(filepath) then
+            add_headerfiles(filepath, {prefixdir = path.join("include", path.directory(path.relative(filepath, libDir)))})
         end
-        rm_cache()
-        io.writefile("xmake.lua", [[
-            add_rules("mode.debug", "mode.release")
-            target("xxhash")
-                set_kind("static")
-                add_files("xxhash.c")
-                add_headerfiles("xxhash.h", "xxh3.h")
-                if is_arch("arm64") then
-                    add_vectorexts("neon")
-                elseif is_arch("x64", "x86_64") then
-                    add_vectorexts("avx", "avx2")
-                end
-        ]])
-        import("package.tools.xmake").install(package)
-        rm_cache()
-    end)
-    on_test(function (package)
-        assert(package:has_cfuncs("XXH_versionNumber", {includes = "xxhash.h"}))
-    end)
-package_end()
-
-package("ext_glfw")
-    add_versions("3.4.0", "")
-    set_sourcedir(path.join(os.scriptdir(), "glfw"))
-    if is_plat("macosx") then
-        add_frameworks("Cocoa", "IOKit")
-    elseif is_plat("windows") then
-        add_syslinks("user32", "shell32", "gdi32")
-    elseif is_plat("linux") then
-        add_deps("libx11", "libxrandr", "libxrender", "libxinerama", "libxfixes", "libxcursor", "libxi", "libxext")
-        add_syslinks("dl", "pthread")
-        add_defines("_GLFW_X11")
     end
-    add_deps("cmake")
-    on_install(function(package)
-        local configs = {}
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:debug() and "Debug" or "Release"))
-        table.insert(configs, "-DGLFW_BUILD_EXAMPLES=OFF")
-        table.insert(configs, "-DGLFW_BUILD_TESTS=OFF")
-        table.insert(configs, "-DBUILD_SHARED_LIBS=OFF")
-        import("package.tools.cmake").install(package, configs)
-    end)
-package_end()
+    add_rules("utils.install.cmake_importfiles")
+    add_rules("utils.install.pkgconfig_importfiles")
+target_end()
+
+target("spdlog")
+    local libDir = path.join(os.scriptdir(), "spdlog")
+    set_languages("cxx20")
+    set_kind("static")
+    add_rules("radray_set_ucrt", "radray_no_rtti")
+    add_includedirs(path.join(libDir, "include"), {public = true})
+	add_defines("SPDLOG_NO_EXCEPTIONS", "SPDLOG_NO_THREAD_ID", "SPDLOG_DISABLE_DEFAULT_LOGGER", "FMT_SHARED", "FMT_CONSTEVAL=constexpr", "FMT_USE_CONSTEXPR=1", "FMT_EXCEPTIONS=0", {public = true})
+	add_defines("FMT_EXPORT", "spdlog_EXPORTS", "SPDLOG_COMPILED_LIB")
+    for _, filepath in ipairs(os.files(path.join(libDir, "include", "**"))) do
+        if os.isfile(filepath) then
+            add_headerfiles(filepath, {prefixdir = path.directory(path.relative(filepath, libDir))})
+        end
+    end
+    add_files(path.join(libDir, "src", "*.cpp"))
+    add_rules("utils.install.cmake_importfiles")
+    add_rules("utils.install.pkgconfig_importfiles")
+target_end()
+
+target("glfw")
+    local libDir = path.join(os.scriptdir(), "glfw")
+    set_languages("cxx20", "c11")
+    set_kind("static")
+    add_rules("radray_set_ucrt")
+    add_includedirs(path.join(libDir, "include"), {public = true})
+    add_defines("_GLFW_BUILD_DLL")
+    if is_plat("linux") then
+        add_defines("_GLFW_X11", "_DEFAULT_SOURCE")
+    elseif is_plat("windows") then
+        add_defines("_GLFW_WIN32")
+        add_syslinks("User32", "Gdi32", "Shell32")
+    elseif is_plat("macosx") then
+        add_files("../ext/glfw/src/*.m")
+        add_mflags("-fno-objc-arc")
+        add_defines("_GLFW_COCOA")
+        add_frameworks("Foundation", "Cocoa", "IOKit", "OpenGL")
+    end
+    add_headerfiles(path.join(libDir, "include", "GLFW", "*.h"), {prefixdir = "include/GLFW"})
+    add_files(path.join(libDir, "src", "*.c"))
+    add_rules("utils.install.cmake_importfiles")
+    add_rules("utils.install.pkgconfig_importfiles")
+target_end()
+
+target("xxhash")
+    local libDir = path.join(os.scriptdir(), "xxHash")
+    set_languages("cxx20", "c11")
+    set_kind("static")
+    add_rules("radray_set_ucrt")
+    add_includedirs(libDir, {public = true})
+    if is_arch("arm64") then
+        add_vectorexts("neon")
+    elseif is_arch("x64", "x86_64") then
+        add_vectorexts("avx", "avx2")
+    end
+    add_headerfiles(path.join(libDir, "xxhash.h"), {prefixdir = "include"})
+    add_files(path.join(libDir, "xxhash.c"))
+    add_rules("utils.install.cmake_importfiles")
+    add_rules("utils.install.pkgconfig_importfiles")
+target_end()
