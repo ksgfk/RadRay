@@ -1,10 +1,12 @@
 #pragma once
 
 #include <unordered_map>
-
+#include <vector>
 #include <radray/d3d12/shader.h>
 
 namespace radray::d3d12 {
+
+struct RasterShaderCompileResult;
 
 enum class InputElementSemantic {
     POSITION,
@@ -68,6 +70,7 @@ public:
     ~RasterShader() noexcept override = default;
 
     ComPtr<ID3D12PipelineState> GetOrCreatePso(const RasterPipelineStateInfo&) noexcept;
+    void Setup(const RasterShaderCompileResult* result);
 
 public:
     ComPtr<ID3D12RootSignature> rootSig;

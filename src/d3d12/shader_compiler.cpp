@@ -49,7 +49,7 @@ ShaderCompileResult ShaderCompiler::Compile(std::string_view code, std::span<LPC
     DxcBuffer buffer{
         code.data(),
         code.size(),
-        CP_ACP};
+        DXC_CP_ACP};
     ComPtr<IDxcResult> compileResult;
     DefaultIncludeHandler ih{this};
     ThrowIfFailed(compiler->Compile(
@@ -63,12 +63,20 @@ ShaderCompileResult ShaderCompiler::Compile(std::string_view code, std::span<LPC
     if (status == 0) {
         ComPtr<IDxcBlob> resultBlob;
         ThrowIfFailed(compileResult->GetResult(resultBlob.GetAddressOf()));
-        return {std::move(resultBlob), std::string{}};
+        ComPtr<IDxcBlob> pReflectionData;
+        compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&pReflectionData), nullptr);
+        ComPtr<ID3D12ShaderReflection> pReflection;
+        DxcBuffer reflectionData;
+        reflectionData.Encoding = DXC_CP_ACP;
+        reflectionData.Ptr = pReflectionData->GetBufferPointer();
+        reflectionData.Size = pReflectionData->GetBufferSize();
+        ThrowIfFailed(utils->CreateReflection(&reflectionData, IID_PPV_ARGS(&pReflection)));
+        return {std::move(resultBlob), std::move(pReflection), std::string{}};
     } else {
         ComPtr<IDxcBlobEncoding> errBuffer;
         ThrowIfFailed(compileResult->GetErrorBuffer(errBuffer.GetAddressOf()));
         std::string errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize() - 1};
-        return {nullptr, errStr};
+        return {nullptr, nullptr, errStr};
     }
 }
 
@@ -91,6 +99,17 @@ ShaderCompileResult ShaderCompiler::Compile(
     std::wstring entryPointW = Utf8ToWString(std::string{entryPoint});
     args.emplace_back(entryPointW.data());
     return Compile(code, std::span<LPCWSTR>{args.data(), args.size()});
+}
+
+RasterShaderCompileResult ShaderCompiler::CompileRaster(
+    std::string_view code,
+    uint32 shaderModel,
+    bool optimize) {
+    std::string vsSM = fmt::format("vs_{}_{}", shaderModel / 10, shaderModel % 10);
+    auto vs = Compile(code, "VSMain", vsSM, optimize);
+    std::string psSM = fmt::format("ps_{}_{}", shaderModel / 10, shaderModel % 10);
+    auto ps = Compile(code, "PSMain", psSM, optimize);
+    return {vs, ps};
 }
 
 }  // namespace radray::d3d12

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <unordered_map>
 #include <radray/d3d12/utility.h>
 
 namespace radray::d3d12 {
@@ -34,6 +35,12 @@ public:
 public:
     Device* device;
     std::vector<ShaderProperty> properties;
+    std::unordered_map<std::string, size_t> nameToIndex;
 };
 
 }  // namespace radray::d3d12
+
+template <>
+struct fmt::formatter<radray::d3d12::ShaderVariableType> : fmt::formatter<std::string> {
+    auto format(radray::d3d12::ShaderVariableType const& val, format_context& ctx) const -> decltype(ctx.out());
+};
