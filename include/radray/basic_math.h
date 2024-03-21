@@ -1,12 +1,21 @@
 #pragma once
 
 #include <cmath>
+#include <numbers>
 #include <Eigen/Dense>
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <spdlog/fmt/ostr.h>
 
 namespace radray {
+
+template <typename T>
+requires(std::is_floating_point_v<T>)
+constexpr T Degree(T value) { return value * (T(180) / std::numbers::pi_v<T>); }
+
+template <typename T>
+requires(std::is_floating_point_v<T>)
+constexpr T Radian(T value) { return value * (std::numbers::pi_v<T> / T(180)); }
 
 template <typename T>
 requires(std::is_floating_point_v<T>)

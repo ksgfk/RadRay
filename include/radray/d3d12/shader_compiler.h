@@ -12,11 +12,17 @@ struct ShaderCompileResult {
     ComPtr<IDxcBlob> data;
     ComPtr<ID3D12ShaderReflection> refl;
     std::string error;
+
+    bool IsValid() const noexcept;
+    void LogErrorIfInvalid() const noexcept;
 };
 
 struct RasterShaderCompileResult {
     ShaderCompileResult vs;
     ShaderCompileResult ps;
+
+    bool IsValid() const noexcept;
+    void LogErrorIfInvalid() const noexcept;
 };
 
 class ShaderCompiler {

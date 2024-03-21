@@ -2,6 +2,30 @@
 
 namespace radray::d3d12 {
 
+bool ShaderCompileResult::IsValid() const noexcept {
+    return data != nullptr;
+}
+
+void ShaderCompileResult::LogErrorIfInvalid() const noexcept {
+    if (IsValid()) {
+        return;
+    }
+    RADRAY_LOG_ERROR("shader compile error\n{}", error);
+}
+
+bool RasterShaderCompileResult::IsValid() const noexcept {
+    return vs.IsValid() && ps.IsValid();
+}
+
+void RasterShaderCompileResult::LogErrorIfInvalid() const noexcept {
+    if (!vs.IsValid()) {
+        RADRAY_LOG_ERROR("vertex shader compile error\n{}", vs.error);
+    }
+    if (!ps.IsValid()) {
+        RADRAY_LOG_ERROR("pixel shader compile error\n{}", ps.error);
+    }
+}
+
 class DefaultIncludeHandler : public IDxcIncludeHandler {
 public:
     DefaultIncludeHandler(const ShaderCompiler* sc) : _sc(sc) {}

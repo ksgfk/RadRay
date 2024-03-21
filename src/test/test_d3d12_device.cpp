@@ -1,3 +1,4 @@
+#include <radray/triangle_mesh.h>
 #include <radray/window/native_window.h>
 #include <radray/d3d12/device.h>
 #include <radray/d3d12/command_queue.h>
@@ -10,71 +11,34 @@
 
 using namespace radray;
 
-const float c[] = {
-    1, 1, 1,
-    2, 2, 2,
-    3, 3, 3};
-
-const char* vs = R"(
-float3 ToSRGB(float3 value) {
-  return select(value <= 0.0031308f, value * 12.92f, (1.0f + 0.055f) * pow(value, 1.0f / 2.4f) - 0.055f);
-}
-
-float3 ToLinear(float3 value) {
-  return select(value <= 0.04045f, value * (1.0f / 12.92f), pow((value + 0.055f) * (1.0f / 1.055f), 2.4f));
-}
-
+const char* shaderSrc = R"(
 cbuffer cbPreObject : register(b0) {
-  float4x4 g_Model;
-  float4x4 g_MVP;
-  float4x4 g_InvM;
+    float4x4 g_Model;
+    float4x4 g_MVP;
+    float4x4 g_InvM;
 };
-
-cbuffer cbGlobal : register(b1) {
-  float4x4 g_View;
-  float4x4 g_Proj;
-  float4x4 g_VP;
-};
-struct Test {
-  float4 a;
-};
-ConstantBuffer<Test> cbTest[4] : register(b2);
-
-Texture2D<float4> g_Color : register(t0);
-SamplerState g_Sampler : register(s1);
-
-RWStructuredBuffer<Test> textures[2] : register(u1);
-StructuredBuffer<Test> buffers[2] : register(t1);
-ByteAddressBuffer bytes : register(t3);
 
 struct VSIn {
-  float3 Pos : POSITION;
-  float2 UV0 : TEXCOORD0;
+    float3 Pos : POSITION;
+    float3 Normal : NORMAL;
 };
 
 struct VSOut {
-  float4 PosClip : SV_POSITION;
-  float2 UV : TEXCOORD0;
+    float4 PosClip : SV_POSITION;
+    float3 NormalW : NORMAL;
 };
 
 VSOut VSMain(VSIn vin) {
-  VSOut v;
-  v.PosClip = mul(g_MVP, float4(vin.Pos, 1.0f));
-  v.UV = vin.UV0;
-  float4 color = cbTest[0].a;
-  v.PosClip *= color;
-  return v;
+    VSOut v;
+    v.PosClip = mul(g_MVP, float4(vin.Pos, 1.0f));
+    v.NormalW = normalize(mul(transpose((float3x3)g_InvM), vin.Normal));
+    return v;
 }
 
-float4 PSMain(VSOut vout) : SV_Target {
-  float4 color = g_Color.Sample(g_Sampler, vout.UV);
-  RWStructuredBuffer<Test> a = textures[0];
-  a[0].a = color;
-  color /= cbTest[0].a;
-  color += buffers[0][0].a;
-  uint4 t = bytes.Load4(0);
-  color /= t;
-  return color;
+float4 PSMain(VSOut v) : SV_Target {
+    float3 nw = normalize(v.NormalW);
+    float4 color = float4((nw + 1.0f) * 0.5f, 1.0f);
+    return color;
 }
 )";
 
@@ -89,15 +53,6 @@ public:
     void Init() {
         window = std::make_unique<window::NativeWindow>("test d3d12", 1280, 720);
         device = std::make_unique<d3d12::Device>();
-        d3d12::RasterShaderCompileResult shaderResult = device->shaderCompiler->CompileRaster(vs, 61, false);
-        if (!shaderResult.vs.data) {
-            RADRAY_ABORT("compile vs error\n{}", shaderResult.vs.error);
-        }
-        if (!shaderResult.ps.data) {
-            RADRAY_ABORT("compile ps error\n{}", shaderResult.ps.error);
-        }
-        d3d12::RasterShader raster{device.get()};
-        raster.Setup(&shaderResult);
         directQueue = std::make_unique<d3d12::CommandQueue>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
         for (int i = 0; i < 3; i++) {
             cmdAllocs[i] = std::make_unique<d3d12::CommandAllocator>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
@@ -106,15 +61,26 @@ public:
     }
 
     void Start() {
+        {
+            shader = std::make_unique<d3d12::RasterShader>(device.get());
+            d3d12::RasterShaderCompileResult compile = device->shaderCompiler->CompileRaster(shaderSrc, 61, false);
+            if (!compile.IsValid()) {
+                compile.LogErrorIfInvalid();
+                RADRAY_ABORT("compile shader error");
+            }
+            shader->Setup(&compile);
+        }
         d3d12::CommandAllocator* cmdAlloc = cmdAllocs[0].get();
         d3d12::CommandList* cmdList = cmdAlloc->cmd.get();
         d3d12::ResourceStateTracker* stateTracker = &cmdAlloc->stateTracker;
         ID3D12GraphicsCommandList* cmd = cmdList->cmd.Get();
         cmdAlloc->Reset();
-        cube = std::make_unique<d3d12::DefaultBuffer>(device.get(), ArrayByteSize(c));
+        TriangleMesh mesh{};
+        mesh.InitAsCube(0.5f);
+        cube = std::make_unique<d3d12::DefaultBuffer>(device.get(), mesh.positions.size() * sizeof(Eigen::Vector3f));
         stateTracker->Track(cube.get(), D3D12_RESOURCE_STATE_COPY_DEST);
         stateTracker->Update(cmd);
-        cmdList->Upload(cube->GetResource(), 0, {reinterpret_cast<const uint8*>(c), ArrayByteSize(c)});
+        cmdList->Upload(cube->GetResource(), 0, {reinterpret_cast<const uint8*>(mesh.positions.data()), cube->GetByteSize()});
         cube->SetInitState(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
         stateTracker->Restore(cmd);
         cmdList->Close();
@@ -155,6 +121,7 @@ public:
     std::unique_ptr<d3d12::CommandAllocator> cmdAllocs[3];
     std::unique_ptr<d3d12::SwapChain> swapChain;
     std::unique_ptr<d3d12::DefaultBuffer> cube;
+    std::unique_ptr<d3d12::RasterShader> shader;
 };
 
 int main() {
