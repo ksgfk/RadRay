@@ -2,28 +2,12 @@
 
 #include <unordered_map>
 #include <vector>
+#include <radray/vertex_data.h>
 #include <radray/d3d12/shader.h>
 
 namespace radray::d3d12 {
 
 struct RasterShaderCompileResult;
-
-enum class InputElementSemantic {
-    POSITION,
-    NORMAL,
-    TEXCOORD,
-    TANGENT,
-    COLOR,
-    PSIZE,
-    BINORMAL,
-    BLENDINDICES,
-    BLENDWEIGHT,
-    POSITIONT,
-    FOG,
-    TESSFACTOR
-};
-
-const char* EnumSemanticToString(InputElementSemantic e) noexcept;
 
 struct InputElementInfo {
     InputElementSemantic Semantic;

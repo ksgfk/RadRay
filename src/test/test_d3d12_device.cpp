@@ -1,4 +1,5 @@
 #include <radray/triangle_mesh.h>
+#include <radray/vertex_data.h>
 #include <radray/window/native_window.h>
 #include <radray/d3d12/device.h>
 #include <radray/d3d12/command_queue.h>
@@ -76,11 +77,13 @@ public:
         ID3D12GraphicsCommandList* cmd = cmdList->cmd.Get();
         cmdAlloc->Reset();
         TriangleMesh mesh{};
-        mesh.InitAsCube(0.5f);
-        cube = std::make_unique<d3d12::DefaultBuffer>(device.get(), mesh.positions.size() * sizeof(Eigen::Vector3f));
+        mesh.InitAsUVSphere(0.5f, 64);
+        VertexData vData{};
+        mesh.ToVertexData(&vData);
+        cube = std::make_unique<d3d12::DefaultBuffer>(device.get(), vData.vertexSize);
         stateTracker->Track(cube.get(), D3D12_RESOURCE_STATE_COPY_DEST);
         stateTracker->Update(cmd);
-        cmdList->Upload(cube->GetResource(), 0, {reinterpret_cast<const uint8*>(mesh.positions.data()), cube->GetByteSize()});
+        cmdList->Upload(cube->GetResource(), 0, {vData.vertexData.get(), vData.vertexSize});
         cube->SetInitState(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
         stateTracker->Restore(cmd);
         cmdList->Close();

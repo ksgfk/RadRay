@@ -68,24 +68,6 @@ ComPtr<ID3D12PipelineState> RasterShader::GetOrCreatePso(const RasterPipelineSta
     return ComPtr<ID3D12PipelineState>{iter->second};
 }
 
-const char* EnumSemanticToString(InputElementSemantic e) noexcept {
-    switch (e) {
-        case InputElementSemantic::POSITION: return "POSITION";
-        case InputElementSemantic::NORMAL: return "NORMAL";
-        case InputElementSemantic::TEXCOORD: return "TEXCOORD";
-        case InputElementSemantic::TANGENT: return "TANGENT";
-        case InputElementSemantic::COLOR: return "COLOR";
-        case InputElementSemantic::PSIZE: return "PSIZE";
-        case InputElementSemantic::BINORMAL: return "BINORMAL";
-        case InputElementSemantic::BLENDINDICES: return "BLENDINDICES";
-        case InputElementSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
-        case InputElementSemantic::POSITIONT: return "POSITIONT";
-        case InputElementSemantic::FOG: return "FOG";
-        case InputElementSemantic::TESSFACTOR: return "TESSFACTOR";
-        default: return "UNKNOWN";
-    }
-}
-
 void RasterShader::Setup(const RasterShaderCompileResult* result) {
     using BindTable = std::unordered_map<std::string, ShaderProperty>;
     BindTable bindTable{};

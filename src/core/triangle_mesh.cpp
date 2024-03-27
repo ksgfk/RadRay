@@ -1,8 +1,93 @@
 #include <radray/triangle_mesh.h>
 
 #include <numbers>
+#include <radray/vertex_data.h>
 
 namespace radray {
+
+bool TriangleMesh::IsValid() const noexcept {
+    return indices.size() > 0 &&
+           positions.size() > 0 &&
+           positions.size() <= std::numeric_limits<uint32>::max() &&
+           (normals.size() == 0 || normals.size() == positions.size()) &&
+           (uv0.size() == 0 || uv0.size() == positions.size()) &&
+           (tangents.size() == 0 || tangents.size() == positions.size()) &&
+           (color0.size() == 0 || color0.size() == positions.size());
+}
+
+uint64 TriangleMesh::GetVertexByteSize() const noexcept {
+    return positions.size() * 12 +
+           normals.size() * 12 +
+           uv0.size() * 8 +
+           tangents.size() * 16 +
+           color0.size() * 16;
+}
+
+void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
+    {
+        data->layouts.emplace_back(VertexLayout{InputElementSemantic::POSITION, 0, 12, 0});
+        uint32 byteOffset = 12;
+        if (normals.size() > 0) {
+            data->layouts.emplace_back(VertexLayout{InputElementSemantic::NORMAL, 0, 12, byteOffset});
+            byteOffset += 12;
+        }
+        if (uv0.size() > 0) {
+            data->layouts.emplace_back(VertexLayout{InputElementSemantic::TEXCOORD, 0, 8, byteOffset});
+            byteOffset += 8;
+        }
+        if (tangents.size() > 0) {
+            data->layouts.emplace_back(VertexLayout{InputElementSemantic::TANGENT, 0, 16, byteOffset});
+            byteOffset += 16;
+        }
+        if (color0.size() > 0) {
+            data->layouts.emplace_back(VertexLayout{InputElementSemantic::COLOR, 0, 16, byteOffset});
+            byteOffset += 16;
+        }
+        uint64 byteSize = byteOffset * positions.size();
+        RADRAY_ASSERT(byteSize == GetVertexByteSize(), "byte size not equal");
+        data->vertexData = std::make_unique<uint8[]>(byteSize);
+        data->vertexSize = byteSize;
+        float* target = reinterpret_cast<float*>(data->vertexData.get());
+        for (size_t i = 0; i < positions.size(); i++) {
+            std::copy(positions[i].begin(), positions[i].end(), target);
+            target += 3;
+            if (normals.size() > 0) {
+                std::copy(normals[i].begin(), normals[i].end(), target);
+                target += 3;
+            }
+            if (uv0.size() > 0) {
+                std::copy(uv0[i].begin(), uv0[i].end(), target);
+                target += 2;
+            }
+            if (tangents.size() > 0) {
+                std::copy(tangents[i].begin(), tangents[i].end(), target);
+                target += 4;
+            }
+            if (color0.size() > 0) {
+                std::copy(color0[i].begin(), color0[i].end(), target);
+                target += 4;
+            }
+        }
+    }
+    {
+        uint64 elemSize = positions.size() <= std::numeric_limits<uint16>::max() ? 2 : 4;
+        uint64 byteSize = indices.size() * elemSize;
+        data->indexData = std::make_unique<uint8[]>(byteSize);
+        data->indexSize = byteSize;
+        if (elemSize == sizeof(decltype(indices[0]))) {
+            std::memcpy(data->indexData.get(), indices.data(), data->indexSize);
+        } else if (elemSize == 2) {
+            uint16* target = reinterpret_cast<uint16*>(data->indexData.get());
+            for (auto&& i : indices) {
+                *target = static_cast<uint16>(i);
+                target++;
+            }
+        } else {
+            RADRAY_ABORT("unreachable");
+        }
+        data->indexType = elemSize == 2 ? VertexIndexType::UInt16 : VertexIndexType::UInt32;
+    }
+}
 
 void TriangleMesh::InitAsCube(float halfExtend) noexcept {
     positions = std::vector<Eigen::Vector3f>{
