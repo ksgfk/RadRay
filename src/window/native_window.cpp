@@ -124,6 +124,12 @@ size_t NativeWindow::GetNativeHandle() const noexcept {
     return static_cast<NativeWindowImpl*>(_impl.get())->nativeHandle;
 }
 
+Eigen::Vector2i NativeWindow::GetSize() const noexcept {
+    int w, h;
+    glfwGetWindowSize(static_cast<NativeWindowImpl*>(_impl.get())->window, &w, &h);
+    return Eigen::Vector2i{w, h};
+}
+
 void NativeWindow::Destroy() noexcept {
     _impl = nullptr;
 }

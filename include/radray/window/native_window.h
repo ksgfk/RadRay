@@ -38,6 +38,7 @@ public:
     bool IsValid() const noexcept;
     bool ShouldClose() const noexcept;
     size_t GetNativeHandle() const noexcept;
+    Eigen::Vector2i GetSize() const noexcept;
 
     void Destroy() noexcept;
 

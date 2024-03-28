@@ -33,7 +33,7 @@ SwapChain::SwapChain(
     uint32 width,
     uint32 height,
     bool vsync)
-    : backBufferIndex(0),
+    : device(device),
       isVsync(vsync) {
     BOOL canTearing = true;
     ThrowIfFailed(device->dxgiFactory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &canTearing, sizeof(decltype(canTearing))));
@@ -71,11 +71,25 @@ SwapChain::SwapChain(
         auto&& rtRes = renderTargets.emplace_back(SwapChainRenderTarget{device, std::move(rt)});
         rtRes.format = desc.Format;
     }
+    createDesc = desc;
     backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 }
 
 void SwapChain::Present() {
     swapChain->Present(isVsync, isVsync ? 0 : DXGI_PRESENT_ALLOW_TEARING);
+    backBufferIndex = swapChain->GetCurrentBackBufferIndex();
+}
+
+void SwapChain::Resize(uint32 width, uint32 height) {
+    UINT count = createDesc.BufferCount;
+    renderTargets.clear();
+    ThrowIfFailed(swapChain->ResizeBuffers(count, width, height, createDesc.Format, createDesc.Flags));
+    for (uint32_t n = 0; n < count; n++) {
+        ComPtr<ID3D12Resource> rt;
+        ThrowIfFailed(swapChain->GetBuffer(n, IID_PPV_ARGS(rt.GetAddressOf())));
+        auto&& rtRes = renderTargets.emplace_back(SwapChainRenderTarget{device, std::move(rt)});
+        rtRes.format = createDesc.Format;
+    }
     backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 }
 

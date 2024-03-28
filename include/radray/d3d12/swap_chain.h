@@ -36,7 +36,10 @@ public:
         bool vsync);
 
     void Present();
+    void Resize(uint32 width, uint32 height);
 
+    Device* device;
+    DXGI_SWAP_CHAIN_DESC1 createDesc;
     ComPtr<IDXGISwapChain3> swapChain;
     std::vector<SwapChainRenderTarget> renderTargets;
     uint32 backBufferIndex;

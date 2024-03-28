@@ -1,3 +1,4 @@
+#include <thread>
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
 #include <radray/window/native_window.h>
@@ -56,13 +57,17 @@ public:
         clearColor[1] = 0.5f;
         clearColor[2] = 0.5f;
         clearColor[3] = 1;
-        window = std::make_unique<window::NativeWindow>("test d3d12", 1280, 720);
+        window = std::make_unique<window::NativeWindow>("test d3d12", 1280, 720, true);
+        winResizeDelegate = {
+            [this](const Eigen::Vector2i& size) { OnWindowResize(size); },
+            window->EventWindwResize()};
         device = std::make_unique<d3d12::Device>();
         directQueue = std::make_unique<d3d12::CommandQueue>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
         for (int i = 0; i < 3; i++) {
             cmdAllocs[i] = std::make_unique<d3d12::CommandAllocator>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
         }
-        swapChain = std::make_unique<d3d12::SwapChain>(device.get(), directQueue.get(), (HWND)window->GetNativeHandle(), 3, 1280, 720, false);
+        Eigen::Vector2i winSize = window->GetSize();
+        swapChain = std::make_unique<d3d12::SwapChain>(device.get(), directQueue.get(), (HWND)window->GetNativeHandle(), 3, winSize.x(), winSize.y(), false);
     }
 
     void Start() {
@@ -105,28 +110,41 @@ public:
 
     void Run() {
         while (!window->ShouldClose()) {
-            uint32 nowBackBufferIndex = swapChain->backBufferIndex;
-            d3d12::SwapChainRenderTarget* swapChainRt = &swapChain->renderTargets[nowBackBufferIndex];
-            d3d12::CommandAllocator* cmdAlloc = cmdAllocs[nowBackBufferIndex].get();
-            d3d12::CommandList* cmdList = cmdAlloc->cmd.get();
-            d3d12::ResourceStateTracker* stateTracker = &cmdAlloc->stateTracker;
-            ID3D12GraphicsCommandList* cmd = cmdList->cmd.Get();
-            directQueue->WaitFrame(cmdAlloc->lastExecuteFenceIndex);
             window::GlobalPollEvents();
-            cmdAlloc->Reset();
-            auto rtDesc = cmdAlloc->rtvHeap.Allocate(1);
-            rtDesc.handle->CreateRtv(swapChainRt->GetResource(), swapChainRt->GetRtvDesc(), rtDesc.offset);
-            auto rtv = rtDesc.handle->HandleCPU(rtDesc.offset);
-            stateTracker->Track(swapChainRt, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            stateTracker->Update(cmd);
-            cmd->OMSetRenderTargets(1, &rtv, false, nullptr);
-            cmd->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
-            stateTracker->Restore(cmd);
-            cmdList->Close();
-            directQueue->Execute(cmdAlloc);
-            swapChain->Present();
+            Draw();
+            std::this_thread::yield();
         }
         directQueue->Flush();
+    }
+
+    void Draw() {
+        uint32 nowBackBufferIndex = swapChain->backBufferIndex;
+        d3d12::SwapChainRenderTarget* swapChainRt = &swapChain->renderTargets[nowBackBufferIndex];
+        d3d12::CommandAllocator* cmdAlloc = cmdAllocs[nowBackBufferIndex].get();
+        d3d12::CommandList* cmdList = cmdAlloc->cmd.get();
+        d3d12::ResourceStateTracker* stateTracker = &cmdAlloc->stateTracker;
+        ID3D12GraphicsCommandList* cmd = cmdList->cmd.Get();
+        directQueue->WaitFrame(cmdAlloc->lastExecuteFenceIndex);
+        cmdAlloc->Reset();
+        auto rtDesc = cmdAlloc->rtvHeap.Allocate(1);
+        rtDesc.handle->CreateRtv(swapChainRt->GetResource(), swapChainRt->GetRtvDesc(), rtDesc.offset);
+        auto rtv = rtDesc.handle->HandleCPU(rtDesc.offset);
+        stateTracker->Track(swapChainRt, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        stateTracker->Update(cmd);
+        cmd->OMSetRenderTargets(1, &rtv, false, nullptr);
+        cmd->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+        stateTracker->Restore(cmd);
+        cmdList->Close();
+        directQueue->Execute(cmdAlloc);
+        swapChain->Present();
+    }
+
+    void OnWindowResize(const Eigen::Vector2i& size) {
+        if (size.x() >= 16 && size.y() >= 16) {
+            directQueue->Flush();
+            swapChain->Resize(size.x(), size.y());
+        }
+        Draw();
     }
 
     std::unique_ptr<window::NativeWindow> window;
@@ -141,7 +159,13 @@ public:
     std::unique_ptr<d3d12::DefaultBuffer> cubeIndex;
     d3d12::ComPtr<ID3D12PipelineState> cubeMatPso;
 
+    DelegateHandle<window::WindowResizeCallback> winResizeDelegate;
     float clearColor[4];
+    Eigen::Vector3f camPos;
+    Eigen::Quaternionf camRot;
+    float camFov;
+    float camNear;
+    float camFar;
 };
 
 int main() {
