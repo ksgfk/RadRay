@@ -61,4 +61,6 @@ std::wstring Utf8ToWString(const std::string& str) noexcept;
 
 std::string Utf8ToString(const std::wstring& str) noexcept;
 
+uint32 DxgiFormatByteSize(DXGI_FORMAT format) noexcept;
+
 }  // namespace radray::d3d12

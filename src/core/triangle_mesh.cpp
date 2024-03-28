@@ -25,22 +25,22 @@ uint64 TriangleMesh::GetVertexByteSize() const noexcept {
 
 void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
     {
-        data->layouts.emplace_back(VertexLayout{InputElementSemantic::POSITION, 0, 12, 0});
+        data->layouts.emplace_back(VertexLayout{VertexSemantic::POSITION, 0, 12, 0});
         uint32 byteOffset = 12;
         if (normals.size() > 0) {
-            data->layouts.emplace_back(VertexLayout{InputElementSemantic::NORMAL, 0, 12, byteOffset});
+            data->layouts.emplace_back(VertexLayout{VertexSemantic::NORMAL, 0, 12, byteOffset});
             byteOffset += 12;
         }
         if (uv0.size() > 0) {
-            data->layouts.emplace_back(VertexLayout{InputElementSemantic::TEXCOORD, 0, 8, byteOffset});
+            data->layouts.emplace_back(VertexLayout{VertexSemantic::TEXCOORD, 0, 8, byteOffset});
             byteOffset += 8;
         }
         if (tangents.size() > 0) {
-            data->layouts.emplace_back(VertexLayout{InputElementSemantic::TANGENT, 0, 16, byteOffset});
+            data->layouts.emplace_back(VertexLayout{VertexSemantic::TANGENT, 0, 16, byteOffset});
             byteOffset += 16;
         }
         if (color0.size() > 0) {
-            data->layouts.emplace_back(VertexLayout{InputElementSemantic::COLOR, 0, 16, byteOffset});
+            data->layouts.emplace_back(VertexLayout{VertexSemantic::COLOR, 0, 16, byteOffset});
             byteOffset += 16;
         }
         uint64 byteSize = byteOffset * positions.size();

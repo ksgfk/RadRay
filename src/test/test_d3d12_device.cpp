@@ -52,6 +52,10 @@ public:
     }
 
     void Init() {
+        clearColor[0] = 0.5f;
+        clearColor[1] = 0.5f;
+        clearColor[2] = 0.5f;
+        clearColor[3] = 1;
         window = std::make_unique<window::NativeWindow>("test d3d12", 1280, 720);
         device = std::make_unique<d3d12::Device>();
         directQueue = std::make_unique<d3d12::CommandQueue>(device.get(), D3D12_COMMAND_LIST_TYPE_DIRECT);
@@ -63,13 +67,13 @@ public:
 
     void Start() {
         {
-            shader = std::make_unique<d3d12::RasterShader>(device.get());
+            colorShader = std::make_unique<d3d12::RasterShader>(device.get());
             d3d12::RasterShaderCompileResult compile = device->shaderCompiler->CompileRaster(shaderSrc, 61, false);
             if (!compile.IsValid()) {
                 compile.LogErrorIfInvalid();
                 RADRAY_ABORT("compile shader error");
             }
-            shader->Setup(&compile);
+            colorShader->Setup(&compile);
         }
         d3d12::CommandAllocator* cmdAlloc = cmdAllocs[0].get();
         d3d12::CommandList* cmdList = cmdAlloc->cmd.get();
@@ -80,11 +84,19 @@ public:
         mesh.InitAsUVSphere(0.5f, 64);
         VertexData vData{};
         mesh.ToVertexData(&vData);
-        cube = std::make_unique<d3d12::DefaultBuffer>(device.get(), vData.vertexSize);
-        stateTracker->Track(cube.get(), D3D12_RESOURCE_STATE_COPY_DEST);
+        d3d12::RasterPipelineStateInfo psInfo{};
+        psInfo.InitDefault();
+        psInfo.InitInputElements(colorShader->inputDefines, &vData, 0);
+        cubeMatPso = colorShader->GetOrCreatePso(psInfo);
+        cubeVertex = std::make_unique<d3d12::DefaultBuffer>(device.get(), vData.vertexSize);
+        cubeIndex = std::make_unique<d3d12::DefaultBuffer>(device.get(), vData.indexSize);
+        stateTracker->Track(cubeVertex.get(), D3D12_RESOURCE_STATE_COPY_DEST);
+        stateTracker->Track(cubeIndex.get(), D3D12_RESOURCE_STATE_COPY_DEST);
         stateTracker->Update(cmd);
-        cmdList->Upload(cube->GetResource(), 0, {vData.vertexData.get(), vData.vertexSize});
-        cube->SetInitState(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        cmdList->Upload(cubeVertex->GetResource(), 0, {vData.vertexData.get(), vData.vertexSize});
+        cmdList->Upload(cubeIndex->GetResource(), 0, {vData.indexData.get(), vData.indexSize});
+        cubeVertex->SetInitState(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+        cubeIndex->SetInitState(D3D12_RESOURCE_STATE_INDEX_BUFFER);
         stateTracker->Restore(cmd);
         cmdList->Close();
         directQueue->Execute(cmdAlloc);
@@ -108,8 +120,7 @@ public:
             stateTracker->Track(swapChainRt, D3D12_RESOURCE_STATE_RENDER_TARGET);
             stateTracker->Update(cmd);
             cmd->OMSetRenderTargets(1, &rtv, false, nullptr);
-            float c[] = {0.5f, 0.5f, 0.5f, 1};
-            cmd->ClearRenderTargetView(rtv, c, 0, nullptr);
+            cmd->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
             stateTracker->Restore(cmd);
             cmdList->Close();
             directQueue->Execute(cmdAlloc);
@@ -123,8 +134,14 @@ public:
     std::unique_ptr<d3d12::CommandQueue> directQueue;
     std::unique_ptr<d3d12::CommandAllocator> cmdAllocs[3];
     std::unique_ptr<d3d12::SwapChain> swapChain;
-    std::unique_ptr<d3d12::DefaultBuffer> cube;
-    std::unique_ptr<d3d12::RasterShader> shader;
+
+    std::unique_ptr<d3d12::RasterShader> colorShader;
+
+    std::unique_ptr<d3d12::DefaultBuffer> cubeVertex;
+    std::unique_ptr<d3d12::DefaultBuffer> cubeIndex;
+    d3d12::ComPtr<ID3D12PipelineState> cubeMatPso;
+
+    float clearColor[4];
 };
 
 int main() {

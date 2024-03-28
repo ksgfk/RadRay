@@ -2,11 +2,12 @@
 
 #include <memory>
 #include <vector>
+#include <string>
 #include <radray/types.h>
 
 namespace radray {
 
-enum class InputElementSemantic {
+enum class VertexSemantic {
     POSITION,
     NORMAL,
     TEXCOORD,
@@ -27,13 +28,14 @@ enum class VertexIndexType {
 };
 
 struct VertexLayout {
-    InputElementSemantic Semantic;
+    VertexSemantic Semantic;
     uint32 SemanticIndex;
     uint32 Size;
     uint32 Offset;
 };
 
-const char* EnumSemanticToString(InputElementSemantic e) noexcept;
+const char* EnumSemanticToString(VertexSemantic e) noexcept;
+VertexSemantic StringToEnumSemantic(const std::string& s) noexcept;
 
 class VertexData {
 public:

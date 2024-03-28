@@ -1,23 +1,59 @@
 #include <radray/vertex_data.h>
 
+#include <cctype>
+#include <algorithm>
+#include <radray/logger.h>
+
 namespace radray {
 
-const char* EnumSemanticToString(InputElementSemantic e) noexcept {
+const char* EnumSemanticToString(VertexSemantic e) noexcept {
     switch (e) {
-        case InputElementSemantic::POSITION: return "POSITION";
-        case InputElementSemantic::NORMAL: return "NORMAL";
-        case InputElementSemantic::TEXCOORD: return "TEXCOORD";
-        case InputElementSemantic::TANGENT: return "TANGENT";
-        case InputElementSemantic::COLOR: return "COLOR";
-        case InputElementSemantic::PSIZE: return "PSIZE";
-        case InputElementSemantic::BINORMAL: return "BINORMAL";
-        case InputElementSemantic::BLENDINDICES: return "BLENDINDICES";
-        case InputElementSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
-        case InputElementSemantic::POSITIONT: return "POSITIONT";
-        case InputElementSemantic::FOG: return "FOG";
-        case InputElementSemantic::TESSFACTOR: return "TESSFACTOR";
+        case VertexSemantic::POSITION: return "POSITION";
+        case VertexSemantic::NORMAL: return "NORMAL";
+        case VertexSemantic::TEXCOORD: return "TEXCOORD";
+        case VertexSemantic::TANGENT: return "TANGENT";
+        case VertexSemantic::COLOR: return "COLOR";
+        case VertexSemantic::PSIZE: return "PSIZE";
+        case VertexSemantic::BINORMAL: return "BINORMAL";
+        case VertexSemantic::BLENDINDICES: return "BLENDINDICES";
+        case VertexSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
+        case VertexSemantic::POSITIONT: return "POSITIONT";
+        case VertexSemantic::FOG: return "FOG";
+        case VertexSemantic::TESSFACTOR: return "TESSFACTOR";
         default: return "UNKNOWN";
     }
+}
+
+VertexSemantic StringToEnumSemantic(const std::string& s) noexcept {
+    std::string e{s};
+    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return std::toupper(c); });
+    if (e == "POSITION") {
+        return VertexSemantic::POSITION;
+    } else if (e == "NORMAL") {
+        return VertexSemantic::NORMAL;
+    } else if (e == "TEXCOORD") {
+        return VertexSemantic::TEXCOORD;
+    } else if (e == "TANGENT") {
+        return VertexSemantic::TANGENT;
+    } else if (e == "COLOR") {
+        return VertexSemantic::COLOR;
+    } else if (e == "PSIZE") {
+        return VertexSemantic::PSIZE;
+    } else if (e == "BINORMAL") {
+        return VertexSemantic::BINORMAL;
+    } else if (e == "BLENDINDICES") {
+        return VertexSemantic::BLENDINDICES;
+    } else if (e == "BLENDWEIGHT") {
+        return VertexSemantic::BLENDWEIGHT;
+    } else if (e == "POSITIONT") {
+        return VertexSemantic::POSITIONT;
+    } else if (e == "FOG") {
+        return VertexSemantic::FOG;
+    } else if (e == "TESSFACTOR") {
+        return VertexSemantic::TESSFACTOR;
+    }
+    RADRAY_ABORT("unknown vertex semantic {}", e);
+    return static_cast<VertexSemantic>(-1);
 }
 
 }  // namespace radray

@@ -62,4 +62,74 @@ std::string Utf8ToString(const std::wstring& str) noexcept {
     return std::string{buffer.begin(), buffer.end()};
 }
 
+uint32 DxgiFormatByteSize(DXGI_FORMAT format) noexcept {
+    switch (format) {
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS: return 16;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16;
+        case DXGI_FORMAT_R32G32B32A32_UINT: return 16;
+        case DXGI_FORMAT_R32G32B32A32_SINT: return 16;
+        case DXGI_FORMAT_R32G32B32_TYPELESS: return 12;
+        case DXGI_FORMAT_R32G32B32_FLOAT: return 12;
+        case DXGI_FORMAT_R32G32B32_UINT: return 12;
+        case DXGI_FORMAT_R32G32B32_SINT: return 12;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return 8;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8;
+        case DXGI_FORMAT_R16G16B16A16_UNORM: return 8;
+        case DXGI_FORMAT_R16G16B16A16_UINT: return 8;
+        case DXGI_FORMAT_R16G16B16A16_SNORM: return 8;
+        case DXGI_FORMAT_R16G16B16A16_SINT: return 8;
+        case DXGI_FORMAT_R32G32_TYPELESS: return 8;
+        case DXGI_FORMAT_R32G32_FLOAT: return 8;
+        case DXGI_FORMAT_R32G32_UINT: return 8;
+        case DXGI_FORMAT_R32G32_SINT: return 8;
+        case DXGI_FORMAT_R32G8X24_TYPELESS: return 8;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return 8;
+        case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS: return 8;
+        case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT: return 8;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS: return 4;
+        case DXGI_FORMAT_R10G10B10A2_UNORM: return 4;
+        case DXGI_FORMAT_R10G10B10A2_UINT: return 4;
+        case DXGI_FORMAT_R11G11B10_FLOAT: return 4;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS: return 4;
+        case DXGI_FORMAT_R8G8B8A8_UNORM: return 4;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 4;
+        case DXGI_FORMAT_R8G8B8A8_UINT: return 4;
+        case DXGI_FORMAT_R8G8B8A8_SNORM: return 4;
+        case DXGI_FORMAT_R8G8B8A8_SINT: return 4;
+        case DXGI_FORMAT_R16G16_TYPELESS: return 4;
+        case DXGI_FORMAT_R16G16_FLOAT: return 4;
+        case DXGI_FORMAT_R16G16_UNORM: return 4;
+        case DXGI_FORMAT_R16G16_UINT: return 4;
+        case DXGI_FORMAT_R16G16_SNORM: return 4;
+        case DXGI_FORMAT_R16G16_SINT: return 4;
+        case DXGI_FORMAT_R32_TYPELESS: return 4;
+        case DXGI_FORMAT_D32_FLOAT: return 4;
+        case DXGI_FORMAT_R32_FLOAT: return 4;
+        case DXGI_FORMAT_R32_UINT: return 4;
+        case DXGI_FORMAT_R32_SINT: return 4;
+        case DXGI_FORMAT_R24G8_TYPELESS: return 4;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT: return 4;
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS: return 4;
+        case DXGI_FORMAT_X24_TYPELESS_G8_UINT: return 4;
+        case DXGI_FORMAT_R8G8_TYPELESS: return 2;
+        case DXGI_FORMAT_R8G8_UNORM: return 2;
+        case DXGI_FORMAT_R8G8_UINT: return 2;
+        case DXGI_FORMAT_R8G8_SNORM: return 2;
+        case DXGI_FORMAT_R8G8_SINT: return 2;
+        case DXGI_FORMAT_R16_TYPELESS: return 2;
+        case DXGI_FORMAT_R16_FLOAT: return 2;
+        case DXGI_FORMAT_D16_UNORM: return 2;
+        case DXGI_FORMAT_R16_UNORM: return 2;
+        case DXGI_FORMAT_R16_UINT: return 2;
+        case DXGI_FORMAT_R16_SNORM: return 2;
+        case DXGI_FORMAT_R16_SINT: return 2;
+        case DXGI_FORMAT_R8_TYPELESS: return 1;
+        case DXGI_FORMAT_R8_UNORM: return 1;
+        case DXGI_FORMAT_R8_UINT: return 1;
+        case DXGI_FORMAT_R8_SNORM: return 1;
+        case DXGI_FORMAT_R8_SINT: return 1;
+        default: return -1;
+    }
+}
+
 }  // namespace radray::d3d12

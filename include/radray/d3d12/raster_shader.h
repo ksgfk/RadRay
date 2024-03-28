@@ -5,18 +5,28 @@
 #include <radray/vertex_data.h>
 #include <radray/d3d12/shader.h>
 
+namespace radray {
+class VertexData;
+}
+
 namespace radray::d3d12 {
 
 struct RasterShaderCompileResult;
 
-struct InputElementInfo {
-    InputElementSemantic Semantic;
+struct RasterInputElementInfo {
+    VertexSemantic Semantic;
     uint32 SemanticIndex;
     DXGI_FORMAT Format;
     uint32 InputSlot;
     uint32 AlignedByteOffset;
     D3D12_INPUT_CLASSIFICATION InputSlotClass;
     uint32 InstanceDataStepRate;
+};
+
+struct RasterInputElementDefine {
+    VertexSemantic Semantic;
+    uint32 SemanticIndex;
+    DXGI_FORMAT Format;
 };
 
 struct RasterPipelineStateInfo {
@@ -32,7 +42,10 @@ struct RasterPipelineStateInfo {
     DXGI_FORMAT DSVFormat;
     DXGI_SAMPLE_DESC SampleDesc;
     uint32 NumInputs;
-    InputElementInfo InputLayouts[MaxInputLayout];
+    RasterInputElementInfo InputLayouts[MaxInputLayout];
+
+    void InitDefault() noexcept;
+    void InitInputElements(const std::vector<RasterInputElementDefine>& targetShaderInput, const VertexData* vertexData, uint32 slot) noexcept;
 };
 
 static_assert(std::is_trivially_copyable_v<RasterPipelineStateInfo>, "raster pso info must be trivially copyable");
@@ -60,6 +73,7 @@ public:
     ComPtr<ID3D12RootSignature> rootSig;
     std::vector<uint8> vsBinary;
     std::vector<uint8> psBinary;
+    std::vector<RasterInputElementDefine> inputDefines;
     PsoMap psoCache;
 };
 
