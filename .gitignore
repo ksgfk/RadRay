@@ -1,0 +1,7 @@
+.vscode
+.xmake
+build
+bin
+ext
+
+scripts/options.lua

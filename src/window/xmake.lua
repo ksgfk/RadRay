@@ -1,0 +1,7 @@
+target("radray_window")
+    set_kind("static")
+    add_rules("c++.unity_build", {batchsize = 32})
+    add_rules("radray_basic_setting")
+    add_files("*.cpp")
+    add_deps("radray_core", "glfw")
+target_end()

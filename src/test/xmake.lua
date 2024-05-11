@@ -1,0 +1,6 @@
+target("test_buddy_alloc")
+    set_kind("binary")
+    add_rules("radray_basic_setting")
+    add_files("test_buddy_alloc.cpp")
+    add_deps("radray_core")
+target_end()

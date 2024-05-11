@@ -1,0 +1,22 @@
+target("spdlog")
+    set_kind("static")
+    add_rules("c++.unity_build", {batchsize = 32})
+    if is_plat("linux", "bsd") then
+        add_syslinks("pthread")
+    end
+    on_load(function(target)
+        target:set("languages", "cxx20")
+        target:set("warnings", "all")
+        if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
+        target:add("vectorexts", "avx", "avx2", "neon")
+        target:add("fpmodels", "fast")
+        target:add("defines", "SPDLOG_COMPILED_LIB")
+        target:add("defines", "SPDLOG_DISABLE_DEFAULT_LOGGER")
+        target:add("defines", "SPDLOG_NO_EXCEPTIONS")
+        target:add("defines", "SPDLOG_NO_THREAD_ID")
+        target:add("defines", "SPDLOG_USE_STD_FORMAT")
+    end)
+    add_includedirs("include", {public = true})
+    add_headerfiles("include/**.h")
+    add_files("src/*.cpp")
+target_end()

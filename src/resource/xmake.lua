@@ -1,0 +1,7 @@
+target("radray_resource")
+    set_kind("static")
+    add_rules("c++.unity_build", {batchsize = 32})
+    add_rules("radray_basic_setting")
+    add_files("*.cpp")
+    add_deps("radray_core", "libpng", "libjpeg")
+target_end()
