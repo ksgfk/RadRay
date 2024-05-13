@@ -17,6 +17,6 @@ target("zlib")
     if is_plat("windows") then
         add_defines("_CRT_SECURE_NO_DEPRECATE", "_CRT_NONSTDC_NO_DEPRECATE")
     else
-        add_defines("ZEXPORT=__attribute__((visibility(\"default\"))", "_LARGEFILE64_SOURCE=1")
+        add_defines("ZEXPORT=__attribute__((visibility(\"default\")))", "_LARGEFILE64_SOURCE=1")
     end
 target_end()

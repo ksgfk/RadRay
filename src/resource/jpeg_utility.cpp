@@ -62,7 +62,7 @@ static boolean FillBuffer(j_decompress_ptr cinfo) {
     }
     src->pub.next_input_byte = (const JOCTET*)src->buf;
     src->pub.bytes_in_buffer = gcnt;
-    return true;
+    return TRUE;
 }
 
 static void Skip(j_decompress_ptr cinfo, long count) {
