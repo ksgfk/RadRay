@@ -8,6 +8,11 @@ option("enable_d3d12")
     set_default(true)
     set_showmenu(true)
 option_end()
+-- option("enable_vulkan")
+--     set_values(true, false)
+--     set_default(true)
+--     set_showmenu(true)
+-- option_end()
 
 includes("scripts/setup.lua")
 if path.absolute(os.projectdir()) == path.absolute(os.scriptdir()) and os.exists("scripts/options.lua") then
