@@ -58,14 +58,15 @@ struct OStreamFormatter : public std::formatter<std::basic_string_view<Char>, Ch
 #define RADRAY_WARN_LOG(fmt, ...) ::radray::LogWarn(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ERR_LOG(fmt, ...) ::radray::LogError(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(fmt "\n  at {}:{}" __VA_OPT__(, ) __VA_ARGS__, __FILE__, __LINE__)
-#if RADRAY_IS_DEBUG
-#define RADRAY_ASSERT(x, f, ...)                                       \
+#define RADRAY_ASSERT_IMPL(x, f, ...)                               \
     do {                                                            \
         if (!(x)) {                                                 \
             auto msg = ::std::format(f __VA_OPT__(, ) __VA_ARGS__); \
             RADRAY_ABORT("assertion '{}' failed: {}", #x, msg);     \
         }                                                           \
     } while (false)
+#if RADRAY_IS_DEBUG
+#define RADRAY_ASSERT(x, f, ...) RADRAY_ASSERT_IMPL(x, f __VA_OPT__(, ) __VA_ARGS__)
 #else
 #define RADRAY_ASSERT(x, f, ...)
 #endif
