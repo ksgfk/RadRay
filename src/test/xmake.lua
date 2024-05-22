@@ -18,3 +18,5 @@ target("test_ref_cnt")
     add_files("test_ref_cnt.cpp")
     add_deps("radray_core")
 target_end()
+
+includes("test_init_rhi")

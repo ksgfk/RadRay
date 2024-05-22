@@ -16,21 +16,28 @@ public:
         return _refCount;
     }
 
-    uint64_t Release() override {
-        if (_refCount == 0) {
-            RADRAY_ABORT("repeat release");
-        }
+    uint64_t RemoveRef() override {
         RADRAY_INFO_LOG("release {}", _value);
         _refCount--;
-        if (_refCount == 0) {
-            delete this;
-        }
         return _refCount;
     }
 
 private:
-    uint64_t _refCount{1};
+    uint64_t _refCount{0};
     int32_t _value;
+};
+
+class Child : public Test {
+public:
+    Child(int32_t value, int32_t child) : Test(value), _child(child) {
+        RADRAY_INFO_LOG("ctor Child {}", child);
+    }
+    ~Child() noexcept override {
+        RADRAY_INFO_LOG("dtor Child {}", _child);
+    }
+
+private:
+    int32_t _child;
 };
 
 int main() {
@@ -53,6 +60,12 @@ int main() {
     {
         RC<Test> a = radray::MakeObject<Test>(5);
         RC<Test> b = std::move(a);
+    }
+    {
+        RC<Test> a = radray::MakeObject<Child>(6, 6);        
+    }
+    {
+        RC<Test> b{radray::MakeObject<Child>(7, 7)};
     }
     return 0;
 }

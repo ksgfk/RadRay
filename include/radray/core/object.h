@@ -16,14 +16,14 @@ public:
 
     virtual uint64_t AddRef() = 0;
 
-    virtual uint64_t Release() = 0;
+    virtual uint64_t RemoveRef() = 0;
 };
 
 template <class T>
-requires std::is_base_of_v<Object, T>
 class RC {
 public:
     RC() noexcept = default;
+    RC(std::nullptr_t) : _ptr{nullptr} {}
     explicit RC(T* ptr) : _ptr{ptr} {
         InternalAddRef();
     }
@@ -31,6 +31,14 @@ public:
         InternalAddRef();
     }
     RC(RC&& other) noexcept : RC{other._ptr} {
+        other._ptr = nullptr;
+    }
+    template <class U, typename std::enable_if_t<std::is_convertible_v<U*, T*>, int> = 0>
+    RC(const RC<U>& other) : _ptr{static_cast<T*>(other._ptr)} {
+        InternalAddRef();
+    }
+    template <class U, typename std::enable_if_t<std::is_convertible_v<U*, T*>, int> = 0>
+    RC(RC<U>&& other) noexcept : _ptr{static_cast<T*>(other._ptr)} {
         other._ptr = nullptr;
     }
     RC& operator=(std::nullptr_t) {
@@ -60,17 +68,6 @@ public:
         InternalRelease();
     }
 
-    friend void swap(RC& first, RC& second) noexcept {
-        std::swap(first._ptr, second._ptr);
-    }
-
-    T** GetAddressOf() noexcept { return &_ptr; }  // dangerous
-
-    T** ReleaseAndGetAddressOf() {
-        InternalRelease();
-        return &_ptr;
-    }
-
     void Reset() {
         InternalRelease();
     }
@@ -79,15 +76,26 @@ public:
 
     T* operator->() const noexcept { return _ptr; }
 
+    friend void swap(RC& first, RC& second) noexcept {
+        std::swap(first._ptr, second._ptr);
+    }
+
+    template <class U>
+    friend class RC;
+
 private:
     void InternalAddRef() {
         if (_ptr != nullptr) {
             _ptr->AddRef();
         }
     }
+
     void InternalRelease() {
         if (_ptr != nullptr) {
-            _ptr->Release();
+            uint64_t refCount = _ptr->RemoveRef();
+            if (refCount == 0) {
+                delete _ptr;
+            }
             _ptr = nullptr;
         }
     }
@@ -108,11 +116,9 @@ bool operator!=(const RC<T>& l, const RC<T>& r) noexcept {
 }
 
 template <class T, class... Args>
-requires std::is_base_of_v<Object, T>
-RC<T> MakeObject(Args... args) {
-    RC<T> result{};
-    *(result.GetAddressOf()) = new T{std::forward<Args>(args)...};
-    return result;
+requires std::is_base_of_v<Object, T> && std::is_constructible_v<T, Args...>
+RC<T> MakeObject(Args&&... args) {
+    return RC<T>{new T{std::forward<Args>(args)...}};
 }
 
 }  // namespace radray
