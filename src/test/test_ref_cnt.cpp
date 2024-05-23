@@ -1,29 +1,22 @@
+#include <thread>
+#include <vector>
+#include <chrono>
+
 #include <radray/logger.h>
 #include <radray/core/object.h>
 
+using radray::RC;
+
 class Test : public radray::Object {
 public:
-    Test(int32_t value) noexcept : _value{value} {
+    Test(int32_t value) noexcept : radray::Object(), _value{value} {
         RADRAY_INFO_LOG("ctor {}", _value);
     }
     ~Test() noexcept override {
         RADRAY_INFO_LOG("dtor {}", _value);
     }
 
-    uint64_t AddRef() override {
-        RADRAY_INFO_LOG("add ref {}", _value);
-        _refCount++;
-        return _refCount;
-    }
-
-    uint64_t RemoveRef() override {
-        RADRAY_INFO_LOG("release {}", _value);
-        _refCount--;
-        return _refCount;
-    }
-
 private:
-    uint64_t _refCount{0};
     int32_t _value;
 };
 
@@ -40,8 +33,7 @@ private:
     int32_t _child;
 };
 
-int main() {
-    using radray::RC;
+void Simple() {
     {
         RC<Test> a = radray::MakeObject<Test>(1);
     }
@@ -62,10 +54,35 @@ int main() {
         RC<Test> b = std::move(a);
     }
     {
-        RC<Test> a = radray::MakeObject<Child>(6, 6);        
+        RC<Test> a = radray::MakeObject<Child>(6, 6);
     }
     {
         RC<Test> b{radray::MakeObject<Child>(7, 7)};
     }
+}
+
+void MT() {
+    std::vector<std::thread> ts;
+    {
+        RC<Test> c = radray::MakeObject<Child>(1, 1);
+        for (int i = 0; i < 10; i++) {
+            std::thread thread{[c, i]() {
+                RC<Test> cp = c;
+                RADRAY_INFO_LOG("thread run {}", i);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                RADRAY_INFO_LOG("thread stop {}", i);
+            }};
+            ts.emplace_back(std::move(thread));
+        }
+    }
+    for (auto&& i : ts) {
+        i.join();
+    }
+}
+
+int main() {
+    Simple();
+    RADRAY_INFO_LOG("------------------------");
+    MT();
     return 0;
 }

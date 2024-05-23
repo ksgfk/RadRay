@@ -59,18 +59,6 @@ Device::Device(const DeviceCreateInfoD3D12& info) {
 
 Device::~Device() noexcept = default;
 
-uint64_t Device::AddRef() {
-    std::lock_guard<std::mutex> guard{_mutex};
-    _refCount++;
-    return _refCount;
-}
-
-uint64_t Device::RemoveRef() {
-    std::lock_guard<std::mutex> guard{_mutex};
-    _refCount--;
-    return _refCount;
-}
-
 RC<ISwapChain> Device::CreateSwapChain(const SwapChainCreateInfo& info) {
     return nullptr;
 }

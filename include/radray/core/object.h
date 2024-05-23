@@ -2,6 +2,7 @@
 
 #include <type_traits>
 #include <utility>
+#include <atomic>
 
 #include <radray/types.h>
 
@@ -9,66 +10,70 @@ namespace radray {
 
 class Object {
 public:
-    Object() = default;
-    Object(const Object&) = delete;
-    Object& operator=(const Object&) = delete;
+    Object() noexcept = default;
     virtual ~Object() noexcept = default;
 
-    virtual uint64_t AddRef() = 0;
+    uint64_t AddRef() noexcept;
 
-    virtual uint64_t RemoveRef() = 0;
+    uint64_t RemoveRef() noexcept;
+
+    Object(const Object&) = delete;
+    Object& operator=(const Object&) = delete;
+
+private:
+    std::atomic_uint64_t _refCount{0};
 };
 
 template <class T>
 class RC {
 public:
     RC() noexcept = default;
-    RC(std::nullptr_t) : _ptr{nullptr} {}
-    explicit RC(T* ptr) : _ptr{ptr} {
+    RC(std::nullptr_t) noexcept : _ptr{nullptr} {}
+    explicit RC(T* ptr) noexcept : _ptr{ptr} {
         InternalAddRef();
     }
-    RC(const RC& other) : _ptr{other._ptr} {
+    RC(const RC& other) noexcept : _ptr{other._ptr} {
         InternalAddRef();
     }
-    RC(RC&& other) noexcept : RC{other._ptr} {
+    RC(RC&& other) noexcept : _ptr{other._ptr} {
         other._ptr = nullptr;
     }
     template <class U, typename std::enable_if_t<std::is_convertible_v<U*, T*>, int> = 0>
-    RC(const RC<U>& other) : _ptr{static_cast<T*>(other._ptr)} {
+    RC(const RC<U>& other) noexcept : _ptr{static_cast<T*>(other._ptr)} {
         InternalAddRef();
     }
     template <class U, typename std::enable_if_t<std::is_convertible_v<U*, T*>, int> = 0>
     RC(RC<U>&& other) noexcept : _ptr{static_cast<T*>(other._ptr)} {
         other._ptr = nullptr;
     }
-    RC& operator=(std::nullptr_t) {
+    RC& operator=(std::nullptr_t) noexcept {
         InternalRelease();
         return *this;
     }
-    RC& operator=(T* other) {
+    RC& operator=(T* other) noexcept {
         if (_ptr != other) {
             RC copy{other};
             std::swap(copy, *this);
         }
         return *this;
     }
-    RC& operator=(const RC& other) {
+    RC& operator=(const RC& other) noexcept {
         if (_ptr != other._ptr) {
             RC copy{other};
             std::swap(copy, *this);
         }
         return *this;
     }
-    RC& operator=(RC&& other) {
+    RC& operator=(RC&& other) noexcept {
         RC mv{std::move(other)};
         std::swap(mv, *this);
         return *this;
     }
-    ~RC() {
+    ~RC() noexcept {
         InternalRelease();
     }
 
-    void Reset() {
+    void Reset() noexcept {
         InternalRelease();
     }
 
@@ -84,13 +89,13 @@ public:
     friend class RC;
 
 private:
-    void InternalAddRef() {
+    void InternalAddRef() noexcept {
         if (_ptr != nullptr) {
             _ptr->AddRef();
         }
     }
 
-    void InternalRelease() {
+    void InternalRelease() noexcept {
         if (_ptr != nullptr) {
             uint64_t refCount = _ptr->RemoveRef();
             if (refCount == 0) {
