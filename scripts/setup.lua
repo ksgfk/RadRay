@@ -40,6 +40,7 @@ rule("radray_basic_setting")
         end
         target:add("cxflags", "/permissive-", "/utf-8", {tools = {"cl", "clang_cl"}})
         target:add("cxflags", "/Zc:preprocessor", "/Zc:__cplusplus", {tools = {"cl"}})
+        target:add("cxflags", "-stdlib=libc++", {tools = "clang"})
         target:add("vectorexts", "avx", "avx2", "neon")
         target:add("fpmodels", "fast")
     end)
