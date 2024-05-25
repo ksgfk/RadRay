@@ -4,7 +4,6 @@ target("glfw")
         add_frameworks("Cocoa", "IOKit", "CoreFoundation")
         add_defines("_GLFW_COCOA")
         add_files("src/*.m")
-        add_mxflags("-fno-objc-arc")
     elseif is_plat("windows") then
         add_syslinks("user32", "shell32", "gdi32")
         add_defines("_GLFW_WIN32")

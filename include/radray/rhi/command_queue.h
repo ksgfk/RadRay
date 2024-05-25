@@ -1,6 +1,6 @@
 #pragma once
 
-#include <radray/core/object.h>
+#include <radray/object.h>
 #include <radray/rhi/command_list.h>
 
 namespace radray::rhi {

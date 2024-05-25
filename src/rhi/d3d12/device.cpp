@@ -59,23 +59,23 @@ Device::Device(const DeviceCreateInfoD3D12& info) {
 
 Device::~Device() noexcept = default;
 
-RC<ISwapChain> Device::CreateSwapChain(const SwapChainCreateInfo& info) {
+std::shared_ptr<ISwapChain> Device::CreateSwapChain(const SwapChainCreateInfo& info) {
     return nullptr;
 }
 
-RC<ICommandQueue> Device::CreateCommandQueue(const CommandQueueCreateInfo& info) {
+std::shared_ptr<ICommandQueue> Device::CreateCommandQueue(const CommandQueueCreateInfo& info) {
     return nullptr;
 }
 
-RC<IFence> Device::CreateFence(const FenceCreateInfo& info) {
+std::shared_ptr<IFence> Device::CreateFence(const FenceCreateInfo& info) {
     return nullptr;
 }
 
-RC<IBuffer> Device::CreateBuffer(const BufferCreateInfo& info) {
+std::shared_ptr<IBuffer> Device::CreateBuffer(const BufferCreateInfo& info) {
     return nullptr;
 }
 
-RC<ITexture> Device::CreateTexture(const TextureCreateInfo& info) {
+std::shared_ptr<ITexture> Device::CreateTexture(const TextureCreateInfo& info) {
     return nullptr;
 }
 

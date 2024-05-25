@@ -7,7 +7,7 @@ int main() {
     window::GlobalInit();
     {
         window::GlfwWindow glfw{"Test RHI", 1280, 720};
-        RC<rhi::IDevice> device = rhi::CreateDeviceD3D12({.IsEnableDebugLayer = true});
+        std::shared_ptr<rhi::IDevice> device = rhi::CreateDeviceD3D12({.IsEnableDebugLayer = true});
         while (!glfw.ShouldClose()) {
             window::GlobalPollEvents();
         }

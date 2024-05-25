@@ -11,15 +11,15 @@ public:
     explicit Device(const DeviceCreateInfoD3D12& info);
     ~Device() noexcept;
 
-    RC<ISwapChain> CreateSwapChain(const SwapChainCreateInfo& info) override;
+    std::shared_ptr<ISwapChain> CreateSwapChain(const SwapChainCreateInfo& info) override;
 
-    RC<ICommandQueue> CreateCommandQueue(const CommandQueueCreateInfo& info) override;
+    std::shared_ptr<ICommandQueue> CreateCommandQueue(const CommandQueueCreateInfo& info) override;
 
-    RC<IFence> CreateFence(const FenceCreateInfo& info) override;
+    std::shared_ptr<IFence> CreateFence(const FenceCreateInfo& info) override;
 
-    RC<IBuffer> CreateBuffer(const BufferCreateInfo& info) override;
+    std::shared_ptr<IBuffer> CreateBuffer(const BufferCreateInfo& info) override;
 
-    RC<ITexture> CreateTexture(const TextureCreateInfo& info) override;
+    std::shared_ptr<ITexture> CreateTexture(const TextureCreateInfo& info) override;
 
 public:
     ComPtr<IDXGIAdapter1> adapter;

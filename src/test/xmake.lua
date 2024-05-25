@@ -12,11 +12,4 @@ target_end()
 --     add_deps("radray_core", "radray_window", "nri")
 -- target_end()
 
-target("test_ref_cnt")
-    set_kind("binary")
-    add_rules("radray_basic_setting")
-    add_files("test_ref_cnt.cpp")
-    add_deps("radray_core")
-target_end()
-
 includes("test_init_rhi")
