@@ -12,7 +12,7 @@ target("libjpeg")
     if is_plat("windows") then
         add_defines("_CRT_SECURE_NO_DEPRECATE", "_CRT_NONSTDC_NO_DEPRECATE")
     end
-    add_vectorexts("sse", "sse2", "ssse3", "sse4.2", "avx", "avx2")
+    add_vectorexts("sse4.2", "avx", "avx2")
     local incDir = path.absolute(path.join(os.projectdir(), "ext", "libjpeg_include", "include"))
     add_includedirs(incDir, {public = true})
     add_headerfiles("jerror.h", "jmorecfg.h", "jpeglib.h", "jconfig.h")

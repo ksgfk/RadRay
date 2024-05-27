@@ -1,9 +1,11 @@
 target("glfw")
     set_kind("static")
+    set_languages("c99")
     if is_plat("macosx") then
-        add_frameworks("Cocoa", "IOKit", "CoreFoundation")
+        add_frameworks("Cocoa", "IOKit", "CoreFoundation", "OpenGL", "QuartzCore")
         add_defines("_GLFW_COCOA")
         add_files("src/*.m")
+        add_mflags("-fno-objc-arc")
     elseif is_plat("windows") then
         add_syslinks("user32", "shell32", "gdi32")
         add_defines("_GLFW_WIN32")

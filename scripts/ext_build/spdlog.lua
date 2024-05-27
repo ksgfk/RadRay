@@ -7,8 +7,6 @@ target("spdlog")
     set_languages("cxx20")
     set_warnings("all")
     if is_mode("debug") then set_optimize("none") else set_optimize("aggressive") end
-    add_vectorexts("sse4.2", "avx", "avx2", "neon")
-    set_fpmodels("fast")
     add_defines("SPDLOG_COMPILED_LIB", "SPDLOG_DISABLE_DEFAULT_LOGGER", "SPDLOG_NO_EXCEPTIONS", "SPDLOG_NO_THREAD_ID", "SPDLOG_USE_STD_FORMAT", {public = true})
     add_includedirs("include", {public = true})
     add_headerfiles("include/**.h")

@@ -6,7 +6,7 @@ target("libpng")
     if is_arch("x86", "x64", "i386", "x86_64") then
         add_files( "intel/*.c")
         add_defines("PNG_INTEL_SSE_OPT=1")
-        add_vectorexts("sse", "sse2", "ssse3", "sse4.2", "avx", "avx2")
+        add_vectorexts("sse4.2", "avx", "avx2")
     elseif is_arch("arm.*") then
         add_files( "arm/*.c")
         if is_plat("windows") then
