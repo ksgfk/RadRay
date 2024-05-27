@@ -136,4 +136,11 @@ uint32_t DxgiFormatByteSize(DXGI_FORMAT format) noexcept {
     }
 }
 
+D3D12_COMMAND_LIST_TYPE ToCmdListType(CommandListType type) noexcept {
+    switch (type) {
+        case CommandListType::Graphics: return D3D12_COMMAND_LIST_TYPE_DIRECT;
+        case CommandListType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    }
+}
+
 }  // namespace radray::rhi::d3d12

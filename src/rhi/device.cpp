@@ -12,7 +12,7 @@ std::shared_ptr<IDevice> CreateDeviceD3D12(const DeviceCreateInfoD3D12& info) {
 #if defined(RADRAY_ENABLE_D3D12)
     return std::make_shared<d3d12::Device>(info);
 #else
-    RADRAY_ABORT("d3d12 is unavailable");
+    RADRAY_ERR_LOG("d3d12 is unavailable");
     return nullptr;
 #endif
 }

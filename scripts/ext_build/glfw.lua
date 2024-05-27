@@ -1,6 +1,6 @@
 target("glfw")
     set_kind("static")
-    set_languages("c99")
+    set_languages("c11")
     if is_plat("macosx") then
         add_frameworks("Cocoa", "IOKit", "CoreFoundation", "OpenGL", "QuartzCore")
         add_defines("_GLFW_COCOA")

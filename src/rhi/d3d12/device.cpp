@@ -1,5 +1,7 @@
 #include "device.h"
 
+#include "command_queue.h"
+
 namespace radray::rhi::d3d12 {
 
 Device::Device(const DeviceCreateInfoD3D12& info) {
@@ -64,7 +66,8 @@ std::shared_ptr<ISwapChain> Device::CreateSwapChain(const SwapChainCreateInfo& i
 }
 
 std::shared_ptr<ICommandQueue> Device::CreateCommandQueue(const CommandQueueCreateInfo& info) {
-    return nullptr;
+    D3D12_COMMAND_LIST_TYPE type = ToCmdListType(info.Type);
+    return std::make_shared<CommandQueue>(std::static_pointer_cast<Device>(shared_from_this()), type);
 }
 
 std::shared_ptr<IFence> Device::CreateFence(const FenceCreateInfo& info) {
@@ -77,6 +80,20 @@ std::shared_ptr<IBuffer> Device::CreateBuffer(const BufferCreateInfo& info) {
 
 std::shared_ptr<ITexture> Device::CreateTexture(const TextureCreateInfo& info) {
     return nullptr;
+}
+
+void Device::WaitFence(ID3D12Fence* fence, uint64_t fenceIndex) {
+    class EventHandleGuard {
+    public:
+        EventHandleGuard() noexcept { handle = CreateEventEx(nullptr, nullptr, false, EVENT_ALL_ACCESS); }
+        ~EventHandleGuard() noexcept { CloseHandle(handle); }
+        HANDLE handle;
+    };
+    EventHandleGuard event{};
+    if (fence->GetCompletedValue() < fenceIndex) {
+        RADRAY_DX_CHECK(fence->SetEventOnCompletion(fenceIndex, event.handle));
+        WaitForSingleObject(event.handle, INFINITE);
+    }
 }
 
 }  // namespace radray::rhi::d3d12

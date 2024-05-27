@@ -8,6 +8,14 @@ namespace radray::rhi::d3d12 {
 
 class SwapChain : public ISwapChain {
 public:
+    // SwapChain(
+    //     Device* device,
+    //     CommandQueue* queue,
+    //     HWND windowHandle,
+    //     uint32_t frameCount,
+    //     uint32_t width,
+    //     uint32_t height,
+    //     bool vsync);
     ~SwapChain() noexcept override = default;
 
     void Present(ICommandQueue* queue) override;

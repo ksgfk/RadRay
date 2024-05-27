@@ -21,6 +21,8 @@ public:
 
     std::shared_ptr<ITexture> CreateTexture(const TextureCreateInfo& info) override;
 
+    void WaitFence(ID3D12Fence* fence, uint64_t fenceIndex);
+
 public:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;

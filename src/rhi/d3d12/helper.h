@@ -3,6 +3,7 @@
 #include <radray/platform.h>
 #include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/rhi/common.h>
 #include <windows.h>
 #include <wrl.h>
 #include <dxgi1_6.h>
@@ -21,6 +22,8 @@ std::wstring Utf8ToWString(const std::string& str) noexcept;
 std::string Utf8ToString(const std::wstring& str) noexcept;
 
 uint32_t DxgiFormatByteSize(DXGI_FORMAT format) noexcept;
+
+D3D12_COMMAND_LIST_TYPE ToCmdListType(CommandListType type) noexcept;
 
 }  // namespace radray::rhi::d3d12
 
