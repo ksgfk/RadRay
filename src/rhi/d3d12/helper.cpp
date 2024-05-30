@@ -143,4 +143,12 @@ D3D12_COMMAND_LIST_TYPE ToCmdListType(CommandListType type) noexcept {
     }
 }
 
+D3D12_HEAP_TYPE ToHeapType(BufferType type) noexcept {
+    switch (type) {
+        case BufferType::Default: return D3D12_HEAP_TYPE_DEFAULT;
+        case BufferType::Upload: return D3D12_HEAP_TYPE_UPLOAD;
+        case BufferType::Readback: return D3D12_HEAP_TYPE_READBACK;
+    }
+}
+
 }  // namespace radray::rhi::d3d12

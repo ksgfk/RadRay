@@ -9,6 +9,12 @@ enum class CommandListType {
     Compute
 };
 
+enum class BufferType {
+    Default,
+    Upload,
+    Readback
+};
+
 struct DeviceCreateInfoD3D12 {
     std::optional<uint32_t> AdapterIndex;
     bool IsEnableDebugLayer;

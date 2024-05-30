@@ -1,0 +1,11 @@
+target("directx-headers")
+    set_kind("static")
+    add_rules("c++.unity_build", {batchsize = 32})
+    set_languages("cxx20")
+    set_warnings("all")
+    if is_mode("debug") then set_optimize("none") else set_optimize("aggressive") end
+    add_includedirs("include", {public = true})
+    add_includedirs("include/directx")
+    add_headerfiles("include/**.h")
+    add_files("src/*.cpp")
+target_end()

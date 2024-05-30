@@ -11,7 +11,7 @@ class CommandAllocator;
 
 class CommandQueue : public ICommandQueue {
 public:
-    CommandQueue(std::shared_ptr<Device> device, D3D12_COMMAND_LIST_TYPE type) noexcept;
+    CommandQueue(std::shared_ptr<Device>&& device, D3D12_COMMAND_LIST_TYPE type) noexcept;
 
     void Sync() override;
 
@@ -21,12 +21,14 @@ public:
     void WaitFrame(uint64_t frameIndex);
     void Flush();
 
-    std::shared_ptr<Device> device;
     D3D12_COMMAND_LIST_TYPE type;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Fence> fence;
     uint64_t lastFrame;
     uint64_t executedFrame;
+
+private:
+    Device* _Device() const noexcept;
 };
 
 }  // namespace radray::rhi::d3d12

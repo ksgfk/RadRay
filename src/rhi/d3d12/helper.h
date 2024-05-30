@@ -7,7 +7,7 @@
 #include <windows.h>
 #include <wrl.h>
 #include <dxgi1_6.h>
-#include <d3d12.h>
+#include <directx/d3dx12.h>
 
 #include <string>
 
@@ -25,10 +25,12 @@ uint32_t DxgiFormatByteSize(DXGI_FORMAT format) noexcept;
 
 D3D12_COMMAND_LIST_TYPE ToCmdListType(CommandListType type) noexcept;
 
+D3D12_HEAP_TYPE ToHeapType(BufferType type) noexcept;
+
 }  // namespace radray::rhi::d3d12
 
 #ifndef RADRAY_DX_CHECK
-#define RADRAY_DX_CHECK(x)                                                                                                  \
+#define RADRAY_DX_CHECK(x)                                                                                               \
     do {                                                                                                                 \
         HRESULT hr_ = (x);                                                                                               \
         if (hr_ != S_OK) [[unlikely]] {                                                                                  \
