@@ -1,7 +1,9 @@
 import("core.platform.platform")
 import("net.http")
 import("utils.archive")
+local opts = import("options", {try = true, anonymous = true})
 
+local options = opts.get_options()
 local extDir = path.absolute(path.join(os.scriptdir(), "..", "ext"))
 if not os.isdir(extDir) then
     os.mkdir(extDir)
@@ -126,5 +128,7 @@ check_zlib("v1.3.1")
 check_libpng("v1.6.43")
 check_libjpeg("9f")
 -- check_git("https://github.com/NVIDIAGameWorks/NRI.git", "nri", "main")
-check_git("https://github.com/microsoft/DirectX-Headers.git", "directx-headers", "v1.614.0")
+if os.is_host("windows") and options.enable_d3d12 then
+    check_git("https://github.com/microsoft/DirectX-Headers.git", "directx-headers", "v1.614.0")
+end
 gen_ext_xmake_script()
