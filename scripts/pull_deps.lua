@@ -130,5 +130,6 @@ check_libjpeg("9f")
 -- check_git("https://github.com/NVIDIAGameWorks/NRI.git", "nri", "main")
 if os.is_host("windows") and options.enable_d3d12 then
     check_git("https://github.com/microsoft/DirectX-Headers.git", "directx-headers", "v1.614.0")
+    check_git("https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git", "d3d12ma", "v2.0.1")
 end
 gen_ext_xmake_script()

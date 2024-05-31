@@ -9,7 +9,7 @@ class IDevice;
 
 class ICommandQueue : public Object {
 public:
-    ICommandQueue(std::shared_ptr<IDevice>&& device) noexcept : _device(std::move(device)) {}
+    ICommandQueue(std::shared_ptr<IDevice> device) noexcept : _device(std::move(device)) {}
     ~ICommandQueue() noexcept override = default;
 
     virtual void Sync() = 0;

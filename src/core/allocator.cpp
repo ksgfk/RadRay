@@ -3,6 +3,7 @@
 #include <limits>
 
 #include <radray/basic_math.h>
+#include <radray/utility.h>
 
 namespace radray {
 

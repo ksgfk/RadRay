@@ -5,7 +5,7 @@
 
 namespace radray::rhi::d3d12 {
 
-CommandQueue::CommandQueue(std::shared_ptr<Device>&& device_, D3D12_COMMAND_LIST_TYPE type) noexcept
+CommandQueue::CommandQueue(std::shared_ptr<Device> device_, D3D12_COMMAND_LIST_TYPE type) noexcept
     : ICommandQueue(std::move(device_)),
       type(type),
       lastFrame(0),

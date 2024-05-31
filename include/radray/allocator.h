@@ -7,10 +7,6 @@
 
 namespace radray {
 
-constexpr uint64_t CalcAlign(uint64_t value, uint64_t align) noexcept {
-    return (value + (align - 1)) & ~(align - 1);
-}
-
 class IAllocator {
 public:
     virtual ~IAllocator() noexcept = default;

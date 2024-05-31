@@ -31,6 +31,8 @@ struct FenceCreateInfo {
 };
 
 struct BufferCreateInfo {
+    BufferType type;
+    uint64_t byteSize;
 };
 
 struct TextureCreateInfo {

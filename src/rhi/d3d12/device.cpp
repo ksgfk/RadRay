@@ -1,6 +1,7 @@
 #include "device.h"
 
 #include "command_queue.h"
+#include "buffer.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -75,7 +76,15 @@ std::shared_ptr<IFence> Device::CreateFence(const FenceCreateInfo& info) {
 }
 
 std::shared_ptr<IBuffer> Device::CreateBuffer(const BufferCreateInfo& info) {
-    return nullptr;
+    auto that = std::static_pointer_cast<Device>(shared_from_this());
+    auto initState = ([&]() {
+        switch (info.type) {
+            case BufferType::Default: return D3D12_RESOURCE_STATE_COMMON;
+            case BufferType::Upload: return D3D12_RESOURCE_STATE_GENERIC_READ;
+            case BufferType::Readback: return D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+    })();
+    return std::make_shared<Buffer>(std::move(that), nullptr, info.type, info.byteSize, initState);
 }
 
 std::shared_ptr<ITexture> Device::CreateTexture(const TextureCreateInfo& info) {
