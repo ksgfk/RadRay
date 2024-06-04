@@ -9,7 +9,7 @@ class IDevice;
 
 class IResource : public Object {
 public:
-    IResource(std::shared_ptr<IDevice> device) noexcept : _device(std::move(device)) {}
+    explicit IResource(std::shared_ptr<IDevice> device) : _device(std::move(device)) {}
     ~IResource() noexcept override = default;
 
     IDevice* GetDevice() const noexcept { return _device.get(); }

@@ -12,7 +12,7 @@ public:
     IBuffer(
         std::shared_ptr<IDevice> device,
         BufferType type,
-        uint64_t byteSize) noexcept
+        uint64_t byteSize)
         : IResource(std::move(device)),
           _byteSize(byteSize),
           _type(type) {}

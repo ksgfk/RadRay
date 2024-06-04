@@ -5,7 +5,7 @@
 
 namespace radray::rhi::d3d12 {
 
-CommandList::CommandList(Device* device, CommandAllocator* allocator) noexcept
+CommandList::CommandList(Device* device, CommandAllocator* allocator)
     : device(device),
       alloc(allocator),
       isOpen(false) {

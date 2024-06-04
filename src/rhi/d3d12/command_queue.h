@@ -11,7 +11,7 @@ class CommandAllocator;
 
 class CommandQueue : public ICommandQueue {
 public:
-    CommandQueue(std::shared_ptr<Device> device, D3D12_COMMAND_LIST_TYPE type) noexcept;
+    CommandQueue(std::shared_ptr<Device> device, D3D12_COMMAND_LIST_TYPE type);
 
     void Sync() override;
 

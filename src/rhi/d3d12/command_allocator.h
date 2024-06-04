@@ -10,7 +10,7 @@ class CommandQueue;
 
 class CommandAllocator {
 public:
-    CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type) noexcept;
+    CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type);
 
     void Execute(CommandQueue* queue, ID3D12Fence* fence, uint64_t fenceIndex);
     void Reset();

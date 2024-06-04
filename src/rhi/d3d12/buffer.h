@@ -15,7 +15,7 @@ public:
         D3D12MA::Allocator* allocator,
         BufferType type,
         uint64_t byteSize,
-        D3D12_RESOURCE_STATES initState) noexcept;
+        D3D12_RESOURCE_STATES initState);
     ~Buffer() noexcept override = default;
 
     D3D12_GPU_VIRTUAL_ADDRESS GetAddress() const;

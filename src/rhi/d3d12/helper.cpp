@@ -151,4 +151,105 @@ D3D12_HEAP_TYPE ToHeapType(BufferType type) noexcept {
     }
 }
 
+DXGI_FORMAT ToDxgiFormat(RhiFormat format) noexcept {
+    switch (format) {
+        case RhiFormat::Unknown:
+        case RhiFormat::R32G32B32A32_Typeless:
+        case RhiFormat::R32G32B32A32_Float:
+        case RhiFormat::R32G32B32A32_UInt:
+        case RhiFormat::R32G32B32A32_SInt:
+        case RhiFormat::R32G32B32_Typeless:
+        case RhiFormat::R32G32B32_Float:
+        case RhiFormat::R32G32B32_UInt:
+        case RhiFormat::R32G32B32_SInt:
+        case RhiFormat::R16G16B16A16_Typeless:
+        case RhiFormat::R16G16B16A16_Float:
+        case RhiFormat::R16G16B16A16_UNorm:
+        case RhiFormat::R16G16B16A16_UInt:
+        case RhiFormat::R16G16B16A16_SNorm:
+        case RhiFormat::R16G16B16A16_SInt:
+        case RhiFormat::R32G32_Typeless:
+        case RhiFormat::R32G32_Float:
+        case RhiFormat::R32G32_UInt:
+        case RhiFormat::R32G32_SInt:
+        case RhiFormat::R32G8X24_Typeless:
+        case RhiFormat::D32_Float_S8X24_UInt:
+        case RhiFormat::R32_Float_X8X24_Typeless:
+        case RhiFormat::X32_Typeless_G8X24_UInt:
+        case RhiFormat::R10G10B10A2_Typeless:
+        case RhiFormat::R10G10B10A2_UNorm:
+        case RhiFormat::R10G10B10A2_UInt:
+        case RhiFormat::R11G11B10_Float:
+        case RhiFormat::R8G8B8A8_Typeless:
+        case RhiFormat::R8G8B8A8_UNorm:
+        case RhiFormat::R8G8B8A8_UNorm_SRGB:
+        case RhiFormat::R8G8B8A8_UInt:
+        case RhiFormat::R8G8B8A8_SNorm:
+        case RhiFormat::R8G8B8A8_SInt:
+        case RhiFormat::R16G16_Typeless:
+        case RhiFormat::R16G16_Float:
+        case RhiFormat::R16G16_UNorm:
+        case RhiFormat::R16G16_UInt:
+        case RhiFormat::R16G16_SNorm:
+        case RhiFormat::R16G16_SInt:
+        case RhiFormat::R32_Typeless:
+        case RhiFormat::D32_Float:
+        case RhiFormat::R32_Float:
+        case RhiFormat::R32_UInt:
+        case RhiFormat::R32_SInt:
+        case RhiFormat::R24G8_Typeless:
+        case RhiFormat::D24_UNorm_S8_UInt:
+        case RhiFormat::R24_UNorm_X8_Typeless:
+        case RhiFormat::X24_Typeless_G8_UInt:
+        case RhiFormat::R8G8_Typeless:
+        case RhiFormat::R8G8_UNorm:
+        case RhiFormat::R8G8_UInt:
+        case RhiFormat::R8G8_SNorm:
+        case RhiFormat::R8G8_SInt:
+        case RhiFormat::R16_Typeless:
+        case RhiFormat::R16_Float:
+        case RhiFormat::D16_UNorm:
+        case RhiFormat::R16_UNorm:
+        case RhiFormat::R16_UInt:
+        case RhiFormat::R16_SNorm:
+        case RhiFormat::R16_SInt:
+        case RhiFormat::R8_Typeless:
+        case RhiFormat::R8_UNorm:
+        case RhiFormat::R8_UInt:
+        case RhiFormat::R8_SNorm:
+        case RhiFormat::R8_SInt:
+        case RhiFormat::A8_UNorm:
+        case RhiFormat::R1_UNorm:
+        case RhiFormat::R9G9B9E5_SharedExp:
+        case RhiFormat::R8G8_B8G8_UNorm:
+        case RhiFormat::G8R8_G8B8_UNorm:
+        case RhiFormat::BC1_Typeless:
+        case RhiFormat::BC1_UNorm:
+        case RhiFormat::BC1_UNorm_SRGB:
+        case RhiFormat::BC2_Typeless:
+        case RhiFormat::BC2_UNorm:
+        case RhiFormat::BC2_UNorm_SRGB:
+        case RhiFormat::BC3_Typeless:
+        case RhiFormat::BC3_UNorm:
+        case RhiFormat::BC3_UNorm_SRGB:
+        case RhiFormat::BC4_Typeless:
+        case RhiFormat::BC4_UNorm:
+        case RhiFormat::BC4_SNorm:
+        case RhiFormat::BC5_Typeless:
+        case RhiFormat::BC5_UNorm:
+        case RhiFormat::BC5_SNorm:
+        case RhiFormat::B5G6R5_UNorm:
+        case RhiFormat::B5G5R5A1_UNorm:
+        case RhiFormat::B8G8R8A8_UNorm:
+        case RhiFormat::B8G8R8X8_UNorm:
+        case RhiFormat::R10G10B10_XR_BIAS_A2_UNorm:
+        case RhiFormat::B8G8R8A8_Typeless:
+        case RhiFormat::B8G8R8A8_UNorm_SRGB:
+        case RhiFormat::B8G8R8X8_Typeless:
+        case RhiFormat::B8G8R8X8_UNorm_SRGB: break;
+    }
+}
+
+RhiFormat ToRhiFormat(DXGI_FORMAT format) noexcept;
+
 }  // namespace radray::rhi::d3d12

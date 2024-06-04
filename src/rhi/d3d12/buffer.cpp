@@ -10,7 +10,7 @@ Buffer::Buffer(
     D3D12MA::Allocator* allocator,
     BufferType type,
     uint64_t byteSize,
-    D3D12_RESOURCE_STATES initState) noexcept
+    D3D12_RESOURCE_STATES initState)
     : IBuffer(
           std::move(device),
           type,

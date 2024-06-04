@@ -9,7 +9,7 @@ class CommandAllocator;
 
 class CommandList {
 public:
-    CommandList(Device* device, CommandAllocator* allocator) noexcept;
+    CommandList(Device* device, CommandAllocator* allocator);
 
     void Reset();
     void Close();

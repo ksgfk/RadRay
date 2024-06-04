@@ -5,7 +5,7 @@
 
 namespace radray::rhi::d3d12 {
 
-CommandAllocator::CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type) noexcept
+CommandAllocator::CommandAllocator(Device* device, D3D12_COMMAND_LIST_TYPE type)
     : device(device),
       type(type) {
     RADRAY_DX_CHECK(device->device->CreateCommandAllocator(type, IID_PPV_ARGS(alloc.GetAddressOf())));
