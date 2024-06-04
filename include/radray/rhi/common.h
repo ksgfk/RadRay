@@ -15,7 +15,7 @@ enum class BufferType {
     Readback
 };
 
-enum class RhiFormat {
+enum class Format {
     Unknown,
     R32G32B32A32_Typeless,
     R32G32B32A32_Float,
@@ -109,7 +109,35 @@ enum class RhiFormat {
     B8G8R8A8_Typeless,
     B8G8R8A8_UNorm_SRGB,
     B8G8R8X8_Typeless,
-    B8G8R8X8_UNorm_SRGB
+    B8G8R8X8_UNorm_SRGB,
+    BC6H_Typeless,
+    BC6H_UF16,
+    BC6H_SF16,
+    BC7_Typeless,
+    BC7_UNorm,
+    BC7_UNorm_SRGB,
+    AYUV,
+    Y410,
+    Y416,
+    NV12,
+    P010,
+    P016,
+    _420_OPAQUE,
+    YUY2,
+    Y210,
+    Y216,
+    NV11,
+    AI44,
+    IA44,
+    P8,
+    A8P8,
+    B4G4R4A4_UNorm,
+    P208,
+    V208,
+    V408,
+    Sampler_FeedBack_Min_Mip_Opaque,
+    Sampler_FeedBack_Mip_region_Used_Opaque,
+    Force_UInt,
 };
 
 enum class TextureDimension {

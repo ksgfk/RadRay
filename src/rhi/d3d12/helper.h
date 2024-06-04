@@ -29,9 +29,9 @@ D3D12_COMMAND_LIST_TYPE ToCmdListType(CommandListType type) noexcept;
 
 D3D12_HEAP_TYPE ToHeapType(BufferType type) noexcept;
 
-DXGI_FORMAT ToDxgiFormat(RhiFormat format) noexcept;
+DXGI_FORMAT ToDxgiFormat(Format format) noexcept;
 
-RhiFormat ToRhiFormat(DXGI_FORMAT format) noexcept;
+Format ToRhiFormat(DXGI_FORMAT format) noexcept;
 
 }  // namespace radray::rhi::d3d12
 
