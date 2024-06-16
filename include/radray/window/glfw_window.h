@@ -10,9 +10,9 @@
 
 namespace radray::window {
 
-void GlobalInit() noexcept;
-void GlobalPollEvents() noexcept;
-void GlobalTerminate() noexcept;
+void GlobalInitGlfw() noexcept;
+void GlobalPollEventsGlfw() noexcept;
+void GlobalTerminateGlfw() noexcept;
 
 using MouseButtonCallback = void(const Eigen::Vector2f& xy, MouseButton button, Action action, KeyModifiers modifiers);
 using CursorPositionCallback = void(const Eigen::Vector2f& xy);

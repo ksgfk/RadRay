@@ -13,18 +13,18 @@
 
 namespace radray::window {
 
-void GlobalInit() noexcept {
+void GlobalInitGlfw() noexcept {
     glfwSetErrorCallback([](int error_code, const char* description) {
         RADRAY_ERR_LOG("glfw error: {} (code = {})", description, error_code);
     });
     glfwInit();
 }
 
-void GlobalPollEvents() noexcept {
+void GlobalPollEventsGlfw() noexcept {
     glfwPollEvents();
 }
 
-void GlobalTerminate() noexcept {
+void GlobalTerminateGlfw() noexcept {
     glfwTerminate();
 }
 
