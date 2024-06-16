@@ -44,6 +44,13 @@ const char* GetErrorName(HRESULT hr) noexcept {
     }
 }
 
+HRESULT LogWhenFail(const char* call, HRESULT hr, const char* file, uint64_t line) noexcept {
+    if (hr != S_OK) [[unlikely]] {
+        RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} with error {} (code = {})", file, line, call, GetErrorName(hr), hr);
+    }
+    return hr;
+}
+
 std::wstring Utf8ToWString(const std::string& str) noexcept {
     if (str.length() >= std::numeric_limits<int>::max()) {
         RADRAY_ABORT("too large string {}", str.length());

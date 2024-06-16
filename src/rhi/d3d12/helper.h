@@ -19,6 +19,8 @@ using Microsoft::WRL::ComPtr;
 
 const char* GetErrorName(HRESULT hr) noexcept;
 
+HRESULT LogWhenFail(const char* call, HRESULT hr, const char* file, uint64_t line) noexcept;
+
 std::wstring Utf8ToWString(const std::string& str) noexcept;
 
 std::string Utf8ToString(const std::wstring& str) noexcept;
@@ -42,5 +44,16 @@ Format ToRhiFormat(DXGI_FORMAT format) noexcept;
         if (hr_ != S_OK) [[unlikely]] {                                                                                  \
             RADRAY_ABORT("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
         }                                                                                                                \
+    } while (false)
+#endif
+
+#ifndef RADRAY_DX_RETURN_WHEN_FAIL
+#define RADRAY_DX_RETURN_WHEN_FAIL(x, ret)                                                                                                                   \
+    do {                                                                                                                                                     \
+        HRESULT hr_ = (x);                                                                                                                                   \
+        if (hr_ != S_OK) [[unlikely]] {                                                                                                                      \
+            RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} with error {} (code = {})", __FILE__, __LINE__, #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
+            return ret;                                                                                                                                      \
+        }                                                                                                                                                    \
     } while (false)
 #endif
