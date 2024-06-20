@@ -10,6 +10,19 @@
 
 namespace radray::rhi {
 
+void GetSupportApi(std::array<bool, (size_t)ApiType::MAX_COUNT>& api) {
+#ifdef RADRAY_ENABLE_D3D12
+    api[(size_t)Api::D3D12] = true;
+#else
+    api[(size_t)ApiType::D3D12] = false;
+#endif
+#ifdef RADRAY_ENABLE_METAL
+    api[(size_t)ApiType::Metal] = true;
+#else
+    api[(size_t)Api::Metal] = false;
+#endif
+}
+
 std::unique_ptr<DeviceInterface> CreateDeviceD3D12(const DeviceCreateInfoD3D12& info) {
 #ifdef RADRAY_ENABLE_D3D12
     return d3d12::CreateImpl(info);

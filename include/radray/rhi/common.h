@@ -2,7 +2,15 @@
 
 #include <optional>
 
+#include <radray/logger.h>
+
 namespace radray::rhi {
+
+enum class ApiType {
+    D3D12,
+    Metal,
+    MAX_COUNT
+};
 
 enum class CommandListType {
     Graphics,
@@ -179,3 +187,8 @@ struct ShaderCreateInfo {
 };
 
 }  // namespace radray::rhi
+
+template <>
+struct std::formatter<radray::rhi::ApiType> : std::formatter<const char*> {
+    auto format(radray::rhi::ApiType const& val, format_context& ctx) const -> decltype(ctx.out());
+};
