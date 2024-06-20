@@ -16,7 +16,6 @@ std::unique_ptr<DeviceInterfaceMetal> CreateImpl(const DeviceCreateInfoMetal& in
         return std::unique_ptr<DeviceInterfaceMetal>{};
     }
     MTL::Device* device = all->object<MTL::Device>(info.DeviceIndex);
-    device->retain();
     RADRAY_INFO_LOG("select metal device: {}", device->name()->utf8String());
     auto result = std::make_unique<DeviceInterfaceMetal>();
     result->device = NSRef{device};
