@@ -1,7 +1,6 @@
 target("libpng")
     set_languages("c11")
     set_kind("static")
-    add_rules("c.unity_build", {batchsize = 32})
     add_files("*.c" .. "|example.c|pngtest.c")
     if is_arch("x86", "x64", "i386", "x86_64") then
         add_files( "intel/*.c")

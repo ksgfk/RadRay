@@ -153,6 +153,10 @@ struct DeviceCreateInfoD3D12 {
     bool IsEnableDebugLayer;
 };
 
+struct DeviceCreateInfoMetal {
+    uint32_t DeviceIndex;
+};
+
 struct SwapChainCreateInfo {
 };
 

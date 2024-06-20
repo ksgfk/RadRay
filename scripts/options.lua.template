@@ -8,6 +8,7 @@ radray_toolchain = {
 function get_options()
 	return {
 		build_test = true,
-		enable_d3d12 = true
+		enable_d3d12 = true,
+		enable_metal = true
 	}
 end

@@ -54,7 +54,7 @@ std::unique_ptr<DeviceInterfaceD3D12> CreateImpl(const DeviceCreateInfoD3D12& in
     }
     if (adapter == nullptr) {
         RADRAY_ERR_LOG("cannot find devices support D3D12");
-        return nullptr;
+        return std::unique_ptr<DeviceInterfaceD3D12>{};
     }
     RADRAY_DX_RETURN_WHEN_FAIL(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf())), std::unique_ptr<DeviceInterfaceD3D12>{});
     {

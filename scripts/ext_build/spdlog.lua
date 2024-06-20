@@ -1,6 +1,5 @@
 target("spdlog")
     set_kind("static")
-    add_rules("c++.unity_build", {batchsize = 32})
     if is_plat("linux", "bsd") then
         add_syslinks("pthread")
     end

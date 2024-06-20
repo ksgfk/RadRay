@@ -11,6 +11,10 @@
 
 #include <radray/logger.h>
 
+#if defined(RADRAY_PLATFORM_MACOS)
+#include "cocoa_handle.h"
+#endif
+
 namespace radray::window {
 
 void GlobalInitGlfw() noexcept {
@@ -39,6 +43,9 @@ public:
         }
 #if defined(RADRAY_PLATFORM_WINDOWS)
         nativeHandle = reinterpret_cast<size_t>(glfwGetWin32Window(window));
+#endif
+#if defined(RADRAY_PLATFORM_MACOS)
+        nativeHandle = GetCocoaHandler(window);
 #endif
         mouseButtonCb = std::make_shared<MultiDelegate<MouseButtonCallback>>();
         cursorPositionCb = std::make_shared<MultiDelegate<CursorPositionCallback>>();

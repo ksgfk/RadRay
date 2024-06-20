@@ -1,6 +1,5 @@
 target("directx-headers")
     set_kind("static")
-    add_rules("c++.unity_build", {batchsize = 32})
     set_languages("cxx20")
     set_warnings("all")
     if is_mode("debug") then set_optimize("none") else set_optimize("aggressive") end

@@ -13,6 +13,11 @@ option_end()
 --     set_default(true)
 --     set_showmenu(true)
 -- option_end()
+option("enable_metal")
+    set_values(true, false)
+    set_default(true)
+    set_showmenu(true)
+option_end()
 
 includes("scripts/setup.lua")
 if path.absolute(os.projectdir()) == path.absolute(os.scriptdir()) and os.exists("scripts/options.lua") then
