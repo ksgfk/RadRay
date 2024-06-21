@@ -5,12 +5,12 @@
 #include "d3d12/device.h"
 #endif
 #ifdef RADRAY_ENABLE_METAL
-#include "metal/device.h"
+#include "metal/metal_device.h"
 #endif
 
 namespace radray::rhi {
 
-void GetSupportApi(std::array<bool, (size_t)ApiType::MAX_COUNT>& api) {
+void GetSupportApi(SupportApiArray& api) {
 #ifdef RADRAY_ENABLE_D3D12
     api[(size_t)Api::D3D12] = true;
 #else

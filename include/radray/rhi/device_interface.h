@@ -12,7 +12,9 @@ public:
     virtual ~DeviceInterface() noexcept = default;
 };
 
-void GetSupportApi(std::array<bool, (size_t)ApiType::MAX_COUNT>& api);
+using SupportApiArray = std::array<bool, (size_t)ApiType::MAX_COUNT>;
+
+void GetSupportApi(SupportApiArray& api);
 
 std::unique_ptr<DeviceInterface> CreateDeviceD3D12(const DeviceCreateInfoD3D12& info);
 

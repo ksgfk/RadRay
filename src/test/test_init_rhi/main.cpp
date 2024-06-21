@@ -8,7 +8,7 @@ using namespace radray;
 
 int main() {
     {
-        std::array<bool, (size_t)rhi::ApiType::MAX_COUNT> api;
+        rhi::SupportApiArray api{};
         rhi::GetSupportApi(api);
         for (size_t i = 0; i < api.size(); i++) {
             if (api[i]) {
