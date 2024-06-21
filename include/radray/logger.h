@@ -1,10 +1,6 @@
 #pragma once
 
 #include <utility>
-#include <sstream>
-#include <ostream>
-#include <format>
-#include <string_view>
 
 #include <spdlog/spdlog.h>
 
@@ -37,19 +33,6 @@ void LogAbort(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
     GetDefaultLogger().error(fmt, std::forward<Args>(args)...);
     std::abort();
 }
-
-template <typename Char>
-struct OStreamFormatter : public std::formatter<std::basic_string_view<Char>, Char> {
-    template <typename T, typename OutputIt>
-    auto format(const T& value, std::basic_format_context<OutputIt, Char>& ctx) const -> OutputIt {
-        std::basic_stringbuf<Char> buf{};
-        std::basic_ostream<Char> output{&buf};
-        output.imbue(ctx.locale());
-        output << value;
-        output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
-        return std::formatter<std::basic_string<Char>, Char>::format(buf.view(), ctx);
-    }
-};
 
 }  // namespace radray
 

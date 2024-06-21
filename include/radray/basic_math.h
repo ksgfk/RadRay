@@ -2,6 +2,10 @@
 
 #include <cmath>
 #include <numbers>
+#include <sstream>
+#include <ostream>
+#include <format>
+
 #include <Eigen/Dense>
 
 #include <radray/types.h>
@@ -9,7 +13,7 @@
 
 namespace radray {
 
-template <typename T>
+template <class T>
 requires(std::is_integral_v<T>)
 constexpr bool IsPowerOf2(T v) noexcept {
     return v && !(v & (v - 1));
@@ -46,26 +50,26 @@ constexpr uint64_t RoundUpPow2(uint64_t v) noexcept {
     return v + 1;
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 constexpr T Degree(T value) noexcept { return value * (T(180) / std::numbers::pi_v<T>); }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 constexpr T Radian(T value) noexcept { return value * (std::numbers::pi_v<T> / T(180)); }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 T Lerp(T a, T b, T t) noexcept {
     return std::fma(b, t, std::fma(-a, t, a));  // a + (b - a) * t
 }
 
-template <typename LhsDerived, typename RhsDerived>
-typename Eigen::ScalarBinaryOpTraits<typename LhsDerived::Scalar, typename RhsDerived::Scalar>::ReturnType AbsDot(const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) noexcept {
+template <class LhsDerived, class RhsDerived>
+class Eigen::ScalarBinaryOpTraits<class LhsDerived::Scalar, class RhsDerived::Scalar>::ReturnType AbsDot(const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) noexcept {
     return std::abs(lhs.dot(rhs));
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> PerspectiveLH(T fovy, T aspect, T zNear, T zFar) noexcept {
     T tanHalfFovy = std::tan(fovy / T(2));
@@ -78,7 +82,7 @@ Eigen::Matrix<T, 4, 4> PerspectiveLH(T fovy, T aspect, T zNear, T zFar) noexcept
     return result;
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> LookAtFrontLH(const Eigen::Vector<T, 3>& eye, const Eigen::Vector<T, 3>& front, const Eigen::Vector<T, 3>& up) noexcept {
     Eigen::Vector<T, 3> f = front;
@@ -92,14 +96,14 @@ Eigen::Matrix<T, 4, 4> LookAtFrontLH(const Eigen::Vector<T, 3>& eye, const Eigen
     return result;
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> LookAtLH(const Eigen::Vector<T, 3>& eye, const Eigen::Vector<T, 3>& center, const Eigen::Vector<T, 3>& up) noexcept {
     Eigen::Vector<T, 3> front = (center - eye).normalized();
     return LookAtFrontLH(eye, front, up);
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Eigen::Vector<T, 3>& up) noexcept {
     Eigen::Vector<T, 3> f = forward;
@@ -110,7 +114,7 @@ Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Ei
     return mat;
 }
 
-template <typename T>
+template <class T>
 requires(std::is_floating_point_v<T>)
 void DecomposeTransform(const Eigen::Matrix<T, 4, 4>& m, Eigen::Vector<T, 3>& translation, Eigen::Quaternion<T>& rotation, Eigen::Vector<T, 3>& scale) noexcept {
     Eigen::Affine3f aff(m);
@@ -121,34 +125,53 @@ void DecomposeTransform(const Eigen::Matrix<T, 4, 4>& m, Eigen::Vector<T, 3>& tr
     scale = sc.diagonal();
 }
 
+template <class Type, int Size>
+std::string to_string(const Eigen::Vector<Type, Size>& v) {
+    Eigen::IOFormat efmt{Eigen::FullPrecision, Eigen::DontAlignCols, "", ", ", "", "", "<", ">"};
+    std::basic_stringbuf<char> buf{};
+    std::basic_ostream<char> output{&buf};
+    output << v.format(efmt);
+    output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
+    return buf.str();
+}
+
+template <class Type, int Rows, int Cols>
+std::string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
+    Eigen::IOFormat efmt{Eigen::FullPrecision, 0, ", ", "\n", "", "", "[", "]"};
+    std::basic_stringbuf<char> buf{};
+    std::basic_ostream<char> output{&buf};
+    output << v.format(efmt);
+    output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
+    return buf.str();
+}
+
+template <class Type>
+std::string to_string(const Eigen::Quaternion<Type>& v) {
+    return std::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
+}
+
 }  // namespace radray
 
-template <typename T>
-requires(std::is_base_of_v<Eigen::DenseBase<T>, T>)
-struct std::formatter<T> : public radray::OStreamFormatter<char> {};
-
-template <typename T>
-struct std::formatter<Eigen::WithFormat<T>> : public radray::OStreamFormatter<char> {};
-
-template <typename T, int Rows, int Cols>
-struct std::formatter<Eigen::Matrix<T, Rows, Cols>> : public std::formatter<std::string> {
-    auto format(Eigen::Matrix<T, Rows, Cols> const& val, format_context& ctx) const -> decltype(ctx.out()) {
-        Eigen::IOFormat matFmt{Eigen::FullPrecision, 0, ", ", "\n", "", "", "[", "]"};
-        return std::formatter<Eigen::WithFormat<Eigen::Matrix<T, Rows, Cols>>>::format(val.format(matFmt), ctx);
+template <class Type, int Size, class CharT>
+struct std::formatter<Eigen::Vector<Type, Size>, CharT> : std::formatter<string, CharT> {
+    template <class FormatContext>
+    auto format(Eigen::Vector<Type, Size> const& val, FormatContext& ctx) const {
+        return formatter<string, CharT>::format(radray::to_string<Type, Size>(val), ctx);
     }
 };
 
-template <typename T, int Size>
-struct std::formatter<Eigen::Vector<T, Size>> : public std::formatter<std::string> {
-    auto format(Eigen::Vector<T, Size> const& val, format_context& ctx) const -> decltype(ctx.out()) {
-        Eigen::IOFormat matFmt{Eigen::FullPrecision, Eigen::DontAlignCols, "", ", ", "", "", "<", ">"};
-        return std::formatter<Eigen::WithFormat<Eigen::Vector<T, Size>>>::format(val.format(matFmt), ctx);
+template <class Type, int Rows, int Cols, class CharT>
+struct std::formatter<Eigen::Matrix<Type, Rows, Cols>, CharT> : std::formatter<string, CharT> {
+    template <class FormatContext>
+    auto format(Eigen::Matrix<Type, Rows, Cols> const& val, FormatContext& ctx) const {
+        return formatter<string, CharT>::format(radray::to_string<Type, Rows, Cols>(val), ctx);
     }
 };
 
-template <typename T>
-struct std::formatter<Eigen::Quaternion<T>> : public std::formatter<std::string> {
-    auto format(Eigen::Quaternion<T> const& val, format_context& ctx) const -> decltype(ctx.out()) {
-        return std::format_to(ctx.out(), "<{}, {}, {}, {}>", val.x(), val.y(), val.z(), val.w());
+template <class Type, class CharT>
+struct std::formatter<Eigen::Quaternion<Type>, CharT> : std::formatter<string, CharT> {
+    template <class FormatContext>
+    auto format(Eigen::Quaternion<Type> const& val, FormatContext& ctx) const {
+        return formatter<string, CharT>::format(radray::to_string<Type>(val), ctx);
     }
 };

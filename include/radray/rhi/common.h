@@ -186,9 +186,14 @@ struct TextureCreateInfo {
 struct ShaderCreateInfo {
 };
 
+const char* to_string(ApiType val) noexcept;
+
 }  // namespace radray::rhi
 
-template <>
-struct std::formatter<radray::rhi::ApiType> : std::formatter<const char*> {
-    auto format(radray::rhi::ApiType const& val, format_context& ctx) const -> decltype(ctx.out());
+template <class CharT>
+struct std::formatter<radray::rhi::ApiType, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::rhi::ApiType val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
 };

@@ -15,7 +15,7 @@ int main() {
             rhi::GetSupportApi(api);
             for (size_t i = 0; i < api.size(); i++) {
                 if (api[i]) {
-                    RADRAY_INFO_LOG("support api: {}", i);
+                    RADRAY_INFO_LOG("support api: {}", (rhi::ApiType)i);
                 }
             }
         }
