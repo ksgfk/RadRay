@@ -10,8 +10,11 @@ public:
     MetalDevice();
     ~MetalDevice() noexcept override;
 
+    SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info) override;
+    void DestroySwapChain(const SwapChainHandle& handle) override;
+
 public:
-    NSRef<MTL::Device> device;
+    NS::SharedPtr<MTL::Device> device;
 };
 
 std::unique_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);

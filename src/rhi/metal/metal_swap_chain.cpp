@@ -11,8 +11,10 @@ MetalSwapChain::MetalSwapChain(
     uint height,
     bool vsync,
     uint32_t backBufferCount) {
-    auto ptr = RadrayMetalCreateLayer(device->device.Get(), windowHandle, width, height, vsync, backBufferCount);
-    layer = NSRef<CA::MetalLayer>{ptr};
+    auto ptr = RadrayMetalCreateLayer(device->device.get(), windowHandle, width, height, vsync, backBufferCount);
+    layer = NS::TransferPtr(ptr);
 }
+
+MetalSwapChain::~MetalSwapChain() noexcept = default;
 
 }  // namespace radray::rhi::metal

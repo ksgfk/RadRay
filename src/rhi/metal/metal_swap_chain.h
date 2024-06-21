@@ -23,9 +23,10 @@ public:
         uint height,
         bool vsync,
         uint32_t backBufferCount);
+    ~MetalSwapChain() noexcept;
 
 public:
-    NSRef<CA::MetalLayer> layer;
+    NS::SharedPtr<CA::MetalLayer> layer;
 };
 
 }  // namespace radray::rhi::metal

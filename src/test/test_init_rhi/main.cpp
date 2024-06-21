@@ -28,9 +28,15 @@ int main() {
         if (device == nullptr) {
             throw std::runtime_error{"cannot create device"};
         }
+        auto sch = device->CreateSwapChain(
+            {glfw.GetNativeHandle(),
+             1280, 720,
+             3,
+             false});
         while (!glfw.ShouldClose()) {
             window::GlobalPollEventsGlfw();
         }
+        device->DestroySwapChain(sch);
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("exception {}", e.what());
     }

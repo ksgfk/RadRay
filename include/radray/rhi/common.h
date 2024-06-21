@@ -166,24 +166,11 @@ struct DeviceCreateInfoMetal {
 };
 
 struct SwapChainCreateInfo {
-};
-
-struct CommandQueueCreateInfo {
-    CommandListType Type;
-};
-
-struct FenceCreateInfo {
-};
-
-struct BufferCreateInfo {
-    BufferType type;
-    uint64_t byteSize;
-};
-
-struct TextureCreateInfo {
-};
-
-struct ShaderCreateInfo {
+    uint64_t WindowHandle;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t BackBufferCount;
+    bool Vsync;
 };
 
 const char* to_string(ApiType val) noexcept;
