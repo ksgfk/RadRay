@@ -7,18 +7,18 @@
 using namespace radray;
 
 int main() {
+    {
+        std::array<bool, (size_t)rhi::ApiType::MAX_COUNT> api;
+        rhi::GetSupportApi(api);
+        for (size_t i = 0; i < api.size(); i++) {
+            if (api[i]) {
+                RADRAY_INFO_LOG("support api: {}", (rhi::ApiType)i);
+            }
+        }
+    }
     window::GlobalInitGlfw();
     try {
         window::GlfwWindow glfw{"Test RHI", 1280, 720};
-        {
-            std::array<bool, (size_t)rhi::ApiType::MAX_COUNT> api;
-            rhi::GetSupportApi(api);
-            for (size_t i = 0; i < api.size(); i++) {
-                if (api[i]) {
-                    RADRAY_INFO_LOG("support api: {}", (rhi::ApiType)i);
-                }
-            }
-        }
 #ifdef RADRAY_ENABLE_D3D12
         auto device = rhi::CreateDeviceD3D12({std::nullopt, true});
 #endif

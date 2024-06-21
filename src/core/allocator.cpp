@@ -1,6 +1,7 @@
 #include <radray/allocator.h>
 
 #include <limits>
+#include <bit>
 
 #include <radray/basic_math.h>
 #include <radray/utility.h>
@@ -116,7 +117,7 @@ void LinearAllocator::Reset() noexcept {
 // https://github.com/cloudwu/buddy/blob/master/buddy.c
 
 BuddyAllocator::BuddyAllocator(uint64_t capacity) noexcept : _capacity(capacity) {
-    uint64_t vcapa = RoundUpPow2(capacity);
+    uint64_t vcapa = std::bit_ceil(capacity);
     RADRAY_ASSERT(vcapa <= std::numeric_limits<int64_t>::max(), "too large tree");
     uint64_t treeSize = 2 * vcapa - 1;  // 建一颗满二叉树
     _tree.resize(treeSize, NodeState::Unused);
@@ -124,10 +125,10 @@ BuddyAllocator::BuddyAllocator(uint64_t capacity) noexcept : _capacity(capacity)
 
 std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_, uint64_t align) noexcept {
     uint64_t size = size_ == 0 ? 1 : size_;
-    size = RoundUpPow2(size);
+    size = std::bit_ceil(size);
     size = CalcAlign(size, align);
-    RADRAY_ASSERT(IsPowerOf2(size), "cannot alloc size={} align={}", size_, align);
-    int64_t vCapacity = RoundUpPow2(_capacity);  // 满二叉树情况虚拟容量
+    RADRAY_ASSERT(std::has_single_bit(size), "cannot alloc size={} align={}", size_, align);
+    int64_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
     int64_t vlength = vCapacity;
     if (size > vlength) {
         return std::nullopt;
@@ -153,7 +154,7 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_, uint64_t align)
                 }
                 return std::make_optional(offset);
             }
-        } else {                                         // 还没到目标大小的层
+        } else {                                    // 还没到目标大小的层
             if (_tree[ptr] == NodeState::Unused) {  // 还没用过的节点，分裂
                 _tree[ptr] = NodeState::Split;
                 _tree[ptr * 2 + 1] = NodeState::Unused;
@@ -185,7 +186,7 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_, uint64_t align)
 }
 
 void BuddyAllocator::Destroy(uint64_t offset) noexcept {
-    int64_t vCapacity = RoundUpPow2(_capacity);
+    int64_t vCapacity = std::bit_ceil(_capacity);
     int64_t vlength = vCapacity;
     int64_t ptr = 0;
     int64_t left = 0;

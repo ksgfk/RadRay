@@ -13,41 +13,8 @@
 
 namespace radray {
 
-template <class T>
-requires(std::is_integral_v<T>)
-constexpr bool IsPowerOf2(T v) noexcept {
-    return v && !(v & (v - 1));
-}
-
 constexpr uint64_t CalcAlign(uint64_t value, uint64_t align) noexcept {
     return (value + (align - 1)) & ~(align - 1);
-}
-
-// 因为是2的幂次，二进制表示时最高位为1，其余位为0
-// 因此通过将所有位置成1再加1，就可以得到2的幂次
-// 通过最高位是1，右移一位，则此高位变成1，从而做或，使得次高位和最高为为1
-// |= 2，则是将前4位变成1
-// |= 4，前8位
-// |= 8，前16位
-// |= 16，前32位
-constexpr uint32_t RoundUpPow2(uint32_t v) noexcept {
-    v--;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    return v + 1;
-}
-constexpr uint64_t RoundUpPow2(uint64_t v) noexcept {
-    v--;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v |= v >> 32;
-    return v + 1;
 }
 
 template <class T>
