@@ -1,8 +1,8 @@
-#include "device.h"
+#include "d3d12_device.h"
 
 namespace radray::rhi::d3d12 {
 
-std::unique_ptr<DeviceInterfaceD3D12> CreateImpl(const DeviceCreateInfoD3D12& info) {
+std::unique_ptr<D3D12Device> CreateImpl(const DeviceCreateInfoD3D12& info) {
     ComPtr<IDXGIFactory2> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
@@ -15,10 +15,22 @@ std::unique_ptr<DeviceInterfaceD3D12> CreateImpl(const DeviceCreateInfoD3D12& in
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
         }
     }
-    RADRAY_DX_RETURN_WHEN_FAIL(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf())), std::unique_ptr<DeviceInterfaceD3D12>{});
+    {
+        HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
+        if (hr != S_OK) {
+            RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} (code = {})", __FILE__, __LINE__, ::radray::rhi::d3d12::GetErrorName(hr), hr);
+            return std::unique_ptr<D3D12Device>{};
+        }
+    }
     if (info.AdapterIndex.has_value()) {
         auto adapterIndex = info.AdapterIndex.value();
-        RADRAY_DX_RETURN_WHEN_FAIL(dxgiFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()), std::unique_ptr<DeviceInterfaceD3D12>{});
+        {
+            HRESULT hr = dxgiFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf());
+            if (hr != S_OK) {
+                RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} (code = {})", __FILE__, __LINE__, ::radray::rhi::d3d12::GetErrorName(hr), hr);
+                return std::unique_ptr<D3D12Device>{};
+            }
+        }
         if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, _uuidof(ID3D12Device), nullptr))) {
             adapter = nullptr;
         }
@@ -54,24 +66,37 @@ std::unique_ptr<DeviceInterfaceD3D12> CreateImpl(const DeviceCreateInfoD3D12& in
     }
     if (adapter == nullptr) {
         RADRAY_ERR_LOG("cannot find devices support D3D12");
-        return std::unique_ptr<DeviceInterfaceD3D12>{};
+        return std::unique_ptr<D3D12Device>{};
     }
-    RADRAY_DX_RETURN_WHEN_FAIL(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf())), std::unique_ptr<DeviceInterfaceD3D12>{});
+    {
+        HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf()));
+        if (hr != S_OK) {
+            RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} (code = {})", __FILE__, __LINE__, ::radray::rhi::d3d12::GetErrorName(hr), hr);
+            return std::unique_ptr<D3D12Device>{};
+        }
+    }
     {
         DXGI_ADAPTER_DESC1 desc;
         adapter->GetDesc1(&desc);
         std::wstring s{desc.Description};
         RADRAY_INFO_LOG("D3D12 device create on device: {}", Utf8ToString(s));
     }
-    auto result = std::make_unique<DeviceInterfaceD3D12>();
+    auto result = std::make_unique<D3D12Device>();
     result->dxgiFactory = std::move(dxgiFactory);
     result->adapter = std::move(adapter);
     result->device = std::move(device);
     return result;
 }
 
-DeviceInterfaceD3D12::DeviceInterfaceD3D12() = default;
+D3D12Device::D3D12Device() = default;
 
-DeviceInterfaceD3D12::~DeviceInterfaceD3D12() noexcept = default;
+D3D12Device::~D3D12Device() noexcept = default;
+
+SwapChainHandle D3D12Device::CreateSwapChain(const SwapChainCreateInfo& info) {
+    return {};
+}
+
+void D3D12Device::DestroySwapChain(const SwapChainHandle& handle) {
+}
 
 }  // namespace radray::rhi::d3d12

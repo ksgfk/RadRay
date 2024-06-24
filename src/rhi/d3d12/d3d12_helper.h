@@ -46,14 +46,3 @@ Format ToRhiFormat(DXGI_FORMAT format) noexcept;
         }                                                                                                                \
     } while (false)
 #endif
-
-#ifndef RADRAY_DX_RETURN_WHEN_FAIL
-#define RADRAY_DX_RETURN_WHEN_FAIL(x, ret)                                                                                                                   \
-    do {                                                                                                                                                     \
-        HRESULT hr_ = (x);                                                                                                                                   \
-        if (hr_ != S_OK) [[unlikely]] {                                                                                                                      \
-            RADRAY_ERR_LOG("at {}:{}\n    D3D12 error '{} with error {} (code = {})", __FILE__, __LINE__, #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
-            return ret;                                                                                                                                      \
-        }                                                                                                                                                    \
-    } while (false)
-#endif

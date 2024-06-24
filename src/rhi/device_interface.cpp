@@ -2,7 +2,7 @@
 
 #include <radray/logger.h>
 #ifdef RADRAY_ENABLE_D3D12
-#include "d3d12/device.h"
+#include "d3d12/d3d12_device.h"
 #endif
 #ifdef RADRAY_ENABLE_METAL
 #include "metal/metal_device.h"
@@ -12,14 +12,14 @@ namespace radray::rhi {
 
 void GetSupportApi(SupportApiArray& api) {
 #ifdef RADRAY_ENABLE_D3D12
-    api[(size_t)Api::D3D12] = true;
+    api[(size_t)ApiType::D3D12] = true;
 #else
     api[(size_t)ApiType::D3D12] = false;
 #endif
 #ifdef RADRAY_ENABLE_METAL
     api[(size_t)ApiType::Metal] = true;
 #else
-    api[(size_t)Api::Metal] = false;
+    api[(size_t)ApiType::Metal] = false;
 #endif
 }
 
