@@ -12,7 +12,10 @@ class DeviceInterface {
 public:
     virtual ~DeviceInterface() noexcept = default;
 
-    virtual SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info) = 0;
+    virtual ResourceHandle CreateCommandQueue(CommandListType type) = 0;
+    virtual void DestroyCommandQueue(const ResourceHandle& handle) = 0;
+
+    virtual SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) = 0;
     virtual void DestroySwapChain(const SwapChainHandle& handle) = 0;
 };
 

@@ -1,5 +1,8 @@
 #include "d3d12_device.h"
 
+#include "d3d12_command_queue.h"
+#include "d3d12_swap_chain.h"
+
 namespace radray::rhi::d3d12 {
 
 std::unique_ptr<D3D12Device> CreateImpl(const DeviceCreateInfoD3D12& info) {
@@ -92,11 +95,37 @@ D3D12Device::D3D12Device() = default;
 
 D3D12Device::~D3D12Device() noexcept = default;
 
-SwapChainHandle D3D12Device::CreateSwapChain(const SwapChainCreateInfo& info) {
-    return {};
+ResourceHandle D3D12Device::CreateCommandQueue(CommandListType type) {
+    auto listType = ToCmdListType(type);
+    auto cmdQueue = new D3D12CommandQueue{this, listType};
+    return {
+        reinterpret_cast<uint64_t>(cmdQueue),
+        cmdQueue->queue.Get()};
+}
+
+void D3D12Device::DestroyCommandQueue(const ResourceHandle& handle) {
+    auto cmdQueue = reinterpret_cast<D3D12CommandQueue*>(handle.Handle);
+    delete cmdQueue;
+}
+
+SwapChainHandle D3D12Device::CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) {
+    HWND hwnd = reinterpret_cast<HWND>(info.WindowHandle);
+    auto cmdQueue = reinterpret_cast<D3D12CommandQueue*>(cmdQueueHandle);
+    auto swapchain = new D3D12SwapChain{
+        this,
+        cmdQueue,
+        hwnd,
+        info.Width, info.Height,
+        info.BackBufferCount,
+        info.Vsync};
+    return {
+        reinterpret_cast<uint64_t>(swapchain),
+        swapchain->swapChain.Get()};
 }
 
 void D3D12Device::DestroySwapChain(const SwapChainHandle& handle) {
+    auto swapchain = reinterpret_cast<D3D12SwapChain*>(handle.Handle);
+    delete swapchain;
 }
 
 }  // namespace radray::rhi::d3d12

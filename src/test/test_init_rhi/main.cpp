@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <thread>
 
 #include <radray/window/glfw_window.h>
 #include <radray/basic_math.h>
@@ -28,15 +29,19 @@ int main() {
         if (device == nullptr) {
             throw std::runtime_error{"cannot create device"};
         }
+        auto cmdQueue = device->CreateCommandQueue(rhi::CommandListType::Graphics);
         auto sch = device->CreateSwapChain(
             {glfw.GetNativeHandle(),
              1280, 720,
              3,
-             false});
+             false},
+            cmdQueue.Handle);
         while (!glfw.ShouldClose()) {
             window::GlobalPollEventsGlfw();
+            std::this_thread::yield();
         }
         device->DestroySwapChain(sch);
+        device->DestroyCommandQueue(cmdQueue);
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("exception {}", e.what());
     }

@@ -11,7 +11,10 @@ public:
     D3D12Device();
     ~D3D12Device() noexcept override;
 
-    SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info) override;
+    ResourceHandle CreateCommandQueue(CommandListType type) override;
+    void DestroyCommandQueue(const ResourceHandle& handle) override;
+
+    SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
     void DestroySwapChain(const SwapChainHandle& handle) override;
 
 public:
