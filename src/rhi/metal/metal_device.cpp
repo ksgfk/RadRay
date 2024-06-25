@@ -2,6 +2,7 @@
 
 #include <radray/logger.h>
 
+#include "metal_command_queue.h"
 #include "metal_swap_chain.h"
 
 namespace radray::rhi::metal {
@@ -24,7 +25,19 @@ std::unique_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     return result;
 }
 
-SwapChainHandle MetalDevice::CreateSwapChain(const SwapChainCreateInfo& info) {
+ResourceHandle MetalDevice::CreateCommandQueue(CommandListType type) {
+    MetalCommandQueue* mcq = new MetalCommandQueue{this, 0};
+    return ResourceHandle{
+        reinterpret_cast<uint64_t>(mcq),
+        mcq->queue.get()};
+}
+
+void MetalDevice::DestroyCommandQueue(const ResourceHandle& handle) {
+    auto mcq = reinterpret_cast<MetalCommandQueue*>(handle.Handle);
+    delete mcq;
+}
+
+SwapChainHandle MetalDevice::CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) {
     MetalSwapChain* msc = new MetalSwapChain{
         this,
         info.WindowHandle,
