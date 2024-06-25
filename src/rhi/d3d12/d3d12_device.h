@@ -16,6 +16,7 @@ public:
 
     SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
     void DestroySwapChain(const SwapChainHandle& handle) override;
+    ResourceHandle GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) override;
 
 public:
     ComPtr<IDXGIFactory2> dxgiFactory;

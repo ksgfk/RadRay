@@ -16,6 +16,7 @@ public:
         uint width, uint height,
         uint depth,
         uint mipmap);
+    virtual ~MetalTexture() noexcept = default;
 
 public:
     NS::SharedPtr<MTL::Texture> texture;

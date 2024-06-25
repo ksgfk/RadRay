@@ -5,6 +5,20 @@
 
 namespace radray::rhi::d3d12 {
 
+static ComPtr<ID3D12Resource> _GetBufferFromSwapChain(D3D12SwapChain* swapchain, uint32_t index) {
+    ComPtr<ID3D12Resource> result;
+    RADRAY_DX_CHECK(swapchain->swapChain->GetBuffer(index, IID_PPV_ARGS(result.GetAddressOf())));
+    return result;
+}
+
+D3D12SwapChainRenderTarget::D3D12SwapChainRenderTarget(
+    D3D12SwapChain* swapchain,
+    uint32_t index)
+    : D3D12Texture(
+          _GetBufferFromSwapChain(swapchain, index),
+          ComPtr<D3D12MA::Allocation>{},
+          D3D12_RESOURCE_STATE_PRESENT) {}
+
 D3D12SwapChain::D3D12SwapChain(
     D3D12Device* device,
     D3D12CommandQueue* queue,
@@ -32,6 +46,10 @@ D3D12SwapChain::D3D12SwapChain(
             nullptr,
             tempSc.GetAddressOf()));
         tempSc.As(&swapChain);
+    }
+    renderTargets.reserve(desc.BufferCount);
+    for (uint32_t n = 0; n < desc.BufferCount; n++) {
+        renderTargets.emplace_back(std::make_unique<D3D12SwapChainRenderTarget>(this, n));
     }
 }
 

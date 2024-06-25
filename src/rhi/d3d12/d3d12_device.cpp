@@ -128,4 +128,13 @@ void D3D12Device::DestroySwapChain(const SwapChainHandle& handle) {
     delete swapchain;
 }
 
+ResourceHandle D3D12Device::GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) {
+    auto swapchain = reinterpret_cast<D3D12SwapChain*>(handle.Handle);
+    auto currIndex = swapchain->swapChain->GetCurrentBackBufferIndex();
+    auto rt = swapchain->renderTargets[currIndex].get();
+    return {
+        reinterpret_cast<uint64_t>(rt),
+        rt->resource.Get()};
+}
+
 }  // namespace radray::rhi::d3d12
