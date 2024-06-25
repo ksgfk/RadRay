@@ -10,11 +10,12 @@ public:
     MetalDevice();
     ~MetalDevice() noexcept override;
 
-    ResourceHandle CreateCommandQueue(CommandListType type) override;
-    void DestroyCommandQueue(const ResourceHandle& handle) override;
+    CommandQueueHandle CreateCommandQueue(CommandListType type) override;
+    void DestroyCommandQueue(const CommandQueueHandle& handle) override;
 
     SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
     void DestroySwapChain(const SwapChainHandle& handle) override;
+    ResourceHandle GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) override;
 
 public:
     NS::SharedPtr<MTL::Device> device;

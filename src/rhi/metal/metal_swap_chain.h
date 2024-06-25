@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal_helper.h"
+#include "metal_texture.h"
 
 extern "C" CA::MetalLayer* RadrayMetalCreateLayer(
     MTL::Device* device,
@@ -13,6 +14,14 @@ extern "C" CA::MetalLayer* RadrayMetalCreateLayer(
 namespace radray::rhi::metal {
 
 class MetalDevice;
+
+class MetalSwapChainRenderTarget : public MetalTexture {
+public:
+    explicit MetalSwapChainRenderTarget(CA::MetalDrawable* drawable);
+
+public:
+    NS::SharedPtr<CA::MetalDrawable> drawable;
+};
 
 class MetalSwapChain {
 public:
@@ -27,6 +36,7 @@ public:
 
 public:
     NS::SharedPtr<CA::MetalLayer> layer;
+    std::unique_ptr<MetalSwapChainRenderTarget> nowRt;
 };
 
 }  // namespace radray::rhi::metal

@@ -14,13 +14,21 @@ struct ResourceHandle {
 
     constexpr bool IsValid() const noexcept { return Handle != InvalidHandle; }
 
-    void invalidate() noexcept {
+    void Invalidate() noexcept {
         Handle = InvalidHandle;
         Ptr = nullptr;
     }
 };
 
-struct SwapChainHandle : public ResourceHandle {
+struct CommandQueueHandle : public ResourceHandle {};
+
+struct SwapChainHandle : public ResourceHandle {};
+
+struct BufferHandle : public ResourceHandle {
+    size_t ByteSize;
+    size_t Stride;
 };
+
+struct TextureHandle : public ResourceHandle {};
 
 }  // namespace radray::rhi

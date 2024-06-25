@@ -12,11 +12,12 @@ class DeviceInterface {
 public:
     virtual ~DeviceInterface() noexcept = default;
 
-    virtual ResourceHandle CreateCommandQueue(CommandListType type) = 0;
-    virtual void DestroyCommandQueue(const ResourceHandle& handle) = 0;
+    virtual CommandQueueHandle CreateCommandQueue(CommandListType type) = 0;
+    virtual void DestroyCommandQueue(const CommandQueueHandle& handle) = 0;
 
     virtual SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) = 0;
     virtual void DestroySwapChain(const SwapChainHandle& handle) = 0;
+    virtual ResourceHandle GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) = 0;
 };
 
 using SupportApiArray = std::array<bool, (size_t)ApiType::MAX_COUNT>;

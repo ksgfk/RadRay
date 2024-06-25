@@ -2,6 +2,8 @@
 
 #include <Metal/Metal.hpp>
 
+#include <radray/rhi/common.h>
+
 namespace radray::rhi::metal {
 
 class ScopedAutoreleasePool {
@@ -16,5 +18,9 @@ public:
 private:
     NS::AutoreleasePool* _pool;
 };
+
+MTL::PixelFormat ToMtlFormat(PixelFormat format) noexcept;
+
+PixelFormat ToRhiFormat(MTL::PixelFormat format) noexcept;
 
 }  // namespace radray::rhi::metal

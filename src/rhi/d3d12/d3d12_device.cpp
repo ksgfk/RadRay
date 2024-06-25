@@ -95,7 +95,7 @@ D3D12Device::D3D12Device() = default;
 
 D3D12Device::~D3D12Device() noexcept = default;
 
-ResourceHandle D3D12Device::CreateCommandQueue(CommandListType type) {
+CommandQueueHandle D3D12Device::CreateCommandQueue(CommandListType type) {
     auto listType = ToCmdListType(type);
     auto cmdQueue = new D3D12CommandQueue{this, listType};
     return {
@@ -103,7 +103,7 @@ ResourceHandle D3D12Device::CreateCommandQueue(CommandListType type) {
         cmdQueue->queue.Get()};
 }
 
-void D3D12Device::DestroyCommandQueue(const ResourceHandle& handle) {
+void D3D12Device::DestroyCommandQueue(const CommandQueueHandle& handle) {
     auto cmdQueue = reinterpret_cast<D3D12CommandQueue*>(handle.Handle);
     delete cmdQueue;
 }

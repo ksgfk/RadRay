@@ -25,14 +25,14 @@ std::unique_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     return result;
 }
 
-ResourceHandle MetalDevice::CreateCommandQueue(CommandListType type) {
+CommandQueueHandle MetalDevice::CreateCommandQueue(CommandListType type) {
     MetalCommandQueue* mcq = new MetalCommandQueue{this, 0};
-    return ResourceHandle{
+    return CommandQueueHandle{
         reinterpret_cast<uint64_t>(mcq),
         mcq->queue.get()};
 }
 
-void MetalDevice::DestroyCommandQueue(const ResourceHandle& handle) {
+void MetalDevice::DestroyCommandQueue(const CommandQueueHandle& handle) {
     auto mcq = reinterpret_cast<MetalCommandQueue*>(handle.Handle);
     delete mcq;
 }
@@ -53,6 +53,13 @@ SwapChainHandle MetalDevice::CreateSwapChain(const SwapChainCreateInfo& info, ui
 void MetalDevice::DestroySwapChain(const SwapChainHandle& handle) {
     auto msc = reinterpret_cast<MetalSwapChain*>(handle.Handle);
     delete msc;
+}
+
+ResourceHandle MetalDevice::GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) {
+    auto msc = reinterpret_cast<MetalSwapChain*>(handle.Handle);
+    return {
+        reinterpret_cast<uint64_t>(msc->nowRt.get()),
+        msc->nowRt->texture.get()};
 }
 
 }  // namespace radray::rhi::metal
