@@ -18,7 +18,7 @@ class MetalDevice;
 class MetalSwapChainRenderTarget : public MetalTexture {
 public:
     explicit MetalSwapChainRenderTarget(CA::MetalDrawable* drawable);
-    ~MetalTexture() noexcept override = default;
+    ~MetalSwapChainRenderTarget() noexcept override = default;
 
 public:
     NS::SharedPtr<CA::MetalDrawable> drawable;
