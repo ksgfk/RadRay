@@ -4,8 +4,4 @@
 
 struct GLFWwindow;
 
-namespace radray::window {
-
-size_t GetCocoaHandler(GLFWwindow* glfw);
-
-}
+extern "C" size_t RadrayGetCocoaHandlerFromGlfw(GLFWwindow* glfw);

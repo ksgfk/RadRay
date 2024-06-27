@@ -6,6 +6,8 @@
 
 namespace radray::rhi {
 
+static_assert(sizeof(uint64_t) == sizeof(void*), "ptr is not 64bit");
+
 constexpr auto InvalidHandle = std::numeric_limits<uint64_t>::max();
 
 struct ResourceHandle {

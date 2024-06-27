@@ -45,7 +45,7 @@ public:
         nativeHandle = reinterpret_cast<size_t>(glfwGetWin32Window(window));
 #endif
 #if defined(RADRAY_PLATFORM_MACOS)
-        nativeHandle = GetCocoaHandler(window);
+        nativeHandle = RadrayGetCocoaHandlerFromGlfw(window);
 #endif
         mouseButtonCb = std::make_shared<MultiDelegate<MouseButtonCallback>>();
         cursorPositionCb = std::make_shared<MultiDelegate<CursorPositionCallback>>();

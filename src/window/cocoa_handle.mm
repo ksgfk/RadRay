@@ -9,11 +9,7 @@
 
 static_assert(sizeof(id) == sizeof(size_t), "id is not size_t");
 
-namespace radray::window {
-
-size_t GetCocoaHandler(GLFWwindow *glfw) {
+extern "C" size_t RadrayGetCocoaHandlerFromGlfw(GLFWwindow *glfw) {
   id h = glfwGetCocoaWindow(glfw);
   return reinterpret_cast<size_t>(h);
 }
-
-} // namespace radray::window
