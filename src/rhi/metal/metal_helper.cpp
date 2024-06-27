@@ -38,6 +38,10 @@ MTL::PixelFormat ToMtlFormat(PixelFormat format) noexcept {
         case PixelFormat::R10G10B10A2_UInt: return MTL::PixelFormat::PixelFormatRGB10A2Uint;
         case PixelFormat::R10G10B10A2_UNorm: return MTL::PixelFormat::PixelFormatRGB10A2Unorm;
         case PixelFormat::R11G11B10_Float: return MTL::PixelFormat::PixelFormatRG11B10Float;
+        case PixelFormat::D16_UNorm: return MTL::PixelFormat::PixelFormatDepth16Unorm;
+        case PixelFormat::D32_Float: return MTL::PixelFormat::PixelFormatDepth32Float;
+        case PixelFormat::D24S8: return MTL::PixelFormat::PixelFormatDepth24Unorm_Stencil8;
+        case PixelFormat::D32S8: return MTL::PixelFormat::PixelFormatDepth32Float_Stencil8;
     }
 }
 
@@ -77,7 +81,32 @@ PixelFormat ToRhiFormat(MTL::PixelFormat format) noexcept {
         case MTL::PixelFormat::PixelFormatRGB10A2Uint: return PixelFormat::R10G10B10A2_UInt;
         case MTL::PixelFormat::PixelFormatRGB10A2Unorm: return PixelFormat::R10G10B10A2_UNorm;
         case MTL::PixelFormat::PixelFormatRG11B10Float: return PixelFormat::R11G11B10_Float;
+        case MTL::PixelFormat::PixelFormatDepth16Unorm: return PixelFormat::D16_UNorm;
+        case MTL::PixelFormat::PixelFormatDepth32Float: return PixelFormat::D32_Float;
+        case MTL::PixelFormat::PixelFormatDepth24Unorm_Stencil8: return PixelFormat::D24S8;
+        case MTL::PixelFormat::PixelFormatDepth32Float_Stencil8: return PixelFormat::D32S8;
         default: return PixelFormat::Unknown;
+    }
+}
+
+MTL::TextureType ToMtlTextureType(TextureDimension dim) noexcept {
+    switch (dim) {
+        case TextureDimension::Tex_1D: return MTL::TextureType1D;
+        case TextureDimension::Tex_2D: return MTL::TextureType2D;
+        case TextureDimension::Tex_3D: return MTL::TextureType3D;
+        case TextureDimension::Cubemap: return MTL::TextureTypeCube;
+        case TextureDimension::Tex_2D_Array: return MTL::TextureType2DArray;
+    }
+}
+
+TextureDimension ToRhiDimension(MTL::TextureType type) noexcept {
+    switch (type) {
+        case MTL::TextureType1D: return TextureDimension::Tex_1D;
+        case MTL::TextureType2D: return TextureDimension::Tex_2D;
+        case MTL::TextureType3D: return TextureDimension::Tex_3D;
+        case MTL::TextureTypeCube: return TextureDimension::Cubemap;
+        case MTL::TextureType2DArray: return TextureDimension::Tex_2D_Array;
+        default: return (TextureDimension)-1;
     }
 }
 

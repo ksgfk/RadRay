@@ -4,6 +4,8 @@
 
 #include "metal_command_queue.h"
 #include "metal_swap_chain.h"
+#include "metal_buffer.h"
+#include "metal_texture.h"
 
 namespace radray::rhi::metal {
 
@@ -55,11 +57,39 @@ void MetalDevice::DestroySwapChain(const SwapChainHandle& handle) {
     delete msc;
 }
 
-ResourceHandle MetalDevice::GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) {
-    auto msc = reinterpret_cast<MetalSwapChain*>(handle.Handle);
-    return {
-        reinterpret_cast<uint64_t>(msc->nowRt.get()),
-        msc->nowRt->texture.get()};
+ResourceHandle MetalDevice::CreateBuffer(BufferType type, uint64_t size) {
+    MetalBuffer* buf = new MetalBuffer{this, size};
+    return ResourceHandle{
+        reinterpret_cast<uint64_t>(buf),
+        buf->buffer.get()};
+}
+
+void MetalDevice::DestroyBuffer(ResourceHandle handle) {
+    MetalBuffer* buf = reinterpret_cast<MetalBuffer*>(handle.Handle);
+    delete buf;
+}
+
+ResourceHandle MetalDevice::CreateTexture(
+    PixelFormat format,
+    TextureDimension dim,
+    uint32_t width, uint32_t height,
+    uint32_t depth,
+    uint32_t mipmap) {
+    MetalTexture* tex = new MetalTexture{
+        this,
+        ToMtlFormat(format),
+        ToMtlTextureType(dim),
+        width, height,
+        depth,
+        mipmap};
+    return ResourceHandle{
+        reinterpret_cast<uint64_t>(tex),
+        tex->texture.get()};
+}
+
+void MetalDevice::DestroyTexture(ResourceHandle handle) {
+    MetalTexture* tex = reinterpret_cast<MetalTexture*>(handle.Handle);
+    delete tex;
 }
 
 }  // namespace radray::rhi::metal

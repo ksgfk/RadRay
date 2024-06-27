@@ -23,4 +23,8 @@ MTL::PixelFormat ToMtlFormat(PixelFormat format) noexcept;
 
 PixelFormat ToRhiFormat(MTL::PixelFormat format) noexcept;
 
+MTL::TextureType ToMtlTextureType(TextureDimension dim) noexcept;
+
+TextureDimension ToRhiDimension(MTL::TextureType type) noexcept;
+
 }  // namespace radray::rhi::metal

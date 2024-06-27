@@ -15,7 +15,17 @@ public:
 
     SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
     void DestroySwapChain(const SwapChainHandle& handle) override;
-    ResourceHandle GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) override;
+
+    ResourceHandle CreateBuffer(BufferType type, uint64_t size) override;
+    void DestroyBuffer(ResourceHandle handle) override;
+
+    ResourceHandle CreateTexture(
+        PixelFormat format,
+        TextureDimension dim,
+        uint32_t width, uint32_t height,
+        uint32_t depth,
+        uint32_t mipmap) override;
+    void DestroyTexture(ResourceHandle handle) override;
 
 public:
     NS::SharedPtr<MTL::Device> device;

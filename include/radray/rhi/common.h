@@ -57,7 +57,20 @@ enum class PixelFormat : uint32_t {
     RGBA32_Float,
     R10G10B10A2_UInt,
     R10G10B10A2_UNorm,
-    R11G11B10_Float
+    R11G11B10_Float,
+
+    D16_UNorm,
+    D32_Float,
+    D24S8,
+    D32S8
+};
+
+enum class TextureDimension {
+    Tex_1D,
+    Tex_2D,
+    Tex_3D,
+    Cubemap,
+    Tex_2D_Array
 };
 
 struct DeviceCreateInfoD3D12 {
@@ -79,6 +92,8 @@ struct SwapChainCreateInfo {
 
 const char* to_string(ApiType val) noexcept;
 const char* to_string(PixelFormat val) noexcept;
+const char* to_string(TextureDimension val) noexcept;
+const char* to_string(BufferType val) noexcept;
 
 }  // namespace radray::rhi
 
@@ -94,6 +109,22 @@ template <class CharT>
 struct std::formatter<radray::rhi::PixelFormat, CharT> : std::formatter<const char*, CharT> {
     template <class FormatContext>
     auto format(radray::rhi::PixelFormat val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
+};
+
+template <class CharT>
+struct std::formatter<radray::rhi::TextureDimension, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::rhi::TextureDimension val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
+};
+
+template <class CharT>
+struct std::formatter<radray::rhi::BufferType, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::rhi::BufferType val, FormatContext& ctx) const {
         return formatter<const char*, CharT>::format(to_string(val), ctx);
     }
 };

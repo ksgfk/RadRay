@@ -46,6 +46,30 @@ const char* to_string(PixelFormat val) noexcept {
         case PixelFormat::R10G10B10A2_UInt: return "R10G10B10A2_UInt";
         case PixelFormat::R10G10B10A2_UNorm: return "R10G10B10A2_UNorm";
         case PixelFormat::R11G11B10_Float: return "R11G11B10_Float";
+        case PixelFormat::D16_UNorm: return "D16_UNorm";
+        case PixelFormat::D32_Float: return "D32_Float";
+        case PixelFormat::D24S8: return "D24S8";
+        case PixelFormat::D32S8: return "D32S8";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(TextureDimension val) noexcept {
+    switch (val) {
+        case TextureDimension::Tex_1D: return "Tex_1D";
+        case TextureDimension::Tex_2D: return "Tex_2D";
+        case TextureDimension::Tex_3D: return "Tex_3D";
+        case TextureDimension::Cubemap: return "Cubemap";
+        case TextureDimension::Tex_2D_Array: return "Tex_2D_Array";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(BufferType val) noexcept {
+    switch (val) {
+        case BufferType::Default: return "Default";
+        case BufferType::Upload: return "Upload";
+        case BufferType::Readback: return "Readback";
         default: return "Unknown";
     }
 }

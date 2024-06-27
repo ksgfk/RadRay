@@ -12,7 +12,7 @@ public:
     MetalTexture(
         MetalDevice* device,
         MTL::PixelFormat foramt,
-        uint dimension,
+        MTL::TextureType type,
         uint width, uint height,
         uint depth,
         uint mipmap);
