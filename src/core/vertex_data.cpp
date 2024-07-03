@@ -5,7 +5,7 @@
 
 namespace radray {
 
-const char* VertexData::EnumSemanticToString(VertexSemantic e) noexcept {
+const char* to_string(VertexSemantic e) noexcept {
     switch (e) {
         case VertexSemantic::POSITION: return "POSITION";
         case VertexSemantic::NORMAL: return "NORMAL";
@@ -19,7 +19,15 @@ const char* VertexData::EnumSemanticToString(VertexSemantic e) noexcept {
         case VertexSemantic::POSITIONT: return "POSITIONT";
         case VertexSemantic::FOG: return "FOG";
         case VertexSemantic::TESSFACTOR: return "TESSFACTOR";
-        default: return "UNKNOWN";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(VertexIndexType val) noexcept {
+    switch (val) {
+        case radray::VertexIndexType::UInt16: return "UInt16";
+        case radray::VertexIndexType::UInt32: return "UInt32";
+        default: return "Unknown";
     }
 }
 
@@ -55,18 +63,3 @@ std::optional<VertexSemantic> VertexData::StringToEnumSemantic(const std::string
 }
 
 }  // namespace radray
-
-auto std::formatter<radray::VertexSemantic>::format(radray::VertexSemantic const& val, std::format_context& ctx) const -> decltype(ctx.out()) {
-    auto str = radray::VertexData::EnumSemanticToString(val);
-    return std::formatter<const char*>::format(str, ctx);
-}
-
-auto std::formatter<radray::VertexIndexType>::format(radray::VertexIndexType const& val, std::format_context& ctx) const -> decltype(ctx.out()) {
-    auto str = ([&]() {
-        switch (val) {
-            case radray::VertexIndexType::UInt16: return "UInt16";
-            case radray::VertexIndexType::UInt32: return "UInt32";
-        }
-    })();
-    return std::formatter<const char*>::format(str, ctx);
-}

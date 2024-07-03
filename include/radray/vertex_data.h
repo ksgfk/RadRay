@@ -39,7 +39,6 @@ struct VertexLayout {
 
 class VertexData {
 public:
-    static const char* EnumSemanticToString(VertexSemantic e) noexcept;
     static std::optional<VertexSemantic> StringToEnumSemantic(const std::string& s) noexcept;
 
     std::vector<VertexLayout> layouts;
@@ -51,14 +50,23 @@ public:
     uint32_t indexCount;
 };
 
+const char* to_string(VertexSemantic e) noexcept;
+const char* to_string(VertexIndexType val) noexcept;
+
 }  // namespace radray
 
-template<>
-struct std::formatter<radray::VertexSemantic> : public std::formatter<const char*> {
-    auto format(radray::VertexSemantic const& val, std::format_context& ctx) const -> decltype(ctx.out());
+template <class CharT>
+struct std::formatter<radray::VertexSemantic, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::VertexSemantic val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
 };
 
-template<>
-struct std::formatter<radray::VertexIndexType> : public std::formatter<const char*> {
-    auto format(radray::VertexIndexType const& val, std::format_context& ctx) const -> decltype(ctx.out());
+template <class CharT>
+struct std::formatter<radray::VertexIndexType, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::VertexIndexType val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
 };

@@ -33,10 +33,15 @@ public:
     JpgColorType colorType{JpgColorType::UNKNOWN};
 };
 
+const char* to_string(JpgColorType val) noexcept;
+
 }  // namespace resource
 }  // namespace radray
 
-template <>
-struct std::formatter<radray::resource::JpgColorType> : std::formatter<const char*> {
-    auto format(radray::resource::JpgColorType const& val, format_context& ctx) const -> decltype(ctx.out());
+template <class CharT>
+struct std::formatter<radray::resource::JpgColorType, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::resource::JpgColorType val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
 };

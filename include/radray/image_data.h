@@ -40,9 +40,14 @@ public:
     ImageFormat format;
 };
 
+const char* to_string(ImageFormat val) noexcept;
+
 }  // namespace radray
 
-template<>
-struct std::formatter<radray::ImageFormat> : public std::formatter<const char*> {
-    auto format(radray::ImageFormat const& val, std::format_context& ctx) const -> decltype(ctx.out());
+template <class CharT>
+struct std::formatter<radray::ImageFormat, CharT> : std::formatter<const char*, CharT> {
+    template <class FormatContext>
+    auto format(radray::ImageFormat val, FormatContext& ctx) const {
+        return formatter<const char*, CharT>::format(to_string(val), ctx);
+    }
 };

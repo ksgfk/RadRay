@@ -198,17 +198,15 @@ void PngData::MoveToImageData(ImageData* o) {
     }
 }
 
-}  // namespace radray::resource
-
-auto std::formatter<radray::resource::PngColorType>::format(radray::resource::PngColorType const& val, format_context& ctx) const -> decltype(ctx.out()) {
-    auto str = ([&]() {
-        switch (val) {
-            case radray::resource::PngColorType::UNKNOWN: return "UNKNOWN";
-            case radray::resource::PngColorType::GRAY: return "GRAY";
-            case radray::resource::PngColorType::RGB: return "RGB";
-            case radray::resource::PngColorType::RGB_ALPHA: return "RGB_ALPHA";
-            case radray::resource::PngColorType::GRAY_ALPHA: return "GRAY_ALPHA";
-        }
-    })();
-    return std::formatter<const char*>::format(str, ctx);
+const char* to_string(PngColorType val) noexcept {
+    switch (val) {
+        case radray::resource::PngColorType::UNKNOWN: return "UNKNOWN";
+        case radray::resource::PngColorType::GRAY: return "GRAY";
+        case radray::resource::PngColorType::RGB: return "RGB";
+        case radray::resource::PngColorType::RGB_ALPHA: return "RGB_ALPHA";
+        case radray::resource::PngColorType::GRAY_ALPHA: return "GRAY_ALPHA";
+        default: return "UNKNOWN";
+    }
 }
+
+}  // namespace radray::resource

@@ -210,15 +210,13 @@ void JpgData::MoveToImageData(ImageData* o) {
     }
 }
 
-}  // namespace radray::resource
-
-auto std::formatter<radray::resource::JpgColorType>::format(radray::resource::JpgColorType const& val, format_context& ctx) const -> decltype(ctx.out()) {
-    auto str = ([&]() {
-        switch (val) {
-            case radray::resource::JpgColorType::UNKNOWN: return "UNKNOWN";
-            case radray::resource::JpgColorType::GRAYSCALE: return "GRAYSCALE";
-            case radray::resource::JpgColorType::RGB: return "RGB";
-        }
-    })();
-    return std::formatter<const char*>::format(str, ctx);
+const char* to_string(JpgColorType val) noexcept {
+    switch (val) {
+        case radray::resource::JpgColorType::UNKNOWN: return "UNKNOWN";
+        case radray::resource::JpgColorType::GRAYSCALE: return "GRAYSCALE";
+        case radray::resource::JpgColorType::RGB: return "RGB";
+        default: return "UNKNOWN";
+    }
 }
+
+}  // namespace radray::resource

@@ -31,25 +31,23 @@ size_t ImageData::FormatByteSize(ImageFormat format) noexcept {
     }
 }
 
-}  // namespace radray
-
-auto std::formatter<radray::ImageFormat>::format(radray::ImageFormat const& val, std::format_context& ctx) const -> decltype(ctx.out()) {
-    auto str = ([&]() {
-        switch (val) {
-            case radray::ImageFormat::R8_BYTE: return "R8_BYTE";
-            case radray::ImageFormat::R16_USHORT: return "R16_USHORT";
-            case radray::ImageFormat::R16_HALF: return "R16_HALF";
-            case radray::ImageFormat::R32_FLOAT: return "R32_FLOAT";
-            case radray::ImageFormat::RG8_BYTE: return "RG8_BYTE";
-            case radray::ImageFormat::RG16_USHORT: return "RG16_USHORT";
-            case radray::ImageFormat::RG16_HALF: return "RG16_HALF";
-            case radray::ImageFormat::RG32_FLOAT: return "RG32_FLOAT";
-            case radray::ImageFormat::RGB32_FLOAT: return "RGB32_FLOAT";
-            case radray::ImageFormat::RGBA8_BYTE: return "RGBA8_BYTE";
-            case radray::ImageFormat::RGBA16_USHORT: return "RGBA16_USHORT";
-            case radray::ImageFormat::RGBA16_HALF: return "RGBA16_HALF";
-            case radray::ImageFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
-        }
-    })();
-    return std::formatter<const char*>::format(str, ctx);
+const char* to_string(ImageFormat val) noexcept {
+    switch (val) {
+        case radray::ImageFormat::R8_BYTE: return "R8_BYTE";
+        case radray::ImageFormat::R16_USHORT: return "R16_USHORT";
+        case radray::ImageFormat::R16_HALF: return "R16_HALF";
+        case radray::ImageFormat::R32_FLOAT: return "R32_FLOAT";
+        case radray::ImageFormat::RG8_BYTE: return "RG8_BYTE";
+        case radray::ImageFormat::RG16_USHORT: return "RG16_USHORT";
+        case radray::ImageFormat::RG16_HALF: return "RG16_HALF";
+        case radray::ImageFormat::RG32_FLOAT: return "RG32_FLOAT";
+        case radray::ImageFormat::RGB32_FLOAT: return "RGB32_FLOAT";
+        case radray::ImageFormat::RGBA8_BYTE: return "RGBA8_BYTE";
+        case radray::ImageFormat::RGBA16_USHORT: return "RGBA16_USHORT";
+        case radray::ImageFormat::RGBA16_HALF: return "RGBA16_HALF";
+        case radray::ImageFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
+        default: return "Unknown";
+    }
 }
+
+}  // namespace radray
