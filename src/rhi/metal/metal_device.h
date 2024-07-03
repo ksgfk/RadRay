@@ -11,10 +11,13 @@ public:
     ~MetalDevice() noexcept override;
 
     CommandQueueHandle CreateCommandQueue(CommandListType type) override;
-    void DestroyCommandQueue(const CommandQueueHandle& handle) override;
+    void DestroyCommandQueue(CommandQueueHandle handle) override;
+
+    EventHandle CreateEvent() override;
+    void DestroyEvent(EventHandle handle) override;
 
     SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
-    void DestroySwapChain(const SwapChainHandle& handle) override;
+    void DestroySwapChain(SwapChainHandle handle) override;
 
     ResourceHandle CreateBuffer(BufferType type, uint64_t size) override;
     void DestroyBuffer(ResourceHandle handle) override;

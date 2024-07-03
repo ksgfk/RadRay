@@ -6,6 +6,7 @@
 #include "metal_swap_chain.h"
 #include "metal_buffer.h"
 #include "metal_texture.h"
+#include "metal_event.h"
 
 namespace radray::rhi::metal {
 
@@ -34,9 +35,21 @@ CommandQueueHandle MetalDevice::CreateCommandQueue(CommandListType type) {
         mcq->queue.get()};
 }
 
-void MetalDevice::DestroyCommandQueue(const CommandQueueHandle& handle) {
+void MetalDevice::DestroyCommandQueue(CommandQueueHandle handle) {
     auto mcq = reinterpret_cast<MetalCommandQueue*>(handle.Handle);
     delete mcq;
+}
+
+EventHandle MetalDevice::CreateEvent() {
+    auto e = new MetalEvent{this};
+    return EventHandle{
+        reinterpret_cast<uint64_t>(e),
+        e->event.get()};
+}
+
+void MetalDevice::DestroyEvent(EventHandle handle) {
+    auto e = reinterpret_cast<EventHandle*>(handle.Handle);
+    delete e;
 }
 
 SwapChainHandle MetalDevice::CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) {
@@ -52,7 +65,7 @@ SwapChainHandle MetalDevice::CreateSwapChain(const SwapChainCreateInfo& info, ui
     return handle;
 }
 
-void MetalDevice::DestroySwapChain(const SwapChainHandle& handle) {
+void MetalDevice::DestroySwapChain(SwapChainHandle handle) {
     auto msc = reinterpret_cast<MetalSwapChain*>(handle.Handle);
     delete msc;
 }

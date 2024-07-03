@@ -13,10 +13,13 @@ public:
     virtual ~DeviceInterface() noexcept = default;
 
     virtual CommandQueueHandle CreateCommandQueue(CommandListType type) = 0;
-    virtual void DestroyCommandQueue(const CommandQueueHandle& handle) = 0;
+    virtual void DestroyCommandQueue(CommandQueueHandle handle) = 0;
+
+    virtual EventHandle CreateEvent() = 0;
+    virtual void DestroyEvent(EventHandle handle) = 0;
 
     virtual SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) = 0;
-    virtual void DestroySwapChain(const SwapChainHandle& handle) = 0;
+    virtual void DestroySwapChain(SwapChainHandle handle) = 0;
 
     virtual ResourceHandle CreateBuffer(BufferType type, uint64_t size) = 0;
     virtual void DestroyBuffer(ResourceHandle handle) = 0;

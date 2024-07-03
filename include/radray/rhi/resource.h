@@ -33,4 +33,6 @@ struct BufferHandle : public ResourceHandle {
 
 struct TextureHandle : public ResourceHandle {};
 
+struct EventHandle : public ResourceHandle {};
+
 }  // namespace radray::rhi
