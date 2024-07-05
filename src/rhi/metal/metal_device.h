@@ -13,8 +13,8 @@ public:
     CommandQueueHandle CreateCommandQueue(CommandListType type) override;
     void DestroyCommandQueue(CommandQueueHandle handle) override;
 
-    EventHandle CreateEvent() override;
-    void DestroyEvent(EventHandle handle) override;
+    FenceHandle CreateFence() override;
+    void DestroyFence(FenceHandle handle) override;
 
     SwapChainHandle CreateSwapChain(const SwapChainCreateInfo& info, uint64_t cmdQueueHandle) override;
     void DestroySwapChain(SwapChainHandle handle) override;
@@ -34,6 +34,6 @@ public:
     NS::SharedPtr<MTL::Device> device;
 };
 
-std::unique_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);
+std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);
 
 }  // namespace radray::rhi::metal

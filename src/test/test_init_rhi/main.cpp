@@ -30,7 +30,7 @@ int main() {
             throw std::runtime_error{"cannot create device"};
         }
         auto cmdQueue = device->CreateCommandQueue(rhi::CommandListType::Graphics);
-        auto event = device->CreateEvent();
+        auto fence = device->CreateFence();
         auto sch = device->CreateSwapChain(
             {glfw.GetNativeHandle(),
              1280, 720,
@@ -41,7 +41,7 @@ int main() {
             window::GlobalPollEventsGlfw();
             std::this_thread::yield();
         }
-        device->DestroyEvent(event);
+        device->DestroyFence(fence);
         device->DestroySwapChain(sch);
         device->DestroyCommandQueue(cmdQueue);
     } catch (const std::exception& e) {

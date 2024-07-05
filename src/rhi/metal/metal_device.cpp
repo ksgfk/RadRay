@@ -14,16 +14,16 @@ MetalDevice::MetalDevice() = default;
 
 MetalDevice::~MetalDevice() noexcept = default;
 
-std::unique_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
+std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     auto all = NS::TransferPtr(MTL::CopyAllDevices());
     auto deviceCount = all->count();
     if (info.DeviceIndex >= deviceCount) {
         RADRAY_ERR_LOG("device index out of range. count = {}", deviceCount);
-        return std::unique_ptr<MetalDevice>{};
+        return std::shared_ptr<MetalDevice>{};
     }
     MTL::Device* device = all->object<MTL::Device>(info.DeviceIndex);
     RADRAY_INFO_LOG("select metal device: {}", device->name()->utf8String());
-    auto result = std::make_unique<MetalDevice>();
+    auto result = std::make_shared<MetalDevice>();
     result->device = NS::TransferPtr(device);
     return result;
 }
@@ -40,15 +40,15 @@ void MetalDevice::DestroyCommandQueue(CommandQueueHandle handle) {
     delete mcq;
 }
 
-EventHandle MetalDevice::CreateEvent() {
+FenceHandle MetalDevice::CreateFence() {
     auto e = new MetalEvent{this};
-    return EventHandle{
+    return FenceHandle{
         reinterpret_cast<uint64_t>(e),
         e->event.get()};
 }
 
-void MetalDevice::DestroyEvent(EventHandle handle) {
-    auto e = reinterpret_cast<EventHandle*>(handle.Handle);
+void MetalDevice::DestroyFence(FenceHandle handle) {
+    auto e = reinterpret_cast<FenceHandle*>(handle.Handle);
     delete e;
 }
 

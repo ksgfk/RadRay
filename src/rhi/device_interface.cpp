@@ -23,7 +23,7 @@ void GetSupportApi(SupportApiArray& api) {
 #endif
 }
 
-std::unique_ptr<DeviceInterface> CreateDeviceD3D12(const DeviceCreateInfoD3D12& info) {
+std::shared_ptr<DeviceInterface> CreateDeviceD3D12(const DeviceCreateInfoD3D12& info) {
 #ifdef RADRAY_ENABLE_D3D12
     return d3d12::CreateImpl(info);
 #else
@@ -32,7 +32,7 @@ std::unique_ptr<DeviceInterface> CreateDeviceD3D12(const DeviceCreateInfoD3D12& 
 #endif
 }
 
-std::unique_ptr<DeviceInterface> CreateDeviceMetal(const DeviceCreateInfoMetal& info) {
+std::shared_ptr<DeviceInterface> CreateDeviceMetal(const DeviceCreateInfoMetal& info) {
 #ifdef RADRAY_ENABLE_METAL
     return metal::CreateImpl(info);
 #else

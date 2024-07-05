@@ -16,7 +16,7 @@ struct ResourceHandle {
 
     constexpr bool IsValid() const noexcept { return Handle != InvalidHandle; }
 
-    void Invalidate() noexcept {
+    constexpr void Invalidate() noexcept {
         Handle = InvalidHandle;
         Ptr = nullptr;
     }
@@ -33,6 +33,6 @@ struct BufferHandle : public ResourceHandle {
 
 struct TextureHandle : public ResourceHandle {};
 
-struct EventHandle : public ResourceHandle {};
+struct FenceHandle : public ResourceHandle {};
 
 }  // namespace radray::rhi
