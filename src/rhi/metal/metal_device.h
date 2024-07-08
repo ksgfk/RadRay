@@ -30,6 +30,11 @@ public:
         uint32_t mipmap) override;
     void DestroyTexture(ResourceHandle handle) override;
 
+    void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) override;
+    void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
+    void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
+    void Synchronize(FenceHandle fence, uint64_t value) override;
+
 public:
     NS::SharedPtr<MTL::Device> device;
 };

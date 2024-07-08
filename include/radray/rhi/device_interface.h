@@ -5,6 +5,7 @@
 
 #include <radray/rhi/common.h>
 #include <radray/rhi/resource.h>
+#include <radray/rhi/command.h>
 
 namespace radray::rhi {
 
@@ -31,6 +32,11 @@ public:
         uint32_t depth,
         uint32_t mipmap) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
+
+    virtual void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) = 0;
+    virtual void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
+    virtual void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
+    virtual void Synchronize(FenceHandle fence, uint64_t value) = 0;
 };
 
 using SupportApiArray = std::array<bool, (size_t)ApiType::MAX_COUNT>;

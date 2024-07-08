@@ -48,7 +48,7 @@ FenceHandle MetalDevice::CreateFence() {
 }
 
 void MetalDevice::DestroyFence(FenceHandle handle) {
-    auto e = reinterpret_cast<FenceHandle*>(handle.Handle);
+    auto e = reinterpret_cast<MetalEvent*>(handle.Handle);
     delete e;
 }
 
@@ -103,6 +103,36 @@ ResourceHandle MetalDevice::CreateTexture(
 void MetalDevice::DestroyTexture(ResourceHandle handle) {
     MetalTexture* tex = reinterpret_cast<MetalTexture*>(handle.Handle);
     delete tex;
+}
+
+void MetalDevice::DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) {
+}
+
+void MetalDevice::Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) {
+    auto e = reinterpret_cast<MetalEvent*>(fence.Handle);
+    auto q = reinterpret_cast<MetalCommandQueue*>(queue.Handle);
+    auto cmdBuffer = q->queue->commandBufferWithUnretainedReferences();
+    cmdBuffer->encodeSignalEvent(e->event.get(), value);
+    cmdBuffer->commit();
+}
+
+void MetalDevice::Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) {
+    auto e = reinterpret_cast<MetalEvent*>(fence.Handle);
+    auto q = reinterpret_cast<MetalCommandQueue*>(queue.Handle);
+    auto cmdBuffer = q->queue->commandBufferWithUnretainedReferences();
+    if (value == 0) {
+        RADRAY_WARN_LOG("MetalDevice::Wait() is called before any signal");
+    } else {
+        cmdBuffer->encodeWait(e->event.get(), value);
+    }
+    cmdBuffer->commit();
+}
+
+void MetalDevice::Synchronize(FenceHandle fence, uint64_t value) {
+    auto e = reinterpret_cast<MetalEvent*>(fence.Handle);
+    while (e->event->signaledValue() < value) {
+        std::this_thread::yield();
+    }
 }
 
 }  // namespace radray::rhi::metal

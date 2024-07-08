@@ -27,7 +27,7 @@ using Command = std::variant<
 class CommandList {
 public:
 private:
-    std::vector<Command> _list;
+    std::pmr::vector<Command> _list;
 };
 
 }  // namespace radray::rhi
