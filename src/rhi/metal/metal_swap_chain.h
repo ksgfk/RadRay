@@ -35,6 +35,8 @@ public:
         uint32_t backBufferCount);
     ~MetalSwapChain() noexcept;
 
+    void NextDrawable();
+
 public:
     NS::SharedPtr<CA::MetalLayer> layer;
     std::unique_ptr<MetalSwapChainRenderTarget> nowRt;

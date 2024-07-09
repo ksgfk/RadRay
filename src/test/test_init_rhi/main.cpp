@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include <thread>
+#include <chrono>
 
 #include <radray/window/glfw_window.h>
 #include <radray/basic_math.h>
@@ -37,8 +38,27 @@ int main() {
              3,
              false},
             cmdQueue.Handle);
+        uint64_t fenceValue = 0;
+        auto last = std::chrono::system_clock::now();
+        std::array<float, 4> clearColor{0.5f, 0.2f, 0.1f, 1.0f};
         while (!glfw.ShouldClose()) {
             window::GlobalPollEventsGlfw();
+            auto now = std::chrono::system_clock::now();
+            float delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() / 1000.0f;
+            RADRAY_DEBUG_LOG("delta {}", delta);
+            for (auto&& i : clearColor) {
+                i += delta * 0.25f;
+                i -= std::floor(i);
+            }
+            clearColor[3] = 1.0f;
+            last = now;
+            rhi::CommandList list{};
+            list.list.emplace_back(rhi::ClearRenderTargetCommand{sch, clearColor});
+            list.list.emplace_back(rhi::PresentCommand{sch});
+            device->DispatchCommand(cmdQueue, std::move(list));
+            device->Signal(fence, cmdQueue, ++fenceValue);
+            device->Wait(fence, cmdQueue, fenceValue);
+            device->Synchronize(fence, fenceValue);
             std::this_thread::yield();
         }
         device->DestroyFence(fence);

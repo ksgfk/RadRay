@@ -3,6 +3,7 @@
 #include <radray/logger.h>
 
 #include "metal_command_queue.h"
+#include "metal_command_encoder.h"
 #include "metal_swap_chain.h"
 #include "metal_buffer.h"
 #include "metal_texture.h"
@@ -105,7 +106,29 @@ void MetalDevice::DestroyTexture(ResourceHandle handle) {
     delete tex;
 }
 
-void MetalDevice::DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) {
+void MetalDevice::DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList_) {
+    auto q = reinterpret_cast<MetalCommandQueue*>(queue.Handle);
+    CommandList cmdList = std::move(cmdList_);
+    MetalCommandEncoder encoder{q};
+    for (auto&& cmd : cmdList.list) {
+        std::visit(encoder, cmd);
+    }
+#ifdef RADRAY_IS_DEBUG
+    if (encoder.cmdBuffer != nullptr) {
+        encoder.cmdBuffer->addCompletedHandler(^(MTL::CommandBuffer* cmdBuffer) noexcept {
+          ScopedAutoreleasePool _arp{};
+          if (auto err = cmdBuffer->error()) {
+              RADRAY_ERR_LOG("MTL::CommnadBuffer execute error: {}", err->localizedDescription()->utf8String());
+          }
+          if (auto logs = cmdBuffer->logs()) {
+              RadrayPrintMTLFunctionLog(logs);
+          }
+        });
+    }
+#endif
+    if (encoder.cmdBuffer != nullptr) {
+        encoder.cmdBuffer->commit();
+    }
 }
 
 void MetalDevice::Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) {

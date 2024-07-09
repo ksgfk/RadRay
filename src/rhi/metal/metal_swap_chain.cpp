@@ -29,6 +29,16 @@ MetalSwapChain::MetalSwapChain(
     nowRt = std::make_unique<MetalSwapChainRenderTarget>(drawable->retain());
 }
 
+void MetalSwapChain::NextDrawable() {
+    auto drawable = layer->nextDrawable();
+    if (drawable == nullptr) {
+        RADRAY_ERR_LOG("cannot get next drawable from MetalLayer");
+    }
+    auto rt = nowRt.get();
+    rt->~MetalSwapChainRenderTarget();
+    new (std::launder(rt)) MetalSwapChainRenderTarget{drawable};
+}
+
 MetalSwapChain::~MetalSwapChain() noexcept = default;
 
 }  // namespace radray::rhi::metal
