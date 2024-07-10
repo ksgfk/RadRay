@@ -13,33 +13,24 @@ extern "C" CA::MetalLayer* RadrayMetalCreateLayer(
 
 namespace radray::rhi::metal {
 
-class MetalDevice;
-
-class MetalSwapChainRenderTarget : public MetalTexture {
-public:
-    explicit MetalSwapChainRenderTarget(CA::MetalDrawable* drawable);
-    ~MetalSwapChainRenderTarget() noexcept override = default;
-
-public:
-    NS::SharedPtr<CA::MetalDrawable> drawable;
-};
-
 class MetalSwapChain {
 public:
     MetalSwapChain(
-        MetalDevice* device,
+        MTL::Device* device,
         uint64_t windowHandle,
         uint width,
         uint height,
         bool vsync,
         uint32_t backBufferCount);
+    MetalSwapChain(const MetalSwapChain&) = delete;
+    MetalSwapChain(MetalSwapChain&&) = delete;
+    MetalSwapChain& operator=(const MetalSwapChain&) = delete;
+    MetalSwapChain& operator=(MetalSwapChain&&) = delete;
     ~MetalSwapChain() noexcept;
 
-    void NextDrawable();
-
 public:
-    NS::SharedPtr<CA::MetalLayer> layer;
-    std::unique_ptr<MetalSwapChainRenderTarget> nowRt;
+    CA::MetalLayer* layer;
+    std::unique_ptr<MetalTexture> backBuffer;
 };
 
 }  // namespace radray::rhi::metal

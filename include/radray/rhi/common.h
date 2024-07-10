@@ -79,7 +79,7 @@ struct DeviceCreateInfoD3D12 {
 };
 
 struct DeviceCreateInfoMetal {
-    uint32_t DeviceIndex;
+    std::optional<uint32_t> DeviceIndex;
 };
 
 struct SwapChainCreateInfo {

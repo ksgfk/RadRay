@@ -4,14 +4,20 @@
 
 namespace radray::rhi::metal {
 
-class MetalDevice;
-
 class MetalEvent {
 public:
-    MetalEvent(MetalDevice* device);
+    explicit MetalEvent(MTL::Device* device);
+    MetalEvent(const MetalEvent&) = delete;
+    MetalEvent(MetalEvent&&) = delete;
+    MetalEvent& operator=(const MetalEvent&) = delete;
+    MetalEvent& operator=(MetalEvent&&) = delete;
+    ~MetalEvent() noexcept;
+
+    bool IsCompleted(uint64_t value) const;
+    void Synchronize(uint64_t value);
 
 public:
-    NS::SharedPtr<MTL::SharedEvent> event;
+    MTL::SharedEvent* event;
 };
 
 }  // namespace radray::rhi::metal

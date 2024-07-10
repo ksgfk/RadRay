@@ -45,7 +45,7 @@ int main() {
             window::GlobalPollEventsGlfw();
             auto now = std::chrono::system_clock::now();
             float delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() / 1000.0f;
-            RADRAY_DEBUG_LOG("delta {}", delta);
+            // RADRAY_DEBUG_LOG("delta {}", delta);
             for (auto&& i : clearColor) {
                 i += delta * 0.25f;
                 i -= std::floor(i);
@@ -53,16 +53,15 @@ int main() {
             clearColor[3] = 1.0f;
             last = now;
             rhi::CommandList list{};
-            list.list.emplace_back(rhi::ClearRenderTargetCommand{sch, clearColor});
-            list.list.emplace_back(rhi::PresentCommand{sch});
+            list.Add(rhi::ClearRenderTargetCommand{sch, clearColor});
             device->DispatchCommand(cmdQueue, std::move(list));
+            device->Present(sch, cmdQueue);
             device->Signal(fence, cmdQueue, ++fenceValue);
-            device->Wait(fence, cmdQueue, fenceValue);
             device->Synchronize(fence, fenceValue);
             std::this_thread::yield();
         }
-        device->DestroyFence(fence);
         device->DestroySwapChain(sch);
+        device->DestroyFence(fence);
         device->DestroyCommandQueue(cmdQueue);
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("exception {}", e.what());

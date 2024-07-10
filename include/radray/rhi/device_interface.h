@@ -37,6 +37,7 @@ public:
     virtual void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
     virtual void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
     virtual void Synchronize(FenceHandle fence, uint64_t value) = 0;
+    virtual void Present(SwapChainHandle swapchain, CommandQueueHandle queue) = 0;
 };
 
 using SupportApiArray = std::array<bool, (size_t)ApiType::MAX_COUNT>;

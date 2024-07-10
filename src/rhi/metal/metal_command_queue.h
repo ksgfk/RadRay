@@ -4,14 +4,22 @@
 
 namespace radray::rhi::metal {
 
-class MetalDevice;
-
 class MetalCommandQueue {
 public:
-    MetalCommandQueue(MetalDevice* device, size_t maxCommands);
+    MetalCommandQueue(MTL::Device* device, size_t maxCommands);
+    MetalCommandQueue(const MetalCommandQueue&) = delete;
+    MetalCommandQueue(MetalCommandQueue&&) = delete;
+    MetalCommandQueue& operator=(const MetalCommandQueue&) = delete;
+    MetalCommandQueue& operator=(MetalCommandQueue&&) = delete;
+    ~MetalCommandQueue() noexcept;
+
+    void Signal(MTL::SharedEvent* event, uint64_t value);
+    void Wait(MTL::SharedEvent* event, uint64_t value);
+    void Synchronize();
+    void Present(MTL::Drawable* drawable);
 
 public:
-    NS::SharedPtr<MTL::CommandQueue> queue;
+    MTL::CommandQueue* queue;
 };
 
 }  // namespace radray::rhi::metal

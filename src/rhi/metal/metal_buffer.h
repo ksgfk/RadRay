@@ -4,14 +4,17 @@
 
 namespace radray::rhi::metal {
 
-class MetalDevice;
-
 class MetalBuffer {
 public:
-    MetalBuffer(MetalDevice* device, size_t size);
+    MetalBuffer(MTL::Device* device, size_t size);
+    MetalBuffer(const MetalBuffer&) = delete;
+    MetalBuffer(MetalBuffer&&) = delete;
+    MetalBuffer& operator=(const MetalBuffer&) = delete;
+    MetalBuffer& operator=(MetalBuffer&&) = delete;
+    ~MetalBuffer() noexcept;
 
 public:
-    NS::SharedPtr<MTL::Buffer> buffer;
+    MTL::Buffer* buffer;
 };
 
 }  // namespace radray::rhi::metal

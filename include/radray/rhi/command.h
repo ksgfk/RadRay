@@ -30,21 +30,16 @@ public:
     std::array<float, 4> color;
 };
 
-class PresentCommand : public ICommand {
-public:
-    explicit PresentCommand(SwapChainHandle handle) noexcept : swapchain(handle) {}
-    virtual ~PresentCommand() noexcept = default;
-
-public:
-    SwapChainHandle swapchain;
-};
-
 using Command = std::variant<
-    ClearRenderTargetCommand,
-    PresentCommand>;
+    ClearRenderTargetCommand>;
 
 class CommandList {
 public:
+    template <class... Args>
+    void Add(Args&&... args) {
+        list.emplace_back(std::forward<Args>(args)...);
+    }
+
 public:
     std::pmr::vector<Command> list;
 };

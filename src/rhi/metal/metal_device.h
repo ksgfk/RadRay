@@ -8,6 +8,10 @@ namespace radray::rhi::metal {
 class MetalDevice : public DeviceInterface {
 public:
     MetalDevice();
+    MetalDevice(const MetalDevice&) = delete;
+    MetalDevice(MetalDevice&&) = delete;
+    MetalDevice& operator=(const MetalDevice&) = delete;
+    MetalDevice& operator=(MetalDevice&&) = delete;
     ~MetalDevice() noexcept override;
 
     CommandQueueHandle CreateCommandQueue(CommandListType type) override;
@@ -34,9 +38,10 @@ public:
     void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
     void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
     void Synchronize(FenceHandle fence, uint64_t value) override;
+    void Present(SwapChainHandle swapchain, CommandQueueHandle queue) override;
 
 public:
-    NS::SharedPtr<MTL::Device> device;
+    MTL::Device* device;
 };
 
 std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);

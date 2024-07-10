@@ -44,6 +44,7 @@ rule("radray_basic_setting")
             target:add("defines", "RADRAY_PLATFORM_LINUX", {public = true})
         elseif target:is_plat("macosx") then
             target:add("defines", "RADRAY_PLATFORM_MACOS", {public = true})
+            target:add("mflags", "-fno-objc-arc")
         end
         if is_mode("debug") then
             target:add("defines", "RADRAY_IS_DEBUG", {public = true})

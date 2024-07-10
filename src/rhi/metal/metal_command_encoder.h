@@ -13,7 +13,6 @@ public:
     explicit MetalCommandEncoder(MetalCommandQueue* queue);
 
     void operator()(const ClearRenderTargetCommand& cmd);
-    void operator()(const PresentCommand& cmd);
 
 private:
     void CheckCmdBuffer();

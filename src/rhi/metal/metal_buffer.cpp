@@ -1,14 +1,14 @@
 #include "metal_buffer.h"
 
-#include "metal_device.h"
-
 namespace radray::rhi::metal {
 
-MetalBuffer::MetalBuffer(MetalDevice* device, size_t size) {
-    auto buf = device->device->newBuffer(
-        size,
-        MTL::ResourceStorageModePrivate | MTL::ResourceHazardTrackingModeTracked);
-    buffer = NS::TransferPtr(buf);
+MetalBuffer::MetalBuffer(MTL::Device* device, size_t size)
+    : buffer(device->newBuffer(
+          size,
+          MTL::ResourceStorageModePrivate | MTL::ResourceHazardTrackingModeTracked)) {}
+
+MetalBuffer::~MetalBuffer() noexcept {
+    buffer->release();
 }
 
 }  // namespace radray::rhi::metal

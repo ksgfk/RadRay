@@ -6,19 +6,19 @@ RadrayMetalCreateLayer(id<MTLDevice> device, uint64_t windowHandle,
                        uint32_t width, uint32_t height, bool vsync,
                        uint32_t backBufferCount) noexcept {
   NSView *view = nullptr;
-  auto window_or_view =
+  auto windowOrView =
       (__bridge NSObject *)(reinterpret_cast<void *>(windowHandle));
-  if ([window_or_view isKindOfClass:[NSWindow class]]) {
-    view = static_cast<NSWindow *>(window_or_view).contentView;
+  if ([windowOrView isKindOfClass:[NSWindow class]]) {
+    view = static_cast<NSWindow *>(windowOrView).contentView;
   } else {
-    if (![window_or_view isKindOfClass:[NSView class]]) {
+    if (![windowOrView isKindOfClass:[NSView class]]) {
       NSLog(@"Invalid window handle %llu of class %@. "
              "Expected NSWindow or NSView.",
-            windowHandle, [window_or_view class]);
+            windowHandle, [windowOrView class]);
     }
-    view = static_cast<NSView *>(window_or_view);
+    view = static_cast<NSView *>(windowOrView);
   }
-  auto layer = [CAMetalLayer layer];
+  CAMetalLayer *layer = [CAMetalLayer layer];
   view.layer = layer;
   view.wantsLayer = YES;
   view.layer.contentsScale = view.window.backingScaleFactor;

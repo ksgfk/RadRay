@@ -4,22 +4,24 @@
 
 namespace radray::rhi::metal {
 
-class MetalDevice;
-
 class MetalTexture {
 public:
-    explicit MetalTexture(NS::SharedPtr<MTL::Texture> ptr);
+    MetalTexture(MTL::Texture* ptr, bool isRetain);
     MetalTexture(
-        MetalDevice* device,
+        MTL::Device* device,
         MTL::PixelFormat foramt,
         MTL::TextureType type,
         uint width, uint height,
         uint depth,
         uint mipmap);
-    virtual ~MetalTexture() noexcept = default;
+    MetalTexture(const MetalTexture&) = delete;
+    MetalTexture(MetalTexture&&) = delete;
+    MetalTexture& operator=(const MetalTexture&) = delete;
+    MetalTexture& operator=(MetalTexture&&) = delete;
+    virtual ~MetalTexture() noexcept;
 
 public:
-    NS::SharedPtr<MTL::Texture> texture;
+    MTL::Texture* texture;
 };
 
 }  // namespace radray::rhi::metal

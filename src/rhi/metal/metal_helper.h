@@ -29,4 +29,4 @@ TextureDimension ToRhiDimension(MTL::TextureType type) noexcept;
 
 }  // namespace radray::rhi::metal
 
-extern "C" void RadrayPrintMTLFunctionLog(MTL::LogContainer* logs);
+extern "C" void RadrayPrintMTLFunctionLog(MTL::LogContainer* logs) noexcept;
