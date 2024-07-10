@@ -41,7 +41,8 @@ public:
     void Present(SwapChainHandle swapchain, CommandQueueHandle queue) override;
 
 public:
-    MTL::Device* device;
+    MTL::Device* device{nullptr};
+    MTL::RenderPipelineState* swapchainPresentPso{nullptr};
 };
 
 std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);

@@ -11,12 +11,33 @@
 
 namespace radray::rhi::metal {
 
+static const char* SWAPCHAIN_PRESENT_SHADER = R"(
+struct RasterData {
+    float4 p [[position]];
+    float2 uv;
+};
+[[vertex]] RasterData swapchain_vertex_shader(
+    constant float2* in [[buffer(0)]],
+    uint vid [[vertex_id]]) {
+    auto p = in[vid];
+    return RasterData{float4(p, 0.f, 1.f), saturate(p * float2(.5f, -.5f) + .5f)};
+}
+[[fragment]] float4 swapchain_fragment_shader(
+    RasterData in [[stage_in]],
+    texture2d<float, access::sample> image [[texture(0)]]) {
+    return float4(image.sample(sampler(filter::linear), in.uv).xyz, 1.f);
+})";
+
 MetalDevice::MetalDevice() = default;
 
 MetalDevice::~MetalDevice() noexcept {
     if (device != nullptr) {
         device->release();
         device = nullptr;
+    }
+    if (swapchainPresentPso != nullptr) {
+        swapchainPresentPso->release();
+        swapchainPresentPso = nullptr;
     }
 }
 
@@ -38,8 +59,70 @@ std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     }
     MTL::Device* device = allDevice->object<MTL::Device>(info.DeviceIndex.value_or(0));
     RADRAY_INFO_LOG("select metal device: {}", device->name()->utf8String());
+
+    auto compileOption = MTL::CompileOptions::alloc()->init()->autorelease();
+    compileOption->setFastMathEnabled(true);
+    compileOption->setLanguageVersion(MTL::LanguageVersion2_4);
+    compileOption->setLibraryType(MTL::LibraryTypeExecutable);
+    NS::String* builtinSource = NS::String::alloc()->init(
+        const_cast<char*>(SWAPCHAIN_PRESENT_SHADER),
+        std::strlen(SWAPCHAIN_PRESENT_SHADER),
+        NS::UTF8StringEncoding,
+        false);
+    builtinSource->autorelease();
+    NS::Error* error{nullptr};
+    MTL::Library* builtinLibrary = device->newLibrary(builtinSource, compileOption, &error)->autorelease();
+    builtinLibrary->setLabel(MTLSTR("radray_builtin"));
+    if (error != nullptr) {
+        RADRAY_ERR_LOG("cannot compile built-in shaders.\n{}", error->localizedDescription()->utf8String());
+        return nullptr;
+    }
+    error = nullptr;
+    if (builtinLibrary == nullptr) {
+        RADRAY_ERR_LOG("cannot compile built-in shaders");
+        return nullptr;
+    }
+    auto createRasterShader = [builtinLibrary](NS::String* name) -> MTL::Function* {
+        MTL::FunctionDescriptor* funcDesc = MTL::FunctionDescriptor::alloc()->init()->autorelease();
+        funcDesc->setName(name);
+        funcDesc->setOptions(MTL::FunctionOptionCompileToBinary);
+        NS::Error* funcErr{nullptr};
+        auto shader = builtinLibrary->newFunction(funcDesc, &funcErr);
+        if (funcErr != nullptr) {
+            RADRAY_ERR_LOG("cannot compile built-in shader {}.\n{}", name->utf8String(), funcErr->localizedDescription()->utf8String());
+            return nullptr;
+        }
+        if (shader == nullptr) {
+            RADRAY_ERR_LOG("cannot compile built-in shader {}", name->utf8String());
+        }
+        return shader;
+    };
+    MTL::Function* swapchainVert = createRasterShader(MTLSTR("swapchain_vertex_shader"));
+    if (swapchainVert == nullptr) {
+        return nullptr;
+    }
+    MTL::Function* swapchainFrag = createRasterShader(MTLSTR("swapchain_fragment_shader"));
+    if (swapchainFrag == nullptr) {
+        return nullptr;
+    }
+    MTL::RenderPipelineDescriptor* swapchainPipeDesc = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
+    swapchainPipeDesc->setVertexFunction(swapchainVert);
+    swapchainPipeDesc->setFragmentFunction(swapchainFrag);
+    auto colorAttachment = swapchainPipeDesc->colorAttachments()->object(0u);
+    colorAttachment->setBlendingEnabled(false);
+    colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm);
+    MTL::RenderPipelineState* swapchainPso = device->newRenderPipelineState(swapchainPipeDesc, MTL::PipelineOptionNone, nullptr, &error);
+    if (error != nullptr) {
+        RADRAY_ERR_LOG("cannot create pso {}.\n{}", "swapchain", error->localizedDescription()->utf8String());
+        return nullptr;
+    }
+    if (swapchainPso == nullptr) {
+        RADRAY_ERR_LOG("cannot create pso swapchain");
+    }
+
     auto result = std::make_shared<MetalDevice>();
     result->device = device;
+    result->swapchainPresentPso = swapchainPso;
     return result;
 }
 
@@ -175,7 +258,7 @@ void MetalDevice::Synchronize(FenceHandle fence, uint64_t value) {
 }
 
 void MetalDevice::Present(SwapChainHandle swapchain, CommandQueueHandle queue) {
-    //TODO:
+    // TODO:
 }
 
 }  // namespace radray::rhi::metal
