@@ -36,7 +36,7 @@ int main() {
             {glfw.GetNativeHandle(),
              1280, 720,
              3,
-             false},
+             true},
             cmdQueue.Handle);
         uint64_t fenceValue = 0;
         auto last = std::chrono::system_clock::now();
@@ -45,7 +45,6 @@ int main() {
             window::GlobalPollEventsGlfw();
             auto now = std::chrono::system_clock::now();
             float delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() / 1000.0f;
-            // RADRAY_DEBUG_LOG("delta {}", delta);
             for (auto&& i : clearColor) {
                 i += delta * 0.25f;
                 i -= std::floor(i);

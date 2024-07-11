@@ -1,5 +1,7 @@
 #include "metal_device.h"
 
+#include <cstring>
+
 #include <radray/logger.h>
 
 #include "metal_command_queue.h"
@@ -12,20 +14,18 @@
 namespace radray::rhi::metal {
 
 static const char* SWAPCHAIN_PRESENT_SHADER = R"(
+#include <metal_stdlib>
+using namespace metal;
 struct RasterData {
     float4 p [[position]];
     float2 uv;
 };
-[[vertex]] RasterData swapchain_vertex_shader(
-    constant float2* in [[buffer(0)]],
-    uint vid [[vertex_id]]) {
+[[vertex]] RasterData swapchain_vert(constant float2* in [[buffer(0)]], uint vid [[vertex_id]]) {
     auto p = in[vid];
-    return RasterData{float4(p, 0.f, 1.f), saturate(p * float2(.5f, -.5f) + .5f)};
+    return RasterData{float4(p, 0.0f, 1.0f), saturate(p * float2(0.5f, -0.5f) + 0.5f)};
 }
-[[fragment]] float4 swapchain_fragment_shader(
-    RasterData in [[stage_in]],
-    texture2d<float, access::sample> image [[texture(0)]]) {
-    return float4(image.sample(sampler(filter::linear), in.uv).xyz, 1.f);
+[[fragment]] float4 swapchain_frag(RasterData in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+    return float4(image.sample(sampler(filter::linear), in.uv).xyz, 1.0f);
 })";
 
 MetalDevice::MetalDevice() = default;
@@ -60,7 +60,7 @@ std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     MTL::Device* device = allDevice->object<MTL::Device>(info.DeviceIndex.value_or(0));
     RADRAY_INFO_LOG("select metal device: {}", device->name()->utf8String());
 
-    auto compileOption = MTL::CompileOptions::alloc()->init()->autorelease();
+    MTL::CompileOptions* compileOption = MTL::CompileOptions::alloc()->init()->autorelease();
     compileOption->setFastMathEnabled(true);
     compileOption->setLanguageVersion(MTL::LanguageVersion2_4);
     compileOption->setLibraryType(MTL::LibraryTypeExecutable);
@@ -85,9 +85,8 @@ std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     auto createRasterShader = [builtinLibrary](NS::String* name) -> MTL::Function* {
         MTL::FunctionDescriptor* funcDesc = MTL::FunctionDescriptor::alloc()->init()->autorelease();
         funcDesc->setName(name);
-        funcDesc->setOptions(MTL::FunctionOptionCompileToBinary);
         NS::Error* funcErr{nullptr};
-        auto shader = builtinLibrary->newFunction(funcDesc, &funcErr);
+        MTL::Function* shader = builtinLibrary->newFunction(funcDesc, &funcErr)->autorelease();
         if (funcErr != nullptr) {
             RADRAY_ERR_LOG("cannot compile built-in shader {}.\n{}", name->utf8String(), funcErr->localizedDescription()->utf8String());
             return nullptr;
@@ -97,11 +96,11 @@ std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
         }
         return shader;
     };
-    MTL::Function* swapchainVert = createRasterShader(MTLSTR("swapchain_vertex_shader"));
+    MTL::Function* swapchainVert = createRasterShader(MTLSTR("swapchain_vert"));
     if (swapchainVert == nullptr) {
         return nullptr;
     }
-    MTL::Function* swapchainFrag = createRasterShader(MTLSTR("swapchain_fragment_shader"));
+    MTL::Function* swapchainFrag = createRasterShader(MTLSTR("swapchain_frag"));
     if (swapchainFrag == nullptr) {
         return nullptr;
     }
@@ -118,6 +117,7 @@ std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info) {
     }
     if (swapchainPso == nullptr) {
         RADRAY_ERR_LOG("cannot create pso swapchain");
+        return nullptr;
     }
 
     auto result = std::make_shared<MetalDevice>();
@@ -258,7 +258,10 @@ void MetalDevice::Synchronize(FenceHandle fence, uint64_t value) {
 }
 
 void MetalDevice::Present(SwapChainHandle swapchain, CommandQueueHandle queue) {
-    // TODO:
+    ScopedAutoreleasePool arp_{};
+    auto q = reinterpret_cast<MetalCommandQueue*>(queue.Handle);
+    auto msc = reinterpret_cast<MetalSwapChain*>(swapchain.Handle);
+    msc->Present(this, q->queue);
 }
 
 }  // namespace radray::rhi::metal

@@ -13,7 +13,8 @@ public:
         MTL::TextureType type,
         uint width, uint height,
         uint depth,
-        uint mipmap);
+        uint mipmap,
+        MTL::TextureUsage usage = MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     MetalTexture(const MetalTexture&) = delete;
     MetalTexture(MetalTexture&&) = delete;
     MetalTexture& operator=(const MetalTexture&) = delete;

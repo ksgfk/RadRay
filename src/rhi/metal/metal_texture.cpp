@@ -8,7 +8,8 @@ static MTL::Texture* CreateTextureImpl(
     MTL::TextureType type,
     uint width, uint height,
     uint depth,
-    uint mipmap) {
+    uint mipmap,
+    MTL::TextureUsage usage) {
     ScopedAutoreleasePool arp_{};
     MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init()->autorelease();
     desc->setTextureType(type);
@@ -20,7 +21,7 @@ static MTL::Texture* CreateTextureImpl(
     desc->setAllowGPUOptimizedContents(true);
     desc->setStorageMode(MTL::StorageModePrivate);
     desc->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
-    desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    desc->setUsage(usage);
     return device->newTexture(desc);
 }
 
@@ -37,8 +38,9 @@ MetalTexture::MetalTexture(
     MTL::TextureType type,
     uint width, uint height,
     uint depth,
-    uint mipmap)
-    : texture(CreateTextureImpl(device, foramt, type, width, height, depth, mipmap)) {}
+    uint mipmap,
+    MTL::TextureUsage usage)
+    : texture(CreateTextureImpl(device, foramt, type, width, height, depth, mipmap, usage)) {}
 
 MetalTexture::~MetalTexture() noexcept {
     if (texture != nullptr) {
