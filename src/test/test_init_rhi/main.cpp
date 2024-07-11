@@ -51,12 +51,17 @@ int main() {
             }
             clearColor[3] = 1.0f;
             last = now;
-            rhi::CommandList list{};
-            list.Add(rhi::ClearRenderTargetCommand{sch, clearColor});
-            device->DispatchCommand(cmdQueue, std::move(list));
-            device->Present(sch, cmdQueue);
+            if (fenceValue > 0) {
+                device->Synchronize(fence, fenceValue);
+            }
+            device->StartFrame(cmdQueue, sch);
+            {
+                rhi::CommandList list{};
+                list.Add(rhi::ClearRenderTargetCommand{sch, clearColor});
+                device->DispatchCommand(cmdQueue, std::move(list));
+            }
             device->Signal(fence, cmdQueue, ++fenceValue);
-            device->Synchronize(fence, fenceValue);
+            device->FinishFrame(cmdQueue, sch);
             std::this_thread::yield();
         }
         device->DestroySwapChain(sch);

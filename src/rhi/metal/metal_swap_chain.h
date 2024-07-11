@@ -1,7 +1,6 @@
 #pragma once
 
 #include "metal_helper.h"
-#include "metal_texture.h"
 
 extern "C" CA::MetalLayer* RadrayMetalCreateLayer(
     MTL::Device* device,
@@ -12,8 +11,6 @@ extern "C" CA::MetalLayer* RadrayMetalCreateLayer(
     uint32_t backBufferCount) noexcept;
 
 namespace radray::rhi::metal {
-
-class MetalDevice;
 
 class MetalSwapChain {
 public:
@@ -30,12 +27,12 @@ public:
     MetalSwapChain& operator=(MetalSwapChain&&) = delete;
     ~MetalSwapChain() noexcept;
 
-    void Present(MetalDevice* device, MTL::CommandQueue* queue);
+    void NextDrawable();
 
 public:
     CA::MetalLayer* layer;
-    MTL::RenderPassDescriptor* presentPassDesc;
-    std::unique_ptr<MetalTexture> backBuffer;
+    CA::MetalDrawable* currentDrawable{nullptr};
+    MTL::Texture* currentBackBuffer{nullptr};
 };
 
 }  // namespace radray::rhi::metal

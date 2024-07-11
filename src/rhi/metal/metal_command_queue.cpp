@@ -37,4 +37,10 @@ void MetalCommandQueue::Synchronize() {
     cmdBuffer->waitUntilCompleted();
 }
 
+void MetalCommandQueue::Present(MTL::Drawable* drawable) {
+    MTL::CommandBuffer* cmdBuffer = queue->commandBufferWithUnretainedReferences();
+    cmdBuffer->presentDrawable(drawable);
+    cmdBuffer->commit();
+}
+
 }  // namespace radray::rhi::metal

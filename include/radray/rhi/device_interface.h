@@ -33,11 +33,13 @@ public:
         uint32_t mipmap) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
 
+    virtual void StartFrame(CommandQueueHandle queue, SwapChainHandle swapchain) = 0;
+    virtual void FinishFrame(CommandQueueHandle queue, SwapChainHandle swapchain) = 0;
+
     virtual void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) = 0;
     virtual void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
     virtual void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
     virtual void Synchronize(FenceHandle fence, uint64_t value) = 0;
-    virtual void Present(SwapChainHandle swapchain, CommandQueueHandle queue) = 0;
 };
 
 using SupportApiArray = std::array<bool, (size_t)ApiType::MAX_COUNT>;

@@ -27,7 +27,7 @@ void MetalCommandEncoder::operator()(const ClearRenderTargetCommand& cmd) {
     auto getTex = [](const std::variant<SwapChainHandle, ResourceHandle>& v) -> MTL::Texture* {
         if (const SwapChainHandle* h = std::get_if<SwapChainHandle>(&v)) {
             MetalSwapChain* swapchain = reinterpret_cast<MetalSwapChain*>(h->Handle);
-            return swapchain->backBuffer->texture;
+            return swapchain->currentBackBuffer;
         } else if (const ResourceHandle* h = std::get_if<ResourceHandle>(&v)) {
             return reinterpret_cast<MTL::Texture*>(h->Ptr);
         } else {

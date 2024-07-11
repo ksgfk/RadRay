@@ -34,15 +34,16 @@ public:
         uint32_t mipmap) override;
     void DestroyTexture(ResourceHandle handle) override;
 
+    void StartFrame(CommandQueueHandle queue, SwapChainHandle swapchain) override;
+    void FinishFrame(CommandQueueHandle queue, SwapChainHandle swapchain) override;
+
     void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) override;
     void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
     void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
     void Synchronize(FenceHandle fence, uint64_t value) override;
-    void Present(SwapChainHandle swapchain, CommandQueueHandle queue) override;
 
 public:
     MTL::Device* device{nullptr};
-    MTL::RenderPipelineState* swapchainPresentPso{nullptr};
 };
 
 std::shared_ptr<MetalDevice> CreateImpl(const DeviceCreateInfoMetal& info);

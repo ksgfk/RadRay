@@ -16,6 +16,7 @@ public:
     void Signal(MTL::SharedEvent* event, uint64_t value);
     void Wait(MTL::SharedEvent* event, uint64_t value);
     void Synchronize();
+    void Present(MTL::Drawable* drawable);
 
 public:
     MTL::CommandQueue* queue;
