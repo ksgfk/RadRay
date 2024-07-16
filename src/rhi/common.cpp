@@ -6,7 +6,8 @@ const char* to_string(ApiType val) noexcept {
     switch (val) {
         case radray::rhi::ApiType::D3D12: return "D3D12";
         case radray::rhi::ApiType::Metal: return "Metal";
-        case radray::rhi::ApiType::MAX_COUNT: return "UNKNOWN";
+        case radray::rhi::ApiType::MAX_COUNT: return "Unknown";
+        default: return "Unknown";
     }
 }
 
@@ -70,6 +71,200 @@ const char* to_string(BufferType val) noexcept {
         case BufferType::Default: return "Default";
         case BufferType::Upload: return "Upload";
         case BufferType::Readback: return "Readback";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(PrimitiveTopology val) noexcept {
+    switch (val) {
+        case PrimitiveTopology::Point_List: return "Point_List";
+        case PrimitiveTopology::Line_List: return "Line_List";
+        case PrimitiveTopology::Line_Strip: return "Line_Strip";
+        case PrimitiveTopology::Triangle_List: return "Triangle_List";
+        case PrimitiveTopology::Triangle_Strip: return "Triangle_Strip";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(BlendType val) noexcept {
+    switch (val) {
+        case BlendType::Zero: return "Zero";
+        case BlendType::One: return "One";
+        case BlendType::Src_Color: return "Src_Color";
+        case BlendType::Inv_Src_Color: return "Inv_Src_Color";
+        case BlendType::Src_Alpha: return "Src_Alpha";
+        case BlendType::Inv_Src_Alpha: return "Inv_Src_Alpha";
+        case BlendType::Dest_Alpha: return "Dest_Alpha";
+        case BlendType::Inv_Dest_Alpha: return "Inv_Dest_Alpha";
+        case BlendType::Dest_Color: return "Dest_Color";
+        case BlendType::Inv_Dest_Color: return "Inv_Dest_Color";
+        case BlendType::Src_Alpha_Sat: return "Src_Alpha_Sat";
+        case BlendType::Blend_Factor: return "Blend_Factor";
+        case BlendType::Inv_Blend_Factor: return "Inv_Blend_Factor";
+        case BlendType::Src1_Color: return "Src1_Color";
+        case BlendType::Inv_Src1_Color: return "Inv_Src1_Color";
+        case BlendType::Src1_Alpha: return "Src1_Alpha";
+        case BlendType::Inv_Src1_Alpha: return "Inv_Src1_Alpha";
+        case BlendType::Alpha_Factor: return "Alpha_Factor";
+        case BlendType::Inv_Alpha_Factor: return "Inv_Alpha_Factor";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(BlendOpMode val) noexcept {
+    switch (val) {
+        case BlendOpMode::Add: return "Add";
+        case BlendOpMode::Subtract: return "Subtract";
+        case BlendOpMode::Rev_Subtract: return "Rev_Subtract";
+        case BlendOpMode::Min: return "Min";
+        case BlendOpMode::Max: return "Max";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(LogicOpMode val) noexcept {
+    switch (val) {
+        case LogicOpMode::Clear: return "Clear";
+        case LogicOpMode::Set: return "Set";
+        case LogicOpMode::Copy: return "Copy";
+        case LogicOpMode::Copy_Inverted: return "Copy_Inverted";
+        case LogicOpMode::Noop: return "Noop";
+        case LogicOpMode::Invert: return "Invert";
+        case LogicOpMode::And: return "And";
+        case LogicOpMode::Nand: return "Nand";
+        case LogicOpMode::Or: return "Or";
+        case LogicOpMode::Nor: return "Nor";
+        case LogicOpMode::Xor: return "Xor";
+        case LogicOpMode::Equiv: return "Equiv";
+        case LogicOpMode::And_Reverse: return "And_Reverse";
+        case LogicOpMode::And_Inverted: return "And_Inverted";
+        case LogicOpMode::Or_Reverse: return "Or_Reverse";
+        case LogicOpMode::Or_Inverted: return "Or_Inverted";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(FillMode val) noexcept {
+    switch (val) {
+        case FillMode::Solid: return "Solid";
+        case FillMode::Wireframe: return "Wireframe";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(CullMode val) noexcept {
+    switch (val) {
+        case CullMode::None: return "None";
+        case CullMode::Front: return "Front";
+        case CullMode::Back: return "Back";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(LineRasterizationMode val) noexcept {
+    switch (val) {
+        case LineRasterizationMode::Aliased: return "Aliased";
+        case LineRasterizationMode::Alpha_Antialiased: return "Alpha_Antialiased";
+        case LineRasterizationMode::Quadrilateral_Wide: return "Quadrilateral_Wide";
+        case LineRasterizationMode::Quadrilateral_Narrow: return "Quadrilateral_Narrow";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(ConservativeRasterizationMode val) noexcept {
+    switch (val) {
+        case ConservativeRasterizationMode::Off: return "Off";
+        case ConservativeRasterizationMode::On: return "On";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(DepthWriteMask val) noexcept {
+    switch (val) {
+        case DepthWriteMask::Zero: return "Zero";
+        case DepthWriteMask::All: return "All";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(ComparisonFunc val) noexcept {
+    switch (val) {
+        case ComparisonFunc::None: return "None";
+        case ComparisonFunc::Never: return "Never";
+        case ComparisonFunc::Less: return "Less";
+        case ComparisonFunc::Equal: return "Equal";
+        case ComparisonFunc::Less_Equal: return "Less_Equal";
+        case ComparisonFunc::Greater: return "Greater";
+        case ComparisonFunc::Not_Equal: return "Not_Equal";
+        case ComparisonFunc::Greater_Equal: return "Greater_Equal";
+        case ComparisonFunc::Always: return "Always";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(StencilOpType val) noexcept {
+    switch (val) {
+        case StencilOpType::Keep: return "Keep";
+        case StencilOpType::Zero: return "Zero";
+        case StencilOpType::Replace: return "Replace";
+        case StencilOpType::Incr_Sat: return "Incr_Sat";
+        case StencilOpType::Decr_Sat: return "Decr_Sat";
+        case StencilOpType::Invert: return "Invert";
+        case StencilOpType::Incr: return "Incr";
+        case StencilOpType::Decr: return "Decr";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(SemanticType val) noexcept {
+    switch (val) {
+        case SemanticType::Position: return "Position";
+        case SemanticType::Normal: return "Normal";
+        case SemanticType::Texcoord: return "Texcoord";
+        case SemanticType::Tanget: return "Tanget";
+        case SemanticType::Color: return "Color";
+        case SemanticType::Psize: return "Psize";
+        case SemanticType::Bi_Nomral: return "Bi_Nomral";
+        case SemanticType::Blend_Indices: return "Blend_Indices";
+        case SemanticType::Blend_Weight: return "Blend_Weight";
+        case SemanticType::Position_T: return "Position_T";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(InputClassification val) noexcept {
+    switch (val) {
+        case InputClassification::Vertex: return "Vertex";
+        case InputClassification::Instance: return "Instance";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(InputElementFormat val) noexcept {
+    switch (val) {
+        case InputElementFormat::Float: return "Float";
+        case InputElementFormat::Float2: return "Float2";
+        case InputElementFormat::Float3: return "Float3";
+        case InputElementFormat::Float4: return "Float4";
+        case InputElementFormat::Int: return "Int";
+        case InputElementFormat::Int2: return "Int2";
+        case InputElementFormat::Int3: return "Int3";
+        case InputElementFormat::Int4: return "Int4";
+        case InputElementFormat::UInt: return "UInt";
+        case InputElementFormat::UInt2: return "UInt2";
+        case InputElementFormat::UInt3: return "UInt3";
+        case InputElementFormat::UInt4: return "UInt4";
+        default: return "Unknown";
+    }
+}
+
+const char* to_string(ColorWriteEnable val) noexcept {
+    switch (val) {
+        case ColorWriteEnable::Red: return "Red";
+        case ColorWriteEnable::Green: return "Green";
+        case ColorWriteEnable::Blue: return "Blue";
+        case ColorWriteEnable::Alpha: return "Alpha";
+        case ColorWriteEnable::All: return "All";
         default: return "Unknown";
     }
 }

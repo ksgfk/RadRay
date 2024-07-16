@@ -10,8 +10,49 @@
 #include "metal_buffer.h"
 #include "metal_texture.h"
 #include "metal_event.h"
+#include "metal_render_pipeline_state.h"
 
 namespace radray::rhi::metal {
+
+static void ToMtlRenderPsoDesc(
+    MTL::RenderPipelineDescriptor* desc,
+    const GraphicsShaderInfo& shader,
+    const GraphicsPipelineStateInfo& info,
+    std::span<const InputElementInfo> input) {
+    desc->setVertexFunction(reinterpret_cast<const MTL::Function*>(shader.Vs.Data));
+    desc->setFragmentFunction(reinterpret_cast<const MTL::Function*>(shader.Ps.Data));
+    MTL::VertexDescriptor* vertexDesc = MTL::VertexDescriptor::alloc()->init()->autorelease();
+    for (size_t i = 0; i < input.size(); i++) {
+        const InputElementInfo& e = input[i];
+        MTL::VertexAttributeDescriptor* attrDesc = vertexDesc->attributes()->object(i);
+        attrDesc->setBufferIndex(e.Slot);
+        attrDesc->setFormat(ToMtlVertexFormat(e.Format));
+        attrDesc->setOffset(e.ByteOffset);
+    }
+    desc->setVertexDescriptor(vertexDesc);
+    desc->setAlphaToCoverageEnabled(info.AlphaToCoverageEnable);
+    desc->setRasterizationEnabled(true);
+    MTL::RenderPipelineColorAttachmentDescriptorArray* colors = desc->colorAttachments();
+    for (size_t i = 0; i < info.RtCount; i++) {
+        PixelFormat rt = info.RtvFormats[i];
+        RenderTargetBlendInfo blend = info.BlendStates[i];
+        MTL::RenderPipelineColorAttachmentDescriptor* colorDesc = colors->object(i);
+        colorDesc->setPixelFormat(ToMtlFormat(rt));
+        colorDesc->setBlendingEnabled(blend.BlendEnable);
+        if (blend.BlendEnable) {
+            colorDesc->setSourceRGBBlendFactor(ToMtlBlendFactor(blend.SrcBlend));
+            colorDesc->setDestinationRGBBlendFactor(ToMtlBlendFactor(blend.DestBlend));
+            colorDesc->setRgbBlendOperation(ToMtlBlendOp(blend.BlendOp));
+            colorDesc->setSourceAlphaBlendFactor(ToMtlBlendFactor(blend.SrcBlendAlpha));
+            colorDesc->setDestinationAlphaBlendFactor(ToMtlBlendFactor(blend.DestBlendAlpha));
+            colorDesc->setAlphaBlendOperation(ToMtlBlendOp(blend.BlendOpAlpha));
+            colorDesc->setWriteMask(ToMtlColorWriteMask(blend.RenderTargetWriteMask));
+        }
+    }
+    desc->setDepthAttachmentPixelFormat(ToMtlFormat(info.DsvFormat));
+    desc->setStencilAttachmentPixelFormat(ToMtlFormat(info.DsvFormat));
+    desc->setInputPrimitiveTopology(ToMtlPrimitiveTopology(info.Topology));
+}
 
 MetalDevice::MetalDevice() = default;
 
@@ -129,6 +170,32 @@ ResourceHandle MetalDevice::CreateTexture(
 void MetalDevice::DestroyTexture(ResourceHandle handle) {
     ScopedAutoreleasePool arp_{};
     auto tex = reinterpret_cast<MetalTexture*>(handle.Handle);
+    delete tex;
+}
+
+PipelineStateHandle MetalDevice::CreateGraphicsPipelineState(
+    const GraphicsShaderInfo& shader,
+    const GraphicsPipelineStateInfo& info,
+    std::span<const InputElementInfo> input) {
+    ScopedAutoreleasePool arp_{};
+    MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
+    ToMtlRenderPsoDesc(desc, shader, info, input);
+    MetalRenderPipelineState* pso = new MetalRenderPipelineState{this->device, desc};
+    if (pso->IsValid()) {
+        return PipelineStateHandle{
+            reinterpret_cast<uint64_t>(pso),
+            pso->pso};
+    } else {
+        delete pso;
+        PipelineStateHandle result{};
+        result.Invalidate();
+        return result;
+    }
+}
+
+void MetalDevice::DestroyPipelineState(PipelineStateHandle handle) {
+    ScopedAutoreleasePool arp_{};
+    auto tex = reinterpret_cast<MetalRenderPipelineState*>(handle.Handle);
     delete tex;
 }
 

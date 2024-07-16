@@ -34,9 +34,14 @@ public:
         uint32_t mipmap) override;
     void DestroyTexture(ResourceHandle handle) override;
 
+    PipelineStateHandle CreateGraphicsPipelineState(
+        const GraphicsShaderInfo& shader,
+        const GraphicsPipelineStateInfo& info,
+        std::span<const InputElementInfo> input) override;
+    void DestroyPipelineState(PipelineStateHandle handle) override;
+
     void StartFrame(CommandQueueHandle queue, SwapChainHandle swapchain) override;
     void FinishFrame(CommandQueueHandle queue, SwapChainHandle swapchain) override;
-
     void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) override;
     void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;
     void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) override;

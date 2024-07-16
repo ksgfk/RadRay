@@ -35,4 +35,6 @@ struct TextureHandle : public ResourceHandle {};
 
 struct FenceHandle : public ResourceHandle {};
 
+struct PipelineStateHandle : public ResourceHandle {};
+
 }  // namespace radray::rhi

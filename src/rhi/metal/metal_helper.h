@@ -27,6 +27,16 @@ MTL::TextureType ToMtlTextureType(TextureDimension dim) noexcept;
 
 TextureDimension ToRhiDimension(MTL::TextureType type) noexcept;
 
+MTL::VertexFormat ToMtlVertexFormat(InputElementFormat format) noexcept;
+
+MTL::BlendFactor ToMtlBlendFactor(BlendType type) noexcept;
+
+MTL::BlendOperation ToMtlBlendOp(BlendOpMode mode) noexcept;
+
+MTL::ColorWriteMask ToMtlColorWriteMask(ColorWriteEnable value) noexcept;
+
+MTL::PrimitiveTopologyClass ToMtlPrimitiveTopology(PrimitiveTopology topo) noexcept;
+
 }  // namespace radray::rhi::metal
 
 extern "C" void RadrayPrintMTLFunctionLog(MTL::LogContainer* logs) noexcept;

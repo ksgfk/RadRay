@@ -110,4 +110,80 @@ TextureDimension ToRhiDimension(MTL::TextureType type) noexcept {
     }
 }
 
+MTL::VertexFormat ToMtlVertexFormat(InputElementFormat format) noexcept {
+    switch (format) {
+        case InputElementFormat::Float: return MTL::VertexFormat::VertexFormatFloat;
+        case InputElementFormat::Float2: return MTL::VertexFormat::VertexFormatFloat2;
+        case InputElementFormat::Float3: return MTL::VertexFormat::VertexFormatFloat3;
+        case InputElementFormat::Float4: return MTL::VertexFormat::VertexFormatFloat4;
+        case InputElementFormat::Int: return MTL::VertexFormat::VertexFormatInt;
+        case InputElementFormat::Int2: return MTL::VertexFormat::VertexFormatInt2;
+        case InputElementFormat::Int3: return MTL::VertexFormat::VertexFormatInt3;
+        case InputElementFormat::Int4: return MTL::VertexFormat::VertexFormatInt4;
+        case InputElementFormat::UInt: return MTL::VertexFormat::VertexFormatUInt;
+        case InputElementFormat::UInt2: return MTL::VertexFormat::VertexFormatUInt2;
+        case InputElementFormat::UInt3: return MTL::VertexFormat::VertexFormatUInt3;
+        case InputElementFormat::UInt4: return MTL::VertexFormat::VertexFormatUInt4;
+        default: return MTL::VertexFormat::VertexFormatInvalid;
+    }
+}
+
+MTL::BlendFactor ToMtlBlendFactor(BlendType type) noexcept {
+    switch (type) {
+        case BlendType::Zero: return MTL::BlendFactor::BlendFactorZero;
+        case BlendType::One: return MTL::BlendFactor::BlendFactorOne;
+        case BlendType::Src_Color: return MTL::BlendFactor::BlendFactorSourceColor;
+        case BlendType::Inv_Src_Color: return MTL::BlendFactor::BlendFactorOneMinusSourceColor;
+        case BlendType::Src_Alpha: return MTL::BlendFactor::BlendFactorSourceAlpha;
+        case BlendType::Inv_Src_Alpha: return MTL::BlendFactor::BlendFactorOneMinusSourceAlpha;
+        case BlendType::Dest_Alpha: return MTL::BlendFactor::BlendFactorDestinationAlpha;
+        case BlendType::Inv_Dest_Alpha: return MTL::BlendFactor::BlendFactorOneMinusDestinationAlpha;
+        case BlendType::Dest_Color: return MTL::BlendFactor::BlendFactorDestinationColor;
+        case BlendType::Inv_Dest_Color: return MTL::BlendFactor::BlendFactorOneMinusDestinationColor;
+        case BlendType::Src_Alpha_Sat: return MTL::BlendFactor::BlendFactorSourceAlphaSaturated;
+        case BlendType::Blend_Factor: return MTL::BlendFactor::BlendFactorBlendColor;
+        case BlendType::Inv_Blend_Factor: return MTL::BlendFactor::BlendFactorOneMinusBlendColor;
+        case BlendType::Src1_Color: return MTL::BlendFactor::BlendFactorSource1Color;
+        case BlendType::Inv_Src1_Color: return MTL::BlendFactor::BlendFactorOneMinusSource1Color;
+        case BlendType::Src1_Alpha: return MTL::BlendFactor::BlendFactorSource1Alpha;
+        case BlendType::Inv_Src1_Alpha: return MTL::BlendFactor::BlendFactorOneMinusSource1Alpha;
+        case BlendType::Alpha_Factor: return MTL::BlendFactor::BlendFactorBlendAlpha;
+        case BlendType::Inv_Alpha_Factor: return MTL::BlendFactor::BlendFactorOneMinusBlendAlpha;
+        default: return (MTL::BlendFactor)-1;
+    }
+}
+
+MTL::BlendOperation ToMtlBlendOp(BlendOpMode mode) noexcept {
+    switch (mode) {
+        case BlendOpMode::Add: return MTL::BlendOperation::BlendOperationAdd;
+        case BlendOpMode::Subtract: return MTL::BlendOperation::BlendOperationSubtract;
+        case BlendOpMode::Rev_Subtract: return MTL::BlendOperation::BlendOperationReverseSubtract;
+        case BlendOpMode::Min: return MTL::BlendOperation::BlendOperationMin;
+        case BlendOpMode::Max: return MTL::BlendOperation::BlendOperationMax;
+        default: return (MTL::BlendOperation)-1;
+    }
+}
+
+MTL::ColorWriteMask ToMtlColorWriteMask(ColorWriteEnable value) noexcept {
+    switch (value) {
+        case ColorWriteEnable::Red: return MTL::ColorWriteMaskRed;
+        case ColorWriteEnable::Green: return MTL::ColorWriteMaskGreen;
+        case ColorWriteEnable::Blue: return MTL::ColorWriteMaskBlue;
+        case ColorWriteEnable::Alpha: return MTL::ColorWriteMaskAlpha;
+        case ColorWriteEnable::All: return MTL::ColorWriteMaskAll;
+        default: return (MTL::ColorWriteMask)-1;
+    }
+}
+
+MTL::PrimitiveTopologyClass ToMtlPrimitiveTopology(PrimitiveTopology topo) noexcept {
+    switch (topo) {
+        case PrimitiveTopology::Point_List: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassPoint;
+        case PrimitiveTopology::Line_List: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassLine;
+        case PrimitiveTopology::Line_Strip: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassLine;
+        case PrimitiveTopology::Triangle_List: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassTriangle;
+        case PrimitiveTopology::Triangle_Strip: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassTriangle;
+        default: return MTL::PrimitiveTopologyClass::PrimitiveTopologyClassUnspecified;
+    }
+}
+
 }  // namespace radray::rhi::metal

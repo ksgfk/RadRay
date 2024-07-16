@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <array>
+#include <span>
 
 #include <radray/rhi/common.h>
 #include <radray/rhi/resource.h>
@@ -33,9 +34,14 @@ public:
         uint32_t mipmap) = 0;
     virtual void DestroyTexture(ResourceHandle handle) = 0;
 
+    virtual PipelineStateHandle CreateGraphicsPipelineState(
+        const GraphicsShaderInfo& shader,
+        const GraphicsPipelineStateInfo& info,
+        std::span<const InputElementInfo> input) = 0;
+    virtual void DestroyPipelineState(PipelineStateHandle handle) = 0;
+
     virtual void StartFrame(CommandQueueHandle queue, SwapChainHandle swapchain) = 0;
     virtual void FinishFrame(CommandQueueHandle queue, SwapChainHandle swapchain) = 0;
-
     virtual void DispatchCommand(CommandQueueHandle queue, CommandList&& cmdList) = 0;
     virtual void Signal(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
     virtual void Wait(FenceHandle fence, CommandQueueHandle queue, uint64_t value) = 0;
