@@ -16,7 +16,6 @@ target_end()
 if get_config("enable_d3d12") then
     includes("d3d12")
 end
-
 if get_config("enable_metal") then 
     includes("metal")
 end
