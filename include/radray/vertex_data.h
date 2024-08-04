@@ -20,9 +20,7 @@ enum class VertexSemantic {
     BINORMAL,
     BLENDINDICES,
     BLENDWEIGHT,
-    POSITIONT,
-    FOG,
-    TESSFACTOR
+    POSITIONT
 };
 
 enum class VertexIndexType {

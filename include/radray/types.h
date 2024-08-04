@@ -16,3 +16,10 @@ using std::uint32_t;
 using std::uint64_t;
 
 }  // namespace radray
+
+#define RADRAY_NO_COPY_CTOR(type) \
+    type(const type&) = delete;   \
+    type& operator=(const type&) = delete;
+#define RADRAY_NO_MOVE_CTOR(type) \
+    type(type&&) = delete;   \
+    type& operator=(type&&) = delete;

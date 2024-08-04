@@ -103,7 +103,7 @@ CommandQueueHandle D3D12Device::CreateCommandQueue(CommandListType type) {
         cmdQueue->queue.Get()};
 }
 
-void D3D12Device::DestroyCommandQueue(const CommandQueueHandle& handle) {
+void D3D12Device::DestroyCommandQueue(CommandQueueHandle handle) {
     auto cmdQueue = reinterpret_cast<D3D12CommandQueue*>(handle.Handle);
     delete cmdQueue;
 }
@@ -123,18 +123,9 @@ SwapChainHandle D3D12Device::CreateSwapChain(const SwapChainCreateInfo& info, ui
         swapchain->swapChain.Get()};
 }
 
-void D3D12Device::DestroySwapChain(const SwapChainHandle& handle) {
+void D3D12Device::DestroySwapChain(SwapChainHandle handle) {
     auto swapchain = reinterpret_cast<D3D12SwapChain*>(handle.Handle);
     delete swapchain;
-}
-
-ResourceHandle D3D12Device::GetCurrentSwapChainBackBuffer(const SwapChainHandle& handle) {
-    auto swapchain = reinterpret_cast<D3D12SwapChain*>(handle.Handle);
-    auto currIndex = swapchain->swapChain->GetCurrentBackBufferIndex();
-    auto rt = swapchain->renderTargets[currIndex].get();
-    return {
-        reinterpret_cast<uint64_t>(rt),
-        rt->resource.Get()};
 }
 
 }  // namespace radray::rhi::d3d12

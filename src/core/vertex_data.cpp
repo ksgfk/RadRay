@@ -17,8 +17,6 @@ const char* to_string(VertexSemantic e) noexcept {
         case VertexSemantic::BLENDINDICES: return "BLENDINDICES";
         case VertexSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
         case VertexSemantic::POSITIONT: return "POSITIONT";
-        case VertexSemantic::FOG: return "FOG";
-        case VertexSemantic::TESSFACTOR: return "TESSFACTOR";
         default: return "Unknown";
     }
 }
@@ -54,10 +52,6 @@ std::optional<VertexSemantic> VertexData::StringToEnumSemantic(const std::string
         return VertexSemantic::BLENDWEIGHT;
     } else if (e == "POSITIONT") {
         return VertexSemantic::POSITIONT;
-    } else if (e == "FOG") {
-        return VertexSemantic::FOG;
-    } else if (e == "TESSFACTOR") {
-        return VertexSemantic::TESSFACTOR;
     }
     return std::nullopt;
 }

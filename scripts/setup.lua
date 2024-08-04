@@ -7,7 +7,7 @@ option("_radray_checkout")
             local opts = import("options", {try = true, anonymous = true})
             if opts then
                 local opt = opts.get_options()
-                for k, v in pairs(map) do
+                for k, v in pairs(opt) do
                     if v ~= nil then
                         option:dep(k):enable(v)
                     end
@@ -29,6 +29,9 @@ option("_radray_checkout")
                     error("metal only support on macosx")
                 end
             end
+
+            print("radray is enable d3d12", enable_d3d12:enabled())
+            print("radray is enable metal", enable_metal:enabled())
         end
     end)
 option_end()
