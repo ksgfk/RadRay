@@ -4,6 +4,7 @@
 #include <cstdint>
 #else
 #include <stdint.h>
+#include <stdbool.h>
 #endif
 
 #define RADRAY_RHI_RESOURCE(name) \
@@ -19,14 +20,14 @@ extern "C" {
 RADRAY_RHI_RESOURCE(RadrayCommandQueue);
 
 typedef enum RadrayBackand {
-    RADRAY_BACKEND_D3D12 = 1,
-    RADRAY_BACKEND_METAL = 2,
-    RADRAY_BACKEND_VULKAN = 3,
+    RADRAY_BACKEND_D3D12,
+    RADRAY_BACKEND_METAL,
+    RADRAY_BACKEND_VULKAN,
 } RadrayRhiBackand;
 
 typedef enum RadrayQueueType {
-    RADRAY_QUEUE_TYPE_DIRECT = 0,
-    RADRAY_QUEUE_TYPE_COMPUTE = 1,
+    RADRAY_QUEUE_TYPE_DIRECT,
+    RADRAY_QUEUE_TYPE_COMPUTE,
 } RadrayQueueType;
 
 typedef enum RadrayFormat {
@@ -202,6 +203,23 @@ typedef enum RadrayResourceState {
 } RadrayResourceState;
 
 typedef uint32_t RadrayResourceStates;
+
+typedef struct RadrayDeviceMemoryManagementDescriptor {
+    void* (*Alloc)(size_t size, size_t align, void* userPtr);
+    void (*Release)(void* ptr, void* userPtr);
+    void* UserPtr;
+} RadrayDeviceMemoryManagementDescriptor;
+
+typedef struct RadrayDeviceDescriptorD3D12 {
+    RadrayDeviceMemoryManagementDescriptor Memory;
+    uint32_t* AdapterIndex;
+    bool IsEnableDebugLayer;
+} RadrayDeviceDescriptorD3D12;
+
+typedef struct RadrayDeviceDescriptorMetal {
+    RadrayDeviceMemoryManagementDescriptor Memory;
+    uint32_t* DeviceIndex;
+} RadrayDeviceDescriptorMetal;
 
 #ifdef __cplusplus
 }

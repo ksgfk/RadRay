@@ -1,0 +1,17 @@
+package("d3d12-memory-allocator_radray")
+    set_base("d3d12-memory-allocator")
+
+    on_install("windows", function (package)
+        io.writefile("xmake.lua", [[
+            add_rules("mode.debug", "mode.release")
+            target("d3d12ma")
+                set_kind("$(kind)")
+                set_languages("cxx20")
+                set_warnings("all")
+                add_includedirs("include", {public = true})
+                add_headerfiles("include/**.h")
+                add_files("src/D3D12MemAlloc.cpp")
+                add_ldflags("/NATVIS:" .. path.join(os.scriptdir(), "src", "D3D12MemAlloc.natvis") , {expand = false, tools = {"clang_cl", "cl"}})
+        ]])
+        import("package.tools.xmake").install(package, configs)
+    end)
