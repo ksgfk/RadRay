@@ -12,7 +12,7 @@ RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc) {
     using namespace radray::rhi;
 #ifdef RADRAY_ENABLE_D3D12
     try {
-        return RhiNew<d3d12::D3D12Device>(*desc);
+        return RhiNew<d3d12::Device>(*desc);
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("{}", e.what());
         return nullptr;

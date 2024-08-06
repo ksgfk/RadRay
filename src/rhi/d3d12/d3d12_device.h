@@ -6,13 +6,19 @@
 
 namespace radray::rhi::d3d12 {
 
-class D3D12Device : public DeviceInterface {
+class Device : public DeviceInterface {
 public:
-    D3D12Device(const RadrayDeviceDescriptorD3D12& desc);
-    ~D3D12Device() noexcept override = default;
+    Device(const RadrayDeviceDescriptorD3D12& desc);
+    ~Device() noexcept override = default;
 
     RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) override;
     void DestroyCommandQueue(RadrayCommandQueue queue) override;
+
+    RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) override;
+    void DestroyCommandAllocator(RadrayCommandAllocator alloc) override;
+
+    RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) override;
+    void DestroyCommandList(RadrayCommandList list) override;
 
 public:
     ComPtr<IDXGIFactory2> dxgiFactory;

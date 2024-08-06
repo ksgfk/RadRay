@@ -14,6 +14,12 @@ public:
 
     virtual RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) = 0;
     virtual void DestroyCommandQueue(RadrayCommandQueue queue) = 0;
+
+    virtual RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) = 0;
+    virtual void DestroyCommandAllocator(RadrayCommandAllocator alloc) = 0;
+
+    virtual RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) = 0;
+    virtual void DestroyCommandList(RadrayCommandList list) = 0;
 };
 
 }  // namespace radray::rhi

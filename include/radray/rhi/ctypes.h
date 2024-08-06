@@ -17,7 +17,11 @@
 extern "C" {
 #endif
 
+typedef void* RadrayDevice;
+
 RADRAY_RHI_RESOURCE(RadrayCommandQueue);
+RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
+RADRAY_RHI_RESOURCE(RadrayCommandList);
 
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,

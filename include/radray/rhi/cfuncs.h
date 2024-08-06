@@ -6,8 +6,6 @@
 extern "C" {
 #endif
 
-typedef void* RadrayDevice;
-
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 
 RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc);

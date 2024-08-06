@@ -3,10 +3,12 @@
 #include <radray/rhi/config.h>
 
 #include "d3d12_command_queue.h"
+#include "d3d12_command_allocator.h"
+#include "d3d12_command_list.h"
 
 namespace radray::rhi::d3d12 {
 
-D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12& desc) {
+Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
@@ -64,14 +66,35 @@ D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12& desc) {
     }
 }
 
-RadrayCommandQueue D3D12Device::CreateCommandQueue(RadrayQueueType type) {
-    auto q = RhiNew<D3D12CommandQueue>(this, EnumConvert(type));
+RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
+    auto q = RhiNew<CommandQueue>(this, EnumConvert(type));
     return {.Ptr = q, .Native = q->queue.Get()};
 }
 
-void D3D12Device::DestroyCommandQueue(RadrayCommandQueue queue) {
-    auto q = reinterpret_cast<D3D12CommandQueue*>(queue.Ptr);
+void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
+    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
     RhiDelete(q);
+}
+
+RadrayCommandAllocator Device::CreateCommandAllocator(RadrayQueueType type) {
+    auto a = RhiNew<CommandAllocator>(this, EnumConvert(type));
+    return {.Ptr = a, .Native = a->alloc.Get()};
+}
+
+void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {
+    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    RhiDelete(a);
+}
+
+RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
+    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    auto l = RhiNew<CommandList>(this, a->alloc.Get(), a->type);
+    return {.Ptr = l, .Native = l->list.Get()};
+}
+
+void Device::DestroyCommandList(RadrayCommandList list) {
+    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    RhiDelete(l);
 }
 
 }  // namespace radray::rhi::d3d12
