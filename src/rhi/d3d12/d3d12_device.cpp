@@ -1,14 +1,14 @@
 #include "d3d12_device.h"
 
+#include <radray/rhi/config.h>
+
 #include "d3d12_command_queue.h"
 
 namespace radray::rhi::d3d12 {
 
-D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12* desc)
-    : memory(desc->Memory),
-      alloc(&memory) {
+D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12& desc) {
     uint32_t dxgiFactoryFlags = 0;
-    if (desc->IsEnableDebugLayer) {
+    if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
@@ -16,8 +16,8 @@ D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12* desc)
         }
     }
     RADRAY_DX_FTHROW(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf())));
-    if (desc->AdapterIndex) {
-        auto adapterIndex = *desc->AdapterIndex;
+    if (desc.AdapterIndex) {
+        auto adapterIndex = desc.AdapterIndex;
         RADRAY_DX_FTHROW(dxgiFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()));
         if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, _uuidof(ID3D12Device), nullptr))) {
             adapter = nullptr;
@@ -65,22 +65,13 @@ D3D12Device::D3D12Device(const RadrayDeviceDescriptorD3D12* desc)
 }
 
 RadrayCommandQueue D3D12Device::CreateCommandQueue(RadrayQueueType type) {
-    auto q = alloc.new_object<D3D12CommandQueue>(this, EnumConvert(type));
+    auto q = RhiNew<D3D12CommandQueue>(this, EnumConvert(type));
     return {.Ptr = q, .Native = q->queue.Get()};
 }
 
 void D3D12Device::DestroyCommandQueue(RadrayCommandQueue queue) {
     auto q = reinterpret_cast<D3D12CommandQueue*>(queue.Ptr);
-    alloc.delete_object(q);
-}
-
-std::shared_ptr<D3D12Device> CreateImpl(const RadrayDeviceDescriptorD3D12* desc) {
-    try {
-        return std::make_shared<D3D12Device>(desc);
-    } catch (const std::exception& e) {
-        RADRAY_ERR_LOG("{}", e.what());
-        return nullptr;
-    }
+    RhiDelete(q);
 }
 
 }  // namespace radray::rhi::d3d12

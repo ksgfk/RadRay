@@ -4,6 +4,7 @@
 
 #include <radray/window/glfw_window.h>
 #include <radray/basic_math.h>
+#include <radray/rhi/cfuncs.h>
 #include <radray/rhi/device_interface.h>
 
 using namespace radray;
@@ -11,7 +12,7 @@ using namespace radray;
 constexpr int FRAME_COUNT = 3;
 
 std::shared_ptr<window::GlfwWindow> glfw;
-std::shared_ptr<rhi::DeviceInterface> device;
+rhi::DeviceInterface* device;
 RadrayCommandQueue queue;
 
 void start() {
@@ -20,7 +21,7 @@ void start() {
 #ifdef RADRAY_ENABLE_D3D12
     RadrayDeviceDescriptorD3D12 desc{
         .IsEnableDebugLayer = true};
-    device = rhi::CreateDeviceD3D12(&desc);
+    device = reinterpret_cast<rhi::DeviceInterface*>(RadrayCreateDeviceD3D12(&desc));
 #endif
     if (device == nullptr) {
         throw std::runtime_error{"cannot create device"};
@@ -37,7 +38,7 @@ void update() {
 
 void destroy() {
     device->DestroyCommandQueue(queue);
-    device = nullptr;
+    RadrayReleaseDevice(device);
     window::GlobalTerminateGlfw();
 }
 
@@ -45,11 +46,11 @@ int main() {
     try {
         start();
         update();
-        destroy();
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("{}", e.what());
     } catch (...) {
         RADRAY_ERR_LOG("crital error");
     }
+    destroy();
     return 0;
 }

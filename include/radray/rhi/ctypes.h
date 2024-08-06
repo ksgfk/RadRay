@@ -204,21 +204,13 @@ typedef enum RadrayResourceState {
 
 typedef uint32_t RadrayResourceStates;
 
-typedef struct RadrayDeviceMemoryManagementDescriptor {
-    void* (*Alloc)(size_t size, size_t align, void* userPtr);
-    void (*Release)(void* ptr, void* userPtr);
-    void* UserPtr;
-} RadrayDeviceMemoryManagementDescriptor;
-
 typedef struct RadrayDeviceDescriptorD3D12 {
-    RadrayDeviceMemoryManagementDescriptor Memory;
-    uint32_t* AdapterIndex;
+    uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
 } RadrayDeviceDescriptorD3D12;
 
 typedef struct RadrayDeviceDescriptorMetal {
-    RadrayDeviceMemoryManagementDescriptor Memory;
-    uint32_t* DeviceIndex;
+    uint32_t DeviceIndex;
 } RadrayDeviceDescriptorMetal;
 
 #ifdef __cplusplus

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <utility>
+#include <memory_resource>
 
 namespace radray {
 
@@ -29,5 +30,15 @@ private:
 
 template <typename Call>
 auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
+
+class DefaultMemoryResource : public std::pmr::memory_resource {
+public:
+    ~DefaultMemoryResource() noexcept override = default;
+
+private:
+    void* do_allocate(size_t bytes, size_t align) override;
+    void do_deallocate(void* ptr, size_t bytes, size_t align) override;
+    bool do_is_equal(const memory_resource& that) const noexcept override;
+};
 
 }  // namespace radray
