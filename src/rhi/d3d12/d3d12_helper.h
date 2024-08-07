@@ -34,6 +34,8 @@ std::string Utf8ToString(const std::wstring& str) noexcept;
 
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
 
+DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
+
 }  // namespace radray::rhi::d3d12
 
 #ifndef RADRAY_DX_CHECK

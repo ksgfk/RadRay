@@ -23,6 +23,9 @@ public:
     virtual RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) = 0;
     virtual void DestroyCommandList(RadrayCommandList list) = 0;
     virtual void ResetCommandAllocator(RadrayCommandAllocator alloc) = 0;
+
+    virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
+    virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;
 };
 
 }  // namespace radray::rhi

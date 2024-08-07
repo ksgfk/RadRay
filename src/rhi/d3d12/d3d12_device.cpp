@@ -6,6 +6,7 @@
 #include "d3d12_command_allocator.h"
 #include "d3d12_command_list.h"
 #include "d3d12_fence.h"
+#include "d3d12_swapchain.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -27,11 +28,9 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         }
     } else {
         ComPtr<IDXGIAdapter1> temp;
-        ComPtr<IDXGIFactory6> tFactory;
-        dxgiFactory.As(&tFactory);
         for (
             auto adapterIndex = 0u;
-            tFactory->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+            dxgiFactory->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
             adapterIndex++) {
             DXGI_ADAPTER_DESC1 desc;
             temp->GetDesc1(&desc);
@@ -43,7 +42,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         }
         for (
             auto adapterIndex = 0u;
-            tFactory->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+            dxgiFactory->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
             adapterIndex++) {
             DXGI_ADAPTER_DESC1 desc;
             adapter->GetDesc1(&desc);
@@ -111,6 +110,16 @@ void Device::DestroyCommandList(RadrayCommandList list) {
 void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
     auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
     a->alloc->Reset();
+}
+
+RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
+    auto s = RhiNew<SwapChain>(this, desc);
+    return {.Ptr = s, .Native = s->swapchain.Get()};
+}
+
+void Device::DestroySwapChian(RadraySwapChain swapchain) {
+    auto s = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    RhiDelete(s);
 }
 
 }  // namespace radray::rhi::d3d12

@@ -23,8 +23,11 @@ public:
     void DestroyCommandList(RadrayCommandList list) override;
     void ResetCommandAllocator(RadrayCommandAllocator alloc) override;
 
+    RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
+    void DestroySwapChian(RadraySwapChain swapchain) override;
+
 public:
-    ComPtr<IDXGIFactory2> dxgiFactory;
+    ComPtr<IDXGIFactory6> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
 };

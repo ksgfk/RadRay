@@ -23,6 +23,7 @@ RADRAY_RHI_RESOURCE(RadrayCommandQueue);
 RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
 RADRAY_RHI_RESOURCE(RadrayCommandList);
 RADRAY_RHI_RESOURCE(RadrayFence);
+RADRAY_RHI_RESOURCE(RadraySwapChain);
 
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,
@@ -72,7 +73,7 @@ typedef enum RadrayFormat {
     RADRAY_FORMAT_R10G10B10A2_UNORM = 32,
     RADRAY_FORMAT_R11G11B10_FLOAT = 33,
 
-    RADRAY_FORMAT_D16_UNORM_S8_UINT = 34,
+    RADRAY_FORMAT_D16_UNORM = 34,
     RADRAY_FORMAT_D32_FLOAT = 35,
     RADRAY_FORMAT_D24_UNORM_S8_UINT = 36,
     RADRAY_FORMAT_D32_FLOAT_S8_UINT = 37
@@ -218,6 +219,16 @@ typedef struct RadrayDeviceDescriptorD3D12 {
 typedef struct RadrayDeviceDescriptorMetal {
     uint32_t DeviceIndex;
 } RadrayDeviceDescriptorMetal;
+
+typedef struct RadraySwapChainDescriptor {
+    RadrayCommandQueue PresentQueue;
+    uint64_t NativeWindow;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t BackBufferCount;
+    RadrayFormat Format;
+    bool EnableSync;
+} RadraySwapChainDescriptor;
 
 #ifdef __cplusplus
 }

@@ -14,6 +14,7 @@ constexpr int FRAME_COUNT = 3;
 std::shared_ptr<window::GlfwWindow> glfw;
 rhi::DeviceInterface* device;
 RadrayCommandQueue queue;
+RadraySwapChain swapchain;
 
 void start() {
     window::GlobalInitGlfw();
@@ -27,6 +28,15 @@ void start() {
         throw std::runtime_error{"cannot create device"};
     }
     queue = device->CreateCommandQueue(RADRAY_QUEUE_TYPE_DIRECT);
+    RadraySwapChainDescriptor chainDesc{
+        queue,
+        glfw->GetNativeHandle(),
+        static_cast<uint32_t>(glfw->GetSize().x()),
+        static_cast<uint32_t>(glfw->GetSize().y()),
+        FRAME_COUNT,
+        RADRAY_FORMAT_RGBA8_UNORM,
+        true};
+    swapchain = device->CreateSwapChain(chainDesc);
 }
 
 void update() {
@@ -37,6 +47,7 @@ void update() {
 }
 
 void destroy() {
+    device->DestroySwapChian(swapchain);
     device->DestroyCommandQueue(queue);
     RadrayReleaseDevice(device);
     window::GlobalTerminateGlfw();
