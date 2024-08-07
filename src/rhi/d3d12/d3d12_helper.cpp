@@ -70,6 +70,8 @@ D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept {
     switch (type) {
         case RADRAY_QUEUE_TYPE_DIRECT: return D3D12_COMMAND_LIST_TYPE_DIRECT;
         case RADRAY_QUEUE_TYPE_COMPUTE: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        case RADRAY_QUEUE_TYPE_COPY: return D3D12_COMMAND_LIST_TYPE_COPY;
+        default: return D3D12_COMMAND_LIST_TYPE_NONE;
     }
 }
 

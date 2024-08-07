@@ -5,6 +5,7 @@
 #include "d3d12_command_queue.h"
 #include "d3d12_command_allocator.h"
 #include "d3d12_command_list.h"
+#include "d3d12_fence.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -76,6 +77,16 @@ void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
     RhiDelete(q);
 }
 
+RadrayFence Device::CreateFence() {
+    auto f = RhiNew<Fence>(this);
+    return {.Ptr = f, .Native = f->fence.Get()};
+}
+
+void Device::DestroyFence(RadrayFence fence) {
+    auto f = reinterpret_cast<Fence*>(fence.Ptr);
+    RhiDelete(f);
+}
+
 RadrayCommandAllocator Device::CreateCommandAllocator(RadrayQueueType type) {
     auto a = RhiNew<CommandAllocator>(this, EnumConvert(type));
     return {.Ptr = a, .Native = a->alloc.Get()};
@@ -95,6 +106,11 @@ RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
 void Device::DestroyCommandList(RadrayCommandList list) {
     auto l = reinterpret_cast<CommandList*>(list.Ptr);
     RhiDelete(l);
+}
+
+void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
+    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    a->alloc->Reset();
 }
 
 }  // namespace radray::rhi::d3d12

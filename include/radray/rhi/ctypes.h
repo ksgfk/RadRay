@@ -22,6 +22,7 @@ typedef void* RadrayDevice;
 RADRAY_RHI_RESOURCE(RadrayCommandQueue);
 RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
 RADRAY_RHI_RESOURCE(RadrayCommandList);
+RADRAY_RHI_RESOURCE(RadrayFence);
 
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,
@@ -32,6 +33,7 @@ typedef enum RadrayBackand {
 typedef enum RadrayQueueType {
     RADRAY_QUEUE_TYPE_DIRECT,
     RADRAY_QUEUE_TYPE_COMPUTE,
+    RADRAY_QUEUE_TYPE_COPY,
 } RadrayQueueType;
 
 typedef enum RadrayFormat {

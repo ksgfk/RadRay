@@ -14,11 +14,14 @@ public:
     RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) override;
     void DestroyCommandQueue(RadrayCommandQueue queue) override;
 
+    RadrayFence CreateFence() override;
+    void DestroyFence(RadrayFence fence) override;
+
     RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) override;
     void DestroyCommandAllocator(RadrayCommandAllocator alloc) override;
-
     RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) override;
     void DestroyCommandList(RadrayCommandList list) override;
+    void ResetCommandAllocator(RadrayCommandAllocator alloc) override;
 
 public:
     ComPtr<IDXGIFactory2> dxgiFactory;
