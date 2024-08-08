@@ -24,6 +24,7 @@ RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
 RADRAY_RHI_RESOURCE(RadrayCommandList);
 RADRAY_RHI_RESOURCE(RadrayFence);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
+RADRAY_RHI_RESOURCE(RadrayBuffer);
 
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,
@@ -211,6 +212,37 @@ typedef enum RadrayResourceState {
 
 typedef uint32_t RadrayResourceStates;
 
+typedef enum RadrayResourceType {
+    RADRAY_RESOURCE_TYPE_UNKNOWN = 0,
+
+    RADRAY_RESOURCE_TYPE_BUFFER = 0x1,
+    RADRAY_RESOURCE_TYPE_BUFFER_RW = 0x2,
+    RADRAY_RESOURCE_TYPE_CBUFFER = 0x4,
+    RADRAY_RESOURCE_TYPE_VERTEX_BUFFER = 0x8,
+    RADRAY_RESOURCE_TYPE_INDEX_BUFFER = 0x10,
+
+    RADRAY_RESOURCE_TYPE_TEXTURE = 0x20,
+    RADRAY_RESOURCE_TYPE_TEXTURE_RW = 0x40,
+    RADRAY_RESOURCE_TYPE_RENDER_TARGET = 0x80,
+    RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100,
+    RADRAY_RESOURCE_TYPE_TEXTURE_CUBE = 0x200
+} RadrayResourceType;
+
+typedef uint32_t RadrayResourceTypes;
+
+typedef enum RadrayHeapUsage {
+    RADRAY_HEAP_USAGE_DEFAULT,
+    RADRAY_HEAP_USAGE_UPLOAD,
+    RADRAY_HEAP_USAGE_READBACK
+} RadrayGpuHeapType;
+
+typedef enum RadrayBufferCreateFlag {
+    RADRAY_BUFFER_CREATE_FLAG_COMMITTED = 0x1,
+    RADRAY_BUFFER_CREATE_FLAG_PERSISTENT_MAP = 0x2
+} RadrayBufferCreateFlag;
+
+typedef uint32_t RadrayBufferCreateFlags;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -229,6 +261,21 @@ typedef struct RadraySwapChainDescriptor {
     RadrayFormat Format;
     bool EnableSync;
 } RadraySwapChainDescriptor;
+
+typedef struct RadrayBufferDescriptor {
+    uint64_t Size;
+    RadrayResourceType Type;
+    RadrayHeapUsage Usage;
+    RadrayFormat Format;
+    RadrayResourceState InitState;
+    RadrayBufferCreateFlags Flags;
+} RadrayBufferDescriptor;
+
+RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
+
+RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc);
+
+void RadrayReleaseDevice(RadrayDevice device);
 
 #ifdef __cplusplus
 }

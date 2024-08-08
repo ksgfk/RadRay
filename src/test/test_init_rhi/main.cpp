@@ -4,7 +4,6 @@
 
 #include <radray/window/glfw_window.h>
 #include <radray/basic_math.h>
-#include <radray/rhi/cfuncs.h>
 #include <radray/rhi/device_interface.h>
 
 using namespace radray;

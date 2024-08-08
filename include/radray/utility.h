@@ -8,11 +8,11 @@ namespace radray {
 template <typename Call>
 class ScopeGuard {
 public:
-    explicit ScopeGuard(Call&& f) noexcept : _fun(std::forward<Call>(f)), _active(true) {}
-    ScopeGuard(ScopeGuard&& rhs) noexcept : _fun(std::move(rhs._fun)), _active(rhs._active) {
+    explicit constexpr ScopeGuard(Call&& f) noexcept : _fun(std::forward<Call>(f)), _active(true) {}
+    constexpr ScopeGuard(ScopeGuard&& rhs) noexcept : _fun(std::move(rhs._fun)), _active(rhs._active) {
         rhs.Dismiss();
     }
-    ~ScopeGuard() noexcept {
+    constexpr ~ScopeGuard() noexcept {
         if (_active) {
             _fun();
         }
@@ -21,7 +21,7 @@ public:
     ScopeGuard(const ScopeGuard&) = delete;
     ScopeGuard& operator=(const ScopeGuard&) = delete;
 
-    void Dismiss() noexcept { _active = false; }
+    constexpr void Dismiss() noexcept { _active = false; }
 
 private:
     Call _fun;
@@ -29,7 +29,7 @@ private:
 };
 
 template <typename Call>
-auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
+constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
 
 class DefaultMemoryResource : public std::pmr::memory_resource {
 public:

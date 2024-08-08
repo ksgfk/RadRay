@@ -7,6 +7,7 @@
 #include "d3d12_command_list.h"
 #include "d3d12_fence.h"
 #include "d3d12_swapchain.h"
+#include "d3d12_buffer.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -64,6 +65,22 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         std::wstring s{desc.Description};
         RADRAY_INFO_LOG("D3D12 device create on device: {}", Utf8ToString(s));
     }
+    {
+        D3D12MA::ALLOCATOR_DESC desc{};
+        desc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
+        desc.pDevice = device.Get();
+        desc.pAdapter = adapter.Get();
+        D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks{};
+        allocationCallbacks.pAllocate = [](size_t size, size_t alignment, void*) {
+            return RhiMalloc(alignment, size);
+        };
+        allocationCallbacks.pFree = +[](void* ptr, void*) {
+            RhiFree(ptr);
+        };
+        desc.pAllocationCallbacks = &allocationCallbacks;
+        desc.Flags |= D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
+        RADRAY_DX_FTHROW(D3D12MA::CreateAllocator(&desc, resourceAlloc.GetAddressOf()));
+    }
 }
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
@@ -113,13 +130,36 @@ void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
 }
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
-    auto s = RhiNew<SwapChain>(this, desc);
+    DXGI_SWAP_CHAIN_DESC1 chain{
+        .Width = desc.Width,
+        .Height = desc.Height,
+        .Format = EnumConvert(desc.Format),
+        .Stereo = FALSE,
+        .SampleDesc = {.Count = 1, .Quality = 0},
+        .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        .BufferCount = desc.BackBufferCount,
+        .Scaling = DXGI_SCALING_STRETCH,
+        .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        .AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED,
+        .Flags = 0};
+    ID3D12CommandQueue* queue = reinterpret_cast<ID3D12CommandQueue*>(desc.PresentQueue.Native);
+    HWND hwnd = reinterpret_cast<HWND>(desc.NativeWindow);
+    auto s = RhiNew<SwapChain>(this, queue, hwnd, chain, desc.EnableSync);
     return {.Ptr = s, .Native = s->swapchain.Get()};
 }
 
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
     auto s = reinterpret_cast<SwapChain*>(swapchain.Ptr);
     RhiDelete(s);
+}
+
+RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
+    return {};
+}
+
+void Device::DestroyBuffer(RadrayBuffer buffer) {
+    auto b = reinterpret_cast<Buffer*>(buffer.Ptr);
+    RhiDelete(b);
 }
 
 }  // namespace radray::rhi::d3d12

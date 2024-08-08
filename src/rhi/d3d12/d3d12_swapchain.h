@@ -8,7 +8,12 @@ class Device;
 
 class SwapChain {
 public:
-    SwapChain(Device* device, const RadraySwapChainDescriptor& desc);
+    SwapChain(
+        Device* device,
+        ID3D12CommandQueue* queue,
+        HWND hwnd,
+        const DXGI_SWAP_CHAIN_DESC1& desc,
+        bool enableSync);
 
 public:
     ComPtr<IDXGISwapChain1> swapchain;

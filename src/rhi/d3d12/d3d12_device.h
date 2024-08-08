@@ -26,10 +26,14 @@ public:
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
 
+    RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
+    void DestroyBuffer(RadrayBuffer buffer) override;
+
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
+    ComPtr<D3D12MA::Allocator> resourceAlloc;
 };
 
 }  // namespace radray::rhi::d3d12

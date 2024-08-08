@@ -26,6 +26,9 @@ public:
 
     virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
     virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;
+
+    virtual RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) = 0;
+    virtual void DestroyBuffer(RadrayBuffer buffer) = 0;
 };
 
 }  // namespace radray::rhi

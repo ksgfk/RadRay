@@ -1,4 +1,4 @@
-#include <radray/rhi/cfuncs.h>
+#include <radray/rhi/ctypes.h>
 
 #include <radray/logger.h>
 #include <radray/rhi/device_interface.h>
