@@ -264,10 +264,10 @@ typedef struct RadraySwapChainDescriptor {
 
 typedef struct RadrayBufferDescriptor {
     uint64_t Size;
-    RadrayResourceType Type;
     RadrayHeapUsage Usage;
     RadrayFormat Format;
-    RadrayResourceState InitState;
+    RadrayResourceTypes Types;
+    RadrayResourceStates InitStates;
     RadrayBufferCreateFlags Flags;
 } RadrayBufferDescriptor;
 

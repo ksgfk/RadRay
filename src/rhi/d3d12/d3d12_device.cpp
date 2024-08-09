@@ -1,5 +1,6 @@
 #include "d3d12_device.h"
 
+#include <radray/basic_math.h>
 #include <radray/rhi/config.h>
 
 #include "d3d12_command_queue.h"
@@ -154,7 +155,55 @@ void Device::DestroySwapChian(RadraySwapChain swapchain) {
 }
 
 RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
-    return {};
+    D3D12_RESOURCE_DESC buf{};
+    {
+        uint64_t allocationSize = desc.Size;
+        if (desc.Types & RADRAY_RESOURCE_TYPE_CBUFFER) {
+            allocationSize = CalcAlign(allocationSize, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        }
+        buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buf.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        buf.Width = allocationSize;
+        buf.Height = 1;
+        buf.DepthOrArraySize = 1;
+        buf.MipLevels = 1;
+        buf.Format = DXGI_FORMAT_UNKNOWN;
+        buf.SampleDesc.Count = 1;
+        buf.SampleDesc.Quality = 0;
+        buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        buf.Flags = D3D12_RESOURCE_FLAG_NONE;
+        if (desc.Types & RADRAY_RESOURCE_TYPE_BUFFER_RW) {
+            buf.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        }
+        UINT64 paddedSize = 0;
+        device->GetCopyableFootprints(&buf, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
+        if (paddedSize != UINT64_MAX) {
+            allocationSize = (uint64_t)paddedSize;
+            buf.Width = allocationSize;
+        }
+        if (desc.Usage == RADRAY_HEAP_USAGE_READBACK) {
+            buf.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+        }
+    }
+    D3D12_RESOURCE_STATES initState;
+    {
+        RadrayResourceStates radaryInitState = desc.InitStates;
+        if (desc.Usage == RADRAY_HEAP_USAGE_UPLOAD) {
+            radaryInitState = RADRAY_RESOURCE_STATE_GENERIC_READ;
+        } else if (desc.Usage == RADRAY_HEAP_USAGE_READBACK) {
+            radaryInitState = RADRAY_RESOURCE_STATE_COPY_DEST;
+        }
+        initState = EnumConvert(radaryInitState);
+    }
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    {
+        allocDesc.HeapType = EnumConvert(desc.Usage);
+        if (desc.Flags & RADRAY_BUFFER_CREATE_FLAG_COMMITTED) {
+            allocDesc.Flags |= D3D12MA::ALLOCATION_FLAG_COMMITTED;
+        }
+    }
+    auto b = RhiNew<Buffer>(this, desc.Size, initState, buf, allocDesc);
+    return {.Ptr = b, .Native = b->buffer.Get()};
 }
 
 void Device::DestroyBuffer(RadrayBuffer buffer) {

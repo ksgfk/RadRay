@@ -8,22 +8,18 @@ class Device;
 
 class Buffer {
 public:
-    virtual ~Buffer() noexcept = default;
+    Buffer(
+        Device* device,
+        uint64_t size,
+        D3D12_RESOURCE_STATES initState,
+        const D3D12_RESOURCE_DESC& resDesc,
+        const D3D12MA::ALLOCATION_DESC& allocDesc);
 
 public:
     ComPtr<ID3D12Resource> buffer;
     ComPtr<D3D12MA::Allocation> alloc;
     uint64_t size;
     D3D12_RESOURCE_STATES initState;
-};
-
-class DefaultBuffer : public Buffer {
-public:
-    DefaultBuffer(
-        Device* device,
-        uint64_t size,
-        D3D12_RESOURCE_STATES initState);
-    ~DefaultBuffer() noexcept override = default;
 };
 
 }  // namespace radray::rhi::d3d12

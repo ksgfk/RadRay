@@ -36,6 +36,10 @@ D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
 
 DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
 
+D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
+
+D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
+
 }  // namespace radray::rhi::d3d12
 
 #ifndef RADRAY_DX_CHECK

@@ -119,4 +119,63 @@ DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept {
     }
 }
 
+D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept {
+    if (state == RADRAY_RESOURCE_STATE_GENERIC_READ) {
+        return D3D12_RESOURCE_STATE_GENERIC_READ;
+    }
+    if (state == RADRAY_RESOURCE_STATE_COMMON) {
+        return D3D12_RESOURCE_STATE_COMMON;
+    }
+    if (state == RADRAY_RESOURCE_STATE_PRESENT) {
+        return D3D12_RESOURCE_STATE_PRESENT;
+    }
+    D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
+    if (state & RADRAY_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) {
+        result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    }
+    if (state & RADRAY_RESOURCE_STATE_INDEX_BUFFER) {
+        result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
+    }
+    if (state & RADRAY_RESOURCE_STATE_RENDER_TARGET) {
+        result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    if (state & RADRAY_RESOURCE_STATE_UNORDERED_ACCESS) {
+        result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (state & RADRAY_RESOURCE_STATE_DEPTH_WRITE) {
+        result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    if (state & RADRAY_RESOURCE_STATE_DEPTH_READ) {
+        result |= D3D12_RESOURCE_STATE_DEPTH_READ;
+    }
+    if (state & RADRAY_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+        result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    if (state & RADRAY_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        result |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (state & RADRAY_RESOURCE_STATE_STREAM_OUT) {
+        result |= D3D12_RESOURCE_STATE_STREAM_OUT;
+    }
+    if (state & RADRAY_RESOURCE_STATE_INDIRECT_ARGUMENT) {
+        result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    }
+    if (state & RADRAY_RESOURCE_STATE_COPY_DEST) {
+        result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (state & RADRAY_RESOURCE_STATE_COPY_SOURCE) {
+        result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    }
+    return result;
+}
+
+D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept {
+    switch (usage) {
+        case RADRAY_HEAP_USAGE_DEFAULT: return D3D12_HEAP_TYPE_DEFAULT;
+        case RADRAY_HEAP_USAGE_UPLOAD: return D3D12_HEAP_TYPE_UPLOAD;
+        case RADRAY_HEAP_USAGE_READBACK: return D3D12_HEAP_TYPE_READBACK;
+        return (D3D12_HEAP_TYPE)-1;
+    }
+}
+
 }  // namespace radray::rhi::d3d12
