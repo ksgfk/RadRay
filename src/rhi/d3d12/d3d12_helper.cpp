@@ -174,7 +174,17 @@ D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept {
         case RADRAY_HEAP_USAGE_DEFAULT: return D3D12_HEAP_TYPE_DEFAULT;
         case RADRAY_HEAP_USAGE_UPLOAD: return D3D12_HEAP_TYPE_UPLOAD;
         case RADRAY_HEAP_USAGE_READBACK: return D3D12_HEAP_TYPE_READBACK;
-        return (D3D12_HEAP_TYPE)-1;
+        default: return (D3D12_HEAP_TYPE)-1;
+    }
+}
+
+std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
+    switch (v) {
+        case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: return "CBV_SRV_UAV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
+        default: return "UNKNOWN";
     }
 }
 

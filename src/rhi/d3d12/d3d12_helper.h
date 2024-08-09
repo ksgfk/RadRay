@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdexcept>
+#include <string_view>
 
 #include <radray/platform.h>
 #include <radray/types.h>
@@ -33,12 +34,11 @@ std::wstring Utf8ToWString(const std::string& str) noexcept;
 std::string Utf8ToString(const std::wstring& str) noexcept;
 
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
-
 DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
-
 D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
-
 D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
+
+std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 
 }  // namespace radray::rhi::d3d12
 
@@ -67,3 +67,11 @@ D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
         }                                                                                                                             \
     } while (false)
 #endif
+
+template <class CharT>
+struct std::formatter<D3D12_DESCRIPTOR_HEAP_TYPE, CharT> : std::formatter<std::string_view, CharT> {
+    template <class FormatContext>
+    auto format(D3D12_DESCRIPTOR_HEAP_TYPE const& val, FormatContext& ctx) const {
+        return formatter<std::string_view, CharT>::format(radray::rhi::d3d12::to_string(val), ctx);
+    }
+};

@@ -3,6 +3,7 @@
 #include <radray/rhi/device_interface.h>
 
 #include "d3d12_helper.h"
+#include "d3d12_descriptor_heap.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -34,6 +35,11 @@ public:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
     ComPtr<D3D12MA::Allocator> resourceAlloc;
+    RhiUniquePtr<DescriptorHeap> srvHeap;
+    RhiUniquePtr<DescriptorHeap> rtvHeap;
+    RhiUniquePtr<DescriptorHeap> dsvHeap;
+    RhiUniquePtr<DescriptorHeap> gpuSrvHeap;
+    RhiUniquePtr<DescriptorHeap> gpuSamplerHeap;
 };
 
 }  // namespace radray::rhi::d3d12

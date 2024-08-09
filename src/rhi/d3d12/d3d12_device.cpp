@@ -82,6 +82,13 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         desc.Flags |= D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
         RADRAY_DX_FTHROW(D3D12MA::CreateAllocator(&desc, resourceAlloc.GetAddressOf()));
     }
+    {
+        srvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 18, false);
+        rtvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1 << 16, false);
+        dsvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1 << 16, false);
+        gpuSrvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16, true);
+        gpuSamplerHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 11, true);
+    }
 }
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
