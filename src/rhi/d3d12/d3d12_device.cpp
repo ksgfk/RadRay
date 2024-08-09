@@ -75,8 +75,10 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         allocationCallbacks.pAllocate = [](size_t size, size_t alignment, void*) {
             return RhiMalloc(alignment, size);
         };
-        allocationCallbacks.pFree = +[](void* ptr, void*) {
-            RhiFree(ptr);
+        allocationCallbacks.pFree = [](void* ptr, void*) {
+            if (ptr != nullptr) {
+                RhiFree(ptr);
+            }
         };
         desc.pAllocationCallbacks = &allocationCallbacks;
         desc.Flags |= D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
