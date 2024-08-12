@@ -238,7 +238,8 @@ typedef enum RadrayHeapUsage {
 
 typedef enum RadrayBufferCreateFlag {
     RADRAY_BUFFER_CREATE_FLAG_COMMITTED = 0x1,
-    RADRAY_BUFFER_CREATE_FLAG_PERSISTENT_MAP = 0x2
+    RADRAY_BUFFER_CREATE_FLAG_IS_CBUFFER = 0x2,
+    RADRAY_BUFFER_CREATE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4,
 } RadrayBufferCreateFlag;
 
 typedef uint32_t RadrayBufferCreateFlags;
@@ -265,11 +266,21 @@ typedef struct RadraySwapChainDescriptor {
 typedef struct RadrayBufferDescriptor {
     uint64_t Size;
     RadrayHeapUsage Usage;
-    RadrayFormat Format;
-    RadrayResourceTypes Types;
     RadrayResourceStates InitStates;
     RadrayBufferCreateFlags Flags;
 } RadrayBufferDescriptor;
+
+typedef struct RadrayBufferViewDescriptor {
+    RadrayBuffer Buffer;
+    RadrayResourceType Type;
+    RadrayFormat Format;
+    /** SRV or UAV param */
+    uint64_t FirstElementOffset;
+    /** SRV or UAV param */
+    uint32_t ElementCount;
+    /** SRV or UAV param */
+    uint32_t ElementStride;
+} RadrayBufferViewDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

@@ -13,6 +13,7 @@ Buffer::Buffer(
     : size(size),
       initState(initState) {
     RADRAY_DX_FTHROW(device->resourceAlloc->CreateResource(&allocDesc, &resDesc, initState, nullptr, alloc.GetAddressOf(), IID_PPV_ARGS(buffer.GetAddressOf())));
+    gpuAddr = buffer->GetGPUVirtualAddress();
 }
 
 }  // namespace radray::rhi::d3d12

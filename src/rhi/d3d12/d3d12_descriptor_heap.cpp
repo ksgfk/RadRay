@@ -9,7 +9,8 @@ DescriptorHeap::DescriptorHeap(
     D3D12_DESCRIPTOR_HEAP_TYPE type,
     uint32_t length,
     bool isShaderVisible)
-    : desc{D3D12_DESCRIPTOR_HEAP_DESC{
+    : device(device),
+      desc{D3D12_DESCRIPTOR_HEAP_DESC{
           .Type = type,
           .NumDescriptors = length,
           .Flags = (isShaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE),
@@ -58,23 +59,27 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleCpu(UINT index) const {
     return {cpuStart.ptr + UINT64(index) * UINT64(incrementSize)};
 }
 
-void DescriptorHeap::Create(Device* device, ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) {
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) {
     device->device->CreateUnorderedAccessView(resource, nullptr, &desc, HandleCpu(index));
 }
 
-void DescriptorHeap::Create(Device* device, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) {
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) {
     device->device->CreateShaderResourceView(resource, &desc, HandleCpu(index));
 }
 
-void DescriptorHeap::Create(Device* device, ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) {
+void DescriptorHeap::Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index) {
+    device->device->CreateConstantBufferView(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) {
     device->device->CreateRenderTargetView(resource, &desc, HandleCpu(index));
 }
 
-void DescriptorHeap::Create(Device* device, ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) {
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) {
     device->device->CreateDepthStencilView(resource, &desc, HandleCpu(index));
 }
 
-void DescriptorHeap::Create(Device* device, const D3D12_SAMPLER_DESC& desc, UINT index) {
+void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) {
     device->device->CreateSampler(&desc, HandleCpu(index));
 }
 

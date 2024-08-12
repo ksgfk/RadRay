@@ -167,7 +167,7 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
     D3D12_RESOURCE_DESC buf{};
     {
         uint64_t allocationSize = desc.Size;
-        if (desc.Types & RADRAY_RESOURCE_TYPE_CBUFFER) {
+        if (desc.Flags & RADRAY_BUFFER_CREATE_FLAG_IS_CBUFFER) {
             allocationSize = CalcAlign(allocationSize, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         }
         buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -181,7 +181,7 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
         buf.SampleDesc.Quality = 0;
         buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         buf.Flags = D3D12_RESOURCE_FLAG_NONE;
-        if (desc.Types & RADRAY_RESOURCE_TYPE_BUFFER_RW) {
+        if (desc.Flags & RADRAY_BUFFER_CREATE_FLAG_ALLOW_UNORDERED_ACCESS) {
             buf.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
         UINT64 paddedSize = 0;
@@ -211,13 +211,77 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
             allocDesc.Flags |= D3D12MA::ALLOCATION_FLAG_COMMITTED;
         }
     }
-    auto b = RhiNew<Buffer>(this, desc.Size, initState, buf, allocDesc);
+    auto b = RhiNew<Buffer>(this, buf.Width, initState, buf, allocDesc);
     return {.Ptr = b, .Native = b->buffer.Get()};
 }
 
 void Device::DestroyBuffer(RadrayBuffer buffer) {
     auto b = reinterpret_cast<Buffer*>(buffer.Ptr);
     RhiDelete(b);
+}
+
+void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
+    auto buffer = reinterpret_cast<Buffer*>(desc.Buffer.Ptr);
+    if (desc.Type & RADRAY_RESOURCE_TYPE_CBUFFER) {
+        UINT index = srvHeap->Allocate();
+        auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{
+            .BufferLocation = buffer->gpuAddr,
+            .SizeInBytes = static_cast<UINT>(buffer->size)};
+        srvHeap->Create(cbvDesc, index);
+        indexGuard.Dismiss();
+        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
+    }
+    if (desc.Type & RADRAY_RESOURCE_TYPE_BUFFER) {
+        UINT index = srvHeap->Allocate();
+        auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = EnumConvert(desc.Format);
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Buffer.FirstElement = desc.FirstElementOffset;
+        srvDesc.Buffer.NumElements = desc.ElementCount;
+        srvDesc.Buffer.StructureByteStride = desc.ElementStride;
+        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        if (srvDesc.Format != DXGI_FORMAT_UNKNOWN) {
+            srvDesc.Buffer.StructureByteStride = 0;
+        }
+        srvHeap->Create(buffer->buffer.Get(), srvDesc, index);
+        indexGuard.Dismiss();
+        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
+    }
+    if (desc.Type & RADRAY_RESOURCE_TYPE_BUFFER_RW) {
+        UINT index = srvHeap->Allocate();
+        auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.FirstElement = desc.FirstElementOffset;
+        uavDesc.Buffer.NumElements = desc.ElementCount;
+        uavDesc.Buffer.StructureByteStride = desc.ElementStride;
+        uavDesc.Buffer.CounterOffsetInBytes = 0;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+        if (desc.Format != RADRAY_FORMAT_UNKNOWN) {
+            uavDesc.Format = EnumConvert(desc.Format);
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport = {
+                uavDesc.Format,
+                D3D12_FORMAT_SUPPORT1_NONE,
+                D3D12_FORMAT_SUPPORT2_NONE};
+            HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport));
+            if (!SUCCEEDED(hr) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
+                RADRAY_DX_THROW(std::format("cannot use UAV format {}", (uint32_t)desc.Format));
+            }
+        }
+        if (uavDesc.Format != DXGI_FORMAT_UNKNOWN) {
+            uavDesc.Buffer.StructureByteStride = 0;
+        }
+        srvHeap->Create(buffer->buffer.Get(), uavDesc, index);
+        indexGuard.Dismiss();
+        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
+    }
+}
+
+void Device::DestroyBufferView() {
 }
 
 }  // namespace radray::rhi::d3d12

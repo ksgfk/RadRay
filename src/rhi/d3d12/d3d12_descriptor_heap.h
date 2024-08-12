@@ -23,13 +23,15 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu(UINT index) const;
     D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu(UINT index) const;
 
-    void Create(Device* device, ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index);
-    void Create(Device* device, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index);
-    void Create(Device* device, ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index);
-    void Create(Device* device, ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index);
-    void Create(Device* device, const D3D12_SAMPLER_DESC& desc, UINT index);
+    void Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index);
+    void Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index);
+    void Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index);
+    void Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index);
+    void Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index);
+    void Create(const D3D12_SAMPLER_DESC& desc, UINT index);
 
 public:
+    Device* device;
     D3D12_DESCRIPTOR_HEAP_DESC desc;
     RhiVector<UINT> empty;
     ComPtr<ID3D12DescriptorHeap> heap;

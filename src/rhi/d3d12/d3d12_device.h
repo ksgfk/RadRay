@@ -29,6 +29,8 @@ public:
 
     RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
     void DestroyBuffer(RadrayBuffer buffer) override;
+    void CreateBufferView(const RadrayBufferViewDescriptor& desc) override;
+    void DestroyBufferView() override;
 
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;

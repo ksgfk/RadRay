@@ -6,6 +6,7 @@
 #include <radray/platform.h>
 #include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/rhi/config.h>
 #include <radray/rhi/ctypes.h>
 
 #include <windows.h>
