@@ -220,9 +220,10 @@ void Device::DestroyBuffer(RadrayBuffer buffer) {
     RhiDelete(b);
 }
 
-void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
+RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
     auto buffer = reinterpret_cast<Buffer*>(desc.Buffer.Ptr);
-    if (desc.Type & RADRAY_RESOURCE_TYPE_CBUFFER) {
+    BufferView* view = nullptr;
+    if (desc.Type == RADRAY_RESOURCE_TYPE_CBUFFER) {
         UINT index = srvHeap->Allocate();
         auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{
@@ -230,9 +231,8 @@ void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
             .SizeInBytes = static_cast<UINT>(buffer->size)};
         srvHeap->Create(cbvDesc, index);
         indexGuard.Dismiss();
-        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
-    }
-    if (desc.Type & RADRAY_RESOURCE_TYPE_BUFFER) {
+        view = RhiNew<BufferView>(BufferView{srvHeap.get(), index, desc.Type, desc.Format});
+    } else if (desc.Type == RADRAY_RESOURCE_TYPE_BUFFER) {
         UINT index = srvHeap->Allocate();
         auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -248,9 +248,8 @@ void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
         }
         srvHeap->Create(buffer->buffer.Get(), srvDesc, index);
         indexGuard.Dismiss();
-        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
-    }
-    if (desc.Type & RADRAY_RESOURCE_TYPE_BUFFER_RW) {
+        view = RhiNew<BufferView>(BufferView{srvHeap.get(), index, desc.Type, desc.Format});
+    } else if (desc.Type == RADRAY_RESOURCE_TYPE_BUFFER_RW) {
         UINT index = srvHeap->Allocate();
         auto indexGuard = MakeScopeGuard([&]() { srvHeap->Recycle(index); });
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
@@ -269,7 +268,7 @@ void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
                 D3D12_FORMAT_SUPPORT2_NONE};
             HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport));
             if (!SUCCEEDED(hr) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
-                RADRAY_DX_THROW(std::format("cannot use UAV format {}", (uint32_t)desc.Format));
+                RADRAY_DX_THROW(std::format("D3D12 cannot use UAV format {}", (uint32_t)desc.Format));
             }
         }
         if (uavDesc.Format != DXGI_FORMAT_UNKNOWN) {
@@ -277,11 +276,17 @@ void Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
         }
         srvHeap->Create(buffer->buffer.Get(), uavDesc, index);
         indexGuard.Dismiss();
-        buffer->descViews.emplace_back(BufferDescView{desc.Type, desc.Format, index});
+        view = RhiNew<BufferView>(BufferView{srvHeap.get(), index, desc.Type, desc.Format});
+    } else {
+        RADRAY_DX_THROW(std::format("D3D12 cannot create buffer view for {}", (uint32_t)desc.Type));
     }
+    return RadrayBufferView{view};
 }
 
-void Device::DestroyBufferView() {
+void Device::DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) {
+    BufferView* v = reinterpret_cast<BufferView*>(view.Handle);
+    v->heap->Recycle(v->index);
+    RhiDelete(v);
 }
 
 }  // namespace radray::rhi::d3d12

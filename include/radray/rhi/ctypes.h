@@ -26,6 +26,10 @@ RADRAY_RHI_RESOURCE(RadrayFence);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
 
+typedef struct RadrayBufferView {
+    void* Handle;
+} RadrayBufferView;
+
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,
     RADRAY_BACKEND_METAL,
@@ -227,8 +231,6 @@ typedef enum RadrayResourceType {
     RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100,
     RADRAY_RESOURCE_TYPE_TEXTURE_CUBE = 0x200
 } RadrayResourceType;
-
-typedef uint32_t RadrayResourceTypes;
 
 typedef enum RadrayHeapUsage {
     RADRAY_HEAP_USAGE_DEFAULT,

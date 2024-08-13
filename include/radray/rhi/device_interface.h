@@ -6,7 +6,6 @@
 namespace radray::rhi {
 
 // TODO: enum format
-// TODO: buffer view design?
 class DeviceInterface {
 public:
     DeviceInterface() = default;
@@ -31,8 +30,8 @@ public:
 
     virtual RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) = 0;
     virtual void DestroyBuffer(RadrayBuffer buffer) = 0;
-    virtual void CreateBufferView(const RadrayBufferViewDescriptor& desc) = 0;
-    virtual void DestroyBufferView() = 0;
+    virtual RadrayBufferView CreateBufferView(const RadrayBufferViewDescriptor& desc) = 0;
+    virtual void DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) = 0;
 };
 
 }  // namespace radray::rhi
