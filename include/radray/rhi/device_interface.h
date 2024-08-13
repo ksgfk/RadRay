@@ -32,6 +32,9 @@ public:
     virtual void DestroyBuffer(RadrayBuffer buffer) = 0;
     virtual RadrayBufferView CreateBufferView(const RadrayBufferViewDescriptor& desc) = 0;
     virtual void DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) = 0;
+
+    virtual RadrayTexture CreateTexture(const RadrayTextureDescriptor& desc) = 0;
+    virtual void DestroyTexture(RadrayTexture texture) = 0;
 };
 
 }  // namespace radray::rhi

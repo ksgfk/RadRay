@@ -25,6 +25,7 @@ RADRAY_RHI_RESOURCE(RadrayCommandList);
 RADRAY_RHI_RESOURCE(RadrayFence);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
+RADRAY_RHI_RESOURCE(RadrayTexture);
 
 typedef struct RadrayBufferView {
     void* Handle;
@@ -232,6 +233,8 @@ typedef enum RadrayResourceType {
     RADRAY_RESOURCE_TYPE_TEXTURE_CUBE = 0x200
 } RadrayResourceType;
 
+typedef uint32_t RadrayResourceTypes;
+
 typedef enum RadrayHeapUsage {
     RADRAY_HEAP_USAGE_DEFAULT,
     RADRAY_HEAP_USAGE_UPLOAD,
@@ -239,12 +242,24 @@ typedef enum RadrayHeapUsage {
 } RadrayGpuHeapType;
 
 typedef enum RadrayBufferCreateFlag {
-    RADRAY_BUFFER_CREATE_FLAG_COMMITTED = 0x1,
-    RADRAY_BUFFER_CREATE_FLAG_IS_CBUFFER = 0x2,
-    RADRAY_BUFFER_CREATE_FLAG_ALLOW_UNORDERED_ACCESS = 0x4,
+    RADRAY_BUFFER_CREATE_FLAG_COMMITTED = 0x1
 } RadrayBufferCreateFlag;
 
 typedef uint32_t RadrayBufferCreateFlags;
+
+typedef enum RadrayTextureMSAACount {
+    RADRAY_TEXTURE_MSAA_1 = 1,
+    RADRAY_TEXTURE_MSAA_2 = 2,
+    RADRAY_TEXTURE_MSAA_4 = 4,
+    RADRAY_TEXTURE_MSAA_8 = 8,
+    RADRAY_TEXTURE_MSAA_16 = 16
+} RadrayTextureMSAACount;
+
+typedef enum RadrayTextureCreateFlag {
+    RADRAY_TEXTURE_CREATE_FLAG_COMMITTED = 0x1
+} RadrayTextureCreateFlag;
+
+typedef uint32_t RadrayTextureCreateFlags;
 
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
@@ -269,6 +284,7 @@ typedef struct RadrayBufferDescriptor {
     uint64_t Size;
     RadrayHeapUsage Usage;
     RadrayResourceStates InitStates;
+    RadrayResourceTypes MaybeTypes;
     RadrayBufferCreateFlags Flags;
 } RadrayBufferDescriptor;
 
@@ -283,6 +299,34 @@ typedef struct RadrayBufferViewDescriptor {
     /** SRV or UAV param */
     uint32_t ElementStride;
 } RadrayBufferViewDescriptor;
+
+typedef union RadrayClearValue {
+    struct {
+        float R;
+        float G;
+        float B;
+        float A;
+    };
+    struct {
+        float Depth;
+        uint32_t Stencil;
+    };
+} RadrayClearValue;
+
+typedef struct RadrayTextureDescriptor {
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t Depth;
+    uint32_t ArraySize;
+    RadrayFormat Format;
+    uint32_t MipLevels;
+    RadrayTextureMSAACount SampleCount;
+    uint32_t Quality;
+    RadrayClearValue ClearValue;
+    RadrayResourceStates InitStates;
+    RadrayResourceTypes MaybeTypes;
+    RadrayTextureCreateFlags Flags;
+} RadrayTextureDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

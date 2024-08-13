@@ -9,6 +9,7 @@
 #include "d3d12_fence.h"
 #include "d3d12_swapchain.h"
 #include "d3d12_buffer.h"
+#include "d3d12_texture.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -167,7 +168,7 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
     D3D12_RESOURCE_DESC buf{};
     {
         uint64_t allocationSize = desc.Size;
-        if (desc.Flags & RADRAY_BUFFER_CREATE_FLAG_IS_CBUFFER) {
+        if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_CBUFFER) {
             allocationSize = CalcAlign(allocationSize, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         }
         buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -181,7 +182,7 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
         buf.SampleDesc.Quality = 0;
         buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         buf.Flags = D3D12_RESOURCE_FLAG_NONE;
-        if (desc.Flags & RADRAY_BUFFER_CREATE_FLAG_ALLOW_UNORDERED_ACCESS) {
+        if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_BUFFER_RW) {
             buf.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
         UINT64 paddedSize = 0;
@@ -287,6 +288,89 @@ void Device::DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) {
     BufferView* v = reinterpret_cast<BufferView*>(view.Handle);
     v->heap->Recycle(v->index);
     RhiDelete(v);
+}
+
+RadrayTexture Device::CreateTexture(const RadrayTextureDescriptor& desc) {
+    DXGI_FORMAT dxgiFormat = EnumConvert(desc.Format);
+    D3D12_RESOURCE_DESC texDesc{};
+    {
+        texDesc.Dimension = ([&]() {
+            if (desc.Depth > 1) {
+                return D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            } else if (desc.Height > 1) {
+                return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            } else {
+                return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+            }
+        })();
+        texDesc.Alignment = (UINT)desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+        texDesc.Width = desc.Width;
+        texDesc.Height = desc.Height;
+        texDesc.DepthOrArraySize = (UINT16)(desc.ArraySize == 1 ? desc.Depth : desc.ArraySize);
+        texDesc.MipLevels = (UINT16)desc.MipLevels;
+        texDesc.Format = TypelessFormat(dxgiFormat);
+        texDesc.SampleDesc.Quality = (UINT)desc.Quality;
+        texDesc.SampleDesc.Count = (UINT)desc.SampleCount ? desc.SampleCount : 1;
+        {
+            D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msaaFeature{};
+            msaaFeature.Format = texDesc.Format;
+            msaaFeature.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+            msaaFeature.SampleCount = texDesc.SampleDesc.Count;
+            if (msaaFeature.SampleCount > 1) {
+                device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &msaaFeature, sizeof(msaaFeature));
+                if (msaaFeature.NumQualityLevels == 0 && msaaFeature.SampleCount > 0) {
+                    RADRAY_WARN_LOG("D3D12 can not supporte sample count {}", texDesc.SampleDesc.Count);
+                    msaaFeature.SampleCount = 1;
+                }
+            }
+        }
+        texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        texDesc.Flags = ([&]() {
+            D3D12_RESOURCE_FLAGS Flags = D3D12_RESOURCE_FLAG_NONE;
+            if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_TEXTURE_RW) {
+                Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            }
+            if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_RENDER_TARGET) {
+                Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            } else if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_DEPTH_STENCIL) {
+                Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            }
+            return Flags;
+        })();
+    }
+    D3D12_RESOURCE_STATES initState = EnumConvert(desc.InitStates);
+    D3D12_CLEAR_VALUE clearValue = ([&]() {
+        D3D12_CLEAR_VALUE cv{};
+        cv.Format = dxgiFormat;
+        if (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_DEPTH_STENCIL) {
+            clearValue.DepthStencil.Depth = desc.ClearValue.Depth;
+            clearValue.DepthStencil.Stencil = (UINT8)desc.ClearValue.Stencil;
+        } else {
+            clearValue.Color[0] = desc.ClearValue.R;
+            clearValue.Color[1] = desc.ClearValue.G;
+            clearValue.Color[2] = desc.ClearValue.B;
+            clearValue.Color[3] = desc.ClearValue.A;
+        }
+        return cv;
+    })();
+    const D3D12_CLEAR_VALUE* cvPtr = nullptr;
+    if ((desc.MaybeTypes & RADRAY_RESOURCE_TYPE_DEPTH_STENCIL) || (desc.MaybeTypes & RADRAY_RESOURCE_TYPE_RENDER_TARGET)) {
+        cvPtr = &clearValue;
+    }
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    {
+        allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (desc.Flags & RADRAY_TEXTURE_CREATE_FLAG_COMMITTED) {
+            allocDesc.Flags |= D3D12MA::ALLOCATION_FLAG_COMMITTED;
+        }
+    }
+    auto tex = RhiNew<Texture>(this, initState, cvPtr, texDesc, allocDesc);
+    return {tex, tex->texture.Get()};
+}
+
+void Device::DestroyTexture(RadrayTexture texture) {
+    auto t = reinterpret_cast<Texture*>(texture.Ptr);
+    RhiDelete(t);
 }
 
 }  // namespace radray::rhi::d3d12

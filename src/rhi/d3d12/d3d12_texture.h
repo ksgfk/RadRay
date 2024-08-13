@@ -5,30 +5,22 @@
 namespace radray::rhi::d3d12 {
 
 class Device;
-class DescriptorHeap;
 
-struct BufferView {
-    DescriptorHeap* heap;
-    UINT index;
-    RadrayResourceType type;
-    RadrayFormat format;
-};
-
-class Buffer {
+class Texture {
 public:
-    Buffer(
+    Texture(
         Device* device,
-        uint64_t size,
         D3D12_RESOURCE_STATES initState,
+        const D3D12_CLEAR_VALUE* cvPtr,
         const D3D12_RESOURCE_DESC& resDesc,
         const D3D12MA::ALLOCATION_DESC& allocDesc);
 
 public:
-    ComPtr<ID3D12Resource> buffer;
-    ComPtr<D3D12MA::Allocation> alloc;
-    uint64_t size;
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr;
+    D3D12_RESOURCE_DESC desc;
     D3D12_RESOURCE_STATES initState;
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<D3D12MA::Allocation> alloc;
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr;
 };
 
 }  // namespace radray::rhi::d3d12

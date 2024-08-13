@@ -39,6 +39,8 @@ DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
 D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
 D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
 
+DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
+
 std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 
 }  // namespace radray::rhi::d3d12
