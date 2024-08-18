@@ -31,6 +31,10 @@ typedef struct RadrayBufferView {
     void* Handle;
 } RadrayBufferView;
 
+typedef struct RadrayTextureView {
+    void* Handle;
+} RadrayTextureView;
+
 typedef enum RadrayBackand {
     RADRAY_BACKEND_D3D12,
     RADRAY_BACKEND_METAL,
@@ -229,8 +233,7 @@ typedef enum RadrayResourceType {
     RADRAY_RESOURCE_TYPE_TEXTURE = 0x20,
     RADRAY_RESOURCE_TYPE_TEXTURE_RW = 0x40,
     RADRAY_RESOURCE_TYPE_RENDER_TARGET = 0x80,
-    RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100,
-    RADRAY_RESOURCE_TYPE_TEXTURE_CUBE = 0x200
+    RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100
 } RadrayResourceType;
 
 typedef uint32_t RadrayResourceTypes;
@@ -327,6 +330,17 @@ typedef struct RadrayTextureDescriptor {
     RadrayResourceTypes MaybeTypes;
     RadrayTextureCreateFlags Flags;
 } RadrayTextureDescriptor;
+
+typedef struct RadrayTextureViewDescriptor {
+    RadrayTexture Texture;
+    RadrayFormat Format;
+    RadrayResourceType Type;
+    RadrayTextureDimension Dimension;
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+} RadrayTextureViewDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -24,6 +25,9 @@ template <class T, class... Args>
 requires(!std::is_array_v<T>)
 T* RhiNew(Args&&... args) {
     void* mem = RhiMalloc(alignof(T), sizeof(T));
+    if (!mem) {
+        throw std::bad_alloc();
+    }
     auto guard = MakeScopeGuard([&]() { RhiFree(mem); });
     T* obj = new (mem) T(std::forward<Args>(args)...);
     guard.Dismiss();

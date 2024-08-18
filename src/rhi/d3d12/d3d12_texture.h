@@ -5,6 +5,14 @@
 namespace radray::rhi::d3d12 {
 
 class Device;
+class DescriptorHeap;
+
+struct TextureView {
+    DescriptorHeap* heap;
+    UINT index;
+    RadrayResourceType type;
+    RadrayFormat format;
+};
 
 class Texture {
 public:

@@ -35,6 +35,8 @@ public:
 
     virtual RadrayTexture CreateTexture(const RadrayTextureDescriptor& desc) = 0;
     virtual void DestroyTexture(RadrayTexture texture) = 0;
+    virtual RadrayTextureView CreateTextureView(const RadrayTextureViewDescriptor& desc) = 0;
+    virtual void DestroyTextureView(RadrayTextureView view) = 0;
 };
 
 }  // namespace radray::rhi

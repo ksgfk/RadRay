@@ -34,16 +34,18 @@ public:
 
     RadrayTexture CreateTexture(const RadrayTextureDescriptor& desc) override;
     void DestroyTexture(RadrayTexture texture) override;
+    RadrayTextureView CreateTextureView(const RadrayTextureViewDescriptor& desc) override;
+    void DestroyTextureView(RadrayTextureView view) override;
 
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
     ComPtr<D3D12MA::Allocator> resourceAlloc;
-    RhiUniquePtr<DescriptorHeap> srvHeap;
+    RhiUniquePtr<DescriptorHeap> cbvSrvUavHeap;
     RhiUniquePtr<DescriptorHeap> rtvHeap;
     RhiUniquePtr<DescriptorHeap> dsvHeap;
-    RhiUniquePtr<DescriptorHeap> gpuSrvHeap;
+    RhiUniquePtr<DescriptorHeap> gpuCbvSrvUavHeap;
     RhiUniquePtr<DescriptorHeap> gpuSamplerHeap;
 };
 
