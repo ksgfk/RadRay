@@ -92,6 +92,9 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         gpuCbvSrvUavHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16, true);
         gpuSamplerHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 11, true);
     }
+    {
+        canSetDebugName = true;
+    }
 }
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
@@ -213,6 +216,10 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
         }
     }
     auto b = RhiNew<Buffer>(this, buf.Width, initState, buf, allocDesc);
+    if (canSetDebugName && desc.Name) {
+        auto n = reinterpret_cast<const char*>(desc.Name);
+        SetObjectName(n, b->buffer.Get(), b->alloc.Get());
+    }
     return {.Ptr = b, .Native = b->buffer.Get()};
 }
 
@@ -365,6 +372,10 @@ RadrayTexture Device::CreateTexture(const RadrayTextureDescriptor& desc) {
         }
     }
     auto tex = RhiNew<Texture>(this, initState, cvPtr, texDesc, allocDesc);
+    if (canSetDebugName && desc.Name) {
+        auto n = reinterpret_cast<const char*>(desc.Name);
+        SetObjectName(n, tex->texture.Get(), tex->alloc.Get());
+    }
     return {tex, tex->texture.Get()};
 }
 
@@ -585,6 +596,13 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
 void Device::DestroyTextureView(RadrayTextureView view) {
     auto v = reinterpret_cast<TextureView*>(view.Handle);
     RhiDelete(v);
+}
+
+RadrayShader Device::CompileShader(const RadrayShaderDescriptor& desc) {
+    return {};
+}
+
+void Device::DestroyShader(RadrayShader shader) {
 }
 
 }  // namespace radray::rhi::d3d12

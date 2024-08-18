@@ -37,6 +37,9 @@ public:
     RadrayTextureView CreateTextureView(const RadrayTextureViewDescriptor& desc) override;
     void DestroyTextureView(RadrayTextureView view) override;
 
+    RadrayShader CompileShader(const RadrayShaderDescriptor& desc) override;
+    void DestroyShader(RadrayShader shader) override;
+
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
@@ -47,6 +50,7 @@ public:
     RhiUniquePtr<DescriptorHeap> dsvHeap;
     RhiUniquePtr<DescriptorHeap> gpuCbvSrvUavHeap;
     RhiUniquePtr<DescriptorHeap> gpuSamplerHeap;
+    bool canSetDebugName;
 };
 
 }  // namespace radray::rhi::d3d12

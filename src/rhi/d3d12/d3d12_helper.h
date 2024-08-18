@@ -34,6 +34,8 @@ std::wstring Utf8ToWString(const std::string& str) noexcept;
 
 std::string Utf8ToString(const std::wstring& str) noexcept;
 
+void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
+
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
 DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
 D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;

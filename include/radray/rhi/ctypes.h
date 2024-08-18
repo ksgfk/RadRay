@@ -26,6 +26,9 @@ RADRAY_RHI_RESOURCE(RadrayFence);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
 RADRAY_RHI_RESOURCE(RadrayTexture);
+RADRAY_RHI_RESOURCE(RadrayShader);
+RADRAY_RHI_RESOURCE(RadrayRootSignature);
+RADRAY_RHI_RESOURCE(RadrayGraphicsPipeline);
 
 typedef struct RadrayBufferView {
     void* Handle;
@@ -264,6 +267,22 @@ typedef enum RadrayTextureCreateFlag {
 
 typedef uint32_t RadrayTextureCreateFlags;
 
+typedef enum RadrayShaderStage {
+    RADRAY_SHADER_STAGE_UNKNOWN = 0,
+
+    RADRAY_SHADER_STAGE_VERTEX = 0x00000001,
+    RADRAY_SHADER_STAGE_HULL = 0x00000002,
+    RADRAY_SHADER_STAGE_DOMAIN = 0x00000004,
+    RADRAY_SHADER_STAGE_GEOMETRY = 0x00000008,
+    RADRAY_SHADER_STAGE_PIXEL = 0x00000010,
+    RADRAY_SHADER_STAGE_COMPUTE = 0x00000020,
+    RADRAY_SHADER_STAGE_RAYTRACING = 0x00000040,
+
+    RADRAY_SHADER_STAGE_ALL_GRAPHICS = (uint32_t)RADRAY_SHADER_STAGE_VERTEX | (uint32_t)RADRAY_SHADER_STAGE_HULL | (uint32_t)RADRAY_SHADER_STAGE_DOMAIN | (uint32_t)RADRAY_SHADER_STAGE_GEOMETRY | (uint32_t)RADRAY_SHADER_STAGE_PIXEL
+} RadrayShaderStage;
+
+typedef uint32_t RadrayShaderStages;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -284,6 +303,7 @@ typedef struct RadraySwapChainDescriptor {
 } RadraySwapChainDescriptor;
 
 typedef struct RadrayBufferDescriptor {
+    const uint8_t* Name;
     uint64_t Size;
     RadrayHeapUsage Usage;
     RadrayResourceStates InitStates;
@@ -317,6 +337,7 @@ typedef union RadrayClearValue {
 } RadrayClearValue;
 
 typedef struct RadrayTextureDescriptor {
+    const uint8_t* Name;
     uint32_t Width;
     uint32_t Height;
     uint32_t Depth;
@@ -341,6 +362,13 @@ typedef struct RadrayTextureViewDescriptor {
     uint32_t BaseMipLevel;
     uint32_t MipLevelCount;
 } RadrayTextureViewDescriptor;
+
+typedef struct RadrayShaderDescriptor {
+    const uint8_t* Name;
+    const uint8_t* Data;
+    size_t Length;
+    RadrayShaderStage Stage;
+} RadrayShaderDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

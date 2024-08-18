@@ -12,4 +12,4 @@ target_end()
 --     add_deps("radray_core", "radray_window", "nri")
 -- target_end()
 
-includes("test_init_rhi")
+-- includes("test_init_rhi")

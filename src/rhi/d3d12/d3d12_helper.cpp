@@ -6,6 +6,8 @@
 
 namespace radray::rhi::d3d12 {
 
+constexpr size_t MaxNameLength = 128;
+
 const char* GetErrorName(HRESULT hr) noexcept {
     switch (hr) {
         case D3D12_ERROR_ADAPTER_NOT_FOUND: return "D3D12_ERROR_ADAPTER_NOT_FOUND";
@@ -64,6 +66,15 @@ std::string Utf8ToString(const std::wstring& str) noexcept {
     buffer.resize(len);
     WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.length(), buffer.data(), (int)buffer.size(), nullptr, nullptr);
     return std::string{buffer.begin(), buffer.end()};
+}
+
+void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc) noexcept {
+    wchar_t debugName[MaxNameLength]{};
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), str.length(), debugName, MaxNameLength);
+    if (alloc) {
+        alloc->SetName(debugName);
+    }
+    obj->SetName(debugName);
 }
 
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept {
