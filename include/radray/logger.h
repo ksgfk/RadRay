@@ -53,3 +53,4 @@ void LogAbort(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
 #else
 #define RADRAY_ASSERT(x, f, ...)
 #endif
+#define RADRAY_THROW(type, fmt, ...) throw type(std::format(fmt __VA_OPT__(, ) __VA_ARGS__))

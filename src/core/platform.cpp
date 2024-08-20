@@ -22,12 +22,60 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 namespace radray {
 
+static std::string _Win32LastErrMessage() {
+    void* buffer = nullptr;
+    auto errCode = GetLastError();
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        errCode,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)&buffer,
+        0, nullptr);
+    std::string msg = std::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
+    LocalFree(buffer);
+    return msg;
+}
+
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
     return _aligned_malloc(size, alignment);
 }
 
 void AlignedFree(void* ptr) noexcept {
     _aligned_free(ptr);
+}
+
+static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?");
+static_assert(sizeof(FARPROC) == sizeof(void*), "size of FARPROC not equal ptr?");
+
+DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
+    std::string name;
+    if (name_.ends_with(".dll")) {
+        name = std::string{name_};
+    } else {
+        name = std::string{name_} + ".dll";
+    }
+    HMODULE m = LoadLibraryA(name.c_str());
+    if (m == nullptr) [[unlikely]] {
+        RADRAY_ERR_LOG("cannot load dynamic library {}, reason: {}", name, _Win32LastErrMessage());
+    }
+    _handle = m;
+}
+
+DynamicLibrary::~DynamicLibrary() noexcept {
+    if (_handle != nullptr) {
+        FreeLibrary(reinterpret_cast<HMODULE>(_handle));
+        _handle = nullptr;
+    }
+}
+
+void* DynamicLibrary::GetSymbol(std::string_view name_) noexcept {
+    std::string name{name_};
+    auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(_handle), name.c_str());
+    if (symbol == nullptr) [[unlikely]] {
+        RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
+    }
+    return reinterpret_cast<void*>(symbol);
 }
 
 }  // namespace radray
