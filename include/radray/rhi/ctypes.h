@@ -2,9 +2,11 @@
 
 #ifdef __cplusplus
 #include <cstdint>
+#include <cstddef>
 #else
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #endif
 
 #define RADRAY_RHI_RESOURCE(name) \
