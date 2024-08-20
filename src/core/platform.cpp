@@ -105,12 +105,14 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     } else {
         name = "lib" + std::string{name_} + ".dylib";
     }
-#else
+#elif RADRAY_PLATFORM_LINUX
     if (name_.starts_with("lib") && name_.ends_with(".so")) {
         name = std::string{name_};
     } else {
         name = "lib" + std::string{name_} + ".so";
     }
+#else
+#error "unknown platform"
 #endif
     auto h = dlopen(name.c_str(), RTLD_LAZY);
     if (h == nullptr) {
