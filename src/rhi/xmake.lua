@@ -26,9 +26,13 @@ target("radray_rhi")
     -- end
 
     before_build(function (target)
-        import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+        if get_config("enable_dxc") then 
+            import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+        end 
     end)
 
-    before_build(function (target)
-        import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+    before_install(function (target)
+        if get_config("enable_dxc") then 
+            import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+        end 
     end)
