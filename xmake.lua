@@ -14,6 +14,11 @@ option("enable_metal")
     set_default(true)
     set_showmenu(true)
 option_end()
+option("enable_dxc")
+    set_values(true, false)
+    set_default(true)
+    set_showmenu(true)
+option_end()
 -- 引入全局变量
 includes("scripts/setup.lua")
 if path.absolute(os.projectdir()) == path.absolute(os.scriptdir()) and os.exists("scripts/options.lua") then

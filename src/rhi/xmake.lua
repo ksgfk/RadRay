@@ -17,6 +17,18 @@ target("radray_rhi")
         add_packages("directx-headers", "d3d12-memory-allocator")
         add_syslinks("d3d12", "dxgi", "dxguid")
     end
+    if get_config("enable_dxc") then 
+        add_defines("RADRAY_ENABLE_DXC", {public = true})
+        add_packages("dxc_radray")
+    end
     -- if get_config("enable_metal") then
     --     add_defines("RADRAY_ENABLE_METAL", {public = true})
     -- end
+
+    before_build(function (target)
+        import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+    end)
+
+    before_build(function (target)
+        import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+    end)

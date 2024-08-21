@@ -20,6 +20,8 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 #include <windows.h>
 
+#include <string>
+
 namespace radray {
 
 static std::string _Win32LastErrMessage() {
