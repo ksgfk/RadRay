@@ -24,7 +24,7 @@ DescriptorHeap::DescriptorHeap(
         gpuStart = {0};
     }
     incrementSize = device->device->GetDescriptorHandleIncrementSize(desc.Type);
-    RADRAY_DEBUG_LOG("D3D12 DescriptorHeap type={} incrementSize={} length={} all={}(bytes)", desc.Type, incrementSize, length, UINT64(length) * incrementSize);
+    RADRAY_DEBUG_LOG("D3D12 DescriptorHeap type={} incrementSize={} length={} all={}(bytes)", (int)desc.Type, incrementSize, length, UINT64(length) * incrementSize);
 }
 
 UINT DescriptorHeap::Allocate() {

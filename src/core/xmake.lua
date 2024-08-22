@@ -4,7 +4,8 @@ add_requires("spdlog_radray v1.14.1", {
     configs = {
         shared = false,
         header_only = false,
-        std_format = true,
+        std_format = false,
+        fmt_external = true,
         noexcept = true,
         no_thread_id = true,
         no_default_logger = true
