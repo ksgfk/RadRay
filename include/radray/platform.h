@@ -28,7 +28,13 @@ public:
     DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
     ~DynamicLibrary() noexcept;
 
-    void* GetSymbol(std::string_view name) noexcept;
+    void* GetSymbol(std::string_view name) const noexcept;
+
+    template <class T>
+    requires std::is_function_v<T>
+    auto GetFunction(std::string_view name) const noexcept {
+        return reinterpret_cast<std::add_pointer_t<T>>(GetSymbol(name));
+    }
 
     constexpr bool IsValid() const noexcept { return _handle != nullptr; }
 

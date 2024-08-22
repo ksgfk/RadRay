@@ -71,7 +71,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
     }
 }
 
-void* DynamicLibrary::GetSymbol(std::string_view name_) noexcept {
+void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     std::string name{name_};
     auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
@@ -130,7 +130,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
     }
 }
 
-void* DynamicLibrary::GetSymbol(std::string_view name_) noexcept {
+void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     std::string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
     if (symbol == nullptr) [[unlikely]] {
