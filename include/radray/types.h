@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <memory>
 #include <string>
+
 #include <fmt/format.h>
 
 namespace radray {
@@ -29,132 +30,130 @@ using std::uint16_t;
 using std::uint32_t;
 using std::uint64_t;
 
-void* RadMalloc(size_t align, size_t size);
-
-void RadFree(void* ptr) noexcept;
+[[nodiscard]] void* malloc(size_t size) noexcept;
+[[nodiscard]] void* mallocn(size_t count, size_t size) noexcept;
+void free(void* ptr) noexcept;
+void free_size(void* ptr, size_t size) noexcept;
+[[nodiscard]] void* aligned_alloc(size_t alignment, size_t size) noexcept;
+void aligned_free(void* ptr, size_t alignment) noexcept;
+void aligned_free_size(void* ptr, size_t size, size_t alignment) noexcept;
 
 template <class T, class... Args>
 requires(!std::is_array_v<T>)
-T* RadNew(Args&&... args) {
-    void* mem = RadMalloc(alignof(T), sizeof(T));
-    if (!mem) {
+T* new_object(Args&&... args) {
+    void* mem = radray::aligned_alloc(alignof(T), sizeof(T));
+    if (!mem) [[unlikely]] {
         throw std::bad_alloc();
     }
-    auto guard = MakeScopeGuard([&]() { RadFree(mem); });
-    T* obj = new (mem) T(std::forward<Args>(args)...);
+    auto guard = MakeScopeGuard([&]() { radray::free(mem); });
+    T* obj = std::construct_at(mem, std::forward<Args>(args)...);
     guard.Dismiss();
     return obj;
 }
 
 template <class T>
 requires(!std::is_array_v<T>)
-void RadDelete(T* ptr) noexcept {
-    ptr->~T();
-    RadFree(ptr);
+void delete_object(T* ptr) noexcept {
+    std::destroy_at(ptr);
+    radray::free(ptr);
 }
 
 template <class T>
-class RadAllocator {
+class allocator {
 public:
     using value_type = T;
 
-    constexpr RadAllocator() = default;
+    constexpr allocator() = default;
     template <class U>
-    constexpr RadAllocator(const RadAllocator<U>&) noexcept {}
+    constexpr allocator(const allocator<U>&) noexcept {}
 
     T* allocate(std::size_t n) {
-        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
-            throw std::bad_array_new_length();
+        auto p = static_cast<T*>(radray::mallocn(n, sizeof(T)));
+        if (p == nullptr) [[unlikely]] {
+            throw std::bad_alloc();
         }
-        if (auto p = static_cast<T*>(RadMalloc(alignof(T), n * sizeof(T)))) {
-            return p;
-        }
-        throw std::bad_alloc();
+        return p;
     }
 
-    void deallocate(T* p, std::size_t n) noexcept {
-        RadFree(p);
-    }
+    void deallocate(T* p, std::size_t) noexcept { radray::free(p); }
 };
 template <class T, class U>
-bool operator==(const RadAllocator<T>&, const RadAllocator<U>&) { return true; }
+bool operator==(const allocator<T>&, const allocator<U>&) { return true; }
 template <class T, class U>
-bool operator!=(const RadAllocator<T>&, const RadAllocator<U>&) { return false; }
+bool operator!=(const allocator<T>&, const allocator<U>&) { return false; }
 
 template <class T>
 requires(!std::is_array_v<T>)
-class RadDeleter {
+class deleter {
 public:
-    constexpr RadDeleter() noexcept = default;
+    constexpr deleter() noexcept = default;
     template <class U>
-    constexpr RadDeleter(const RadDeleter<U>&) noexcept {}
+    constexpr deleter(const deleter<U>&) noexcept {}
 
-    void operator()(T* ptr) const noexcept {
-        RadDelete(ptr);
-    }
+    void operator()(T* ptr) const noexcept { delete_object(ptr); }
 };
 
 template <class T>
-using RadVector = std::vector<T, RadAllocator<T>>;
+using vector = std::vector<T, radray::allocator<T>>;
 
 template <class T>
-using RadDeque = std::deque<T, RadAllocator<T>>;
+using deque = std::deque<T, radray::allocator<T>>;
 
 template <class T>
-using RadQueue = std::queue<T, RadDeque<T>>;
+using queue = std::queue<T, radray::deque<T>>;
 
 template <class T>
-using RadStack = std::stack<T, RadDeque<T>>;
+using stack = std::stack<T, radray::deque<T>>;
 
 template <class K, class V, class Cmp = std::less<K>>
-using RadMap = std::map<K, V, Cmp, RadAllocator<std::pair<const K, V>>>;
+using map = std::map<K, V, Cmp, radray::allocator<std::pair<const K, V>>>;
 
 template <class T, class Cmp = std::less<T>>
-using RadSet = std::set<T, Cmp, RadAllocator<T>>;
+using set = std::set<T, Cmp, radray::allocator<T>>;
 
 template <class K, class V, class Hash = std::hash<K>, class Equal = std::equal_to<K>>
-using RadUnorderedMap = std::unordered_map<K, V, Hash, Equal, RadAllocator<std::pair<const K, V>>>;
+using unordered_map = std::unordered_map<K, V, Hash, Equal, radray::allocator<std::pair<const K, V>>>;
 
 template <class T, class Hash = std::hash<T>, class Equal = std::equal_to<T>>
-using RadUnorderedSet = std::unordered_set<T, Hash, Equal, RadAllocator<T>>;
+using unordered_set = std::unordered_set<T, Hash, Equal, radray::allocator<T>>;
 
 template <class T>
-using RadUniquePtr = std::unique_ptr<T, RadDeleter<T>>;
+using unique_ptr = std::unique_ptr<T, radray::deleter<T>>;
 
 template <class T>
-using RadSharedPtr = std::shared_ptr<T>;
+using shared_ptr = std::shared_ptr<T>;
 
 template <class T>
-using RadWeakPtr = std::weak_ptr<T>;
+using weak_ptr = std::weak_ptr<T>;
 
 template <class T, class... Args>
 requires(!std::is_array_v<T>)
-constexpr RadUniquePtr<T> MakeUnique(Args&&... args) {
-    return RadUniquePtr<T>{RadNew<T>(std::forward<Args>(args)...), RadDeleter<T>{}};
+constexpr unique_ptr<T> make_unique(Args&&... args) {
+    return unique_ptr<T>{new_object<T>(std::forward<Args>(args)...), deleter<T>{}};
 }
 
 template <class T, class... Args>
 requires(!std::is_array_v<T>)
-constexpr RadSharedPtr<T> MakeShared(Args&&... args) {
-    return RadSharedPtr<T>{RadNew<T>(std::forward<Args>(args)...), RadDeleter<T>{}};
+constexpr shared_ptr<T> make_shared(Args&&... args) {
+    return shared_ptr<T>{new_object<T>(std::forward<Args>(args)...), deleter<T>{}};
 }
 
-using RadString = std::basic_string<char, std::char_traits<char>, RadAllocator<char>>;
+using string = std::basic_string<char, std::char_traits<char>, radray::allocator<char>>;
 
-using RadWString = std::basic_string<wchar_t, std::char_traits<wchar_t>, RadAllocator<wchar_t>>;
+using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
 
-using RadFmtMemBuffer = fmt::basic_memory_buffer<char, fmt::inline_buffer_size, RadAllocator<char>>;
+using fmt_memory_buffer = fmt::basic_memory_buffer<char, fmt::inline_buffer_size, radray::allocator<char>>;
 
-RadString VFormat(fmt::string_view fmtStr, fmt::format_args args) noexcept;
+string v_format(fmt::string_view fmtStr, fmt::format_args args) noexcept;
 
 template <typename... Args>
-RadString RFormat(fmt::string_view fmtStr, const Args&... args) {
-    return VFormat(fmtStr, fmt::make_format_args(args...));
+string format(fmt::string_view fmtStr, Args&&... args) {
+    return radray::v_format(fmtStr, fmt::make_format_args(std::forward<Args>(args)...));
 }
 
 template <typename... Args>
-RadString CFormat(fmt::format_string<Args...> fmt, const Args&... args) {
-    return VFormat(fmt, fmt::make_format_args(args...));
+string format_to(fmt::format_string<Args...> fmt, Args&&... args) {
+    return radray::v_format(fmt::string_view(fmt), fmt::make_format_args(std::forward<Args>(args)...));
 }
 
 }  // namespace radray
@@ -165,3 +164,30 @@ RadString CFormat(fmt::format_string<Args...> fmt, const Args&... args) {
 #define RADRAY_NO_MOVE_CTOR(type) \
     type(type&&) = delete;        \
     type& operator=(type&&) = delete;
+
+void operator delete(void* p) noexcept;
+void operator delete[](void* p) noexcept;
+
+void operator delete(void* p, const std::nothrow_t&) noexcept;
+void operator delete[](void* p, const std::nothrow_t&) noexcept;
+
+void* operator new(std::size_t n) noexcept(false);
+void* operator new[](std::size_t n) noexcept(false);
+
+void* operator new(std::size_t n, const std::nothrow_t& tag) noexcept;
+void* operator new[](std::size_t n, const std::nothrow_t& tag) noexcept;
+
+void operator delete(void* p, std::size_t n) noexcept;
+void operator delete[](void* p, std::size_t n) noexcept;
+
+void operator delete(void* p, std::align_val_t al) noexcept;
+void operator delete[](void* p, std::align_val_t al) noexcept;
+void operator delete(void* p, std::size_t n, std::align_val_t al) noexcept;
+void operator delete[](void* p, std::size_t n, std::align_val_t al) noexcept;
+void operator delete(void* p, std::align_val_t al, const std::nothrow_t&) noexcept;
+void operator delete[](void* p, std::align_val_t al, const std::nothrow_t&) noexcept;
+
+void* operator new(std::size_t n, std::align_val_t al) noexcept(false);
+void* operator new[](std::size_t n, std::align_val_t al) noexcept(false);
+void* operator new(std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept;
+void* operator new[](std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept;

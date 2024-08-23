@@ -11,6 +11,9 @@ add_requires("spdlog_radray v1.14.1", {
         no_default_logger = true
     }})
 add_requires("eigen 3.4.0")
+if get_config("enable_mimalloc") then
+    add_requires("mimalloc 2.1.7", {debug = is_mode("debug"), configs = {shared = false}}) 
+end
 
 target("radray_core")
     set_kind("static")
@@ -18,3 +21,7 @@ target("radray_core")
     add_includedirs(path.join(os.projectdir(), "include"), {public = true})
     add_files("*.cpp")
     add_packages("spdlog", "eigen", {public = true})
+    if get_config("enable_mimalloc") then
+        add_defines("RADRAY_ENABLE_MIMALLOC")
+        add_packages("mimalloc")
+    end

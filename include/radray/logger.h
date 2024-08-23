@@ -8,33 +8,33 @@
 
 namespace radray {
 
-spdlog::logger& GetDefaultLogger() noexcept;
+// spdlog::logger& GetDefaultLogger() noexcept;
 
 void Log(spdlog::source_loc loc, spdlog::level::level_enum lvl, spdlog::string_view_t msg) noexcept;
 
 template <typename... Args>
 void LogDebug(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
-    Log(spdlog::source_loc{}, spdlog::level::debug, CFormat(fmt, std::forward<Args>(args)...));
+    Log(spdlog::source_loc{}, spdlog::level::debug, radray::format_to(fmt, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
 void LogInfo(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
-    Log(spdlog::source_loc{}, spdlog::level::info, CFormat(fmt, std::forward<Args>(args)...));
+    Log(spdlog::source_loc{}, spdlog::level::info, radray::format_to(fmt, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
 void LogWarn(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
-    Log(spdlog::source_loc{}, spdlog::level::warn, CFormat(fmt, std::forward<Args>(args)...));
+    Log(spdlog::source_loc{}, spdlog::level::warn, radray::format_to(fmt, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
 void LogError(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
-    Log(spdlog::source_loc{}, spdlog::level::err, CFormat(fmt, std::forward<Args>(args)...));
+    Log(spdlog::source_loc{}, spdlog::level::err, radray::format_to(fmt, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
 void LogAbort(spdlog::format_string_t<Args...> fmt, Args&&... args) noexcept {
-    Log(spdlog::source_loc{}, spdlog::level::critical, CFormat(fmt, std::forward<Args>(args)...));
+    Log(spdlog::source_loc{}, spdlog::level::critical, radray::format_to(fmt, std::forward<Args>(args)...));
     std::abort();
 }
 

@@ -18,7 +18,7 @@ static spdlog::logger g_logger = []() {
     return l;
 }();
 
-spdlog::logger& GetDefaultLogger() noexcept { return g_logger; }
+// spdlog::logger& GetDefaultLogger() noexcept { return g_logger; }
 
 void Log(spdlog::source_loc loc, spdlog::level::level_enum lvl, spdlog::string_view_t msg) noexcept {
     g_logger.log(loc, lvl, msg);
