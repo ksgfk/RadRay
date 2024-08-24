@@ -3,42 +3,33 @@ package("dxc_radray")
 
     add_versions("v1.8.2407", "894a223491f0fee168c918f552aec35c2d067bfca2d2f28011d506b6e6af11b4")
 
-    on_install("windows|x64", function (package)
-        os.cp("win-x64/bin/*", package:installdir("bin"))
-        os.cp("win-x64/inc/*", package:installdir("include"))
-        package:addenv("PATH", "bin")
-    end)
-
-    on_install("windows|arm64", function (package)
-        os.cp("win-arm64/bin/*", package:installdir("bin"))
-        os.cp("win-arm64/inc/*", package:installdir("include"))
-        package:addenv("PATH", "bin")
-    end)
-
-    on_install("linux|x64", function (package)
-        os.cp("linux-x64/bin/*", package:installdir("bin"))
+    on_install(function (package)
         os.cp("linux-x64/include/*", package:installdir("include"))
-        os.cp("linux-x64/lib/*", package:installdir("lib"))
-        package:addenv("PATH", "bin")
-        package:addenv("PATH", "lib")
+        package:addenv("PATH", "include")
+        if package:is_plat("windows") and package:is_arch("x64") then
+            os.cp("win-x64/bin/*", package:installdir("bin"))
+            package:addenv("PATH", "bin")
+        end
+        if package:is_plat("windows") and package:is_arch("arm64") then
+            os.cp("win-arm64/bin/*", package:installdir("bin"))
+            package:addenv("PATH", "bin")
+        end
+        if package:is_plat("linux") and package:is_arch("x64") then
+            os.cp("linux-x64/bin/*", package:installdir("bin"))
+            os.cp("linux-x64/lib/*", package:installdir("lib"))
+            package:addenv("PATH", "bin")
+            package:addenv("PATH", "lib")
+        end
+        if package:is_plat("macosx") and package:is_arch("x86_64") then
+            os.cp("osx-x64/bin/*", package:installdir("bin"))
+            os.cp("osx-x64/lib/*", package:installdir("lib"))
+            package:addenv("PATH", "bin")
+            package:addenv("PATH", "lib")
+        end
+        if package:is_plat("macosx") and package:is_arch("arm64") then
+            os.cp("osx-arm64/bin/*", package:installdir("bin"))
+            os.cp("osx-arm64/lib/*", package:installdir("lib"))
+            package:addenv("PATH", "bin")
+            package:addenv("PATH", "lib")
+        end
     end)
-
-    on_install("macosx|x86_64", function (package)
-        os.cp("osx-x64/bin/*", package:installdir("bin"))
-        os.cp("osx-x64/include/*", package:installdir("include"))
-        os.cp("osx-x64/lib/*", package:installdir("lib"))
-        package:addenv("PATH", "bin")
-        package:addenv("PATH", "lib")
-    end)
-
-    on_install("macosx|arm64", function (package)
-        os.cp("osx-arm64/bin/*", package:installdir("bin"))
-        os.cp("osx-arm64/include/*", package:installdir("include"))
-        os.cp("osx-arm64/lib/*", package:installdir("lib"))
-        package:addenv("PATH", "bin")
-        package:addenv("PATH", "lib")
-    end)
-
-    -- on_test(function (package)
-    --     os.vrun("dxc -help")
-    -- end)

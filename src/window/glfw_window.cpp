@@ -114,58 +114,48 @@ public:
     radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> windowRefreshCb;
 };
 
-GlfwWindow::GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable, bool fullScreen) noexcept {
-    _impl = radray::make_unique<Impl>(name, width, height, resizable, fullScreen);
-}
+GlfwWindow::GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable, bool fullScreen) noexcept
+    : _impl(new GlfwWindow::Impl{name, width, height, resizable, fullScreen}) {}
 
-GlfwWindow::~GlfwWindow() noexcept = default;
+GlfwWindow::~GlfwWindow() noexcept {
+    Destroy();
+}
 
 bool GlfwWindow::IsValid() const noexcept { return _impl != nullptr; }
 
 bool GlfwWindow::ShouldClose() const noexcept {
-    return glfwWindowShouldClose(_impl.get()->window);
+    return glfwWindowShouldClose(_impl->window);
 }
 
 size_t GlfwWindow::GetNativeHandle() const noexcept {
-    return _impl.get()->nativeHandle;
+    return _impl->nativeHandle;
 }
 
 Eigen::Vector2i GlfwWindow::GetSize() const noexcept {
     int w, h;
-    glfwGetWindowSize(_impl.get()->window, &w, &h);
+    glfwGetWindowSize(_impl->window, &w, &h);
     return Eigen::Vector2i{w, h};
 }
 
 void GlfwWindow::Destroy() noexcept {
-    _impl = nullptr;
+    if (_impl != nullptr) {
+        delete _impl;
+        _impl = nullptr;
+    }
 }
 
-radray::shared_ptr<MultiDelegate<MouseButtonCallback>> GlfwWindow::EventMouseButtonCall() const noexcept {
-    return _impl.get()->mouseButtonCb;
-}
+radray::shared_ptr<MultiDelegate<MouseButtonCallback>> GlfwWindow::EventMouseButtonCall() const noexcept { return _impl->mouseButtonCb; }
 
-radray::shared_ptr<MultiDelegate<CursorPositionCallback>> GlfwWindow::EventCursorPosition() const noexcept {
-    return _impl.get()->cursorPositionCb;
-}
+radray::shared_ptr<MultiDelegate<CursorPositionCallback>> GlfwWindow::EventCursorPosition() const noexcept { return _impl->cursorPositionCb; }
 
-radray::shared_ptr<MultiDelegate<KeyCallback>> GlfwWindow::EventKey() const noexcept {
-    return _impl.get()->keyCb;
-}
+radray::shared_ptr<MultiDelegate<KeyCallback>> GlfwWindow::EventKey() const noexcept { return _impl->keyCb; }
 
-radray::shared_ptr<MultiDelegate<ScrollCallback>> GlfwWindow::EventScroll() const noexcept {
-    return _impl.get()->scrollCb;
-}
+radray::shared_ptr<MultiDelegate<ScrollCallback>> GlfwWindow::EventScroll() const noexcept { return _impl->scrollCb; }
 
-radray::shared_ptr<MultiDelegate<WindowResizeCallback>> GlfwWindow::EventWindwResize() const noexcept {
-    return _impl.get()->windowResizeCb;
-}
+radray::shared_ptr<MultiDelegate<WindowResizeCallback>> GlfwWindow::EventWindwResize() const noexcept { return _impl->windowResizeCb; }
 
-radray::shared_ptr<MultiDelegate<FrameResizeCallback>> GlfwWindow::EventFrameResize() const noexcept {
-    return _impl.get()->frameResizeCb;
-}
+radray::shared_ptr<MultiDelegate<FrameResizeCallback>> GlfwWindow::EventFrameResize() const noexcept { return _impl->frameResizeCb; }
 
-radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> GlfwWindow::EventWindowRefresh() const noexcept {
-    return _impl.get()->windowRefreshCb;
-}
+radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> GlfwWindow::EventWindowRefresh() const noexcept { return _impl->windowRefreshCb; }
 
 }  // namespace radray::window

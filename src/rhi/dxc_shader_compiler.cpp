@@ -71,7 +71,11 @@ class DxcShaderCompiler::Impl {
 public:
     Impl() : _dxcLib("dxcompiler") {
         if (!_dxcLib.IsValid()) {
+#ifdef RADRAY_ENABLE_DXC
             RADRAY_THROW(std::runtime_error, "cannot load dxcompiler");
+#else
+            return;
+#endif
         }
         auto pDxcCreateInstance = _dxcLib.GetFunction<decltype(DxcCreateInstance)>("DxcCreateInstance");
         if (pDxcCreateInstance == nullptr) {
@@ -93,17 +97,84 @@ public:
     ~Impl() noexcept = default;
 
     CompileResult Compile(std::string_view code, std::span<LPCWSTR> args) {
-        return "no impl";
+        if (_dxc.Get() == nullptr) {
+            return "cannot use dxc. dynamic lib dxcompiler is not exist";
+        }
+        DxcBuffer buffer{
+            code.data(),
+            code.size(),
+            CP_ACP};
+        RhiComPtr<IDxcResult> compileResult;
+        {
+            HRESULT hr = _dxc->Compile(
+                &buffer,
+                args.data(),
+                args.size(),
+                nullptr,
+                IID_PPV_ARGS(compileResult.GetAddressOf()));
+            if (hr != S_OK) {
+                return radray::format("dxc error {}", hr);
+            }
+        }
+        HRESULT status;
+        {
+            HRESULT hr = compileResult->GetStatus(&status);
+            if (hr != S_OK) {
+                return radray::format("dxc error {}", hr);
+            }
+        }
+        if (status == 0) {
+            RhiComPtr<IDxcBlob> resultBlob;
+            {
+                HRESULT hr = compileResult->GetResult(resultBlob.GetAddressOf());
+                if (hr != S_OK) {
+                    return radray::format("dxc error {}", hr);
+                }
+            }
+            auto data = reinterpret_cast<const uint8_t*>(resultBlob->GetBufferPointer());
+            radray::vector<uint8_t> code{data, data + resultBlob->GetBufferSize()};
+            RhiComPtr<IDxcBlob> reflBlob;
+            {
+                HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(reflBlob.GetAddressOf()), nullptr);
+                if (hr != S_OK) {
+                    return radray::format("dxc error {}", hr);
+                }
+            }
+            auto refld = reinterpret_cast<const uint8_t*>(reflBlob->GetBufferPointer());
+            radray::vector<uint8_t> refl{refld, refld + reflBlob->GetBufferSize()};
+            return ShaderBlob{std::move(code), std::move(refl)};
+        } else {
+            RhiComPtr<IDxcBlobEncoding> errBuffer;
+            {
+                HRESULT hr = compileResult->GetErrorBuffer(errBuffer.GetAddressOf());
+                if (hr != S_OK) {
+                    return radray::format("dxc error {}", hr);
+                }
+            }
+            std::string_view errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
+            return radray::string{errStr};
+        }
     }
 
-private:
+public:
     DynamicLibrary _dxcLib;
-    RhiComPtr<IDxcCompiler> _dxc;
+    RhiComPtr<IDxcCompiler3> _dxc;
     RhiComPtr<IDxcUtils> _utils;
 };
 
-DxcShaderCompiler::DxcShaderCompiler() : _impl(radray::make_unique<DxcShaderCompiler::Impl>()) {}
+DxcShaderCompiler::DxcShaderCompiler() : _impl(new DxcShaderCompiler::Impl{}) {}
+
+DxcShaderCompiler::~DxcShaderCompiler() noexcept {
+    if (_impl != nullptr) {
+        delete _impl;
+        _impl = nullptr;
+    }
+}
 
 CompileResult DxcShaderCompiler::Compile(std::string_view code, std::span<const wchar_t*> args) const { return _impl->Compile(code, args); }
+
+IDxcCompiler3* DxcShaderCompiler::GetCompiler() const noexcept { return _impl->_dxc.Get(); }
+
+IDxcUtils* DxcShaderCompiler::GetUtils() const noexcept { return _impl->_utils.Get(); }
 
 }  // namespace radray::rhi

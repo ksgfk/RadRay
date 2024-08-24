@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/rhi/device_interface.h>
+#include <radray/rhi/dxc_shader_compiler.h>
 
 #include "d3d12_helper.h"
 #include "d3d12_descriptor_heap.h"
@@ -37,8 +38,13 @@ public:
     RadrayTextureView CreateTextureView(const RadrayTextureViewDescriptor& desc) override;
     void DestroyTextureView(RadrayTextureView view) override;
 
-    RadrayShader CompileShader(const RadrayShaderDescriptor& desc) override;
+    RadrayShader CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) override;
     void DestroyShader(RadrayShader shader) override;
+
+    RadrayRootSignature CreateRootSignature(const RadrayRootSignatureDescriptor& desc) override;
+    void DestroyRootSignature(RadrayRootSignature rootSig) override;
+
+    DxcShaderCompiler* GetDxc();
 
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;
@@ -50,6 +56,11 @@ public:
     radray::unique_ptr<DescriptorHeap> dsvHeap;
     radray::unique_ptr<DescriptorHeap> gpuCbvSrvUavHeap;
     radray::unique_ptr<DescriptorHeap> gpuSamplerHeap;
+
+private:
+    radray::unique_ptr<DxcShaderCompiler> _dxc;
+
+public:
     bool canSetDebugName;
 };
 

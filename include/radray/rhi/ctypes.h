@@ -28,6 +28,7 @@ RADRAY_RHI_RESOURCE(RadrayFence);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
 RADRAY_RHI_RESOURCE(RadrayTexture);
+RADRAY_RHI_RESOURCE(RadraySampler);
 RADRAY_RHI_RESOURCE(RadrayShader);
 RADRAY_RHI_RESOURCE(RadrayRootSignature);
 RADRAY_RHI_RESOURCE(RadrayGraphicsPipeline);
@@ -365,12 +366,31 @@ typedef struct RadrayTextureViewDescriptor {
     uint32_t MipLevelCount;
 } RadrayTextureViewDescriptor;
 
-typedef struct RadrayShaderDescriptor {
-    const uint8_t* Name;
-    const uint8_t* Data;
-    size_t Length;
+typedef struct RadrayCompileRasterizationShaderDescriptor {
+    const char* Name;
+    const char* Data;
+    size_t DataLength;
+    const char* EntryPoint;
     RadrayShaderStage Stage;
-} RadrayShaderDescriptor;
+    uint32_t ShaderModel;
+    const char* const* Defines;
+    size_t DefineCount;
+    bool IsOptimize;
+} RadrayCompileRasterizationShaderDescriptor;
+
+typedef struct RadrayStageShaderDescriptor {
+    RadrayShader Shader;
+    const char* EntryPoint;
+    RadrayShaderStage Stage;
+} RadrayStageShaderDescriptor;
+
+typedef struct RadrayRootSignatureDescriptor {
+    const RadrayStageShaderDescriptor* Shaders;
+    size_t ShaderCount;
+    const RadraySampler* StaticSamplers;
+    const char* const* StaticSamplerNames;
+    size_t StaticSamplerCount;
+} RadrayRootSignatureDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

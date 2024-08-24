@@ -1,3 +1,4 @@
+add_requires("dxc_radray v1.8.2407", {debug = is_mode("debug")})
 if get_config("enable_d3d12") then
     add_requires("directx-headers v1.614.0", {debug = is_mode("debug")})
     add_requires("d3d12-memory-allocator_radray v2.0.1", {
@@ -19,8 +20,8 @@ target("radray_rhi")
     end
     if get_config("enable_dxc") then 
         add_defines("RADRAY_ENABLE_DXC", {public = true})
-        add_packages("dxc_radray")
     end
+    add_packages("dxc_radray")
     -- if get_config("enable_metal") then
     --     add_defines("RADRAY_ENABLE_METAL", {public = true})
     -- end

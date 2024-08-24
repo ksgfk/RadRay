@@ -46,7 +46,7 @@ public:
 private:
     class Impl;
 
-    radray::unique_ptr<Impl> _impl;
+    Impl* _impl;
 };
 
 }  // namespace radray::window

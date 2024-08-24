@@ -48,8 +48,11 @@ public:
     virtual RadrayTextureView CreateTextureView(const RadrayTextureViewDescriptor& desc) = 0;
     virtual void DestroyTextureView(RadrayTextureView view) = 0;
 
-    virtual RadrayShader CompileShader(const RadrayShaderDescriptor& desc) = 0;
+    virtual RadrayShader CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) = 0;
     virtual void DestroyShader(RadrayShader shader) = 0;
+
+    virtual RadrayRootSignature CreateRootSignature(const RadrayRootSignatureDescriptor& desc) = 0;
+    virtual void DestroyRootSignature(RadrayRootSignature rootSig) = 0;
 };
 
 }  // namespace radray::rhi

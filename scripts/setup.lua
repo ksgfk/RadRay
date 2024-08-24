@@ -1,7 +1,7 @@
 option("_radray_checkout")
     set_default(false)
     set_showmenu(false)
-    add_deps("build_test", "enable_d3d12", "enable_metal")
+    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc")
     before_check(function(option)
         if path.absolute(path.join(os.projectdir(), "scripts")) == path.absolute(os.scriptdir()) then
             local opts = import("options", {try = true, anonymous = true})

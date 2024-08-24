@@ -12,6 +12,8 @@
 #include <wrl.h>
 #include <dxgi1_6.h>
 #include <directx/d3dx12.h>
+#include <directx/d3d12shader.h>
+#include <dxcapi.h>
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
 #include <D3D12MemAlloc.h>
 

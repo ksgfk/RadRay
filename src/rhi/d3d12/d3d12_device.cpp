@@ -1,5 +1,7 @@
 #include "d3d12_device.h"
 
+#include <sstream>
+
 #include <radray/basic_math.h>
 #include <radray/utility.h>
 
@@ -10,6 +12,7 @@
 #include "d3d12_swapchain.h"
 #include "d3d12_buffer.h"
 #include "d3d12_texture.h"
+#include "d3d12_shader.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -598,11 +601,99 @@ void Device::DestroyTextureView(RadrayTextureView view) {
     RhiDelete(v);
 }
 
-RadrayShader Device::CompileShader(const RadrayShaderDescriptor& desc) {
-    return {};
+RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
+    auto toSm = [](RadrayShaderStage stage, uint32_t shaderModel) {
+        using oss = std::basic_ostringstream<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
+        oss s{};
+        switch (stage) {
+            case RADRAY_SHADER_STAGE_VERTEX: s << L"vs_"; break;
+            case RADRAY_SHADER_STAGE_HULL: s << L"hs_"; break;
+            case RADRAY_SHADER_STAGE_DOMAIN: s << L"ds_"; break;
+            case RADRAY_SHADER_STAGE_GEOMETRY: s << L"gs_"; break;
+            case RADRAY_SHADER_STAGE_PIXEL: s << L"ps_"; break;
+            default: RADRAY_DX_THROW(radray::format("cannot compile {} in raster shader", (uint32_t)stage));
+        }
+        s << (shaderModel / 10) << "_" << shaderModel % 10;
+        radray::wstring result = s.str();
+        return result;
+    };
+    radray::wstring sm = toSm(desc.Stage, desc.ShaderModel);
+    radray::wstring entryPoint = Utf8ToWString(radray::string{desc.EntryPoint});
+    radray::wstring name = Utf8ToWString(radray::string{desc.Name});
+    radray::vector<radray::wstring> defines{};
+    defines.reserve(desc.DefineCount);
+    for (size_t i = 0; i < desc.DefineCount; i++) {
+        defines.emplace_back(Utf8ToWString(radray::string{desc.Defines[i]}));
+    }
+    radray::vector<LPCWSTR> args{};
+    args.emplace_back(L"-all_resources_bound");
+    {
+        args.emplace_back(L"-HV");
+        args.emplace_back(L"2021");
+    }
+    if (desc.IsOptimize) {
+        args.emplace_back(L"-O3");
+    } else {
+        args.emplace_back(L"-Od");
+    }
+    {
+        args.emplace_back(L"-T");
+        args.emplace_back(sm.c_str());
+    }
+    {
+        args.emplace_back(L"-E");
+        args.emplace_back(entryPoint.c_str());
+    }
+    {
+        args.emplace_back(L"-Fd");
+        args.emplace_back(name.c_str());
+    }
+    for (auto&& i : defines) {
+        args.emplace_back(L"-D");
+        args.emplace_back(i.c_str());
+    }
+    auto dxc = GetDxc();
+    CompileResult cr = dxc->Compile(std::string_view{desc.Data, desc.DataLength}, args);
+    RadrayShader result{nullptr, nullptr};
+    if (auto err = std::get_if<radray::string>(&cr)) {
+        RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
+        RADRAY_INFO_LOG("{}", *err);
+    } else if (auto bc = std::get_if<ShaderBlob>(&cr)) {
+        auto rs = RhiNew<RasterShader>();
+        auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
+        rs->code = std::move(bc->Data);
+        {
+            DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
+            HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(rs->refl.GetAddressOf()));
+            if (hr != S_OK) {
+                RADRAY_ERR_LOG("cannot create reflection for {}", desc.Name);
+                return RadrayShader{};
+            }
+        }
+        result = {rs, rs->refl.Get()};
+        guard.Dismiss();
+    }
+    return result;
 }
 
 void Device::DestroyShader(RadrayShader shader) {
+    auto rs = reinterpret_cast<RasterShader*>(shader.Ptr);
+    RhiDelete(rs);
+}
+
+RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescriptor& desc) {
+    RADRAY_DX_THROW("no impl");
+}
+
+void Device::DestroyRootSignature(RadrayRootSignature shader) {
+    RADRAY_DX_THROW("no impl");
+}
+
+DxcShaderCompiler* Device::GetDxc() {
+    if (_dxc == nullptr) {
+        _dxc = radray::make_unique<DxcShaderCompiler>();
+    }
+    return _dxc.get();
 }
 
 }  // namespace radray::rhi::d3d12
