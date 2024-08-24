@@ -4,11 +4,11 @@
 #include <string_view>
 #include <span>
 
-#include <radray/rhi/config.h>
+#include <radray/types.h>
 
 namespace radray::rhi {
 
-using CompileResult = std::variant<RhiVector<uint8_t>, std::string>;
+using CompileResult = std::variant<radray::vector<uint8_t>, radray::string>;
 
 class DxcShaderCompiler {
 public:
@@ -19,7 +19,7 @@ public:
 private:
     class Impl;
 
-    RhiUniquePtr<Impl> _impl;
+    radray::unique_ptr<Impl> _impl;
 };
 
 }  // namespace radray::rhi

@@ -29,8 +29,8 @@ std::string_view to_string(VertexIndexType val) noexcept {
     }
 }
 
-std::optional<VertexSemantic> VertexData::StringToEnumSemantic(const std::string& s) noexcept {
-    std::string e{s};
+std::optional<VertexSemantic> VertexData::StringToEnumSemantic(const radray::string& s) noexcept {
+    radray::string e{s};
     std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return std::toupper(c); });
     if (e == "POSITION") {
         return VertexSemantic::POSITION;

@@ -31,7 +31,7 @@ UINT DescriptorHeap::Allocate() {
     UINT result;
     if (empty.empty()) {
         if (allocIndex == desc.NumDescriptors) {
-            RADRAY_DX_THROW(std::format("DescriptorHeap is out of space {}", desc.NumDescriptors));
+            RADRAY_DX_THROW(radray::format("DescriptorHeap is out of space {}", desc.NumDescriptors));
         }
         result = allocIndex;
         allocIndex++;

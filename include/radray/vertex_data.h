@@ -35,7 +35,7 @@ struct VertexLayout {
 
 class VertexData {
 public:
-    static std::optional<VertexSemantic> StringToEnumSemantic(const std::string& s) noexcept;
+    static std::optional<VertexSemantic> StringToEnumSemantic(const radray::string& s) noexcept;
 
     radray::vector<VertexLayout> layouts;
     radray::unique_ptr<byte[]> vertexData;

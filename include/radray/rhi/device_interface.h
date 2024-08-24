@@ -5,6 +5,16 @@
 
 namespace radray::rhi {
 
+template <class T, class... Args>
+constexpr T* RhiNew(Args&&... args) {
+    return new T{std::forward<Args>(args)...};
+}
+
+template <class T>
+constexpr void RhiDelete(T* ptr) noexcept {
+    delete ptr;
+}
+
 // TODO: enum format
 class DeviceInterface {
 public:

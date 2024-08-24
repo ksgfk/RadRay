@@ -6,7 +6,6 @@
 #include <radray/platform.h>
 #include <radray/types.h>
 #include <radray/logger.h>
-#include <radray/rhi/config.h>
 #include <radray/rhi/ctypes.h>
 
 #include <windows.h>
@@ -16,13 +15,11 @@
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
 #include <D3D12MemAlloc.h>
 
-#include <string>
-
 namespace radray::rhi::d3d12 {
 
 class D3D12Exception : public std::runtime_error {
 public:
-    explicit D3D12Exception(const std::string& message) : std::runtime_error(message) {}
+    explicit D3D12Exception(const radray::string& message) : std::runtime_error(message.c_str()) {}
     explicit D3D12Exception(const char* message) : std::runtime_error(message) {}
 };
 
@@ -30,9 +27,9 @@ using Microsoft::WRL::ComPtr;
 
 const char* GetErrorName(HRESULT hr) noexcept;
 
-std::wstring Utf8ToWString(const std::string& str) noexcept;
+radray::wstring Utf8ToWString(const radray::string& str) noexcept;
 
-std::string Utf8ToString(const std::wstring& str) noexcept;
+radray::string Utf8ToString(const radray::wstring& str) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
 
@@ -67,14 +64,14 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
     do {                                                                                                                              \
         HRESULT hr_ = (x);                                                                                                            \
         if (hr_ != S_OK) [[unlikely]] {                                                                                               \
-            auto mfmt__ = std::format("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
+            auto mfmt__ = ::radray::format("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
             throw D3D12Exception(mfmt__);                                                                                             \
         }                                                                                                                             \
     } while (false)
 #endif
 
 template <class CharT>
-struct std::formatter<D3D12_DESCRIPTOR_HEAP_TYPE, CharT> : std::formatter<std::string_view, CharT> {
+struct fmt::formatter<D3D12_DESCRIPTOR_HEAP_TYPE, CharT> : fmt::formatter<std::string_view, CharT> {
     template <class FormatContext>
     auto format(D3D12_DESCRIPTOR_HEAP_TYPE const& val, FormatContext& ctx) const {
         return formatter<std::string_view, CharT>::format(radray::rhi::d3d12::to_string(val), ctx);

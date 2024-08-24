@@ -45,11 +45,11 @@ public:
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<ID3D12Device5> device;
     ComPtr<D3D12MA::Allocator> resourceAlloc;
-    RhiUniquePtr<DescriptorHeap> cbvSrvUavHeap;
-    RhiUniquePtr<DescriptorHeap> rtvHeap;
-    RhiUniquePtr<DescriptorHeap> dsvHeap;
-    RhiUniquePtr<DescriptorHeap> gpuCbvSrvUavHeap;
-    RhiUniquePtr<DescriptorHeap> gpuSamplerHeap;
+    radray::unique_ptr<DescriptorHeap> cbvSrvUavHeap;
+    radray::unique_ptr<DescriptorHeap> rtvHeap;
+    radray::unique_ptr<DescriptorHeap> dsvHeap;
+    radray::unique_ptr<DescriptorHeap> gpuCbvSrvUavHeap;
+    radray::unique_ptr<DescriptorHeap> gpuSamplerHeap;
     bool canSetDebugName;
 };
 

@@ -1,7 +1,7 @@
-#include <radray/types.h>
+// #include <radray/types.h>
 
 int main() {
-    auto t = radray::new_array<int[]>(16);
-    radray::delete_array(t);
+    auto t = new int[16];
+    delete[] t;
     return 0;
 }

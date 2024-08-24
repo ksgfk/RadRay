@@ -2,7 +2,6 @@
 
 #include <radray/logger.h>
 #include <radray/rhi/device_interface.h>
-#include <radray/rhi/config.h>
 #ifdef RADRAY_ENABLE_D3D12
 #include "d3d12/d3d12_device.h"
 #endif
@@ -12,7 +11,7 @@ RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc) {
     using namespace radray::rhi;
 #ifdef RADRAY_ENABLE_D3D12
     try {
-        return RhiNew<d3d12::Device>(*desc);
+        return new d3d12::Device(*desc);
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("{}", e.what());
         return nullptr;
@@ -29,5 +28,5 @@ RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc) {
 }
 
 void RadrayReleaseDevice(RadrayDevice device) {
-    RhiDelete(reinterpret_cast<radray::rhi::DeviceInterface*>(device));
+    delete reinterpret_cast<radray::rhi::DeviceInterface*>(device);
 }

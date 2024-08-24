@@ -102,7 +102,7 @@ private:
     RhiComPtr<IDxcUtils> _utils;
 };
 
-DxcShaderCompiler::DxcShaderCompiler() : _impl(MakeUnique<DxcShaderCompiler::Impl>()) {}
+DxcShaderCompiler::DxcShaderCompiler() : _impl(radray::make_unique<DxcShaderCompiler::Impl>()) {}
 
 CompileResult DxcShaderCompiler::Compile(std::string_view code, std::span<const wchar_t*> args) const { return _impl->Compile(code, args); }
 

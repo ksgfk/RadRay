@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
-#include <type_traits>
 #include <utility>
 #include <vector>
 #include <deque>
@@ -63,21 +62,6 @@ void free_size(void* ptr, size_t size) noexcept;
 void aligned_free(void* ptr, size_t alignment) noexcept;
 void aligned_free_size(void* ptr, size_t size, size_t alignment) noexcept;
 
-template <class T, class... Args>
-requires(!std::is_array_v<T>)
-constexpr T* new_object(Args&&... args) { return new T{std::forward<Args>(args)...}; }
-
-template <class T>
-requires(std::is_array_v<T> && std::extent_v<T> == 0)
-constexpr auto new_array(size_t length) { return new std::remove_extent_t<T>[length]; }
-
-template <class T>
-requires(!std::is_array_v<T>)
-constexpr void delete_object(T* ptr) noexcept { delete ptr; }
-
-template <class T>
-constexpr auto delete_array(T* ptr) noexcept { delete[] ptr; }
-
 template <class T>
 class allocator {
 public:
@@ -100,26 +84,6 @@ template <class T, class U>
 constexpr bool operator==(const allocator<T>&, const allocator<U>&) { return true; }
 template <class T, class U>
 constexpr bool operator!=(const allocator<T>&, const allocator<U>&) { return false; }
-
-template <class T>
-class deleter {
-public:
-    constexpr deleter() noexcept = default;
-    template <class U>
-    constexpr deleter(const deleter<U>&) noexcept {}
-
-    constexpr void operator()(T* ptr) const noexcept { delete_object(ptr); }
-};
-
-template <class T>
-class deleter<T[]> {
-public:
-    constexpr deleter() noexcept = default;
-    template <class U>
-    constexpr deleter(const deleter<U>&) noexcept {}
-
-    constexpr void operator()(T* ptr) const noexcept { delete_array(ptr); }
-};
 
 template <class T>
 using vector = std::vector<T, radray::allocator<T>>;
@@ -145,32 +109,11 @@ using unordered_map = std::unordered_map<K, V, Hash, Equal, radray::allocator<st
 template <class T, class Hash = std::hash<T>, class Equal = std::equal_to<T>>
 using unordered_set = std::unordered_set<T, Hash, Equal, radray::allocator<T>>;
 
-template <class T>
-using unique_ptr = std::unique_ptr<T, radray::deleter<T>>;
-
-template <class T>
-using shared_ptr = std::shared_ptr<T>;
-
-template <class T>
-using weak_ptr = std::weak_ptr<T>;
-
-template <class T, class... Args>
-requires(!std::is_array_v<T>)
-constexpr unique_ptr<T> make_unique(Args&&... args) {
-    return unique_ptr<T>{new_object<T>(std::forward<Args>(args)...), radray::deleter<T>{}};
-}
-
-template <class T, class... Args>
-requires(std::is_array_v<T> && std::extent_v<T> == 0)
-constexpr unique_ptr<T> make_unique(size_t length) {
-    return unique_ptr<T>{new_array<T>(length), radray::deleter<T>{}};
-}
-
-template <class T, class... Args>
-requires(!std::is_array_v<T>)
-constexpr shared_ptr<T> make_shared(Args&&... args) {
-    return shared_ptr<T>{new_object<T>(std::forward<Args>(args)...), radray::deleter<T>{}};
-}
+using std::unique_ptr;
+using std::shared_ptr;
+using std::weak_ptr;
+using std::make_unique;
+using std::make_shared;
 
 using string = std::basic_string<char, std::char_traits<char>, radray::allocator<char>>;
 

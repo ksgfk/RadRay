@@ -1,7 +1,7 @@
 #include "d3d12_device.h"
 
 #include <radray/basic_math.h>
-#include <radray/rhi/config.h>
+#include <radray/utility.h>
 
 #include "d3d12_command_queue.h"
 #include "d3d12_command_allocator.h"
@@ -38,7 +38,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
             DXGI_ADAPTER_DESC1 desc;
             temp->GetDesc1(&desc);
             if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
-                std::wstring s{desc.Description};
+                radray::wstring s{desc.Description};
                 RADRAY_DEBUG_LOG("D3D12 find device: {}", Utf8ToString(s));
             }
             temp = nullptr;
@@ -64,7 +64,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
     {
         DXGI_ADAPTER_DESC1 desc;
         adapter->GetDesc1(&desc);
-        std::wstring s{desc.Description};
+        radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("D3D12 device create on device: {}", Utf8ToString(s));
     }
     {
@@ -74,11 +74,11 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         desc.pAdapter = adapter.Get();
         D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks{};
         allocationCallbacks.pAllocate = [](size_t size, size_t alignment, void*) {
-            return RhiMalloc(alignment, size);
+            return radray::aligned_alloc(alignment, size);
         };
         allocationCallbacks.pFree = [](void* ptr, void*) {
             if (ptr != nullptr) {
-                RhiFree(ptr);
+                radray::free(ptr);
             }
         };
         desc.pAllocationCallbacks = &allocationCallbacks;
@@ -86,11 +86,11 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         RADRAY_DX_FTHROW(D3D12MA::CreateAllocator(&desc, resourceAlloc.GetAddressOf()));
     }
     {
-        cbvSrvUavHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 18, false);
-        rtvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1 << 16, false);
-        dsvHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1 << 16, false);
-        gpuCbvSrvUavHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16, true);
-        gpuSamplerHeap = MakeUnique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 11, true);
+        cbvSrvUavHeap = radray::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 18, false);
+        rtvHeap = radray::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1 << 16, false);
+        dsvHeap = radray::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1 << 16, false);
+        gpuCbvSrvUavHeap = radray::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16, true);
+        gpuSamplerHeap = radray::make_unique<DescriptorHeap>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 11, true);
     }
     {
         canSetDebugName = true;
@@ -276,7 +276,7 @@ RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc
                 D3D12_FORMAT_SUPPORT2_NONE};
             HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport));
             if (!SUCCEEDED(hr) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
-                RADRAY_DX_THROW(std::format("D3D12 cannot use UAV format {}", (uint32_t)desc.Format));
+                RADRAY_DX_THROW(radray::format("D3D12 cannot use UAV format {}", (uint32_t)desc.Format));
             }
         }
         if (uavDesc.Format != DXGI_FORMAT_UNKNOWN) {
@@ -286,7 +286,7 @@ RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc
         indexGuard.Dismiss();
         view = RhiNew<BufferView>(BufferView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
     } else {
-        RADRAY_DX_THROW(std::format("D3D12 cannot create buffer view for {}", (uint32_t)desc.Type));
+        RADRAY_DX_THROW(radray::format("D3D12 cannot create buffer view for {}", (uint32_t)desc.Type));
     }
     return RadrayBufferView{view};
 }
@@ -425,7 +425,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(std::format("cannot create RTV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create RTV for {}", (uint32_t)desc.Dimension));
                 break;
             }
         }
@@ -463,7 +463,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(std::format("cannot create DSV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create DSV for {}", (uint32_t)desc.Dimension));
                 break;
             }
         }
@@ -528,7 +528,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(std::format("cannot create SRV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create SRV for {}", (uint32_t)desc.Dimension));
                 break;
             }
         }
@@ -578,7 +578,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(std::format("cannot create UAV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create UAV for {}", (uint32_t)desc.Dimension));
                 break;
             }
         }
@@ -588,7 +588,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         indexGuard.Dismiss();
         view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
     } else {
-        RADRAY_DX_THROW(std::format("cannot create texture view for {}", (uint32_t)desc.Type));
+        RADRAY_DX_THROW(radray::format("cannot create texture view for {}", (uint32_t)desc.Type));
     }
     return RadrayTextureView{view};
 }

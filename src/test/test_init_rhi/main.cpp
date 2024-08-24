@@ -6,29 +6,27 @@
 #include <radray/basic_math.h>
 #include <radray/rhi/device_interface.h>
 
-using namespace radray;
-
 constexpr int FRAME_COUNT = 3;
 
-std::shared_ptr<window::GlfwWindow> glfw;
-rhi::DeviceInterface* device;
-RadrayCommandQueue queue;
+radray::shared_ptr<radray::window::GlfwWindow> glfw;
+radray::rhi::DeviceInterface* device;
+RadrayCommandQueue cmdQueue;
 RadraySwapChain swapchain;
 
 void start() {
-    window::GlobalInitGlfw();
-    glfw = std::make_shared<window::GlfwWindow>("init rhi", 1280, 720);
+    radray::window::GlobalInitGlfw();
+    glfw = radray::make_shared<radray::window::GlfwWindow>("init rhi", 1280, 720);
 #ifdef RADRAY_ENABLE_D3D12
     RadrayDeviceDescriptorD3D12 desc{
         .IsEnableDebugLayer = true};
-    device = reinterpret_cast<rhi::DeviceInterface*>(RadrayCreateDeviceD3D12(&desc));
+    device = reinterpret_cast<radray::rhi::DeviceInterface*>(RadrayCreateDeviceD3D12(&desc));
 #endif
     if (device == nullptr) {
         throw std::runtime_error{"cannot create device"};
     }
-    queue = device->CreateCommandQueue(RADRAY_QUEUE_TYPE_DIRECT);
+    cmdQueue = device->CreateCommandQueue(RADRAY_QUEUE_TYPE_DIRECT);
     RadraySwapChainDescriptor chainDesc{
-        queue,
+        cmdQueue,
         glfw->GetNativeHandle(),
         static_cast<uint32_t>(glfw->GetSize().x()),
         static_cast<uint32_t>(glfw->GetSize().y()),
@@ -40,16 +38,16 @@ void start() {
 
 void update() {
     while (!glfw->ShouldClose()) {
-        window::GlobalPollEventsGlfw();
+        radray::window::GlobalPollEventsGlfw();
         std::this_thread::yield();
     }
 }
 
 void destroy() {
     device->DestroySwapChian(swapchain);
-    device->DestroyCommandQueue(queue);
+    device->DestroyCommandQueue(cmdQueue);
     RadrayReleaseDevice(device);
-    window::GlobalTerminateGlfw();
+    radray::window::GlobalTerminateGlfw();
 }
 
 int main() {

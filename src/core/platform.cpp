@@ -20,8 +20,6 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 #include <windows.h>
 
-#include <string>
-
 namespace radray {
 
 static auto _Win32LastErrMessage() {
@@ -51,11 +49,11 @@ static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?"
 static_assert(sizeof(FARPROC) == sizeof(void*), "size of FARPROC not equal ptr?");
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
-    std::string name;
+    radray::string name;
     if (name_.ends_with(".dll")) {
-        name = std::string{name_};
+        name = radray::string{name_};
     } else {
-        name = std::string{name_} + ".dll";
+        name = radray::string{name_} + ".dll";
     }
     HMODULE m = LoadLibraryA(name.c_str());
     if (m == nullptr) [[unlikely]] {
@@ -72,7 +70,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
-    std::string name{name_};
+    radray::string name{name_};
     auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
@@ -100,18 +98,18 @@ void AlignedFree(void* ptr) noexcept {
 }
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
-    std::string name;
+    radray::string name;
 #ifdef RADRAY_PLATFORM_MACOS
     if (name_.starts_with("lib") && name_.ends_with(".dylib")) {
-        name = std::string{name_};
+        name = radray::string{name_};
     } else {
-        name = "lib" + std::string{name_} + ".dylib";
+        name = "lib" + radray::string{name_} + ".dylib";
     }
 #elif RADRAY_PLATFORM_LINUX
     if (name_.starts_with("lib") && name_.ends_with(".so")) {
-        name = std::string{name_};
+        name = radray::string{name_};
     } else {
-        name = "lib" + std::string{name_} + ".so";
+        name = "lib" + radray::string{name_} + ".so";
     }
 #else
 #error "unknown platform"
@@ -131,7 +129,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
-    std::string name{name_};
+    radray::string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot load symbol {}, reason: {}", name, dlerror());

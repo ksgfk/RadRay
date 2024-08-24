@@ -1,7 +1,5 @@
 #pragma once
 
-#include <radray/rhi/config.h>
-
 #include "d3d12_helper.h"
 
 namespace radray::rhi::d3d12 {
@@ -33,7 +31,7 @@ public:
 public:
     Device* device;
     D3D12_DESCRIPTOR_HEAP_DESC desc;
-    RhiVector<UINT> empty;
+    radray::vector<UINT> empty;
     ComPtr<ID3D12DescriptorHeap> heap;
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuStart;

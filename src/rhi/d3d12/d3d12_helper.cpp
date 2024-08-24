@@ -1,7 +1,5 @@
 #include "d3d12_helper.h"
 
-#include <vector>
-
 #include <radray/logger.h>
 
 namespace radray::rhi::d3d12 {
@@ -46,26 +44,26 @@ const char* GetErrorName(HRESULT hr) noexcept {
     }
 }
 
-std::wstring Utf8ToWString(const std::string& str) noexcept {
+radray::wstring Utf8ToWString(const radray::string& str) noexcept {
     if (str.length() >= std::numeric_limits<int>::max()) {
         RADRAY_ABORT("too large string {}", str.length());
     }
     int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.length(), nullptr, 0);
-    std::vector<wchar_t> buffer{};
+    radray::vector<wchar_t> buffer{};
     buffer.resize(len);
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.length(), buffer.data(), (int)buffer.size());
-    return std::wstring{buffer.begin(), buffer.end()};
+    return radray::wstring{buffer.begin(), buffer.end()};
 }
 
-std::string Utf8ToString(const std::wstring& str) noexcept {
+radray::string Utf8ToString(const radray::wstring& str) noexcept {
     if (str.length() >= std::numeric_limits<int>::max()) {
         RADRAY_ABORT("too large string {}", str.length());
     }
     int len = WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.length(), nullptr, 0, nullptr, nullptr);
-    std::vector<char> buffer{};
+    radray::vector<char> buffer{};
     buffer.resize(len);
     WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.length(), buffer.data(), (int)buffer.size(), nullptr, nullptr);
-    return std::string{buffer.begin(), buffer.end()};
+    return radray::string{buffer.begin(), buffer.end()};
 }
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc) noexcept {

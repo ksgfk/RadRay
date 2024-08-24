@@ -34,10 +34,10 @@ struct SourceLocation {
 using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, allocator<char>>;
 
 template <typename... Args>
-string format(fmt::format_string<Args...> fmtStr, Args&&... args) {
+radray::string format(fmt::format_string<Args...> fmtStr, Args&&... args) {
     fmt_memory_buffer buf{};
     fmt::format_to(std::back_inserter(buf), fmtStr, std::forward<Args>(args)...);
-    return string{buf.data(), buf.size()};
+    return radray::string{buf.data(), buf.size()};
 }
 
 void Log(SourceLocation loc, LogLevel lvl, fmt::string_view msg) noexcept;
@@ -67,10 +67,34 @@ void LogError(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
 }
 
 template <typename... Args>
-void LogAbort(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+void LogAbort(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
     auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(SourceLocation{}, LogLevel::Critical, str);
+    Log(loc, LogLevel::Critical, str);
     std::abort();
+}
+
+template <typename... Args>
+void LogDebugLoc(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    Log(loc, LogLevel::Debug, str);
+}
+
+template <typename... Args>
+void LogInfoLoc(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    Log(loc, LogLevel::Info, str);
+}
+
+template <typename... Args>
+void LogWarnLoc(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    Log(loc, LogLevel::Warn, str);
+}
+
+template <typename... Args>
+void LogErrorLoc(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    Log(loc, LogLevel::Err, str);
 }
 
 }  // namespace radray
@@ -79,7 +103,12 @@ void LogAbort(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
 #define RADRAY_INFO_LOG(fmt, ...) ::radray::LogInfo(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_WARN_LOG(fmt, ...) ::radray::LogWarn(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ERR_LOG(fmt, ...) ::radray::LogError(fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(fmt "\n  at {}:{}" __VA_OPT__(, ) __VA_ARGS__, __FILE__, __LINE__)
+#define RADRAY_ABORT(fmt, ...) ::radray::LogAbort({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_DEBUG_LOG_LOC(fmt, ...) ::radray::LogDebugLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_INFO_LOG_LOC(fmt, ...) ::radray::LogInfoLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_WARN_LOG_LOC(fmt, ...) ::radray::LogWarnLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_ERR_LOG_LOC(fmt, ...) ::radray::LogErrorLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
+
 #if RADRAY_IS_DEBUG
 #define RADRAY_ASSERT(x) assert(x)
 #else
