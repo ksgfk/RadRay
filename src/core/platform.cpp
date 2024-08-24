@@ -24,7 +24,7 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 namespace radray {
 
-static std::string _Win32LastErrMessage() {
+static auto _Win32LastErrMessage() {
     void* buffer = nullptr;
     auto errCode = GetLastError();
     FormatMessage(
@@ -34,7 +34,7 @@ static std::string _Win32LastErrMessage() {
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPTSTR)&buffer,
         0, nullptr);
-    std::string msg = std::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
+    auto msg = fmt::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
     LocalFree(buffer);
     return msg;
 }

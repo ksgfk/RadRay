@@ -21,6 +21,13 @@ if get_config("enable_dxc") then
     target_end()
 end
 
+target("test_basic_alloc")
+    set_kind("binary")
+    add_rules("radray_basic_setting")
+    add_files("test_basic_alloc.cpp")
+    add_deps("radray_core")
+target_end()
+
 -- target("test_nri")
 --     set_kind("binary")
 --     add_rules("radray_basic_setting")

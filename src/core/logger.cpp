@@ -1,5 +1,6 @@
 #include <radray/logger.h>
 
+#include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
@@ -18,10 +19,23 @@ static spdlog::logger g_logger = []() {
     return l;
 }();
 
-// spdlog::logger& GetDefaultLogger() noexcept { return g_logger; }
+static spdlog::level::level_enum _ToSpdlogLogLevel(LogLevel level) {
+    switch (level) {
+        case LogLevel::Trace: return spdlog::level::trace;
+        case LogLevel::Debug: return spdlog::level::debug;
+        case LogLevel::Info: return spdlog::level::info;
+        case LogLevel::Warn: return spdlog::level::warn;
+        case LogLevel::Err: return spdlog::level::err;
+        case LogLevel::Critical: return spdlog::level::critical;
+        default: return spdlog::level::trace;
+    }
+}
 
-void Log(spdlog::source_loc loc, spdlog::level::level_enum lvl, spdlog::string_view_t msg) noexcept {
-    g_logger.log(loc, lvl, msg);
+void Log(SourceLocation loc, LogLevel lvl, fmt::string_view msg) noexcept {
+    g_logger.log(
+        spdlog::source_loc{loc.filename, loc.line, loc.funcname},
+        _ToSpdlogLogLevel(lvl),
+        msg);
 }
 
 }  // namespace radray

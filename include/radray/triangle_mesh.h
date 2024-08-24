@@ -1,6 +1,5 @@
 #pragma once
 
-#include <vector>
 #include <radray/basic_math.h>
 
 namespace radray {
@@ -9,12 +8,12 @@ class VertexData;
 
 class TriangleMesh {
 public:
-    std::vector<uint32_t> indices;
-    std::vector<Eigen::Vector3f> positions;
-    std::vector<Eigen::Vector3f> normals;
-    std::vector<Eigen::Vector2f> uv0;
-    std::vector<Eigen::Vector4f> tangents;
-    std::vector<Eigen::Vector4f> color0;
+    radray::vector<uint32_t> indices;
+    radray::vector<Eigen::Vector3f> positions;
+    radray::vector<Eigen::Vector3f> normals;
+    radray::vector<Eigen::Vector2f> uv0;
+    radray::vector<Eigen::Vector4f> tangents;
+    radray::vector<Eigen::Vector4f> color0;
 
     bool IsValid() const noexcept;
     uint64_t GetVertexByteSize() const noexcept;

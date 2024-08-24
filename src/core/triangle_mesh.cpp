@@ -46,8 +46,8 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
             byteOffset += 16;
         }
         uint64_t byteSize = byteOffset * positions.size();
-        RADRAY_ASSERT(byteSize == GetVertexByteSize(), "byte size not equal");
-        data->vertexData = std::make_unique<byte[]>(byteSize);
+        RADRAY_ASSERT(byteSize == GetVertexByteSize());
+        data->vertexData = radray::make_unique<byte[]>(byteSize);
         data->vertexSize = byteSize;
         float* target = std::launder(reinterpret_cast<float*>(data->vertexData.get()));
         for (size_t i = 0; i < positions.size(); i++) {
@@ -72,17 +72,17 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
         }
     }
     {
-        RADRAY_ASSERT(indices.size() <= std::numeric_limits<uint32_t>::max(), "too large size {}", indices.size());
+        RADRAY_ASSERT(indices.size() <= std::numeric_limits<uint32_t>::max());
         if (positions.size() <= std::numeric_limits<uint16_t>::max()) {
             data->indexType = VertexIndexType::UInt16;
             data->indexSize = indices.size() * sizeof(uint16_t);
-            data->indexData = std::make_unique<byte[]>(data->indexSize);
+            data->indexData = radray::make_unique<byte[]>(data->indexSize);
             data->indexCount = (uint32_t)indices.size();
             std::memcpy(data->indexData.get(), indices.data(), data->indexSize);
         } else if (positions.size() <= std::numeric_limits<uint32_t>::max()) {
             data->indexType = VertexIndexType::UInt32;
             data->indexSize = indices.size() * sizeof(uint32_t);
-            data->indexData = std::make_unique<byte[]>(data->indexSize);
+            data->indexData = radray::make_unique<byte[]>(data->indexSize);
             data->indexCount = (uint32_t)indices.size();
             uint16_t* target = std::launder(reinterpret_cast<uint16_t*>(data->indexData.get()));
             for (auto&& i : indices) {
@@ -96,7 +96,7 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
 }
 
 void TriangleMesh::InitAsCube(float halfExtend) noexcept {
-    positions = std::vector<Eigen::Vector3f>{
+    positions = radray::vector<Eigen::Vector3f>{
         {-1.0f, -1.0f, -1.0f},
         {-1.0f, -1.0f, 1.0f},
         {1.0f, -1.0f, 1.0f},
@@ -121,7 +121,7 @@ void TriangleMesh::InitAsCube(float halfExtend) noexcept {
         {1.0f, -1.0f, 1.0f},
         {1.0f, 1.0f, 1.0f},
         {1.0f, 1.0f, -1.0f}};
-    normals = std::vector<Eigen::Vector3f>{
+    normals = radray::vector<Eigen::Vector3f>{
         {0.0f, -1.0f, 0.0f},
         {0.0f, -1.0f, 0.0f},
         {0.0f, -1.0f, 0.0f},
@@ -146,7 +146,7 @@ void TriangleMesh::InitAsCube(float halfExtend) noexcept {
         {1.0f, 0.0f, 0.0f},
         {1.0f, 0.0f, 0.0f},
         {1.0f, 0.0f, 0.0f}};
-    uv0 = std::vector<Eigen::Vector2f>{
+    uv0 = radray::vector<Eigen::Vector2f>{
         {0.0f, 0.0f},
         {0.0f, 1.0f},
         {1.0f, 1.0f},
@@ -171,7 +171,7 @@ void TriangleMesh::InitAsCube(float halfExtend) noexcept {
         {0.0f, 0.0f},
         {0.0f, 1.0f},
         {1.0f, 1.0f}};
-    tangents = std::vector<Eigen::Vector4f>{
+    tangents = radray::vector<Eigen::Vector4f>{
         {1.0f, 0.0f, 0.0f, 1.0f},
         {1.0f, 0.0f, 0.0f, 1.0f},
         {1.0f, 0.0f, 0.0f, 1.0f},
@@ -196,7 +196,7 @@ void TriangleMesh::InitAsCube(float halfExtend) noexcept {
         {0.0f, 0.0f, -1.0f, 1.0f},
         {0.0f, 0.0f, -1.0f, 1.0f},
         {0.0f, 0.0f, -1.0f, 1.0f}};
-    indices = std::vector<uint32_t>{0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 15, 14, 12, 14, 13, 16, 17, 18, 16, 18, 19, 20, 23, 22, 20, 22, 21};
+    indices = radray::vector<uint32_t>{0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 15, 14, 12, 14, 13, 16, 17, 18, 16, 18, 19, 20, 23, 22, 20, 22, 21};
     if (halfExtend != 1) {
         for (auto&& i : positions) {
             i *= halfExtend;

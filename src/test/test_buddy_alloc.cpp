@@ -8,82 +8,82 @@ void a() {
     {
         BuddyAllocator buddy{2};
         auto d = buddy.Allocate(114514);
-        RADRAY_ASSERT_IMPL(!d.has_value(), "err");
+        RADRAY_ASSERT(!d.has_value());
 
         auto a = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto b = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(b.has_value(), "err");
-        RADRAY_ASSERT_IMPL(b.value() == 1, "err");
+        RADRAY_ASSERT(b.has_value());
+        RADRAY_ASSERT(b.value() == 1);
 
         auto c = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(!c.has_value(), "err");
+        RADRAY_ASSERT(!c.has_value());
     }
     {
         BuddyAllocator buddy{2};
 
         auto a = buddy.Allocate(2);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto c = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(!c.has_value(), "err");
+        RADRAY_ASSERT(!c.has_value());
     }
     {
         BuddyAllocator buddy{8};
         auto a = buddy.Allocate(4);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto b = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(b.has_value(), "err");
-        RADRAY_ASSERT_IMPL(b.value() == 4, "err");
+        RADRAY_ASSERT(b.has_value());
+        RADRAY_ASSERT(b.value() == 4);
 
         auto c = buddy.Allocate(2);
-        RADRAY_ASSERT_IMPL(c.has_value(), "err");
-        RADRAY_ASSERT_IMPL(c.value() == 6, "err");
+        RADRAY_ASSERT(c.has_value());
+        RADRAY_ASSERT(c.value() == 6);
     }
     {
         BuddyAllocator buddy{1};
         auto a = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto c = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(!c.has_value(), "err");
+        RADRAY_ASSERT(!c.has_value());
     }
     {
         BuddyAllocator buddy{3};
         auto a = buddy.Allocate(3);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto c = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(!c.has_value(), "err");
+        RADRAY_ASSERT(!c.has_value());
     }
     {
         BuddyAllocator buddy{5};
         auto a = buddy.Allocate(3);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto b = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(b.has_value(), "err");
-        RADRAY_ASSERT_IMPL(b.value() == 4, "err");
+        RADRAY_ASSERT(b.has_value());
+        RADRAY_ASSERT(b.value() == 4);
 
         auto c = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(!c.has_value(), "err");
+        RADRAY_ASSERT(!c.has_value());
     }
     {
         BuddyAllocator buddy{31};
         auto a = buddy.Allocate(17);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         auto b = buddy.Allocate(14);
-        RADRAY_ASSERT_IMPL(!b.has_value(), "err");
+        RADRAY_ASSERT(!b.has_value());
     }
 }
 
@@ -91,32 +91,32 @@ void b() {
     {
         BuddyAllocator buddy{8};
         auto a = buddy.Allocate(4);
-        RADRAY_ASSERT_IMPL(a.has_value(), "err");
-        RADRAY_ASSERT_IMPL(a.value() == 0, "err");
+        RADRAY_ASSERT(a.has_value());
+        RADRAY_ASSERT(a.value() == 0);
 
         buddy.Destroy(a.value());
 
         auto b = buddy.Allocate(2);
-        RADRAY_ASSERT_IMPL(b.has_value(), "err");
-        RADRAY_ASSERT_IMPL(b.value() == 0, "err");
+        RADRAY_ASSERT(b.has_value());
+        RADRAY_ASSERT(b.value() == 0);
 
         auto c = buddy.Allocate(2);
-        RADRAY_ASSERT_IMPL(c.has_value(), "err");
-        RADRAY_ASSERT_IMPL(c.value() == 2, "err");
+        RADRAY_ASSERT(c.has_value());
+        RADRAY_ASSERT(c.value() == 2);
 
         auto d = buddy.Allocate(4);
-        RADRAY_ASSERT_IMPL(d.has_value(), "err");
-        RADRAY_ASSERT_IMPL(d.value() == 4, "err");
+        RADRAY_ASSERT(d.has_value());
+        RADRAY_ASSERT(d.value() == 4);
 
         buddy.Destroy(c.value());
 
         auto e = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(e.has_value(), "err");
-        RADRAY_ASSERT_IMPL(e.value() == 2, "err");
+        RADRAY_ASSERT(e.has_value());
+        RADRAY_ASSERT(e.value() == 2);
 
         auto f = buddy.Allocate(1);
-        RADRAY_ASSERT_IMPL(f.has_value(), "err");
-        RADRAY_ASSERT_IMPL(f.value() == 3, "err");
+        RADRAY_ASSERT(f.has_value());
+        RADRAY_ASSERT(f.value() == 3);
     }
 }
 

@@ -4,7 +4,6 @@
 #include <numbers>
 #include <sstream>
 #include <ostream>
-#include <format>
 
 #include <Eigen/Dense>
 
@@ -93,52 +92,54 @@ void DecomposeTransform(const Eigen::Matrix<T, 4, 4>& m, Eigen::Vector<T, 3>& tr
 }
 
 template <class Type, int Size>
-std::string to_string(const Eigen::Vector<Type, Size>& v) {
+radray::string to_string(const Eigen::Vector<Type, Size>& v) {
+    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, radray::allocator<char>>;
     Eigen::IOFormat efmt{Eigen::FullPrecision, Eigen::DontAlignCols, "", ", ", "", "", "<", ">"};
-    std::basic_stringbuf<char> buf{};
+    str_buf buf{};
     std::basic_ostream<char> output{&buf};
     output << v.format(efmt);
     output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
-    return buf.str();
+    return radray::string{buf.view()};
 }
 
 template <class Type, int Rows, int Cols>
-std::string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
+radray::string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
+    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, radray::allocator<char>>;
     Eigen::IOFormat efmt{Eigen::FullPrecision, 0, ", ", "\n", "", "", "[", "]"};
-    std::basic_stringbuf<char> buf{};
+    str_buf buf{};
     std::basic_ostream<char> output{&buf};
     output << v.format(efmt);
     output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
-    return buf.str();
+    return radray::string{buf.view()};
 }
 
 template <class Type>
-std::string to_string(const Eigen::Quaternion<Type>& v) {
-    return std::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
+radray::string to_string(const Eigen::Quaternion<Type>& v) {
+    return radray::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
 }
 
 }  // namespace radray
 
 template <class Type, int Size, class CharT>
-struct std::formatter<Eigen::Vector<Type, Size>, CharT> : std::formatter<string, CharT> {
+struct fmt::formatter<Eigen::Vector<Type, Size>, CharT> : fmt::formatter<radray::string, CharT> {
     template <class FormatContext>
     auto format(Eigen::Vector<Type, Size> const& val, FormatContext& ctx) const {
-        return formatter<string, CharT>::format(radray::to_string<Type, Size>(val), ctx);
+        return formatter<radray::string, CharT>::format(radray::to_string<Type, Size>(val), ctx);
     }
 };
 
 template <class Type, int Rows, int Cols, class CharT>
-struct std::formatter<Eigen::Matrix<Type, Rows, Cols>, CharT> : std::formatter<string, CharT> {
+struct fmt::formatter<Eigen::Matrix<Type, Rows, Cols>, CharT> : fmt::formatter<radray::string, CharT> {
     template <class FormatContext>
     auto format(Eigen::Matrix<Type, Rows, Cols> const& val, FormatContext& ctx) const {
-        return formatter<string, CharT>::format(radray::to_string<Type, Rows, Cols>(val), ctx);
+        return formatter<radray::string, CharT>::format(radray::to_string<Type, Rows, Cols>(val), ctx);
     }
 };
 
 template <class Type, class CharT>
-struct std::formatter<Eigen::Quaternion<Type>, CharT> : std::formatter<string, CharT> {
+struct fmt::formatter<Eigen::Quaternion<Type>, CharT> : fmt::formatter<radray::string, CharT> {
     template <class FormatContext>
     auto format(Eigen::Quaternion<Type> const& val, FormatContext& ctx) const {
-        return formatter<string, CharT>::format(radray::to_string<Type>(val), ctx);
+        return formatter<radray::string, CharT>::format(radray::to_string<Type>(val), ctx);
     }
 };

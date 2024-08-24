@@ -139,7 +139,7 @@ static bool ReadStreamImpl(JpgData* that, std::istream& stream) {
             auto row_stride = cinfo.output_width * cinfo.output_components;
             auto buffer = (*cinfo.mem->alloc_sarray)((j_common_ptr)&cinfo, JPOOL_IMAGE, row_stride, 1);
             size_t allSize = (size_t)row_stride * cinfo.output_height;
-            auto result = std::make_unique<byte[]>(allSize);
+            auto result = radray::make_unique<byte[]>(allSize);
             size_t oft = 0;
             while (cinfo.output_scanline < cinfo.output_height) {
                 jpeg_read_scanlines(&cinfo, buffer, 1);
@@ -192,7 +192,7 @@ void JpgData::MoveToImageData(ImageData* o) {
     if (component == 3) {
         size_t srcStride = (size_t)width * 3;
         size_t dstStride = (size_t)width * 4;
-        o->data = std::make_unique<byte[]>(dstStride * height);
+        o->data = radray::make_unique<byte[]>(dstStride * height);
         for (size_t j = 0; j < height; j++) {
             const byte* srcStart = data.get() + srcStride * j;
             byte* dstStart = o->data.get() + dstStride * j;
@@ -210,7 +210,7 @@ void JpgData::MoveToImageData(ImageData* o) {
     }
 }
 
-const char* to_string(JpgColorType val) noexcept {
+std::string_view to_string(JpgColorType val) noexcept {
     switch (val) {
         case radray::resource::JpgColorType::UNKNOWN: return "UNKNOWN";
         case radray::resource::JpgColorType::GRAYSCALE: return "GRAYSCALE";

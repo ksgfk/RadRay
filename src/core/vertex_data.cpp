@@ -5,7 +5,7 @@
 
 namespace radray {
 
-const char* to_string(VertexSemantic e) noexcept {
+std::string_view to_string(VertexSemantic e) noexcept {
     switch (e) {
         case VertexSemantic::POSITION: return "POSITION";
         case VertexSemantic::NORMAL: return "NORMAL";
@@ -21,7 +21,7 @@ const char* to_string(VertexSemantic e) noexcept {
     }
 }
 
-const char* to_string(VertexIndexType val) noexcept {
+std::string_view to_string(VertexIndexType val) noexcept {
     switch (val) {
         case radray::VertexIndexType::UInt16: return "UInt16";
         case radray::VertexIndexType::UInt32: return "UInt32";

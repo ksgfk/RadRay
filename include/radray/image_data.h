@@ -1,7 +1,7 @@
 #pragma once
 
-#include <memory>
 #include <span>
+#include <string_view>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -34,20 +34,20 @@ public:
 
     static size_t FormatByteSize(ImageFormat format) noexcept;
 
-    std::unique_ptr<byte[]> data;
+    radray::unique_ptr<byte[]> data;
     uint32_t width;
     uint32_t height;
     ImageFormat format;
 };
 
-const char* to_string(ImageFormat val) noexcept;
+std::string_view to_string(ImageFormat val) noexcept;
 
 }  // namespace radray
 
 template <class CharT>
-struct std::formatter<radray::ImageFormat, CharT> : std::formatter<const char*, CharT> {
+struct fmt::formatter<radray::ImageFormat, CharT> : fmt::formatter<std::string_view, CharT> {
     template <class FormatContext>
     auto format(radray::ImageFormat val, FormatContext& ctx) const {
-        return formatter<const char*, CharT>::format(to_string(val), ctx);
+        return formatter<std::string_view, CharT>::format(to_string(val), ctx);
     }
 };

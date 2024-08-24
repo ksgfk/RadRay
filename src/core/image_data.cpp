@@ -31,7 +31,7 @@ size_t ImageData::FormatByteSize(ImageFormat format) noexcept {
     }
 }
 
-const char* to_string(ImageFormat val) noexcept {
+std::string_view to_string(ImageFormat val) noexcept {
     switch (val) {
         case radray::ImageFormat::R8_BYTE: return "R8_BYTE";
         case radray::ImageFormat::R16_USHORT: return "R16_USHORT";

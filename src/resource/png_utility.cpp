@@ -29,7 +29,7 @@ static bool IsPng(std::istream& is) {
 }
 
 static bool ReadStreamImpl(PngData* that, std::istream& stream) {
-    png_structp pPng = png_create_read_struct(
+    png_structp pPng = png_create_read_struct_2(
         PNG_LIBPNG_VER_STRING,
         nullptr,
         [](png_structp p, png_const_charp reason) {
@@ -37,6 +37,13 @@ static bool ReadStreamImpl(PngData* that, std::istream& stream) {
         },
         [](png_structp p, png_const_charp tips) {
             RADRAY_WARN_LOG("warning with read png: {}", tips);
+        },
+        nullptr,
+        [](png_structp p, png_alloc_size_t size) {
+            return radray::malloc(size);
+        },
+        [](png_structp p, png_voidp block) {
+            radray::free(block);
         });
     png_infop pInfo = png_create_info_struct(pPng);
     auto guard1 = MakeScopeGuard([&]() {
@@ -72,7 +79,7 @@ static bool ReadStreamImpl(PngData* that, std::istream& stream) {
         color_type = png_get_color_type(pPng, pInfo);
         auto row_ptrs = std::make_unique<png_bytep[]>(img_height);
         size_t byteSize = (size_t)img_width * img_height * img_channels * elemSize;
-        auto png_data = std::make_unique<byte[]>(byteSize);
+        auto png_data = radray::make_unique<byte[]>(byteSize);
         size_t stride = img_width * img_channels * elemSize;
         for (size_t i = 0; i < img_height; i++) {
             size_t offset = i * stride;
@@ -93,13 +100,6 @@ static bool ReadStreamImpl(PngData* that, std::istream& stream) {
             }
         })();
         that->data = std::move(png_data);
-        switch (that->colorType) {
-            case PngColorType::GRAY: RADRAY_ASSERT(that->channel == 1, "what?"); break;
-            case PngColorType::RGB: RADRAY_ASSERT(that->channel == 3, "what?"); break;
-            case PngColorType::RGB_ALPHA: RADRAY_ASSERT(that->channel == 4, "what?"); break;
-            case PngColorType::GRAY_ALPHA: RADRAY_ASSERT(that->channel == 2, "what?"); break;
-            default: break;
-        }
         return true;
     } catch (ReadPngException& e) {
         RADRAY_ERR_LOG("load png error {}", e.what());
@@ -172,13 +172,13 @@ void PngData::MoveToImageData(ImageData* o) {
         }
     })();
     if (colorType == PngColorType::RGB) {
-        RADRAY_ASSERT(channel == 3, "what?");
+        RADRAY_ASSERT(channel == 3);
         size_t elemSize = (size_t)bitDepth / 8;
         size_t srcElem = elemSize * 3;
         size_t srcStride = (size_t)width * srcElem;
         size_t dstElem = elemSize * 4;
         size_t dstStride = (size_t)width * dstElem;
-        o->data = std::make_unique<byte[]>(dstStride * height);
+        o->data = radray::make_unique<byte[]>(dstStride * height);
         for (size_t j = 0; j < height; j++) {
             const byte* srcStart = data.get() + srcStride * j;
             byte* dstStart = o->data.get() + dstStride * j;
@@ -198,7 +198,7 @@ void PngData::MoveToImageData(ImageData* o) {
     }
 }
 
-const char* to_string(PngColorType val) noexcept {
+std::string_view to_string(PngColorType val) noexcept {
     switch (val) {
         case radray::resource::PngColorType::UNKNOWN: return "UNKNOWN";
         case radray::resource::PngColorType::GRAY: return "GRAY";

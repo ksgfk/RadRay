@@ -8,47 +8,16 @@
 
 namespace radray {
 
-LinearAllocator::LinearAllocator(IAllocator* alloc, uint64_t capacity, double incMag) noexcept
-    : _proxy(alloc),
-      _capacity(capacity),
+LinearAllocator::LinearAllocator(uint64_t capacity, double incMag) noexcept
+    : _capacity(capacity),
       _initCapacity(capacity),
       _capacityIncMag(incMag) {}
 
-LinearAllocator::~LinearAllocator() noexcept {
-    for (auto&& i : _buffers) {
-        _proxy->Destroy(i.handle);
-    }
-    _buffers.clear();
-}
-
-LinearAllocator::View LinearAllocator::Allocate(uint64_t targetSize, uint64_t align) noexcept {
-    targetSize = std::max(targetSize, align);
-    for (auto&& i : _buffers) {
-        auto count = CalcAlign(i.count, align);
-        if (i.capacity > count) {
-            int64_t leftSize = (i.capacity - count);
-            if (leftSize >= targetSize) {
-                auto offset = count;
-                i.count = count + targetSize;
-                return {i.handle, offset};
-            }
-        }
-    }
-    if (_capacity < targetSize) {
-        _capacity = std::max<uint64_t>(_capacity, _capacity * _capacityIncMag);
-    }
-    auto allocSize = std::max<uint64_t>(targetSize, _capacity);
-    auto neopt = _proxy->Allocate(allocSize, 1);
-    auto newuint64_t = neopt.value();
-    _buffers.emplace_back(Buffer{
-        .handle = newuint64_t,
-        .capacity = allocSize,
-        .count = targetSize});
-    return {newuint64_t, 0};
-}
+LinearAllocator::~LinearAllocator() noexcept = default;
 
 LinearAllocator::View LinearAllocator::Allocate(uint64_t size) noexcept {
-    for (auto&& i : _buffers) {
+    auto&& buffers = GetBuffer();
+    for (auto&& i : buffers) {
         uint64_t freeSize = i.capacity - i.count;
         if (freeSize >= size) {
             uint64_t offset = i.count;
@@ -60,33 +29,34 @@ LinearAllocator::View LinearAllocator::Allocate(uint64_t size) noexcept {
         _capacity = std::max<uint64_t>(_capacity, static_cast<uint64_t>(_capacity * _capacityIncMag));
     }
     uint64_t allocSize = std::max<uint64_t>(size, _capacity);
-    auto neopt = _proxy->Allocate(allocSize, 1);
-    auto newuint64_t = neopt.value();
-    _buffers.emplace_back(Buffer{
-        .handle = newuint64_t,
+    auto neopt = DoAllocate(allocSize);
+    auto newData = neopt.value();
+    buffers.emplace_back(Buffer{
+        .handle = newData,
         .capacity = allocSize,
         .count = size});
-    return {newuint64_t, 0};
+    return {newData, 0};
 }
 
 void LinearAllocator::Clear() noexcept {
-    switch (_buffers.size()) {
+    auto&& buffers = GetBuffer();
+    switch (buffers.size()) {
         case 0:
             break;
         case 1: {
-            auto&& i = _buffers[0];
+            auto&& i = buffers[0];
             i.count = 0;
             break;
         }
         default: {
             uint64_t sumSize = 0u;
-            for (auto&& i : _buffers) {
+            for (auto&& i : buffers) {
                 sumSize += i.capacity;
-                _proxy->Destroy(i.handle);
+                DoDestroy(i.handle);
             }
-            _buffers.clear();
-            _buffers.emplace_back(Buffer{
-                .handle = _proxy->Allocate(sumSize, 1).value(),
+            buffers.clear();
+            buffers.emplace_back(Buffer{
+                .handle = DoAllocate(sumSize).value(),
                 .capacity = sumSize,
                 .count = 0});
             break;
@@ -95,20 +65,21 @@ void LinearAllocator::Clear() noexcept {
 }
 
 void LinearAllocator::Reset() noexcept {
+    auto&& buffers = GetBuffer();
     _capacity = _initCapacity;
-    if (_buffers.empty()) {
+    if (buffers.empty()) {
         return;
     }
-    if (_buffers.size() > 1) {
-        for (size_t i = 1; i < _buffers.size(); i++) {
-            _proxy->Destroy(_buffers[i].handle);
+    if (buffers.size() > 1) {
+        for (size_t i = 1; i < buffers.size(); i++) {
+            DoDestroy(buffers[i].handle);
         }
-        _buffers.resize(1);
+        buffers.resize(1);
     }
-    Buffer& first = _buffers[0];
+    Buffer& first = buffers[0];
     if (first.capacity > _capacity) {
-        _proxy->Destroy(first.handle);
-        first.handle = _proxy->Allocate(_capacity, 1).value();
+        DoDestroy(first.handle);
+        first.handle = DoAllocate(_capacity).value();
         first.capacity = _capacity;
     }
     first.count = 0;
@@ -118,16 +89,15 @@ void LinearAllocator::Reset() noexcept {
 
 BuddyAllocator::BuddyAllocator(uint64_t capacity) noexcept : _capacity(capacity) {
     uint64_t vcapa = std::bit_ceil(capacity);
-    RADRAY_ASSERT(vcapa <= std::numeric_limits<int64_t>::max(), "too large tree");
+    RADRAY_ASSERT(vcapa <= std::numeric_limits<int64_t>::max());
     uint64_t treeSize = 2 * vcapa - 1;  // 建一颗满二叉树
     _tree.resize(treeSize, NodeState::Unused);
 }
 
-std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_, uint64_t align) noexcept {
+std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
     uint64_t size = size_ == 0 ? 1 : size_;
     size = std::bit_ceil(size);
-    size = CalcAlign(size, align);
-    RADRAY_ASSERT(std::has_single_bit(size), "cannot alloc size={} align={}", size_, align);
+    RADRAY_ASSERT(std::has_single_bit(size));
     int64_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
     int64_t vlength = vCapacity;
     if (size > vlength) {
@@ -193,7 +163,7 @@ void BuddyAllocator::Destroy(uint64_t offset) noexcept {
     while (true) {
         switch (_tree[ptr]) {
             case NodeState::Used: {  // 找到需要释放的节点
-                RADRAY_ASSERT(offset == left, "what?");
+                RADRAY_ASSERT(offset == left);
                 int64_t now = ptr;
                 while (true) {
                     int64_t buddy = now - 1 + ((now % 2 == 0) ? 0 : 2);

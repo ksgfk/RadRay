@@ -5,6 +5,7 @@
 #endif
 
 #include <cstdlib>
+
 #include <radray/platform.h>
 
 namespace radray {
@@ -31,12 +32,6 @@ void* aligned_alloc(size_t alignment, size_t size) noexcept { return AlignedAllo
 void aligned_free(void* ptr, size_t alignment) noexcept { AlignedFree(ptr); }
 void aligned_free_size(void* ptr, size_t size, size_t alignment) noexcept { AlignedFree(ptr); }
 #endif
-
-string v_format(fmt::string_view fmtStr, fmt::format_args args) noexcept {
-    fmt_memory_buffer buf{};
-    fmt::vformat_to(std::back_inserter(buf), fmtStr, args);
-    return string{buf.data(), buf.size()};
-}
 
 }  // namespace radray
 
