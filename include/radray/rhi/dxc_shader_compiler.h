@@ -11,12 +11,12 @@ class IDxcUtils;
 
 namespace radray::rhi {
 
-struct ShaderBlob {
+struct DxilShaderBlob {
     radray::vector<uint8_t> Data;
     radray::vector<uint8_t> Reflection;
 };
 
-using CompileResult = std::variant<ShaderBlob, radray::string>;
+using CompileResult = std::variant<DxilShaderBlob, radray::string>;
 
 class DxcShaderCompiler {
 public:

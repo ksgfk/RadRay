@@ -142,7 +142,7 @@ public:
             }
             auto refld = reinterpret_cast<const uint8_t*>(reflBlob->GetBufferPointer());
             radray::vector<uint8_t> refl{refld, refld + reflBlob->GetBufferSize()};
-            return ShaderBlob{std::move(code), std::move(refl)};
+            return DxilShaderBlob{std::move(code), std::move(refl)};
         } else {
             RhiComPtr<IDxcBlobEncoding> errBuffer;
             {

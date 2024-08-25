@@ -658,7 +658,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
     if (auto err = std::get_if<radray::string>(&cr)) {
         RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
         RADRAY_INFO_LOG("{}", *err);
-    } else if (auto bc = std::get_if<ShaderBlob>(&cr)) {
+    } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
         auto rs = RhiNew<RasterShader>();
         auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
         rs->code = std::move(bc->Data);
