@@ -5,13 +5,6 @@ target("test_buddy_alloc")
     add_deps("radray_core")
 target_end()
 
-target("test_dynamic_lib")
-    set_kind("binary")
-    add_rules("radray_basic_setting")
-    add_files("test_dynamic_lib.cpp")
-    add_deps("radray_core")
-target_end()
-
 target("test_basic_alloc")
     set_kind("binary")
     add_rules("radray_basic_setting")

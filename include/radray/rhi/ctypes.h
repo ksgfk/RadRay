@@ -15,6 +15,11 @@
         void* Native;             \
     } name;
 
+#define RADRAY_IS_EMPTY_RESOURCE(res) res.Ptr == nullptr
+
+#define RADRAY_RHI_MAX_VERTEX_ELEMENT 8
+#define RADRAY_RHI_MAX_MRT 8
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -286,6 +291,19 @@ typedef enum RadrayShaderStage {
 
 typedef uint32_t RadrayShaderStages;
 
+typedef enum RadrayVertexSemantic {
+    RADRAY_VERTEX_SEMANTIC_POSITION,
+    RADRAY_VERTEX_SEMANTIC_NORMAL,
+    RADRAY_VERTEX_SEMANTIC_TEXCOORD,
+    RADRAY_VERTEX_SEMANTIC_TANGENT,
+    RADRAY_VERTEX_SEMANTIC_COLOR,
+    RADRAY_VERTEX_SEMANTIC_PSIZE,
+    RADRAY_VERTEX_SEMANTIC_BINORMAL,
+    RADRAY_VERTEX_SEMANTIC_BLENDINDICES,
+    RADRAY_VERTEX_SEMANTIC_BLENDWEIGHT,
+    RADRAY_VERTEX_SEMANTIC_POSITIONT
+} RadrayVertexSemantic;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -378,19 +396,85 @@ typedef struct RadrayCompileRasterizationShaderDescriptor {
     bool IsOptimize;
 } RadrayCompileRasterizationShaderDescriptor;
 
-typedef struct RadrayStageShaderDescriptor {
-    RadrayShader Shader;
-    const char* EntryPoint;
-    RadrayShaderStage Stage;
-} RadrayStageShaderDescriptor;
-
 typedef struct RadrayRootSignatureDescriptor {
-    const RadrayStageShaderDescriptor* Shaders;
+    const RadrayShader* Shaders;
     size_t ShaderCount;
     const RadraySampler* StaticSamplers;
     const char* const* StaticSamplerNames;
     size_t StaticSamplerCount;
 } RadrayRootSignatureDescriptor;
+
+typedef struct RadrayVertexElement {
+    RadrayVertexSemantic Semantic;
+    uint32_t SemanticIndex;
+    RadrayFormat Format;
+    uint32_t Binding;
+    uint32_t Offset;
+    uint32_t Stride;
+    RadrayVertexInputRate Rate;
+} RadrayVertexElement;
+
+typedef struct RadrayVertexLayout {
+    uint32_t ElementCount;
+    RadrayVertexElement Elements[RADRAY_RHI_MAX_VERTEX_ELEMENT];
+} RadrayVertexLayout;
+
+typedef struct RadrayBlendStateDescriptor {
+    RadrayBlendType SrcFactors;
+    RadrayBlendType DstFactors;
+    RadrayBlendType SrcAlphaFactors;
+    RadrayBlendType DstAlphaFactors;
+    RadrayBlendOp BlendModes;
+    RadrayBlendOp BlendAlphaModes;
+    int32_t Masks;
+    bool AlphaTocoverage;
+    bool IndependentBlend;
+} RadrayBlendStateDescriptor;
+
+typedef struct RadrayDepthStencilDescriptor {
+    RadrayCompareMode DepthFunc;
+    RadrayCompareMode StencilFrontFunc;
+    RadrayStencilOp StencilFrontFail;
+    RadrayStencilOp DepthFrontFail;
+    RadrayStencilOp StencilFrontPass;
+    RadrayCompareMode StencilBackFunc;
+    RadrayStencilOp StencilBackFail;
+    RadrayStencilOp DepthBackFail;
+    RadrayStencilOp StencilBackPass;
+    bool IsEnableDepthTest;
+    bool IsEnableDepthWrite;
+    bool IsEnableStencil;
+} RadrayDepthStencilDescriptor;
+
+typedef struct RadrayRasterizerStateDescriptor {
+    RadrayCullMode Cull;
+    RadrayFillMode Fill;
+    RadrayFrontFace FrontFace;
+    int32_t DepthBias;
+    float SlopeScaledDepthBias;
+    bool IsEnableMultiSample;
+    bool IsEnableScissor;
+    bool IsEnableDepthClamp;
+} RadrayRasterizerStateDescriptor;
+
+typedef struct RadrayGraphicsPipelineDescriptor {
+    RadrayRootSignature RootSignature;
+    RadrayShader VertexShader;
+    RadrayShader HullShader;
+    RadrayShader DomainShader;
+    RadrayShader GeometryShader;
+    RadrayShader PixelShader;
+    RadrayVertexLayout VertexLayout;
+    RadrayBlendStateDescriptor Blend;
+    RadrayDepthStencilDescriptor DepthStencil;
+    RadrayRasterizerStateDescriptor Raster;
+    RadrayFormat ColorFormats[RADRAY_RHI_MAX_MRT];
+    uint32_t RenderTargetCount;
+    RadrayTextureMSAACount SampleCount;
+    uint32_t SampleQuality;
+    RadrayFormat DepthStencilFormat;
+    RadrayTopology PrimitiveTopology;
+} RadrayGraphicsPipelineDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

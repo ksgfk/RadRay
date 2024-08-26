@@ -53,6 +53,9 @@ public:
 
     virtual RadrayRootSignature CreateRootSignature(const RadrayRootSignatureDescriptor& desc) = 0;
     virtual void DestroyRootSignature(RadrayRootSignature rootSig) = 0;
+
+    virtual RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) = 0;
+    virtual void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) = 0;
 };
 
 }  // namespace radray::rhi
