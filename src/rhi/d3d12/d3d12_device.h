@@ -44,6 +44,9 @@ public:
     RadrayRootSignature CreateRootSignature(const RadrayRootSignatureDescriptor& desc) override;
     void DestroyRootSignature(RadrayRootSignature rootSig) override;
 
+    RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) override;
+    void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) override;
+
     DxcShaderCompiler* GetDxc();
 
 public:

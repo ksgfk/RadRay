@@ -195,6 +195,7 @@ typedef enum RadrayStencilOp {
 } RadrayStencilOp;
 
 typedef enum RadrayTextureDimension {
+    RADRAY_TEXTURE_DIM_UNKNOWN,
     RADRAY_TEXTURE_DIM_1D,
     RADRAY_TEXTURE_DIM_2D,
     RADRAY_TEXTURE_DIM_3D,
@@ -244,7 +245,11 @@ typedef enum RadrayResourceType {
     RADRAY_RESOURCE_TYPE_TEXTURE = 0x20,
     RADRAY_RESOURCE_TYPE_TEXTURE_RW = 0x40,
     RADRAY_RESOURCE_TYPE_RENDER_TARGET = 0x80,
-    RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100
+    RADRAY_RESOURCE_TYPE_DEPTH_STENCIL = 0x100,
+
+    RADRAY_RESOURCE_TYPE_SAMPLER = 0x200,
+
+    RADRAY_RESOURCE_TYPE_RAYTRACING = 0x400
 } RadrayResourceType;
 
 typedef uint32_t RadrayResourceTypes;

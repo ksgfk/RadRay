@@ -662,6 +662,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
         auto rs = RhiNew<RasterShader>();
         auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
         rs->code = std::move(bc->Data);
+        rs->stage = desc.Stage;
         {
             DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
             HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(rs->refl.GetAddressOf()));
@@ -682,10 +683,108 @@ void Device::DestroyShader(RadrayShader shader) {
 }
 
 RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescriptor& desc) {
+    struct ShaderResource {
+        radray::string Name;
+        RadrayResourceType Type;
+        RadrayTextureDimension Dim;
+        uint32_t Bind;
+        uint32_t Space;
+        uint32_t Size;
+    };
+    auto d3d12ResTypeToRadType = [](D3D_SHADER_INPUT_TYPE type) {
+        switch (type) {
+            case D3D_SIT_CBUFFER: return RADRAY_RESOURCE_TYPE_CBUFFER;
+            case D3D_SIT_TBUFFER: return RADRAY_RESOURCE_TYPE_BUFFER;
+            case D3D_SIT_TEXTURE: return RADRAY_RESOURCE_TYPE_TEXTURE;
+            case D3D_SIT_SAMPLER: return RADRAY_RESOURCE_TYPE_SAMPLER;
+            case D3D_SIT_UAV_RWTYPED: return RADRAY_RESOURCE_TYPE_TEXTURE_RW;
+            case D3D_SIT_STRUCTURED: return RADRAY_RESOURCE_TYPE_BUFFER;
+            case D3D_SIT_UAV_RWSTRUCTURED: return RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            case D3D_SIT_BYTEADDRESS: return RADRAY_RESOURCE_TYPE_BUFFER;
+            case D3D_SIT_UAV_RWBYTEADDRESS: return RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            case D3D_SIT_UAV_APPEND_STRUCTURED: return RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            case D3D_SIT_UAV_CONSUME_STRUCTURED: return RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: return RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            case D3D_SIT_RTACCELERATIONSTRUCTURE: return RADRAY_RESOURCE_TYPE_RAYTRACING;
+            case D3D_SIT_UAV_FEEDBACKTEXTURE: return RADRAY_RESOURCE_TYPE_TEXTURE_RW;
+            default: return RADRAY_RESOURCE_TYPE_UNKNOWN;
+        }
+    };
+    auto d3d12DimToRadDim = [](D3D_SRV_DIMENSION dim) {
+        switch (dim) {
+            case D3D_SRV_DIMENSION_UNKNOWN: return RADRAY_TEXTURE_DIM_UNKNOWN;
+            case D3D_SRV_DIMENSION_BUFFER: return RADRAY_TEXTURE_DIM_UNKNOWN;
+            case D3D_SRV_DIMENSION_TEXTURE1D: return RADRAY_TEXTURE_DIM_1D;
+            case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return RADRAY_TEXTURE_DIM_1D_ARRAY;
+            case D3D_SRV_DIMENSION_TEXTURE2D: return RADRAY_TEXTURE_DIM_2D;
+            case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return RADRAY_TEXTURE_DIM_2D_ARRAY;
+            case D3D_SRV_DIMENSION_TEXTURE2DMS: return RADRAY_TEXTURE_DIM_UNKNOWN;
+            case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return RADRAY_TEXTURE_DIM_UNKNOWN;
+            case D3D_SRV_DIMENSION_TEXTURE3D: return RADRAY_TEXTURE_DIM_3D;
+            case D3D_SRV_DIMENSION_TEXTURECUBE: return RADRAY_TEXTURE_DIM_CUBE;
+            case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return RADRAY_TEXTURE_DIM_CUBE_ARRAY;
+            case D3D_SRV_DIMENSION_BUFFEREX: return RADRAY_TEXTURE_DIM_UNKNOWN;
+            default: return RADRAY_TEXTURE_DIM_UNKNOWN;
+        }
+    };
+
+    radray::unordered_map<radray::string, ShaderResource> boundRes;
+    for (size_t i = 0; i < desc.ShaderCount; i++) {
+        auto shaderWrap = desc.Shaders[i];
+        Shader* shader = reinterpret_cast<Shader*>(shaderWrap.Ptr);
+        ID3D12ShaderReflection* refl = shader->refl.Get();
+        D3D12_SHADER_DESC shaderDesc;
+        refl->GetDesc(&shaderDesc);
+        for (size_t j = 0; j < shaderDesc.BoundResources; j++) {
+            D3D12_SHADER_INPUT_BIND_DESC bindDesc;
+            refl->GetResourceBindingDesc(j, &bindDesc);
+            radray::string radName{bindDesc.Name};
+            ShaderResource radRes{
+                radName,
+                d3d12ResTypeToRadType(bindDesc.Type),
+                d3d12DimToRadDim(bindDesc.Dimension),
+                bindDesc.BindPoint,
+                bindDesc.Space,
+                bindDesc.BindCount};
+            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            }
+            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER;
+            }
+            auto&& [where, isEmplace] = boundRes.try_emplace(radName, radRes);
+            if (!isEmplace) {
+                auto&& exist = where->second;
+                if (radRes.Type != exist.Type ||
+                    radRes.Dim != exist.Dim ||
+                    radRes.Bind != exist.Bind ||
+                    radRes.Space != exist.Space ||
+                    radRes.Size != exist.Size) {
+                    RADRAY_ERR_LOG(
+                        "shader resource has same name but different structures. name={}\n"
+                        "exist: type={}, dim={}, bind={}, space={}, size={}\n"
+                        "diff:  type={}, dim={}, bind={}, space={}, size={}\n",
+                        radName,
+                        (uint32_t)exist.Type, (uint32_t)exist.Dim, exist.Bind, exist.Size, exist.Size,
+                        (uint32_t)radRes.Type, (uint32_t)radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
+                    RADRAY_DX_THROW("create root signature fail");
+                }
+            }
+        }
+    }
+
     RADRAY_DX_THROW("no impl");
 }
 
 void Device::DestroyRootSignature(RadrayRootSignature shader) {
+    RADRAY_DX_THROW("no impl");
+}
+
+RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {
+    RADRAY_DX_THROW("no impl");
+}
+
+void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
     RADRAY_DX_THROW("no impl");
 }
 

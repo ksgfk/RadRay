@@ -9,13 +9,13 @@ public:
     virtual ~Shader() noexcept = default;
 
     radray::vector<uint8_t> code;
+    ComPtr<ID3D12ShaderReflection> refl;
+    RadrayShaderStage stage;
 };
 
 class RasterShader : public Shader {
 public:
     ~RasterShader() noexcept override = default;
-
-    ComPtr<ID3D12ShaderReflection> refl;
 };
 
 }  // namespace radray::rhi::d3d12
