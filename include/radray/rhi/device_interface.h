@@ -15,7 +15,6 @@ constexpr void RhiDelete(T* ptr) noexcept {
     delete ptr;
 }
 
-// TODO: enum format
 class DeviceInterface {
 public:
     DeviceInterface() = default;

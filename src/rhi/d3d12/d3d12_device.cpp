@@ -279,7 +279,7 @@ RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc
                 D3D12_FORMAT_SUPPORT2_NONE};
             HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport));
             if (!SUCCEEDED(hr) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) || !(formatSupport.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
-                RADRAY_DX_THROW(radray::format("D3D12 cannot use UAV format {}", (uint32_t)desc.Format));
+                RADRAY_DX_THROW(radray::format("D3D12 cannot use UAV format {}", desc.Format));
             }
         }
         if (uavDesc.Format != DXGI_FORMAT_UNKNOWN) {
@@ -289,7 +289,7 @@ RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc
         indexGuard.Dismiss();
         view = RhiNew<BufferView>(BufferView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
     } else {
-        RADRAY_DX_THROW(radray::format("D3D12 cannot create buffer view for {}", (uint32_t)desc.Type));
+        RADRAY_DX_THROW(radray::format("D3D12 cannot create buffer view for {}", desc.Type));
     }
     return RadrayBufferView{view};
 }
@@ -428,7 +428,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(radray::format("cannot create RTV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create RTV for {}", desc.Dimension));
                 break;
             }
         }
@@ -466,7 +466,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(radray::format("cannot create DSV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create DSV for {}", desc.Dimension));
                 break;
             }
         }
@@ -531,7 +531,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(radray::format("cannot create SRV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create SRV for {}", desc.Dimension));
                 break;
             }
         }
@@ -581,7 +581,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
                 break;
             }
             default: {
-                RADRAY_DX_THROW(radray::format("cannot create UAV for {}", (uint32_t)desc.Dimension));
+                RADRAY_DX_THROW(radray::format("cannot create UAV for {}", desc.Dimension));
                 break;
             }
         }
@@ -591,7 +591,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         indexGuard.Dismiss();
         view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
     } else {
-        RADRAY_DX_THROW(radray::format("cannot create texture view for {}", (uint32_t)desc.Type));
+        RADRAY_DX_THROW(radray::format("cannot create texture view for {}", desc.Type));
     }
     return RadrayTextureView{view};
 }
@@ -611,7 +611,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
             case RADRAY_SHADER_STAGE_DOMAIN: s << L"ds_"; break;
             case RADRAY_SHADER_STAGE_GEOMETRY: s << L"gs_"; break;
             case RADRAY_SHADER_STAGE_PIXEL: s << L"ps_"; break;
-            default: RADRAY_DX_THROW(radray::format("cannot compile {} in raster shader", (uint32_t)stage));
+            default: RADRAY_DX_THROW(radray::format("cannot compile {} in raster shader", stage));
         }
         s << (shaderModel / 10) << "_" << shaderModel % 10;
         radray::wstring result = s.str();
@@ -657,7 +657,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
     RadrayShader result{nullptr, nullptr};
     if (auto err = std::get_if<radray::string>(&cr)) {
         RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
-        RADRAY_INFO_LOG("{}", *err);
+        RADRAY_DX_THROW("{}", *err);
     } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
         auto rs = RhiNew<RasterShader>();
         auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
@@ -765,8 +765,8 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
                         "exist: type={}, dim={}, bind={}, space={}, size={}\n"
                         "diff:  type={}, dim={}, bind={}, space={}, size={}\n",
                         radName,
-                        (uint32_t)exist.Type, (uint32_t)exist.Dim, exist.Bind, exist.Size, exist.Size,
-                        (uint32_t)radRes.Type, (uint32_t)radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
+                        exist.Type, exist.Dim, exist.Bind, exist.Size, exist.Size,
+                        radRes.Type, radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
                     RADRAY_DX_THROW("create root signature fail");
                 }
             }
