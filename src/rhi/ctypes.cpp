@@ -23,8 +23,13 @@ RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc) {
 }
 
 RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc) {
+#ifdef RADRAY_ENABLE_METAL
+    RADRAY_ABORT("no impl");
+    return nullptr;
+#else
     RADRAY_ERR_LOG("cannot create Metal device. no Metal impl");
     return nullptr;
+#endif
 }
 
 void RadrayReleaseDevice(RadrayDevice device) {

@@ -22,9 +22,14 @@ target("radray_rhi")
         add_defines("RADRAY_ENABLE_DXC", {public = true})
     end
     add_packages("dxc_radray")
-    -- if get_config("enable_metal") then
-    --     add_defines("RADRAY_ENABLE_METAL", {public = true})
-    -- end
+    if get_config("enable_metal") then
+        add_defines("RADRAY_ENABLE_METAL", {public = true})
+        add_files("metal/*.cpp")
+        -- add_files("metal/*.swift")
+        -- local mapPath = path.join(os.scriptdir(), "metal", "module.modulemap")
+        -- add_scflags("-Xcc -fmodules", "-Xcc -fmodule-map-file=" .. mapPath, {force = true})
+        add_frameworks("Foundation", "Metal", "QuartzCore", "AppKit")
+    end
 
     before_build(function (target)
         if get_config("enable_dxc") then 

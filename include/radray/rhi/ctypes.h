@@ -258,7 +258,7 @@ typedef enum RadrayHeapUsage {
     RADRAY_HEAP_USAGE_DEFAULT,
     RADRAY_HEAP_USAGE_UPLOAD,
     RADRAY_HEAP_USAGE_READBACK
-} RadrayGpuHeapType;
+} RadrayHeapUsage;
 
 typedef enum RadrayBufferCreateFlag {
     RADRAY_BUFFER_CREATE_FLAG_COMMITTED = 0x1

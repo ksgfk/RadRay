@@ -1,0 +1,5 @@
+module radrayRhiMetal {
+    header "../../../include/radray/rhi/ctypes.h"
+
+    export *
+}
