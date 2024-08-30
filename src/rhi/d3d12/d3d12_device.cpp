@@ -657,7 +657,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
     RadrayShader result{nullptr, nullptr};
     if (auto err = std::get_if<radray::string>(&cr)) {
         RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
-        RADRAY_DX_THROW("{}", *err);
+        RADRAY_DX_THROW(radray::format("{}", *err));
     } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
         auto rs = RhiNew<RasterShader>();
         auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
@@ -780,11 +780,11 @@ void Device::DestroyRootSignature(RadrayRootSignature shader) {
     RADRAY_DX_THROW("no impl");
 }
 
-RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {
+RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {
     RADRAY_DX_THROW("no impl");
 }
 
-void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
+void Device::DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
     RADRAY_DX_THROW("no impl");
 }
 

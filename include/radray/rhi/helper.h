@@ -6,6 +6,8 @@
 
 namespace radray::rhi {
 
+}  // namespace radray::rhi
+
 std::string_view format_as(RadrayBackand v) noexcept;
 std::string_view format_as(RadrayQueueType v) noexcept;
 std::string_view format_as(RadrayFormat v) noexcept;
@@ -31,5 +33,3 @@ std::string_view format_as(RadrayTextureMSAACount v) noexcept;
 std::string_view format_as(RadrayTextureCreateFlag v) noexcept;
 std::string_view format_as(RadrayShaderStage v) noexcept;
 std::string_view format_as(RadrayVertexSemantic v) noexcept;
-
-}  // namespace radray::rhi

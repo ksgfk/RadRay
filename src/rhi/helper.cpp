@@ -1,6 +1,7 @@
 #include <radray/rhi/helper.h>
 
 namespace radray::rhi {
+}  // namespace radray::rhi
 
 std::string_view format_as(RadrayBackand v) noexcept {
     switch (v) {
@@ -317,5 +318,3 @@ std::string_view format_as(RadrayVertexSemantic v) noexcept {
         default: return "UNKNOWN";
     }
 }
-
-}  // namespace radray::rhi
