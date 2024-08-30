@@ -30,3 +30,14 @@ function copy_dxc_lib(target)
         copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
     end
 end
+
+function build_radray_rhi_swift(target, isConfig) 
+    local mode = is_mode("debug") and "debug" or "release"
+    local dir = path.join(os.projectdir(), "src", "rhi", "metal", "private")
+    os.execv("swift", {"build", "-c", mode, "--package-path", dir})
+    if isConfig then
+        local libPath = os.iorunv("swift", {"build", "-c", mode, "--package-path", dir, "--show-bin-path"})
+        local buildDir = string.trim(libPath)
+        target:add("files", path.join(buildDir, "*.a"))
+    end
+end
