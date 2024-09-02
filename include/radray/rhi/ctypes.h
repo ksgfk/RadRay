@@ -3,10 +3,12 @@
 #ifdef __cplusplus
 #include <cstdint>
 #include <cstddef>
+#include <climits>
 #else
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <limits.h>
 #endif
 
 #define RADRAY_RHI_RESOURCE(name) \
@@ -19,6 +21,7 @@
 
 #define RADRAY_RHI_MAX_VERTEX_ELEMENT 8
 #define RADRAY_RHI_MAX_MRT 8
+#define RADRAY_RHI_AUTO_SELECT_DEVICE UINT_MAX
 
 #ifdef __cplusplus
 extern "C" {
@@ -320,7 +323,7 @@ typedef struct RadrayDeviceDescriptorMetal {
 
 typedef struct RadraySwapChainDescriptor {
     RadrayCommandQueue PresentQueue;
-    uint64_t NativeWindow;
+    size_t NativeWindow;
     uint32_t Width;
     uint32_t Height;
     uint32_t BackBufferCount;

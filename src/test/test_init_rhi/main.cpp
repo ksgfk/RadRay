@@ -18,8 +18,14 @@ void start() {
     glfw = radray::make_shared<radray::window::GlfwWindow>("init rhi", 1280, 720);
 #ifdef RADRAY_ENABLE_D3D12
     RadrayDeviceDescriptorD3D12 desc{
+        .AdapterIndex = RADRAY_RHI_AUTO_SELECT_DEVICE,
         .IsEnableDebugLayer = true};
     device = reinterpret_cast<radray::rhi::DeviceInterface*>(RadrayCreateDeviceD3D12(&desc));
+#endif
+#ifdef RADRAY_ENABLE_METAL
+    RadrayDeviceDescriptorMetal desc{
+        .DeviceIndex = RADRAY_RHI_AUTO_SELECT_DEVICE};
+    device = reinterpret_cast<radray::rhi::DeviceInterface*>(RadrayCreateDeviceMetal(&desc));
 #endif
     if (device == nullptr) {
         throw std::runtime_error{"cannot create device"};

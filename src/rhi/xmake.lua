@@ -27,6 +27,7 @@ target("radray_rhi")
     if get_config("enable_metal") then 
         add_defines("RADRAY_ENABLE_METAL", {public = true})
         add_files("metal/*.cpp")
+        add_files("metal/*.mm")
         add_frameworks("Foundation", "Metal", "QuartzCore", "AppKit")
         add_packages("metal-cpp")
     end

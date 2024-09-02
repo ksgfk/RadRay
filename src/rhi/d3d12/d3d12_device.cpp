@@ -26,7 +26,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         }
     }
     RADRAY_DX_FTHROW(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf())));
-    if (desc.AdapterIndex) {
+    if (desc.AdapterIndex != RADRAY_RHI_AUTO_SELECT_DEVICE) {
         auto adapterIndex = desc.AdapterIndex;
         RADRAY_DX_FTHROW(dxgiFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()));
         if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, _uuidof(ID3D12Device), nullptr))) {

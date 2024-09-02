@@ -1,6 +1,7 @@
 #include "metal_device.h"
 
 #include "metal_command_queue.h"
+#include "metal_swapchain.h"
 
 namespace radray::rhi::metal {
 
@@ -8,7 +9,7 @@ Device::Device(const RadrayDeviceDescriptorMetal& desc) {
     AutoRelease([this, &desc]() {
         auto allDevices = MTL::CopyAllDevices();
         auto deviceCount = allDevices->count();
-        uint32_t deviceIndex = desc.DeviceIndex == std::numeric_limits<uint32_t>::max() ? 0 : desc.DeviceIndex;
+        uint32_t deviceIndex = desc.DeviceIndex == RADRAY_RHI_AUTO_SELECT_DEVICE ? 0 : desc.DeviceIndex;
         if (deviceIndex >= deviceCount) {
             RADRAY_MTL_THROW("Metal device index out of range (need={}, count={})", desc.DeviceIndex, deviceCount);
         }
@@ -18,17 +19,23 @@ Device::Device(const RadrayDeviceDescriptorMetal& desc) {
 }
 
 Device::~Device() noexcept {
-    device->release();
+    AutoRelease([this]() {
+        device->release();
+    });
 }
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
-    auto q = RhiNew<CommandQueue>(device);
-    return RadrayCommandQueue{q, q->queue};
+    return AutoRelease([this]() {
+        auto q = RhiNew<CommandQueue>(device);
+        return RadrayCommandQueue{q, q->queue};
+    });
 }
 
 void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
-    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
-    RhiDelete(q);
+    AutoRelease([=]() {
+        auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+        RhiDelete(q);
+    });
 }
 
 RadrayFence Device::CreateFence() {
@@ -55,10 +62,24 @@ void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
 }
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+    return AutoRelease([&desc, this]() {
+        auto sc = RhiNew<SwapChain>(
+            device,
+            desc.NativeWindow,
+            desc.Width,
+            desc.Height,
+            desc.BackBufferCount,
+            EnumConvert(desc.Format),
+            desc.EnableSync);
+        return RadraySwapChain{sc, sc->layer};
+    });
 }
+
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([=]() {
+        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        RhiDelete(sc);
+    });
 }
 
 RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {

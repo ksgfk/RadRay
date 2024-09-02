@@ -37,6 +37,8 @@ decltype(auto) AutoRelease(T&& func) noexcept {
     return std::forward<T>(func)();
 }
 
+MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept;
+
 }  // namespace radray::rhi::metal
 
 #ifndef RADRAY_MTL_THROW
