@@ -63,6 +63,9 @@ void update() {
 }
 
 void destroy() {
+    device->WaitQueue(cmdQueue);
+    RadrayFence fences[]{fence};
+    device->WaitFences(fences);
     device->DestroyFence(fence);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandList(cmdList);

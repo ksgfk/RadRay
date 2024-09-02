@@ -18,9 +18,9 @@
     } name;
 
 #ifdef __cplusplus
-#define RADRAY_IS_EMPTY_RESOURCE(res) res.Ptr == nullptr
+#define RADRAY_IS_EMPTY_RESOURCE(res) (res.Ptr == nullptr)
 #else
-#define RADRAY_IS_EMPTY_RESOURCE(res) res.Ptr == NULL
+#define RADRAY_IS_EMPTY_RESOURCE(res) (res.Ptr == NULL)
 #endif
 
 #define RADRAY_RHI_MAX_VERTEX_ELEMENT 8

@@ -9,6 +9,7 @@ class Device;
 class Fence {
 public:
     Fence(Device* device);
+    ~Fence() noexcept;
 
 public:
     ComPtr<ID3D12Fence> fence;

@@ -27,6 +27,7 @@ public:
     virtual RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) = 0;
     virtual void DestroyCommandQueue(RadrayCommandQueue queue) = 0;
     virtual void SubmitQueue(const RadraySubmitQueueDescriptor& desc) = 0;
+    virtual void WaitQueue(RadrayCommandQueue queue) = 0;
 
     virtual RadrayFence CreateFence() = 0;
     virtual void DestroyFence(RadrayFence fence) = 0;

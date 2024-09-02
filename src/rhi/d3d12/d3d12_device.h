@@ -16,6 +16,7 @@ public:
     RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) override;
     void DestroyCommandQueue(RadrayCommandQueue queue) override;
     void SubmitQueue(const RadraySubmitQueueDescriptor& desc) override;
+    void WaitQueue(RadrayCommandQueue queue) override;
 
     RadrayFence CreateFence() override;
     void DestroyFence(RadrayFence fence) override;

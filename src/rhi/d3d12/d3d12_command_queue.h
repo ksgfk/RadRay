@@ -5,6 +5,7 @@
 namespace radray::rhi::d3d12 {
 
 class Device;
+class Fence;
 
 class CommandQueue {
 public:
@@ -12,6 +13,7 @@ public:
 
 public:
     ComPtr<ID3D12CommandQueue> queue;
+    radray::unique_ptr<Fence> fence;
 };
 
 }  // namespace radray::rhi::d3d12
