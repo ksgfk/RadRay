@@ -8,6 +8,7 @@ class SwapChain {
 public:
     SwapChain(
         MTL::Device* device,
+        MTL::CommandQueue* queue,
         size_t windowHandle,
         uint width,
         uint height,
@@ -16,8 +17,12 @@ public:
         bool enableSync);
     ~SwapChain() noexcept;
 
+    void AcquireNextDrawable();
+
 public:
+    MTL::CommandQueue* queue;
     CA::MetalLayer* layer;
+    CA::MetalDrawable* currentDrawable{nullptr};
 };
 
 }  // namespace radray::rhi::metal

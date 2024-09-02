@@ -4,13 +4,13 @@
 
 namespace radray::rhi::metal {
 
-class CommandQueue {
+class Event {
 public:
-    explicit CommandQueue(MTL::Device* device);
-    ~CommandQueue() noexcept;
+    explicit Event(MTL::Device* device);
+    ~Event() noexcept;
 
 public:
-    MTL::CommandQueue* queue;
+    MTL::SharedEvent* event;
 };
 
 }  // namespace radray::rhi::metal

@@ -12,6 +12,8 @@ radray::shared_ptr<radray::window::GlfwWindow> glfw;
 radray::rhi::DeviceInterface* device;
 RadrayCommandQueue cmdQueue;
 RadraySwapChain swapchain;
+RadrayFence fence;
+uint64_t fenceValue;
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -40,16 +42,23 @@ void start() {
         RADRAY_FORMAT_RGBA8_UNORM,
         true};
     swapchain = device->CreateSwapChain(chainDesc);
+    fence = device->CreateFence();
+    fenceValue = 0;
 }
 
 void update() {
     while (!glfw->ShouldClose()) {
         radray::window::GlobalPollEventsGlfw();
+        // device->Wait(cmdQueue, fence, fenceValue);
+        // device->AcquireNextRenderTarget(swapchain);
+        // fenceValue++;
+        // device->Signal(cmdQueue, fence, fenceValue);
         std::this_thread::yield();
     }
 }
 
 void destroy() {
+    device->DestroyFence(fence);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandQueue(cmdQueue);
     RadrayReleaseDevice(device);

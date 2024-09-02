@@ -15,6 +15,9 @@ public:
     RadrayFence CreateFence() override;
     void DestroyFence(RadrayFence fence) override;
 
+    RadraySemaphore CreateSemaphore() override;
+    void DestroySemaphore(RadraySemaphore semaphore) override;
+
     RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) override;
     void DestroyCommandAllocator(RadrayCommandAllocator alloc) override;
     RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) override;
@@ -42,6 +45,9 @@ public:
 
     RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) override;
     void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) override;
+
+    uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) override;
+    void Present(RadraySwapChain swapchain) override;
 
 public:
     MTL::Device* device;

@@ -33,6 +33,7 @@ RADRAY_RHI_RESOURCE(RadrayCommandQueue);
 RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
 RADRAY_RHI_RESOURCE(RadrayCommandList);
 RADRAY_RHI_RESOURCE(RadrayFence);
+RADRAY_RHI_RESOURCE(RadraySemaphore);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
 RADRAY_RHI_RESOURCE(RadrayTexture);

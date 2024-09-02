@@ -28,6 +28,9 @@ public:
     virtual RadrayFence CreateFence() = 0;
     virtual void DestroyFence(RadrayFence fence) = 0;
 
+    virtual RadraySemaphore CreateSemaphore() = 0;
+    virtual void DestroySemaphore(RadraySemaphore semaphore) = 0;
+
     virtual RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) = 0;
     virtual void DestroyCommandAllocator(RadrayCommandAllocator alloc) = 0;
     virtual RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) = 0;
@@ -55,6 +58,9 @@ public:
 
     virtual RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) = 0;
     virtual void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) = 0;
+
+    virtual uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
+    virtual void Present(RadraySwapChain swapchain) = 0;
 };
 
 }  // namespace radray::rhi

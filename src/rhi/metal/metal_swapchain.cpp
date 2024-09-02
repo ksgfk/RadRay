@@ -4,13 +4,15 @@ namespace radray::rhi::metal {
 
 SwapChain::SwapChain(
     MTL::Device* device,
+    MTL::CommandQueue* queue,
     size_t windowHandle,
     uint width,
     uint height,
     uint backBufferCount,
     MTL::PixelFormat format,
     bool enableSync)
-    : layer(RadrayMetalCreateLayer(
+    : queue(queue->retain()),
+      layer(RadrayMetalCreateLayer(
           device,
           windowHandle,
           width,
@@ -22,8 +24,20 @@ SwapChain::SwapChain(
         RADRAY_WARN_LOG("CAMetalLayer only support format RGBA16Float or BGRA8Unorm");
     }
 }
+
 SwapChain::~SwapChain() noexcept {
+    queue->release();
     layer->release();
+}
+
+void SwapChain::AcquireNextDrawable() {
+    if (currentDrawable != nullptr) {
+        currentDrawable->release();
+    }
+    currentDrawable = layer->nextDrawable()->retain();
+    if (currentDrawable == nullptr) {
+        RADRAY_MTL_THROW("Failed to acquire next drawable from swapchain");
+    }
 }
 
 }  // namespace radray::rhi::metal

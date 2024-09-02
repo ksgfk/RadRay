@@ -1,13 +1,14 @@
 #include "metal_device.h"
 
 #include "metal_command_queue.h"
+#include "metal_event.h"
 #include "metal_swapchain.h"
 
 namespace radray::rhi::metal {
 
 Device::Device(const RadrayDeviceDescriptorMetal& desc) {
     AutoRelease([this, &desc]() {
-        auto allDevices = MTL::CopyAllDevices();
+        auto allDevices = MTL::CopyAllDevices()->autorelease();
         auto deviceCount = allDevices->count();
         uint32_t deviceIndex = desc.DeviceIndex == RADRAY_RHI_AUTO_SELECT_DEVICE ? 0 : desc.DeviceIndex;
         if (deviceIndex >= deviceCount) {
@@ -39,9 +40,23 @@ void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
 }
 
 RadrayFence Device::CreateFence() {
+    return AutoRelease([this]() {
+        auto e = RhiNew<Event>(device);
+        return RadrayFence{e, e->event};
+    });
+}
+
+void Device::DestroyFence(RadrayFence fence) {
+    AutoRelease([=]() {
+        auto e = reinterpret_cast<Event*>(fence.Ptr);
+        RhiDelete(e);
+    });
+}
+
+RadraySemaphore Device::CreateSemaphore() {
     RADRAY_MTL_THROW("no impl");
 }
-void Device::DestroyFence(RadrayFence fence) {
+void Device::DestroySemaphore(RadraySemaphore semaphore) {
     RADRAY_MTL_THROW("no impl");
 }
 
@@ -63,8 +78,10 @@ void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     return AutoRelease([&desc, this]() {
+        auto q = reinterpret_cast<CommandQueue*>(desc.PresentQueue.Ptr);
         auto sc = RhiNew<SwapChain>(
             device,
+            q->queue,
             desc.NativeWindow,
             desc.Width,
             desc.Height,
@@ -127,6 +144,23 @@ RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipeli
 }
 void Device::DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
     RADRAY_MTL_THROW("no impl");
+}
+
+uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
+    return AutoRelease([=]() {
+        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        sc->AcquireNextDrawable();
+        return 0;
+    });
+}
+
+void Device::Present(RadraySwapChain swapchain) {
+    AutoRelease([=]() {
+        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
+        cmdBuffer->presentDrawable(sc->currentDrawable);
+        cmdBuffer->commit();
+    });
 }
 
 }  // namespace radray::rhi::metal
