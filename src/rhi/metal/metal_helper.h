@@ -5,6 +5,7 @@
 #include <MetalFX/MetalFX.hpp>
 #include <QuartzCore/QuartzCore.hpp>
 
+#include <radray/logger.h>
 #include <radray/rhi/ctypes.h>
 #include <radray/rhi/device_interface.h>
 #include <radray/rhi/helper.h>
@@ -39,6 +40,5 @@ decltype(auto) AutoRelease(T&& func) noexcept {
 }  // namespace radray::rhi::metal
 
 #ifndef RADRAY_MTL_THROW
-#define RADRAY_MTL_THROW(x) \
-    throw MetalException(x);
+#define RADRAY_MTL_THROW(fmt, ...) throw MetalException(radray::format(fmt __VA_OPT__(, ) __VA_ARGS__));
 #endif

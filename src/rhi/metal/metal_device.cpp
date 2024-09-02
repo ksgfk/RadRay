@@ -1,17 +1,34 @@
 #include "metal_device.h"
 
+#include "metal_command_queue.h"
+
 namespace radray::rhi::metal {
 
 Device::Device(const RadrayDeviceDescriptorMetal& desc) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([this, &desc]() {
+        auto allDevices = MTL::CopyAllDevices();
+        auto deviceCount = allDevices->count();
+        uint32_t deviceIndex = desc.DeviceIndex == std::numeric_limits<uint32_t>::max() ? 0 : desc.DeviceIndex;
+        if (deviceIndex >= deviceCount) {
+            RADRAY_MTL_THROW("Metal device index out of range (need={}, count={})", desc.DeviceIndex, deviceCount);
+        }
+        device = allDevices->object<MTL::Device>(deviceIndex)->retain();
+        RADRAY_INFO_LOG("Metal device: {}", device->name()->utf8String());
+    });
 }
-Device::~Device() noexcept = default;
+
+Device::~Device() noexcept {
+    device->release();
+}
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
-    RADRAY_MTL_THROW("no impl");
+    auto q = RhiNew<CommandQueue>(device);
+    return RadrayCommandQueue{q, q->queue};
 }
+
 void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
-    RADRAY_MTL_THROW("no impl");
+    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+    RhiDelete(q);
 }
 
 RadrayFence Device::CreateFence() {

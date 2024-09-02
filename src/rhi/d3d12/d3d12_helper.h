@@ -58,8 +58,8 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 #endif
 
 #ifndef RADRAY_DX_THROW
-#define RADRAY_DX_THROW(x) \
-    throw D3D12Exception(x);
+#define RADRAY_DX_THROW(fmt, ...) \
+    throw D3D12Exception(radray::format(fmt __VA_OPT__(, ) __VA_ARGS__));
 #endif
 
 #ifndef RADRAY_DX_FTHROW

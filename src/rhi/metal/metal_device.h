@@ -42,6 +42,9 @@ public:
 
     RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) override;
     void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) override;
+
+public:
+    MTL::Device* device;
 };
 
 }  // namespace radray::rhi::metal
