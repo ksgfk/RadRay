@@ -110,6 +110,35 @@ void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
     RhiDelete(q);
 }
 
+void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
+    RADRAY_ASSERT(desc.ListCount <= std::numeric_limits<UINT>::max());
+    auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
+    // wait
+    for (size_t i = 0; i < desc.WaitSemaphoreCount; i++) {
+        auto f = reinterpret_cast<Fence*>(desc.WaitSemaphores[i].Ptr);
+        q->queue->Wait(f->fence.Get(), f->fenceValue);
+    }
+    // execute
+    {
+        radray::vector<ID3D12CommandList*> cmds{desc.ListCount};
+        for (size_t i = 0; i < desc.ListCount; i++) {
+            cmds[i] = reinterpret_cast<CommandList*>(desc.Lists[i].Ptr)->list.Get();
+        }
+        q->queue->ExecuteCommandLists(static_cast<UINT>(cmds.size()), cmds.data());
+    }
+    // signal
+    if (RADRAY_IS_EMPTY_RESOURCE(desc.SignalFence)) {
+        auto f = reinterpret_cast<Fence*>(desc.SignalFence.Ptr);
+        f->fenceValue++;
+        q->queue->Signal(f->fence.Get(), f->fenceValue);
+    }
+    for (size_t i = 0; i < desc.SignalSemaphoreCount; i++) {
+        auto f = reinterpret_cast<Fence*>(desc.SignalSemaphores[i].Ptr);
+        f->fenceValue++;
+        q->queue->Signal(f->fence.Get(), f->fenceValue);
+    }
+}
+
 RadrayFence Device::CreateFence() {
     auto f = RhiNew<Fence>(this);
     return {.Ptr = f, .Native = f->fence.Get()};
@@ -118,6 +147,22 @@ RadrayFence Device::CreateFence() {
 void Device::DestroyFence(RadrayFence fence) {
     auto f = reinterpret_cast<Fence*>(fence.Ptr);
     RhiDelete(f);
+}
+
+RadrayFenceState Device::GetFenceState(RadrayFence fence) {
+    auto f = reinterpret_cast<Fence*>(fence.Ptr);
+    uint64_t completeValue = f->fence->GetCompletedValue();
+    return completeValue < f->fenceValue ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
+}
+
+void Device::WaitFences(std::span<RadrayFence> fences) {
+    for (auto&& fence : fences) {
+        auto f = reinterpret_cast<Fence*>(fence.Ptr);
+        if (GetFenceState(fence) == RADRAY_FENCE_STATE_INCOMPLETE) {
+            f->fence->SetEventOnCompletion(f->fenceValue, f->waitEvent);
+            WaitForSingleObject(f->waitEvent, INFINITE);
+        }
+    }
 }
 
 RadrayCommandAllocator Device::CreateCommandAllocator(RadrayQueueType type) {
@@ -146,6 +191,16 @@ void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
     a->alloc->Reset();
 }
 
+void Device::BeginCommandList(RadrayCommandList list) {
+    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    l->list->Reset(l->alloc.Get(), nullptr);
+}
+
+void Device::EndCommandList(RadrayCommandList list) {
+    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    l->list->Close();
+}
+
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     DXGI_SWAP_CHAIN_DESC1 chain{
         .Width = desc.Width,
@@ -168,6 +223,16 @@ RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
     auto s = reinterpret_cast<SwapChain*>(swapchain.Ptr);
     RhiDelete(s);
+}
+
+uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
+    auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    return sc->swapchain->GetCurrentBackBufferIndex();
+}
+
+void Device::Present(RadraySwapChain swapchain) {
+    auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    RADRAY_DX_FTHROW(sc->swapchain->Present(0, sc->presentFlags));
 }
 
 RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {

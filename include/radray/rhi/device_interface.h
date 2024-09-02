@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include <radray/types.h>
 #include <radray/rhi/ctypes.h>
 
@@ -24,21 +26,25 @@ public:
 
     virtual RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) = 0;
     virtual void DestroyCommandQueue(RadrayCommandQueue queue) = 0;
+    virtual void SubmitQueue(const RadraySubmitQueueDescriptor& desc) = 0;
 
     virtual RadrayFence CreateFence() = 0;
     virtual void DestroyFence(RadrayFence fence) = 0;
-
-    virtual RadraySemaphore CreateSemaphore() = 0;
-    virtual void DestroySemaphore(RadraySemaphore semaphore) = 0;
+    virtual RadrayFenceState GetFenceState(RadrayFence fence) = 0;
+    virtual void WaitFences(std::span<RadrayFence> fences) = 0;
 
     virtual RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) = 0;
     virtual void DestroyCommandAllocator(RadrayCommandAllocator alloc) = 0;
     virtual RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) = 0;
     virtual void DestroyCommandList(RadrayCommandList list) = 0;
     virtual void ResetCommandAllocator(RadrayCommandAllocator alloc) = 0;
+    virtual void BeginCommandList(RadrayCommandList list) = 0;
+    virtual void EndCommandList(RadrayCommandList list) = 0;
 
     virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
     virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;
+    virtual uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
+    virtual void Present(RadraySwapChain swapchain) = 0;
 
     virtual RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) = 0;
     virtual void DestroyBuffer(RadrayBuffer buffer) = 0;
@@ -58,9 +64,6 @@ public:
 
     virtual RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) = 0;
     virtual void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) = 0;
-
-    virtual uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
-    virtual void Present(RadraySwapChain swapchain) = 0;
 };
 
 }  // namespace radray::rhi

@@ -8,7 +8,8 @@ CommandList::CommandList(
     Device* device,
     ID3D12CommandAllocator* allocator,
     D3D12_COMMAND_LIST_TYPE type)
-    : isOpen(false) {
+    : alloc(allocator),
+      isOpen(false) {
     RADRAY_DX_FTHROW(device->device->CreateCommandList(
         0,
         type,

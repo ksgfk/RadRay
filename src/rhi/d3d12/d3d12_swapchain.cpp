@@ -16,8 +16,10 @@ SwapChain::SwapChain(
     RADRAY_DX_FTHROW(device->dxgiFactory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing)));
     chain.Flags |= allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     presentFlags |= (!enableSync && allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    RADRAY_DX_FTHROW(device->dxgiFactory->CreateSwapChainForHwnd(queue, hwnd, &chain, nullptr, nullptr, swapchain.GetAddressOf()));
+    ComPtr<IDXGISwapChain1> temp;
+    RADRAY_DX_FTHROW(device->dxgiFactory->CreateSwapChainForHwnd(queue, hwnd, &chain, nullptr, nullptr, temp.GetAddressOf()));
     RADRAY_DX_FTHROW(device->dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));  // 阻止全屏
+    RADRAY_DX_FTHROW(temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf())));
 }
 
 }  // namespace radray::rhi::d3d12

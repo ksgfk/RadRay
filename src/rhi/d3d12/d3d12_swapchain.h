@@ -16,7 +16,7 @@ public:
         bool enableSync);
 
 public:
-    ComPtr<IDXGISwapChain1> swapchain;
+    ComPtr<IDXGISwapChain3> swapchain;
     UINT presentFlags;
 };
 

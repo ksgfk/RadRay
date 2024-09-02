@@ -14,6 +14,7 @@ public:
         D3D12_COMMAND_LIST_TYPE type);
 
     ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12CommandAllocator> alloc;
     bool isOpen;
 };
 

@@ -17,11 +17,20 @@
         void* Native;             \
     } name;
 
+#ifdef __cplusplus
 #define RADRAY_IS_EMPTY_RESOURCE(res) res.Ptr == nullptr
+#else
+#define RADRAY_IS_EMPTY_RESOURCE(res) res.Ptr == NULL
+#endif
 
 #define RADRAY_RHI_MAX_VERTEX_ELEMENT 8
 #define RADRAY_RHI_MAX_MRT 8
 #define RADRAY_RHI_AUTO_SELECT_DEVICE UINT_MAX
+#ifdef __cplusplus
+#define RADRAY_EMPTY_RESOURCE(name) name{ .Ptr = nullptr }
+#else
+#define RADRAY_EMPTY_RESOURCE(name) name{ .Ptr = NULL }
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -484,6 +493,17 @@ typedef struct RadrayGraphicsPipelineDescriptor {
     RadrayFormat DepthStencilFormat;
     RadrayTopology PrimitiveTopology;
 } RadrayGraphicsPipelineDescriptor;
+
+typedef struct RadraySubmitQueueDescriptor {
+    RadrayCommandQueue Queue;
+    const RadrayCommandList* Lists;
+    size_t ListCount;
+    RadrayFence SignalFence;
+    const RadraySemaphore* WaitSemaphores;
+    size_t WaitSemaphoreCount;
+    const RadraySemaphore* SignalSemaphores;
+    size_t SignalSemaphoreCount;
+} RadraySubmitQueueDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

@@ -11,9 +11,10 @@ constexpr int FRAME_COUNT = 3;
 radray::shared_ptr<radray::window::GlfwWindow> glfw;
 radray::rhi::DeviceInterface* device;
 RadrayCommandQueue cmdQueue;
+RadrayCommandAllocator cmdAlloc;
+RadrayCommandList cmdList;
 RadraySwapChain swapchain;
 RadrayFence fence;
-uint64_t fenceValue;
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -41,18 +42,22 @@ void start() {
         FRAME_COUNT,
         RADRAY_FORMAT_RGBA8_UNORM,
         true};
+    cmdAlloc = device->CreateCommandAllocator(RADRAY_QUEUE_TYPE_DIRECT);
+    cmdList = device->CreateCommandList(cmdAlloc);
     swapchain = device->CreateSwapChain(chainDesc);
     fence = device->CreateFence();
-    fenceValue = 0;
 }
 
 void update() {
     while (!glfw->ShouldClose()) {
         radray::window::GlobalPollEventsGlfw();
-        // device->Wait(cmdQueue, fence, fenceValue);
-        // device->AcquireNextRenderTarget(swapchain);
-        // fenceValue++;
-        // device->Signal(cmdQueue, fence, fenceValue);
+        RadrayFence fences[]{fence};
+        device->WaitFences(fences);
+        device->ResetCommandAllocator(cmdAlloc);
+        device->BeginCommandList(cmdList);
+        device->EndCommandList(cmdList);
+        device->SubmitQueue({cmdQueue, &cmdList, 1, fence});
+        device->Present(swapchain);
         std::this_thread::yield();
     }
 }
@@ -60,6 +65,8 @@ void update() {
 void destroy() {
     device->DestroyFence(fence);
     device->DestroySwapChian(swapchain);
+    device->DestroyCommandList(cmdList);
+    device->DestroyCommandAllocator(cmdAlloc);
     device->DestroyCommandQueue(cmdQueue);
     RadrayReleaseDevice(device);
     radray::window::GlobalTerminateGlfw();
