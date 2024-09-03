@@ -23,10 +23,10 @@ function copy_dxc_lib(target)
     for _, file in ipairs(os.files(path.join(dxc_dir, "bin", "*.dll"))) do
         copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
     end
-    for _, file in ipairs(os.files(path.join(dxc_dir, "lib", "*.so"))) do
+    for _, file in ipairs(os.files(path.join(dxc_dir, "*.so"))) do
         copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
     end
-    for _, file in ipairs(os.files(path.join(dxc_dir, "lib", "*.dylib"))) do
+    for _, file in ipairs(os.files(path.join(dxc_dir, "*.dylib"))) do
         copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
     end
 end

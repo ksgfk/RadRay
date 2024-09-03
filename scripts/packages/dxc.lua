@@ -8,28 +8,17 @@ package("dxc_radray")
         package:addenv("PATH", "include")
         if package:is_plat("windows") and package:is_arch("x64") then
             os.cp("win-x64/bin/*", package:installdir("bin"))
-            package:addenv("PATH", "bin")
         end
         if package:is_plat("windows") and package:is_arch("arm64") then
             os.cp("win-arm64/bin/*", package:installdir("bin"))
-            package:addenv("PATH", "bin")
         end
         if package:is_plat("linux") and package:is_arch("x64") then
-            os.cp("linux-x64/bin/*", package:installdir("bin"))
-            os.cp("linux-x64/lib/*", package:installdir("lib"))
-            package:addenv("PATH", "bin")
-            package:addenv("PATH", "lib")
+            os.cp("linux-x64/lib/*", package:installdir())
         end
         if package:is_plat("macosx") and package:is_arch("x86_64") then
-            os.cp("osx-x64/bin/*", package:installdir("bin"))
-            os.cp("osx-x64/lib/*", package:installdir("lib"))
-            package:addenv("PATH", "bin")
-            package:addenv("PATH", "lib")
+            os.cp("osx-x64/lib/*", package:installdir())
         end
         if package:is_plat("macosx") and package:is_arch("arm64") then
-            os.cp("osx-arm64/bin/*", package:installdir("bin"))
-            os.cp("osx-arm64/lib/*", package:installdir("lib"))
-            package:addenv("PATH", "bin")
-            package:addenv("PATH", "lib")
+            os.cp("osx-arm64/lib/*", package:installdir())
         end
     end)

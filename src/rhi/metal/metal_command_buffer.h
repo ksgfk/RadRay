@@ -9,6 +9,7 @@ public:
     explicit CommandBuffer(MTL::CommandQueue* queue);
     ~CommandBuffer() noexcept;
 
+    void Begin();
     void Commit();
 
 public:

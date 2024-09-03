@@ -41,32 +41,30 @@ void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
 }
 
 void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
-    auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
-    // for (size_t i = 0; i < desc.WaitSemaphoreCount; i++) {
-    // TODO:
-    // }
-    for (size_t i = 0; i < desc.ListCount; i++) {
-        auto cb = reinterpret_cast<CommandBuffer*>(desc.Lists[i].Ptr);
-        cb->Commit();
-    }
-    if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
-        auto sem = reinterpret_cast<Semaphore*>(desc.SignalFence.Ptr);
-        auto cb = q->queue->commandBufferWithUnretainedReferences();
-        cb->addCompletedHandler([=](MTL::CommandBuffer* cmdBuf) {
-            sem->Signal();
-        });
-        cb->commit();
-    }
-    // for (size_t i = 0; i < desc.SignalSemaphoreCount; i++) {
-    // TODO:
-    // }
+    AutoRelease([&desc]() {
+        auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
+        for (size_t i = 0; i < desc.ListCount; i++) {
+            auto cb = reinterpret_cast<CommandBuffer*>(desc.Lists[i].Ptr);
+            cb->Commit();
+        }
+        if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
+            auto sem = reinterpret_cast<Semaphore*>(desc.SignalFence.Ptr);
+            auto cb = q->queue->commandBufferWithUnretainedReferences();
+            cb->addCompletedHandler(^(MTL::CommandBuffer* cmdBuf) {
+              sem->Signal();
+            });
+            cb->commit();
+        }
+    });
 }
 
 void Device::WaitQueue(RadrayCommandQueue queue) {
-    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
-    MTL::CommandBuffer* cb = q->queue->commandBufferWithUnretainedReferences();
-    cb->commit();
-    cb->waitUntilCompleted();
+    AutoRelease([queue]() {
+        auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+        MTL::CommandBuffer* cb = q->queue->commandBufferWithUnretainedReferences();
+        cb->commit();
+        cb->waitUntilCompleted();
+    });
 }
 
 RadrayFence Device::CreateFence() {
@@ -84,15 +82,19 @@ void Device::DestroyFence(RadrayFence fence) {
 }
 
 RadrayFenceState Device::GetFenceState(RadrayFence fence) {
-    auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
-    return e->count < 0 ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
+    return AutoRelease([fence]() {
+        auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
+        return e->count < 0 ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
+    });
 }
 
 void Device::WaitFences(std::span<const RadrayFence> fences) {
-    for (auto&& i : fences) {
-        auto e = reinterpret_cast<Semaphore*>(i.Ptr);
-        e->Wait();
-    }
+    AutoRelease([fences]() {
+        for (auto&& i : fences) {
+            auto e = reinterpret_cast<Semaphore*>(i.Ptr);
+            e->Wait();
+        }
+    });
 }
 
 RadrayCommandAllocator Device::CreateCommandAllocator(RadrayCommandQueue queue) {
@@ -119,7 +121,10 @@ void Device::DestroyCommandList(RadrayCommandList list) {
 void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {}
 
 void Device::BeginCommandList(RadrayCommandList list) {
-    
+    AutoRelease([=]() {
+        auto cb = reinterpret_cast<CommandBuffer*>(list.Ptr);
+        cb->Begin();
+    });
 }
 
 void Device::EndCommandList(RadrayCommandList list) {}

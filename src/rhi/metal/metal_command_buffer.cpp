@@ -3,21 +3,33 @@
 namespace radray::rhi::metal {
 
 CommandBuffer::CommandBuffer(MTL::CommandQueue* queue)
-    : queue(queue),
-      cmdBuffer(queue->commandBufferWithUnretainedReferences()) {
-    queue->retain();
-    cmdBuffer->retain();
-}
+    : queue(queue->retain()),
+      cmdBuffer(nullptr) {}
 
 CommandBuffer::~CommandBuffer() noexcept {
     queue->release();
-    cmdBuffer->release();
+    if (cmdBuffer != nullptr) {
+        cmdBuffer->release();
+        cmdBuffer = nullptr;
+    }
+}
+
+void CommandBuffer::Begin() {
+    if (cmdBuffer != nullptr) {
+        cmdBuffer->release();
+        cmdBuffer = nullptr;
+    }
+    cmdBuffer = queue->commandBufferWithUnretainedReferences();
+    cmdBuffer->retain();
 }
 
 void CommandBuffer::Commit() {
+    if (cmdBuffer == nullptr) {
+        return;
+    }
     cmdBuffer->commit();
     cmdBuffer->release();
-    cmdBuffer = queue->commandBufferWithUnretainedReferences();
+    cmdBuffer = nullptr;
 }
 
 }  // namespace radray::rhi::metal
