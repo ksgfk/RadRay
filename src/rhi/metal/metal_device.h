@@ -11,18 +11,21 @@ public:
 
     RadrayCommandQueue CreateCommandQueue(RadrayQueueType type) override;
     void DestroyCommandQueue(RadrayCommandQueue queue) override;
+    void SubmitQueue(const RadraySubmitQueueDescriptor& desc) override;
+    void WaitQueue(RadrayCommandQueue queue) override;
 
     RadrayFence CreateFence() override;
     void DestroyFence(RadrayFence fence) override;
+    RadrayFenceState GetFenceState(RadrayFence fence) override;
+    void WaitFences(std::span<const RadrayFence> fences) override;
 
-    RadraySemaphore CreateSemaphore() override;
-    void DestroySemaphore(RadraySemaphore semaphore) override;
-
-    RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) override;
+    RadrayCommandAllocator CreateCommandAllocator(RadrayCommandQueue queue) override;
     void DestroyCommandAllocator(RadrayCommandAllocator alloc) override;
     RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) override;
     void DestroyCommandList(RadrayCommandList list) override;
     void ResetCommandAllocator(RadrayCommandAllocator alloc) override;
+    void BeginCommandList(RadrayCommandList list) override;
+    void EndCommandList(RadrayCommandList list) override;
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;

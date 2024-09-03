@@ -18,19 +18,17 @@
     } name;
 
 #ifdef __cplusplus
-#define RADRAY_IS_EMPTY_RESOURCE(res) (res.Ptr == nullptr)
+#define RADRAY_RHI_IS_EMPTY_RES(res) (res.Ptr == nullptr)
+#define RADRAY_RHI_EMPTY_RES(name) \
+    name { .Ptr = nullptr }
 #else
-#define RADRAY_IS_EMPTY_RESOURCE(res) (res.Ptr == NULL)
+#define RADRAY_RHI_IS_EMPTY_RES(res) (res.Ptr == NULL)
+#define RADRAY_RHI_EMPTY_RES(name) \
+    name { .Ptr = NULL }
 #endif
-
 #define RADRAY_RHI_MAX_VERTEX_ELEMENT 8
 #define RADRAY_RHI_MAX_MRT 8
 #define RADRAY_RHI_AUTO_SELECT_DEVICE UINT_MAX
-#ifdef __cplusplus
-#define RADRAY_EMPTY_RESOURCE(name) name{ .Ptr = nullptr }
-#else
-#define RADRAY_EMPTY_RESOURCE(name) name{ .Ptr = NULL }
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,8 +39,18 @@ typedef void* RadrayDevice;
 RADRAY_RHI_RESOURCE(RadrayCommandQueue);
 RADRAY_RHI_RESOURCE(RadrayCommandAllocator);
 RADRAY_RHI_RESOURCE(RadrayCommandList);
+/**
+ * DX12/VK/MTL 对 Fence 这一概念的理解都不同
+ * DX12 的 ID3D12Fence 可用于Device/Host间同步，也可用于Device Queue间同步
+ * VK 的 VkFence 只用于Device/Host间同步
+ * MTL 的 MTLFence 则完全不一样, 只用于Device内部同步
+ *
+ * 为了统一这么多混乱的情况, 我们规定 RadrayFence 专指 Device/Host 间同步, 因此:
+ * DX12 使用ID3D12Fence, 同步时使用win32提供的api
+ * VK TODO: no impl
+ * MTL 使用os提供的同步原语
+ */
 RADRAY_RHI_RESOURCE(RadrayFence);
-RADRAY_RHI_RESOURCE(RadraySemaphore);
 RADRAY_RHI_RESOURCE(RadraySwapChain);
 RADRAY_RHI_RESOURCE(RadrayBuffer);
 RADRAY_RHI_RESOURCE(RadrayTexture);
@@ -499,10 +507,10 @@ typedef struct RadraySubmitQueueDescriptor {
     const RadrayCommandList* Lists;
     size_t ListCount;
     RadrayFence SignalFence;
-    const RadraySemaphore* WaitSemaphores;
-    size_t WaitSemaphoreCount;
-    const RadraySemaphore* SignalSemaphores;
-    size_t SignalSemaphoreCount;
+    // const RadraySemaphore* WaitSemaphores;
+    // size_t WaitSemaphoreCount;
+    // const RadraySemaphore* SignalSemaphores;
+    // size_t SignalSemaphoreCount;
 } RadraySubmitQueueDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);

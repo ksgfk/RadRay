@@ -42,5 +42,5 @@ MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept;
 }  // namespace radray::rhi::metal
 
 #ifndef RADRAY_MTL_THROW
-#define RADRAY_MTL_THROW(fmt, ...) throw MetalException(radray::format(fmt __VA_OPT__(, ) __VA_ARGS__));
+#define RADRAY_MTL_THROW(fmt, ...) throw MetalException(radray::format(fmt __VA_OPT__(, ) __VA_ARGS__))
 #endif

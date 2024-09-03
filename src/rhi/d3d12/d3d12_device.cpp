@@ -127,7 +127,7 @@ void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
         q->queue->ExecuteCommandLists(static_cast<UINT>(cmds.size()), cmds.data());
     }
     // signal
-    if (!RADRAY_IS_EMPTY_RESOURCE(desc.SignalFence)) {
+    if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
         auto f = reinterpret_cast<Fence*>(desc.SignalFence.Ptr);
         f->fenceValue++;
         RADRAY_DX_FTHROW(q->queue->Signal(f->fence.Get(), f->fenceValue));

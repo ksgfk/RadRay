@@ -1,7 +1,8 @@
 #include "metal_device.h"
 
+#include "dispatch_semaphore.h"
 #include "metal_command_queue.h"
-#include "metal_event.h"
+#include "metal_command_buffer.h"
 #include "metal_swapchain.h"
 
 namespace radray::rhi::metal {
@@ -39,42 +40,89 @@ void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
     });
 }
 
+void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
+    auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
+    // for (size_t i = 0; i < desc.WaitSemaphoreCount; i++) {
+    // TODO:
+    // }
+    for (size_t i = 0; i < desc.ListCount; i++) {
+        auto cb = reinterpret_cast<CommandBuffer*>(desc.Lists[i].Ptr);
+        cb->Commit();
+    }
+    if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
+        auto sem = reinterpret_cast<Semaphore*>(desc.SignalFence.Ptr);
+        auto cb = q->queue->commandBufferWithUnretainedReferences();
+        cb->addCompletedHandler([=](MTL::CommandBuffer* cmdBuf) {
+            sem->Signal();
+        });
+        cb->commit();
+    }
+    // for (size_t i = 0; i < desc.SignalSemaphoreCount; i++) {
+    // TODO:
+    // }
+}
+
+void Device::WaitQueue(RadrayCommandQueue queue) {
+    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+    MTL::CommandBuffer* cb = q->queue->commandBufferWithUnretainedReferences();
+    cb->commit();
+    cb->waitUntilCompleted();
+}
+
 RadrayFence Device::CreateFence() {
-    return AutoRelease([this]() {
-        auto e = RhiNew<Event>(device);
-        return RadrayFence{e, e->event};
+    return AutoRelease([]() {
+        auto e = RhiNew<Semaphore>(1);
+        return RadrayFence{e, e->semaphore};
     });
 }
 
 void Device::DestroyFence(RadrayFence fence) {
     AutoRelease([=]() {
-        auto e = reinterpret_cast<Event*>(fence.Ptr);
+        auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
         RhiDelete(e);
     });
 }
 
-RadraySemaphore Device::CreateSemaphore() {
-    RADRAY_MTL_THROW("no impl");
-}
-void Device::DestroySemaphore(RadraySemaphore semaphore) {
-    RADRAY_MTL_THROW("no impl");
+RadrayFenceState Device::GetFenceState(RadrayFence fence) {
+    auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
+    return e->count < 0 ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
 }
 
-RadrayCommandAllocator Device::CreateCommandAllocator(RadrayQueueType type) {
-    RADRAY_MTL_THROW("no impl");
+void Device::WaitFences(std::span<const RadrayFence> fences) {
+    for (auto&& i : fences) {
+        auto e = reinterpret_cast<Semaphore*>(i.Ptr);
+        e->Wait();
+    }
 }
-void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {
-    RADRAY_MTL_THROW("no impl");
+
+RadrayCommandAllocator Device::CreateCommandAllocator(RadrayCommandQueue queue) {
+    return RadrayCommandAllocator{queue.Ptr, queue.Native};
 }
+
+void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {}
+
 RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
-    RADRAY_MTL_THROW("no impl");
+    return AutoRelease([=]() {
+        auto q = reinterpret_cast<CommandQueue*>(alloc.Ptr);
+        auto cb = RhiNew<CommandBuffer>(q->queue);
+        return RadrayCommandList{cb, cb->cmdBuffer};
+    });
 }
+
 void Device::DestroyCommandList(RadrayCommandList list) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([=]() {
+        auto cb = reinterpret_cast<CommandBuffer*>(list.Ptr);
+        RhiDelete(cb);
+    });
 }
-void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
-    RADRAY_MTL_THROW("no impl");
+
+void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {}
+
+void Device::BeginCommandList(RadrayCommandList list) {
+    
 }
+
+void Device::EndCommandList(RadrayCommandList list) {}
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     return AutoRelease([&desc, this]() {

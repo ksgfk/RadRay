@@ -42,7 +42,7 @@ void start() {
         FRAME_COUNT,
         RADRAY_FORMAT_RGBA8_UNORM,
         true};
-    cmdAlloc = device->CreateCommandAllocator(RADRAY_QUEUE_TYPE_DIRECT);
+    cmdAlloc = device->CreateCommandAllocator(cmdQueue);
     cmdList = device->CreateCommandList(cmdAlloc);
     swapchain = device->CreateSwapChain(chainDesc);
     fence = device->CreateFence();
@@ -53,6 +53,7 @@ void update() {
         radray::window::GlobalPollEventsGlfw();
         RadrayFence fences[]{fence};
         device->WaitFences(fences);
+        device->AcquireNextRenderTarget(swapchain);
         device->ResetCommandAllocator(cmdAlloc);
         device->BeginCommandList(cmdList);
         device->EndCommandList(cmdList);
@@ -64,8 +65,6 @@ void update() {
 
 void destroy() {
     device->WaitQueue(cmdQueue);
-    RadrayFence fences[]{fence};
-    device->WaitFences(fences);
     device->DestroyFence(fence);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandList(cmdList);
