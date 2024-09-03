@@ -152,6 +152,23 @@ void Device::DestroySwapChian(RadraySwapChain swapchain) {
     });
 }
 
+uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
+    return AutoRelease([=]() {
+        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        sc->AcquireNextDrawable();
+        return 0;
+    });
+}
+
+void Device::Present(RadraySwapChain swapchain) {
+    AutoRelease([=]() {
+        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
+        cmdBuffer->presentDrawable(sc->currentDrawable);
+        cmdBuffer->commit();
+    });
+}
+
 RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
     RADRAY_MTL_THROW("no impl");
 }
@@ -197,23 +214,6 @@ RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipeli
 }
 void Device::DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
     RADRAY_MTL_THROW("no impl");
-}
-
-uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
-    return AutoRelease([=]() {
-        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
-        sc->AcquireNextDrawable();
-        return 0;
-    });
-}
-
-void Device::Present(RadraySwapChain swapchain) {
-    AutoRelease([=]() {
-        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
-        MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
-        cmdBuffer->presentDrawable(sc->currentDrawable);
-        cmdBuffer->commit();
-    });
 }
 
 }  // namespace radray::rhi::metal

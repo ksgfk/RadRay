@@ -29,6 +29,8 @@ public:
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
+    uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) override;
+    void Present(RadraySwapChain swapchain) override;
 
     RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
     void DestroyBuffer(RadrayBuffer buffer) override;
@@ -48,9 +50,6 @@ public:
 
     RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) override;
     void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) override;
-
-    uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) override;
-    void Present(RadraySwapChain swapchain) override;
 
 public:
     MTL::Device* device;
