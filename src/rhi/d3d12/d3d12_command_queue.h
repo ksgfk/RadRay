@@ -14,6 +14,7 @@ public:
 public:
     ComPtr<ID3D12CommandQueue> queue;
     radray::unique_ptr<Fence> fence;
+    D3D12_COMMAND_LIST_TYPE type;
 };
 
 }  // namespace radray::rhi::d3d12

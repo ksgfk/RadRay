@@ -350,7 +350,7 @@ typedef struct RadraySwapChainDescriptor {
 } RadraySwapChainDescriptor;
 
 typedef struct RadrayBufferDescriptor {
-    const uint8_t* Name;
+    const char* Name;
     uint64_t Size;
     RadrayHeapUsage Usage;
     RadrayResourceStates InitStates;
@@ -362,11 +362,8 @@ typedef struct RadrayBufferViewDescriptor {
     RadrayBuffer Buffer;
     RadrayResourceType Type;
     RadrayFormat Format;
-    /** SRV or UAV param */
     uint64_t FirstElementOffset;
-    /** SRV or UAV param */
     uint32_t ElementCount;
-    /** SRV or UAV param */
     uint32_t ElementStride;
 } RadrayBufferViewDescriptor;
 
@@ -384,7 +381,7 @@ typedef union RadrayClearValue {
 } RadrayClearValue;
 
 typedef struct RadrayTextureDescriptor {
-    const uint8_t* Name;
+    const char* Name;
     uint32_t Width;
     uint32_t Height;
     uint32_t Depth;
@@ -507,10 +504,6 @@ typedef struct RadraySubmitQueueDescriptor {
     const RadrayCommandList* Lists;
     size_t ListCount;
     RadrayFence SignalFence;
-    // const RadraySemaphore* WaitSemaphores;
-    // size_t WaitSemaphoreCount;
-    // const RadraySemaphore* SignalSemaphores;
-    // size_t SignalSemaphoreCount;
 } RadraySubmitQueueDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);

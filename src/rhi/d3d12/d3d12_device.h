@@ -21,9 +21,9 @@ public:
     RadrayFence CreateFence() override;
     void DestroyFence(RadrayFence fence) override;
     RadrayFenceState GetFenceState(RadrayFence fence) override;
-    void WaitFences(std::span<RadrayFence> fences) override;
+    void WaitFences(std::span<const RadrayFence> fences) override;
 
-    RadrayCommandAllocator CreateCommandAllocator(RadrayQueueType type) override;
+    RadrayCommandAllocator CreateCommandAllocator(RadrayCommandQueue queue) override;
     void DestroyCommandAllocator(RadrayCommandAllocator alloc) override;
     RadrayCommandList CreateCommandList(RadrayCommandAllocator alloc) override;
     void DestroyCommandList(RadrayCommandList list) override;

@@ -16,6 +16,17 @@
 
 namespace radray::rhi::d3d12 {
 
+static CommandQueue* Underlying(RadrayCommandQueue queue) noexcept { return reinterpret_cast<CommandQueue*>(queue.Ptr); }
+static Fence* Underlying(RadrayFence fence) noexcept { return reinterpret_cast<Fence*>(fence.Ptr); }
+static CommandAllocator* Underlying(RadrayCommandAllocator alloc) noexcept { return reinterpret_cast<CommandAllocator*>(alloc.Ptr); }
+static CommandList* Underlying(RadrayCommandList list) noexcept { return reinterpret_cast<CommandList*>(list.Ptr); }
+static SwapChain* Underlying(RadraySwapChain swapchain) noexcept { return reinterpret_cast<SwapChain*>(swapchain.Ptr); }
+static Buffer* Underlying(RadrayBuffer buffer) noexcept { return reinterpret_cast<Buffer*>(buffer.Ptr); }
+static BufferView* Underlying(RadrayBufferView view) noexcept { return reinterpret_cast<BufferView*>(view.Handle); }
+static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
+static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
+static Shader* Underlying(RadrayShader shader) noexcept { return reinterpret_cast<Shader*>(shader.Ptr); }
+
 Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
@@ -106,41 +117,31 @@ RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
 }
 
 void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
-    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+    auto q = Underlying(queue);
     RhiDelete(q);
 }
 
 void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
     RADRAY_ASSERT(desc.ListCount <= std::numeric_limits<UINT>::max());
-    auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
-    // wait
-    for (size_t i = 0; i < desc.WaitSemaphoreCount; i++) {
-        auto f = reinterpret_cast<Fence*>(desc.WaitSemaphores[i].Ptr);
-        RADRAY_DX_FTHROW(q->queue->Wait(f->fence.Get(), f->fenceValue));
-    }
+    auto q = Underlying(desc.Queue);
     // execute
     {
         radray::vector<ID3D12CommandList*> cmds{desc.ListCount};
         for (size_t i = 0; i < desc.ListCount; i++) {
-            cmds[i] = reinterpret_cast<CommandList*>(desc.Lists[i].Ptr)->list.Get();
+            cmds[i] = Underlying(desc.Lists[i])->list.Get();
         }
         q->queue->ExecuteCommandLists(static_cast<UINT>(cmds.size()), cmds.data());
     }
     // signal
     if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
-        auto f = reinterpret_cast<Fence*>(desc.SignalFence.Ptr);
-        f->fenceValue++;
-        RADRAY_DX_FTHROW(q->queue->Signal(f->fence.Get(), f->fenceValue));
-    }
-    for (size_t i = 0; i < desc.SignalSemaphoreCount; i++) {
-        auto f = reinterpret_cast<Fence*>(desc.SignalSemaphores[i].Ptr);
+        auto f = Underlying(desc.SignalFence);
         f->fenceValue++;
         RADRAY_DX_FTHROW(q->queue->Signal(f->fence.Get(), f->fenceValue));
     }
 }
 
 void Device::WaitQueue(RadrayCommandQueue queue) {
-    auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+    auto q = Underlying(queue);
     auto f = q->fence.get();
     f->fenceValue++;
     q->queue->Signal(f->fence.Get(), f->fenceValue);
@@ -154,19 +155,19 @@ RadrayFence Device::CreateFence() {
 }
 
 void Device::DestroyFence(RadrayFence fence) {
-    auto f = reinterpret_cast<Fence*>(fence.Ptr);
+    auto f = Underlying(fence);
     RhiDelete(f);
 }
 
 RadrayFenceState Device::GetFenceState(RadrayFence fence) {
-    auto f = reinterpret_cast<Fence*>(fence.Ptr);
+    auto f = Underlying(fence);
     uint64_t completeValue = f->fence->GetCompletedValue();
     return completeValue < f->fenceValue ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
 }
 
-void Device::WaitFences(std::span<RadrayFence> fences) {
+void Device::WaitFences(std::span<const RadrayFence> fences) {
     for (auto&& fence : fences) {
-        auto f = reinterpret_cast<Fence*>(fence.Ptr);
+        auto f = Underlying(fence);
         if (GetFenceState(fence) == RADRAY_FENCE_STATE_INCOMPLETE) {
             RADRAY_DX_FTHROW(f->fence->SetEventOnCompletion(f->fenceValue, f->waitEvent));
             WaitForSingleObject(f->waitEvent, INFINITE);
@@ -174,39 +175,40 @@ void Device::WaitFences(std::span<RadrayFence> fences) {
     }
 }
 
-RadrayCommandAllocator Device::CreateCommandAllocator(RadrayQueueType type) {
-    auto a = RhiNew<CommandAllocator>(this, EnumConvert(type));
+RadrayCommandAllocator Device::CreateCommandAllocator(RadrayCommandQueue queue) {
+    auto q = Underlying(queue);
+    auto a = RhiNew<CommandAllocator>(this, q->type);
     return {.Ptr = a, .Native = a->alloc.Get()};
 }
 
 void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {
-    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    auto a = Underlying(alloc);
     RhiDelete(a);
 }
 
 RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
-    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    auto a = Underlying(alloc);
     auto l = RhiNew<CommandList>(this, a->alloc.Get(), a->type);
     return {.Ptr = l, .Native = l->list.Get()};
 }
 
 void Device::DestroyCommandList(RadrayCommandList list) {
-    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    auto l = Underlying(list);
     RhiDelete(l);
 }
 
 void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
-    auto a = reinterpret_cast<CommandAllocator*>(alloc.Ptr);
+    auto a = Underlying(alloc);
     RADRAY_DX_FTHROW(a->alloc->Reset());
 }
 
 void Device::BeginCommandList(RadrayCommandList list) {
-    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    auto l = Underlying(list);
     RADRAY_DX_FTHROW(l->list->Reset(l->alloc.Get(), nullptr));
 }
 
 void Device::EndCommandList(RadrayCommandList list) {
-    auto l = reinterpret_cast<CommandList*>(list.Ptr);
+    auto l = Underlying(list);
     RADRAY_DX_FTHROW(l->list->Close());
 }
 
@@ -223,24 +225,25 @@ RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
         .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
         .AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED,
         .Flags = 0};
-    ID3D12CommandQueue* queue = reinterpret_cast<ID3D12CommandQueue*>(desc.PresentQueue.Native);
+    auto q = Underlying(desc.PresentQueue);
+    ID3D12CommandQueue* queue = q->queue.Get();
     HWND hwnd = reinterpret_cast<HWND>(desc.NativeWindow);
     auto s = RhiNew<SwapChain>(this, queue, hwnd, chain, desc.EnableSync);
     return {.Ptr = s, .Native = s->swapchain.Get()};
 }
 
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
-    auto s = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    auto s = Underlying(swapchain);
     RhiDelete(s);
 }
 
 uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
-    auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    auto sc = Underlying(swapchain);
     return sc->swapchain->GetCurrentBackBufferIndex();
 }
 
 void Device::Present(RadraySwapChain swapchain) {
-    auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+    auto sc = Underlying(swapchain);
     RADRAY_DX_FTHROW(sc->swapchain->Present(0, sc->presentFlags));
 }
 
@@ -294,19 +297,18 @@ RadrayBuffer Device::CreateBuffer(const RadrayBufferDescriptor& desc) {
     }
     auto b = RhiNew<Buffer>(this, buf.Width, initState, buf, allocDesc);
     if (canSetDebugName && desc.Name) {
-        auto n = reinterpret_cast<const char*>(desc.Name);
-        SetObjectName(n, b->buffer.Get(), b->alloc.Get());
+        SetObjectName(desc.Name, b->buffer.Get(), b->alloc.Get());
     }
     return {.Ptr = b, .Native = b->buffer.Get()};
 }
 
 void Device::DestroyBuffer(RadrayBuffer buffer) {
-    auto b = reinterpret_cast<Buffer*>(buffer.Ptr);
+    auto b = Underlying(buffer);
     RhiDelete(b);
 }
 
 RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc) {
-    auto buffer = reinterpret_cast<Buffer*>(desc.Buffer.Ptr);
+    auto buffer = Underlying(desc.Buffer);
     BufferView* view = nullptr;
     if (desc.Type == RADRAY_RESOURCE_TYPE_CBUFFER) {
         UINT index = cbvSrvUavHeap->Allocate();
@@ -369,7 +371,7 @@ RadrayBufferView Device::CreateBufferView(const RadrayBufferViewDescriptor& desc
 }
 
 void Device::DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) {
-    BufferView* v = reinterpret_cast<BufferView*>(view.Handle);
+    BufferView* v = Underlying(view);
     v->heap->Recycle(v->index);
     RhiDelete(v);
 }
@@ -450,19 +452,18 @@ RadrayTexture Device::CreateTexture(const RadrayTextureDescriptor& desc) {
     }
     auto tex = RhiNew<Texture>(this, initState, cvPtr, texDesc, allocDesc);
     if (canSetDebugName && desc.Name) {
-        auto n = reinterpret_cast<const char*>(desc.Name);
-        SetObjectName(n, tex->texture.Get(), tex->alloc.Get());
+        SetObjectName(desc.Name, tex->texture.Get(), tex->alloc.Get());
     }
     return {tex, tex->texture.Get()};
 }
 
 void Device::DestroyTexture(RadrayTexture texture) {
-    auto t = reinterpret_cast<Texture*>(texture.Ptr);
+    auto t = Underlying(texture);
     RhiDelete(t);
 }
 
 RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& desc) {
-    auto texture = reinterpret_cast<Texture*>(desc.Texture.Ptr);
+    auto texture = Underlying(desc.Texture);
     TextureView* view = nullptr;
     if (desc.Type == RADRAY_RESOURCE_TYPE_RENDER_TARGET) {
         D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
@@ -671,7 +672,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
 }
 
 void Device::DestroyTextureView(RadrayTextureView view) {
-    auto v = reinterpret_cast<TextureView*>(view.Handle);
+    auto v = Underlying(view);
     RhiDelete(v);
 }
 
@@ -752,7 +753,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
 }
 
 void Device::DestroyShader(RadrayShader shader) {
-    auto rs = reinterpret_cast<RasterShader*>(shader.Ptr);
+    auto rs = Underlying(shader);
     RhiDelete(rs);
 }
 
@@ -805,7 +806,7 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
     radray::unordered_map<radray::string, ShaderResource> boundRes;
     for (size_t i = 0; i < desc.ShaderCount; i++) {
         auto shaderWrap = desc.Shaders[i];
-        Shader* shader = reinterpret_cast<Shader*>(shaderWrap.Ptr);
+        Shader* shader = Underlying(shaderWrap);
         ID3D12ShaderReflection* refl = shader->refl.Get();
         D3D12_SHADER_DESC shaderDesc;
         refl->GetDesc(&shaderDesc);
