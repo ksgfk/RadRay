@@ -26,6 +26,7 @@ static BufferView* Underlying(RadrayBufferView view) noexcept { return reinterpr
 static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
 static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
 static Shader* Underlying(RadrayShader shader) noexcept { return reinterpret_cast<Shader*>(shader.Ptr); }
+static CommandList* Underlying(RadrayRenderPassEncoder encoder) noexcept { return reinterpret_cast<CommandList*>(encoder.Ptr); }
 
 Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
     uint32_t dxgiFactoryFlags = 0;
@@ -210,6 +211,56 @@ void Device::BeginCommandList(RadrayCommandList list) {
 void Device::EndCommandList(RadrayCommandList list) {
     auto l = Underlying(list);
     RADRAY_DX_FTHROW(l->list->Close());
+}
+
+RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor& desc) {
+    if (desc.ColorCount >= RADRAY_RHI_MAX_MRT) {
+        RADRAY_DX_THROW("dx12 BeginRenderPass cannot set too many rt (ColorCount = {})", desc.ColorCount);
+    }
+    auto list = Underlying(desc.List);
+    ComPtr<ID3D12GraphicsCommandList4> cmdList{};
+    RADRAY_DX_FTHROW(list->list->QueryInterface(IID_PPV_ARGS(cmdList.GetAddressOf())));
+    D3D12_RENDER_PASS_RENDER_TARGET_DESC rprt[RADRAY_RHI_MAX_MRT]{};
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC rpds{};
+    const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* rpdsPtr = nullptr;
+    for (uint32_t i = 0; i < desc.ColorCount; i++) {
+        auto&& color = desc.Colors[i];
+        auto&& desc = rprt[i];
+        auto texView = Underlying(color.View);
+        auto tex = texView->tex;
+        D3D12_CLEAR_VALUE clrColor{};
+        clrColor.Format = tex->desc.Format;
+        CopyAssign(clrColor.Color, tex->clrValue.Color);
+        desc.cpuDescriptor = texView->heap->HandleCpu(texView->index);
+        desc.BeginningAccess = {.Type = EnumConvert(color.Load), .Clear = {clrColor}};
+        desc.EndingAccess = {.Type = EnumConvert(color.Store), .Resolve = {}};
+    }
+    if (desc.DepthStencil != nullptr) {
+        auto&& ds = *desc.DepthStencil;
+        auto texView = Underlying(ds.View);
+        auto tex = texView->tex;
+        rpds.cpuDescriptor = texView->heap->HandleCpu(texView->index);
+        D3D12_CLEAR_VALUE clrDepth{};
+        clrDepth.Format = tex->desc.Format;
+        clrDepth.DepthStencil.Depth = ds.DepthClear;
+        rpds.DepthBeginningAccess = {.Type = EnumConvert(ds.DepthLoad), .Clear = {clrDepth}};
+        rpds.DepthEndingAccess = {.Type = EnumConvert(ds.DepthStore)};
+        D3D12_CLEAR_VALUE clrStencil{};
+        clrStencil.Format = tex->desc.Format;
+        clrStencil.DepthStencil.Stencil = ds.StencilClear;
+        rpds.StencilBeginningAccess = {.Type = EnumConvert(ds.StencilLoad), .Clear = {clrStencil}};
+        rpds.StencilEndingAccess = {.Type = EnumConvert(ds.StencilStore)};
+        rpdsPtr = &rpds;
+    }
+    cmdList->BeginRenderPass(desc.ColorCount, rprt, rpdsPtr, D3D12_RENDER_PASS_FLAG_NONE);
+    return RadrayRenderPassEncoder{.Ptr = desc.List.Ptr, .Native = desc.List.Native};
+}
+
+void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
+    auto list = Underlying(encoder);
+    ComPtr<ID3D12GraphicsCommandList4> cmdList{};
+    RADRAY_DX_FTHROW(list->list->QueryInterface(IID_PPV_ARGS(cmdList.GetAddressOf())));
+    cmdList->EndRenderPass();
 }
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
@@ -511,7 +562,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         auto indexGuard = MakeScopeGuard([&]() { rtvHeap->Recycle(index); });
         rtvHeap->Create(texture->texture.Get(), rtvDesc, index);
         indexGuard.Dismiss();
-        view = RhiNew<TextureView>(TextureView{rtvHeap.get(), index, desc.Type, desc.Format});
+        view = RhiNew<TextureView>(TextureView{rtvHeap.get(), texture, index});
     } else if (desc.Type == RADRAY_RESOURCE_TYPE_DEPTH_STENCIL) {
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = EnumConvert(desc.Format);
@@ -549,7 +600,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         auto indexGuard = MakeScopeGuard([&]() { dsvHeap->Recycle(index); });
         dsvHeap->Create(texture->texture.Get(), dsvDesc, index);
         indexGuard.Dismiss();
-        view = RhiNew<TextureView>(TextureView{dsvHeap.get(), index, desc.Type, desc.Format});
+        view = RhiNew<TextureView>(TextureView{dsvHeap.get(), texture, index});
     } else if (desc.Type == RADRAY_RESOURCE_TYPE_TEXTURE) {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = EnumConvert(desc.Format);
@@ -614,7 +665,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         auto indexGuard = MakeScopeGuard([&]() { cbvSrvUavHeap->Recycle(index); });
         cbvSrvUavHeap->Create(texture->texture.Get(), srvDesc, index);
         indexGuard.Dismiss();
-        view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
+        view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), texture, index});
     } else if (desc.Type == RADRAY_RESOURCE_TYPE_TEXTURE_RW) {
         if (desc.MipLevelCount > 1) {
             RADRAY_DX_THROW("UAV cannot create multi mip slice");
@@ -664,7 +715,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
         auto indexGuard = MakeScopeGuard([&]() { cbvSrvUavHeap->Recycle(index); });
         cbvSrvUavHeap->Create(texture->texture.Get(), uavDesc, index);
         indexGuard.Dismiss();
-        view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), index, desc.Type, desc.Format});
+        view = RhiNew<TextureView>(TextureView{cbvSrvUavHeap.get(), texture, index});
     } else {
         RADRAY_DX_THROW("cannot create texture view for {}", desc.Type);
     }

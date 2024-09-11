@@ -11,7 +11,8 @@ Texture::Texture(
     const D3D12_RESOURCE_DESC& resDesc,
     const D3D12MA::ALLOCATION_DESC& allocDesc)
     : desc(resDesc),
-      initState(initState) {
+      initState(initState),
+      clrValue(cvPtr ? *cvPtr : D3D12_CLEAR_VALUE{}) {
     RADRAY_DX_FTHROW(device->resourceAlloc->CreateResource(
         &allocDesc,
         &resDesc,

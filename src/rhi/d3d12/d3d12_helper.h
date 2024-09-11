@@ -40,6 +40,8 @@ D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
 DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
 D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
 D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
+D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE EnumConvert(RadrayLoadAction load) noexcept;
+D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexcept;
 
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
 

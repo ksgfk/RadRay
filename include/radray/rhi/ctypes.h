@@ -58,6 +58,7 @@ RADRAY_RHI_RESOURCE(RadraySampler);
 RADRAY_RHI_RESOURCE(RadrayShader);
 RADRAY_RHI_RESOURCE(RadrayRootSignature);
 RADRAY_RHI_RESOURCE(RadrayGraphicsPipeline);
+RADRAY_RHI_RESOURCE(RadrayRenderPassEncoder);
 
 typedef struct RadrayBufferView {
     void* Handle;
@@ -330,6 +331,17 @@ typedef enum RadrayVertexSemantic {
     RADRAY_VERTEX_SEMANTIC_POSITIONT
 } RadrayVertexSemantic;
 
+typedef enum RadrayLoadAction {
+    RADRAY_LOAD_ACTION_DONTCARE,
+    RADRAY_LOAD_ACTION_LOAD,
+    RADRAY_LOAD_ACTION_CLEAR
+} RadrayLoadAction;
+
+typedef enum RadrayStoreAction {
+    RADRAY_STORE_ACTION_STORE,
+    RADRAY_STORE_ACTION_DISCARD
+} RadrayStoreAction;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -505,6 +517,33 @@ typedef struct RadraySubmitQueueDescriptor {
     size_t ListCount;
     RadrayFence SignalFence;
 } RadraySubmitQueueDescriptor;
+
+typedef struct RadrayColorAttachment {
+    RadrayTextureView View;
+    RadrayLoadAction Load;
+    RadrayStoreAction Store;
+    RadrayClearValue Clear;
+} RadrayColorAttachment;
+
+typedef struct RadrayDepthStencilAttachment {
+    RadrayTextureView View;
+    RadrayLoadAction DepthLoad;
+    RadrayStoreAction DepthStore;
+    float DepthClear;
+    uint8_t DepthWrite;
+    RadrayLoadAction StencilLoad;
+    RadrayStoreAction StencilStore;
+    uint32_t StencilClear;
+    uint8_t StencilWrite;
+} RadrayDepthStencilAttachment;
+
+typedef struct RadrayRenderPassDescriptor {
+    const char* Name;
+    RadrayCommandList List;
+    const RadrayColorAttachment* Colors;
+    const RadrayDepthStencilAttachment* DepthStencil;
+    uint32_t ColorCount;
+} RadrayRenderPassDescriptor;
 
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 

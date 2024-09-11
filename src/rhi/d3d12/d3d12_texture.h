@@ -7,13 +7,6 @@ namespace radray::rhi::d3d12 {
 class Device;
 class DescriptorHeap;
 
-struct TextureView {
-    DescriptorHeap* heap;
-    UINT index;
-    RadrayResourceType type;
-    RadrayFormat format;
-};
-
 class Texture {
 public:
     Texture(
@@ -26,9 +19,16 @@ public:
 public:
     D3D12_RESOURCE_DESC desc;
     D3D12_RESOURCE_STATES initState;
+    D3D12_CLEAR_VALUE clrValue;
     ComPtr<ID3D12Resource> texture;
     ComPtr<D3D12MA::Allocation> alloc;
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddr;
+};
+
+struct TextureView {
+    DescriptorHeap* heap;
+    Texture* tex;
+    UINT index;
 };
 
 }  // namespace radray::rhi::d3d12

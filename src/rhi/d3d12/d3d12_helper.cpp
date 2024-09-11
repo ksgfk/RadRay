@@ -187,6 +187,23 @@ D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept {
     }
 }
 
+D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE EnumConvert(RadrayLoadAction load) noexcept {
+    switch (load) {
+        case RADRAY_LOAD_ACTION_DONTCARE: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
+        case RADRAY_LOAD_ACTION_LOAD: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+        case RADRAY_LOAD_ACTION_CLEAR: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+        default: return (D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE)-1;
+    }
+}
+
+D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexcept {
+    switch (store) {
+        case RADRAY_STORE_ACTION_STORE: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+        case RADRAY_STORE_ACTION_DISCARD: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD;
+        default: return (D3D12_RENDER_PASS_ENDING_ACCESS_TYPE)-1;
+    }
+}
+
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept {
     switch (fmt) {
         case DXGI_FORMAT_R32G32B32A32_FLOAT:

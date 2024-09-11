@@ -41,6 +41,8 @@ public:
     virtual void ResetCommandAllocator(RadrayCommandAllocator alloc) = 0;
     virtual void BeginCommandList(RadrayCommandList list) = 0;
     virtual void EndCommandList(RadrayCommandList list) = 0;
+    virtual RadrayRenderPassEncoder BeginRenderPass(const RadrayRenderPassDescriptor& desc) = 0;
+    virtual void EndRenderPass(RadrayRenderPassEncoder encoder) = 0;
 
     virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
     virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;

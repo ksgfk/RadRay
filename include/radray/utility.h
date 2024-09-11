@@ -1,6 +1,7 @@
 #pragma once
 
 #include <utility>
+#include <type_traits>
 
 namespace radray {
 
@@ -29,5 +30,13 @@ private:
 
 template <typename Call>
 constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
+
+template <class T, size_t Length>
+requires std::is_copy_assignable_v<T>
+constexpr void CopyAssign(T (&dst)[Length], T (&src)[Length]) {
+    for (size_t i = 0; i < Length; i++) {
+        dst[i] = src[i];
+    }
+}
 
 }  // namespace radray
