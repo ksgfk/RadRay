@@ -530,11 +530,9 @@ typedef struct RadrayDepthStencilAttachment {
     RadrayLoadAction DepthLoad;
     RadrayStoreAction DepthStore;
     float DepthClear;
-    uint8_t DepthWrite;
     RadrayLoadAction StencilLoad;
     RadrayStoreAction StencilStore;
     uint32_t StencilClear;
-    uint8_t StencilWrite;
 } RadrayDepthStencilAttachment;
 
 typedef struct RadrayRenderPassDescriptor {
