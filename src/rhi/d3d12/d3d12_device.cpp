@@ -723,7 +723,7 @@ RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& d
 }
 
 void Device::DestroyTextureView(RadrayTextureView view) {
-    auto v = Underlying(view);
+    auto v = Underlying(view); // FIXME: view leak
     RhiDelete(v);
 }
 

@@ -45,4 +45,45 @@ MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept {
     }
 }
 
+NS::UInteger EnumConvert(RadrayTextureMSAACount cnt) noexcept {
+    switch (cnt) {
+        case RADRAY_TEXTURE_MSAA_1: return 1;
+        case RADRAY_TEXTURE_MSAA_2: return 2;
+        case RADRAY_TEXTURE_MSAA_4: return 4;
+        case RADRAY_TEXTURE_MSAA_8: return 8;
+        case RADRAY_TEXTURE_MSAA_16: return 16;
+        default: return 0;
+    }
+}
+
+MTL::TextureType EnumConvert(RadrayTextureDimension dim) noexcept {
+    switch (dim) {
+        case RADRAY_TEXTURE_DIM_1D: return MTL::TextureType1D;
+        case RADRAY_TEXTURE_DIM_2D: return MTL::TextureType2D;
+        case RADRAY_TEXTURE_DIM_3D: return MTL::TextureType3D;
+        case RADRAY_TEXTURE_DIM_CUBE: return MTL::TextureTypeCube;
+        case RADRAY_TEXTURE_DIM_1D_ARRAY: return MTL::TextureType1DArray;
+        case RADRAY_TEXTURE_DIM_2D_ARRAY: return MTL::TextureType2DArray;
+        case RADRAY_TEXTURE_DIM_CUBE_ARRAY: return MTL::TextureTypeCubeArray;
+        default: return (MTL::TextureType)-1;
+    }
+}
+
+MTL::LoadAction EnumConvert(RadrayLoadAction load) noexcept {
+    switch (load) {
+        case RADRAY_LOAD_ACTION_DONTCARE: return MTL::LoadActionDontCare;
+        case RADRAY_LOAD_ACTION_LOAD: return MTL::LoadActionLoad;
+        case RADRAY_LOAD_ACTION_CLEAR: return MTL::LoadActionClear;
+        default: return (MTL::LoadAction)-1;
+    }
+}
+
+MTL::StoreAction EnumConvert(RadrayStoreAction store) noexcept {
+    switch (store) {
+        case RADRAY_STORE_ACTION_STORE: return MTL::StoreActionStore;
+        case RADRAY_STORE_ACTION_DISCARD: return MTL::StoreActionDontCare;
+        default: return (MTL::StoreAction)-1;
+    }
+}
+
 }  // namespace radray::rhi::metal

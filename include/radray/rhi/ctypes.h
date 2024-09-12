@@ -398,6 +398,7 @@ typedef struct RadrayTextureDescriptor {
     uint32_t Height;
     uint32_t Depth;
     uint32_t ArraySize;
+    RadrayTextureDimension Dimension;
     RadrayFormat Format;
     uint32_t MipLevels;
     RadrayTextureMSAACount SampleCount;
@@ -412,7 +413,6 @@ typedef struct RadrayTextureViewDescriptor {
     RadrayTexture Texture;
     RadrayFormat Format;
     RadrayResourceType Type;
-    RadrayTextureDimension Dimension;
     uint32_t BaseArrayLayer;
     uint32_t ArrayLayerCount;
     uint32_t BaseMipLevel;

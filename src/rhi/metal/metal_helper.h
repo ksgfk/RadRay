@@ -38,6 +38,10 @@ decltype(auto) AutoRelease(T&& func) noexcept {
 }
 
 MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept;
+NS::UInteger EnumConvert(RadrayTextureMSAACount cnt) noexcept;
+MTL::TextureType EnumConvert(RadrayTextureDimension dim) noexcept;
+MTL::LoadAction EnumConvert(RadrayLoadAction load) noexcept;
+MTL::StoreAction EnumConvert(RadrayStoreAction store) noexcept;
 
 }  // namespace radray::rhi::metal
 

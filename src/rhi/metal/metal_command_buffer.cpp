@@ -19,7 +19,14 @@ void CommandBuffer::Begin() {
         cmdBuffer->release();
         cmdBuffer = nullptr;
     }
-    cmdBuffer = queue->commandBufferWithUnretainedReferences();
+    auto desc = MTL::CommandBufferDescriptor::alloc()->autorelease();
+    desc->setRetainedReferences(false);
+#if RADRAY_IS_DEBUG
+    desc->setErrorOptions(MTL::CommandBufferErrorOptionEncoderExecutionStatus);
+#else
+    desc->setErrorOptions(MTL::CommandBufferErrorOptionNone);
+#endif
+    cmdBuffer = queue->commandBuffer(desc);
     cmdBuffer->retain();
 }
 

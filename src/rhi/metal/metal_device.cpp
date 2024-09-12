@@ -3,9 +3,20 @@
 #include "dispatch_semaphore.h"
 #include "metal_command_queue.h"
 #include "metal_command_buffer.h"
+#include "metal_command_encoder.h"
 #include "metal_swapchain.h"
+#include "metal_texture.h"
 
 namespace radray::rhi::metal {
+
+static CommandQueue* Underlying(RadrayCommandQueue queue) noexcept { return reinterpret_cast<CommandQueue*>(queue.Ptr); }
+static CommandQueue* Underlying(RadrayCommandAllocator alloc) noexcept { return reinterpret_cast<CommandQueue*>(alloc.Ptr); }
+static CommandBuffer* Underlying(RadrayCommandList list) noexcept { return reinterpret_cast<CommandBuffer*>(list.Ptr); }
+static CommandEncoder* Underlying(RadrayRenderPassEncoder encoder) noexcept { return reinterpret_cast<CommandEncoder*>(encoder.Ptr); }
+static Semaphore* Underlying(RadrayFence fence) noexcept { return reinterpret_cast<Semaphore*>(fence.Ptr); }
+static SwapChain* Underlying(RadraySwapChain swapchain) noexcept { return reinterpret_cast<SwapChain*>(swapchain.Ptr); }
+static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
+static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
 
 Device::Device(const RadrayDeviceDescriptorMetal& desc) {
     AutoRelease([this, &desc]() {
@@ -35,20 +46,20 @@ RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
 
 void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
     AutoRelease([=]() {
-        auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+        auto q = Underlying(queue);
         RhiDelete(q);
     });
 }
 
 void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
     AutoRelease([&desc]() {
-        auto q = reinterpret_cast<CommandQueue*>(desc.Queue.Ptr);
+        auto q = Underlying(desc.Queue);
         for (size_t i = 0; i < desc.ListCount; i++) {
-            auto cb = reinterpret_cast<CommandBuffer*>(desc.Lists[i].Ptr);
+            auto cb = Underlying(desc.Lists[i]);
             cb->Commit();
         }
         if (!RADRAY_RHI_IS_EMPTY_RES(desc.SignalFence)) {
-            auto sem = reinterpret_cast<Semaphore*>(desc.SignalFence.Ptr);
+            auto sem = Underlying(desc.SignalFence);
             auto cb = q->queue->commandBufferWithUnretainedReferences();
             cb->addCompletedHandler(^(MTL::CommandBuffer* cmdBuf) {
               sem->Signal();
@@ -60,7 +71,7 @@ void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
 
 void Device::WaitQueue(RadrayCommandQueue queue) {
     AutoRelease([queue]() {
-        auto q = reinterpret_cast<CommandQueue*>(queue.Ptr);
+        auto q = Underlying(queue);
         MTL::CommandBuffer* cb = q->queue->commandBufferWithUnretainedReferences();
         cb->commit();
         cb->waitUntilCompleted();
@@ -76,14 +87,14 @@ RadrayFence Device::CreateFence() {
 
 void Device::DestroyFence(RadrayFence fence) {
     AutoRelease([=]() {
-        auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
+        auto e = Underlying(fence);
         RhiDelete(e);
     });
 }
 
 RadrayFenceState Device::GetFenceState(RadrayFence fence) {
     return AutoRelease([fence]() {
-        auto e = reinterpret_cast<Semaphore*>(fence.Ptr);
+        auto e = Underlying(fence);
         return e->count < 0 ? RADRAY_FENCE_STATE_INCOMPLETE : RADRAY_FENCE_STATE_COMPLETE;
     });
 }
@@ -91,7 +102,7 @@ RadrayFenceState Device::GetFenceState(RadrayFence fence) {
 void Device::WaitFences(std::span<const RadrayFence> fences) {
     AutoRelease([fences]() {
         for (auto&& i : fences) {
-            auto e = reinterpret_cast<Semaphore*>(i.Ptr);
+            auto e = Underlying(i);
             e->Wait();
         }
     });
@@ -105,7 +116,7 @@ void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {}
 
 RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
     return AutoRelease([=]() {
-        auto q = reinterpret_cast<CommandQueue*>(alloc.Ptr);
+        auto q = Underlying(alloc);
         auto cb = RhiNew<CommandBuffer>(q->queue);
         return RadrayCommandList{cb, cb->cmdBuffer};
     });
@@ -113,7 +124,7 @@ RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
 
 void Device::DestroyCommandList(RadrayCommandList list) {
     AutoRelease([=]() {
-        auto cb = reinterpret_cast<CommandBuffer*>(list.Ptr);
+        auto cb = Underlying(list);
         RhiDelete(cb);
     });
 }
@@ -122,16 +133,57 @@ void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {}
 
 void Device::BeginCommandList(RadrayCommandList list) {
     AutoRelease([=]() {
-        auto cb = reinterpret_cast<CommandBuffer*>(list.Ptr);
+        auto cb = Underlying(list);
         cb->Begin();
     });
 }
 
 void Device::EndCommandList(RadrayCommandList list) {}
 
+RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor& desc) {
+    return AutoRelease([&desc]() {
+        auto cb = Underlying(desc.List);
+        auto rp = MTL::RenderPassDescriptor::renderPassDescriptor()->autorelease();
+        auto colorArray = rp->colorAttachments();
+        for (size_t i = 0; i < desc.ColorCount; i++) {
+            auto&& radColor = desc.Colors[i];
+            auto color = colorArray->object(i);
+            auto colorView = Underlying(radColor.View);
+            auto clear = MTL::ClearColor::Make(radColor.Clear.G, radColor.Clear.B, radColor.Clear.R, radColor.Clear.A);
+            color->setTexture(colorView->texture);
+            color->setClearColor(clear);
+            color->setLoadAction(EnumConvert(radColor.Load));
+            color->setStoreAction(EnumConvert(radColor.Store));
+        }
+        if (desc.DepthStencil) {
+            auto&& radDs = *desc.DepthStencil;
+            auto depth = rp->depthAttachment();
+            auto dsView = Underlying(radDs.View);
+            depth->setTexture(dsView->texture);
+            depth->setClearDepth(radDs.DepthClear);
+            depth->setLoadAction(EnumConvert(radDs.DepthLoad));
+            depth->setStoreAction(EnumConvert(radDs.DepthStore));
+            auto stencil = rp->stencilAttachment();
+            stencil->setTexture(dsView->texture);
+            stencil->setClearStencil(radDs.StencilClear);
+            stencil->setLoadAction(EnumConvert(radDs.StencilLoad));
+            stencil->setStoreAction(EnumConvert(radDs.StencilStore));
+        }
+        auto rpe = RhiNew<CommandEncoder>(cb->cmdBuffer, rp);
+        return RadrayRenderPassEncoder{rpe, rpe->encoder};
+    });
+}
+
+void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
+    AutoRelease([=]() {
+        auto rpe = Underlying(encoder);
+        RhiDelete(rpe);
+    });
+}
+
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     return AutoRelease([&desc, this]() {
-        auto q = reinterpret_cast<CommandQueue*>(desc.PresentQueue.Ptr);
+        auto q = Underlying(desc.PresentQueue);
         auto sc = RhiNew<SwapChain>(
             device,
             q->queue,
@@ -147,14 +199,14 @@ RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
 
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
     AutoRelease([=]() {
-        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        auto sc = Underlying(swapchain);
         RhiDelete(sc);
     });
 }
 
 uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
     return AutoRelease([=]() {
-        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        auto sc = Underlying(swapchain);
         sc->AcquireNextDrawable();
         return 0;
     });
@@ -162,7 +214,7 @@ uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
 
 void Device::Present(RadraySwapChain swapchain) {
     AutoRelease([=]() {
-        auto sc = reinterpret_cast<SwapChain*>(swapchain.Ptr);
+        auto sc = Underlying(swapchain);
         MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
         cmdBuffer->presentDrawable(sc->currentDrawable);
         cmdBuffer->commit();
@@ -183,16 +235,44 @@ void Device::DestroyBufferView(RadrayBuffer buffer, RadrayBufferView view) {
 }
 
 RadrayTexture Device::CreateTexture(const RadrayTextureDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+    return AutoRelease([this, &desc]() {
+        auto td = MTL::TextureDescriptor::alloc()->init()->autorelease();
+        td->setWidth(desc.Width);
+        td->setHeight(desc.Height);
+        td->setDepth(desc.Depth);
+        td->setArrayLength(desc.ArraySize);
+        td->setPixelFormat(EnumConvert(desc.Format));
+        td->setMipmapLevelCount(desc.MipLevels);
+        td->setSampleCount(EnumConvert(desc.SampleCount));
+        td->setTextureType(EnumConvert(desc.Dimension));
+        td->setStorageMode(MTL::StorageModePrivate);
+        auto tex = RhiNew<Texture>(device, td);
+        auto name = NS::String::alloc()->init(desc.Name, NS::UTF8StringEncoding)->autorelease();
+        tex->texture->setLabel(name);
+        return RadrayTexture{tex, tex->texture};
+    });
 }
+
 void Device::DestroyTexture(RadrayTexture texture) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([texture]() {
+        auto t = Underlying(texture);
+        RhiDelete(t);
+    });
 }
+
 RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+    return AutoRelease([&desc]() {
+        auto tex = Underlying(desc.Texture);
+        auto v = RhiNew<TextureView>(tex, EnumConvert(desc.Format));
+        return RadrayTextureView{v};
+    });
 }
+
 void Device::DestroyTextureView(RadrayTextureView view) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([view]() {
+        auto v = Underlying(view);
+        RhiDelete(v);
+    });
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {

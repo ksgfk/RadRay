@@ -26,6 +26,8 @@ public:
     void ResetCommandAllocator(RadrayCommandAllocator alloc) override;
     void BeginCommandList(RadrayCommandList list) override;
     void EndCommandList(RadrayCommandList list) override;
+    RadrayRenderPassEncoder BeginRenderPass(const RadrayRenderPassDescriptor& desc) override;
+    void EndRenderPass(RadrayRenderPassEncoder encoder) override;
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
