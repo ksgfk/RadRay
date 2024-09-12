@@ -35,7 +35,7 @@ public:
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
-    uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) override;
+    RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain) override;
     void Present(RadraySwapChain swapchain) override;
 
     RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
@@ -57,8 +57,6 @@ public:
     RadrayGraphicsPipeline CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) override;
     void DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) override;
 
-    DxcShaderCompiler* GetDxc();
-
 public:
     ComPtr<IDXGIFactory6> dxgiFactory;
     ComPtr<IDXGIAdapter1> adapter;
@@ -69,9 +67,7 @@ public:
     radray::unique_ptr<DescriptorHeap> dsvHeap;
     radray::unique_ptr<DescriptorHeap> gpuCbvSrvUavHeap;
     radray::unique_ptr<DescriptorHeap> gpuSamplerHeap;
-
-private:
-    radray::unique_ptr<DxcShaderCompiler> _dxc;
+    radray::unique_ptr<DxcShaderCompiler> dxc;
 
 public:
     bool canSetDebugName;

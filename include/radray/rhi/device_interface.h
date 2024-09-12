@@ -46,7 +46,7 @@ public:
 
     virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
     virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;
-    virtual uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
+    virtual RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
     virtual void Present(RadraySwapChain swapchain) = 0;
 
     virtual RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) = 0;

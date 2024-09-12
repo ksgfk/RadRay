@@ -17,6 +17,7 @@ public:
 
 public:
     ComPtr<IDXGISwapChain3> swapchain;
+    radray::vector<ComPtr<ID3D12Resource>> colors;
     UINT presentFlags;
 };
 

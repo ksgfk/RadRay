@@ -20,6 +20,12 @@ SwapChain::SwapChain(
     RADRAY_DX_FTHROW(device->dxgiFactory->CreateSwapChainForHwnd(queue, hwnd, &chain, nullptr, nullptr, temp.GetAddressOf()));
     RADRAY_DX_FTHROW(device->dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER));  // 阻止全屏
     RADRAY_DX_FTHROW(temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf())));
+    colors.reserve(desc.BufferCount);
+    for (size_t i = 0; i < desc.BufferCount; i++) {
+        ComPtr<ID3D12Resource> color;
+        RADRAY_DX_FTHROW(swapchain->GetBuffer(i, IID_PPV_ARGS(color.GetAddressOf())));
+        colors.emplace_back(std::move(color));
+    }
 }
 
 }  // namespace radray::rhi::d3d12

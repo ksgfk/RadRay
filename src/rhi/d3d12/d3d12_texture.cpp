@@ -6,21 +6,28 @@ namespace radray::rhi::d3d12 {
 
 Texture::Texture(
     Device* device,
-    D3D12_RESOURCE_STATES initState,
-    const D3D12_CLEAR_VALUE* cvPtr,
     const D3D12_RESOURCE_DESC& resDesc,
+    D3D12_RESOURCE_STATES initState,
     const D3D12MA::ALLOCATION_DESC& allocDesc)
     : desc(resDesc),
-      initState(initState),
-      clrValue(cvPtr ? *cvPtr : D3D12_CLEAR_VALUE{}) {
+      initState(initState) {
     RADRAY_DX_FTHROW(device->resourceAlloc->CreateResource(
         &allocDesc,
         &resDesc,
         initState,
-        cvPtr,
+        nullptr,
         alloc.GetAddressOf(),
         IID_PPV_ARGS(texture.GetAddressOf())));
     gpuAddr = texture->GetGPUVirtualAddress();
 }
+
+Texture::Texture(
+    const ComPtr<ID3D12Resource>& res,
+    D3D12_RESOURCE_STATES initState)
+    : desc(res->GetDesc()),
+      initState(initState),
+      texture(res),
+      alloc{},
+      gpuAddr(texture->GetGPUVirtualAddress()) {}
 
 }  // namespace radray::rhi::d3d12
