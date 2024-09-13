@@ -17,7 +17,6 @@ std::string_view to_string(VertexSemantic e) noexcept {
         case VertexSemantic::BLENDINDICES: return "BLENDINDICES";
         case VertexSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
         case VertexSemantic::POSITIONT: return "POSITIONT";
-        default: return "Unknown";
     }
 }
 
@@ -25,7 +24,6 @@ std::string_view to_string(VertexIndexType val) noexcept {
     switch (val) {
         case radray::VertexIndexType::UInt16: return "UInt16";
         case radray::VertexIndexType::UInt32: return "UInt32";
-        default: return "Unknown";
     }
 }
 

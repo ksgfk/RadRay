@@ -80,7 +80,6 @@ D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept {
         case RADRAY_QUEUE_TYPE_DIRECT: return D3D12_COMMAND_LIST_TYPE_DIRECT;
         case RADRAY_QUEUE_TYPE_COMPUTE: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
         case RADRAY_QUEUE_TYPE_COPY: return D3D12_COMMAND_LIST_TYPE_COPY;
-        default: return D3D12_COMMAND_LIST_TYPE_NONE;
     }
 }
 
@@ -124,7 +123,6 @@ DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept {
         case RADRAY_FORMAT_D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case RADRAY_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         case RADRAY_FORMAT_D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        default: return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -183,7 +181,6 @@ D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept {
         case RADRAY_HEAP_USAGE_DEFAULT: return D3D12_HEAP_TYPE_DEFAULT;
         case RADRAY_HEAP_USAGE_UPLOAD: return D3D12_HEAP_TYPE_UPLOAD;
         case RADRAY_HEAP_USAGE_READBACK: return D3D12_HEAP_TYPE_READBACK;
-        default: return (D3D12_HEAP_TYPE)-1;
     }
 }
 
@@ -192,7 +189,6 @@ D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE EnumConvert(RadrayLoadAction load) noexc
         case RADRAY_LOAD_ACTION_DONTCARE: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
         case RADRAY_LOAD_ACTION_LOAD: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
         case RADRAY_LOAD_ACTION_CLEAR: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
-        default: return (D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE)-1;
     }
 }
 
@@ -200,7 +196,6 @@ D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexce
     switch (store) {
         case RADRAY_STORE_ACTION_STORE: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
         case RADRAY_STORE_ACTION_DISCARD: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD;
-        default: return (D3D12_RENDER_PASS_ENDING_ACCESS_TYPE)-1;
     }
 }
 
@@ -347,7 +342,7 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
         case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
         case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
         case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
-        default: return "UNKNOWN";
+        
     }
 }
 

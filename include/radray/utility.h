@@ -3,6 +3,11 @@
 #include <utility>
 #include <type_traits>
 
+#define RADRAY_UNUSED(expr) \
+    do {                    \
+        (void)(expr);       \
+    } while (0)
+
 namespace radray {
 
 template <typename Call>

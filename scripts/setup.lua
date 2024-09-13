@@ -39,7 +39,7 @@ option_end()
 rule("radray_basic_setting")
     on_load(function(target) 
         target:set("languages", "cxx20", "c17")
-        target:set("warnings", "all")
+        target:set("warnings", "allextra")
         if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
         if target:is_plat("windows") then
             target:add("defines", "RADRAY_PLATFORM_WINDOWS", {public = true})

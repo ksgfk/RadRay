@@ -10,6 +10,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 
 #if defined(RADRAY_PLATFORM_MACOS)
 #include "cocoa_handle.h"
@@ -19,11 +20,16 @@ namespace radray::window {
 
 void GlobalInitGlfw() noexcept {
     GLFWallocator alloc{
-        .allocate = [](size_t size, void* user) { return radray::malloc(size); },
+        .allocate = [](size_t size, void* user) { 
+            RADRAY_UNUSED(user);
+            return radray::malloc(size); },
         .reallocate = [](void* block, size_t size, void* user) {
+            RADRAY_UNUSED(user);
             radray::free(block);
             return radray::malloc(size); },
-        .deallocate = [](void* block, void* user) { radray::free(block); },
+        .deallocate = [](void* block, void* user) { 
+            RADRAY_UNUSED(user);
+            radray::free(block); },
         .user = nullptr};
     glfwInitAllocator(&alloc);
     glfwSetErrorCallback([](int error_code, const char* description) {
@@ -78,6 +84,7 @@ public:
         glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
             auto self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
             self->keyCb->Invoke(static_cast<Key>(key), static_cast<Action>(action), static_cast<KeyModifiers>(mods));
+            RADRAY_UNUSED(scancode);
         });
         glfwSetScrollCallback(window, [](GLFWwindow* window, double dx, double dy) {
             auto self = static_cast<Impl*>(glfwGetWindowUserPointer(window));

@@ -6,6 +6,7 @@
 #include <QuartzCore/QuartzCore.hpp>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 #include <radray/rhi/ctypes.h>
 #include <radray/rhi/device_interface.h>
 #include <radray/rhi/helper.h>

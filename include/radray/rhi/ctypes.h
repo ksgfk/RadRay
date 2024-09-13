@@ -20,11 +20,11 @@
 #ifdef __cplusplus
 #define RADRAY_RHI_IS_EMPTY_RES(res) (res.Ptr == nullptr)
 #define RADRAY_RHI_EMPTY_RES(name) \
-    name { .Ptr = nullptr }
+    name { .Ptr = nullptr, .Native = nullptr }
 #else
 #define RADRAY_RHI_IS_EMPTY_RES(res) (res.Ptr == NULL)
 #define RADRAY_RHI_EMPTY_RES(name) \
-    name { .Ptr = NULL }
+    name { .Ptr = NULL, .Native = NULL }
 #endif
 #define RADRAY_RHI_MAX_VERTEX_ELEMENT 8
 #define RADRAY_RHI_MAX_MRT 8

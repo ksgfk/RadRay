@@ -1,6 +1,7 @@
 #include <radray/rhi/ctypes.h>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 #include <radray/rhi/device_interface.h>
 #ifdef RADRAY_ENABLE_D3D12
 #include "d3d12/d3d12_device.h"
@@ -21,6 +22,7 @@ RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc) {
     }
 #else
     RADRAY_ERR_LOG("cannot create D3D12 device. D3D12 disabled");
+    RADRAY_UNUSED(desc);
     return nullptr;
 #endif
 }

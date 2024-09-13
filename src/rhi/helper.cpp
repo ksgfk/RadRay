@@ -8,7 +8,6 @@ std::string_view format_as(RadrayBackand v) noexcept {
         case RADRAY_BACKEND_D3D12: return "D3D12";
         case RADRAY_BACKEND_METAL: return "Metal";
         case RADRAY_BACKEND_VULKAN: return "Vulakn";
-        default: return "UNKNOWN";
     }
 }
 
@@ -17,7 +16,6 @@ std::string_view format_as(RadrayQueueType v) noexcept {
         case RADRAY_QUEUE_TYPE_DIRECT: return "Direct";
         case RADRAY_QUEUE_TYPE_COMPUTE: return "Compute";
         case RADRAY_QUEUE_TYPE_COPY: return "Copy";
-        default: return "UNKNOWN";
     }
 }
 
@@ -60,7 +58,8 @@ std::string_view format_as(RadrayFormat v) noexcept {
         case RADRAY_FORMAT_D32_FLOAT: return "D32_FLOAT";
         case RADRAY_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
         case RADRAY_FORMAT_D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
-        default: return "UNKNOWN";
+        case RADRAY_FORMAT_BGRA8_UNORM: return "BGRA8_UNORM";
+        case RADRAY_FORMAT_UNKNOWN: return "UNKNOWN";
     }
 }
 
@@ -68,7 +67,6 @@ std::string_view format_as(RadrayFilterMode v) noexcept {
     switch (v) {
         case RADRAY_FILTER_MODE_NEAREST: return "Nearest";
         case RADRAY_FILTER_MODE_LINEAR: return "Linear";
-        default: return "UNKNOWN";
     }
 }
 
@@ -78,7 +76,6 @@ std::string_view format_as(RadrayAddressMode v) noexcept {
         case RADRAY_ADDRESS_MODE_REPEAT: return "Repeat";
         case RADRAY_ADDRESS_MODE_CLAMP_TO_EDGE: return "ClampEdge";
         case RADRAY_ADDRESS_MODE_CLAMP_TO_BORDER: return "ClampBorder";
-        default: return "UNKNOWN";
     }
 }
 
@@ -86,7 +83,6 @@ std::string_view format_as(RadrayMipMapMode v) noexcept {
     switch (v) {
         case RADRAY_MIPMAP_MODE_NEAREST: return "Nearest";
         case RADRAY_MIPMAP_MODE_LINEAR: return "Linear";
-        default: return "UNKNOWN";
     }
 }
 
@@ -98,7 +94,6 @@ std::string_view format_as(RadrayTopology v) noexcept {
         case RADRAY_TOPOLOGY_TRI_LIST: return "TriangleList";
         case RADRAY_TOPOLOGY_TRI_STRIP: return "TriangleStrip";
         case RADRAY_TOPOLOGY_PATCH_LIST: return "PatchList";
-        default: return "UNKNOWN";
     }
 }
 
@@ -117,7 +112,6 @@ std::string_view format_as(RadrayBlendType v) noexcept {
         case RADRAY_BLEND_TYPE_SRC_ALPHA_SATURATE: return "SrcAlphaSat";
         case RADRAY_BLEND_TYPE_BLEND_FACTOR: return "BlendFactor";
         case RADRAY_BLEND_TYPE_INV_BLEND_FACTOR: return "InvBlendFactor";
-        default: return "UNKNOWN";
     }
 }
 
@@ -128,7 +122,6 @@ std::string_view format_as(RadrayBlendOp v) noexcept {
         case RADRAY_BLEND_OP_REVERSE_SUBTRACT: return "RevSub";
         case RADRAY_BLEND_OP_MIN: return "Min";
         case RADRAY_BLEND_OP_MAX: return "Max";
-        default: return "UNKNOWN";
     }
 }
 
@@ -138,7 +131,6 @@ std::string_view format_as(RadrayCullMode v) noexcept {
         case RADRAY_CULL_MODE_BACK: return "Back";
         case RADRAY_CULL_MODE_FRONT: return "Front";
         case RADRAY_CULL_MODE_BOTH: return "Both";
-        default: return "UNKNOWN";
     }
 }
 
@@ -146,7 +138,6 @@ std::string_view format_as(RadrayFrontFace v) noexcept {
     switch (v) {
         case RADRAY_FRONT_FACE_CCW: return "CCW";
         case RADRAY_FRONT_FACE_CW: return "CW";
-        default: return "UNKNOWN";
     }
 }
 
@@ -154,7 +145,6 @@ std::string_view format_as(RadrayFillMode v) noexcept {
     switch (v) {
         case RADRAY_FILL_MODE_SOLID: return "Solid";
         case RADRAY_FILL_MODE_WIREFRAME: return "Wireframe";
-        default: return "UNKNOWN";
     }
 }
 
@@ -162,7 +152,6 @@ std::string_view format_as(RadrayVertexInputRate v) noexcept {
     switch (v) {
         case RADRAY_INPUT_RATE_VERTEX: return "Vertex";
         case RADRAY_INPUT_RATE_INSTANCE: return "Instance";
-        default: return "UNKNOWN";
     }
 }
 
@@ -176,7 +165,6 @@ std::string_view format_as(RadrayCompareMode v) noexcept {
         case RADRAY_COMPARE_NOTEQUAL: return "NotEqual";
         case RADRAY_COMPARE_GEQUAL: return "GreatEqual";
         case RADRAY_COMPARE_ALWAYS: return "Always";
-        default: return "UNKNOWN";
     }
 }
 
@@ -190,7 +178,6 @@ std::string_view format_as(RadrayStencilOp v) noexcept {
         case RADRAY_STENCIL_OP_DECR: return "Dec";
         case RADRAY_STENCIL_OP_INCR_SAT: return "IncSat";
         case RADRAY_STENCIL_OP_DECR_SAT: return "DecSat";
-        default: return "UNKNOWN";
     }
 }
 
@@ -203,7 +190,7 @@ std::string_view format_as(RadrayTextureDimension v) noexcept {
         case RADRAY_TEXTURE_DIM_1D_ARRAY: return "1DArray";
         case RADRAY_TEXTURE_DIM_2D_ARRAY: return "2DArray";
         case RADRAY_TEXTURE_DIM_CUBE_ARRAY: return "CubeArray";
-        default: return "UNKNOWN";
+        case RADRAY_TEXTURE_DIM_UNKNOWN: return "UNKNOWN";
     }
 }
 
@@ -212,7 +199,6 @@ std::string_view format_as(RadrayFenceState v) noexcept {
         case RADRAY_FENCE_STATE_COMPLETE: return "Complete";
         case RADRAY_FENCE_STATE_INCOMPLETE: return "Incomplete";
         case RADRAY_FENCE_STATE_NOTSUBMITTED: return "NotSubmitted";
-        default: return "UNKNOWN";
     }
 }
 
@@ -234,7 +220,7 @@ std::string_view format_as(RadrayResourceState v) noexcept {
         case RADRAY_RESOURCE_STATE_GENERIC_READ: return "GenericRead";
         case RADRAY_RESOURCE_STATE_PRESENT: return "Present";
         case RADRAY_RESOURCE_STATE_COMMON: return "Common";
-        default: return "UNKNOWN";
+        case RADRAY_RESOURCE_STATE_UNKNOWN: return "UNKNOWN";
     }
 }
 
@@ -251,7 +237,7 @@ std::string_view format_as(RadrayResourceType v) noexcept {
         case RADRAY_RESOURCE_TYPE_DEPTH_STENCIL: return "DS";
         case RADRAY_RESOURCE_TYPE_SAMPLER: return "Sampler";
         case RADRAY_RESOURCE_TYPE_RAYTRACING: return "RayTracing";
-        default: return "UNKNOWN";
+        case RADRAY_RESOURCE_TYPE_UNKNOWN: return "UNKNOWN";
     }
 }
 
@@ -260,14 +246,12 @@ std::string_view format_as(RadrayHeapUsage v) noexcept {
         case RADRAY_HEAP_USAGE_DEFAULT: return "Default";
         case RADRAY_HEAP_USAGE_UPLOAD: return "Upload";
         case RADRAY_HEAP_USAGE_READBACK: return "ReadBack";
-        default: return "UNKNOWN";
     }
 }
 
 std::string_view format_as(RadrayBufferCreateFlag v) noexcept {
     switch (v) {
         case RADRAY_BUFFER_CREATE_FLAG_COMMITTED: return "Committed";
-        default: return "UNKNOWN";
     }
 }
 
@@ -278,14 +262,12 @@ std::string_view format_as(RadrayTextureMSAACount v) noexcept {
         case RADRAY_TEXTURE_MSAA_4: return "x4";
         case RADRAY_TEXTURE_MSAA_8: return "x8";
         case RADRAY_TEXTURE_MSAA_16: return "x16";
-        default: return "UNKNOWN";
     }
 }
 
 std::string_view format_as(RadrayTextureCreateFlag v) noexcept {
     switch (v) {
         case RADRAY_TEXTURE_CREATE_FLAG_COMMITTED: return "Committed";
-        default: return "UNKNOWN";
     }
 }
 
@@ -299,7 +281,7 @@ std::string_view format_as(RadrayShaderStage v) noexcept {
         case RADRAY_SHADER_STAGE_COMPUTE: return "Compute";
         case RADRAY_SHADER_STAGE_RAYTRACING: return "RayTracing";
         case RADRAY_SHADER_STAGE_ALL_GRAPHICS: return "AllGraphics";
-        default: return "UNKNOWN";
+        case RADRAY_SHADER_STAGE_UNKNOWN: return "UNKNOWN";
     }
 }
 
@@ -315,6 +297,5 @@ std::string_view format_as(RadrayVertexSemantic v) noexcept {
         case RADRAY_VERTEX_SEMANTIC_BLENDINDICES: return "BLENDINDICES";
         case RADRAY_VERTEX_SEMANTIC_BLENDWEIGHT: return "BLENDWEIGHT";
         case RADRAY_VERTEX_SEMANTIC_POSITIONT: return "POSITIONT";
-        default: return "UNKNOWN";
     }
 }

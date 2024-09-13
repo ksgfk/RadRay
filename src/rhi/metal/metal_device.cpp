@@ -38,6 +38,7 @@ Device::~Device() noexcept {
 }
 
 RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
+    RADRAY_UNUSED(type);
     return AutoRelease([this]() {
         auto q = RhiNew<CommandQueue>(device);
         return RadrayCommandQueue{q, q->queue};
@@ -62,6 +63,7 @@ void Device::SubmitQueue(const RadraySubmitQueueDescriptor& desc) {
             auto sem = Underlying(desc.SignalFence);
             auto cb = q->queue->commandBufferWithUnretainedReferences();
             cb->addCompletedHandler(^(MTL::CommandBuffer* cmdBuf) {
+              RADRAY_UNUSED(cmdBuf);
               sem->Signal();
             });
             cb->commit();
@@ -112,7 +114,9 @@ RadrayCommandAllocator Device::CreateCommandAllocator(RadrayCommandQueue queue) 
     return RadrayCommandAllocator{queue.Ptr, queue.Native};
 }
 
-void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {}
+void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {
+    RADRAY_UNUSED(alloc);
+}
 
 RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
     return AutoRelease([alloc]() {
@@ -129,7 +133,9 @@ void Device::DestroyCommandList(RadrayCommandList list) {
     });
 }
 
-void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {}
+void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {
+    RADRAY_UNUSED(alloc);
+}
 
 void Device::BeginCommandList(RadrayCommandList list) {
     AutoRelease([list]() {
@@ -138,7 +144,9 @@ void Device::BeginCommandList(RadrayCommandList list) {
     });
 }
 
-void Device::EndCommandList(RadrayCommandList list) {}
+void Device::EndCommandList(RadrayCommandList list) {
+    RADRAY_UNUSED(list);
+}
 
 RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor& desc) {
     return AutoRelease([&desc]() {

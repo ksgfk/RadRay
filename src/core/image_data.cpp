@@ -27,7 +27,6 @@ size_t ImageData::FormatByteSize(ImageFormat format) noexcept {
         case ImageFormat::RGBA16_USHORT: return 8;
         case ImageFormat::RGBA16_HALF: return 8;
         case ImageFormat::RGBA32_FLOAT: return 16;
-        default: return -1;
     }
 }
 
@@ -46,7 +45,6 @@ std::string_view to_string(ImageFormat val) noexcept {
         case radray::ImageFormat::RGBA16_USHORT: return "RGBA16_USHORT";
         case radray::ImageFormat::RGBA16_HALF: return "RGBA16_HALF";
         case radray::ImageFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
-        default: return "Unknown";
     }
 }
 
