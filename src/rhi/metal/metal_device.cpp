@@ -45,7 +45,7 @@ RadrayCommandQueue Device::CreateCommandQueue(RadrayQueueType type) {
 }
 
 void Device::DestroyCommandQueue(RadrayCommandQueue queue) {
-    AutoRelease([=]() {
+    AutoRelease([queue]() {
         auto q = Underlying(queue);
         RhiDelete(q);
     });
@@ -86,7 +86,7 @@ RadrayFence Device::CreateFence() {
 }
 
 void Device::DestroyFence(RadrayFence fence) {
-    AutoRelease([=]() {
+    AutoRelease([fence]() {
         auto e = Underlying(fence);
         RhiDelete(e);
     });
@@ -115,7 +115,7 @@ RadrayCommandAllocator Device::CreateCommandAllocator(RadrayCommandQueue queue) 
 void Device::DestroyCommandAllocator(RadrayCommandAllocator alloc) {}
 
 RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
-    return AutoRelease([=]() {
+    return AutoRelease([alloc]() {
         auto q = Underlying(alloc);
         auto cb = RhiNew<CommandBuffer>(q->queue);
         return RadrayCommandList{cb, cb->cmdBuffer};
@@ -123,7 +123,7 @@ RadrayCommandList Device::CreateCommandList(RadrayCommandAllocator alloc) {
 }
 
 void Device::DestroyCommandList(RadrayCommandList list) {
-    AutoRelease([=]() {
+    AutoRelease([list]() {
         auto cb = Underlying(list);
         RhiDelete(cb);
     });
@@ -132,7 +132,7 @@ void Device::DestroyCommandList(RadrayCommandList list) {
 void Device::ResetCommandAllocator(RadrayCommandAllocator alloc) {}
 
 void Device::BeginCommandList(RadrayCommandList list) {
-    AutoRelease([=]() {
+    AutoRelease([list]() {
         auto cb = Underlying(list);
         cb->Begin();
     });
@@ -175,7 +175,7 @@ RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor
 }
 
 void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
-    AutoRelease([=]() {
+    AutoRelease([encoder]() {
         auto rpe = Underlying(encoder);
         RhiDelete(rpe);
     });
@@ -198,25 +198,34 @@ RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
 }
 
 void Device::DestroySwapChian(RadraySwapChain swapchain) {
-    AutoRelease([=]() {
+    AutoRelease([swapchain]() {
         auto sc = Underlying(swapchain);
         RhiDelete(sc);
     });
 }
 
-uint32_t Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
-    return AutoRelease([=]() {
+RadrayTexture Device::AcquireNextRenderTarget(RadraySwapChain swapchain, RadrayTexture lastRt) {
+    return AutoRelease([swapchain, lastRt]() {
+        if (!RADRAY_RHI_IS_EMPTY_RES(lastRt)) {
+            auto tex = static_cast<MetalDrawableTexture*>(Underlying(lastRt));
+            RhiDelete(tex);
+        }
         auto sc = Underlying(swapchain);
-        sc->AcquireNextDrawable();
-        return 0;
+        auto drawable = sc->layer->nextDrawable();
+        if (drawable == nullptr) {
+            RADRAY_MTL_THROW("metal cannot acquire next drawable");
+        }
+        auto rt = RhiNew<MetalDrawableTexture>(drawable);
+        return RadrayTexture{rt, rt->texture};
     });
 }
 
-void Device::Present(RadraySwapChain swapchain) {
-    AutoRelease([=]() {
+void Device::Present(RadraySwapChain swapchain, RadrayTexture currentRt) {
+    AutoRelease([swapchain, currentRt]() {
         auto sc = Underlying(swapchain);
+        auto tex = static_cast<MetalDrawableTexture*>(Underlying(currentRt));
         MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
-        cmdBuffer->presentDrawable(sc->currentDrawable);
+        cmdBuffer->presentDrawable(tex->drawable);
         cmdBuffer->commit();
     });
 }

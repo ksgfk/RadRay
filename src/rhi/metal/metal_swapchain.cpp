@@ -30,15 +30,4 @@ SwapChain::~SwapChain() noexcept {
     layer->release();
 }
 
-void SwapChain::AcquireNextDrawable() {
-    if (currentDrawable != nullptr) {
-        currentDrawable->release();
-    }
-    currentDrawable = layer->nextDrawable();
-    if (currentDrawable == nullptr) {
-        RADRAY_MTL_THROW("Failed to acquire next drawable from swapchain");
-    }
-    currentDrawable->retain();
-}
-
 }  // namespace radray::rhi::metal

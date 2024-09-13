@@ -31,8 +31,8 @@ public:
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
-    uint32_t AcquireNextRenderTarget(RadraySwapChain swapchain) override;
-    void Present(RadraySwapChain swapchain) override;
+    RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain, RadrayTexture lastRt) override;
+    void Present(RadraySwapChain swapchain, RadrayTexture currentRt) override;
 
     RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
     void DestroyBuffer(RadrayBuffer buffer) override;

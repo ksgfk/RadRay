@@ -8,7 +8,22 @@ Texture::Texture(
     : texture(device->newTexture(desc)) {}
 
 Texture::~Texture() noexcept {
-    texture->release();
+    if (texture != nullptr) {
+        texture->release();
+        texture = nullptr;
+    }
+}
+
+MetalDrawableTexture::MetalDrawableTexture(CA::MetalDrawable* drawable)
+    : Texture(drawable->texture()),
+      drawable(drawable->retain()) {}
+
+MetalDrawableTexture::~MetalDrawableTexture() noexcept {
+    texture = nullptr;
+    if (drawable != nullptr) {
+        drawable->release();
+        drawable = nullptr;
+    }
 }
 
 TextureView::TextureView(Texture* raw, MTL::PixelFormat format)

@@ -15,6 +15,7 @@ RadrayCommandAllocator cmdAlloc;
 RadrayCommandList cmdList;
 RadraySwapChain swapchain;
 RadrayFence fence;
+RadrayTexture nowRt = RADRAY_RHI_EMPTY_RES(RadrayTexture);
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -53,12 +54,12 @@ void update() {
         radray::window::GlobalPollEventsGlfw();
         RadrayFence fences[]{fence};
         device->WaitFences(fences);
-        device->AcquireNextRenderTarget(swapchain);
+        nowRt = device->AcquireNextRenderTarget(swapchain, nowRt);
         device->ResetCommandAllocator(cmdAlloc);
         device->BeginCommandList(cmdList);
         device->EndCommandList(cmdList);
         device->SubmitQueue({cmdQueue, &cmdList, 1, fence});
-        device->Present(swapchain);
+        device->Present(swapchain, nowRt);
         std::this_thread::yield();
     }
 }
@@ -66,6 +67,7 @@ void update() {
 void destroy() {
     device->WaitQueue(cmdQueue);
     device->DestroyFence(fence);
+    device->DestroyTexture(nowRt);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandList(cmdList);
     device->DestroyCommandAllocator(cmdAlloc);

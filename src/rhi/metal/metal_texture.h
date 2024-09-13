@@ -6,13 +6,23 @@ namespace radray::rhi::metal {
 
 class Texture {
 public:
+    explicit Texture(MTL::Texture* texture) noexcept : texture(texture) {}
     Texture(
         MTL::Device* device,
         MTL::TextureDescriptor* desc);
-    ~Texture() noexcept;
+    virtual ~Texture() noexcept;
 
 public:
     MTL::Texture* texture;
+};
+
+class MetalDrawableTexture : public Texture {
+public:
+    explicit MetalDrawableTexture(CA::MetalDrawable* drawable);
+    ~MetalDrawableTexture() noexcept override;
+
+public:
+    CA::MetalDrawable* drawable;
 };
 
 class TextureView {

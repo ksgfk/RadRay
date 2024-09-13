@@ -17,12 +17,9 @@ public:
         bool enableSync);
     ~SwapChain() noexcept;
 
-    void AcquireNextDrawable();
-
 public:
     MTL::CommandQueue* queue;
     CA::MetalLayer* layer;
-    CA::MetalDrawable* currentDrawable{nullptr};
 };
 
 }  // namespace radray::rhi::metal
