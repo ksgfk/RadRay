@@ -1,5 +1,7 @@
 #pragma once
 
+#include <variant>
+
 #include "d3d12_helper.h"
 
 namespace radray::rhi::d3d12 {
@@ -24,10 +26,21 @@ public:
     D3D12_RESOURCE_STATES initState;
     ComPtr<ID3D12Resource> texture;
     ComPtr<D3D12MA::Allocation> alloc;
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr;
 };
 
-struct TextureView {
+class TextureView {
+public:
+    using ViewDesc = std::variant<
+        D3D12_RENDER_TARGET_VIEW_DESC,
+        D3D12_DEPTH_STENCIL_VIEW_DESC,
+        D3D12_SHADER_RESOURCE_VIEW_DESC,
+        D3D12_UNORDERED_ACCESS_VIEW_DESC>;
+
+    TextureView(DescriptorHeap* heap, Texture* tex, const ViewDesc& desc);
+    ~TextureView() noexcept;
+
+public:
+    ViewDesc desc;
     DescriptorHeap* heap;
     Texture* tex;
     UINT index;

@@ -269,6 +269,35 @@ void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
     cmdList->EndRenderPass();
 }
 
+void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) {
+    radray::vector<D3D12_RESOURCE_BARRIER> dx12Barriers;
+    dx12Barriers.reserve(desc.TextureBarrierCount);
+    for (uint32_t i = 0; i < desc.TextureBarrierCount; i++) {
+        auto&& barrier = desc.TextureBarriers[i];
+        auto tex = Underlying(barrier.Texture);
+        if (barrier.SrcState == RADRAY_RESOURCE_STATE_UNORDERED_ACCESS &&
+            barrier.DstState == RADRAY_RESOURCE_STATE_UNORDERED_ACCESS) {
+            D3D12_RESOURCE_BARRIER& drb = dx12Barriers.emplace_back();
+            drb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            drb.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            drb.UAV.pResource = tex->texture.Get();
+            continue;
+        }
+        if (barrier.SrcState == barrier.DstState) {
+            continue;
+        }
+        D3D12_RESOURCE_BARRIER& drb = dx12Barriers.emplace_back();
+        drb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        drb.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        drb.Transition.pResource = tex->texture.Get();
+        drb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        drb.Transition.StateBefore = EnumConvert(barrier.SrcState);
+        drb.Transition.StateAfter = EnumConvert(barrier.DstState);
+    }
+    auto cmdList = Underlying(list);
+    cmdList->list->ResourceBarrier(static_cast<UINT>(dx12Barriers.size()), dx12Barriers.data());
+}
+
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     DXGI_SWAP_CHAIN_DESC1 chain{
         .Width = desc.Width,
@@ -297,12 +326,12 @@ void Device::DestroySwapChian(RadraySwapChain swapchain) {
 RadrayTexture Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
     auto sc = Underlying(swapchain);
     UINT index = sc->swapchain->GetCurrentBackBufferIndex();
-    auto color = sc->colors.at(index);
-    auto tex = RhiNew<Texture>(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    return RadrayTexture{tex, tex->texture.Get()};
+    auto&& color = sc->colors.at(index);
+    return RadrayTexture{color.get(), color->texture.Get()};
 }
 
-void Device::Present(RadraySwapChain swapchain) {
+void Device::Present(RadraySwapChain swapchain, RadrayTexture currentRt) {
+    RADRAY_UNUSED(currentRt);
     auto sc = Underlying(swapchain);
     RADRAY_DX_FTHROW(sc->swapchain->Present(0, sc->presentFlags));
 }
@@ -328,15 +357,206 @@ RadrayTexture Device::CreateTexture(const RadrayTextureDescriptor& desc) {
 }
 
 void Device::DestroyTexture(RadrayTexture texture) {
-    RADRAY_DX_THROW("no impl");
+    auto t = Underlying(texture);
+    RhiDelete(t);
 }
 
 RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& desc) {
-    RADRAY_DX_THROW("no impl");
+    auto texture = Underlying(desc.Texture);
+    TextureView* view = nullptr;
+    if (desc.Type == RADRAY_RESOURCE_TYPE_RENDER_TARGET) {
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = EnumConvert(desc.Format);
+        switch (desc.Dimension) {
+            case RADRAY_TEXTURE_DIM_1D: {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
+                rtvDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D: {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                rtvDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture2D.PlaneSlice = 0;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_3D: {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                rtvDesc.Texture3D.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture3D.FirstWSlice = desc.BaseArrayLayer;
+                rtvDesc.Texture3D.WSize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_1D_ARRAY: {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
+                rtvDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
+                rtvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D_ARRAY: {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                rtvDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture2DArray.PlaneSlice = 0;
+                rtvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
+                rtvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            default: {
+                RADRAY_DX_THROW("cannot create RTV for {}", desc.Dimension);
+                break;
+            }
+        }
+        view = RhiNew<TextureView>(rtvHeap.get(), texture, rtvDesc);
+    } else if (desc.Type == RADRAY_RESOURCE_TYPE_DEPTH_STENCIL) {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = EnumConvert(desc.Format);
+        switch (desc.Dimension) {
+            case RADRAY_TEXTURE_DIM_1D: {
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
+                dsvDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D: {
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                dsvDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_1D_ARRAY: {
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
+                dsvDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
+                dsvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
+                dsvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D_ARRAY: {
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                dsvDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
+                dsvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
+                dsvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            default: {
+                RADRAY_DX_THROW("cannot create DSV for {}", desc.Dimension);
+                break;
+            }
+        }
+        view = RhiNew<TextureView>(dsvHeap.get(), texture, dsvDesc);
+    } else if (desc.Type == RADRAY_RESOURCE_TYPE_TEXTURE) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = EnumConvert(desc.Format);
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        switch (desc.Dimension) {
+            case RADRAY_TEXTURE_DIM_1D: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+                srvDesc.Texture1D.MipLevels = desc.MipLevelCount;
+                srvDesc.Texture1D.MostDetailedMip = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                srvDesc.Texture2D.MipLevels = desc.MipLevelCount;
+                srvDesc.Texture2D.MostDetailedMip = desc.BaseMipLevel;
+                srvDesc.Texture2D.PlaneSlice = 0;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_3D: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                srvDesc.Texture3D.MipLevels = desc.MipLevelCount;
+                srvDesc.Texture3D.MostDetailedMip = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_CUBE: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                srvDesc.TextureCube.MipLevels = desc.MipLevelCount;
+                srvDesc.TextureCube.MostDetailedMip = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_1D_ARRAY: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+                srvDesc.Texture1DArray.MipLevels = desc.MipLevelCount;
+                srvDesc.Texture1DArray.MostDetailedMip = desc.BaseMipLevel;
+                srvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
+                srvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D_ARRAY: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                srvDesc.Texture2DArray.MipLevels = desc.MipLevelCount;
+                srvDesc.Texture2DArray.MostDetailedMip = desc.BaseMipLevel;
+                srvDesc.Texture2DArray.PlaneSlice = 0;
+                srvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
+                srvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_CUBE_ARRAY: {
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+                srvDesc.TextureCubeArray.MipLevels = desc.MipLevelCount;
+                srvDesc.TextureCubeArray.MostDetailedMip = desc.BaseMipLevel;
+                srvDesc.TextureCubeArray.NumCubes = desc.ArrayLayerCount;
+                srvDesc.TextureCubeArray.First2DArrayFace = desc.BaseArrayLayer;
+                break;
+            }
+            default: {
+                RADRAY_DX_THROW("cannot create SRV for {}", desc.Dimension);
+                break;
+            }
+        }
+        view = RhiNew<TextureView>(cbvSrvUavHeap.get(), texture, srvDesc);
+    } else if (desc.Type == RADRAY_RESOURCE_TYPE_TEXTURE_RW) {
+        if (desc.MipLevelCount > 1) {
+            RADRAY_DX_THROW("UAV cannot create multi mip slice");
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = EnumConvert(desc.Format);
+        switch (desc.Dimension) {
+            case RADRAY_TEXTURE_DIM_1D: {
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
+                uavDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D: {
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                uavDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture2D.PlaneSlice = 0;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_3D: {
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+                uavDesc.Texture3D.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture3D.FirstWSlice = desc.BaseArrayLayer;
+                uavDesc.Texture3D.WSize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_1D_ARRAY: {
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+                uavDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
+                uavDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            case RADRAY_TEXTURE_DIM_2D_ARRAY: {
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                uavDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture2DArray.PlaneSlice = 0;
+                uavDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
+                uavDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount;
+                break;
+            }
+            default: {
+                RADRAY_DX_THROW("cannot create UAV for {}", desc.Dimension);
+                break;
+            }
+        }
+        view = RhiNew<TextureView>(cbvSrvUavHeap.get(), texture, uavDesc);
+    } else {
+        RADRAY_DX_THROW("cannot create texture view for {}", desc.Type);
+    }
+    return RadrayTextureView{view};
 }
 
 void Device::DestroyTextureView(RadrayTextureView view) {
-    RADRAY_DX_THROW("no impl");
+    auto v = Underlying(view);
+    RhiDelete(v);
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {

@@ -43,10 +43,11 @@ public:
     virtual void EndCommandList(RadrayCommandList list) = 0;
     virtual RadrayRenderPassEncoder BeginRenderPass(const RadrayRenderPassDescriptor& desc) = 0;
     virtual void EndRenderPass(RadrayRenderPassEncoder encoder) = 0;
+    virtual void ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) = 0;
 
     virtual RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) = 0;
     virtual void DestroySwapChian(RadraySwapChain swapchain) = 0;
-    virtual RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain, RadrayTexture lastRt) = 0;
+    virtual RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain) = 0;
     virtual void Present(RadraySwapChain swapchain, RadrayTexture currentRt) = 0;
 
     virtual RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) = 0;

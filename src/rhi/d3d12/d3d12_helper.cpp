@@ -75,6 +75,10 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
     obj->SetName(debugName);
 }
 
+UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept {
+    return ((MipSlice) + ((ArraySlice) * (MipLevels)) + ((PlaneSlice) * (MipLevels) * (ArraySize)));
+}
+
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept {
     switch (type) {
         case RADRAY_QUEUE_TYPE_DIRECT: return D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -123,6 +127,7 @@ DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept {
         case RADRAY_FORMAT_D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case RADRAY_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         case RADRAY_FORMAT_D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        case RADRAY_FORMAT_BGRA8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
     }
 }
 
@@ -342,7 +347,7 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
         case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
         case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
         case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
-        
+        case D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES: return "UNKNOWN";
     }
 }
 

@@ -1,6 +1,7 @@
 #include "d3d12_swapchain.h"
 
 #include "d3d12_device.h"
+#include "d3d12_texture.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -24,7 +25,8 @@ SwapChain::SwapChain(
     for (size_t i = 0; i < desc.BufferCount; i++) {
         ComPtr<ID3D12Resource> color;
         RADRAY_DX_FTHROW(swapchain->GetBuffer(i, IID_PPV_ARGS(color.GetAddressOf())));
-        colors.emplace_back(std::move(color));
+        auto rtTex = std::make_unique<Texture>(std::move(color), D3D12_RESOURCE_STATE_PRESENT);
+        colors.emplace_back(std::move(rtTex));
     }
 }
 

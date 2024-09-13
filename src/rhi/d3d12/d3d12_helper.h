@@ -6,6 +6,7 @@
 #include <radray/platform.h>
 #include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/utility.h>
 #include <radray/rhi/ctypes.h>
 #include <radray/rhi/helper.h>
 
@@ -36,6 +37,8 @@ radray::string Utf8ToString(const radray::wstring& str) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
 
+UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept;
+
 D3D12_COMMAND_LIST_TYPE EnumConvert(RadrayQueueType type) noexcept;
 DXGI_FORMAT EnumConvert(RadrayFormat format) noexcept;
 D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
@@ -65,13 +68,13 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 #endif
 
 #ifndef RADRAY_DX_FTHROW
-#define RADRAY_DX_FTHROW(x)                                                                                                           \
-    do {                                                                                                                              \
-        HRESULT hr_ = (x);                                                                                                            \
-        if (hr_ != S_OK) [[unlikely]] {                                                                                               \
+#define RADRAY_DX_FTHROW(x)                                                                                                                \
+    do {                                                                                                                                   \
+        HRESULT hr_ = (x);                                                                                                                 \
+        if (hr_ != S_OK) [[unlikely]] {                                                                                                    \
             auto mfmt__ = ::radray::format("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
-            throw D3D12Exception(mfmt__);                                                                                             \
-        }                                                                                                                             \
+            throw D3D12Exception(mfmt__);                                                                                                  \
+        }                                                                                                                                  \
     } while (false)
 #endif
 

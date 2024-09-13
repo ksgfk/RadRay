@@ -18,7 +18,6 @@ Texture::Texture(
         nullptr,
         alloc.GetAddressOf(),
         IID_PPV_ARGS(texture.GetAddressOf())));
-    gpuAddr = texture->GetGPUVirtualAddress();
 }
 
 Texture::Texture(
@@ -27,7 +26,25 @@ Texture::Texture(
     : desc(res->GetDesc()),
       initState(initState),
       texture(res),
-      alloc{},
-      gpuAddr(texture->GetGPUVirtualAddress()) {}
+      alloc{} {}
+
+TextureView::TextureView(DescriptorHeap* heap, Texture* tex, const ViewDesc& desc)
+    : desc(desc),
+      heap(heap),
+      tex(tex),
+      index(std::numeric_limits<UINT>::max()) {
+    auto allocIdx = heap->Allocate();
+    auto guard = MakeScopeGuard([heap, allocIdx]() { heap->Recycle(allocIdx); });
+    std::visit([heap, tex, allocIdx](auto&& value) { heap->Create(tex->texture.Get(), value, allocIdx); }, desc);
+    guard.Dismiss();
+    index = allocIdx;
+}
+
+TextureView::~TextureView() noexcept {
+    if (index != std::numeric_limits<UINT>::max()) {
+        heap->Recycle(index);
+        index = std::numeric_limits<UINT>::max();
+    }
+}
 
 }  // namespace radray::rhi::d3d12

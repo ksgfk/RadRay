@@ -39,6 +39,7 @@ RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc) {
     }
 #else
     RADRAY_ERR_LOG("cannot create Metal device. no Metal impl");
+    RADRAY_UNUSED(desc);
     return nullptr;
 #endif
 }

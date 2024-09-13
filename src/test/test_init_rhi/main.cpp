@@ -15,7 +15,6 @@ RadrayCommandAllocator cmdAlloc;
 RadrayCommandList cmdList;
 RadraySwapChain swapchain;
 RadrayFence fence;
-RadrayTexture nowRt = RADRAY_RHI_EMPTY_RES(RadrayTexture);
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -41,7 +40,11 @@ void start() {
         static_cast<uint32_t>(glfw->GetSize().x()),
         static_cast<uint32_t>(glfw->GetSize().y()),
         FRAME_COUNT,
+#ifdef RADRAY_ENABLE_METAL
         RADRAY_FORMAT_BGRA8_UNORM,
+#else
+        RADRAY_FORMAT_RGBA8_UNORM,
+#endif
         true};
     cmdAlloc = device->CreateCommandAllocator(cmdQueue);
     cmdList = device->CreateCommandList(cmdAlloc);
@@ -81,16 +84,27 @@ void update() {
             device->DestroyTextureView(i);
         }
         lastTv.clear();
-        nowRt = device->AcquireNextRenderTarget(swapchain, nowRt);
+        RadrayTexture nowRt = device->AcquireNextRenderTarget(swapchain);
         device->ResetCommandAllocator(cmdAlloc);
         device->BeginCommandList(cmdList);
         auto rtv = device->CreateTextureView(
             {nowRt,
+#ifdef RADRAY_ENABLE_METAL
              RADRAY_FORMAT_BGRA8_UNORM,
+#else
+             RADRAY_FORMAT_RGBA8_UNORM,
+#endif
              RADRAY_RESOURCE_TYPE_RENDER_TARGET,
              RADRAY_TEXTURE_DIM_2D,
              0, 1, 0, 1});
         lastTv.emplace_back(rtv);
+        RadrayTextureBarrier bbToRt{
+            nowRt,
+            RADRAY_RESOURCE_STATE_PRESENT,
+            RADRAY_RESOURCE_STATE_RENDER_TARGET,
+            false,
+            0, 0};
+        device->ResourceBarriers(cmdList, {&bbToRt, 1});
         RadrayColorAttachment colorAttach{
             rtv,
             RADRAY_LOAD_ACTION_CLEAR,
@@ -103,6 +117,13 @@ void update() {
              nullptr,
              1});
         device->EndRenderPass(colorPass);
+        RadrayTextureBarrier rtToBb{
+            nowRt,
+            RADRAY_RESOURCE_STATE_RENDER_TARGET,
+            RADRAY_RESOURCE_STATE_PRESENT,
+            false,
+            0, 0};
+        device->ResourceBarriers(cmdList, {&rtToBb, 1});
         device->EndCommandList(cmdList);
         device->SubmitQueue({cmdQueue, &cmdList, 1, fence});
         device->Present(swapchain, nowRt);
@@ -113,7 +134,6 @@ void update() {
 void destroy() {
     device->WaitQueue(cmdQueue);
     device->DestroyFence(fence);
-    device->DestroyTexture(nowRt);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandList(cmdList);
     device->DestroyCommandAllocator(cmdAlloc);

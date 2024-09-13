@@ -549,6 +549,20 @@ typedef struct RadrayRenderPassDescriptor {
     uint32_t ColorCount;
 } RadrayRenderPassDescriptor;
 
+typedef struct RadrayTextureBarrier {
+    RadrayTexture Texture;
+    RadrayResourceState SrcState;
+    RadrayResourceState DstState;
+    bool IsSubresource;
+    uint32_t ArrayLayerCount;
+    uint32_t MipLevelCount;
+} RadrayTextureBarrier;
+
+typedef struct RadrayResourceBarriersDescriptor {
+    const RadrayTextureBarrier* TextureBarriers;
+    uint32_t TextureBarrierCount;
+} RadrayResourceBarriersDescriptor;
+
 RadrayDevice RadrayCreateDeviceD3D12(const RadrayDeviceDescriptorD3D12* desc);
 
 RadrayDevice RadrayCreateDeviceMetal(const RadrayDeviceDescriptorMetal* desc);

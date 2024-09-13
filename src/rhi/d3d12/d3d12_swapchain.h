@@ -5,6 +5,7 @@
 namespace radray::rhi::d3d12 {
 
 class Device;
+class Texture;
 
 class SwapChain {
 public:
@@ -16,8 +17,8 @@ public:
         bool enableSync);
 
 public:
+    radray::vector<radray::unique_ptr<Texture>> colors;
     ComPtr<IDXGISwapChain3> swapchain;
-    radray::vector<ComPtr<ID3D12Resource>> colors;
     UINT presentFlags;
 };
 
