@@ -149,7 +149,7 @@ RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor
             auto&& radColor = desc.Colors[i];
             auto color = colorArray->object(i);
             auto colorView = Underlying(radColor.View);
-            auto clear = MTL::ClearColor::Make(radColor.Clear.G, radColor.Clear.B, radColor.Clear.R, radColor.Clear.A);
+            auto clear = MTL::ClearColor::Make(radColor.Clear.R, radColor.Clear.G, radColor.Clear.B, radColor.Clear.A);
             color->setTexture(colorView->texture);
             color->setClearColor(clear);
             color->setLoadAction(EnumConvert(radColor.Load));
@@ -272,8 +272,31 @@ void Device::DestroyTexture(RadrayTexture texture) {
 RadrayTextureView Device::CreateTextureView(const RadrayTextureViewDescriptor& desc) {
     return AutoRelease([&desc]() {
         auto tex = Underlying(desc.Texture);
-        auto v = RhiNew<TextureView>(tex, EnumConvert(desc.Format));
-        return RadrayTextureView{v};
+        MTL::TextureType type = EnumConvert(desc.Dimension);
+        if (tex->texture->textureType() == MTL::TextureType2DMultisample) {
+            type = MTL::TextureType2DMultisample;
+        }
+        MTL::PixelFormat format = EnumConvert(desc.Format);
+        bool isEqFmt = format == tex->texture->pixelFormat();
+        bool isEqType = type == tex->texture->textureType();
+        bool isAllRes = desc.BaseMipLevel == 0 &&
+                        desc.MipLevelCount == tex->texture->mipmapLevelCount() &&
+                        desc.BaseArrayLayer == 0 &&
+                        desc.ArrayLayerCount == tex->texture->arrayLength();
+        RadrayTextureView result;
+        if (isEqFmt && isEqType && isAllRes) {
+            auto cp = RhiNew<TextureView>(tex);
+            result = {cp};
+        } else {
+            auto v = RhiNew<TextureView>(
+                tex,
+                format,
+                type,
+                desc.BaseMipLevel, desc.MipLevelCount,
+                desc.BaseArrayLayer, desc.ArrayLayerCount);
+            result = {v};
+        }
+        return result;
     });
 }
 

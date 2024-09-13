@@ -41,6 +41,7 @@ MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept {
         case RADRAY_FORMAT_D32_FLOAT: return MTL::PixelFormatDepth32Float;
         case RADRAY_FORMAT_D24_UNORM_S8_UINT: return MTL::PixelFormatDepth24Unorm_Stencil8;
         case RADRAY_FORMAT_D32_FLOAT_S8_UINT: return MTL::PixelFormatDepth32Float_Stencil8;
+        case RADRAY_FORMAT_BGRA8_UNORM: return MTL::PixelFormatBGRA8Unorm;
         default: return MTL::PixelFormatInvalid;
     }
 }

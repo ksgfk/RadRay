@@ -27,7 +27,16 @@ public:
 
 class TextureView {
 public:
+    explicit TextureView(Texture* raw);
     TextureView(Texture* raw, MTL::PixelFormat format);
+    TextureView(
+        Texture* raw,
+        MTL::PixelFormat format,
+        MTL::TextureType type,
+        NS::UInteger baseMipLevel,
+        NS::UInteger mipLevelCount,
+        NS::UInteger baseArrayLayer,
+        NS::UInteger arrayLayerCount);
     ~TextureView() noexcept;
 
 public:

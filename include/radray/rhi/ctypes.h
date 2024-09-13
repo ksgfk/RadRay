@@ -119,7 +119,9 @@ typedef enum RadrayFormat {
     RADRAY_FORMAT_D16_UNORM = 34,
     RADRAY_FORMAT_D32_FLOAT = 35,
     RADRAY_FORMAT_D24_UNORM_S8_UINT = 36,
-    RADRAY_FORMAT_D32_FLOAT_S8_UINT = 37
+    RADRAY_FORMAT_D32_FLOAT_S8_UINT = 37,
+
+    RADRAY_FORMAT_BGRA8_UNORM = 38
 } RadrayFormat;
 
 typedef enum RadrayFilterMode {
@@ -390,6 +392,9 @@ typedef union RadrayClearValue {
         float Depth;
         uint32_t Stencil;
     };
+    struct {
+        float Color[4];
+    };
 } RadrayClearValue;
 
 typedef struct RadrayTextureDescriptor {
@@ -413,6 +418,7 @@ typedef struct RadrayTextureViewDescriptor {
     RadrayTexture Texture;
     RadrayFormat Format;
     RadrayResourceType Type;
+    RadrayTextureDimension Dimension;
     uint32_t BaseArrayLayer;
     uint32_t ArrayLayerCount;
     uint32_t BaseMipLevel;

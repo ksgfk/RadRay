@@ -26,12 +26,34 @@ MetalDrawableTexture::~MetalDrawableTexture() noexcept {
     }
 }
 
+TextureView::TextureView(Texture* raw)
+    : raw(raw),
+      texture(raw->texture->retain()) {}
+
 TextureView::TextureView(Texture* raw, MTL::PixelFormat format)
     : raw(raw),
       texture(raw->texture->newTextureView(format)) {}
 
+TextureView::TextureView(
+    Texture* raw,
+    MTL::PixelFormat format,
+    MTL::TextureType type,
+    NS::UInteger baseMipLevel,
+    NS::UInteger mipLevelCount,
+    NS::UInteger baseArrayLayer,
+    NS::UInteger arrayLayerCount)
+    : raw(raw),
+      texture(raw->texture->newTextureView(
+          format,
+          type,
+          NS::Range::Make(baseMipLevel, mipLevelCount),
+          NS::Range::Make(baseArrayLayer, arrayLayerCount))) {}
+
 TextureView::~TextureView() noexcept {
-    texture->release();
+    if (texture != nullptr) {
+        texture->release();
+        texture = nullptr;
+    }
 }
 
 }  // namespace radray::rhi::metal
