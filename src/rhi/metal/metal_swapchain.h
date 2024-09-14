@@ -4,6 +4,8 @@
 
 namespace radray::rhi::metal {
 
+class MetalDrawableTexture;
+
 class SwapChain {
 public:
     SwapChain(
@@ -20,6 +22,7 @@ public:
 public:
     MTL::CommandQueue* queue;
     CA::MetalLayer* layer;
+    MetalDrawableTexture* presented;
 };
 
 }  // namespace radray::rhi::metal

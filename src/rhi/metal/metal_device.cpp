@@ -163,7 +163,7 @@ RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor
             color->setLoadAction(EnumConvert(radColor.Load));
             color->setStoreAction(EnumConvert(radColor.Store));
         }
-        if (desc.DepthStencil) {
+        if (desc.DepthStencil != nullptr) {
             auto&& radDs = *desc.DepthStencil;
             auto depth = rp->depthAttachment();
             auto dsView = Underlying(radDs.View);
@@ -189,6 +189,8 @@ void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
     });
 }
 
+void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) {}
+
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     return AutoRelease([&desc, this]() {
         auto q = Underlying(desc.PresentQueue);
@@ -212,13 +214,13 @@ void Device::DestroySwapChian(RadraySwapChain swapchain) {
     });
 }
 
-RadrayTexture Device::AcquireNextRenderTarget(RadraySwapChain swapchain, RadrayTexture lastRt) {
-    return AutoRelease([swapchain, lastRt]() {
-        if (!RADRAY_RHI_IS_EMPTY_RES(lastRt)) {
-            auto tex = static_cast<MetalDrawableTexture*>(Underlying(lastRt));
-            RhiDelete(tex);
-        }
+RadrayTexture Device::AcquireNextRenderTarget(RadraySwapChain swapchain) {
+    return AutoRelease([swapchain]() {
         auto sc = Underlying(swapchain);
+        if (sc->presented != nullptr) {
+            RhiDelete(sc->presented);
+            sc->presented = nullptr;
+        }
         auto drawable = sc->layer->nextDrawable();
         if (drawable == nullptr) {
             RADRAY_MTL_THROW("metal cannot acquire next drawable");
@@ -235,6 +237,7 @@ void Device::Present(RadraySwapChain swapchain, RadrayTexture currentRt) {
         MTL::CommandBuffer* cmdBuffer = sc->queue->commandBufferWithUnretainedReferences();
         cmdBuffer->presentDrawable(tex->drawable);
         cmdBuffer->commit();
+        sc->presented = tex;
     });
 }
 

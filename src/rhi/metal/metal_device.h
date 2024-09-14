@@ -28,10 +28,11 @@ public:
     void EndCommandList(RadrayCommandList list) override;
     RadrayRenderPassEncoder BeginRenderPass(const RadrayRenderPassDescriptor& desc) override;
     void EndRenderPass(RadrayRenderPassEncoder encoder) override;
+    void ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) override;
 
     RadraySwapChain CreateSwapChain(const RadraySwapChainDescriptor& desc) override;
     void DestroySwapChian(RadraySwapChain swapchain) override;
-    RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain, RadrayTexture lastRt) override;
+    RadrayTexture AcquireNextRenderTarget(RadraySwapChain swapchain) override;
     void Present(RadraySwapChain swapchain, RadrayTexture currentRt) override;
 
     RadrayBuffer CreateBuffer(const RadrayBufferDescriptor& desc) override;
