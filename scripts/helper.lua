@@ -42,6 +42,15 @@ function copy_msc_lib(target)
     end
 end
 
+function copy_example_shaders(target)
+    local shader_src = path.join(target:scriptdir(), "shaders", "**")
+    local shader_dst = path.join(target:targetdir(), "shaders", target:name())
+    if not os.isdir(shader_dst) then
+        os.mkdir(shader_dst)
+    end
+    os.cp(shader_src, shader_dst)
+end
+
 function build_radray_rhi_swift(target, isConfig) 
     local mode = is_mode("debug") and "debug" or "release"
     local dir = path.join(os.projectdir(), "src", "rhi", "metal", "private")

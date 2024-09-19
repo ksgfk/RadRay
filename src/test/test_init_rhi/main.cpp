@@ -2,8 +2,9 @@
 #include <thread>
 #include <chrono>
 
-#include <radray/window/glfw_window.h>
+#include <radray/utility.h>
 #include <radray/basic_math.h>
+#include <radray/window/glfw_window.h>
 #include <radray/rhi/device_interface.h>
 
 constexpr int FRAME_COUNT = 3;
@@ -15,6 +16,9 @@ RadrayCommandAllocator cmdAlloc;
 RadrayCommandList cmdList;
 RadraySwapChain swapchain;
 RadrayFence fence;
+radray::string shaderStr;
+RadrayShader vs;
+RadrayShader ps;
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -50,6 +54,21 @@ void start() {
     cmdList = device->CreateCommandList(cmdAlloc);
     swapchain = device->CreateSwapChain(chainDesc);
     fence = device->CreateFence();
+
+    shaderStr = radray::ReadText(std::filesystem::path{"shaders"} / "test_init_rhi" / "color.hlsl");
+    RadrayCompileRasterizationShaderDescriptor vsDesc{
+        "color",
+        shaderStr.data(),
+        shaderStr.size(),
+        "VSMain",
+        RADRAY_SHADER_STAGE_VERTEX,
+        61,
+        nullptr,
+        0,
+        false};
+    vs = device->CompileShader(vsDesc);
+    // RadrayCompileRasterizationShaderDescriptor psDesc{};
+    // ps = device->CompileShader(psDesc);
 }
 
 void update() {

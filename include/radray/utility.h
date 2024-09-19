@@ -1,6 +1,9 @@
 #pragma once
 
 #include <utility>
+#include <filesystem>
+
+#include <radray/types.h>
 
 #define RADRAY_UNUSED(expr) \
     do {                    \
@@ -34,5 +37,7 @@ private:
 
 template <typename Call>
 constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
+
+radray::string ReadText(const std::filesystem::path& filepath);
 
 }  // namespace radray

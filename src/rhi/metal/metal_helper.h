@@ -4,9 +4,6 @@
 #include <Metal/Metal.hpp>
 #include <MetalFX/MetalFX.hpp>
 #include <QuartzCore/QuartzCore.hpp>
-#define IR_RUNTIME_METALCPP
-#include <metal_irconverter/metal_irconverter.h>
-#include <metal_irconverter_runtime/metal_irconverter_runtime.h>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
@@ -40,6 +37,8 @@ decltype(auto) AutoRelease(T&& func) noexcept {
     ScopedAutoreleasePool pool;
     return std::forward<T>(func)();
 }
+
+radray::wstring ToWideChar(const radray::string& str) noexcept;
 
 MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept;
 NS::UInteger EnumConvert(RadrayTextureMSAACount cnt) noexcept;
