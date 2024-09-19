@@ -25,7 +25,7 @@ radray::wstring ToWideChar(const radray::string& str) {
     std::mbstate_t state{};
     size_t len{0};
     mbsrtowcs_s(&len, nullptr, 0, &mbstr, 0, &state);
-    radray::vector<wchar_t> wstr(len + 1);
+    radray::vector<wchar_t> wstr(len);
     state = mbstate_t{};
     mbsrtowcs_s(nullptr, wstr.data(), wstr.size(), &mbstr, len, &state);
     return radray::wstring{wstr.begin(), wstr.end()};
