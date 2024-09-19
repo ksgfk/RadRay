@@ -55,7 +55,7 @@ void start() {
     swapchain = device->CreateSwapChain(chainDesc);
     fence = device->CreateFence();
 
-    shaderStr = radray::ReadText(std::filesystem::path{"shaders"} / "test_init_rhi" / "color.hlsl");
+    shaderStr = radray::ReadText(std::filesystem::path{"shaders"} / RADRAY_APPNAME / "color.hlsl");
     RadrayCompileRasterizationShaderDescriptor vsDesc{
         "color",
         shaderStr.data(),

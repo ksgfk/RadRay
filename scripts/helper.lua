@@ -51,6 +51,10 @@ function copy_example_shaders(target)
     os.cp(shader_src, shader_dst)
 end
 
+function setup_example_app(target)
+    target:add("defines", format("RADRAY_APPNAME=\"%s\"", target:name()))
+end
+
 function build_radray_rhi_swift(target, isConfig) 
     local mode = is_mode("debug") and "debug" or "release"
     local dir = path.join(os.projectdir(), "src", "rhi", "metal", "private")
