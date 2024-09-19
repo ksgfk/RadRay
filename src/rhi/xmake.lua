@@ -7,7 +7,7 @@ if get_config("enable_d3d12") then
     })
 end
 if get_config("enable_metal") then 
-    add_requires("metal-cpp macOS14.2_iOS17.2", {debug = is_mode("debug")})
+    add_requires("metalcpp macOS14.2_iOS17.2", {debug = is_mode("debug")})
 end
 
 target("radray_rhi")
@@ -29,7 +29,10 @@ target("radray_rhi")
         add_files("metal/*.cpp")
         add_files("metal/*.mm")
         add_frameworks("Foundation", "Metal", "QuartzCore", "AppKit")
-        add_packages("metal-cpp")
+        add_packages("metalcpp")
+        if get_config("enable_msc") then
+            add_defines("RADRAY_ENABLE_MSC", {public = true})
+        end
     end
     add_packages("dxc_radray")
 
@@ -37,11 +40,17 @@ target("radray_rhi")
         if get_config("enable_dxc") then 
             import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
         end
+        if get_config("enable_msc") then 
+            import("scripts.helper", {rootdir = os.projectdir()}).copy_msc_lib(target)
+        end
     end)
 
     before_install(function (target)
         if get_config("enable_dxc") then 
             import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
-        end 
+        end
+        if get_config("enable_msc") then 
+            import("scripts.helper", {rootdir = os.projectdir()}).copy_msc_lib(target)
+        end
     end)
 target_end()

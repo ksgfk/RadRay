@@ -189,7 +189,10 @@ void Device::EndRenderPass(RadrayRenderPassEncoder encoder) {
     });
 }
 
-void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) {}
+void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarriersDescriptor& desc) {
+    RADRAY_UNUSED(list);
+    RADRAY_UNUSED(desc);
+}
 
 RadraySwapChain Device::CreateSwapChain(const RadraySwapChainDescriptor& desc) {
     return AutoRelease([&desc, this]() {
@@ -319,8 +322,9 @@ void Device::DestroyTextureView(RadrayTextureView view) {
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+
 }
+
 void Device::DestroyShader(RadrayShader shader) {
     RADRAY_MTL_THROW("no impl");
 }

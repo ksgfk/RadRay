@@ -123,7 +123,7 @@ public:
                 return radray::format("dxc error {}", hr);
             }
         }
-        if (status == 0) {
+        if (status == S_OK) {
             RhiComPtr<IDxcBlob> resultBlob;
             {
                 HRESULT hr = compileResult->GetResult(resultBlob.GetAddressOf());

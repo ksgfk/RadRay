@@ -31,6 +31,17 @@ function copy_dxc_lib(target)
     end
 end
 
+function copy_msc_lib(target)
+    local bin_dir = target:targetdir()
+    if not os.isdir(bin_dir) then
+        os.mkdir(bin_dir)
+    end
+    local mcpp_dir = target:pkg("metalcpp"):installdir()
+    for _, file in ipairs(os.files(path.join(mcpp_dir, "*.dylib"))) do
+        copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
+    end
+end
+
 function build_radray_rhi_swift(target, isConfig) 
     local mode = is_mode("debug") and "debug" or "release"
     local dir = path.join(os.projectdir(), "src", "rhi", "metal", "private")

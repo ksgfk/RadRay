@@ -290,7 +290,7 @@ void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarrie
         drb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         drb.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         drb.Transition.pResource = tex->texture.Get();
-        drb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        drb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; // TODO: subresource
         drb.Transition.StateBefore = EnumConvert(barrier.SrcState);
         drb.Transition.StateAfter = EnumConvert(barrier.DstState);
     }
