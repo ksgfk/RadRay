@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <type_traits>
+#include <sstream>
 #include <span>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -15,6 +16,7 @@
 
 #include <radray/platform.h>
 #include <radray/logger.h>
+#include <radray/utility.h>
 #include <radray/rhi/ctypes.h>
 
 namespace radray::rhi {
@@ -96,7 +98,7 @@ public:
     }
     ~Impl() noexcept = default;
 
-    CompileResult Compile(std::string_view code, std::span<LPCWSTR> args) {
+    CompileResult Compile(std::string_view code, std::span<LPCWSTR> args) const {
         if (_dxc.Get() == nullptr) {
             return "cannot use dxc. dynamic lib dxcompiler is not exist";
         }
@@ -156,6 +158,61 @@ public:
         }
     }
 
+    CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc_) const {
+        auto&& desc = *desc_;
+        auto toSm = [](RadrayShaderStage stage, uint32_t shaderModel) {
+            using oss = std::basic_ostringstream<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
+            oss s{};
+            switch (stage) {
+                case RADRAY_SHADER_STAGE_VERTEX: s << L"vs_"; break;
+                case RADRAY_SHADER_STAGE_HULL: s << L"hs_"; break;
+                case RADRAY_SHADER_STAGE_DOMAIN: s << L"ds_"; break;
+                case RADRAY_SHADER_STAGE_GEOMETRY: s << L"gs_"; break;
+                case RADRAY_SHADER_STAGE_PIXEL: s << L"ps_"; break;
+                default: break;
+            }
+            s << (shaderModel / 10) << "_" << shaderModel % 10;
+            radray::wstring result = s.str();
+            return result;
+        };
+        radray::wstring sm = toSm(desc.Stage, desc.ShaderModel);
+        radray::wstring entryPoint = ToWideChar(radray::string{desc.EntryPoint});
+        radray::wstring name = ToWideChar(radray::string{desc.Name});
+        radray::vector<radray::wstring> defines{};
+        defines.reserve(desc.DefineCount);
+        for (size_t i = 0; i < desc.DefineCount; i++) {
+            defines.emplace_back(ToWideChar(radray::string{desc.Defines[i]}));
+        }
+        radray::vector<LPCWSTR> args{};
+        args.emplace_back(L"-all_resources_bound");
+        {
+            args.emplace_back(L"-HV");
+            args.emplace_back(L"2021");
+        }
+        if (desc.IsOptimize) {
+            args.emplace_back(L"-O3");
+        } else {
+            args.emplace_back(L"-Od");
+        }
+        {
+            args.emplace_back(L"-T");
+            args.emplace_back(sm.c_str());
+        }
+        {
+            args.emplace_back(L"-E");
+            args.emplace_back(entryPoint.c_str());
+        }
+        {
+            args.emplace_back(L"-Fd");
+            args.emplace_back(name.c_str());
+        }
+        for (auto&& i : defines) {
+            args.emplace_back(L"-D");
+            args.emplace_back(i.c_str());
+        }
+        return Compile(std::string_view{desc.Data, desc.DataLength}, args);
+    }
+
 public:
     DynamicLibrary _dxcLib;
     RhiComPtr<IDxcCompiler3> _dxc;
@@ -172,6 +229,8 @@ DxcShaderCompiler::~DxcShaderCompiler() noexcept {
 }
 
 CompileResult DxcShaderCompiler::Compile(std::string_view code, std::span<const wchar_t*> args) const { return _impl->Compile(code, args); }
+
+CompileResult DxcShaderCompiler::Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const { return _impl->Compile(desc); }
 
 IDxcCompiler3* DxcShaderCompiler::GetCompiler() const noexcept { return _impl->_dxc.Get(); }
 

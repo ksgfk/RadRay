@@ -40,4 +40,6 @@ constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::
 
 radray::string ReadText(const std::filesystem::path& filepath);
 
+radray::wstring ToWideChar(const radray::string& str);
+
 }  // namespace radray

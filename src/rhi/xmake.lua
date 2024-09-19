@@ -1,6 +1,6 @@
 add_requires("dxc_radray v1.8.2407", {debug = is_mode("debug")})
 if get_config("enable_d3d12") then
-    add_requires("directx-headers v1.614.0", {debug = is_mode("debug")})
+    add_requires("directx-headers v1.614.1", {debug = is_mode("debug")})
     add_requires("d3d12-memory-allocator_radray v2.0.1", {
         alias = "d3d12-memory-allocator",
         debug = is_mode("debug")

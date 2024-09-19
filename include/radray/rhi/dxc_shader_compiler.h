@@ -8,6 +8,7 @@
 
 class IDxcCompiler3;
 class IDxcUtils;
+struct RadrayCompileRasterizationShaderDescriptor;
 
 namespace radray::rhi {
 
@@ -24,6 +25,7 @@ public:
     ~DxcShaderCompiler() noexcept;
 
     CompileResult Compile(std::string_view code, std::span<const wchar_t*> args) const;
+    CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const;
 
     IDxcCompiler3* GetCompiler() const noexcept;
     IDxcUtils* GetUtils() const noexcept;

@@ -38,8 +38,6 @@ decltype(auto) AutoRelease(T&& func) noexcept {
     return std::forward<T>(func)();
 }
 
-radray::wstring ToWideChar(const radray::string& str) noexcept;
-
 MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept;
 NS::UInteger EnumConvert(RadrayTextureMSAACount cnt) noexcept;
 MTL::TextureType EnumConvert(RadrayTextureDimension dim) noexcept;

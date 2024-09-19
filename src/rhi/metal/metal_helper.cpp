@@ -1,18 +1,6 @@
 #include "metal_helper.h"
 
-#include <cwchar>
-
 namespace radray::rhi::metal {
-
-radray::wstring ToWideChar(const radray::string& str) noexcept {
-    radray::string cp{str};
-    const char* start = cp.data();
-    std::mbstate_t state{};
-    size_t len = std::mbsrtowcs(nullptr, &start, 0, &state) + 1;
-    radray::vector<wchar_t> wstr(len);
-    std::mbsrtowcs(&wstr[0], &start, wstr.size(), &state);
-    return radray::wstring{wstr.begin(), wstr.end()};
-}
 
 MTL::PixelFormat EnumConvert(RadrayFormat format) noexcept {
     switch (format) {
