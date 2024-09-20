@@ -1,11 +1,14 @@
 #include "metal_device.h"
 
+#include <radray/stopwatch.h>
+
 #include "dispatch_semaphore.h"
 #include "metal_command_queue.h"
 #include "metal_command_buffer.h"
 #include "metal_command_encoder.h"
 #include "metal_swapchain.h"
 #include "metal_texture.h"
+#include "metal_library.h"
 
 namespace radray::rhi::metal {
 
@@ -17,6 +20,7 @@ static Semaphore* Underlying(RadrayFence fence) noexcept { return reinterpret_ca
 static SwapChain* Underlying(RadraySwapChain swapchain) noexcept { return reinterpret_cast<SwapChain*>(swapchain.Ptr); }
 static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
 static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
+static Library* Underlying(RadrayShader shader) noexcept { return reinterpret_cast<Library*>(shader.Ptr); }
 
 Device::Device(const RadrayDeviceDescriptorMetal& desc) {
     AutoRelease([this, &desc]() {
@@ -324,20 +328,38 @@ void Device::DestroyTextureView(RadrayTextureView view) {
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
-    CompileResult cr = dxc->Compile(&desc);
-    RadrayShader result{nullptr, nullptr};
-    if (auto err = std::get_if<radray::string>(&cr)) {
-        RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
-        RADRAY_MTL_THROW("\n{}", *err);
-    } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
-        // ir->DxilToMetallib(bc->Data);
-        // TODO:
-    }
-    return result;
+    return AutoRelease([this, &desc]() {
+        Stopwatch sw{};
+        sw.Start();
+        CompileResult cr = dxc->Compile(&desc);
+        RadrayShader result{nullptr, nullptr};
+        if (auto err = std::get_if<radray::string>(&cr)) {
+            RADRAY_ERR_LOG("cannot compile shader {}\n{}", desc.Name, *err);
+        } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
+            ConvertResult cvtr = ir->DxilToMetallib(bc->Data, desc.Stage);
+            if (auto err = std::get_if<radray::string>(&cvtr)) {
+                RADRAY_ERR_LOG("cannot convert ir {}\n{}", desc.Name, *err);
+            } else if (auto mlib = std::get_if<radray::vector<uint8_t>>(&cvtr)) {
+                auto mtllib = RhiNew<Library>(device, std::span<uint8_t>{mlib->data(), mlib->size()});
+                result = {mtllib, mtllib->lib};
+            }
+        }
+        sw.Stop();
+        RADRAY_INFO_LOG(
+            "compile shader name={} stage={} entry={} ({}ms)",
+            desc.Name,
+            desc.Stage,
+            desc.EntryPoint,
+            sw.ElapsedMilliseconds());
+        return result;
+    });
 }
 
 void Device::DestroyShader(RadrayShader shader) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([shader]() {
+        auto s = Underlying(shader);
+        RhiDelete(s);
+    });
 }
 
 RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescriptor& desc) {

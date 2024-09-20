@@ -62,6 +62,7 @@ void start() {
             auto tips = radray::format("cannot read {}", path.generic_string());
             throw std::runtime_error{tips.c_str()};
         }
+        shaderStr = tmp.value();
     }
     {
         RadrayCompileRasterizationShaderDescriptor vsDesc{
@@ -77,7 +78,7 @@ void start() {
         vs = device->CompileShader(vsDesc);
     }
     {
-        RadrayCompileRasterizationShaderDescriptor vsDesc{
+        RadrayCompileRasterizationShaderDescriptor psDesc{
             "color",
             shaderStr.data(),
             shaderStr.size(),
@@ -87,7 +88,7 @@ void start() {
             nullptr,
             0,
             false};
-        vs = device->CompileShader(vsDesc);
+        ps = device->CompileShader(psDesc);
     }
 }
 
@@ -172,6 +173,8 @@ void update() {
 
 void destroy() {
     device->WaitQueue(cmdQueue);
+    device->DestroyShader(vs);
+    device->DestroyShader(ps);
     device->DestroyFence(fence);
     device->DestroySwapChian(swapchain);
     device->DestroyCommandList(cmdList);

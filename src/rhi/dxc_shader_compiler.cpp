@@ -169,6 +169,7 @@ public:
                 case RADRAY_SHADER_STAGE_DOMAIN: s << L"ds_"; break;
                 case RADRAY_SHADER_STAGE_GEOMETRY: s << L"gs_"; break;
                 case RADRAY_SHADER_STAGE_PIXEL: s << L"ps_"; break;
+                case RADRAY_SHADER_STAGE_COMPUTE: s << L"cs_"; break;
                 default: break;
             }
             s << (shaderModel / 10) << "_" << shaderModel % 10;
