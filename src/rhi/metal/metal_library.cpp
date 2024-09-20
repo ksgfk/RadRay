@@ -4,7 +4,7 @@
 
 namespace radray::rhi::metal {
 
-Library::Library(MTL::Device* device, std::span<const uint8_t> ir) {
+Library::Library(MTL::Device* device, std::span<const uint8_t> ir, const char* entry) {
     DispatchData data{ir.data(), ir.size()};
     NS::Error* pErr;
     MTL::Library* mtllib = device->newLibrary(data.data, &pErr);
@@ -15,11 +15,19 @@ Library::Library(MTL::Device* device, std::span<const uint8_t> ir) {
         RADRAY_MTL_THROW("cannot create MTLLibrary");
     }
     lib = mtllib;
+    auto name = NS::String::alloc()->init(entry, NS::UTF8StringEncoding)->autorelease();
+    entryPoint = lib->newFunction(name);
+    if (entryPoint == nullptr) {
+        RADRAY_MTL_THROW("cannot create MTLFunction");
+    }
 }
 
 Library::~Library() noexcept {
     if (lib != nullptr) {
         lib->release();
+    }
+    if (entryPoint != nullptr) {
+        entryPoint->release();
     }
 }
 

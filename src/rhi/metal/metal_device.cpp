@@ -15,7 +15,7 @@ namespace radray::rhi::metal {
 static CommandQueue* Underlying(RadrayCommandQueue queue) noexcept { return reinterpret_cast<CommandQueue*>(queue.Ptr); }
 static CommandQueue* Underlying(RadrayCommandAllocator alloc) noexcept { return reinterpret_cast<CommandQueue*>(alloc.Ptr); }
 static CommandBuffer* Underlying(RadrayCommandList list) noexcept { return reinterpret_cast<CommandBuffer*>(list.Ptr); }
-static CommandEncoder* Underlying(RadrayRenderPassEncoder encoder) noexcept { return reinterpret_cast<CommandEncoder*>(encoder.Ptr); }
+static RenderCommandEncoder* Underlying(RadrayRenderPassEncoder encoder) noexcept { return reinterpret_cast<RenderCommandEncoder*>(encoder.Ptr); }
 static Semaphore* Underlying(RadrayFence fence) noexcept { return reinterpret_cast<Semaphore*>(fence.Ptr); }
 static SwapChain* Underlying(RadraySwapChain swapchain) noexcept { return reinterpret_cast<SwapChain*>(swapchain.Ptr); }
 static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
@@ -183,7 +183,7 @@ RadrayRenderPassEncoder Device::BeginRenderPass(const RadrayRenderPassDescriptor
             stencil->setLoadAction(EnumConvert(radDs.StencilLoad));
             stencil->setStoreAction(EnumConvert(radDs.StencilStore));
         }
-        auto rpe = RhiNew<CommandEncoder>(cb->cmdBuffer, rp);
+        auto rpe = RhiNew<RenderCommandEncoder>(cb->cmdBuffer, rp);
         return RadrayRenderPassEncoder{rpe, rpe->encoder};
     });
 }
@@ -340,7 +340,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
             if (auto err = std::get_if<radray::string>(&cvtr)) {
                 RADRAY_ERR_LOG("cannot convert ir {}\n{}", desc.Name, *err);
             } else if (auto mlib = std::get_if<radray::vector<uint8_t>>(&cvtr)) {
-                auto mtllib = RhiNew<Library>(device, std::span<uint8_t>{mlib->data(), mlib->size()});
+                auto mtllib = RhiNew<Library>(device, std::span<uint8_t>{mlib->data(), mlib->size()}, desc.EntryPoint);
                 result = {mtllib, mtllib->lib};
             }
         }
@@ -363,15 +363,46 @@ void Device::DestroyShader(RadrayShader shader) {
 }
 
 RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+    RADRAY_UNUSED(desc);
+    return RADRAY_RHI_EMPTY_RES(RadrayRootSignature);
 }
+
 void Device::DestroyRootSignature(RadrayRootSignature rootSig) {
-    RADRAY_MTL_THROW("no impl");
+    RADRAY_UNUSED(rootSig);
 }
 
 RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {
-    RADRAY_MTL_THROW("no impl");
+    return AutoRelease([this, &desc]() {
+        auto vs = Underlying(desc.VertexShader);
+        auto ps = Underlying(desc.PixelShader);
+        RadrayGraphicsPipeline pso{};
+        auto rpdesc = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
+        rpdesc->setVertexFunction(vs->entryPoint);
+        rpdesc->setFragmentFunction(ps->entryPoint);
+        {
+            auto vd = MTL::VertexDescriptor::vertexDescriptor()->autorelease();
+            auto layouts = vd->layouts();
+            auto attrs = vd->attributes();
+            for (size_t i = 0; i < desc.VertexLayout.ElementCount; i++) {
+                const auto& ve = desc.VertexLayout.Elements[i];
+                auto attr = attrs->object(i);
+                attr->setFormat(EnumConvert(ve.Format));
+                attr->setOffset(ve.Offset);
+                attr->setBufferIndex(ve.Binding);
+            }
+            for (size_t i = 0; i < desc.VertexLayout.LayoutCount; i++) {
+                const auto& vl = desc.VertexLayout.Layouts[i];
+                auto layout = layouts->object(i);
+                layout->setStride(vl.Stride);
+                layout->setStepFunction(EnumConvert(vl.Rate));
+            }
+            rpdesc->setVertexDescriptor(vd);
+        }
+        RADRAY_MTL_THROW("no impl");
+        return pso;
+    });
 }
+
 void Device::DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
     RADRAY_MTL_THROW("no impl");
 }

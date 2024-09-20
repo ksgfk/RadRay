@@ -8,11 +8,12 @@ namespace radray::rhi::metal {
 
 class Library {
 public:
-    Library(MTL::Device* device, std::span<const uint8_t> ir);
+    Library(MTL::Device* device, std::span<const uint8_t> ir, const char* entry);
     ~Library() noexcept;
 
 public:
     MTL::Library* lib;
+    MTL::Function* entryPoint;
 };
 
 }  // namespace radray::rhi::metal

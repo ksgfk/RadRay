@@ -43,6 +43,8 @@ NS::UInteger EnumConvert(RadrayTextureMSAACount cnt) noexcept;
 MTL::TextureType EnumConvert(RadrayTextureDimension dim) noexcept;
 MTL::LoadAction EnumConvert(RadrayLoadAction load) noexcept;
 MTL::StoreAction EnumConvert(RadrayStoreAction store) noexcept;
+MTL::VertexFormat EnumConvert(RadrayVertexFormat format) noexcept;
+MTL::VertexStepFunction EnumConvert(RadrayVertexInputRate rate) noexcept;
 
 }  // namespace radray::rhi::metal
 

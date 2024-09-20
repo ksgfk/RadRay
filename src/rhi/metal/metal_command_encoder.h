@@ -4,13 +4,13 @@
 
 namespace radray::rhi::metal {
 
-class CommandEncoder {
+class RenderCommandEncoder {
 public:
-    CommandEncoder(MTL::CommandBuffer* cmdBuffer, MTL::RenderPassDescriptor* desc);
-    ~CommandEncoder() noexcept;
+    RenderCommandEncoder(MTL::CommandBuffer* cmdBuffer, MTL::RenderPassDescriptor* desc);
+    ~RenderCommandEncoder() noexcept;
 
 public:
-    MTL::CommandEncoder* encoder;
+    MTL::RenderCommandEncoder* encoder;
 };
 
 }  // namespace radray::rhi::metal

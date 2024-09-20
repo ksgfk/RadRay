@@ -344,6 +344,21 @@ typedef enum RadrayStoreAction {
     RADRAY_STORE_ACTION_DISCARD
 } RadrayStoreAction;
 
+typedef enum RadrayVertexFormat {
+    RADRAY_VERTEX_FORMAT_FLOAT1,
+    RADRAY_VERTEX_FORMAT_FLOAT2,
+    RADRAY_VERTEX_FORMAT_FLOAT3,
+    RADRAY_VERTEX_FORMAT_FLOAT4,
+    RADRAY_VERTEX_FORMAT_INT1,
+    RADRAY_VERTEX_FORMAT_INT2,
+    RADRAY_VERTEX_FORMAT_INT3,
+    RADRAY_VERTEX_FORMAT_INT4,
+    RADRAY_VERTEX_FORMAT_UINT1,
+    RADRAY_VERTEX_FORMAT_UINT2,
+    RADRAY_VERTEX_FORMAT_UINT3,
+    RADRAY_VERTEX_FORMAT_UINT4
+} RadrayVertexFormat;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -448,16 +463,21 @@ typedef struct RadrayRootSignatureDescriptor {
 typedef struct RadrayVertexElement {
     RadrayVertexSemantic Semantic;
     uint32_t SemanticIndex;
-    RadrayFormat Format;
+    RadrayVertexFormat Format;
     uint32_t Binding;
     uint32_t Offset;
+} RadrayVertexElement;
+
+typedef struct RadrayVertexBufferLayout {
     uint32_t Stride;
     RadrayVertexInputRate Rate;
-} RadrayVertexElement;
+} RadrayVertexBufferLayout;
 
 typedef struct RadrayVertexLayout {
     uint32_t ElementCount;
     RadrayVertexElement Elements[RADRAY_RHI_MAX_VERTEX_ELEMENT];
+    uint32_t LayoutCount;
+    RadrayVertexBufferLayout Layouts[8];
 } RadrayVertexLayout;
 
 typedef struct RadrayBlendStateDescriptor {
@@ -501,9 +521,6 @@ typedef struct RadrayRasterizerStateDescriptor {
 typedef struct RadrayGraphicsPipelineDescriptor {
     RadrayRootSignature RootSignature;
     RadrayShader VertexShader;
-    RadrayShader HullShader;
-    RadrayShader DomainShader;
-    RadrayShader GeometryShader;
     RadrayShader PixelShader;
     RadrayVertexLayout VertexLayout;
     RadrayBlendStateDescriptor Blend;

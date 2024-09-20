@@ -2,10 +2,10 @@
 
 namespace radray::rhi::metal {
 
-CommandEncoder::CommandEncoder(MTL::CommandBuffer* cmdBuffer, MTL::RenderPassDescriptor* desc)
+RenderCommandEncoder::RenderCommandEncoder(MTL::CommandBuffer* cmdBuffer, MTL::RenderPassDescriptor* desc)
     : encoder(cmdBuffer->renderCommandEncoder(desc)->retain()) {}
 
-CommandEncoder::~CommandEncoder() noexcept {
+RenderCommandEncoder::~RenderCommandEncoder() noexcept {
     encoder->endEncoding();
     encoder->release();
 }

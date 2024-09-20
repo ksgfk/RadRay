@@ -84,4 +84,28 @@ MTL::StoreAction EnumConvert(RadrayStoreAction store) noexcept {
     }
 }
 
+MTL::VertexFormat EnumConvert(RadrayVertexFormat format) noexcept {
+    switch (format) {
+        case RADRAY_VERTEX_FORMAT_FLOAT1: return MTL::VertexFormatFloat;
+        case RADRAY_VERTEX_FORMAT_FLOAT2: return MTL::VertexFormatFloat2;
+        case RADRAY_VERTEX_FORMAT_FLOAT3: return MTL::VertexFormatFloat3;
+        case RADRAY_VERTEX_FORMAT_FLOAT4: return MTL::VertexFormatFloat4;
+        case RADRAY_VERTEX_FORMAT_INT1: return MTL::VertexFormatInt;
+        case RADRAY_VERTEX_FORMAT_INT2: return MTL::VertexFormatInt2;
+        case RADRAY_VERTEX_FORMAT_INT3: return MTL::VertexFormatInt3;
+        case RADRAY_VERTEX_FORMAT_INT4: return MTL::VertexFormatInt4;
+        case RADRAY_VERTEX_FORMAT_UINT1: return MTL::VertexFormatUInt;
+        case RADRAY_VERTEX_FORMAT_UINT2: return MTL::VertexFormatUInt2;
+        case RADRAY_VERTEX_FORMAT_UINT3: return MTL::VertexFormatUInt3;
+        case RADRAY_VERTEX_FORMAT_UINT4: return MTL::VertexFormatUInt4;
+    }
+}
+
+MTL::VertexStepFunction EnumConvert(RadrayVertexInputRate rate) noexcept {
+    switch (rate) {
+        case RADRAY_INPUT_RATE_VERTEX: return MTL::VertexStepFunctionPerVertex;
+        case RADRAY_INPUT_RATE_INSTANCE: return MTL::VertexStepFunctionPerInstance;
+    }
+}
+
 }  // namespace radray::rhi::metal
