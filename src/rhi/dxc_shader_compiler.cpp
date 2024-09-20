@@ -176,12 +176,30 @@ public:
             return result;
         };
         radray::wstring sm = toSm(desc.Stage, desc.ShaderModel);
-        radray::wstring entryPoint = ToWideChar(radray::string{desc.EntryPoint});
-        radray::wstring name = ToWideChar(radray::string{desc.Name});
+        radray::wstring entryPoint;
+        {
+            auto tmp = ToWideChar(radray::string{desc.EntryPoint});
+            if (!tmp.has_value()) {
+                return radray::format("cannot convert to wchar {}", desc.EntryPoint);
+            }
+            entryPoint = tmp.value();
+        }
+        radray::wstring name;
+        {
+            auto tmp = ToWideChar(radray::string{desc.Name});
+            if (!tmp.has_value()) {
+                return radray::format("cannot convert to wchar {}", desc.Name);
+            }
+            name = tmp.value();
+        }
         radray::vector<radray::wstring> defines{};
         defines.reserve(desc.DefineCount);
         for (size_t i = 0; i < desc.DefineCount; i++) {
-            defines.emplace_back(ToWideChar(radray::string{desc.Defines[i]}));
+            auto tmp = ToWideChar(radray::string{desc.Defines[i]});
+            if (!tmp.has_value()) {
+                return radray::format("cannot convert to wchar {}", desc.Defines[i]);
+            }
+            defines.emplace_back(tmp.value());
         }
         radray::vector<LPCWSTR> args{};
         args.emplace_back(L"-all_resources_bound");

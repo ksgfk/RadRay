@@ -1,16 +1,15 @@
 #include <radray/utility.h>
 
 #include <fstream>
-#include <stdexcept>
 #include <cwchar>
 
 #include <radray/logger.h>
 
 namespace radray {
 
-radray::string ReadText(const std::filesystem::path& filepath) {
+std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept {
     if (!std::filesystem::exists(filepath)) {
-        RADRAY_THROW(std::runtime_error, "cannot read text {}", filepath.generic_string());
+        return std::nullopt;
     }
     std::ifstream t{filepath};
     radray::string str(
@@ -19,7 +18,7 @@ radray::string ReadText(const std::filesystem::path& filepath) {
     return str;
 }
 
-radray::wstring ToWideChar(const radray::string& str) {
+std::optional<radray::wstring> ToWideChar(const radray::string& str) noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     const char* mbstr = str.data();
     std::mbstate_t state{};
@@ -27,16 +26,24 @@ radray::wstring ToWideChar(const radray::string& str) {
     mbsrtowcs_s(&len, nullptr, 0, &mbstr, 0, &state);
     radray::vector<wchar_t> wstr(len);
     state = mbstate_t{};
-    mbsrtowcs_s(nullptr, wstr.data(), wstr.size(), &mbstr, len, &state);
-    return radray::wstring{wstr.begin(), wstr.end()};
+    auto err = mbsrtowcs_s(nullptr, wstr.data(), wstr.size(), &mbstr, len, &state);
+    if (err == 0) {
+        return radray::wstring{wstr.begin(), wstr.end()};   
+    } else {
+        return std::nullopt;
+    }
 #else
     const char* start = str.data();
     std::mbstate_t state{};
     size_t len = std::mbsrtowcs(nullptr, &start, 0, &state) + 1;
     radray::vector<wchar_t> wstr(len);
     state = mbstate_t{};
-    std::mbsrtowcs(&wstr[0], &start, wstr.size(), &state);
-    return radray::wstring{wstr.begin(), wstr.end()};
+    size_t result = std::mbsrtowcs(&wstr[0], &start, wstr.size(), &state);
+    if (result == (size_t)-1) {
+        return std::nullopt;
+    } else {
+        return radray::wstring{wstr.begin(), wstr.end()};
+    }
 #endif
 }
 

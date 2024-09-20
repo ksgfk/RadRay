@@ -2,6 +2,7 @@
 
 #include <utility>
 #include <filesystem>
+#include <optional>
 
 #include <radray/types.h>
 
@@ -38,8 +39,8 @@ private:
 template <typename Call>
 constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
 
-radray::string ReadText(const std::filesystem::path& filepath);
+std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
 
-radray::wstring ToWideChar(const radray::string& str);
+std::optional<radray::wstring> ToWideChar(const radray::string& str) noexcept;
 
 }  // namespace radray

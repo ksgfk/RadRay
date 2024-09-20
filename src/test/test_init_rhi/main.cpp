@@ -55,20 +55,40 @@ void start() {
     swapchain = device->CreateSwapChain(chainDesc);
     fence = device->CreateFence();
 
-    shaderStr = radray::ReadText(std::filesystem::path{"shaders"} / RADRAY_APPNAME / "color.hlsl");
-    RadrayCompileRasterizationShaderDescriptor vsDesc{
-        "color",
-        shaderStr.data(),
-        shaderStr.size(),
-        "VSMain",
-        RADRAY_SHADER_STAGE_VERTEX,
-        61,
-        nullptr,
-        0,
-        false};
-    vs = device->CompileShader(vsDesc);
-    // RadrayCompileRasterizationShaderDescriptor psDesc{};
-    // ps = device->CompileShader(psDesc);
+    {
+        auto path = std::filesystem::path{"shaders"} / RADRAY_APPNAME / "color.hlsl";
+        auto tmp = radray::ReadText(path);
+        if (!tmp.has_value()) {
+            auto tips = radray::format("cannot read {}", path.generic_string());
+            throw std::runtime_error{tips.c_str()};
+        }
+    }
+    {
+        RadrayCompileRasterizationShaderDescriptor vsDesc{
+            "color",
+            shaderStr.data(),
+            shaderStr.size(),
+            "VSMain",
+            RADRAY_SHADER_STAGE_VERTEX,
+            61,
+            nullptr,
+            0,
+            false};
+        vs = device->CompileShader(vsDesc);
+    }
+    {
+        RadrayCompileRasterizationShaderDescriptor vsDesc{
+            "color",
+            shaderStr.data(),
+            shaderStr.size(),
+            "PSMain",
+            RADRAY_SHADER_STAGE_PIXEL,
+            61,
+            nullptr,
+            0,
+            false};
+        vs = device->CompileShader(vsDesc);
+    }
 }
 
 void update() {

@@ -20,8 +20,8 @@ enum class LogLevel {
 };
 
 struct SourceLocation {
-    constexpr SourceLocation() = default;
-    constexpr SourceLocation(const char* file, int line, const char* func)
+    constexpr SourceLocation() noexcept = default;
+    constexpr SourceLocation(const char* file, int line, const char* func) noexcept
         : filename{file},
           line{line},
           funcname{func} {}
