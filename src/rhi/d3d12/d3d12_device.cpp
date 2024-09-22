@@ -4,6 +4,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/utility.h>
+#include <radray/stopwatch.h>
 
 #include "d3d12_command_queue.h"
 #include "d3d12_command_allocator.h"
@@ -290,7 +291,7 @@ void Device::ResourceBarriers(RadrayCommandList list, const RadrayResourceBarrie
         drb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         drb.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         drb.Transition.pResource = tex->texture.Get();
-        drb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; // TODO: subresource
+        drb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;  // TODO: subresource
         drb.Transition.StateBefore = EnumConvert(barrier.SrcState);
         drb.Transition.StateAfter = EnumConvert(barrier.DstState);
     }
@@ -560,27 +561,33 @@ void Device::DestroyTextureView(RadrayTextureView view) {
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
+    Stopwatch sw{};
+    sw.Start();
     CompileResult cr = dxc->Compile(&desc);
     RadrayShader result{nullptr, nullptr};
     if (auto err = std::get_if<radray::string>(&cr)) {
         RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
         RADRAY_DX_THROW("{}", *err);
     } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
-        auto rs = RhiNew<RasterShader>();
-        auto guard = MakeScopeGuard([&]() { RhiDelete(rs); });
-        rs->code = std::move(bc->Data);
-        rs->stage = desc.Stage;
-        {
-            DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
-            HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(rs->refl.GetAddressOf()));
-            if (hr != S_OK) {
-                RADRAY_ERR_LOG("cannot create reflection for {}", desc.Name);
-                return RadrayShader{};
-            }
+        DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
+        ComPtr<ID3D12ShaderReflection> refl;
+        HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(refl.GetAddressOf()));
+        if (hr != S_OK) {
+            RADRAY_DX_THROW("cannot create reflection for {}", desc.Name);
         }
+        auto rs = RhiNew<RasterShader>();
+        rs->code = std::move(bc->Data);
+        rs->refl = std::move(refl);
+        rs->stage = desc.Stage;
         result = {rs, rs->refl.Get()};
-        guard.Dismiss();
     }
+    sw.Stop();
+    RADRAY_INFO_LOG(
+        "compile shader name={} stage={} entry={} ({}ms)",
+        desc.Name,
+        desc.Stage,
+        desc.EntryPoint,
+        sw.ElapsedMilliseconds());
     return result;
 }
 
@@ -635,7 +642,7 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
         }
     };
 
-    radray::unordered_map<radray::string, ShaderResource> boundRes;
+    // radray::unordered_map<radray::string, ShaderResource> boundRes;
     for (size_t i = 0; i < desc.ShaderCount; i++) {
         auto shaderWrap = desc.Shaders[i];
         Shader* shader = Underlying(shaderWrap);
@@ -653,38 +660,37 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
                 bindDesc.BindPoint,
                 bindDesc.Space,
                 bindDesc.BindCount};
-            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
-                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER_RW;
-            }
-            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
-                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER;
-            }
-            auto&& [where, isEmplace] = boundRes.try_emplace(radName, radRes);
-            if (!isEmplace) {
-                auto&& exist = where->second;
-                if (radRes.Type != exist.Type ||
-                    radRes.Dim != exist.Dim ||
-                    radRes.Bind != exist.Bind ||
-                    radRes.Space != exist.Space ||
-                    radRes.Size != exist.Size) {
-                    RADRAY_ERR_LOG(
-                        "shader resource has same name but different structures. name={}\n"
-                        "exist: type={}, dim={}, bind={}, space={}, size={}\n"
-                        "diff:  type={}, dim={}, bind={}, space={}, size={}\n",
-                        radName,
-                        exist.Type, exist.Dim, exist.Bind, exist.Size, exist.Size,
-                        radRes.Type, radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
-                    RADRAY_DX_THROW("create root signature fail");
-                }
-            }
+            // if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+            //     radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            // }
+            // if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+            //     radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER;
+            // }
+            // auto&& [where, isEmplace] = boundRes.try_emplace(radName, radRes);
+            // if (!isEmplace) {
+            //     auto&& exist = where->second;
+            //     if (radRes.Type != exist.Type ||
+            //         radRes.Dim != exist.Dim ||
+            //         radRes.Bind != exist.Bind ||
+            //         radRes.Space != exist.Space ||
+            //         radRes.Size != exist.Size) {
+            //         RADRAY_ERR_LOG(
+            //             "shader resource has same name but different structures. name={}\n"
+            //             "exist: type={}, dim={}, bind={}, space={}, size={}\n"
+            //             "diff:  type={}, dim={}, bind={}, space={}, size={}\n",
+            //             radName,
+            //             exist.Type, exist.Dim, exist.Bind, exist.Size, exist.Size,
+            //             radRes.Type, radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
+            //         RADRAY_DX_THROW("create root signature fail");
+            //     }
+            // }
         }
     }
 
-    RADRAY_DX_THROW("no impl");
+    return RadrayRootSignature{};
 }
 
 void Device::DestroyRootSignature(RadrayRootSignature shader) {
-    RADRAY_DX_THROW("no impl");
 }
 
 RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {

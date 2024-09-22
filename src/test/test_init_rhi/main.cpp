@@ -19,6 +19,7 @@ RadrayFence fence;
 radray::string shaderStr;
 RadrayShader vs;
 RadrayShader ps;
+RadrayRootSignature sig;
 
 void start() {
     radray::window::GlobalInitGlfw();
@@ -64,32 +65,83 @@ void start() {
         }
         shaderStr = tmp.value();
     }
+    vs = device->CompileShader(
+        {"color",
+         shaderStr.data(),
+         shaderStr.size(),
+         "VSMain",
+         RADRAY_SHADER_STAGE_VERTEX,
+         61,
+         nullptr,
+         0,
+         nullptr,
+         0,
+         false});
+    ps = device->CompileShader(
+        {"color",
+         shaderStr.data(),
+         shaderStr.size(),
+         "PSMain",
+         RADRAY_SHADER_STAGE_PIXEL,
+         61,
+         nullptr,
+         0,
+         nullptr,
+         0,
+         false});
     {
-        RadrayCompileRasterizationShaderDescriptor vsDesc{
-            "color",
-            shaderStr.data(),
-            shaderStr.size(),
-            "VSMain",
-            RADRAY_SHADER_STAGE_VERTEX,
-            61,
-            nullptr,
-            0,
-            false};
-        vs = device->CompileShader(vsDesc);
+        // test
+        std::filesystem::path fullpath{"shader_lib"};
+        std::string root = fullpath.generic_string();
+        auto data = root.c_str();
+        auto tvsopt = radray::ReadText(fullpath / "DefaultVS.hlsl").value();
+        auto tpsopt = radray::ReadText(fullpath / "DefaultPS.hlsl").value();
+        RadrayShader tvs = device->CompileShader(
+            {"DefaultVS",
+             tvsopt.data(),
+             tvsopt.size(),
+             "main",
+             RADRAY_SHADER_STAGE_VERTEX,
+             61,
+             nullptr,
+             0,
+             &data,
+             1,
+             false});
+        RadrayShader tps = device->CompileShader(
+            {"DefaultPS",
+             tpsopt.data(),
+             tpsopt.size(),
+             "main",
+             RADRAY_SHADER_STAGE_PIXEL,
+             61,
+             nullptr,
+             0,
+             &data,
+             1,
+             false});
+
+        RadrayShader shaders[] = {tvs, tps};
+        RadrayRootSignature tsig = device->CreateRootSignature(
+            {shaders,
+             2,
+             nullptr,
+             nullptr,
+             0});
+
+        device->DestroyShader(tvs);
+        device->DestroyShader(tps);
+        device->DestroyRootSignature(tsig);
     }
-    {
-        RadrayCompileRasterizationShaderDescriptor psDesc{
-            "color",
-            shaderStr.data(),
-            shaderStr.size(),
-            "PSMain",
-            RADRAY_SHADER_STAGE_PIXEL,
-            61,
-            nullptr,
-            0,
-            false};
-        ps = device->CompileShader(psDesc);
-    }
+    // {
+    //     RadrayShader shaders[] = {vs, ps};
+    //     sig = device->CreateRootSignature(
+    //         {shaders,
+    //          2,
+    //          nullptr,
+    //          nullptr,
+    //          0});
+    // }
 }
 
 void update() {

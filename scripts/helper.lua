@@ -5,12 +5,31 @@ function copy_file_if_newer(from, to)
     end
     if not os.isfile(to) then
         os.cp(from, to)
-        print("copy", from, "to", to)
+        print("copy", from, "->", to)
         return
     end
     if os.mtime(from) > os.mtime(to) then
         os.cp(from, to)
-        print("copy", from, "to", to)
+        print("copy", from, "->", to)
+    end
+end
+
+function copy_dir_if_newer_recursive(from, to)
+    for _, file in ipairs(os.files(path.join(from, "**"))) do
+        local rela = path.relative(file, from)
+        local dst = path.join(to, rela)
+        copy_file_if_newer(file, dst)
+    end
+end
+
+function clear_dst_dir_no_exist_file(from, to)
+    for _, file in ipairs(os.files(path.join(to, "**"))) do
+        local rela = path.relative(file, to)
+        local src = path.join(from, rela)
+        if not os.exists(src) then
+            os.rm(file)
+            print("rm not exist file", file)
+        end
     end
 end
 
@@ -42,17 +61,18 @@ function copy_msc_lib(target)
     end
 end
 
-function copy_example_shaders(target)
-    local shader_src = path.join(target:scriptdir(), "shaders", "**")
-    local shader_dst = path.join(target:targetdir(), "shaders", target:name())
-    if not os.isdir(shader_dst) then
-        os.mkdir(shader_dst)
-    end
-    os.cp(shader_src, shader_dst)
+function copy_shader_lib(rhi_target)
+    local src_dir = path.join(rhi_target:scriptdir(), "shader_lib")
+    local dst_dir = path.join(rhi_target:targetdir(), "shader_lib")
+    copy_dir_if_newer_recursive(src_dir, dst_dir)
+    clear_dst_dir_no_exist_file(src_dir, dst_dir)
 end
 
-function setup_example_app(target)
-    target:add("defines", format("RADRAY_APPNAME=\"%s\"", target:name()))
+function copy_example_shaders(target)
+    local shader_src = path.join(target:scriptdir(), "shaders")
+    local shader_dst = path.join(target:targetdir(), "shaders", target:name())
+    copy_dir_if_newer_recursive(shader_src, shader_dst)
+    clear_dst_dir_no_exist_file(shader_src, shader_dst)
 end
 
 function build_radray_rhi_swift(target, isConfig) 

@@ -5,6 +5,8 @@
 #include <sstream>
 #include <span>
 
+#include <fmt/ranges.h>
+
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <windows.h>
 #endif
@@ -95,12 +97,30 @@ public:
                 RADRAY_THROW(std::runtime_error, "cannot create IDxcUtils. code={}", hr);
             }
         }
+        {
+            _utils->CreateDefaultIncludeHandler(_incHandler.GetAddressOf());
+        }
     }
     ~Impl() noexcept = default;
 
-    CompileResult Compile(std::string_view code, std::span<LPCWSTR> args) const {
+    CompileResult Compile(std::string_view code, std::span<std::string_view> args) const {
         if (_dxc.Get() == nullptr) {
             return "cannot use dxc. dynamic lib dxcompiler is not exist";
+        }
+        RADRAY_DEBUG_LOG("dxc {}", fmt::join(args, " "));
+        radray::vector<radray::wstring> wargs;
+        wargs.reserve(args.size());
+        for (auto i : args) {
+            auto w = ToWideChar(i);
+            if (!w.has_value()) {
+                return radray::format("cannot convert to wide char str: {}", i);
+            }
+            wargs.emplace_back(std::move(w.value()));
+        }
+        radray::vector<LPCWSTR> argsref;
+        argsref.reserve(wargs.size());
+        for (auto&& i : wargs) {
+            argsref.emplace_back(i.c_str());
         }
         DxcBuffer buffer{
             code.data(),
@@ -110,9 +130,9 @@ public:
         {
             HRESULT hr = _dxc->Compile(
                 &buffer,
-                args.data(),
-                args.size(),
-                nullptr,
+                argsref.data(),
+                argsref.size(),
+                _incHandler.Get(),
                 IID_PPV_ARGS(compileResult.GetAddressOf()));
             if (hr != S_OK) {
                 return radray::format("dxc error {}", hr);
@@ -161,73 +181,49 @@ public:
     CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc_) const {
         auto&& desc = *desc_;
         auto toSm = [](RadrayShaderStage stage, uint32_t shaderModel) {
-            using oss = std::basic_ostringstream<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
+            using oss = std::basic_ostringstream<char, std::char_traits<char>, radray::allocator<char>>;
             oss s{};
             switch (stage) {
-                case RADRAY_SHADER_STAGE_VERTEX: s << L"vs_"; break;
-                case RADRAY_SHADER_STAGE_HULL: s << L"hs_"; break;
-                case RADRAY_SHADER_STAGE_DOMAIN: s << L"ds_"; break;
-                case RADRAY_SHADER_STAGE_GEOMETRY: s << L"gs_"; break;
-                case RADRAY_SHADER_STAGE_PIXEL: s << L"ps_"; break;
-                case RADRAY_SHADER_STAGE_COMPUTE: s << L"cs_"; break;
+                case RADRAY_SHADER_STAGE_VERTEX: s << "vs_"; break;
+                case RADRAY_SHADER_STAGE_HULL: s << "hs_"; break;
+                case RADRAY_SHADER_STAGE_DOMAIN: s << "ds_"; break;
+                case RADRAY_SHADER_STAGE_GEOMETRY: s << "gs_"; break;
+                case RADRAY_SHADER_STAGE_PIXEL: s << "ps_"; break;
+                case RADRAY_SHADER_STAGE_COMPUTE: s << "cs_"; break;
                 default: break;
             }
             s << (shaderModel / 10) << "_" << shaderModel % 10;
-            radray::wstring result = s.str();
+            radray::string result = s.str();
             return result;
         };
-        radray::wstring sm = toSm(desc.Stage, desc.ShaderModel);
-        radray::wstring entryPoint;
+        radray::string sm = toSm(desc.Stage, desc.ShaderModel);
+        radray::vector<std::string_view> args{};
+        args.emplace_back("-all_resources_bound");
         {
-            auto tmp = ToWideChar(radray::string{desc.EntryPoint});
-            if (!tmp.has_value()) {
-                return radray::format("cannot convert to wchar {}", desc.EntryPoint);
-            }
-            entryPoint = tmp.value();
-        }
-        radray::wstring name;
-        {
-            auto tmp = ToWideChar(radray::string{desc.Name});
-            if (!tmp.has_value()) {
-                return radray::format("cannot convert to wchar {}", desc.Name);
-            }
-            name = tmp.value();
-        }
-        radray::vector<radray::wstring> defines{};
-        defines.reserve(desc.DefineCount);
-        for (size_t i = 0; i < desc.DefineCount; i++) {
-            auto tmp = ToWideChar(radray::string{desc.Defines[i]});
-            if (!tmp.has_value()) {
-                return radray::format("cannot convert to wchar {}", desc.Defines[i]);
-            }
-            defines.emplace_back(tmp.value());
-        }
-        radray::vector<LPCWSTR> args{};
-        args.emplace_back(L"-all_resources_bound");
-        {
-            args.emplace_back(L"-HV");
-            args.emplace_back(L"2021");
+            args.emplace_back("-HV");
+            args.emplace_back("2021");
         }
         if (desc.IsOptimize) {
-            args.emplace_back(L"-O3");
+            args.emplace_back("-O3");
         } else {
-            args.emplace_back(L"-Od");
+            args.emplace_back("-Od");
+            args.emplace_back("-Zi");
         }
         {
-            args.emplace_back(L"-T");
-            args.emplace_back(sm.c_str());
+            args.emplace_back("-T");
+            args.emplace_back(sm);
         }
         {
-            args.emplace_back(L"-E");
-            args.emplace_back(entryPoint.c_str());
+            args.emplace_back("-E");
+            args.emplace_back(std::string_view{desc.EntryPoint});
         }
-        {
-            args.emplace_back(L"-Fd");
-            args.emplace_back(name.c_str());
+        for (size_t i = 0; i < desc.DefineCount; i++) {
+            args.emplace_back("-D");
+            args.emplace_back(std::string_view{desc.Defines[i]});
         }
-        for (auto&& i : defines) {
-            args.emplace_back(L"-D");
-            args.emplace_back(i.c_str());
+        for (size_t i = 0; i < desc.IncludeDirCount; i++) {
+            args.emplace_back("-I");
+            args.emplace_back(std::string_view{desc.IncludeDirs[i]});
         }
         return Compile(std::string_view{desc.Data, desc.DataLength}, args);
     }
@@ -236,6 +232,7 @@ public:
     DynamicLibrary _dxcLib;
     RhiComPtr<IDxcCompiler3> _dxc;
     RhiComPtr<IDxcUtils> _utils;
+    RhiComPtr<IDxcIncludeHandler> _incHandler;
 };
 
 DxcShaderCompiler::DxcShaderCompiler() : _impl(new DxcShaderCompiler::Impl{}) {}
@@ -247,7 +244,7 @@ DxcShaderCompiler::~DxcShaderCompiler() noexcept {
     }
 }
 
-CompileResult DxcShaderCompiler::Compile(std::string_view code, std::span<const wchar_t*> args) const { return _impl->Compile(code, args); }
+CompileResult DxcShaderCompiler::Compile(std::string_view code, std::span<std::string_view> args) const { return _impl->Compile(code, args); }
 
 CompileResult DxcShaderCompiler::Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const { return _impl->Compile(desc); }
 

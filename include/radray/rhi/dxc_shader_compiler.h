@@ -24,7 +24,7 @@ public:
     DxcShaderCompiler();
     ~DxcShaderCompiler() noexcept;
 
-    CompileResult Compile(std::string_view code, std::span<const wchar_t*> args) const;
+    CompileResult Compile(std::string_view code, std::span<std::string_view> args) const;
     CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const;
 
     IDxcCompiler3* GetCompiler() const noexcept;

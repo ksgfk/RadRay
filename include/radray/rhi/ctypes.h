@@ -449,6 +449,8 @@ typedef struct RadrayCompileRasterizationShaderDescriptor {
     uint32_t ShaderModel;
     const char* const* Defines;
     size_t DefineCount;
+    const char* const* IncludeDirs;
+    size_t IncludeDirCount;
     bool IsOptimize;
 } RadrayCompileRasterizationShaderDescriptor;
 

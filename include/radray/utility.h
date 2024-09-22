@@ -3,6 +3,7 @@
 #include <utility>
 #include <filesystem>
 #include <optional>
+#include <string_view>
 
 #include <radray/types.h>
 
@@ -41,6 +42,6 @@ constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::
 
 std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
 
-std::optional<radray::wstring> ToWideChar(const radray::string& str) noexcept;
+std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
 
 }  // namespace radray

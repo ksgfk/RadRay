@@ -37,20 +37,24 @@ target("radray_rhi")
     add_packages("dxc_radray")
 
     before_build(function (target)
+        local helper = import("scripts.helper", {rootdir = os.projectdir()})
+        helper.copy_shader_lib(target)
         if get_config("enable_dxc") then 
-            import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+            helper.copy_dxc_lib(target)
         end
         if get_config("enable_msc") then 
-            import("scripts.helper", {rootdir = os.projectdir()}).copy_msc_lib(target)
+            helper.copy_msc_lib(target)
         end
     end)
 
     before_install(function (target)
+        local helper = import("scripts.helper", {rootdir = os.projectdir()})
+        helper.copy_shader_lib(target)
         if get_config("enable_dxc") then 
-            import("scripts.helper", {rootdir = os.projectdir()}).copy_dxc_lib(target)
+            helper.copy_dxc_lib(target)
         end
         if get_config("enable_msc") then 
-            import("scripts.helper", {rootdir = os.projectdir()}).copy_msc_lib(target)
+            helper.copy_msc_lib(target)
         end
     end)
 target_end()

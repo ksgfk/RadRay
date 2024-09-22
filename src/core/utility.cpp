@@ -18,25 +18,31 @@ std::optional<radray::string> ReadText(const std::filesystem::path& filepath) no
     return str;
 }
 
-std::optional<radray::wstring> ToWideChar(const radray::string& str) noexcept {
+std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     const char* mbstr = str.data();
     std::mbstate_t state{};
     size_t len{0};
-    mbsrtowcs_s(&len, nullptr, 0, &mbstr, 0, &state);
+    mbsrtowcs_s(&len, nullptr, 0, &mbstr, str.size(), &state);
+    if (len != str.size() + 1) { // because string_view dose not contains eof '\0'
+        return std::nullopt;
+    }
     radray::vector<wchar_t> wstr(len);
     state = mbstate_t{};
     auto err = mbsrtowcs_s(nullptr, wstr.data(), wstr.size(), &mbstr, len, &state);
     if (err == 0) {
-        return radray::wstring{wstr.begin(), wstr.end()};   
+        return radray::wstring{wstr.begin(), wstr.end()};
     } else {
         return std::nullopt;
     }
 #else
     const char* start = str.data();
     std::mbstate_t state{};
-    size_t len = std::mbsrtowcs(nullptr, &start, 0, &state) + 1;
-    radray::vector<wchar_t> wstr(len);
+    size_t len = std::mbsrtowcs(nullptr, &start, str.size(), &state);
+    if (len != str.size()) {
+        return std::nullopt;
+    }
+    radray::vector<wchar_t> wstr(len + 1);
     state = mbstate_t{};
     size_t result = std::mbsrtowcs(&wstr[0], &start, wstr.size(), &state);
     if (result == (size_t)-1) {
