@@ -2,7 +2,7 @@
 
 #include "metal_helper.h"
 #include "ir_converter.h"
-#include <radray/rhi/dxc_shader_compiler.h>
+#include <radray/rhi/shader_compiler.h>
 
 namespace radray::rhi::metal {
 

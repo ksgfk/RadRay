@@ -1,23 +1,21 @@
 #pragma once
 
+#include <string>
+#include <vector>
 #include <variant>
 #include <string_view>
 #include <span>
 
-#include <radray/types.h>
-
-class IDxcCompiler3;
-class IDxcUtils;
 struct RadrayCompileRasterizationShaderDescriptor;
 
-namespace radray::rhi {
+namespace radray::rhi::shader_compiler {
 
 struct DxilShaderBlob {
-    radray::vector<uint8_t> Data;
-    radray::vector<uint8_t> Reflection;
+    std::vector<uint8_t> Data;
+    std::vector<uint8_t> Reflection;
 };
 
-using CompileResult = std::variant<DxilShaderBlob, radray::string>;
+using CompileResult = std::variant<DxilShaderBlob, std::string>;
 
 class DxcShaderCompiler {
 public:
@@ -26,9 +24,6 @@ public:
 
     CompileResult Compile(std::string_view code, std::span<std::string_view> args) const;
     CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const;
-
-    IDxcCompiler3* GetCompiler() const noexcept;
-    IDxcUtils* GetUtils() const noexcept;
 
 private:
     class Impl;

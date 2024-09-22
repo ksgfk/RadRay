@@ -1,7 +1,5 @@
 #include "d3d12_device.h"
 
-#include <sstream>
-
 #include <radray/basic_math.h>
 #include <radray/utility.h>
 #include <radray/stopwatch.h>
@@ -112,7 +110,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         canSetDebugName = true;
     }
     {
-        dxc = radray::make_unique<DxcShaderCompiler>();
+        // dxc = radray::make_unique<DxcShaderCompiler>();
     }
 }
 
@@ -561,34 +559,35 @@ void Device::DestroyTextureView(RadrayTextureView view) {
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
-    Stopwatch sw{};
-    sw.Start();
-    CompileResult cr = dxc->Compile(&desc);
-    RadrayShader result{nullptr, nullptr};
-    if (auto err = std::get_if<radray::string>(&cr)) {
-        RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
-        RADRAY_DX_THROW("{}", *err);
-    } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
-        DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
-        ComPtr<ID3D12ShaderReflection> refl;
-        HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(refl.GetAddressOf()));
-        if (hr != S_OK) {
-            RADRAY_DX_THROW("cannot create reflection for {}", desc.Name);
-        }
-        auto rs = RhiNew<RasterShader>();
-        rs->code = std::move(bc->Data);
-        rs->refl = std::move(refl);
-        rs->stage = desc.Stage;
-        result = {rs, rs->refl.Get()};
-    }
-    sw.Stop();
-    RADRAY_INFO_LOG(
-        "compile shader name={} stage={} entry={} ({}ms)",
-        desc.Name,
-        desc.Stage,
-        desc.EntryPoint,
-        sw.ElapsedMilliseconds());
-    return result;
+    // Stopwatch sw{};
+    // sw.Start();
+    // CompileResult cr = dxc->Compile(&desc);
+    // RadrayShader result{nullptr, nullptr};
+    // if (auto err = std::get_if<radray::string>(&cr)) {
+    //     RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
+    //     RADRAY_DX_THROW("{}", *err);
+    // } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
+    //     DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
+    //     ComPtr<ID3D12ShaderReflection> refl;
+    //     HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(refl.GetAddressOf()));
+    //     if (hr != S_OK) {
+    //         RADRAY_DX_THROW("cannot create reflection for {}", desc.Name);
+    //     }
+    //     auto rs = RhiNew<RasterShader>();
+    //     rs->code = std::move(bc->Data);
+    //     rs->refl = std::move(refl);
+    //     rs->stage = desc.Stage;
+    //     result = {rs, rs->refl.Get()};
+    // }
+    // sw.Stop();
+    // RADRAY_INFO_LOG(
+    //     "compile shader name={} stage={} entry={} ({}ms)",
+    //     desc.Name,
+    //     desc.Stage,
+    //     desc.EntryPoint,
+    //     sw.ElapsedMilliseconds());
+    // return result;
+    return RadrayShader{};
 }
 
 void Device::DestroyShader(RadrayShader shader) {

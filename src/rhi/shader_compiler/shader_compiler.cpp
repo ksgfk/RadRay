@@ -1,4 +1,4 @@
-#include <radray/rhi/dxc_shader_compiler.h>
+#include <radray/rhi/shader_compiler.h>
 
 #include <stdexcept>
 #include <type_traits>
