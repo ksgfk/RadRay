@@ -10,6 +10,7 @@ function get_options()
 		build_test = true,
 		enable_d3d12 = true,
 		enable_metal = true,
-		enable_mimalloc = true
+		enable_mimalloc = true,
+		enable_shader_compiler = true
 	}
 end

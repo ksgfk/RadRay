@@ -1,34 +1,93 @@
 #pragma once
 
-#include <string>
-#include <vector>
-#include <variant>
-#include <string_view>
-#include <span>
+#if defined(_WIN32)
+#ifndef RADRAYSC_DLL_EXPORT
+#define RADRAYSC_DLL_EXPORT __declspec(dllexport)
+#endif
+#else
+#ifndef RADRAYSC_DLL_EXPORT
+#define RADRAYSC_DLL_EXPORT __attribute__((visibility("default")))
+#endif
+#endif
 
-struct RadrayCompileRasterizationShaderDescriptor;
+#ifdef __cplusplus
+#include <cstddef>
+#include <cstdint>
+#define RADRAYSC_NOEXCEPT noexcept
+#else
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#define RADRAYSC_NOEXCEPT
+#endif
 
-namespace radray::rhi::shader_compiler {
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-struct DxilShaderBlob {
-    std::vector<uint8_t> Data;
-    std::vector<uint8_t> Reflection;
-};
+typedef enum RadrayShaderCompilerType {
+    RADRAY_SHADER_COMPILER_DXC,
+    RADRAY_SHADER_COMPILER_MSC,
+    RADRAY_SHADER_COMPILER_SPIRV_CROSS
+} RadrayShaderCompilerType;
 
-using CompileResult = std::variant<DxilShaderBlob, std::string>;
+typedef void* (*RadrayGetLibraryAddrFunc)(const char* name)RADRAYSC_NOEXCEPT;
 
-class DxcShaderCompiler {
-public:
-    DxcShaderCompiler();
-    ~DxcShaderCompiler() noexcept;
+typedef void* (*RadrayGetProcAddrFunc)(void* libAddr, const char* name)RADRAYSC_NOEXCEPT;
 
-    CompileResult Compile(std::string_view code, std::span<std::string_view> args) const;
-    CompileResult Compile(const RadrayCompileRasterizationShaderDescriptor* desc) const;
+typedef void (*RadrayCloseLibraryFunc)(void* addr) RADRAYSC_NOEXCEPT;
 
-private:
-    class Impl;
+typedef void (*RadrayShaderCompilerLogFunc)(const char* str, size_t length) RADRAYSC_NOEXCEPT;
 
-    Impl* _impl;
-};
+typedef struct RadrayShaderCompilerCreateDescriptor {
+    RadrayGetLibraryAddrFunc GetLibAddr;
+    RadrayGetProcAddrFunc GetProcAddr;
+    RadrayCloseLibraryFunc CloseLib;
+    RadrayShaderCompilerLogFunc Log;
+} RadrayShaderCompilerCreateDescriptor;
 
-}  // namespace radray::rhi
+typedef struct RadrayCompilerError {
+    const char* Str;
+    size_t StrSize;
+} RadrayCompilerError;
+
+typedef struct RadrayCompilerBlob {
+    const uint8_t* Data;
+    size_t DataSize;
+} RadrayCompilerBlob;
+
+struct RadrayShaderCompiler;
+
+typedef bool (*RadrayIsCompilerAvailableFunc)(RadrayShaderCompiler* this_, RadrayShaderCompilerType type) RADRAYSC_NOEXCEPT;
+
+typedef void (*RadrayDestroyCompilerErrorFunc)(RadrayShaderCompiler* this_, RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
+
+typedef void (*RadrayDestroyCompilerBlobFunc)(RadrayShaderCompiler* this_, RadrayCompilerBlob* error) RADRAYSC_NOEXCEPT;
+
+typedef bool (*RadrayDxcCompileHlslToDxilFunc)(
+    RadrayShaderCompiler* this_,
+    const uint8_t* hlslCode, size_t codeSize,
+    const uint8_t* const* args, size_t argCount,
+    RadrayCompilerBlob* dxil, RadrayCompilerBlob* refl,
+    RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
+
+typedef bool (*RadrayMscConvertDxilToMetallibFunc)(
+    RadrayShaderCompiler* this_,
+    const uint8_t* dxilCode, size_t codeSize,
+    RadrayCompilerBlob* metallib,
+    RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
+
+typedef struct RadrayShaderCompiler {
+    RadrayIsCompilerAvailableFunc IsAvailable;
+    RadrayDestroyCompilerErrorFunc DestroyError;
+    RadrayDestroyCompilerBlobFunc DestroyBlob;
+    RadrayDxcCompileHlslToDxilFunc CompileHlslToDxil;
+    RadrayMscConvertDxilToMetallibFunc ConvertDxilToMetallib;
+} RadrayShaderCompiler;
+
+RADRAYSC_DLL_EXPORT RadrayShaderCompiler* RadrayCreateShaderCompiler(const RadrayShaderCompilerCreateDescriptor* desc) RADRAYSC_NOEXCEPT;
+RADRAYSC_DLL_EXPORT void RadrayReleaseShaderCompiler(RadrayShaderCompiler* sc) RADRAYSC_NOEXCEPT;
+
+#ifdef __cplusplus
+}
+#endif

@@ -33,8 +33,8 @@ Device::Device(const RadrayDeviceDescriptorMetal& desc) {
         device = allDevices->object<MTL::Device>(deviceIndex)->retain();
         RADRAY_INFO_LOG("Metal device: {}", device->name()->utf8String());
     });
-    dxc = radray::make_unique<DxcShaderCompiler>();
-    ir = radray::make_unique<IrConverter>();
+    // dxc = radray::make_unique<DxcShaderCompiler>();
+    // ir = radray::make_unique<IrConverter>();
 }
 
 Device::~Device() noexcept {
@@ -331,26 +331,26 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
     return AutoRelease([this, &desc]() {
         Stopwatch sw{};
         sw.Start();
-        CompileResult cr = dxc->Compile(&desc);
+        // CompileResult cr = dxc->Compile(&desc);
         RadrayShader result{nullptr, nullptr};
-        if (auto err = std::get_if<radray::string>(&cr)) {
-            RADRAY_ERR_LOG("cannot compile shader {}\n{}", desc.Name, *err);
-        } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
-            ConvertResult cvtr = ir->DxilToMetallib(bc->Data, desc.Stage);
-            if (auto err = std::get_if<radray::string>(&cvtr)) {
-                RADRAY_ERR_LOG("cannot convert ir {}\n{}", desc.Name, *err);
-            } else if (auto mlib = std::get_if<radray::vector<uint8_t>>(&cvtr)) {
-                auto mtllib = RhiNew<Library>(device, std::span<uint8_t>{mlib->data(), mlib->size()}, desc.EntryPoint);
-                result = {mtllib, mtllib->lib};
-            }
-        }
-        sw.Stop();
-        RADRAY_INFO_LOG(
-            "compile shader name={} stage={} entry={} ({}ms)",
-            desc.Name,
-            desc.Stage,
-            desc.EntryPoint,
-            sw.ElapsedMilliseconds());
+        // if (auto err = std::get_if<radray::string>(&cr)) {
+        //     RADRAY_ERR_LOG("cannot compile shader {}\n{}", desc.Name, *err);
+        // } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
+        //     ConvertResult cvtr = ir->DxilToMetallib(bc->Data, desc.Stage);
+        //     if (auto err = std::get_if<radray::string>(&cvtr)) {
+        //         RADRAY_ERR_LOG("cannot convert ir {}\n{}", desc.Name, *err);
+        //     } else if (auto mlib = std::get_if<radray::vector<uint8_t>>(&cvtr)) {
+        //         auto mtllib = RhiNew<Library>(device, std::span<uint8_t>{mlib->data(), mlib->size()}, desc.EntryPoint);
+        //         result = {mtllib, mtllib->lib};
+        //     }
+        // }
+        // sw.Stop();
+        // RADRAY_INFO_LOG(
+        //     "compile shader name={} stage={} entry={} ({}ms)",
+        //     desc.Name,
+        //     desc.Stage,
+        //     desc.EntryPoint,
+        //     sw.ElapsedMilliseconds());
         return result;
     });
 }

@@ -1,17 +1,15 @@
-package("metalcpp")
+package("metal-cpp")
     add_urls("https://developer.apple.com/metal/cpp/files/metal-cpp_$(version).zip")
 
     add_versions("macOS14.2_iOS17.2", "d800ddbc3fccabce3a513f975eeafd4057e07a29e905ad5aaef8c1f4e12d9ada")
+
+    add_includedirs("include", {public = true})
 
     on_install("macosx", "iphoneos", function (package)
         os.cp(path.join("Foundation", "*"), "include/Foundation/")
         os.cp(path.join("Metal", "*"), "include/Metal/")
         os.cp(path.join("MetalFX", "*"), "include/MetalFX/")
         os.cp(path.join("QuartzCore", "*"), "include/QuartzCore/")
-
-        os.cp("/usr/local/include/metal_irconverter/*", "include/metal_irconverter/")
-        os.cp("/usr/local/include/metal_irconverter_runtime/*", "include/metal_irconverter_runtime/")
-        os.cp("/usr/local/lib/libmetalirconverter.dylib", package:installdir())
 
         io.writefile("impl.cpp", [[
             #define NS_PRIVATE_IMPLEMENTATION
@@ -21,14 +19,9 @@ package("metalcpp")
             #include <Metal/Metal.hpp>
             #include <MetalFX/MetalFX.hpp>
             #include <QuartzCore/QuartzCore.hpp>
-
-            #define IR_RUNTIME_METALCPP
-            #define IR_PRIVATE_IMPLEMENTATION
-            #include <metal_irconverter_runtime/metal_irconverter_runtime.h>
-            #include <metal_irconverter/metal_irconverter.h>
         ]])
         io.writefile("xmake.lua", [[
-            target("metalcpp")
+            target("metal-cpp")
                 set_kind("$(kind)")
                 set_languages("cxx17")
                 add_includedirs("include", {public = true})
@@ -37,18 +30,11 @@ package("metalcpp")
                 add_headerfiles("include/Metal/**", {prefixdir = "Metal"})
                 add_headerfiles("include/MetalFX/**", {prefixdir = "MetalFX"})
                 add_headerfiles("include/QuartzCore/**", {prefixdir = "QuartzCore"})
-                add_headerfiles("include/metal_irconverter/**", {prefixdir = "metal_irconverter"})
-                add_headerfiles("include/metal_irconverter_runtime/**", {prefixdir = "metal_irconverter_runtime"})
                 add_frameworks("Foundation", "Metal", "QuartzCore")
         ]])
         import("package.tools.xmake").install(package)
     end)
 
     on_test(function (package)
-        assert(package:check_cxxsnippets({test = [[
-            #include <Metal/Metal.hpp>
-            #define IR_RUNTIME_METALCPP
-            #include <metal_irconverter_runtime/metal_irconverter_runtime.h>
-            void test(int argc, char** argv) {}
-        ]]}, {configs = {languages = "cxx17"}}))
+        assert(package:has_cxxincludes("Metal/Metal.hpp"), {configs = {languages = "cxx17"}})
     end)

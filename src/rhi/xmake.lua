@@ -5,20 +5,33 @@ if get_config("enable_d3d12") then
         debug = is_mode("debug")
     })
 end
+local _metalcpp_ver = "macOS14.2_iOS17.2"
 if get_config("enable_metal") then 
-    add_requires("metalcpp macOS14.2_iOS17.2", {debug = is_mode("debug")})
+    add_requires(format("metal-cpp %s", _metalcpp_ver), {debug = is_mode("debug")})
 end
 if get_config("enable_shader_compiler") then
     add_requires("dxc_radray v1.8.2407", {debug = is_mode("debug")})
     add_requires("spirv-cross_radray 1.3.290", {debug = is_mode("debug")})
+    if is_plat("macosx") then
+        add_requires("metal-shaderconverter", {
+            debug = is_mode("debug"),
+            configs = {
+                metal_cpp_version = _metalcpp_ver
+            }
+        })
+    end
 end
 
 if get_config("enable_shader_compiler") then
     target("radray_shader_compiler")
         set_kind("shared")
         add_rules("radray_basic_setting")
+        add_includedirs(path.join(os.projectdir(), "include"))
         add_files("shader_compiler/*.cpp")
         add_packages("dxc_radray", "spirv-cross_radray")
+        if is_plat("macosx") then
+            add_packages("metal-shaderconverter", {links = "metal-shaderconverter"})
+        end
     target_end()
 end
 
@@ -38,7 +51,7 @@ target("radray_rhi")
         add_files("metal/*.cpp")
         add_files("metal/*.mm")
         add_frameworks("Foundation", "Metal", "QuartzCore", "AppKit")
-        add_packages("metalcpp")
+        add_packages("metal-cpp")
     end
 
     before_build(function (target)

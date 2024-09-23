@@ -1,8 +1,6 @@
 #pragma once
 
 #include "metal_helper.h"
-#include "ir_converter.h"
-#include <radray/rhi/shader_compiler.h>
 
 namespace radray::rhi::metal {
 
@@ -58,8 +56,8 @@ public:
 
 public:
     MTL::Device* device;
-    radray::unique_ptr<DxcShaderCompiler> dxc;
-    radray::unique_ptr<IrConverter> ir;
+    // radray::unique_ptr<DxcShaderCompiler> dxc;
+    // radray::unique_ptr<IrConverter> ir;
 };
 
 }  // namespace radray::rhi::metal
