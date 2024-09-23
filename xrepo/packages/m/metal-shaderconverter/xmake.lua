@@ -1,12 +1,12 @@
 package("metal-shaderconverter")
     add_versions("1.1", "dummy")
 
-    add_configs("metal_cpp_version", {description = "metal-cpp version", type = "string"})
+    add_configs("dep_ver", {description = "metal-cpp version", type = "string"})
 
     add_includedirs("include", {public = true})
 
     on_load(function (package) 
-        package:add("deps", format("metal-cpp %s", package:config("metal_cpp_version")), {debug = package:is_debug()})
+        package:add("deps", format("metal-cpp %s", package:config("dep_ver")), {debug = package:is_debug()})
     end)
 
     on_install("macosx", function (package)

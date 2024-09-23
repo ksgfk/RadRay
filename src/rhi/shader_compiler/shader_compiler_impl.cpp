@@ -1,7 +1,11 @@
 #include "shader_compiler_impl.h"
 
+#include <vector>
+
 #include "directx_shader_compiler.h"
+#ifdef RADRAYSC_ENABLE_MSC
 #include "metal_ir_converter.h"
+#endif
 
 std::optional<std::wstring> MToWideChar(std::string_view str) noexcept {
 #ifdef _WIN64
@@ -54,6 +58,12 @@ RadrayCompilerBlob ShaderCompilerImpl::CreateBlob(const void* data, size_t size)
 
 void ShaderCompilerImpl::DestroyBlob(RadrayCompilerBlob blob) const noexcept {
     delete[] blob.Data;
+}
+
+void ShaderCompilerImpl::Log(RadrayShaderCompilerLogLevel level, std::string_view log) const noexcept {
+    if (_desc.Log) {
+        _desc.Log(level, log.data(), log.size(), _desc.UserPtr);
+    }
 }
 
 CompileResultDxil ShaderCompilerImpl::DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept {

@@ -31,19 +31,17 @@ typedef enum RadrayShaderCompilerType {
     RADRAY_SHADER_COMPILER_SPIRV_CROSS
 } RadrayShaderCompilerType;
 
-typedef void* (*RadrayGetLibraryAddrFunc)(const char* name)RADRAYSC_NOEXCEPT;
+typedef enum RadrayShaderCompilerLogLevel {
+    RADRAY_SHADER_COMPILER_LOG_DEBUG,
+    RADRAY_SHADER_COMPILER_LOG_INFO,
+    RADRAY_SHADER_COMPILER_LOG_ERROR
+} RadrayShaderCompilerLogLevel;
 
-typedef void* (*RadrayGetProcAddrFunc)(void* libAddr, const char* name)RADRAYSC_NOEXCEPT;
-
-typedef void (*RadrayCloseLibraryFunc)(void* addr) RADRAYSC_NOEXCEPT;
-
-typedef void (*RadrayShaderCompilerLogFunc)(const char* str, size_t length) RADRAYSC_NOEXCEPT;
+typedef void (*RadrayShaderCompilerLogFunc)(RadrayShaderCompilerLogLevel level, const char* str, size_t length, void* userPtr) RADRAYSC_NOEXCEPT;
 
 typedef struct RadrayShaderCompilerCreateDescriptor {
-    RadrayGetLibraryAddrFunc GetLibAddr;
-    RadrayGetProcAddrFunc GetProcAddr;
-    RadrayCloseLibraryFunc CloseLib;
     RadrayShaderCompilerLogFunc Log;
+    void* UserPtr;
 } RadrayShaderCompilerCreateDescriptor;
 
 typedef struct RadrayCompilerError {

@@ -27,6 +27,7 @@ public:
 
     RadrayCompilerBlob CreateBlob(const void* data, size_t size) const noexcept;
     void DestroyBlob(RadrayCompilerBlob blob) const noexcept;
+    void Log(RadrayShaderCompilerLogLevel level, std::string_view log) const noexcept;
 
     CompileResultDxil DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept;
 

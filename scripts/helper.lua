@@ -1,6 +1,6 @@
 function copy_file_if_newer(from, to)
     if not os.isfile(from) then
-        error(from .. "is not a file")
+        print(from, "is not a file")
         return
     end
     if not os.isfile(to) then
@@ -33,55 +33,26 @@ function clear_dst_dir_no_exist_file(from, to)
     end
 end
 
-function copy_dxc_lib(target)
-    local bin_dir = target:targetdir()
-    if not os.isdir(bin_dir) then
-        os.mkdir(bin_dir)
-    end
-    local dxc_dir = target:pkg("dxc_radray"):installdir()
-    for _, file in ipairs(os.files(path.join(dxc_dir, "bin", "*.dll"))) do
-        copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
-    end
-    for _, file in ipairs(os.files(path.join(dxc_dir, "*.so"))) do
-        copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
-    end
-    for _, file in ipairs(os.files(path.join(dxc_dir, "*.dylib"))) do
-        copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
-    end
-end
-
-function copy_msc_lib(target)
-    local bin_dir = target:targetdir()
-    if not os.isdir(bin_dir) then
-        os.mkdir(bin_dir)
-    end
-    local mcpp_dir = target:pkg("metalcpp"):installdir()
-    for _, file in ipairs(os.files(path.join(mcpp_dir, "*.dylib"))) do
-        copy_file_if_newer(file, path.join(bin_dir, path.filename(file)))
-    end
-end
-
-function copy_shader_lib(rhi_target)
+function copy_shader_lib(rhi_target, is_install)
     local src_dir = path.join(rhi_target:scriptdir(), "shader_lib")
-    local dst_dir = path.join(rhi_target:targetdir(), "shader_lib")
+    local dst_dir
+    if is_install then
+        dst_dir = path.join(rhi_target:installdir(), "bin", "shader_lib")
+    else
+        dst_dir = path.join(rhi_target:targetdir(), "shader_lib")
+    end
     copy_dir_if_newer_recursive(src_dir, dst_dir)
     clear_dst_dir_no_exist_file(src_dir, dst_dir)
 end
 
-function copy_example_shaders(target)
+function copy_example_shaders(target, is_install)
     local shader_src = path.join(target:scriptdir(), "shaders")
-    local shader_dst = path.join(target:targetdir(), "shaders", target:name())
+    local shader_dst
+    if is_install then
+        shader_dst = path.join(target:installdir(), "bin", "shaders", target:name())
+    else
+        shader_dst = path.join(target:targetdir(), "shaders", target:name())
+    end
     copy_dir_if_newer_recursive(shader_src, shader_dst)
     clear_dst_dir_no_exist_file(shader_src, shader_dst)
-end
-
-function build_radray_rhi_swift(target, isConfig) 
-    local mode = is_mode("debug") and "debug" or "release"
-    local dir = path.join(os.projectdir(), "src", "rhi", "metal", "private")
-    os.execv("swift", {"build", "-c", mode, "--package-path", dir})
-    if isConfig then
-        local libPath = os.iorunv("swift", {"build", "-c", mode, "--package-path", dir, "--show-bin-path"})
-        local buildDir = string.trim(libPath)
-        target:add("files", path.join(buildDir, "*.a"))
-    end
 end

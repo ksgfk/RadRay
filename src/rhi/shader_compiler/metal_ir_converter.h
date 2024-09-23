@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAYSC_ENABLE_MSC
+
 #include <array>
 
 #include "shader_compiler_impl.h"
@@ -17,3 +19,5 @@ private:
     std::array<void*, 12> _vtbl;
     IRCompiler* _compiler{nullptr};
 };
+
+#endif

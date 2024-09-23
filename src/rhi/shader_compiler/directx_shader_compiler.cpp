@@ -1,12 +1,13 @@
 #include "directx_shader_compiler.h"
 
+#include <vector>
+
 #ifdef _WIN64
 #include <windows.h>
 #endif
 #ifdef RADRAY_PLATFORM_MACOS
 #define __EMULATE_UUID 1
 #endif
-#define DXC_API_IMPORT
 #include <dxcapi.h>
 
 template <class T>
@@ -59,28 +60,21 @@ private:
     T* _ptr{nullptr};
 };
 
-ShaderCompilerImpl::DxcImpl::DxcImpl(ShaderCompilerImpl* sc) noexcept
-    : _sc(sc) {
-    _dxcLib = _sc->_desc.GetLibAddr("dxcompiler");
-    if (_dxcLib != nullptr) {
-        auto pDxcCreateInstance = (std::add_pointer_t<decltype(DxcCreateInstance)>)_sc->_desc.GetProcAddr(_dxcLib, "DxcCreateInstance");
-        {
-            HRESULT hr = pDxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&_dxc));
-            if (hr != S_OK) {
-                std::string_view tips{"cannot create IDxcCompiler3 instance"};
-                _sc->_desc.Log(tips.data(), tips.size());
-            }
+ShaderCompilerImpl::DxcImpl::DxcImpl(ShaderCompilerImpl* sc) noexcept : _sc(sc) {
+    {
+        HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&_dxc));
+        if (hr != S_OK) {
+            _sc->Log(RADRAY_SHADER_COMPILER_LOG_ERROR, "cannot create IDxcCompiler3 instance");
         }
-        if (_dxc != nullptr) {
-            HRESULT hr = pDxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&_dxcUtil));
-            if (hr != S_OK) {
-                std::string_view tips{"cannot create IDxcUtils instance"};
-                _sc->_desc.Log(tips.data(), tips.size());
-            }
+    }
+    if (_dxc != nullptr) {
+        HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&_dxcUtil));
+        if (hr != S_OK) {
+            _sc->Log(RADRAY_SHADER_COMPILER_LOG_ERROR, "cannot create IDxcUtils instance");
         }
-        if (_dxcUtil != nullptr) {
-            _dxcUtil->CreateDefaultIncludeHandler(&_dxcInc);
-        }
+    }
+    if (_dxcUtil != nullptr) {
+        _dxcUtil->CreateDefaultIncludeHandler(&_dxcInc);
     }
 }
 
@@ -88,10 +82,6 @@ ShaderCompilerImpl::DxcImpl::~DxcImpl() noexcept {
     _dxcInc->Release();
     _dxcUtil->Release();
     _dxc->Release();
-    if (_dxcLib != nullptr) {
-        _sc->_desc.CloseLib(_dxcLib);
-        _dxcLib = nullptr;
-    }
 }
 
 CompileResultDxil ShaderCompilerImpl::DxcImpl::DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept {

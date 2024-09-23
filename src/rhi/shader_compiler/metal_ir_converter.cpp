@@ -1,3 +1,5 @@
+#ifdef RADRAYSC_ENABLE_MSC
+
 #include "metal_ir_converter.h"
 
 #include <Metal/Metal.hpp>
@@ -139,3 +141,4 @@ ShaderCompilerImpl::MscImpl::~MscImpl() noexcept {
 //     }
 // }
 
+#endif

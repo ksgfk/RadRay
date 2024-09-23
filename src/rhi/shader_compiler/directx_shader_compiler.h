@@ -15,7 +15,6 @@ public:
 
 private:
     ShaderCompilerImpl* _sc;
-    void* _dxcLib{nullptr};
     IDxcCompiler3* _dxc{nullptr};
     IDxcUtils* _dxcUtil{nullptr};
     IDxcIncludeHandler* _dxcInc{nullptr};

@@ -13,12 +13,7 @@ if get_config("enable_shader_compiler") then
     add_requires("dxc_radray v1.8.2407", {debug = is_mode("debug")})
     add_requires("spirv-cross_radray 1.3.290", {debug = is_mode("debug")})
     if is_plat("macosx") then
-        add_requires("metal-shaderconverter", {
-            debug = is_mode("debug"),
-            configs = {
-                metal_cpp_version = _metalcpp_ver
-            }
-        })
+        add_requires("metal-shaderconverter", {debug = is_mode("debug"), configs = {dep_ver = _metalcpp_ver}})
     end
 end
 
@@ -31,7 +26,15 @@ if get_config("enable_shader_compiler") then
         add_packages("dxc_radray", "spirv-cross_radray")
         if is_plat("macosx") then
             add_packages("metal-shaderconverter", {links = "metal-shaderconverter"})
+            add_defines("RADRAYSC_ENABLE_MSC")
         end
+        after_install(function (target) 
+            local helper = import("scripts.helper", {rootdir = os.projectdir()})
+            local dxc_dir = target:pkg("dxc_radray"):installdir()
+            if is_plat("windows") then
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), target:installdir("bin", "dxil.dll"))
+            end
+        end)
     target_end()
 end
 
@@ -54,13 +57,13 @@ target("radray_rhi")
         add_packages("metal-cpp")
     end
 
-    before_build(function (target)
+    after_build(function (target)
         local helper = import("scripts.helper", {rootdir = os.projectdir()})
         helper.copy_shader_lib(target)
     end)
 
-    before_install(function (target)
+    after_install(function (target)
         local helper = import("scripts.helper", {rootdir = os.projectdir()})
-        helper.copy_shader_lib(target)
+        helper.copy_shader_lib(target, true)
     end)
 target_end()
