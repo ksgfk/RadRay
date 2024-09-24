@@ -28,6 +28,15 @@ if get_config("enable_shader_compiler") then
             add_packages("metal-shaderconverter", {links = {"metal-shaderconverter", "metalirconverter"}})
             add_defines("RADRAYSC_ENABLE_MSC")
         end
+        after_build(function (target)
+            local helper = import("scripts.helper", {rootdir = os.projectdir()})
+            local dxc_dir = target:pkg("dxc_radray"):installdir()
+            if is_plat("windows") then
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxcompiler.dll"), target:targetdir("bin", "dxcompiler.dll"))
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), target:targetdir("bin", "dxil.dll"))
+            end
+        end)
+
         after_install(function (target) 
             local helper = import("scripts.helper", {rootdir = os.projectdir()})
             local dxc_dir = target:pkg("dxc_radray"):installdir()

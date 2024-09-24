@@ -84,7 +84,13 @@ ConvertResultMetallib ShaderCompilerImpl::MscConvertHlslToMetallib(std::span<con
     if (_msc == nullptr) {
         return std::string{"metal-irconverter is invalid"};
     }
+#ifdef RADRAYSC_ENABLE_MSC
     return _msc->DxilToMetallib(dxil, stage);
+#else
+    (void)dxil;
+    (void)stage;
+    return std::string{"metal-irconverter is invalid"};
+#endif
 }
 
 struct ShaderCompilerInterface {

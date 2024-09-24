@@ -1,9 +1,12 @@
 #pragma once
 
 #include <radray/rhi/device_interface.h>
+#include <radray/rhi/shader_compiler_bridge.h>
 
 #include "d3d12_helper.h"
 #include "d3d12_descriptor_heap.h"
+
+struct RadrayShaderCompiler;
 
 namespace radray::rhi::d3d12 {
 
@@ -67,7 +70,7 @@ public:
     radray::unique_ptr<DescriptorHeap> dsvHeap;
     radray::unique_ptr<DescriptorHeap> gpuCbvSrvUavHeap;
     radray::unique_ptr<DescriptorHeap> gpuSamplerHeap;
-    // radray::unique_ptr<DxcShaderCompiler> dxc;
+    radray::unique_ptr<ShaderCompilerBridge> shaderCompiler;
 
 public:
     bool canSetDebugName;

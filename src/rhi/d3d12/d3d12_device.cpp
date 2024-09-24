@@ -3,6 +3,8 @@
 #include <radray/basic_math.h>
 #include <radray/utility.h>
 #include <radray/stopwatch.h>
+#include <radray/logger.h>
+#include <radray/rhi/shader_compiler.h>
 
 #include "d3d12_command_queue.h"
 #include "d3d12_command_allocator.h"
@@ -110,7 +112,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         canSetDebugName = true;
     }
     {
-        // dxc = radray::make_unique<DxcShaderCompiler>();
+        shaderCompiler = radray::make_unique<ShaderCompilerBridge>();
     }
 }
 
