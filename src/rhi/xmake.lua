@@ -25,7 +25,7 @@ if get_config("enable_shader_compiler") then
         add_files("shader_compiler/*.cpp")
         add_packages("dxc_radray", "spirv-cross_radray")
         if is_plat("macosx") then
-            add_packages("metal-shaderconverter", {links = "metal-shaderconverter"})
+            add_packages("metal-shaderconverter", {links = {"metal-shaderconverter", "metalirconverter"}})
             add_defines("RADRAYSC_ENABLE_MSC")
         end
         after_install(function (target) 

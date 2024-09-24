@@ -37,6 +37,25 @@ typedef enum RadrayShaderCompilerLogLevel {
     RADRAY_SHADER_COMPILER_LOG_ERROR
 } RadrayShaderCompilerLogLevel;
 
+typedef enum RadrayShaderCompilerMetalStage {
+    RADRAY_SHADER_COMPILER_MTL_STAGE_VERTEX,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_PIXEL,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_HULL,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_DOMAIN,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_MESH,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_AMPLIFICATION,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_GEOMETRY,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_COMPUTE,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_CLOSESTHIT,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_INTERSECTION,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_ANYHIT,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_MISS,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_RAYGENERATION,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_CALLABLE,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_STREAMOUT,
+    RADRAY_SHADER_COMPILER_MTL_STAGE_STAGEIN
+} RadrayShaderCompilerStage;
+
 typedef void (*RadrayShaderCompilerLogFunc)(RadrayShaderCompilerLogLevel level, const char* str, size_t length, void* userPtr) RADRAYSC_NOEXCEPT;
 
 typedef struct RadrayShaderCompilerCreateDescriptor {
@@ -64,14 +83,15 @@ typedef void (*RadrayDestroyCompilerBlobFunc)(RadrayShaderCompiler* this_, Radra
 
 typedef bool (*RadrayDxcCompileHlslToDxilFunc)(
     RadrayShaderCompiler* this_,
-    const uint8_t* hlslCode, size_t codeSize,
-    const uint8_t* const* args, size_t argCount,
+    const char* hlslCode, size_t codeSize,
+    const char* const* args, size_t argCount,
     RadrayCompilerBlob* dxil, RadrayCompilerBlob* refl,
     RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
 
 typedef bool (*RadrayMscConvertDxilToMetallibFunc)(
     RadrayShaderCompiler* this_,
     const uint8_t* dxilCode, size_t codeSize,
+    RadrayShaderCompilerMetalStage stage,
     RadrayCompilerBlob* metallib,
     RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
 

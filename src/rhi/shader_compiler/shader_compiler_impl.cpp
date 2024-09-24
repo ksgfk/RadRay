@@ -44,10 +44,17 @@ std::optional<std::wstring> MToWideChar(std::string_view str) noexcept {
 
 ShaderCompilerImpl::ShaderCompilerImpl(const RadrayShaderCompilerCreateDescriptor* desc) noexcept
     : _desc(*desc),
-      _dxc(new DxcImpl{this}) {}
+      _dxc(new DxcImpl{this}) {
+#ifdef RADRAYSC_ENABLE_MSC
+    _msc = new MscImpl{this};
+#endif
+}
 
 ShaderCompilerImpl::~ShaderCompilerImpl() noexcept {
     delete _dxc;
+#ifdef RADRAYSC_ENABLE_MSC
+    delete _msc;
+#endif
 }
 
 RadrayCompilerBlob ShaderCompilerImpl::CreateBlob(const void* data, size_t size) const noexcept {
@@ -67,7 +74,17 @@ void ShaderCompilerImpl::Log(RadrayShaderCompilerLogLevel level, std::string_vie
 }
 
 CompileResultDxil ShaderCompilerImpl::DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept {
+    if (_dxc == nullptr) {
+        return std::string{"dxc is invalid"};
+    }
     return _dxc->DxcCompileHlsl(code, args);
+}
+
+ConvertResultMetallib ShaderCompilerImpl::MscConvertHlslToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept {
+    if (_msc == nullptr) {
+        return std::string{"metal-irconverter is invalid"};
+    }
+    return _msc->DxilToMetallib(dxil, stage);
 }
 
 struct ShaderCompilerInterface {
@@ -75,9 +92,96 @@ struct ShaderCompilerInterface {
     ShaderCompilerImpl* impl;
 };
 
+static ShaderCompilerInterface* Underlaying(RadrayShaderCompiler* this_) noexcept { return reinterpret_cast<ShaderCompilerInterface*>(this_); }
+
+static bool IsCompilerAvailableImpl(RadrayShaderCompiler* this_, RadrayShaderCompilerType type) noexcept {
+    auto sc = Underlaying(this_);
+    switch (type) {
+        case RADRAY_SHADER_COMPILER_DXC: return sc->impl->_dxc != nullptr;
+        case RADRAY_SHADER_COMPILER_MSC: return sc->impl->_msc != nullptr;
+        case RADRAY_SHADER_COMPILER_SPIRV_CROSS: return true;
+    }
+    return false;
+}
+
+static void CreateCompilerErrorImpl(RadrayCompilerError* error, const std::string& str) noexcept {
+    auto newStr = new char[str.size()];
+    error->Str = newStr;
+    error->StrSize = str.size();
+    std::copy(str.begin(), str.end(), newStr);
+}
+
+static void DestroyCompilerErrorImpl(RadrayShaderCompiler* this_, RadrayCompilerError* error) noexcept {
+    delete[] error->Str;
+    error->Str = nullptr;
+    error->StrSize = 0;
+    (void)this_;
+}
+
+static void DestroyCompilerBlobImpl(RadrayShaderCompiler* this_, RadrayCompilerBlob* blob) noexcept {
+    auto sc = Underlaying(this_);
+    sc->impl->DestroyBlob(*blob);
+    blob->Data = nullptr;
+    blob->DataSize = 0;
+}
+
+static bool DxcCompileHlslToDxilImpl(
+    RadrayShaderCompiler* this_,
+    const char* hlslCode, size_t codeSize,
+    const char* const* args, size_t argCount,
+    RadrayCompilerBlob* dxil, RadrayCompilerBlob* refl,
+    RadrayCompilerError* error) noexcept {
+    auto sc = Underlaying(this_);
+    std::vector<std::string_view> margs;
+    margs.reserve(argCount);
+    for (size_t i = 0; i < argCount; i++) {
+        margs.emplace_back(std::string_view{args[i]});
+    }
+    CompileResultDxil result = sc->impl->DxcCompileHlsl(std::string_view{hlslCode, codeSize}, margs);
+    if (auto errStr = std::get_if<std::string>(&result)) {
+        if (error != nullptr) {
+            CreateCompilerErrorImpl(error, *errStr);
+        }
+        return false;
+    } else if (auto data = std::get_if<DxilData>(&result)) {
+        *dxil = data->Data;
+        *refl = data->Refl;
+        return true;
+    }
+    CreateCompilerErrorImpl(error, "internal error");
+    return false;
+}
+
+static bool MscConvertDxilToMetallibImpl(
+    RadrayShaderCompiler* this_,
+    const uint8_t* dxilCode, size_t codeSize,
+    RadrayShaderCompilerMetalStage stage,
+    RadrayCompilerBlob* metallib,
+    RadrayCompilerError* error) noexcept {
+    auto sc = Underlaying(this_);
+    ConvertResultMetallib result = sc->impl->MscConvertHlslToMetallib(std::span<const uint8_t>{dxilCode, codeSize}, stage);
+    if (auto errStr = std::get_if<std::string>(&result)) {
+        if (error != nullptr) {
+            CreateCompilerErrorImpl(error, *errStr);
+        }
+        return false;
+    } else if (auto data = std::get_if<RadrayCompilerBlob>(&result)) {
+        *metallib = *data;
+        return true;
+    }
+    CreateCompilerErrorImpl(error, "internal error");
+    return false;
+}
+
 RadrayShaderCompiler* RadrayCreateShaderCompiler(const RadrayShaderCompilerCreateDescriptor* desc) RADRAYSC_NOEXCEPT {
     auto sc = new ShaderCompilerInterface{};
     sc->impl = new ShaderCompilerImpl{desc};
+    sc->ctype = {
+        IsCompilerAvailableImpl,
+        DestroyCompilerErrorImpl,
+        DestroyCompilerBlobImpl,
+        DxcCompileHlslToDxilImpl,
+        MscConvertDxilToMetallibImpl};
     return &sc->ctype;
 }
 

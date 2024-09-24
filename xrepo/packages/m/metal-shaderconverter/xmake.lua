@@ -4,6 +4,7 @@ package("metal-shaderconverter")
     add_configs("dep_ver", {description = "metal-cpp version", type = "string"})
 
     add_includedirs("include", {public = true})
+    add_links("metal-shaderconverter", "metalirconverter")
 
     on_load(function (package) 
         package:add("deps", format("metal-cpp %s", package:config("dep_ver")), {debug = package:is_debug()})
@@ -12,7 +13,7 @@ package("metal-shaderconverter")
     on_install("macosx", function (package)
         os.cp("/usr/local/include/metal_irconverter/*", "include/metal_irconverter/")
         os.cp("/usr/local/include/metal_irconverter_runtime/*", "include/metal_irconverter_runtime/")
-        os.cp("/usr/local/lib/libmetalirconverter.dylib", package:installdir())
+        os.cp("/usr/local/lib/libmetalirconverter.dylib", package:installdir("lib"))
         local metalcpp = package:dep("metal-cpp")
         io.writefile("impl.cpp", [[
             #include <Metal/Metal.hpp>

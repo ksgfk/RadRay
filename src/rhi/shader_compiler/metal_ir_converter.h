@@ -13,11 +13,11 @@ public:
     MscImpl(ShaderCompilerImpl* sc) noexcept;
     ~MscImpl() noexcept;
 
+    ConvertResultMetallib DxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept;
+
 private:
     ShaderCompilerImpl* _sc;
-    void* _mscLib{nullptr};
-    std::array<void*, 12> _vtbl;
-    IRCompiler* _compiler{nullptr};
+    IRCompiler* _ir{nullptr};
 };
 
 #endif
