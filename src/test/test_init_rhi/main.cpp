@@ -89,50 +89,50 @@ void start() {
     //      nullptr,
     //      0,
     //      false});
-    // {
-    //     // test
-    //     std::filesystem::path fullpath{"shader_lib"};
-    //     std::string root = fullpath.generic_string();
-    //     auto data = root.c_str();
-    //     auto tvsopt = radray::ReadText(fullpath / "DefaultVS.hlsl").value();
-    //     auto tpsopt = radray::ReadText(fullpath / "DefaultPS.hlsl").value();
-    //     RadrayShader tvs = device->CompileShader(
-    //         {"DefaultVS",
-    //          tvsopt.data(),
-    //          tvsopt.size(),
-    //          "main",
-    //          RADRAY_SHADER_STAGE_VERTEX,
-    //          61,
-    //          nullptr,
-    //          0,
-    //          &data,
-    //          1,
-    //          false});
-    //     RadrayShader tps = device->CompileShader(
-    //         {"DefaultPS",
-    //          tpsopt.data(),
-    //          tpsopt.size(),
-    //          "main",
-    //          RADRAY_SHADER_STAGE_PIXEL,
-    //          61,
-    //          nullptr,
-    //          0,
-    //          &data,
-    //          1,
-    //          false});
+    {
+        // test
+        std::filesystem::path fullpath{"shader_lib"};
+        std::string root = fullpath.generic_string();
+        auto data = root.c_str();
+        auto tvsopt = radray::ReadText(fullpath / "DefaultVS.hlsl").value();
+        auto tpsopt = radray::ReadText(fullpath / "DefaultPS.hlsl").value();
+        RadrayShader tvs = device->CompileShader(
+            {"DefaultVS",
+             tvsopt.data(),
+             tvsopt.size(),
+             "main",
+             RADRAY_SHADER_STAGE_VERTEX,
+             61,
+             nullptr,
+             0,
+             &data,
+             1,
+             false});
+        RadrayShader tps = device->CompileShader(
+            {"DefaultPS",
+             tpsopt.data(),
+             tpsopt.size(),
+             "main",
+             RADRAY_SHADER_STAGE_PIXEL,
+             61,
+             nullptr,
+             0,
+             &data,
+             1,
+             false});
 
-    //     RadrayShader shaders[] = {tvs, tps};
-    //     RadrayRootSignature tsig = device->CreateRootSignature(
-    //         {shaders,
-    //          2,
-    //          nullptr,
-    //          nullptr,
-    //          0});
+        // RadrayShader shaders[] = {tvs, tps};
+        // RadrayRootSignature tsig = device->CreateRootSignature(
+        //     {shaders,
+        //      2,
+        //      nullptr,
+        //      nullptr,
+        //      0});
 
-    //     device->DestroyShader(tvs);
-    //     device->DestroyShader(tps);
-    //     device->DestroyRootSignature(tsig);
-    // }
+        device->DestroyShader(tvs);
+        device->DestroyShader(tps);
+        // device->DestroyRootSignature(tsig);
+    }
     // {
     //     RadrayShader shaders[] = {vs, ps};
     //     sig = device->CreateRootSignature(

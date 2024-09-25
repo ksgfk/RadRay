@@ -112,7 +112,7 @@ Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
         canSetDebugName = true;
     }
     {
-        shaderCompiler = radray::make_unique<ShaderCompilerBridge>();
+        shaderCompiler = radray::make_shared<ShaderCompilerBridge>();
     }
 }
 
@@ -561,8 +561,41 @@ void Device::DestroyTextureView(RadrayTextureView view) {
 }
 
 RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescriptor& desc) {
-    // Stopwatch sw{};
-    // sw.Start();
+    if (!shaderCompiler->IsValid() || !shaderCompiler->IsAvailable(RADRAY_SHADER_COMPILER_DXC)) {
+        RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
+        RADRAY_DX_THROW("radray shader compiler is invalid");
+    }
+    Stopwatch sw{};
+    sw.Start();
+    auto result = shaderCompiler->DxcHlslToDxil(desc);
+    auto shader = RADRAY_RHI_EMPTY_RES(RadrayShader);
+    if (auto err = std::get_if<radray::string>(&result)) {
+        RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
+        RADRAY_DX_THROW("{}", *err);
+    } else if (auto bc = std::get_if<DxilWithReflection>(&result)) {
+        auto dxil = bc->Dxil.GetView();
+        auto refl = shaderCompiler->DxcCreateReflection(bc->Refl);
+        if (auto err = std::get_if<radray::string>(&refl)) {
+            RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
+            RADRAY_DX_THROW("{}", *err);
+        } else if (auto reflRes = std::get_if<ID3D12ShaderReflection*>(&refl)) {
+            ComPtr<ID3D12ShaderReflection> comRefl{};
+            comRefl.Attach(*reflRes);
+            auto rs = RhiNew<RasterShader>();
+            rs->code = radray::vector<uint8_t>{dxil.begin(), dxil.end()};
+            rs->refl = std::move(comRefl);
+            rs->stage = desc.Stage;
+            shader = {rs, rs->refl.Get()};
+        }
+    }
+    sw.Stop();
+    RADRAY_INFO_LOG(
+        "compile shader name={} stage={} entry={} ({}ms)",
+        desc.Name,
+        desc.Stage,
+        desc.EntryPoint,
+        sw.ElapsedMilliseconds());
+    return shader;
     // CompileResult cr = dxc->Compile(&desc);
     // RadrayShader result{nullptr, nullptr};
     // if (auto err = std::get_if<radray::string>(&cr)) {
@@ -589,7 +622,6 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
     //     desc.EntryPoint,
     //     sw.ElapsedMilliseconds());
     // return result;
-    return RadrayShader{};
 }
 
 void Device::DestroyShader(RadrayShader shader) {

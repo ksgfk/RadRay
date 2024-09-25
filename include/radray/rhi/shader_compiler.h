@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+struct ID3D12ShaderReflection;
+
 typedef enum RadrayShaderCompilerType {
     RADRAY_SHADER_COMPILER_DXC,
     RADRAY_SHADER_COMPILER_MSC,
@@ -95,12 +97,19 @@ typedef bool (*RadrayMscConvertDxilToMetallibFunc)(
     RadrayCompilerBlob* metallib,
     RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
 
+typedef bool (*RadrayDxcCreateD3D12ShaderReflectionFunc)(
+    RadrayShaderCompiler* this_,
+    const RadrayCompilerBlob* refl,
+    ID3D12ShaderReflection** result,
+    RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
+
 typedef struct RadrayShaderCompiler {
     RadrayIsCompilerAvailableFunc IsAvailable;
     RadrayDestroyCompilerErrorFunc DestroyError;
     RadrayDestroyCompilerBlobFunc DestroyBlob;
     RadrayDxcCompileHlslToDxilFunc CompileHlslToDxil;
     RadrayMscConvertDxilToMetallibFunc ConvertDxilToMetallib;
+    RadrayDxcCreateD3D12ShaderReflectionFunc CreateD3D12Reflection;
 } RadrayShaderCompiler;
 
 RADRAYSC_DLL_EXPORT RadrayShaderCompiler* RadrayCreateShaderCompiler(const RadrayShaderCompilerCreateDescriptor* desc) RADRAYSC_NOEXCEPT;

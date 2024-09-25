@@ -9,6 +9,9 @@
 #define __EMULATE_UUID 1
 #endif
 #include <dxcapi.h>
+#ifdef RADRAYSC_ENABLE_DXC_CREATE_D3D12_REFL
+#include <d3d12shader.h>
+#endif
 
 template <class T>
 requires std::is_base_of_v<IUnknown, T>
@@ -154,4 +157,19 @@ CompileResultDxil ShaderCompilerImpl::DxcImpl::DxcCompileHlsl(std::string_view c
         std::string_view errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
         return std::string{errStr};
     }
+}
+
+CreateReflectResult ShaderCompilerImpl::DxcImpl::DxcCreateReflection(std::span<const uint8_t> refl) const noexcept {
+#ifdef RADRAYSC_ENABLE_DXC_CREATE_D3D12_REFL
+    DxcBuffer reflectionData{refl.data(), refl.size(), DXC_CP_ACP};
+    ID3D12ShaderReflection* sr;
+    HRESULT hr = _dxcUtil->CreateReflection(&reflectionData, IID_PPV_ARGS(&sr));
+    if (hr == S_OK) {
+        return sr;
+    } else {
+        return std::string{"cannot create reflection, code="} + std::to_string(hr);
+    }
+#else
+    return std::string{"only win can create ID3D12ShaderReflection"};
+#endif
 }

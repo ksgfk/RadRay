@@ -5,12 +5,12 @@ function copy_file_if_newer(from, to)
     end
     if not os.isfile(to) then
         os.cp(from, to)
-        print("copy", from, "->", to)
+        print("copy no exist", from, "->", to)
         return
     end
     if os.mtime(from) > os.mtime(to) then
         os.cp(from, to)
-        print("copy", from, "->", to)
+        print("copy newer", from, "->", to)
     end
 end
 

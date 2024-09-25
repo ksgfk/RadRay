@@ -40,6 +40,7 @@ struct DxilData {
 
 using CompileResultDxil = std::variant<DxilData, std::string>;
 using ConvertResultMetallib = std::variant<RadrayCompilerBlob, std::string>;
+using CreateReflectResult = std::variant<ID3D12ShaderReflection*, std::string>;
 
 class ShaderCompilerImpl {
 public:
@@ -55,6 +56,7 @@ public:
 
     CompileResultDxil DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept;
     ConvertResultMetallib MscConvertHlslToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept;
+    CreateReflectResult DxcCreateReflection(std::span<const uint8_t> refl) const noexcept;
 
 public:
     RadrayShaderCompilerCreateDescriptor _desc{};

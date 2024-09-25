@@ -70,7 +70,7 @@ public:
     radray::unique_ptr<DescriptorHeap> dsvHeap;
     radray::unique_ptr<DescriptorHeap> gpuCbvSrvUavHeap;
     radray::unique_ptr<DescriptorHeap> gpuSamplerHeap;
-    radray::unique_ptr<ShaderCompilerBridge> shaderCompiler;
+    radray::shared_ptr<ShaderCompilerBridge> shaderCompiler;
 
 public:
     bool canSetDebugName;

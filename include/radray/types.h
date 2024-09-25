@@ -114,6 +114,7 @@ using std::shared_ptr;
 using std::weak_ptr;
 using std::make_unique;
 using std::make_shared;
+using std::enable_shared_from_this;
 
 using string = std::basic_string<char, std::char_traits<char>, radray::allocator<char>>;
 

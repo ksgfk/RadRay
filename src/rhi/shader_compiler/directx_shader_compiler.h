@@ -13,6 +13,8 @@ public:
 
     CompileResultDxil DxcCompileHlsl(std::string_view code, std::span<std::string_view> args) const noexcept;
 
+    CreateReflectResult DxcCreateReflection(std::span<const uint8_t> refl) const noexcept;
+
 private:
     ShaderCompilerImpl* _sc;
     IDxcCompiler3* _dxc{nullptr};

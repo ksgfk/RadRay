@@ -24,6 +24,9 @@ if get_config("enable_shader_compiler") then
         add_includedirs(path.join(os.projectdir(), "include"))
         add_files("shader_compiler/*.cpp")
         add_packages("dxc_radray", "spirv-cross_radray")
+        if is_plat("windows") then 
+            add_defines("RADRAYSC_ENABLE_DXC_CREATE_D3D12_REFL")
+        end
         if is_plat("macosx") then
             add_packages("metal-shaderconverter", {links = {"metal-shaderconverter", "metalirconverter"}})
             add_defines("RADRAYSC_ENABLE_MSC")
@@ -31,17 +34,19 @@ if get_config("enable_shader_compiler") then
         after_build(function (target)
             local helper = import("scripts.helper", {rootdir = os.projectdir()})
             local dxc_dir = target:pkg("dxc_radray"):installdir()
+            local tar_dir = target:targetdir()
             if is_plat("windows") then
-                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxcompiler.dll"), target:targetdir("bin", "dxcompiler.dll"))
-                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), target:targetdir("bin", "dxil.dll"))
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxcompiler.dll"), path.join(tar_dir, "dxcompiler.dll"))
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), path.join(tar_dir, "dxil.dll"))
             end
         end)
 
         after_install(function (target) 
             local helper = import("scripts.helper", {rootdir = os.projectdir()})
             local dxc_dir = target:pkg("dxc_radray"):installdir()
+            local inst_dir = target:installdir()
             if is_plat("windows") then
-                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), target:installdir("bin", "dxil.dll"))
+                helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), path.join(inst_dir, "bin", "dxil.dll"))
             end
         end)
     target_end()

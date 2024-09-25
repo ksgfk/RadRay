@@ -93,6 +93,13 @@ ConvertResultMetallib ShaderCompilerImpl::MscConvertHlslToMetallib(std::span<con
 #endif
 }
 
+CreateReflectResult ShaderCompilerImpl::DxcCreateReflection(std::span<const uint8_t> refl) const noexcept {
+    if (_dxc == nullptr) {
+        return std::string{"dxc is invalid"};
+    }
+    return _dxc->DxcCreateReflection(refl);
+}
+
 struct ShaderCompilerInterface {
     RadrayShaderCompiler ctype;
     ShaderCompilerImpl* impl;
@@ -179,6 +186,26 @@ static bool MscConvertDxilToMetallibImpl(
     return false;
 }
 
+static bool RadrayDxcCreateD3D12ShaderReflectionImpl(
+    RadrayShaderCompiler* this_,
+    const RadrayCompilerBlob* refl,
+    ID3D12ShaderReflection** result,
+    RadrayCompilerError* error) noexcept {
+    auto sc = Underlaying(this_);
+    auto ex = sc->impl->DxcCreateReflection(std::span<const uint8_t>{refl->Data, refl->DataSize});
+    if (auto errStr = std::get_if<std::string>(&ex)) {
+        if (error != nullptr) {
+            CreateCompilerErrorImpl(error, *errStr);
+        }
+        return false;
+    } else if (auto data = std::get_if<ID3D12ShaderReflection*>(&ex)) {
+        *result = *data;
+        return true;
+    }
+    CreateCompilerErrorImpl(error, "internal error");
+    return false;
+}
+
 RadrayShaderCompiler* RadrayCreateShaderCompiler(const RadrayShaderCompilerCreateDescriptor* desc) RADRAYSC_NOEXCEPT {
     auto sc = new ShaderCompilerInterface{};
     sc->impl = new ShaderCompilerImpl{desc};
@@ -187,7 +214,8 @@ RadrayShaderCompiler* RadrayCreateShaderCompiler(const RadrayShaderCompilerCreat
         DestroyCompilerErrorImpl,
         DestroyCompilerBlobImpl,
         DxcCompileHlslToDxilImpl,
-        MscConvertDxilToMetallibImpl};
+        MscConvertDxilToMetallibImpl,
+        RadrayDxcCreateD3D12ShaderReflectionImpl};
     return &sc->ctype;
 }
 
