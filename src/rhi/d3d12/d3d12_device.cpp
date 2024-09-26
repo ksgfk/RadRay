@@ -1,5 +1,7 @@
 #include "d3d12_device.h"
 
+#include <algorithm>
+
 #include <radray/basic_math.h>
 #include <radray/utility.h>
 #include <radray/stopwatch.h>
@@ -574,7 +576,7 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
         RADRAY_DX_THROW("{}", *err);
     } else if (auto bc = std::get_if<DxilWithReflection>(&result)) {
         auto dxil = bc->Dxil.GetView();
-        auto refl = shaderCompiler->DxcCreateReflection(bc->Refl);
+        auto refl = shaderCompiler->DxcCreateReflection(bc->Refl.GetView());
         if (auto err = std::get_if<radray::string>(&refl)) {
             RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
             RADRAY_DX_THROW("{}", *err);
@@ -596,32 +598,6 @@ RadrayShader Device::CompileShader(const RadrayCompileRasterizationShaderDescrip
         desc.EntryPoint,
         sw.ElapsedMilliseconds());
     return shader;
-    // CompileResult cr = dxc->Compile(&desc);
-    // RadrayShader result{nullptr, nullptr};
-    // if (auto err = std::get_if<radray::string>(&cr)) {
-    //     RADRAY_ERR_LOG("cannot compile shader {}", desc.Name);
-    //     RADRAY_DX_THROW("{}", *err);
-    // } else if (auto bc = std::get_if<DxilShaderBlob>(&cr)) {
-    //     DxcBuffer reflectionData{bc->Reflection.data(), bc->Reflection.size(), DXC_CP_ACP};
-    //     ComPtr<ID3D12ShaderReflection> refl;
-    //     HRESULT hr = dxc->GetUtils()->CreateReflection(&reflectionData, IID_PPV_ARGS(refl.GetAddressOf()));
-    //     if (hr != S_OK) {
-    //         RADRAY_DX_THROW("cannot create reflection for {}", desc.Name);
-    //     }
-    //     auto rs = RhiNew<RasterShader>();
-    //     rs->code = std::move(bc->Data);
-    //     rs->refl = std::move(refl);
-    //     rs->stage = desc.Stage;
-    //     result = {rs, rs->refl.Get()};
-    // }
-    // sw.Stop();
-    // RADRAY_INFO_LOG(
-    //     "compile shader name={} stage={} entry={} ({}ms)",
-    //     desc.Name,
-    //     desc.Stage,
-    //     desc.EntryPoint,
-    //     sw.ElapsedMilliseconds());
-    // return result;
 }
 
 void Device::DestroyShader(RadrayShader shader) {
@@ -634,9 +610,10 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
         radray::string Name;
         RadrayResourceType Type;
         RadrayTextureDimension Dim;
-        uint32_t Bind;
+        RadrayShaderStages Stage;
+        uint32_t BindPoint;
         uint32_t Space;
-        uint32_t Size;
+        uint32_t BindCount;
     };
     auto d3d12ResTypeToRadType = [](D3D_SHADER_INPUT_TYPE type) {
         switch (type) {
@@ -674,8 +651,28 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
             default: return RADRAY_TEXTURE_DIM_UNKNOWN;
         }
     };
-
-    // radray::unordered_map<radray::string, ShaderResource> boundRes;
+    auto isStaticSampler = [](const ShaderResource& res, const RadrayRootSignatureDescriptor& desc) {
+        if (res.Type != RADRAY_RESOURCE_TYPE_SAMPLER) {
+            return false;
+        }
+        for (size_t i = 0; i < desc.StaticSamplerCount; i++) {
+            std::string_view t{desc.StaticSamplerNames[i]};
+            if (res.Name == t) {
+                return true;
+            }
+        }
+        return false;
+    };
+    /**
+     * vk 里叫 push constant 的在 D3D12 里应该对应根常量 (root constant)
+     * 处理起来好麻烦啊, 暂时先全当需要绑定的 cbuffer 了
+     * 暂时先全都用 descriptor table
+     * 之后可能会改成先尝试用 descriptor, 超出空间限制再转 table ?
+     *
+     * 先把所有 bind resource 反射出来
+     */
+    radray::vector<ShaderResource> resources;
+    radray::vector<ShaderResource> staticSamplers;
     for (size_t i = 0; i < desc.ShaderCount; i++) {
         auto shaderWrap = desc.Shaders[i];
         Shader* shader = Underlying(shaderWrap);
@@ -690,35 +687,67 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
                 radName,
                 d3d12ResTypeToRadType(bindDesc.Type),
                 d3d12DimToRadDim(bindDesc.Dimension),
+                static_cast<uint32_t>(shader->stage),
                 bindDesc.BindPoint,
                 bindDesc.Space,
                 bindDesc.BindCount};
-            // if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
-            //     radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER_RW;
-            // }
-            // if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
-            //     radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER;
-            // }
-            // auto&& [where, isEmplace] = boundRes.try_emplace(radName, radRes);
-            // if (!isEmplace) {
-            //     auto&& exist = where->second;
-            //     if (radRes.Type != exist.Type ||
-            //         radRes.Dim != exist.Dim ||
-            //         radRes.Bind != exist.Bind ||
-            //         radRes.Space != exist.Space ||
-            //         radRes.Size != exist.Size) {
-            //         RADRAY_ERR_LOG(
-            //             "shader resource has same name but different structures. name={}\n"
-            //             "exist: type={}, dim={}, bind={}, space={}, size={}\n"
-            //             "diff:  type={}, dim={}, bind={}, space={}, size={}\n",
-            //             radName,
-            //             exist.Type, exist.Dim, exist.Bind, exist.Size, exist.Size,
-            //             radRes.Type, radRes.Dim, radRes.Bind, radRes.Size, radRes.Size);
-            //         RADRAY_DX_THROW("create root signature fail");
-            //     }
-            // }
+            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER_RW;
+            }
+            if (bindDesc.Type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && bindDesc.Dimension == D3D_SRV_DIMENSION_BUFFER) {
+                radRes.Type = RADRAY_RESOURCE_TYPE_BUFFER;
+            }
+            if (isStaticSampler(radRes, desc)) {
+                bool isConflit = false;
+                for (auto&& i : staticSamplers) {
+                    if (i.BindPoint == radRes.BindPoint && i.Space == radRes.Space) {
+                        i.Stage |= radRes.Stage;
+                        isConflit = true;
+                    }
+                }
+                if (!isConflit) {
+                    staticSamplers.emplace_back(radRes);
+                }
+            } else {
+                resources.emplace_back(radRes);
+            }
         }
     }
+    /**
+     * 合并不同 stage 所需的相同资源, 也就是 Space 和 Bind 一致的资源
+     * 有没有可能出现, 阶段 a 的资源数组占有的绑定点覆盖了阶段 b 的资源绑定点 ?
+     * 例如:
+     * vertex stage: Texture2D arr[6] : register(t0);
+     * pixel stage : Texture2D v : register(t2);
+     * 这个时候给t0s0绑一个长度6, t2绑长度1会发生什么事
+     */
+    radray::vector<ShaderResource> merge;
+    radray::set<uint32_t> spaces;
+    merge.reserve(resources.size());
+    for (auto&& res : resources) {
+        bool isConflit = false;
+        for (auto&& i : merge) {
+            if (i.Space == res.Space && i.BindPoint == res.BindPoint && i.Type == res.Type) {
+                i.Stage |= res.Stage;
+                isConflit = true;
+            }
+        }
+        if (!isConflit) {
+            spaces.insert(res.Space);
+            merge.emplace_back(res);
+        }
+    }
+    std::sort(merge.begin(), merge.end(), [](const auto& lhs, const auto& rhs) noexcept {
+        if (lhs.Space == rhs.Space) {
+            return lhs.BindPoint < rhs.BindPoint;
+        } else {
+            return lhs.Space < rhs.Space;
+        }
+    });
+    /**
+     * 根据 Space 划分 table
+     * //TODO:
+     */
 
     return RadrayRootSignature{};
 }

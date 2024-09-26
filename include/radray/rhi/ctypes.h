@@ -460,6 +460,8 @@ typedef struct RadrayRootSignatureDescriptor {
     const RadraySampler* StaticSamplers;
     const char* const* StaticSamplerNames;
     size_t StaticSamplerCount;
+    const char* const* PushConstantNames;
+    uint32_t PushConstantCount;
 } RadrayRootSignatureDescriptor;
 
 typedef struct RadrayVertexElement {

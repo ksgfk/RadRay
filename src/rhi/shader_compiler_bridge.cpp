@@ -59,25 +59,6 @@ std::string_view CompilerError::GetView() const noexcept {
     return std::string_view{_err.Str, _err.StrSize};
 }
 
-ShaderCompilerBridge::ShaderCompilerBridge()
-    : _scLib("radray_shader_compiler") {
-    if (_scLib.IsValid()) {
-        CreateShaderCompiler = _scLib.GetFunction<decltype(RadrayCreateShaderCompiler)>("RadrayCreateShaderCompiler");
-        ReleaseShaderCompiler = _scLib.GetFunction<decltype(RadrayReleaseShaderCompiler)>("RadrayReleaseShaderCompiler");
-        RadrayShaderCompilerCreateDescriptor desc{};
-        desc.Log = [](RadrayShaderCompilerLogLevel level, const char* str, size_t length, void* userPtr) noexcept {
-            switch (level) {
-                case RADRAY_SHADER_COMPILER_LOG_DEBUG: RADRAY_DEBUG_LOG("{}", std::string_view{str, str + length}); break;
-                case RADRAY_SHADER_COMPILER_LOG_INFO: RADRAY_INFO_LOG("{}", std::string_view{str, str + length}); break;
-                case RADRAY_SHADER_COMPILER_LOG_ERROR: RADRAY_ERR_LOG("{}", std::string_view{str, str + length}); break;
-            }
-            RADRAY_UNUSED(userPtr);
-        };
-        desc.UserPtr = nullptr;
-        _shaderCompiler = CreateShaderCompiler(&desc);
-    }
-}
-
 ShaderCompilerBridge::~ShaderCompilerBridge() noexcept {
     if (_scLib.IsValid() && _shaderCompiler != nullptr) {
         ReleaseShaderCompiler(_shaderCompiler);
@@ -97,15 +78,18 @@ ShaderCompilerBridge& ShaderCompilerBridge::operator=(ShaderCompilerBridge&& oth
     return *this;
 }
 
-bool ShaderCompilerBridge::IsValid() const noexcept {
+bool ShaderCompilerBridge::IsValid() noexcept {
+    LazyInit();
     return _scLib.IsValid();
 }
 
-bool ShaderCompilerBridge::IsAvailable(RadrayShaderCompilerType type) const noexcept {
+bool ShaderCompilerBridge::IsAvailable(RadrayShaderCompilerType type) noexcept {
+    LazyInit();
     return _shaderCompiler->IsAvailable(_shaderCompiler, type);
 }
 
-DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(std::span<const char> hlsl, std::span<std::string_view> args) const noexcept {
+DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(std::span<const char> hlsl, std::span<std::string_view> args) noexcept {
+    LazyInit();
     if (!IsValid()) {
         return radray::string{"radray shader compiler is invalid"};
     }
@@ -133,7 +117,8 @@ DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(std::span<const char> hlsl
     }
 }
 
-DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(const RadrayCompileRasterizationShaderDescriptor& desc) const noexcept {
+DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(const RadrayCompileRasterizationShaderDescriptor& desc) noexcept {
+    LazyInit();
     auto toSm = [](RadrayShaderStage stage, uint32_t shaderModel) {
         using oss = std::basic_ostringstream<char, std::char_traits<char>, radray::allocator<char>>;
         oss s{};
@@ -182,7 +167,8 @@ DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(const RadrayCompileRasteri
     return DxcHlslToDxil(std::string_view{desc.Data, desc.DataLength}, args);
 }
 
-DxcCreateReflectionResult ShaderCompilerBridge::DxcCreateReflection(std::span<const uint8_t> dxil) const noexcept {
+DxcCreateReflectionResult ShaderCompilerBridge::DxcCreateReflection(std::span<const uint8_t> dxil) noexcept {
+    LazyInit();
     ID3D12ShaderReflection* result{nullptr};
     RadrayCompilerError err{};
     bool isSucc = _shaderCompiler->CreateD3D12Reflection(_shaderCompiler, dxil.data(), dxil.size(), &result, &err);
@@ -194,7 +180,8 @@ DxcCreateReflectionResult ShaderCompilerBridge::DxcCreateReflection(std::span<co
     }
 }
 
-MscConvertResult ShaderCompilerBridge::MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept {
+MscConvertResult ShaderCompilerBridge::MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) noexcept {
+    LazyInit();
     RadrayCompilerBlob mtllib{};
     RadrayCompilerError err{};
     bool result = _shaderCompiler->ConvertDxilToMetallib(_shaderCompiler, dxil.data(), dxil.size(), stage, &mtllib, &err);
@@ -213,6 +200,30 @@ void ShaderCompilerBridge::DestroyShaderBlob(RadrayCompilerBlob blob) const noex
 
 void ShaderCompilerBridge::DestroyError(RadrayCompilerError error) const noexcept {
     _shaderCompiler->DestroyError(_shaderCompiler, &error);
+}
+
+void ShaderCompilerBridge::LazyInit() noexcept {
+    std::lock_guard<std::mutex> guard{_mutex};
+    if (_isInit) {
+        return;
+    }
+    _scLib = DynamicLibrary{"radray_shader_compiler"};
+    if (_scLib.IsValid()) {
+        CreateShaderCompiler = _scLib.GetFunction<decltype(RadrayCreateShaderCompiler)>("RadrayCreateShaderCompiler");
+        ReleaseShaderCompiler = _scLib.GetFunction<decltype(RadrayReleaseShaderCompiler)>("RadrayReleaseShaderCompiler");
+        RadrayShaderCompilerCreateDescriptor desc{};
+        desc.Log = [](RadrayShaderCompilerLogLevel level, const char* str, size_t length, void* userPtr) noexcept {
+            switch (level) {
+                case RADRAY_SHADER_COMPILER_LOG_DEBUG: RADRAY_DEBUG_LOG("{}", std::string_view{str, length}); break;
+                case RADRAY_SHADER_COMPILER_LOG_INFO: RADRAY_INFO_LOG("{}", std::string_view{str, length}); break;
+                case RADRAY_SHADER_COMPILER_LOG_ERROR: RADRAY_ERR_LOG("{}", std::string_view{str, length}); break;
+            }
+            RADRAY_UNUSED(userPtr);
+        };
+        desc.UserPtr = nullptr;
+        _shaderCompiler = CreateShaderCompiler(&desc);
+    }
+    _isInit = true;
 }
 
 RadrayShaderCompilerMetalStage ToMscStage(RadrayShaderStage stage) noexcept {

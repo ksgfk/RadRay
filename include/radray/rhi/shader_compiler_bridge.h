@@ -2,6 +2,7 @@
 
 #include <variant>
 #include <span>
+#include <mutex>
 
 #include <radray/types.h>
 #include <radray/platform.h>
@@ -73,23 +74,23 @@ using MscConvertResult = std::variant<CompilerBlob, radray::string>;
 
 class ShaderCompilerBridge : public radray::enable_shared_from_this<ShaderCompilerBridge> {
 public:
-    ShaderCompilerBridge();
+    ShaderCompilerBridge() noexcept = default;
     ~ShaderCompilerBridge() noexcept;
     RADRAY_NO_COPY_CTOR(ShaderCompilerBridge);
     ShaderCompilerBridge(ShaderCompilerBridge&& other) noexcept;
     ShaderCompilerBridge& operator=(ShaderCompilerBridge&& other) noexcept;
 
-    bool IsValid() const noexcept;
+    bool IsValid() noexcept;
 
-    bool IsAvailable(RadrayShaderCompilerType type) const noexcept;
+    bool IsAvailable(RadrayShaderCompilerType type) noexcept;
 
-    DxcCompilerResult DxcHlslToDxil(std::span<const char> hlsl, std::span<std::string_view> args) const noexcept;
+    DxcCompilerResult DxcHlslToDxil(std::span<const char> hlsl, std::span<std::string_view> args) noexcept;
 
-    DxcCompilerResult DxcHlslToDxil(const RadrayCompileRasterizationShaderDescriptor& desc) const noexcept;
+    DxcCompilerResult DxcHlslToDxil(const RadrayCompileRasterizationShaderDescriptor& desc) noexcept;
 
-    DxcCreateReflectionResult DxcCreateReflection(std::span<const uint8_t> dxil) const noexcept;
+    DxcCreateReflectionResult DxcCreateReflection(std::span<const uint8_t> dxil) noexcept;
 
-    MscConvertResult MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept;
+    MscConvertResult MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) noexcept;
 
     friend constexpr void swap(ShaderCompilerBridge& l, ShaderCompilerBridge& r) noexcept {
         swap(l._scLib, r._scLib);
@@ -100,8 +101,12 @@ private:
     void DestroyShaderBlob(RadrayCompilerBlob blob) const noexcept;
     void DestroyError(RadrayCompilerError error) const noexcept;
 
-    DynamicLibrary _scLib;
-    RadrayShaderCompiler* _shaderCompiler;
+    void LazyInit() noexcept;
+
+    mutable std::mutex _mutex{};
+    DynamicLibrary _scLib{};
+    RadrayShaderCompiler* _shaderCompiler{};
+    bool _isInit{};
 
     std::add_pointer_t<decltype(RadrayCreateShaderCompiler)> CreateShaderCompiler;
     std::add_pointer_t<decltype(RadrayReleaseShaderCompiler)> ReleaseShaderCompiler;
