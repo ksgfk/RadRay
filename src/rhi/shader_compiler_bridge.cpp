@@ -1,5 +1,6 @@
 #include <radray/rhi/shader_compiler_bridge.h>
 
+#include <sstream>
 #include <string_view>
 
 #include <radray/logger.h>
@@ -181,13 +182,26 @@ DxcCompilerResult ShaderCompilerBridge::DxcHlslToDxil(const RadrayCompileRasteri
     return DxcHlslToDxil(std::string_view{desc.Data, desc.DataLength}, args);
 }
 
-DxcCreateReflectionResult ShaderCompilerBridge::DxcCreateReflection(const CompilerBlob& refl) const noexcept {
+DxcCreateReflectionResult ShaderCompilerBridge::DxcCreateReflection(std::span<const uint8_t> dxil) const noexcept {
     ID3D12ShaderReflection* result{nullptr};
     RadrayCompilerError err{};
-    bool isSucc = _shaderCompiler->CreateD3D12Reflection(_shaderCompiler, &refl._blob, &result, &err);
+    bool isSucc = _shaderCompiler->CreateD3D12Reflection(_shaderCompiler, dxil.data(), dxil.size(), &result, &err);
     CompilerError radErr{shared_from_this(), err};
     if (isSucc) {
         return result;
+    } else {
+        return radray::string{radErr.GetView()};
+    }
+}
+
+MscConvertResult ShaderCompilerBridge::MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept {
+    RadrayCompilerBlob mtllib{};
+    RadrayCompilerError err{};
+    bool result = _shaderCompiler->ConvertDxilToMetallib(_shaderCompiler, dxil.data(), dxil.size(), stage, &mtllib, &err);
+    CompilerBlob radBlob{shared_from_this(), mtllib};
+    CompilerError radErr{shared_from_this(), err};
+    if (result) {
+        return radBlob;
     } else {
         return radray::string{radErr.GetView()};
     }
@@ -199,6 +213,20 @@ void ShaderCompilerBridge::DestroyShaderBlob(RadrayCompilerBlob blob) const noex
 
 void ShaderCompilerBridge::DestroyError(RadrayCompilerError error) const noexcept {
     _shaderCompiler->DestroyError(_shaderCompiler, &error);
+}
+
+RadrayShaderCompilerMetalStage ToMscStage(RadrayShaderStage stage) noexcept {
+    switch (stage) {
+        case RADRAY_SHADER_STAGE_UNKNOWN: return RADRAY_SHADER_COMPILER_MTL_STAGE_INVALID;
+        case RADRAY_SHADER_STAGE_VERTEX: return RADRAY_SHADER_COMPILER_MTL_STAGE_VERTEX;
+        case RADRAY_SHADER_STAGE_HULL: return RADRAY_SHADER_COMPILER_MTL_STAGE_HULL;
+        case RADRAY_SHADER_STAGE_DOMAIN: return RADRAY_SHADER_COMPILER_MTL_STAGE_DOMAIN;
+        case RADRAY_SHADER_STAGE_GEOMETRY: return RADRAY_SHADER_COMPILER_MTL_STAGE_GEOMETRY;
+        case RADRAY_SHADER_STAGE_PIXEL: return RADRAY_SHADER_COMPILER_MTL_STAGE_PIXEL;
+        case RADRAY_SHADER_STAGE_COMPUTE: return RADRAY_SHADER_COMPILER_MTL_STAGE_COMPUTE;
+        case RADRAY_SHADER_STAGE_RAYTRACING: return RADRAY_SHADER_COMPILER_MTL_STAGE_INVALID;
+        case RADRAY_SHADER_STAGE_ALL_GRAPHICS: return RADRAY_SHADER_COMPILER_MTL_STAGE_INVALID;
+    }
 }
 
 }  // namespace radray::rhi

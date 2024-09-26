@@ -170,6 +170,7 @@ CreateReflectResult ShaderCompilerImpl::DxcImpl::DxcCreateReflection(std::span<c
         return std::string{"cannot create reflection, code="} + std::to_string(hr);
     }
 #else
+    (void)refl;
     return std::string{"only win can create ID3D12ShaderReflection"};
 #endif
 }

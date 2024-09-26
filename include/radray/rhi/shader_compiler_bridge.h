@@ -69,6 +69,8 @@ using DxcCompilerResult = std::variant<DxilWithReflection, radray::string>;
 
 using DxcCreateReflectionResult = std::variant<ID3D12ShaderReflection*, radray::string>;
 
+using MscConvertResult = std::variant<CompilerBlob, radray::string>;
+
 class ShaderCompilerBridge : public radray::enable_shared_from_this<ShaderCompilerBridge> {
 public:
     ShaderCompilerBridge();
@@ -85,7 +87,9 @@ public:
 
     DxcCompilerResult DxcHlslToDxil(const RadrayCompileRasterizationShaderDescriptor& desc) const noexcept;
 
-    DxcCreateReflectionResult DxcCreateReflection(const CompilerBlob& refl) const noexcept;
+    DxcCreateReflectionResult DxcCreateReflection(std::span<const uint8_t> dxil) const noexcept;
+
+    MscConvertResult MscDxilToMetallib(std::span<const uint8_t> dxil, RadrayShaderCompilerMetalStage stage) const noexcept;
 
     friend constexpr void swap(ShaderCompilerBridge& l, ShaderCompilerBridge& r) noexcept {
         swap(l._scLib, r._scLib);
@@ -105,5 +109,7 @@ private:
     friend class CompilerBlob;
     friend class CompilerError;
 };
+
+RadrayShaderCompilerMetalStage ToMscStage(RadrayShaderStage stage) noexcept;
 
 }  // namespace radray::rhi

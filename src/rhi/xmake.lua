@@ -38,6 +38,12 @@ if get_config("enable_shader_compiler") then
             if is_plat("windows") then
                 helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxcompiler.dll"), path.join(tar_dir, "dxcompiler.dll"))
                 helper.copy_file_if_newer(path.join(dxc_dir, "bin", "dxil.dll"), path.join(tar_dir, "dxil.dll"))
+            elseif is_plat("macosx") then 
+                helper.copy_file_if_newer(path.join(dxc_dir, "lib", "libdxcompiler.dylib"), path.join(tar_dir, "lib", "libdxcompiler.dylib"))
+                local msc_dir = target:pkg("metal-shaderconverter"):installdir()
+                helper.copy_file_if_newer(path.join(msc_dir, "lib", "libmetalirconverter.dylib"), path.join(tar_dir, "lib", "libmetalirconverter.dylib"))
+            else 
+                helper.copy_file_if_newer(path.join(dxc_dir, "lib", "libdxcompiler.so"), path.join(tar_dir, "libdxcompiler.so"))
             end
         end)
 
@@ -70,6 +76,25 @@ target("radray_rhi")
         add_frameworks("Foundation", "Metal", "QuartzCore", "AppKit")
         add_packages("metal-cpp")
     end
+
+    on_config(function (target) 
+        local tar_dir = target:targetdir()
+        if get_config("enable_shader_compiler") then
+            if not target:is_plat("windows") then
+                local lib_path = path.join(os.projectdir(), tar_dir, "lib")
+                do
+                    local pkg_env = target._PKGENVS.LD_LIBRARY_PATH
+                    pkg_env = format("%s:%s", pkg_env, lib_path)
+                    target._PKGENVS.LD_LIBRARY_PATH = pkg_env
+                end
+                if is_plat("macosx") then
+                    local pkg_env = target._PKGENVS.DYLD_LIBRARY_PATH
+                    pkg_env = format("%s:%s", pkg_env, lib_path)
+                    target._PKGENVS.DYLD_LIBRARY_PATH = pkg_env
+                end
+            end
+        end
+    end)
 
     after_build(function (target)
         local helper = import("scripts.helper", {rootdir = os.projectdir()})

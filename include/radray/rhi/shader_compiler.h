@@ -40,6 +40,7 @@ typedef enum RadrayShaderCompilerLogLevel {
 } RadrayShaderCompilerLogLevel;
 
 typedef enum RadrayShaderCompilerMetalStage {
+    RADRAY_SHADER_COMPILER_MTL_STAGE_INVALID,
     RADRAY_SHADER_COMPILER_MTL_STAGE_VERTEX,
     RADRAY_SHADER_COMPILER_MTL_STAGE_PIXEL,
     RADRAY_SHADER_COMPILER_MTL_STAGE_HULL,
@@ -99,7 +100,7 @@ typedef bool (*RadrayMscConvertDxilToMetallibFunc)(
 
 typedef bool (*RadrayDxcCreateD3D12ShaderReflectionFunc)(
     RadrayShaderCompiler* this_,
-    const RadrayCompilerBlob* refl,
+    const uint8_t* dxilCode, size_t codeSize,
     ID3D12ShaderReflection** result,
     RadrayCompilerError* error) RADRAYSC_NOEXCEPT;
 

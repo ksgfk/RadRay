@@ -188,11 +188,11 @@ static bool MscConvertDxilToMetallibImpl(
 
 static bool RadrayDxcCreateD3D12ShaderReflectionImpl(
     RadrayShaderCompiler* this_,
-    const RadrayCompilerBlob* refl,
+    const uint8_t* dxilCode, size_t codeSize,
     ID3D12ShaderReflection** result,
     RadrayCompilerError* error) noexcept {
     auto sc = Underlaying(this_);
-    auto ex = sc->impl->DxcCreateReflection(std::span<const uint8_t>{refl->Data, refl->DataSize});
+    auto ex = sc->impl->DxcCreateReflection(std::span<const uint8_t>{dxilCode, codeSize});
     if (auto errStr = std::get_if<std::string>(&ex)) {
         if (error != nullptr) {
             CreateCompilerErrorImpl(error, *errStr);

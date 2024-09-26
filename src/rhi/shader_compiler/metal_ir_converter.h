@@ -2,8 +2,6 @@
 
 #ifdef RADRAYSC_ENABLE_MSC
 
-#include <array>
-
 #include "shader_compiler_impl.h"
 
 class IRCompiler;
