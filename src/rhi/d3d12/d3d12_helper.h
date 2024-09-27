@@ -46,6 +46,7 @@ D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE EnumConvert(RadrayLoadAction load) noexc
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexcept;
 
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
+D3D12_FILTER ConvertFilter(RadrayFilterMode mig, RadrayFilterMode mag, RadrayMipMapMode mip, bool isAniso, bool isComp) noexcept;
 
 std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 

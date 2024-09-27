@@ -440,6 +440,18 @@ typedef struct RadrayTextureViewDescriptor {
     uint32_t MipLevelCount;
 } RadrayTextureViewDescriptor;
 
+typedef struct RadraySamplerDescriptor {
+    RadrayFilterMode MinFilter;
+    RadrayFilterMode MagFilter;
+    RadrayMipMapMode MipmapMode;
+    RadrayAddressMode AddressU;
+    RadrayAddressMode AddressV;
+    RadrayAddressMode AddressW;
+    float MipLoadBias;
+    float MaxAnisotropy;
+    RadrayCompareMode CompareFunc;
+} RadraySamplerDescriptor;
+
 typedef struct RadrayCompileRasterizationShaderDescriptor {
     const char* Name;
     const char* Data;
@@ -457,7 +469,7 @@ typedef struct RadrayCompileRasterizationShaderDescriptor {
 typedef struct RadrayRootSignatureDescriptor {
     const RadrayShader* Shaders;
     size_t ShaderCount;
-    const RadraySampler* StaticSamplers;
+    const RadraySamplerDescriptor* StaticSamplers;
     const char* const* StaticSamplerNames;
     size_t StaticSamplerCount;
     const char* const* PushConstantNames;

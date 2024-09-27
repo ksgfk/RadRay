@@ -651,6 +651,18 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
             default: return RADRAY_TEXTURE_DIM_UNKNOWN;
         }
     };
+    auto toRangeType = [](RadrayResourceType type) {
+        switch (type) {
+            case RADRAY_RESOURCE_TYPE_BUFFER: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            case RADRAY_RESOURCE_TYPE_BUFFER_RW: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            case RADRAY_RESOURCE_TYPE_CBUFFER: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+            case RADRAY_RESOURCE_TYPE_TEXTURE: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            case RADRAY_RESOURCE_TYPE_TEXTURE_RW: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            case RADRAY_RESOURCE_TYPE_SAMPLER: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            case RADRAY_RESOURCE_TYPE_RAYTRACING: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            default: RADRAY_DX_THROW("unknown type {}", type);
+        }
+    };
     auto isStaticSampler = [](const ShaderResource& res, const RadrayRootSignatureDescriptor& desc) {
         if (res.Type != RADRAY_RESOURCE_TYPE_SAMPLER) {
             return false;
@@ -662,6 +674,37 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
             }
         }
         return false;
+    };
+    auto getShaderVis = [](RadrayShaderStages stages) {
+        if (stages == RADRAY_SHADER_STAGE_COMPUTE) {
+            return D3D12_SHADER_VISIBILITY_ALL;
+        }
+        if (stages == RADRAY_SHADER_STAGE_RAYTRACING) {
+            return D3D12_SHADER_VISIBILITY_ALL;
+        }
+        D3D12_SHADER_VISIBILITY res = D3D12_SHADER_VISIBILITY_ALL;
+        uint32_t stageCount = 0;
+        if (stages & RADRAY_SHADER_STAGE_VERTEX) {
+            res = D3D12_SHADER_VISIBILITY_VERTEX;
+            ++stageCount;
+        }
+        if (stages & RADRAY_SHADER_STAGE_GEOMETRY) {
+            res = D3D12_SHADER_VISIBILITY_GEOMETRY;
+            ++stageCount;
+        }
+        if (stages & RADRAY_SHADER_STAGE_HULL) {
+            res = D3D12_SHADER_VISIBILITY_HULL;
+            ++stageCount;
+        }
+        if (stages & RADRAY_SHADER_STAGE_DOMAIN) {
+            res = D3D12_SHADER_VISIBILITY_DOMAIN;
+            ++stageCount;
+        }
+        if (stages & RADRAY_SHADER_STAGE_PIXEL) {
+            res = D3D12_SHADER_VISIBILITY_PIXEL;
+            ++stageCount;
+        }
+        return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
     };
     /**
      * vk 里叫 push constant 的在 D3D12 里应该对应根常量 (root constant)
@@ -746,9 +789,48 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
     });
     /**
      * 根据 Space 划分 table
-     * //TODO:
      */
-
+    radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
+    rootParmas.reserve(spaces.size());
+    for (uint32_t space : spaces) {
+        auto&& rootParam = rootParmas.emplace_back();
+        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        auto&& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
+        RadrayShaderStages tableStages{0};
+        for (const auto& res : merge) {
+            if (res.Space != space) {
+                continue;
+            }
+            tableStages |= res.Stage;
+            auto&& range = ranges.emplace_back();
+            range.RangeType = toRangeType(res.Type);
+            range.NumDescriptors = res.BindCount;
+            range.BaseShaderRegister = res.BindPoint;
+            range.RegisterSpace = res.Space;
+            range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+            range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        }
+        rootParam.DescriptorTable.NumDescriptorRanges = ranges.size();
+        rootParam.DescriptorTable.pDescriptorRanges = ranges.data();
+        rootParam.ShaderVisibility = getShaderVis(tableStages);
+    }
+    /**
+     * 创建 static samplers
+     */
+    radray::vector<D3D12_STATIC_SAMPLER_DESC> samplerDescs;
+    samplerDescs.reserve(desc.StaticSamplerCount);
+    for (size_t i = 0; i < desc.StaticSamplerCount; i++) {
+        std::string_view samplerName{desc.StaticSamplerNames[i]};
+        auto&& rad = desc.StaticSamplers[i];
+        auto&& sampler = samplerDescs.emplace_back();
+        auto iter = std::find_if(staticSamplers.begin(), staticSamplers.end(), [samplerName](const auto& v) { return samplerName == v.Name; });
+        if (iter == staticSamplers.end()) {
+            RADRAY_DX_THROW("cannot find static sampler {}", samplerName);
+        }
+        const auto& res = *iter;
+        sampler.Filter = ConvertFilter(rad.MinFilter, rad.MagFilter, rad.MipmapMode, rad.MaxAnisotropy > 0.0f, rad.CompareFunc != RADRAY_COMPARE_NEVER);
+    }
     return RadrayRootSignature{};
 }
 
