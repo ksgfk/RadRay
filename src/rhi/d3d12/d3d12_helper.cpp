@@ -204,6 +204,28 @@ D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexce
     }
 }
 
+D3D12_TEXTURE_ADDRESS_MODE EnumConvert(RadrayAddressMode addr) noexcept {
+    switch (addr) {
+        case RADRAY_ADDRESS_MODE_MIRROR: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        case RADRAY_ADDRESS_MODE_REPEAT: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        case RADRAY_ADDRESS_MODE_CLAMP_TO_EDGE: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        case RADRAY_ADDRESS_MODE_CLAMP_TO_BORDER: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    }
+}
+
+D3D12_COMPARISON_FUNC EnumConvert(RadrayCompareMode comp) noexcept {
+    switch (comp) {
+        case RADRAY_COMPARE_NEVER: return D3D12_COMPARISON_FUNC_NEVER;
+        case RADRAY_COMPARE_LESS: return D3D12_COMPARISON_FUNC_LESS;
+        case RADRAY_COMPARE_EQUAL: return D3D12_COMPARISON_FUNC_EQUAL;
+        case RADRAY_COMPARE_LEQUAL: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        case RADRAY_COMPARE_GREATER: return D3D12_COMPARISON_FUNC_GREATER;
+        case RADRAY_COMPARE_NOTEQUAL: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        case RADRAY_COMPARE_GEQUAL: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        case RADRAY_COMPARE_ALWAYS: return D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+}
+
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept {
     switch (fmt) {
         case DXGI_FORMAT_R32G32B32A32_FLOAT:
@@ -346,23 +368,53 @@ D3D12_FILTER ConvertFilter(RadrayFilterMode mig, RadrayFilterMode mag, RadrayMip
         return isComp ? D3D12_FILTER_COMPARISON_ANISOTROPIC : D3D12_FILTER_ANISOTROPIC;
     }
     switch (mig) {
-        case RADRAY_FILTER_MODE_NEAREST: { // min POINT
+        case RADRAY_FILTER_MODE_NEAREST: {  // min POINT
             switch (mag) {
-                case RADRAY_FILTER_MODE_NEAREST: { // mag POINT
+                case RADRAY_FILTER_MODE_NEAREST: {  // mag POINT
                     switch (mip) {
-                        case RADRAY_MIPMAP_MODE_NEAREST: return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_POINT;
-                        case RADRAY_MIPMAP_MODE_LINEAR: return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR : D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+                        case RADRAY_MIPMAP_MODE_NEAREST: {  // mip POINT
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_POINT;
+                        }
+                        case RADRAY_MIPMAP_MODE_LINEAR: {  // mip LINEAR
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_POINT_MIP_LINEAR : D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+                        }
                     }
                 }
-                case RADRAY_FILTER_MODE_LINEAR: { // mag LINEAR
+                case RADRAY_FILTER_MODE_LINEAR: {  // mag LINEAR
                     switch (mip) {
-                        case RADRAY_MIPMAP_MODE_NEAREST: return isComp ? D3D12_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT : D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT;
-                        case RADRAY_MIPMAP_MODE_LINEAR: return isComp ? D3D12_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR : D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR;
+                        case RADRAY_MIPMAP_MODE_NEAREST: {  // mip POINT
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_POINT_MAG_LINEAR_MIP_POINT : D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT;
+                        }
+                        case RADRAY_MIPMAP_MODE_LINEAR: {  // mip LINEAR
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR : D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR;
+                        }
                     }
                 }
             }
         }
-        case RADRAY_FILTER_MODE_LINEAR: {
+        case RADRAY_FILTER_MODE_LINEAR: {  // min LINEAR
+            switch (mag) {
+                case RADRAY_FILTER_MODE_NEAREST: {  // mag POINT
+                    switch (mip) {
+                        case RADRAY_MIPMAP_MODE_NEAREST: {  // mip POINT
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_LINEAR_MAG_MIP_POINT : D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT;
+                        }
+                        case RADRAY_MIPMAP_MODE_LINEAR: {  // mip LINEAR
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_LINEAR_MAG_POINT_MIP_LINEAR : D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
+                        }
+                    }
+                }
+                case RADRAY_FILTER_MODE_LINEAR: {  // mag LINEAR
+                    switch (mip) {
+                        case RADRAY_MIPMAP_MODE_NEAREST: {  // mip POINT
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT : D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+                        }
+                        case RADRAY_MIPMAP_MODE_LINEAR: {  // mip LINEAR
+                            return isComp ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -16,6 +16,7 @@
 #include "d3d12_buffer.h"
 #include "d3d12_texture.h"
 #include "d3d12_shader.h"
+#include "d3d12_root_signature.h"
 
 namespace radray::rhi::d3d12 {
 
@@ -30,6 +31,7 @@ static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_
 static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
 static Shader* Underlying(RadrayShader shader) noexcept { return reinterpret_cast<Shader*>(shader.Ptr); }
 static CommandList* Underlying(RadrayRenderPassEncoder encoder) noexcept { return reinterpret_cast<CommandList*>(encoder.Ptr); }
+static RootSignature* Underlying(RadrayRootSignature rootSig) noexcept { return reinterpret_cast<RootSignature*>(rootSig.Ptr); }
 
 Device::Device(const RadrayDeviceDescriptorD3D12& desc) {
     uint32_t dxgiFactoryFlags = 0;
@@ -716,10 +718,12 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
      */
     radray::vector<ShaderResource> resources;
     radray::vector<ShaderResource> staticSamplers;
+    RadrayShaderStages shaderStages{RADRAY_SHADER_STAGE_UNKNOWN};
     for (size_t i = 0; i < desc.ShaderCount; i++) {
         auto shaderWrap = desc.Shaders[i];
         Shader* shader = Underlying(shaderWrap);
         ID3D12ShaderReflection* refl = shader->refl.Get();
+        shaderStages |= shader->stage;
         D3D12_SHADER_DESC shaderDesc;
         refl->GetDesc(&shaderDesc);
         for (size_t j = 0; j < shaderDesc.BoundResources; j++) {
@@ -830,11 +834,55 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
         }
         const auto& res = *iter;
         sampler.Filter = ConvertFilter(rad.MinFilter, rad.MagFilter, rad.MipmapMode, rad.MaxAnisotropy > 0.0f, rad.CompareFunc != RADRAY_COMPARE_NEVER);
+        sampler.AddressU = EnumConvert(rad.AddressU);
+        sampler.AddressV = EnumConvert(rad.AddressV);
+        sampler.AddressW = EnumConvert(rad.AddressW);
+        sampler.MipLODBias = rad.MipLodBias;
+        sampler.MaxAnisotropy = rad.MaxAnisotropy;
+        sampler.ComparisonFunc = EnumConvert(rad.CompareFunc);
+        sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        sampler.MinLOD = 0.0f;
+        sampler.MaxLOD = (rad.MipmapMode == RADRAY_MIPMAP_MODE_LINEAR) ? D3D12_FLOAT32_MAX : 0.0f;
+        sampler.ShaderRegister = res.BindPoint;
+        sampler.RegisterSpace = res.Space;
+        sampler.ShaderVisibility = getShaderVis(res.Stage);
     }
-    return RadrayRootSignature{};
+    /**
+     * 创建 root sig
+     */
+    D3D12_ROOT_SIGNATURE_FLAGS rootSignatureFlags{D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    if (shaderStages & RADRAY_SHADER_STAGE_VERTEX) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    }
+    if (!(shaderStages & RADRAY_SHADER_STAGE_VERTEX)) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+    }
+    if (!(shaderStages & RADRAY_SHADER_STAGE_HULL)) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS;
+    }
+    if (!(shaderStages & RADRAY_SHADER_STAGE_DOMAIN)) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS;
+    }
+    if (!(shaderStages & RADRAY_SHADER_STAGE_GEOMETRY)) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+    }
+    if (!(shaderStages & RADRAY_SHADER_STAGE_PIXEL)) {
+        rootSignatureFlags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC sigDesc{};
+    sigDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    sigDesc.Desc_1_1.NumParameters = rootParmas.size();
+    sigDesc.Desc_1_1.pParameters = rootParmas.data();
+    sigDesc.Desc_1_1.NumStaticSamplers = samplerDescs.size();
+    sigDesc.Desc_1_1.pStaticSamplers = samplerDescs.data();
+    sigDesc.Desc_1_1.Flags = rootSignatureFlags;
+    auto rootSig = RhiNew<RootSignature>(this, sigDesc);
+    return RadrayRootSignature{rootSig, rootSig->rootSig.Get()};
 }
 
-void Device::DestroyRootSignature(RadrayRootSignature shader) {
+void Device::DestroyRootSignature(RadrayRootSignature rootSig) {
+    auto rs = Underlying(rootSig);
+    RhiDelete(rs);
 }
 
 RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {

@@ -44,6 +44,8 @@ D3D12_RESOURCE_STATES EnumConvert(RadrayResourceStates state) noexcept;
 D3D12_HEAP_TYPE EnumConvert(RadrayHeapUsage usage) noexcept;
 D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE EnumConvert(RadrayLoadAction load) noexcept;
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE EnumConvert(RadrayStoreAction store) noexcept;
+D3D12_TEXTURE_ADDRESS_MODE EnumConvert(RadrayAddressMode addr) noexcept;
+D3D12_COMPARISON_FUNC EnumConvert(RadrayCompareMode comp) noexcept;
 
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
 D3D12_FILTER ConvertFilter(RadrayFilterMode mig, RadrayFilterMode mag, RadrayMipMapMode mip, bool isAniso, bool isComp) noexcept;

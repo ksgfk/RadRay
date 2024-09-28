@@ -447,7 +447,7 @@ typedef struct RadraySamplerDescriptor {
     RadrayAddressMode AddressU;
     RadrayAddressMode AddressV;
     RadrayAddressMode AddressW;
-    float MipLoadBias;
+    float MipLodBias;
     float MaxAnisotropy;
     RadrayCompareMode CompareFunc;
 } RadraySamplerDescriptor;
