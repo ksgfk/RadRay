@@ -108,4 +108,43 @@ MTL::VertexStepFunction EnumConvert(RadrayVertexInputRate rate) noexcept {
     }
 }
 
+MTL::BlendFactor EnumConvert(RadrayBlendType blend) noexcept {
+    switch (blend) {
+        case RADRAY_BLEND_TYPE_ZERO: return MTL::BlendFactorZero;
+        case RADRAY_BLEND_TYPE_ONE: return MTL::BlendFactorOne;
+        case RADRAY_BLEND_TYPE_SRC_COLOR: return MTL::BlendFactorSourceColor;
+        case RADRAY_BLEND_TYPE_INV_SRC_COLOR: return MTL::BlendFactorOneMinusSourceColor;
+        case RADRAY_BLEND_TYPE_DST_COLOR: return MTL::BlendFactorDestinationColor;
+        case RADRAY_BLEND_TYPE_INV_DST_COLOR: return MTL::BlendFactorOneMinusDestinationColor;
+        case RADRAY_BLEND_TYPE_SRC_ALPHA: return MTL::BlendFactorSourceAlpha;
+        case RADRAY_BLEND_TYPE_INV_SRC_ALPHA: return MTL::BlendFactorOneMinusSourceAlpha;
+        case RADRAY_BLEND_TYPE_DST_ALPHA: return MTL::BlendFactorDestinationAlpha;
+        case RADRAY_BLEND_TYPE_INV_DST_ALPHA: return MTL::BlendFactorOneMinusDestinationAlpha;
+        case RADRAY_BLEND_TYPE_SRC_ALPHA_SATURATE: return MTL::BlendFactorSourceAlphaSaturated;
+        case RADRAY_BLEND_TYPE_BLEND_FACTOR: return MTL::BlendFactorBlendColor;
+        case RADRAY_BLEND_TYPE_INV_BLEND_FACTOR: return MTL::BlendFactorOneMinusBlendColor;
+    }
+}
+
+MTL::BlendOperation EnumConvert(RadrayBlendOp op) noexcept {
+    switch (op) {
+        case RADRAY_BLEND_OP_ADD: return MTL::BlendOperationAdd;
+        case RADRAY_BLEND_OP_SUBTRACT: return MTL::BlendOperationSubtract;
+        case RADRAY_BLEND_OP_REVERSE_SUBTRACT: return MTL::BlendOperationReverseSubtract;
+        case RADRAY_BLEND_OP_MIN: return MTL::BlendOperationMin;
+        case RADRAY_BLEND_OP_MAX: return MTL::BlendOperationMax;
+    }
+}
+
+MTL::PrimitiveTopologyClass EnumConvert(RadrayTopology topo) noexcept {
+    switch (topo) {
+        case RADRAY_TOPOLOGY_POINT_LIST: return MTL::PrimitiveTopologyClassPoint;
+        case RADRAY_TOPOLOGY_LINE_LIST: return MTL::PrimitiveTopologyClassLine;
+        case RADRAY_TOPOLOGY_LINE_STRIP: return MTL::PrimitiveTopologyClassLine;
+        case RADRAY_TOPOLOGY_TRI_LIST: return MTL::PrimitiveTopologyClassPoint;
+        case RADRAY_TOPOLOGY_TRI_STRIP: return MTL::PrimitiveTopologyClassPoint;
+        case RADRAY_TOPOLOGY_PATCH_LIST: return MTL::PrimitiveTopologyClassUnspecified;
+    }
+}
+
 }  // namespace radray::rhi::metal

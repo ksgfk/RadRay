@@ -506,6 +506,7 @@ typedef struct RadrayBlendStateDescriptor {
     int32_t Masks;
     bool AlphaTocoverage;
     bool IndependentBlend;
+    bool IsEnableBlend;
 } RadrayBlendStateDescriptor;
 
 typedef struct RadrayDepthStencilDescriptor {
@@ -539,15 +540,8 @@ typedef struct RadrayGraphicsPipelineDescriptor {
     RadrayShader VertexShader;
     RadrayShader PixelShader;
     RadrayVertexLayout VertexLayout;
-    RadrayBlendStateDescriptor Blend;
-    RadrayDepthStencilDescriptor DepthStencil;
-    RadrayRasterizerStateDescriptor Raster;
-    RadrayFormat ColorFormats[RADRAY_RHI_MAX_MRT];
-    uint32_t RenderTargetCount;
-    RadrayTextureMSAACount SampleCount;
-    uint32_t SampleQuality;
-    RadrayFormat DepthStencilFormat;
-    RadrayTopology PrimitiveTopology;
+    RadrayTopology Topology;
+    // TODO: how
 } RadrayGraphicsPipelineDescriptor;
 
 typedef struct RadraySubmitQueueDescriptor {

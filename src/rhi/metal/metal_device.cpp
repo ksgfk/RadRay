@@ -9,6 +9,7 @@
 #include "metal_swapchain.h"
 #include "metal_texture.h"
 #include "metal_library.h"
+#include "metal_pipeline_state.h"
 
 namespace radray::rhi::metal {
 
@@ -21,6 +22,7 @@ static SwapChain* Underlying(RadraySwapChain swapchain) noexcept { return reinte
 static Texture* Underlying(RadrayTexture texture) noexcept { return reinterpret_cast<Texture*>(texture.Ptr); }
 static TextureView* Underlying(RadrayTextureView view) noexcept { return reinterpret_cast<TextureView*>(view.Handle); }
 static Library* Underlying(RadrayShader shader) noexcept { return reinterpret_cast<Library*>(shader.Ptr); }
+static RenderPipelineState* Underlying(RadrayGraphicsPipeline pso) noexcept { return reinterpret_cast<RenderPipelineState*>(pso.Ptr); }
 
 Device::Device(const RadrayDeviceDescriptorMetal& desc) {
     AutoRelease([this, &desc]() {
@@ -378,36 +380,65 @@ RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipeli
     return AutoRelease([this, &desc]() {
         auto vs = Underlying(desc.VertexShader);
         auto ps = Underlying(desc.PixelShader);
-        RadrayGraphicsPipeline pso{};
         auto rpdesc = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
-        rpdesc->setVertexFunction(vs->entryPoint);
-        rpdesc->setFragmentFunction(ps->entryPoint);
-        {
-            auto vd = MTL::VertexDescriptor::vertexDescriptor()->autorelease();
-            auto layouts = vd->layouts();
-            auto attrs = vd->attributes();
-            for (size_t i = 0; i < desc.VertexLayout.ElementCount; i++) {
-                const auto& ve = desc.VertexLayout.Elements[i];
-                auto attr = attrs->object(i);
-                attr->setFormat(EnumConvert(ve.Format));
-                attr->setOffset(ve.Offset);
-                attr->setBufferIndex(ve.Binding);
-            }
-            for (size_t i = 0; i < desc.VertexLayout.LayoutCount; i++) {
-                const auto& vl = desc.VertexLayout.Layouts[i];
-                auto layout = layouts->object(i);
-                layout->setStride(vl.Stride);
-                layout->setStepFunction(EnumConvert(vl.Rate));
-            }
-            rpdesc->setVertexDescriptor(vd);
-        }
-        RADRAY_MTL_THROW("no impl");
-        return pso;
+        // rpdesc->setVertexFunction(vs->entryPoint);
+        // rpdesc->setFragmentFunction(ps->entryPoint);
+        // {
+        //     auto vd = MTL::VertexDescriptor::vertexDescriptor()->autorelease();
+        //     auto layouts = vd->layouts();
+        //     auto attrs = vd->attributes();
+        //     for (size_t i = 0; i < desc.VertexLayout.ElementCount; i++) {
+        //         const auto& ve = desc.VertexLayout.Elements[i];
+        //         auto attr = attrs->object(i);
+        //         attr->setFormat(EnumConvert(ve.Format));
+        //         attr->setOffset(ve.Offset);
+        //         attr->setBufferIndex(ve.Binding);
+        //     }
+        //     for (size_t i = 0; i < desc.VertexLayout.LayoutCount; i++) {
+        //         const auto& vl = desc.VertexLayout.Layouts[i];
+        //         auto layout = layouts->object(i);
+        //         layout->setStride(vl.Stride);
+        //         layout->setStepFunction(EnumConvert(vl.Rate));
+        //     }
+        //     rpdesc->setVertexDescriptor(vd);
+        // }
+        // rpdesc->setRasterSampleCount(EnumConvert(desc.SampleCount));
+        // // rpdesc->setAlphaToCoverageEnabled();
+        // rpdesc->setRasterizationEnabled(true);
+        // {
+        //     auto colors = rpdesc->colorAttachments();
+        //     for (size_t i = 0; i < desc.RenderTargetCount; i++) {
+        //         auto format = desc.ColorFormats[i];
+        //         const auto& blend = desc.ColorBlends[i];
+        //         auto color = colors->object(i);
+        //         color->setPixelFormat(EnumConvert(format));
+        //         color->setBlendingEnabled(blend.IsEnableBlend);
+        //         if (blend.IsEnableBlend) {
+        //             color->setSourceRGBBlendFactor(EnumConvert(blend.SrcFactors));
+        //             color->setDestinationRGBBlendFactor(EnumConvert(blend.DstFactors));
+        //             color->setRgbBlendOperation(EnumConvert(blend.BlendModes));
+        //             color->setSourceAlphaBlendFactor(EnumConvert(blend.SrcAlphaFactors));
+        //             color->setDestinationAlphaBlendFactor(EnumConvert(blend.DstAlphaFactors));
+        //             color->setAlphaBlendOperation(EnumConvert(blend.BlendAlphaModes));
+        //             color->setWriteMask(blend.Masks);
+        //         }
+        //     }
+        // }
+        // if (desc.DepthStencil.IsEnableDepthTest) {
+        //     rpdesc->setDepthAttachmentPixelFormat(EnumConvert(desc.DepthStencilFormat));
+        //     rpdesc->setStencilAttachmentPixelFormat(EnumConvert(desc.DepthStencilFormat));
+        // }
+        // rpdesc->setInputPrimitiveTopology(EnumConvert(desc.PrimitiveTopology));
+        auto rps = RhiNew<RenderPipelineState>(device, rpdesc);
+        return RadrayGraphicsPipeline{rps, rps->pso};
     });
 }
 
 void Device::DestroyGraphicsPipeline(RadrayGraphicsPipeline pipe) {
-    RADRAY_MTL_THROW("no impl");
+    AutoRelease([pipe]() {
+        auto rps = Underlying(pipe);
+        RhiDelete(rps);
+    });
 }
 
 }  // namespace radray::rhi::metal

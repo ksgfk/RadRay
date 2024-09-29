@@ -45,6 +45,9 @@ MTL::LoadAction EnumConvert(RadrayLoadAction load) noexcept;
 MTL::StoreAction EnumConvert(RadrayStoreAction store) noexcept;
 MTL::VertexFormat EnumConvert(RadrayVertexFormat format) noexcept;
 MTL::VertexStepFunction EnumConvert(RadrayVertexInputRate rate) noexcept;
+MTL::BlendFactor EnumConvert(RadrayBlendType blend) noexcept;
+MTL::BlendOperation EnumConvert(RadrayBlendOp op) noexcept;
+MTL::PrimitiveTopologyClass EnumConvert(RadrayTopology topo) noexcept;
 
 }  // namespace radray::rhi::metal
 
