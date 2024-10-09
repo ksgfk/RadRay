@@ -141,14 +141,13 @@ typedef enum RadrayMipMapMode {
     RADRAY_MIPMAP_MODE_LINEAR
 } RadrayMipMapMode;
 
-typedef enum RadrayTopology {
-    RADRAY_TOPOLOGY_POINT_LIST,
-    RADRAY_TOPOLOGY_LINE_LIST,
-    RADRAY_TOPOLOGY_LINE_STRIP,
-    RADRAY_TOPOLOGY_TRI_LIST,
-    RADRAY_TOPOLOGY_TRI_STRIP,
-    RADRAY_TOPOLOGY_PATCH_LIST
-} RadrayTopology;
+typedef enum RadrayPrimitiveTopology {
+    RADRAY_PRIMITIVE_TOPOLOGY_POINT_LIST,
+    RADRAY_PRIMITIVE_TOPOLOGY_LINE_LIST,
+    RADRAY_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+    RADRAY_PRIMITIVE_TOPOLOGY_TRI_LIST,
+    RADRAY_PRIMITIVE_TOPOLOGY_TRI_STRIP
+} RadrayPrimitiveTopology;
 
 typedef enum RadrayBlendType {
     RADRAY_BLEND_TYPE_ZERO,
@@ -190,6 +189,12 @@ typedef enum RadrayFillMode {
     RADRAY_FILL_MODE_SOLID,
     RADRAY_FILL_MODE_WIREFRAME
 } RadrayFillMode;
+
+typedef enum RadrayPolygonMode {
+    RADRAY_POLYGON_MODE_FILL,
+    RADRAY_POLYGON_MODE_LINE,
+    RADRAY_POLYGON_MODE_POINT
+} RadrayPolygonMode;
 
 typedef enum RadrayVertexInputRate {
     RADRAY_INPUT_RATE_VERTEX,
@@ -359,6 +364,11 @@ typedef enum RadrayVertexFormat {
     RADRAY_VERTEX_FORMAT_UINT4
 } RadrayVertexFormat;
 
+typedef enum RadrayIndexFormat {
+    RADRAY_INDEX_FORMAT_UINT16,
+    RADRAY_INDEX_FORMAT_UINT32
+} RadrayIndexFormat;
+
 typedef struct RadrayDeviceDescriptorD3D12 {
     uint32_t AdapterIndex;
     bool IsEnableDebugLayer;
@@ -490,58 +500,79 @@ typedef struct RadrayVertexBufferLayout {
 } RadrayVertexBufferLayout;
 
 typedef struct RadrayVertexLayout {
-    uint32_t ElementCount;
     RadrayVertexElement Elements[RADRAY_RHI_MAX_VERTEX_ELEMENT];
+    uint32_t ElementCount;
+    RadrayVertexBufferLayout Layouts[RADRAY_RHI_MAX_VERTEX_ELEMENT];
     uint32_t LayoutCount;
-    RadrayVertexBufferLayout Layouts[8];
 } RadrayVertexLayout;
 
-typedef struct RadrayBlendStateDescriptor {
-    RadrayBlendType SrcFactors;
-    RadrayBlendType DstFactors;
-    RadrayBlendType SrcAlphaFactors;
-    RadrayBlendType DstAlphaFactors;
-    RadrayBlendOp BlendModes;
-    RadrayBlendOp BlendAlphaModes;
-    int32_t Masks;
-    bool AlphaTocoverage;
-    bool IndependentBlend;
-    bool IsEnableBlend;
-} RadrayBlendStateDescriptor;
-
-typedef struct RadrayDepthStencilDescriptor {
-    RadrayCompareMode DepthFunc;
-    RadrayCompareMode StencilFrontFunc;
-    RadrayStencilOp StencilFrontFail;
-    RadrayStencilOp DepthFrontFail;
-    RadrayStencilOp StencilFrontPass;
-    RadrayCompareMode StencilBackFunc;
-    RadrayStencilOp StencilBackFail;
-    RadrayStencilOp DepthBackFail;
-    RadrayStencilOp StencilBackPass;
-    bool IsEnableDepthTest;
-    bool IsEnableDepthWrite;
-    bool IsEnableStencil;
-} RadrayDepthStencilDescriptor;
-
-typedef struct RadrayRasterizerStateDescriptor {
-    RadrayCullMode Cull;
-    RadrayFillMode Fill;
+typedef struct RadrayPrimitiveState {
+    RadrayPrimitiveTopology Topology;
+    RadrayIndexFormat IndexFormat;
     RadrayFrontFace FrontFace;
-    int32_t DepthBias;
-    float SlopeScaledDepthBias;
-    bool IsEnableMultiSample;
-    bool IsEnableScissor;
-    bool IsEnableDepthClamp;
-} RadrayRasterizerStateDescriptor;
+    RadrayCullMode Cull;
+    RadrayPolygonMode Polygon;
+    bool DepthClipEnable;
+    bool Conservative;
+} RadrayPrimitiveState;
+
+typedef struct RadrayDepthBiasState {
+    int32_t Value;
+    int32_t SlopeScale;
+    float Clamp;
+} RadrayDepthBiasState;
+
+typedef struct RadrayStencilFaceState {
+    RadrayCompareMode Compare;
+    RadrayStencilOp Fail;
+    RadrayStencilOp DepthFail;
+    RadrayStencilOp Pass;
+} RadrayStencilState;
+
+typedef struct RadrayDepthStencilState {
+    RadrayFormat Format;
+    RadrayCompareMode DepthCompare;
+    RadrayDepthBiasState DepthBias;
+    RadrayStencilFaceState StencilFront;
+    RadrayStencilFaceState StencilBack;
+    uint32_t StencilReadMask;
+    uint32_t StencilWriteMask;
+    bool DepthWriteEnable;
+} RadrayDepthStencilState;
+
+typedef struct RadrayBlendComponentState {
+    RadrayBlendType SrcFactor;
+    RadrayBlendType DstFactor;
+    RadrayBlendOp Operation;
+} RadrayBlendComponentState;
+
+typedef struct RadrayBlendState {
+    RadrayBlendComponentState Color;
+    RadrayBlendComponentState Alpha;
+} RadrayBlendState;
+
+typedef struct RadrayMultisampleState {
+    uint32_t Count;
+    uint64_t Mask;
+    bool AlphaToConverageEnable;
+} RadrayMultisampleState;
+
+typedef struct RadrayColorTargetState {
+    RadrayFormat Format;
+    RadrayBlendState Blend;
+    uint32_t WriteMask;
+} RadrayColorTargetState;
 
 typedef struct RadrayGraphicsPipelineDescriptor {
     RadrayRootSignature RootSignature;
     RadrayShader VertexShader;
     RadrayShader PixelShader;
     RadrayVertexLayout VertexLayout;
-    RadrayTopology Topology;
-    // TODO: how
+    RadrayPrimitiveState Primitive;
+    RadrayDepthStencilState DepthStencil;
+    RadrayMultisampleState Multisample;
+    RadrayColorTargetState ColorTargets[RADRAY_RHI_MAX_MRT];
+    uint32_t ColorTargetCount;
 } RadrayGraphicsPipelineDescriptor;
 
 typedef struct RadraySubmitQueueDescriptor {

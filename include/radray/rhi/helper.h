@@ -14,7 +14,7 @@ std::string_view format_as(RadrayFormat v) noexcept;
 std::string_view format_as(RadrayFilterMode v) noexcept;
 std::string_view format_as(RadrayAddressMode v) noexcept;
 std::string_view format_as(RadrayMipMapMode v) noexcept;
-std::string_view format_as(RadrayTopology v) noexcept;
+std::string_view format_as(RadrayPrimitiveTopology v) noexcept;
 std::string_view format_as(RadrayBlendType v) noexcept;
 std::string_view format_as(RadrayBlendOp v) noexcept;
 std::string_view format_as(RadrayCullMode v) noexcept;
