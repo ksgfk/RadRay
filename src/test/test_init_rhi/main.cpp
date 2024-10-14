@@ -121,17 +121,20 @@ void start() {
              1,
              false});
 
-        // RadrayShader shaders[] = {tvs, tps};
-        // RadrayRootSignature tsig = device->CreateRootSignature(
-        //     {shaders,
-        //      2,
-        //      nullptr,
-        //      nullptr,
-        //      0});
+        RadrayShader shaders[] = {tvs, tps};
+        RadrayRootSignature tsig = device->CreateRootSignature(
+            {shaders,
+             2,
+             nullptr,
+             nullptr,
+             0,
+             nullptr,
+             0});
 
         device->DestroyShader(tvs);
         device->DestroyShader(tps);
-        // device->DestroyRootSignature(tsig);
+
+        device->DestroyRootSignature(tsig);
     }
     // {
     //     RadrayShader shaders[] = {vs, ps};

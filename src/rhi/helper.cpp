@@ -108,9 +108,13 @@ std::string_view format_as(RadrayBlendType v) noexcept {
         case RADRAY_BLEND_TYPE_INV_SRC_ALPHA: return "InvSrcAlpha";
         case RADRAY_BLEND_TYPE_DST_ALPHA: return "DstAlpha";
         case RADRAY_BLEND_TYPE_INV_DST_ALPHA: return "InvDstAlpha";
-        case RADRAY_BLEND_TYPE_SRC_ALPHA_SATURATE: return "SrcAlphaSat";
-        case RADRAY_BLEND_TYPE_BLEND_FACTOR: return "BlendFactor";
-        case RADRAY_BLEND_TYPE_INV_BLEND_FACTOR: return "InvBlendFactor";
+        case RADRAY_BLEND_TYPE_SRC_ALPHA_SAT: return "SrcAlphaSat";
+        case RADRAY_BLEND_TYPE_CONSTANT: return "Constant";
+        case RADRAY_BLEND_TYPE_INV_CONSTANT: return "InvConstant";
+        case RADRAY_BLEND_TYPE_SRC1_COLOR: return "Src1Color";
+        case RADRAY_BLEND_TYPE_INV_SRC1_COLOR: return "InvSrc1Color";
+        case RADRAY_BLEND_TYPE_SRC1_ALPHA: return "Src1Alpah";
+        case RADRAY_BLEND_TYPE_INV_SRC1_ALPHA: return "InvSrc1Alpha";
     }
 }
 

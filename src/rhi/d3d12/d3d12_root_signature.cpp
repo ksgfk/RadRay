@@ -9,7 +9,8 @@ RootSignature::RootSignature(Device* device, const D3D12_VERSIONED_ROOT_SIGNATUR
     ComPtr<ID3DBlob> rootSigSer{};
     HRESULT hr = D3D12SerializeVersionedRootSignature(&desc, rootSigSer.GetAddressOf(), error.GetAddressOf());
     if (!SUCCEEDED(hr)) {
-        RADRAY_DX_THROW("cannot serialize root signature, reason={}", error->GetBufferPointer());
+        std::string_view reason{(const char*)error->GetBufferPointer(), error->GetBufferSize()};
+        RADRAY_DX_THROW("cannot serialize root signature\nreason: {}", reason);
     }
     RADRAY_DX_FTHROW(device->device->CreateRootSignature(
         0,

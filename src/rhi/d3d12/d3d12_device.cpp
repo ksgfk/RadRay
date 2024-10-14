@@ -769,6 +769,7 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
      * 这个时候给t0s0绑一个长度6, t2绑长度1会发生什么事
      */
     radray::vector<ShaderResource> merge;
+    radray::vector<ShaderResource> samplers;
     radray::set<uint32_t> spaces;
     merge.reserve(resources.size());
     for (auto&& res : resources) {
@@ -781,22 +782,35 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
         }
         if (!isConflit) {
             spaces.insert(res.Space);
-            merge.emplace_back(res);
+            if (res.Type == RADRAY_RESOURCE_TYPE_SAMPLER) {
+                samplers.emplace_back(res);
+            } else {
+                merge.emplace_back(res);
+            }
         }
     }
-    std::sort(merge.begin(), merge.end(), [](const auto& lhs, const auto& rhs) noexcept {
+    auto&& resCmp = [](const auto& lhs, const auto& rhs) noexcept {
         if (lhs.Space == rhs.Space) {
             return lhs.BindPoint < rhs.BindPoint;
         } else {
             return lhs.Space < rhs.Space;
         }
-    });
+    };
+    std::sort(merge.begin(), merge.end(), resCmp);
+    std::sort(samplers.begin(), samplers.end(), resCmp);
     /**
      * 根据 Space 划分 table
      */
+    auto&& resToDxRange = [toRangeType](const ShaderResource& res, D3D12_DESCRIPTOR_RANGE1& range) {
+        range.RangeType = toRangeType(res.Type);
+        range.NumDescriptors = res.BindCount;
+        range.BaseShaderRegister = res.BindPoint;
+        range.RegisterSpace = res.Space;
+        range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    };
     radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
     radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
-    rootParmas.reserve(spaces.size());
     for (uint32_t space : spaces) {
         auto&& rootParam = rootParmas.emplace_back();
         rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -808,12 +822,21 @@ RadrayRootSignature Device::CreateRootSignature(const RadrayRootSignatureDescrip
             }
             tableStages |= res.Stage;
             auto&& range = ranges.emplace_back();
-            range.RangeType = toRangeType(res.Type);
-            range.NumDescriptors = res.BindCount;
-            range.BaseShaderRegister = res.BindPoint;
-            range.RegisterSpace = res.Space;
-            range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
-            range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+            resToDxRange(res, range);
+        }
+        rootParam.DescriptorTable.NumDescriptorRanges = ranges.size();
+        rootParam.DescriptorTable.pDescriptorRanges = ranges.data();
+        rootParam.ShaderVisibility = getShaderVis(tableStages);
+    }
+    if (samplers.size() > 0) {
+        auto&& rootParam = rootParmas.emplace_back();
+        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        auto&& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
+        RadrayShaderStages tableStages{0};
+        for (const auto& res : samplers) {
+            tableStages |= res.Stage;
+            auto&& range = ranges.emplace_back();
+            resToDxRange(res, range);
         }
         rootParam.DescriptorTable.NumDescriptorRanges = ranges.size();
         rootParam.DescriptorTable.pDescriptorRanges = ranges.data();
