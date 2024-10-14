@@ -114,15 +114,19 @@ MTL::BlendFactor EnumConvert(RadrayBlendType blend) noexcept {
         case RADRAY_BLEND_TYPE_ONE: return MTL::BlendFactorOne;
         case RADRAY_BLEND_TYPE_SRC_COLOR: return MTL::BlendFactorSourceColor;
         case RADRAY_BLEND_TYPE_INV_SRC_COLOR: return MTL::BlendFactorOneMinusSourceColor;
-        case RADRAY_BLEND_TYPE_DST_COLOR: return MTL::BlendFactorDestinationColor;
-        case RADRAY_BLEND_TYPE_INV_DST_COLOR: return MTL::BlendFactorOneMinusDestinationColor;
         case RADRAY_BLEND_TYPE_SRC_ALPHA: return MTL::BlendFactorSourceAlpha;
         case RADRAY_BLEND_TYPE_INV_SRC_ALPHA: return MTL::BlendFactorOneMinusSourceAlpha;
+        case RADRAY_BLEND_TYPE_DST_COLOR: return MTL::BlendFactorDestinationColor;
+        case RADRAY_BLEND_TYPE_INV_DST_COLOR: return MTL::BlendFactorOneMinusDestinationColor;
         case RADRAY_BLEND_TYPE_DST_ALPHA: return MTL::BlendFactorDestinationAlpha;
         case RADRAY_BLEND_TYPE_INV_DST_ALPHA: return MTL::BlendFactorOneMinusDestinationAlpha;
-        case RADRAY_BLEND_TYPE_SRC_ALPHA_SATURATE: return MTL::BlendFactorSourceAlphaSaturated;
-        case RADRAY_BLEND_TYPE_BLEND_FACTOR: return MTL::BlendFactorBlendColor;
-        case RADRAY_BLEND_TYPE_INV_BLEND_FACTOR: return MTL::BlendFactorOneMinusBlendColor;
+        case RADRAY_BLEND_TYPE_SRC_ALPHA_SAT: return MTL::BlendFactorSourceAlphaSaturated;
+        case RADRAY_BLEND_TYPE_CONSTANT: return MTL::BlendFactorBlendColor;
+        case RADRAY_BLEND_TYPE_INV_CONSTANT: return MTL::BlendFactorOneMinusBlendColor;
+        case RADRAY_BLEND_TYPE_SRC1_COLOR: return MTL::BlendFactorSource1Color;
+        case RADRAY_BLEND_TYPE_INV_SRC1_COLOR: return MTL::BlendFactorOneMinusSource1Color;
+        case RADRAY_BLEND_TYPE_SRC1_ALPHA: return MTL::BlendFactorSource1Alpha;
+        case RADRAY_BLEND_TYPE_INV_SRC1_ALPHA: return MTL::BlendFactorOneMinusSource1Alpha;
     }
 }
 
@@ -136,15 +140,46 @@ MTL::BlendOperation EnumConvert(RadrayBlendOp op) noexcept {
     }
 }
 
-MTL::PrimitiveTopologyClass EnumConvert(RadrayTopology topo) noexcept {
+std::pair<MTL::PrimitiveTopologyClass, MTL::PrimitiveType> EnumConvert(RadrayPrimitiveTopology topo) noexcept {
     switch (topo) {
-        case RADRAY_TOPOLOGY_POINT_LIST: return MTL::PrimitiveTopologyClassPoint;
-        case RADRAY_TOPOLOGY_LINE_LIST: return MTL::PrimitiveTopologyClassLine;
-        case RADRAY_TOPOLOGY_LINE_STRIP: return MTL::PrimitiveTopologyClassLine;
-        case RADRAY_TOPOLOGY_TRI_LIST: return MTL::PrimitiveTopologyClassPoint;
-        case RADRAY_TOPOLOGY_TRI_STRIP: return MTL::PrimitiveTopologyClassPoint;
-        case RADRAY_TOPOLOGY_PATCH_LIST: return MTL::PrimitiveTopologyClassUnspecified;
+        case RADRAY_PRIMITIVE_TOPOLOGY_POINT_LIST: return std::make_pair(MTL::PrimitiveTopologyClassPoint, MTL::PrimitiveTypePoint);
+        case RADRAY_PRIMITIVE_TOPOLOGY_LINE_LIST: return std::make_pair(MTL::PrimitiveTopologyClassLine, MTL::PrimitiveTypeLine);
+        case RADRAY_PRIMITIVE_TOPOLOGY_LINE_STRIP: return std::make_pair(MTL::PrimitiveTopologyClassLine, MTL::PrimitiveTypeLineStrip);
+        case RADRAY_PRIMITIVE_TOPOLOGY_TRI_LIST: return std::make_pair(MTL::PrimitiveTopologyClassTriangle, MTL::PrimitiveTypeTriangle);
+        case RADRAY_PRIMITIVE_TOPOLOGY_TRI_STRIP: return std::make_pair(MTL::PrimitiveTopologyClassTriangle, MTL::PrimitiveTypeTriangleStrip);
     }
+}
+
+MTL::TriangleFillMode EnumConvert(RadrayPolygonMode poly) noexcept {
+    switch (poly) {
+        case RADRAY_POLYGON_MODE_FILL: return MTL::TriangleFillModeFill;
+        case RADRAY_POLYGON_MODE_LINE: return MTL::TriangleFillModeLines;
+        case RADRAY_POLYGON_MODE_POINT: return (MTL::TriangleFillMode)-1;
+    }
+}
+
+MTL::ColorWriteMask EnumConvert(RadrayColorWrites bits) noexcept {
+    MTL::ColorWriteMask result = MTL::ColorWriteMaskNone;
+    if (bits & RADRAY_COLOR_WRITE_RED) {
+        result |= MTL::ColorWriteMaskRed;
+    }
+    if (bits & RADRAY_COLOR_WRITE_GREEN) {
+        result |= MTL::ColorWriteMaskGreen;
+    }
+    if (bits & RADRAY_COLOR_WRITE_BLUE) {
+        result |= MTL::ColorWriteMaskBlue;
+    }
+    if (bits & RADRAY_COLOR_WRITE_ALPHA) {
+        result |= MTL::ColorWriteMaskAlpha;
+    }
+    return result;
+}
+
+std::tuple<MTL::BlendOperation, MTL::BlendFactor, MTL::BlendFactor> EnumConvert(const RadrayBlendComponentState& s) noexcept {
+    return std::make_tuple(
+        EnumConvert(s.Operation),
+        EnumConvert(s.SrcFactor),
+        EnumConvert(s.DstFactor));
 }
 
 }  // namespace radray::rhi::metal

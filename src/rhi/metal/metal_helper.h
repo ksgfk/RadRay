@@ -47,7 +47,10 @@ MTL::VertexFormat EnumConvert(RadrayVertexFormat format) noexcept;
 MTL::VertexStepFunction EnumConvert(RadrayVertexInputRate rate) noexcept;
 MTL::BlendFactor EnumConvert(RadrayBlendType blend) noexcept;
 MTL::BlendOperation EnumConvert(RadrayBlendOp op) noexcept;
-MTL::PrimitiveTopologyClass EnumConvert(RadrayTopology topo) noexcept;
+std::pair<MTL::PrimitiveTopologyClass, MTL::PrimitiveType> EnumConvert(RadrayPrimitiveTopology topo) noexcept;
+MTL::TriangleFillMode EnumConvert(RadrayPolygonMode poly) noexcept;
+MTL::ColorWriteMask EnumConvert(RadrayColorWrites bits) noexcept;
+std::tuple<MTL::BlendOperation, MTL::BlendFactor, MTL::BlendFactor> EnumConvert(const RadrayBlendComponentState& s) noexcept;
 
 }  // namespace radray::rhi::metal
 

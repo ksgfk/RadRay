@@ -154,15 +154,19 @@ typedef enum RadrayBlendType {
     RADRAY_BLEND_TYPE_ONE,
     RADRAY_BLEND_TYPE_SRC_COLOR,
     RADRAY_BLEND_TYPE_INV_SRC_COLOR,
-    RADRAY_BLEND_TYPE_DST_COLOR,
-    RADRAY_BLEND_TYPE_INV_DST_COLOR,
     RADRAY_BLEND_TYPE_SRC_ALPHA,
     RADRAY_BLEND_TYPE_INV_SRC_ALPHA,
+    RADRAY_BLEND_TYPE_DST_COLOR,
+    RADRAY_BLEND_TYPE_INV_DST_COLOR,
     RADRAY_BLEND_TYPE_DST_ALPHA,
     RADRAY_BLEND_TYPE_INV_DST_ALPHA,
-    RADRAY_BLEND_TYPE_SRC_ALPHA_SATURATE,
-    RADRAY_BLEND_TYPE_BLEND_FACTOR,
-    RADRAY_BLEND_TYPE_INV_BLEND_FACTOR,
+    RADRAY_BLEND_TYPE_SRC_ALPHA_SAT,
+    RADRAY_BLEND_TYPE_CONSTANT,
+    RADRAY_BLEND_TYPE_INV_CONSTANT,
+    RADRAY_BLEND_TYPE_SRC1_COLOR,
+    RADRAY_BLEND_TYPE_INV_SRC1_COLOR,
+    RADRAY_BLEND_TYPE_SRC1_ALPHA,
+    RADRAY_BLEND_TYPE_INV_SRC1_ALPHA
 } RadrayBlendType;
 
 typedef enum RadrayBlendOp {
@@ -222,6 +226,15 @@ typedef enum RadrayStencilOp {
     RADRAY_STENCIL_OP_INCR_SAT,
     RADRAY_STENCIL_OP_DECR_SAT
 } RadrayStencilOp;
+
+typedef enum RadrayColorWrite {
+    RADRAY_COLOR_WRITE_RED = 0x00000001,
+    RADRAY_COLOR_WRITE_GREEN = 0x00000002,
+    RADRAY_COLOR_WRITE_BLUE = 0x00000004,
+    RADRAY_COLOR_WRITE_ALPHA = 0x00000008,
+} RadrayColorWrite;
+
+typedef uint32_t RadrayColorWrites;
 
 typedef enum RadrayTextureDimension {
     RADRAY_TEXTURE_DIM_UNKNOWN,
@@ -560,7 +573,8 @@ typedef struct RadrayMultisampleState {
 typedef struct RadrayColorTargetState {
     RadrayFormat Format;
     RadrayBlendState Blend;
-    uint32_t WriteMask;
+    RadrayColorWrites WriteMask;
+    bool EnableBlend;
 } RadrayColorTargetState;
 
 typedef struct RadrayGraphicsPipelineDescriptor {
@@ -573,6 +587,7 @@ typedef struct RadrayGraphicsPipelineDescriptor {
     RadrayMultisampleState Multisample;
     RadrayColorTargetState ColorTargets[RADRAY_RHI_MAX_MRT];
     uint32_t ColorTargetCount;
+    bool HasDepthStencil;
 } RadrayGraphicsPipelineDescriptor;
 
 typedef struct RadraySubmitQueueDescriptor {

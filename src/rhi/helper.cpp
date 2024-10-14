@@ -86,14 +86,13 @@ std::string_view format_as(RadrayMipMapMode v) noexcept {
     }
 }
 
-std::string_view format_as(RadrayTopology v) noexcept {
+std::string_view format_as(RadrayPrimitiveTopology v) noexcept {
     switch (v) {
-        case RADRAY_TOPOLOGY_POINT_LIST: return "PointList";
-        case RADRAY_TOPOLOGY_LINE_LIST: return "LineList";
-        case RADRAY_TOPOLOGY_LINE_STRIP: return "LineStrip";
-        case RADRAY_TOPOLOGY_TRI_LIST: return "TriangleList";
-        case RADRAY_TOPOLOGY_TRI_STRIP: return "TriangleStrip";
-        case RADRAY_TOPOLOGY_PATCH_LIST: return "PatchList";
+        case RADRAY_PRIMITIVE_TOPOLOGY_POINT_LIST: return "PointList";
+        case RADRAY_PRIMITIVE_TOPOLOGY_LINE_LIST: return "LineList";
+        case RADRAY_PRIMITIVE_TOPOLOGY_LINE_STRIP: return "LineStrip";
+        case RADRAY_PRIMITIVE_TOPOLOGY_TRI_LIST: return "TriangleList";
+        case RADRAY_PRIMITIVE_TOPOLOGY_TRI_STRIP: return "TriangleStrip";
     }
 }
 

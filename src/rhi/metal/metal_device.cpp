@@ -378,9 +378,45 @@ void Device::DestroyRootSignature(RadrayRootSignature rootSig) {
 
 RadrayGraphicsPipeline Device::CreateGraphicsPipeline(const RadrayGraphicsPipelineDescriptor& desc) {
     return AutoRelease([this, &desc]() {
-        auto vs = Underlying(desc.VertexShader);
-        auto ps = Underlying(desc.PixelShader);
         auto rpdesc = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
+        if (desc.Primitive.Polygon == RADRAY_POLYGON_MODE_POINT) {
+            RADRAY_MTL_THROW("metal does not support point polygon");
+        }
+        auto rawFillMode = EnumConvert(desc.Primitive.Polygon);
+        auto&& [primClass, primType] = EnumConvert(desc.Primitive.Topology);
+        {
+            auto vs = Underlying(desc.VertexShader);
+            rpdesc->setVertexFunction(vs->entryPoint);
+            if (RADRAY_RHI_IS_EMPTY_RES(desc.PixelShader)) {
+                if (desc.ColorTargetCount == 0 && !desc.HasDepthStencil) {
+                    rpdesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+                }
+            } else {
+                auto ps = Underlying(desc.PixelShader);
+                rpdesc->setFragmentFunction(ps->entryPoint);
+            }
+        }
+        for (size_t i = 0; i < desc.ColorTargetCount; i++) {
+            const auto& rt = desc.ColorTargets[i];
+            auto rtDesc = rpdesc->colorAttachments()->object(i);
+            auto rawFormat = EnumConvert(rt.Format);
+            rtDesc->setPixelFormat(MTL::PixelFormatInvalid);
+            if (rawFormat == MTL::PixelFormatInvalid) {
+                continue;
+            }
+            auto rawWriteMask = EnumConvert(rt.WriteMask);
+            rtDesc->setWriteMask(rawWriteMask);
+            if (rt.EnableBlend) {
+                rtDesc->setBlendingEnabled(true);
+                const auto& bld = rt.Blend;
+                auto&& [colorOp, colorSrc, colorDst] = EnumConvert(bld.Color);
+                rtDesc->setRgbBlendOperation(colorOp);
+                rtDesc->setSourceRGBBlendFactor(colorSrc);
+                
+                auto&& [alphaOp, alphaSrc, alphaDst] = EnumConvert(bld.Alpha);
+            }
+        }
+
         // rpdesc->setVertexFunction(vs->entryPoint);
         // rpdesc->setFragmentFunction(ps->entryPoint);
         // {
