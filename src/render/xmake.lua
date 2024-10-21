@@ -1,0 +1,5 @@
+target("radray_render")
+    set_kind("static")
+    add_rules("radray_basic_setting")
+    add_files("*.cpp")
+    add_deps("radray_core")

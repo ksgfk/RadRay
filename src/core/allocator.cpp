@@ -1,6 +1,5 @@
 #include <radray/allocator.h>
 
-#include <limits>
 #include <bit>
 
 #include <radray/basic_math.h>
@@ -98,8 +97,8 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
     uint64_t size = size_ == 0 ? 1 : size_;
     size = std::bit_ceil(size);
     RADRAY_ASSERT(std::has_single_bit(size));
-    int64_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
-    int64_t vlength = vCapacity;
+    uint64_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
+    uint64_t vlength = vCapacity;
     if (size > vlength) {
         return std::nullopt;
     }
@@ -156,10 +155,10 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
 }
 
 void BuddyAllocator::Destroy(uint64_t offset) noexcept {
-    int64_t vCapacity = std::bit_ceil(_capacity);
-    int64_t vlength = vCapacity;
+    uint64_t vCapacity = std::bit_ceil(_capacity);
+    uint64_t vlength = vCapacity;
     int64_t ptr = 0;
-    int64_t left = 0;
+    uint64_t left = 0;
     while (true) {
         switch (_tree[ptr]) {
             case NodeState::Used: {  // 找到需要释放的节点
