@@ -19,19 +19,20 @@
 namespace radray::window {
 
 void GlobalInitGlfw() noexcept {
+#ifdef RADRAY_ENABLE_MIMALLOC
     GLFWallocator alloc{
         .allocate = [](size_t size, void* user) { 
             RADRAY_UNUSED(user);
-            return radray::malloc(size); },
+            return mi_malloc(size); },
         .reallocate = [](void* block, size_t size, void* user) {
             RADRAY_UNUSED(user);
-            radray::free(block);
-            return radray::malloc(size); },
+            return mi_realloc(block, size); },
         .deallocate = [](void* block, void* user) { 
             RADRAY_UNUSED(user);
-            radray::free(block); },
+            mi_free(block); },
         .user = nullptr};
     glfwInitAllocator(&alloc);
+#endif
     glfwSetErrorCallback([](int error_code, const char* description) {
         RADRAY_ERR_LOG("glfw error: {} (code = {})", description, error_code);
     });

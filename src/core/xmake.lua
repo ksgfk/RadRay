@@ -37,7 +37,7 @@ target("radray_core")
     add_files("*.cpp")
     add_packages("spdlog")
     if get_config("enable_mimalloc") then
-        add_defines("RADRAY_ENABLE_MIMALLOC")
-        add_packages("mimalloc")
+        add_defines("RADRAY_ENABLE_MIMALLOC", {public = true})
+        add_packages("mimalloc", {public = true})
     end
     add_packages("fmt", "eigen", {public = true})

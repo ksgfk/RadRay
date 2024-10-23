@@ -3,7 +3,7 @@
 namespace radray {
 
 size_t ImageData::GetSize() const noexcept {
-    auto bs = FormatByteSize(format);
+    auto bs = GetImageFormatSize(format);
     return bs * width * height;
 }
 
@@ -12,7 +12,7 @@ std::span<const byte> ImageData::GetSpan() const noexcept {
     return std::span<const byte>{data.get(), size};
 }
 
-size_t ImageData::FormatByteSize(ImageFormat format) noexcept {
+size_t GetImageFormatSize(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::R8_BYTE: return 1;
         case ImageFormat::R16_USHORT: return 2;

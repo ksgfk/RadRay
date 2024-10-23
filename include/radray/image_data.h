@@ -27,12 +27,12 @@ enum class ImageFormat {
     RGBA32_FLOAT,
 };
 
+size_t GetImageFormatSize(ImageFormat format) noexcept;
+
 class ImageData {
 public:
     size_t GetSize() const noexcept;
     std::span<const byte> GetSpan() const noexcept;
-
-    static size_t FormatByteSize(ImageFormat format) noexcept;
 
     radray::unique_ptr<byte[]> data;
     uint32_t width;

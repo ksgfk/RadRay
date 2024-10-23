@@ -2,8 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <new>
+
 #include <utility>
+
 #include <vector>
 #include <deque>
 #include <queue>
@@ -15,32 +16,9 @@
 #include <memory>
 #include <string>
 
-void operator delete(void* p) noexcept;
-void operator delete[](void* p) noexcept;
-
-void operator delete(void* p, const std::nothrow_t&) noexcept;
-void operator delete[](void* p, const std::nothrow_t&) noexcept;
-
-void* operator new(std::size_t n) noexcept(false);
-void* operator new[](std::size_t n) noexcept(false);
-
-void* operator new(std::size_t n, const std::nothrow_t& tag) noexcept;
-void* operator new[](std::size_t n, const std::nothrow_t& tag) noexcept;
-
-void operator delete(void* p, std::size_t n) noexcept;
-void operator delete[](void* p, std::size_t n) noexcept;
-
-void operator delete(void* p, std::align_val_t al) noexcept;
-void operator delete[](void* p, std::align_val_t al) noexcept;
-void operator delete(void* p, std::size_t n, std::align_val_t al) noexcept;
-void operator delete[](void* p, std::size_t n, std::align_val_t al) noexcept;
-void operator delete(void* p, std::align_val_t al, const std::nothrow_t&) noexcept;
-void operator delete[](void* p, std::align_val_t al, const std::nothrow_t&) noexcept;
-
-void* operator new(std::size_t n, std::align_val_t al) noexcept(false);
-void* operator new[](std::size_t n, std::align_val_t al) noexcept(false);
-void* operator new(std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept;
-void* operator new[](std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept;
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
 
 namespace radray {
 
@@ -54,36 +32,13 @@ using std::uint16_t;
 using std::uint32_t;
 using std::uint64_t;
 
-[[nodiscard]] void* malloc(size_t size) noexcept;
-[[nodiscard]] void* mallocn(size_t count, size_t size) noexcept;
-void free(void* ptr) noexcept;
-void free_size(void* ptr, size_t size) noexcept;
-[[nodiscard]] void* aligned_alloc(size_t alignment, size_t size) noexcept;
-void aligned_free(void* ptr, size_t alignment) noexcept;
-void aligned_free_size(void* ptr, size_t size, size_t alignment) noexcept;
-
+#ifdef RADRAY_ENABLE_MIMALLOC
 template <class T>
-class allocator {
-public:
-    using value_type = T;
-
-    constexpr allocator() = default;
-    template <class U>
-    constexpr allocator(const allocator<U>&) noexcept {}
-
-    constexpr T* allocate(std::size_t n) {
-        auto p = static_cast<T*>(radray::mallocn(n, sizeof(T)));
-        if (p == nullptr) [[unlikely]] {
-            throw std::bad_alloc();
-        }
-        return p;
-    }
-    constexpr void deallocate(T* p, std::size_t) noexcept { radray::free(p); }
-};
-template <class T, class U>
-constexpr bool operator==(const allocator<T>&, const allocator<U>&) { return true; }
-template <class T, class U>
-constexpr bool operator!=(const allocator<T>&, const allocator<U>&) { return false; }
+using allocator = mi_stl_allocator<T>;
+#else
+template <class T>
+using allocator = std::allocator<T>;
+#endif
 
 template <class T>
 using vector = std::vector<T, radray::allocator<T>>;
@@ -121,10 +76,3 @@ using string = std::basic_string<char, std::char_traits<char>, radray::allocator
 using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
 
 }  // namespace radray
-
-#define RADRAY_NO_COPY_CTOR(type) \
-    type(const type&) = delete;   \
-    type& operator=(const type&) = delete;
-#define RADRAY_NO_MOVE_CTOR(type) \
-    type(type&&) = delete;        \
-    type& operator=(type&&) = delete;
