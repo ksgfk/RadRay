@@ -15,11 +15,11 @@
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
 #include <D3D12MemAlloc.h>
 
-namespace radray::rhi::d3d12 {
+namespace radray::render::d3d12 {
 
 using Microsoft::WRL::ComPtr;
 
-const char* GetErrorName(HRESULT hr) noexcept;
+std::string_view GetErrorName(HRESULT hr) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
 
@@ -29,7 +29,7 @@ DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
 
 std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 
-}  // namespace radray::rhi::d3d12
+}  // namespace radray::render::d3d12
 
 #ifndef RADRAY_DX_CHECK
 #define RADRAY_DX_CHECK(x)                                                                                               \
@@ -45,6 +45,6 @@ template <class CharT>
 struct fmt::formatter<D3D12_DESCRIPTOR_HEAP_TYPE, CharT> : fmt::formatter<std::string_view, CharT> {
     template <class FormatContext>
     auto format(D3D12_DESCRIPTOR_HEAP_TYPE const& val, FormatContext& ctx) const {
-        return formatter<std::string_view, CharT>::format(radray::rhi::d3d12::to_string(val), ctx);
+        return formatter<std::string_view, CharT>::format(radray::render::d3d12::to_string(val), ctx);
     }
 };

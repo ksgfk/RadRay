@@ -24,7 +24,7 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
     std::mbstate_t state{};
     size_t len{0};
     mbsrtowcs_s(&len, nullptr, 0, &mbstr, str.size(), &state);
-    if (len != str.size() + 1) { // because string_view dose not contains eof '\0'
+    if (len != str.size() + 1) {  // because string_view dose not contains eof '\0'
         return std::nullopt;
     }
     radray::vector<wchar_t> wstr(len);
@@ -50,6 +50,27 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
     } else {
         return radray::wstring{wstr.begin(), wstr.end()};
     }
+#endif
+}
+
+std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    std::mbstate_t state{};
+    size_t len{0};
+    wcstombs_s(&len, nullptr, 0, str.data(), str.size());
+    if (len != str.size() + 1) {  // because string_view dose not contains eof '\0'
+        return std::nullopt;
+    }
+    radray::vector<char> wstr(len);
+    state = mbstate_t{};
+    auto err = wcstombs_s(nullptr, wstr.data(), wstr.size(), str.data(), len);
+    if (err == 0) {
+        return radray::string{wstr.begin(), wstr.end()};
+    } else {
+        return std::nullopt;
+    }
+#else
+#error "todo"
 #endif
 }
 

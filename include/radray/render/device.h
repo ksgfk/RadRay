@@ -9,12 +9,13 @@
 namespace radray::render {
 
 struct D3D12DeviceDescriptor {
-    uint32_t AdapterIndex;
+    std::optional<uint32_t> AdapterIndex;
     bool IsEnableDebugLayer;
+    bool IsEnableGpuBasedValid;
 };
 
 struct MetalDeviceDescriptor {
-    uint32_t DeviceIndex;
+    std::optional<uint32_t> DeviceIndex;
 };
 
 struct VulkanDeviceDescriptor {

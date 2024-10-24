@@ -1,10 +1,10 @@
 #include "d3d12_helper.h"
 
-namespace radray::rhi::d3d12 {
+namespace radray::render::d3d12 {
 
 constexpr size_t MaxNameLength = 128;
 
-const char* GetErrorName(HRESULT hr) noexcept {
+std::string_view GetErrorName(HRESULT hr) noexcept {
     switch (hr) {
         case D3D12_ERROR_ADAPTER_NOT_FOUND: return "D3D12_ERROR_ADAPTER_NOT_FOUND";
         case D3D12_ERROR_DRIVER_VERSION_MISMATCH: return "D3D12_ERROR_DRIVER_VERSION_MISMATCH";

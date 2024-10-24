@@ -44,4 +44,6 @@ std::optional<radray::string> ReadText(const std::filesystem::path& filepath) no
 
 std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
 
+std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
+
 }  // namespace radray
