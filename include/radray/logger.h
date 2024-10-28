@@ -31,7 +31,7 @@ struct SourceLocation {
     const char* funcname{nullptr};
 };
 
-using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, allocator<char>>;
+using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, radray::allocator<char>>;
 
 template <typename... Args>
 radray::string format(fmt::format_string<Args...> fmtStr, Args&&... args) {

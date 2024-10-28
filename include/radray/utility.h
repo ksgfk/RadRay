@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 
 #include <radray/types.h>
 
@@ -45,5 +46,19 @@ std::optional<radray::string> ReadText(const std::filesystem::path& filepath) no
 std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
 
 std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
+
+template <typename T>
+struct ArrayTrait;
+template <typename T, size_t N>
+struct ArrayTrait<T[N]> {
+    static constexpr size_t length = N;
+};
+
+template <typename T>
+requires(std::is_bounded_array_v<T>)
+constexpr auto ArrayLength(const T& arr) noexcept {
+    RADRAY_UNUSED(arr);
+    return ArrayTrait<T>::length;
+}
 
 }  // namespace radray

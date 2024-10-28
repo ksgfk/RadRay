@@ -27,8 +27,6 @@ UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipL
 
 DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
 
-std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
-
 }  // namespace radray::render::d3d12
 
 #ifndef RADRAY_DX_CHECK
@@ -41,10 +39,5 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
     } while (false)
 #endif
 
-template <class CharT>
-struct fmt::formatter<D3D12_DESCRIPTOR_HEAP_TYPE, CharT> : fmt::formatter<std::string_view, CharT> {
-    template <class FormatContext>
-    auto format(D3D12_DESCRIPTOR_HEAP_TYPE const& val, FormatContext& ctx) const {
-        return formatter<std::string_view, CharT>::format(radray::render::d3d12::to_string(val), ctx);
-    }
-};
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
+std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept;

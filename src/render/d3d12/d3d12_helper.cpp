@@ -38,7 +38,7 @@ std::string_view GetErrorName(HRESULT hr) noexcept {
         case E_NOTIMPL: return "E_NOTIMPL";
         case S_FALSE: return "S_FALSE";
         case S_OK: return "S_OK";
-        default: return "Unknown Error";
+        default: return "UNKNOWN";
     }
 }
 
@@ -55,7 +55,9 @@ UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipL
     return ((MipSlice) + ((ArraySlice) * (MipLevels)) + ((PlaneSlice) * (MipLevels) * (ArraySize)));
 }
 
-std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
+}  // namespace radray::render::d3d12
+
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
     switch (v) {
         case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: return "CBV_SRV_UAV";
         case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
@@ -64,5 +66,13 @@ std::string_view to_string(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
         case D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES: return "UNKNOWN";
     }
 }
-
-}  // namespace radray::rhi::d3d12
+std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
+    switch (v) {
+        case D3D_FEATURE_LEVEL_11_0: return "11.0";
+        case D3D_FEATURE_LEVEL_11_1: return "11.1";
+        case D3D_FEATURE_LEVEL_12_0: return "12.0";
+        case D3D_FEATURE_LEVEL_12_1: return "12.1";
+        case D3D_FEATURE_LEVEL_12_2: return "12.2";
+        default: return "UNKNOWN";
+    }
+}

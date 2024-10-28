@@ -32,7 +32,7 @@ static void LogWinCharCvtErr() {
             case ERROR_INVALID_FLAGS: return "invalid flags";
             case ERROR_INVALID_PARAMETER: return "invalid parameter";
             case ERROR_NO_UNICODE_TRANSLATION: return "no unicode translation";
-            default: return "unknown";
+            default: return "UNKNOWN";
         }
     })();
     RADRAY_ERR_LOG("cannot convert char to wchar, reason={} (code={})", strErr, err);
