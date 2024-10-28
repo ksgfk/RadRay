@@ -72,7 +72,9 @@ using std::make_shared;
 using std::enable_shared_from_this;
 
 using string = std::basic_string<char, std::char_traits<char>, radray::allocator<char>>;
-
 using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
+using u8string = std::basic_string<char8_t, std::char_traits<char8_t>, radray::allocator<char8_t>>;
+using u16string = std::basic_string<char16_t, std::char_traits<char16_t>, radray::allocator<char16_t>>;
+using u32string = std::basic_string<char32_t, std::char_traits<char32_t>, radray::allocator<char32_t>>;
 
 }  // namespace radray

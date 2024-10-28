@@ -38,21 +38,20 @@ std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor&
     } else {
         ComPtr<IDXGIFactory6> factory6;
         if (dxgiFactory.As(&factory6) == S_OK) {
-            ComPtr<IDXGIAdapter1> temp;
             for (
                 auto adapterIndex = 0u;
-                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
                 DXGI_ADAPTER_DESC1 desc;
-                temp->GetDesc1(&desc);
+                adapter->GetDesc1(&desc);
                 if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
                     radray::wstring s{desc.Description};
-                    RADRAY_DEBUG_LOG("D3D12 find device: {}", ToMultiByte(s).value());
+                    RADRAY_INFO_LOG("D3D12 find device: {}", ToMultiByte(s).value());
                 }
             }
             for (
                 auto adapterIndex = 0u;
-                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
                 DXGI_ADAPTER_DESC1 desc;
                 adapter->GetDesc1(&desc);
@@ -79,10 +78,16 @@ std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor&
         return std::nullopt;
     }
     ComPtr<ID3D12Device> device;
-    if (HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf()));
+    if (HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create ID3D12Device, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
+    }
+    {
+        DXGI_ADAPTER_DESC1 desc{};
+        adapter->GetDesc1(&desc);
+        radray::wstring s{desc.Description};
+        RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
     auto result = std::make_shared<Device>();
     result->_device = std::move(device);

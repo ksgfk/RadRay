@@ -1,5 +1,5 @@
-target("test_init_rhi")
+target("test_base_render")
     set_kind("binary")
     add_rules("radray_basic_setting", "radray_app", "radray_copy_shaders_to_bin")
     add_files("*.cpp")
-    add_deps("radray_core", "radray_window", "radray_rhi")
+    add_deps("radray_core", "radray_window", "radray_render")
