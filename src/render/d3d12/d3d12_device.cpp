@@ -91,6 +91,7 @@ std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor&
     }
     auto result = std::make_shared<Device>();
     result->_device = device;
+    RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
         HRESULT hr = adapter->CheckInterfaceSupport(IID_IDXGIDevice, &l);
@@ -103,39 +104,23 @@ std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor&
                 (quad >> 32) & mask,
                 (quad >> 16) & mask,
                 quad & mask);
-            RADRAY_INFO_LOG("driver version {}", ver);
+            RADRAY_INFO_LOG("Driver Version: {}", ver);
         } else {
             RADRAY_WARN_LOG("get driver version failed");
         }
     }
-    {
-        D3D_FEATURE_LEVEL l[] = {
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_12_0,
-            D3D_FEATURE_LEVEL_12_1,
-            D3D_FEATURE_LEVEL_12_2};
-        D3D12_FEATURE_DATA_FEATURE_LEVELS f{};
-        f.pFeatureLevelsRequested = l;
-        f.NumFeatureLevels = ArrayLength(l);
-        HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &f, sizeof(decltype(f)));
-        if (hr == S_OK) {
-            result->_maxFeature = f.MaxSupportedFeatureLevel;
-        } else {
-            RADRAY_WARN_LOG("check d3d12 feature level faild");
-        }
-        RADRAY_INFO_LOG("d3d12 feature level: {}", f.MaxSupportedFeatureLevel);
+    CD3DX12FeatureSupport fs{};
+    if (HRESULT hr = fs.Init(device.Get());
+        hr == S_OK) {
+        result->_maxFeature = fs.MaxSupportedFeatureLevel();
+        RADRAY_INFO_LOG("Feature Level: {}", result->_maxFeature);
+        RADRAY_INFO_LOG("Shader Model: {}", result->_maxShaderModel);
+        RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
+        RADRAY_INFO_LOG("UMA: {}", static_cast<bool>(fs.UMA()));
+    } else {
+        RADRAY_WARN_LOG("check d3d12 feature failed");
     }
-    {
-        D3D12_FEATURE_DATA_ARCHITECTURE1 arch{};
-        E_INVALIDARG;
-        HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &arch, sizeof(decltype(arch)));
-        if (hr == S_OK) {
-            RADRAY_INFO_LOG("device arch TBR={} UMA={} CacheCoherentUMA={} IsolatedMMU={}", arch.TileBasedRenderer, arch.UMA, arch.CacheCoherentUMA, arch.IsolatedMMU);
-        } else {
-            RADRAY_WARN_LOG("check architecture failed");
-        }
-    }
+    RADRAY_INFO_LOG("=============================");
     return result;
 }
 

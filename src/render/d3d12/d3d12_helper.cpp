@@ -76,3 +76,32 @@ std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
         default: return "UNKNOWN";
     }
 }
+std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
+    switch (v) {
+        case D3D_SHADER_MODEL_5_1: return "5.1";
+        case D3D_SHADER_MODEL_6_0: return "6.0";
+        case D3D_SHADER_MODEL_6_1: return "6.1";
+        case D3D_SHADER_MODEL_6_2: return "6.2";
+        case D3D_SHADER_MODEL_6_3: return "6.3";
+        case D3D_SHADER_MODEL_6_4: return "6.4";
+        case D3D_SHADER_MODEL_6_5: return "6.5";
+        case D3D_SHADER_MODEL_6_6: return "6.6";
+        case D3D_SHADER_MODEL_6_7: return "6.7";
+        case D3D_SHADER_MODEL_6_8: return "6.8";
+        case D3D_SHADER_MODEL_6_9: return "6.9";
+        default: return "UNKNOWN";
+    }
+}
+std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
+    switch (v) {
+        case D3D12_RESOURCE_HEAP_TIER_1: return "1";
+        case D3D12_RESOURCE_HEAP_TIER_2: return "2";
+    }
+}
+std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
+    switch (v) {
+        case D3D12_RESOURCE_BINDING_TIER_1: return "1";
+        case D3D12_RESOURCE_BINDING_TIER_2: return "2";
+        case D3D12_RESOURCE_BINDING_TIER_3: return "3";
+    }
+}

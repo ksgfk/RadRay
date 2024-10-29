@@ -14,6 +14,7 @@ public:
 private:
     ComPtr<ID3D12Device> _device;
     D3D_FEATURE_LEVEL _maxFeature;
+    D3D_SHADER_MODEL _maxShaderModel;
 
     friend std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor& desc);
 };

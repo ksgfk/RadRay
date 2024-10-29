@@ -56,7 +56,8 @@ rule("radray_basic_setting")
         target:add("cxflags", "/Zc:preprocessor", "/Zc:__cplusplus", {tools = {"cl"}})
         target:add("cxflags", "-stdlib=libc++", {tools = "clang"})
         target:add("vectorexts", "sse4.2", "avx", "avx2", "neon")
-        if is_mode("release") then target:add("ldflags", "/LTCG", {tools = {"cl", "clang_cl"}}) end
+        if is_mode("release") then target:set("policy", "build.optimization.lto", true) end
+        if is_mode("release") then target:set("symbols", "debug") end
     end)
 rule_end()
 
