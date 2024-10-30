@@ -90,4 +90,8 @@ public:
     virtual void Destroy() noexcept = 0;
 };
 
+std::string_view format_as(Backend v) noexcept;
+std::string_view format_as(TextureFormat v) noexcept;
+std::string_view format_as(QueueType v) noexcept;
+
 }  // namespace radray::render

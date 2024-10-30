@@ -12,6 +12,8 @@ public:
     bool IsValid() const noexcept override { return _queue.Get() != nullptr; }
     void Destroy() noexcept override;
 
+    std::optional<std::shared_ptr<CommandPool>> CreateCommandPool(std::string_view debugName = "") noexcept override;
+
 public:
     ComPtr<ID3D12CommandQueue> _queue;
 };

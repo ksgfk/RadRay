@@ -18,16 +18,21 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         for (size_t i = queues.size(); i <= slot; i++) {
             queues.emplace_back(std::unique_ptr<CmdQueueD3D12>{nullptr});
         }
-        auto q = std::make_unique<CmdQueueD3D12>();
+    }
+    radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
+    if (q == nullptr) {
+        auto ins = std::make_unique<CmdQueueD3D12>();
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = MapType(type);
-        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(q->_queue.GetAddressOf()));
-            hr != S_OK) {
+        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(ins->_queue.GetAddressOf()));
+            hr == S_OK) {
+            radray::string debugName = radray::format("Queue {} {}", type, slot);
+            SetObjectName(debugName, ins->_queue.Get());
+            q = std::move(ins);
+        } else {
             RADRAY_ERR_LOG("cannot create ID3D12CommandQueue, reason={} (code:{})", GetErrorName(hr), hr);
         }
-        queues[slot] = std::move(q);
     }
-    auto& q = queues[slot];
     return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
 }
 

@@ -40,7 +40,6 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
     } while (false)
 #endif
 
-std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept;
 std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
