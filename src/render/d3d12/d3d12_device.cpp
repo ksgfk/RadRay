@@ -2,7 +2,36 @@
 
 namespace radray::render::d3d12 {
 
-std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor& desc) {
+void DeviceD3D12::Destroy() noexcept {
+    for (auto&& i : _queues) {
+        i.clear();
+    }
+    _device = nullptr;
+}
+
+std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+    uint32_t index = static_cast<size_t>(type);
+    RADRAY_ASSERT(index >= 0 && index < 3);
+    auto& queues = _queues[index];
+    if (queues.size() <= slot) {
+        queues.reserve(slot + 1);
+        for (size_t i = queues.size(); i <= slot; i++) {
+            queues.emplace_back(std::unique_ptr<CmdQueueD3D12>{nullptr});
+        }
+        auto q = std::make_unique<CmdQueueD3D12>();
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        desc.Type = MapType(type);
+        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(q->_queue.GetAddressOf()));
+            hr != S_OK) {
+            RADRAY_ERR_LOG("cannot create ID3D12CommandQueue, reason={} (code:{})", GetErrorName(hr), hr);
+        }
+        queues[slot] = std::move(q);
+    }
+    auto& q = queues[slot];
+    return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
+}
+
+std::optional<std::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
@@ -89,7 +118,7 @@ std::optional<std::shared_ptr<Device>> CreateDevice(const D3D12DeviceDescriptor&
         radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
-    auto result = std::make_shared<Device>();
+    auto result = std::make_shared<DeviceD3D12>();
     result->_device = device;
     RADRAY_INFO_LOG("========== Feature ==========");
     {

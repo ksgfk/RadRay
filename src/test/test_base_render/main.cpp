@@ -12,5 +12,6 @@ using namespace radray::render;
 
 int main() {
     auto device = CreateDevice(D3D12DeviceDescriptor{}).value();
+    auto queue = device->GetCommandQueue(QueueType::Direct, 0).value();
     return 0;
 }

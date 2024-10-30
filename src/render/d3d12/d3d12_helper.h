@@ -6,6 +6,7 @@
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
+#include <radray/render/common.h>
 
 #include <windows.h>
 #include <wrl.h>
@@ -25,7 +26,7 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
 
 UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept;
 
-DXGI_FORMAT TypelessFormat(DXGI_FORMAT fmt) noexcept;
+D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 
 }  // namespace radray::render::d3d12
 

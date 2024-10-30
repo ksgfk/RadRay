@@ -55,6 +55,14 @@ UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipL
     return ((MipSlice) + ((ArraySlice) * (MipLevels)) + ((PlaneSlice) * (MipLevels) * (ArraySize)));
 }
 
+D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
+    switch (v) {
+        case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;
+        case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {

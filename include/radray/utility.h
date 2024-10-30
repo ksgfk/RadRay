@@ -41,12 +41,6 @@ private:
 template <typename Call>
 constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
 
-std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
-
-std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
-
-std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
-
 template <typename T>
 struct ArrayTrait;
 template <typename T, size_t N>
@@ -60,5 +54,20 @@ constexpr auto ArrayLength(const T& arr) noexcept {
     RADRAY_UNUSED(arr);
     return ArrayTrait<T>::length;
 }
+
+class Noncopyable {
+protected:
+    constexpr Noncopyable() = default;
+    ~Noncopyable() = default;
+
+    Noncopyable(const Noncopyable&) = delete;
+    Noncopyable& operator=(const Noncopyable&) = delete;
+};
+
+std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
+
+std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
+
+std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
 
 }  // namespace radray

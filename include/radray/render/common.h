@@ -1,5 +1,8 @@
 #pragma once
 
+#include <radray/types.h>
+#include <radray/utility.h>
+
 namespace radray::render {
 
 enum class Backend {
@@ -70,12 +73,21 @@ enum class TextureFormat {
     D32_FLOAT_S8_UINT,
 };
 
-enum class QueueType {
+enum class QueueType : uint32_t {
     Direct,
     Compute,
     Copy,
 };
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+
+class RenderBase : public Noncopyable {
+public:
+    virtual ~RenderBase() noexcept = default;
+
+    virtual bool IsValid() const noexcept = 0;
+
+    virtual void Destroy() noexcept = 0;
+};
 
 }  // namespace radray::render
