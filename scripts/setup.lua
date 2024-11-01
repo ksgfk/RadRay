@@ -107,3 +107,55 @@ rule("radray_copy_shaders_to_bin")
         helper.copy_example_shaders(target, true)
     end)
 rule_end()
+
+-- https://github.com/xmake-io/xmake/blob/dev/xmake/toolchains/llvm/xmake.lua
+toolchain("llvm-macos-brew")
+    set_kind("standalone")
+    set_homepage("https://llvm.org/")
+    set_description("A collection of modular and reusable compiler and toolchain technologies")
+    set_runtimes("c++_static", "c++_shared", "stdc++_static", "stdc++_shared")
+
+    set_sdkdir("/usr/local/opt/llvm")
+
+    set_toolset("cc",     "clang")
+    set_toolset("cxx",    "clang", "clang++")
+    set_toolset("mxx",    "clang", "clang++")
+    set_toolset("mm",     "clang")
+    set_toolset("cpp",    "clang -E")
+    set_toolset("as",     "clang")
+    set_toolset("ld",     "clang++", "clang")
+    set_toolset("sh",     "clang++", "clang")
+    set_toolset("ar",     "llvm-ar")
+    set_toolset("strip",  "llvm-strip")
+    set_toolset("ranlib", "llvm-ranlib")
+    set_toolset("objcopy","llvm-objcopy")
+    set_toolset("mrc",    "llvm-rc")
+
+    on_load(function (toolchain)
+        if toolchain:is_plat("macosx") then
+            local xcode_dir     = get_config("xcode")
+            local xcode_sdkver  = toolchain:config("xcode_sdkver")
+            local xcode_sdkdir  = nil
+            if xcode_dir and xcode_sdkver then
+                xcode_sdkdir = xcode_dir .. "/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX" .. xcode_sdkver .. ".sdk"
+                toolchain:add("cxflags", {"-isysroot", xcode_sdkdir})
+                toolchain:add("mxflags", {"-isysroot", xcode_sdkdir})
+                toolchain:add("ldflags", {"-isysroot", xcode_sdkdir})
+                toolchain:add("shflags", {"-isysroot", xcode_sdkdir})
+            else
+                local macsdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+                if os.exists(macsdk) then
+                    toolchain:add("cxflags", {"-isysroot", macsdk})
+                    toolchain:add("mxflags", {"-isysroot", macsdk})
+                    toolchain:add("ldflags", {"-isysroot", macsdk})
+                    toolchain:add("shflags", {"-isysroot", macsdk})
+                end
+            end
+            toolchain:add("mxflags", "-fobjc-arc")
+
+			toolchain:add("ldflags", format("-L%s/lib/", toolchain:sdkdir()))
+			toolchain:add("ldflags", format("-L%s/lib/c++/", toolchain:sdkdir()))
+			toolchain:add("ldflags", format("-Wl,-rpath,%s/lib/c++", toolchain:sdkdir()))
+        end
+    end)
+toolchain_end()

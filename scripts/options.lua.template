@@ -2,8 +2,8 @@ radray_toolchain = {
 	-- toolchain = "clang-cl"
 
 	-- toolchain = "llvm",
-	-- sdk = "/usr/local/opt/llvm",
-	-- ldflags = "-L/usr/local/opt/llvm/lib/ -L/usr/local/opt/llvm/lib/c++ -Wl -rpath /usr/local/opt/llvm/lib/c++"
+
+	-- toolchain = "llvm-macos-brew",
 }
 function get_options()
 	return {
