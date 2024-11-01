@@ -20,7 +20,7 @@ std::optional<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32
         radray::unique_ptr<CmdQueueMetal>& q = queues[slot];
         if (q == nullptr) {
             auto queue = _device->newCommandQueue();
-            auto ins = std::make_unique<CmdQueueMetal>();
+            auto ins = radray::make_unique<CmdQueueMetal>();
             ins->_queue = NS::TransferPtr(queue);
             q = std::move(ins);
         }
@@ -64,7 +64,7 @@ std::optional<std::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescri
         } else {
             device = MTL::CreateSystemDefaultDevice();
         }
-        auto result = std::make_shared<DeviceMetal>();
+        auto result = radray::make_shared<DeviceMetal>();
         result->_device = NS::TransferPtr(device);
         RADRAY_INFO_LOG("select device: {}", device->name()->utf8String());
         RADRAY_INFO_LOG("========== Feature ==========");

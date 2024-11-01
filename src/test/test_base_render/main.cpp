@@ -1,4 +1,7 @@
 #include <radray/render/device.h>
+#include <radray/render/command_queue.h>
+#include <radray/render/command_pool.h>
+#include <radray/render/command_buffer.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -11,9 +14,10 @@ int main() {
     deviceDesc = MetalDeviceDescriptor{};
 #endif
     auto device = CreateDevice(deviceDesc).value();
-    auto queue = device->GetCommandQueue(QueueType::Direct, 0).value();
-    auto same = device->GetCommandQueue(QueueType::Direct, 0).value();
-    if (queue != same) {
+    auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).value();
+    auto cmdPool = cmdQueue->CreateCommandPool().value();
+    auto cmdBuffer = cmdPool->CreateCommandBuffer().value();
+    if (cmdBuffer == nullptr) {
         std::abort();
     }
     return 0;

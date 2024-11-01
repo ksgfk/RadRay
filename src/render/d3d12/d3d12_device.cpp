@@ -2,12 +2,16 @@
 
 namespace radray::render::d3d12 {
 
-void DeviceD3D12::Destroy() noexcept {
-    for (auto&& i : _queues) {
+static void DestroyImpl(DeviceD3D12* d) noexcept {
+    for (auto&& i : d->_queues) {
         i.clear();
     }
-    _device = nullptr;
+    d->_device = nullptr;
 }
+
+DeviceD3D12::~DeviceD3D12() noexcept { DestroyImpl(this); }
+
+void DeviceD3D12::Destroy() noexcept { DestroyImpl(this); }
 
 std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     uint32_t index = static_cast<size_t>(type);
@@ -21,11 +25,13 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     }
     radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
-        auto ins = std::make_unique<CmdQueueD3D12>();
+        ComPtr<ID3D12CommandQueue> queue;
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = MapType(type);
-        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(ins->_queue.GetAddressOf()));
+        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             hr == S_OK) {
+            auto ins = radray::make_unique<CmdQueueD3D12>(this, desc.Type);
+            ins->_queue = std::move(queue);
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
@@ -123,7 +129,7 @@ std::optional<std::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescri
         radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
-    auto result = std::make_shared<DeviceD3D12>();
+    auto result = radray::make_shared<DeviceD3D12>();
     result->_device = device;
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -147,6 +153,7 @@ std::optional<std::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescri
     if (HRESULT hr = fs.Init(device.Get());
         hr == S_OK) {
         result->_maxFeature = fs.MaxSupportedFeatureLevel();
+        result->_maxShaderModel = fs.HighestShaderModel();
         RADRAY_INFO_LOG("Feature Level: {}", result->_maxFeature);
         RADRAY_INFO_LOG("Shader Model: {}", result->_maxShaderModel);
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
