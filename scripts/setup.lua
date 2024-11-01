@@ -21,11 +21,11 @@ option("_radray_checkout")
                 end
                 enable_d3d12:enable(false, {force = true})
             end
-            local is_macos = is_plat("macosx")
+            local is_macos = is_plat("macosx", "iphoneos")
             local enable_metal = option:dep("enable_metal")
             if enable_metal:enabled() and not is_macos then
                 if enable_metal:enabled() then
-                    print("metal only support on macosx")
+                    print("metal only support on macosx or iphoneos")
                 end
                 enable_metal:enable(false, {force = true})
             end
@@ -38,9 +38,9 @@ option_end()
 
 rule("radray_basic_setting")
     on_load(function(target) 
+        -- lang
         target:set("languages", "cxx20", "c17")
-        target:set("warnings", "allextra")
-        if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
+        -- env define
         if target:is_plat("windows") then
             target:add("defines", "RADRAY_PLATFORM_WINDOWS", {public = true})
         elseif target:is_plat("linux") then
@@ -48,14 +48,43 @@ rule("radray_basic_setting")
         elseif target:is_plat("macosx") then
             target:add("defines", "RADRAY_PLATFORM_MACOS", {public = true})
             target:add("mflags", "-fno-objc-arc")
+        elseif target:is_plat("iphoneos") then
+            target:add("defines", "RADRAY_PLATFORM_IOS", {public = true})
+            target:add("mflags", "-fno-objc-arc")
         end
+        -- warning
+        target:set("warnings", "allextra")
+        -- optimize
+        if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
         if is_mode("debug") then
             target:add("defines", "RADRAY_IS_DEBUG", {public = true})
         end
+        -- exception
+        target:set("exceptions", "no-cxx")
+        -- rtti
+        target:add("cxflags", "/GR-", {tools = {"clang_cl", "cl"}, public = true})
+        target:add("cxflags", "-fno-rtti", "-fno-rtti-data", {tools = {"clang"}, public = true})
+        target:add("cxflags", "-fno-rtti", {tools = {"gcc"}, public = true})
+        -- msvc
         target:add("cxflags", "/permissive-", "/utf-8", {tools = {"cl", "clang_cl"}})
         target:add("cxflags", "/Zc:preprocessor", "/Zc:__cplusplus", {tools = {"cl"}})
-        target:add("cxflags", "-stdlib=libc++", {tools = "clang"})
-        target:add("vectorexts", "sse4.2", "avx", "avx2", "neon")
+        -- clang
+        if is_plat("linux") then
+            local _, cc = target:tool("cxx")
+            if (cc == "clang" or cc == "clangxx") then
+                target:add("cxflags", "-stdlib=libc++", {force = true})
+                target:add("syslinks", "c++")
+            end
+        end
+        -- simd
+        if is_arch("arm64") then
+            target:add("vectorexts", "neon")
+        else
+            target:add("vectorexts", "avx", "avx2")
+        end
+        -- fma
+        if is_arch("x64", "x86_64") then target:add("cxflags", "-mfma", {tools = {"clang", "gcc"}}) end
+        -- link
         if is_mode("release") then target:set("policy", "build.optimization.lto", true) end
         if is_mode("release") then target:set("symbols", "debug") end
     end)

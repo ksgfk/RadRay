@@ -7,7 +7,7 @@ int main() {
         radray::wstring wa = opt.value();
         radray::wstring ta{L"cajsijsaoi  aiosf jais fja pfjap s"};
         if (wa != ta) {
-            throw std::exception();
+            std::abort();
         }
     }
     {
@@ -16,7 +16,7 @@ int main() {
         radray::string wa = opt.value();
         radray::string ta{"abcdef"};
         if (wa != ta) {
-            throw std::exception();
+            std::abort();
         }
     }
     return 0;

@@ -2,6 +2,7 @@ package("metal-cpp")
     add_urls("https://developer.apple.com/metal/cpp/files/metal-cpp_$(version).zip")
 
     add_versions("macOS14.2_iOS17.2", "d800ddbc3fccabce3a513f975eeafd4057e07a29e905ad5aaef8c1f4e12d9ada")
+    add_versions("macOS15_iOS18", "601b9723bb4f05f55401d0797677b96aaa606078679bc27a99824d1f20c4d38f")
 
     add_includedirs("include", {public = true})
 

@@ -5,6 +5,9 @@ end
 if get_config("enable_shader_compiler") then
     add_requires("dxc_radray v1.8.2407", {debug = is_mode("debug")})
 end
+if get_config("enable_metal") then 
+    add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
+end
 
 target("radray_render")
     set_kind("static")
@@ -20,4 +23,10 @@ target("radray_render")
         add_files("d3d12/*.cpp")
         add_packages("directx-headers", "d3d12-memory-allocator_radray")
         add_syslinks("d3d12", "dxgi", "dxguid")
+    end
+    if get_config("enable_metal") then
+        add_defines("RADRAY_ENABLE_METAL", {public = true})
+        add_files("metal/*.cpp")
+        add_packages("metal-cpp")
+        add_frameworks("Foundation", "Metal", "QuartzCore")
     end
