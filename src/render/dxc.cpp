@@ -106,6 +106,7 @@ public:
             }
             std::string_view errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
             RADRAY_ERR_LOG("compile hlsl error\n{}", errStr);
+            return std::nullopt;
         }
         ComPtr<IDxcBlob> dxilBlob;
         if (HRESULT hr = compileResult->GetResult(&dxilBlob);
