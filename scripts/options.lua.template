@@ -11,6 +11,6 @@ function get_options()
 		enable_d3d12 = true,
 		enable_metal = true,
 		enable_mimalloc = true,
-		enable_shader_compiler = true
+		enable_dxc = true
 	}
 end

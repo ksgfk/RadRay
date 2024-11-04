@@ -1,5 +1,7 @@
 #include "metal_cmd_queue.h"
 
+#include "metal_cmd_pool.h"
+
 namespace radray::render::metal {
 
 void CmdQueueMetal::Destroy() noexcept {
@@ -7,7 +9,11 @@ void CmdQueueMetal::Destroy() noexcept {
 }
 
 std::optional<std::shared_ptr<CommandPool>> CmdQueueMetal::CreateCommandPool() noexcept {
-    return std::nullopt;
+    return AutoRelease([this]() {
+        auto p = std::make_shared<CmdPoolMetal>();
+        p->_queue = _queue.get();
+        return p;
+    });
 }
 
 }  // namespace radray::render::metal

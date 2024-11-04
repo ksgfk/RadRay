@@ -79,6 +79,12 @@ enum class QueueType : uint32_t {
     Copy,
 };
 
+enum class ShaderStage {
+    Vertex,
+    Pixel,
+    Compute
+};
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 
 class RenderBase : public Noncopyable {
