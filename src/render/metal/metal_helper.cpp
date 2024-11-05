@@ -1,5 +1,17 @@
 #include "metal_helper.h"
 
+SEL s_kinitWithBytes_length_encoding_ = ([]() {
+    return sel_registerName("initWithBytes:length:encoding:");
+})();
+
+class DummyNS : public NS::Object {
+public:
+    template <typename R, typename... Args>
+    static R hackSendMessage(const void* pObj, SEL selector, Args&&... args) {
+        return sendMessage<R>(pObj, selector, std::forward<Args>(args)...);
+    }
+};
+
 namespace radray::render::metal {
 
 ScopedAutoreleasePool::ScopedAutoreleasePool() noexcept
@@ -7,6 +19,10 @@ ScopedAutoreleasePool::ScopedAutoreleasePool() noexcept
 
 ScopedAutoreleasePool::~ScopedAutoreleasePool() noexcept {
     _pool->release();
+}
+
+NS::String* NSStringInit(NS::String* that, const void* bytes, NS::UInteger len, NS::StringEncoding encoding) noexcept {
+    return DummyNS::hackSendMessage<NS::String*>(that, s_kinitWithBytes_length_encoding_, bytes, len, encoding);
 }
 
 }  // namespace radray::render::metal

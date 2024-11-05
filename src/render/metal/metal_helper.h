@@ -32,9 +32,11 @@ decltype(auto) AutoRelease(T&& func) noexcept {
     return std::forward<T>(func)();
 }
 
+NS::String* NSStringInit(NS::String* that, const void* bytes, NS::UInteger len, NS::StringEncoding encoding) noexcept;
+
 }  // namespace radray::render::metal
 
 namespace MTL {
 std::string_view format_as(LanguageVersion v) noexcept;
 std::string_view format_as(GPUFamily v) noexcept;
-}
+}  // namespace MTL

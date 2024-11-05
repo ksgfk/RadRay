@@ -22,7 +22,7 @@ class DxcOutput {
 public:
     radray::vector<byte> data;
     radray::vector<byte> refl;
-    ShaderLangCategory category;
+    ShaderBlobCategory category;
 };
 
 class Dxc : public RenderBase, public radray::enable_shared_from_this<Dxc> {

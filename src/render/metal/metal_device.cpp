@@ -1,5 +1,7 @@
 #include "metal_device.h"
 
+#include "metal_shader_lib.h"
+
 namespace radray::render::metal {
 
 void DeviceMetal::Destroy() noexcept {
@@ -7,7 +9,7 @@ void DeviceMetal::Destroy() noexcept {
 }
 
 std::optional<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
-    return AutoRelease([this, type, slot]() {
+    return AutoRelease([this, type, slot]() noexcept {
         uint32_t index = static_cast<size_t>(type);
         RADRAY_ASSERT(index >= 0 && index < 3);
         auto& queues = _queues[index];
@@ -28,8 +30,41 @@ std::optional<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32
     });
 }
 
+std::optional<std::shared_ptr<Shader>> DeviceMetal::CreateShader(
+    std::span<const byte> blob,
+    ShaderBlobCategory category,
+    ShaderStage stage,
+    std::string_view entryPoint,
+    std::string_view name) noexcept {
+    return AutoRelease([this, blob, category, stage, entryPoint, name]() noexcept -> std::optional<std::shared_ptr<Shader>> {
+        if (category != ShaderBlobCategory::MSL) {
+            RADRAY_ERR_LOG("metal can only use MSL, not {}", category);
+            return std::nullopt;
+        }
+        auto mslStr = NSStringInit(
+            NS::String::alloc()->autorelease(),
+            reinterpret_cast<const void*>(blob.data()),
+            blob.size(),
+            NS::StringEncoding::UTF8StringEncoding);
+        auto co = MTL::CompileOptions::alloc()->autorelease();
+        NS::Error* err{nullptr};
+        MTL::Library* lib = _device->newLibrary(mslStr, co, &err);
+        if (err != nullptr) {
+            err->autorelease();
+            RADRAY_ERR_LOG("metal cannot new library", err->localizedDescription()->utf8String());
+            return std::nullopt;
+        }
+        auto slm = std::make_shared<ShaderLibMetal>();
+        slm->Name = name;
+        slm->EntryPoint = entryPoint;
+        slm->Stage = stage;
+        slm->_library = NS::TransferPtr(lib);
+        return slm;
+    });
+}
+
 std::optional<std::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
-    return AutoRelease([&desc]() -> std::optional<std::shared_ptr<DeviceMetal>> {
+    return AutoRelease([&desc]() noexcept -> std::optional<std::shared_ptr<DeviceMetal>> {
         MTL::Device* device;
         bool isMac;
 #if defined(RADRAY_PLATFORM_MACOS)

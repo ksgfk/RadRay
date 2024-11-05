@@ -82,10 +82,11 @@ std::string_view format_as(QueueType v) noexcept {
     }
 }
 
-std::string_view format_as(ShaderLangCategory v) noexcept {
+std::string_view format_as(ShaderBlobCategory v) noexcept {
     switch (v) {
-        case ShaderLangCategory::DXIL: return "DXIL";
-        case ShaderLangCategory::SPIRV: return "SPIR-V";
+        case ShaderBlobCategory::DXIL: return "DXIL";
+        case ShaderBlobCategory::SPIRV: return "SPIR-V";
+        case ShaderBlobCategory::MSL: return "MSL";
     }
 }
 

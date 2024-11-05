@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <variant>
+#include <span>
 
 #include <radray/types.h>
 #include <radray/utility.h>
@@ -24,6 +25,8 @@ struct VulkanDeviceDescriptor {};
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
 
 class CommandQueue;
+class Shader;
+class RootSignature;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
 public:
@@ -32,6 +35,13 @@ public:
     virtual Backend GetBackend() noexcept = 0;
 
     virtual std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
+
+    virtual std::optional<std::shared_ptr<Shader>> CreateShader(
+        std::span<const byte> blob,
+        ShaderBlobCategory category,
+        ShaderStage stage,
+        std::string_view entryPoint,
+        std::string_view name) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

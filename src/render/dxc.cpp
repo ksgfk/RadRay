@@ -138,7 +138,7 @@ public:
         return DxcOutput{
             .data = std::move(blobData),
             .refl = std::move(reflData),
-            .category = isSpirv ? ShaderLangCategory::SPIRV : ShaderLangCategory::DXIL};
+            .category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
     }
 
 public:

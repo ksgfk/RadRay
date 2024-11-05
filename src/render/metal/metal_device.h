@@ -18,6 +18,13 @@ public:
 
     std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
+    std::optional<std::shared_ptr<Shader>> CreateShader(
+        std::span<const byte> blob,
+        ShaderBlobCategory category,
+        ShaderStage stage,
+        std::string_view entryPoint,
+        std::string_view name) noexcept override;
+
 public:
     NS::SharedPtr<MTL::Device> _device;
     std::array<radray::vector<radray::unique_ptr<CmdQueueMetal>>, 3> _queues;
