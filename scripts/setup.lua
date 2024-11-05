@@ -1,7 +1,7 @@
 option("_radray_checkout")
     set_default(false)
     set_showmenu(false)
-    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc")
+    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc", "enable_spirv_cross")
     before_check(function(option)
         if path.absolute(path.join(os.projectdir(), "scripts")) == path.absolute(os.scriptdir()) then
             local opts = import("options", {try = true, anonymous = true})
@@ -32,6 +32,9 @@ option("_radray_checkout")
 
             print("radray is enable d3d12", enable_d3d12:enabled())
             print("radray is enable metal", enable_metal:enabled())
+            print("radray is enable mimalloc", option:dep("enable_mimalloc"):enabled())
+            print("radray is enable dxc", option:dep("enable_dxc"):enabled())
+            print("radray is enable spirv-cross", option:dep("enable_spirv_cross"):enabled())
         end
     end)
 option_end()
@@ -52,15 +55,15 @@ rule("radray_basic_setting")
             target:add("defines", "RADRAY_PLATFORM_IOS", {public = true})
             target:add("mflags", "-fno-objc-arc")
         end
+        if is_mode("debug") then
+            target:add("defines", "RADRAY_IS_DEBUG", {public = true})
+        end
         -- warning
         target:set("warnings", "allextra")
         -- optimize
         if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
-        if is_mode("debug") then
-            target:add("defines", "RADRAY_IS_DEBUG", {public = true})
-        end
         -- exception
-        target:set("exceptions", "no-cxx")
+        target:set("exceptions", "cxx")
         -- rtti
         target:add("cxflags", "/GR-", {tools = {"clang_cl", "cl"}, public = true})
         target:add("cxflags", "-fno-rtti", "-fno-rtti-data", {tools = {"clang"}, public = true})
@@ -86,7 +89,7 @@ rule("radray_basic_setting")
         if is_arch("x64", "x86_64") then target:add("cxflags", "-mfma", {tools = {"clang", "gcc"}}) end
         -- link
         if is_mode("release") then target:set("policy", "build.optimization.lto", true) end
-        if is_mode("release") then target:set("symbols", "debug") end
+        -- if is_mode("release") then target:set("symbols", "debug") end
     end)
 rule_end()
 

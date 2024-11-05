@@ -5,6 +5,7 @@
 #include <optional>
 #include <string_view>
 #include <type_traits>
+#include <span>
 
 #include <radray/types.h>
 
@@ -69,5 +70,7 @@ std::optional<radray::string> ReadText(const std::filesystem::path& filepath) no
 std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
 
 std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
+
+radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
 
 }  // namespace radray

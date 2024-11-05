@@ -85,6 +85,11 @@ enum class ShaderStage {
     Compute
 };
 
+enum class ShaderLangCategory {
+    DXIL,
+    SPIRV
+};
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 
 class RenderBase : public Noncopyable {
@@ -99,5 +104,6 @@ public:
 std::string_view format_as(Backend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
+std::string_view format_as(ShaderLangCategory v) noexcept;
 
 }  // namespace radray::render

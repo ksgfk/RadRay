@@ -8,6 +8,9 @@ end
 if get_config("enable_metal") then 
     add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
 end
+if get_config("enable_spirv_cross") then
+    add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug"), configs = {shared = true}})
+end
 
 target("radray_render")
     set_kind("static")
@@ -17,6 +20,10 @@ target("radray_render")
     if get_config("enable_dxc") then
         add_defines("RADRAY_ENABLE_DXC", {public = true})
         add_packages("directxshadercompiler_radray")
+    end
+    if get_config("enable_spirv_cross") then
+        add_defines("RADRAY_ENABLE_SPIRV_CROSS", {public = true})
+        add_packages("spirv-cross_radray")
     end
     if get_config("enable_d3d12") then
         add_defines("RADRAY_ENABLE_D3D12", {public = true})

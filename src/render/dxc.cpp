@@ -63,10 +63,18 @@ class Dxc::Impl : public Noncopyable {
 public:
     Impl() noexcept = default;
 
-    std::optional<DxilBlob> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
+    std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
+        bool isSpirv = false;
+        bool isStripRefl = false;
         radray::vector<radray::wstring> wargs;
         wargs.reserve(args.size());
         for (auto i : args) {
+            if (i == "-spirv") {
+                isSpirv = true;
+            }
+            if (i == "-Qstrip_reflect") {
+                isStripRefl = true;
+            }
             auto w = ToWideChar(i);
             if (!w.has_value()) {
                 RADRAY_ERR_LOG("cannot convert to wide str: {}", i);
@@ -105,26 +113,32 @@ public:
                 return std::nullopt;
             }
             std::string_view errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
-            RADRAY_ERR_LOG("compile hlsl error\n{}", errStr);
+            RADRAY_ERR_LOG("dxc compile error\n{}", errStr);
             return std::nullopt;
         }
-        ComPtr<IDxcBlob> dxilBlob;
-        if (HRESULT hr = compileResult->GetResult(&dxilBlob);
+        ComPtr<IDxcBlob> blob;
+        if (HRESULT hr = compileResult->GetResult(&blob);
             hr != S_OK) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
             return std::nullopt;
         }
-        ComPtr<IDxcBlob> reflBlob;
-        if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
-            hr != S_OK) {
-            RADRAY_ERR_LOG("dxc error, code={}", hr);
-            return std::nullopt;
+        auto blobStart = reinterpret_cast<byte const*>(blob->GetBufferPointer());
+        radray::vector<byte> blobData{blobStart, blobStart + blob->GetBufferSize()};
+        radray::vector<byte> reflData{};
+        if (!isSpirv && !isStripRefl) {
+            ComPtr<IDxcBlob> reflBlob;
+            if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
+                hr == S_OK) {
+                auto reflStart = reinterpret_cast<byte const*>(reflBlob->GetBufferPointer());
+                reflData = {reflStart, reflStart + reflBlob->GetBufferSize()};
+            } else {
+                RADRAY_ERR_LOG("dxc cannot get reflection, code={}", hr);
+            }
         }
-        auto dxilStart = reinterpret_cast<byte const*>(dxilBlob->GetBufferPointer());
-        auto reflStart = reinterpret_cast<byte const*>(reflBlob->GetBufferPointer());
-        return DxilBlob{
-            .data = {dxilStart, dxilStart + dxilBlob->GetBufferSize()},
-            .refl = {reflStart, reflStart + reflBlob->GetBufferSize()}};
+        return DxcOutput{
+            .data = std::move(blobData),
+            .refl = std::move(reflData),
+            .category = isSpirv ? ShaderLangCategory::SPIRV : ShaderLangCategory::DXIL};
     }
 
 public:
@@ -189,18 +203,19 @@ void Dxc::Destroy() noexcept {
     }
 }
 
-std::optional<DxilBlob> Dxc::Compile(std::string_view code, std::span<std::string_view> args) noexcept {
+std::optional<DxcOutput> Dxc::Compile(std::string_view code, std::span<std::string_view> args) noexcept {
     return _impl->Compile(code, args);
 }
 
-std::optional<DxilBlob> Dxc::Compile(
+std::optional<DxcOutput> Dxc::Compile(
     std::string_view code,
     std::string_view entryPoint,
     ShaderStage stage,
     HlslShaderModel sm,
     bool isOptimize,
     std::span<std::string_view> defines,
-    std::span<std::string_view> includes) noexcept {
+    std::span<std::string_view> includes,
+    bool isSpirv) noexcept {
     radray::string smStr = ([stage, sm]() noexcept {
         using oss = std::basic_ostringstream<char, std::char_traits<char>, radray::allocator<char>>;
         oss s{};
@@ -222,6 +237,9 @@ std::optional<DxilBlob> Dxc::Compile(
         return result;
     })();
     radray::vector<std::string_view> args{};
+    if (isSpirv) {
+        args.emplace_back("-spirv");
+    }
     args.emplace_back("-all_resources_bound");
     {
         args.emplace_back("-HV");

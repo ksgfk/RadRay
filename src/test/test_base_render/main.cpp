@@ -2,6 +2,7 @@
 #include <radray/utility.h>
 #include <radray/render/device.h>
 #include <radray/render/dxc.h>
+#include <radray/render/spirvc.h>
 #include <radray/render/command_queue.h>
 #include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
@@ -25,8 +26,16 @@ int main() {
         std::abort();
     }
     auto dxc = CreateDxc().value();
-    auto dxil = dxc->Compile(color, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false).value();
-    RADRAY_INFO_LOG("size={}", dxil.data.size());
+    {
+        auto outp = dxc->Compile(color, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, false).value();
+        RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
+    }
+    {
+        auto outp = dxc->Compile(color, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, true).value();
+        RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
+        auto msl = SpirvToMsl(outp.data);
+        RADRAY_INFO_LOG("to msl\n{}", msl.value());
+    }
     cmdBuffer->Destroy();
     cmdPool->Destroy();
     device->Destroy();

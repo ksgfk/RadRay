@@ -82,4 +82,11 @@ std::string_view format_as(QueueType v) noexcept {
     }
 }
 
+std::string_view format_as(ShaderLangCategory v) noexcept {
+    switch (v) {
+        case ShaderLangCategory::DXIL: return "DXIL";
+        case ShaderLangCategory::SPIRV: return "SPIR-V";
+    }
+}
+
 }  // namespace radray::render

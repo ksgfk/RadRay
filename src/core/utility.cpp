@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <limits>
+#include <bit>
 
 #include <radray/platform.h>
 #include <radray/logger.h>
@@ -92,6 +93,44 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
     RADRAY_ASSERT(result == str.size());
     return result == static_cast<size_t>(-1) ? std::nullopt : std::make_optional(wstr);
 #endif
+}
+
+radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept {
+    size_t quo = bytes.size() / 4;
+    size_t remain = bytes.size() % 4;
+    radray::vector<uint32_t> result;
+    result.resize(quo + (remain == 0 ? 0 : 1));
+    for (size_t i = 0; i < quo; i++) {
+        size_t p = i * 4;
+        uint32_t a = (bytes[p]);
+        uint32_t b = (bytes[p + 1]);
+        uint32_t c = (bytes[p + 2]);
+        uint32_t d = (bytes[p + 3]);
+        uint32_t dword;
+        if constexpr (std::endian::native == std::endian::little) {
+            dword = a | (b << 8) | (c << 16) | (d << 24);
+        } else if constexpr (std::endian::native == std::endian::big) {
+            dword = (a << 24) | (b << 16) | (c << 8) | d;
+        } else {
+            static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big, "unknown endian platform");
+        }
+        result[i] = dword;
+    }
+    if (remain != 0) {
+        uint32_t last = 0;
+        for (size_t i = 0; i < remain; i++) {
+            uint32_t a = (bytes[quo * 4 + i]);
+            if constexpr (std::endian::native == std::endian::little) {
+                last |= a << (i * 8);
+            } else if constexpr (std::endian::native == std::endian::big) {
+                last |= a << (24 - i * 8);
+            } else {
+                static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big, "unknown endian platform");
+            }
+        }
+        result[quo] = last;
+    }
+    return result;
 }
 
 }  // namespace radray
