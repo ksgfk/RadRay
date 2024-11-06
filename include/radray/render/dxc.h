@@ -27,7 +27,13 @@ public:
 
 class Dxc : public RenderBase, public radray::enable_shared_from_this<Dxc> {
 public:
-    ~Dxc() noexcept override;
+    class Impl {
+    public:
+        virtual ~Impl() noexcept = default;
+    };
+
+    explicit Dxc(radray::unique_ptr<Impl> impl) noexcept : _impl(std::move(impl)) {}
+    ~Dxc() noexcept override = default;
 
     bool IsValid() const noexcept override { return _impl != nullptr; }
     void Destroy() noexcept override;
@@ -44,12 +50,7 @@ public:
         bool isSpirv = false) noexcept;
 
 private:
-    class Impl;
-
-    Impl* _impl{nullptr};
-
-    friend class Impl;
-    friend std::optional<std::shared_ptr<Dxc>> CreateDxc() noexcept;
+    radray::unique_ptr<Impl> _impl;
 };
 
 std::optional<std::shared_ptr<Dxc>> CreateDxc() noexcept;

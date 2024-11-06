@@ -59,9 +59,28 @@ private:
 };
 #endif
 
-class Dxc::Impl : public Noncopyable {
+class DxcImpl : public Dxc::Impl, public Noncopyable {
 public:
-    Impl() noexcept = default;
+#ifdef RADRAY_ENABLE_MIMALLOC
+    DxcImpl(
+        ComPtr<MiMallocAdapter> mi,
+        ComPtr<IDxcCompiler3> dxc,
+        ComPtr<IDxcUtils> utils,
+        ComPtr<IDxcIncludeHandler> inc) noexcept
+        : _mi(std::move(mi)),
+          _dxc(std::move(dxc)),
+          _utils(std::move(utils)),
+          _inc(std::move(inc)) {}
+#else
+    DxcImpl(
+        ComPtr<IDxcCompiler3> dxc,
+        ComPtr<IDxcUtils> utils,
+        ComPtr<IDxcIncludeHandler> inc) noexcept
+        : _dxc(std::move(dxc)),
+          _utils(std::move(utils)),
+          _inc(std::move(inc)) {}
+#endif
+    ~DxcImpl() noexcept override = default;
 
     std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
         bool isSpirv = false;
@@ -178,33 +197,23 @@ std::optional<std::shared_ptr<Dxc>> CreateDxc() noexcept {
         RADRAY_ERR_LOG("cannot create IDxcIncludeHandler, code={}", hr);
         return std::nullopt;
     }
-    auto result = std::make_shared<Dxc>();
-    result->_impl = new Dxc::Impl{};
+    auto implPtr = std::make_unique<DxcImpl>(
 #ifdef RADRAY_ENABLE_MIMALLOC
-    result->_impl->_mi = std::move(mi);
+        std::move(mi),
 #endif
-    result->_impl->_dxc = std::move(dxc);
-    result->_impl->_utils = std::move(utils);
-    result->_impl->_inc = std::move(incHandler);
+        std::move(dxc),
+        std::move(utils),
+        std::move(incHandler));
+    auto result = std::make_shared<Dxc>(std::move(implPtr));
     return result;
 }
 
-Dxc::~Dxc() noexcept {
-    if (_impl != nullptr) {
-        delete _impl;
-        _impl = nullptr;
-    }
-}
-
 void Dxc::Destroy() noexcept {
-    if (_impl != nullptr) {
-        delete _impl;
-        _impl = nullptr;
-    }
+    _impl.reset();
 }
 
 std::optional<DxcOutput> Dxc::Compile(std::string_view code, std::span<std::string_view> args) noexcept {
-    return _impl->Compile(code, args);
+    return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
 std::optional<DxcOutput> Dxc::Compile(
@@ -267,7 +276,7 @@ std::optional<DxcOutput> Dxc::Compile(
         args.emplace_back("-D");
         args.emplace_back(i);
     }
-    return _impl->Compile(code, args);
+    return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
 }  // namespace radray::render

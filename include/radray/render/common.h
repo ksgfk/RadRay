@@ -98,7 +98,6 @@ public:
     virtual ~RenderBase() noexcept = default;
 
     virtual bool IsValid() const noexcept = 0;
-
     virtual void Destroy() noexcept = 0;
 };
 

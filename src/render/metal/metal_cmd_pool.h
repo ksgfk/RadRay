@@ -7,6 +7,7 @@ namespace radray::render::metal {
 
 class CmdPoolMetal : public CommandPool {
 public:
+    explicit CmdPoolMetal(MTL::CommandQueue* q) noexcept : _queue(q) {}
     ~CmdPoolMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _queue != nullptr; }

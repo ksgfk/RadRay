@@ -8,7 +8,7 @@ namespace radray::render::metal {
 
 class DeviceMetal : public radray::render::Device {
 public:
-    DeviceMetal() noexcept = default;
+    explicit DeviceMetal(NS::SharedPtr<MTL::Device> device) noexcept : _device(std::move(device)) {}
     ~DeviceMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _device.get() != nullptr; }

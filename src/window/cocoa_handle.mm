@@ -7,9 +7,18 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
-static_assert(sizeof(id) == sizeof(size_t), "id is not size_t");
+#include <radray/logger.h>
 
-extern "C" size_t RadrayGetCocoaHandlerFromGlfw(GLFWwindow *glfw) {
-  id h = glfwGetCocoaWindow(glfw);
-  return reinterpret_cast<size_t>(h);
+const void *RadrayGetCocoaHandlerFromGlfw(GLFWwindow *glfw) {
+  id nsWin = glfwGetCocoaWindow(glfw);
+  return CFBridgingRetain(nsWin);
+}
+
+void RadrayReleaseCocoaHandlerFromGlfw(GLFWwindow *glfw, const void *ptr) {
+  id nsWin = glfwGetCocoaWindow(glfw);
+  id extRef = CFBridgingRelease(ptr);
+  if (nsWin != extRef) {
+    RADRAY_ABORT(
+        "cannod use RadrayReleaseCocoaHandlerFromGlfw on unknown ptr {}", ptr);
+  }
 }

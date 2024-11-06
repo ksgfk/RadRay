@@ -7,6 +7,7 @@ namespace radray::render::metal {
 
 class CmdBufferMetal : public CommandBuffer {
 public:
+    explicit CmdBufferMetal(NS::SharedPtr<MTL::CommandBuffer> buffer) noexcept : _buffer(std::move(buffer)) {}
     ~CmdBufferMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _buffer.get() != nullptr; }

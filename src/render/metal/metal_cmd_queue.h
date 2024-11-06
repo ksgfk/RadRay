@@ -7,6 +7,7 @@ namespace radray::render::metal {
 
 class CmdQueueMetal : public CommandQueue {
 public:
+    explicit CmdQueueMetal(NS::SharedPtr<MTL::CommandQueue> queue) : _queue(std::move(queue)) {}
     ~CmdQueueMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _queue.get() != nullptr; }

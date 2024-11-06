@@ -10,8 +10,7 @@ void CmdQueueMetal::Destroy() noexcept {
 
 std::optional<std::shared_ptr<CommandPool>> CmdQueueMetal::CreateCommandPool() noexcept {
     return AutoRelease([this]() {
-        auto p = std::make_shared<CmdPoolMetal>();
-        p->_queue = _queue.get();
+        auto p = std::make_shared<CmdPoolMetal>(_queue.get());
         return p;
     });
 }

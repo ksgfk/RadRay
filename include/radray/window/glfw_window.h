@@ -21,6 +21,11 @@ using WindowRefreshCallback = void();
 
 class GlfwWindow {
 public:
+    class Impl {
+    public:
+        virtual ~Impl() noexcept = default;
+    };
+
     GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable = false, bool fullScreen = false) noexcept;
     ~GlfwWindow() noexcept;
     GlfwWindow(const GlfwWindow&) = delete;
@@ -30,7 +35,7 @@ public:
 
     bool IsValid() const noexcept;
     bool ShouldClose() const noexcept;
-    size_t GetNativeHandle() const noexcept;
+    const void* GetNativeHandle() const noexcept;
     Eigen::Vector2i GetSize() const noexcept;
 
     void Destroy() noexcept;
@@ -44,9 +49,7 @@ public:
     radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> EventWindowRefresh() const noexcept;
 
 private:
-    class Impl;
-
-    Impl* _impl;
+    radray::unique_ptr<Impl> _impl;
 };
 
 }  // namespace radray::window
