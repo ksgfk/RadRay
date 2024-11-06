@@ -69,7 +69,7 @@ public:
             RADRAY_ABORT("create glfw window fail");
         }
 #if defined(RADRAY_PLATFORM_WINDOWS)
-        nativeHandle = reinterpret_cast<size_t>(glfwGetWin32Window(window));
+        nativeHandle = reinterpret_cast<const void*>(glfwGetWin32Window(window));
 #endif
 #if defined(RADRAY_PLATFORM_MACOS)
         nativeHandle = RadrayGetCocoaHandlerFromGlfw(window);

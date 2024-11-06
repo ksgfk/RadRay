@@ -13,8 +13,7 @@ std::optional<radray::shared_ptr<CommandBuffer>> CmdAllocatorD3D12::CreateComman
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->_device->CreateCommandList(0, _type, _cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         hr == S_OK) {
-        auto ins = radray::make_shared<CmdListD3D12>(_device, this, _type);
-        ins->_cmdList = std::move(list);
+        auto ins = radray::make_shared<CmdListD3D12>(std::move(list), _device, _type);
         return ins;
     } else {
         return std::nullopt;

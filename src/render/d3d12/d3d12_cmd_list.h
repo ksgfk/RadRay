@@ -6,13 +6,15 @@
 namespace radray::render::d3d12 {
 
 class DeviceD3D12;
-class CmdAllocatorD3D12;
 
 class CmdListD3D12 : public CommandBuffer {
 public:
-    CmdListD3D12(DeviceD3D12* device, CmdAllocatorD3D12* alloc, D3D12_COMMAND_LIST_TYPE type) noexcept
-        : _device(device),
-          _alloc(alloc),
+    CmdListD3D12(
+        ComPtr<ID3D12GraphicsCommandList> cmdList,
+        std::shared_ptr<DeviceD3D12> device,
+        D3D12_COMMAND_LIST_TYPE type) noexcept
+        : _cmdList(std::move(cmdList)),
+          _device(std::move(device)),
           _type(type) {}
     ~CmdListD3D12() noexcept override = default;
 
@@ -21,8 +23,7 @@ public:
 
 public:
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
-    DeviceD3D12* _device;
-    CmdAllocatorD3D12* _alloc;
+    std::shared_ptr<DeviceD3D12> _device;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 

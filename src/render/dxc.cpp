@@ -12,14 +12,18 @@
 #define __EMULATE_UUID
 #include <WinAdapter.h>
 #endif
-#include <dxcapi.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
+#include <radray/platform.h>
+#include <windows.h>
+#include <wrl.h>
 using Microsoft::WRL::ComPtr;
 #else
 template <class T>
 using ComPtr = CComPtr<T>;
 #endif
+
+#include <dxcapi.h>
 
 namespace radray::render {
 
@@ -112,7 +116,7 @@ public:
                 &buffer,
                 argsref.data(),
                 argsref.size(),
-                _inc,
+                _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
             hr != S_OK) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
@@ -173,7 +177,7 @@ std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
-    if (HRESULT hr = DxcCreateInstance2(mi, CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
+    if (HRESULT hr = DxcCreateInstance2(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         hr != S_OK) {
         RADRAY_ERR_LOG("cannot create IDxcCompiler3, code={}", hr);
         return std::nullopt;

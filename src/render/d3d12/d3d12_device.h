@@ -10,7 +10,7 @@ namespace radray::render::d3d12 {
 
 class DeviceD3D12 : public radray::render::Device {
 public:
-    DeviceD3D12() noexcept = default;
+    explicit DeviceD3D12(ComPtr<ID3D12Device> device) noexcept : _device(std::move(device)) {}
     ~DeviceD3D12() noexcept override;
 
     bool IsValid() const noexcept override { return _device != nullptr; }
@@ -20,11 +20,21 @@ public:
 
     std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
+    std::optional<radray::shared_ptr<Shader>> CreateShader(
+        std::span<const byte> blob,
+        ShaderBlobCategory category,
+        ShaderStage stage,
+        std::string_view entryPoint,
+        std::string_view name) noexcept override;
+
+    std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
+        std::span<Shader*> shaders,
+        std::span<SamplerDescriptor> staticSamplers,
+        std::span<std::string_view> pushConstants) noexcept override;
+
 public:
     ComPtr<ID3D12Device> _device;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
-    D3D_FEATURE_LEVEL _maxFeature;
-    D3D_SHADER_MODEL _maxShaderModel;
 };
 
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);

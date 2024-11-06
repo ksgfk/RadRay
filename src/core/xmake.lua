@@ -27,7 +27,7 @@ add_requireconfs("spdlog_radray.fmt", {
 })
 add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
-    add_requires("mimalloc v2.1.7", {debug = is_mode("debug"), configs = {shared = false}}) 
+    add_requires("mimalloc_radray v2.1.7", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
 
 target("radray_core")
@@ -38,6 +38,6 @@ target("radray_core")
     add_packages("spdlog")
     if get_config("enable_mimalloc") then
         add_defines("RADRAY_ENABLE_MIMALLOC", {public = true})
-        add_packages("mimalloc", {public = true})
+        add_packages("mimalloc_radray", {public = true})
     end
     add_packages("fmt", "eigen", {public = true})

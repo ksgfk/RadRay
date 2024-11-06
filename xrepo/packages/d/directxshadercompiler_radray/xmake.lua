@@ -3,7 +3,7 @@ package("directxshadercompiler_radray")
 
     local date = {["v1.8.2407"] = "2024_07_31_clang_cl"}
     if is_plat("windows") then
-        add_urls("https://github.com/microsoft/DirectXShaderCompiler/releases/download/v$(version).zip", {version = function (version) return version .. "/dxc_" .. date[tostring(version)] end})
+        add_urls("https://github.com/microsoft/DirectXShaderCompiler/releases/download/$(version).zip", {version = function (version) return version .. "/dxc_" .. date[tostring(version)] end})
         add_versions("v1.8.2407", "d6650a1b431fb24e47507b615c77f8a9717cd03e422ee12d4a1e98856f9ba7a6")
     elseif is_plat("linux") then
         add_urls("https://github.com/microsoft/DirectXShaderCompiler.git")
@@ -17,6 +17,13 @@ package("directxshadercompiler_radray")
 
         add_deps("cmake")
     end
+
+    on_install("windows|x64", function (package)
+        os.cp("bin/x64/*", package:installdir("bin"))
+        os.cp("inc/*", package:installdir("include"))
+        os.cp("lib/x64/*", package:installdir("lib"))
+        package:addenv("PATH", "bin")
+    end)
 
     on_install("windows|arm64", function (package)
         os.cp("bin/arm64/*", package:installdir("bin"))

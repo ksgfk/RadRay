@@ -30,8 +30,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             hr == S_OK) {
-            auto ins = radray::make_unique<CmdQueueD3D12>(this, desc.Type);
-            ins->_queue = std::move(queue);
+            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), this, desc.Type);
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
@@ -40,6 +39,22 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         }
     }
     return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
+}
+
+std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
+    std::span<const byte> blob,
+    ShaderBlobCategory category,
+    ShaderStage stage,
+    std::string_view entryPoint,
+    std::string_view name) noexcept {
+    return std::nullopt;
+}
+
+std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(
+    std::span<Shader*> shaders,
+    std::span<SamplerDescriptor> staticSamplers,
+    std::span<std::string_view> pushConstants) noexcept {
+    return std::nullopt;
 }
 
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
@@ -129,8 +144,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
-    auto result = radray::make_shared<DeviceD3D12>();
-    result->_device = device;
+    auto result = radray::make_shared<DeviceD3D12>(std::move(device));
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
@@ -150,12 +164,10 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         }
     }
     CD3DX12FeatureSupport fs{};
-    if (HRESULT hr = fs.Init(device.Get());
+    if (HRESULT hr = fs.Init(result->_device.Get());
         hr == S_OK) {
-        result->_maxFeature = fs.MaxSupportedFeatureLevel();
-        result->_maxShaderModel = fs.HighestShaderModel();
-        RADRAY_INFO_LOG("Feature Level: {}", result->_maxFeature);
-        RADRAY_INFO_LOG("Shader Model: {}", result->_maxShaderModel);
+        RADRAY_INFO_LOG("Feature Level: {}", fs.MaxSupportedFeatureLevel());
+        RADRAY_INFO_LOG("Shader Model: {}", fs.HighestShaderModel());
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
         RADRAY_INFO_LOG("UMA: {}", static_cast<bool>(fs.UMA()));
     } else {
