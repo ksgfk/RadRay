@@ -27,6 +27,6 @@ public:
     D3D_SHADER_MODEL _maxShaderModel;
 };
 
-std::optional<std::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
+std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 }  // namespace radray::render::d3d12

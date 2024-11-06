@@ -5,15 +5,22 @@
 
 namespace radray::render::metal {
 
+class DeviceMetal;
+
 class CmdBufferMetal : public CommandBuffer {
 public:
-    explicit CmdBufferMetal(NS::SharedPtr<MTL::CommandBuffer> buffer) noexcept : _buffer(std::move(buffer)) {}
+    explicit CmdBufferMetal(
+        radray::shared_ptr<DeviceMetal> device,
+        NS::SharedPtr<MTL::CommandBuffer> buffer) noexcept
+        : _device(std::move(device)),
+          _buffer(std::move(buffer)) {}
     ~CmdBufferMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _buffer.get() != nullptr; }
     void Destroy() noexcept override;
 
 public:
+    radray::shared_ptr<DeviceMetal> _device;
     NS::SharedPtr<MTL::CommandBuffer> _buffer;
 };
 

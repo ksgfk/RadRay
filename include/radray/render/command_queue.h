@@ -9,7 +9,7 @@ class CommandQueue : public RenderBase {
 public:
     virtual ~CommandQueue() noexcept = default;
 
-    virtual std::optional<std::shared_ptr<CommandPool>> CreateCommandPool() noexcept = 0;
+    virtual std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool() noexcept = 0;
 };
 
 }  // namespace radray::render

@@ -169,7 +169,7 @@ public:
     ComPtr<IDxcIncludeHandler> _inc;
 };
 
-std::optional<std::shared_ptr<Dxc>> CreateDxc() noexcept {
+std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
@@ -197,14 +197,14 @@ std::optional<std::shared_ptr<Dxc>> CreateDxc() noexcept {
         RADRAY_ERR_LOG("cannot create IDxcIncludeHandler, code={}", hr);
         return std::nullopt;
     }
-    auto implPtr = std::make_unique<DxcImpl>(
+    auto implPtr = radray::make_unique<DxcImpl>(
 #ifdef RADRAY_ENABLE_MIMALLOC
         std::move(mi),
 #endif
         std::move(dxc),
         std::move(utils),
         std::move(incHandler));
-    auto result = std::make_shared<Dxc>(std::move(implPtr));
+    auto result = radray::make_shared<Dxc>(std::move(implPtr));
     return result;
 }
 

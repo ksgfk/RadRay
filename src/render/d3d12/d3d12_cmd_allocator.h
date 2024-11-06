@@ -15,7 +15,7 @@ public:
     bool IsValid() const noexcept override { return _cmdAlloc.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    std::optional<std::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
+    std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
 
 public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;

@@ -134,7 +134,7 @@ public:
 };
 
 GlfwWindow::GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable, bool fullScreen) noexcept
-    : _impl(std::make_unique<GlfwWindowImpl>(name, width, height, resizable, fullScreen)) {}
+    : _impl(radray::make_unique<GlfwWindowImpl>(name, width, height, resizable, fullScreen)) {}
 
 GlfwWindow::~GlfwWindow() noexcept {
     Destroy();

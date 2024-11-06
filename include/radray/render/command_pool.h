@@ -11,7 +11,7 @@ class CommandPool : public RenderBase {
 public:
     virtual ~CommandPool() noexcept = default;
 
-    virtual std::optional<std::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept = 0;
+    virtual std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept = 0;
 };
 
 }  // namespace radray::render

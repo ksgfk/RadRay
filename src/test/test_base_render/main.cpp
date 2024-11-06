@@ -40,8 +40,5 @@ int main() {
         auto shader = device->CreateShader(blob, ShaderBlobCategory::MSL, ShaderStage::Pixel, "PSMain", "color").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
     }
-    cmdBuffer->Destroy();
-    cmdPool->Destroy();
-    device->Destroy();
     return 0;
 }

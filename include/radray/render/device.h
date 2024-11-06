@@ -36,12 +36,16 @@ public:
 
     virtual std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual std::optional<std::shared_ptr<Shader>> CreateShader(
+    virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept = 0;
+
+    virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
+        std::span<Shader*> shaders,
+        std::span<std::string_view> pushConstants) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

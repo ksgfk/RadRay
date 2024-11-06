@@ -20,7 +20,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     if (queues.size() <= slot) {
         queues.reserve(slot + 1);
         for (size_t i = queues.size(); i <= slot; i++) {
-            queues.emplace_back(std::unique_ptr<CmdQueueD3D12>{nullptr});
+            queues.emplace_back(radray::unique_ptr<CmdQueueD3D12>{nullptr});
         }
     }
     radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
@@ -42,7 +42,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
 }
 
-std::optional<std::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
+std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;

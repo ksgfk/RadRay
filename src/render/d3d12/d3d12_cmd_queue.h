@@ -17,7 +17,7 @@ public:
     bool IsValid() const noexcept override { return _queue.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    std::optional<std::shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
+    std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
 
 public:
     ComPtr<ID3D12CommandQueue> _queue;

@@ -5,17 +5,24 @@
 
 namespace radray::render::metal {
 
+class DeviceMetal;
+
 class CmdQueueMetal : public CommandQueue {
 public:
-    explicit CmdQueueMetal(NS::SharedPtr<MTL::CommandQueue> queue) : _queue(std::move(queue)) {}
+    explicit CmdQueueMetal(
+        DeviceMetal* device,
+        NS::SharedPtr<MTL::CommandQueue> queue)
+        : _device(device),
+          _queue(std::move(queue)) {}
     ~CmdQueueMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _queue.get() != nullptr; }
     void Destroy() noexcept override;
 
-    std::optional<std::shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
+    std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
 
 public:
+    DeviceMetal* _device;
     NS::SharedPtr<MTL::CommandQueue> _queue;
 };
 

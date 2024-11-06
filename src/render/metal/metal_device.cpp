@@ -16,26 +16,26 @@ std::optional<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32
         if (queues.size() <= slot) {
             queues.reserve(slot + 1);
             for (size_t i = queues.size(); i <= slot; i++) {
-                queues.emplace_back(std::unique_ptr<CmdQueueMetal>{nullptr});
+                queues.emplace_back(radray::unique_ptr<CmdQueueMetal>{nullptr});
             }
         }
         radray::unique_ptr<CmdQueueMetal>& q = queues[slot];
         if (q == nullptr) {
             auto queue = _device->newCommandQueue();
-            auto ins = radray::make_unique<CmdQueueMetal>(NS::TransferPtr(queue));
+            auto ins = radray::make_unique<CmdQueueMetal>(this, NS::TransferPtr(queue));
             q = std::move(ins);
         }
         return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
     });
 }
 
-std::optional<std::shared_ptr<Shader>> DeviceMetal::CreateShader(
+std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
     std::span<const byte> blob,
     ShaderBlobCategory category,
     ShaderStage stage,
     std::string_view entryPoint,
     std::string_view name) noexcept {
-    return AutoRelease([this, blob, category, stage, entryPoint, name]() noexcept -> std::optional<std::shared_ptr<Shader>> {
+    return AutoRelease([this, blob, category, stage, entryPoint, name]() noexcept -> std::optional<radray::shared_ptr<Shader>> {
         if (category != ShaderBlobCategory::MSL) {
             RADRAY_ERR_LOG("metal can only use MSL, not {}", category);
             return std::nullopt;
@@ -53,7 +53,7 @@ std::optional<std::shared_ptr<Shader>> DeviceMetal::CreateShader(
             RADRAY_ERR_LOG("metal cannot new library", err->localizedDescription()->utf8String());
             return std::nullopt;
         }
-        auto slm = std::make_shared<ShaderLibMetal>(
+        auto slm = radray::make_shared<ShaderLibMetal>(
             NS::TransferPtr(lib),
             name,
             entryPoint,
@@ -62,8 +62,14 @@ std::optional<std::shared_ptr<Shader>> DeviceMetal::CreateShader(
     });
 }
 
-std::optional<std::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
-    return AutoRelease([&desc]() noexcept -> std::optional<std::shared_ptr<DeviceMetal>> {
+std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(
+    std::span<Shader*> shaders,
+    std::span<std::string_view> pushConstants) noexcept {
+    return std::nullopt;
+}
+
+std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
+    return AutoRelease([&desc]() noexcept -> std::optional<radray::shared_ptr<DeviceMetal>> {
         MTL::Device* device;
         bool isMac;
 #if defined(RADRAY_PLATFORM_MACOS)

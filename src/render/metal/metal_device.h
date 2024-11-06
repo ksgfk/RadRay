@@ -18,18 +18,22 @@ public:
 
     std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    std::optional<std::shared_ptr<Shader>> CreateShader(
+    std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept override;
 
+    std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
+        std::span<Shader*> shaders,
+        std::span<std::string_view> pushConstants) noexcept override;
+
 public:
     NS::SharedPtr<MTL::Device> _device;
     std::array<radray::vector<radray::unique_ptr<CmdQueueMetal>>, 3> _queues;
 };
 
-std::optional<std::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept;
+std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept;
 
 }  // namespace radray::render::metal
