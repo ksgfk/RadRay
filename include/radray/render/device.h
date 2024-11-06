@@ -45,6 +45,7 @@ public:
 
     virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
+        std::span<SamplerDescriptor> staticSamplers,
         std::span<std::string_view> pushConstants) noexcept = 0;
 };
 

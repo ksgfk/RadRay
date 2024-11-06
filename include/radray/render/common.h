@@ -91,7 +91,42 @@ enum class ShaderBlobCategory {
     MSL
 };
 
+enum class AddressMode {
+    ClampToEdge,
+    Repeat,
+    Mirror
+};
+
+enum class FilterMode {
+    Nearest,
+    Linear
+};
+
+enum class CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always
+};
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+
+struct SamplerDescriptor {
+    AddressMode AddressS;
+    AddressMode AddressT;
+    AddressMode AddressR;
+    FilterMode MigFilter;
+    FilterMode MagFilter;
+    FilterMode MipmapFilter;
+    float LodMin;
+    float LodMax;
+    CompareFunction Compare;
+    uint32_t AnisotropyClamp;
+};
 
 class RenderBase : public Noncopyable {
 public:

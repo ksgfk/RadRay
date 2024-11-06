@@ -64,8 +64,14 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(
     std::span<Shader*> shaders,
+    std::span<SamplerDescriptor> staticSamplers,
     std::span<std::string_view> pushConstants) noexcept {
-    return std::nullopt;
+    return AutoRelease([shaders, staticSamplers, pushConstants]() noexcept -> std::optional<radray::shared_ptr<RootSignature>> {
+        // for (auto shader : shaders) {
+        //     ShaderLibMetal* lib = static_cast<ShaderLibMetal*>(shader);
+        // }
+        return std::nullopt;
+    });
 }
 
 std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
