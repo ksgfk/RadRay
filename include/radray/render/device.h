@@ -28,6 +28,8 @@ class CommandQueue;
 class Shader;
 class ShaderResourcesDescriptor;
 class RootSignature;
+class GraphicsPipelineState;
+class GraphicsPipelineStateDescriptor;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
 public:
@@ -47,6 +49,9 @@ public:
     virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
         const ShaderResourcesDescriptor* resources) noexcept = 0;
+
+    virtual std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+        const GraphicsPipelineStateDescriptor* desc) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

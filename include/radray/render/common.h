@@ -144,6 +144,56 @@ enum class CompareFunction {
     Always
 };
 
+enum class VertexStepMode {
+    Vertex,
+    Instance
+};
+
+enum class VertexFormat {
+    // TODO
+};
+
+enum class VertexSemantic {
+    // TODO
+};
+
+enum class PrimitiveTopology {
+    // TODO
+};
+
+enum class IndexFormat {
+    // TODO
+};
+
+enum class FrontFace {
+    // TODO
+};
+
+enum class CullMode {
+    // TODO
+};
+
+enum class PolygonMode {
+    // TODO
+};
+
+enum class StencilOperation {
+    // TODO
+};
+
+enum class BlendFactor {
+    // TODO
+};
+
+enum class BlendOperation {
+    // TODO
+};
+
+enum class ColorWrite : uint32_t {
+    // TODO
+};
+using ColorWrites = std::underlying_type_t<ColorWrite>;
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 
 struct SamplerDescriptor {
@@ -157,6 +207,82 @@ struct SamplerDescriptor {
     float LodMax;
     CompareFunction Compare;
     uint32_t AnisotropyClamp;
+};
+
+struct VertexElement {
+    uint64_t Offset;
+    VertexSemantic Semantic;
+    uint32_t SemanticIndex;
+    VertexFormat Format;
+    uint32_t Location;
+};
+
+class VertexBufferLayout {
+public:
+    uint64_t ArrayStride;
+    VertexStepMode StepMode;
+    std::vector<VertexElement> Elements;
+};
+
+struct PrimitiveState {
+    PrimitiveTopology Topology;
+    IndexFormat StripIndexFormat;
+    FrontFace FaceClockwise;
+    CullMode Cull;
+    PolygonMode Poly;
+    bool Conservative;
+};
+
+struct StencilFaceState {
+    CompareFunction Compare;
+    StencilOperation FailOp;
+    StencilOperation DepthFailOp;
+    StencilOperation ColorOp;
+};
+
+struct StencilState {
+    StencilFaceState Front;
+    StencilFaceState Back;
+    uint32_t ReadMask;
+    uint32_t WriteMask;
+};
+
+struct DepthBiasState {
+    int32_t Constant;
+    float SlopScale;
+    float Clamp;
+};
+
+struct DepthStencilState {
+    TextureFormat Format;
+    CompareFunction DepthCompare;
+    StencilState Stencil;
+    DepthBiasState DepthBias;
+    bool DepthWriteEnable;
+};
+
+struct MultiSampleState {
+    uint32_t Count;
+    uint64_t Mask;
+    bool AlphaTocoverageEnable;
+};
+
+struct BlendComponent {
+    BlendFactor Src;
+    BlendFactor Dst;
+    BlendOperation Op;
+};
+
+struct BlendState {
+    BlendComponent Color;
+    BlendComponent Alpha;
+    bool BlendEnable;
+};
+
+struct ColorTargetState {
+    TextureFormat Format;
+    BlendState Blend;
+    ColorWrites WriteMask;
 };
 
 class RenderBase : public Noncopyable {

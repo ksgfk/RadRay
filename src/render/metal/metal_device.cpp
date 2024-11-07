@@ -89,6 +89,13 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignatur
     });
 }
 
+std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipeline(
+    const GraphicsPipelineStateDescriptor* desc) noexcept {
+    return AutoRelease([]() noexcept -> std::optional<radray::shared_ptr<GraphicsPipelineState>> {
+        return std::nullopt;
+    });
+}
+
 std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
     return AutoRelease([&desc]() noexcept -> std::optional<radray::shared_ptr<DeviceMetal>> {
         MTL::Device* device;

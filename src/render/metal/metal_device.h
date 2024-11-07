@@ -29,6 +29,9 @@ public:
         std::span<Shader*> shaders,
         const ShaderResourcesDescriptor* resources) noexcept override;
 
+    std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+        const GraphicsPipelineStateDescriptor* desc) noexcept override;
+
 public:
     NS::SharedPtr<MTL::Device> _device;
     std::array<radray::vector<radray::unique_ptr<CmdQueueMetal>>, 3> _queues;
