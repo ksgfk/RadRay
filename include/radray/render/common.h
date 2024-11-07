@@ -73,22 +73,53 @@ enum class TextureFormat {
     D32_FLOAT_S8_UINT,
 };
 
+enum class TextureDimension {
+    Dim1D,
+    Dim2D,
+    Dim3D,
+    Cube
+};
+
 enum class QueueType : uint32_t {
     Direct,
     Compute,
     Copy,
 };
 
-enum class ShaderStage {
-    Vertex,
-    Pixel,
-    Compute
+enum class ShaderStage : uint32_t {
+    Vertex = 0x1,
+    Pixel = 0x2,
+    Compute = 0x4
 };
+using ShaderStages = std::underlying_type_t<ShaderStage>;
+constexpr ShaderStages operator|(ShaderStages l, ShaderStage r) noexcept {
+    return static_cast<ShaderStages>(static_cast<std::underlying_type_t<ShaderStage>>(l) | static_cast<std::underlying_type_t<ShaderStage>>(r));
+}
+constexpr ShaderStages& operator|=(ShaderStages& l, ShaderStage r) noexcept {
+    l = l | r;
+    return l;
+}
+constexpr ShaderStage operator&(ShaderStages l, ShaderStage r) noexcept {
+    return static_cast<ShaderStage>(static_cast<std::underlying_type_t<ShaderStage>>(l) & static_cast<std::underlying_type_t<ShaderStage>>(r));
+}
+constexpr bool HasFlag(ShaderStages that, ShaderStage l) noexcept {
+    return (that & l) == l;
+}
 
 enum class ShaderBlobCategory {
     DXIL,
     SPIRV,
     MSL
+};
+
+enum class ShaderResourceType {
+    CBuffer,
+    Texture,
+    Buffer,
+    RWTexture,
+    RWBuffer,
+    Sampler,
+    PushConstant
 };
 
 enum class AddressMode {

@@ -25,27 +25,23 @@ package("mimalloc_radray")
             package:add("ldflags", "-sMALLOC=emmalloc")
         end
         local configs = {
+            "-DMI_OVERRIDE=OFF",
             "-DMI_BUILD_TESTS=OFF",
+            "-DMI_BUILD_OBJECT=OFF",
+            "-DCMAKE_BUILD_TYPE=" .. (package:is_debug() and "Debug" or "Release"),
+            "-DMI_DEBUG_FULL=" .. (package:is_debug() and "ON" or "OFF"),
+            "-DMI_BUILD_STATIC=" .. (package:config("shared") and "OFF" or "ON"),
+            "-DMI_BUILD_SHARED=" .. (package:config("shared") and "ON" or "OFF"),
+            "-DMI_INSTALL_TOPLEVEL=ON"
         }
-        table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:is_debug() and "Debug" or "Release"))
-        table.insert(configs, "-DMI_DEBUG_FULL=" .. (package:is_debug() and "ON" or "OFF"))
-        table.insert(configs, "-DMI_BUILD_STATIC=" .. (package:config("shared") and "OFF" or "ON"))
-        table.insert(configs, "-DMI_BUILD_SHARED=" .. (package:config("shared") and "ON" or "OFF"))
-
         import("package.tools.cmake").build(package, configs, {buildir = "build"})
-
         if package:is_plat("windows") then
             os.trycp("build/**.dll", package:installdir("bin"))
             os.trycp("build/**.lib", package:installdir("lib"))
-        elseif package:is_plat("mingw") then
-            os.trycp("build/**.dll", package:installdir("bin"))
-            os.trycp("build/**.a", package:installdir("lib"))
         elseif package:is_plat("macosx") then
-            os.trycp("build/*.dylib", package:installdir("bin"))
             os.trycp("build/*.dylib", package:installdir("lib"))
             os.trycp("build/*.a", package:installdir("lib"))               
         else
-            os.trycp("build/*.so", package:installdir("bin"))
             os.trycp("build/*.so", package:installdir("lib"))
             os.trycp("build/*.a", package:installdir("lib"))
         end

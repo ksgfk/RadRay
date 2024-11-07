@@ -24,9 +24,22 @@ enum class MslPlatform {
     Ios
 };
 
+class SpvcEntryPoint {
+public:
+    radray::string Name;
+    ShaderStage Stage;
+};
+
+class SpvcMslOutput {
+public:
+    radray::string Msl;
+    radray::string SpvReflJson;
+    radray::vector<SpvcEntryPoint> EntryPoints;
+};
+
 std::pair<uint32_t, uint32_t> GetMslVersionNumber(MslVersion ver) noexcept;
 
-std::optional<radray::string> SpirvToMsl(
+std::optional<SpvcMslOutput> SpirvToMsl(
     std::span<byte> spirv,
     MslVersion ver,
     MslPlatform plat);

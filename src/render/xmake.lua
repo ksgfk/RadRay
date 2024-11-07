@@ -9,7 +9,7 @@ if get_config("enable_metal") then
     add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
 end
 if get_config("enable_spirv_cross") then
-    add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug"), configs = {shared = true}})
+    add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
 end
 
 target("radray_render")

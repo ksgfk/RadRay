@@ -1,6 +1,7 @@
 #include "metal_device.h"
 
-#include "metal_shader_lib.h"
+#include <radray/render/shader.h>
+#include "metal_function.h"
 
 namespace radray::render::metal {
 
@@ -40,21 +41,36 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
             RADRAY_ERR_LOG("metal can only use MSL, not {}", category);
             return std::nullopt;
         }
-        auto mslStr = NSStringInit(
-            NS::String::alloc()->autorelease(),
-            reinterpret_cast<const void*>(blob.data()),
-            blob.size(),
-            NS::StringEncoding::UTF8StringEncoding);
-        auto co = MTL::CompileOptions::alloc()->autorelease();
-        NS::Error* err{nullptr};
-        MTL::Library* lib = _device->newLibrary(mslStr, co, &err);
-        if (err != nullptr) {
-            err->autorelease();
-            RADRAY_ERR_LOG("metal cannot new library", err->localizedDescription()->utf8String());
-            return std::nullopt;
+        auto mslStr = StringCppToNS(std::string_view{reinterpret_cast<const char*>(blob.data()), blob.size()})->autorelease();
+        MTL::Library* lib;
+        {
+            auto co = MTL::CompileOptions::alloc()->autorelease();
+            NS::Error* err{nullptr};
+            lib = _device->newLibrary(mslStr, co, &err);
+            if (err != nullptr) {
+                err->autorelease();
+                RADRAY_ERR_LOG("metal cannot new library\n{}", err->localizedDescription()->utf8String());
+                return std::nullopt;
+            }
         }
-        auto slm = radray::make_shared<ShaderLibMetal>(
-            NS::TransferPtr(lib),
+        lib->autorelease();
+        MTL::Function* func;
+        {
+            auto entry = StringCppToNS(entryPoint)->autorelease();
+            auto funcDesc = MTL::FunctionDescriptor::alloc()->autorelease()->init();
+            funcDesc->setName(entry);
+            NS::Error* err{nullptr};
+            func = lib->newFunction(funcDesc, &err);
+            if (err != nullptr) {
+                err->autorelease();
+                RADRAY_ERR_LOG("metal cannot new function\n{}", err->localizedDescription()->utf8String());
+                return std::nullopt;
+            }
+        }
+        RADRAY_INFO_LOG("metal function {}", func->name()->utf8String());
+        func->setLabel(StringCppToNS(name)->autorelease());
+        auto slm = radray::make_shared<FunctionMetal>(
+            NS::TransferPtr(func),
             name,
             entryPoint,
             stage);
@@ -64,9 +80,8 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(
     std::span<Shader*> shaders,
-    std::span<SamplerDescriptor> staticSamplers,
-    std::span<std::string_view> pushConstants) noexcept {
-    return AutoRelease([shaders, staticSamplers, pushConstants]() noexcept -> std::optional<radray::shared_ptr<RootSignature>> {
+    const ShaderResourcesDescriptor* resources) noexcept {
+    return AutoRelease([shaders, resources]() noexcept -> std::optional<radray::shared_ptr<RootSignature>> {
         // for (auto shader : shaders) {
         //     ShaderLibMetal* lib = static_cast<ShaderLibMetal*>(shader);
         // }

@@ -2,7 +2,7 @@
 #include <radray/utility.h>
 #include <radray/render/device.h>
 #include <radray/render/dxc.h>
-#include <radray/render/spirvc.h>
+#include <radray/render/spvc.h>
 #include <radray/render/command_queue.h>
 #include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
@@ -39,16 +39,17 @@ int main() {
             true);
         auto outp = outv.value();
         RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
-        auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos);
-        RADRAY_INFO_LOG("to msl\n{}", msl.value());
-        // std::span<const byte> blob{reinterpret_cast<const byte*>(msl->data()), msl->size()};
-        // auto shader = device->CreateShader(blob, ShaderBlobCategory::MSL, ShaderStage::Vertex, "main", "color").value();
-        // RADRAY_INFO_LOG("shader name {}", shader->Name);
+        auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos).value();
+        RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
+        RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
+        std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
+        auto shader = device->CreateShader(blob, ShaderBlobCategory::MSL, ShaderStage::Vertex, msl.EntryPoints.at(0).Name, "colorVS").value();
+        RADRAY_INFO_LOG("shader name {}", shader->Name);
     }
     {
         std::string_view includes[] = {std::string_view{"shaders"}};
         auto color = ReadText(std::filesystem::path("shaders") / "DefaultPS.hlsl").value();
-        auto outp = *dxc->Compile(
+        auto outv = dxc->Compile(
             color,
             "main",
             ShaderStage::Pixel,
@@ -57,12 +58,14 @@ int main() {
             {},
             includes,
             true);
+        auto outp = outv.value();
         RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
-        auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos);
-        RADRAY_INFO_LOG("to msl\n{}", msl.value());
-        // std::span<const byte> blob{reinterpret_cast<const byte*>(msl->data()), msl->size()};
-        // auto shader = device->CreateShader(blob, ShaderBlobCategory::MSL, ShaderStage::Pixel, "main", "color").value();
-        // RADRAY_INFO_LOG("shader name {}", shader->Name);
+        auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos).value();
+        RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
+        RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
+        std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
+        auto shader = device->CreateShader(blob, ShaderBlobCategory::MSL, ShaderStage::Pixel, msl.EntryPoints.at(0).Name, "colorPS").value();
+        RADRAY_INFO_LOG("shader name {}", shader->Name);
     }
     return 0;
 }

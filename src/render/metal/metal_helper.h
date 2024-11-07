@@ -33,6 +33,7 @@ decltype(auto) AutoRelease(T&& func) noexcept {
 }
 
 NS::String* NSStringInit(NS::String* that, const void* bytes, NS::UInteger len, NS::StringEncoding encoding) noexcept;
+NS::String* StringCppToNS(std::string_view str) noexcept;
 
 }  // namespace radray::render::metal
 

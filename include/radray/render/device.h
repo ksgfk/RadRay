@@ -26,6 +26,7 @@ using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescript
 
 class CommandQueue;
 class Shader;
+class ShaderResourcesDescriptor;
 class RootSignature;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
@@ -45,8 +46,7 @@ public:
 
     virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
-        std::span<SamplerDescriptor> staticSamplers,
-        std::span<std::string_view> pushConstants) noexcept = 0;
+        const ShaderResourcesDescriptor* resources) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

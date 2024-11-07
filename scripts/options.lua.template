@@ -12,6 +12,6 @@ function get_options()
 		enable_metal = true,
 		enable_mimalloc = true,
 		enable_dxc = true,
-		spirv-cross = true
+		enable_spirv_cross = true
 	}
 end

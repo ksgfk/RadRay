@@ -8,19 +8,20 @@
 #include <radray/logger.h>
 #include <radray/utility.h>
 
-#ifndef RADRAY_PLATFORM_WINDOWS
-#define __EMULATE_UUID
-#include <WinAdapter.h>
-#endif
-
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform.h>
 #include <windows.h>
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
 #else
+#define __EMULATE_UUID
+#include <WinAdapter.h>
 template <class T>
-using ComPtr = CComPtr<T>;
+class ComPtr : public CComPtr<T> {
+public:
+    T* Get() noexcept { return this->p; }
+    T* Get() const noexcept { return this->p; }
+};
 #endif
 
 #include <dxcapi.h>

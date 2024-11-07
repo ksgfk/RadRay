@@ -5,20 +5,20 @@
 
 namespace radray::render::metal {
 
-class ShaderLibMetal : public Shader {
+class FunctionMetal : public Shader {
 public:
-    ShaderLibMetal(
-        NS::SharedPtr<MTL::Library> lib,
+    FunctionMetal(
+        NS::SharedPtr<MTL::Function> func,
         std::string_view name,
         std::string_view entryPoint,
         ShaderStage stage) noexcept;
-    ~ShaderLibMetal() noexcept override = default;
+    ~FunctionMetal() noexcept override = default;
 
-    bool IsValid() const noexcept override { return _library.get() != nullptr; }
+    bool IsValid() const noexcept override { return _func.get() != nullptr; }
     void Destroy() noexcept override;
 
 public:
-    NS::SharedPtr<MTL::Library> _library;
+    NS::SharedPtr<MTL::Function> _func;
 };
 
 }  // namespace radray::render::metal

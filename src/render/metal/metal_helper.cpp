@@ -26,6 +26,14 @@ NS::String* NSStringInit(NS::String* that, const void* bytes, NS::UInteger len, 
     return DummyNS::hackSendMessage<NS::String*>(that, NSString_initWithBytes_length_encoding_(), bytes, len, encoding);
 }
 
+NS::String* StringCppToNS(std::string_view str) noexcept {
+    return NSStringInit(
+        NS::String::alloc(),
+        reinterpret_cast<const void*>(str.data()),
+        str.size(),
+        NS::StringEncoding::UTF8StringEncoding);
+}
+
 }  // namespace radray::render::metal
 
 namespace MTL {

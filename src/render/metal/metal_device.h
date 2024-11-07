@@ -27,8 +27,7 @@ public:
 
     std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
-        std::span<SamplerDescriptor> staticSamplers,
-        std::span<std::string_view> pushConstants) noexcept override;
+        const ShaderResourcesDescriptor* resources) noexcept override;
 
 public:
     NS::SharedPtr<MTL::Device> _device;
