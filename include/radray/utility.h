@@ -14,6 +14,21 @@
         (void)(expr);       \
     } while (0)
 
+#define RADRAY_FLAG_ENUM(etype, flags)                                                      \
+    constexpr flags operator|(flags l, etype r) noexcept {                                  \
+        return static_cast<flags>(l | static_cast<std::underlying_type_t<decltype(r)>>(r)); \
+    }                                                                                       \
+    constexpr flags& operator|=(flags& l, etype r) noexcept {                               \
+        l = l | r;                                                                          \
+        return l;                                                                           \
+    }                                                                                       \
+    constexpr etype operator&(flags l, etype r) noexcept {                                  \
+        return static_cast<etype>(l & static_cast<std::underlying_type_t<decltype(r)>>(r)); \
+    }                                                                                       \
+    constexpr bool HasFlag(flags that, etype l) noexcept {                                  \
+        return (that & l) == l;                                                             \
+    }
+
 namespace radray {
 
 template <typename Call>

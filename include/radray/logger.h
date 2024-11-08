@@ -20,15 +20,9 @@ enum class LogLevel {
 };
 
 struct SourceLocation {
-    constexpr SourceLocation() noexcept = default;
-    constexpr SourceLocation(const char* file, int line, const char* func) noexcept
-        : filename{file},
-          line{line},
-          funcname{func} {}
-
-    const char* filename{nullptr};
-    int line{0};
-    const char* funcname{nullptr};
+    const char* filename;
+    int line;
+    const char* funcname;
 };
 
 using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, radray::allocator<char>>;

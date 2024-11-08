@@ -27,10 +27,10 @@ public:
 
     std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
-        const ShaderResourcesDescriptor* resources) noexcept override;
+        const ShaderResourcesDescriptor& resources) noexcept override;
 
     std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
-        const GraphicsPipelineStateDescriptor* desc) noexcept override;
+        const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
 public:
     NS::SharedPtr<MTL::Device> _device;

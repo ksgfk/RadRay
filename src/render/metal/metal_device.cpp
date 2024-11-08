@@ -80,7 +80,7 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(
     std::span<Shader*> shaders,
-    const ShaderResourcesDescriptor* resources) noexcept {
+    const ShaderResourcesDescriptor& resources) noexcept {
     return AutoRelease([shaders, resources]() noexcept -> std::optional<radray::shared_ptr<RootSignature>> {
         // for (auto shader : shaders) {
         //     ShaderLibMetal* lib = static_cast<ShaderLibMetal*>(shader);
@@ -90,7 +90,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignatur
 }
 
 std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipeline(
-    const GraphicsPipelineStateDescriptor* desc) noexcept {
+    const GraphicsPipelineStateDescriptor& desc) noexcept {
     return AutoRelease([]() noexcept -> std::optional<radray::shared_ptr<GraphicsPipelineState>> {
         return std::nullopt;
     });

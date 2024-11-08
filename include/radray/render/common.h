@@ -92,19 +92,7 @@ enum class ShaderStage : uint32_t {
     Compute = 0x4
 };
 using ShaderStages = std::underlying_type_t<ShaderStage>;
-constexpr ShaderStages operator|(ShaderStages l, ShaderStage r) noexcept {
-    return static_cast<ShaderStages>(static_cast<std::underlying_type_t<ShaderStage>>(l) | static_cast<std::underlying_type_t<ShaderStage>>(r));
-}
-constexpr ShaderStages& operator|=(ShaderStages& l, ShaderStage r) noexcept {
-    l = l | r;
-    return l;
-}
-constexpr ShaderStage operator&(ShaderStages l, ShaderStage r) noexcept {
-    return static_cast<ShaderStage>(static_cast<std::underlying_type_t<ShaderStage>>(l) & static_cast<std::underlying_type_t<ShaderStage>>(r));
-}
-constexpr bool HasFlag(ShaderStages that, ShaderStage l) noexcept {
-    return (that & l) == l;
-}
+RADRAY_FLAG_ENUM(ShaderStage, ShaderStages);
 
 enum class ShaderBlobCategory {
     DXIL,
@@ -150,51 +138,135 @@ enum class VertexStepMode {
 };
 
 enum class VertexFormat {
-    // TODO
+    UINT8X2,
+    UINT8X4,
+    SINT8X2,
+    SINT8X4,
+    UNORM8X2,
+    UNORM8X4,
+    SNORM8X2,
+    SNORM8X4,
+    UINT16x2,
+    UINT16x4,
+    SINT16X2,
+    SINT16X4,
+    UNORM16X2,
+    UNORM16X4,
+    SNORM16X2,
+    SNORM16X4,
+    FLOAT16X2,
+    FLOAT16X4,
+    UINT32,
+    UINT32X2,
+    UINT32X3,
+    UINT32X4,
+    SINT32,
+    SINT32X2,
+    SINT32X3,
+    SINT32X4,
+    FLOAT32,
+    FLOAT32X2,
+    FLOAT32X3,
+    FLOAT32X4,
 };
 
 enum class VertexSemantic {
-    // TODO
+    Position,
+    Normal,
+    Texcoord,
+    Tangent,
+    Color,
+    PSize,
+    BiNormal,
+    BlendIndices,
+    BlendWeight,
+    PositionT
 };
 
 enum class PrimitiveTopology {
-    // TODO
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip
 };
 
 enum class IndexFormat {
-    // TODO
+    UINT16,
+    UINT32
 };
 
 enum class FrontFace {
-    // TODO
+    CCW,
+    CW
 };
 
 enum class CullMode {
-    // TODO
+    Front,
+    Back,
+    None
 };
 
 enum class PolygonMode {
-    // TODO
+    Fill,
+    Line,
+    Point
 };
 
 enum class StencilOperation {
-    // TODO
+    Keep,
+    Zero,
+    Replace,
+    Invert,
+    IncrementClamp,
+    DecrementClamp,
+    IncrementWrap,
+    DecrementWrap
 };
 
 enum class BlendFactor {
-    // TODO
+    Zero,
+    One,
+    Src,
+    OneMinusSrc,
+    SrcAlpha,
+    OneMinusSrcAlpha,
+    Dst,
+    OneMinusDst,
+    DstAlpha,
+    OneMinusDstAlpha,
+    SrcAlphaSaturated,
+    Constant,
+    OneMinusConstant,
+    Src1,
+    OneMinusSrc1,
+    Src1Alpha,
+    OneMinusSrc1Alpha
 };
 
 enum class BlendOperation {
-    // TODO
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max
 };
 
 enum class ColorWrite : uint32_t {
-    // TODO
+    Red = 0x1,
+    Green = 0x2,
+    Blue = 0x4,
+    Alpha = 0x8,
+    Color = Red | Green | Blue,
+    All = Red | Green | Blue | Alpha
 };
 using ColorWrites = std::underlying_type_t<ColorWrite>;
+RADRAY_FLAG_ENUM(ColorWrite, ColorWrites);
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+
+class RootSignature;
+class Shader;
 
 struct SamplerDescriptor {
     AddressMode AddressS;
@@ -207,6 +279,27 @@ struct SamplerDescriptor {
     float LodMax;
     CompareFunction Compare;
     uint32_t AnisotropyClamp;
+};
+
+class ShaderResource {
+public:
+    radray::string Name;
+    ShaderResourceType Type;
+    TextureDimension Dim;
+    uint32_t Space;
+    uint32_t BindPoint;
+    uint32_t BindCount;
+    ShaderStages Stages;
+};
+
+class ShaderResourcesDescriptor {
+public:
+    struct StaticSamplerDescriptor : public SamplerDescriptor {
+        size_t Index;
+    };
+
+    radray::vector<ShaderResource> BindResources;
+    radray::vector<StaticSamplerDescriptor> StaticSamplers;
 };
 
 struct VertexElement {
@@ -230,6 +323,7 @@ struct PrimitiveState {
     FrontFace FaceClockwise;
     CullMode Cull;
     PolygonMode Poly;
+    bool UnclippedDepth;
     bool Conservative;
 };
 
@@ -276,13 +370,27 @@ struct BlendComponent {
 struct BlendState {
     BlendComponent Color;
     BlendComponent Alpha;
-    bool BlendEnable;
 };
 
 struct ColorTargetState {
     TextureFormat Format;
     BlendState Blend;
     ColorWrites WriteMask;
+    bool BlendEnable;
+};
+
+class GraphicsPipelineStateDescriptor {
+public:
+    std::string Name;
+    RootSignature* RootSig;
+    Shader* VS;
+    Shader* PS;
+    std::vector<VertexBufferLayout> VertexBuffers;
+    PrimitiveState Primitive;
+    DepthStencilState DepthStencil;
+    MultiSampleState MultiSample;
+    std::vector<ColorTargetState> ColorTargets;
+    bool DepthStencilEnable;
 };
 
 class RenderBase : public Noncopyable {
