@@ -22,6 +22,7 @@ public:
 
     std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
+        std::span<const byte> refl,
         ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,
@@ -29,8 +30,10 @@ public:
 
     std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
         std::span<Shader*> shaders,
-        std::span<SamplerDescriptor> staticSamplers,
-        std::span<std::string_view> pushConstants) noexcept override;
+        const ShaderResourcesDescriptor& resources) noexcept override;
+
+    std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+        const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
 public:
     ComPtr<ID3D12Device> _device;

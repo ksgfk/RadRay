@@ -43,6 +43,7 @@ public:
 
     virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
+        std::span<const byte> refl,
         ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,

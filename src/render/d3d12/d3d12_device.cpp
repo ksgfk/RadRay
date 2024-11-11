@@ -1,5 +1,7 @@
 #include "d3d12_device.h"
 
+#include "d3d12_shader.h"
+
 namespace radray::render::d3d12 {
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
@@ -43,17 +45,26 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
 
 std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
+    std::span<const byte> refl,
     ShaderBlobCategory category,
     ShaderStage stage,
     std::string_view entryPoint,
     std::string_view name) noexcept {
-    return std::nullopt;
+    if (category != ShaderBlobCategory::DXIL) {
+        RADRAY_ERR_LOG("d3d12 can only use dxil shader, cannot use {}", category);
+        return std::nullopt;
+    }
+    return radray::make_shared<Dxil>(blob, refl, entryPoint, name, stage);
 }
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(
     std::span<Shader*> shaders,
-    std::span<SamplerDescriptor> staticSamplers,
-    std::span<std::string_view> pushConstants) noexcept {
+    const ShaderResourcesDescriptor& resources) noexcept {
+    return std::nullopt;
+}
+
+std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
+    const GraphicsPipelineStateDescriptor& desc) noexcept {
     return std::nullopt;
 }
 
