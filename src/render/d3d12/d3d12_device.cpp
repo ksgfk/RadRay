@@ -60,6 +60,11 @@ std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
 std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(
     std::span<Shader*> shaders,
     const ShaderResourcesDescriptor& resources) noexcept {
+    for (auto i : shaders) {
+        Dxil* il = static_cast<Dxil*>(i);
+        
+    }
+
     return std::nullopt;
 }
 

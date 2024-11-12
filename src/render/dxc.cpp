@@ -25,6 +25,7 @@ public:
 #endif
 
 #include <dxcapi.h>
+#include "ext/d3d12shader.h"
 
 namespace radray::render {
 
@@ -158,11 +159,58 @@ public:
             } else {
                 RADRAY_ERR_LOG("dxc cannot get reflection, code={}", hr);
             }
+            ToD3D12ShaderReflection(reflData);
         }
         return DxcOutput{
             .data = std::move(blobData),
             .refl = std::move(reflData),
             .category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
+    }
+
+    std::optional<DxilReflection> ToD3D12ShaderReflection(std::span<const byte> refl) noexcept {
+        DxcBuffer buf{refl.data(), refl.size(), 0};
+        ComPtr<ID3D12ShaderReflection> sr;
+        if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
+            hr != S_OK) {
+            RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
+            return std::nullopt;
+        }
+        D3D12_SHADER_DESC shaderDesc{};
+        if (HRESULT hr = sr->GetDesc(&shaderDesc);
+            hr != S_OK) {
+            RADRAY_ERR_LOG("dxc util cannot get D3D12_SHADER_DESC, code={}", hr);
+            return std::nullopt;
+        }
+        DxilReflection result{};
+        result.CBuffers.reserve(shaderDesc.ConstantBuffers);
+        for (UINT i = 0; i < shaderDesc.ConstantBuffers; i++) {
+            ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByIndex(i);
+            D3D12_SHADER_BUFFER_DESC bufDesc;
+            cb->GetDesc(&bufDesc);
+            auto&& cbt = result.CBuffers.emplace_back(DxilReflection::CBuffer{});
+            cbt.Name = bufDesc.Name;
+            cbt.Size = bufDesc.Size;
+            cbt.Vars.reserve(bufDesc.Variables);
+            for (UINT j = 0; j < bufDesc.Variables; j++) {
+                ID3D12ShaderReflectionVariable* v = cb->GetVariableByIndex(j);
+                D3D12_SHADER_VARIABLE_DESC varDesc;
+                v->GetDesc(&varDesc);
+                auto&& vart = cbt.Vars.emplace_back(DxilReflection::Variable{});
+                vart.Name = varDesc.Name;
+                vart.Start = varDesc.StartOffset;
+                vart.Size = varDesc.Size;
+            }
+        }
+        RADRAY_INFO_LOG("bind resources {}", shaderDesc.BoundResources);
+        for (UINT i = 0; i < shaderDesc.BoundResources; i++) {
+            D3D12_SHADER_INPUT_BIND_DESC bindDesc;
+            if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
+                hr != S_OK) {
+                RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SHADER_INPUT_BIND_DESC, code={}", hr);
+                return std::nullopt;
+            }
+        }
+        return result;
     }
 
 public:
@@ -282,6 +330,10 @@ std::optional<DxcOutput> Dxc::Compile(
         args.emplace_back(i);
     }
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
+}
+
+std::optional<DxilReflection> Dxc::GetDxilReflection(std::span<const byte> refl) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->ToD3D12ShaderReflection(refl);
 }
 
 }  // namespace radray::render
