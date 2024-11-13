@@ -43,15 +43,12 @@ public:
 
     virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
-        std::span<const byte> refl,
-        ShaderBlobCategory category,
+        const ShaderReflection& refl,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(
-        std::span<Shader*> shaders,
-        const ShaderResourcesDescriptor& resources) noexcept = 0;
+    virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept = 0;
 
     virtual std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept = 0;

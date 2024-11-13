@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <variant>
+
 #include <radray/types.h>
 #include <radray/utility.h>
 
@@ -74,10 +77,14 @@ enum class TextureFormat {
 };
 
 enum class TextureDimension {
+    UNKNOWN,
     Dim1D,
     Dim2D,
     Dim3D,
-    Cube
+    Dim1DArray,
+    Dim2DArray,
+    Cube,
+    CubeArray
 };
 
 enum class QueueType : uint32_t {
@@ -107,7 +114,8 @@ enum class ShaderResourceType {
     RWTexture,
     RWBuffer,
     Sampler,
-    PushConstant
+    PushConstant,
+    RayTracing
 };
 
 enum class AddressMode {
@@ -138,6 +146,8 @@ enum class VertexStepMode {
 };
 
 enum class VertexFormat {
+    UNKNOWN,
+
     UINT8X2,
     UINT8X4,
     SINT8X2,
@@ -281,26 +291,51 @@ struct SamplerDescriptor {
     uint32_t AnisotropyClamp;
 };
 
-class ShaderResource {
+class DxilReflection {
 public:
-    radray::string Name;
-    ShaderResourceType Type;
-    TextureDimension Dim;
-    uint32_t Space;
-    uint32_t BindPoint;
-    uint32_t BindCount;
-    ShaderStages Stages;
-};
-
-class ShaderResourcesDescriptor {
-public:
-    struct StaticSamplerDescriptor : public SamplerDescriptor {
-        size_t Index;
+    class Variable {
+    public:
+        radray::string Name;
+        uint32_t Start;
+        uint32_t Size;
     };
 
-    radray::vector<ShaderResource> BindResources;
-    radray::vector<StaticSamplerDescriptor> StaticSamplers;
+    class CBuffer {
+    public:
+        radray::string Name;
+        radray::vector<Variable> Vars;
+        uint32_t Size;
+    };
+
+    class BindResource {
+    public:
+        radray::string Name;
+        ShaderResourceType Type;
+        TextureDimension Dim;
+        uint32_t Space;
+        uint32_t BindPoint;
+        uint32_t BindCount;
+    };
+
+    class VertexInput {
+    public:
+        VertexSemantic Semantic;
+        uint32_t SemanticIndex;
+        VertexFormat Format;
+    };
+
+public:
+    radray::vector<CBuffer> CBuffers;
+    radray::vector<BindResource> Binds;
+    radray::vector<VertexInput> VertexInputs;
+    std::array<uint32_t, 3> GroupSize;
 };
+
+class SpirvReflection {};
+
+class MslReflection {};
+
+using ShaderReflection = std::variant<DxilReflection, SpirvReflection, MslReflection>;
 
 struct VertexElement {
     uint64_t Offset;
@@ -405,5 +440,8 @@ std::string_view format_as(Backend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;
+std::string_view format_as(ShaderResourceType v) noexcept;
+std::string_view format_as(VertexSemantic v) noexcept;
+std::string_view format_as(VertexFormat v) noexcept;
 
 }  // namespace radray::render

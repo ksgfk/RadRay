@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <sstream>
+#include <optional>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
@@ -159,7 +160,6 @@ public:
             } else {
                 RADRAY_ERR_LOG("dxc cannot get reflection, code={}", hr);
             }
-            ToD3D12ShaderReflection(reflData);
         }
         return DxcOutput{
             .data = std::move(blobData),
@@ -167,7 +167,7 @@ public:
             .category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
     }
 
-    std::optional<DxilReflection> ToD3D12ShaderReflection(std::span<const byte> refl) noexcept {
+    std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
         DxcBuffer buf{refl.data(), refl.size(), 0};
         ComPtr<ID3D12ShaderReflection> sr;
         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
@@ -201,7 +201,7 @@ public:
                 vart.Size = varDesc.Size;
             }
         }
-        RADRAY_INFO_LOG("bind resources {}", shaderDesc.BoundResources);
+        result.Binds.reserve(shaderDesc.BoundResources);
         for (UINT i = 0; i < shaderDesc.BoundResources; i++) {
             D3D12_SHADER_INPUT_BIND_DESC bindDesc;
             if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
@@ -209,6 +209,131 @@ public:
                 RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SHADER_INPUT_BIND_DESC, code={}", hr);
                 return std::nullopt;
             }
+            auto&& br = result.Binds.emplace_back(DxilReflection::BindResource{});
+            br.Name = bindDesc.Name;
+            br.Type = ([](D3D_SHADER_INPUT_TYPE type, D3D_SRV_DIMENSION dim) noexcept -> ShaderResourceType {
+                if (type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && dim == D3D_SRV_DIMENSION_BUFFER) {
+                    return ShaderResourceType::RWBuffer;
+                }
+                if (type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && dim == D3D_SRV_DIMENSION_BUFFER) {
+                    return ShaderResourceType::Buffer;
+                }
+                switch (type) {
+                    case D3D_SIT_CBUFFER: return ShaderResourceType::CBuffer;
+                    case D3D_SIT_TBUFFER: return ShaderResourceType::Buffer;
+                    case D3D_SIT_TEXTURE: return ShaderResourceType::Texture;
+                    case D3D_SIT_SAMPLER: return ShaderResourceType::Sampler;
+                    case D3D_SIT_UAV_RWTYPED: return ShaderResourceType::RWTexture;
+                    case D3D_SIT_STRUCTURED: return ShaderResourceType::Buffer;
+                    case D3D_SIT_UAV_RWSTRUCTURED: return ShaderResourceType::RWBuffer;
+                    case D3D_SIT_BYTEADDRESS: return ShaderResourceType::Buffer;
+                    case D3D_SIT_UAV_RWBYTEADDRESS: return ShaderResourceType::RWBuffer;
+                    case D3D_SIT_UAV_APPEND_STRUCTURED: return ShaderResourceType::RWBuffer;
+                    case D3D_SIT_UAV_CONSUME_STRUCTURED: return ShaderResourceType::RWBuffer;
+                    case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: return ShaderResourceType::RWBuffer;
+                    case D3D_SIT_RTACCELERATIONSTRUCTURE: return ShaderResourceType::RayTracing;
+                    case D3D_SIT_UAV_FEEDBACKTEXTURE: return ShaderResourceType::RWTexture;
+                }
+            })(bindDesc.Type, bindDesc.Dimension);
+            br.Dim = ([](D3D_SRV_DIMENSION dim) noexcept -> TextureDimension {
+                switch (dim) {
+                    case D3D_SRV_DIMENSION_UNKNOWN: return TextureDimension::UNKNOWN;
+                    case D3D_SRV_DIMENSION_BUFFER: return TextureDimension::UNKNOWN;
+                    case D3D_SRV_DIMENSION_TEXTURE1D: return TextureDimension::Dim1D;
+                    case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return TextureDimension::Dim1DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE2D: return TextureDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return TextureDimension::Dim2DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE2DMS: return TextureDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return TextureDimension::Dim2DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE3D: return TextureDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURECUBE: return TextureDimension::Cube;
+                    case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return TextureDimension::CubeArray;
+                    case D3D_SRV_DIMENSION_BUFFEREX: return TextureDimension::UNKNOWN;
+                }
+            })(bindDesc.Dimension);
+            br.Space = bindDesc.Space;
+            br.BindPoint = bindDesc.BindPoint;
+            br.BindCount = bindDesc.BindCount;
+        }
+        if (stage == ShaderStage::Vertex) {
+            result.VertexInputs.reserve(shaderDesc.InputParameters);
+            RADRAY_INFO_LOG("- inputs {}", shaderDesc.InputParameters);
+            for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
+                D3D12_SIGNATURE_PARAMETER_DESC spDesc;
+                if (HRESULT hr = sr->GetInputParameterDesc(i, &spDesc);
+                    hr != S_OK) {
+                    RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SIGNATURE_PARAMETER_DESC, code={}", hr);
+                    return std::nullopt;
+                }
+                auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
+                auto semOpt = ([](std::string_view name) noexcept -> std::optional<VertexSemantic> {
+                    if (name == "POSITION") {
+                        return VertexSemantic::Position;
+                    } else if (name == "NORMAL") {
+                        return VertexSemantic::Normal;
+                    } else if (name == "TEXCOORD") {
+                        return VertexSemantic::Texcoord;
+                    } else if (name == "TANGENT") {
+                        return VertexSemantic::Tangent;
+                    } else if (name == "COLOR") {
+                        return VertexSemantic::Color;
+                    } else if (name == "PSIZE") {
+                        return VertexSemantic::PSize;
+                    } else if (name == "BINORMAL") {
+                        return VertexSemantic::BiNormal;
+                    } else if (name == "BLENDINDICES") {
+                        return VertexSemantic::BlendIndices;
+                    } else if (name == "BLENDWEIGHT") {
+                        return VertexSemantic::BlendWeight;
+                    } else if (name == "POSITIONT") {
+                        return VertexSemantic::PositionT;
+                    } else {
+                        return std::nullopt;
+                    }
+                })(std::string_view{spDesc.SemanticName});
+                if (!semOpt.has_value()) {
+                    RADRAY_ERR_LOG("dxc ID3D12ShaderReflection unknown vertex input semantic {}", spDesc.SemanticName);
+                    return std::nullopt;
+                }
+                vi.Semantic = semOpt.value();
+                vi.SemanticIndex = spDesc.SemanticIndex;
+                uint32_t comps = static_cast<uint32_t>(std::log2(spDesc.Mask));
+                vi.Format = ([](D3D_REGISTER_COMPONENT_TYPE type, uint32_t coms) noexcept -> VertexFormat {
+                    switch (type) {
+                        case D3D_REGISTER_COMPONENT_UNKNOWN: return VertexFormat::UNKNOWN;
+                        case D3D_REGISTER_COMPONENT_UINT32:
+                            switch (coms) {
+                                case 0: return VertexFormat::UINT32;
+                                case 1: return VertexFormat::UINT32X2;
+                                case 2: return VertexFormat::UINT32X3;
+                                case 3: return VertexFormat::UINT32X4;
+                                default: return VertexFormat::UNKNOWN;
+                            }
+                        case D3D_REGISTER_COMPONENT_SINT32:
+                            switch (coms) {
+                                case 0: return VertexFormat::SINT32;
+                                case 1: return VertexFormat::SINT32X2;
+                                case 2: return VertexFormat::SINT32X3;
+                                case 3: return VertexFormat::SINT32X4;
+                                default: return VertexFormat::UNKNOWN;
+                            }
+                        case D3D_REGISTER_COMPONENT_FLOAT32:
+                            switch (coms) {
+                                case 0: return VertexFormat::FLOAT32;
+                                case 1: return VertexFormat::FLOAT32X2;
+                                case 2: return VertexFormat::FLOAT32X3;
+                                case 3: return VertexFormat::FLOAT32X4;
+                                default: return VertexFormat::UNKNOWN;
+                            }
+                    }
+                })(spDesc.ComponentType, comps);
+                RADRAY_INFO_LOG(" - attr {}{} {}", vi.Semantic, vi.SemanticIndex, vi.Format);
+            }
+        }
+        if (stage == ShaderStage::Compute) {
+            UINT x, y, z;
+            sr->GetThreadGroupSize(&x, &y, &z);
+            result.GroupSize = {x, y, z};
         }
         return result;
     }
@@ -332,8 +457,8 @@ std::optional<DxcOutput> Dxc::Compile(
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
-std::optional<DxilReflection> Dxc::GetDxilReflection(std::span<const byte> refl) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->ToD3D12ShaderReflection(refl);
+std::optional<DxilReflection> Dxc::GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->GetDxilReflection(stage, refl);
 }
 
 }  // namespace radray::render

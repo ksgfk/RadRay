@@ -45,26 +45,19 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
 
 std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
-    std::span<const byte> refl,
-    ShaderBlobCategory category,
+    const ShaderReflection& refl,
     ShaderStage stage,
     std::string_view entryPoint,
     std::string_view name) noexcept {
-    if (category != ShaderBlobCategory::DXIL) {
-        RADRAY_ERR_LOG("d3d12 can only use dxil shader, cannot use {}", category);
+    auto dxilRefl = std::get_if<DxilReflection>(&refl);
+    if (dxilRefl == nullptr) {
+        RADRAY_ERR_LOG("d3d12 can only use dxil shader");
         return std::nullopt;
     }
-    return radray::make_shared<Dxil>(blob, refl, entryPoint, name, stage);
+    return radray::make_shared<Dxil>(blob, *dxilRefl, entryPoint, name, stage);
 }
 
-std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(
-    std::span<Shader*> shaders,
-    const ShaderResourcesDescriptor& resources) noexcept {
-    for (auto i : shaders) {
-        Dxil* il = static_cast<Dxil*>(i);
-        
-    }
-
+std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
     return std::nullopt;
 }
 

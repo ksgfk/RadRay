@@ -90,4 +90,68 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
     }
 }
 
+std::string_view format_as(ShaderResourceType v) noexcept {
+    switch (v) {
+        case ShaderResourceType::CBuffer: return "CBuffer";
+        case ShaderResourceType::Texture: return "Texture";
+        case ShaderResourceType::Buffer: return "Buffer";
+        case ShaderResourceType::RWTexture: return "RWTexture";
+        case ShaderResourceType::RWBuffer: return "RWBuffer";
+        case ShaderResourceType::Sampler: return "Sampler";
+        case ShaderResourceType::PushConstant: return "PushConstant";
+        case ShaderResourceType::RayTracing: return "RayTracing";
+    }
+}
+
+std::string_view format_as(VertexSemantic v) noexcept {
+    switch (v) {
+        case VertexSemantic::Position: return "POSITION";
+        case VertexSemantic::Normal: return "NORMAL";
+        case VertexSemantic::Texcoord: return "TEXCOORD";
+        case VertexSemantic::Tangent: return "TANGENT";
+        case VertexSemantic::Color: return "COLOR";
+        case VertexSemantic::PSize: return "PSIZE";
+        case VertexSemantic::BiNormal: return "BINORMAL";
+        case VertexSemantic::BlendIndices: return "BLENDINDICES";
+        case VertexSemantic::BlendWeight: return "BLENDWEIGHT";
+        case VertexSemantic::PositionT: return "POSITIONT";
+    }
+}
+
+std::string_view format_as(VertexFormat v) noexcept {
+    switch (v) {
+        case VertexFormat::UNKNOWN: return "UNKNOWN";
+        case VertexFormat::UINT8X2: return "byte2";
+        case VertexFormat::UINT8X4: return "byte4";
+        case VertexFormat::SINT8X2: return "char2";
+        case VertexFormat::SINT8X4: return "char4";
+        case VertexFormat::UNORM8X2: return "unorm8x2";
+        case VertexFormat::UNORM8X4: return "unorm8x4";
+        case VertexFormat::SNORM8X2: return "snorm8x2";
+        case VertexFormat::SNORM8X4: return "snorm8x4";
+        case VertexFormat::UINT16x2: return "ushort2";
+        case VertexFormat::UINT16x4: return "ushort4";
+        case VertexFormat::SINT16X2: return "short2";
+        case VertexFormat::SINT16X4: return "short4";
+        case VertexFormat::UNORM16X2: return "unorm16x2";
+        case VertexFormat::UNORM16X4: return "unorm16x4";
+        case VertexFormat::SNORM16X2: return "snorm16x2";
+        case VertexFormat::SNORM16X4: return "snorm16x4";
+        case VertexFormat::FLOAT16X2: return "half2";
+        case VertexFormat::FLOAT16X4: return "half4";
+        case VertexFormat::UINT32: return "uint";
+        case VertexFormat::UINT32X2: return "uint2";
+        case VertexFormat::UINT32X3: return "uint3";
+        case VertexFormat::UINT32X4: return "uint4";
+        case VertexFormat::SINT32: return "int";
+        case VertexFormat::SINT32X2: return "int2";
+        case VertexFormat::SINT32X3: return "int3";
+        case VertexFormat::SINT32X4: return "int4";
+        case VertexFormat::FLOAT32: return "float";
+        case VertexFormat::FLOAT32X2: return "float2";
+        case VertexFormat::FLOAT32X3: return "float3";
+        case VertexFormat::FLOAT32X4: return "float4";
+    }
+}
+
 }  // namespace radray::render

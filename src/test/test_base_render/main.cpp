@@ -54,9 +54,9 @@ int main() {
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
-        ShaderBlobCategory cate = outp.category;
+        ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Vertex, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, outp.refl, cate, ShaderStage::Vertex, entry, "colorVS").value();
+        auto shader = device->CreateShader(blob, refl, ShaderStage::Vertex, entry, "colorVS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
     }
     {
@@ -83,9 +83,9 @@ int main() {
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
-        ShaderBlobCategory cate = outp.category;
+        ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, outp.refl, cate, ShaderStage::Pixel, entry, "colorPS").value();
+        auto shader = device->CreateShader(blob, refl, ShaderStage::Pixel, entry, "colorPS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
     }
     return 0;
