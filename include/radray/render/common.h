@@ -94,6 +94,7 @@ enum class QueueType : uint32_t {
 };
 
 enum class ShaderStage : uint32_t {
+    UNKNOWN = 0x0,
     Vertex = 0x1,
     Pixel = 0x2,
     Compute = 0x4
@@ -328,6 +329,7 @@ public:
     radray::vector<CBuffer> CBuffers;
     radray::vector<BindResource> Binds;
     radray::vector<VertexInput> VertexInputs;
+    radray::vector<radray::string> StaticSamplers;
     std::array<uint32_t, 3> GroupSize;
 };
 

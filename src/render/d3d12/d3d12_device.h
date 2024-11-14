@@ -22,7 +22,7 @@ public:
 
     std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
-         const ShaderReflection& refl,
+        const ShaderReflection& refl,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept override;

@@ -6,6 +6,8 @@
 #include <string_view>
 #include <type_traits>
 #include <span>
+#include <iterator>
+#include <concepts>
 
 #include <radray/types.h>
 
@@ -27,6 +29,9 @@
     }                                                                                       \
     constexpr bool HasFlag(flags that, etype l) noexcept {                                  \
         return (that & l) == l;                                                             \
+    }                                                                                       \
+    constexpr flags ToFlags(etype v) noexcept {                                             \
+        return static_cast<flags>(v);                                                       \
     }
 
 namespace radray {
@@ -70,6 +75,14 @@ constexpr auto ArrayLength(const T& arr) noexcept {
     RADRAY_UNUSED(arr);
     return ArrayTrait<T>::length;
 }
+
+template <typename Iter>
+concept IsIterator = requires(Iter ite, size_t n) {
+    { *ite };
+    { !std::is_integral_v<Iter> };
+    { std::distance(ite, ite) } -> std::same_as<typename std::iterator_traits<Iter>::difference_type>;
+    { std::advance(ite, n) };
+};
 
 class Noncopyable {
 protected:

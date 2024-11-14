@@ -58,6 +58,75 @@ std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
 }
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
+    class StageResource {
+    public:
+        DxilReflection::BindResource Base;
+        ShaderStages Stages;
+    };
+    // 收集所有 bind resource
+    radray::vector<StageResource> resources;
+    radray::vector<StageResource> samplers;
+    radray::vector<StageResource> staticSamplers;
+    ShaderStages shaderStages{ToFlags(ShaderStage::UNKNOWN)};
+    for (Shader* i : shaders) {
+        Dxil* dxil = static_cast<Dxil*>(i);
+        shaderStages |= dxil->Stage;
+        const auto& refl = dxil->_refl;
+        for (const DxilReflection::BindResource& j : refl.Binds) {
+            StageResource res{j, ToFlags(dxil->Stage)};
+            if (j.Type == ShaderResourceType::Sampler) {
+                const auto& stat = refl.StaticSamplers;
+                auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v; });
+                if (iter == stat.end()) {
+                    samplers.emplace_back(res);
+                } else {
+                    staticSamplers.emplace_back(res);
+                }
+            } else {
+                resources.emplace_back(res);
+            }
+        }
+    }
+    // 合并不同 stage 所需相同资源, 也就是 Space 和 Bind 一致的资源. 把 cbuffer 放前面, 其他类型资源放后面, 再按 Space, BindPoint 排序
+    auto merge = [](const radray::vector<StageResource>& res) noexcept {
+        radray::vector<StageResource> result;
+        for (const StageResource& i : res) {
+            auto iter = std::find_if(result.begin(), result.end(), [&](auto&& v) noexcept {
+                return v.Base.Space == i.Base.Space && v.Base.BindPoint == i.Base.BindPoint && v.Base.Type == i.Base.Type;
+            });
+            if (iter == result.end()) {
+                result.emplace_back(i);
+            } else {
+                iter->Stages |= i.Stages;
+            }
+        }
+        return result;
+    };
+    auto&& resCmp = [](const auto& lhs, const auto& rhs) noexcept {
+        if (lhs.Base.Type == ShaderResourceType::CBuffer && rhs.Base.Type != ShaderResourceType::CBuffer) {
+            return true;
+        }
+        if (lhs.Base.Type != ShaderResourceType::CBuffer && rhs.Base.Type == ShaderResourceType::CBuffer) {
+            return false;
+        }
+        if (lhs.Base.Space == rhs.Base.Space) {
+            return lhs.Base.BindPoint < rhs.Base.BindPoint;
+        } else {
+            return lhs.Base.Space < rhs.Base.Space;
+        }
+    };
+    radray::vector<StageResource> mergeBinds = merge(resources);
+    radray::vector<StageResource> mergeSamplers = merge(samplers);
+    radray::vector<StageResource> mergeStaticSamplers = merge(staticSamplers);
+    std::sort(mergeBinds.begin(), mergeBinds.end(), resCmp);
+    std::sort(mergeSamplers.begin(), mergeSamplers.end(), resCmp);
+    std::sort(mergeStaticSamplers.begin(), mergeStaticSamplers.end(), resCmp);
+    // https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits
+    // root sig 最大可存 64 DWORD
+    // - 1 Descriptor Table 消耗 1 DWORD
+    // - 1 Root Constant 消耗 1 DWORD
+    // - 1 Root Descriptor 消耗 2 DWORD
+    // 尝试将 cbuffer 用 root constant 存储, 计算会不会超出 root sig 大小限制, 超出限制的话, 再尝试用 root descriptor, 最后才是按 space 划分 descriptor table
     return std::nullopt;
 }
 

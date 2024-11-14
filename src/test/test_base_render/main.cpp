@@ -30,6 +30,7 @@ int main() {
 #elif defined(RADRAY_PLATFORM_WINDOWS)
     bool isSpirv = false;
 #endif
+    radray::shared_ptr<Shader> vs, ps;
     {
         std::string_view includes[] = {std::string_view{"shaders"}};
         auto color = ReadText(std::filesystem::path("shaders") / "DefaultVS.hlsl").value();
@@ -58,6 +59,7 @@ int main() {
 #endif
         auto shader = device->CreateShader(blob, refl, ShaderStage::Vertex, entry, "colorVS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
+        vs = std::move(shader);
     }
     {
         std::string_view includes[] = {std::string_view{"shaders"}};
@@ -87,6 +89,12 @@ int main() {
 #endif
         auto shader = device->CreateShader(blob, refl, ShaderStage::Pixel, entry, "colorPS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
+        ps = std::move(shader);
+    }
+    {
+        Shader* shaders[] = {vs.get(), ps.get()};
+        auto rootSig = device->CreateRootSignature(shaders);
+        RADRAY_INFO_LOG("done? {}", rootSig.has_value());
     }
     return 0;
 }
