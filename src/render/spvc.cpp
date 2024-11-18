@@ -123,6 +123,7 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                     RADRAY_ERR_LOG("cannot convert SPIR-V execution model to stage {}", spvEP.model);
                     return std::nullopt;
                 }
+                ep.emplace_back(SpvcEntryPoint{radray::string{spvEP.name}, stage.value()});
                 // spirv_cross::ShaderResources res = mslc.get_shader_resources(mslc.get_active_interface_variables());
                 // for (const auto& j : res.uniform_buffers) {
                 //     auto set = mslc.get_decoration(j.id, spv::DecorationDescriptorSet);
@@ -164,7 +165,14 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                 //     auto loc = mslc.get_decoration(j.id, spv::DecorationLocation);
                 //     RADRAY_INFO_LOG("storage buffers: {}\tset={} bind={} loc={}", j.name, set, binding, loc);
                 // }
-                ep.emplace_back(SpvcEntryPoint{radray::string{spvEP.name}, stage.value()});
+            }
+            spirv_cross::ShaderResources res = mslc.get_shader_resources(mslc.get_active_interface_variables());
+            for (const auto& j : res.stage_inputs) {
+                auto loc = mslc.get_decoration(j.id, spv::DecorationLocation);
+                auto t = mslc.get_type(j.type_id);
+                RADRAY_INFO_LOG("stage input: {}", j.name);
+                RADRAY_INFO_LOG("- location={}", loc);
+                RADRAY_INFO_LOG("- type={}{}", spirv_cross::format_as(t.basetype), t.vecsize);
             }
         }
         return SpvcMslOutput{msl, ep};

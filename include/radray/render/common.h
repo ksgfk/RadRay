@@ -336,7 +336,19 @@ public:
 
 class SpirvReflection {};
 
-class MslReflection {};
+class MslReflection {
+public:
+    class VertexInput {
+    public:
+        radray::string Name;
+        uint32_t Location;
+        VertexFormat Format;
+        VertexSemantic Semantic;
+        uint32_t SemanticIndex;
+    };
+
+    radray::vector<VertexInput> VertexInputs;
+};
 
 using ShaderReflection = std::variant<DxilReflection, SpirvReflection, MslReflection>;
 

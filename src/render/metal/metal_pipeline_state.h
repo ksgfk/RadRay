@@ -15,15 +15,7 @@ public:
         MTL::CullMode cull,
         MTL::DepthClipMode depthClip,
         NS::SharedPtr<MTL::DepthStencilState> depthStencil,
-        DepthBiasState depthBias) noexcept
-        : _pso(std::move(pso)),
-          _primType(primType),
-          _fill(fill),
-          _winding(winding),
-          _cull(cull),
-          _depthClip(depthClip),
-          _depthStencil(std::move(depthStencil)),
-          _depthBias(depthBias) {}
+        DepthBiasState depthBias) noexcept;
     ~RenderPipelineStateMetal() noexcept override = default;
 
     bool IsValid() const noexcept override { return _pso.get() != nullptr; }
