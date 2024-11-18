@@ -157,8 +157,8 @@ enum class VertexFormat {
     UNORM8X4,
     SNORM8X2,
     SNORM8X4,
-    UINT16x2,
-    UINT16x4,
+    UINT16X2,
+    UINT16X4,
     SINT16X2,
     SINT16X4,
     UNORM16X2,
@@ -275,6 +275,7 @@ using ColorWrites = std::underlying_type_t<ColorWrite>;
 RADRAY_FLAG_ENUM(ColorWrite, ColorWrites);
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 
 class RootSignature;
 class Shader;
@@ -396,7 +397,7 @@ struct DepthStencilState {
 struct MultiSampleState {
     uint32_t Count;
     uint64_t Mask;
-    bool AlphaTocoverageEnable;
+    bool AlphaToCoverageEnable;
 };
 
 struct BlendComponent {

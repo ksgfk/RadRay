@@ -13,6 +13,42 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept {
     }
 }
 
+uint32_t GetVertexFormatSize(VertexFormat format) noexcept {
+    switch (format) {
+        case VertexFormat::UINT8X2:
+        case VertexFormat::SINT8X2:
+        case VertexFormat::UNORM8X2:
+        case VertexFormat::SNORM8X2: return 2;
+        case VertexFormat::UINT8X4:
+        case VertexFormat::SINT8X4:
+        case VertexFormat::UNORM8X4:
+        case VertexFormat::SNORM8X4:
+        case VertexFormat::UINT16X2:
+        case VertexFormat::SINT16X2:
+        case VertexFormat::UNORM16X2:
+        case VertexFormat::SNORM16X2:
+        case VertexFormat::FLOAT16X2:
+        case VertexFormat::UINT32:
+        case VertexFormat::SINT32:
+        case VertexFormat::FLOAT32: return 4;
+        case VertexFormat::UINT16X4:
+        case VertexFormat::SINT16X4:
+        case VertexFormat::UNORM16X4:
+        case VertexFormat::SNORM16X4:
+        case VertexFormat::FLOAT16X4:
+        case VertexFormat::UINT32X2:
+        case VertexFormat::SINT32X2:
+        case VertexFormat::FLOAT32X2: return 8;
+        case VertexFormat::UINT32X3:
+        case VertexFormat::SINT32X3:
+        case VertexFormat::FLOAT32X3: return 12;
+        case VertexFormat::UINT32X4:
+        case VertexFormat::SINT32X4:
+        case VertexFormat::FLOAT32X4: return 16;
+        case VertexFormat::UNKNOWN: return 0;
+    }
+}
+
 std::string_view format_as(Backend v) noexcept {
     switch (v) {
         case Backend::D3D12: return "D3D12";
@@ -129,8 +165,8 @@ std::string_view format_as(VertexFormat v) noexcept {
         case VertexFormat::UNORM8X4: return "unorm8x4";
         case VertexFormat::SNORM8X2: return "snorm8x2";
         case VertexFormat::SNORM8X4: return "snorm8x4";
-        case VertexFormat::UINT16x2: return "ushort2";
-        case VertexFormat::UINT16x4: return "ushort4";
+        case VertexFormat::UINT16X2: return "ushort2";
+        case VertexFormat::UINT16X4: return "ushort4";
         case VertexFormat::SINT16X2: return "short2";
         case VertexFormat::SINT16X4: return "short4";
         case VertexFormat::UNORM16X2: return "unorm16x2";

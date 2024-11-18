@@ -176,6 +176,64 @@ MTL::StencilOperation MapType(StencilOperation v) noexcept {
     }
 }
 
+MTL::VertexStepFunction MapType(VertexStepMode v) noexcept {
+    switch (v) {
+        case VertexStepMode::Vertex: return MTL::VertexStepFunctionPerVertex;
+        case VertexStepMode::Instance: return MTL::VertexStepFunctionPerInstance;
+    }
+}
+
+MTL::VertexFormat MapType(VertexFormat v) noexcept {
+    switch (v) {
+        case VertexFormat::UNKNOWN: return MTL::VertexFormatInvalid;
+        case VertexFormat::UINT8X2: return MTL::VertexFormatUChar2;
+        case VertexFormat::UINT8X4: return MTL::VertexFormatUChar4;
+        case VertexFormat::SINT8X2: return MTL::VertexFormatChar2;
+        case VertexFormat::SINT8X4: return MTL::VertexFormatChar4;
+        case VertexFormat::UNORM8X2: return MTL::VertexFormatUChar2Normalized;
+        case VertexFormat::UNORM8X4: return MTL::VertexFormatUChar4Normalized;
+        case VertexFormat::SNORM8X2: return MTL::VertexFormatChar2Normalized;
+        case VertexFormat::SNORM8X4: return MTL::VertexFormatChar4Normalized;
+        case VertexFormat::UINT16X2: return MTL::VertexFormatUShort2;
+        case VertexFormat::UINT16X4: return MTL::VertexFormatUShort4;
+        case VertexFormat::SINT16X2: return MTL::VertexFormatShort2;
+        case VertexFormat::SINT16X4: return MTL::VertexFormatShort4;
+        case VertexFormat::UNORM16X2: return MTL::VertexFormatUShort2Normalized;
+        case VertexFormat::UNORM16X4: return MTL::VertexFormatUShort4Normalized;
+        case VertexFormat::SNORM16X2: return MTL::VertexFormatShort2Normalized;
+        case VertexFormat::SNORM16X4: return MTL::VertexFormatShort4Normalized;
+        case VertexFormat::FLOAT16X2: return MTL::VertexFormatHalf2;
+        case VertexFormat::FLOAT16X4: return MTL::VertexFormatHalf4;
+        case VertexFormat::FLOAT32: return MTL::VertexFormatFloat;
+        case VertexFormat::FLOAT32X2: return MTL::VertexFormatFloat2;
+        case VertexFormat::FLOAT32X3: return MTL::VertexFormatFloat3;
+        case VertexFormat::FLOAT32X4: return MTL::VertexFormatFloat4;
+        case VertexFormat::UINT32: return MTL::VertexFormatUInt;
+        case VertexFormat::UINT32X2: return MTL::VertexFormatUInt2;
+        case VertexFormat::UINT32X3: return MTL::VertexFormatUInt3;
+        case VertexFormat::UINT32X4: return MTL::VertexFormatUInt4;
+        case VertexFormat::SINT32: return MTL::VertexFormatInt;
+        case VertexFormat::SINT32X2: return MTL::VertexFormatInt2;
+        case VertexFormat::SINT32X3: return MTL::VertexFormatInt3;
+        case VertexFormat::SINT32X4: return MTL::VertexFormatInt4;
+    }
+}
+
+MTL::Winding MapType(FrontFace v) noexcept {
+    switch (v) {
+        case FrontFace::CCW: return MTL::WindingCounterClockwise;
+        case FrontFace::CW: return MTL::WindingClockwise;
+    }
+}
+
+MTL::CullMode MapType(CullMode v) noexcept {
+    switch (v) {
+        case CullMode::None: return MTL::CullModeNone;
+        case CullMode::Front: return MTL::CullModeFront;
+        case CullMode::Back: return MTL::CullModeBack;
+    }
+}
+
 }  // namespace radray::render::metal
 
 namespace MTL {

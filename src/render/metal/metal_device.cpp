@@ -1,8 +1,10 @@
 #include "metal_device.h"
 
+#include <radray/basic_math.h>
 #include <radray/render/shader.h>
 #include "metal_function.h"
 #include "metal_root_sig.h"
+#include "metal_pipeline_state.h"
 
 namespace radray::render::metal {
 
@@ -90,7 +92,11 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
     const GraphicsPipelineStateDescriptor& desc) noexcept {
     return AutoRelease([this, &desc]() noexcept -> std::optional<radray::shared_ptr<GraphicsPipelineState>> {
         auto rpd = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
-        rpd->setLabel(StringCppToNS(desc.Name)->autorelease());
+        if (desc.Name.size() > 0) {
+            rpd->setLabel(StringCppToNS(desc.Name)->autorelease());
+        }
+        rpd->setVertexFunction(static_cast<FunctionMetal*>(desc.VS)->_func.get());
+        rpd->setFragmentFunction(static_cast<FunctionMetal*>(desc.PS)->_func.get());
         MTL::TriangleFillMode rawFillMode;
         if (auto fillMode = MapType(desc.Primitive.Poly);
             fillMode.has_value()) {
@@ -99,7 +105,8 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
             RADRAY_ERR_LOG("metal unsupported polygon mode {}", desc.Primitive.Poly);
             return std::nullopt;
         }
-        auto [rawPrimClass, rawPrimType] = MapType(desc.Primitive.Topology);
+        auto&& [rawPrimClass, rawPrimType] = MapType(desc.Primitive.Topology);
+        rpd->setInputPrimitiveTopology(rawPrimClass);
         for (size_t i = 0; i < desc.ColorTargets.size(); i++) {
             const ColorTargetState& cts = desc.ColorTargets[i];
             MTL::RenderPipelineColorAttachmentDescriptor* cad = rpd->colorAttachments()->object(i);
@@ -122,6 +129,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
                 cad->setDestinationAlphaBlendFactor(alphaDst);
             }
         }
+        MTL::DepthStencilState* rawDepthStencil = nullptr;
         if (desc.DepthStencilEnable) {
             const DepthStencilState& ds = desc.DepthStencil;
             auto dsFmt = ds.Format;
@@ -154,9 +162,59 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
                 dsd->setFrontFaceStencil(createStencilDesc(ds.Stencil.Front, ds.Stencil.ReadMask, ds.Stencil.WriteMask));
                 dsd->setBackFaceStencil(createStencilDesc(ds.Stencil.Back, ds.Stencil.ReadMask, ds.Stencil.WriteMask));
             }
-            MTL::DepthStencilState* dss = _device->newDepthStencilState(dsd);
+            rawDepthStencil = _device->newDepthStencilState(dsd);
         }
-        return std::nullopt;
+        if (desc.VertexBuffers.size() > 0) {
+            auto vd = MTL::VertexDescriptor::alloc()->init()->autorelease();
+            for (size_t i = 0; i < desc.VertexBuffers.size(); i++) {
+                const VertexBufferLayout& vbl = desc.VertexBuffers[i];
+                MTL::VertexBufferLayoutDescriptor* vbld = vd->layouts()->object(i);
+                if (vbl.ArrayStride == 0) {
+                    uint64_t stride = 0;
+                    for (const VertexElement& j : vbl.Elements) {
+                        stride = std::max(stride, j.Offset + GetVertexFormatSize(j.Format));
+                    }
+                    vbld->setStride(CalcAlign(stride, 4));
+                    vbld->setStepFunction(MTL::VertexStepFunctionConstant);
+                    vbld->setStepRate(0);
+                } else {
+                    vbld->setStride(vbl.ArrayStride);
+                    vbld->setStepFunction(MapType(vbl.StepMode));
+                }
+                for (size_t j = 0; j < vbl.Elements.size(); j++) {
+                    const VertexElement& ve = vbl.Elements[j];
+                    MTL::VertexAttributeDescriptor* vad = vd->attributes()->object(ve.Location);
+                    vad->setFormat(MapType(ve.Format));
+                    vad->setBufferIndex(i);
+                    vad->setOffset(ve.Offset);
+                }
+            }
+            rpd->setVertexDescriptor(vd);
+        }
+        if (desc.MultiSample.Count != 1) {
+            rpd->setSampleCount(desc.MultiSample.Count);
+            rpd->setAlphaToCoverageEnabled(desc.MultiSample.AlphaToCoverageEnable);
+        }
+        NS::Error* err{nullptr};
+        MTL::RenderPipelineState* pso = _device->newRenderPipelineState(rpd, &err);
+        if (err != nullptr) {
+            err->autorelease();
+            RADRAY_ERR_LOG("metal cannot new render pipeline state\n{}", err->localizedDescription()->utf8String());
+            return std::nullopt;
+        }
+        MTL::Winding rawWinding = MapType(desc.Primitive.FaceClockwise);
+        MTL::CullMode rawCullMode = MapType(desc.Primitive.Cull);
+        MTL::DepthClipMode rawDepthClip = desc.Primitive.UnclippedDepth ? MTL::DepthClipModeClamp : MTL::DepthClipModeClip;
+        auto psoMetal = radray::make_shared<RenderPipelineStateMetal>(
+            NS::TransferPtr(pso),
+            rawPrimType,
+            rawFillMode,
+            rawWinding,
+            rawCullMode,
+            rawDepthClip,
+            NS::TransferPtr(rawDepthStencil),
+            desc.DepthStencil.DepthBias);
+        return std::static_pointer_cast<GraphicsPipelineState>(psoMetal);
     });
 }
 

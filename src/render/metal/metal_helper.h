@@ -44,6 +44,10 @@ MTL::BlendFactor MapType(BlendFactor v) noexcept;
 std::tuple<MTL::BlendOperation, MTL::BlendFactor, MTL::BlendFactor> MapType(BlendComponent v) noexcept;
 MTL::CompareFunction MapType(CompareFunction v) noexcept;
 MTL::StencilOperation MapType(StencilOperation v) noexcept;
+MTL::VertexStepFunction MapType(VertexStepMode v) noexcept;
+MTL::VertexFormat MapType(VertexFormat v) noexcept;
+MTL::Winding MapType(FrontFace v) noexcept;
+MTL::CullMode MapType(CullMode v) noexcept;
 
 }  // namespace radray::render::metal
 

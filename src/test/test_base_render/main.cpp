@@ -92,7 +92,66 @@ int main() {
     {
         Shader* shaders[] = {vs.get(), ps.get()};
         auto rootSig = device->CreateRootSignature(shaders);
-        RADRAY_INFO_LOG("done? {}", rootSig.has_value());
+        RADRAY_INFO_LOG("root sig done? {}", rootSig.has_value());
+        GraphicsPipelineStateDescriptor desc{
+            "color pso",
+            rootSig.value().get(),
+            vs.get(),
+            ps.get(),
+            {VertexBufferLayout{
+                56,
+                VertexStepMode::Vertex,
+                {
+                    VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0},
+                    VertexElement{12, VertexSemantic::Normal, 0, VertexFormat::FLOAT32X3, 1},
+                    VertexElement{24, VertexSemantic::Tangent, 0, VertexFormat::FLOAT32X4, 2},
+                    VertexElement{40, VertexSemantic::Texcoord, 0, VertexFormat::FLOAT32X2, 3},
+                    VertexElement{48, VertexSemantic::Texcoord, 1, VertexFormat::FLOAT32X2, 4},
+                }}},
+            PrimitiveState{
+                PrimitiveTopology::TriangleList,
+                IndexFormat::UINT32,
+                FrontFace::CCW,
+                CullMode::Back,
+                PolygonMode::Fill,
+                false,
+                false},
+            DepthStencilState{
+                TextureFormat::D32_FLOAT,
+                CompareFunction::LessEqual,
+                StencilState{
+                    StencilFaceState{
+                        CompareFunction::Always,
+                        StencilOperation::Keep,
+                        StencilOperation::Keep,
+                        StencilOperation::Keep},
+                    StencilFaceState{
+                        CompareFunction::Always,
+                        StencilOperation::Keep,
+                        StencilOperation::Keep,
+                        StencilOperation::Keep},
+                    0xFF,
+                    0xFF},
+                DepthBiasState{0, 0.0f, 0.0f},
+                true,
+                false},
+            MultiSampleState{
+                1,
+                0,
+                false},
+            {ColorTargetState{
+                TextureFormat::BGRA8_UNORM,
+                {{BlendFactor::One,
+                  BlendFactor::Zero,
+                  BlendOperation::Add},
+                 {BlendFactor::One,
+                  BlendFactor::Zero,
+                  BlendOperation::Add}},
+                static_cast<ColorWrites>(ColorWrite::All),
+                false}},
+            true};
+        auto pso = device->CreateGraphicsPipeline(desc);
+        RADRAY_INFO_LOG("pso done? {}", pso.has_value());
     }
     return 0;
 }
