@@ -154,4 +154,12 @@ std::string_view format_as(VertexFormat v) noexcept {
     }
 }
 
+std::string_view format_as(PolygonMode v) noexcept {
+    switch (v) {
+        case PolygonMode::Fill: return "Fill";
+        case PolygonMode::Line: return "Line";
+        case PolygonMode::Point: return "Point";
+    }
+}
+
 }  // namespace radray::render

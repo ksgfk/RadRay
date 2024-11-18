@@ -33,7 +33,6 @@ public:
 class SpvcMslOutput {
 public:
     radray::string Msl;
-    radray::string SpvReflJson;
     radray::vector<SpvcEntryPoint> EntryPoints;
 };
 

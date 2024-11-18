@@ -47,17 +47,16 @@ int main() {
         RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
 #if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos).value();
-        RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
-        RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
+        // RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
+        // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
-        std::string entry = msl.EntryPoints.at(0).Name;
-        ShaderBlobCategory cate = ShaderBlobCategory::MSL;
+        radray::string entry = msl.EntryPoints.at(0).Name;
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
         ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Vertex, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, refl, ShaderStage::Vertex, entry, "colorVS").value();
+        auto shader = device->CreateShader(blob, MslReflection{}, ShaderStage::Vertex, entry, "colorVS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
         vs = std::move(shader);
     }
@@ -77,17 +76,16 @@ int main() {
         RADRAY_INFO_LOG("type={} size={}", outp.category, outp.data.size());
 #if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         auto msl = SpirvToMsl(outp.data, MslVersion::MSL24, MslPlatform::Macos).value();
-        RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
-        RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
+        // RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
+        // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
-        std::string entry = msl.EntryPoints.at(0).Name;
-        ShaderBlobCategory cate = ShaderBlobCategory::MSL;
+        radray::string entry = msl.EntryPoints.at(0).Name;
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
         ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, refl, ShaderStage::Pixel, entry, "colorPS").value();
+        auto shader = device->CreateShader(blob, MslReflection{}, ShaderStage::Pixel, entry, "colorPS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
         ps = std::move(shader);
     }

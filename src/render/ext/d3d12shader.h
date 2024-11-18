@@ -1178,5 +1178,10 @@ extern "C" {
 }
 #endif //__cplusplus
     
+#ifndef RADRAY_PLATFORM_WINDOWS
+#undef __STRUCT__
+#undef interface
+#endif
+
 #endif //__D3D12SHADER_H__
 

@@ -368,7 +368,7 @@ struct StencilFaceState {
     CompareFunction Compare;
     StencilOperation FailOp;
     StencilOperation DepthFailOp;
-    StencilOperation ColorOp;
+    StencilOperation PassOp;
 };
 
 struct StencilState {
@@ -390,6 +390,7 @@ struct DepthStencilState {
     StencilState Stencil;
     DepthBiasState DepthBias;
     bool DepthWriteEnable;
+    bool StencilEnable;
 };
 
 struct MultiSampleState {
@@ -445,5 +446,6 @@ std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(ShaderResourceType v) noexcept;
 std::string_view format_as(VertexSemantic v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
+std::string_view format_as(PolygonMode v) noexcept;
 
 }  // namespace radray::render

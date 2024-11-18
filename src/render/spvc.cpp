@@ -32,6 +32,37 @@ std::string_view format_as(ExecutionModel v) noexcept {
 }
 }  // namespace spv
 
+namespace spirv_cross {
+std::string_view format_as(SPIRType::BaseType v) noexcept {
+    switch (v) {
+        case SPIRType::Unknown: return "Unknown";
+        case SPIRType::Void: return "Void";
+        case SPIRType::Boolean: return "Boolean";
+        case SPIRType::SByte: return "SByte";
+        case SPIRType::UByte: return "UByte";
+        case SPIRType::Short: return "Short";
+        case SPIRType::UShort: return "UShort";
+        case SPIRType::Int: return "Int";
+        case SPIRType::UInt: return "UInt";
+        case SPIRType::Int64: return "Int64";
+        case SPIRType::UInt64: return "UInt64";
+        case SPIRType::AtomicCounter: return "AtomicCounter";
+        case SPIRType::Half: return "Half";
+        case SPIRType::Float: return "Float";
+        case SPIRType::Double: return "Double";
+        case SPIRType::Struct: return "Struct";
+        case SPIRType::Image: return "Image";
+        case SPIRType::SampledImage: return "SampledImage";
+        case SPIRType::Sampler: return "Sampler";
+        case SPIRType::AccelerationStructure: return "AccelerationStructure";
+        case SPIRType::RayQuery: return "RayQuery";
+        case SPIRType::ControlPointArray: return "ControlPointArray";
+        case SPIRType::Interpolant: return "Interpolant";
+        case SPIRType::Char: return "Char";
+    }
+}
+}  // namespace spirv_cross
+
 namespace radray::render {
 
 static spirv_cross::CompilerMSL::Options::Platform EnumConvertSR(MslPlatform plat) noexcept {
@@ -98,7 +129,10 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                 //     auto binding = mslc.get_decoration(j.id, spv::DecorationBinding);
                 //     auto loc = mslc.get_decoration(j.id, spv::DecorationLocation);
                 //     auto t = mslc.get_type(j.type_id);
-                //     RADRAY_INFO_LOG("uniform buffer: {}\tset={} bind={} loc={}", j.name, set, binding, loc);
+                //     RADRAY_INFO_LOG("uniform buffer: {}", j.name);
+                //     RADRAY_INFO_LOG("- set={}", set);
+                //     RADRAY_INFO_LOG("- bind={}", binding);
+                //     RADRAY_INFO_LOG("- location={}", loc);
                 // }
                 // for (const auto& j : res.push_constant_buffers) {
                 //     auto set = mslc.get_decoration(j.id, spv::DecorationDescriptorSet);
@@ -133,12 +167,7 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                 ep.emplace_back(SpvcEntryPoint{radray::string{spvEP.name}, stage.value()});
             }
         }
-        radray::string refl;
-        {
-            spirv_cross::CompilerReflection reflc{dword.data(), dword.size()};
-            refl = radray::string{reflc.compile()};
-        }
-        return SpvcMslOutput{msl, refl, ep};
+        return SpvcMslOutput{msl, ep};
     } catch (const std::exception& e) {
         RADRAY_ERR_LOG("cannot convert SPIR-V to MSL\n{}", e.what());
         return std::nullopt;

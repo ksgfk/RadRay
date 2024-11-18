@@ -35,6 +35,16 @@ decltype(auto) AutoRelease(T&& func) noexcept {
 NS::String* NSStringInit(NS::String* that, const void* bytes, NS::UInteger len, NS::StringEncoding encoding) noexcept;
 NS::String* StringCppToNS(std::string_view str) noexcept;
 
+std::optional<MTL::TriangleFillMode> MapType(PolygonMode v) noexcept;
+std::pair<MTL::PrimitiveTopologyClass, MTL::PrimitiveType> MapType(PrimitiveTopology v) noexcept;
+MTL::PixelFormat MapType(TextureFormat v) noexcept;
+MTL::ColorWriteMask MapType(ColorWrites v) noexcept;
+MTL::BlendOperation MapType(BlendOperation v) noexcept;
+MTL::BlendFactor MapType(BlendFactor v) noexcept;
+std::tuple<MTL::BlendOperation, MTL::BlendFactor, MTL::BlendFactor> MapType(BlendComponent v) noexcept;
+MTL::CompareFunction MapType(CompareFunction v) noexcept;
+MTL::StencilOperation MapType(StencilOperation v) noexcept;
+
 }  // namespace radray::render::metal
 
 namespace MTL {

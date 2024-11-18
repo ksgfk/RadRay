@@ -410,6 +410,7 @@ std::optional<DxcOutput> Dxc::Compile(
             case ShaderStage::Vertex: s << "vs_"; break;
             case ShaderStage::Pixel: s << "ps_"; break;
             case ShaderStage::Compute: s << "cs_"; break;
+            case ShaderStage::UNKNOWN: s << "??_"; break;
         }
         switch (sm) {
             case HlslShaderModel::SM60: s << "6_0"; break;
