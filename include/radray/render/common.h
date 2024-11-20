@@ -300,6 +300,9 @@ public:
         radray::string Name;
         uint32_t Start;
         uint32_t Size;
+
+        bool operator==(const Variable& rhs) const noexcept;
+        bool operator!=(const Variable& rhs) const noexcept;
     };
 
     class CBuffer {
@@ -307,6 +310,9 @@ public:
         radray::string Name;
         radray::vector<Variable> Vars;
         uint32_t Size;
+
+        bool operator==(const CBuffer& rhs) const noexcept;
+        bool operator!=(const CBuffer& rhs) const noexcept;
     };
 
     class BindResource {

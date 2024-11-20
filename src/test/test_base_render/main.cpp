@@ -51,12 +51,13 @@ int main() {
         // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
         radray::string entry = msl.EntryPoints.at(0).Name;
+        ShaderReflection refl = MslReflection{};
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
         ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Vertex, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, MslReflection{}, ShaderStage::Vertex, entry, "colorVS").value();
+        auto shader = device->CreateShader(blob, refl, ShaderStage::Vertex, entry, "colorVS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
         vs = std::move(shader);
     }
@@ -80,12 +81,13 @@ int main() {
         // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
         radray::string entry = msl.EntryPoints.at(0).Name;
+        ShaderReflection refl = MslReflection{};
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
         ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
 #endif
-        auto shader = device->CreateShader(blob, MslReflection{}, ShaderStage::Pixel, entry, "colorPS").value();
+        auto shader = device->CreateShader(blob, refl, ShaderStage::Pixel, entry, "colorPS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
         ps = std::move(shader);
     }

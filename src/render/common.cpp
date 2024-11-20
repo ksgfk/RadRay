@@ -2,6 +2,29 @@
 
 namespace radray::render {
 
+bool DxilReflection::Variable::operator==(const Variable& rhs) const noexcept {
+    return Name == rhs.Name && Start == rhs.Start && Size == rhs.Size;
+}
+
+bool DxilReflection::Variable::operator!=(const Variable& rhs) const noexcept { return !(*this == rhs); }
+
+bool DxilReflection::CBuffer::operator==(const CBuffer& rhs) const noexcept {
+    if (Size != rhs.Size) {
+        return false;
+    }
+    if (Vars.size() != rhs.Vars.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < Vars.size(); i++) {
+        if (Vars[i] != rhs.Vars[i]) {
+            return false;
+        }
+    }
+    return Name == rhs.Name;
+}
+
+bool DxilReflection::CBuffer::operator!=(const CBuffer& rhs) const noexcept { return !(*this == rhs); }
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
         case TextureFormat::S8: return "S8";

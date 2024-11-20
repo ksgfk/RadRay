@@ -1,5 +1,6 @@
 #include "d3d12_device.h"
 
+#include <radray/basic_math.h>
 #include "d3d12_shader.h"
 
 namespace radray::render::d3d12 {
@@ -58,9 +59,8 @@ std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
 }
 
 std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
-    class StageResource {
+    class StageResource : public DxilReflection::BindResource {
     public:
-        DxilReflection::BindResource Base;
         ShaderStages Stages;
     };
     // 收集所有 bind resource
@@ -78,12 +78,12 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
                 const auto& stat = refl.StaticSamplers;
                 auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v; });
                 if (iter == stat.end()) {
-                    samplers.emplace_back(res);
+                    samplers.emplace_back(std::move(res));
                 } else {
-                    staticSamplers.emplace_back(res);
+                    staticSamplers.emplace_back(std::move(res));
                 }
             } else {
-                resources.emplace_back(res);
+                resources.emplace_back(std::move(res));
             }
         }
     }
@@ -92,7 +92,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         radray::vector<StageResource> result;
         for (const StageResource& i : res) {
             auto iter = std::find_if(result.begin(), result.end(), [&](auto&& v) noexcept {
-                return v.Base.Space == i.Base.Space && v.Base.BindPoint == i.Base.BindPoint && v.Base.Type == i.Base.Type;
+                return v.Space == i.Space && v.BindPoint == i.BindPoint && v.Type == i.Type;
             });
             if (iter == result.end()) {
                 result.emplace_back(i);
@@ -103,30 +103,110 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         return result;
     };
     auto&& resCmp = [](const auto& lhs, const auto& rhs) noexcept {
-        if (lhs.Base.Type == ShaderResourceType::CBuffer && rhs.Base.Type != ShaderResourceType::CBuffer) {
+        if (lhs.Type == ShaderResourceType::CBuffer && rhs.Type != ShaderResourceType::CBuffer) {
             return true;
         }
-        if (lhs.Base.Type != ShaderResourceType::CBuffer && rhs.Base.Type == ShaderResourceType::CBuffer) {
+        if (lhs.Type != ShaderResourceType::CBuffer && rhs.Type == ShaderResourceType::CBuffer) {
             return false;
         }
-        if (lhs.Base.Space == rhs.Base.Space) {
-            return lhs.Base.BindPoint < rhs.Base.BindPoint;
+        if (lhs.Space == rhs.Space) {
+            return lhs.BindPoint < rhs.BindPoint;
         } else {
-            return lhs.Base.Space < rhs.Base.Space;
+            return lhs.Space < rhs.Space;
         }
     };
-    radray::vector<StageResource> mergeBinds = merge(resources);
-    radray::vector<StageResource> mergeSamplers = merge(samplers);
-    radray::vector<StageResource> mergeStaticSamplers = merge(staticSamplers);
-    std::sort(mergeBinds.begin(), mergeBinds.end(), resCmp);
+    radray::vector<StageResource> mergedCbuffers, mergedResources;
+    radray::unordered_set<uint32_t> cbufferSpaces, resourceSpaces;
+    {
+        radray::vector<StageResource> mergeBinds = merge(resources);
+        std::sort(mergeBinds.begin(), mergeBinds.end(), resCmp);
+        for (StageResource& i : mergeBinds) {
+            if (i.Type == ShaderResourceType::CBuffer) {
+                cbufferSpaces.emplace(i.Space);
+                mergedCbuffers.emplace_back(std::move(i));
+            } else {
+                resourceSpaces.emplace(i.Space);
+                mergedResources.emplace_back(std::move(i));
+            }
+        }
+    }
+    radray::vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
+    radray::unordered_set<uint32_t> samplersSpaces;
     std::sort(mergeSamplers.begin(), mergeSamplers.end(), resCmp);
     std::sort(mergeStaticSamplers.begin(), mergeStaticSamplers.end(), resCmp);
+    for (const StageResource& i : mergeSamplers) {
+        samplersSpaces.emplace(i.Space);
+    }
     // https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits
+    // DWORD = 4 bytes = 32 bits
     // root sig 最大可存 64 DWORD
     // - 1 Descriptor Table 消耗 1 DWORD
     // - 1 Root Constant 消耗 1 DWORD
     // - 1 Root Descriptor 消耗 2 DWORD
-    // 尝试将 cbuffer 用 root constant 存储, 计算会不会超出 root sig 大小限制, 超出限制的话, 再尝试用 root descriptor, 最后才是按 space 划分 descriptor table
+    enum class RootSigStrategy {
+        CBufferRootConst,
+        CBufferRootDesc,
+        DescTable
+    };
+    radray::unordered_map<radray::string, DxilReflection::CBuffer> cbufferMap{};
+    for (Shader* i : shaders) {
+        Dxil* dxil = static_cast<Dxil*>(i);
+        for (const DxilReflection::CBuffer& j : dxil->_refl.CBuffers) {
+            auto [iter, isInsert] = cbufferMap.emplace(j.Name, DxilReflection::CBuffer{});
+            if (isInsert) {
+                iter->second = j;
+            } else {
+                if (iter->second != j) {
+                    if (j.Size > iter->second.Size) {
+                        iter->second = j;
+                        RADRAY_DEBUG_LOG("cbuffer has different layout but same name {}. maybe reinterpret?", j.Name);
+                    }
+                }
+            }
+        }
+    }
+    uint64_t useRC = 0, useRD = 0, useDT = 0;
+    {
+        // 尝试将 cbuffer 用 root constant 存储
+        for (const StageResource& i : mergedCbuffers) {
+            auto iter = cbufferMap.find(i.Name);
+            if (iter == cbufferMap.end()) {
+                RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
+                return std::nullopt;
+            }
+            const DxilReflection::CBuffer& cbuffer = iter->second;
+            useRC += CalcAlign(cbuffer.Size, 4);
+        }
+        useRC += resourceSpaces.size() * 4;
+        useRC += samplersSpaces.size() * 4;
+    }
+    RADRAY_DEBUG_LOG("all cbuffers use root constant. root sig size: {} DWORDs", useRC / 4);
+    {
+        // 尝试将 cbuffer 用 root descriptor 储存
+        useRD += mergedCbuffers.size() * 4 * 2;
+        useRD += resourceSpaces.size() * 4;
+        useRD += samplersSpaces.size() * 4;
+    }
+    RADRAY_DEBUG_LOG("all cbuffers use root descriptor. root sig size: {} DWORDs", useRD / 4);
+    {
+        // 按 space 划分 descriptor table
+        radray::unordered_set<uint32_t> resSpaces;
+        std::merge(
+            cbufferSpaces.begin(), cbufferSpaces.end(),
+            resourceSpaces.begin(), resourceSpaces.end(),
+            std::inserter(resSpaces, resSpaces.begin()));
+        useDT += resSpaces.size() * 4;
+        useDT += samplersSpaces.size() * 4;
+    }
+    RADRAY_DEBUG_LOG("all use descriptor table. split by space. root sig size: {} DWORDs", useDT / 4);
+    RootSigStrategy strategy = RootSigStrategy::CBufferRootConst;
+    if (useRC > 256) {
+        strategy = RootSigStrategy::CBufferRootDesc;
+        if (useRD > 256) {
+            strategy = RootSigStrategy::DescTable;
+        }
+    }
+    D3D12_ROOT_SIGNATURE_DESC1 rcDesc;
     return std::nullopt;
 }
 
