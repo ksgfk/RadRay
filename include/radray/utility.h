@@ -30,6 +30,12 @@
     constexpr etype operator&(flags l, etype r) noexcept {                                                                                    \
         return static_cast<etype>(l & static_cast<std::underlying_type_t<decltype(r)>>(r));                                                   \
     }                                                                                                                                         \
+    constexpr bool operator==(flags l, etype r) noexcept {                                                                                    \
+        return l == static_cast<std::underlying_type_t<decltype(r)>>(r);                                                                      \
+    }                                                                                                                                         \
+    constexpr bool operator!=(flags l, etype r) noexcept {                                                                                    \
+        return !(l == r);                                                                                                                     \
+    }                                                                                                                                         \
     constexpr bool HasFlag(flags that, etype l) noexcept {                                                                                    \
         return (that & l) == l;                                                                                                               \
     }                                                                                                                                         \

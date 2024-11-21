@@ -1,5 +1,7 @@
 #include "d3d12_helper.h"
 
+#include <type_traits>
+
 namespace radray::render::d3d12 {
 
 constexpr size_t MaxNameLength = 128;
@@ -61,6 +63,35 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
         case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
         case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
     }
+}
+
+D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {
+    switch (v) {
+        case ShaderStage::UNKNOWN: return D3D12_SHADER_VISIBILITY_ALL;
+        case ShaderStage::Vertex: return D3D12_SHADER_VISIBILITY_VERTEX;
+        case ShaderStage::Pixel: return D3D12_SHADER_VISIBILITY_PIXEL;
+        case ShaderStage::Compute: return D3D12_SHADER_VISIBILITY_ALL;
+    }
+}
+
+D3D12_SHADER_VISIBILITY MapType(ShaderStages v) noexcept {
+    if (v == ShaderStage::Compute) {
+        return D3D12_SHADER_VISIBILITY_ALL;
+    }
+    if (v == ShaderStage::UNKNOWN) {
+        return D3D12_SHADER_VISIBILITY_ALL;
+    }
+    D3D12_SHADER_VISIBILITY res = D3D12_SHADER_VISIBILITY_ALL;
+    uint32_t stageCount = 0;
+    if (HasFlag(v, ShaderStage::Vertex)) {
+        res = D3D12_SHADER_VISIBILITY_VERTEX;
+        ++stageCount;
+    }
+    if (HasFlag(v, ShaderStage::Pixel)) {
+        res = D3D12_SHADER_VISIBILITY_PIXEL;
+        ++stageCount;
+    }
+    return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
 }
 
 }  // namespace radray::render::d3d12

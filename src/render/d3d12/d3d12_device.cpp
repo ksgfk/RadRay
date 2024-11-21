@@ -165,17 +165,23 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             }
         }
     }
+    // 检查下 cbuffer 反射数据
+    {
+        for (const StageResource& i : mergedCbuffers) {
+            auto iter = cbufferMap.find(i.Name);
+            if (iter == cbufferMap.end()) {
+                RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
+                return std::nullopt;
+            }
+        }
+    }
     uint64_t useRC = 0, useRD = 0, useDT = 0;
     {
         // 尝试将第一个 cbuffer 用 root constant, 其他 cbuffer 用 root descriptor
         for (size_t i = 0; i < mergedCbuffers.size(); i++) {
+            const StageResource& r = mergedCbuffers[i];
             if (i == 0) {
-                auto iter = cbufferMap.find(mergedCbuffers[i].Name);
-                if (iter == cbufferMap.end()) {
-                    RADRAY_ERR_LOG("cannot find cbuffer {}", mergedCbuffers[i].Name);
-                    return std::nullopt;
-                }
-                const DxilReflection::CBuffer& cbuffer = iter->second;
+                const DxilReflection::CBuffer& cbuffer = cbufferMap.find(r.Name)->second;
                 useRC += CalcAlign(cbuffer.Size, 4);
             } else {
                 useRD += 4 * 2;
@@ -211,6 +217,39 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         }
     }
     D3D12_ROOT_SIGNATURE_DESC1 rcDesc;
+    radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
+    switch (strategy) {
+        case RootSigStrategy::CBufferRootConst: {
+            for (size_t i = 0; i < mergedCbuffers.size(); i++) {
+                const StageResource& r = mergedCbuffers[i];
+                const DxilReflection::CBuffer& cbuffer = cbufferMap.find(r.Name)->second;
+                auto&& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
+                if (i == 0) {
+                    CD3DX12_ROOT_PARAMETER1::InitAsConstants(
+                        p,
+                        CalcAlign(cbuffer.Size, 4) / 4,
+                        r.BindPoint,
+                        r.Space,
+                        MapType(r.Stages));
+                } else {
+                    CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
+                        p,
+                        r.BindPoint,
+                        r.Space,
+                        D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
+                        MapType(r.Stages));
+                }
+            }
+            break;
+        }
+        case RootSigStrategy::CBufferRootDesc: {
+            break;
+        }
+        case RootSigStrategy::DescTable: {
+            break;
+        }
+    }
     return std::nullopt;
 }
 
