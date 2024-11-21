@@ -167,22 +167,26 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     }
     uint64_t useRC = 0, useRD = 0, useDT = 0;
     {
-        // 尝试将 cbuffer 用 root constant 存储
-        for (const StageResource& i : mergedCbuffers) {
-            auto iter = cbufferMap.find(i.Name);
-            if (iter == cbufferMap.end()) {
-                RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
-                return std::nullopt;
+        // 尝试将第一个 cbuffer 用 root constant, 其他 cbuffer 用 root descriptor
+        for (size_t i = 0; i < mergedCbuffers.size(); i++) {
+            if (i == 0) {
+                auto iter = cbufferMap.find(mergedCbuffers[i].Name);
+                if (iter == cbufferMap.end()) {
+                    RADRAY_ERR_LOG("cannot find cbuffer {}", mergedCbuffers[i].Name);
+                    return std::nullopt;
+                }
+                const DxilReflection::CBuffer& cbuffer = iter->second;
+                useRC += CalcAlign(cbuffer.Size, 4);
+            } else {
+                useRD += 4 * 2;
             }
-            const DxilReflection::CBuffer& cbuffer = iter->second;
-            useRC += CalcAlign(cbuffer.Size, 4);
         }
         useRC += resourceSpaces.size() * 4;
         useRC += samplersSpaces.size() * 4;
     }
     RADRAY_DEBUG_LOG("all cbuffers use root constant. root sig size: {} DWORDs", useRC / 4);
     {
-        // 尝试将 cbuffer 用 root descriptor 储存
+        // 尝试将 cbuffer 全用 root descriptor 储存
         useRD += mergedCbuffers.size() * 4 * 2;
         useRD += resourceSpaces.size() * 4;
         useRD += samplersSpaces.size() * 4;
