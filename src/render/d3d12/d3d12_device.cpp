@@ -2,6 +2,7 @@
 
 #include <radray/basic_math.h>
 #include "d3d12_shader.h"
+#include "d3d12_root_sig.h"
 
 namespace radray::render::d3d12 {
 
@@ -63,6 +64,35 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     public:
         ShaderStages Stages;
     };
+    radray::unordered_map<radray::string, DxilReflection::CBuffer> cbufferMap{};
+    radray::unordered_map<radray::string, DxilReflection::StaticSampler> staticSamplerMap{};
+    for (Shader* i : shaders) {
+        Dxil* dxil = static_cast<Dxil*>(i);
+        for (const DxilReflection::CBuffer& j : dxil->_refl.CBuffers) {
+            auto [iter, isInsert] = cbufferMap.emplace(j.Name, DxilReflection::CBuffer{});
+            if (isInsert) {
+                iter->second = j;
+            } else {
+                if (iter->second != j) {
+                    if (j.Size > iter->second.Size) {
+                        iter->second = j;
+                        RADRAY_DEBUG_LOG("cbuffer has different layout but same name {}. maybe reinterpret?", j.Name);
+                    }
+                }
+            }
+        }
+        for (const DxilReflection::StaticSampler& j : dxil->_refl.StaticSamplers) {
+            auto [iter, isInsert] = staticSamplerMap.emplace(j.Name, DxilReflection::StaticSampler{});
+            if (isInsert) {
+                iter->second = j;
+            } else {
+                if (iter->second != j) {
+                    RADRAY_ERR_LOG("static sampler has different layout but same name {}", j.Name);
+                    return std::nullopt;
+                }
+            }
+        }
+    }
     // 收集所有 bind resource
     radray::vector<StageResource> resources;
     radray::vector<StageResource> samplers;
@@ -76,7 +106,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             StageResource res{j, ToFlags(dxil->Stage)};
             if (j.Type == ShaderResourceType::Sampler) {
                 const auto& stat = refl.StaticSamplers;
-                auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v; });
+                auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v.Name; });
                 if (iter == stat.end()) {
                     samplers.emplace_back(std::move(res));
                 } else {
@@ -130,12 +160,26 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             }
         }
     }
+    for (const StageResource& i : mergedCbuffers) {  // 检查下 cbuffer 反射数据
+        auto iter = cbufferMap.find(i.Name);
+        if (iter == cbufferMap.end()) {
+            RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
+            return std::nullopt;
+        }
+    }
     radray::vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
     radray::unordered_set<uint32_t> samplersSpaces;
     std::sort(mergeSamplers.begin(), mergeSamplers.end(), resCmp);
     std::sort(mergeStaticSamplers.begin(), mergeStaticSamplers.end(), resCmp);
     for (const StageResource& i : mergeSamplers) {
         samplersSpaces.emplace(i.Space);
+    }
+    for (const StageResource& i : mergeStaticSamplers) {  // 检查下 static sampler 反射数据
+        auto iter = staticSamplerMap.find(i.Name);
+        if (iter == staticSamplerMap.end()) {
+            RADRAY_ERR_LOG("cannot find static sampler {}", i.Name);
+            return std::nullopt;
+        }
     }
     // https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits
     // DWORD = 4 bytes = 32 bits
@@ -148,40 +192,18 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         CBufferRootDesc,
         DescTable
     };
-    radray::unordered_map<radray::string, DxilReflection::CBuffer> cbufferMap{};
-    for (Shader* i : shaders) {
-        Dxil* dxil = static_cast<Dxil*>(i);
-        for (const DxilReflection::CBuffer& j : dxil->_refl.CBuffers) {
-            auto [iter, isInsert] = cbufferMap.emplace(j.Name, DxilReflection::CBuffer{});
-            if (isInsert) {
-                iter->second = j;
-            } else {
-                if (iter->second != j) {
-                    if (j.Size > iter->second.Size) {
-                        iter->second = j;
-                        RADRAY_DEBUG_LOG("cbuffer has different layout but same name {}. maybe reinterpret?", j.Name);
-                    }
-                }
-            }
-        }
-    }
-    // 检查下 cbuffer 反射数据
-    {
-        for (const StageResource& i : mergedCbuffers) {
-            auto iter = cbufferMap.find(i.Name);
-            if (iter == cbufferMap.end()) {
-                RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
-                return std::nullopt;
-            }
-        }
-    }
     uint64_t useRC = 0, useRD = 0, useDT = 0;
     {
-        // 尝试将第一个 cbuffer 用 root constant, 其他 cbuffer 用 root descriptor
-        for (size_t i = 0; i < mergedCbuffers.size(); i++) {
-            const StageResource& r = mergedCbuffers[i];
-            if (i == 0) {
-                const DxilReflection::CBuffer& cbuffer = cbufferMap.find(r.Name)->second;
+        // 找 push constant, 找不到就尝试第一个 cbuffer 用 root constant, 其他 cbuffer 用 root descriptor
+        auto pcIter = std::find_if(
+            mergedCbuffers.begin(), mergedCbuffers.end(),
+            [](auto&& v) noexcept { return v.Type == ShaderResourceType::PushConstant; });
+        if (pcIter == mergedCbuffers.end()) {
+            pcIter = mergedCbuffers.begin();
+        }
+        for (auto i = mergedCbuffers.begin(); i != mergedCbuffers.end(); i++) {
+            if (i == pcIter) {
+                const DxilReflection::CBuffer& cbuffer = cbufferMap.find(i->Name)->second;
                 useRC += CalcAlign(cbuffer.Size, 4);
             } else {
                 useRD += 4 * 2;
@@ -214,43 +236,140 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         strategy = RootSigStrategy::CBufferRootDesc;
         if (useRD > 256) {
             strategy = RootSigStrategy::DescTable;
+            RADRAY_DEBUG_LOG("use descriptor table");
+        } else {
+            RADRAY_DEBUG_LOG("cbuffer use root descriptor");
         }
+    } else {
+        RADRAY_DEBUG_LOG("push constant or first cbuffer use root constant");
     }
-    D3D12_ROOT_SIGNATURE_DESC1 rcDesc;
     radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
     radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
-    switch (strategy) {
-        case RootSigStrategy::CBufferRootConst: {
-            for (size_t i = 0; i < mergedCbuffers.size(); i++) {
-                const StageResource& r = mergedCbuffers[i];
-                const DxilReflection::CBuffer& cbuffer = cbufferMap.find(r.Name)->second;
-                auto&& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
-                if (i == 0) {
-                    CD3DX12_ROOT_PARAMETER1::InitAsConstants(
-                        p,
-                        CalcAlign(cbuffer.Size, 4) / 4,
+    auto&& setupTableRes = [&rootParmas, &descRanges](
+                               const radray::unordered_set<uint32_t>& spaces,
+                               const radray::vector<StageResource>& res) noexcept {
+        for (uint32_t space : spaces) {
+            auto& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
+            ShaderStages tableStages = 0;
+            for (const StageResource& r : res) {
+                if (r.Space == space) {
+                    auto&& range = ranges.emplace_back(D3D12_DESCRIPTOR_RANGE1{});
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        MapDescRangeType(r.Type),
+                        r.BindCount,
                         r.BindPoint,
                         r.Space,
-                        MapType(r.Stages));
-                } else {
-                    CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
-                        p,
-                        r.BindPoint,
-                        r.Space,
-                        D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
-                        MapType(r.Stages));
+                        r.Type == ShaderResourceType::Sampler ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+                    tableStages |= r.Stages;
                 }
             }
-            break;
+            auto& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
+            CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                p,
+                ranges.size(),
+                ranges.data(),
+                MapType(tableStages));
         }
-        case RootSigStrategy::CBufferRootDesc: {
-            break;
+    };
+    if (strategy == RootSigStrategy::CBufferRootConst || strategy == RootSigStrategy::CBufferRootDesc) {
+        auto pcIter = std::find_if(
+            mergedCbuffers.begin(), mergedCbuffers.end(),
+            [](auto&& v) noexcept { return v.Type == ShaderResourceType::PushConstant; });
+        if (pcIter == mergedCbuffers.end()) {
+            pcIter = mergedCbuffers.begin();
         }
-        case RootSigStrategy::DescTable: {
-            break;
+        for (auto i = mergedCbuffers.begin(); i != mergedCbuffers.end(); i++) {
+            const DxilReflection::CBuffer& cbuffer = cbufferMap.find(i->Name)->second;
+            auto&& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
+            if (strategy == RootSigStrategy::CBufferRootConst && i == pcIter) {
+                CD3DX12_ROOT_PARAMETER1::InitAsConstants(
+                    p,
+                    CalcAlign(cbuffer.Size, 4) / 4,
+                    i->BindPoint,
+                    i->Space,
+                    MapType(i->Stages));
+            } else {
+                CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
+                    p,
+                    i->BindPoint,
+                    i->Space,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
+                    MapType(i->Stages));
+            }
         }
+        setupTableRes(resourceSpaces, mergedResources);
+        setupTableRes(samplersSpaces, mergeSamplers);
+    } else {
+        setupTableRes(resourceSpaces, mergedResources);
+        setupTableRes(samplersSpaces, mergeSamplers);
     }
-    return std::nullopt;
+    radray::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplerDescs;
+    staticSamplerDescs.reserve(mergeStaticSamplers.size());
+    for (const StageResource& i : mergeStaticSamplers) {
+        const DxilReflection::StaticSampler& rs = staticSamplerMap.find(i.Name)->second;
+        auto& ssd = staticSamplerDescs.emplace_back(D3D12_STATIC_SAMPLER_DESC{});
+        ssd.Filter = MapType(rs.MigFilter, rs.MagFilter, rs.MipmapFilter, rs.HasCompare, rs.AnisotropyClamp);
+        ssd.AddressU = MapType(rs.AddressS);
+        ssd.AddressV = MapType(rs.AddressT);
+        ssd.AddressW = MapType(rs.AddressR);
+        ssd.MipLODBias = 0;
+        ssd.MaxAnisotropy = rs.AnisotropyClamp;
+        ssd.ComparisonFunc = rs.HasCompare ? MapType(rs.Compare) : D3D12_COMPARISON_FUNC_ALWAYS;
+        ssd.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+        ssd.MinLOD = rs.LodMin;
+        ssd.MaxLOD = rs.LodMax;
+        ssd.ShaderRegister = i.BindPoint;
+        ssd.RegisterSpace = i.Space;
+        ssd.ShaderVisibility = MapType(i.Stages);
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
+    versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    D3D12_ROOT_SIGNATURE_DESC1& rcDesc = versionDesc.Desc_1_1;
+    rcDesc.NumParameters = rootParmas.size();
+    rcDesc.pParameters = rootParmas.data();
+    rcDesc.NumStaticSamplers = staticSamplerDescs.size();
+    rcDesc.pStaticSamplers = staticSamplerDescs.data();
+    {
+        D3D12_ROOT_SIGNATURE_FLAGS flag =
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
+            D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
+        if (!HasFlag(shaderStages, ShaderStage::Vertex)) {
+            flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+        }
+        if (!HasFlag(shaderStages, ShaderStage::Pixel)) {
+            flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+        }
+        rcDesc.Flags = flag;
+    }
+    ComPtr<ID3DBlob> rootSigBlob, errorBlob;
+    if (HRESULT hr = D3DX12SerializeVersionedRootSignature(
+            &versionDesc,
+            D3D_ROOT_SIGNATURE_VERSION_1_1,
+            rootSigBlob.GetAddressOf(),
+            errorBlob.GetAddressOf());
+        hr != S_OK) {
+        const char* errInfoBegin = errorBlob ? reinterpret_cast<const char*>(errorBlob->GetBufferPointer()) : nullptr;
+        const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
+        auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
+        RADRAY_ERR_LOG("d3d12 cannot serialize root sig\n{}", reason);
+        return std::nullopt;
+    }
+    ComPtr<ID3D12RootSignature> rootSig;
+    if (HRESULT hr = _device->CreateRootSignature(
+            0,
+            rootSigBlob->GetBufferPointer(),
+            rootSigBlob->GetBufferSize(),
+            IID_PPV_ARGS(rootSig.GetAddressOf()));
+        hr != S_OK) {
+        RADRAY_ERR_LOG("d3d12 cannot create root sig\n{}", GetErrorName(hr));
+        return std::nullopt;
+    }
+    return std::make_shared<RootSigD3D12>(std::move(rootSig));
 }
 
 std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(

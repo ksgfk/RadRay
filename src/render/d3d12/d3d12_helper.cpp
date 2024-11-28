@@ -94,6 +94,63 @@ D3D12_SHADER_VISIBILITY MapType(ShaderStages v) noexcept {
     return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
 }
 
+D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept {
+    switch (v) {
+        case ShaderResourceType::CBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case ShaderResourceType::Texture: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ShaderResourceType::Buffer: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ShaderResourceType::RWTexture: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case ShaderResourceType::RWBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case ShaderResourceType::Sampler: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        case ShaderResourceType::PushConstant: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case ShaderResourceType::RayTracing: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    }
+}
+
+D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
+    switch (v) {
+        case FilterMode::Nearest: return D3D12_FILTER_TYPE_POINT;
+        case FilterMode::Linear: return D3D12_FILTER_TYPE_LINEAR;
+    }
+}
+
+D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept {
+    D3D12_FILTER_TYPE minFilter = MapType(mig);
+    D3D12_FILTER_TYPE magFilter = MapType(mag);
+    D3D12_FILTER_TYPE mipmapFilter = MapType(mipmap);
+    D3D12_FILTER_REDUCTION_TYPE reduction = hasCompare ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    if (aniso > 1) {
+        if (mipmapFilter == D3D12_FILTER_TYPE_POINT) {
+            return D3D12_ENCODE_MIN_MAG_ANISOTROPIC_MIP_POINT_FILTER(reduction);
+        } else {
+            return D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
+        }
+    } else {
+        return D3D12_ENCODE_BASIC_FILTER(minFilter, magFilter, mipmapFilter, reduction);
+    }
+}
+
+D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
+    switch (v) {
+        case AddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+    }
+}
+
+D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
+    switch (v) {
+        case CompareFunction::Never: return D3D12_COMPARISON_FUNC_NEVER;
+        case CompareFunction::Less: return D3D12_COMPARISON_FUNC_LESS;
+        case CompareFunction::Equal: return D3D12_COMPARISON_FUNC_EQUAL;
+        case CompareFunction::LessEqual: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        case CompareFunction::Greater: return D3D12_COMPARISON_FUNC_GREATER;
+        case CompareFunction::NotEqual: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        case CompareFunction::GreaterEqual: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        case CompareFunction::Always: return D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

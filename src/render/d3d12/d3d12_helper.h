@@ -29,6 +29,11 @@ UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipL
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept;
 D3D12_SHADER_VISIBILITY MapType(ShaderStages v) noexcept;
+D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept;
+D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
+D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
+D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
+D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept;
 
 }  // namespace radray::render::d3d12
 

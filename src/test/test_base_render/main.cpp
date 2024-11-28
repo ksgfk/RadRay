@@ -55,7 +55,7 @@ int main() {
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
-        ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Vertex, outp.refl).value();
+        DxilReflection refl = dxc->GetDxilReflection(ShaderStage::Vertex, outp.refl).value();
 #endif
         auto shader = device->CreateShader(blob, refl, ShaderStage::Vertex, entry, "colorVS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
@@ -85,7 +85,20 @@ int main() {
 #elif defined(RADRAY_PLATFORM_WINDOWS)
         std::span<const byte> blob = outp.data;
         std::string_view entry = "outv";
-        ShaderReflection refl = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+        DxilReflection refl = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+        refl.StaticSamplers.emplace_back(DxilReflection::StaticSampler{
+            {AddressMode::ClampToEdge,
+             AddressMode::ClampToEdge,
+             AddressMode::ClampToEdge,
+             FilterMode::Linear,
+             FilterMode::Linear,
+             FilterMode::Linear,
+             0.0f,
+             0.0f,
+             CompareFunction::Always,
+             1,
+             false},
+            "baseColorSampler"});
 #endif
         auto shader = device->CreateShader(blob, refl, ShaderStage::Pixel, entry, "colorPS").value();
         RADRAY_INFO_LOG("shader name {}", shader->Name);
@@ -152,8 +165,8 @@ int main() {
                 static_cast<ColorWrites>(ColorWrite::All),
                 false}},
             true};
-        auto pso = device->CreateGraphicsPipeline(desc);
-        RADRAY_INFO_LOG("pso done? {}", pso.has_value());
+        // auto pso = device->CreateGraphicsPipeline(desc);
+        // RADRAY_INFO_LOG("pso done? {}", pso.has_value());
     }
     return 0;
 }

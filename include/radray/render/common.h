@@ -291,6 +291,10 @@ struct SamplerDescriptor {
     float LodMax;
     CompareFunction Compare;
     uint32_t AnisotropyClamp;
+    bool HasCompare;
+
+    bool operator==(const SamplerDescriptor& rhs) const noexcept;
+    bool operator!=(const SamplerDescriptor& rhs) const noexcept;
 };
 
 class DxilReflection {
@@ -325,6 +329,14 @@ public:
         uint32_t BindCount;
     };
 
+    class StaticSampler : public SamplerDescriptor {
+    public:
+        radray::string Name;
+
+        bool operator==(const StaticSampler& rhs) const noexcept;
+        bool operator!=(const StaticSampler& rhs) const noexcept;
+    };
+
     class VertexInput {
     public:
         VertexSemantic Semantic;
@@ -336,7 +348,7 @@ public:
     radray::vector<CBuffer> CBuffers;
     radray::vector<BindResource> Binds;
     radray::vector<VertexInput> VertexInputs;
-    radray::vector<radray::string> StaticSamplers;
+    radray::vector<StaticSampler> StaticSamplers;
     std::array<uint32_t, 3> GroupSize;
 };
 

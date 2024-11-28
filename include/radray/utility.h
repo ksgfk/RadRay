@@ -110,4 +110,18 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
 
 radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
 
+[[noreturn]] inline void Unreachable() noexcept {
+#ifdef __cpp_lib_unreachable
+    std::unreachable();
+#else
+#if defined(_MSC_VER)
+    __assume(false);
+#elif defined(__clang__) || defined(__GNUC__)
+    __builtin_unreachable();
+#else
+    // no impl
+#endif
+#endif
+}
+
 }  // namespace radray
