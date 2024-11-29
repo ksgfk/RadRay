@@ -374,6 +374,22 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
 
 std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
     const GraphicsPipelineStateDescriptor& desc) noexcept {
+    auto [topoClass, topo] = MapType(desc.Primitive.Topology);
+    radray::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    for (size_t index = 0; index < desc.VertexBuffers.size(); index++) {
+        const VertexBufferLayout& i = desc.VertexBuffers[index];
+        D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
+        for (const VertexElement& j : i.Elements) {
+            auto& ied = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
+            ied.SemanticName = format_as(j.Semantic).data();
+            ied.SemanticIndex = j.SemanticIndex;
+            ied.Format = MapType(j.Format);
+            ied.InputSlot = index;
+            ied.AlignedByteOffset = j.Offset;
+            ied.InputSlotClass = inputClass;
+            ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
+        }
+    }
     return std::nullopt;
 }
 

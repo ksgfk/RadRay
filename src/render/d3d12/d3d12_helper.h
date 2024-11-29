@@ -34,6 +34,9 @@ D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
 D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
 D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept;
+std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept;
+D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept;
+DXGI_FORMAT MapType(VertexFormat v) noexcept;
 
 }  // namespace radray::render::d3d12
 
