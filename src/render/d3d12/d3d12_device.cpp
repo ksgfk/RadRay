@@ -371,7 +371,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             rootSigBlob->GetBufferSize(),
             IID_PPV_ARGS(rootSig.GetAddressOf()));
         hr != S_OK) {
-        RADRAY_ERR_LOG("d3d12 cannot create root sig\n{}", GetErrorName(hr));
+        RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
     return std::make_shared<RootSigD3D12>(std::move(rootSig));
@@ -494,7 +494,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     ComPtr<ID3D12PipelineState> pso;
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
         hr != S_OK) {
-        RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state\n{}", GetErrorName(hr));
+        RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state. reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
     return radray::make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
