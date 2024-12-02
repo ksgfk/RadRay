@@ -3,8 +3,13 @@
 #include <radray/basic_math.h>
 #include "d3d12_shader.h"
 #include "d3d12_root_sig.h"
+#include "d3d12_pso.h"
 
 namespace radray::render::d3d12 {
+
+static RootSigD3D12* Underlying(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+static Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+static GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -67,7 +72,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     radray::unordered_map<radray::string, DxilReflection::CBuffer> cbufferMap{};
     radray::unordered_map<radray::string, DxilReflection::StaticSampler> staticSamplerMap{};
     for (Shader* i : shaders) {
-        Dxil* dxil = static_cast<Dxil*>(i);
+        Dxil* dxil = Underlying(i);
         for (const DxilReflection::CBuffer& j : dxil->_refl.CBuffers) {
             auto [iter, isInsert] = cbufferMap.emplace(j.Name, DxilReflection::CBuffer{});
             if (isInsert) {
@@ -99,7 +104,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     radray::vector<StageResource> staticSamplers;
     ShaderStages shaderStages{ToFlags(ShaderStage::UNKNOWN)};
     for (Shader* i : shaders) {
-        Dxil* dxil = static_cast<Dxil*>(i);
+        Dxil* dxil = Underlying(i);
         shaderStages |= dxil->Stage;
         const auto& refl = dxil->_refl;
         for (const DxilReflection::BindResource& j : refl.Binds) {
@@ -269,7 +274,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
                 p,
                 ranges.size(),
                 ranges.data(),
-                MapType(tableStages));
+                MapShaderStages(tableStages));
         }
     };
     if (strategy == RootSigStrategy::CBufferRootConst || strategy == RootSigStrategy::CBufferRootDesc) {
@@ -288,14 +293,14 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
                     CalcAlign(cbuffer.Size, 4) / 4,
                     i->BindPoint,
                     i->Space,
-                    MapType(i->Stages));
+                    MapShaderStages(i->Stages));
             } else {
                 CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
                     p,
                     i->BindPoint,
                     i->Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
-                    MapType(i->Stages));
+                    MapShaderStages(i->Stages));
             }
         }
         setupTableRes(resourceSpaces, mergedResources);
@@ -321,7 +326,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         ssd.MaxLOD = rs.LodMax;
         ssd.ShaderRegister = i.BindPoint;
         ssd.RegisterSpace = i.Space;
-        ssd.ShaderVisibility = MapType(i.Stages);
+        ssd.ShaderVisibility = MapShaderStages(i.Stages);
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -376,8 +381,10 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     const GraphicsPipelineStateDescriptor& desc) noexcept {
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     radray::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    radray::vector<uint32_t> arrayStrides(desc.VertexBuffers.size(), 0);
     for (size_t index = 0; index < desc.VertexBuffers.size(); index++) {
         const VertexBufferLayout& i = desc.VertexBuffers[index];
+        arrayStrides[index] = i.ArrayStride;
         D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
         for (const VertexElement& j : i.Elements) {
             auto& ied = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
@@ -390,7 +397,107 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
             ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
         }
     }
-    return std::nullopt;
+    DepthBiasState depBias = desc.DepthStencilEnable
+                                 ? desc.DepthStencil.DepthBias
+                                 : DepthBiasState{0, 0, 0};
+    D3D12_RASTERIZER_DESC rawRaster{};
+    if (auto fillMode = MapType(desc.Primitive.Poly);
+        fillMode.has_value()) {
+        rawRaster.FillMode = fillMode.value();
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot set fill mode {}", desc.Primitive.Poly);
+        return std::nullopt;
+    }
+    rawRaster.CullMode = MapType(desc.Primitive.Cull);
+    rawRaster.FrontCounterClockwise = desc.Primitive.FaceClockwise == FrontFace::CCW;
+    rawRaster.DepthBias = depBias.Constant;
+    rawRaster.DepthBiasClamp = depBias.Clamp;
+    rawRaster.SlopeScaledDepthBias = depBias.SlopScale;
+    rawRaster.DepthClipEnable = !desc.Primitive.UnclippedDepth;
+    rawRaster.MultisampleEnable = desc.MultiSample.Count > 1;
+    rawRaster.AntialiasedLineEnable = false;
+    rawRaster.ForcedSampleCount = 0;
+    rawRaster.ConservativeRaster = desc.Primitive.Conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    D3D12_BLEND_DESC rawBlend{};
+    rawBlend.AlphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable;
+    rawBlend.IndependentBlendEnable = true;
+    {
+        for (size_t i = 0; i < ArrayLength(rawBlend.RenderTarget); i++) {
+            D3D12_RENDER_TARGET_BLEND_DESC& rtb = rawBlend.RenderTarget[i];
+            if (i < desc.ColorTargets.size()) {
+                const ColorTargetState& ct = desc.ColorTargets[i];
+                rtb.BlendEnable = ct.BlendEnable;
+                if (rtb.BlendEnable) {
+                    rtb.SrcBlend = MapBlendColor(ct.Blend.Color.Src);
+                    rtb.DestBlend = MapBlendColor(ct.Blend.Color.Dst);
+                    rtb.BlendOp = MapType(ct.Blend.Color.Op);
+                    rtb.SrcBlendAlpha = MapBlendAlpha(ct.Blend.Alpha.Src);
+                    rtb.DestBlendAlpha = MapBlendAlpha(ct.Blend.Alpha.Dst);
+                    rtb.BlendOpAlpha = MapType(ct.Blend.Alpha.Op);
+                }
+                if (auto writeMask = MapColorWrites(ct.WriteMask);
+                    writeMask.has_value()) {
+                    rtb.RenderTargetWriteMask = writeMask.value();
+                } else {
+                    RADRAY_ERR_LOG("d3d12 cannot set color write mask {0:b}", ct.WriteMask);
+                    return std::nullopt;
+                }
+            } else {
+                rtb.BlendEnable = false;
+                rtb.LogicOpEnable = false;
+                rtb.LogicOp = D3D12_LOGIC_OP_CLEAR;
+                rtb.RenderTargetWriteMask = 0;
+            }
+        }
+    }
+    D3D12_DEPTH_STENCIL_DESC dsDesc{};
+    if (desc.DepthStencilEnable) {
+        dsDesc.DepthEnable = true;
+        dsDesc.DepthWriteMask = desc.DepthStencil.DepthWriteEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        dsDesc.DepthFunc = MapType(desc.DepthStencil.DepthCompare);
+        dsDesc.StencilEnable = desc.DepthStencil.StencilEnable;
+        if (dsDesc.StencilEnable) {
+            dsDesc.StencilReadMask = desc.DepthStencil.Stencil.ReadMask;
+            dsDesc.StencilWriteMask = desc.DepthStencil.Stencil.WriteMask;
+            dsDesc.FrontFace = MapType(desc.DepthStencil.Stencil.Front);
+            dsDesc.BackFace = MapType(desc.DepthStencil.Stencil.Back);
+        }
+    } else {
+        dsDesc.DepthEnable = false;
+        dsDesc.StencilEnable = false;
+    }
+    DXGI_SAMPLE_DESC sampleDesc{desc.MultiSample.Count, 0};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC rawPsoDesc{};
+    rawPsoDesc.pRootSignature = Underlying(desc.RootSig)->_rootSig.Get();
+    rawPsoDesc.VS = desc.VS ? Underlying(desc.VS)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.PS = desc.PS ? Underlying(desc.PS)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.DS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.HS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.GS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.StreamOutput = D3D12_STREAM_OUTPUT_DESC{};
+    rawPsoDesc.BlendState = rawBlend;
+    rawPsoDesc.SampleMask = desc.MultiSample.Mask;
+    rawPsoDesc.RasterizerState = rawRaster;
+    rawPsoDesc.DepthStencilState = dsDesc;
+    rawPsoDesc.InputLayout = {inputElements.data(), static_cast<uint32_t>(inputElements.size())};
+    rawPsoDesc.IBStripCutValue = MapType(desc.Primitive.StripIndexFormat);
+    rawPsoDesc.PrimitiveTopologyType = topoClass;
+    rawPsoDesc.NumRenderTargets = std::min(static_cast<uint32_t>(desc.ColorTargets.size()), (uint32_t)D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+    for (size_t i = 0; i < rawPsoDesc.NumRenderTargets; i++) {
+        rawPsoDesc.RTVFormats[i] = i < desc.ColorTargets.size() ? MapType(desc.ColorTargets[i].Format) : DXGI_FORMAT_UNKNOWN;
+    }
+    rawPsoDesc.DSVFormat = desc.DepthStencilEnable ? MapType(desc.DepthStencil.Format) : DXGI_FORMAT_UNKNOWN;
+    rawPsoDesc.SampleDesc = sampleDesc;
+    rawPsoDesc.NodeMask = 0;
+    rawPsoDesc.CachedPSO = D3D12_CACHED_PIPELINE_STATE{};
+    rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    ComPtr<ID3D12PipelineState> pso;
+    if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+        hr != S_OK) {
+        RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state\n{}", GetErrorName(hr));
+        return std::nullopt;
+    }
+    return radray::make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
 }
 
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {

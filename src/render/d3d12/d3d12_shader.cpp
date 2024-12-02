@@ -22,4 +22,8 @@ void Dxil::Destroy() noexcept {
     _dxil.resize(0);
 }
 
+D3D12_SHADER_BYTECODE Dxil::ToByteCode() const noexcept {
+    return D3D12_SHADER_BYTECODE{_dxil.data(), _dxil.size()};
+}
+
 }  // namespace radray::render::d3d12

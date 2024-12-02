@@ -165,8 +165,8 @@ int main() {
                 static_cast<ColorWrites>(ColorWrite::All),
                 false}},
             true};
-        // auto pso = device->CreateGraphicsPipeline(desc);
-        // RADRAY_INFO_LOG("pso done? {}", pso.has_value());
+        auto pso = device->CreateGraphicsPipeline(desc);
+        RADRAY_INFO_LOG("pso done? {}", pso.has_value());
     }
     return 0;
 }

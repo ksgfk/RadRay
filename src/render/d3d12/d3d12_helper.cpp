@@ -74,7 +74,7 @@ D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {
     }
 }
 
-D3D12_SHADER_VISIBILITY MapType(ShaderStages v) noexcept {
+D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
     if (v == ShaderStage::Compute) {
         return D3D12_SHADER_VISIBILITY_ALL;
     }
@@ -201,6 +201,167 @@ DXGI_FORMAT MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return DXGI_FORMAT_R32G32_FLOAT;
         case VertexFormat::FLOAT32X3: return DXGI_FORMAT_R32G32B32_FLOAT;
         case VertexFormat::FLOAT32X4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    }
+}
+
+DXGI_FORMAT MapType(TextureFormat v) noexcept {
+    switch (v) {
+        case TextureFormat::UNKNOWN: return DXGI_FORMAT_UNKNOWN;
+        case TextureFormat::R8_SINT: return DXGI_FORMAT_R8_SINT;
+        case TextureFormat::R8_UINT: return DXGI_FORMAT_R8_UINT;
+        case TextureFormat::R8_SNORM: return DXGI_FORMAT_R8_SNORM;
+        case TextureFormat::R8_UNORM: return DXGI_FORMAT_R8_UNORM;
+        case TextureFormat::R16_SINT: return DXGI_FORMAT_R16_SINT;
+        case TextureFormat::R16_UINT: return DXGI_FORMAT_R16_UINT;
+        case TextureFormat::R16_SNORM: return DXGI_FORMAT_R16_SNORM;
+        case TextureFormat::R16_UNORM: return DXGI_FORMAT_R16_UNORM;
+        case TextureFormat::R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
+        case TextureFormat::RG8_SINT: return DXGI_FORMAT_R8G8_SINT;
+        case TextureFormat::RG8_UINT: return DXGI_FORMAT_R8G8_UINT;
+        case TextureFormat::RG8_SNORM: return DXGI_FORMAT_R8G8_SNORM;
+        case TextureFormat::RG8_UNORM: return DXGI_FORMAT_R8G8_UNORM;
+        case TextureFormat::R32_SINT: return DXGI_FORMAT_R32_SINT;
+        case TextureFormat::R32_UINT: return DXGI_FORMAT_R32_UINT;
+        case TextureFormat::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
+        case TextureFormat::RG16_SINT: return DXGI_FORMAT_R16G16_SINT;
+        case TextureFormat::RG16_UINT: return DXGI_FORMAT_R16G16_UINT;
+        case TextureFormat::RG16_SNORM: return DXGI_FORMAT_R16G16_SNORM;
+        case TextureFormat::RG16_UNORM: return DXGI_FORMAT_R16G16_UNORM;
+        case TextureFormat::RG16_FLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+        case TextureFormat::RGBA8_SINT: return DXGI_FORMAT_R8G8B8A8_SINT;
+        case TextureFormat::RGBA8_UINT: return DXGI_FORMAT_R8G8B8A8_UINT;
+        case TextureFormat::RGBA8_SNORM: return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case TextureFormat::RGBA8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case TextureFormat::RGBA8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case TextureFormat::BGRA8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case TextureFormat::BGRA8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        case TextureFormat::RGB10A2_UINT: return DXGI_FORMAT_R10G10B10A2_UINT;
+        case TextureFormat::RGB10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case TextureFormat::RG11B10_FLOAT: return DXGI_FORMAT_R11G11B10_FLOAT;
+        case TextureFormat::RG32_SINT: return DXGI_FORMAT_R32G32_SINT;
+        case TextureFormat::RG32_UINT: return DXGI_FORMAT_R32G32_UINT;
+        case TextureFormat::RG32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+        case TextureFormat::RGBA16_SINT: return DXGI_FORMAT_R16G16B16A16_SINT;
+        case TextureFormat::RGBA16_UINT: return DXGI_FORMAT_R16G16B16A16_UINT;
+        case TextureFormat::RGBA16_SNORM: return DXGI_FORMAT_R16G16B16A16_SNORM;
+        case TextureFormat::RGBA16_UNORM: return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case TextureFormat::RGBA16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case TextureFormat::RGBA32_SINT: return DXGI_FORMAT_R32G32B32A32_SINT;
+        case TextureFormat::RGBA32_UINT: return DXGI_FORMAT_R32G32B32A32_UINT;
+        case TextureFormat::RGBA32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case TextureFormat::S8: return DXGI_FORMAT_R8_UINT;
+        case TextureFormat::D16_UNORM: return DXGI_FORMAT_D16_UNORM;
+        case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
+        case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        case TextureFormat::D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    }
+}
+
+std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
+    switch (v) {
+        case PolygonMode::Fill: return D3D12_FILL_MODE_SOLID;
+        case PolygonMode::Line: return D3D12_FILL_MODE_WIREFRAME;
+        case PolygonMode::Point: return std::nullopt;
+    }
+}
+
+D3D12_CULL_MODE MapType(CullMode v) noexcept {
+    switch (v) {
+        case CullMode::Front: return D3D12_CULL_MODE_FRONT;
+        case CullMode::Back: return D3D12_CULL_MODE_BACK;
+        case CullMode::None: return D3D12_CULL_MODE_NONE;
+    }
+}
+
+D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
+    switch (v) {
+        case BlendOperation::Add: return D3D12_BLEND_OP_ADD;
+        case BlendOperation::Subtract: return D3D12_BLEND_OP_SUBTRACT;
+        case BlendOperation::ReverseSubtract: return D3D12_BLEND_OP_REV_SUBTRACT;
+        case BlendOperation::Min: return D3D12_BLEND_OP_MIN;
+        case BlendOperation::Max: return D3D12_BLEND_OP_MAX;
+    }
+}
+
+D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
+    switch (v) {
+        case BlendFactor::Zero: return D3D12_BLEND_ZERO;
+        case BlendFactor::One: return D3D12_BLEND_ONE;
+        case BlendFactor::Src: return D3D12_BLEND_SRC_COLOR;
+        case BlendFactor::OneMinusSrc: return D3D12_BLEND_INV_SRC_COLOR;
+        case BlendFactor::SrcAlpha: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::Dst: return D3D12_BLEND_DEST_COLOR;
+        case BlendFactor::OneMinusDst: return D3D12_BLEND_INV_DEST_COLOR;
+        case BlendFactor::DstAlpha: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::SrcAlphaSaturated: return D3D12_BLEND_SRC_ALPHA_SAT;
+        case BlendFactor::Constant: return D3D12_BLEND_BLEND_FACTOR;
+        case BlendFactor::OneMinusConstant: return D3D12_BLEND_INV_BLEND_FACTOR;
+        case BlendFactor::Src1: return D3D12_BLEND_SRC1_COLOR;
+        case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_COLOR;
+        case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
+    }
+}
+
+D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
+    switch (v) {
+        case BlendFactor::Zero: return D3D12_BLEND_ZERO;
+        case BlendFactor::One: return D3D12_BLEND_ONE;
+        case BlendFactor::Src: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrc: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::SrcAlpha: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::Dst: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDst: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::DstAlpha: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::SrcAlphaSaturated: return D3D12_BLEND_SRC_ALPHA_SAT;
+        case BlendFactor::Constant: return D3D12_BLEND_BLEND_FACTOR;
+        case BlendFactor::OneMinusConstant: return D3D12_BLEND_INV_BLEND_FACTOR;
+        case BlendFactor::Src1: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_ALPHA;
+        case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
+    }
+}
+
+std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
+    if (v == ColorWrite::Red) return D3D12_COLOR_WRITE_ENABLE_RED;
+    if (v == ColorWrite::Green) return D3D12_COLOR_WRITE_ENABLE_GREEN;
+    if (v == ColorWrite::Blue) return D3D12_COLOR_WRITE_ENABLE_BLUE;
+    if (v == ColorWrite::Alpha) return D3D12_COLOR_WRITE_ENABLE_ALPHA;
+    if (v == ColorWrite::All) return D3D12_COLOR_WRITE_ENABLE_ALL;
+    return std::nullopt;
+}
+
+D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
+    switch (v) {
+        case StencilOperation::Keep: return D3D12_STENCIL_OP_KEEP;
+        case StencilOperation::Zero: return D3D12_STENCIL_OP_ZERO;
+        case StencilOperation::Replace: return D3D12_STENCIL_OP_REPLACE;
+        case StencilOperation::Invert: return D3D12_STENCIL_OP_INVERT;
+        case StencilOperation::IncrementClamp: return D3D12_STENCIL_OP_INCR_SAT;
+        case StencilOperation::DecrementClamp: return D3D12_STENCIL_OP_DECR_SAT;
+        case StencilOperation::IncrementWrap: return D3D12_STENCIL_OP_INCR;
+        case StencilOperation::DecrementWrap: return D3D12_STENCIL_OP_DECR;
+    }
+}
+
+D3D12_DEPTH_STENCILOP_DESC MapType(StencilFaceState v) noexcept {
+    D3D12_DEPTH_STENCILOP_DESC result{};
+    result.StencilFailOp = MapType(v.FailOp);
+    result.StencilDepthFailOp = MapType(v.DepthFailOp);
+    result.StencilPassOp = MapType(v.PassOp);
+    result.StencilFunc = MapType(v.Compare);
+    return result;
+}
+
+D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
+    switch (v) {
+        case IndexFormat::UINT16: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+        case IndexFormat::UINT32: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
     }
 }
 

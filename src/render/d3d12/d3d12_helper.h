@@ -28,7 +28,7 @@ UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipL
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept;
-D3D12_SHADER_VISIBILITY MapType(ShaderStages v) noexcept;
+D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept;
 D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept;
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
@@ -37,6 +37,16 @@ D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept;
 std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept;
 D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept;
 DXGI_FORMAT MapType(VertexFormat v) noexcept;
+DXGI_FORMAT MapType(TextureFormat v) noexcept;
+std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept;
+D3D12_CULL_MODE MapType(CullMode v) noexcept;
+D3D12_BLEND_OP MapType(BlendOperation v) noexcept;
+D3D12_BLEND MapBlendColor(BlendFactor v) noexcept;
+D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept;
+std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept;
+D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
+D3D12_DEPTH_STENCILOP_DESC MapType(StencilFaceState v) noexcept;
+D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 
 }  // namespace radray::render::d3d12
 
