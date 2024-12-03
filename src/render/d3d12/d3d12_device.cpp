@@ -4,12 +4,15 @@
 #include "d3d12_shader.h"
 #include "d3d12_root_sig.h"
 #include "d3d12_pso.h"
+#include "d3d12_swapchain.h"
 
 namespace radray::render::d3d12 {
 
+static CmdQueueD3D12* Underlying(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
 static RootSigD3D12* Underlying(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 static Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 static GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+static SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -500,6 +503,63 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     return radray::make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
 }
 
+std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
+    CommandQueue* presentQueue,
+    const void* nativeWindow,
+    uint32_t width,
+    uint32_t height,
+    uint32_t backBufferCount,
+    TextureFormat format,
+    bool enableSync) noexcept {
+    // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
+    DXGI_SWAP_CHAIN_DESC1 scDesc{};
+    scDesc.Width = width;
+    scDesc.Height = height;
+    scDesc.Format = MapType(format);
+    if (scDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        scDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        scDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        scDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
+        RADRAY_ERR_LOG("d3d12 IDXGISwapChain doesn't support format {}", format);
+        return std::nullopt;
+    }
+    scDesc.Stereo = false;
+    scDesc.SampleDesc.Count = 1;
+    scDesc.SampleDesc.Quality = 0;
+    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scDesc.BufferCount = backBufferCount;
+    if (scDesc.BufferCount < 2 || scDesc.BufferCount > 16) {
+        RADRAY_ERR_LOG("d3d12 IDXGISwapChain buffer count must >= 2 and <= 16, cannot be {}", backBufferCount);
+        return std::nullopt;
+    }
+    scDesc.Scaling = DXGI_SCALING_STRETCH;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    scDesc.Flags = 0;
+    scDesc.Flags |= _isAllowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    CmdQueueD3D12* queue = Underlying(presentQueue);
+    HWND hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
+    ComPtr<IDXGISwapChain1> temp;
+    if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
+        hr != S_OK) {
+        RADRAY_ERR_LOG("d3d12 cannot create IDXGISwapChain1 for HWND, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+    if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
+        hr != S_OK) {
+        RADRAY_WARN_LOG("d3d12 cannot make window association no alt enter, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+    ComPtr<IDXGISwapChain3> swapchain;
+    if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
+        hr != S_OK) {
+        RADRAY_ERR_LOG("d3d12 doesn't support IDXGISwapChain3, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+    UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    return std::make_shared<SwapChainD3D12>(swapchain, presentFlags);
+}
+
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
@@ -587,7 +647,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
-    auto result = radray::make_shared<DeviceD3D12>(std::move(device));
+    auto result = radray::make_shared<DeviceD3D12>(device, dxgiFactory, adapter);
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
@@ -605,6 +665,21 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         } else {
             RADRAY_WARN_LOG("get driver version failed");
         }
+    }
+    {
+        BOOL allowTearing = FALSE;
+        ComPtr<IDXGIFactory6> factory6;
+        if (dxgiFactory.As(&factory6) == S_OK) {
+            if (HRESULT hr = factory6->CheckFeatureSupport(
+                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                    &allowTearing,
+                    sizeof(allowTearing));
+                hr != S_OK) {
+                RADRAY_DEBUG_LOG("query IDXGIFactory6 feature DXGI_FEATURE_PRESENT_ALLOW_TEARING failed, reason={} (code={})", GetErrorName(hr), hr);
+            }
+        }
+        RADRAY_INFO_LOG("Allow Tearing: {}", static_cast<bool>(allowTearing));
+        result->_isAllowTearing = allowTearing;
     }
     CD3DX12FeatureSupport fs{};
     if (HRESULT hr = fs.Init(result->_device.Get());
