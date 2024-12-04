@@ -2,51 +2,6 @@
 
 namespace radray::render {
 
-bool SamplerDescriptor::operator==(const SamplerDescriptor& rhs) const noexcept {
-    return AddressS == rhs.AddressS &&
-           AddressT == rhs.AddressT &&
-           AddressR == rhs.AddressR &&
-           MigFilter == rhs.MigFilter &&
-           MagFilter == rhs.MagFilter &&
-           MipmapFilter == rhs.MipmapFilter &&
-           LodMin == rhs.LodMin &&
-           LodMax == rhs.LodMax &&
-           Compare == rhs.Compare &&
-           AnisotropyClamp == rhs.AnisotropyClamp &&
-           HasCompare == rhs.HasCompare;
-}
-
-bool SamplerDescriptor::operator!=(const SamplerDescriptor& rhs) const noexcept { return !(*this == rhs); }
-
-bool DxilReflection::Variable::operator==(const Variable& rhs) const noexcept {
-    return Name == rhs.Name && Start == rhs.Start && Size == rhs.Size;
-}
-
-bool DxilReflection::Variable::operator!=(const Variable& rhs) const noexcept { return !(*this == rhs); }
-
-bool DxilReflection::CBuffer::operator==(const CBuffer& rhs) const noexcept {
-    if (Size != rhs.Size) {
-        return false;
-    }
-    if (Vars.size() != rhs.Vars.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < Vars.size(); i++) {
-        if (Vars[i] != rhs.Vars[i]) {
-            return false;
-        }
-    }
-    return Name == rhs.Name;
-}
-
-bool DxilReflection::CBuffer::operator!=(const CBuffer& rhs) const noexcept { return !(*this == rhs); }
-
-bool DxilReflection::StaticSampler::operator==(const StaticSampler& rhs) const noexcept {
-    return SamplerDescriptor::operator==(rhs) && Name == rhs.Name;
-}
-
-bool DxilReflection::StaticSampler::operator!=(const StaticSampler& rhs) const noexcept { return !(*this == rhs); }
-
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
         case TextureFormat::S8: return "S8";

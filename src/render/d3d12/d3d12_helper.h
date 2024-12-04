@@ -45,7 +45,6 @@ D3D12_BLEND MapBlendColor(BlendFactor v) noexcept;
 D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept;
 std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept;
 D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
-D3D12_DEPTH_STENCILOP_DESC MapType(StencilFaceState v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 
 }  // namespace radray::render::d3d12

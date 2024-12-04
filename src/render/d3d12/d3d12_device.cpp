@@ -460,10 +460,18 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
         dsDesc.DepthFunc = MapType(desc.DepthStencil.DepthCompare);
         dsDesc.StencilEnable = desc.DepthStencil.StencilEnable;
         if (dsDesc.StencilEnable) {
+            auto ToDsd = [](StencilFaceState v) noexcept {
+                D3D12_DEPTH_STENCILOP_DESC result{};
+                result.StencilFailOp = MapType(v.FailOp);
+                result.StencilDepthFailOp = MapType(v.DepthFailOp);
+                result.StencilPassOp = MapType(v.PassOp);
+                result.StencilFunc = MapType(v.Compare);
+                return result;
+            };
             dsDesc.StencilReadMask = desc.DepthStencil.Stencil.ReadMask;
             dsDesc.StencilWriteMask = desc.DepthStencil.Stencil.WriteMask;
-            dsDesc.FrontFace = MapType(desc.DepthStencil.Stencil.Front);
-            dsDesc.BackFace = MapType(desc.DepthStencil.Stencil.Back);
+            dsDesc.FrontFace = ToDsd(desc.DepthStencil.Stencil.Front);
+            dsDesc.BackFace = ToDsd(desc.DepthStencil.Stencil.Back);
         }
     } else {
         dsDesc.DepthEnable = false;

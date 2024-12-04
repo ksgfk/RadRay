@@ -1,10 +1,70 @@
 #pragma once
 
+#include <array>
+
+#include <radray/render/common.h>
+#include <radray/render/sampler.h>
+
+namespace radray::render {
+
+class DxilReflection {
+public:
+    class Variable {
+    public:
+        radray::string Name;
+        uint32_t Start;
+        uint32_t Size;
+    };
+
+    class CBuffer {
+    public:
+        radray::string Name;
+        radray::vector<Variable> Vars;
+        uint32_t Size;
+    };
+
+    class BindResource {
+    public:
+        radray::string Name;
+        ShaderResourceType Type;
+        TextureDimension Dim;
+        uint32_t Space;
+        uint32_t BindPoint;
+        uint32_t BindCount;
+    };
+
+    class StaticSampler : public SamplerDescriptor {
+    public:
+        radray::string Name;
+    };
+
+    class VertexInput {
+    public:
+        VertexSemantic Semantic;
+        uint32_t SemanticIndex;
+        VertexFormat Format;
+    };
+
+public:
+    radray::vector<CBuffer> CBuffers;
+    radray::vector<BindResource> Binds;
+    radray::vector<VertexInput> VertexInputs;
+    radray::vector<StaticSampler> StaticSamplers;
+    std::array<uint32_t, 3> GroupSize;
+};
+
+bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
+bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
+bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
+bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
+bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
+bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
+
+}  // namespace radray::render
+
 #ifdef RADRAY_ENABLE_DXC
 
 #include <span>
-
-#include <radray/render/common.h>
 
 namespace radray::render {
 

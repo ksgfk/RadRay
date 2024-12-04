@@ -7,6 +7,9 @@
 #include <radray/types.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
+#include <radray/render/dxc.h>
+#include <radray/render/spvc.h>
+#include <radray/render/root_signature.h>
 
 namespace radray::render {
 
@@ -27,6 +30,8 @@ public:
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
+
+using ShaderReflection = std::variant<DxilReflection, SpirvReflection, MslReflection>;
 
 class CommandQueue;
 class Shader;

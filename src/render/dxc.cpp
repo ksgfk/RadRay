@@ -1,5 +1,45 @@
 #include <radray/render/dxc.h>
 
+namespace radray::render {
+
+bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept {
+    return lhs.Name == rhs.Name && lhs.Start == rhs.Start && lhs.Size == rhs.Size;
+}
+
+bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
+bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept {
+    if (lhs.Size != rhs.Size) {
+        return false;
+    }
+    if (lhs.Vars.size() != rhs.Vars.size()) {
+        return false;
+    }
+    size_t cnt = lhs.Vars.size();
+    for (size_t i = 0; i < cnt; i++) {
+        if (lhs.Vars[i] != rhs.Vars[i]) {
+            return false;
+        }
+    }
+    return lhs.Name == rhs.Name;
+}
+
+bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
+bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept {
+    return operator==(static_cast<SamplerDescriptor>(lhs), rhs) && lhs.Name == rhs.Name;
+}
+
+bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
+}  // namespace radray::render
+
 #ifdef RADRAY_ENABLE_DXC
 
 #include <atomic>

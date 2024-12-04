@@ -1,8 +1,28 @@
 #pragma once
 
-#ifdef RADRAY_ENABLE_SPIRV_CROSS
-
 #include <radray/render/common.h>
+
+namespace radray::render {
+
+class MslReflection {
+public:
+    class VertexInput {
+    public:
+        radray::string Name;
+        uint32_t Location;
+        VertexFormat Format;
+        VertexSemantic Semantic;
+        uint32_t SemanticIndex;
+    };
+
+    radray::vector<VertexInput> VertexInputs;
+};
+
+class SpirvReflection {};
+
+};  // namespace radray::render
+
+#ifdef RADRAY_ENABLE_SPIRV_CROSS
 
 namespace radray::render {
 

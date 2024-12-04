@@ -1,7 +1,5 @@
 #include "d3d12_helper.h"
 
-#include <type_traits>
-
 namespace radray::render::d3d12 {
 
 constexpr size_t MaxNameLength = 128;
@@ -347,15 +345,6 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
         case StencilOperation::IncrementWrap: return D3D12_STENCIL_OP_INCR;
         case StencilOperation::DecrementWrap: return D3D12_STENCIL_OP_DECR;
     }
-}
-
-D3D12_DEPTH_STENCILOP_DESC MapType(StencilFaceState v) noexcept {
-    D3D12_DEPTH_STENCILOP_DESC result{};
-    result.StencilFailOp = MapType(v.FailOp);
-    result.StencilDepthFailOp = MapType(v.DepthFailOp);
-    result.StencilPassOp = MapType(v.PassOp);
-    result.StencilFunc = MapType(v.Compare);
-    return result;
 }
 
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
