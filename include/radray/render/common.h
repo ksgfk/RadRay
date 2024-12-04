@@ -271,6 +271,48 @@ enum class ColorWrite : uint32_t {
 using ColorWrites = std::underlying_type_t<ColorWrite>;
 RADRAY_FLAG_ENUM(ColorWrite, ColorWrites);
 
+enum class ResourceType {
+    UNKNOWN,
+
+    Sampler,
+
+    Texture,
+    RenderTarget,
+    DepthStencil,
+    TextureRW,
+
+    Buffer,
+    CBuffer,
+    PushConstant,
+    BufferRW,
+
+    RayTracing
+};
+
+enum class ResourceState : uint32_t {
+    Common = 0x0,
+
+    VertexAndConstantBuffer = 0x1,
+    IndexBuffer = 0x2,
+    ShaderResource = 0x4,
+    IndirectArgument = 0x8,
+    CopySource = 0x10,
+    GenericRead = VertexAndConstantBuffer | IndexBuffer | ShaderResource | IndirectArgument | CopySource,
+
+    RenderTarget = 0x20,
+    StreamOut = 0x40,
+    CopyDestination = 0x80,
+
+    UnorderedAccess = 0x100,
+
+    DepthWrite = 0x200,
+    DepthRead = 0x400,
+    AccelerationStructure = 0x800,
+    Present = 0x1000
+};
+using ResourceStates = std::underlying_type_t<ResourceState>;
+RADRAY_FLAG_ENUM(ResourceState, ResourceStates);
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 
