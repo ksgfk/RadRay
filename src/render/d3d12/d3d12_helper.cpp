@@ -354,6 +354,26 @@ D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
     }
 }
 
+ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept {
+    ResourceStates result = 0;
+    if (v & D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) result |= ResourceState::VertexAndConstantBuffer;
+    if (v & D3D12_RESOURCE_STATE_INDEX_BUFFER) result |= ResourceState::IndexBuffer;
+    if (v & D3D12_RESOURCE_STATE_RENDER_TARGET) result |= ResourceState::RenderTarget;
+    if (v & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) result |= ResourceState::UnorderedAccess;
+    if (v & D3D12_RESOURCE_STATE_DEPTH_WRITE) result |= ResourceState::DepthWrite;
+    if (v & D3D12_RESOURCE_STATE_DEPTH_READ) result |= ResourceState::DepthRead;
+    if ((v & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) || (v & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)) {
+        result |= ResourceState::ShaderResource;
+    }
+    if (v & D3D12_RESOURCE_STATE_STREAM_OUT) result |= ResourceState::StreamOut;
+    if (v & D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT) result |= ResourceState::IndirectArgument;
+    if (v & D3D12_RESOURCE_STATE_COPY_DEST) result |= ResourceState::CopyDestination;
+    if (v & D3D12_RESOURCE_STATE_COPY_SOURCE) result |= ResourceState::CopySource;
+    if (v & D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE) result |= ResourceState::AccelerationStructure;
+    if (v & D3D12_RESOURCE_STATE_GENERIC_READ) result |= ResourceState::GenericRead;
+    return result;
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

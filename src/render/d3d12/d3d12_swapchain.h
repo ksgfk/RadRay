@@ -5,10 +5,16 @@
 
 namespace radray::render::d3d12 {
 
+class TextureD3D12;
+
 class SwapChainD3D12 : public SwapChain {
 public:
-    SwapChainD3D12(ComPtr<IDXGISwapChain3> swapchain, UINT presentFlags) noexcept
+    SwapChainD3D12(
+        ComPtr<IDXGISwapChain3> swapchain,
+        radray::vector<radray::shared_ptr<TextureD3D12>> colors,
+        UINT presentFlags) noexcept
         : _swapchain(std::move(swapchain)),
+          _colors(std::move(colors)),
           _presentFlags(presentFlags) {}
     ~SwapChainD3D12() noexcept override = default;
 
@@ -17,6 +23,7 @@ public:
 
 public:
     ComPtr<IDXGISwapChain3> _swapchain;
+    radray::vector<radray::shared_ptr<TextureD3D12>> _colors;
     UINT _presentFlags;
 };
 

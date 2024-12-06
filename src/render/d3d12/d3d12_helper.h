@@ -47,6 +47,8 @@ std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept;
 D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 
+ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept;
+
 }  // namespace radray::render::d3d12
 
 #ifndef RADRAY_DX_CHECK

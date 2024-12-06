@@ -5,6 +5,7 @@
 #include "d3d12_root_sig.h"
 #include "d3d12_pso.h"
 #include "d3d12_swapchain.h"
+#include "d3d12_texture.h"
 
 namespace radray::render::d3d12 {
 
@@ -13,6 +14,7 @@ static RootSigD3D12* Underlying(RootSignature* v) noexcept { return static_cast<
 static Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 static GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 static SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
+static TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -564,8 +566,24 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         RADRAY_ERR_LOG("d3d12 doesn't support IDXGISwapChain3, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
+    radray::vector<radray::shared_ptr<TextureD3D12>> colors;
+    colors.reserve(scDesc.BufferCount);
+    for (size_t i = 0; i < scDesc.BufferCount; i++) {
+        ComPtr<ID3D12Resource> color;
+        if (HRESULT hr = swapchain->GetBuffer(i, IID_PPV_ARGS(color.GetAddressOf()));
+            hr != S_OK) {
+            RADRAY_ERR_LOG("d3d12 cannot get back buffer in IDXGISwapChain1, reason={} (code:{})", GetErrorName(hr), hr);
+            return std::nullopt;
+        }
+        auto tex = radray::make_shared<TextureD3D12>(
+            std::move(color),
+            ComPtr<D3D12MA::Allocation>{},
+            D3D12_RESOURCE_STATE_PRESENT,
+            ResourceType::RenderTarget);
+        colors.emplace_back(std::move(tex));
+    }
     UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    return std::make_shared<SwapChainD3D12>(swapchain, presentFlags);
+    return std::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
 }
 
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
