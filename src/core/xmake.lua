@@ -5,7 +5,7 @@ add_requires("fmt 11.0.2", {
         header_only = false
     }
 })
-add_requires("spdlog_radray v1.14.1", {
+add_requires("spdlog_radray v1.15.0", {
     alias = "spdlog",
     debug = is_mode("debug"),
     configs = {
