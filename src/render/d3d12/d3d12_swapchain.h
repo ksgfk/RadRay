@@ -21,6 +21,10 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
+    Texture* AcquireNextRenderTarget() noexcept override;
+    Texture* GetCurrentRenderTarget() noexcept override;
+    void Present() noexcept override;
+
 public:
     ComPtr<IDXGISwapChain3> _swapchain;
     radray::vector<radray::shared_ptr<TextureD3D12>> _colors;

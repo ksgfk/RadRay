@@ -208,7 +208,8 @@ public:
             if (window->ShouldClose()) {
                 break;
             }
-
+            swapchain->AcquireNextRenderTarget();
+            swapchain->Present();
             std::this_thread::yield();
         }
     }
