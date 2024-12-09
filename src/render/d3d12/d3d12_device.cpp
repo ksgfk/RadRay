@@ -6,6 +6,7 @@
 #include "d3d12_pso.h"
 #include "d3d12_swapchain.h"
 #include "d3d12_texture.h"
+#include "d3d12_buffer.h"
 
 namespace radray::render::d3d12 {
 
@@ -15,6 +16,7 @@ static Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 static GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 static SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
 static TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+static BufferD3D12* Underlying(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -586,6 +588,81 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     return std::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
 }
 
+std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
+    uint64_t size,
+    ResourceType type,
+    ResourceUsage usage,
+    ResourceStates initState,
+    ResourceMemoryTips tips) noexcept {
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    desc.Width = type == ResourceType::CBuffer ? CalcAlign(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) : size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (type == ResourceType::BufferRW) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (usage == ResourceUsage::Readback) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    }
+    if (usage == ResourceUsage::Upload) {
+        initState = (ResourceStates)ResourceState::GenericRead;
+    } else if (usage == ResourceUsage::Readback) {
+        initState = (ResourceStates)ResourceState::CopyDestination;
+    }
+    D3D12_RESOURCE_STATES rawInitState = MapTypeResStates(initState);
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = MapType(usage);
+    allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+    if (HasFlag(tips, ResourceMemoryTip::Dedicated)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+    ComPtr<ID3D12Resource> buffer;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    if (allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
+        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+        heapProps.VisibleNodeMask = 0;
+        heapProps.CreationNodeMask = 0;
+        if (rawInitState == D3D12_RESOURCE_STATE_GENERIC_READ) {
+            rawInitState = D3D12_RESOURCE_STATE_COMMON;
+        }
+        if (HRESULT hr = _device->CreateCommittedResource(
+                &heapProps,
+                allocDesc.ExtraHeapFlags,
+                &desc,
+                rawInitState,
+                nullptr,
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
+            return std::nullopt;
+        }
+    } else {
+        if (HRESULT hr = _mainAlloc->CreateResource(
+                &allocDesc,
+                &desc,
+                rawInitState,
+                nullptr,
+                allocRes.GetAddressOf(),
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
+            return std::nullopt;
+        }
+    }
+    return std::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
+}
+
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
@@ -673,7 +750,32 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         radray::wstring s{desc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
-    auto result = radray::make_shared<DeviceD3D12>(device, dxgiFactory, adapter);
+    ComPtr<D3D12MA::Allocator> alloc;
+    {
+        D3D12MA::ALLOCATOR_DESC desc{};
+        desc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
+        desc.pDevice = device.Get();
+        desc.pAdapter = adapter.Get();
+#ifdef RADRAY_ENABLE_MIMALLOC
+        D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks{};
+        allocationCallbacks.pAllocate = [](size_t Size, size_t Alignment, void* pPrivateData) {
+            RADRAY_UNUSED(pPrivateData);
+            return mi_malloc_aligned(Size, Alignment);
+        };
+        allocationCallbacks.pFree = [](void* pMemory, void* pPrivateData) {
+            RADRAY_UNUSED(pPrivateData);
+            mi_free(pMemory);
+        };
+        desc.pAllocationCallbacks = &allocationCallbacks;
+#endif
+        desc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
+        if (HRESULT hr = D3D12MA::CreateAllocator(&desc, alloc.GetAddressOf());
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("cannot create D3D12MA::Allocator, reason={} (code:{})", GetErrorName(hr), hr);
+            return std::nullopt;
+        }
+    }
+    auto result = radray::make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;

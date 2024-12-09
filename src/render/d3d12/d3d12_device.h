@@ -13,10 +13,12 @@ public:
     DeviceD3D12(
         ComPtr<ID3D12Device> device,
         ComPtr<IDXGIFactory4> dxgiFactory,
-        ComPtr<IDXGIAdapter1> dxgiAdapter) noexcept
+        ComPtr<IDXGIAdapter1> dxgiAdapter,
+        ComPtr<D3D12MA::Allocator> mainAlloc) noexcept
         : _device(std::move(device)),
           _dxgiFactory(std::move(dxgiFactory)),
-          _dxgiAdapter(std::move(dxgiAdapter)) {}
+          _dxgiAdapter(std::move(dxgiAdapter)),
+          _mainAlloc(std::move(mainAlloc)) {}
     ~DeviceD3D12() noexcept override;
 
     bool IsValid() const noexcept override { return _device != nullptr; }
@@ -47,10 +49,18 @@ public:
         TextureFormat format,
         bool enableSync) noexcept override;
 
+    std::optional<radray::shared_ptr<Buffer>> CreateBuffer(
+        uint64_t size,
+        ResourceType type,
+        ResourceUsage usage,
+        ResourceStates initState,
+        ResourceMemoryTips tips) noexcept override;
+
 public:
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
+    ComPtr<D3D12MA::Allocator> _mainAlloc;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
     bool _isAllowTearing = false;
 };

@@ -39,7 +39,7 @@ static void LogWinCharCvtErr() {
     RADRAY_ERR_LOG("cannot convert char to wchar, reason={} (code={})", strErr, err);
 }
 #endif
-
+// TODO: use lib to support utf8 on other platforms
 std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     if (str.size() >= std::numeric_limits<int>::max()) {
@@ -54,7 +54,6 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
     MultiByteToWideChar(CP_UTF8, 0, str.data(), str.size(), to.data(), (int)to.size());
     return to;
 #else
-    // can process utf8 on other platform? need test
     const char* start = str.data();
     std::mbstate_t state{};
     size_t len = std::mbsrtowcs(nullptr, &start, str.size(), &state);
@@ -83,7 +82,6 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
     WideCharToMultiByte(CP_UTF8, 0, str.data(), str.size(), to.data(), (int)to.size(), nullptr, nullptr);
     return to;
 #else
-    // can process utf8 on other platform? need test
     size_t len = std::wcstombs(nullptr, str.data(), str.size());
     if (len == static_cast<size_t>(-1)) {
         return std::nullopt;

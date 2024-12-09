@@ -38,6 +38,7 @@ class Shader;
 class RootSignature;
 class GraphicsPipelineState;
 class SwapChain;
+class Buffer;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
 public:
@@ -67,6 +68,13 @@ public:
         uint32_t backBufferCount,
         TextureFormat format,
         bool enableSync) noexcept = 0;
+
+    virtual std::optional<radray::shared_ptr<Buffer>> CreateBuffer(
+        uint64_t size,
+        ResourceType type,
+        ResourceUsage usage,
+        ResourceStates initState,
+        ResourceMemoryTips tips) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

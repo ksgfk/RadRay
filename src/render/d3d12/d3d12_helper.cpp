@@ -374,6 +374,35 @@ ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept {
     return result;
 }
 
+D3D12_RESOURCE_STATES MapTypeResStates(ResourceStates v) noexcept {
+    D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
+    if (HasFlag(v, ResourceState::VertexAndConstantBuffer)) result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    if (HasFlag(v, ResourceState::IndexBuffer)) result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
+    if (HasFlag(v, ResourceState::RenderTarget)) result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    if (HasFlag(v, ResourceState::UnorderedAccess)) result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (HasFlag(v, ResourceState::DepthWrite)) result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    if (HasFlag(v, ResourceState::DepthRead)) result |= D3D12_RESOURCE_STATE_DEPTH_READ;
+    if (HasFlag(v, ResourceState::ShaderResource)) {
+        result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        result |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (HasFlag(v, ResourceState::StreamOut)) result |= D3D12_RESOURCE_STATE_STREAM_OUT;
+    if (HasFlag(v, ResourceState::IndirectArgument)) result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    if (HasFlag(v, ResourceState::CopyDestination)) result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    if (HasFlag(v, ResourceState::CopySource)) result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (HasFlag(v, ResourceState::AccelerationStructure)) result |= D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+    if (HasFlag(v, ResourceState::GenericRead)) result |= D3D12_RESOURCE_STATE_GENERIC_READ;
+    return result;
+}
+
+D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept {
+    switch (v) {
+        case ResourceUsage::Default: return D3D12_HEAP_TYPE_DEFAULT;
+        case ResourceUsage::Upload: return D3D12_HEAP_TYPE_UPLOAD;
+        case ResourceUsage::Readback: return D3D12_HEAP_TYPE_READBACK;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

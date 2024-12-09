@@ -313,6 +313,20 @@ enum class ResourceState : uint32_t {
 using ResourceStates = std::underlying_type_t<ResourceState>;
 RADRAY_FLAG_ENUM(ResourceState, ResourceStates);
 
+enum class ResourceUsage {
+    Default,
+    Upload,
+    Readback
+};
+
+enum class ResourceMemoryTip : uint32_t {
+    None = 0x0,
+    Dedicated = 0x1,
+    PersistentMap = 0x2
+};
+using ResourceMemoryTips = std::underlying_type_t<ResourceMemoryTip>;
+RADRAY_FLAG_ENUM(ResourceMemoryTip, ResourceMemoryTips);
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 
