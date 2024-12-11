@@ -57,7 +57,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
-            hr == S_OK) {
+            SUCCEEDED(hr)) {
             auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), this, desc.Type);
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
@@ -376,7 +376,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             D3D_ROOT_SIGNATURE_VERSION_1_1,
             rootSigBlob.GetAddressOf(),
             errorBlob.GetAddressOf());
-        hr != S_OK) {
+        FAILED(hr)) {
         const char* errInfoBegin = errorBlob ? reinterpret_cast<const char*>(errorBlob->GetBufferPointer()) : nullptr;
         const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
         auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
@@ -389,7 +389,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             rootSigBlob->GetBufferPointer(),
             rootSigBlob->GetBufferSize(),
             IID_PPV_ARGS(rootSig.GetAddressOf()));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
@@ -520,7 +520,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     ComPtr<ID3D12PipelineState> pso;
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state. reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
@@ -565,18 +565,18 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     HWND hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
     ComPtr<IDXGISwapChain1> temp;
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create IDXGISwapChain1 for HWND, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_WARN_LOG("d3d12 cannot make window association no alt enter, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
     ComPtr<IDXGISwapChain3> swapchain;
     if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 doesn't support IDXGISwapChain3, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
@@ -585,7 +585,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
         ComPtr<ID3D12Resource> color;
         if (HRESULT hr = swapchain->GetBuffer(i, IID_PPV_ARGS(color.GetAddressOf()));
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("d3d12 cannot get back buffer in IDXGISwapChain1, reason={} (code:{})", GetErrorName(hr), hr);
             return std::nullopt;
         }
@@ -776,6 +776,7 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         RADRAY_ERR_LOG("d3d12 cannot create texture, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
+    SetObjectName(name, texture.Get(), allocRes.Get());
     return std::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
 }
 
@@ -788,7 +789,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             if (desc.IsEnableGpuBasedValid) {
                 ComPtr<ID3D12Debug1> debug1;
-                if (debugController.As(&debug1) == S_OK) {
+                if (SUCCEEDED(debugController.As(&debug1))) {
                     debug1->SetEnableGPUBasedValidation(true);
                 } else {
                     RADRAY_WARN_LOG("cannot get ID3D12Debug1. cannot enable gpu based validation");
@@ -814,7 +815,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         }
     } else {
         ComPtr<IDXGIFactory6> factory6;
-        if (dxgiFactory.As(&factory6) == S_OK) {
+        if (SUCCEEDED(dxgiFactory.As(&factory6))) {
             for (
                 auto adapterIndex = 0u;
                 factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
@@ -896,7 +897,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
     {
         LARGE_INTEGER l;
         HRESULT hr = adapter->CheckInterfaceSupport(IID_IDXGIDevice, &l);
-        if (hr == S_OK) {
+        if (SUCCEEDED(hr)) {
             const int64_t mask = 0xFFFF;
             auto quad = l.QuadPart;
             auto ver = radray::format(
@@ -913,12 +914,12 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
     {
         BOOL allowTearing = FALSE;
         ComPtr<IDXGIFactory6> factory6;
-        if (dxgiFactory.As(&factory6) == S_OK) {
+        if (SUCCEEDED(dxgiFactory.As(&factory6))) {
             if (HRESULT hr = factory6->CheckFeatureSupport(
                     DXGI_FEATURE_PRESENT_ALLOW_TEARING,
                     &allowTearing,
                     sizeof(allowTearing));
-                hr != S_OK) {
+                FAILED(hr)) {
                 RADRAY_DEBUG_LOG("query IDXGIFactory6 feature DXGI_FEATURE_PRESENT_ALLOW_TEARING failed, reason={} (code={})", GetErrorName(hr), hr);
             }
         }
