@@ -161,20 +161,20 @@ public:
                 argsref.size(),
                 _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
             return std::nullopt;
         }
         HRESULT status;
         if (HRESULT hr = compileResult->GetStatus(&status);
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
             return std::nullopt;
         }
-        if (status != S_OK) {
+        if (FAILED(status)) {
             ComPtr<IDxcBlobEncoding> errBuffer;
             if (HRESULT hr = compileResult->GetErrorBuffer(&errBuffer);
-                hr != S_OK) {
+                FAILED(hr)) {
                 RADRAY_ERR_LOG("dxc error, code={}", hr);
                 return std::nullopt;
             }
@@ -184,7 +184,7 @@ public:
         }
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetResult(&blob);
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
             return std::nullopt;
         }
@@ -194,7 +194,7 @@ public:
         if (!isSpirv && !isStripRefl) {
             ComPtr<IDxcBlob> reflBlob;
             if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
-                hr == S_OK) {
+                SUCCEEDED(hr)) {
                 auto reflStart = reinterpret_cast<byte const*>(reflBlob->GetBufferPointer());
                 reflData = {reflStart, reflStart + reflBlob->GetBufferSize()};
             } else {
@@ -211,13 +211,13 @@ public:
         DxcBuffer buf{refl.data(), refl.size(), 0};
         ComPtr<ID3D12ShaderReflection> sr;
         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
             return std::nullopt;
         }
         D3D12_SHADER_DESC shaderDesc{};
         if (HRESULT hr = sr->GetDesc(&shaderDesc);
-            hr != S_OK) {
+            FAILED(hr)) {
             RADRAY_ERR_LOG("dxc util cannot get D3D12_SHADER_DESC, code={}", hr);
             return std::nullopt;
         }
@@ -245,7 +245,7 @@ public:
         for (UINT i = 0; i < shaderDesc.BoundResources; i++) {
             D3D12_SHADER_INPUT_BIND_DESC bindDesc;
             if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
-                hr != S_OK) {
+                FAILED(hr)) {
                 RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SHADER_INPUT_BIND_DESC, code={}", hr);
                 return std::nullopt;
             }
@@ -301,7 +301,7 @@ public:
             for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
                 D3D12_SIGNATURE_PARAMETER_DESC spDesc;
                 if (HRESULT hr = sr->GetInputParameterDesc(i, &spDesc);
-                    hr != S_OK) {
+                    FAILED(hr)) {
                     RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SIGNATURE_PARAMETER_DESC, code={}", hr);
                     return std::nullopt;
                 }
@@ -392,26 +392,26 @@ std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
     if (HRESULT hr = DxcCreateInstance2(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcCompiler3, code={}", hr);
         return std::nullopt;
     }
 #else
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcCompiler3, code={}", hr);
         return std::nullopt;
     }
 #endif
     ComPtr<IDxcUtils> utils;
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcUtils, code={}", hr);
         return std::nullopt;
     }
     ComPtr<IDxcIncludeHandler> incHandler;
     if (HRESULT hr = utils->CreateDefaultIncludeHandler(&incHandler);
-        hr != S_OK) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcIncludeHandler, code={}", hr);
         return std::nullopt;
     }

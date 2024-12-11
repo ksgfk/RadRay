@@ -55,7 +55,7 @@ D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept;
 #define RADRAY_DX_CHECK(x)                                                                                               \
     do {                                                                                                                 \
         HRESULT hr_ = (x);                                                                                               \
-        if (hr_ != S_OK) [[unlikely]] {                                                                                  \
+        if (FAILED(hr_)) [[unlikely]] {                                                                                  \
             RADRAY_ABORT("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
         }                                                                                                                \
     } while (false)

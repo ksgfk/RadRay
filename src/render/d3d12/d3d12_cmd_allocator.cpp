@@ -12,7 +12,7 @@ void CmdAllocatorD3D12::Destroy() noexcept {
 std::optional<radray::shared_ptr<CommandBuffer>> CmdAllocatorD3D12::CreateCommandBuffer() noexcept {
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->_device->CreateCommandList(0, _type, _cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
-        hr == S_OK) {
+        SUCCEEDED(hr)) {
         auto ins = radray::make_shared<CmdListD3D12>(std::move(list), _device, _type);
         return ins;
     } else {
