@@ -327,6 +327,15 @@ enum class ResourceMemoryTip : uint32_t {
 using ResourceMemoryTips = std::underlying_type_t<ResourceMemoryTip>;
 RADRAY_FLAG_ENUM(ResourceMemoryTip, ResourceMemoryTips);
 
+class Device;
+class CommandQueue;
+class Shader;
+class RootSignature;
+class GraphicsPipelineState;
+class SwapChain;
+class Buffer;
+class Texture;
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 

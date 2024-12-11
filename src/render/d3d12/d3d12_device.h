@@ -14,11 +14,7 @@ public:
         ComPtr<ID3D12Device> device,
         ComPtr<IDXGIFactory4> dxgiFactory,
         ComPtr<IDXGIAdapter1> dxgiAdapter,
-        ComPtr<D3D12MA::Allocator> mainAlloc) noexcept
-        : _device(std::move(device)),
-          _dxgiFactory(std::move(dxgiFactory)),
-          _dxgiAdapter(std::move(dxgiAdapter)),
-          _mainAlloc(std::move(mainAlloc)) {}
+        ComPtr<D3D12MA::Allocator> mainAlloc) noexcept;
     ~DeviceD3D12() noexcept override;
 
     bool IsValid() const noexcept override { return _device != nullptr; }
@@ -54,7 +50,25 @@ public:
         ResourceType type,
         ResourceUsage usage,
         ResourceStates initState,
-        ResourceMemoryTips tips) noexcept override;
+        ResourceMemoryTips tips,
+        std::string_view name = {}) noexcept override;
+
+    std::optional<radray::shared_ptr<Texture>> CreateTexture(
+        uint64_t width,
+        uint64_t height,
+        uint64_t depth,
+        uint32_t arraySize,
+        TextureFormat format,
+        uint32_t mipLevels,
+        uint32_t sampleCount,
+        uint32_t sampleQuality,
+        ClearValue clearValue,
+        ResourceType type,
+        ResourceStates initState,
+        ResourceMemoryTips tips,
+        std::string_view name = {}) noexcept override;
+
+    const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
 public:
     ComPtr<ID3D12Device> _device;
@@ -62,6 +76,7 @@ public:
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
+    CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };
 

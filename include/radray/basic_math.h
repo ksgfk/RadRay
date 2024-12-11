@@ -31,7 +31,7 @@ T Lerp(T a, T b, T t) noexcept {
 }
 
 template <class LhsDerived, class RhsDerived>
-class Eigen::ScalarBinaryOpTraits<class LhsDerived::Scalar, class RhsDerived::Scalar>::ReturnType AbsDot(const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) noexcept {
+typename Eigen::ScalarBinaryOpTraits<typename LhsDerived::Scalar, typename RhsDerived::Scalar>::ReturnType AbsDot(const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) noexcept {
     return std::abs(lhs.dot(rhs));
 }
 

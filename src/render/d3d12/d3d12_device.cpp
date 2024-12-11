@@ -25,6 +25,18 @@ static void DestroyImpl(DeviceD3D12* d) noexcept {
     d->_device = nullptr;
 }
 
+DeviceD3D12::DeviceD3D12(
+    ComPtr<ID3D12Device> device,
+    ComPtr<IDXGIFactory4> dxgiFactory,
+    ComPtr<IDXGIAdapter1> dxgiAdapter,
+    ComPtr<D3D12MA::Allocator> mainAlloc) noexcept
+    : _device(std::move(device)),
+      _dxgiFactory(std::move(dxgiFactory)),
+      _dxgiAdapter(std::move(dxgiAdapter)),
+      _mainAlloc(std::move(mainAlloc)) {
+    _features.Init(_device.Get());
+}
+
 DeviceD3D12::~DeviceD3D12() noexcept { DestroyImpl(this); }
 
 void DeviceD3D12::Destroy() noexcept { DestroyImpl(this); }
@@ -593,10 +605,15 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     ResourceType type,
     ResourceUsage usage,
     ResourceStates initState,
-    ResourceMemoryTips tips) noexcept {
+    ResourceMemoryTips tips,
+    std::string_view name) noexcept {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_desc
     desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    // D3D12 要求 cbuffer 是 256 字节对齐
+    // https://github.com/d3dcoder/d3d12book/blob/master/Common/d3dUtil.h#L99
     desc.Width = type == ResourceType::CBuffer ? CalcAlign(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) : size;
     desc.Height = 1;
     desc.DepthOrArraySize = 1;
@@ -660,7 +677,106 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
             return std::nullopt;
         }
     }
+    SetObjectName(name, buffer.Get(), allocRes.Get());
     return std::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
+}
+
+std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
+    uint64_t width,
+    uint64_t height,
+    uint64_t depth,
+    uint32_t arraySize,
+    TextureFormat format,
+    uint32_t mipLevels,
+    uint32_t sampleCount,
+    uint32_t sampleQuality,
+    ClearValue clearValue,
+    ResourceType type,
+    ResourceStates initState,
+    ResourceMemoryTips tips,
+    std::string_view name) noexcept {
+    DXGI_FORMAT rawFormat = MapType(format);
+    D3D12_RESOURCE_DESC desc{};
+    if (depth > 1) {
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    } else if (depth > 1) {
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    } else {
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    }
+    desc.Alignment = sampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+    desc.Width = width;
+    if (height > std::numeric_limits<decltype(desc.Height)>::max()) {
+        RADRAY_ERR_LOG("d3d12 cannot create texture, height {} too large", height);
+        return std::nullopt;
+    }
+    desc.Height = height;
+    if (depth > std::numeric_limits<decltype(desc.DepthOrArraySize)>::max()) {
+        RADRAY_ERR_LOG("d3d12 cannot create texture, depth {} too large", depth);
+        return std::nullopt;
+    }
+    if (arraySize > std::numeric_limits<decltype(desc.DepthOrArraySize)>::max()) {
+        RADRAY_ERR_LOG("d3d12 cannot create texture, array size {} too large", arraySize);
+        return std::nullopt;
+    }
+    desc.DepthOrArraySize = arraySize != 1 ? arraySize : depth;
+    if (mipLevels > std::numeric_limits<decltype(desc.MipLevels)>::max()) {
+        RADRAY_ERR_LOG("d3d12 cannot create texture, mip levels {} too large", mipLevels);
+        return std::nullopt;
+    }
+    desc.MipLevels = mipLevels;
+    desc.Format = FormatToTypeless(rawFormat);
+    desc.SampleDesc.Count = sampleCount ? sampleCount : 1;
+    desc.SampleDesc.Quality = sampleQuality;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (type == ResourceType::TextureRW) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (type == ResourceType::RenderTarget) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+    if (type == ResourceType::DepthStencil) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
+    D3D12_RESOURCE_STATES startState = MapTypeResStates(initState);
+    if (HasFlag(initState, ResourceState::CopyDestination)) {
+        startState = D3D12_RESOURCE_STATE_COMMON;
+    }
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = rawFormat;
+    if (auto ccv = std::get_if<ColorClearValue>(&clearValue)) {
+        clear.Color[0] = ccv->R;
+        clear.Color[1] = ccv->G;
+        clear.Color[2] = ccv->B;
+        clear.Color[3] = ccv->A;
+    } else if (auto dcv = std::get_if<DepthStencilClearValue>(&clearValue)) {
+        clear.DepthStencil.Depth = dcv->Depth;
+        clear.DepthStencil.Stencil = dcv->Stencil;
+    }
+    const D3D12_CLEAR_VALUE* clearPtr = nullptr;
+    if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
+        clearPtr = &clear;
+    }
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    if (HasFlag(tips, ResourceMemoryTip::Dedicated)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    if (HRESULT hr = _mainAlloc->CreateResource(
+            &allocDesc,
+            &desc,
+            startState,
+            clearPtr,
+            allocRes.GetAddressOf(),
+            IID_PPV_ARGS(texture.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 cannot create texture, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+    return std::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
 }
 
 std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
@@ -809,9 +925,8 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         RADRAY_INFO_LOG("Allow Tearing: {}", static_cast<bool>(allowTearing));
         result->_isAllowTearing = allowTearing;
     }
-    CD3DX12FeatureSupport fs{};
-    if (HRESULT hr = fs.Init(result->_device.Get());
-        hr == S_OK) {
+    const CD3DX12FeatureSupport& fs = result->GetFeatures();
+    if (SUCCEEDED(fs.GetStatus())) {
         RADRAY_INFO_LOG("Feature Level: {}", fs.MaxSupportedFeatureLevel());
         RADRAY_INFO_LOG("Shader Model: {}", fs.HighestShaderModel());
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));

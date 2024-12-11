@@ -21,10 +21,9 @@ namespace radray::render::d3d12 {
 using Microsoft::WRL::ComPtr;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
-
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
-
 UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept;
+DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept;

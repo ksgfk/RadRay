@@ -33,12 +33,16 @@ using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescript
 
 using ShaderReflection = std::variant<DxilReflection, SpirvReflection, MslReflection>;
 
-class CommandQueue;
-class Shader;
-class RootSignature;
-class GraphicsPipelineState;
-class SwapChain;
-class Buffer;
+struct ColorClearValue {
+    float R, G, B, A;
+};
+
+struct DepthStencilClearValue {
+    float Depth;
+    uint32_t Stencil;
+};
+
+using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
 public:
@@ -74,7 +78,23 @@ public:
         ResourceType type,
         ResourceUsage usage,
         ResourceStates initState,
-        ResourceMemoryTips tips) noexcept = 0;
+        ResourceMemoryTips tips,
+        std::string_view name = {}) noexcept = 0;
+
+    virtual std::optional<radray::shared_ptr<Texture>> CreateTexture(
+        uint64_t width,
+        uint64_t height,
+        uint64_t depth,
+        uint32_t arraySize,
+        TextureFormat format,
+        uint32_t mipLevels,
+        uint32_t sampleCount,
+        uint32_t sampleQuality,
+        ClearValue clearValue,
+        ResourceType type,
+        ResourceStates initState,
+        ResourceMemoryTips tips,
+        std::string_view name = {}) noexcept = 0;
 };
 
 std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
