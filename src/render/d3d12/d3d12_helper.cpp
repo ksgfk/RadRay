@@ -1,8 +1,8 @@
 #include "d3d12_helper.h"
 
-namespace radray::render::d3d12 {
+#include <radray/utility.h>
 
-constexpr size_t MaxNameLength = 128;
+namespace radray::render::d3d12 {
 
 std::string_view GetErrorName(HRESULT hr) noexcept {
     switch (hr) {
@@ -49,12 +49,14 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
         }
         obj->SetName(nullptr);
     } else {
-        wchar_t debugName[MaxNameLength]{};
-        MultiByteToWideChar(CP_UTF8, 0, str.data(), str.length(), debugName, MaxNameLength);
-        if (alloc) {
-            alloc->SetName(debugName);
+        std::optional<radray::wstring> wco = ToWideChar(str);
+        if (wco.has_value()) {
+            const wchar_t* debugName = wco.value().c_str();
+            if (alloc) {
+                alloc->SetName(debugName);
+            }
+            obj->SetName(debugName);
         }
-        obj->SetName(debugName);
     }
 }
 
@@ -200,6 +202,7 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept {
         case DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE:
         case DXGI_FORMAT_FORCE_UINT: return DXGI_FORMAT_UNKNOWN;
     }
+    Unreachable();
 }
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
@@ -208,6 +211,7 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
         case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
         case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
     }
+    Unreachable();
 }
 
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {
@@ -217,6 +221,7 @@ D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {
         case ShaderStage::Pixel: return D3D12_SHADER_VISIBILITY_PIXEL;
         case ShaderStage::Compute: return D3D12_SHADER_VISIBILITY_ALL;
     }
+    Unreachable();
 }
 
 D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
@@ -250,6 +255,7 @@ D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept {
         case ShaderResourceType::PushConstant: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
         case ShaderResourceType::RayTracing: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     }
+    Unreachable();
 }
 
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
@@ -257,6 +263,7 @@ D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
         case FilterMode::Nearest: return D3D12_FILTER_TYPE_POINT;
         case FilterMode::Linear: return D3D12_FILTER_TYPE_LINEAR;
     }
+    Unreachable();
 }
 
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept {
@@ -281,6 +288,7 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
         case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
     }
+    Unreachable();
 }
 
 D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
@@ -294,6 +302,7 @@ D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
         case CompareFunction::GreaterEqual: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
         case CompareFunction::Always: return D3D12_COMPARISON_FUNC_ALWAYS;
     }
+    Unreachable();
 }
 
 std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept {
@@ -304,6 +313,7 @@ std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(Primi
         case PrimitiveTopology::TriangleList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
         case PrimitiveTopology::TriangleStrip: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP};
     }
+    Unreachable();
 }
 
 D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept {
@@ -311,6 +321,7 @@ D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept {
         case VertexStepMode::Vertex: return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
         case VertexStepMode::Instance: return D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
     }
+    Unreachable();
 }
 
 DXGI_FORMAT MapType(VertexFormat v) noexcept {
@@ -347,6 +358,7 @@ DXGI_FORMAT MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X3: return DXGI_FORMAT_R32G32B32_FLOAT;
         case VertexFormat::FLOAT32X4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
     }
+    Unreachable();
 }
 
 DXGI_FORMAT MapType(TextureFormat v) noexcept {
@@ -400,6 +412,7 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     }
+    Unreachable();
 }
 
 std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
@@ -408,6 +421,7 @@ std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
         case PolygonMode::Line: return D3D12_FILL_MODE_WIREFRAME;
         case PolygonMode::Point: return std::nullopt;
     }
+    Unreachable();
 }
 
 D3D12_CULL_MODE MapType(CullMode v) noexcept {
@@ -416,6 +430,7 @@ D3D12_CULL_MODE MapType(CullMode v) noexcept {
         case CullMode::Back: return D3D12_CULL_MODE_BACK;
         case CullMode::None: return D3D12_CULL_MODE_NONE;
     }
+    Unreachable();
 }
 
 D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
@@ -426,6 +441,7 @@ D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
         case BlendOperation::Min: return D3D12_BLEND_OP_MIN;
         case BlendOperation::Max: return D3D12_BLEND_OP_MAX;
     }
+    Unreachable();
 }
 
 D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
@@ -448,6 +464,7 @@ D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
         case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
         case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
     }
+    Unreachable();
 }
 
 D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
@@ -470,6 +487,7 @@ D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
         case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
         case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
     }
+    Unreachable();
 }
 
 std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
@@ -492,6 +510,7 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
         case StencilOperation::IncrementWrap: return D3D12_STENCIL_OP_INCR;
         case StencilOperation::DecrementWrap: return D3D12_STENCIL_OP_DECR;
     }
+    Unreachable();
 }
 
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
@@ -499,6 +518,7 @@ D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
         case IndexFormat::UINT16: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
         case IndexFormat::UINT32: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
     }
+    Unreachable();
 }
 
 ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept {
@@ -548,6 +568,7 @@ D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept {
         case ResourceUsage::Upload: return D3D12_HEAP_TYPE_UPLOAD;
         case ResourceUsage::Readback: return D3D12_HEAP_TYPE_READBACK;
     }
+    Unreachable();
 }
 
 }  // namespace radray::render::d3d12
@@ -583,6 +604,7 @@ std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
         case D3D12_RESOURCE_HEAP_TIER_1: return "1";
         case D3D12_RESOURCE_HEAP_TIER_2: return "2";
     }
+    radray::Unreachable();
 }
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
     switch (v) {
@@ -590,4 +612,5 @@ std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
         case D3D12_RESOURCE_BINDING_TIER_2: return "2";
         case D3D12_RESOURCE_BINDING_TIER_3: return "3";
     }
+    radray::Unreachable();
 }

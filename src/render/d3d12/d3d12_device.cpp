@@ -291,7 +291,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             auto& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
             CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                 p,
-                ranges.size(),
+                (UINT)ranges.size(),
                 ranges.data(),
                 MapShaderStages(tableStages));
         }
@@ -309,7 +309,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             if (strategy == RootSigStrategy::CBufferRootConst && i == pcIter) {
                 CD3DX12_ROOT_PARAMETER1::InitAsConstants(
                     p,
-                    CalcAlign(cbuffer.Size, 4) / 4,
+                    (UINT)(CalcAlign(cbuffer.Size, 4) / 4),
                     i->BindPoint,
                     i->Space,
                     MapShaderStages(i->Stages));
@@ -350,9 +350,9 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     D3D12_ROOT_SIGNATURE_DESC1& rcDesc = versionDesc.Desc_1_1;
-    rcDesc.NumParameters = rootParmas.size();
+    rcDesc.NumParameters = (UINT)rootParmas.size();
     rcDesc.pParameters = rootParmas.data();
-    rcDesc.NumStaticSamplers = staticSamplerDescs.size();
+    rcDesc.NumStaticSamplers = (UINT)staticSamplerDescs.size();
     rcDesc.pStaticSamplers = staticSamplerDescs.data();
     {
         D3D12_ROOT_SIGNATURE_FLAGS flag =
@@ -400,7 +400,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     const GraphicsPipelineStateDescriptor& desc) noexcept {
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     radray::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
-    radray::vector<uint32_t> arrayStrides(desc.VertexBuffers.size(), 0);
+    radray::vector<uint64_t> arrayStrides(desc.VertexBuffers.size(), 0);
     for (size_t index = 0; index < desc.VertexBuffers.size(); index++) {
         const VertexBufferLayout& i = desc.VertexBuffers[index];
         arrayStrides[index] = i.ArrayStride;
@@ -410,8 +410,8 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
             ied.SemanticName = format_as(j.Semantic).data();
             ied.SemanticIndex = j.SemanticIndex;
             ied.Format = MapType(j.Format);
-            ied.InputSlot = index;
-            ied.AlignedByteOffset = j.Offset;
+            ied.InputSlot = (UINT)index;
+            ied.AlignedByteOffset = (UINT)j.Offset;
             ied.InputSlotClass = inputClass;
             ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
         }
@@ -456,7 +456,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
                 }
                 if (auto writeMask = MapColorWrites(ct.WriteMask);
                     writeMask.has_value()) {
-                    rtb.RenderTargetWriteMask = writeMask.value();
+                    rtb.RenderTargetWriteMask = (UINT8)writeMask.value();
                 } else {
                     RADRAY_ERR_LOG("d3d12 cannot set color write mask {}", ct.WriteMask);
                     return std::nullopt;
@@ -484,8 +484,8 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
                 result.StencilFunc = MapType(v.Compare);
                 return result;
             };
-            dsDesc.StencilReadMask = desc.DepthStencil.Stencil.ReadMask;
-            dsDesc.StencilWriteMask = desc.DepthStencil.Stencil.WriteMask;
+            dsDesc.StencilReadMask = (UINT8)desc.DepthStencil.Stencil.ReadMask;
+            dsDesc.StencilWriteMask = (UINT8)desc.DepthStencil.Stencil.WriteMask;
             dsDesc.FrontFace = ToDsd(desc.DepthStencil.Stencil.Front);
             dsDesc.BackFace = ToDsd(desc.DepthStencil.Stencil.Back);
         }
@@ -503,7 +503,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     rawPsoDesc.GS = D3D12_SHADER_BYTECODE{};
     rawPsoDesc.StreamOutput = D3D12_STREAM_OUTPUT_DESC{};
     rawPsoDesc.BlendState = rawBlend;
-    rawPsoDesc.SampleMask = desc.MultiSample.Mask;
+    rawPsoDesc.SampleMask = (UINT)desc.MultiSample.Mask;
     rawPsoDesc.RasterizerState = rawRaster;
     rawPsoDesc.DepthStencilState = dsDesc;
     rawPsoDesc.InputLayout = {inputElements.data(), static_cast<uint32_t>(inputElements.size())};
@@ -584,7 +584,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     colors.reserve(scDesc.BufferCount);
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
         ComPtr<ID3D12Resource> color;
-        if (HRESULT hr = swapchain->GetBuffer(i, IID_PPV_ARGS(color.GetAddressOf()));
+        if (HRESULT hr = swapchain->GetBuffer((UINT)i, IID_PPV_ARGS(color.GetAddressOf()));
             FAILED(hr)) {
             RADRAY_ERR_LOG("d3d12 cannot get back buffer in IDXGISwapChain1, reason={} (code:{})", GetErrorName(hr), hr);
             return std::nullopt;
@@ -710,7 +710,7 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         RADRAY_ERR_LOG("d3d12 cannot create texture, height {} too large", height);
         return std::nullopt;
     }
-    desc.Height = height;
+    desc.Height = (UINT)height;
     if (depth > std::numeric_limits<decltype(desc.DepthOrArraySize)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, depth {} too large", depth);
         return std::nullopt;
@@ -719,12 +719,12 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         RADRAY_ERR_LOG("d3d12 cannot create texture, array size {} too large", arraySize);
         return std::nullopt;
     }
-    desc.DepthOrArraySize = arraySize != 1 ? arraySize : depth;
+    desc.DepthOrArraySize = (UINT16)(arraySize != 1 ? arraySize : depth);
     if (mipLevels > std::numeric_limits<decltype(desc.MipLevels)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, mip levels {} too large", mipLevels);
         return std::nullopt;
     }
-    desc.MipLevels = mipLevels;
+    desc.MipLevels = (UINT16)mipLevels;
     desc.Format = FormatToTypeless(rawFormat);
     desc.SampleDesc.Count = sampleCount ? sampleCount : 1;
     desc.SampleDesc.Quality = sampleQuality;
@@ -752,7 +752,7 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         clear.Color[3] = ccv->A;
     } else if (auto dcv = std::get_if<DepthStencilClearValue>(&clearValue)) {
         clear.DepthStencil.Depth = dcv->Depth;
-        clear.DepthStencil.Stencil = dcv->Stencil;
+        clear.DepthStencil.Stencil = (UINT8)dcv->Stencil;
     }
     const D3D12_CLEAR_VALUE* clearPtr = nullptr;
     if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
@@ -820,10 +820,10 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
                 auto adapterIndex = 0u;
                 factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
-                DXGI_ADAPTER_DESC1 desc;
-                adapter->GetDesc1(&desc);
-                if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
-                    radray::wstring s{desc.Description};
+                DXGI_ADAPTER_DESC1 adapDesc;
+                adapter->GetDesc1(&adapDesc);
+                if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+                    radray::wstring s{adapDesc.Description};
                     RADRAY_INFO_LOG("D3D12 find device: {}", ToMultiByte(s).value());
                 }
             }
@@ -831,9 +831,9 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
                 auto adapterIndex = 0u;
                 factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
-                DXGI_ADAPTER_DESC1 desc;
-                adapter->GetDesc1(&desc);
-                if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+                DXGI_ADAPTER_DESC1 adapDesc;
+                adapter->GetDesc1(&adapDesc);
+                if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
                     if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
                         break;
                     }
@@ -842,9 +842,9 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
             }
         } else {
             if (dxgiFactory->EnumAdapters1(0, adapter.GetAddressOf())) {
-                DXGI_ADAPTER_DESC1 desc;
-                adapter->GetDesc1(&desc);
-                if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ||
+                DXGI_ADAPTER_DESC1 adapDesc;
+                adapter->GetDesc1(&adapDesc);
+                if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ||
                     FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
                     adapter = nullptr;
                 }
@@ -862,17 +862,17 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         return std::nullopt;
     }
     {
-        DXGI_ADAPTER_DESC1 desc{};
-        adapter->GetDesc1(&desc);
-        radray::wstring s{desc.Description};
+        DXGI_ADAPTER_DESC1 adapDesc{};
+        adapter->GetDesc1(&adapDesc);
+        radray::wstring s{adapDesc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
     ComPtr<D3D12MA::Allocator> alloc;
     {
-        D3D12MA::ALLOCATOR_DESC desc{};
-        desc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
-        desc.pDevice = device.Get();
-        desc.pAdapter = adapter.Get();
+        D3D12MA::ALLOCATOR_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
+        allocDesc.pDevice = device.Get();
+        allocDesc.pAdapter = adapter.Get();
 #ifdef RADRAY_ENABLE_MIMALLOC
         D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks{};
         allocationCallbacks.pAllocate = [](size_t Size, size_t Alignment, void* pPrivateData) {
@@ -883,10 +883,10 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
             RADRAY_UNUSED(pPrivateData);
             mi_free(pMemory);
         };
-        desc.pAllocationCallbacks = &allocationCallbacks;
+        allocDesc.pAllocationCallbacks = &allocationCallbacks;
 #endif
-        desc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
-        if (HRESULT hr = D3D12MA::CreateAllocator(&desc, alloc.GetAddressOf());
+        allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
+        if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
             FAILED(hr)) {
             RADRAY_ERR_LOG("cannot create D3D12MA::Allocator, reason={} (code:{})", GetErrorName(hr), hr);
             return std::nullopt;

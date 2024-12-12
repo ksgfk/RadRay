@@ -1,5 +1,7 @@
 #include <radray/image_data.h>
 
+#include <radray/utility.h>
+
 namespace radray {
 
 size_t ImageData::GetSize() const noexcept {
@@ -28,6 +30,7 @@ size_t GetImageFormatSize(ImageFormat format) noexcept {
         case ImageFormat::RGBA16_HALF: return 8;
         case ImageFormat::RGBA32_FLOAT: return 16;
     }
+    Unreachable();
 }
 
 std::string_view to_string(ImageFormat val) noexcept {
@@ -46,6 +49,7 @@ std::string_view to_string(ImageFormat val) noexcept {
         case radray::ImageFormat::RGBA16_HALF: return "RGBA16_HALF";
         case radray::ImageFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
     }
+    Unreachable();
 }
 
 }  // namespace radray

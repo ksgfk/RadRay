@@ -1,14 +1,16 @@
 #include <radray/render/common.h>
 
+#include <radray/utility.h>
+
 namespace radray::render {
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
-        case TextureFormat::S8: return "S8";
-        case TextureFormat::D16_UNORM: return "D16_UNORM";
-        case TextureFormat::D32_FLOAT: return "D32_FLOAT";
-        case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
-        case TextureFormat::D32_FLOAT_S8_UINT: return true; return "D32_FLOAT_S8_UINT: return true";
+        case TextureFormat::S8:
+        case TextureFormat::D16_UNORM:
+        case TextureFormat::D32_FLOAT:
+        case TextureFormat::D24_UNORM_S8_UINT:
+        case TextureFormat::D32_FLOAT_S8_UINT: return true;
         default: return false;
     }
 }
@@ -47,6 +49,7 @@ uint32_t GetVertexFormatSize(VertexFormat format) noexcept {
         case VertexFormat::FLOAT32X4: return 16;
         case VertexFormat::UNKNOWN: return 0;
     }
+    Unreachable();
 }
 
 std::string_view format_as(Backend v) noexcept {
@@ -55,6 +58,7 @@ std::string_view format_as(Backend v) noexcept {
         case Backend::Vulkan: return "Vulkan";
         case Backend::Metal: return "Metal";
     }
+    Unreachable();
 }
 
 std::string_view format_as(TextureFormat v) noexcept {
@@ -108,6 +112,7 @@ std::string_view format_as(TextureFormat v) noexcept {
         case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
         case TextureFormat::D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
     }
+    Unreachable();
 }
 
 std::string_view format_as(QueueType v) noexcept {
@@ -116,6 +121,7 @@ std::string_view format_as(QueueType v) noexcept {
         case radray::render::QueueType::Compute: return "Compute";
         case radray::render::QueueType::Copy: return "Copy";
     }
+    Unreachable();
 }
 
 std::string_view format_as(ShaderBlobCategory v) noexcept {
@@ -124,6 +130,7 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
         case ShaderBlobCategory::SPIRV: return "SPIR-V";
         case ShaderBlobCategory::MSL: return "MSL";
     }
+    Unreachable();
 }
 
 std::string_view format_as(ShaderResourceType v) noexcept {
@@ -137,6 +144,7 @@ std::string_view format_as(ShaderResourceType v) noexcept {
         case ShaderResourceType::PushConstant: return "PushConstant";
         case ShaderResourceType::RayTracing: return "RayTracing";
     }
+    Unreachable();
 }
 
 std::string_view format_as(VertexSemantic v) noexcept {
@@ -152,6 +160,7 @@ std::string_view format_as(VertexSemantic v) noexcept {
         case VertexSemantic::BlendWeight: return "BLENDWEIGHT";
         case VertexSemantic::PositionT: return "POSITIONT";
     }
+    Unreachable();
 }
 
 std::string_view format_as(VertexFormat v) noexcept {
@@ -188,6 +197,7 @@ std::string_view format_as(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X3: return "float3";
         case VertexFormat::FLOAT32X4: return "float4";
     }
+    Unreachable();
 }
 
 std::string_view format_as(PolygonMode v) noexcept {
@@ -196,6 +206,7 @@ std::string_view format_as(PolygonMode v) noexcept {
         case PolygonMode::Line: return "Line";
         case PolygonMode::Point: return "Point";
     }
+    Unreachable();
 }
 
 }  // namespace radray::render

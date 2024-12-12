@@ -191,10 +191,10 @@ public:
             pso = device->CreateGraphicsPipeline(desc).value();
         }
         {
-            auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).value();
+            auto q = device->GetCommandQueue(QueueType::Direct, 0).value();
             auto size = window->GetSize();
             auto sc = device->CreateSwapChain(
-                cmdQueue,
+                q,
                 window->GetNativeHandle(),
                 size.x(), size.y(), 2,
                 TextureFormat::BGRA8_UNORM, true);

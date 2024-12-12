@@ -158,7 +158,7 @@ public:
         if (HRESULT hr = _dxc->Compile(
                 &buffer,
                 argsref.data(),
-                argsref.size(),
+                (UINT32)argsref.size(),
                 _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
             FAILED(hr)) {
@@ -274,6 +274,7 @@ public:
                     case D3D_SIT_RTACCELERATIONSTRUCTURE: return ShaderResourceType::RayTracing;
                     case D3D_SIT_UAV_FEEDBACKTEXTURE: return ShaderResourceType::RWTexture;
                 }
+                Unreachable();
             })(bindDesc.Type, bindDesc.Dimension);
             br.Dim = ([](D3D_SRV_DIMENSION dim) noexcept -> TextureDimension {
                 switch (dim) {
@@ -290,6 +291,7 @@ public:
                     case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return TextureDimension::CubeArray;
                     case D3D_SRV_DIMENSION_BUFFEREX: return TextureDimension::UNKNOWN;
                 }
+                Unreachable();
             })(bindDesc.Dimension);
             br.Space = bindDesc.Space;
             br.BindPoint = bindDesc.BindPoint;
@@ -366,6 +368,7 @@ public:
                                 default: return VertexFormat::UNKNOWN;
                             }
                     }
+                    return VertexFormat::UNKNOWN;
                 })(spDesc.ComponentType, comps);
                 RADRAY_INFO_LOG(" - attr {}{} {}", vi.Semantic, vi.SemanticIndex, vi.Format);
             }

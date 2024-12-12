@@ -3,6 +3,8 @@
 #include <cctype>
 #include <algorithm>
 
+#include <radray/utility.h>
+
 namespace radray {
 
 std::string_view to_string(VertexSemantic e) noexcept {
@@ -18,6 +20,7 @@ std::string_view to_string(VertexSemantic e) noexcept {
         case VertexSemantic::BLENDWEIGHT: return "BLENDWEIGHT";
         case VertexSemantic::POSITIONT: return "POSITIONT";
     }
+    Unreachable();
 }
 
 std::string_view to_string(VertexIndexType val) noexcept {
@@ -25,6 +28,7 @@ std::string_view to_string(VertexIndexType val) noexcept {
         case radray::VertexIndexType::UInt16: return "UInt16";
         case radray::VertexIndexType::UInt32: return "UInt32";
     }
+    Unreachable();
 }
 
 std::optional<VertexSemantic> VertexData::StringToEnumSemantic(const radray::string& s) noexcept {

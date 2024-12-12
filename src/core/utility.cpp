@@ -51,7 +51,7 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
         return std::nullopt;
     }
     radray::wstring to(test, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, str.data(), str.size(), to.data(), (int)to.size());
+    MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size());
     return to;
 #else
     const char* start = str.data();
@@ -79,7 +79,7 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
         return std::nullopt;
     }
     radray::string to(test, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, str.data(), str.size(), to.data(), (int)to.size(), nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size(), nullptr, nullptr);
     return to;
 #else
     size_t len = std::wcstombs(nullptr, str.data(), str.size());

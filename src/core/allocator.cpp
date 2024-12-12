@@ -88,7 +88,7 @@ void LinearAllocator::Reset() noexcept {
 
 BuddyAllocator::BuddyAllocator(uint64_t capacity) noexcept : _capacity(capacity) {
     uint64_t vcapa = std::bit_ceil(capacity);
-    RADRAY_ASSERT(vcapa <= std::numeric_limits<int64_t>::max());
+    RADRAY_ASSERT(vcapa <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
     uint64_t treeSize = 2 * vcapa - 1;  // 建一颗满二叉树
     _tree.resize(treeSize, NodeState::Unused);
 }

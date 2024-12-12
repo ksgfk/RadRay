@@ -6,6 +6,7 @@
 #include <spirv_cross/spirv_reflect.hpp>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 
 namespace spv {
 std::string_view format_as(ExecutionModel v) noexcept {
@@ -29,6 +30,7 @@ std::string_view format_as(ExecutionModel v) noexcept {
         case ExecutionModelMeshEXT: return "MeshEXT";
         case ExecutionModelMax: return "Max";
     }
+    radray::Unreachable();
 }
 }  // namespace spv
 
@@ -60,6 +62,7 @@ std::string_view format_as(SPIRType::BaseType v) noexcept {
         case SPIRType::Interpolant: return "Interpolant";
         case SPIRType::Char: return "Char";
     }
+    radray::Unreachable();
 }
 }  // namespace spirv_cross
 
@@ -70,6 +73,7 @@ static spirv_cross::CompilerMSL::Options::Platform EnumConvertSR(MslPlatform pla
         case MslPlatform::Macos: return spirv_cross::CompilerMSL::Options::Platform::macOS;
         case MslPlatform::Ios: return spirv_cross::CompilerMSL::Options::Platform::iOS;
     }
+    radray::Unreachable();
 }
 
 static std::optional<ShaderStage> EnumConvertRS(spv::ExecutionModel v) noexcept {
@@ -94,6 +98,7 @@ std::pair<uint32_t, uint32_t> GetMslVersionNumber(MslVersion ver) noexcept {
         case MslVersion::MSL31: return {3, 1};
         case MslVersion::MSL32: return {3, 2};
     }
+    radray::Unreachable();
 }
 
 std::optional<SpvcMslOutput> SpirvToMsl(
