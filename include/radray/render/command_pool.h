@@ -1,11 +1,8 @@
 #pragma once
 
 #include <radray/render/common.h>
-#include <radray/render/command_buffer.h>
 
 namespace radray::render {
-
-class CommandBuffer;
 
 class CommandPool : public RenderBase {
 public:

@@ -10,6 +10,7 @@
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
 #include <radray/render/root_signature.h>
+#include <radray/render/pipeline_state.h>
 
 namespace radray::render {
 

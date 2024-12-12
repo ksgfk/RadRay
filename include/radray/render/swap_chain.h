@@ -4,8 +4,6 @@
 
 namespace radray::render {
 
-class Texture;
-
 class SwapChain : public RenderBase {
 public:
     virtual ~SwapChain() noexcept = default;

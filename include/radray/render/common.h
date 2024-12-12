@@ -326,6 +326,8 @@ using ResourceMemoryTips = EnumFlags<ResourceMemoryTip>;
 
 class Device;
 class CommandQueue;
+class CommandPool;
+class CommandBuffer;
 class Shader;
 class RootSignature;
 class GraphicsPipelineState;
