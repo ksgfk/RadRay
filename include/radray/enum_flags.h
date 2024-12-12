@@ -57,9 +57,9 @@ public:
     friend constexpr EnumFlags operator&(EnumFlags l, enum_type r) noexcept { return EnumFlags{l._value & static_cast<underlying_type>(r)}; }
     friend constexpr EnumFlags operator&(enum_type l, EnumFlags r) noexcept { return EnumFlags{static_cast<underlying_type>(l) & r._value}; }
 
-    friend constexpr EnumFlags operator^(EnumFlags l, EnumFlags r) noexcept { return EnumFlags{l._value & r._value}; }
-    friend constexpr EnumFlags operator^(EnumFlags l, enum_type r) noexcept { return EnumFlags{l._value & static_cast<underlying_type>(r)}; }
-    friend constexpr EnumFlags operator^(enum_type l, EnumFlags r) noexcept { return EnumFlags{static_cast<underlying_type>(l) & r._value}; }
+    friend constexpr EnumFlags operator^(EnumFlags l, EnumFlags r) noexcept { return EnumFlags{l._value ^ r._value}; }
+    friend constexpr EnumFlags operator^(EnumFlags l, enum_type r) noexcept { return EnumFlags{l._value ^ static_cast<underlying_type>(r)}; }
+    friend constexpr EnumFlags operator^(enum_type l, EnumFlags r) noexcept { return EnumFlags{static_cast<underlying_type>(l) ^ r._value}; }
 
     EnumFlags& operator|=(EnumFlags v) noexcept {
         _value |= v._value;
