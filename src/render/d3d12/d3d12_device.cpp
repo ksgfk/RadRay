@@ -121,13 +121,13 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
     radray::vector<StageResource> resources;
     radray::vector<StageResource> samplers;
     radray::vector<StageResource> staticSamplers;
-    ShaderStages shaderStages{ToFlags(ShaderStage::UNKNOWN)};
+    ShaderStages shaderStages{ShaderStage::UNKNOWN};
     for (Shader* i : shaders) {
         Dxil* dxil = Underlying(i);
         shaderStages |= dxil->Stage;
         const auto& refl = dxil->_refl;
         for (const DxilReflection::BindResource& j : refl.Binds) {
-            StageResource res{j, ToFlags(dxil->Stage)};
+            StageResource res{j, ShaderStages{dxil->Stage}};
             if (j.Type == ShaderResourceType::Sampler) {
                 const auto& stat = refl.StaticSamplers;
                 auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v.Name; });
@@ -274,7 +274,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
                                const radray::vector<StageResource>& res) noexcept {
         for (uint32_t space : spaces) {
             auto& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
-            ShaderStages tableStages = 0;
+            ShaderStages tableStages{};
             for (const StageResource& r : res) {
                 if (r.Space == space) {
                     auto&& range = ranges.emplace_back(D3D12_DESCRIPTOR_RANGE1{});
@@ -458,7 +458,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
                     writeMask.has_value()) {
                     rtb.RenderTargetWriteMask = writeMask.value();
                 } else {
-                    RADRAY_ERR_LOG("d3d12 cannot set color write mask {0:b}", ct.WriteMask);
+                    RADRAY_ERR_LOG("d3d12 cannot set color write mask {}", ct.WriteMask);
                     return std::nullopt;
                 }
             } else {

@@ -2,6 +2,7 @@
 
 #include <radray/types.h>
 #include <radray/utility.h>
+#include <radray/enum_flags.h>
 
 namespace radray::render {
 
@@ -96,8 +97,7 @@ enum class ShaderStage : uint32_t {
     Pixel = 0x2,
     Compute = 0x4
 };
-using ShaderStages = std::underlying_type_t<ShaderStage>;
-RADRAY_FLAG_ENUM(ShaderStage, ShaderStages);
+using ShaderStages = EnumFlags<ShaderStage>;
 
 enum class ShaderBlobCategory {
     DXIL,
@@ -268,8 +268,7 @@ enum class ColorWrite : uint32_t {
     Color = Red | Green | Blue,
     All = Red | Green | Blue | Alpha
 };
-using ColorWrites = std::underlying_type_t<ColorWrite>;
-RADRAY_FLAG_ENUM(ColorWrite, ColorWrites);
+using ColorWrites = EnumFlags<ColorWrite>;
 
 enum class ResourceType {
     UNKNOWN,
@@ -310,8 +309,7 @@ enum class ResourceState : uint32_t {
     AccelerationStructure = 0x800,
     Present = 0x1000
 };
-using ResourceStates = std::underlying_type_t<ResourceState>;
-RADRAY_FLAG_ENUM(ResourceState, ResourceStates);
+using ResourceStates = EnumFlags<ResourceState>;
 
 enum class ResourceUsage {
     Default,
@@ -324,8 +322,7 @@ enum class ResourceMemoryTip : uint32_t {
     Dedicated = 0x1,
     PersistentMap = 0x2
 };
-using ResourceMemoryTips = std::underlying_type_t<ResourceMemoryTip>;
-RADRAY_FLAG_ENUM(ResourceMemoryTip, ResourceMemoryTips);
+using ResourceMemoryTips = EnumFlags<ResourceMemoryTip>;
 
 class Device;
 class CommandQueue;
@@ -357,3 +354,19 @@ std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 
 }  // namespace radray::render
+
+namespace radray::detail {
+
+template <>
+struct is_flags<render::ShaderStage> : public std::true_type {};
+
+template <>
+struct is_flags<render::ColorWrite> : public std::true_type {};
+
+template <>
+struct is_flags<render::ResourceState> : public std::true_type {};
+
+template <>
+struct is_flags<render::ResourceMemoryTip> : public std::true_type {};
+
+}  // namespace radray::detail

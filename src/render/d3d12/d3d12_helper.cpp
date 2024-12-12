@@ -502,7 +502,7 @@ D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
 }
 
 ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept {
-    ResourceStates result = 0;
+    ResourceStates result{};
     if (v & D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) result |= ResourceState::VertexAndConstantBuffer;
     if (v & D3D12_RESOURCE_STATE_INDEX_BUFFER) result |= ResourceState::IndexBuffer;
     if (v & D3D12_RESOURCE_STATE_RENDER_TARGET) result |= ResourceState::RenderTarget;
