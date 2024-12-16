@@ -42,8 +42,6 @@ DeviceD3D12::DeviceD3D12(
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)) {
     _features.Init(_device.Get());
-    GetCbvSrvUavHeap();
-    GetRtvHeap();
 }
 
 DeviceD3D12::~DeviceD3D12() noexcept { DestroyImpl(this); }
