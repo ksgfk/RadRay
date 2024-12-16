@@ -614,3 +614,12 @@ std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
     }
     radray::Unreachable();
 }
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
+    switch (v) {
+        case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: return "CBV_SRV_UAV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
+        default: return "UNKNOWN";
+    }
+}

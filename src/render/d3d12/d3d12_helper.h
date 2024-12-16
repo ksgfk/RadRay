@@ -52,12 +52,12 @@ D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept;
 }  // namespace radray::render::d3d12
 
 #ifndef RADRAY_DX_CHECK
-#define RADRAY_DX_CHECK(x)                                                                                               \
-    do {                                                                                                                 \
-        HRESULT hr_ = (x);                                                                                               \
-        if (FAILED(hr_)) [[unlikely]] {                                                                                  \
-            RADRAY_ABORT("D3D12 error '{} with error {} (code = {})", #x, ::radray::rhi::d3d12::GetErrorName(hr_), hr_); \
-        }                                                                                                                \
+#define RADRAY_DX_CHECK(x)                                                                                                  \
+    do {                                                                                                                    \
+        HRESULT hr_ = (x);                                                                                                  \
+        if (FAILED(hr_)) [[unlikely]] {                                                                                     \
+            RADRAY_ABORT("D3D12 error '{} with error {} (code = {})", #x, ::radray::render::d3d12::GetErrorName(hr_), hr_); \
+        }                                                                                                                   \
     } while (false)
 #endif
 
@@ -65,3 +65,4 @@ std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept;
 std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;

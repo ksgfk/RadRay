@@ -5,8 +5,11 @@
 #include <radray/render/device.h>
 #include "d3d12_helper.h"
 #include "d3d12_cmd_queue.h"
+#include "d3d12_descriptor_heap.h"
 
 namespace radray::render::d3d12 {
+
+class DescriptorHeap;
 
 class DeviceD3D12 : public radray::render::Device {
 public:
@@ -70,12 +73,23 @@ public:
 
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
+    DescriptorHeap* GetCbvSrvUavHeap() noexcept;
+    DescriptorHeap* GetRtvHeap() noexcept;
+    DescriptorHeap* GetDsvHeap() noexcept;
+    DescriptorHeap* GetGpuHeap() noexcept;
+    DescriptorHeap* GetGpuSamplerHeap() noexcept;
+
 public:
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
+    std::unique_ptr<DescriptorHeap> _cbvSrvUavHeap;
+    std::unique_ptr<DescriptorHeap> _rtvHeap;
+    std::unique_ptr<DescriptorHeap> _dsvHeap;
+    std::unique_ptr<DescriptorHeap> _gpuHeap;
+    std::unique_ptr<DescriptorHeap> _gpuSamplerHeap;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };
