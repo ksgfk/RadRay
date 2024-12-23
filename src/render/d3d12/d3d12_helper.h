@@ -18,6 +18,18 @@
 
 namespace radray::render::d3d12 {
 
+class DeviceD3D12;
+class CmdQueueD3D12;
+class CmdAllocatorD3D12;
+class CmdListD3D12;
+class RootSigD3D12;
+class Dxil;
+class GraphicsPsoD3D12;
+class SwapChainD3D12;
+class TextureD3D12;
+class BufferD3D12;
+class DescriptorHeap;
+
 using Microsoft::WRL::ComPtr;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;

@@ -5,8 +5,6 @@
 
 namespace radray::render::d3d12 {
 
-class TextureD3D12;
-
 class SwapChainD3D12 : public SwapChain {
 public:
     SwapChainD3D12(

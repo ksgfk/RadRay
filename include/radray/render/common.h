@@ -354,6 +354,8 @@ std::string_view format_as(ShaderResourceType v) noexcept;
 std::string_view format_as(VertexSemantic v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
+std::string_view format_as(ResourceType v) noexcept;
+std::string_view format_as(ResourceUsage v) noexcept;
 
 }  // namespace radray::render
 

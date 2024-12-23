@@ -53,6 +53,10 @@ public:
 
     virtual std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
+    virtual std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept = 0;
+
+    virtual std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept = 0;
+
     virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         const ShaderReflection& refl,

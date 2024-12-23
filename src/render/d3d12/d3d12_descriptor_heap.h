@@ -4,8 +4,6 @@
 
 namespace radray::render::d3d12 {
 
-class DeviceD3D12;
-
 class DescriptorHeap {
 public:
     DescriptorHeap(

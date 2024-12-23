@@ -9,8 +9,6 @@
 
 namespace radray::render::d3d12 {
 
-class DescriptorHeap;
-
 class DeviceD3D12 : public radray::render::Device {
 public:
     DeviceD3D12(
@@ -26,6 +24,10 @@ public:
     Backend GetBackend() noexcept override { return Backend::D3D12; }
 
     std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
+
+    std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept override;
+
+    std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept override;
 
     std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,

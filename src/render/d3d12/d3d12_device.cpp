@@ -7,16 +7,20 @@
 #include "d3d12_swapchain.h"
 #include "d3d12_texture.h"
 #include "d3d12_buffer.h"
+#include "d3d12_cmd_allocator.h"
+#include "d3d12_cmd_list.h"
 
 namespace radray::render::d3d12 {
 
-static CmdQueueD3D12* Underlying(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
-static RootSigD3D12* Underlying(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
-static Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
-static GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
-static SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
-static TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-static BufferD3D12* Underlying(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
+CmdQueueD3D12* Underlying(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
+RootSigD3D12* Underlying(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+Dxil* Underlying(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
+TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+BufferD3D12* Underlying(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
+CmdAllocatorD3D12* Underlying(CommandPool* v) noexcept { return static_cast<CmdAllocatorD3D12*>(v); }
+CmdListD3D12* Underlying(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -74,6 +78,28 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         }
     }
     return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
+}
+
+std::optional<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(CommandQueue* queue) noexcept {
+    auto q = Underlying(queue);
+    ComPtr<ID3D12CommandAllocator> alloc;
+    if (HRESULT hr = _device->CreateCommandAllocator(q->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
+        SUCCEEDED(hr)) {
+        return radray::make_shared<CmdAllocatorD3D12>(std::move(alloc), q->_type);
+    } else {
+        return std::nullopt;
+    }
+}
+
+std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandPool* pool) noexcept {
+    auto p = Underlying(pool);
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (HRESULT hr = _device->CreateCommandList(0, p->_type, p->_cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        SUCCEEDED(hr)) {
+        return radray::make_shared<CmdListD3D12>(std::move(list), p->_type);
+    } else {
+        return std::nullopt;
+    }
 }
 
 std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
@@ -685,6 +711,7 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
         }
     }
     SetObjectName(name, buffer.Get(), allocRes.Get());
+    RADRAY_DEBUG_LOG("d3d12 create buffer, size={}, type={}, usage={}", size, type, usage);
     return std::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
 }
 

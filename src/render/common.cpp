@@ -209,4 +209,30 @@ std::string_view format_as(PolygonMode v) noexcept {
     Unreachable();
 }
 
+std::string_view format_as(ResourceType v) noexcept {
+    switch (v) {
+        case ResourceType::UNKNOWN: return "UNKNOWN";
+        case ResourceType::Sampler: return "Sampler";
+        case ResourceType::Texture: return "Texture";
+        case ResourceType::RenderTarget: return "RenderTarget";
+        case ResourceType::DepthStencil: return "DepthStencil";
+        case ResourceType::TextureRW: return "TextureRW";
+        case ResourceType::Buffer: return "Buffer";
+        case ResourceType::CBuffer: return "CBuffer";
+        case ResourceType::PushConstant: return "PushConstant";
+        case ResourceType::BufferRW: return "BufferRW";
+        case ResourceType::RayTracing: return "RayTracing";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(ResourceUsage v) noexcept {
+    switch (v) {
+        case ResourceUsage::Default: return "Default";
+        case ResourceUsage::Upload: return "Upload";
+        case ResourceUsage::Readback: return "Readback";
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render

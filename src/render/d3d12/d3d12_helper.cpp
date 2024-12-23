@@ -47,7 +47,7 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
         if (alloc) {
             alloc->SetName(nullptr);
         }
-        obj->SetName(nullptr);
+        obj->SetName(L"");
     } else {
         std::optional<radray::wstring> wco = ToWideChar(str);
         if (wco.has_value()) {
