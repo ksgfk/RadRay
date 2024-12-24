@@ -17,6 +17,8 @@ public:
     bool IsValid() const noexcept override { return _cmdList.Get() != nullptr; }
     void Destroy() noexcept override;
 
+    void ResourceBarrier(const ResourceBarriers& barriers) noexcept override;
+
     void CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept override;
 
 public:
