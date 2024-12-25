@@ -27,6 +27,8 @@ public:
     void Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) noexcept;
     void Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept;
 
+    ID3D12DescriptorHeap* Get() const noexcept { return _heap.Get(); }
+
 private:
     void ExpandCapacity() noexcept;
 

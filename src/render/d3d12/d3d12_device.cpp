@@ -96,7 +96,12 @@ std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffe
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->CreateCommandList(0, p->_type, p->_cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         SUCCEEDED(hr)) {
-        return radray::make_shared<CmdListD3D12>(std::move(list), p->_type);
+        return radray::make_shared<CmdListD3D12>(
+            std::move(list),
+            p->_type,
+            p->_cmdAlloc,
+            _gpuHeap.get(),
+            _gpuSamplerHeap.get());
     } else {
         return std::nullopt;
     }

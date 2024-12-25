@@ -5,15 +5,18 @@
 namespace radray::render {
 
 struct BufferBarrier {
-    Buffer* buffer;
-    ResourceState before;
-    ResourceState after;
+    Buffer* Buffer;
+    ResourceStates Before;
+    ResourceStates After;
 };
 
 struct TextureBarrier {
-    Texture* texture;
-    ResourceState before;
-    ResourceState after;
+    Texture* Texture;
+    ResourceStates Before;
+    ResourceStates After;
+    uint32_t MipLevel;
+    uint32_t ArrayLayer;
+    bool IsSubresourceBarrier;
 };
 
 struct ResourceBarriers {
@@ -24,6 +27,10 @@ struct ResourceBarriers {
 class CommandBuffer : public RenderBase {
 public:
     virtual ~CommandBuffer() noexcept = default;
+
+    virtual void Begin() noexcept = 0;
+
+    virtual void End() noexcept = 0;
 
     virtual void ResourceBarrier(const ResourceBarriers& barriers) noexcept = 0;
 
