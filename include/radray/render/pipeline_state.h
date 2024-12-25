@@ -16,7 +16,7 @@ class VertexBufferLayout {
 public:
     uint64_t ArrayStride;
     VertexStepMode StepMode;
-    std::vector<VertexElement> Elements;
+    radray::vector<VertexElement> Elements;
 };
 
 struct PrimitiveState {
@@ -84,15 +84,15 @@ struct ColorTargetState {
 
 class GraphicsPipelineStateDescriptor {
 public:
-    std::string Name;
+    radray::string Name;
     RootSignature* RootSig;
     Shader* VS;
     Shader* PS;
-    std::vector<VertexBufferLayout> VertexBuffers;
+    radray::vector<VertexBufferLayout> VertexBuffers;
     PrimitiveState Primitive;
     DepthStencilState DepthStencil;
     MultiSampleState MultiSample;
-    std::vector<ColorTargetState> ColorTargets;
+    radray::vector<ColorTargetState> ColorTargets;
     bool DepthStencilEnable;
 };
 

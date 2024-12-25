@@ -7,7 +7,7 @@ namespace radray::render::d3d12 {
 class DescriptorHeap {
 public:
     DescriptorHeap(
-        DeviceD3D12* device,
+        ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         uint32_t length,
         bool isShaderVisible) noexcept;
@@ -32,7 +32,7 @@ public:
 private:
     void ExpandCapacity() noexcept;
 
-    DeviceD3D12* _device;
+    ID3D12Device* _device;
     D3D12_DESCRIPTOR_HEAP_DESC _desc;
     radray::vector<UINT> _empty;
     ComPtr<ID3D12DescriptorHeap> _heap;

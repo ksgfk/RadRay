@@ -87,11 +87,11 @@ public:
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
-    std::unique_ptr<DescriptorHeap> _cbvSrvUavHeap;
-    std::unique_ptr<DescriptorHeap> _rtvHeap;
-    std::unique_ptr<DescriptorHeap> _dsvHeap;
-    std::unique_ptr<DescriptorHeap> _gpuHeap;
-    std::unique_ptr<DescriptorHeap> _gpuSamplerHeap;
+    radray::unique_ptr<DescriptorHeap> _cbvSrvUavHeap;
+    radray::unique_ptr<DescriptorHeap> _rtvHeap;
+    radray::unique_ptr<DescriptorHeap> _dsvHeap;
+    radray::unique_ptr<DescriptorHeap> _gpuHeap;
+    radray::unique_ptr<DescriptorHeap> _gpuSamplerHeap;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };

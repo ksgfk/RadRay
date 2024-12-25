@@ -69,7 +69,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), this, desc.Type);
+            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type);
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
@@ -98,10 +98,10 @@ std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffe
         SUCCEEDED(hr)) {
         return radray::make_shared<CmdListD3D12>(
             std::move(list),
+            p->_cmdAlloc.Get(),
             p->_type,
-            p->_cmdAlloc,
-            _gpuHeap.get(),
-            _gpuSamplerHeap.get());
+            GetGpuHeap(),
+            GetGpuSamplerHeap());
     } else {
         return std::nullopt;
     }
@@ -431,7 +431,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
-    return std::make_shared<RootSigD3D12>(std::move(rootSig));
+    return radray::make_shared<RootSigD3D12>(std::move(rootSig));
 }
 
 std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
@@ -635,7 +635,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         colors.emplace_back(std::move(tex));
     }
     UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    return std::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
+    return radray::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
 }
 
 std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
@@ -717,7 +717,7 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     }
     SetObjectName(name, buffer.Get(), allocRes.Get());
     RADRAY_DEBUG_LOG("d3d12 create buffer, size={}, type={}, usage={}", size, type, usage);
-    return std::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
+    return radray::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
 }
 
 std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
@@ -816,13 +816,13 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         return std::nullopt;
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
-    return std::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
+    return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
 }
 
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {
     if (_cbvSrvUavHeap == nullptr) {
         _cbvSrvUavHeap = radray::make_unique<DescriptorHeap>(
-            this,
+            _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             1 << 14,
             false);
@@ -833,7 +833,7 @@ DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {
 DescriptorHeap* DeviceD3D12::GetRtvHeap() noexcept {
     if (_rtvHeap == nullptr) {
         _rtvHeap = radray::make_unique<DescriptorHeap>(
-            this,
+            _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
             1 << 8,
             false);
@@ -844,7 +844,7 @@ DescriptorHeap* DeviceD3D12::GetRtvHeap() noexcept {
 DescriptorHeap* DeviceD3D12::GetDsvHeap() noexcept {
     if (_dsvHeap == nullptr) {
         _dsvHeap = radray::make_unique<DescriptorHeap>(
-            this,
+            _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
             1 << 8,
             false);
@@ -855,7 +855,7 @@ DescriptorHeap* DeviceD3D12::GetDsvHeap() noexcept {
 DescriptorHeap* DeviceD3D12::GetGpuHeap() noexcept {
     if (_gpuHeap == nullptr) {
         _gpuHeap = radray::make_unique<DescriptorHeap>(
-            this,
+            _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             1 << 16,
             true);
@@ -866,7 +866,7 @@ DescriptorHeap* DeviceD3D12::GetGpuHeap() noexcept {
 DescriptorHeap* DeviceD3D12::GetGpuSamplerHeap() noexcept {
     if (_gpuSamplerHeap == nullptr) {
         _gpuSamplerHeap = radray::make_unique<DescriptorHeap>(
-            this,
+            _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
             1 << 8,
             true);
