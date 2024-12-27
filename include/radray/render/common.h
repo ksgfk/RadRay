@@ -328,6 +328,7 @@ class Device;
 class CommandQueue;
 class CommandPool;
 class CommandBuffer;
+class Fence;
 class Shader;
 class RootSignature;
 class GraphicsPipelineState;

@@ -9,6 +9,7 @@
 #include "d3d12_buffer.h"
 #include "d3d12_cmd_allocator.h"
 #include "d3d12_cmd_list.h"
+#include "d3d12_fence.h"
 
 namespace radray::render::d3d12 {
 
@@ -87,6 +88,7 @@ std::optional<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(Co
         SUCCEEDED(hr)) {
         return radray::make_shared<CmdAllocatorD3D12>(std::move(alloc), q->_type);
     } else {
+        RADRAY_ERR_LOG("cannot create ID3D12CommandAllocator, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
 }
@@ -103,8 +105,23 @@ std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffe
             GetGpuHeap(),
             GetGpuSamplerHeap());
     } else {
+        RADRAY_ERR_LOG("cannot create ID3D12GraphicsCommandList, reason={} (code:{})", GetErrorName(hr), hr);
         return std::nullopt;
     }
+}
+
+std::optional<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+    ComPtr<ID3D12Fence> fence;
+    if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("cannot create ID3D12Fence, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+    std::optional<Win32Event> e = MakeWin32Event();
+    if (!e.has_value()) {
+        return std::nullopt;
+    }
+    return radray::make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
 }
 
 std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(

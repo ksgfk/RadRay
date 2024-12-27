@@ -22,6 +22,7 @@ class DeviceD3D12;
 class CmdQueueD3D12;
 class CmdAllocatorD3D12;
 class CmdListD3D12;
+class FenceD3D12;
 class RootSigD3D12;
 class Dxil;
 class GraphicsPsoD3D12;
@@ -31,6 +32,25 @@ class BufferD3D12;
 class DescriptorHeap;
 
 using Microsoft::WRL::ComPtr;
+
+class Win32Event : public Noncopyable {
+public:
+    Win32Event() noexcept = default;
+    ~Win32Event() noexcept;
+    Win32Event(Win32Event&& other) noexcept;
+    Win32Event& operator=(Win32Event&& other) noexcept;
+
+    HANDLE Get() const noexcept { return _event; }
+    
+    void Destroy() noexcept;
+
+private:
+    HANDLE _event{nullptr};
+
+    friend std::optional<Win32Event> MakeWin32Event() noexcept;
+};
+
+std::optional<Win32Event> MakeWin32Event() noexcept;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;

@@ -57,6 +57,8 @@ public:
 
     virtual std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept = 0;
 
+    virtual std::optional<radray::shared_ptr<Fence>> CreateFence() noexcept = 0;
+
     virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         const ShaderReflection& refl,
