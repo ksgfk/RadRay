@@ -10,7 +10,7 @@ public:
     CmdQueueD3D12(
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
-        std::shared_ptr<FenceD3D12> fence) noexcept
+        radray::shared_ptr<FenceD3D12> fence) noexcept
         : _queue(std::move(queue)),
           _fence(std::move(fence)),
           _type(type) {}
@@ -27,7 +27,7 @@ public:
 
 public:
     ComPtr<ID3D12CommandQueue> _queue;
-    std::shared_ptr<FenceD3D12> _fence;
+    radray::shared_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 

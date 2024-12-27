@@ -66,7 +66,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     }
     radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
-        std::optional<std::shared_ptr<Fence>> fence = CreateFence();
+        std::optional<radray::shared_ptr<Fence>> fence = CreateFence();
         if (!fence.has_value()) {
             return std::nullopt;
         }
@@ -75,7 +75,7 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            std::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.value());
+            radray::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.value());
             auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type, std::move(f));
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
