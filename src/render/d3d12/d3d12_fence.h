@@ -17,6 +17,8 @@ public:
     bool IsValid() const noexcept override { return _fence.Get() != nullptr; }
     void Destroy() noexcept override;
 
+    void Wait() noexcept override;
+
 public:
     ComPtr<ID3D12Fence> _fence;
     uint64_t _fenceValue{0};

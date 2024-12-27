@@ -220,6 +220,14 @@ public:
                               ResourceStates{ResourceState::Common},
                               ResourceMemoryTips{ResourceMemoryTip::None})
                         .value();
+
+            cmdPool->Reset();
+            cmdBuffer->Begin();
+            cmdBuffer->CopyBuffer(upload.get(), 0, verts.get(), 0, sizeof(vertices));
+            cmdBuffer->End();
+            CommandBuffer* t[] = {cmdBuffer.get()};
+            cmdQueue->Submit(t, Nullable<Fence>{});
+            cmdQueue->Wait();
         }
     }
 

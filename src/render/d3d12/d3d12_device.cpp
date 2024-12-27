@@ -22,6 +22,7 @@ TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*
 BufferD3D12* Underlying(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 CmdAllocatorD3D12* Underlying(CommandPool* v) noexcept { return static_cast<CmdAllocatorD3D12*>(v); }
 CmdListD3D12* Underlying(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
+FenceD3D12* Underlying(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
@@ -65,12 +66,17 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     }
     radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
+        std::optional<std::shared_ptr<Fence>> fence = CreateFence();
+        if (!fence.has_value()) {
+            return std::nullopt;
+        }
         ComPtr<ID3D12CommandQueue> queue;
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type);
+            std::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.value());
+            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type, std::move(f));
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
@@ -98,6 +104,7 @@ std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffe
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->CreateCommandList(0, p->_type, p->_cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         SUCCEEDED(hr)) {
+        RADRAY_DX_CHECK(list->Close());
         return radray::make_shared<CmdListD3D12>(
             std::move(list),
             p->_cmdAlloc.Get(),

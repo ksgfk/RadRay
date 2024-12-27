@@ -17,6 +17,8 @@ public:
     bool IsValid() const noexcept override { return _cmdAlloc.Get() != nullptr; }
     void Destroy() noexcept override;
 
+    void Reset() noexcept override;
+
 public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     D3D12_COMMAND_LIST_TYPE _type;

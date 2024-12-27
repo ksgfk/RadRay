@@ -45,6 +45,15 @@ template <typename Call>
 constexpr auto MakeScopeGuard(Call&& f) noexcept { return ScopeGuard<Call>{std::forward<Call>(f)}; }
 
 template <typename T>
+struct Nullable {
+    T* Ptr = nullptr;
+
+    constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
+    constexpr T* Value() const noexcept { return Ptr; }
+    constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
+};
+
+template <typename T>
 struct ArrayTrait;
 template <typename T, size_t N>
 struct ArrayTrait<T[N]> {

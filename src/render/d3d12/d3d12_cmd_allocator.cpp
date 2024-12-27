@@ -8,4 +8,8 @@ void CmdAllocatorD3D12::Destroy() noexcept {
     _cmdAlloc = nullptr;
 }
 
+void CmdAllocatorD3D12::Reset() noexcept {
+    RADRAY_DX_CHECK(_cmdAlloc->Reset());
+}
+
 }  // namespace radray::render::d3d12
