@@ -13,10 +13,65 @@
 #include <radray/render/root_signature.h>
 #include <radray/render/pipeline_state.h>
 #include <radray/render/swap_chain.h>
+#include <radray/render/resource.h>
 
 using namespace radray;
 using namespace radray::render;
 using namespace radray::window;
+
+const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
+    "color pso",
+    nullptr,
+    nullptr,
+    nullptr,
+    {VertexBufferLayout{
+        56,
+        VertexStepMode::Vertex,
+        {
+            VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0},
+        }}},
+    PrimitiveState{
+        PrimitiveTopology::TriangleList,
+        IndexFormat::UINT32,
+        FrontFace::CCW,
+        CullMode::Back,
+        PolygonMode::Fill,
+        false,
+        false},
+    DepthStencilState{
+        TextureFormat::D24_UNORM_S8_UINT,
+        CompareFunction::LessEqual,
+        StencilState{
+            StencilFaceState{
+                CompareFunction::Always,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+                StencilOperation::Keep},
+            StencilFaceState{
+                CompareFunction::Always,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+                StencilOperation::Keep},
+            0xFF,
+            0xFF},
+        DepthBiasState{0, 0.0f, 0.0f},
+        true,
+        false},
+    MultiSampleState{
+        1,
+        0,
+        false},
+    {ColorTargetState{
+        TextureFormat::RGBA8_UNORM,
+        {{BlendFactor::One,
+          BlendFactor::Zero,
+          BlendOperation::Add},
+         {BlendFactor::One,
+          BlendFactor::Zero,
+          BlendOperation::Add}},
+        ToFlag(ColorWrite::All),
+        false}},
+    true};
 
 class TestApp {
 public:
@@ -132,65 +187,52 @@ public:
         //             Shader* shaders[] = {vs.get(), ps.get()};
         //             auto rootSig = device->CreateRootSignature(shaders);
         //             RADRAY_INFO_LOG("root sig done? {}", rootSig.has_value());
-        //             GraphicsPipelineStateDescriptor desc{
-        //                 "color pso",
-        //                 rootSig.value().get(),
-        //                 vs.get(),
-        //                 ps.get(),
-        //                 {VertexBufferLayout{
-        //                     56,
-        //                     VertexStepMode::Vertex,
-        //                     {
-        //                         VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0},
-        //                         VertexElement{12, VertexSemantic::Normal, 0, VertexFormat::FLOAT32X3, 1},
-        //                         VertexElement{24, VertexSemantic::Tangent, 0, VertexFormat::FLOAT32X4, 2},
-        //                         VertexElement{40, VertexSemantic::Texcoord, 0, VertexFormat::FLOAT32X2, 3},
-        //                         VertexElement{48, VertexSemantic::Texcoord, 1, VertexFormat::FLOAT32X2, 4},
-        //                     }}},
-        //                 PrimitiveState{
-        //                     PrimitiveTopology::TriangleList,
-        //                     IndexFormat::UINT32,
-        //                     FrontFace::CCW,
-        //                     CullMode::Back,
-        //                     PolygonMode::Fill,
-        //                     false,
-        //                     false},
-        //                 DepthStencilState{
-        //                     TextureFormat::D32_FLOAT,
-        //                     CompareFunction::LessEqual,
-        //                     StencilState{
-        //                         StencilFaceState{
-        //                             CompareFunction::Always,
-        //                             StencilOperation::Keep,
-        //                             StencilOperation::Keep,
-        //                             StencilOperation::Keep},
-        //                         StencilFaceState{
-        //                             CompareFunction::Always,
-        //                             StencilOperation::Keep,
-        //                             StencilOperation::Keep,
-        //                             StencilOperation::Keep},
-        //                         0xFF,
-        //                         0xFF},
-        //                     DepthBiasState{0, 0.0f, 0.0f},
-        //                     true,
-        //                     false},
-        //                 MultiSampleState{
-        //                     1,
-        //                     0,
-        //                     false},
-        //                 {ColorTargetState{
-        //                     TextureFormat::BGRA8_UNORM,
-        //                     {{BlendFactor::One,
-        //                       BlendFactor::Zero,
-        //                       BlendOperation::Add},
-        //                      {BlendFactor::One,
-        //                       BlendFactor::Zero,
-        //                       BlendOperation::Add}},
-        //                     static_cast<ColorWrites>(ColorWrite::All),
-        //                     false}},
-        //                 true};
         //             pso = device->CreateGraphicsPipeline(desc).value();
         //         }
+        {
+            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+            DxcOutput outv = dxc->Compile(
+                color,
+                "VSMain",
+                ShaderStage::Vertex,
+                HlslShaderModel::SM60,
+                true,
+                {},
+                {},
+                false).value();
+            DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
+            auto vs = device->CreateShader(
+                outv.data,
+                reflv,
+                ShaderStage::Vertex,
+                "VSMain",
+                "colorVS").value();
+
+            DxcOutput outp = dxc->Compile(
+                color,
+                "PSMain",
+                ShaderStage::Pixel,
+                HlslShaderModel::SM60,
+                true,
+                {},
+                {},
+                false).value();
+            DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+            auto ps = device->CreateShader(
+                outp.data,
+                reflp,
+                ShaderStage::Pixel,
+                "PSMain",
+                "colorPS").value();
+
+            Shader* shaders[] = {vs.get(), ps.get()};
+            auto rootSig = device->CreateRootSignature(shaders).value();
+            auto psoDesc = DEFAULT_PSO_DESC;
+            psoDesc.RootSig = rootSig.get();
+            psoDesc.VS = vs.get();
+            psoDesc.PS = ps.get();
+            pso = device->CreateGraphicsPipeline(psoDesc).value();
+        }
         {
             auto q = device->GetCommandQueue(QueueType::Direct, 0).value();
             auto size = window->GetSize();
@@ -198,7 +240,7 @@ public:
                 q,
                 window->GetNativeHandle(),
                 size.x(), size.y(), 2,
-                TextureFormat::BGRA8_UNORM, true);
+                TextureFormat::RGBA8_UNORM, true);
             swapchain = sc.value();
         }
         {
@@ -206,24 +248,42 @@ public:
                 {0.0f, 0.5f, 0.0f},
                 {0.5f, -0.5f, 0.0f},
                 {-0.5f, -0.5f, 0.0f}};
-            auto upload = device->CreateBuffer(
-                                    sizeof(vertices),
-                                    ResourceType::Buffer,
-                                    ResourceUsage::Upload,
-                                    ResourceStates{ResourceState::GenericRead},
-                                    ResourceMemoryTips{ResourceMemoryTip::PersistentMap})
-                              .value();
-            verts = device->CreateBuffer(
-                              sizeof(vertices),
-                              ResourceType::Buffer,
-                              ResourceUsage::Default,
-                              ResourceStates{ResourceState::Common},
-                              ResourceMemoryTips{ResourceMemoryTip::None})
-                        .value();
-
+            auto upload = *device->CreateBuffer(
+                sizeof(vertices),
+                ResourceType::Buffer,
+                ResourceUsage::Upload,
+                ResourceStates{ResourceState::GenericRead},
+                {});
+            {
+                auto ptr = *upload->Map(0, upload->GetSize());
+                std::memcpy(ptr, vertices, sizeof(vertices));
+                upload->Unmap();
+            }
+            verts = *device->CreateBuffer(
+                sizeof(vertices),
+                ResourceType::Buffer,
+                ResourceUsage::Default,
+                ToFlag(ResourceState::Common),
+                ToFlag(ResourceMemoryTip::None));
             cmdPool->Reset();
             cmdBuffer->Begin();
+            {
+                BufferBarrier barriers[] = {
+                    {verts.get(),
+                     ToFlag(ResourceState::Common),
+                     ToFlag(ResourceState::CopyDestination)}};
+                ResourceBarriers rb{barriers, {}};
+                cmdBuffer->ResourceBarrier(rb);
+            }
             cmdBuffer->CopyBuffer(upload.get(), 0, verts.get(), 0, sizeof(vertices));
+            {
+                BufferBarrier barriers[] = {
+                    {verts.get(),
+                     ToFlag(ResourceState::CopyDestination),
+                     ToFlag(ResourceState::Common)}};
+                ResourceBarriers rb{barriers, {}};
+                cmdBuffer->ResourceBarrier(rb);
+            }
             cmdBuffer->End();
             CommandBuffer* t[] = {cmdBuffer.get()};
             cmdQueue->Submit(t, Nullable<Fence>{});
@@ -238,7 +298,14 @@ public:
                 break;
             }
             swapchain->AcquireNextRenderTarget();
+            cmdPool->Reset();
+            cmdBuffer->Begin();
+            cmdBuffer->End();
+            CommandBuffer* t[] = {cmdBuffer.get()};
+            auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).value();
+            cmdQueue->Submit(t, Nullable<Fence>{});
             swapchain->Present();
+            cmdQueue->Wait();
             std::this_thread::yield();
         }
     }

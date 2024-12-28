@@ -26,6 +26,11 @@ FenceD3D12* Underlying(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); 
 
 static void DestroyImpl(DeviceD3D12* d) noexcept {
     for (auto&& i : d->_queues) {
+        for (auto&& j : i) {
+            j->Wait();
+        }
+    }
+    for (auto&& i : d->_queues) {
         i.clear();
     }
 
@@ -322,12 +327,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         strategy = RootSigStrategy::CBufferRootDesc;
         if (useRD > 256) {
             strategy = RootSigStrategy::DescTable;
-            RADRAY_DEBUG_LOG("use descriptor table");
-        } else {
-            RADRAY_DEBUG_LOG("cbuffer use root descriptor");
         }
-    } else {
-        RADRAY_DEBUG_LOG("push constant or first cbuffer use root constant");
     }
     radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
     radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;

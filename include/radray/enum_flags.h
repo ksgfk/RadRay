@@ -29,6 +29,12 @@ public:
     constexpr EnumFlags(EnumFlags&&) noexcept = default;
     constexpr EnumFlags& operator=(EnumFlags&&) noexcept = default;
 
+    explicit constexpr EnumFlags(underlying_type v) noexcept : _value(v) {}
+    constexpr EnumFlags& operator=(underlying_type e) noexcept {
+        _value = e;
+        return *this;
+    }
+
     explicit constexpr EnumFlags(enum_type e) noexcept : _value(static_cast<underlying_type>(e)) {}
     constexpr EnumFlags& operator=(enum_type e) noexcept {
         _value = static_cast<underlying_type>(e);
@@ -93,6 +99,12 @@ public:
 private:
     underlying_type _value{};
 };
+
+template <class T>
+requires std::is_enum_v<T>
+constexpr EnumFlags<T> ToFlag(T v) noexcept {
+    return EnumFlags<T>{v};
+}
 
 }  // namespace radray
 

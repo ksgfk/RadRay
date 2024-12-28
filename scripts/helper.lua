@@ -56,3 +56,17 @@ function copy_example_shaders(target, is_install)
     copy_dir_if_newer_recursive(shader_src, shader_dst)
     clear_dst_dir_no_exist_file(shader_src, shader_dst)
 end
+
+function copy_dxil_dll(target)
+    if target:is_plat("windows") then
+        local dxc = target:pkg("directxshadercompiler_radray")
+        if (dxc) then
+            local dxil = path.join(dxc:installdir(), "bin", "dxil.dll")
+            if not os.exists(dxil) then 
+                raise("dxil.dll not found, please check the installation of directxshadercompiler_radray")
+            end
+            local bin_dir = path.join(target:installdir(), "bin", "dxil.dll")
+            copy_file_if_newer(dxil, bin_dir)
+        end
+    end
+end

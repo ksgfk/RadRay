@@ -37,3 +37,8 @@ target("radray_render")
         add_packages("metal-cpp")
         add_frameworks("Foundation", "Metal", "QuartzCore")
     end
+
+    on_install(function (target)
+        local helper = import("scripts.helper", {rootdir = os.projectdir()})
+        helper.copy_dxil_dll(target)
+    end)

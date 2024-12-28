@@ -307,7 +307,6 @@ public:
                     RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SIGNATURE_PARAMETER_DESC, code={}", hr);
                     return std::nullopt;
                 }
-                auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
                 auto semOpt = ([](std::string_view name) noexcept -> std::optional<VertexSemantic> {
                     if (name == "POSITION") {
                         return VertexSemantic::Position;
@@ -334,9 +333,14 @@ public:
                     }
                 })(std::string_view{spDesc.SemanticName});
                 if (!semOpt.has_value()) {
+                    std::string_view semName{spDesc.SemanticName};
+                    if (semName.starts_with("SV_")) { // 系统语义, 不处理
+                        continue;
+                    }
                     RADRAY_ERR_LOG("dxc ID3D12ShaderReflection unknown vertex input semantic {}", spDesc.SemanticName);
                     return std::nullopt;
                 }
+                auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
                 vi.Semantic = semOpt.value();
                 vi.SemanticIndex = spDesc.SemanticIndex;
                 uint32_t comps = static_cast<uint32_t>(std::log2(spDesc.Mask));

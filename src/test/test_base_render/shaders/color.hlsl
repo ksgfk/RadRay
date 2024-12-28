@@ -1,7 +1,3 @@
-const static float3 g_Triangle[3] = {
-    float3(-0.35f, -0.35f, 0),
-    float3(0, 0.75f, 0),
-    float3(0.35f, -0.35f, 0)};
 const static float3 g_Color[3] = {
     float3(1, 0, 0),
     float3(0, 1, 0),
@@ -12,9 +8,9 @@ struct V2P {
     float3 color: COLOR0;
 };
 
-V2P VSMain(uint vertId: SV_VertexID) {
+V2P VSMain(float3 v_vert: POSITION, uint vertId: SV_VertexID) {
     V2P v2p;
-    v2p.pos = float4(g_Triangle[vertId], 1);
+    v2p.pos = float4(v_vert, 1);
     v2p.color = g_Color[vertId];
     return v2p;
 }

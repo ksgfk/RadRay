@@ -25,8 +25,28 @@ ResourceType BufferD3D12::GetType() const noexcept {
     return _type;
 }
 
+uint64_t BufferD3D12::GetSize() const noexcept {
+    return _desc.Width;
+}
+
 ResourceStates BufferD3D12::GetInitState() const noexcept {
     return MapType(_initState);
+}
+
+std::optional<void*> BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
+    D3D12_RANGE range{offset, offset + size};
+    void* ptr = nullptr;
+    if (HRESULT hr = _buf->Map(0, &range, &ptr);
+        SUCCEEDED(hr)) {
+        return ptr;
+    } else {
+        RADRAY_ERR_LOG("cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
+        return std::nullopt;
+    }
+}
+
+void BufferD3D12::Unmap() noexcept {
+    _buf->Unmap(0, nullptr);
 }
 
 }  // namespace radray::render::d3d12

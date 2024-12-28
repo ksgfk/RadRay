@@ -6,6 +6,7 @@
 
 tips:
 * make file `options.lua` use template `options.lua.template` in `scripts` folder. can set many settings in `options.lua`
+* cmd command `xmake i -o bin` can export binaries to bin dir
 
 ## dev env
 * vscode

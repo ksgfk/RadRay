@@ -19,6 +19,12 @@ public:
     ResourceType GetType() const noexcept override;
     ResourceStates GetInitState() const noexcept override;
 
+    uint64_t GetSize() const noexcept override;
+
+    std::optional<void*> Map(uint64_t offset, uint64_t size) noexcept override;
+
+    void Unmap() noexcept override;
+
 public:
     ComPtr<ID3D12Resource> _buf;
     ComPtr<D3D12MA::Allocation> _alloc;

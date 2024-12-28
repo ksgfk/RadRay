@@ -319,8 +319,7 @@ enum class ResourceUsage {
 
 enum class ResourceMemoryTip : uint32_t {
     None = 0x0,
-    Dedicated = 0x1,
-    PersistentMap = 0x2
+    Dedicated = 0x1
 };
 using ResourceMemoryTips = EnumFlags<ResourceMemoryTip>;
 

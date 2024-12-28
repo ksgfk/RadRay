@@ -20,6 +20,12 @@ public:
 class Buffer : public Resource {
 public:
     ~Buffer() noexcept override = default;
+
+    virtual uint64_t GetSize() const noexcept = 0;
+
+    virtual std::optional<void*> Map(uint64_t offset, uint64_t size) noexcept = 0;
+
+    virtual void Unmap() noexcept = 0;
 };
 
 }  // namespace radray::render
