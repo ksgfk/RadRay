@@ -102,6 +102,14 @@ public:
         ResourceStates initState,
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept = 0;
+
+    virtual Nullable<radray::shared_ptr<BufferView>> CreateBufferView(
+        Buffer* buffer,
+        ResourceType type,
+        TextureFormat format,
+        uint64_t offset,
+        uint32_t count,
+        uint32_t stride) noexcept = 0;
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

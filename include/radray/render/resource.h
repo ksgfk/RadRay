@@ -28,4 +28,14 @@ public:
     virtual void Unmap() noexcept = 0;
 };
 
+class BufferView : public RenderBase {
+public:
+    ~BufferView() noexcept override = default;
+};
+
+class TextureView : public RenderBase {
+public:
+    ~TextureView() noexcept override = default;
+};
+
 }  // namespace radray::render

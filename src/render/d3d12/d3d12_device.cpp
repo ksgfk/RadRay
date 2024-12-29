@@ -478,9 +478,7 @@ Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsP
             ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
         }
     }
-    DepthBiasState depBias = desc.DepthStencilEnable
-                                 ? desc.DepthStencil.DepthBias
-                                 : DepthBiasState{0, 0, 0};
+    DepthBiasState depBias = desc.DepthStencilEnable ? desc.DepthStencil.DepthBias : DepthBiasState{0, 0, 0};
     D3D12_RASTERIZER_DESC rawRaster{};
     if (auto fillMode = MapType(desc.Primitive.Poly);
         fillMode.has_value()) {
@@ -841,6 +839,55 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
     return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
+}
+
+Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
+    Buffer* buffer,
+    ResourceType type,
+    TextureFormat format,
+    uint64_t offset,
+    uint32_t count,
+    uint32_t stride) noexcept {
+    auto buf = Underlying(buffer);
+    DescriptorHeap* heap = GetCbvSrvUavHeap();
+    UINT heapIndex = heap->Allocate();
+    auto guard = radray::MakeScopeGuard([=]() noexcept { heap->Recycle(heapIndex); });
+    DXGI_FORMAT dxgiFormat;
+    if (type == ResourceType::CBuffer || type == ResourceType::PushConstant) {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
+        desc.BufferLocation = buf->_buf->GetGPUVirtualAddress() + offset;
+        desc.SizeInBytes = count;
+        _device->CreateConstantBufferView(&desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        dxgiFormat = DXGI_FORMAT_UNKNOWN;
+    } else if (type == ResourceType::Buffer) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.Format = MapType(format);
+        desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Buffer.FirstElement = offset;
+        desc.Buffer.NumElements = count;
+        desc.Buffer.StructureByteStride = stride;
+        desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        _device->CreateShaderResourceView(buf->_buf.Get(), &desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        dxgiFormat = desc.Format;
+    } else if (type == ResourceType::BufferRW) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+        desc.Format = MapType(format);
+        desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        desc.Buffer.FirstElement = offset;
+        desc.Buffer.NumElements = count;
+        desc.Buffer.StructureByteStride = stride;
+        desc.Buffer.CounterOffsetInBytes = 0;
+        desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+        _device->CreateUnorderedAccessView(buf->_buf.Get(), nullptr, &desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        dxgiFormat = desc.Format;
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot create buffer view, type={}", type);
+        return nullptr;
+    }
+    auto result = std::make_shared<BufferViewD3D12>(buf, heap, heapIndex, type, dxgiFormat, count, offset, stride);
+    guard.Dismiss();
+    return result;
 }
 
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {

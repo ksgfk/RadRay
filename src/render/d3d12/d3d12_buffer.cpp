@@ -1,5 +1,7 @@
 #include "d3d12_buffer.h"
 
+#include "d3d12_descriptor_heap.h"
+
 namespace radray::render::d3d12 {
 
 BufferD3D12::BufferD3D12(
@@ -47,6 +49,17 @@ Nullable<void> BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
 
 void BufferD3D12::Unmap() noexcept {
     _buf->Unmap(0, nullptr);
+}
+
+bool BufferViewD3D12::IsValid() const noexcept {
+    return _buffer != nullptr && _heap != nullptr && _heapIndex != std::numeric_limits<UINT>::max();
+}
+
+void BufferViewD3D12::Destroy() noexcept {
+    _heap->Recycle(_heapIndex);
+    _buffer = nullptr;
+    _heap = nullptr;
+    _heapIndex = std::numeric_limits<UINT>::max();
 }
 
 }  // namespace radray::render::d3d12

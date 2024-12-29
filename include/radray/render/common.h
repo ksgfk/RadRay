@@ -327,6 +327,7 @@ class Device;
 class CommandQueue;
 class CommandPool;
 class CommandBuffer;
+class CommandEncoder;
 class Fence;
 class Shader;
 class RootSignature;
@@ -334,6 +335,8 @@ class GraphicsPipelineState;
 class SwapChain;
 class Buffer;
 class Texture;
+class BufferView;
+class TextureView;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;

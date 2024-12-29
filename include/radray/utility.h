@@ -80,6 +80,10 @@ struct Nullable {
 
     constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
     constexpr T* Value() const noexcept { return Ptr; }
+    constexpr T* Unwrap() const noexcept {
+        RADRAY_ASSERT(HasValue());
+        return Ptr;
+    }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
@@ -121,6 +125,10 @@ struct Nullable<void> {
 
     constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
     constexpr void* Value() const noexcept { return Ptr; }
+    constexpr void* Unwrap() const noexcept {
+        RADRAY_ASSERT(HasValue());
+        return Ptr;
+    }
     constexpr void* GetValueOrDefault(void* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
     constexpr void* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
@@ -156,6 +164,10 @@ struct Nullable<std::unique_ptr<T, D>> {
 
     constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
     constexpr T* Value() const noexcept { return Ptr.get(); }
+    constexpr std::unique_ptr<T, D>&& Unwrap() noexcept {
+        RADRAY_ASSERT(HasValue());
+        return std::move(Ptr);
+    }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr.get() : defaultPtr; }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
@@ -166,15 +178,6 @@ struct Nullable<std::unique_ptr<T, D>> {
         return *Ptr;
     }
     constexpr operator bool() const noexcept { return HasValue(); }
-    constexpr operator std::unique_ptr<T, D>() noexcept {
-        RADRAY_ASSERT(HasValue());
-        return std::move(Ptr);
-    }
-    template <typename U>
-    constexpr operator std::unique_ptr<U, D>() noexcept {
-        RADRAY_ASSERT(HasValue());
-        return std::move(Ptr);
-    }
 };
 template <typename T>
 struct Nullable<std::shared_ptr<T>> {
@@ -204,6 +207,10 @@ struct Nullable<std::shared_ptr<T>> {
 
     constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
     constexpr T* Value() const noexcept { return Ptr.get(); }
+    constexpr std::shared_ptr<T>&& Unwrap() noexcept {
+        RADRAY_ASSERT(HasValue());
+        return std::move(Ptr);
+    }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr.get() : defaultPtr; }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
@@ -214,15 +221,6 @@ struct Nullable<std::shared_ptr<T>> {
         return *Ptr;
     }
     constexpr operator bool() const noexcept { return HasValue(); }
-    constexpr operator std::shared_ptr<T>() const noexcept {
-        RADRAY_ASSERT(HasValue());
-        return Ptr;
-    }
-    template <typename U>
-    constexpr operator std::shared_ptr<U>() const noexcept {
-        RADRAY_ASSERT(HasValue());
-        return Ptr;
-    }
 };
 
 template <typename T>

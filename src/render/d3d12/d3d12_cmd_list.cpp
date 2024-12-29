@@ -24,8 +24,8 @@ void CmdListD3D12::End() noexcept {
 
 void CmdListD3D12::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
     radray::vector<D3D12_RESOURCE_BARRIER> rawBarriers;
-    rawBarriers.reserve(barriers.buffers.size() + barriers.textures.size());
-    for (const BufferBarrier& bb : barriers.buffers) {
+    rawBarriers.reserve(barriers.Buffers.size() + barriers.Textures.size());
+    for (const BufferBarrier& bb : barriers.Buffers) {
         BufferD3D12* buf = static_cast<BufferD3D12*>(bb.Buffer);
         D3D12_RESOURCE_BARRIER raw{};
         if (bb.Before == ResourceState::UnorderedAccess && bb.After == ResourceState::UnorderedAccess) {
@@ -45,7 +45,7 @@ void CmdListD3D12::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
         }
         rawBarriers.push_back(raw);
     }
-    for (const TextureBarrier& tb : barriers.textures) {
+    for (const TextureBarrier& tb : barriers.Textures) {
         TextureD3D12* tex = static_cast<TextureD3D12*>(tb.Texture);
         D3D12_RESOURCE_BARRIER raw{};
         if (tb.Before == ResourceState::UnorderedAccess && tb.After == ResourceState::UnorderedAccess) {

@@ -75,6 +75,14 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept override;
 
+    Nullable<radray::shared_ptr<BufferView>> CreateBufferView(
+        Buffer* buffer,
+        ResourceType type,
+        TextureFormat format,
+        uint64_t offset,
+        uint32_t count,
+        uint32_t stride) noexcept override;
+
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
     DescriptorHeap* GetCbvSrvUavHeap() noexcept;

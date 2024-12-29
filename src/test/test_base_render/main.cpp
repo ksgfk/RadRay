@@ -93,17 +93,14 @@ public:
         GlobalInitGlfw();
         window = radray::make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
 #if defined(RADRAY_PLATFORM_WINDOWS)
-        device = CreateDevice(D3D12DeviceDescriptor{});
+        device = CreateDevice(D3D12DeviceDescriptor{}).Unwrap();
 #elif defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         device = CreateDevice(MetalDeviceDescriptor{}).value();
 #endif
-        auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0);
-        cmdPool = device->CreateCommandPool(cmdQueue.Value());
-        cmdBuffer = device->CreateCommandBuffer(cmdPool.get());
-        if (cmdBuffer == nullptr) {
-            std::abort();
-        }
-        dxc = CreateDxc();
+        auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+        cmdPool = device->CreateCommandPool(cmdQueue).Unwrap();
+        cmdBuffer = device->CreateCommandBuffer(cmdPool.get()).Unwrap();
+        dxc = CreateDxc().Unwrap();
         // #if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         //         bool isSpirv = true;
         // #elif defined(RADRAY_PLATFORM_WINDOWS)
@@ -231,17 +228,17 @@ public:
             psoDesc.RootSig = rootSig.Value();
             psoDesc.VS = vs.Value();
             psoDesc.PS = ps.Value();
-            pso = device->CreateGraphicsPipeline(psoDesc);
+            pso = device->CreateGraphicsPipeline(psoDesc).Unwrap();
         }
         {
             auto q = device->GetCommandQueue(QueueType::Direct, 0);
             auto size = window->GetSize();
-            auto sc = device->CreateSwapChain(
-                q.Value(),
-                window->GetNativeHandle(),
-                size.x(), size.y(), 2,
-                TextureFormat::RGBA8_UNORM, true);
-            swapchain = sc;
+            swapchain = device->CreateSwapChain(
+                                  q.Value(),
+                                  window->GetNativeHandle(),
+                                  size.x(), size.y(), 2,
+                                  TextureFormat::RGBA8_UNORM, true)
+                            .Unwrap();
         }
         {
             Eigen::Vector3f vertices[] = {
@@ -252,19 +249,20 @@ public:
                 sizeof(vertices),
                 ResourceType::Buffer,
                 ResourceUsage::Upload,
-                ResourceStates{ResourceState::GenericRead},
-                {});
+                ToFlag(ResourceState::GenericRead),
+                ToFlag(ResourceMemoryTip::None));
             {
                 auto ptr = upload->Map(0, upload->GetSize());
                 std::memcpy(ptr.Value(), vertices, sizeof(vertices));
                 upload->Unmap();
             }
             verts = device->CreateBuffer(
-                sizeof(vertices),
-                ResourceType::Buffer,
-                ResourceUsage::Default,
-                ToFlag(ResourceState::Common),
-                ToFlag(ResourceMemoryTip::None));
+                              sizeof(vertices),
+                              ResourceType::Buffer,
+                              ResourceUsage::Default,
+                              ToFlag(ResourceState::Common),
+                              ToFlag(ResourceMemoryTip::None))
+                        .Unwrap();
             cmdPool->Reset();
             cmdBuffer->Begin();
             {
