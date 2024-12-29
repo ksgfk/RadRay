@@ -23,27 +23,27 @@ public:
 
     Backend GetBackend() noexcept override { return Backend::D3D12; }
 
-    std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
+    Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept override;
+    Nullable<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept override;
 
-    std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept override;
+    Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept override;
 
-    std::optional<radray::shared_ptr<Fence>> CreateFence() noexcept override;
+    Nullable<radray::shared_ptr<Fence>> CreateFence() noexcept override;
 
-    std::optional<radray::shared_ptr<Shader>> CreateShader(
+    Nullable<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         const ShaderReflection& refl,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept override;
 
-    std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept override;
+    Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept override;
 
-    std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+    Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    std::optional<radray::shared_ptr<SwapChain>> CreateSwapChain(
+    Nullable<radray::shared_ptr<SwapChain>> CreateSwapChain(
         CommandQueue* presentQueue,
         const void* nativeWindow,
         uint32_t width,
@@ -52,7 +52,7 @@ public:
         TextureFormat format,
         bool enableSync) noexcept override;
 
-    std::optional<radray::shared_ptr<Buffer>> CreateBuffer(
+    Nullable<radray::shared_ptr<Buffer>> CreateBuffer(
         uint64_t size,
         ResourceType type,
         ResourceUsage usage,
@@ -60,7 +60,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept override;
 
-    std::optional<radray::shared_ptr<Texture>> CreateTexture(
+    Nullable<radray::shared_ptr<Texture>> CreateTexture(
         uint64_t width,
         uint64_t height,
         uint64_t depth,
@@ -98,6 +98,6 @@ public:
     bool _isAllowTearing = false;
 };
 
-std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
+Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 }  // namespace radray::render::d3d12

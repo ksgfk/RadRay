@@ -93,17 +93,17 @@ public:
         GlobalInitGlfw();
         window = radray::make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
 #if defined(RADRAY_PLATFORM_WINDOWS)
-        device = CreateDevice(D3D12DeviceDescriptor{}).value();
+        device = CreateDevice(D3D12DeviceDescriptor{});
 #elif defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         device = CreateDevice(MetalDeviceDescriptor{}).value();
 #endif
-        auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).value();
-        cmdPool = device->CreateCommandPool(cmdQueue).value();
-        cmdBuffer = device->CreateCommandBuffer(cmdPool.get()).value();
+        auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0);
+        cmdPool = device->CreateCommandPool(cmdQueue.Value());
+        cmdBuffer = device->CreateCommandBuffer(cmdPool.get());
         if (cmdBuffer == nullptr) {
             std::abort();
         }
-        dxc = CreateDxc().value();
+        dxc = CreateDxc();
         // #if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         //         bool isSpirv = true;
         // #elif defined(RADRAY_PLATFORM_WINDOWS)
@@ -191,7 +191,7 @@ public:
         //         }
         {
             radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
-            DxcOutput outv = dxc->Compile(
+            DxcOutput outv = *dxc->Compile(
                 color,
                 "VSMain",
                 ShaderStage::Vertex,
@@ -199,16 +199,16 @@ public:
                 true,
                 {},
                 {},
-                false).value();
+                false);
             DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
             auto vs = device->CreateShader(
                 outv.data,
                 reflv,
                 ShaderStage::Vertex,
                 "VSMain",
-                "colorVS").value();
+                "colorVS");
 
-            DxcOutput outp = dxc->Compile(
+            DxcOutput outp = *dxc->Compile(
                 color,
                 "PSMain",
                 ShaderStage::Pixel,
@@ -216,50 +216,50 @@ public:
                 true,
                 {},
                 {},
-                false).value();
+                false);
             DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
             auto ps = device->CreateShader(
                 outp.data,
                 reflp,
                 ShaderStage::Pixel,
                 "PSMain",
-                "colorPS").value();
+                "colorPS");
 
-            Shader* shaders[] = {vs.get(), ps.get()};
-            auto rootSig = device->CreateRootSignature(shaders).value();
+            Shader* shaders[] = {vs.Value(), ps.Value()};
+            auto rootSig = device->CreateRootSignature(shaders);
             auto psoDesc = DEFAULT_PSO_DESC;
-            psoDesc.RootSig = rootSig.get();
-            psoDesc.VS = vs.get();
-            psoDesc.PS = ps.get();
-            pso = device->CreateGraphicsPipeline(psoDesc).value();
+            psoDesc.RootSig = rootSig.Value();
+            psoDesc.VS = vs.Value();
+            psoDesc.PS = ps.Value();
+            pso = device->CreateGraphicsPipeline(psoDesc);
         }
         {
-            auto q = device->GetCommandQueue(QueueType::Direct, 0).value();
+            auto q = device->GetCommandQueue(QueueType::Direct, 0);
             auto size = window->GetSize();
             auto sc = device->CreateSwapChain(
-                q,
+                q.Value(),
                 window->GetNativeHandle(),
                 size.x(), size.y(), 2,
                 TextureFormat::RGBA8_UNORM, true);
-            swapchain = sc.value();
+            swapchain = sc;
         }
         {
             Eigen::Vector3f vertices[] = {
                 {0.0f, 0.5f, 0.0f},
                 {0.5f, -0.5f, 0.0f},
                 {-0.5f, -0.5f, 0.0f}};
-            auto upload = *device->CreateBuffer(
+            auto upload = device->CreateBuffer(
                 sizeof(vertices),
                 ResourceType::Buffer,
                 ResourceUsage::Upload,
                 ResourceStates{ResourceState::GenericRead},
                 {});
             {
-                auto ptr = *upload->Map(0, upload->GetSize());
-                std::memcpy(ptr, vertices, sizeof(vertices));
+                auto ptr = upload->Map(0, upload->GetSize());
+                std::memcpy(ptr.Value(), vertices, sizeof(vertices));
                 upload->Unmap();
             }
-            verts = *device->CreateBuffer(
+            verts = device->CreateBuffer(
                 sizeof(vertices),
                 ResourceType::Buffer,
                 ResourceUsage::Default,
@@ -275,7 +275,7 @@ public:
                 ResourceBarriers rb{barriers, {}};
                 cmdBuffer->ResourceBarrier(rb);
             }
-            cmdBuffer->CopyBuffer(upload.get(), 0, verts.get(), 0, sizeof(vertices));
+            cmdBuffer->CopyBuffer(upload.Value(), 0, verts.get(), 0, sizeof(vertices));
             {
                 BufferBarrier barriers[] = {
                     {verts.get(),
@@ -302,7 +302,7 @@ public:
             cmdBuffer->Begin();
             cmdBuffer->End();
             CommandBuffer* t[] = {cmdBuffer.get()};
-            auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).value();
+            auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0);
             cmdQueue->Submit(t, Nullable<Fence>{});
             swapchain->Present();
             cmdQueue->Wait();

@@ -10,7 +10,7 @@ void SwapChainD3D12::Destroy() noexcept {
     _swapchain = nullptr;
 }
 
-Texture* SwapChainD3D12::AcquireNextRenderTarget() noexcept {
+Nullable<Texture> SwapChainD3D12::AcquireNextRenderTarget() noexcept {
     UINT curr = _swapchain->GetCurrentBackBufferIndex();
     if (curr >= _colors.size()) {
         return nullptr;
@@ -20,9 +20,6 @@ Texture* SwapChainD3D12::AcquireNextRenderTarget() noexcept {
 
 Texture* SwapChainD3D12::GetCurrentRenderTarget() noexcept {
     UINT curr = _swapchain->GetCurrentBackBufferIndex();
-    if (curr >= _colors.size()) {
-        return nullptr;
-    }
     return _colors[curr].get();
 }
 

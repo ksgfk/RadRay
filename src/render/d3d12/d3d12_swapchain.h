@@ -19,7 +19,7 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
-    Texture* AcquireNextRenderTarget() noexcept override;
+    Nullable<Texture> AcquireNextRenderTarget() noexcept override;
     Texture* GetCurrentRenderTarget() noexcept override;
     void Present() noexcept override;
 

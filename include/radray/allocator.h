@@ -3,6 +3,7 @@
 #include <optional>
 
 #include <radray/types.h>
+#include <radray/utility.h>
 
 namespace radray {
 
@@ -28,7 +29,7 @@ public:
     void Reset() noexcept;
 
 protected:
-    virtual std::optional<void*> DoAllocate(uint64_t size) = 0;
+    virtual Nullable<void> DoAllocate(uint64_t size) = 0;
     virtual uint64_t DoDestroy(void* handle) = 0;
     virtual radray::vector<Buffer>& GetBuffer() = 0;
 

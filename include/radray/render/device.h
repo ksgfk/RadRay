@@ -51,27 +51,27 @@ public:
 
     virtual Backend GetBackend() noexcept = 0;
 
-    virtual std::optional<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
+    virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept = 0;
+    virtual Nullable<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept = 0;
+    virtual Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<Fence>> CreateFence() noexcept = 0;
+    virtual Nullable<radray::shared_ptr<Fence>> CreateFence() noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<Shader>> CreateShader(
+    virtual Nullable<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         const ShaderReflection& refl,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept = 0;
+    virtual Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+    virtual Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<SwapChain>> CreateSwapChain(
+    virtual Nullable<radray::shared_ptr<SwapChain>> CreateSwapChain(
         CommandQueue* presentQueue,
         const void* nativeWindow,
         uint32_t width,
@@ -80,7 +80,7 @@ public:
         TextureFormat format,
         bool enableSync) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<Buffer>> CreateBuffer(
+    virtual Nullable<radray::shared_ptr<Buffer>> CreateBuffer(
         uint64_t size,
         ResourceType type,
         ResourceUsage usage,
@@ -88,7 +88,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept = 0;
 
-    virtual std::optional<radray::shared_ptr<Texture>> CreateTexture(
+    virtual Nullable<radray::shared_ptr<Texture>> CreateTexture(
         uint64_t width,
         uint64_t height,
         uint64_t depth,
@@ -104,6 +104,6 @@ public:
         std::string_view name = {}) noexcept = 0;
 };
 
-std::optional<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
+Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
 
 }  // namespace radray::render

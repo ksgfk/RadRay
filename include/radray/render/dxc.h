@@ -116,7 +116,7 @@ private:
     radray::unique_ptr<Impl> _impl;
 };
 
-std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept;
+Nullable<radray::shared_ptr<Dxc>> CreateDxc() noexcept;
 
 }  // namespace radray::render
 

@@ -22,7 +22,7 @@ void CmdQueueD3D12::Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> si
         lists.push_back(list->_cmdList.Get());
     }
     _queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
-    if (singalFence.HasValue()) {
+    if (singalFence) {
         auto fence = static_cast<FenceD3D12*>(singalFence.Value());
         fence->_fenceValue++;
         RADRAY_DX_CHECK(_queue->Signal(fence->_fence.Get(), fence->_fenceValue));

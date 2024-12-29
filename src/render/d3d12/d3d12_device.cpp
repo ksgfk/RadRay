@@ -59,7 +59,7 @@ DeviceD3D12::~DeviceD3D12() noexcept { DestroyImpl(this); }
 
 void DeviceD3D12::Destroy() noexcept { DestroyImpl(this); }
 
-std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     uint32_t index = static_cast<size_t>(type);
     RADRAY_ASSERT(index >= 0 && index < 3);
     auto& queues = _queues[index];
@@ -71,16 +71,16 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
     }
     radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
-        std::optional<radray::shared_ptr<Fence>> fence = CreateFence();
-        if (!fence.has_value()) {
-            return std::nullopt;
+        Nullable<radray::shared_ptr<Fence>> fence = CreateFence();
+        if (!fence) {
+            return nullptr;
         }
         ComPtr<ID3D12CommandQueue> queue;
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            radray::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.value());
+            radray::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
             auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type, std::move(f));
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
@@ -89,10 +89,10 @@ std::optional<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32
             RADRAY_ERR_LOG("cannot create ID3D12CommandQueue, reason={} (code:{})", GetErrorName(hr), hr);
         }
     }
-    return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
+    return q->IsValid() ? q.get() : nullptr;
 }
 
-std::optional<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(CommandQueue* queue) noexcept {
+Nullable<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(CommandQueue* queue) noexcept {
     auto q = Underlying(queue);
     ComPtr<ID3D12CommandAllocator> alloc;
     if (HRESULT hr = _device->CreateCommandAllocator(q->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
@@ -100,11 +100,11 @@ std::optional<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(Co
         return radray::make_shared<CmdAllocatorD3D12>(std::move(alloc), q->_type);
     } else {
         RADRAY_ERR_LOG("cannot create ID3D12CommandAllocator, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
 }
 
-std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandPool* pool) noexcept {
+Nullable<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandPool* pool) noexcept {
     auto p = Underlying(pool);
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->CreateCommandList(0, p->_type, p->_cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
@@ -118,25 +118,25 @@ std::optional<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffe
             GetGpuSamplerHeap());
     } else {
         RADRAY_ERR_LOG("cannot create ID3D12GraphicsCommandList, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
 }
 
-std::optional<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+Nullable<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     ComPtr<ID3D12Fence> fence;
     if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create ID3D12Fence, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     std::optional<Win32Event> e = MakeWin32Event();
     if (!e.has_value()) {
-        return std::nullopt;
+        return nullptr;
     }
     return radray::make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
 }
 
-std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
+Nullable<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
     const ShaderReflection& refl,
     ShaderStage stage,
@@ -145,12 +145,12 @@ std::optional<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     auto dxilRefl = std::get_if<DxilReflection>(&refl);
     if (dxilRefl == nullptr) {
         RADRAY_ERR_LOG("d3d12 can only use dxil shader");
-        return std::nullopt;
+        return nullptr;
     }
     return radray::make_shared<Dxil>(blob, *dxilRefl, entryPoint, name, stage);
 }
 
-std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
+Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
     class StageResource : public DxilReflection::BindResource {
     public:
         ShaderStages Stages;
@@ -179,7 +179,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             } else {
                 if (iter->second != j) {
                     RADRAY_ERR_LOG("static sampler has different layout but same name {}", j.Name);
-                    return std::nullopt;
+                    return nullptr;
                 }
             }
         }
@@ -255,7 +255,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         auto iter = cbufferMap.find(i.Name);
         if (iter == cbufferMap.end()) {
             RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
-            return std::nullopt;
+            return nullptr;
         }
     }
     radray::vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
@@ -269,7 +269,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         auto iter = staticSamplerMap.find(i.Name);
         if (iter == staticSamplerMap.end()) {
             RADRAY_ERR_LOG("cannot find static sampler {}", i.Name);
-            return std::nullopt;
+            return nullptr;
         }
     }
     // https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits
@@ -443,7 +443,7 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
         const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
         auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
         RADRAY_ERR_LOG("d3d12 cannot serialize root sig\n{}", reason);
-        return std::nullopt;
+        return nullptr;
     }
     ComPtr<ID3D12RootSignature> rootSig;
     if (HRESULT hr = _device->CreateRootSignature(
@@ -453,12 +453,12 @@ std::optional<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignatur
             IID_PPV_ARGS(rootSig.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     return radray::make_shared<RootSigD3D12>(std::move(rootSig));
 }
 
-std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
+Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
     const GraphicsPipelineStateDescriptor& desc) noexcept {
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     radray::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
@@ -487,7 +487,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
         rawRaster.FillMode = fillMode.value();
     } else {
         RADRAY_ERR_LOG("d3d12 cannot set fill mode {}", desc.Primitive.Poly);
-        return std::nullopt;
+        return nullptr;
     }
     rawRaster.CullMode = MapType(desc.Primitive.Cull);
     rawRaster.FrontCounterClockwise = desc.Primitive.FaceClockwise == FrontFace::CCW;
@@ -521,7 +521,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
                     rtb.RenderTargetWriteMask = (UINT8)writeMask.value();
                 } else {
                     RADRAY_ERR_LOG("d3d12 cannot set color write mask {}", ct.WriteMask);
-                    return std::nullopt;
+                    return nullptr;
                 }
             } else {
                 rtb.BlendEnable = false;
@@ -584,12 +584,12 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGrap
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state. reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     return radray::make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
 }
 
-std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
+Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     CommandQueue* presentQueue,
     const void* nativeWindow,
     uint32_t width,
@@ -607,7 +607,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         scDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
         scDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
         RADRAY_ERR_LOG("d3d12 IDXGISwapChain doesn't support format {}", format);
-        return std::nullopt;
+        return nullptr;
     }
     scDesc.Stereo = false;
     scDesc.SampleDesc.Count = 1;
@@ -616,7 +616,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     scDesc.BufferCount = backBufferCount;
     if (scDesc.BufferCount < 2 || scDesc.BufferCount > 16) {
         RADRAY_ERR_LOG("d3d12 IDXGISwapChain buffer count must >= 2 and <= 16, cannot be {}", backBufferCount);
-        return std::nullopt;
+        return nullptr;
     }
     scDesc.Scaling = DXGI_SCALING_STRETCH;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -629,18 +629,18 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create IDXGISwapChain1 for HWND, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
         RADRAY_WARN_LOG("d3d12 cannot make window association no alt enter, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     ComPtr<IDXGISwapChain3> swapchain;
     if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 doesn't support IDXGISwapChain3, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     radray::vector<radray::shared_ptr<TextureD3D12>> colors;
     colors.reserve(scDesc.BufferCount);
@@ -649,7 +649,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         if (HRESULT hr = swapchain->GetBuffer((UINT)i, IID_PPV_ARGS(color.GetAddressOf()));
             FAILED(hr)) {
             RADRAY_ERR_LOG("d3d12 cannot get back buffer in IDXGISwapChain1, reason={} (code:{})", GetErrorName(hr), hr);
-            return std::nullopt;
+            return nullptr;
         }
         auto tex = radray::make_shared<TextureD3D12>(
             std::move(color),
@@ -662,7 +662,7 @@ std::optional<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     return radray::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
 }
 
-std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
+Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     uint64_t size,
     ResourceType type,
     ResourceUsage usage,
@@ -724,7 +724,7 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
             RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
-            return std::nullopt;
+            return nullptr;
         }
     } else {
         if (HRESULT hr = _mainAlloc->CreateResource(
@@ -736,7 +736,7 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
             RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
-            return std::nullopt;
+            return nullptr;
         }
     }
     SetObjectName(name, buffer.Get(), allocRes.Get());
@@ -744,7 +744,7 @@ std::optional<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     return radray::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
 }
 
-std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
+Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     uint64_t width,
     uint64_t height,
     uint64_t depth,
@@ -771,21 +771,21 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     desc.Width = width;
     if (height > std::numeric_limits<decltype(desc.Height)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, height {} too large", height);
-        return std::nullopt;
+        return nullptr;
     }
     desc.Height = (UINT)height;
     if (depth > std::numeric_limits<decltype(desc.DepthOrArraySize)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, depth {} too large", depth);
-        return std::nullopt;
+        return nullptr;
     }
     if (arraySize > std::numeric_limits<decltype(desc.DepthOrArraySize)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, array size {} too large", arraySize);
-        return std::nullopt;
+        return nullptr;
     }
     desc.DepthOrArraySize = (UINT16)(arraySize != 1 ? arraySize : depth);
     if (mipLevels > std::numeric_limits<decltype(desc.MipLevels)>::max()) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, mip levels {} too large", mipLevels);
-        return std::nullopt;
+        return nullptr;
     }
     desc.MipLevels = (UINT16)mipLevels;
     desc.Format = FormatToTypeless(rawFormat);
@@ -837,7 +837,7 @@ std::optional<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
             IID_PPV_ARGS(texture.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 cannot create texture, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
     return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
@@ -898,7 +898,7 @@ DescriptorHeap* DeviceD3D12::GetGpuSamplerHeap() noexcept {
     return _gpuSamplerHeap.get();
 }
 
-std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
+Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
@@ -921,7 +921,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
     if (HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDXGIFactory4, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     ComPtr<IDXGIAdapter1> adapter;
     if (desc.AdapterIndex.has_value()) {
@@ -929,7 +929,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         if (HRESULT hr = dxgiFactory->EnumAdapters1(index, adapter.GetAddressOf());
             FAILED(hr)) {
             RADRAY_ERR_LOG("cannot get IDXGIAdapter1 at index {}, reason={} (code:{})", index, GetErrorName(hr), hr);
-            return std::nullopt;
+            return nullptr;
         }
     } else {
         ComPtr<IDXGIFactory6> factory6;
@@ -971,13 +971,13 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
     }
     if (adapter == nullptr) {
         RADRAY_ERR_LOG("cannot get IDXGIAdapter1");
-        return std::nullopt;
+        return nullptr;
     }
     ComPtr<ID3D12Device> device;
     if (HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create ID3D12Device, reason={} (code:{})", GetErrorName(hr), hr);
-        return std::nullopt;
+        return nullptr;
     }
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
@@ -1007,7 +1007,7 @@ std::optional<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDes
         if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
             FAILED(hr)) {
             RADRAY_ERR_LOG("cannot create D3D12MA::Allocator, reason={} (code:{})", GetErrorName(hr), hr);
-            return std::nullopt;
+            return nullptr;
         }
     }
     auto result = radray::make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);

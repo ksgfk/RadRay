@@ -21,7 +21,7 @@ public:
 
     uint64_t GetSize() const noexcept override;
 
-    std::optional<void*> Map(uint64_t offset, uint64_t size) noexcept override;
+    Nullable<void> Map(uint64_t offset, uint64_t size) noexcept override;
 
     void Unmap() noexcept override;
 

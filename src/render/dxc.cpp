@@ -334,7 +334,7 @@ public:
                 })(std::string_view{spDesc.SemanticName});
                 if (!semOpt.has_value()) {
                     std::string_view semName{spDesc.SemanticName};
-                    if (semName.starts_with("SV_")) { // 系统语义, 不处理
+                    if (semName.starts_with("SV_")) {  // 系统语义, 不处理
                         continue;
                     }
                     RADRAY_ERR_LOG("dxc ID3D12ShaderReflection unknown vertex input semantic {}", spDesc.SemanticName);
@@ -394,14 +394,14 @@ public:
     ComPtr<IDxcIncludeHandler> _inc;
 };
 
-std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
+Nullable<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
     if (HRESULT hr = DxcCreateInstance2(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcCompiler3, code={}", hr);
-        return std::nullopt;
+        return nullptr;
     }
 #else
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
@@ -414,13 +414,13 @@ std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcUtils, code={}", hr);
-        return std::nullopt;
+        return nullptr;
     }
     ComPtr<IDxcIncludeHandler> incHandler;
     if (HRESULT hr = utils->CreateDefaultIncludeHandler(&incHandler);
         FAILED(hr)) {
         RADRAY_ERR_LOG("cannot create IDxcIncludeHandler, code={}", hr);
-        return std::nullopt;
+        return nullptr;
     }
     auto implPtr = radray::make_unique<DxcImpl>(
 #ifdef RADRAY_ENABLE_MIMALLOC
@@ -429,8 +429,7 @@ std::optional<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
         std::move(dxc),
         std::move(utils),
         std::move(incHandler));
-    auto result = radray::make_shared<Dxc>(std::move(implPtr));
-    return result;
+    return radray::make_shared<Dxc>(std::move(implPtr));
 }
 
 void Dxc::Destroy() noexcept {

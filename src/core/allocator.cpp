@@ -28,8 +28,7 @@ LinearAllocator::View LinearAllocator::Allocate(uint64_t size) noexcept {
         _capacity = std::max<uint64_t>(_capacity, static_cast<uint64_t>(_capacity * _capacityIncMag));
     }
     uint64_t allocSize = std::max<uint64_t>(size, _capacity);
-    auto neopt = DoAllocate(allocSize);
-    auto newData = neopt.value();
+    auto newData = DoAllocate(allocSize).Value();
     buffers.emplace_back(Buffer{
         .handle = newData,
         .capacity = allocSize,
@@ -55,7 +54,7 @@ void LinearAllocator::Clear() noexcept {
             }
             buffers.clear();
             buffers.emplace_back(Buffer{
-                .handle = DoAllocate(sumSize).value(),
+                .handle = DoAllocate(sumSize).Value(),
                 .capacity = sumSize,
                 .count = 0});
             break;
@@ -78,7 +77,7 @@ void LinearAllocator::Reset() noexcept {
     Buffer& first = buffers[0];
     if (first.capacity > _capacity) {
         DoDestroy(first.handle);
-        first.handle = DoAllocate(_capacity).value();
+        first.handle = DoAllocate(_capacity).Value();
         first.capacity = _capacity;
     }
     first.count = 0;

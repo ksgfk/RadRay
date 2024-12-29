@@ -101,7 +101,7 @@ private:
 };
 
 template <class T>
-requires std::is_enum_v<T>
+requires detail::is_flags<T>::value
 constexpr EnumFlags<T> ToFlag(T v) noexcept {
     return EnumFlags<T>{v};
 }
