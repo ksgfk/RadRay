@@ -1,6 +1,8 @@
 package("spdlog_radray")
     set_base("spdlog")
 
+    add_patches("v1.15.0", "patches/v1.15.0/0001-fix-remove-unused-to_string_view-overload-in-fmt-11..patch", "e35f3c6754ede56670603f6e888758f10269987deba6e225cf5b807a5e15837c")
+
     add_configs("no_thread_id", {description = "prevent spdlog from querying the thread id on each log call if thread id is not needed", default = false, type = "boolean"})
     add_configs("no_default_logger", {description = "Disable default logger creation", default = false, type = "boolean"})
 
@@ -16,7 +18,7 @@ package("spdlog_radray")
             package:add("defines", "SPDLOG_USE_STD_FORMAT")
         elseif package:config("fmt_external") or package:config("fmt_external_ho") then
             package:add("defines", "SPDLOG_FMT_EXTERNAL")
-            package:add("deps", "fmt", {configs = {header_only = package:config("header_only")}})
+            package:add("deps", "fmt_radray", {configs = {header_only = package:config("header_only")}})
         end
         if not package:config("header_only") and package:config("fmt_external_ho") then
             package:add("defines", "FMT_HEADER_ONLY=1")
@@ -50,5 +52,5 @@ package("spdlog_radray")
         table.insert(configs, "-DSPDLOG_WCHAR_SUPPORT=" .. (package:config("wchar") and "ON" or "OFF"))
         table.insert(configs, "-DSPDLOG_NO_THREAD_ID=" .. (package:config("no_thread_id") and "ON" or "OFF"))
         table.insert(configs, "-DSPDLOG_DISABLE_DEFAULT_LOGGER=" .. (package:config("no_default_logger") and "ON" or "OFF"))
-        import("package.tools.cmake").install(package, configs)
+        import("package.tools.cmake").install(package, configs, {packages = "fmt_radray"})
     end)

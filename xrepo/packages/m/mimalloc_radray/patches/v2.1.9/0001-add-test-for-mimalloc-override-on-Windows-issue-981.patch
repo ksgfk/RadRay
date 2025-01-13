@@ -1,0 +1,921 @@
+From e8ef8882932e624ad24e17edd6d96108bb4f4738 Mon Sep 17 00:00:00 2001
+From: Daan Leijen <daan@microsoft.com>
+Date: Fri, 3 Jan 2025 20:34:14 -0800
+Subject: [PATCH] add test for mimalloc override on Windows (issue #981)
+
+update readme
+
+move singleton pages to the full queue at allocation time
+
+Merge branch 'dev' into dev2
+
+return length from _mi_snprintf
+
+Merge branch 'dev' into dev2
+
+remove mi_debug_show_arenas parameter
+
+Merge branch 'dev' into dev2
+
+Merge branch 'dev' of e:\dev\mimalloc3 into dev
+
+bump version for further development
+
+bump version for further development
+
+fix build on msvc in C compilation; fix build with clang-cl on Windows
+---
+ CMakeLists.txt                                |  22 +-
+ cmake/mimalloc-config-version.cmake           |   4 +-
+ ide/vs2022/mimalloc-override-test-dep.vcxproj | 352 ++++++++++++++++++
+ ide/vs2022/mimalloc-override-test.vcxproj     |   3 +
+ ide/vs2022/mimalloc.sln                       | Bin 9301 -> 10738 bytes
+ include/mimalloc.h                            |   4 +-
+ include/mimalloc/atomic.h                     |  33 +-
+ include/mimalloc/internal.h                   |   4 +-
+ readme.md                                     |   2 +-
+ src/arena.c                                   |   9 +-
+ src/libc.c                                    |  24 +-
+ src/page.c                                    |  14 +-
+ src/prim/windows/prim.c                       |   2 +-
+ test/main-override-dep.cpp                    |  15 +
+ test/main-override-dep.h                      |  11 +
+ test/main-override.cpp                        |  23 +-
+ test/test-stress.c                            |   2 +-
+ 17 files changed, 469 insertions(+), 55 deletions(-)
+ create mode 100644 ide/vs2022/mimalloc-override-test-dep.vcxproj
+ create mode 100644 test/main-override-dep.cpp
+ create mode 100644 test/main-override-dep.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 283b0f57..5ca281e1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -102,10 +102,17 @@ endif()
+ # -----------------------------------------------------------------------------
+ # Process options
+ # -----------------------------------------------------------------------------
++if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
++  set(MI_CLANG_CL "ON")
++endif()
+ 
+ # put -Wall early so other warnings can be disabled selectively
+ if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang")
+-  list(APPEND mi_cflags -Wall -Wextra -Wpedantic)
++  if (MI_CLANG_CL)
++    list(APPEND mi_cflags -W)
++  else()
++    list(APPEND mi_cflags -Wall -Wextra -Wpedantic)
++  endif()
+ endif()
+ if(CMAKE_C_COMPILER_ID MATCHES "GNU")
+     list(APPEND mi_cflags -Wall -Wextra)
+@@ -371,21 +378,21 @@ endif()
+ # endif()
+ 
+ # Compiler flags
+-if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
++if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU" AND NOT MI_CLANG_CL)
+   list(APPEND mi_cflags -Wno-unknown-pragmas -fvisibility=hidden)
+   if(NOT MI_USE_CXX)
+     list(APPEND mi_cflags -Wstrict-prototypes)
+   endif()
+   if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang")
+     list(APPEND mi_cflags -Wno-static-in-inline)
+-  endif()
++  endif()  
+ endif()
+ 
+ if(CMAKE_C_COMPILER_ID MATCHES "Intel")
+   list(APPEND mi_cflags -fvisibility=hidden)
+ endif()
+ 
+-if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU|Intel" AND NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
++if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU|Intel" AND NOT CMAKE_SYSTEM_NAME MATCHES "Haiku" AND NOT MI_CLANG_CL)
+   if(MI_LOCAL_DYNAMIC_TLS)
+     list(APPEND mi_cflags -ftls-model=local-dynamic)
+   else()
+@@ -401,6 +408,9 @@ if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU|Intel" AND NOT CMAKE_SYSTEM
+   if(MI_OVERRIDE)
+     list(APPEND mi_cflags -fno-builtin-malloc)
+   endif()
++endif()
++
++if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU|Intel" AND NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
+   if(MI_OPT_ARCH)
+     if(MI_ARCH STREQUAL "arm64")
+       set(MI_OPT_ARCH_FLAGS "-march=armv8.1-a")         # fast atomics
+@@ -410,9 +420,9 @@ endif()
+ 
+ if (MSVC AND MSVC_VERSION GREATER_EQUAL 1914)
+   list(APPEND mi_cflags /Zc:__cplusplus)
+-  if(MI_OPT_ARCH)
++  if(MI_OPT_ARCH AND NOT MI_CLANG_CL)
+     if(MI_ARCH STREQUAL "arm64")
+-      set(MI_OPT_ARCH_FLAGS "/arch:armv8.1")           # fast atomics
++      set(MI_OPT_ARCH_FLAGS "/arch:armv8.1")           # fast atomics      
+     endif()
+   endif()
+ endif()
+diff --git a/cmake/mimalloc-config-version.cmake b/cmake/mimalloc-config-version.cmake
+index f3ed36ab..286ec0ba 100644
+--- a/cmake/mimalloc-config-version.cmake
++++ b/cmake/mimalloc-config-version.cmake
+@@ -1,6 +1,6 @@
+ set(mi_version_major 2)
+-set(mi_version_minor 1)
+-set(mi_version_patch 9)
++set(mi_version_minor 2)
++set(mi_version_patch 2)
+ set(mi_version ${mi_version_major}.${mi_version_minor})
+ 
+ set(PACKAGE_VERSION ${mi_version})
+diff --git a/ide/vs2022/mimalloc-override-test-dep.vcxproj b/ide/vs2022/mimalloc-override-test-dep.vcxproj
+new file mode 100644
+index 00000000..606bec9c
+--- /dev/null
++++ b/ide/vs2022/mimalloc-override-test-dep.vcxproj
+@@ -0,0 +1,352 @@
++<?xml version="1.0" encoding="utf-8"?>
++<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++  <ItemGroup Label="ProjectConfigurations">
++    <ProjectConfiguration Include="Debug|ARM64">
++      <Configuration>Debug</Configuration>
++      <Platform>ARM64</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Debug|ARM64EC">
++      <Configuration>Debug</Configuration>
++      <Platform>ARM64EC</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Debug|Win32">
++      <Configuration>Debug</Configuration>
++      <Platform>Win32</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Release|ARM64">
++      <Configuration>Release</Configuration>
++      <Platform>ARM64</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Release|ARM64EC">
++      <Configuration>Release</Configuration>
++      <Platform>ARM64EC</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Release|Win32">
++      <Configuration>Release</Configuration>
++      <Platform>Win32</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Debug|x64">
++      <Configuration>Debug</Configuration>
++      <Platform>x64</Platform>
++    </ProjectConfiguration>
++    <ProjectConfiguration Include="Release|x64">
++      <Configuration>Release</Configuration>
++      <Platform>x64</Platform>
++    </ProjectConfiguration>
++  </ItemGroup>
++  <PropertyGroup Label="Globals">
++    <VCProjectVersion>15.0</VCProjectVersion>
++    <ProjectGuid>{FEF7869F-750E-4C21-A04D-22707CC66879}</ProjectGuid>
++    <RootNamespace>mimalloc-test-override-dep</RootNamespace>
++    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
++    <ProjectName>mimalloc-test-override-dep</ProjectName>
++  </PropertyGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>true</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>false</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++    <WholeProgramOptimization>true</WholeProgramOptimization>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>true</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>true</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64EC'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>true</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>false</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++    <WholeProgramOptimization>true</WholeProgramOptimization>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>false</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++    <WholeProgramOptimization>true</WholeProgramOptimization>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64EC'" Label="Configuration">
++    <ConfigurationType>DynamicLibrary</ConfigurationType>
++    <UseDebugLibraries>false</UseDebugLibraries>
++    <PlatformToolset>v143</PlatformToolset>
++    <WholeProgramOptimization>true</WholeProgramOptimization>
++  </PropertyGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
++  <ImportGroup Label="ExtensionSettings">
++  </ImportGroup>
++  <ImportGroup Label="Shared">
++  </ImportGroup>
++  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'" Label="PropertySheets">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64EC'" Label="PropertySheets">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="PropertySheets">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64EC'" Label="PropertySheets">
++    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
++  </ImportGroup>
++  <PropertyGroup Label="UserMacros" />
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64EC'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64EC'">
++    <OutDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(Configuration)\</OutDir>
++    <IntDir>$(ProjectDir)..\..\out\msvc-$(Platform)\$(ProjectName)\$(Configuration)\</IntDir>
++  </PropertyGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>Disabled</Optimization>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
++      <ExceptionHandling>Sync</ExceptionHandling>
++      <CompileAs>Default</CompileAs>
++      <SupportJustMyCode>false</SupportJustMyCode>
++    </ClCompile>
++    <Link>
++      <SubSystem>Console</SubSystem>
++      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent />
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>Disabled</Optimization>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
++      <ExceptionHandling>Sync</ExceptionHandling>
++      <CompileAs>Default</CompileAs>
++      <SupportJustMyCode>false</SupportJustMyCode>
++    </ClCompile>
++    <Link>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent />
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>Disabled</Optimization>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
++      <ExceptionHandling>Sync</ExceptionHandling>
++      <CompileAs>Default</CompileAs>
++      <SupportJustMyCode>false</SupportJustMyCode>
++    </ClCompile>
++    <Link>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent />
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64EC'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>Disabled</Optimization>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
++      <ExceptionHandling>Sync</ExceptionHandling>
++      <CompileAs>Default</CompileAs>
++      <SupportJustMyCode>false</SupportJustMyCode>
++    </ClCompile>
++    <Link>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent />
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>MaxSpeed</Optimization>
++      <FunctionLevelLinking>true</FunctionLevelLinking>
++      <IntrinsicFunctions>true</IntrinsicFunctions>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <PreprocessorDefinitions>_MBCS;%(PreprocessorDefinitions);NDEBUG</PreprocessorDefinitions>
++      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
++    </ClCompile>
++    <Link>
++      <EnableCOMDATFolding>true</EnableCOMDATFolding>
++      <OptimizeReferences>true</OptimizeReferences>
++      <SubSystem>Console</SubSystem>
++      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>MaxSpeed</Optimization>
++      <FunctionLevelLinking>true</FunctionLevelLinking>
++      <IntrinsicFunctions>true</IntrinsicFunctions>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <PreprocessorDefinitions>_MBCS;%(PreprocessorDefinitions);NDEBUG</PreprocessorDefinitions>
++      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
++    </ClCompile>
++    <Link>
++      <EnableCOMDATFolding>true</EnableCOMDATFolding>
++      <OptimizeReferences>true</OptimizeReferences>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>MaxSpeed</Optimization>
++      <FunctionLevelLinking>true</FunctionLevelLinking>
++      <IntrinsicFunctions>true</IntrinsicFunctions>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <PreprocessorDefinitions>_MBCS;%(PreprocessorDefinitions);NDEBUG</PreprocessorDefinitions>
++      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
++    </ClCompile>
++    <Link>
++      <EnableCOMDATFolding>true</EnableCOMDATFolding>
++      <OptimizeReferences>true</OptimizeReferences>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64EC'">
++    <ClCompile>
++      <WarningLevel>Level3</WarningLevel>
++      <Optimization>MaxSpeed</Optimization>
++      <FunctionLevelLinking>true</FunctionLevelLinking>
++      <IntrinsicFunctions>true</IntrinsicFunctions>
++      <SDLCheck>true</SDLCheck>
++      <ConformanceMode>true</ConformanceMode>
++      <AdditionalIncludeDirectories>..\..\include</AdditionalIncludeDirectories>
++      <PreprocessorDefinitions>_MBCS;%(PreprocessorDefinitions);NDEBUG</PreprocessorDefinitions>
++      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
++    </ClCompile>
++    <Link>
++      <EnableCOMDATFolding>true</EnableCOMDATFolding>
++      <OptimizeReferences>true</OptimizeReferences>
++      <SubSystem>Console</SubSystem>
++      <EntryPointSymbol>
++      </EntryPointSymbol>
++      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
++    </Link>
++    <PostBuildEvent>
++      <Command>
++      </Command>
++    </PostBuildEvent>
++  </ItemDefinitionGroup>
++  <ItemGroup>
++    <ClCompile Include="..\..\test\main-override-dep.cpp" />
++  </ItemGroup>
++  <ItemGroup>
++    <ClInclude Include="..\..\test\main-override-dep.h" />
++  </ItemGroup>
++  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
++  <ImportGroup Label="ExtensionTargets">
++  </ImportGroup>
++</Project>
+\ No newline at end of file
+diff --git a/ide/vs2022/mimalloc-override-test.vcxproj b/ide/vs2022/mimalloc-override-test.vcxproj
+index 427a75ae..ae465349 100644
+--- a/ide/vs2022/mimalloc-override-test.vcxproj
++++ b/ide/vs2022/mimalloc-override-test.vcxproj
+@@ -347,6 +347,9 @@
+     <ProjectReference Include="mimalloc-override-dll.vcxproj">
+       <Project>{abb5eae7-b3e6-432e-b636-333449892ea7}</Project>
+     </ProjectReference>
++    <ProjectReference Include="mimalloc-override-test-dep.vcxproj">
++      <Project>{fef7869f-750e-4c21-a04d-22707cc66879}</Project>
++    </ProjectReference>
+   </ItemGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+   <ImportGroup Label="ExtensionTargets">
+diff --git a/ide/vs2022/mimalloc.sln b/ide/vs2022/mimalloc.sln
+index 040af3aca407a09f586504b17f01fc3c4a02451c..212b75155517c90e944eb75403afd914cfa0620d 100644
+GIT binary patch
+delta 252
+zcmccW@hNyi3nRO3aY<rHX7c71Mia(KEUY~FWvN9)nJKBdDX9gM6_~_iN>YnUKpefY
+z<cfl#{46CM1*K{?S2uGDGt0@2qH>c3nS(fBx<EQM-)1^3$Ow|tn!Hm|kr|>+YqGqk
+zB3LvKOzKWPAgTmp9TZcW%qgY}Wd)0Y)EpGkoIFnqBI^m{f0R(4EG44>HVMRT5!Zl<
+rUJ=)Wva}?0z$}f)^%AO3)>#RVxgRC`fuy6P_vC$I8k^6Ebn*iLj&@JX
+
+delta 42
+zcmV+_0M-BUQ`JbYgaNaQ0W<-V8v+TFkOKsh&;lB>lmo{RlU*Dplg||fvu_%M4_FBg
+A4FCWD
+
+diff --git a/include/mimalloc.h b/include/mimalloc.h
+index bd91db43..1aa9190c 100644
+--- a/include/mimalloc.h
++++ b/include/mimalloc.h
+@@ -8,7 +8,7 @@ terms of the MIT license. A copy of the license can be found in the file
+ #ifndef MIMALLOC_H
+ #define MIMALLOC_H
+ 
+-#define MI_MALLOC_VERSION 219   // major + 2 digits minor
++#define MI_MALLOC_VERSION 222   // major + 2 digits minor
+ 
+ // ------------------------------------------------------
+ // Compiler specific attributes
+@@ -277,7 +277,7 @@ mi_decl_export int mi_reserve_huge_os_pages_at(size_t pages, int numa_node, size
+ mi_decl_export int  mi_reserve_os_memory(size_t size, bool commit, bool allow_large) mi_attr_noexcept;
+ mi_decl_export bool mi_manage_os_memory(void* start, size_t size, bool is_committed, bool is_large, bool is_zero, int numa_node) mi_attr_noexcept;
+ 
+-mi_decl_export void mi_debug_show_arenas(bool show_inuse) mi_attr_noexcept;
++mi_decl_export void mi_debug_show_arenas(void) mi_attr_noexcept;
+ 
+ // Experimental: heaps associated with specific memory arena's
+ typedef int mi_arena_id_t;
+diff --git a/include/mimalloc/atomic.h b/include/mimalloc/atomic.h
+index 0d7aaf78..dbd7160c 100644
+--- a/include/mimalloc/atomic.h
++++ b/include/mimalloc/atomic.h
+@@ -31,33 +31,33 @@ terms of the MIT license. A copy of the license can be found in the file
+ #if defined(__cplusplus)
+ // Use C++ atomics
+ #include <atomic>
+-#define  _Atomic(tp)            std::atomic<tp>
+-#define  mi_atomic(name)        std::atomic_##name
+-#define  mi_memory_order(name)  std::memory_order_##name
+-#if (__cplusplus >= 202002L)    // c++20, see issue #571
+- #define MI_ATOMIC_VAR_INIT(x)  x
++#define  _Atomic(tp)              std::atomic<tp>
++#define  mi_atomic(name)          std::atomic_##name
++#define  mi_memory_order(name)    std::memory_order_##name
++#if (__cplusplus >= 202002L)      // c++20, see issue #571
++ #define MI_ATOMIC_VAR_INIT(x)    x
+ #elif !defined(ATOMIC_VAR_INIT)
+- #define MI_ATOMIC_VAR_INIT(x)  x
++ #define MI_ATOMIC_VAR_INIT(x)    x
+ #else
+- #define MI_ATOMIC_VAR_INIT(x)  ATOMIC_VAR_INIT(x)
++ #define MI_ATOMIC_VAR_INIT(x)    ATOMIC_VAR_INIT(x)
+ #endif
+ #elif defined(_MSC_VER)
+ // Use MSVC C wrapper for C11 atomics
+-#define  _Atomic(tp)            tp
+-#define  MI_ATOMIC_VAR_INIT(x)  x
+-#define  mi_atomic(name)        mi_atomic_##name
+-#define  mi_memory_order(name)  mi_memory_order_##name
++#define  _Atomic(tp)              tp
++#define  MI_ATOMIC_VAR_INIT(x)    x
++#define  mi_atomic(name)          mi_atomic_##name
++#define  mi_memory_order(name)    mi_memory_order_##name
+ #else
+ // Use C11 atomics
+ #include <stdatomic.h>
+-#define  mi_atomic(name)        atomic_##name
+-#define  mi_memory_order(name)  memory_order_##name
++#define  mi_atomic(name)          atomic_##name
++#define  mi_memory_order(name)    memory_order_##name
+ #if (__STDC_VERSION__ >= 201710L) // c17, see issue #735
+- #define MI_ATOMIC_VAR_INIT(x) x
++ #define MI_ATOMIC_VAR_INIT(x)    x
+ #elif !defined(ATOMIC_VAR_INIT)
+- #define MI_ATOMIC_VAR_INIT(x) x
++ #define MI_ATOMIC_VAR_INIT(x)    x
+ #else
+- #define MI_ATOMIC_VAR_INIT(x) ATOMIC_VAR_INIT(x)
++ #define MI_ATOMIC_VAR_INIT(x)    ATOMIC_VAR_INIT(x)
+ #endif
+ #endif
+ 
+@@ -290,6 +290,7 @@ static inline bool mi_atomic_casi64_strong_acq_rel(volatile _Atomic(int64_t*)p,
+ #define mi_atomic_cas_ptr_weak_release(tp,p,exp,des)    mi_atomic_cas_weak_release((_Atomic(uintptr_t)*)(p),(uintptr_t*)exp,(uintptr_t)des)
+ #define mi_atomic_cas_ptr_weak_acq_rel(tp,p,exp,des)    mi_atomic_cas_weak_acq_rel((_Atomic(uintptr_t)*)(p),(uintptr_t*)exp,(uintptr_t)des)
+ #define mi_atomic_cas_ptr_strong_release(tp,p,exp,des)  mi_atomic_cas_strong_release((_Atomic(uintptr_t)*)(p),(uintptr_t*)exp,(uintptr_t)des)
++#define mi_atomic_exchange_ptr_relaxed(tp,p,x)          (tp*)mi_atomic_exchange_relaxed((_Atomic(uintptr_t)*)(p),(uintptr_t)x)
+ #define mi_atomic_exchange_ptr_release(tp,p,x)          (tp*)mi_atomic_exchange_release((_Atomic(uintptr_t)*)(p),(uintptr_t)x)
+ #define mi_atomic_exchange_ptr_acq_rel(tp,p,x)          (tp*)mi_atomic_exchange_acq_rel((_Atomic(uintptr_t)*)(p),(uintptr_t)x)
+ 
+diff --git a/include/mimalloc/internal.h b/include/mimalloc/internal.h
+index e7e7b508..40af540f 100644
+--- a/include/mimalloc/internal.h
++++ b/include/mimalloc/internal.h
+@@ -64,8 +64,8 @@ terms of the MIT license. A copy of the license can be found in the file
+ 
+ // "libc.c"
+ #include    <stdarg.h>
+-void        _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args);
+-void        _mi_snprintf(char* buf, size_t buflen, const char* fmt, ...);
++int         _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args);
++int         _mi_snprintf(char* buf, size_t buflen, const char* fmt, ...);
+ char        _mi_toupper(char c);
+ int         _mi_strnicmp(const char* s, const char* t, size_t n);
+ void        _mi_strlcpy(char* dest, const char* src, size_t dest_size);
+diff --git a/readme.md b/readme.md
+index 264da2b5..ecb16ae4 100644
+--- a/readme.md
++++ b/readme.md
+@@ -81,7 +81,7 @@ Enjoy!
+ 
+ ### Releases
+ 
+-* 2025-01-03, `v1.8.9`, `v2.1.9`, `v3.0-alpha`: Interim release. Support Windows arm64. New [guarded](#guarded) build that can place OS 
++* 2025-01-03, `v1.8.9`, `v2.1.9`, `v3.0.1-alpha`: Interim release. Support Windows arm64. New [guarded](#guarded) build that can place OS 
+   guard pages behind objects to catch buffer overflows as they occur. 
+   Many small fixes: build on Windows arm64, cygwin, riscV, and dragonfly; fix Windows static library initialization to account for
+   thread local destructors (in Rust/C++); macOS tag change; macOS TLS slot fix; improve stats; 
+diff --git a/src/arena.c b/src/arena.c
+index a809b85f..67694988 100644
+--- a/src/arena.c
++++ b/src/arena.c
+@@ -607,7 +607,7 @@ static void mi_arenas_try_purge( bool force, bool visit_all )
+ 
+   // check if any arena needs purging?
+   const mi_msecs_t now = _mi_clock_now();
+-  mi_msecs_t arenas_expire = mi_atomic_load_acquire(&mi_arenas_purge_expire);
++  mi_msecs_t arenas_expire = mi_atomic_loadi64_acquire(&mi_arenas_purge_expire);
+   if (!force && (arenas_expire == 0 || arenas_expire < now)) return;
+ 
+   const size_t max_arena = mi_atomic_load_acquire(&mi_arena_count);
+@@ -618,7 +618,7 @@ static void mi_arenas_try_purge( bool force, bool visit_all )
+   mi_atomic_guard(&purge_guard)
+   {
+     // increase global expire: at most one purge per delay cycle
+-    mi_atomic_store_release(&mi_arenas_purge_expire, now + mi_arena_purge_delay());  
++    mi_atomic_storei64_release(&mi_arenas_purge_expire, now + mi_arena_purge_delay());  
+     size_t max_purge_count = (visit_all ? max_arena : 2);
+     bool all_visited = true;
+     for (size_t i = 0; i < max_arena; i++) {
+@@ -635,7 +635,7 @@ static void mi_arenas_try_purge( bool force, bool visit_all )
+     }
+     if (all_visited) {
+       // all arena's were visited and purged: reset global expire
+-      mi_atomic_store_release(&mi_arenas_purge_expire, 0);
++      mi_atomic_storei64_release(&mi_arenas_purge_expire, 0);
+     }
+   }
+ }
+@@ -927,7 +927,8 @@ static size_t mi_debug_show_bitmap(const char* prefix, const char* header, size_
+   return inuse_count;
+ }
+ 
+-void mi_debug_show_arenas(bool show_inuse) mi_attr_noexcept {
++void mi_debug_show_arenas(void) mi_attr_noexcept {
++  const bool show_inuse = true;
+   size_t max_arenas = mi_atomic_load_relaxed(&mi_arena_count);
+   size_t inuse_total = 0;
+   //size_t abandoned_total = 0;
+diff --git a/src/libc.c b/src/libc.c
+index ce541f1b..1bd97aa3 100644
+--- a/src/libc.c
++++ b/src/libc.c
+@@ -7,7 +7,7 @@ terms of the MIT license. A copy of the license can be found in the file
+ 
+ // --------------------------------------------------------
+ // This module defines various std libc functions to reduce
+-// the dependency on libc, and also prevent errors caused 
++// the dependency on libc, and also prevent errors caused
+ // by some libc implementations when called before `main`
+ // executes (due to malloc redirection)
+ // --------------------------------------------------------
+@@ -83,7 +83,7 @@ bool _mi_getenv(const char* name, char* result, size_t result_size) {
+ // Define our own limited `_mi_vsnprintf` and `_mi_snprintf`
+ // This is mostly to avoid calling these when libc is not yet
+ // initialized (and to reduce dependencies)
+-// 
++//
+ // format:      d i, p x u, s
+ // prec:        z l ll L
+ // width:       10
+@@ -130,7 +130,7 @@ static void mi_out_alignright(char fill, char* start, size_t len, size_t extra,
+ }
+ 
+ 
+-static void mi_out_num(uintmax_t x, size_t base, char prefix, char** out, char* end) 
++static void mi_out_num(uintmax_t x, size_t base, char prefix, char** out, char* end)
+ {
+   if (x == 0 || base == 0 || base > 16) {
+     if (prefix != 0) { mi_outc(prefix, out, end); }
+@@ -144,8 +144,8 @@ static void mi_out_num(uintmax_t x, size_t base, char prefix, char** out, char*
+       mi_outc((digit <= 9 ? '0' + digit : 'A' + digit - 10),out,end);
+       x = x / base;
+     }
+-    if (prefix != 0) { 
+-      mi_outc(prefix, out, end); 
++    if (prefix != 0) {
++      mi_outc(prefix, out, end);
+     }
+     size_t len = *out - start;
+     // and reverse in-place
+@@ -160,8 +160,8 @@ static void mi_out_num(uintmax_t x, size_t base, char prefix, char** out, char*
+ 
+ #define MI_NEXTC()  c = *in; if (c==0) break; in++;
+ 
+-void _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args) {
+-  if (buf == NULL || bufsize == 0 || fmt == NULL) return;
++int _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args) {
++  if (buf == NULL || bufsize == 0 || fmt == NULL) return 0;
+   buf[bufsize - 1] = 0;
+   char* const end = buf + (bufsize - 1);
+   const char* in = fmt;
+@@ -181,7 +181,7 @@ void _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args) {
+       size_t width = 0;
+       char   numtype = 'd';
+       char   numplus = 0;
+-      bool   alignright = true; 
++      bool   alignright = true;
+       if (c == '+' || c == ' ') { numplus = c; MI_NEXTC(); }
+       if (c == '-') { alignright = false; MI_NEXTC(); }
+       if (c == '0') { fill = '0'; MI_NEXTC(); }
+@@ -191,7 +191,7 @@ void _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args) {
+           width = (10 * width) + (c - '0'); MI_NEXTC();
+         }
+         if (c == 0) break;  // extra check due to while
+-      }      
++      }
+       if (c == 'z' || c == 't' || c == 'L') { numtype = c; MI_NEXTC(); }
+       else if (c == 'l') {
+         numtype = c; MI_NEXTC();
+@@ -265,11 +265,13 @@ void _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args) {
+   }
+   mi_assert_internal(out <= end);
+   *out = 0;
++  return (int)(out - buf);
+ }
+ 
+-void _mi_snprintf(char* buf, size_t buflen, const char* fmt, ...) {
++int _mi_snprintf(char* buf, size_t buflen, const char* fmt, ...) {
+   va_list args;
+   va_start(args, fmt);
+-  _mi_vsnprintf(buf, buflen, fmt, args);
++  const int written = _mi_vsnprintf(buf, buflen, fmt, args);
+   va_end(args);
++  return written;
+ }
+diff --git a/src/page.c b/src/page.c
+index 6a559af0..d74c3e08 100644
+--- a/src/page.c
++++ b/src/page.c
+@@ -412,7 +412,7 @@ void _mi_page_force_abandon(mi_page_t* page) {
+ 
+   // ensure this page is no longer in the heap delayed free list
+   _mi_heap_delayed_free_all(heap);
+-  // We can still access the page meta-info even if it is freed as we ensure 
++  // We can still access the page meta-info even if it is freed as we ensure
+   // in `mi_segment_force_abandon` that the segment is not freed (yet)
+   if (page->capacity == 0) return; // it may have been freed now
+ 
+@@ -1010,14 +1010,20 @@ void* _mi_malloc_generic(mi_heap_t* heap, size_t size, bool zero, size_t huge_al
+   mi_assert_internal(mi_page_block_size(page) >= size);
+ 
+   // and try again, this time succeeding! (i.e. this should never recurse through _mi_page_malloc)
++  void* p;
+   if mi_unlikely(zero && mi_page_is_huge(page)) {
+     // note: we cannot call _mi_page_malloc with zeroing for huge blocks; we zero it afterwards in that case.
+-    void* p = _mi_page_malloc(heap, page, size);
++    p = _mi_page_malloc(heap, page, size);
+     mi_assert_internal(p != NULL);
+     _mi_memzero_aligned(p, mi_page_usable_block_size(page));
+-    return p;
+   }
+   else {
+-    return _mi_page_malloc_zero(heap, page, size, zero);
++    p = _mi_page_malloc_zero(heap, page, size, zero);
++    mi_assert_internal(p != NULL);
++  }
++  // move singleton pages to the full queue
++  if (page->reserved == page->used) {
++    mi_page_to_full(page, mi_page_queue_of(page));
+   }
++  return p;
+ }
+diff --git a/src/prim/windows/prim.c b/src/prim/windows/prim.c
+index 745224c2..9686fe07 100644
+--- a/src/prim/windows/prim.c
++++ b/src/prim/windows/prim.c
+@@ -173,7 +173,7 @@ int _mi_prim_free(void* addr, size_t size ) {
+     // In mi_os_mem_alloc_aligned the fallback path may have returned a pointer inside
+     // the memory region returned by VirtualAlloc; in that case we need to free using
+     // the start of the region.
+-    MEMORY_BASIC_INFORMATION info = { 0 };
++    MEMORY_BASIC_INFORMATION info; _mi_memzero_var(info);
+     VirtualQuery(addr, &info, sizeof(info));
+     if (info.AllocationBase < addr && ((uint8_t*)addr - (uint8_t*)info.AllocationBase) < (ptrdiff_t)MI_SEGMENT_SIZE) {
+       errcode = 0;
+diff --git a/test/main-override-dep.cpp b/test/main-override-dep.cpp
+new file mode 100644
+index 00000000..e92f6fc4
+--- /dev/null
++++ b/test/main-override-dep.cpp
+@@ -0,0 +1,15 @@
++// Issue #981: test overriding allocation in a DLL that is compiled independent of mimalloc. 
++// This is imported by the `mimalloc-test-override` project.
++#include <string>
++#include "main-override-dep.h"
++
++std::string TestAllocInDll::GetString()
++{
++	char* test = new char[128];
++	memset(test, 0, 128);
++	const char* t = "test";
++	memcpy(test, t, 4);
++	std::string r = test;
++	delete[] test;
++	return r;
++}
+\ No newline at end of file
+diff --git a/test/main-override-dep.h b/test/main-override-dep.h
+new file mode 100644
+index 00000000..4826f25f
+--- /dev/null
++++ b/test/main-override-dep.h
+@@ -0,0 +1,11 @@
++#pragma once
++// Issue #981: test overriding allocation in a DLL that is compiled independent of mimalloc. 
++// This is imported by the `mimalloc-test-override` project.
++
++#include <string>
++
++class TestAllocInDll
++{
++public:
++	__declspec(dllexport) std::string GetString();
++};
+diff --git a/test/main-override.cpp b/test/main-override.cpp
+index 0fbb58e8..b8e060dd 100644
+--- a/test/main-override.cpp
++++ b/test/main-override.cpp
+@@ -9,16 +9,11 @@
+ #include <vector>
+ #include <future>
+ #include <iostream>
+-
+ #include <thread>
+-//#include <mimalloc.h>
+ #include <assert.h>
+ 
+ #ifdef _WIN32
+ #include <mimalloc-new-delete.h>
+-#endif
+-
+-#ifdef _WIN32
+ #include <windows.h>
+ static void msleep(unsigned long msecs) { Sleep(msecs); }
+ #else
+@@ -45,11 +40,19 @@ static void test_thread_local();      // issue #944
+ static void test_mixed1();             // issue #942
+ static void test_stl_allocators();
+ 
++#if _WIN32
++#include "main-override-dep.h"
++static void test_dep();               // issue #981: test overriding in another DLL 
++#else
++static void test_dep() { };
++#endif
+ 
+ int main() {
+   mi_stats_reset();  // ignore earlier allocations
+   various_tests();
+   test_mixed1();
++
++  test_dep();
+   
+   //test_std_string();
+   //test_thread_local();
+@@ -144,6 +147,16 @@ static bool test_stl_allocator1() {
+ 
+ struct some_struct { int i; int j; double z; };
+ 
++
++#if _WIN32
++static void test_dep()
++{
++  TestAllocInDll t;
++  std::string s = t.GetString();
++}
++#endif
++
++
+ static bool test_stl_allocator2() {
+   std::vector<some_struct, mi_stl_allocator<some_struct> > vec;
+   vec.push_back(some_struct());
+diff --git a/test/test-stress.c b/test/test-stress.c
+index c0d9761a..eb788b85 100644
+--- a/test/test-stress.c
++++ b/test/test-stress.c
+@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
+ 
+ #ifndef USE_STD_MALLOC
+   #ifndef NDEBUG
+-  mi_debug_show_arenas(true);
++  mi_debug_show_arenas();
+   mi_collect(true);
+   #endif  
+ #endif
+-- 
+2.47.1.windows.1
+

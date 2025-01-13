@@ -1,9 +1,3 @@
-add_requires("glfw 3.4", {
-    debug = is_mode("debug"),
-    configs = { 
-        shared = false
-    }})
-
 target("radray_window")
     set_kind("static")
     add_rules("radray_basic_setting")
