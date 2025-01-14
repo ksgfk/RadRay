@@ -14,7 +14,7 @@ void CmdListD3D12::Begin() noexcept {
     _cmdList->Reset(_attachAlloc, nullptr);
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
         ID3D12DescriptorHeap* heaps[] = {_cbvSrvUavHeaps->Get(), _samplerHeaps->Get()};
-        _cmdList->SetDescriptorHeaps(ArrayLength(heaps), heaps);
+        _cmdList->SetDescriptorHeaps((UINT)ArrayLength(heaps), heaps);
     }
 }
 

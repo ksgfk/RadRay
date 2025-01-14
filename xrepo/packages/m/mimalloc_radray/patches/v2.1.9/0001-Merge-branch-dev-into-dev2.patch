@@ -1,7 +1,7 @@
-From e8ef8882932e624ad24e17edd6d96108bb4f4738 Mon Sep 17 00:00:00 2001
+From 590c32b676c51fd188413931a8cf253bc788d4e1 Mon Sep 17 00:00:00 2001
 From: Daan Leijen <daan@microsoft.com>
 Date: Fri, 3 Jan 2025 20:34:14 -0800
-Subject: [PATCH] add test for mimalloc override on Windows (issue #981)
+Subject: [PATCH] Merge branch 'dev' into dev2
 
 update readme
 
@@ -15,22 +15,17 @@ Merge branch 'dev' into dev2
 
 remove mi_debug_show_arenas parameter
 
-Merge branch 'dev' into dev2
-
 Merge branch 'dev' of e:\dev\mimalloc3 into dev
 
-bump version for further development
-
-bump version for further development
-
 fix build on msvc in C compilation; fix build with clang-cl on Windows
+
+add test for mimalloc override on Windows (issue #981)
 ---
  CMakeLists.txt                                |  22 +-
- cmake/mimalloc-config-version.cmake           |   4 +-
  ide/vs2022/mimalloc-override-test-dep.vcxproj | 352 ++++++++++++++++++
  ide/vs2022/mimalloc-override-test.vcxproj     |   3 +
  ide/vs2022/mimalloc.sln                       | Bin 9301 -> 10738 bytes
- include/mimalloc.h                            |   4 +-
+ include/mimalloc.h                            |   2 +-
  include/mimalloc/atomic.h                     |  33 +-
  include/mimalloc/internal.h                   |   4 +-
  readme.md                                     |   2 +-
@@ -42,7 +37,7 @@ fix build on msvc in C compilation; fix build with clang-cl on Windows
  test/main-override-dep.h                      |  11 +
  test/main-override.cpp                        |  23 +-
  test/test-stress.c                            |   2 +-
- 17 files changed, 469 insertions(+), 55 deletions(-)
+ 16 files changed, 466 insertions(+), 52 deletions(-)
  create mode 100644 ide/vs2022/mimalloc-override-test-dep.vcxproj
  create mode 100644 test/main-override-dep.cpp
  create mode 100644 test/main-override-dep.h
@@ -117,19 +112,6 @@ index 283b0f57..5ca281e1 100644
      endif()
    endif()
  endif()
-diff --git a/cmake/mimalloc-config-version.cmake b/cmake/mimalloc-config-version.cmake
-index f3ed36ab..286ec0ba 100644
---- a/cmake/mimalloc-config-version.cmake
-+++ b/cmake/mimalloc-config-version.cmake
-@@ -1,6 +1,6 @@
- set(mi_version_major 2)
--set(mi_version_minor 1)
--set(mi_version_patch 9)
-+set(mi_version_minor 2)
-+set(mi_version_patch 2)
- set(mi_version ${mi_version_major}.${mi_version_minor})
- 
- set(PACKAGE_VERSION ${mi_version})
 diff --git a/ide/vs2022/mimalloc-override-test-dep.vcxproj b/ide/vs2022/mimalloc-override-test-dep.vcxproj
 new file mode 100644
 index 00000000..606bec9c
@@ -517,18 +499,9 @@ zcmV+_0M-BUQ`JbYgaNaQ0W<-V8v+TFkOKsh&;lB>lmo{RlU*Dplg||fvu_%M4_FBg
 A4FCWD
 
 diff --git a/include/mimalloc.h b/include/mimalloc.h
-index bd91db43..1aa9190c 100644
+index bd91db43..9ab73c2a 100644
 --- a/include/mimalloc.h
 +++ b/include/mimalloc.h
-@@ -8,7 +8,7 @@ terms of the MIT license. A copy of the license can be found in the file
- #ifndef MIMALLOC_H
- #define MIMALLOC_H
- 
--#define MI_MALLOC_VERSION 219   // major + 2 digits minor
-+#define MI_MALLOC_VERSION 222   // major + 2 digits minor
- 
- // ------------------------------------------------------
- // Compiler specific attributes
 @@ -277,7 +277,7 @@ mi_decl_export int mi_reserve_huge_os_pages_at(size_t pages, int numa_node, size
  mi_decl_export int  mi_reserve_os_memory(size_t size, bool commit, bool allow_large) mi_attr_noexcept;
  mi_decl_export bool mi_manage_os_memory(void* start, size_t size, bool is_committed, bool is_large, bool is_zero, int numa_node) mi_attr_noexcept;
@@ -917,5 +890,5 @@ index c0d9761a..eb788b85 100644
    #endif  
  #endif
 -- 
-2.47.1.windows.1
+2.47.0.windows.2
 

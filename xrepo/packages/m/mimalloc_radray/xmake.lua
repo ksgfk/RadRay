@@ -7,7 +7,7 @@ package("mimalloc_radray")
 
     add_versions("v2.1.7", "8c532c32c3c96e5ba1f2283e032f69ead8add00f")
     add_versions("v2.1.9", "a3070dc57fa03a43cae9079a2a879a66cec8f715")
-    add_patches("v2.1.9", "patches/v2.1.9/0001-add-test-for-mimalloc-override-on-Windows-issue-981.patch", "05d83e0da9194840188146e73cb6f31e8a94eb3829887d95fa21389be455722d")
+    add_patches("v2.1.9", "patches/v2.1.9/0001-Merge-branch-dev-into-dev2.patch", "814650c4fa64ca33ca8f845d49fe88291c6762b9686be1c645d47afe6994e37e")
 
     add_deps("cmake")
 
