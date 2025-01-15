@@ -1,5 +1,7 @@
 #include "d3d12_texture.h"
 
+#include "d3d12_descriptor_heap.h"
+
 namespace radray::render::d3d12 {
 
 TextureD3D12::TextureD3D12(
@@ -27,6 +29,23 @@ ResourceType TextureD3D12::GetType() const noexcept {
 
 ResourceStates TextureD3D12::GetInitState() const noexcept {
     return MapType(_initState);
+}
+
+TextureViewD3D12::~TextureViewD3D12() noexcept {
+    Destroy();
+}
+
+bool TextureViewD3D12::IsValid() const noexcept {
+    return _desc.texture != nullptr && _desc.heap != nullptr && _desc.heapIndex != TextureViewD3D12Desc::InvalidHeapIndex;
+}
+
+void TextureViewD3D12::Destroy() noexcept {
+    if (IsValid()) {
+        _desc.heap->Recycle(_desc.heapIndex);
+        _desc.texture = nullptr;
+        _desc.heap = nullptr;
+        _desc.heapIndex = TextureViewD3D12Desc::InvalidHeapIndex;
+    }
 }
 
 }  // namespace radray::render::d3d12

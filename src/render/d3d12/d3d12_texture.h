@@ -27,4 +27,31 @@ public:
     ResourceType _type;
 };
 
+struct TextureViewD3D12Desc {
+    constexpr static UINT InvalidHeapIndex = std::numeric_limits<UINT>::max();
+
+    TextureD3D12* texture;
+    DescriptorHeap* heap;
+    UINT heapIndex;
+    ResourceType type;
+    DXGI_FORMAT format;
+    TextureDimension dim;
+    uint32_t baseArrayLayer;
+    uint32_t arrayLayerCount;
+    uint32_t baseMipLevel;
+    uint32_t mipLevelCount;
+};
+
+class TextureViewD3D12 : public TextureView {
+public:
+    explicit TextureViewD3D12(const TextureViewD3D12Desc& desc) noexcept : _desc(desc) {}
+    ~TextureViewD3D12() noexcept override;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+
+public:
+    TextureViewD3D12Desc _desc;
+};
+
 }  // namespace radray::render::d3d12

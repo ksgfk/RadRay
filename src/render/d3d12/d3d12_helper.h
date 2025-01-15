@@ -69,6 +69,7 @@ std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(Primi
 D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept;
 DXGI_FORMAT MapType(VertexFormat v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;
+DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
 std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept;
 D3D12_CULL_MODE MapType(CullMode v) noexcept;
 D3D12_BLEND_OP MapType(BlendOperation v) noexcept;

@@ -857,7 +857,7 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
         D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
         desc.BufferLocation = buf->_buf->GetGPUVirtualAddress() + offset;
         desc.SizeInBytes = count;
-        _device->CreateConstantBufferView(&desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        _device->CreateConstantBufferView(&desc, heap->HandleCpu(heapIndex));
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
     } else if (type == ResourceType::Buffer) {
         D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -868,7 +868,7 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
         desc.Buffer.NumElements = count;
         desc.Buffer.StructureByteStride = stride;
         desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        _device->CreateShaderResourceView(buf->_buf.Get(), &desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        _device->CreateShaderResourceView(buf->_buf.Get(), &desc, heap->HandleCpu(heapIndex));
         dxgiFormat = desc.Format;
     } else if (type == ResourceType::BufferRW) {
         D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
@@ -879,13 +879,230 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
         desc.Buffer.StructureByteStride = stride;
         desc.Buffer.CounterOffsetInBytes = 0;
         desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-        _device->CreateUnorderedAccessView(buf->_buf.Get(), nullptr, &desc, _cbvSrvUavHeap->HandleCpu(heapIndex));
+        _device->CreateUnorderedAccessView(buf->_buf.Get(), nullptr, &desc, heap->HandleCpu(heapIndex));
         dxgiFormat = desc.Format;
     } else {
         RADRAY_ERR_LOG("d3d12 cannot create buffer view, type={}", type);
         return nullptr;
     }
-    auto result = std::make_shared<BufferViewD3D12>(buf, heap, heapIndex, type, dxgiFormat, count, offset, stride);
+    BufferViewD3D12Desc bv{
+        buf,
+        heap,
+        heapIndex,
+        type,
+        dxgiFormat,
+        count,
+        offset,
+        stride};
+    auto result = std::make_shared<BufferViewD3D12>(bv);
+    guard.Dismiss();
+    return result;
+}
+
+Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
+    Texture* texture,
+    ResourceType type,
+    TextureFormat format,
+    TextureDimension dim,
+    uint32_t baseArrayLayer,
+    uint32_t arrayLayerCount,
+    uint32_t baseMipLevel,
+    uint32_t mipLevelCount) noexcept {
+    // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
+    // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
+    auto tex = Underlying(texture);
+    DescriptorHeap* heap = nullptr;
+    UINT heapIndex = std::numeric_limits<UINT>::max();
+    auto guard = radray::MakeScopeGuard([&]() noexcept {
+        if (heap != nullptr && heapIndex != std::numeric_limits<UINT>::max()) {
+            heap->Recycle(heapIndex);
+        }
+    });
+    DXGI_FORMAT dxgiFormat;
+    if (type == ResourceType::Texture) {
+        heap = GetCbvSrvUavHeap();
+        heapIndex = heap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = MapShaderResourceType(format);
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        switch (dim) {
+            case TextureDimension::Dim1D:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+                srvDesc.Texture1D.MostDetailedMip = baseMipLevel;
+                srvDesc.Texture1D.MipLevels = mipLevelCount;
+                break;
+            case TextureDimension::Dim1DArray:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+                srvDesc.Texture1DArray.MostDetailedMip = baseMipLevel;
+                srvDesc.Texture1DArray.MipLevels = mipLevelCount;
+                srvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
+                srvDesc.Texture1DArray.ArraySize = arrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                srvDesc.Texture2D.MostDetailedMip = baseMipLevel;
+                srvDesc.Texture2D.MipLevels = mipLevelCount;
+                srvDesc.Texture2D.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim2DArray:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                srvDesc.Texture2DArray.MostDetailedMip = baseMipLevel;
+                srvDesc.Texture2DArray.MipLevels = mipLevelCount;
+                srvDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
+                srvDesc.Texture2DArray.ArraySize = arrayLayerCount;
+                srvDesc.Texture2DArray.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim3D:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                srvDesc.Texture3D.MostDetailedMip = baseMipLevel;
+                srvDesc.Texture3D.MipLevels = mipLevelCount;
+                break;
+            case TextureDimension::Cube:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                srvDesc.TextureCube.MostDetailedMip = baseMipLevel;
+                srvDesc.TextureCube.MipLevels = mipLevelCount;
+                break;
+            case TextureDimension::CubeArray:
+                // https://learn.microsoft.com/zh-cn/windows/win32/api/d3d12/ns-d3d12-d3d12_texcube_array_srv
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+                srvDesc.TextureCubeArray.MostDetailedMip = baseMipLevel;
+                srvDesc.TextureCubeArray.MipLevels = mipLevelCount;
+                srvDesc.TextureCubeArray.First2DArrayFace = baseArrayLayer;
+                srvDesc.TextureCubeArray.NumCubes = arrayLayerCount;
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
+                return nullptr;
+        }
+        heap->Create(tex->_tex.Get(), srvDesc, heapIndex);
+        dxgiFormat = srvDesc.Format;
+    } else if (type == ResourceType::RenderTarget) {
+        heap = GetRtvHeap();
+        heapIndex = heap->Allocate();
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = MapType(format);
+        switch (dim) {
+            case TextureDimension::Dim1D:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
+                rtvDesc.Texture1D.MipSlice = baseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
+                rtvDesc.Texture1DArray.MipSlice = baseMipLevel;
+                rtvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
+                rtvDesc.Texture1DArray.ArraySize = arrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                rtvDesc.Texture2D.MipSlice = baseMipLevel;
+                rtvDesc.Texture2D.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim2DArray:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                rtvDesc.Texture2DArray.MipSlice = baseMipLevel;
+                rtvDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
+                rtvDesc.Texture2DArray.ArraySize = arrayLayerCount;
+                rtvDesc.Texture2DArray.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim3D:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                rtvDesc.Texture3D.MipSlice = baseMipLevel;
+                rtvDesc.Texture3D.FirstWSlice = baseArrayLayer;
+                rtvDesc.Texture3D.WSize = arrayLayerCount;
+            default:
+                RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
+                return nullptr;
+        }
+        heap->Create(tex->_tex.Get(), rtvDesc, heapIndex);
+        dxgiFormat = rtvDesc.Format;
+    } else if (type == ResourceType::DepthStencil) {
+        heap = GetDsvHeap();
+        heapIndex = heap->Allocate();
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = MapType(format);
+        switch (dim) {
+            case TextureDimension::Dim1D:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
+                dsvDesc.Texture1D.MipSlice = baseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
+                dsvDesc.Texture1DArray.MipSlice = baseMipLevel;
+                dsvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
+                dsvDesc.Texture1DArray.ArraySize = arrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                dsvDesc.Texture2D.MipSlice = baseMipLevel;
+                break;
+            case TextureDimension::Dim2DArray:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                dsvDesc.Texture2DArray.MipSlice = baseMipLevel;
+                dsvDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
+                dsvDesc.Texture2DArray.ArraySize = arrayLayerCount;
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
+                return nullptr;
+        }
+        heap->Create(tex->_tex.Get(), dsvDesc, heapIndex);
+        dxgiFormat = dsvDesc.Format;
+    } else if (type == ResourceType::TextureRW) {
+        heap = GetCbvSrvUavHeap();
+        heapIndex = heap->Allocate();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = MapShaderResourceType(format);
+        switch (dim) {
+            case TextureDimension::Dim1D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
+                uavDesc.Texture1D.MipSlice = baseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+                uavDesc.Texture1DArray.MipSlice = baseMipLevel;
+                uavDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
+                uavDesc.Texture1DArray.ArraySize = arrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                uavDesc.Texture2D.MipSlice = baseMipLevel;
+                uavDesc.Texture2D.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim2DArray:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                uavDesc.Texture2DArray.MipSlice = baseMipLevel;
+                uavDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
+                uavDesc.Texture2DArray.ArraySize = arrayLayerCount;
+                uavDesc.Texture2DArray.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim3D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+                uavDesc.Texture3D.MipSlice = baseMipLevel;
+                uavDesc.Texture3D.FirstWSlice = baseArrayLayer;
+                uavDesc.Texture3D.WSize = arrayLayerCount;
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
+                return nullptr;
+        }
+        heap->Create(tex->_tex.Get(), uavDesc, heapIndex);
+        dxgiFormat = uavDesc.Format;
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
+        return nullptr;
+    }
+    TextureViewD3D12Desc tvd{
+        tex,
+        heap,
+        heapIndex,
+        type,
+        dxgiFormat,
+        dim,
+        baseArrayLayer,
+        arrayLayerCount,
+        baseMipLevel,
+        mipLevelCount};
+    auto result = radray::make_shared<TextureViewD3D12>(tvd);
     guard.Dismiss();
     return result;
 }

@@ -104,6 +104,10 @@ void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept
 }
 
 void DescriptorHeap::ExpandCapacity() noexcept {
+    if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
+        RADRAY_ABORT("DescriptorHeap cannot expand GPU visible heap");
+        return;
+    }
     UINT now = _desc.NumDescriptors;
     UINT next = static_cast<UINT>(std::min(std::max(UINT64(now) + 1, static_cast<UINT64>(UINT64(now) * 1.5)), UINT64(std::numeric_limits<UINT>::max())));
     if (now == next) {

@@ -51,15 +51,22 @@ void BufferD3D12::Unmap() noexcept {
     _buf->Unmap(0, nullptr);
 }
 
+BufferViewD3D12::~BufferViewD3D12() noexcept {
+    Destroy();
+}
+
 bool BufferViewD3D12::IsValid() const noexcept {
-    return _buffer != nullptr && _heap != nullptr && _heapIndex != std::numeric_limits<UINT>::max();
+    return _desc.buffer != nullptr && _desc.heap != nullptr && _desc.heapIndex != BufferViewD3D12Desc::InvalidHeapIndex;
 }
 
 void BufferViewD3D12::Destroy() noexcept {
-    _heap->Recycle(_heapIndex);
-    _buffer = nullptr;
-    _heap = nullptr;
-    _heapIndex = std::numeric_limits<UINT>::max();
+    if (!IsValid()) {
+        return;
+    }
+    _desc.heap->Recycle(_desc.heapIndex);
+    _desc.buffer = nullptr;
+    _desc.heap = nullptr;
+    _desc.heapIndex = BufferViewD3D12Desc::InvalidHeapIndex;
 }
 
 }  // namespace radray::render::d3d12

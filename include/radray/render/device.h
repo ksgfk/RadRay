@@ -110,6 +110,16 @@ public:
         uint64_t offset,
         uint32_t count,
         uint32_t stride) noexcept = 0;
+
+    virtual Nullable<radray::shared_ptr<TextureView>> CreateTextureView(
+        Texture* texture,
+        ResourceType type,
+        TextureFormat format,
+        TextureDimension dim,
+        uint32_t baseArrayLayer,
+        uint32_t arrayLayerCount,
+        uint32_t baseMipLevel,
+        uint32_t mipLevelCount) noexcept = 0;
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

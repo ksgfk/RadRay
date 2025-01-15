@@ -83,6 +83,16 @@ public:
         uint32_t count,
         uint32_t stride) noexcept override;
 
+    Nullable<radray::shared_ptr<TextureView>> CreateTextureView(
+        Texture* texture,
+        ResourceType type,
+        TextureFormat format,
+        TextureDimension dim,
+        uint32_t baseArrayLayer,
+        uint32_t arrayLayerCount,
+        uint32_t baseMipLevel,
+        uint32_t mipLevelCount) noexcept override;
+
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
     DescriptorHeap* GetCbvSrvUavHeap() noexcept;

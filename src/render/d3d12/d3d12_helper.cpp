@@ -451,6 +451,18 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
     Unreachable();
 }
 
+DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept {
+    DXGI_FORMAT fmt = MapType(v);
+    switch (v) {
+        case TextureFormat::D16_UNORM: fmt = DXGI_FORMAT_R16_UNORM; break;
+        case TextureFormat::D32_FLOAT: fmt = DXGI_FORMAT_R32_FLOAT; break;
+        case TextureFormat::D24_UNORM_S8_UINT: fmt = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case TextureFormat::D32_FLOAT_S8_UINT: fmt = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS; break;
+        default: break;
+    }
+    return fmt;
+}
+
 std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
     switch (v) {
         case PolygonMode::Fill: return D3D12_FILL_MODE_SOLID;
