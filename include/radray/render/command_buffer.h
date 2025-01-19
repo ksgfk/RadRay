@@ -24,9 +24,28 @@ struct ResourceBarriers {
     std::span<TextureBarrier> Textures;
 };
 
+struct ColorAttachment {
+    TextureView* Target;
+    LoadAction Load;
+    StoreAction Store;
+    ColorClearValue ClearValue; 
+};
+
+struct DepthStencilAttachment {
+    TextureView* Target;
+    LoadAction DepthLoad;
+    StoreAction DepthStore;
+    LoadAction StencilLoad;
+    StoreAction StencilStore;
+    DepthStencilClearValue ClearValue;
+};
+
 class RenderPassDesc {
 public:
     radray::string Name;
+    std::span<ColorAttachment> ColorAttachments;
+    std::optional<DepthStencilAttachment> DepthStencilAttachment;
+    uint32_t SampleCount;
 };
 
 class CommandBuffer : public RenderBase {

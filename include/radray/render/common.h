@@ -1,5 +1,7 @@
 #pragma once
 
+#include <variant>
+
 #include <radray/types.h>
 #include <radray/utility.h>
 #include <radray/enum_flags.h>
@@ -323,6 +325,17 @@ enum class ResourceMemoryTip : uint32_t {
 };
 using ResourceMemoryTips = EnumFlags<ResourceMemoryTip>;
 
+enum class LoadAction {
+    DontCare,
+    Load,
+    Clear
+};
+
+enum class StoreAction {
+    Store,
+    Discard
+};
+
 class Device;
 class CommandQueue;
 class CommandPool;
@@ -340,6 +353,17 @@ class TextureView;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
+
+struct ColorClearValue {
+    float R, G, B, A;
+};
+
+struct DepthStencilClearValue {
+    float Depth;
+    uint32_t Stencil;
+};
+
+using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
 class RenderBase : public Noncopyable {
 public:

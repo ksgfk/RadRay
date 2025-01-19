@@ -1,7 +1,6 @@
 #pragma once
 
 #include <optional>
-#include <variant>
 #include <span>
 
 #include <radray/types.h>
@@ -33,17 +32,6 @@ public:
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
 
 using ShaderReflection = std::variant<DxilReflection, SpirvReflection, MslReflection>;
-
-struct ColorClearValue {
-    float R, G, B, A;
-};
-
-struct DepthStencilClearValue {
-    float Depth;
-    uint32_t Stencil;
-};
-
-using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
 class Device : public radray::enable_shared_from_this<Device>, public RenderBase {
 public:
