@@ -40,7 +40,11 @@ static void DestroyImpl(DeviceD3D12* d) noexcept {
     d->_gpuHeap = nullptr;
     d->_gpuSamplerHeap = nullptr;
 
+    d->_mainAlloc = nullptr;
+
     d->_device = nullptr;
+    d->_dxgiAdapter = nullptr;
+    d->_dxgiFactory = nullptr;
 }
 
 DeviceD3D12::DeviceD3D12(
@@ -1197,13 +1201,14 @@ Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescript
         }
     } else {
         ComPtr<IDXGIFactory6> factory6;
-        if (SUCCEEDED(dxgiFactory.As(&factory6))) {
+        if (SUCCEEDED(dxgiFactory->QueryInterface(IID_PPV_ARGS(factory6.GetAddressOf())))) {
+            ComPtr<IDXGIAdapter1> temp;
             for (
                 auto adapterIndex = 0u;
-                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.ReleaseAndGetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
                 DXGI_ADAPTER_DESC1 adapDesc;
-                adapter->GetDesc1(&adapDesc);
+                temp->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
                     radray::wstring s{adapDesc.Description};
                     RADRAY_INFO_LOG("D3D12 find device: {}", ToMultiByte(s).value());
@@ -1211,17 +1216,18 @@ Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescript
             }
             for (
                 auto adapterIndex = 0u;
-                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+                factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(temp.GetAddressOf())) != DXGI_ERROR_NOT_FOUND;
                 adapterIndex++) {
                 DXGI_ADAPTER_DESC1 adapDesc;
-                adapter->GetDesc1(&adapDesc);
+                temp->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
-                    if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
+                    if (SUCCEEDED(D3D12CreateDevice(temp.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
                         break;
                     }
                 }
-                adapter = nullptr;
+                temp = nullptr;
             }
+            adapter = temp;
         } else {
             if (dxgiFactory->EnumAdapters1(0, adapter.GetAddressOf())) {
                 DXGI_ADAPTER_DESC1 adapDesc;
