@@ -9,6 +9,7 @@
 #include <radray/render/command_queue.h>
 #include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
+#include <radray/render/command_encoder.h>
 #include <radray/render/shader.h>
 #include <radray/render/root_signature.h>
 #include <radray/render/pipeline_state.h>
@@ -59,7 +60,7 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
         false},
     MultiSampleState{
         1,
-        0,
+        0xFFFFFFFF,
         false},
     {ColorTargetState{
         TextureFormat::RGBA8_UNORM,
@@ -93,7 +94,7 @@ public:
         GlobalInitGlfw();
         window = radray::make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
 #if defined(RADRAY_PLATFORM_WINDOWS)
-        device = CreateDevice(D3D12DeviceDescriptor{}).Unwrap();
+        device = CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap();
 #elif defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         device = CreateDevice(MetalDeviceDescriptor{}).value();
 #endif
@@ -298,6 +299,42 @@ public:
             swapchain->AcquireNextRenderTarget();
             cmdPool->Reset();
             cmdBuffer->Begin();
+            Texture* rt = swapchain->GetCurrentRenderTarget();
+            {
+                TextureBarrier barriers[] = {
+                    {rt,
+                     ToFlag(ResourceState::Present),
+                     ToFlag(ResourceState::RenderTarget),
+                     0, 0, false}};
+                ResourceBarriers rb{{}, barriers};
+                cmdBuffer->ResourceBarrier(rb);
+            }
+            auto rtView = device->CreateTextureView(
+                                    rt,
+                                    ResourceType::RenderTarget,
+                                    TextureFormat::RGBA8_UNORM,
+                                    TextureDimension::Dim2D,
+                                    0, 0,
+                                    0, 0)
+                              .Unwrap();
+            RenderPassDesc rpDesc{};
+            ColorAttachment colors[] = {
+                {rtView.get(),
+                 LoadAction::Clear,
+                 StoreAction::Store,
+                 ColorClearValue{0.0f, 0.2f, 0.4f, 1.0f}}};
+            rpDesc.ColorAttachments = colors;
+            auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            cmdBuffer->EndRenderPass(std::move(rp));
+            {
+                TextureBarrier barriers[] = {
+                    {rt,
+                     ToFlag(ResourceState::RenderTarget),
+                     ToFlag(ResourceState::Present),
+                     0, 0, false}};
+                ResourceBarriers rb{{}, barriers};
+                cmdBuffer->ResourceBarrier(rb);
+            }
             cmdBuffer->End();
             CommandBuffer* t[] = {cmdBuffer.get()};
             auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0);
