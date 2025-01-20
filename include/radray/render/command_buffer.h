@@ -45,7 +45,6 @@ public:
     radray::string Name;
     std::span<ColorAttachment> ColorAttachments;
     std::optional<DepthStencilAttachment> DepthStencilAttachment;
-    uint32_t SampleCount;
 };
 
 class CommandBuffer : public RenderBase {
@@ -60,9 +59,9 @@ public:
 
     virtual void CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept = 0;
 
-    // virtual Nullable<radray::unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept = 0;
+    virtual Nullable<radray::unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept = 0;
 
-    // virtual void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept = 0;
+    virtual void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept = 0;
 };
 
 }  // namespace radray::render

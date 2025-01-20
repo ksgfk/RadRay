@@ -91,4 +91,66 @@ void CmdListD3D12::CopyBuffer(Buffer* src_, uint64_t srcOffset, Buffer* dst_, ui
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
+Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDesc& desc) noexcept {
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        return nullptr;
+    }
+    radray::vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
+    rtDescs.reserve(desc.ColorAttachments.size());
+    for (const ColorAttachment& color : desc.ColorAttachments) {
+        auto v = static_cast<TextureViewD3D12*>(color.Target);
+        D3D12_CLEAR_VALUE clearColor{};
+        clearColor.Format = v->_desc.format;
+        clearColor.Color[0] = color.ClearValue.R;
+        clearColor.Color[1] = color.ClearValue.G;
+        clearColor.Color[2] = color.ClearValue.B;
+        clearColor.Color[3] = color.ClearValue.A;
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE beginningAccess = MapType(color.Load);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
+        auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
+        rtDesc.cpuDescriptor = v->_desc.heap->HandleCpu(v->_desc.heapIndex);
+        rtDesc.BeginningAccess.Type = beginningAccess;
+        rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
+        rtDesc.EndingAccess.Type = endingAccess;
+    }
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC dsDesc{};
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDsDesc = nullptr;
+    if (desc.DepthStencilAttachment.has_value()) {
+        const DepthStencilAttachment& depthStencil = desc.DepthStencilAttachment.value();
+        auto v = static_cast<TextureViewD3D12*>(depthStencil.Target);
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE depthBeginningAccess = MapType(depthStencil.DepthLoad);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE depthEndingAccess = MapType(depthStencil.DepthStore);
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE stencilBeginningAccess = MapType(depthStencil.StencilLoad);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE stencilEndingAccess = MapType(depthStencil.StencilStore);
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = v->_desc.format;
+        clear.DepthStencil.Depth = depthStencil.ClearValue.Depth;
+        clear.DepthStencil.Stencil = depthStencil.ClearValue.Stencil;
+        dsDesc.cpuDescriptor = v->_desc.heap->HandleCpu(v->_desc.heapIndex);
+        dsDesc.DepthBeginningAccess.Type = depthBeginningAccess;
+        dsDesc.DepthBeginningAccess.Clear.ClearValue = clear;
+        dsDesc.DepthEndingAccess.Type = depthEndingAccess;
+        dsDesc.StencilBeginningAccess.Type = stencilBeginningAccess;
+        dsDesc.StencilBeginningAccess.Clear.ClearValue = clear;
+        dsDesc.StencilEndingAccess.Type = stencilEndingAccess;
+        pDsDesc = &dsDesc;
+    }
+    cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
+    return {radray::make_unique<CmdRenderPassD3D12>(this)};
+}
+
+void CmdListD3D12::EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept {
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        return;
+    }
+    cmdList4->EndRenderPass();
+    encoder->Destroy();
+}
+
 }  // namespace radray::render::d3d12

@@ -360,7 +360,7 @@ struct ColorClearValue {
 
 struct DepthStencilClearValue {
     float Depth;
-    uint32_t Stencil;
+    uint8_t Stencil;
 };
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;

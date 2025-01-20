@@ -619,6 +619,23 @@ D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept {
     Unreachable();
 }
 
+D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept {
+    switch (v) {
+        case LoadAction::DontCare: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
+        case LoadAction::Load: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+        case LoadAction::Clear: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+    }
+    Unreachable();
+}
+
+D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept {
+    switch (v) {
+        case StoreAction::Store: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+        case StoreAction::Discard: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD;
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
