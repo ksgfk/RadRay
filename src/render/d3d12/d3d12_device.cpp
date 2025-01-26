@@ -1111,6 +1111,12 @@ Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
     return result;
 }
 
+Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
+    RootSignature* rootSignature,
+    uint32_t slot) noexcept {
+    return nullptr;
+}
+
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {
     if (_cbvSrvUavHeap == nullptr) {
         _cbvSrvUavHeap = radray::make_unique<DescriptorHeap>(

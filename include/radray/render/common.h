@@ -350,6 +350,7 @@ class Buffer;
 class Texture;
 class BufferView;
 class TextureView;
+class DescriptorSet;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
