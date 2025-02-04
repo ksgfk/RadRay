@@ -362,6 +362,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                 MapShaderStages(tableStages));
         }
     };
+    radray::vector<RootConst> rootConsts;
+    radray::vector<CBufferView> cbufferViews;
     if (strategy == RootSigStrategy::CBufferRootConst || strategy == RootSigStrategy::CBufferRootDesc) {
         auto pcIter = std::find_if(
             mergedCbuffers.begin(), mergedCbuffers.end(),
@@ -379,6 +381,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     i->BindPoint,
                     i->Space,
                     MapShaderStages(i->Stages));
+                rootConsts.emplace_back(RootConst{i->Name, i->BindPoint, i->Space});
             } else {
                 CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
                     p,
@@ -386,6 +389,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     i->Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
                     MapShaderStages(i->Stages));
+                cbufferViews.emplace_back(CBufferView{i->Name, i->BindPoint, i->Space});
             }
         }
         setupTableRes(resourceSpaces, mergedResources);
