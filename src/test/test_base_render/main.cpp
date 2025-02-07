@@ -30,6 +30,10 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
         VertexStepMode::Vertex,
         {
             VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0},
+            VertexElement{12, VertexSemantic::Normal, 0, VertexFormat::FLOAT32X3, 0},
+            VertexElement{24, VertexSemantic::Tangent, 0, VertexFormat::FLOAT32X4, 0},
+            VertexElement{40, VertexSemantic::Texcoord, 0, VertexFormat::FLOAT32X2, 0},
+            VertexElement{48, VertexSemantic::Texcoord, 1, VertexFormat::FLOAT32X2, 0},
         }}},
     PrimitiveState{
         PrimitiveTopology::TriangleList,
@@ -188,39 +192,42 @@ public:
         //             pso = device->CreateGraphicsPipeline(desc).value();
         //         }
         {
-            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+            // radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+            radray::string defaultVS = ReadText(std::filesystem::path("shaders") / "DefaultVS.hlsl").value();
+            radray::string defaultPS = ReadText(std::filesystem::path("shaders") / "DefaultPS.hlsl").value();
+            std::string_view includes[] = {"shaders"};
             DxcOutput outv = *dxc->Compile(
-                color,
-                "VSMain",
+                defaultVS,
+                "main",
                 ShaderStage::Vertex,
                 HlslShaderModel::SM60,
                 true,
                 {},
-                {},
+                includes,
                 false);
             DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
             auto vs = device->CreateShader(
                 outv.data,
                 reflv,
                 ShaderStage::Vertex,
-                "VSMain",
+                "main",
                 "colorVS");
 
             DxcOutput outp = *dxc->Compile(
-                color,
-                "PSMain",
+                defaultPS,
+                "main",
                 ShaderStage::Pixel,
                 HlslShaderModel::SM60,
                 true,
                 {},
-                {},
+                includes,
                 false);
             DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
             auto ps = device->CreateShader(
                 outp.data,
                 reflp,
                 ShaderStage::Pixel,
-                "PSMain",
+                "main",
                 "colorPS");
 
             Shader* shaders[] = {vs.Value(), ps.Value()};

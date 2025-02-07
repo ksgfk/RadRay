@@ -213,6 +213,23 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
         }
     }
     // 合并不同 stage 所需相同资源, 也就是 Space 和 Bind 一致的资源. 把 cbuffer 放前面, 其他类型资源放后面, 再按 Space, BindPoint 排序
+    auto check = [](const radray::vector<StageResource>& res) noexcept {
+        radray::vector<StageResource> temp;
+        for (const StageResource& i : res) {
+            auto iter = std::find_if(temp.begin(), temp.end(), [&](auto&& v) noexcept {
+                return v.Space == i.Space && v.BindPoint == i.BindPoint && v.Type == i.Type;
+            });
+            if (iter == temp.end()) {
+                temp.emplace_back(i);
+            } else {
+                if (iter->Name != i.Name) {
+                    RADRAY_ERR_LOG("resource {} and {} has different name but same space and bind point", iter->Name, i.Name);
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
     auto merge = [](const radray::vector<StageResource>& res) noexcept {
         radray::vector<StageResource> result;
         for (const StageResource& i : res) {
@@ -243,6 +260,9 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
     radray::vector<StageResource> mergedCbuffers, mergedResources;
     radray::unordered_set<uint32_t> cbufferSpaces, resourceSpaces;
     {
+        if (!check(resources)) {
+            return nullptr;
+        }
         radray::vector<StageResource> mergeBinds = merge(resources);
         std::sort(mergeBinds.begin(), mergeBinds.end(), resCmp);
         for (StageResource& i : mergeBinds) {
@@ -261,6 +281,12 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
             RADRAY_ERR_LOG("cannot find cbuffer {}", i.Name);
             return nullptr;
         }
+    }
+    if (!check(samplers)) {
+        return nullptr;
+    }
+    if (!check(staticSamplers)) {
+        return nullptr;
     }
     radray::vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
     radray::unordered_set<uint32_t> samplersSpaces;
@@ -337,10 +363,12 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
     radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
     auto&& setupTableRes = [&rootParmas, &descRanges](
                                const radray::unordered_set<uint32_t>& spaces,
-                               const radray::vector<StageResource>& res) noexcept {
+                               const radray::vector<StageResource>& res,
+                               radray::vector<DescTable>& tbls) noexcept {
         for (uint32_t space : spaces) {
             auto& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
             ShaderStages tableStages{};
+            DescTable tbl{};
             for (const StageResource& r : res) {
                 if (r.Space == space) {
                     auto&& range = ranges.emplace_back(D3D12_DESCRIPTOR_RANGE1{});
@@ -352,6 +380,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                         r.Space,
                         r.Type == ShaderResourceType::Sampler ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
                     tableStages |= r.Stages;
+                    tbl._elems.emplace_back(DescElem{r.Name, range.RangeType, r.BindPoint, r.Space, r.BindCount});
                 }
             }
             auto& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
@@ -360,10 +389,13 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                 (UINT)ranges.size(),
                 ranges.data(),
                 MapShaderStages(tableStages));
+            tbls.emplace_back(std::move(tbl));
         }
     };
     radray::vector<RootConst> rootConsts;
     radray::vector<CBufferView> cbufferViews;
+    radray::vector<DescTable> resDescTables;
+    radray::vector<DescTable> samplerDescTables;
     if (strategy == RootSigStrategy::CBufferRootConst || strategy == RootSigStrategy::CBufferRootDesc) {
         auto pcIter = std::find_if(
             mergedCbuffers.begin(), mergedCbuffers.end(),
@@ -392,11 +424,11 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                 cbufferViews.emplace_back(CBufferView{i->Name, i->BindPoint, i->Space});
             }
         }
-        setupTableRes(resourceSpaces, mergedResources);
-        setupTableRes(samplersSpaces, mergeSamplers);
+        setupTableRes(resourceSpaces, mergedResources, resDescTables);
+        setupTableRes(samplersSpaces, mergeSamplers, samplerDescTables);
     } else {
-        setupTableRes(resourceSpaces, mergedResources);
-        setupTableRes(samplersSpaces, mergeSamplers);
+        setupTableRes(resourceSpaces, mergedResources, resDescTables);
+        setupTableRes(samplersSpaces, mergeSamplers, samplerDescTables);
     }
     radray::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplerDescs;
     staticSamplerDescs.reserve(mergeStaticSamplers.size());
@@ -463,7 +495,12 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return nullptr;
     }
-    return radray::make_shared<RootSigD3D12>(std::move(rootSig));
+    auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
+    result->_rootConsts = std::move(rootConsts);
+    result->_cbufferViews = std::move(cbufferViews);
+    result->_resDescTables = std::move(resDescTables);
+    result->_samplerDescTables = std::move(samplerDescTables);
+    return result;
 }
 
 Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
@@ -1115,9 +1152,9 @@ Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
     return result;
 }
 
-Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
-    RootSignature* rootSignature,
-    uint32_t slot) noexcept {
+Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSignature) noexcept {
+    auto rs = Underlying(rootSignature);
+    
     return nullptr;
 }
 

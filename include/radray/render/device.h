@@ -109,9 +109,7 @@ public:
         uint32_t baseMipLevel,
         uint32_t mipLevelCount) noexcept = 0;
 
-    virtual Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(
-        RootSignature* rootSignature,
-        uint32_t slot) noexcept = 0;
+    virtual Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSignature) noexcept = 0;
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
