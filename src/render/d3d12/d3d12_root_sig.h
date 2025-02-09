@@ -21,7 +21,7 @@ public:
 class DescElem {
 public:
     radray::string _name;
-    D3D12_DESCRIPTOR_RANGE_TYPE _type;
+    ShaderResourceType _type;
     uint32_t _point;
     uint32_t _space;
     uint32_t _count;
@@ -39,6 +39,14 @@ public:
     bool IsValid() const noexcept override { return _rootSig.Get() != nullptr; }
     void Destroy() noexcept override;
 
+    uint32_t GetDescriptorSetCount() const noexcept override;
+
+    uint32_t GetConstantBufferSlotCount() const noexcept override;
+
+    radray::vector<DescriptorLayout> GetDescriptorSetLayout(uint32_t set) const noexcept override;
+
+    RootSignatureConstantBufferSlotInfo GetConstantBufferSlotInfo(uint32_t slot) const noexcept override;
+
 public:
     ComPtr<ID3D12RootSignature> _rootSig;
     radray::vector<RootConst> _rootConsts;
@@ -50,8 +58,6 @@ public:
 class ShaderBindTable : public DescriptorSet {
 public:
     ~ShaderBindTable() noexcept override = default;
-
-
 };
 
 }  // namespace radray::render::d3d12

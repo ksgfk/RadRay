@@ -93,7 +93,9 @@ public:
         uint32_t baseMipLevel,
         uint32_t mipLevelCount) noexcept override;
 
-    Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSignature) noexcept override;
+    Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(
+        RootSignature* rootSignature,
+        uint32_t set) noexcept override;
 
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 

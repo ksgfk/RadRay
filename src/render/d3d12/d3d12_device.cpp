@@ -380,7 +380,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                         r.Space,
                         r.Type == ShaderResourceType::Sampler ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
                     tableStages |= r.Stages;
-                    tbl._elems.emplace_back(DescElem{r.Name, range.RangeType, r.BindPoint, r.Space, r.BindCount});
+                    tbl._elems.emplace_back(DescElem{r.Name, r.Type, r.BindPoint, r.Space, r.BindCount});
                 }
             }
             auto& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
@@ -1152,9 +1152,11 @@ Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
     return result;
 }
 
-Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSignature) noexcept {
+Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
+    RootSignature* rootSignature,
+    uint32_t set) noexcept {
     auto rs = Underlying(rootSignature);
-    
+
     return nullptr;
 }
 
