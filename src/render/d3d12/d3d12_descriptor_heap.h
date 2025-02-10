@@ -17,6 +17,7 @@ public:
     void Clear() noexcept;
     void Reset() noexcept;
     UINT AllocateRange(UINT count) noexcept;
+    void RecycleRange(UINT start, UINT count) noexcept;
 
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu(UINT index) const noexcept;
     D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu(UINT index) const noexcept;

@@ -113,6 +113,12 @@ UINT DescriptorHeap::AllocateRange(UINT count) noexcept {
     return start;
 }
 
+void DescriptorHeap::RecycleRange(UINT start, UINT count) noexcept {
+    for (UINT i = 0; i < count; i++) {
+        _empty.emplace_back(start + i);
+    }
+}
+
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGpu(UINT index) const noexcept {
     return {_gpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
 }
@@ -151,8 +157,8 @@ void DescriptorHeap::ExpandCapacity(UINT need) noexcept {
         return;
     }
     UINT now = _desc.NumDescriptors;
-    UINT next = static_cast<UINT>(std::min(std::max(UINT64(now) + need, static_cast<UINT64>(UINT64(now) * 1.5)), UINT64(std::numeric_limits<UINT>::max())));
-    if (now == next) {
+    UINT next = static_cast<UINT>(std::min(std::max(UINT64(need), static_cast<UINT64>(UINT64(now) * 1.5)), UINT64(std::numeric_limits<UINT>::max())));
+    if (now >= next) {
         RADRAY_ABORT("DescriptorHeap expand failed");
         return;
     }
