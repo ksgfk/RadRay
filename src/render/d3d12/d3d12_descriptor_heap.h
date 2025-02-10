@@ -16,6 +16,7 @@ public:
     void Recycle(UINT value) noexcept;
     void Clear() noexcept;
     void Reset() noexcept;
+    UINT AllocateRange(UINT count) noexcept;
 
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu(UINT index) const noexcept;
     D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu(UINT index) const noexcept;
@@ -30,7 +31,7 @@ public:
     ID3D12DescriptorHeap* Get() const noexcept { return _heap.Get(); }
 
 private:
-    void ExpandCapacity() noexcept;
+    void ExpandCapacity(UINT need) noexcept;
 
     ID3D12Device* _device;
     D3D12_DESCRIPTOR_HEAP_DESC _desc;

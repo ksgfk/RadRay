@@ -1156,7 +1156,21 @@ Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
     RootSignature* rootSignature,
     uint32_t set) noexcept {
     auto rs = Underlying(rootSignature);
-
+    if (set >= rs->GetDescriptorSetCount()) {
+        RADRAY_ERR_LOG("d3d12 cannot create descriptor set, param 'set' out of range {}", set);
+        return nullptr;
+    }
+    radray::vector<DescriptorLayout> layout = rs->GetDescriptorSetLayout(set);
+    uint32_t cbvSrvUavCount = 0;
+    uint32_t samplerCount = 0;
+    for (const DescriptorLayout& i : layout) {
+        if (i.Type == ShaderResourceType::Sampler) {
+            samplerCount += i.Count;
+        } else {
+            cbvSrvUavCount += i.Count;
+        }
+    }
+    
     return nullptr;
 }
 

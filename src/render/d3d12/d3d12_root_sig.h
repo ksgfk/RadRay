@@ -55,9 +55,30 @@ public:
     radray::vector<DescTable> _samplerDescTables;
 };
 
-class ShaderBindTable : public DescriptorSet {
+class GpuDescHeapView : public DescriptorSet {
 public:
-    ~ShaderBindTable() noexcept override = default;
+    GpuDescHeapView(
+        DescriptorHeap* shaderResHeap,
+        DescriptorHeap* samplerHeap,
+        uint32_t shaderResStart,
+        uint32_t shaderResCount,
+        uint32_t samplerStart,
+        uint32_t samplerCount) noexcept
+        : _shaderResHeap(shaderResHeap),
+          _samplerHeap(samplerHeap),
+          _shaderResStart(shaderResStart),
+          _shaderResCount(shaderResCount),
+          _samplerStart(samplerStart),
+          _samplerCount(samplerCount) {}
+    ~GpuDescHeapView() noexcept override = default;
+
+public:
+    DescriptorHeap* _shaderResHeap;
+    DescriptorHeap* _samplerHeap;
+    uint32_t _shaderResStart;
+    uint32_t _shaderResCount;
+    uint32_t _samplerStart;
+    uint32_t _samplerCount;
 };
 
 }  // namespace radray::render::d3d12

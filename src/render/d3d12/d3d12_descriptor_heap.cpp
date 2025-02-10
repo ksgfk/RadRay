@@ -27,17 +27,18 @@ DescriptorHeap::DescriptorHeap(
         _gpuStart = {0};
     }
     _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
-    RADRAY_DEBUG_LOG("D3D12 create DescHeap type={} isGpuVis={} incrementSize={} length={} all={}(bytes)",
-                     _desc.Type,
-                     isShaderVisible,
-                     _incrementSize, length, UINT64(length) * _incrementSize);
+    RADRAY_DEBUG_LOG(
+        "D3D12 create DescHeap type={} isGpuVis={} incrementSize={} length={} all={}(bytes)",
+        _desc.Type,
+        isShaderVisible,
+        _incrementSize, length, UINT64(length) * _incrementSize);
 }
 
 UINT DescriptorHeap::Allocate() noexcept {
     UINT result;
     if (_empty.empty()) {
         if (_allocIndex == _desc.NumDescriptors) {
-            ExpandCapacity();
+            ExpandCapacity(_desc.NumDescriptors + 1);
         }
         result = _allocIndex;
         _allocIndex++;
@@ -60,15 +61,56 @@ void DescriptorHeap::Clear() noexcept {
 void DescriptorHeap::Reset() noexcept {
     Clear();
     _empty.shrink_to_fit();
+    if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
+        return;
+    }
     if (_desc.NumDescriptors != _initLength) {
         _desc.NumDescriptors = _initLength;
         _heap.Reset();
         RADRAY_DX_CHECK(_device->CreateDescriptorHeap(&_desc, IID_PPV_ARGS(_heap.GetAddressOf())));
         _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
-        if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
-            _gpuStart = _heap->GetGPUDescriptorHandleForHeapStart();
+    }
+}
+
+UINT DescriptorHeap::AllocateRange(UINT count) noexcept {
+    if (count == 0) {
+        return std::numeric_limits<UINT>::max();
+    }
+    if (_allocIndex + count >= _desc.NumDescriptors) {
+        ExpandCapacity(_allocIndex + count);
+    }
+    std::sort(_empty.begin(), _empty.end());
+    UINT continuous = 0;
+    size_t i = 0;
+    for (; i < _empty.size(); i++) {
+        UINT v = _empty[i];
+        continuous++;
+        if (i != 0) {
+            UINT last = _empty[i - 1];
+            if (last != v - 1) {
+                continuous = 1;
+            }
+        }
+        if (continuous >= count) {
+            break;
         }
     }
+    if (continuous >= count) {
+        size_t start = i - count + 1;
+        size_t end = i + 1;
+        UINT result = _empty[start];
+        _empty.erase(_empty.begin() + start, _empty.begin() + end);
+        return result;
+    }
+    UINT v = 0, start = _allocIndex;
+    if (!_empty.empty() && _empty[_empty.size() - 1] == (_allocIndex - 1) && continuous > 0) {
+        v = continuous;
+        start = _allocIndex - v;
+        auto begin = std::lower_bound(_empty.begin(), _empty.end(), start);
+        _empty.erase(begin, _empty.end());
+    }
+    _allocIndex += count - v;
+    return start;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGpu(UINT index) const noexcept {
@@ -103,13 +145,13 @@ void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept
     _device->CreateSampler(&desc, HandleCpu(index));
 }
 
-void DescriptorHeap::ExpandCapacity() noexcept {
+void DescriptorHeap::ExpandCapacity(UINT need) noexcept {
     if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
         RADRAY_ABORT("DescriptorHeap cannot expand GPU visible heap");
         return;
     }
     UINT now = _desc.NumDescriptors;
-    UINT next = static_cast<UINT>(std::min(std::max(UINT64(now) + 1, static_cast<UINT64>(UINT64(now) * 1.5)), UINT64(std::numeric_limits<UINT>::max())));
+    UINT next = static_cast<UINT>(std::min(std::max(UINT64(now) + need, static_cast<UINT64>(UINT64(now) * 1.5)), UINT64(std::numeric_limits<UINT>::max())));
     if (now == next) {
         RADRAY_ABORT("DescriptorHeap expand failed");
         return;
@@ -129,11 +171,12 @@ void DescriptorHeap::ExpandCapacity() noexcept {
     if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
         _gpuStart = nextHeap->GetGPUDescriptorHandleForHeapStart();
     }
-    RADRAY_DEBUG_LOG("D3D12 expand DescHeap type={} isGpuVis={} incrementSize={} length={} all={}(bytes)",
-                     _desc.Type,
-                     ((_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE),
-                     _incrementSize,
-                     _desc.NumDescriptors, UINT64(_desc.NumDescriptors) * _incrementSize);
+    RADRAY_DEBUG_LOG(
+        "D3D12 expand DescHeap type={} isGpuVis={} incrementSize={} length={} all={}(bytes)",
+        _desc.Type,
+        ((_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE),
+        _incrementSize,
+        _desc.NumDescriptors, UINT64(_desc.NumDescriptors) * _incrementSize);
 }
 
 }  // namespace radray::render::d3d12

@@ -32,4 +32,13 @@ target_end()
 --     add_deps("radray_core", "radray_window", "nri")
 -- target_end()
 
+target("test_range_alloc")
+    set_kind("binary")
+    add_rules("radray_basic_setting")
+    add_files("test_range_alloc.cpp")
+    add_deps("radray_core")
+    -- set_default(false)
+    -- add_tests("default")
+target_end()
+
 includes("test_base_render")
