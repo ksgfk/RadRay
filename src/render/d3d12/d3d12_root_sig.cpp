@@ -66,9 +66,21 @@ RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint
     }
 }
 
-//TODO:
-GpuDescriptorHeapView::~GpuDescriptorHeapView() noexcept {
+static void DestroyGpuDescriptorHeapView(GpuDescriptorHeapView* v) noexcept {
+    if (v->_shaderResHeap.HasValue()) {
+        auto heap = v->_shaderResHeap.Value();
+        heap->RecycleRange(v->_shaderResStart, v->_shaderResCount);
+        v->_shaderResHeap.Release();
+    }
+    if (v->_samplerHeap.HasValue()) {
+        auto heap = v->_samplerHeap.Value();
+        heap->RecycleRange(v->_samplerStart, v->_samplerCount);
+        v->_samplerHeap.Release();
+    }
+}
 
+GpuDescriptorHeapView::~GpuDescriptorHeapView() noexcept {
+    DestroyGpuDescriptorHeapView(this);
 }
 
 bool GpuDescriptorHeapView::IsValid() const noexcept {
@@ -76,9 +88,7 @@ bool GpuDescriptorHeapView::IsValid() const noexcept {
 }
 
 void GpuDescriptorHeapView::Destroy() noexcept {
-    if (_shaderResHeap.HasValue()) {
-        // _shaderResHeap.Value()->
-    }
+    DestroyGpuDescriptorHeapView(this);
 }
 
 }  // namespace radray::render::d3d12

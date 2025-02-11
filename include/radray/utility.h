@@ -85,6 +85,11 @@ struct Nullable {
         return Ptr;
     }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
+    constexpr T* Release() noexcept {
+        T* tmp = Ptr;
+        Ptr = nullptr;
+        return tmp;
+    }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
         return Ptr;
@@ -130,6 +135,11 @@ struct Nullable<void> {
         return Ptr;
     }
     constexpr void* GetValueOrDefault(void* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
+    constexpr void* Release() noexcept {
+        void* tmp = Ptr;
+        Ptr = nullptr;
+        return tmp;
+    }
     constexpr void* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
         return Ptr;
@@ -169,6 +179,9 @@ struct Nullable<std::unique_ptr<T, D>> {
         return std::move(Ptr);
     }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr.get() : defaultPtr; }
+    constexpr std::unique_ptr<T, D> Release() noexcept {
+        return std::move(Ptr);
+    }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
         return Ptr.get();
@@ -212,6 +225,11 @@ struct Nullable<std::shared_ptr<T>> {
         return std::move(Ptr);
     }
     constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr.get() : defaultPtr; }
+    constexpr std::shared_ptr<T> Release() noexcept {
+        std::shared_ptr<T> tmp = std::move(Ptr);
+        Ptr.reset();
+        return tmp;
+    }
     constexpr T* operator->() const noexcept {
         RADRAY_ASSERT(HasValue());
         return Ptr.get();
