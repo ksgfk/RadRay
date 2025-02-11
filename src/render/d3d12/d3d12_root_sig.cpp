@@ -1,5 +1,7 @@
 #include "d3d12_root_sig.h"
 
+#include "d3d12_descriptor_heap.h"
+
 namespace radray::render::d3d12 {
 
 RootSigD3D12::RootSigD3D12(ComPtr<ID3D12RootSignature> rootSig) noexcept : _rootSig(std::move(rootSig)) {}
@@ -61,6 +63,21 @@ RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint
     } else {
         RADRAY_ABORT("out of range");
         return {};
+    }
+}
+
+//TODO:
+GpuDescriptorHeapView::~GpuDescriptorHeapView() noexcept {
+
+}
+
+bool GpuDescriptorHeapView::IsValid() const noexcept {
+    return !_shaderResHeap.HasValue() && !_samplerHeap.HasValue();
+}
+
+void GpuDescriptorHeapView::Destroy() noexcept {
+    if (_shaderResHeap.HasValue()) {
+        // _shaderResHeap.Value()->
     }
 }
 

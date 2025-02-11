@@ -55,9 +55,9 @@ public:
     radray::vector<DescTable> _samplerDescTables;
 };
 
-class GpuDescHeapView : public DescriptorSet {
+class GpuDescriptorHeapView : public DescriptorSet {
 public:
-    GpuDescHeapView(
+    GpuDescriptorHeapView(
         DescriptorHeap* shaderResHeap,
         DescriptorHeap* samplerHeap,
         uint32_t shaderResStart,
@@ -70,11 +70,14 @@ public:
           _shaderResCount(shaderResCount),
           _samplerStart(samplerStart),
           _samplerCount(samplerCount) {}
-    ~GpuDescHeapView() noexcept override = default;
+    ~GpuDescriptorHeapView() noexcept override;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
 
 public:
-    DescriptorHeap* _shaderResHeap;
-    DescriptorHeap* _samplerHeap;
+    Nullable<DescriptorHeap> _shaderResHeap;
+    Nullable<DescriptorHeap> _samplerHeap;
     uint32_t _shaderResStart;
     uint32_t _shaderResCount;
     uint32_t _samplerStart;

@@ -3,6 +3,7 @@
 #include "d3d12_buffer.h"
 #include "d3d12_texture.h"
 #include "d3d12_descriptor_heap.h"
+#include "d3d12_root_sig.h"
 
 namespace radray::render::d3d12 {
 
@@ -92,6 +93,10 @@ void CmdListD3D12::CopyBuffer(Buffer* src_, uint64_t srcOffset, Buffer* dst_, ui
 }
 
 Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDesc& desc) noexcept {
+    if (_isRenderPassActive) {
+        RADRAY_ERR_LOG("Render pass already active, cannot begin another render pass");
+        return nullptr;
+    }
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
@@ -139,18 +144,76 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
         pDsDesc = &dsDesc;
     }
     cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
+    _isRenderPassActive = true;
+    _bindRootSig = nullptr;
     return {radray::make_unique<CmdRenderPassD3D12>(this)};
 }
 
 void CmdListD3D12::EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept {
+    CmdRenderPassD3D12* pass = static_cast<CmdRenderPassD3D12*>(encoder.get());
+    if (pass->_cmdList != this) {
+        RADRAY_ABORT("Render pass does not belong to this command list");
+        return;
+    }
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        RADRAY_ABORT("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
         return;
     }
     cmdList4->EndRenderPass();
     encoder->Destroy();
+    _isRenderPassActive = false;
+}
+
+bool CmdRenderPassD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdRenderPassD3D12::Destroy() noexcept {
+    _cmdList = nullptr;
+}
+
+void CmdRenderPassD3D12::SetViewport(Viewport viewport) noexcept {
+    D3D12_VIEWPORT vp{};
+    vp.TopLeftX = viewport.X;
+    vp.TopLeftY = viewport.Y;
+    vp.Width = viewport.Width;
+    vp.Height = viewport.Height;
+    vp.MinDepth = viewport.MinDepth;
+    vp.MaxDepth = viewport.MaxDepth;
+    _cmdList->_cmdList->RSSetViewports(1, &vp);
+}
+
+void CmdRenderPassD3D12::SetScissor(Scissor scissor) noexcept {
+    D3D12_RECT rect{};
+    rect.left = scissor.X;
+    rect.top = scissor.Y;
+    rect.right = scissor.X + scissor.Width;
+    rect.bottom = scissor.Y + scissor.Height;
+    _cmdList->_cmdList->RSSetScissorRects(1, &rect);
+}
+
+void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    if (_cmdList->_bindRootSig != sig) {
+        _cmdList->_cmdList->SetGraphicsRootSignature(sig->_rootSig.Get());
+        _cmdList->_bindRootSig = sig;
+    }
+}
+
+void CmdRenderPassD3D12::BindDescriptorSet(DescriptorSet* descSet, uint32_t set) noexcept {
+    GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
+    if (heapView->_shaderResHeap.HasValue()) {
+        auto heap = heapView->_shaderResHeap.Value();
+        auto start = heap->HandleGpu(heapView->_shaderResStart);
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(set, start);
+    }
+    if (heapView->_samplerHeap.HasValue()) {
+        auto heap = heapView->_samplerHeap.Value();
+        auto start = heap->HandleGpu(heapView->_samplerStart);
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(set, start);
+    }
 }
 
 }  // namespace radray::render::d3d12

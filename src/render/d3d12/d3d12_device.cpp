@@ -1170,8 +1170,24 @@ Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
             cbvSrvUavCount += i.Count;
         }
     }
-    
-    return nullptr;
+    DescriptorHeap* shaderResHeap{nullptr};
+    DescriptorHeap* samplerHeap{nullptr};
+    uint32_t shaderResHeapStart = 0, samplerHeapStart = 0;
+    if (cbvSrvUavCount > 0) {
+        shaderResHeap = GetGpuHeap();
+        shaderResHeapStart = shaderResHeap->AllocateRange(cbvSrvUavCount);
+    }
+    if (samplerCount > 0) {
+        samplerHeap = GetGpuSamplerHeap();
+        samplerHeapStart = samplerHeap->AllocateRange(samplerCount);
+    }
+    return radray::make_shared<GpuDescriptorHeapView>(
+        shaderResHeap,
+        samplerHeap,
+        shaderResHeapStart,
+        cbvSrvUavCount,
+        samplerHeapStart,
+        samplerCount);
 }
 
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {

@@ -42,6 +42,9 @@ public:
     DescriptorHeap* _cbvSrvUavHeaps;
     DescriptorHeap* _samplerHeaps;
     D3D12_COMMAND_LIST_TYPE _type;
+
+    bool _isRenderPassActive{false};
+    RootSigD3D12* _bindRootSig{nullptr};
 };
 
 class CmdRenderPassD3D12 : public CommandEncoder {
@@ -49,8 +52,16 @@ public:
     explicit CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept : _cmdList(cmdList) {}
     ~CmdRenderPassD3D12() noexcept override = default;
 
-    bool IsValid() const noexcept override { return true; }
-    void Destroy() noexcept override {}
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+
+    void SetViewport(Viewport viewport) noexcept override;
+
+    void SetScissor(Scissor scissor) noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void BindDescriptorSet(DescriptorSet* descSet, uint32_t set) noexcept override;
 
 public:
     CmdListD3D12* _cmdList;

@@ -73,6 +73,7 @@ void DescriptorHeap::Reset() noexcept {
 }
 
 UINT DescriptorHeap::AllocateRange(UINT count) noexcept {
+    // TODO: 写的什么jb玩意, 有空了重写
     if (count == 0) {
         return std::numeric_limits<UINT>::max();
     }
