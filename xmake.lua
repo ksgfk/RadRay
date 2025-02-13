@@ -91,7 +91,7 @@ add_requires("glfw 3.4", {
         shared = false
     }})
 if get_config("enable_d3d12") then
-    add_requires("directx-headers v1.614.1", {debug = is_mode("debug")})
+    add_requires("directx-headers v1.615.0", {debug = is_mode("debug")})
     add_requires("d3d12-memory-allocator_radray v2.0.1", {debug = is_mode("debug")})
 end
 if get_config("enable_dxc") then

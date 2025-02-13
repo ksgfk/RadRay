@@ -383,12 +383,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     tbl._elems.emplace_back(DescElem{r.Name, r.Type, r.BindPoint, r.Space, r.BindCount});
                 }
             }
+            UINT rootParamIndex = (UINT)rootParmas.size();
             auto& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
             CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                 p,
                 (UINT)ranges.size(),
                 ranges.data(),
                 MapShaderStages(tableStages));
+            tbl._rootParamIndex = rootParamIndex;
             tbls.emplace_back(std::move(tbl));
         }
     };
@@ -405,6 +407,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
         }
         for (auto i = mergedCbuffers.begin(); i != mergedCbuffers.end(); i++) {
             const DxilReflection::CBuffer& cbuffer = cbufferMap.find(i->Name)->second;
+            UINT rootParamIndex = (UINT)rootParmas.size();
             auto&& p = rootParmas.emplace_back(D3D12_ROOT_PARAMETER1{});
             if (strategy == RootSigStrategy::CBufferRootConst && i == pcIter) {
                 CD3DX12_ROOT_PARAMETER1::InitAsConstants(
@@ -413,7 +416,12 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     i->BindPoint,
                     i->Space,
                     MapShaderStages(i->Stages));
-                rootConsts.emplace_back(RootConst{i->Name, i->BindPoint, i->Space});
+                rootConsts.emplace_back(RootConst{
+                    i->Name,
+                    rootParamIndex,
+                    i->BindPoint,
+                    i->Space,
+                    p.Constants.Num32BitValues});
             } else {
                 CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
                     p,
@@ -421,7 +429,11 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     i->Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC,
                     MapShaderStages(i->Stages));
-                cbufferViews.emplace_back(CBufferView{i->Name, i->BindPoint, i->Space});
+                cbufferViews.emplace_back(CBufferView{
+                    i->Name,
+                    rootParamIndex,
+                    i->BindPoint,
+                    i->Space});
             }
         }
         setupTableRes(resourceSpaces, mergedResources, resDescTables);
@@ -900,7 +912,7 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
     DXGI_FORMAT dxgiFormat;
     if (type == ResourceType::CBuffer || type == ResourceType::PushConstant) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
-        desc.BufferLocation = buf->_buf->GetGPUVirtualAddress() + offset;
+        desc.BufferLocation = buf->_gpuAddr + offset;
         desc.SizeInBytes = count;
         _device->CreateConstantBufferView(&desc, heap->HandleCpu(heapIndex));
         dxgiFormat = DXGI_FORMAT_UNKNOWN;

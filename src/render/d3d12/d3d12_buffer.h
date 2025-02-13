@@ -29,6 +29,7 @@ public:
     ComPtr<ID3D12Resource> _buf;
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _desc;
+    D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
     D3D12_RESOURCE_STATES _initState;
     ResourceType _type;
 };

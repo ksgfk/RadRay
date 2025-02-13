@@ -14,6 +14,7 @@ BufferD3D12::BufferD3D12(
       _initState(initState),
       _type(type) {
     _desc = _buf->GetDesc();
+    _gpuAddr = _buf->GetGPUVirtualAddress();
 }
 
 bool BufferD3D12::IsValid() const noexcept { return _buf != nullptr; }

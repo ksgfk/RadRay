@@ -13,7 +13,11 @@ uint32_t RootSigD3D12::GetDescriptorSetCount() const noexcept {
 }
 
 uint32_t RootSigD3D12::GetConstantBufferSlotCount() const noexcept {
-    return _rootConsts.size() + _cbufferViews.size();
+    return _cbufferViews.size();
+}
+
+uint32_t RootSigD3D12::GetRootConstantCount() const noexcept {
+    return _rootConsts.size();
 }
 
 radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t set) const noexcept {
@@ -54,16 +58,21 @@ radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t s
 }
 
 RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint32_t slot) const noexcept {
-    if (slot < _rootConsts.size()) {
-        const auto& rootConst = _rootConsts[slot];
-        return RootSignatureConstantBufferSlotInfo{rootConst._name, slot};
-    } else if (slot < _rootConsts.size() + _cbufferViews.size()) {
-        const auto& cbufferView = _cbufferViews[slot - _rootConsts.size()];
-        return RootSignatureConstantBufferSlotInfo{cbufferView._name, slot};
-    } else {
+    if (slot >= _cbufferViews.size()) {
         RADRAY_ABORT("out of range");
         return {};
     }
+    const CBufferView& cbufferView = _cbufferViews[slot];
+    return RootSignatureConstantBufferSlotInfo{cbufferView._name, slot};
+}
+
+RootSignatureRootConstantSlotInfo RootSigD3D12::GetRootConstantSlotInfo(uint32_t slot) const noexcept {
+    if (slot >= _rootConsts.size()) {
+        RADRAY_ABORT("out of range");
+        return {};
+    }
+    const RootConst& rootConst = _rootConsts[slot];
+    return RootSignatureRootConstantSlotInfo{rootConst._name, slot};
 }
 
 static void DestroyGpuDescriptorHeapView(GpuDescriptorHeapView* v) noexcept {

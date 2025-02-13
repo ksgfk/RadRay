@@ -15,9 +15,13 @@ public:
 
     virtual void BindRootSignature(RootSignature* rootSig) noexcept = 0;
 
-    virtual void BindDescriptorSet(DescriptorSet* descSet, uint32_t set) noexcept = 0;
+    virtual void BindPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
-    // virtual void SetPipelineState(GraphicsPipelineState* pso) noexcept = 0;
+    virtual void BindDescriptorSet(RootSignature* rootSig, DescriptorSet* descSet, uint32_t set) noexcept = 0;
+
+    virtual void PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept = 0;
+
+    virtual void BindConstantBuffer(RootSignature* rootSig, BufferView* buffer, uint32_t slot) noexcept = 0;
 };
 
 }  // namespace radray::render

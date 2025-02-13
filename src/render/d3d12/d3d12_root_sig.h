@@ -9,12 +9,15 @@ namespace radray::render::d3d12 {
 class RootConst {
 public:
     radray::string _name;
+    UINT _rootParamIndex;
     uint32_t _point;
     uint32_t _space;
+    uint32_t _num32BitValues;
 };
 class CBufferView {
 public:
     radray::string _name;
+    UINT _rootParamIndex;
     uint32_t _point;
     uint32_t _space;
 };
@@ -29,6 +32,7 @@ public:
 class DescTable {
 public:
     radray::vector<DescElem> _elems;
+    UINT _rootParamIndex;
 };
 
 class RootSigD3D12 : public RootSignature {
@@ -43,9 +47,13 @@ public:
 
     uint32_t GetConstantBufferSlotCount() const noexcept override;
 
+    uint32_t GetRootConstantCount() const noexcept override;
+
     radray::vector<DescriptorLayout> GetDescriptorSetLayout(uint32_t set) const noexcept override;
 
     RootSignatureConstantBufferSlotInfo GetConstantBufferSlotInfo(uint32_t slot) const noexcept override;
+
+    RootSignatureRootConstantSlotInfo GetRootConstantSlotInfo(uint32_t slot) const noexcept override;
 
 public:
     ComPtr<ID3D12RootSignature> _rootSig;

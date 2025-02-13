@@ -4,6 +4,7 @@
 #include "d3d12_texture.h"
 #include "d3d12_descriptor_heap.h"
 #include "d3d12_root_sig.h"
+#include "d3d12_pso.h"
 
 namespace radray::render::d3d12 {
 
@@ -166,6 +167,13 @@ void CmdListD3D12::EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noe
     _isRenderPassActive = false;
 }
 
+void CmdListD3D12::TrySetRootSig(RootSigD3D12* rootSig) noexcept {
+    if (_bindRootSig != rootSig->_rootSig) {
+        _cmdList->SetGraphicsRootSignature(rootSig->_rootSig.Get());
+        _bindRootSig = rootSig->_rootSig;
+    }
+}
+
 bool CmdRenderPassD3D12::IsValid() const noexcept {
     return _cmdList != nullptr;
 }
@@ -196,24 +204,71 @@ void CmdRenderPassD3D12::SetScissor(Scissor scissor) noexcept {
 
 void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
     RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    if (_cmdList->_bindRootSig != sig) {
-        _cmdList->_cmdList->SetGraphicsRootSignature(sig->_rootSig.Get());
-        _cmdList->_bindRootSig = sig;
-    }
+    _cmdList->TrySetRootSig(sig);
 }
 
-void CmdRenderPassD3D12::BindDescriptorSet(DescriptorSet* descSet, uint32_t set) noexcept {
+void CmdRenderPassD3D12::BindPipelineState(GraphicsPipelineState* pso) noexcept {
+    GraphicsPsoD3D12* psoD3D12 = static_cast<GraphicsPsoD3D12*>(pso);
+    _cmdList->_cmdList->IASetPrimitiveTopology(psoD3D12->_topo);
+    _cmdList->_cmdList->SetPipelineState(psoD3D12->_pso.Get());
+}
+
+void CmdRenderPassD3D12::BindDescriptorSet(RootSignature* rootSig, DescriptorSet* descSet, uint32_t set) noexcept {
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
     GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
+    if (heapView->_shaderResHeap.HasValue()) {
+        if (set >= sig->_resDescTables.size()) {
+            RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'set' out of range {}", set);
+            return;
+        }
+    }
+    if (heapView->_samplerHeap.HasValue()) {
+        if (set >= sig->_samplerDescTables.size()) {
+            RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'set' out of range {}", set);
+            return;
+        }
+    }
+    _cmdList->TrySetRootSig(sig);
     if (heapView->_shaderResHeap.HasValue()) {
         auto heap = heapView->_shaderResHeap.Value();
         auto start = heap->HandleGpu(heapView->_shaderResStart);
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(set, start);
+        UINT rootParamIndex = sig->_resDescTables[set]._rootParamIndex;
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
     }
     if (heapView->_samplerHeap.HasValue()) {
         auto heap = heapView->_samplerHeap.Value();
         auto start = heap->HandleGpu(heapView->_samplerStart);
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(set, start);
+        UINT rootParamIndex = sig->_samplerDescTables[set]._rootParamIndex;
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
     }
+}
+
+void CmdRenderPassD3D12::PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept {
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    if (slot >= sig->_rootConsts.size()) {
+        RADRAY_ABORT("d3d12 cannot SetGraphicsRoot32BitConstants, param 'slot' out of range {}", slot);
+        return;
+    }
+    const RootConst& rootConst = sig->_rootConsts[slot];
+    if (length < rootConst._num32BitValues * 4) {
+        RADRAY_ERR_LOG("d3d12 cannot SetGraphicsRoot32BitConstants, param 'length' too small");
+    }
+    _cmdList->TrySetRootSig(sig);
+    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootConst._rootParamIndex, rootConst._num32BitValues, data, 0);
+}
+
+void CmdRenderPassD3D12::BindConstantBuffer(RootSignature* rootSig, BufferView* buffer, uint32_t slot) noexcept {
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    if (slot >= sig->_cbufferViews.size()) {
+        RADRAY_ABORT("d3d12 cannot SetGraphicsRootConstantBufferView, param 'slot' out of range {}", slot);
+        return;
+    }
+    const CBufferView& cbvd = sig->_cbufferViews[slot];
+    BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(buffer);
+    const auto& bufferDesc = bufferView->_desc;
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferDesc.buffer->_gpuAddr + bufferDesc.offset;
+    _cmdList->TrySetRootSig(sig);
+    _cmdList->_cmdList->SetGraphicsRootConstantBufferView(cbvd._rootParamIndex, gpuAddr);
 }
 
 }  // namespace radray::render::d3d12

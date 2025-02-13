@@ -36,6 +36,8 @@ public:
 
     void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept override;
 
+    void TrySetRootSig(RootSigD3D12* rootSig) noexcept;
+
 public:
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     ID3D12CommandAllocator* _attachAlloc;
@@ -44,7 +46,7 @@ public:
     D3D12_COMMAND_LIST_TYPE _type;
 
     bool _isRenderPassActive{false};
-    RootSigD3D12* _bindRootSig{nullptr};
+    ComPtr<ID3D12RootSignature> _bindRootSig{nullptr};
 };
 
 class CmdRenderPassD3D12 : public CommandEncoder {
@@ -61,7 +63,13 @@ public:
 
     void BindRootSignature(RootSignature* rootSig) noexcept override;
 
-    void BindDescriptorSet(DescriptorSet* descSet, uint32_t set) noexcept override;
+    void BindPipelineState(GraphicsPipelineState* pso) noexcept override;
+
+    void BindDescriptorSet(RootSignature* rootSig, DescriptorSet* descSet, uint32_t set) noexcept override;
+
+    void PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept override;
+
+    void BindConstantBuffer(RootSignature* rootSig, BufferView* buffer, uint32_t slot) noexcept override;
 
 public:
     CmdListD3D12* _cmdList;
