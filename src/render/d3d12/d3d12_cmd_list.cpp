@@ -275,7 +275,7 @@ void CmdRenderPassD3D12::BindVertexBuffers(std::span<VertexBufferView> vbvs) noe
         return;
     }
     radray::vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
-    rawVbvs.resize(vbvs.size());
+    rawVbvs.reserve(vbvs.size());
     for (const VertexBufferView& i : vbvs) {
         D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
         BufferD3D12* buf = static_cast<BufferD3D12*>(i.Buffer);

@@ -26,20 +26,14 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
     nullptr,
     nullptr,
     {VertexBufferLayout{
-        56,
+        12,
         VertexStepMode::Vertex,
-        {
-            VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0},
-            VertexElement{12, VertexSemantic::Normal, 0, VertexFormat::FLOAT32X3, 0},
-            VertexElement{24, VertexSemantic::Tangent, 0, VertexFormat::FLOAT32X4, 0},
-            VertexElement{40, VertexSemantic::Texcoord, 0, VertexFormat::FLOAT32X2, 0},
-            VertexElement{48, VertexSemantic::Texcoord, 1, VertexFormat::FLOAT32X2, 0},
-        }}},
+        {VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0}}}},
     PrimitiveState{
         PrimitiveTopology::TriangleList,
         IndexFormat::UINT32,
         FrontFace::CCW,
-        CullMode::Back,
+        CullMode::None,
         PolygonMode::Fill,
         false,
         false},
@@ -76,7 +70,7 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
           BlendOperation::Add}},
         ToFlag(ColorWrite::All),
         false}},
-    true};
+    false};
 
 class TestApp {
 public:
@@ -192,13 +186,11 @@ public:
         //             pso = device->CreateGraphicsPipeline(desc).value();
         //         }
         {
-            // radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
-            radray::string defaultVS = ReadText(std::filesystem::path("shaders") / "DefaultVS.hlsl").value();
-            radray::string defaultPS = ReadText(std::filesystem::path("shaders") / "DefaultPS.hlsl").value();
+            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
             std::string_view includes[] = {"shaders"};
             DxcOutput outv = *dxc->Compile(
-                defaultVS,
-                "main",
+                color,
+                "VSMain",
                 ShaderStage::Vertex,
                 HlslShaderModel::SM60,
                 true,
@@ -210,12 +202,12 @@ public:
                 outv.data,
                 reflv,
                 ShaderStage::Vertex,
-                "main",
+                "VSMain",
                 "colorVS");
 
             DxcOutput outp = *dxc->Compile(
-                defaultPS,
-                "main",
+                color,
+                "PSMain",
                 ShaderStage::Pixel,
                 HlslShaderModel::SM60,
                 true,
@@ -227,13 +219,13 @@ public:
                 outp.data,
                 reflp,
                 ShaderStage::Pixel,
-                "main",
+                "PSMain",
                 "colorPS");
 
             Shader* shaders[] = {vs.Value(), ps.Value()};
-            auto rootSig = device->CreateRootSignature(shaders);
+            rootSig = device->CreateRootSignature(shaders).Unwrap();
             auto psoDesc = DEFAULT_PSO_DESC;
-            psoDesc.RootSig = rootSig.Value();
+            psoDesc.RootSig = rootSig.get();
             psoDesc.VS = vs.Value();
             psoDesc.PS = ps.Value();
             pso = device->CreateGraphicsPipeline(psoDesc).Unwrap();
@@ -332,6 +324,13 @@ public:
                  ColorClearValue{0.0f, 0.2f, 0.4f, 1.0f}}};
             rpDesc.ColorAttachments = colors;
             auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            rp->SetViewport({0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 1.0f});
+            rp->SetScissor({0, 0, 1280, 720});
+            rp->BindRootSignature(rootSig.get());
+            rp->BindPipelineState(pso.get());
+            VertexBufferView vbv[] = {{verts.get(), 12, 0}};
+            rp->BindVertexBuffers(vbv);
+            rp->Draw(3, 0);
             cmdBuffer->EndRenderPass(std::move(rp));
             {
                 TextureBarrier barriers[] = {
@@ -359,8 +358,9 @@ public:
     radray::shared_ptr<CommandBuffer> cmdBuffer;
     radray::shared_ptr<SwapChain> swapchain;
     radray::shared_ptr<Dxc> dxc;
-    radray::shared_ptr<GraphicsPipelineState> pso;
 
+    radray::shared_ptr<RootSignature> rootSig;
+    radray::shared_ptr<GraphicsPipelineState> pso;
     radray::shared_ptr<Buffer> verts;
 };
 

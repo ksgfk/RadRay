@@ -556,7 +556,7 @@ Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsP
     rawRaster.ConservativeRaster = desc.Primitive.Conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
     D3D12_BLEND_DESC rawBlend{};
     rawBlend.AlphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable;
-    rawBlend.IndependentBlendEnable = true;
+    rawBlend.IndependentBlendEnable = false;
     {
         for (size_t i = 0; i < ArrayLength(rawBlend.RenderTarget); i++) {
             D3D12_RENDER_TARGET_BLEND_DESC& rtb = rawBlend.RenderTarget[i];
