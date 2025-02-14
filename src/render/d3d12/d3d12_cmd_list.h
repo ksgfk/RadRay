@@ -65,11 +65,19 @@ public:
 
     void BindPipelineState(GraphicsPipelineState* pso) noexcept override;
 
-    void BindDescriptorSet(RootSignature* rootSig, DescriptorSet* descSet, uint32_t set) noexcept override;
+    void BindDescriptorSet(RootSignature* rootSig, uint32_t set, DescriptorSet* descSet) noexcept override;
 
     void PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept override;
 
-    void BindConstantBuffer(RootSignature* rootSig, BufferView* buffer, uint32_t slot) noexcept override;
+    void BindConstantBuffer(RootSignature* rootSig, uint32_t slot, Buffer* buffer, uint32_t offset) noexcept override;
+
+    void BindVertexBuffers(std::span<VertexBufferView> vbvs) noexcept override;
+
+    void BindIndexBuffer(Buffer* buffer, uint32_t stride, uint32_t offset) noexcept override;
+
+    void Draw(uint32_t vertexCount, uint32_t firstVertex) noexcept override;
+
+    void DrawIndexed(uint32_t indexCount, uint32_t firstIndex, uint32_t firstVertex) noexcept override;
 
 public:
     CmdListD3D12* _cmdList;
