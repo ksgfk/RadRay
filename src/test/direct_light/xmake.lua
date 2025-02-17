@@ -1,4 +1,4 @@
-target("test_base_render")
+target("direct_light")
     set_kind("binary")
     add_rules("radray_basic_setting", "radray_app", "radray_copy_shaders_to_bin")
     add_files("*.cpp")

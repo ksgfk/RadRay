@@ -41,4 +41,5 @@ target("test_range_alloc")
     add_tests("default")
 target_end()
 
-includes("test_base_render")
+includes("hello_world_dx12")
+includes("direct_light")
