@@ -37,6 +37,8 @@ public:
         _cubeVb = nullptr;
         _cubeIb = nullptr;
         _cubeCb = nullptr;
+        _rootSig = nullptr;
+        _pso = nullptr;
 
         _dxc = nullptr;
         _cmdBuffer = nullptr;
@@ -78,12 +80,72 @@ public:
     }
 
     void SetupCamera() {
+        using namespace std::placeholders;
         _camPos = Eigen::Vector3f(0.0f, 0.0f, -2.0f);
-        _camTarget = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
-        _camUp = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+        _camRot = Eigen::Quaternionf::Identity();
+        _camCtrl.distance = std::abs(_camPos.z());
+        _fovDeg = 90.0f;
+        _zNear = 0.1f;
+        _zFar = 100.0f;
+        _onMouseClick = {std::bind(&TestApp1::OnMouseClick, this, _1, _2, _3, _4), _window->EventMouseButtonCall()};
+        _onMouseMove = {std::bind(&TestApp1::OnMouseMove, this, _1), _window->EventCursorPosition()};
     }
 
     void SetupCube() {
+        _cubePos = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
+        _SetupCubeMaterial();
+        _SetupCubeMesh();
+    }
+
+    void _SetupCubeMaterial() {
+        radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "normal.hlsl").value();
+        DxcOutput outv = _dxc->Compile(
+                                 color,
+                                 "VSMain",
+                                 ShaderStage::Vertex,
+                                 HlslShaderModel::SM60,
+                                 true,
+                                 {},
+                                 {},
+                                 false)
+                             .value();
+        DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
+        shared_ptr<Shader> vs = _device->CreateShader(
+                                           outv.data,
+                                           reflv,
+                                           ShaderStage::Vertex,
+                                           "VSMain",
+                                           "colorVS")
+                                    .Unwrap();
+        DxcOutput outp = _dxc->Compile(
+                                 color,
+                                 "PSMain",
+                                 ShaderStage::Pixel,
+                                 HlslShaderModel::SM60,
+                                 true,
+                                 {},
+                                 {},
+                                 false)
+                             .value();
+        DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+        shared_ptr<Shader> ps = _device->CreateShader(
+                                           outp.data,
+                                           reflp,
+                                           ShaderStage::Pixel,
+                                           "PSMain",
+                                           "colorPS")
+                                    .Unwrap();
+
+        // Shader* shaders[] = {vs.get(), ps.get()};
+        // _rootSig = _device->CreateRootSignature(shaders).Unwrap();
+        // GraphicsPipelineStateDescriptor psoDesc{};
+        // psoDesc.RootSig = _rootSig.get();
+        // psoDesc.VS = vs.get();
+        // psoDesc.PS = ps.get();
+        // _pso = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
+    }
+
+    void _SetupCubeMesh() {
         TriangleMesh cube{};
         cube.InitAsCube(0.5f);
         VertexData vd{};
@@ -186,6 +248,7 @@ public:
             if (_window->ShouldClose()) {
                 break;
             }
+            UpdateCamera();
             std::this_thread::yield();
         }
     }
@@ -202,11 +265,52 @@ public:
     shared_ptr<Buffer> _cubeIb;
     shared_ptr<Buffer> _cubeCb;
     void* _cubeCbMapped;
+    Eigen::Vector3f _cubePos;
+    shared_ptr<RootSignature> _rootSig;
+    shared_ptr<GraphicsPipelineState> _pso;
 
     CameraControl _camCtrl;
+    float _fovDeg;
+    float _zNear;
+    float _zFar;
     Eigen::Vector3f _camPos;
-    Eigen::Vector3f _camTarget;
-    Eigen::Vector3f _camUp;
+    Eigen::Quaternionf _camRot;
+    Eigen::Matrix4f _view;
+    Eigen::Matrix4f _proj;
+    DelegateHandle<MouseButtonCallback> _onMouseClick;
+    DelegateHandle<CursorPositionCallback> _onMouseMove;
+
+    void OnMouseClick(const Eigen::Vector2f& xy, MouseButton button, Action action, KeyModifiers modifiers) {
+        if (button == MOUSE_BUTTON_LEFT) {
+            _camCtrl.nowPos = xy;
+            if (action == ACTION_PRESSED) {
+                _camCtrl.canOrbit = true;
+                _camCtrl.lastPos = xy;
+            } else if (action == ACTION_RELEASED) {
+                _camCtrl.canOrbit = false;
+            }
+        }
+        RADRAY_UNUSED(modifiers);
+    }
+
+    void OnMouseMove(const Eigen::Vector2f& xy) {
+        if (_camCtrl.canOrbit) {
+            _camCtrl.nowPos = xy;
+        }
+    }
+
+    void UpdateCamera() {
+        _camCtrl.Orbit(_camPos, _camRot);
+        if (_camCtrl.canOrbit) {
+            Eigen::Matrix3f rotMat = _camRot.toRotationMatrix();
+            Eigen::Vector3f radian = rotMat.eulerAngles(2, 0, 1);
+            RADRAY_INFO_LOG("x:{} ,y:{} ,z:{}", Degree(radian.x()), Degree(radian.y()), Degree(radian.z()));
+        }
+        Eigen::Vector3f front = (_camRot * Eigen::Vector3f{0, 0, 1}).normalized();
+        Eigen::Vector3f up = (_camRot * Eigen::Vector3f{0, 1, 0}).normalized();
+        _view = LookAtFrontLH(_camPos, front, up);
+        _proj = PerspectiveLH(Radian(_fovDeg), WIN_WIDTH / static_cast<float>(WIN_HEIGHT), _zNear, _zFar);
+    }
 };
 
 int main() {
