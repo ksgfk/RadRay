@@ -28,8 +28,19 @@ struct ColorAttachment {
     TextureView* Target;
     LoadAction Load;
     StoreAction Store;
-    ColorClearValue ClearValue; 
+    ColorClearValue ClearValue;
 };
+
+inline ColorAttachment DefaultColorAttachment(
+    TextureView* rtView,
+    ColorClearValue clear = {0.0f, 0.0f, 0.0f, 1.0f}) noexcept {
+    return {
+        .Target = rtView,
+        .Load = LoadAction::Clear,
+        .Store = StoreAction::Store,
+        .ClearValue = clear,
+    };
+}
 
 struct DepthStencilAttachment {
     TextureView* Target;
@@ -39,6 +50,19 @@ struct DepthStencilAttachment {
     StoreAction StencilStore;
     DepthStencilClearValue ClearValue;
 };
+
+inline DepthStencilAttachment DefaultDepthStencilAttachment(
+    TextureView* depthView,
+    DepthStencilClearValue clear = {1.0f, 0}) noexcept {
+    return {
+        .Target = depthView,
+        .DepthLoad = LoadAction::Clear,
+        .DepthStore = StoreAction::Store,
+        .StencilLoad = LoadAction::Clear,
+        .StencilStore = StoreAction::Store,
+        .ClearValue = clear,
+    };
+}
 
 class RenderPassDesc {
 public:

@@ -817,7 +817,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     D3D12_RESOURCE_DESC desc{};
     if (depth > 1) {
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    } else if (depth > 1) {
+    } else if (height > 1) {
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     } else {
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;

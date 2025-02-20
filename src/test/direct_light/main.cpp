@@ -14,6 +14,7 @@
 #include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
 #include <radray/render/command_encoder.h>
+#include <radray/render/swap_chain.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -40,6 +41,9 @@ public:
         _rootSig = nullptr;
         _pso = nullptr;
 
+        _depthView = nullptr;
+        _depthTex = nullptr;
+
         _dxc = nullptr;
         _cmdBuffer = nullptr;
         _cmdPool = nullptr;
@@ -62,8 +66,7 @@ public:
             true,
             true};
         _device = CreateDevice(d3d12Desc).Unwrap();
-        CommandQueue* cmdQueue =
-            _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
         _cmdPool = _device->CreateCommandPool(cmdQueue).Unwrap();
         _cmdBuffer = _device->CreateCommandBuffer(_cmdPool.get()).Unwrap();
         _dxc = CreateDxc().Unwrap();
@@ -77,6 +80,31 @@ public:
                                 true)
                          .Unwrap();
         RADRAY_INFO_LOG("end init graphics");
+
+        _depthTex = _device->CreateTexture(
+                               WIN_WIDTH,
+                               WIN_HEIGHT,
+                               1,
+                               1,
+                               TextureFormat::D24_UNORM_S8_UINT,
+                               0,
+                               1,
+                               0,
+                               DepthStencilClearValue{1.0f, 0},
+                               ResourceType::DepthStencil,
+                               ToFlag(ResourceState::Common),
+                               ToFlag(ResourceMemoryTip::None))
+                        .Unwrap();
+        _depthView = _device->CreateTextureView(
+                                _depthTex.get(),
+                                ResourceType::DepthStencil,
+                                TextureFormat::D24_UNORM_S8_UINT,
+                                TextureDimension::Dim2D,
+                                0,
+                                0,
+                                0,
+                                0)
+                         .Unwrap();
     }
 
     void SetupCamera() {
@@ -92,12 +120,16 @@ public:
     }
 
     void SetupCube() {
+        TriangleMesh cube{};
+        cube.InitAsCube(0.5f);
+        VertexData vd{};
+        cube.ToVertexData(&vd);
         _cubePos = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
-        _SetupCubeMaterial();
-        _SetupCubeMesh();
+        _SetupCubeMesh(vd);
+        _SetupCubeMaterial(vd);
     }
 
-    void _SetupCubeMaterial() {
+    void _SetupCubeMaterial(const VertexData& vd) {
         radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "normal.hlsl").value();
         DxcOutput outv = _dxc->Compile(
                                  color,
@@ -136,21 +168,74 @@ public:
                                            "colorPS")
                                     .Unwrap();
 
-        // Shader* shaders[] = {vs.get(), ps.get()};
-        // _rootSig = _device->CreateRootSignature(shaders).Unwrap();
-        // GraphicsPipelineStateDescriptor psoDesc{};
-        // psoDesc.RootSig = _rootSig.get();
-        // psoDesc.VS = vs.get();
-        // psoDesc.PS = ps.get();
-        // _pso = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
+        uint64_t stride = 0;
+        radray::vector<VertexElement> elements{};
+        elements.reserve(vd.layouts.size());
+        for (size_t v = 0; v < vd.layouts.size(); v++) {
+            const auto& i = vd.layouts[v];
+            stride += i.Size;
+            auto& e = elements.emplace_back(VertexElement{});
+            e.Offset = i.Offset;
+            e.Semantic = ([&]() {
+                switch (i.Semantic) {
+                    case radray::VertexSemantic::POSITION: return radray::render::VertexSemantic::Position;
+                    case radray::VertexSemantic::NORMAL: return radray::render::VertexSemantic::Normal;
+                    case radray::VertexSemantic::TEXCOORD: return radray::render::VertexSemantic::Texcoord;
+                    case radray::VertexSemantic::TANGENT: return radray::render::VertexSemantic::Tangent;
+                    case radray::VertexSemantic::COLOR: return radray::render::VertexSemantic::Color;
+                    case radray::VertexSemantic::PSIZE: return radray::render::VertexSemantic::PSize;
+                    case radray::VertexSemantic::BINORMAL: return radray::render::VertexSemantic::BiNormal;
+                    case radray::VertexSemantic::BLENDINDICES: return radray::render::VertexSemantic::BlendIndices;
+                    case radray::VertexSemantic::BLENDWEIGHT: return radray::render::VertexSemantic::BlendWeight;
+                    case radray::VertexSemantic::POSITIONT: return radray::render::VertexSemantic::PositionT;
+                }
+            })();
+            e.SemanticIndex = i.SemanticIndex;
+            e.Format = ([&]() {
+                switch (i.Size) {
+                    case sizeof(float): return VertexFormat::FLOAT32;
+                    case sizeof(float) * 2: return VertexFormat::FLOAT32X2;
+                    case sizeof(float) * 3: return VertexFormat::FLOAT32X3;
+                    case sizeof(float) * 4: return VertexFormat::FLOAT32X4;
+                    default: return VertexFormat::UNKNOWN;
+                }
+            })();
+            e.Location = v;
+        }
+        Shader* shaders[] = {vs.get(), ps.get()};
+        _rootSig = _device->CreateRootSignature(shaders).Unwrap();
+        GraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = _rootSig.get();
+        psoDesc.VS = vs.get();
+        psoDesc.PS = ps.get();
+        psoDesc.VertexBuffers.emplace_back(VertexBufferLayout{
+            .ArrayStride = stride,
+            .StepMode = VertexStepMode::Vertex,
+            .Elements = elements});
+        psoDesc.Primitive = DefaultPrimitiveState();
+        psoDesc.DepthStencil = DefaultDepthStencilState();
+        psoDesc.MultiSample = DefaultMultiSampleState();
+        psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
+        psoDesc.DepthStencilEnable = true;
+        psoDesc.Primitive.StripIndexFormat = ([&]() {
+            switch (vd.indexType) {
+                case VertexIndexType::UInt16: return IndexFormat::UINT16;
+                case VertexIndexType::UInt32: return IndexFormat::UINT32;
+            }
+        })();
+        _pso = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
+
+        _cubeVbv = {_cubeVb.get(), (uint32_t)stride, 0};
+        _cubeIbStride = ([&]() {
+            switch (vd.indexType) {
+                case VertexIndexType::UInt16: return sizeof(uint16_t);
+                case VertexIndexType::UInt32: return sizeof(uint32_t);
+            }
+        })();
+        _cubeIbCount = vd.indexCount;
     }
 
-    void _SetupCubeMesh() {
-        TriangleMesh cube{};
-        cube.InitAsCube(0.5f);
-        VertexData vd{};
-        cube.ToVertexData(&vd);
-
+    void _SetupCubeMesh(const VertexData& vd) {
         _cubeVb = _device->CreateBuffer(
                              vd.vertexSize,
                              ResourceType::Buffer,
@@ -249,6 +334,7 @@ public:
                 break;
             }
             UpdateCamera();
+            DrawCube();
             std::this_thread::yield();
         }
     }
@@ -261,8 +347,13 @@ public:
     shared_ptr<SwapChain> _swapchain;
     shared_ptr<Dxc> _dxc;
 
+    shared_ptr<Texture> _depthTex;
+    shared_ptr<TextureView> _depthView;
     shared_ptr<Buffer> _cubeVb;
+    VertexBufferView _cubeVbv;
     shared_ptr<Buffer> _cubeIb;
+    uint32_t _cubeIbStride;
+    uint32_t _cubeIbCount;
     shared_ptr<Buffer> _cubeCb;
     void* _cubeCbMapped;
     Eigen::Vector3f _cubePos;
@@ -310,6 +401,49 @@ public:
         Eigen::Vector3f up = (_camRot * Eigen::Vector3f{0, 1, 0}).normalized();
         _view = LookAtFrontLH(_camPos, front, up);
         _proj = PerspectiveLH(Radian(_fovDeg), WIN_WIDTH / static_cast<float>(WIN_HEIGHT), _zNear, _zFar);
+    }
+
+    void DrawCube() {
+        _cmdPool->Reset();
+        _cmdBuffer->Begin();
+        Texture* rt = _swapchain->GetCurrentRenderTarget();
+        {
+            TextureBarrier barriers[] = {
+                {rt,
+                 ToFlag(ResourceState::Present),
+                 ToFlag(ResourceState::RenderTarget),
+                 0, 0, false}};
+            ResourceBarriers rb{{}, barriers};
+            _cmdBuffer->ResourceBarrier(rb);
+        }
+        auto rtView = _device->CreateTextureView(
+                                 rt,
+                                 ResourceType::RenderTarget,
+                                 TextureFormat::RGBA8_UNORM,
+                                 TextureDimension::Dim2D,
+                                 0,
+                                 0,
+                                 0,
+                                 0)
+                          .Unwrap();
+        RenderPassDesc rpDesc{};
+        rpDesc.Name = "normal";
+        ColorAttachment colors[] = {DefaultColorAttachment(rtView.get(), {0.0f, 0.2f, 0.4f, 1.0f})};
+        rpDesc.ColorAttachments = colors;
+        rpDesc.DepthStencilAttachment = DefaultDepthStencilAttachment(_depthView.get());
+        radray::unique_ptr<CommandEncoder> pass = _cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        pass->SetViewport({0.0f, 0.0f, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
+        pass->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
+        pass->BindRootSignature(_rootSig.get());
+        pass->BindPipelineState(_pso.get());
+        Eigen::Matrix4f mvp = _proj * _view;
+        pass->PushConstants(_rootSig.get(), 0, &mvp, sizeof(mvp));
+        VertexBufferView vbv[] = {_cubeVbv};
+        pass->BindVertexBuffers(vbv);
+        pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);
+        pass->DrawIndexed(_cubeIbCount, 0, 0);
+        _cmdBuffer->EndRenderPass(std::move(pass));
+        _cmdBuffer->End();
     }
 };
 

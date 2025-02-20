@@ -29,6 +29,18 @@ struct PrimitiveState {
     bool Conservative;
 };
 
+inline PrimitiveState DefaultPrimitiveState() noexcept {
+    return {
+        .Topology = PrimitiveTopology::TriangleList,
+        .StripIndexFormat = IndexFormat::UINT32,
+        .FaceClockwise = FrontFace::CW,
+        .Cull = CullMode::Back,
+        .Poly = PolygonMode::Fill,
+        .UnclippedDepth = true,
+        .Conservative = false,
+    };
+}
+
 struct StencilFaceState {
     CompareFunction Compare;
     StencilOperation FailOp;
@@ -58,11 +70,49 @@ struct DepthStencilState {
     bool StencilEnable;
 };
 
+inline DepthStencilState DefaultDepthStencilState() noexcept {
+    return {
+        .Format = TextureFormat::D24_UNORM_S8_UINT,
+        .DepthCompare = CompareFunction::Less,
+        .Stencil = {
+            .Front = {
+                .Compare = CompareFunction::Always,
+                .FailOp = StencilOperation::Keep,
+                .DepthFailOp = StencilOperation::Keep,
+                .PassOp = StencilOperation::Keep,
+            },
+            .Back = {
+                .Compare = CompareFunction::Always,
+                .FailOp = StencilOperation::Keep,
+                .DepthFailOp = StencilOperation::Keep,
+                .PassOp = StencilOperation::Keep,
+            },
+            .ReadMask = 0xFF,
+            .WriteMask = 0xFF,
+        },
+        .DepthBias = {
+            .Constant = 0,
+            .SlopScale = 0.0f,
+            .Clamp = 0.0f,
+        },
+        .DepthWriteEnable = true,
+        .StencilEnable = false,
+    };
+}
+
 struct MultiSampleState {
     uint32_t Count;
     uint64_t Mask;
     bool AlphaToCoverageEnable;
 };
+
+inline MultiSampleState DefaultMultiSampleState() noexcept {
+    return {
+        .Count = 1,
+        .Mask = 0xFFFFFFFF,
+        .AlphaToCoverageEnable = false,
+    };
+}
 
 struct BlendComponent {
     BlendFactor Src;
@@ -81,6 +131,26 @@ struct ColorTargetState {
     ColorWrites WriteMask;
     bool BlendEnable;
 };
+
+inline ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept {
+    return {
+        .Format = format,
+        .Blend = {
+            .Color = {
+                .Src = BlendFactor::One,
+                .Dst = BlendFactor::Zero,
+                .Op = BlendOperation::Add,
+            },
+            .Alpha = {
+                .Src = BlendFactor::One,
+                .Dst = BlendFactor::Zero,
+                .Op = BlendOperation::Add,
+            },
+        },
+        .WriteMask = ToFlag(ColorWrite::All),
+        .BlendEnable = false,
+    };
+}
 
 class GraphicsPipelineStateDescriptor {
 public:

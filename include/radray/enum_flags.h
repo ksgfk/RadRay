@@ -41,7 +41,7 @@ public:
         return *this;
     }
 
-    underlying_type value() const noexcept { return _value; }
+    constexpr underlying_type value() const noexcept { return _value; }
 
     friend constexpr bool HasFlag(EnumFlags that, enum_type l) noexcept {
         return (that._value & static_cast<underlying_type>(l)) == static_cast<underlying_type>(l);
