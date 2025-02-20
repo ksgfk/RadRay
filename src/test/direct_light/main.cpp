@@ -250,7 +250,7 @@ public:
                              ResourceUsage::Default,
                              ToFlag(ResourceState::IndexBuffer),
                              ToFlag(ResourceMemoryTip::None),
-                             "cube_vb")
+                             "cube_ib")
                       .Unwrap();
 
         auto uploadVb = _device->CreateBuffer(
@@ -412,7 +412,17 @@ public:
                 {rt,
                  ToFlag(ResourceState::Present),
                  ToFlag(ResourceState::RenderTarget),
-                 0, 0, false}};
+                 0,
+                 0,
+                 false},
+                {
+                    _depthTex.get(),
+                    ToFlag(ResourceState::Common),
+                    ToFlag(ResourceState::DepthWrite),
+                    0,
+                    0,
+                    false,
+                }};
             ResourceBarriers rb{{}, barriers};
             _cmdBuffer->ResourceBarrier(rb);
         }
@@ -443,7 +453,31 @@ public:
         pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);
         pass->DrawIndexed(_cubeIbCount, 0, 0);
         _cmdBuffer->EndRenderPass(std::move(pass));
+        {
+            TextureBarrier barriers[] = {
+                {rt,
+                 ToFlag(ResourceState::RenderTarget),
+                 ToFlag(ResourceState::Present),
+                 0,
+                 0,
+                 false},
+                {
+                    _depthTex.get(),
+                    ToFlag(ResourceState::DepthWrite),
+                    ToFlag(ResourceState::Common),
+                    0,
+                    0,
+                    false,
+                }};
+            ResourceBarriers rb{{}, barriers};
+            _cmdBuffer->ResourceBarrier(rb);
+        }
         _cmdBuffer->End();
+        CommandBuffer* t[] = {_cmdBuffer.get()};
+        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+        cmdQueue->Submit(t, Nullable<Fence>{});
+        _swapchain->Present();
+        cmdQueue->Wait();
     }
 };
 

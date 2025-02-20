@@ -78,17 +78,17 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
             data->indexSize = indices.size() * sizeof(uint16_t);
             data->indexData = radray::make_unique<byte[]>(data->indexSize);
             data->indexCount = (uint32_t)indices.size();
-            std::memcpy(data->indexData.get(), indices.data(), data->indexSize);
-        } else if (positions.size() <= std::numeric_limits<uint32_t>::max()) {
-            data->indexType = VertexIndexType::UInt32;
-            data->indexSize = indices.size() * sizeof(uint32_t);
-            data->indexData = radray::make_unique<byte[]>(data->indexSize);
-            data->indexCount = (uint32_t)indices.size();
             uint16_t* target = std::launder(reinterpret_cast<uint16_t*>(data->indexData.get()));
             for (auto&& i : indices) {
                 *target = static_cast<uint16_t>(i);
                 target++;
             }
+        } else if (positions.size() <= std::numeric_limits<uint32_t>::max()) {
+            data->indexType = VertexIndexType::UInt32;
+            data->indexSize = indices.size() * sizeof(uint32_t);
+            data->indexData = radray::make_unique<byte[]>(data->indexSize);
+            data->indexCount = (uint32_t)indices.size();
+            std::memcpy(data->indexData.get(), indices.data(), data->indexSize);
         } else {
             RADRAY_ABORT("too large mesh {}", positions.size());
         }
