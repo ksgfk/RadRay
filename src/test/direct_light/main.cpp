@@ -25,6 +25,7 @@ constexpr auto WIN_HEIGHT = 720;
 
 struct PreObject {
     Eigen::Matrix4f mvp;
+    Eigen::Matrix4f model;
 };
 
 class TestApp1 {
@@ -349,6 +350,7 @@ public:
 
     shared_ptr<Texture> _depthTex;
     shared_ptr<TextureView> _depthView;
+
     shared_ptr<Buffer> _cubeVb;
     VertexBufferView _cubeVbv;
     shared_ptr<Buffer> _cubeIb;
@@ -357,6 +359,7 @@ public:
     shared_ptr<Buffer> _cubeCb;
     void* _cubeCbMapped;
     Eigen::Vector3f _cubePos;
+
     shared_ptr<RootSignature> _rootSig;
     shared_ptr<GraphicsPipelineState> _pso;
 
@@ -446,8 +449,11 @@ public:
         pass->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
         pass->BindRootSignature(_rootSig.get());
         pass->BindPipelineState(_pso.get());
-        Eigen::Matrix4f mvp = _proj * _view;
-        pass->PushConstants(_rootSig.get(), 0, &mvp, sizeof(mvp));
+        Eigen::Affine3f m{Eigen::Translation3f(_cubePos)};
+        PreObject preObj{};
+        preObj.model = m.matrix();
+        preObj.mvp = _proj * _view * preObj.model;
+        pass->PushConstants(_rootSig.get(), 0, &preObj, sizeof(preObj));
         VertexBufferView vbv[] = {_cubeVbv};
         pass->BindVertexBuffers(vbv);
         pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);
