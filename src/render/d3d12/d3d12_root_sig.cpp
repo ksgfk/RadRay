@@ -27,13 +27,13 @@ radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t s
         layouts.reserve(descTable._elems.size());
         for (size_t i = 0; i < descTable._elems.size(); i++) {
             const auto& elem = descTable._elems[i];
-            DescriptorLayout layout;
-            layout.Name = elem._name;
-            layout.Set = elem._space;
-            layout.Slot = i;
-            layout.Type = elem._type;
-            layout.Count = elem._count;
-            layouts.push_back(layout);
+            layouts.emplace_back(DescriptorLayout{
+                elem._name,
+                elem._space,
+                (uint32_t)i,
+                elem._type,
+                elem._count,
+                elem._cbSize});
         }
         return layouts;
     } else if (set < _resDescTables.size() + _samplerDescTables.size()) {
@@ -42,13 +42,13 @@ radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t s
         layouts.reserve(descTable._elems.size());
         for (size_t i = 0; i < descTable._elems.size(); i++) {
             const auto& elem = descTable._elems[i];
-            DescriptorLayout layout;
-            layout.Name = elem._name;
-            layout.Set = elem._space;
-            layout.Slot = i;
-            layout.Type = elem._type;
-            layout.Count = elem._count;
-            layouts.push_back(layout);
+            layouts.emplace_back(DescriptorLayout{
+                elem._name,
+                elem._space,
+                (uint32_t)i,
+                elem._type,
+                elem._count,
+                elem._cbSize});
         }
         return layouts;
     } else {
@@ -63,7 +63,7 @@ RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint
         return {};
     }
     const CBufferView& cbufferView = _cbufferViews[slot];
-    return RootSignatureConstantBufferSlotInfo{cbufferView._name, slot};
+    return RootSignatureConstantBufferSlotInfo{cbufferView._name, cbufferView._size, slot};
 }
 
 RootSignatureRootConstantSlotInfo RootSigD3D12::GetRootConstantSlotInfo(uint32_t slot) const noexcept {
@@ -72,7 +72,7 @@ RootSignatureRootConstantSlotInfo RootSigD3D12::GetRootConstantSlotInfo(uint32_t
         return {};
     }
     const RootConst& rootConst = _rootConsts[slot];
-    return RootSignatureRootConstantSlotInfo{rootConst._name, slot};
+    return RootSignatureRootConstantSlotInfo{rootConst._name, rootConst._num32BitValues * 4, slot};
 }
 
 static void DestroyGpuDescriptorHeapView(GpuDescriptorHeapView* v) noexcept {

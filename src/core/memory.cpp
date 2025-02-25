@@ -4,7 +4,6 @@
 #include <cstring>
 
 #include <radray/types.h>
-#include <radray/logger.h>
 
 namespace radray {
 
@@ -29,9 +28,9 @@ static void _MemoryFreeImpl(void* ptr) noexcept {
 #endif
 }
 
-Memory::Memory(size_t size) noexcept
-    : _ptr{nullptr},
-      _size(size) {
+Memory::Memory() noexcept : Memory(0) {}
+
+Memory::Memory(size_t size) noexcept : _ptr{nullptr}, _size{size} {
     if (_size > 0) {
         _ptr = _MemoryAllocImpl(_size);
     }
@@ -50,21 +49,40 @@ Memory::Memory(Memory&& other) noexcept : _ptr{other._ptr}, _size{other._size} {
 }
 
 Memory& Memory::operator=(const Memory& other) noexcept {
-    // TODO:
+    Memory tmp(other);
+    swap(*this, tmp);
     return *this;
 }
 
 Memory& Memory::operator=(Memory&& other) noexcept {
-    // TODO:
+    Memory tmp(std::move(other));
+    swap(*this, tmp);
     return *this;
 }
 
 Memory::~Memory() noexcept {
+    Destroy();
+}
+
+void Memory::Allocate(size_t size) noexcept {
+    if (_ptr) {
+        RADRAY_ABORT("Memory already allocated");
+        return;
+    }
+    _size = size;
+    if (_size > 0) {
+        _ptr = _MemoryAllocImpl(_size);
+    } else {
+        _ptr = nullptr;
+    }
+}
+
+void Memory::Destroy() noexcept {
     if (_ptr) {
         _MemoryFreeImpl(_ptr);
         _ptr = nullptr;
-        _size = 0;
     }
+    _size = 0;
 }
 
 }  // namespace radray

@@ -1,20 +1,31 @@
 #pragma once
 
 #include <radray/render/common.h>
-#include <radray/render/descriptor_set.h>
 
 namespace radray::render {
 
 class RootSignatureConstantBufferSlotInfo {
 public:
     radray::string Name;
+    size_t Size;
     uint32_t Slot;
 };
 
 class RootSignatureRootConstantSlotInfo {
 public:
     radray::string Name;
+    size_t Size;
     uint32_t Slot;
+};
+
+class DescriptorLayout {
+public:
+    radray::string Name;
+    uint32_t Set;
+    uint32_t Slot;
+    ShaderResourceType Type;
+    uint32_t Count;
+    size_t CbSize;
 };
 
 class RootSignature : public RenderBase {

@@ -20,6 +20,7 @@ public:
     UINT _rootParamIndex;
     uint32_t _point;
     uint32_t _space;
+    size_t _size;
 };
 class DescElem {
 public:
@@ -28,6 +29,7 @@ public:
     uint32_t _point;
     uint32_t _space;
     uint32_t _count;
+    size_t _cbSize;
 };
 class DescTable {
 public:

@@ -198,7 +198,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
         shaderStages |= dxil->Stage;
         const auto& refl = dxil->_refl;
         for (const DxilReflection::BindResource& j : refl.Binds) {
-            StageResource res{j, ShaderStages{dxil->Stage}};
+            StageResource res{j, ToFlag(dxil->Stage)};
             if (j.Type == ShaderResourceType::Sampler) {
                 const auto& stat = refl.StaticSamplers;
                 auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v.Name; });
@@ -361,7 +361,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
     }
     radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
     radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
-    auto&& setupTableRes = [&rootParmas, &descRanges](
+    auto&& setupTableRes = [&rootParmas, &descRanges, &cbufferMap](
                                const radray::unordered_set<uint32_t>& spaces,
                                const radray::vector<StageResource>& res,
                                radray::vector<DescTable>& tbls) noexcept {
@@ -380,7 +380,17 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                         r.Space,
                         r.Type == ShaderResourceType::Sampler ? D3D12_DESCRIPTOR_RANGE_FLAG_NONE : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
                     tableStages |= r.Stages;
-                    tbl._elems.emplace_back(DescElem{r.Name, r.Type, r.BindPoint, r.Space, r.BindCount});
+                    auto& de = tbl._elems.emplace_back(DescElem{
+                        r.Name,
+                        r.Type,
+                        r.BindPoint,
+                        r.Space,
+                        r.BindCount,
+                        0});
+                    if (r.Type == ShaderResourceType::CBuffer) {
+                        const DxilReflection::CBuffer& cbuffer = cbufferMap.find(r.Name)->second;
+                        de._cbSize = cbuffer.Size;
+                    }
                 }
             }
             UINT rootParamIndex = (UINT)rootParmas.size();
@@ -433,7 +443,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
                     i->Name,
                     rootParamIndex,
                     i->BindPoint,
-                    i->Space});
+                    i->Space,
+                    cbuffer.Size});
             }
         }
         setupTableRes(resourceSpaces, mergedResources, resDescTables);
