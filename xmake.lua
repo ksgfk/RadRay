@@ -28,7 +28,7 @@ option("enable_dxc")
 option_end()
 option("enable_spirv_cross")
     set_values(true, false)
-    set_default(true)
+    set_default(false)
     set_showmenu(true)
 option_end()
 
@@ -95,7 +95,7 @@ if get_config("enable_d3d12") then
     add_requires("d3d12-memory-allocator_radray v2.0.1", {debug = is_mode("debug")})
 end
 if get_config("enable_dxc") then
-    add_requires("directxshadercompiler_radray v1.8.2407")
+    add_requires("directxshadercompiler_radray v1.8.2502")
 end
 if get_config("enable_metal") then 
     add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
