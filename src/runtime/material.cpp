@@ -2,11 +2,10 @@
 
 namespace radray::runtime {
 
-Material::Material(radray::shared_ptr<render::RootSignature> rootSig) noexcept
-    : _rootSig(std::move(rootSig)) {
+Material::Material(render::RootSignature* rootSig) noexcept {
     size_t cbSize = 0;
-    for (uint32_t i = 0, all = _rootSig->GetRootConstantCount(); i < all; i++) {
-        render::RootSignatureRootConstantSlotInfo slotInfo = _rootSig->GetRootConstantSlotInfo(i);
+    for (uint32_t i = 0, all = rootSig->GetRootConstantCount(); i < all; i++) {
+        render::RootSignatureRootConstantSlotInfo slotInfo = rootSig->GetRootConstantSlotInfo(i);
         auto [exist, isInsert] = _slots.try_emplace(slotInfo.Name, RootConstSlot{slotInfo, 0});
         if (isInsert) {
             auto& rcSlot = std::get<RootConstSlot>(exist->second);
@@ -16,8 +15,8 @@ Material::Material(radray::shared_ptr<render::RootSignature> rootSig) noexcept
             RADRAY_ERR_LOG("Material exist root constant slot: {}", exist->first);
         }
     }
-    for (uint32_t i = 0, all = _rootSig->GetConstantBufferSlotCount(); i < all; i++) {
-        render::RootSignatureConstantBufferSlotInfo slotInfo = _rootSig->GetConstantBufferSlotInfo(i);
+    for (uint32_t i = 0, all = rootSig->GetConstantBufferSlotCount(); i < all; i++) {
+        render::RootSignatureConstantBufferSlotInfo slotInfo = rootSig->GetConstantBufferSlotInfo(i);
         auto [exist, isInsert] = _slots.try_emplace(slotInfo.Name, CBufferSlot{slotInfo, 0});
         if (isInsert) {
             auto& cbSlot = std::get<CBufferSlot>(exist->second);
@@ -27,11 +26,16 @@ Material::Material(radray::shared_ptr<render::RootSignature> rootSig) noexcept
             RADRAY_ERR_LOG("Material exist constant buffer slot: {}", exist->first);
         }
     }
-    for (uint32_t i = 0, all = _rootSig->GetDescriptorSetCount(); i < all; i++) {
-        radray::vector<render::DescriptorLayout> descLayouts = _rootSig->GetDescriptorSetLayout(i);
-        for (size_t j = 0; j < descLayouts.size(); j++) {
-            const render::DescriptorLayout& descLayout = descLayouts[j];
-            auto [exist, isInsert] = _slots.try_emplace(descLayout.Name, DescriptorLayoutIndex{i, j, 0});
+    for (uint32_t i = 0, all = rootSig->GetDescriptorSetCount(); i < all; i++) {
+        radray::vector<render::DescriptorLayout> descLayouts = rootSig->GetDescriptorSetLayout(i);
+        for (render::DescriptorLayout& descLayout : descLayouts) {
+            size_t v = _descLayouts.size();
+            auto [exist, isInsert] = _slots.try_emplace(
+                descLayout.Name,
+                DescriptorLayoutIndex{
+                    v,
+                    0,
+                    {descLayout.Count, weak_ptr<render::ResourceView>{}}});
             if (isInsert) {
                 auto& descIndex = std::get<DescriptorLayoutIndex>(exist->second);
                 if (descLayout.Type == render::ShaderResourceType::CBuffer) {
@@ -41,9 +45,10 @@ Material::Material(radray::shared_ptr<render::RootSignature> rootSig) noexcept
             } else {
                 RADRAY_ERR_LOG("Material exist descriptor slot: {}", exist->first);
             }
+            _descLayouts.emplace_back(std::move(descLayout));
         }
-        _descLayouts.emplace_back(std::move(descLayouts));
     }
+    _descLayouts.shrink_to_fit();
     _cbCache.Allocate(cbSize);
 }
 
@@ -64,7 +69,11 @@ void Material::SetConstantBufferData(std::string_view name, uint32_t index, std:
             };
             using T = std::decay_t<decltype(v)>;
             if constexpr (std::is_same_v<T, DescriptorLayoutIndex>) {
-                render::DescriptorLayout& layout = _descLayouts[v.Dim1][v.Dim2];
+                render::DescriptorLayout& layout = _descLayouts[v.Index];
+                if (index >= layout.Count) {
+                    RADRAY_ERR_LOG("Material value {} index out of range", layout.Name);
+                    return;
+                }
                 if (layout.Type == render::ShaderResourceType::CBuffer) {
                     size_t start = v.CbCacheStart + layout.CbSize * index;
                     std::span<byte> dst = _cbCache.GetSpan(start, layout.CbSize);
@@ -80,10 +89,27 @@ void Material::SetConstantBufferData(std::string_view name, uint32_t index, std:
         iter->second);
 }
 
-void Material::SetBuffer(std::string_view name, uint32_t index, render::BufferView* bv) noexcept {
+void Material::SetResource(std::string_view name, uint32_t index, shared_ptr<render::ResourceView> rv) noexcept {
+    auto iter = _slots.find(name);
+    if (iter == _slots.end()) {
+        RADRAY_ERR_LOG("Material not found slot: {}", name);
+        return;
+    }
+    if (std::holds_alternative<DescriptorLayoutIndex>(iter->second)) {
+        DescriptorLayoutIndex& v = std::get<DescriptorLayoutIndex>(iter->second);
+        const render::DescriptorLayout& layout = _descLayouts[v.Index];
+        if (index >= v.Views.size()) {
+            RADRAY_ERR_LOG("Material value {} index out of range", layout.Name);
+            return;
+        }
+        v.Views[index] = rv;
+    } else {
+        RADRAY_ERR_LOG("Material value {} is not descriptor", name);
+    }
 }
 
-void Material::SetTexture(std::string_view name, uint32_t index, render::TextureView* tv) noexcept {
+void Material::UploadConstants(render::CommandEncoder* encoder, render::RootSignature* rootSig) noexcept {
+
 }
 
 }  // namespace radray::runtime

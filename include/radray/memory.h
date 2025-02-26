@@ -4,8 +4,6 @@
 #include <utility>
 #include <span>
 
-#include <radray/logger.h>
-
 namespace radray {
 
 class Memory {
@@ -25,17 +23,7 @@ public:
 
     void* GetData() const noexcept { return _ptr; }
     size_t GetSize() const noexcept { return _size; }
-    std::span<std::byte> GetSpan(size_t start, size_t count) const noexcept {
-        return GetSpan<std::byte>(start, count);
-    }
-    template <class T>
-    std::span<T> GetSpan(size_t start, size_t count) const noexcept {
-        constexpr size_t size = sizeof(T);
-        const size_t x = start * size;
-        const size_t y = count * size;
-        RADRAY_ASSERT((x + y) <= _size);
-        return std::span<T>{reinterpret_cast<T*>(_ptr) + x, y};
-    }
+    std::span<std::byte> GetSpan(size_t start, size_t count) const noexcept;
 
     void Allocate(size_t size) noexcept;
     void Destroy() noexcept;

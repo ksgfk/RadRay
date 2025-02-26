@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include <radray/types.h>
+#include <radray/logger.h>
 
 namespace radray {
 
@@ -62,6 +63,11 @@ Memory& Memory::operator=(Memory&& other) noexcept {
 
 Memory::~Memory() noexcept {
     Destroy();
+}
+
+std::span<std::byte> Memory::GetSpan(size_t start, size_t count) const noexcept {
+    RADRAY_ASSERT((start + count) <= _size);
+    return {reinterpret_cast<std::byte*>(_ptr) + start, count};
 }
 
 void Memory::Allocate(size_t size) noexcept {

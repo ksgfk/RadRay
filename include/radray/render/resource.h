@@ -28,12 +28,17 @@ public:
     virtual void Unmap() noexcept = 0;
 };
 
-class BufferView : public RenderBase {
+class ResourceView : public RenderBase {
+public:
+    ~ResourceView() noexcept override = default;
+};
+
+class BufferView : public ResourceView {
 public:
     ~BufferView() noexcept override = default;
 };
 
-class TextureView : public RenderBase {
+class TextureView : public ResourceView {
 public:
     ~TextureView() noexcept override = default;
 };

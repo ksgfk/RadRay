@@ -4,22 +4,21 @@
 
 #include <radray/types.h>
 #include <radray/memory.h>
-#include <radray/render/device.h>
 #include <radray/render/root_signature.h>
-#include <radray/render/pipeline_state.h>
 #include <radray/render/resource.h>
+#include <radray/render/command_encoder.h>
 
 namespace radray::runtime {
 
 class Material {
 public:
-    Material(shared_ptr<render::RootSignature> rootSig) noexcept;
+    Material(render::RootSignature* rootSig) noexcept;
 
     void SetConstantBufferData(std::string_view name, uint32_t index, std::span<const byte> data) noexcept;
 
-    void SetBuffer(std::string_view name, uint32_t index, render::BufferView* bv) noexcept;
+    void SetResource(std::string_view name, uint32_t index, shared_ptr<render::ResourceView> rv) noexcept;
 
-    void SetTexture(std::string_view name, uint32_t index, render::TextureView* tv) noexcept;
+    void UploadConstants(render::CommandEncoder* encoder, render::RootSignature* rootSig) noexcept;
 
 private:
     struct RootConstSlot {
@@ -33,16 +32,15 @@ private:
     };
 
     struct DescriptorLayoutIndex {
-        size_t Dim1;
-        size_t Dim2;
+        size_t Index;
         size_t CbCacheStart;
+        std::vector<weak_ptr<render::ResourceView>> Views;
     };
 
     using Slot = std::variant<RootConstSlot, CBufferSlot, DescriptorLayoutIndex>;
 
-    shared_ptr<render::RootSignature> _rootSig;
     unordered_map<string, Slot, StringHash, std::equal_to<>> _slots;
-    vector<vector<render::DescriptorLayout>> _descLayouts;
+    vector<render::DescriptorLayout> _descLayouts;
     Memory _cbCache;
 };
 
