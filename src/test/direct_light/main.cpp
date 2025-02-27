@@ -395,11 +395,11 @@ public:
 
     void UpdateCamera() {
         _camCtrl.Orbit(_camPos, _camRot);
-        if (_camCtrl.canOrbit) {
-            Eigen::Matrix3f rotMat = _camRot.toRotationMatrix();
-            Eigen::Vector3f radian = rotMat.eulerAngles(2, 0, 1);
-            RADRAY_INFO_LOG("x:{} ,y:{} ,z:{}", Degree(radian.x()), Degree(radian.y()), Degree(radian.z()));
-        }
+        // if (_camCtrl.canOrbit) {
+        //     Eigen::Matrix3f rotMat = _camRot.toRotationMatrix();
+        //     Eigen::Vector3f radian = rotMat.eulerAngles(2, 0, 1);
+        //     RADRAY_INFO_LOG("x:{} ,y:{} ,z:{}", Degree(radian.x()), Degree(radian.y()), Degree(radian.z()));
+        // }
         Eigen::Vector3f front = (_camRot * Eigen::Vector3f{0, 0, 1}).normalized();
         Eigen::Vector3f up = (_camRot * Eigen::Vector3f{0, 1, 0}).normalized();
         _view = LookAtFrontLH(_camPos, front, up);

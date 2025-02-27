@@ -108,8 +108,4 @@ void Material::SetResource(std::string_view name, uint32_t index, shared_ptr<ren
     }
 }
 
-void Material::UploadConstants(render::CommandEncoder* encoder, render::RootSignature* rootSig) noexcept {
-
-}
-
 }  // namespace radray::runtime

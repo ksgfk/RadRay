@@ -70,3 +70,7 @@ function copy_dxil_dll(target)
         end
     end
 end
+
+function enable_lto(target)
+    target:set("policy", "build.optimization.lto", true)
+end

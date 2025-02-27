@@ -4,9 +4,7 @@
 
 #include <radray/types.h>
 #include <radray/memory.h>
-#include <radray/render/root_signature.h>
 #include <radray/render/resource.h>
-#include <radray/render/command_encoder.h>
 
 namespace radray::runtime {
 
@@ -17,8 +15,6 @@ public:
     void SetConstantBufferData(std::string_view name, uint32_t index, std::span<const byte> data) noexcept;
 
     void SetResource(std::string_view name, uint32_t index, shared_ptr<render::ResourceView> rv) noexcept;
-
-    void UploadConstants(render::CommandEncoder* encoder, render::RootSignature* rootSig) noexcept;
 
 private:
     struct RootConstSlot {
