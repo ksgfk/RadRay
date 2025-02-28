@@ -1,6 +1,8 @@
 #include "d3d12_root_sig.h"
 
 #include "d3d12_descriptor_heap.h"
+#include "d3d12_buffer.h"
+#include "d3d12_texture.h"
 
 namespace radray::render::d3d12 {
 
@@ -98,6 +100,18 @@ bool GpuDescriptorHeapView::IsValid() const noexcept {
 
 void GpuDescriptorHeapView::Destroy() noexcept {
     DestroyGpuDescriptorHeapView(this);
+}
+
+void GpuDescriptorHeapView::SetResources(std::span<ResourceView*> views) noexcept {
+    for (ResourceView* rv : views) {
+        auto type = rv->GetViewType();
+        if (type == ResourceView::Type::Buffer) {
+            // TODO:
+            // BufferViewD3D12* bv = static_cast<BufferViewD3D12*>(rv);
+            // const auto& desc = bv->_desc;
+            // desc.heap->CopyTo(desc.heapIndex, 1, _shaderResHeap.Value(), _shaderResStart);
+        }
+    }
 }
 
 }  // namespace radray::render::d3d12

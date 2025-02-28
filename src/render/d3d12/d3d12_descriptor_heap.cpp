@@ -152,6 +152,14 @@ void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept
     _device->CreateSampler(&desc, HandleCpu(index));
 }
 
+void DescriptorHeap::CopyTo(UINT start, UINT count, DescriptorHeap* dst, UINT dstStart) noexcept {
+    _device->CopyDescriptorsSimple(
+        count,
+        dst->HandleCpu(dstStart),
+        HandleCpu(start),
+        _desc.Type);
+}
+
 void DescriptorHeap::ExpandCapacity(UINT need) noexcept {
     if (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) {
         RADRAY_ABORT("DescriptorHeap cannot expand GPU visible heap");

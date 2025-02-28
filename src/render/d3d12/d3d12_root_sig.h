@@ -85,7 +85,10 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
+    void SetResources(std::span<ResourceView*> views) noexcept override;
+
 public:
+    // TODO: split
     Nullable<DescriptorHeap> _shaderResHeap;
     Nullable<DescriptorHeap> _samplerHeap;
     uint32_t _shaderResStart;

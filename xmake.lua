@@ -85,6 +85,7 @@ add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
     add_requires("mimalloc_radray v2.1.9", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
+add_requires("xxhash v0.8.3", {debug = is_mode("debug"), configs = {shared = false, dispatch = true}})
 add_requires("glfw 3.4", {
     debug = is_mode("debug"),
     configs = { 

@@ -276,9 +276,10 @@ struct StringHash {
     using hash_type = std::hash<std::string_view>;
     using is_transparent = void;
 
-    std::size_t operator()(const char* str) const { return hash_type{}(str); }
-    std::size_t operator()(std::string_view str) const { return hash_type{}(str); }
-    std::size_t operator()(std::string const& str) const { return hash_type{}(str); }
+    size_t operator()(const char* str) const noexcept { return hash_type{}(str); }
+    size_t operator()(std::string_view str) const noexcept { return hash_type{}(str); }
+    template <class Char, class Traits, class Alloc>
+    size_t operator()(std::basic_string<Char, Traits, Alloc> const& str) const noexcept { return hash_type{}(str); }
 };
 
 std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
@@ -302,5 +303,7 @@ radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
 #endif
 #endif
 }
+
+size_t HashData(const void* data, size_t size) noexcept;
 
 }  // namespace radray

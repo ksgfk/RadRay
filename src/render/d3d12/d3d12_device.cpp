@@ -962,7 +962,7 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
         count,
         offset,
         stride};
-    auto result = std::make_shared<BufferViewD3D12>(bv);
+    auto result = radray::make_shared<BufferViewD3D12>(bv);
     guard.Dismiss();
     return result;
 }

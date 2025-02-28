@@ -4,6 +4,8 @@
 #include <limits>
 #include <bit>
 
+#include <xxHash.h>
+
 #include <radray/platform.h>
 #include <radray/logger.h>
 
@@ -129,6 +131,16 @@ radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept {
         result[quo] = last;
     }
     return result;
+}
+
+size_t HashData(const void* data, size_t size) noexcept {
+    if constexpr (sizeof(size_t) == sizeof(uint32_t)) {
+        return XXH32(data, size, 0);
+    } else if constexpr (sizeof(size_t) == sizeof(uint64_t)) {
+        return XXH64(data, size, 0);
+    } else {
+        static_assert(sizeof(size_t) == sizeof(uint32_t) || sizeof(size_t) == sizeof(uint64_t), "unknown size_t size");
+    }
 }
 
 }  // namespace radray
