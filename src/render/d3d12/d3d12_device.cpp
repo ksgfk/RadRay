@@ -167,7 +167,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
         shaderStages |= dxil->Stage;
         const auto& refl = dxil->_refl;
         for (const DxilReflection::BindResource& j : refl.Binds) {
-            StageResource res{j, ToFlag(dxil->Stage)};
+            StageResource res{j, dxil->Stage};
             if (j.Type == ShaderResourceType::Sampler) {
                 const auto& stat = refl.StaticSamplers;
                 auto iter = std::find_if(stat.begin(), stat.end(), [&](auto&& v) noexcept { return j.Name == v.Name; });
@@ -456,10 +456,10 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
             D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
             D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
             D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
-        if (!HasFlag(shaderStages, ShaderStage::Vertex)) {
+        if (!shaderStages.HasFlag(ShaderStage::Vertex)) {
             flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
         }
-        if (!HasFlag(shaderStages, ShaderStage::Pixel)) {
+        if (!shaderStages.HasFlag(ShaderStage::Pixel)) {
             flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
         }
         rcDesc.Flags = flag;
@@ -735,7 +735,7 @@ Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(usage);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
-    if (HasFlag(tips, ResourceMemoryTip::Dedicated)) {
+    if (tips.HasFlag(ResourceMemoryTip::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> buffer;
@@ -838,7 +838,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     }
     D3D12_RESOURCE_STATES startState = MapTypeResStates(initState);
-    if (HasFlag(initState, ResourceState::CopyDestination)) {
+    if (initState.HasFlag(ResourceState::CopyDestination)) {
         startState = D3D12_RESOURCE_STATE_COMMON;
     }
     D3D12_CLEAR_VALUE clear{};
@@ -858,7 +858,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     }
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (HasFlag(tips, ResourceMemoryTip::Dedicated)) {
+    if (tips.HasFlag(ResourceMemoryTip::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> texture;

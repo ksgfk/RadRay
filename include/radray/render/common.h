@@ -99,7 +99,6 @@ enum class ShaderStage : uint32_t {
     Pixel = 0x2,
     Compute = 0x4
 };
-using ShaderStages = EnumFlags<ShaderStage>;
 
 enum class ShaderBlobCategory {
     DXIL,
@@ -270,7 +269,6 @@ enum class ColorWrite : uint32_t {
     Color = Red | Green | Blue,
     All = Red | Green | Blue | Alpha
 };
-using ColorWrites = EnumFlags<ColorWrite>;
 
 enum class ResourceType {
     UNKNOWN,
@@ -311,7 +309,6 @@ enum class ResourceState : uint32_t {
     AccelerationStructure = 0x800,
     Present = 0x1000
 };
-using ResourceStates = EnumFlags<ResourceState>;
 
 enum class ResourceUsage {
     Default,
@@ -323,7 +320,6 @@ enum class ResourceMemoryTip : uint32_t {
     None = 0x0,
     Dedicated = 0x1
 };
-using ResourceMemoryTips = EnumFlags<ResourceMemoryTip>;
 
 enum class LoadAction {
     DontCare,
@@ -388,18 +384,22 @@ std::string_view format_as(TextureDimension v) noexcept;
 
 }  // namespace radray::render
 
-namespace radray::detail {
+namespace radray {
 
 template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
+using ShaderStages = EnumFlags<render::ShaderStage>;
 
 template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
+using ColorWrites = EnumFlags<render::ColorWrite>;
 
 template <>
 struct is_flags<render::ResourceState> : public std::true_type {};
+using ResourceStates = EnumFlags<render::ResourceState>;
 
 template <>
 struct is_flags<render::ResourceMemoryTip> : public std::true_type {};
+using ResourceMemoryTips = EnumFlags<render::ResourceMemoryTip>;
 
-}  // namespace radray::detail
+}  // namespace radray

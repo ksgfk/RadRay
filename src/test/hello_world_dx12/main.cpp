@@ -67,7 +67,7 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
          {BlendFactor::One,
           BlendFactor::Zero,
           BlendOperation::Add}},
-        ToFlag(ColorWrite::All),
+        ColorWrite::All,
         false}},
     false};
 
@@ -246,8 +246,8 @@ public:
                 sizeof(vertices),
                 ResourceType::Buffer,
                 ResourceUsage::Upload,
-                ToFlag(ResourceState::GenericRead),
-                ToFlag(ResourceMemoryTip::None));
+                ResourceState::GenericRead,
+                ResourceMemoryTip::None);
             {
                 auto ptr = upload->Map(0, upload->GetSize());
                 std::memcpy(ptr.Value(), vertices, sizeof(vertices));
@@ -257,15 +257,15 @@ public:
                               sizeof(vertices),
                               ResourceType::Buffer,
                               ResourceUsage::Default,
-                              ToFlag(ResourceState::Common),
-                              ToFlag(ResourceMemoryTip::None))
+                              ResourceState::Common,
+                              ResourceMemoryTip::None)
                         .Unwrap();
             cmdBuffer->Begin();
             {
                 BufferBarrier barriers[] = {
                     {verts.get(),
-                     ToFlag(ResourceState::Common),
-                     ToFlag(ResourceState::CopyDestination)}};
+                     ResourceState::Common,
+                     ResourceState::CopyDestination}};
                 ResourceBarriers rb{barriers, {}};
                 cmdBuffer->ResourceBarrier(rb);
             }
@@ -273,8 +273,8 @@ public:
             {
                 BufferBarrier barriers[] = {
                     {verts.get(),
-                     ToFlag(ResourceState::CopyDestination),
-                     ToFlag(ResourceState::Common)}};
+                     ResourceState::CopyDestination,
+                     ResourceState::Common}};
                 ResourceBarriers rb{barriers, {}};
                 cmdBuffer->ResourceBarrier(rb);
             }
@@ -297,8 +297,8 @@ public:
             {
                 TextureBarrier barriers[] = {
                     {rt,
-                     ToFlag(ResourceState::Present),
-                     ToFlag(ResourceState::RenderTarget),
+                     ResourceState::Present,
+                     ResourceState::RenderTarget,
                      0, 0, false}};
                 ResourceBarriers rb{{}, barriers};
                 cmdBuffer->ResourceBarrier(rb);
@@ -330,8 +330,8 @@ public:
             {
                 TextureBarrier barriers[] = {
                     {rt,
-                     ToFlag(ResourceState::RenderTarget),
-                     ToFlag(ResourceState::Present),
+                     ResourceState::RenderTarget,
+                     ResourceState::Present,
                      0, 0, false}};
                 ResourceBarriers rb{{}, barriers};
                 cmdBuffer->ResourceBarrier(rb);

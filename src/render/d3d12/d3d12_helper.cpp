@@ -269,11 +269,11 @@ D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
     }
     D3D12_SHADER_VISIBILITY res = D3D12_SHADER_VISIBILITY_ALL;
     uint32_t stageCount = 0;
-    if (HasFlag(v, ShaderStage::Vertex)) {
+    if (v.HasFlag(ShaderStage::Vertex)) {
         res = D3D12_SHADER_VISIBILITY_VERTEX;
         ++stageCount;
     }
-    if (HasFlag(v, ShaderStage::Pixel)) {
+    if (v.HasFlag(ShaderStage::Pixel)) {
         res = D3D12_SHADER_VISIBILITY_PIXEL;
         ++stageCount;
     }
@@ -591,22 +591,22 @@ ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept {
 
 D3D12_RESOURCE_STATES MapTypeResStates(ResourceStates v) noexcept {
     D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
-    if (HasFlag(v, ResourceState::VertexAndConstantBuffer)) result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    if (HasFlag(v, ResourceState::IndexBuffer)) result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
-    if (HasFlag(v, ResourceState::RenderTarget)) result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
-    if (HasFlag(v, ResourceState::UnorderedAccess)) result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    if (HasFlag(v, ResourceState::DepthWrite)) result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    if (HasFlag(v, ResourceState::DepthRead)) result |= D3D12_RESOURCE_STATE_DEPTH_READ;
-    if (HasFlag(v, ResourceState::ShaderResource)) {
+    if (v.HasFlag(ResourceState::VertexAndConstantBuffer)) result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    if (v.HasFlag(ResourceState::IndexBuffer)) result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
+    if (v.HasFlag(ResourceState::RenderTarget)) result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    if (v.HasFlag(ResourceState::UnorderedAccess)) result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (v.HasFlag(ResourceState::DepthWrite)) result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    if (v.HasFlag(ResourceState::DepthRead)) result |= D3D12_RESOURCE_STATE_DEPTH_READ;
+    if (v.HasFlag(ResourceState::ShaderResource)) {
         result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         result |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
-    if (HasFlag(v, ResourceState::StreamOut)) result |= D3D12_RESOURCE_STATE_STREAM_OUT;
-    if (HasFlag(v, ResourceState::IndirectArgument)) result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
-    if (HasFlag(v, ResourceState::CopyDestination)) result |= D3D12_RESOURCE_STATE_COPY_DEST;
-    if (HasFlag(v, ResourceState::CopySource)) result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
-    if (HasFlag(v, ResourceState::AccelerationStructure)) result |= D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
-    if (HasFlag(v, ResourceState::GenericRead)) result |= D3D12_RESOURCE_STATE_GENERIC_READ;
+    if (v.HasFlag(ResourceState::StreamOut)) result |= D3D12_RESOURCE_STATE_STREAM_OUT;
+    if (v.HasFlag(ResourceState::IndirectArgument)) result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    if (v.HasFlag(ResourceState::CopyDestination)) result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    if (v.HasFlag(ResourceState::CopySource)) result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (v.HasFlag(ResourceState::AccelerationStructure)) result |= D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+    if (v.HasFlag(ResourceState::GenericRead)) result |= D3D12_RESOURCE_STATE_GENERIC_READ;
     return result;
 }
 

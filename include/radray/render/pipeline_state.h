@@ -147,7 +147,7 @@ inline ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept {
                 .Op = BlendOperation::Add,
             },
         },
-        .WriteMask = ToFlag(ColorWrite::All),
+        .WriteMask = ColorWrite::All,
         .BlendEnable = false,
     };
 }

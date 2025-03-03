@@ -90,8 +90,8 @@ public:
                                0,
                                DepthStencilClearValue{1.0f, 0},
                                ResourceType::DepthStencil,
-                               ToFlag(ResourceState::Common),
-                               ToFlag(ResourceMemoryTip::None))
+                               ResourceState::Common,
+                               ResourceMemoryTip::None)
                         .Unwrap();
         _depthView = _device->CreateTextureView(
                                 _depthTex.get(),
@@ -238,16 +238,16 @@ public:
                              vd.vertexSize,
                              ResourceType::Buffer,
                              ResourceUsage::Default,
-                             ToFlag(ResourceState::VertexAndConstantBuffer),
-                             ToFlag(ResourceMemoryTip::None),
+                             ResourceState::VertexAndConstantBuffer,
+                             ResourceMemoryTip::None,
                              "cube_vb")
                       .Unwrap();
         _cubeIb = _device->CreateBuffer(
                              vd.indexSize,
                              ResourceType::Buffer,
                              ResourceUsage::Default,
-                             ToFlag(ResourceState::IndexBuffer),
-                             ToFlag(ResourceMemoryTip::None),
+                             ResourceState::IndexBuffer,
+                             ResourceMemoryTip::None,
                              "cube_ib")
                       .Unwrap();
 
@@ -255,8 +255,8 @@ public:
                                    vd.vertexSize,
                                    ResourceType::Buffer,
                                    ResourceUsage::Upload,
-                                   ToFlag(ResourceState::GenericRead),
-                                   ToFlag(ResourceMemoryTip::None))
+                                   ResourceState::GenericRead,
+                                   ResourceMemoryTip::None)
                             .Unwrap();
         {
             auto ptr = uploadVb->Map(0, uploadVb->GetSize()).Unwrap();
@@ -267,8 +267,8 @@ public:
                                    vd.indexSize,
                                    ResourceType::Buffer,
                                    ResourceUsage::Upload,
-                                   ToFlag(ResourceState::GenericRead),
-                                   ToFlag(ResourceMemoryTip::None))
+                                   ResourceState::GenericRead,
+                                   ResourceMemoryTip::None)
                             .Unwrap();
         {
             auto ptr = uploadIb->Map(0, uploadIb->GetSize()).Unwrap();
@@ -279,8 +279,8 @@ public:
                              sizeof(PreObject),
                              ResourceType::Buffer,
                              ResourceUsage::Upload,
-                             ToFlag(ResourceState::GenericRead),
-                             ToFlag(ResourceMemoryTip::None),
+                             ResourceState::GenericRead,
+                             ResourceMemoryTip::None,
                              "cube_cb")
                       .Unwrap();
         _cubeCbMapped = _cubeCb->Map(0, _cubeCb->GetSize()).Unwrap();
@@ -289,11 +289,11 @@ public:
         {
             BufferBarrier barriers[] = {
                 {_cubeVb.get(),
-                 ToFlag(ResourceState::VertexAndConstantBuffer),
-                 ToFlag(ResourceState::CopyDestination)},
+                 ResourceState::VertexAndConstantBuffer,
+                 ResourceState::CopyDestination},
                 {_cubeIb.get(),
-                 ToFlag(ResourceState::IndexBuffer),
-                 ToFlag(ResourceState::CopyDestination)}};
+                 ResourceState::IndexBuffer,
+                 ResourceState::CopyDestination}};
             ResourceBarriers rb{barriers, {}};
             _cmdBuffer->ResourceBarrier(rb);
         }
@@ -302,11 +302,11 @@ public:
         {
             BufferBarrier barriers[] = {
                 {_cubeVb.get(),
-                 ToFlag(ResourceState::CopyDestination),
-                 ToFlag(ResourceState::VertexAndConstantBuffer)},
+                 ResourceState::CopyDestination,
+                 ResourceState::VertexAndConstantBuffer},
                 {_cubeIb.get(),
-                 ToFlag(ResourceState::CopyDestination),
-                 ToFlag(ResourceState::IndexBuffer)}};
+                 ResourceState::CopyDestination,
+                 ResourceState::IndexBuffer}};
             ResourceBarriers rb{barriers, {}};
             _cmdBuffer->ResourceBarrier(rb);
         }
@@ -407,15 +407,15 @@ public:
         {
             TextureBarrier barriers[] = {
                 {rt,
-                 ToFlag(ResourceState::Present),
-                 ToFlag(ResourceState::RenderTarget),
+                 ResourceState::Present,
+                 ResourceState::RenderTarget,
                  0,
                  0,
                  false},
                 {
                     _depthTex.get(),
-                    ToFlag(ResourceState::Common),
-                    ToFlag(ResourceState::DepthWrite),
+                    ResourceState::Common,
+                    ResourceState::DepthWrite,
                     0,
                     0,
                     false,
@@ -456,15 +456,15 @@ public:
         {
             TextureBarrier barriers[] = {
                 {rt,
-                 ToFlag(ResourceState::RenderTarget),
-                 ToFlag(ResourceState::Present),
+                 ResourceState::RenderTarget,
+                 ResourceState::Present,
                  0,
                  0,
                  false},
                 {
                     _depthTex.get(),
-                    ToFlag(ResourceState::DepthWrite),
-                    ToFlag(ResourceState::Common),
+                    ResourceState::DepthWrite,
+                    ResourceState::Common,
                     0,
                     0,
                     false,
