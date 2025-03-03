@@ -77,17 +77,17 @@ public:
         return static_cast<T>(~static_cast<std::underlying_type_t<T>>(v._value));
     }
 
-    EnumFlags& operator|=(EnumFlags v) noexcept {
+    constexpr EnumFlags& operator|=(EnumFlags v) noexcept {
         _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) | static_cast<std::underlying_type_t<T>>(v._value));
         return *this;
     }
 
-    EnumFlags& operator&=(EnumFlags v) noexcept {
+    constexpr EnumFlags& operator&=(EnumFlags v) noexcept {
         _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) & static_cast<std::underlying_type_t<T>>(v._value));
         return *this;
     }
 
-    EnumFlags& operator^=(EnumFlags v) noexcept {
+    constexpr EnumFlags& operator^=(EnumFlags v) noexcept {
         _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) ^ static_cast<std::underlying_type_t<T>>(v._value));
         return *this;
     }
