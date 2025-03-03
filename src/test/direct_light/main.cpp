@@ -11,7 +11,6 @@
 #include <radray/render/device.h>
 #include <radray/render/resource.h>
 #include <radray/render/command_queue.h>
-#include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
 #include <radray/render/command_encoder.h>
 #include <radray/render/swap_chain.h>
@@ -47,7 +46,6 @@ public:
 
         _dxc = nullptr;
         _cmdBuffer = nullptr;
-        _cmdPool = nullptr;
         _swapchain = nullptr;
         _device = nullptr;
         _window = nullptr;
@@ -68,8 +66,7 @@ public:
             true};
         _device = CreateDevice(d3d12Desc).Unwrap();
         CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
-        _cmdPool = _device->CreateCommandPool(cmdQueue).Unwrap();
-        _cmdBuffer = _device->CreateCommandBuffer(_cmdPool.get()).Unwrap();
+        _cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
         _dxc = CreateDxc().Unwrap();
         _swapchain = _device->CreateSwapChain(
                                 cmdQueue,
@@ -288,7 +285,6 @@ public:
                       .Unwrap();
         _cubeCbMapped = _cubeCb->Map(0, _cubeCb->GetSize()).Unwrap();
 
-        _cmdPool->Reset();
         _cmdBuffer->Begin();
         {
             BufferBarrier barriers[] = {
@@ -343,7 +339,6 @@ public:
     unique_ptr<GlfwWindow> _window;
 
     shared_ptr<Device> _device;
-    shared_ptr<CommandPool> _cmdPool;
     shared_ptr<CommandBuffer> _cmdBuffer;
     shared_ptr<SwapChain> _swapchain;
     shared_ptr<Dxc> _dxc;
@@ -407,7 +402,6 @@ public:
     }
 
     void DrawCube() {
-        _cmdPool->Reset();
         _cmdBuffer->Begin();
         Texture* rt = _swapchain->GetCurrentRenderTarget();
         {

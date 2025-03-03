@@ -25,10 +25,6 @@ public:
 
     Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept override;
-
-    Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept override;
-
     Nullable<radray::shared_ptr<Fence>> CreateFence() noexcept override;
 
     Nullable<radray::shared_ptr<Shader>> CreateShader(

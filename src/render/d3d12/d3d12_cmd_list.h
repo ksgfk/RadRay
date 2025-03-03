@@ -9,15 +9,11 @@ namespace radray::render::d3d12 {
 class CmdListD3D12 : public CommandBuffer {
 public:
     CmdListD3D12(
+        ComPtr<ID3D12CommandAllocator> cmdAlloc,
         ComPtr<ID3D12GraphicsCommandList> cmdList,
-        ID3D12CommandAllocator* attachAlloc,
-        D3D12_COMMAND_LIST_TYPE type,
-        DescriptorHeap* cbvSrvUavHeaps,
-        DescriptorHeap* samplerHeaps) noexcept
-        : _cmdList(std::move(cmdList)),
-          _attachAlloc(attachAlloc),
-          _cbvSrvUavHeaps(cbvSrvUavHeaps),
-          _samplerHeaps(samplerHeaps),
+        D3D12_COMMAND_LIST_TYPE type) noexcept
+        : _cmdAlloc(std::move(cmdAlloc)),
+          _cmdList(std::move(cmdList)),
           _type(type) {}
     ~CmdListD3D12() noexcept override = default;
 
@@ -39,10 +35,8 @@ public:
     void TrySetRootSig(RootSigD3D12* rootSig) noexcept;
 
 public:
+    ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
-    ID3D12CommandAllocator* _attachAlloc;
-    DescriptorHeap* _cbvSrvUavHeaps;
-    DescriptorHeap* _samplerHeaps;
     D3D12_COMMAND_LIST_TYPE _type;
 
     bool _isRenderPassActive{false};

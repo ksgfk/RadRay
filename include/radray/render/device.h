@@ -41,10 +41,6 @@ public:
 
     virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual Nullable<radray::shared_ptr<CommandPool>> CreateCommandPool(CommandQueue* queue) noexcept = 0;
-
-    virtual Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandPool* pool) noexcept = 0;
-
     virtual Nullable<radray::shared_ptr<Fence>> CreateFence() noexcept = 0;
 
     virtual Nullable<radray::shared_ptr<Shader>> CreateShader(
@@ -54,6 +50,7 @@ public:
         std::string_view entryPoint,
         std::string_view name) noexcept = 0;
 
+    // TODO: no auto root sig layout
     virtual Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept = 0;
 
     virtual Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
@@ -109,6 +106,7 @@ public:
         uint32_t baseMipLevel,
         uint32_t mipLevelCount) noexcept = 0;
 
+    // TODO: no, we need input desc set layout by use, not by root sig
     virtual Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(
         RootSignature* rootSignature,
         uint32_t set) noexcept = 0;

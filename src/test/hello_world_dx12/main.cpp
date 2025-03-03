@@ -7,7 +7,6 @@
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
 #include <radray/render/command_queue.h>
-#include <radray/render/command_pool.h>
 #include <radray/render/command_buffer.h>
 #include <radray/render/command_encoder.h>
 #include <radray/render/shader.h>
@@ -81,7 +80,6 @@ public:
         dxc = nullptr;
         pso = nullptr;
         cmdBuffer = nullptr;
-        cmdPool = nullptr;
         swapchain = nullptr;
         device = nullptr;
         window = nullptr;
@@ -97,8 +95,7 @@ public:
         device = CreateDevice(MetalDeviceDescriptor{}).value();
 #endif
         auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
-        cmdPool = device->CreateCommandPool(cmdQueue).Unwrap();
-        cmdBuffer = device->CreateCommandBuffer(cmdPool.get()).Unwrap();
+        cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
         dxc = CreateDxc().Unwrap();
         // #if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
         //         bool isSpirv = true;
@@ -263,7 +260,6 @@ public:
                               ToFlag(ResourceState::Common),
                               ToFlag(ResourceMemoryTip::None))
                         .Unwrap();
-            cmdPool->Reset();
             cmdBuffer->Begin();
             {
                 BufferBarrier barriers[] = {
@@ -296,7 +292,6 @@ public:
                 break;
             }
             swapchain->AcquireNextRenderTarget();
-            cmdPool->Reset();
             cmdBuffer->Begin();
             Texture* rt = swapchain->GetCurrentRenderTarget();
             {
@@ -354,7 +349,6 @@ public:
 public:
     radray::unique_ptr<GlfwWindow> window;
     radray::shared_ptr<Device> device;
-    radray::shared_ptr<CommandPool> cmdPool;
     radray::shared_ptr<CommandBuffer> cmdBuffer;
     radray::shared_ptr<SwapChain> swapchain;
     radray::shared_ptr<Dxc> dxc;

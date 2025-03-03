@@ -20,7 +20,6 @@ GraphicsPsoD3D12* Underlying(GraphicsPipelineState* v) noexcept { return static_
 SwapChainD3D12* Underlying(SwapChain* v) noexcept { return static_cast<SwapChainD3D12*>(v); }
 TextureD3D12* Underlying(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
 BufferD3D12* Underlying(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
-CmdAllocatorD3D12* Underlying(CommandPool* v) noexcept { return static_cast<CmdAllocatorD3D12*>(v); }
 CmdListD3D12* Underlying(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 FenceD3D12* Underlying(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 
@@ -85,7 +84,7 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
             radray::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
-            auto ins = radray::make_unique<CmdQueueD3D12>(std::move(queue), desc.Type, std::move(f));
+            auto ins = radray::make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
             radray::string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
@@ -94,36 +93,6 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
         }
     }
     return q->IsValid() ? q.get() : nullptr;
-}
-
-Nullable<radray::shared_ptr<CommandPool>> DeviceD3D12::CreateCommandPool(CommandQueue* queue) noexcept {
-    auto q = Underlying(queue);
-    ComPtr<ID3D12CommandAllocator> alloc;
-    if (HRESULT hr = _device->CreateCommandAllocator(q->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
-        SUCCEEDED(hr)) {
-        return radray::make_shared<CmdAllocatorD3D12>(std::move(alloc), q->_type);
-    } else {
-        RADRAY_ERR_LOG("cannot create ID3D12CommandAllocator, reason={} (code:{})", GetErrorName(hr), hr);
-        return nullptr;
-    }
-}
-
-Nullable<radray::shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandPool* pool) noexcept {
-    auto p = Underlying(pool);
-    ComPtr<ID3D12GraphicsCommandList> list;
-    if (HRESULT hr = _device->CreateCommandList(0, p->_type, p->_cmdAlloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
-        SUCCEEDED(hr)) {
-        RADRAY_DX_CHECK(list->Close());
-        return radray::make_shared<CmdListD3D12>(
-            std::move(list),
-            p->_cmdAlloc.Get(),
-            p->_type,
-            GetGpuHeap(),
-            GetGpuSamplerHeap());
-    } else {
-        RADRAY_ERR_LOG("cannot create ID3D12GraphicsCommandList, reason={} (code:{})", GetErrorName(hr), hr);
-        return nullptr;
-    }
 }
 
 Nullable<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {

@@ -10,6 +10,27 @@ void CmdQueueD3D12::Destroy() noexcept {
     _queue = nullptr;
 }
 
+Nullable<radray::shared_ptr<CommandBuffer>> CmdQueueD3D12::CreateCommandBuffer() noexcept {
+    ComPtr<ID3D12CommandAllocator> alloc;
+    if (HRESULT hr = _device->_device->CreateCommandAllocator(_type, IID_PPV_ARGS(alloc.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("cannot create ID3D12CommandAllocator, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (HRESULT hr = _device->_device->CreateCommandList(0, _type, alloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        SUCCEEDED(hr)) {
+        RADRAY_DX_CHECK(list->Close());
+        return radray::make_shared<CmdListD3D12>(
+            std::move(alloc),
+            std::move(list),
+            _type);
+    } else {
+        RADRAY_ERR_LOG("cannot create ID3D12GraphicsCommandList, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+}
+
 void CmdQueueD3D12::Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept {
     if (buffers.size() >= std::numeric_limits<UINT>::max()) {
         RADRAY_ERR_LOG("submit too many command buffers {}", buffers.size());

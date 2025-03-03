@@ -338,7 +338,6 @@ enum class StoreAction {
 
 class Device;
 class CommandQueue;
-class CommandPool;
 class CommandBuffer;
 class CommandEncoder;
 class Fence;

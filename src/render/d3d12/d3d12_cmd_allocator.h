@@ -1,11 +1,10 @@
 #pragma once
 
-#include <radray/render/command_pool.h>
 #include "d3d12_helper.h"
 
 namespace radray::render::d3d12 {
 
-class CmdAllocatorD3D12 : public CommandPool {
+class CmdAllocatorD3D12 : public RenderBase {
 public:
     CmdAllocatorD3D12(
         ComPtr<ID3D12CommandAllocator> alloc,
@@ -17,7 +16,7 @@ public:
     bool IsValid() const noexcept override { return _cmdAlloc.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    void Reset() noexcept override;
+    void Reset() noexcept;
 
 public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
