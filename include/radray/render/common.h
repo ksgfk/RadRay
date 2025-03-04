@@ -3,8 +3,9 @@
 #include <variant>
 
 #include <radray/types.h>
-#include <radray/utility.h>
+#include <radray/nullable.h>
 #include <radray/enum_flags.h>
+#include <radray/utility.h>
 
 namespace radray::render {
 
