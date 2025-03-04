@@ -12,6 +12,7 @@ public:
     radray::string Name;
     radray::string EntryPoint;
     ShaderStage Stage;
+    ShaderBlobCategory Category;
 };
 
 }  // namespace radray::render

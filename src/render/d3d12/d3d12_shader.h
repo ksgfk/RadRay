@@ -10,7 +10,6 @@ class Dxil : public Shader {
 public:
     Dxil(
         std::span<const byte> blob,
-        const DxilReflection& refl,
         std::string_view entryPoint,
         std::string_view name,
         ShaderStage stage) noexcept;
@@ -23,7 +22,6 @@ public:
 
 public:
     radray::vector<byte> _dxil;
-    DxilReflection _refl;
 };
 
 }  // namespace radray::render::d3d12

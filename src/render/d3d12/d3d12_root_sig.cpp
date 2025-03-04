@@ -10,72 +10,72 @@ RootSigD3D12::RootSigD3D12(ComPtr<ID3D12RootSignature> rootSig) noexcept : _root
 
 void RootSigD3D12::Destroy() noexcept { _rootSig = nullptr; }
 
-uint32_t RootSigD3D12::GetDescriptorSetCount() const noexcept {
-    return _resDescTables.size() + _samplerDescTables.size();
-}
+// uint32_t RootSigD3D12::GetDescriptorSetCount() const noexcept {
+//     return _resDescTables.size() + _samplerDescTables.size();
+// }
 
-uint32_t RootSigD3D12::GetConstantBufferSlotCount() const noexcept {
-    return _cbufferViews.size();
-}
+// uint32_t RootSigD3D12::GetConstantBufferSlotCount() const noexcept {
+//     return _cbufferViews.size();
+// }
 
-uint32_t RootSigD3D12::GetRootConstantCount() const noexcept {
-    return _rootConsts.size();
-}
+// uint32_t RootSigD3D12::GetRootConstantCount() const noexcept {
+//     return _rootConsts.size();
+// }
 
-radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t set) const noexcept {
-    if (set < _resDescTables.size()) {
-        const auto& descTable = _resDescTables[set];
-        radray::vector<DescriptorLayout> layouts;
-        layouts.reserve(descTable._elems.size());
-        for (size_t i = 0; i < descTable._elems.size(); i++) {
-            const auto& elem = descTable._elems[i];
-            layouts.emplace_back(DescriptorLayout{
-                elem._name,
-                elem._space,
-                (uint32_t)i,
-                elem._type,
-                elem._count,
-                elem._cbSize});
-        }
-        return layouts;
-    } else if (set < _resDescTables.size() + _samplerDescTables.size()) {
-        const auto& descTable = _samplerDescTables[set - _resDescTables.size()];
-        radray::vector<DescriptorLayout> layouts;
-        layouts.reserve(descTable._elems.size());
-        for (size_t i = 0; i < descTable._elems.size(); i++) {
-            const auto& elem = descTable._elems[i];
-            layouts.emplace_back(DescriptorLayout{
-                elem._name,
-                elem._space,
-                (uint32_t)i,
-                elem._type,
-                elem._count,
-                elem._cbSize});
-        }
-        return layouts;
-    } else {
-        RADRAY_ABORT("out of range");
-        return {};
-    }
-}
+// radray::vector<DescriptorLayout> RootSigD3D12::GetDescriptorSetLayout(uint32_t set) const noexcept {
+//     if (set < _resDescTables.size()) {
+//         const auto& descTable = _resDescTables[set];
+//         radray::vector<DescriptorLayout> layouts;
+//         layouts.reserve(descTable._elems.size());
+//         for (size_t i = 0; i < descTable._elems.size(); i++) {
+//             const auto& elem = descTable._elems[i];
+//             layouts.emplace_back(DescriptorLayout{
+//                 elem._name,
+//                 elem._space,
+//                 (uint32_t)i,
+//                 elem._type,
+//                 elem._count,
+//                 elem._cbSize});
+//         }
+//         return layouts;
+//     } else if (set < _resDescTables.size() + _samplerDescTables.size()) {
+//         const auto& descTable = _samplerDescTables[set - _resDescTables.size()];
+//         radray::vector<DescriptorLayout> layouts;
+//         layouts.reserve(descTable._elems.size());
+//         for (size_t i = 0; i < descTable._elems.size(); i++) {
+//             const auto& elem = descTable._elems[i];
+//             layouts.emplace_back(DescriptorLayout{
+//                 elem._name,
+//                 elem._space,
+//                 (uint32_t)i,
+//                 elem._type,
+//                 elem._count,
+//                 elem._cbSize});
+//         }
+//         return layouts;
+//     } else {
+//         RADRAY_ABORT("out of range");
+//         return {};
+//     }
+// }
 
-RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint32_t slot) const noexcept {
-    if (slot >= _cbufferViews.size()) {
-        RADRAY_ABORT("out of range");
-        return {};
-    }
-    const CBufferView& cbufferView = _cbufferViews[slot];
-    return RootSignatureConstantBufferSlotInfo{cbufferView._name, cbufferView._size, slot};
-}
+// RootSignatureConstantBufferSlotInfo RootSigD3D12::GetConstantBufferSlotInfo(uint32_t slot) const noexcept {
+//     if (slot >= _cbufferViews.size()) {
+//         RADRAY_ABORT("out of range");
+//         return {};
+//     }
+//     const CBufferView& cbufferView = _cbufferViews[slot];
+//     return RootSignatureConstantBufferSlotInfo{cbufferView._name, cbufferView._size, slot};
+// }
 
-RootSignatureRootConstantSlotInfo RootSigD3D12::GetRootConstantSlotInfo(uint32_t slot) const noexcept {
-    if (slot >= _rootConsts.size()) {
-        RADRAY_ABORT("out of range");
-        return {};
-    }
-    const RootConst& rootConst = _rootConsts[slot];
-    return RootSignatureRootConstantSlotInfo{rootConst._name, rootConst._num32BitValues * 4, slot};
-}
+// RootSignatureRootConstantSlotInfo RootSigD3D12::GetRootConstantSlotInfo(uint32_t slot) const noexcept {
+//     if (slot >= _rootConsts.size()) {
+//         RADRAY_ABORT("out of range");
+//         return {};
+//     }
+//     const RootConst& rootConst = _rootConsts[slot];
+//     return RootSignatureRootConstantSlotInfo{rootConst._name, rootConst._num32BitValues * 4, slot};
+// }
 
 static void DestroyGpuDescriptorHeapView(GpuDescriptorHeapView* v) noexcept {
     if (v->_shaderResHeap.HasValue()) {

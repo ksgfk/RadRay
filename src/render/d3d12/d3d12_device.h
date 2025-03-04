@@ -29,7 +29,7 @@ public:
 
     Nullable<radray::shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
-        const ShaderReflection& refl,
+        ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept override;

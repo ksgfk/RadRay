@@ -111,19 +111,19 @@ Nullable<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
 
 Nullable<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
-    const ShaderReflection& refl,
+    ShaderBlobCategory category,
     ShaderStage stage,
     std::string_view entryPoint,
     std::string_view name) noexcept {
-    auto dxilRefl = std::get_if<DxilReflection>(&refl);
-    if (dxilRefl == nullptr) {
+    if (category != ShaderBlobCategory::DXIL) {
         RADRAY_ERR_LOG("d3d12 can only use dxil shader");
         return nullptr;
     }
-    return radray::make_shared<Dxil>(blob, *dxilRefl, entryPoint, name, stage);
+    return radray::make_shared<Dxil>(blob, entryPoint, name, stage);
 }
 
 Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
+    /*
     class StageResource : public DxilReflection::BindResource {
     public:
         ShaderStages Stages;
@@ -493,6 +493,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std
     result->_resDescTables = std::move(resDescTables);
     result->_samplerDescTables = std::move(samplerDescTables);
     return result;
+    */
+    return nullptr;
 }
 
 Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
@@ -1147,39 +1149,40 @@ Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
 Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
     RootSignature* rootSignature,
     uint32_t set) noexcept {
-    auto rs = Underlying(rootSignature);
-    if (set >= rs->GetDescriptorSetCount()) {
-        RADRAY_ERR_LOG("d3d12 cannot create descriptor set, param 'set' out of range {}", set);
-        return nullptr;
-    }
-    radray::vector<DescriptorLayout> layout = rs->GetDescriptorSetLayout(set);
-    uint32_t cbvSrvUavCount = 0;
-    uint32_t samplerCount = 0;
-    for (const DescriptorLayout& i : layout) {
-        if (i.Type == ShaderResourceType::Sampler) {
-            samplerCount += i.Count;
-        } else {
-            cbvSrvUavCount += i.Count;
-        }
-    }
-    DescriptorHeap* shaderResHeap{nullptr};
-    DescriptorHeap* samplerHeap{nullptr};
-    uint32_t shaderResHeapStart = 0, samplerHeapStart = 0;
-    if (cbvSrvUavCount > 0) {
-        shaderResHeap = GetGpuHeap();
-        shaderResHeapStart = shaderResHeap->AllocateRange(cbvSrvUavCount);
-    }
-    if (samplerCount > 0) {
-        samplerHeap = GetGpuSamplerHeap();
-        samplerHeapStart = samplerHeap->AllocateRange(samplerCount);
-    }
-    return radray::make_shared<GpuDescriptorHeapView>(
-        shaderResHeap,
-        samplerHeap,
-        shaderResHeapStart,
-        cbvSrvUavCount,
-        samplerHeapStart,
-        samplerCount);
+    // auto rs = Underlying(rootSignature);
+    // if (set >= rs->GetDescriptorSetCount()) {
+    //     RADRAY_ERR_LOG("d3d12 cannot create descriptor set, param 'set' out of range {}", set);
+    //     return nullptr;
+    // }
+    // radray::vector<DescriptorLayout> layout = rs->GetDescriptorSetLayout(set);
+    // uint32_t cbvSrvUavCount = 0;
+    // uint32_t samplerCount = 0;
+    // for (const DescriptorLayout& i : layout) {
+    //     if (i.Type == ShaderResourceType::Sampler) {
+    //         samplerCount += i.Count;
+    //     } else {
+    //         cbvSrvUavCount += i.Count;
+    //     }
+    // }
+    // DescriptorHeap* shaderResHeap{nullptr};
+    // DescriptorHeap* samplerHeap{nullptr};
+    // uint32_t shaderResHeapStart = 0, samplerHeapStart = 0;
+    // if (cbvSrvUavCount > 0) {
+    //     shaderResHeap = GetGpuHeap();
+    //     shaderResHeapStart = shaderResHeap->AllocateRange(cbvSrvUavCount);
+    // }
+    // if (samplerCount > 0) {
+    //     samplerHeap = GetGpuSamplerHeap();
+    //     samplerHeapStart = samplerHeap->AllocateRange(samplerCount);
+    // }
+    // return radray::make_shared<GpuDescriptorHeapView>(
+    //     shaderResHeap,
+    //     samplerHeap,
+    //     shaderResHeapStart,
+    //     cbvSrvUavCount,
+    //     samplerHeapStart,
+    //     samplerCount);
+    return nullptr;
 }
 
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {

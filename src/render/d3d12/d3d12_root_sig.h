@@ -45,17 +45,17 @@ public:
     bool IsValid() const noexcept override { return _rootSig.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    uint32_t GetDescriptorSetCount() const noexcept override;
+    // uint32_t GetDescriptorSetCount() const noexcept override;
 
-    uint32_t GetConstantBufferSlotCount() const noexcept override;
+    // uint32_t GetConstantBufferSlotCount() const noexcept override;
 
-    uint32_t GetRootConstantCount() const noexcept override;
+    // uint32_t GetRootConstantCount() const noexcept override;
 
-    radray::vector<DescriptorLayout> GetDescriptorSetLayout(uint32_t set) const noexcept override;
+    // radray::vector<DescriptorLayout> GetDescriptorSetLayout(uint32_t set) const noexcept override;
 
-    RootSignatureConstantBufferSlotInfo GetConstantBufferSlotInfo(uint32_t slot) const noexcept override;
+    // RootSignatureConstantBufferSlotInfo GetConstantBufferSlotInfo(uint32_t slot) const noexcept override;
 
-    RootSignatureRootConstantSlotInfo GetRootConstantSlotInfo(uint32_t slot) const noexcept override;
+    // RootSignatureRootConstantSlotInfo GetRootConstantSlotInfo(uint32_t slot) const noexcept override;
 
 public:
     ComPtr<ID3D12RootSignature> _rootSig;

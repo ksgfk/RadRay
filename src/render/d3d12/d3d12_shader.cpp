@@ -4,15 +4,14 @@ namespace radray::render::d3d12 {
 
 Dxil::Dxil(
     std::span<const byte> blob,
-    const DxilReflection& refl,
     std::string_view entryPoint,
     std::string_view name,
     ShaderStage stage) noexcept
-    : _dxil(blob.begin(), blob.end()),
-      _refl(refl) {
+    : _dxil(blob.begin(), blob.end()) {
     Name = name;
     EntryPoint = entryPoint;
     Stage = stage;
+    Category = ShaderBlobCategory::DXIL;
 }
 
 bool Dxil::IsValid() const noexcept { return _dxil.size() > 0; }
