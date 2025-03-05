@@ -294,6 +294,23 @@ D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept {
     Unreachable();
 }
 
+D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ResourceType v) noexcept {
+    switch (v) {
+        case ResourceType::UNKNOWN: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ResourceType::Sampler: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        case ResourceType::Texture: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ResourceType::RenderTarget: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ResourceType::DepthStencil: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ResourceType::TextureRW: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case ResourceType::Buffer: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ResourceType::CBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case ResourceType::PushConstant: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case ResourceType::BufferRW: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case ResourceType::RayTracing: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    }
+    Unreachable();
+}
+
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
     switch (v) {
         case FilterMode::Nearest: return D3D12_FILTER_TYPE_POINT;

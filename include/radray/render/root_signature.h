@@ -24,9 +24,16 @@ struct DescriptorSetElementInfo {
     ShaderStages Stages;
 };
 
-struct DescriptorSetInfo {
+class DescriptorSetInfo {
+public:
     uint32_t Index;
     radray::vector<DescriptorSetElementInfo> Elements;
+};
+
+struct RootSignatureDescriptor {
+    std::span<RootConstantInfo> RootConstants;
+    std::span<RootDescriptorInfo> RootDescriptors;
+    std::span<DescriptorSetInfo> DescriptorSets;
 };
 
 class RootSignature : public RenderBase {

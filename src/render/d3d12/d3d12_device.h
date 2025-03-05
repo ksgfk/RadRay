@@ -34,7 +34,7 @@ public:
         std::string_view entryPoint,
         std::string_view name) noexcept override;
 
-    Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept override;
+    Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& info) noexcept override;
 
     Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept override;

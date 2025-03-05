@@ -46,8 +46,7 @@ public:
         std::string_view entryPoint,
         std::string_view name) noexcept = 0;
 
-    // TODO: no auto root sig layout
-    virtual Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(std::span<Shader*> shaders) noexcept = 0;
+    virtual Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& info) noexcept = 0;
 
     virtual Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept = 0;

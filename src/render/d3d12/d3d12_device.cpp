@@ -122,7 +122,216 @@ Nullable<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
     return radray::make_shared<Dxil>(blob, entryPoint, name, stage);
 }
 
-Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(std::span<Shader*> shaders) noexcept {
+Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootSignatureDescriptor& info) noexcept {
+    radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    radray::vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
+    ShaderStages allStages = ShaderStage::UNKNOWN;
+    for (const RootConstantInfo& rootConst : info.RootConstants) {
+        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+        CD3DX12_ROOT_PARAMETER1::InitAsConstants(
+            rp,
+            rootConst.Size / 4,
+            rootConst.Slot,
+            0,
+            MapShaderStages(rootConst.Stages));
+        allStages |= rootConst.Stages;
+    }
+    for (const RootDescriptorInfo& rootDesc : info.RootDescriptors) {
+        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+        switch (rootDesc.Type) {
+            case ResourceType::PushConstant:
+            case ResourceType::CBuffer: {
+                CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
+                    rp,
+                    rootDesc.Slot,
+                    0,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            case ResourceType::Buffer:
+            case ResourceType::Texture:
+            case ResourceType::RenderTarget:
+            case ResourceType::DepthStencil: {
+                CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
+                    rp,
+                    rootDesc.Slot,
+                    0,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            case ResourceType::BufferRW:
+            case ResourceType::TextureRW: {
+                CD3DX12_ROOT_PARAMETER1::InitAsUnorderedAccessView(
+                    rp,
+                    rootDesc.Slot,
+                    0,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            default: {
+                RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {} in RootDescriptors", rootDesc.Type);
+                return nullptr;
+            }
+        }
+        allStages |= rootDesc.Stages;
+    }
+    // 我们约定, hlsl 中定义的单个资源独占一个 range
+    // 资源数组占一个 range
+    for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
+        for (const DescriptorSetElementInfo& e : descSet.Elements) {
+            switch (e.Type) {
+                case ResourceType::Sampler:
+                case ResourceType::Texture:
+                case ResourceType::RenderTarget:
+                case ResourceType::DepthStencil:
+                case ResourceType::TextureRW:
+                case ResourceType::Buffer:
+                case ResourceType::CBuffer:
+                case ResourceType::PushConstant:
+                case ResourceType::BufferRW:
+                case ResourceType::RayTracing:
+                    descRanges.emplace_back();
+                    allStages |= e.Stages;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    size_t offset = 0;
+    for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
+        for (const DescriptorSetElementInfo& e : descSet.Elements) {
+            switch (e.Type) {
+                case ResourceType::Sampler: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+                        e.Count,
+                        e.Slot,
+                        descSet.Index);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    break;
+                }
+                case ResourceType::Texture:
+                case ResourceType::RenderTarget:
+                case ResourceType::DepthStencil:
+                case ResourceType::Buffer:
+                case ResourceType::RayTracing: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                        e.Count,
+                        e.Slot,
+                        descSet.Index);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    break;
+                }
+                case ResourceType::CBuffer:
+                case ResourceType::PushConstant: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
+                        e.Count,
+                        e.Slot,
+                        descSet.Index);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    break;
+                }
+                case ResourceType::TextureRW:
+                case ResourceType::BufferRW: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+                        e.Count,
+                        e.Slot,
+                        descSet.Index);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+    }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
+    versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
+    D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
+    rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
+    rsDesc.pParameters = rootParmas.data();
+    rsDesc.NumStaticSamplers = 0;
+    rsDesc.pStaticSamplers = nullptr;
+    D3D12_ROOT_SIGNATURE_FLAGS flag =
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
+    if (!allStages.HasFlag(ShaderStage::Vertex)) {
+        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+    }
+    if (!allStages.HasFlag(ShaderStage::Pixel)) {
+        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+    }
+    rsDesc.Flags = flag;
+    ComPtr<ID3DBlob> rootSigBlob, errorBlob;
+    if (HRESULT hr = D3DX12SerializeVersionedRootSignature(
+            &versionDesc,
+            D3D_ROOT_SIGNATURE_VERSION_1_1,
+            rootSigBlob.GetAddressOf(),
+            errorBlob.GetAddressOf());
+        FAILED(hr)) {
+        const char* errInfoBegin = errorBlob ? reinterpret_cast<const char*>(errorBlob->GetBufferPointer()) : nullptr;
+        const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
+        auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
+        RADRAY_ERR_LOG("d3d12 cannot serialize root sig\n{}", reason);
+        return nullptr;
+    }
+    ComPtr<ID3D12RootSignature> rootSig;
+    if (HRESULT hr = _device->CreateRootSignature(
+            0,
+            rootSigBlob->GetBufferPointer(),
+            rootSigBlob->GetBufferSize(),
+            IID_PPV_ARGS(rootSig.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
+    result->_rootSig = std::move(rootSig);
+    return result;
     /*
     class StageResource : public DxilReflection::BindResource {
     public:
