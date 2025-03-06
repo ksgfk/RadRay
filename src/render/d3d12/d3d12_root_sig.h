@@ -6,37 +6,6 @@
 
 namespace radray::render::d3d12 {
 
-class RootConst {
-public:
-    radray::string _name;
-    UINT _rootParamIndex;
-    uint32_t _point;
-    uint32_t _space;
-    uint32_t _num32BitValues;
-};
-class CBufferView {
-public:
-    radray::string _name;
-    UINT _rootParamIndex;
-    uint32_t _point;
-    uint32_t _space;
-    size_t _size;
-};
-class DescElem {
-public:
-    radray::string _name;
-    ShaderResourceType _type;
-    uint32_t _point;
-    uint32_t _space;
-    uint32_t _count;
-    size_t _cbSize;
-};
-class DescTable {
-public:
-    radray::vector<DescElem> _elems;
-    UINT _rootParamIndex;
-};
-
 class RootSigD3D12 : public RootSignature {
 public:
     explicit RootSigD3D12(ComPtr<ID3D12RootSignature>) noexcept;
@@ -45,56 +14,35 @@ public:
     bool IsValid() const noexcept override { return _rootSig.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    // uint32_t GetDescriptorSetCount() const noexcept override;
+    std::span<const RootConstantInfo> GetRootConstants() const noexcept override;
 
-    // uint32_t GetConstantBufferSlotCount() const noexcept override;
+    std::span<const RootDescriptorInfo> GetRootDescriptors() const noexcept override;
 
-    // uint32_t GetRootConstantCount() const noexcept override;
-
-    // radray::vector<DescriptorLayout> GetDescriptorSetLayout(uint32_t set) const noexcept override;
-
-    // RootSignatureConstantBufferSlotInfo GetConstantBufferSlotInfo(uint32_t slot) const noexcept override;
-
-    // RootSignatureRootConstantSlotInfo GetRootConstantSlotInfo(uint32_t slot) const noexcept override;
+    std::span<const DescriptorSetElementInfo> GetBindDescriptors() const noexcept override;
 
 public:
     ComPtr<ID3D12RootSignature> _rootSig;
-    radray::vector<RootConst> _rootConsts;
-    radray::vector<CBufferView> _cbufferViews;
-    radray::vector<DescTable> _resDescTables;
-    radray::vector<DescTable> _samplerDescTables;
+    radray::vector<RootConstantInfo> _rootConstants;
+    radray::vector<RootDescriptorInfo> _rootDescriptors;
+    radray::vector<DescriptorSetElementInfo> _bindDescriptors;
 };
 
 class GpuDescriptorHeapView : public DescriptorSet {
 public:
     GpuDescriptorHeapView(
-        DescriptorHeap* shaderResHeap,
-        DescriptorHeap* samplerHeap,
-        uint32_t shaderResStart,
-        uint32_t shaderResCount,
-        uint32_t samplerStart,
-        uint32_t samplerCount) noexcept
-        : _shaderResHeap(shaderResHeap),
-          _samplerHeap(samplerHeap),
-          _shaderResStart(shaderResStart),
-          _shaderResCount(shaderResCount),
-          _samplerStart(samplerStart),
-          _samplerCount(samplerCount) {}
+        DescriptorHeap* heap,
+        ResourceType type,
+        uint32_t start,
+        uint32_t count) noexcept;
     ~GpuDescriptorHeapView() noexcept override;
 
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
-    void SetResources(std::span<ResourceView*> views) noexcept override;
-
-public:
-    // TODO: split
-    Nullable<DescriptorHeap> _shaderResHeap;
-    Nullable<DescriptorHeap> _samplerHeap;
-    uint32_t _shaderResStart;
-    uint32_t _shaderResCount;
-    uint32_t _samplerStart;
-    uint32_t _samplerCount;
+    DescriptorHeap* _heap;
+    ResourceType _type;
+    uint32_t _start;
+    uint32_t _count;
 };
 
 }  // namespace radray::render::d3d12

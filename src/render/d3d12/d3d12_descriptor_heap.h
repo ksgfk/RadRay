@@ -34,6 +34,8 @@ public:
 
     ID3D12DescriptorHeap* Get() const noexcept { return _heap.Get(); }
 
+    D3D12_DESCRIPTOR_HEAP_TYPE GetHeapType() const noexcept { return _desc.Type; }
+
 private:
     void ExpandCapacity(UINT need) noexcept;
 

@@ -126,16 +126,18 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
     radray::vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
     ShaderStages allStages = ShaderStage::UNKNOWN;
+    size_t rootConstStart = rootParmas.size();
     for (const RootConstantInfo& rootConst : info.RootConstants) {
         D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
         CD3DX12_ROOT_PARAMETER1::InitAsConstants(
             rp,
             rootConst.Size / 4,
             rootConst.Slot,
-            0,
+            rootConst.Space,
             MapShaderStages(rootConst.Stages));
         allStages |= rootConst.Stages;
     }
+    size_t rootDesc = rootParmas.size();
     for (const RootDescriptorInfo& rootDesc : info.RootDescriptors) {
         D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
         switch (rootDesc.Type) {
@@ -144,7 +146,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                 CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
                     rp,
                     rootDesc.Slot,
-                    0,
+                    rootDesc.Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
                     MapShaderStages(rootDesc.Stages));
                 break;
@@ -196,12 +198,15 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                     descRanges.emplace_back();
                     allStages |= e.Stages;
                     break;
-                default:
-                    break;
+                default: {
+                    RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {} in RootDescriptors", e.Type);
+                    return nullptr;
+                }
             }
         }
     }
     size_t offset = 0;
+    radray::vector<DescriptorSetElementInfo> bindDescs{};
     for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
         for (const DescriptorSetElementInfo& e : descSet.Elements) {
             switch (e.Type) {
@@ -213,13 +218,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                         D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
                         e.Count,
                         e.Slot,
-                        descSet.Index);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
                         1,
                         &range,
                         MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
                     break;
                 }
                 case ResourceType::Texture:
@@ -234,13 +240,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
                         e.Count,
                         e.Slot,
-                        descSet.Index);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
                         1,
                         &range,
                         MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
                     break;
                 }
                 case ResourceType::CBuffer:
@@ -252,13 +259,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                         D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
                         e.Count,
                         e.Slot,
-                        descSet.Index);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
                         1,
                         &range,
                         MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
                     break;
                 }
                 case ResourceType::TextureRW:
@@ -270,13 +278,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
                         D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
                         e.Count,
                         e.Slot,
-                        descSet.Index);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
                         1,
                         &range,
                         MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
                     break;
                 }
                 default:
@@ -284,6 +293,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             }
         }
     }
+    bindDescs.shrink_to_fit();
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
@@ -331,6 +341,9 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     }
     auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
     result->_rootSig = std::move(rootSig);
+    result->_rootConstants = {info.RootConstants.begin(), info.RootConstants.end()};
+    result->_rootDescriptors = {info.RootDescriptors.begin(), info.RootDescriptors.end()};
+    result->_bindDescriptors = std::move(bindDescs);
     return result;
     /*
     class StageResource : public DxilReflection::BindResource {
@@ -1355,43 +1368,14 @@ Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
     return result;
 }
 
-Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(
-    RootSignature* rootSignature,
-    uint32_t set) noexcept {
-    // auto rs = Underlying(rootSignature);
-    // if (set >= rs->GetDescriptorSetCount()) {
-    //     RADRAY_ERR_LOG("d3d12 cannot create descriptor set, param 'set' out of range {}", set);
-    //     return nullptr;
-    // }
-    // radray::vector<DescriptorLayout> layout = rs->GetDescriptorSetLayout(set);
-    // uint32_t cbvSrvUavCount = 0;
-    // uint32_t samplerCount = 0;
-    // for (const DescriptorLayout& i : layout) {
-    //     if (i.Type == ShaderResourceType::Sampler) {
-    //         samplerCount += i.Count;
-    //     } else {
-    //         cbvSrvUavCount += i.Count;
-    //     }
-    // }
-    // DescriptorHeap* shaderResHeap{nullptr};
-    // DescriptorHeap* samplerHeap{nullptr};
-    // uint32_t shaderResHeapStart = 0, samplerHeapStart = 0;
-    // if (cbvSrvUavCount > 0) {
-    //     shaderResHeap = GetGpuHeap();
-    //     shaderResHeapStart = shaderResHeap->AllocateRange(cbvSrvUavCount);
-    // }
-    // if (samplerCount > 0) {
-    //     samplerHeap = GetGpuSamplerHeap();
-    //     samplerHeapStart = samplerHeap->AllocateRange(samplerCount);
-    // }
-    // return radray::make_shared<GpuDescriptorHeapView>(
-    //     shaderResHeap,
-    //     samplerHeap,
-    //     shaderResHeapStart,
-    //     cbvSrvUavCount,
-    //     samplerHeapStart,
-    //     samplerCount);
-    return nullptr;
+Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept {
+    DescriptorHeap* heap = info.Type == ResourceType::Sampler ? GetGpuSamplerHeap() : GetGpuHeap();
+    uint32_t heapStart = heap->AllocateRange(info.Count);
+    return radray::make_shared<GpuDescriptorHeapView>(
+        heap,
+        info.Type,
+        heapStart,
+        info.Count);
 }
 
 DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {

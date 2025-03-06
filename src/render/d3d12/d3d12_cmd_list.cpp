@@ -211,60 +211,60 @@ void CmdRenderPassD3D12::BindPipelineState(GraphicsPipelineState* pso) noexcept 
 }
 
 void CmdRenderPassD3D12::BindDescriptorSet(RootSignature* rootSig, uint32_t slot, DescriptorSet* descSet) noexcept {
-    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
-    if (heapView->_shaderResHeap.HasValue()) {
-        if (slot >= sig->_resDescTables.size()) {
-            RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
-            return;
-        }
-    }
-    if (heapView->_samplerHeap.HasValue()) {
-        if (slot >= sig->_samplerDescTables.size()) {
-            RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
-            return;
-        }
-    }
-    _cmdList->TrySetRootSig(sig);
-    if (heapView->_shaderResHeap.HasValue()) {
-        auto heap = heapView->_shaderResHeap.Value();
-        auto start = heap->HandleGpu(heapView->_shaderResStart);
-        UINT rootParamIndex = sig->_resDescTables[slot]._rootParamIndex;
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
-    }
-    if (heapView->_samplerHeap.HasValue()) {
-        auto heap = heapView->_samplerHeap.Value();
-        auto start = heap->HandleGpu(heapView->_samplerStart);
-        UINT rootParamIndex = sig->_samplerDescTables[slot]._rootParamIndex;
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
-    }
+    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    // GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
+    // if (heapView->_shaderResHeap.HasValue()) {
+    //     if (slot >= sig->_resDescTables.size()) {
+    //         RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
+    //         return;
+    //     }
+    // }
+    // if (heapView->_samplerHeap.HasValue()) {
+    //     if (slot >= sig->_samplerDescTables.size()) {
+    //         RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
+    //         return;
+    //     }
+    // }
+    // _cmdList->TrySetRootSig(sig);
+    // if (heapView->_shaderResHeap.HasValue()) {
+    //     auto heap = heapView->_shaderResHeap.Value();
+    //     auto start = heap->HandleGpu(heapView->_shaderResStart);
+    //     UINT rootParamIndex = sig->_resDescTables[slot]._rootParamIndex;
+    //     _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
+    // }
+    // if (heapView->_samplerHeap.HasValue()) {
+    //     auto heap = heapView->_samplerHeap.Value();
+    //     auto start = heap->HandleGpu(heapView->_samplerStart);
+    //     UINT rootParamIndex = sig->_samplerDescTables[slot]._rootParamIndex;
+    //     _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
+    // }
 }
 
 void CmdRenderPassD3D12::PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept {
-    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    if (slot >= sig->_rootConsts.size()) {
-        RADRAY_ABORT("d3d12 cannot SetGraphicsRoot32BitConstants, param 'slot' out of range {}", slot);
-        return;
-    }
-    const RootConst& rootConst = sig->_rootConsts[slot];
-    if (length < rootConst._num32BitValues * 4) {
-        RADRAY_ERR_LOG("d3d12 cannot SetGraphicsRoot32BitConstants, param 'length' too small");
-    }
-    _cmdList->TrySetRootSig(sig);
-    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootConst._rootParamIndex, rootConst._num32BitValues, data, 0);
+    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    // if (slot >= sig->_rootConsts.size()) {
+    //     RADRAY_ABORT("d3d12 cannot SetGraphicsRoot32BitConstants, param 'slot' out of range {}", slot);
+    //     return;
+    // }
+    // const RootConst& rootConst = sig->_rootConsts[slot];
+    // if (length < rootConst._num32BitValues * 4) {
+    //     RADRAY_ERR_LOG("d3d12 cannot SetGraphicsRoot32BitConstants, param 'length' too small");
+    // }
+    // _cmdList->TrySetRootSig(sig);
+    // _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootConst._rootParamIndex, rootConst._num32BitValues, data, 0);
 }
 
 void CmdRenderPassD3D12::BindConstantBuffer(RootSignature* rootSig, uint32_t slot, Buffer* buffer, uint32_t offset) noexcept {
-    RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    if (slot >= sig->_cbufferViews.size()) {
-        RADRAY_ABORT("d3d12 cannot SetGraphicsRootConstantBufferView, param 'slot' out of range {}", slot);
-        return;
-    }
-    const CBufferView& cbvd = sig->_cbufferViews[slot];
-    BufferD3D12* bufferD3D12 = static_cast<BufferD3D12*>(buffer);
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferD3D12->_gpuAddr + offset;
-    _cmdList->TrySetRootSig(sig);
-    _cmdList->_cmdList->SetGraphicsRootConstantBufferView(cbvd._rootParamIndex, gpuAddr);
+    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
+    // if (slot >= sig->_cbufferViews.size()) {
+    //     RADRAY_ABORT("d3d12 cannot SetGraphicsRootConstantBufferView, param 'slot' out of range {}", slot);
+    //     return;
+    // }
+    // const CBufferView& cbvd = sig->_cbufferViews[slot];
+    // BufferD3D12* bufferD3D12 = static_cast<BufferD3D12*>(buffer);
+    // D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferD3D12->_gpuAddr + offset;
+    // _cmdList->TrySetRootSig(sig);
+    // _cmdList->_cmdList->SetGraphicsRootConstantBufferView(cbvd._rootParamIndex, gpuAddr);
 }
 
 void CmdRenderPassD3D12::BindVertexBuffers(std::span<VertexBufferView> vbvs) noexcept {
