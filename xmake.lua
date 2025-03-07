@@ -54,7 +54,7 @@ if is_plat("windows") then
 end
 
 -- 第三方库
-add_requires("fmt_radray 11.1.3", {
+add_requires("fmt_radray 11.1.4", {
     debug = is_mode("debug"),
     configs = {
         shared = false,
@@ -74,7 +74,7 @@ add_requires("spdlog_radray v1.15.1", {
         no_default_logger = true
     }})
 add_requireconfs("spdlog_radray.fmt_radray", {
-    version = "11.1.3",
+    version = "11.1.4",
     debug = is_mode("debug"),
     configs = {
         shared = false,
@@ -83,7 +83,7 @@ add_requireconfs("spdlog_radray.fmt_radray", {
 })
 add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
-    add_requires("mimalloc_radray v2.1.9", {debug = is_mode("debug"), configs = {shared = false}}) 
+    add_requires("mimalloc_radray v2.2.2", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
 add_requires("xxhash v0.8.3", {debug = is_mode("debug"), configs = {shared = false, dispatch = true}})
 add_requires("glfw 3.4", {
