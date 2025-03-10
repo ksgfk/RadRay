@@ -137,7 +137,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             MapShaderStages(rootConst.Stages));
         allStages |= rootConst.Stages;
     }
-    size_t rootDesc = rootParmas.size();
+    size_t rootDescStart = rootParmas.size();
     for (const RootDescriptorInfo& rootDesc : info.RootDescriptors) {
         D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
         switch (rootDesc.Type) {
@@ -205,6 +205,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             }
         }
     }
+    size_t bindStart = 0;
     size_t offset = 0;
     radray::vector<DescriptorSetElementInfo> bindDescs{};
     for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
@@ -340,10 +341,12 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         return nullptr;
     }
     auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
-    result->_rootSig = std::move(rootSig);
     result->_rootConstants = {info.RootConstants.begin(), info.RootConstants.end()};
     result->_rootDescriptors = {info.RootDescriptors.begin(), info.RootDescriptors.end()};
     result->_bindDescriptors = std::move(bindDescs);
+    result->_rootConstStart = (UINT)rootConstStart;
+    result->_rootDescStart = (UINT)rootDescStart;
+    result->_bindDescStart = (UINT)bindStart;
     return result;
     /*
     class StageResource : public DxilReflection::BindResource {
@@ -1102,7 +1105,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
 }
 
-Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
+Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
     Buffer* buffer,
     ResourceType type,
     TextureFormat format,
@@ -1160,7 +1163,7 @@ Nullable<radray::shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(
     return result;
 }
 
-Nullable<radray::shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(
+Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
     Texture* texture,
     ResourceType type,
     TextureFormat format,

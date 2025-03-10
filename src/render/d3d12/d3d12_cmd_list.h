@@ -32,15 +32,12 @@ public:
 
     void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept override;
 
-    void TrySetRootSig(RootSigD3D12* rootSig) noexcept;
-
 public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     D3D12_COMMAND_LIST_TYPE _type;
 
     bool _isRenderPassActive{false};
-    ComPtr<ID3D12RootSignature> _bindRootSig{nullptr};
 };
 
 class CmdRenderPassD3D12 : public CommandEncoder {
@@ -59,11 +56,11 @@ public:
 
     void BindPipelineState(GraphicsPipelineState* pso) noexcept override;
 
-    void BindDescriptorSet(RootSignature* rootSig, uint32_t set, DescriptorSet* descSet) noexcept override;
+    void BindDescriptorSet(uint32_t set, DescriptorSet* descSet) noexcept override;
 
-    void PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept override;
+    void PushConstants(uint32_t slot, const void* data, size_t length) noexcept override;
 
-    void BindConstantBuffer(RootSignature* rootSig, uint32_t slot, Buffer* buffer, uint32_t offset) noexcept override;
+    void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
 
     void BindVertexBuffers(std::span<VertexBufferView> vbvs) noexcept override;
 
@@ -74,7 +71,11 @@ public:
     void DrawIndexed(uint32_t indexCount, uint32_t firstIndex, uint32_t firstVertex) noexcept override;
 
 public:
+    void TrySetRootSig(RootSigD3D12* rootSig) noexcept;
+
     CmdListD3D12* _cmdList;
+
+    RootSigD3D12* _bindRootSig{nullptr};
 };
 
 }  // namespace radray::render::d3d12

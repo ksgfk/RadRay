@@ -89,11 +89,12 @@ public:
     void Start() {
         GlobalInitGlfw();
         window = radray::make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
-#if defined(RADRAY_PLATFORM_WINDOWS)
-        device = CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap();
-#elif defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
-        device = CreateDevice(MetalDeviceDescriptor{}).value();
-#endif
+        device = CreateDevice(
+                     D3D12DeviceDescriptor{
+                         std::nullopt,
+                         true,
+                         false})
+                     .Unwrap();
         auto cmdQueue = device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
         cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
         dxc = CreateDxc().Unwrap();
@@ -197,7 +198,7 @@ public:
             DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
             auto vs = device->CreateShader(
                 outv.data,
-                reflv,
+                ShaderBlobCategory::DXIL,
                 ShaderStage::Vertex,
                 "VSMain",
                 "colorVS");
@@ -214,13 +215,12 @@ public:
             DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
             auto ps = device->CreateShader(
                 outp.data,
-                reflp,
+                ShaderBlobCategory::DXIL,
                 ShaderStage::Pixel,
                 "PSMain",
                 "colorPS");
 
-            Shader* shaders[] = {vs.Value(), ps.Value()};
-            rootSig = device->CreateRootSignature(shaders).Unwrap();
+            rootSig = device->CreateRootSignature(RootSignatureDescriptor{}).Unwrap();
             auto psoDesc = DEFAULT_PSO_DESC;
             psoDesc.RootSig = rootSig.get();
             psoDesc.VS = vs.Value();

@@ -25,6 +25,9 @@ public:
     radray::vector<RootConstantInfo> _rootConstants;
     radray::vector<RootDescriptorInfo> _rootDescriptors;
     radray::vector<DescriptorSetElementInfo> _bindDescriptors;
+    UINT _rootConstStart;
+    UINT _rootDescStart;
+    UINT _bindDescStart;
 };
 
 class GpuDescriptorHeapView : public DescriptorSet {

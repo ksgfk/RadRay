@@ -37,7 +37,18 @@ package("mimalloc_radray")
             "-DMI_BUILD_SHARED=" .. (package:config("shared") and "ON" or "OFF"),
             "-DMI_INSTALL_TOPLEVEL=ON"
         }
-        import("package.tools.cmake").build(package, configs, {buildir = "build"})
+        local opts = {
+            buildir = "build"
+        }
+        if package:is_plat("windows") and package:version_str() == "v2.2.2" then 
+            -- workaround for v2.2.2, it cannot use ninja build on windows. but why?
+            -- xmake v2.9.8, msbuild and clang-cl 同时在win上使用时
+            -- xmake 会给 cmake 传递 CMAKE_GENERATOR_TOOLSET=v143, 和 clang-cl 的路径作为 CXX 编译器
+            -- 但是 cmake 完全无视了编译器路径，依然使用 msvc
+            -- what can I say man?
+            opts.cmake_generator = "Visual Studio"
+        end
+        import("package.tools.cmake").build(package, configs, opts)
         if package:is_plat("windows") then
             os.trycp("build/**.dll", package:installdir("bin"))
             os.trycp("build/**.lib", package:installdir("lib"))

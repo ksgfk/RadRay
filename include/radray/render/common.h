@@ -345,8 +345,6 @@ class SwapChain;
 class Buffer;
 class Texture;
 class ResourceView;
-class BufferView;
-class TextureView;
 class DescriptorSet;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;

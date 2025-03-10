@@ -7,6 +7,7 @@
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
+#include <radray/render/resource.h>
 
 #include <windows.h>
 #include <wrl.h>
@@ -41,13 +42,24 @@ public:
     Win32Event& operator=(Win32Event&& other) noexcept;
 
     HANDLE Get() const noexcept { return _event; }
-    
+
     void Destroy() noexcept;
 
 private:
     HANDLE _event{nullptr};
 
     friend std::optional<Win32Event> MakeWin32Event() noexcept;
+};
+
+class ResourceViewD3D12 : public ResourceView {
+public:
+    explicit ResourceViewD3D12(ResourceView::Type type) noexcept : _type(type) {}
+    ~ResourceViewD3D12() noexcept override = default;
+
+    ResourceView::Type GetViewType() const noexcept final { return _type; }
+
+public:
+    ResourceView::Type _type;
 };
 
 std::optional<Win32Event> MakeWin32Event() noexcept;

@@ -47,9 +47,11 @@ struct BufferViewD3D12Desc {
     uint32_t stride;
 };
 
-class BufferViewD3D12 : public BufferView {
+class BufferViewD3D12 : public ResourceViewD3D12 {
 public:
-    explicit BufferViewD3D12(BufferViewD3D12Desc desc) noexcept : _desc(desc) {}
+    explicit BufferViewD3D12(BufferViewD3D12Desc desc) noexcept
+        : ResourceViewD3D12(ResourceView::Type::Buffer),
+          _desc(desc) {}
     ~BufferViewD3D12() noexcept override;
 
     bool IsValid() const noexcept override;

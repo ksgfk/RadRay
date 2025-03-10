@@ -83,7 +83,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept = 0;
 
-    virtual Nullable<radray::shared_ptr<BufferView>> CreateBufferView(
+    virtual Nullable<radray::shared_ptr<ResourceView>> CreateBufferView(
         Buffer* buffer,
         ResourceType type,
         TextureFormat format,
@@ -91,7 +91,7 @@ public:
         uint32_t count,
         uint32_t stride) noexcept = 0;
 
-    virtual Nullable<radray::shared_ptr<TextureView>> CreateTextureView(
+    virtual Nullable<radray::shared_ptr<ResourceView>> CreateTextureView(
         Texture* texture,
         ResourceType type,
         TextureFormat format,

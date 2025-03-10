@@ -42,9 +42,11 @@ struct TextureViewD3D12Desc {
     uint32_t mipLevelCount;
 };
 
-class TextureViewD3D12 : public TextureView {
+class TextureViewD3D12 : public ResourceViewD3D12 {
 public:
-    explicit TextureViewD3D12(const TextureViewD3D12Desc& desc) noexcept : _desc(desc) {}
+    explicit TextureViewD3D12(const TextureViewD3D12Desc& desc) noexcept
+        : ResourceViewD3D12(TextureViewD3D12::Type::Texture),
+          _desc(desc) {}
     ~TextureViewD3D12() noexcept override;
 
     bool IsValid() const noexcept override;

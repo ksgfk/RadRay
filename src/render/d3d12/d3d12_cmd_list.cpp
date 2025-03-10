@@ -143,7 +143,6 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
     }
     cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
     _isRenderPassActive = true;
-    _bindRootSig = nullptr;
     return {radray::make_unique<CmdRenderPassD3D12>(this)};
 }
 
@@ -162,13 +161,6 @@ void CmdListD3D12::EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noe
     cmdList4->EndRenderPass();
     encoder->Destroy();
     _isRenderPassActive = false;
-}
-
-void CmdListD3D12::TrySetRootSig(RootSigD3D12* rootSig) noexcept {
-    if (_bindRootSig != rootSig->_rootSig) {
-        _cmdList->SetGraphicsRootSignature(rootSig->_rootSig.Get());
-        _bindRootSig = rootSig->_rootSig;
-    }
 }
 
 bool CmdRenderPassD3D12::IsValid() const noexcept {
@@ -201,7 +193,7 @@ void CmdRenderPassD3D12::SetScissor(Scissor scissor) noexcept {
 
 void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
     RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    _cmdList->TrySetRootSig(sig);
+    TrySetRootSig(sig);
 }
 
 void CmdRenderPassD3D12::BindPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -210,61 +202,78 @@ void CmdRenderPassD3D12::BindPipelineState(GraphicsPipelineState* pso) noexcept 
     _cmdList->_cmdList->SetPipelineState(psoD3D12->_pso.Get());
 }
 
-void CmdRenderPassD3D12::BindDescriptorSet(RootSignature* rootSig, uint32_t slot, DescriptorSet* descSet) noexcept {
-    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    // GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
-    // if (heapView->_shaderResHeap.HasValue()) {
-    //     if (slot >= sig->_resDescTables.size()) {
-    //         RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
-    //         return;
-    //     }
-    // }
-    // if (heapView->_samplerHeap.HasValue()) {
-    //     if (slot >= sig->_samplerDescTables.size()) {
-    //         RADRAY_ABORT("d3d12 cannot SetGraphicsRootDescriptorTable, param 'slot' out of range {}", slot);
-    //         return;
-    //     }
-    // }
-    // _cmdList->TrySetRootSig(sig);
-    // if (heapView->_shaderResHeap.HasValue()) {
-    //     auto heap = heapView->_shaderResHeap.Value();
-    //     auto start = heap->HandleGpu(heapView->_shaderResStart);
-    //     UINT rootParamIndex = sig->_resDescTables[slot]._rootParamIndex;
-    //     _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
-    // }
-    // if (heapView->_samplerHeap.HasValue()) {
-    //     auto heap = heapView->_samplerHeap.Value();
-    //     auto start = heap->HandleGpu(heapView->_samplerStart);
-    //     UINT rootParamIndex = sig->_samplerDescTables[slot]._rootParamIndex;
-    //     _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, start);
-    // }
+void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* descSet) noexcept {
+    if (_bindRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot BindDescriptorSet, root signature not bound");
+        return;
+    }
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(_bindRootSig);
+    GpuDescriptorHeapView* heapView = static_cast<GpuDescriptorHeapView*>(descSet);
+    if (slot >= sig->_bindDescriptors.size()) {
+        RADRAY_ABORT("d3d12 cannot BindDescriptorSet, param 'slot' out of range {} of {}", slot, sig->_bindDescriptors.size());
+        return;
+    }
+    UINT rootParamIndex = sig->_bindDescStart + slot;
+    D3D12_GPU_DESCRIPTOR_HANDLE desc = heapView->_heap->HandleGpu(heapView->_start);
+    _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, desc);
 }
 
-void CmdRenderPassD3D12::PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept {
-    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    // if (slot >= sig->_rootConsts.size()) {
-    //     RADRAY_ABORT("d3d12 cannot SetGraphicsRoot32BitConstants, param 'slot' out of range {}", slot);
-    //     return;
-    // }
-    // const RootConst& rootConst = sig->_rootConsts[slot];
-    // if (length < rootConst._num32BitValues * 4) {
-    //     RADRAY_ERR_LOG("d3d12 cannot SetGraphicsRoot32BitConstants, param 'length' too small");
-    // }
-    // _cmdList->TrySetRootSig(sig);
-    // _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootConst._rootParamIndex, rootConst._num32BitValues, data, 0);
+void CmdRenderPassD3D12::PushConstants(uint32_t slot, const void* data, size_t length) noexcept {
+    if (_bindRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot PushConstants, root signature not bound");
+        return;
+    }
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(_bindRootSig);
+    if (slot >= sig->_rootConstants.size()) {
+        RADRAY_ABORT("d3d12 cannot PushConstants, param 'slot' out of range {} of {}", slot, sig->_rootConstants.size());
+        return;
+    }
+    uint32_t size = sig->_rootConstants[slot].Size;
+    if (length > size) {
+        RADRAY_ERR_LOG("d3d12 cannot PushConstants, param 'length' too large {}, required {}", length, size);
+        return;
+    }
+    UINT rootParamIndex = sig->_rootConstStart + slot;
+    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootParamIndex, (UINT)length / 4, data, 0);
 }
 
-void CmdRenderPassD3D12::BindConstantBuffer(RootSignature* rootSig, uint32_t slot, Buffer* buffer, uint32_t offset) noexcept {
-    // RootSigD3D12* sig = static_cast<RootSigD3D12*>(rootSig);
-    // if (slot >= sig->_cbufferViews.size()) {
-    //     RADRAY_ABORT("d3d12 cannot SetGraphicsRootConstantBufferView, param 'slot' out of range {}", slot);
-    //     return;
-    // }
-    // const CBufferView& cbvd = sig->_cbufferViews[slot];
-    // BufferD3D12* bufferD3D12 = static_cast<BufferD3D12*>(buffer);
-    // D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferD3D12->_gpuAddr + offset;
-    // _cmdList->TrySetRootSig(sig);
-    // _cmdList->_cmdList->SetGraphicsRootConstantBufferView(cbvd._rootParamIndex, gpuAddr);
+void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+    if (_bindRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, root signature not bound");
+        return;
+    }
+    RootSigD3D12* sig = static_cast<RootSigD3D12*>(_bindRootSig);
+    if (slot >= sig->_rootDescriptors.size()) {
+        RADRAY_ABORT("d3d12 cannot BindRootDescriptor, param 'slot' out of range {} of {}", slot, sig->_rootDescriptors.size());
+        return;
+    }
+    UINT rootParamIndex = sig->_rootDescStart + slot;
+    ResourceViewD3D12* viewD3D12 = static_cast<ResourceViewD3D12*>(view);
+    ResourceView::Type resViewtype = viewD3D12->GetViewType();
+    if (resViewtype == ResourceView::Type::Buffer) {
+        BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
+        D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferView->_desc.buffer->_gpuAddr + bufferView->_desc.offset;
+        ResourceType resType = bufferView->_desc.type;
+        switch (resType) {
+            case ResourceType::Buffer:
+                _cmdList->_cmdList->SetGraphicsRootShaderResourceView(rootParamIndex, gpuAddr);
+                break;
+            case ResourceType::CBuffer:
+            case ResourceType::PushConstant:
+                _cmdList->_cmdList->SetGraphicsRootConstantBufferView(rootParamIndex, gpuAddr);
+                break;
+            case ResourceType::BufferRW:
+                _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(rootParamIndex, gpuAddr);
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, unsupported buffer type {}", resType);
+                break;
+        }
+    } else if (resViewtype == ResourceView::Type::Texture) {
+        RADRAY_ERR_LOG("d3d12 cannot bind texture as root descriptor");
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, unsupported view type");
+    }
 }
 
 void CmdRenderPassD3D12::BindVertexBuffers(std::span<VertexBufferView> vbvs) noexcept {
@@ -288,7 +297,8 @@ void CmdRenderPassD3D12::BindIndexBuffer(Buffer* buffer, uint32_t stride, uint32
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = buf->_gpuAddr + offset;
     view.SizeInBytes = (UINT)buf->GetSize() - offset;
-    view.Format = stride == 1 ? DXGI_FORMAT_R8_UINT : stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+    view.Format = stride == 1 ? DXGI_FORMAT_R8_UINT : stride == 2 ? DXGI_FORMAT_R16_UINT
+                                                                  : DXGI_FORMAT_R32_UINT;
     _cmdList->_cmdList->IASetIndexBuffer(&view);
 }
 
@@ -298,6 +308,13 @@ void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t firstVertex) noexce
 
 void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t firstIndex, uint32_t firstVertex) noexcept {
     _cmdList->_cmdList->DrawIndexedInstanced(indexCount, 1, firstIndex, firstVertex, 0);
+}
+
+void CmdRenderPassD3D12::TrySetRootSig(RootSigD3D12* rootSig) noexcept {
+    if (_bindRootSig != rootSig) {
+        _cmdList->_cmdList->SetGraphicsRootSignature(rootSig->_rootSig.Get());
+        _bindRootSig = rootSig;
+    }
 }
 
 }  // namespace radray::render::d3d12

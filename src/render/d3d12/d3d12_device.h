@@ -71,7 +71,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept override;
 
-    Nullable<radray::shared_ptr<BufferView>> CreateBufferView(
+    Nullable<radray::shared_ptr<ResourceView>> CreateBufferView(
         Buffer* buffer,
         ResourceType type,
         TextureFormat format,
@@ -79,7 +79,7 @@ public:
         uint32_t count,
         uint32_t stride) noexcept override;
 
-    Nullable<radray::shared_ptr<TextureView>> CreateTextureView(
+    Nullable<radray::shared_ptr<ResourceView>> CreateTextureView(
         Texture* texture,
         ResourceType type,
         TextureFormat format,

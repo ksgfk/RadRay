@@ -35,25 +35,9 @@ public:
         Texture
     };
 
-    explicit ResourceView(ResourceView::Type type) noexcept : _type(type) {}
     ~ResourceView() noexcept override = default;
 
-    ResourceView::Type GetViewType() const noexcept { return _type; }
-
-private:
-    ResourceView::Type _type;
-};
-
-class BufferView : public ResourceView {
-public:
-    BufferView() : ResourceView(ResourceView::Type::Buffer) {}
-    ~BufferView() noexcept override = default;
-};
-
-class TextureView : public ResourceView {
-public:
-    TextureView() : ResourceView(ResourceView::Type::Texture) {}
-    ~TextureView() noexcept override = default;
+    virtual ResourceView::Type GetViewType() const noexcept = 0;
 };
 
 }  // namespace radray::render

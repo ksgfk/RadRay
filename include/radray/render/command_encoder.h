@@ -23,11 +23,11 @@ public:
 
     virtual void BindPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
-    virtual void BindDescriptorSet(RootSignature* rootSig, uint32_t slot, DescriptorSet* descSet) noexcept = 0;
+    virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* descSet) noexcept = 0;
 
-    virtual void PushConstants(RootSignature* rootSig, uint32_t slot, const void* data, size_t length) noexcept = 0;
+    virtual void PushConstants(uint32_t slot, const void* data, size_t length) noexcept = 0;
 
-    virtual void BindConstantBuffer(RootSignature* rootSig, uint32_t slot, Buffer* buffer, uint32_t offset) noexcept = 0;
+    virtual void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept = 0;
 
     virtual void BindVertexBuffers(std::span<VertexBufferView> vbvs) noexcept = 0;
 

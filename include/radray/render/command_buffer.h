@@ -25,14 +25,14 @@ struct ResourceBarriers {
 };
 
 struct ColorAttachment {
-    TextureView* Target;
+    ResourceView* Target;
     LoadAction Load;
     StoreAction Store;
     ColorClearValue ClearValue;
 };
 
 inline ColorAttachment DefaultColorAttachment(
-    TextureView* rtView,
+    ResourceView* rtView,
     ColorClearValue clear = {0.0f, 0.0f, 0.0f, 1.0f}) noexcept {
     return {
         .Target = rtView,
@@ -43,7 +43,7 @@ inline ColorAttachment DefaultColorAttachment(
 }
 
 struct DepthStencilAttachment {
-    TextureView* Target;
+    ResourceView* Target;
     LoadAction DepthLoad;
     StoreAction DepthStore;
     LoadAction StencilLoad;
@@ -52,7 +52,7 @@ struct DepthStencilAttachment {
 };
 
 inline DepthStencilAttachment DefaultDepthStencilAttachment(
-    TextureView* depthView,
+    ResourceView* depthView,
     DepthStencilClearValue clear = {1.0f, 0}) noexcept {
     return {
         .Target = depthView,
