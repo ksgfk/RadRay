@@ -91,6 +91,12 @@ using unordered_map = std::unordered_map<K, V, Hash, Equal, radray::allocator<st
 template <class T, class Hash = std::hash<T>, class Equal = std::equal_to<T>>
 using unordered_set = std::unordered_set<T, Hash, Equal, radray::allocator<T>>;
 
+template <class K, class V, class Cmp = std::less<K>>
+using multimap = std::multimap<K, V, Cmp, radray::allocator<std::pair<const K, V>>>;
+
+template <class T, class Cmp = std::less<T>>
+using multiset = std::multiset<T, Cmp, radray::allocator<T>>;
+
 using std::unique_ptr;
 using std::shared_ptr;
 using std::weak_ptr;

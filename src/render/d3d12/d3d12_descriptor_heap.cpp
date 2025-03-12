@@ -6,6 +6,127 @@
 
 namespace radray::render::d3d12 {
 
+DescriptorHeap1::DescriptorHeap1(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
+    : _device(device) {
+    RADRAY_DX_CHECK(_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf())));
+    _desc = _heap->GetDesc();
+    _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
+    _gpuStart = IsShaderVisible() ? _heap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{0};
+    _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
+    RADRAY_DEBUG_LOG(
+        "D3D12 create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)",
+        _desc.Type,
+        IsShaderVisible(),
+        _incrementSize,
+        _desc.NumDescriptors,
+        UINT64(_desc.NumDescriptors) * _incrementSize);
+}
+
+ID3D12DescriptorHeap* DescriptorHeap1::Get() const noexcept {
+    return _heap.Get();
+}
+
+D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeap1::GetHeapType() const noexcept {
+    return _desc.Type;
+}
+
+UINT DescriptorHeap1::GetLength() const noexcept {
+    return _desc.NumDescriptors;
+}
+
+bool DescriptorHeap1::IsShaderVisible() const noexcept {
+    return (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap1::HandleGpu(UINT index) const noexcept {
+    return {_gpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap1::HandleCpu(UINT index) const noexcept {
+    return {_cpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+void DescriptorHeap1::Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateUnorderedAccessView(resource, nullptr, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateShaderResourceView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateConstantBufferView(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateRenderTargetView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateDepthStencilView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept {
+    _device->CreateSampler(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap1::CopyTo(UINT start, UINT count, DescriptorHeap* dst, UINT dstStart) noexcept {
+    _device->CopyDescriptorsSimple(
+        count,
+        dst->HandleCpu(dstStart),
+        HandleCpu(start),
+        _desc.Type);
+}
+
+DescriptorHeapView CpuDescriptorAllocator::Allocate(uint32_t count) noexcept {
+    if (count == 0) {
+        return DescriptorHeapView{nullptr, 0, 0};
+    }
+    for (auto iter = _sizeQuery.lower_bound(count); iter != _sizeQuery.end(); iter++) {
+        CpuDescriptorAllocator::Block* block = iter->second;
+        std::optional<uint64_t> start = block->_allocator.Allocate(count);
+        if (start.has_value()) {
+            block->_used += count;
+            _sizeQuery.erase(iter);
+            if (block->GetFreeSize() > 0) {
+                _sizeQuery.emplace(block->GetFreeSize(), block);
+            }
+            return DescriptorHeapView{block->_heap.get(), static_cast<UINT>(start.value()), count};
+        }
+    }
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC desc{
+            _type,
+            std::max(count, _basicSize),
+            D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            0};
+        auto block = std::make_unique<CpuDescriptorAllocator::Block>(_device, desc);
+        Block* blockPtr = block.get();
+        auto [newIter, isInsert] = _blocks.emplace(blockPtr, std::move(block));
+        RADRAY_ASSERT(isInsert);
+        uint64_t start = blockPtr->_allocator.Allocate(count).value();
+        blockPtr->_used += count;
+        if (blockPtr->GetFreeSize() > 0) {
+            _sizeQuery.emplace(blockPtr->GetFreeSize(), newIter->second.get());
+        }
+        return DescriptorHeapView{blockPtr->_heap.get(), static_cast<UINT>(start), count};
+    }
+}
+
+void CpuDescriptorAllocator::Free(DescriptorHeapView view) noexcept {
+}
+
+CpuDescriptorAllocator::Block::Block(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
+    : _heap(std::make_unique<DescriptorHeap1>(device, desc)),
+      _allocator(desc.NumDescriptors),
+      _used(0) {}
+
+uint64_t CpuDescriptorAllocator::Block::GetFreeSize() const noexcept {
+    return _heap->GetLength() - _used;
+}
+
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_TYPE type,
