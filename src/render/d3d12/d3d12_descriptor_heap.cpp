@@ -99,7 +99,7 @@ DescriptorHeapView CpuDescriptorAllocator::Allocate(uint32_t count) noexcept {
     {
         D3D12_DESCRIPTOR_HEAP_DESC desc{
             _type,
-            std::max(count, _basicSize),
+            std::bit_ceil(std::max(count, _basicSize)),
             D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
             0};
         auto block = std::make_unique<CpuDescriptorAllocator::Block>(_device, desc);
@@ -116,6 +116,24 @@ DescriptorHeapView CpuDescriptorAllocator::Allocate(uint32_t count) noexcept {
 }
 
 void CpuDescriptorAllocator::Free(DescriptorHeapView view) noexcept {
+    auto iter = _blocks.find(view.Heap);
+    if (iter == _blocks.end()) {
+        RADRAY_ABORT("D3D12 CpuDescriptorAllocator::Free invalid heap");
+        return;
+    }
+    Block* block = iter->second.get();
+    block->_allocator.Destroy(view.Start);
+    block->_used -= view.Length;
+    auto [qBegin, qEnd] = _sizeQuery.equal_range(block->GetFreeSize());
+    for (auto it = qBegin; it != qEnd; it++) {
+        if (it->second == block) {
+            _sizeQuery.erase(it);
+            break;
+        }
+    }
+    if (block->GetFreeSize() > 0) {
+        _sizeQuery.emplace(block->GetFreeSize(), block);
+    }
 }
 
 CpuDescriptorAllocator::Block::Block(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept

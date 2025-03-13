@@ -70,11 +70,16 @@ private:
         BuddyAllocator _allocator;
         uint64_t _used;
     };
-    radray::unordered_map<DescriptorHeap1*, std::unique_ptr<Block>> _blocks;
+    radray::unordered_map<DescriptorHeap1*, radray::unique_ptr<Block>> _blocks;
     radray::multimap<uint64_t, Block*> _sizeQuery;
     ID3D12Device* _device;
     D3D12_DESCRIPTOR_HEAP_TYPE _type;
     UINT _basicSize;
+};
+
+class GpuDescriptorAllocator {
+private:
+    radray::unique_ptr<DescriptorHeap1> _heap;
 };
 
 // TODO: rewrite alloc
