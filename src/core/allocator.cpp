@@ -9,19 +9,23 @@ namespace radray {
 
 // https://github.com/cloudwu/buddy/blob/master/buddy.c
 
-BuddyAllocator::BuddyAllocator(uint64_t capacity) noexcept : _capacity(capacity) {
-    uint64_t vcapa = std::bit_ceil(capacity);
-    RADRAY_ASSERT(vcapa <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
-    uint64_t treeSize = 2 * vcapa - 1;  // 建一颗满二叉树
+BuddyAllocator::BuddyAllocator(size_t capacity) noexcept : _capacity(capacity) {
+    size_t vcapa = std::bit_ceil(capacity);
+    if constexpr (sizeof(size_t) == sizeof(uint32_t)) {
+        RADRAY_ASSERT(vcapa <= static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+    } else {
+        RADRAY_ASSERT(vcapa <= static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+    }
+    size_t treeSize = 2 * vcapa - 1;  // 建一颗满二叉树
     _tree.resize(treeSize, NodeState::Unused);
 }
 
-std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
-    uint64_t size = size_ == 0 ? 1 : size_;
+std::optional<size_t> BuddyAllocator::Allocate(size_t size_) noexcept {
+    size_t size = size_ == 0 ? 1 : size_;
     size = std::bit_ceil(size);
     RADRAY_ASSERT(std::has_single_bit(size));
-    uint64_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
-    uint64_t vlength = vCapacity;
+    size_t vCapacity = std::bit_ceil(_capacity);  // 满二叉树情况虚拟容量
+    size_t vlength = vCapacity;
     if (size > vlength) {
         return std::nullopt;
     }
@@ -29,7 +33,7 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
     while (ptr >= 0) {          // 从根节点开始搜索可用空间
         if (size == vlength) {  // 找到目标大小层
             if (_tree[ptr] == NodeState::Unused) {
-                uint64_t offset = ((uint64_t)ptr + 1) * vlength - vCapacity;  // 树节点下标对应内存下标
+                size_t offset = ((size_t)ptr + 1) * vlength - vCapacity;  // 树节点下标对应内存下标
                 if (offset + size_ > _capacity) {                             // 分配块是否超出实际容量
                     return std::nullopt;
                 }
@@ -77,11 +81,11 @@ std::optional<uint64_t> BuddyAllocator::Allocate(uint64_t size_) noexcept {
     return std::nullopt;
 }
 
-void BuddyAllocator::Destroy(uint64_t offset) noexcept {
-    uint64_t vCapacity = std::bit_ceil(_capacity);
-    uint64_t vlength = vCapacity;
+void BuddyAllocator::Destroy(size_t offset) noexcept {
+    size_t vCapacity = std::bit_ceil(_capacity);
+    size_t vlength = vCapacity;
     int64_t ptr = 0;
-    uint64_t left = 0;
+    size_t left = 0;
     while (true) {
         switch (_tree[ptr]) {
             case NodeState::Used: {  // 找到需要释放的节点

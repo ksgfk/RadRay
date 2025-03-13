@@ -104,7 +104,7 @@ DescriptorHeapView CpuDescriptorAllocator::Allocate(uint32_t count) noexcept {
             0};
         auto block = std::make_unique<CpuDescriptorAllocator::Block>(_device, desc);
         Block* blockPtr = block.get();
-        auto [newIter, isInsert] = _blocks.emplace(blockPtr, std::move(block));
+        auto [newIter, isInsert] = _blocks.emplace(blockPtr->_heap.get(), std::move(block));
         RADRAY_ASSERT(isInsert);
         uint64_t start = blockPtr->_allocator.Allocate(count).value();
         blockPtr->_used += count;
