@@ -198,25 +198,26 @@ void FreeListAllocator::Destroy(size_t offset) noexcept {
         _sizeQuery.emplace(node->_length, node);
         return;
     }
+    FreeListAllocator::LinkNode endFree = *endFreePtr;
     size_t newSize = 0;
     for (FreeListAllocator::LinkNode* i = startFreePtr; i != endFreePtr->_next; i = i->_next) {
         newSize += i->_length;
-    }
-    FreeListAllocator::LinkNode endFree = *endFreePtr;
-    for (FreeListAllocator::LinkNode* i = startFreePtr->_next; i != endFreePtr->_next; i = i->_next) {
         for (auto j = _sizeQuery.begin(); j != _sizeQuery.end(); j++) {
             if (j->second == i) {
                 _sizeQuery.erase(j);
                 break;
             }
         }
-        _nodes.erase(i->_start);
+        if (i != startFreePtr) {
+            _nodes.erase(i->_start);
+        }
     }
     startFreePtr->_length = newSize;
     startFreePtr->_next = endFree._next;
     if (endFree._next != nullptr) {
         endFree._next->_prev = startFreePtr;
     }
+    _sizeQuery.emplace(startFreePtr->_length, startFreePtr);
 }
 
 FreeListAllocator::LinkNode::LinkNode(size_t start, size_t length) noexcept
