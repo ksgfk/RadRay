@@ -6,12 +6,6 @@
 using namespace radray;
 using namespace std;
 
-struct CreateBuddyAllocator {
-    BuddyAllocator operator()(size_t capacity) const noexcept {
-        return BuddyAllocator{capacity};
-    }
-};
-
 class HeapInternal {
 public:
     HeapInternal(int* counter, size_t size) noexcept : Size(size), Counter(counter) {
@@ -39,19 +33,30 @@ public:
     radray::unique_ptr<HeapInternal> Internal;
 };
 
-struct CreateHeap {
-    int* counter;
-    Heap operator()(size_t size) const noexcept {
-        return Heap{counter, size};
-    }
-};
+class TestAllocator : public BlockAllocator<BuddyAllocator, Heap, TestAllocator> {
+public:
+    TestAllocator(
+        int* counter,
+        size_t basicSize,
+        size_t destroyThreshold) noexcept
+        : BlockAllocator(basicSize, destroyThreshold),
+          Counter(counter) {}
 
-using TestAllocator = BlockAllocator<BuddyAllocator, CreateBuddyAllocator, Heap, CreateHeap>;
+    ~TestAllocator() noexcept override = default;
+
+    radray::unique_ptr<Heap> CreateHeap(size_t size) noexcept {
+        return radray::make_unique<Heap>(Counter, size);
+    }
+
+    BuddyAllocator CreateSubAllocator(size_t size) noexcept { return BuddyAllocator{size}; }
+
+    int* Counter;
+};
 
 void a() {
     radray::unique_ptr<int> counter = radray::make_unique<int>(0);
 
-    TestAllocator alloc{CreateBuddyAllocator{}, CreateHeap{counter.get()}, 2, 0};
+    TestAllocator alloc{counter.get(), 2, 0};
     auto a = alloc.Allocate(1);
     RADRAY_TEST_TRUE(a.has_value());
     RADRAY_TEST_TRUE(a.value().Length == 1);

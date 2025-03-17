@@ -34,7 +34,7 @@ std::optional<size_t> BuddyAllocator::Allocate(size_t size_) noexcept {
         if (size == vlength) {  // 找到目标大小层
             if (_tree[ptr] == NodeState::Unused) {
                 size_t offset = ((size_t)ptr + 1) * vlength - vCapacity;  // 树节点下标对应内存下标
-                if (offset + size_ > _capacity) {                             // 分配块是否超出实际容量
+                if (offset + size_ > _capacity) {                         // 分配块是否超出实际容量
                     return std::nullopt;
                 }
                 _tree[ptr] = NodeState::Used;  // 标记为已使用
@@ -130,5 +130,100 @@ void BuddyAllocator::Destroy(size_t offset) noexcept {
         }
     }
 }
+
+FreeListAllocator::FreeListAllocator(
+    size_t capacity) noexcept
+    : _capacity(capacity) {
+    auto iter = _nodes.emplace(0, radray::make_unique<FreeListAllocator::LinkNode>(0, _capacity));
+    _sizeQuery.emplace(_capacity, iter.first->second.get());
+}
+
+std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
+    if (size == 0 || size > _capacity) {
+        return std::nullopt;
+    }
+    for (auto iter = _sizeQuery.lower_bound(size); iter != _sizeQuery.end(); iter++) {
+        FreeListAllocator::LinkNode* node = iter->second;
+        if (node->_length == size) {
+            _sizeQuery.erase(iter);
+            node->_state = FreeListAllocator::NodeState::Used;
+            return std::make_optional(node->_start);
+        } else {
+            RADRAY_ASSERT(node->_length > size);
+            size_t newStart = node->_start + size;
+            size_t newLength = node->_length - size;
+            auto [newIter, isInsert] = _nodes.emplace(
+                newStart,
+                radray::make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
+            RADRAY_ASSERT(isInsert);
+            FreeListAllocator::LinkNode* newNode = newIter->second.get();
+            node->_state = FreeListAllocator::NodeState::Used;
+            node->_length = size;
+            newNode->_state = FreeListAllocator::NodeState::Free;
+            newNode->_prev = node;
+            newNode->_next = node->_next;
+            node->_next = newNode;
+            if (newNode->_next != nullptr) {
+                newNode->_next->_prev = newNode;
+            }
+            _sizeQuery.erase(iter);
+            _sizeQuery.emplace(newNode->_length, newNode);
+            return std::make_optional(node->_start);
+        }
+    }
+    return std::nullopt;
+}
+
+void FreeListAllocator::Destroy(size_t offset) noexcept {
+    auto iter = _nodes.find(offset);
+    if (iter == _nodes.end()) {
+        RADRAY_ABORT("FreeListAllocator::Destroy invalid offset {}", offset);
+        return;
+    }
+    FreeListAllocator::LinkNode* node = iter->second.get();
+    if (node->_state == FreeListAllocator::NodeState::Free) {
+        RADRAY_ABORT("FreeListAllocator::Destroy invalid offset {}", offset);
+        return;
+    }
+    node->_state = FreeListAllocator::NodeState::Free;
+    FreeListAllocator::LinkNode* startFreePtr = node;
+    while (startFreePtr->_prev != nullptr && startFreePtr->_prev->_state == FreeListAllocator::NodeState::Free) {
+        startFreePtr = startFreePtr->_prev;
+    }
+    FreeListAllocator::LinkNode* endFreePtr = node;
+    while (endFreePtr->_next != nullptr && endFreePtr->_next->_state == FreeListAllocator::NodeState::Free) {
+        endFreePtr = endFreePtr->_next;
+    }
+    if (startFreePtr == endFreePtr) {
+        _sizeQuery.emplace(node->_length, node);
+        return;
+    }
+    size_t newSize = 0;
+    for (FreeListAllocator::LinkNode* i = startFreePtr; i != endFreePtr->_next; i = i->_next) {
+        newSize += i->_length;
+    }
+    FreeListAllocator::LinkNode endFree = *endFreePtr;
+    for (FreeListAllocator::LinkNode* i = startFreePtr->_next; i != endFreePtr->_next; i = i->_next) {
+        for (auto j = _sizeQuery.begin(); j != _sizeQuery.end(); j++) {
+            if (j->second == i) {
+                _sizeQuery.erase(j);
+                break;
+            }
+        }
+        _nodes.erase(i->_start);
+    }
+    startFreePtr->_length = newSize;
+    startFreePtr->_next = endFree._next;
+    if (endFree._next != nullptr) {
+        endFree._next->_prev = startFreePtr;
+    }
+}
+
+FreeListAllocator::LinkNode::LinkNode(size_t start, size_t length) noexcept
+    : _start(start),
+      _length(length),
+      _prev(nullptr),
+      _next(nullptr),
+      _state(FreeListAllocator::NodeState::Free) {}
 
 }  // namespace radray

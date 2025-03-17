@@ -16,6 +16,15 @@ concept is_allocator = requires(TAllocator alloc, size_t size, TAllocation alloc
 };
 
 class BuddyAllocator {
+public:
+    explicit BuddyAllocator(size_t capacity) noexcept;
+
+    ~BuddyAllocator() noexcept = default;
+
+    std::optional<size_t> Allocate(size_t size) noexcept;
+
+    void Destroy(size_t offset) noexcept;
+
 private:
     enum class NodeState : uint8_t {
         Unused = 0,
@@ -24,14 +33,6 @@ private:
         Full = 3
     };
 
-public:
-    BuddyAllocator(size_t capacity) noexcept;
-    ~BuddyAllocator() noexcept = default;
-
-    std::optional<size_t> Allocate(size_t size) noexcept;
-    void Destroy(size_t offset) noexcept;
-
-private:
     radray::vector<NodeState> _tree;
     size_t _capacity;
 };
@@ -43,28 +44,24 @@ struct BlockAllocation {
     size_t Length;
 };
 
-template <class TSubAlloc, class TSubAllocCreate, class THeap, class THeapCreate>
-requires is_allocator<TSubAlloc, size_t> &&
-         std::is_nothrow_invocable_r_v<TSubAlloc, TSubAllocCreate, size_t> &&
-         std::is_nothrow_invocable_r_v<THeap, THeapCreate, size_t>
+template <class TSubAlloc, class THeap, class TDerived>
+requires is_allocator<TSubAlloc, size_t>
 class BlockAllocator {
 public:
     BlockAllocator(
-        TSubAllocCreate sac,
-        THeapCreate hc,
         size_t basicSize,
         size_t destroyThreshold) noexcept
-        : _subAllocCtor(std::move(sac)),
-          _heapCtor(std::move(hc)),
-          _basicSize(basicSize),
+        : _basicSize(basicSize),
           _destroyThreshold(destroyThreshold) {}
+
+    virtual ~BlockAllocator() noexcept = default;
 
     std::optional<BlockAllocation<THeap>> Allocate(size_t size) noexcept {
         if (size == 0) {
             return std::nullopt;
         }
         for (auto iter = _sizeQuery.lower_bound(size); iter != _sizeQuery.end(); iter++) {
-            Block* block = iter->second;
+            BlockAllocator::Block* block = iter->second;
             std::optional<size_t> start = block->_allocator.Allocate(size);
             if (start.has_value()) {
                 _sizeQuery.erase(iter);
@@ -74,8 +71,12 @@ public:
             }
         }
         {
-            radray::unique_ptr<Block> newBlock = radray::make_unique<Block>(_subAllocCtor, _heapCtor, std::max(size, _basicSize));
-            Block* blockPtr = newBlock.get();
+            size_t needSize = std::max(size, _basicSize);
+            radray::unique_ptr<BlockAllocator::Block> newBlock = radray::make_unique<BlockAllocator::Block>(
+                static_cast<TDerived*>(this)->CreateHeap(needSize),
+                static_cast<TDerived*>(this)->CreateSubAllocator(needSize),
+                needSize);
+            BlockAllocator::Block* blockPtr = newBlock.get();
             auto [newIter, isInsert] = _blocks.emplace(blockPtr->_heap.get(), std::move(newBlock));
             RADRAY_ASSERT(isInsert);
             size_t newStart = blockPtr->_allocator.Allocate(size).value();
@@ -88,7 +89,7 @@ public:
     void Destroy(BlockAllocation<THeap> allocation) noexcept {
         auto iter = _blocks.find(allocation.Heap);
         RADRAY_ASSERT(iter != _blocks.end());
-        Block* block = iter->second.get();
+        BlockAllocator::Block* block = iter->second.get();
         block->_allocator.Destroy(allocation.Start);
         auto [qBegin, qEnd] = _sizeQuery.equal_range(block->_freeSize);
         for (auto it = qBegin; it != qEnd; it++) {
@@ -105,29 +106,30 @@ private:
     class Block {
     public:
         Block(
-            const TSubAllocCreate& subAllocCtor,
-            const THeapCreate& heapCtor,
+            radray::unique_ptr<THeap> heap,
+            TSubAlloc&& allocator,
             size_t heapSize) noexcept
-            : _heap(radray::make_unique<THeap>(heapCtor(heapSize))),
-              _allocator(subAllocCtor(heapSize)),
-              _freeSize(heapSize),
-              _initSize(heapSize) {}
+            : _freeSize(heapSize),
+              _initSize(heapSize),
+              _heap(std::move(heap)),
+              _allocator(std::move(std::forward<TSubAlloc>(allocator))) {}
 
-        radray::unique_ptr<THeap> _heap;
-        TSubAlloc _allocator;
         size_t _freeSize;
         size_t _initSize;
+        radray::unique_ptr<THeap> _heap;
+        TSubAlloc _allocator;
     };
 
-    void CheckBlockState(Block* block) noexcept {
-        if (block->_freeSize > 0) {
-            _sizeQuery.emplace(block->_freeSize, block);
-        }
+    void CheckBlockState(BlockAllocator::Block* block) noexcept {
+        bool isBlockDestroyed = false;
         if (block->_freeSize == block->_initSize) {
             _unused.emplace(block);
             while (_unused.size() > _destroyThreshold) {
                 auto selectIter = _unused.begin();
-                Block* selectBlock = *selectIter;
+                BlockAllocator::Block* selectBlock = *selectIter;
+                if (selectBlock == block) {
+                    isBlockDestroyed = true;
+                }
                 _unused.erase(selectIter);
                 auto [qBegin, qEnd] = _sizeQuery.equal_range(selectBlock->_freeSize);
                 for (auto it = qBegin; it != qEnd; it++) {
@@ -141,15 +143,46 @@ private:
         } else {
             _unused.erase(block);
         }
+        if (block->_freeSize > 0 && !isBlockDestroyed) {
+            _sizeQuery.emplace(block->_freeSize, block);
+        }
     }
 
-    radray::unordered_map<THeap*, radray::unique_ptr<Block>> _blocks;
-    radray::multimap<size_t, Block*> _sizeQuery;
-    radray::unordered_set<Block*> _unused;
-    TSubAllocCreate _subAllocCtor;
-    THeapCreate _heapCtor;
+    radray::unordered_map<THeap*, radray::unique_ptr<BlockAllocator::Block>> _blocks;
+    radray::multimap<size_t, BlockAllocator::Block*> _sizeQuery;
+    radray::unordered_set<BlockAllocator::Block*> _unused;
     size_t _basicSize;
     size_t _destroyThreshold;
+};
+
+class FreeListAllocator {
+public:
+    explicit FreeListAllocator(size_t capacity) noexcept;
+
+    std::optional<size_t> Allocate(size_t size) noexcept;
+
+    void Destroy(size_t offset) noexcept;
+
+private:
+    enum class NodeState {
+        Free,
+        Used
+    };
+
+    class LinkNode {
+    public:
+        LinkNode(size_t start, size_t length) noexcept;
+
+        size_t _start;
+        size_t _length;
+        FreeListAllocator::LinkNode* _prev;
+        FreeListAllocator::LinkNode* _next;
+        NodeState _state;
+    };
+
+    radray::unordered_map<size_t, radray::unique_ptr<FreeListAllocator::LinkNode>> _nodes;
+    radray::multimap<size_t, FreeListAllocator::LinkNode*> _sizeQuery;
+    size_t _capacity;
 };
 
 }  // namespace radray
