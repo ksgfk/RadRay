@@ -200,7 +200,9 @@ void FreeListAllocator::Destroy(size_t offset) noexcept {
     }
     FreeListAllocator::LinkNode endFree = *endFreePtr;
     size_t newSize = 0;
-    for (FreeListAllocator::LinkNode* i = startFreePtr; i != endFreePtr->_next; i = i->_next) {
+    FreeListAllocator::LinkNode* tmp = startFreePtr;
+    for (FreeListAllocator::LinkNode* i = tmp; i != endFreePtr->_next; i = tmp) {
+        tmp = i->_next;
         newSize += i->_length;
         for (auto j = _sizeQuery.begin(); j != _sizeQuery.end(); j++) {
             if (j->second == i) {

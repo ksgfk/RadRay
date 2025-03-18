@@ -104,6 +104,9 @@ end
 if get_config("enable_spirv_cross") then
     add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
 end
+if get_config("build_test") then
+    add_requires("gtest v1.15.2", {debug = is_mode("debug")})
+end
 
 -- 编译目标
 includes("src")

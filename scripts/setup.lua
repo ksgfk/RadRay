@@ -111,6 +111,13 @@ rule("radray_copy_shaders_to_bin")
     end)
 rule_end()
 
+rule("radray_test")
+    on_config(function (target)
+        target:set("kind", "binary")
+        target:add("packages", "gtest")
+    end)
+rule_end()
+
 -- https://github.com/xmake-io/xmake/blob/dev/xmake/toolchains/llvm/xmake.lua
 toolchain("llvm-macos-brew")
     set_kind("standalone")

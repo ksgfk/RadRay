@@ -1,23 +1,23 @@
+#include <gtest/gtest.h>
+
 #include <radray/logger.h>
 #include <radray/allocator.h>
 
-#include "test_helpers.h"
-
-void a() {
+TEST(Core_Allocator_FreeList, Simple) {
     radray::FreeListAllocator alloc{2};
     auto a = alloc.Allocate(1);
-    RADRAY_TEST_TRUE(a.has_value());
-    RADRAY_TEST_TRUE(a.value() == 0);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_EQ(a.value(), 0);
 
     auto b = alloc.Allocate(1);
-    RADRAY_TEST_TRUE(b.has_value());
-    RADRAY_TEST_TRUE(b.value() == 1);
+    ASSERT_TRUE(b.has_value());
+    ASSERT_EQ(b.value(), 1);
 
     auto c = alloc.Allocate(1);
-    RADRAY_TEST_TRUE(!c.has_value());
+    ASSERT_FALSE(c.has_value());
 }
 
-void b() {
+TEST(Core_Allocator_FreeList, Simple2) {
     radray::FreeListAllocator alloc{16};
     alloc.Allocate(1);
     auto b = alloc.Allocate(1).value();
@@ -32,12 +32,86 @@ void b() {
     alloc.Destroy(e);
 
     auto g = alloc.Allocate(4);
-    RADRAY_TEST_TRUE(g.has_value());
-    RADRAY_TEST_TRUE(g.value() == 1);
+    ASSERT_TRUE(g.has_value());
+    ASSERT_EQ(g.value(), 1);
 }
 
-int main() {
-    a();
-    b();
-    return 0;
+TEST(Core_Allocator_FreeList, AllocateAndDestroy) {
+    ::testing::GTEST_FLAG(catch_exceptions) = false;
+
+    radray::FreeListAllocator alloc{8};
+
+    auto a = alloc.Allocate(2);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_EQ(a.value(), 0);
+
+    auto b = alloc.Allocate(3);
+    ASSERT_TRUE(b.has_value());
+    ASSERT_EQ(b.value(), 2);
+
+    alloc.Destroy(a.value());
+    auto c = alloc.Allocate(1);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c.value(), 0);
+
+    alloc.Destroy(b.value());
+    auto d = alloc.Allocate(5);
+    ASSERT_TRUE(d.has_value());
+    ASSERT_EQ(d.value(), 2);
+}
+
+TEST(Core_Allocator_FreeList, OverAllocate) {
+    radray::FreeListAllocator alloc{4};
+
+    auto a = alloc.Allocate(2);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_EQ(a.value(), 0);
+
+    auto b = alloc.Allocate(3);
+    ASSERT_FALSE(b.has_value());
+
+    alloc.Destroy(a.value());
+    auto c = alloc.Allocate(4);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c.value(), 0);
+}
+
+TEST(Core_Allocator_FreeList, Fragmentation) {
+    radray::FreeListAllocator alloc{10};
+
+    auto a = alloc.Allocate(3);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_EQ(a.value(), 0);
+
+    auto b = alloc.Allocate(2);
+    ASSERT_TRUE(b.has_value());
+    ASSERT_EQ(b.value(), 3);
+
+    auto c = alloc.Allocate(4);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c.value(), 5);
+
+    alloc.Destroy(b.value());
+    auto d = alloc.Allocate(2);
+    ASSERT_TRUE(d.has_value());
+    ASSERT_EQ(d.value(), 3);
+
+    auto e = alloc.Allocate(1);
+    ASSERT_FALSE(e.has_value());
+}
+
+TEST(Core_Allocator_FreeList, EdgeCases) {
+    radray::FreeListAllocator alloc{1};
+
+    auto a = alloc.Allocate(1);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_EQ(a.value(), 0);
+
+    auto b = alloc.Allocate(1);
+    ASSERT_FALSE(b.has_value());
+
+    alloc.Destroy(a.value());
+    auto c = alloc.Allocate(1);
+    ASSERT_TRUE(c.has_value());
+    ASSERT_EQ(c.value(), 0);
 }
