@@ -103,11 +103,13 @@ void LogErrorLoc(SourceLocation loc, fmt::format_string<Args...> fmt, Args&&... 
 #define RADRAY_WARN_LOG_LOC(fmt, ...) ::radray::LogWarnLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ERR_LOG_LOC(fmt, ...) ::radray::LogErrorLoc({__FILE__, __LINE__, nullptr}, fmt __VA_OPT__(, ) __VA_ARGS__)
 
-#if RADRAY_IS_DEBUG
-#define RADRAY_ASSERT(x) assert(x)
-#else
-#define RADRAY_ASSERT(x)
-#endif
+#define RADRAY_ASSERT(x)                              \
+    do {                                              \
+        if (!(x)) [[unlikely]] {                      \
+            RADRAY_ABORT("Assertion failed: {}", #x); \
+        }                                             \
+    } while (0)
+
 #define RADRAY_THROW(type, fmt, ...)                                    \
     do {                                                                \
         auto tmp___ = ::radray::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
