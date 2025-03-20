@@ -23,28 +23,27 @@ std::span<const DescriptorSetElementInfo> RootSigD3D12::GetBindDescriptors() con
 }
 
 static void DestroyGpuDescriptorHeapView(GpuDescriptorHeapView* v) noexcept {
-    if (v->_heap) {
-        v->_heap->RecycleRange(v->_start, v->_count);
-        v->_heap = nullptr;
+    if (v->_heapView.IsValid()) {
+        v->_allocator->Destroy(v->_heapView);
+        v->_heapView = DescriptorHeapView::Invalid();
+        v->_allocator = nullptr;
     }
 }
 
 GpuDescriptorHeapView::GpuDescriptorHeapView(
-    DescriptorHeap* heap,
-    ResourceType type,
-    uint32_t start,
-    uint32_t count) noexcept
-    : _heap(heap),
-      _type(type),
-      _start(start),
-      _count(count) {}
+    DescriptorHeapView heapView,
+    GpuDescriptorAllocator* allocator,
+    ResourceType type) noexcept
+    : _heapView(heapView),
+      _allocator(allocator),
+      _type(type) {}
 
 GpuDescriptorHeapView::~GpuDescriptorHeapView() noexcept {
     DestroyGpuDescriptorHeapView(this);
 }
 
 bool GpuDescriptorHeapView::IsValid() const noexcept {
-    return _heap != nullptr;
+    return _heapView.IsValid();
 }
 
 void GpuDescriptorHeapView::Destroy() noexcept {

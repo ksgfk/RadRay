@@ -57,17 +57,16 @@ BufferViewD3D12::~BufferViewD3D12() noexcept {
 }
 
 bool BufferViewD3D12::IsValid() const noexcept {
-    return _desc.buffer != nullptr && _desc.heap != nullptr && _desc.heapIndex != BufferViewD3D12Desc::InvalidHeapIndex;
+    return _desc.buffer != nullptr && _desc.heapView.IsValid();
 }
 
 void BufferViewD3D12::Destroy() noexcept {
     if (!IsValid()) {
         return;
     }
-    _desc.heap->Recycle(_desc.heapIndex);
+    _desc.heapAlloc->Destroy(_desc.heapView);
+    _desc.heapView = DescriptorHeapView::Invalid();
     _desc.buffer = nullptr;
-    _desc.heap = nullptr;
-    _desc.heapIndex = BufferViewD3D12Desc::InvalidHeapIndex;
 }
 
 }  // namespace radray::render::d3d12

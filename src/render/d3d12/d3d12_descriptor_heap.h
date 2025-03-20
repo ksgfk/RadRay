@@ -6,9 +6,9 @@
 
 namespace radray::render::d3d12 {
 
-class DescriptorHeap1 {
+class DescriptorHeap {
 public:
-    DescriptorHeap1(
+    DescriptorHeap(
         ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept;
 
@@ -48,84 +48,71 @@ private:
 };
 
 struct DescriptorHeapView {
-    DescriptorHeap1* Heap;
+    DescriptorHeap* Heap;
     UINT Start;
     UINT Length;
+
+    static constexpr DescriptorHeapView Invalid() noexcept { return {nullptr, 0, 0}; }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu() const noexcept;
+
+    constexpr bool IsValid() const noexcept { return Heap != nullptr; }
+};
+
+class CpuDescriptorAllocatorImpl final : public BlockAllocator<BuddyAllocator, DescriptorHeap, CpuDescriptorAllocatorImpl> {
+public:
+    CpuDescriptorAllocatorImpl(
+        ID3D12Device* device,
+        D3D12_DESCRIPTOR_HEAP_TYPE type,
+        UINT basicSize) noexcept;
+
+    ~CpuDescriptorAllocatorImpl() noexcept override = default;
+
+    radray::unique_ptr<DescriptorHeap> CreateHeap(size_t size) noexcept;
+
+    BuddyAllocator CreateSubAllocator(size_t size) noexcept;
+
+private:
+    ID3D12Device* _device;
+    D3D12_DESCRIPTOR_HEAP_TYPE _type;
 };
 
 class CpuDescriptorAllocator {
 public:
-    DescriptorHeapView Allocate(uint32_t count) noexcept;
-
-    void Free(DescriptorHeapView view) noexcept;
-
-private:
-    class Block {
-    public:
-        Block(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept;
-
-        uint64_t GetFreeSize() const noexcept;
-
-        radray::unique_ptr<DescriptorHeap1> _heap;
-        BuddyAllocator _allocator;
-        uint64_t _used;
-    };
-    radray::unordered_map<DescriptorHeap1*, radray::unique_ptr<Block>> _blocks;
-    radray::multimap<uint64_t, Block*> _sizeQuery;
-    ID3D12Device* _device;
-    D3D12_DESCRIPTOR_HEAP_TYPE _type;
-    UINT _basicSize;
-};
-
-class GpuDescriptorAllocator {
-private:
-    radray::unique_ptr<DescriptorHeap1> _heap;
-};
-
-// TODO: rewrite alloc
-class DescriptorHeap {
-public:
-    DescriptorHeap(
+    CpuDescriptorAllocator(
         ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
-        uint32_t length,
-        bool isShaderVisible) noexcept;
+        UINT basicSize) noexcept;
 
-    UINT Allocate() noexcept;
-    void Recycle(UINT value) noexcept;
-    void Clear() noexcept;
-    void Reset() noexcept;
-    UINT AllocateRange(UINT count) noexcept;
-    void RecycleRange(UINT start, UINT count) noexcept;
+    std::optional<DescriptorHeapView> Allocate(UINT count) noexcept;
 
-    D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu(UINT index) const noexcept;
-    D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu(UINT index) const noexcept;
-
-    void Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) noexcept;
-    void Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) noexcept;
-    void Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index) noexcept;
-    void Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) noexcept;
-    void Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) noexcept;
-    void Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept;
-
-    void CopyTo(UINT start, UINT count, DescriptorHeap* dst, UINT dstStart) noexcept;
-
-    ID3D12DescriptorHeap* Get() const noexcept { return _heap.Get(); }
-
-    D3D12_DESCRIPTOR_HEAP_TYPE GetHeapType() const noexcept { return _desc.Type; }
+    void Destroy(DescriptorHeapView view) noexcept;
 
 private:
-    void ExpandCapacity(UINT need) noexcept;
-
-    ID3D12Device* _device;
-    D3D12_DESCRIPTOR_HEAP_DESC _desc;
-    radray::vector<UINT> _empty;
-    ComPtr<ID3D12DescriptorHeap> _heap;
-    D3D12_CPU_DESCRIPTOR_HANDLE _cpuStart;
-    D3D12_GPU_DESCRIPTOR_HANDLE _gpuStart;
-    UINT _incrementSize;
-    UINT _allocIndex;
-    uint32_t _initLength;
+    CpuDescriptorAllocatorImpl _impl;
 };
+
+static_assert(is_allocator<CpuDescriptorAllocator, DescriptorHeapView>, "CpuDescriptorAllocator is not an allocator");
+
+class GpuDescriptorAllocator {
+public:
+    GpuDescriptorAllocator(
+        ID3D12Device* device,
+        D3D12_DESCRIPTOR_HEAP_TYPE type,
+        UINT size) noexcept;
+
+    std::optional<DescriptorHeapView> Allocate(UINT count) noexcept;
+
+    void Destroy(DescriptorHeapView view) noexcept;
+
+private:
+    ID3D12Device* _device;
+    DescriptorHeap _heap;
+    FreeListAllocator _allocator;
+};
+
+static_assert(is_allocator<GpuDescriptorAllocator, DescriptorHeapView>, "GpuDescriptorAllocator is not an allocator");
 
 }  // namespace radray::render::d3d12

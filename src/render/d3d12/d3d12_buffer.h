@@ -2,6 +2,7 @@
 
 #include <radray/render/resource.h>
 #include "d3d12_helper.h"
+#include "d3d12_descriptor_heap.h"
 
 namespace radray::render::d3d12 {
 
@@ -35,11 +36,9 @@ public:
 };
 
 struct BufferViewD3D12Desc {
-    constexpr static UINT InvalidHeapIndex = std::numeric_limits<UINT>::max();
-
     BufferD3D12* buffer;
-    DescriptorHeap* heap;
-    UINT heapIndex;
+    DescriptorHeapView heapView;
+    CpuDescriptorAllocator* heapAlloc;
     ResourceType type;
     DXGI_FORMAT format;
     uint32_t count;

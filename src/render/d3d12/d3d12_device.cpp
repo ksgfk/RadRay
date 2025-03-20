@@ -33,10 +33,10 @@ static void DestroyImpl(DeviceD3D12* d) noexcept {
         i.clear();
     }
 
-    d->_cbvSrvUavHeap = nullptr;
-    d->_rtvHeap = nullptr;
-    d->_dsvHeap = nullptr;
-    d->_gpuHeap = nullptr;
+    d->_cpuResAlloc = nullptr;
+    d->_cpuRtvAlloc = nullptr;
+    d->_cpuDsvAlloc = nullptr;
+    d->_gpuResHeap = nullptr;
     d->_gpuSamplerHeap = nullptr;
 
     d->_mainAlloc = nullptr;
@@ -1113,15 +1113,20 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
     uint32_t count,
     uint32_t stride) noexcept {
     auto buf = Underlying(buffer);
-    DescriptorHeap* heap = GetCbvSrvUavHeap();
-    UINT heapIndex = heap->Allocate();
-    auto guard = radray::MakeScopeGuard([=]() noexcept { heap->Recycle(heapIndex); });
+    CpuDescriptorAllocator* heap = this->GetCpuResAllocator();
+    auto heapViewOpt = heap->Allocate(1);
+    if (!heapViewOpt.has_value()) {
+        RADRAY_ERR_LOG("d3d12 cannot allocate buffer view, unknown error");
+        return nullptr;
+    }
+    DescriptorHeapView heapView = heapViewOpt.value();
+    auto guard = radray::MakeScopeGuard([=]() noexcept { heap->Destroy(heapView); });
     DXGI_FORMAT dxgiFormat;
     if (type == ResourceType::CBuffer || type == ResourceType::PushConstant) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
         desc.BufferLocation = buf->_gpuAddr + offset;
         desc.SizeInBytes = count;
-        _device->CreateConstantBufferView(&desc, heap->HandleCpu(heapIndex));
+        heapView.Heap->Create(desc, heapView.Start);
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
     } else if (type == ResourceType::Buffer) {
         D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -1132,7 +1137,7 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
         desc.Buffer.NumElements = count;
         desc.Buffer.StructureByteStride = stride;
         desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        _device->CreateShaderResourceView(buf->_buf.Get(), &desc, heap->HandleCpu(heapIndex));
+        heapView.Heap->Create(buf->_buf.Get(), desc, heapView.Start);
         dxgiFormat = desc.Format;
     } else if (type == ResourceType::BufferRW) {
         D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
@@ -1143,7 +1148,7 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
         desc.Buffer.StructureByteStride = stride;
         desc.Buffer.CounterOffsetInBytes = 0;
         desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-        _device->CreateUnorderedAccessView(buf->_buf.Get(), nullptr, &desc, heap->HandleCpu(heapIndex));
+        heapView.Heap->Create(buf->_buf.Get(), desc, heapView.Start);
         dxgiFormat = desc.Format;
     } else {
         RADRAY_ERR_LOG("d3d12 cannot create buffer view, type={}", type);
@@ -1151,8 +1156,8 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
     }
     BufferViewD3D12Desc bv{
         buf,
+        heapView,
         heap,
-        heapIndex,
         type,
         dxgiFormat,
         count,
@@ -1175,17 +1180,22 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
     auto tex = Underlying(texture);
-    DescriptorHeap* heap = nullptr;
-    UINT heapIndex = std::numeric_limits<UINT>::max();
+    CpuDescriptorAllocator* heap = nullptr;
+    DescriptorHeapView heapView = DescriptorHeapView::Invalid();
     auto guard = radray::MakeScopeGuard([&]() noexcept {
-        if (heap != nullptr && heapIndex != std::numeric_limits<UINT>::max()) {
-            heap->Recycle(heapIndex);
+        if (heap != nullptr && heapView.IsValid()) {
+            heap->Destroy(heapView);
         }
     });
     DXGI_FORMAT dxgiFormat;
     if (type == ResourceType::Texture) {
-        heap = GetCbvSrvUavHeap();
-        heapIndex = heap->Allocate();
+        heap = this->GetCpuResAllocator();
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot allocate texture view, unknown error");
+            return nullptr;
+        }
+        heapView = heapViewOpt.value();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = MapShaderResourceType(format);
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1238,11 +1248,16 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
                 RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
                 return nullptr;
         }
-        heap->Create(tex->_tex.Get(), srvDesc, heapIndex);
+        heapView.Heap->Create(tex->_tex.Get(), srvDesc, heapView.Start);
         dxgiFormat = srvDesc.Format;
     } else if (type == ResourceType::RenderTarget) {
-        heap = GetRtvHeap();
-        heapIndex = heap->Allocate();
+        heap = this->GetRtvAllocator();
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot allocate texture view, unknown error");
+            return nullptr;
+        }
+        heapView = heapViewOpt.value();
         D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
         rtvDesc.Format = MapType(format);
         switch (dim) {
@@ -1277,11 +1292,16 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
                 RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
                 return nullptr;
         }
-        heap->Create(tex->_tex.Get(), rtvDesc, heapIndex);
+        heapView.Heap->Create(tex->_tex.Get(), rtvDesc, heapView.Start);
         dxgiFormat = rtvDesc.Format;
     } else if (type == ResourceType::DepthStencil) {
-        heap = GetDsvHeap();
-        heapIndex = heap->Allocate();
+        heap = this->GetDsvAllocator();
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot allocate texture view, unknown error");
+            return nullptr;
+        }
+        heapView = heapViewOpt.value();
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = MapType(format);
         switch (dim) {
@@ -1309,11 +1329,16 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
                 RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
                 return nullptr;
         }
-        heap->Create(tex->_tex.Get(), dsvDesc, heapIndex);
+        heapView.Heap->Create(tex->_tex.Get(), dsvDesc, heapView.Start);
         dxgiFormat = dsvDesc.Format;
     } else if (type == ResourceType::TextureRW) {
-        heap = GetCbvSrvUavHeap();
-        heapIndex = heap->Allocate();
+        heap = this->GetCpuResAllocator();
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot allocate texture view, unknown error");
+            return nullptr;
+        }
+        heapView = heapViewOpt.value();
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = MapShaderResourceType(format);
         switch (dim) {
@@ -1349,7 +1374,7 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
                 RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
                 return nullptr;
         }
-        heap->Create(tex->_tex.Get(), uavDesc, heapIndex);
+        heapView.Heap->Create(tex->_tex.Get(), uavDesc, heapView.Start);
         dxgiFormat = uavDesc.Format;
     } else {
         RADRAY_ERR_LOG("d3d12 cannot create texture view, type={} dim={}", type, dim);
@@ -1357,8 +1382,8 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
     }
     TextureViewD3D12Desc tvd{
         tex,
+        heapView,
         heap,
-        heapIndex,
         type,
         dxgiFormat,
         dim,
@@ -1372,66 +1397,64 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
 }
 
 Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept {
-    DescriptorHeap* heap = info.Type == ResourceType::Sampler ? GetGpuSamplerHeap() : GetGpuHeap();
-    uint32_t heapStart = heap->AllocateRange(info.Count);
+    GpuDescriptorAllocator* heap = info.Type == ResourceType::Sampler ? this->GetGpuResAllocator() : this->GetGpuResAllocator();
+    auto heapViewOpt = heap->Allocate(info.Count);
+    if (!heapViewOpt.has_value()) {
+        RADRAY_ERR_LOG("d3d12 cannot allocate gpu descriptor set, out of memory");
+        return nullptr;
+    }
     return radray::make_shared<GpuDescriptorHeapView>(
+        heapViewOpt.value(),
         heap,
-        info.Type,
-        heapStart,
-        info.Count);
+        info.Type);
 }
 
-DescriptorHeap* DeviceD3D12::GetCbvSrvUavHeap() noexcept {
-    if (_cbvSrvUavHeap == nullptr) {
-        _cbvSrvUavHeap = radray::make_unique<DescriptorHeap>(
+CpuDescriptorAllocator* DeviceD3D12::GetCpuResAllocator() noexcept {
+    if (_cpuResAlloc == nullptr) {
+        _cpuResAlloc = radray::make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            1 << 14,
-            false);
+            512);
     }
-    return _cbvSrvUavHeap.get();
+    return _cpuResAlloc.get();
 }
 
-DescriptorHeap* DeviceD3D12::GetRtvHeap() noexcept {
-    if (_rtvHeap == nullptr) {
-        _rtvHeap = radray::make_unique<DescriptorHeap>(
+CpuDescriptorAllocator* DeviceD3D12::GetRtvAllocator() noexcept {
+    if (_cpuRtvAlloc == nullptr) {
+        _cpuRtvAlloc = radray::make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-            1 << 8,
-            false);
+            256);
     }
-    return _rtvHeap.get();
+    return _cpuRtvAlloc.get();
 }
 
-DescriptorHeap* DeviceD3D12::GetDsvHeap() noexcept {
-    if (_dsvHeap == nullptr) {
-        _dsvHeap = radray::make_unique<DescriptorHeap>(
+CpuDescriptorAllocator* DeviceD3D12::GetDsvAllocator() noexcept {
+    if (_cpuDsvAlloc == nullptr) {
+        _cpuDsvAlloc = radray::make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
-            1 << 8,
-            false);
+            128);
     }
-    return _dsvHeap.get();
+    return _cpuDsvAlloc.get();
 }
 
-DescriptorHeap* DeviceD3D12::GetGpuHeap() noexcept {
-    if (_gpuHeap == nullptr) {
-        _gpuHeap = radray::make_unique<DescriptorHeap>(
+GpuDescriptorAllocator* DeviceD3D12::GetGpuResAllocator() noexcept {
+    if (_gpuResHeap == nullptr) {
+        _gpuResHeap = radray::make_unique<GpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            1 << 16,
-            true);
+            1 << 16);
     }
-    return _gpuHeap.get();
+    return _gpuResHeap.get();
 }
 
-DescriptorHeap* DeviceD3D12::GetGpuSamplerHeap() noexcept {
+GpuDescriptorAllocator* DeviceD3D12::GetGpuSamplerAllocator() noexcept {
     if (_gpuSamplerHeap == nullptr) {
-        _gpuSamplerHeap = radray::make_unique<DescriptorHeap>(
+        _gpuSamplerHeap = radray::make_unique<GpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            1 << 8,
-            true);
+            1 << 8);
     }
     return _gpuSamplerHeap.get();
 }

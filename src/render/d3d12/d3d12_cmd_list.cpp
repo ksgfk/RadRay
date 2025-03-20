@@ -114,7 +114,7 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
         D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE beginningAccess = MapType(color.Load);
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
         auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
-        rtDesc.cpuDescriptor = v->_desc.heap->HandleCpu(v->_desc.heapIndex);
+        rtDesc.cpuDescriptor = v->_desc.heapView.HandleCpu();
         rtDesc.BeginningAccess.Type = beginningAccess;
         rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
         rtDesc.EndingAccess.Type = endingAccess;
@@ -132,7 +132,7 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
         clear.Format = v->_desc.format;
         clear.DepthStencil.Depth = depthStencil.ClearValue.Depth;
         clear.DepthStencil.Stencil = depthStencil.ClearValue.Stencil;
-        dsDesc.cpuDescriptor = v->_desc.heap->HandleCpu(v->_desc.heapIndex);
+        dsDesc.cpuDescriptor = v->_desc.heapView.HandleCpu();
         dsDesc.DepthBeginningAccess.Type = depthBeginningAccess;
         dsDesc.DepthBeginningAccess.Clear.ClearValue = clear;
         dsDesc.DepthEndingAccess.Type = depthEndingAccess;
@@ -214,7 +214,7 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* descSet
         return;
     }
     UINT rootParamIndex = sig->_bindDescStart + slot;
-    D3D12_GPU_DESCRIPTOR_HANDLE desc = heapView->_heap->HandleGpu(heapView->_start);
+    D3D12_GPU_DESCRIPTOR_HANDLE desc = heapView->_heapView.HandleGpu();
     _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, desc);
 }
 

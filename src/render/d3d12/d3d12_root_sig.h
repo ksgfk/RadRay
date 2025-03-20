@@ -3,6 +3,7 @@
 #include <radray/render/root_signature.h>
 #include <radray/render/descriptor_set.h>
 #include "d3d12_helper.h"
+#include "d3d12_descriptor_heap.h"
 
 namespace radray::render::d3d12 {
 
@@ -33,19 +34,17 @@ public:
 class GpuDescriptorHeapView : public DescriptorSet {
 public:
     GpuDescriptorHeapView(
-        DescriptorHeap* heap,
-        ResourceType type,
-        uint32_t start,
-        uint32_t count) noexcept;
+        DescriptorHeapView heapView,
+        GpuDescriptorAllocator* allocator,
+        ResourceType type) noexcept;
     ~GpuDescriptorHeapView() noexcept override;
 
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
-    DescriptorHeap* _heap;
+    DescriptorHeapView _heapView;
+    GpuDescriptorAllocator* _allocator;
     ResourceType _type;
-    uint32_t _start;
-    uint32_t _count;
 };
 
 }  // namespace radray::render::d3d12

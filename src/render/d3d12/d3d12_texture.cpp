@@ -36,15 +36,14 @@ TextureViewD3D12::~TextureViewD3D12() noexcept {
 }
 
 bool TextureViewD3D12::IsValid() const noexcept {
-    return _desc.texture != nullptr && _desc.heap != nullptr && _desc.heapIndex != TextureViewD3D12Desc::InvalidHeapIndex;
+    return _desc.texture != nullptr && _desc.heapView.IsValid();
 }
 
 void TextureViewD3D12::Destroy() noexcept {
     if (IsValid()) {
-        _desc.heap->Recycle(_desc.heapIndex);
+        _desc.heapAlloc->Destroy(_desc.heapView);
+        _desc.heapView = DescriptorHeapView::Invalid();
         _desc.texture = nullptr;
-        _desc.heap = nullptr;
-        _desc.heapIndex = TextureViewD3D12Desc::InvalidHeapIndex;
     }
 }
 

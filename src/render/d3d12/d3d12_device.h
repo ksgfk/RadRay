@@ -93,11 +93,11 @@ public:
 
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
-    DescriptorHeap* GetCbvSrvUavHeap() noexcept;
-    DescriptorHeap* GetRtvHeap() noexcept;
-    DescriptorHeap* GetDsvHeap() noexcept;
-    DescriptorHeap* GetGpuHeap() noexcept;
-    DescriptorHeap* GetGpuSamplerHeap() noexcept;
+    CpuDescriptorAllocator* GetCpuResAllocator() noexcept;
+    CpuDescriptorAllocator* GetRtvAllocator() noexcept;
+    CpuDescriptorAllocator* GetDsvAllocator() noexcept;
+    GpuDescriptorAllocator* GetGpuResAllocator() noexcept;
+    GpuDescriptorAllocator* GetGpuSamplerAllocator() noexcept;
 
 public:
     ComPtr<ID3D12Device> _device;
@@ -105,11 +105,11 @@ public:
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
     std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
-    radray::unique_ptr<DescriptorHeap> _cbvSrvUavHeap;
-    radray::unique_ptr<DescriptorHeap> _rtvHeap;
-    radray::unique_ptr<DescriptorHeap> _dsvHeap;
-    radray::unique_ptr<DescriptorHeap> _gpuHeap;
-    radray::unique_ptr<DescriptorHeap> _gpuSamplerHeap;
+    radray::unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
+    radray::unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
+    radray::unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
+    radray::unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
+    radray::unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };

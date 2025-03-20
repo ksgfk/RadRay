@@ -37,6 +37,8 @@ private:
     size_t _capacity;
 };
 
+static_assert(is_allocator<BuddyAllocator, size_t>, "BuddyAllocator is not an allocator");
+
 template <class THeap>
 struct BlockAllocation {
     THeap* Heap;
@@ -184,5 +186,7 @@ private:
     radray::multimap<size_t, FreeListAllocator::LinkNode*> _sizeQuery;
     size_t _capacity;
 };
+
+static_assert(is_allocator<FreeListAllocator, size_t>, "FreeListAllocator is not an allocator");
 
 }  // namespace radray
