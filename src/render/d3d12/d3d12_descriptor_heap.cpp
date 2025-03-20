@@ -135,13 +135,15 @@ GpuDescriptorAllocator::GpuDescriptorAllocator(
     D3D12_DESCRIPTOR_HEAP_TYPE type,
     UINT size) noexcept
     : _device(device),
-      _heap(_device,
-            D3D12_DESCRIPTOR_HEAP_DESC{
-                type,
-                static_cast<UINT>(size),
-                D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-                0}),
-      _allocator(size) {}
+      _allocator(size) {
+    _heap = radray::make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            type,
+            static_cast<UINT>(size),
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            0});
+}
 
 std::optional<DescriptorHeapView> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
     auto allocation = _allocator.Allocate(count);
@@ -150,7 +152,7 @@ std::optional<DescriptorHeapView> GpuDescriptorAllocator::Allocate(UINT count) n
     }
     auto v = allocation.value();
     return std::make_optional(DescriptorHeapView{
-        &_heap,
+        _heap.get(),
         static_cast<UINT>(v),
         count});
 }

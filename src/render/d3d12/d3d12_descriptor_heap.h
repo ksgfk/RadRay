@@ -109,7 +109,7 @@ public:
 
 private:
     ID3D12Device* _device;
-    DescriptorHeap _heap;
+    radray::unique_ptr<DescriptorHeap> _heap;
     FreeListAllocator _allocator;
 };
 
