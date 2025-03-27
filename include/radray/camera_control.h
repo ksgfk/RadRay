@@ -11,18 +11,18 @@ public:
     void PanZ(Eigen::Vector3f& position, const Eigen::Quaternionf& rotation) noexcept;
 
 public:
-    Eigen::Vector2f nowPos{};
-    Eigen::Vector2f lastPos{};
-    float panDelta{};
-    bool canFly{};
-    bool canOrbit{};
-    bool canPanXY{};
-    bool canPanZWithDist{};
-    float distance{1.0f};
-    float minDistance{0.05f};
-    float orbitSpeed{0.002f};
-    float panXYSpeed{0.002f};
-    float panZSpeed{0.05f};
+    Eigen::Vector2f NowPos{};
+    Eigen::Vector2f LastPos{};
+    float PanDelta{};
+    bool CanFly{};
+    bool CanOrbit{};
+    bool CanPanXY{};
+    bool CanPanZWithDist{};
+    float Distance{1.0f};
+    float MinDistance{0.05f};
+    float OrbitSpeed{0.002f};
+    float PanXYSpeed{0.002f};
+    float PanZSpeed{0.05f};
 };
 
 }  // namespace radray

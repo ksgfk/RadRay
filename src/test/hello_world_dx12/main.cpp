@@ -196,9 +196,9 @@ public:
                 {},
                 includes,
                 false);
-            DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
+            DxilReflection reflv = dxc->GetDxilReflection(ShaderStage::Vertex, outv.Refl).value();
             auto vs = device->CreateShader(
-                outv.data,
+                outv.Data,
                 ShaderBlobCategory::DXIL,
                 ShaderStage::Vertex,
                 "VSMain",
@@ -213,9 +213,9 @@ public:
                 {},
                 includes,
                 false);
-            DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+            DxilReflection reflp = dxc->GetDxilReflection(ShaderStage::Pixel, outp.Refl).value();
             auto ps = device->CreateShader(
-                outp.data,
+                outp.Data,
                 ShaderBlobCategory::DXIL,
                 ShaderStage::Pixel,
                 "PSMain",

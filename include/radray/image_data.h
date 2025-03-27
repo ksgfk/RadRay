@@ -34,10 +34,10 @@ public:
     size_t GetSize() const noexcept;
     std::span<const byte> GetSpan() const noexcept;
 
-    radray::unique_ptr<byte[]> data;
-    uint32_t width;
-    uint32_t height;
-    ImageFormat format;
+    radray::unique_ptr<byte[]> Data;
+    uint32_t Width;
+    uint32_t Height;
+    ImageFormat Format;
 };
 
 std::string_view to_string(ImageFormat val) noexcept;

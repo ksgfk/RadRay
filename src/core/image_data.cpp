@@ -5,13 +5,13 @@
 namespace radray {
 
 size_t ImageData::GetSize() const noexcept {
-    auto bs = GetImageFormatSize(format);
-    return bs * width * height;
+    auto bs = GetImageFormatSize(Format);
+    return bs * Width * Height;
 }
 
 std::span<const byte> ImageData::GetSpan() const noexcept {
     size_t size = GetSize();
-    return std::span<const byte>{data.get(), size};
+    return std::span<const byte>{Data.get(), size};
 }
 
 size_t GetImageFormatSize(ImageFormat format) noexcept {

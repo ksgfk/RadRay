@@ -202,9 +202,9 @@ public:
             }
         }
         return DxcOutput{
-            .data = std::move(blobData),
-            .refl = std::move(reflData),
-            .category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
+            .Data = std::move(blobData),
+            .Refl = std::move(reflData),
+            .Category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
     }
 
     std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {

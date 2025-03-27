@@ -80,9 +80,9 @@ enum class HlslShaderModel {
 
 class DxcOutput {
 public:
-    radray::vector<byte> data;
-    radray::vector<byte> refl;
-    ShaderBlobCategory category;
+    radray::vector<byte> Data;
+    radray::vector<byte> Refl;
+    ShaderBlobCategory Category;
 };
 
 class Dxc : public RenderBase, public radray::enable_shared_from_this<Dxc> {

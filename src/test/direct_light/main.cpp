@@ -110,7 +110,7 @@ public:
         using namespace std::placeholders;
         _camPos = Eigen::Vector3f(0.0f, 0.0f, -2.0f);
         _camRot = Eigen::Quaternionf::Identity();
-        _camCtrl.distance = std::abs(_camPos.z());
+        _camCtrl.Distance = std::abs(_camPos.z());
         _fovDeg = 90.0f;
         _zNear = 0.1f;
         _zFar = 100.0f;
@@ -140,9 +140,9 @@ public:
                                  {},
                                  false)
                              .value();
-        DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
+        DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.Refl).value();
         shared_ptr<Shader> vs = _device->CreateShader(
-                                           outv.data,
+                                           outv.Data,
                                            ShaderBlobCategory::DXIL,
                                            ShaderStage::Vertex,
                                            "VSMain",
@@ -158,9 +158,9 @@ public:
                                  {},
                                  false)
                              .value();
-        DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
+        DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.Refl).value();
         shared_ptr<Shader> ps = _device->CreateShader(
-                                           outp.data,
+                                           outp.Data,
                                            ShaderBlobCategory::DXIL,
                                            ShaderStage::Pixel,
                                            "PSMain",
@@ -361,20 +361,20 @@ public:
 
     void OnMouseClick(const Eigen::Vector2f& xy, MouseButton button, Action action, KeyModifiers modifiers) {
         if (button == MOUSE_BUTTON_LEFT) {
-            _camCtrl.nowPos = xy;
+            _camCtrl.NowPos = xy;
             if (action == ACTION_PRESSED) {
-                _camCtrl.canOrbit = true;
-                _camCtrl.lastPos = xy;
+                _camCtrl.CanOrbit = true;
+                _camCtrl.LastPos = xy;
             } else if (action == ACTION_RELEASED) {
-                _camCtrl.canOrbit = false;
+                _camCtrl.CanOrbit = false;
             }
         }
         RADRAY_UNUSED(modifiers);
     }
 
     void OnMouseMove(const Eigen::Vector2f& xy) {
-        if (_camCtrl.canOrbit) {
-            _camCtrl.nowPos = xy;
+        if (_camCtrl.CanOrbit) {
+            _camCtrl.NowPos = xy;
         }
     }
 
