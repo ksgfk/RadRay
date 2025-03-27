@@ -8,17 +8,18 @@
 
 namespace radray {
 
-enum class VertexSemantic {
-    POSITION,
-    NORMAL,
-    TEXCOORD,
-    TANGENT,
-    COLOR,
-    PSIZE,
-    BINORMAL,
-    BLENDINDICES,
-    BLENDWEIGHT,
-    POSITIONT
+class VertexSemantic {
+public:
+    static constexpr std::string_view POSITION = "POSITION";
+    static constexpr std::string_view NORMAL = "NORMAL";
+    static constexpr std::string_view TEXCOORD = "TEXCOORD";
+    static constexpr std::string_view TANGENT = "TANGENT";
+    static constexpr std::string_view COLOR = "COLOR";
+    static constexpr std::string_view PSIZE = "PSIZE";
+    static constexpr std::string_view BINORMAL = "BINORMAL";
+    static constexpr std::string_view BLENDINDICES = "BLENDINDICES";
+    static constexpr std::string_view BLENDWEIGHT = "BLENDWEIGHT";
+    static constexpr std::string_view POSITIONT = "POSITIONT";
 };
 
 enum class VertexIndexType {
@@ -26,8 +27,9 @@ enum class VertexIndexType {
     UInt16
 };
 
-struct VertexLayout {
-    VertexSemantic Semantic;
+class VertexLayout {
+public:
+    radray::string Semantic;
     uint32_t SemanticIndex;
     uint32_t Size;
     uint32_t Offset;
@@ -35,29 +37,18 @@ struct VertexLayout {
 
 class VertexData {
 public:
-    static std::optional<VertexSemantic> StringToEnumSemantic(const radray::string& s) noexcept;
-
-    radray::vector<VertexLayout> layouts;
-    radray::unique_ptr<byte[]> vertexData;
-    radray::unique_ptr<byte[]> indexData;
-    uint64_t vertexSize;
-    uint64_t indexSize;
-    VertexIndexType indexType;
-    uint32_t indexCount;
+    radray::vector<VertexLayout> Layouts;
+    radray::unique_ptr<byte[]> VertexData;
+    radray::unique_ptr<byte[]> IndexData;
+    uint32_t VertexSize;
+    uint32_t IndexSize;
+    VertexIndexType IndexType;
+    uint32_t IndexCount;
 };
 
-std::string_view to_string(VertexSemantic e) noexcept;
 std::string_view to_string(VertexIndexType val) noexcept;
 
 }  // namespace radray
-
-template <class CharT>
-struct fmt::formatter<radray::VertexSemantic, CharT> : fmt::formatter<std::string_view, CharT> {
-    template <class FormatContext>
-    auto format(radray::VertexSemantic val, FormatContext& ctx) const {
-        return formatter<std::string_view, CharT>::format(to_string(val), ctx);
-    }
-};
 
 template <class CharT>
 struct fmt::formatter<radray::VertexIndexType, CharT> : fmt::formatter<std::string_view, CharT> {

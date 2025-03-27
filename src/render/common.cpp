@@ -147,22 +147,6 @@ std::string_view format_as(ShaderResourceType v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(VertexSemantic v) noexcept {
-    switch (v) {
-        case VertexSemantic::Position: return "POSITION";
-        case VertexSemantic::Normal: return "NORMAL";
-        case VertexSemantic::Texcoord: return "TEXCOORD";
-        case VertexSemantic::Tangent: return "TANGENT";
-        case VertexSemantic::Color: return "COLOR";
-        case VertexSemantic::PSize: return "PSIZE";
-        case VertexSemantic::BiNormal: return "BINORMAL";
-        case VertexSemantic::BlendIndices: return "BLENDINDICES";
-        case VertexSemantic::BlendWeight: return "BLENDWEIGHT";
-        case VertexSemantic::PositionT: return "POSITIONT";
-    }
-    Unreachable();
-}
-
 std::string_view format_as(VertexFormat v) noexcept {
     switch (v) {
         case VertexFormat::UNKNOWN: return "UNKNOWN";

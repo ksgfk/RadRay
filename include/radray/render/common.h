@@ -180,19 +180,6 @@ enum class VertexFormat {
     FLOAT32X4,
 };
 
-enum class VertexSemantic {
-    Position,
-    Normal,
-    Texcoord,
-    Tangent,
-    Color,
-    PSize,
-    BiNormal,
-    BlendIndices,
-    BlendWeight,
-    PositionT
-};
-
 enum class PrimitiveTopology {
     PointList,
     LineList,
@@ -374,7 +361,6 @@ std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(ShaderResourceType v) noexcept;
-std::string_view format_as(VertexSemantic v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(ResourceType v) noexcept;

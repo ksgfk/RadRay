@@ -40,7 +40,7 @@ public:
 
     class VertexInput {
     public:
-        VertexSemantic Semantic;
+        radray::string Semantic;
         uint32_t SemanticIndex;
         VertexFormat Format;
     };

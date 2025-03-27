@@ -4,9 +4,10 @@
 
 namespace radray::render {
 
-struct VertexElement {
+class VertexElement {
+public:
     uint64_t Offset;
-    VertexSemantic Semantic;
+    radray::string Semantic;
     uint32_t SemanticIndex;
     VertexFormat Format;
     uint32_t Location;

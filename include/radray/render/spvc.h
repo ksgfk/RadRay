@@ -11,7 +11,7 @@ public:
         radray::string Name;
         uint32_t Location;
         VertexFormat Format;
-        VertexSemantic Semantic;
+        radray::string Semantic;
         uint32_t SemanticIndex;
     };
 

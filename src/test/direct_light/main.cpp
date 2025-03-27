@@ -169,26 +169,13 @@ public:
 
         uint64_t stride = 0;
         radray::vector<VertexElement> elements{};
-        elements.reserve(vd.layouts.size());
-        for (size_t v = 0; v < vd.layouts.size(); v++) {
-            const auto& i = vd.layouts[v];
+        elements.reserve(vd.Layouts.size());
+        for (size_t v = 0; v < vd.Layouts.size(); v++) {
+            const auto& i = vd.Layouts[v];
             stride += i.Size;
             auto& e = elements.emplace_back(VertexElement{});
             e.Offset = i.Offset;
-            e.Semantic = ([&]() {
-                switch (i.Semantic) {
-                    case radray::VertexSemantic::POSITION: return radray::render::VertexSemantic::Position;
-                    case radray::VertexSemantic::NORMAL: return radray::render::VertexSemantic::Normal;
-                    case radray::VertexSemantic::TEXCOORD: return radray::render::VertexSemantic::Texcoord;
-                    case radray::VertexSemantic::TANGENT: return radray::render::VertexSemantic::Tangent;
-                    case radray::VertexSemantic::COLOR: return radray::render::VertexSemantic::Color;
-                    case radray::VertexSemantic::PSIZE: return radray::render::VertexSemantic::PSize;
-                    case radray::VertexSemantic::BINORMAL: return radray::render::VertexSemantic::BiNormal;
-                    case radray::VertexSemantic::BLENDINDICES: return radray::render::VertexSemantic::BlendIndices;
-                    case radray::VertexSemantic::BLENDWEIGHT: return radray::render::VertexSemantic::BlendWeight;
-                    case radray::VertexSemantic::POSITIONT: return radray::render::VertexSemantic::PositionT;
-                }
-            })();
+            e.Semantic = i.Semantic;
             e.SemanticIndex = i.SemanticIndex;
             e.Format = ([&]() {
                 switch (i.Size) {
@@ -219,7 +206,7 @@ public:
         psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
         psoDesc.DepthStencilEnable = true;
         psoDesc.Primitive.StripIndexFormat = ([&]() {
-            switch (vd.indexType) {
+            switch (vd.IndexType) {
                 case VertexIndexType::UInt16: return IndexFormat::UINT16;
                 case VertexIndexType::UInt32: return IndexFormat::UINT32;
             }
@@ -228,17 +215,17 @@ public:
 
         _cubeVbv = {_cubeVb.get(), (uint32_t)stride, 0};
         _cubeIbStride = ([&]() {
-            switch (vd.indexType) {
+            switch (vd.IndexType) {
                 case VertexIndexType::UInt16: return sizeof(uint16_t);
                 case VertexIndexType::UInt32: return sizeof(uint32_t);
             }
         })();
-        _cubeIbCount = vd.indexCount;
+        _cubeIbCount = vd.IndexCount;
     }
 
     void _SetupCubeMesh(const VertexData& vd) {
         _cubeVb = _device->CreateBuffer(
-                             vd.vertexSize,
+                             vd.VertexSize,
                              ResourceType::Buffer,
                              ResourceUsage::Default,
                              ResourceState::VertexAndConstantBuffer,
@@ -246,7 +233,7 @@ public:
                              "cube_vb")
                       .Unwrap();
         _cubeIb = _device->CreateBuffer(
-                             vd.indexSize,
+                             vd.IndexSize,
                              ResourceType::Buffer,
                              ResourceUsage::Default,
                              ResourceState::IndexBuffer,
@@ -255,7 +242,7 @@ public:
                       .Unwrap();
 
         auto uploadVb = _device->CreateBuffer(
-                                   vd.vertexSize,
+                                   vd.VertexSize,
                                    ResourceType::Buffer,
                                    ResourceUsage::Upload,
                                    ResourceState::GenericRead,
@@ -263,11 +250,11 @@ public:
                             .Unwrap();
         {
             auto ptr = uploadVb->Map(0, uploadVb->GetSize()).Unwrap();
-            std::memcpy(ptr, vd.vertexData.get(), vd.vertexSize);
+            std::memcpy(ptr, vd.VertexData.get(), vd.VertexSize);
             uploadVb->Unmap();
         }
         auto uploadIb = _device->CreateBuffer(
-                                   vd.indexSize,
+                                   vd.IndexSize,
                                    ResourceType::Buffer,
                                    ResourceUsage::Upload,
                                    ResourceState::GenericRead,
@@ -275,7 +262,7 @@ public:
                             .Unwrap();
         {
             auto ptr = uploadIb->Map(0, uploadIb->GetSize()).Unwrap();
-            std::memcpy(ptr, vd.indexData.get(), vd.indexSize);
+            std::memcpy(ptr, vd.IndexData.get(), vd.IndexSize);
             uploadIb->Unmap();
         }
         _cubeCb = _device->CreateBuffer(
@@ -300,8 +287,8 @@ public:
             ResourceBarriers rb{barriers, {}};
             _cmdBuffer->ResourceBarrier(rb);
         }
-        _cmdBuffer->CopyBuffer(uploadVb.get(), 0, _cubeVb.get(), 0, vd.vertexSize);
-        _cmdBuffer->CopyBuffer(uploadIb.get(), 0, _cubeIb.get(), 0, vd.indexSize);
+        _cmdBuffer->CopyBuffer(uploadVb.get(), 0, _cubeVb.get(), 0, vd.VertexSize);
+        _cmdBuffer->CopyBuffer(uploadIb.get(), 0, _cubeIb.get(), 0, vd.IndexSize);
         {
             BufferBarrier barriers[] = {
                 {_cubeVb.get(),

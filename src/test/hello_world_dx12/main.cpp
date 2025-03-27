@@ -2,6 +2,7 @@
 
 #include <radray/logger.h>
 #include <radray/utility.h>
+#include <radray/vertex_data.h>
 #include <radray/window/glfw_window.h>
 #include <radray/render/device.h>
 #include <radray/render/dxc.h>
@@ -27,7 +28,7 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
     {VertexBufferLayout{
         12,
         VertexStepMode::Vertex,
-        {VertexElement{0, VertexSemantic::Position, 0, VertexFormat::FLOAT32X3, 0}}}},
+        {VertexElement{0, radray::string{VertexSemantic::POSITION}, 0, VertexFormat::FLOAT32X3, 0}}}},
     PrimitiveState{
         PrimitiveTopology::TriangleList,
         IndexFormat::UINT32,

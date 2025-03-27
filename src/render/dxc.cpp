@@ -307,41 +307,8 @@ public:
                     RADRAY_ERR_LOG("dxc ID3D12ShaderReflection cannot get D3D12_SIGNATURE_PARAMETER_DESC, code={}", hr);
                     return std::nullopt;
                 }
-                auto semOpt = ([](std::string_view name) noexcept -> std::optional<VertexSemantic> {
-                    if (name == "POSITION") {
-                        return VertexSemantic::Position;
-                    } else if (name == "NORMAL") {
-                        return VertexSemantic::Normal;
-                    } else if (name == "TEXCOORD") {
-                        return VertexSemantic::Texcoord;
-                    } else if (name == "TANGENT") {
-                        return VertexSemantic::Tangent;
-                    } else if (name == "COLOR") {
-                        return VertexSemantic::Color;
-                    } else if (name == "PSIZE") {
-                        return VertexSemantic::PSize;
-                    } else if (name == "BINORMAL") {
-                        return VertexSemantic::BiNormal;
-                    } else if (name == "BLENDINDICES") {
-                        return VertexSemantic::BlendIndices;
-                    } else if (name == "BLENDWEIGHT") {
-                        return VertexSemantic::BlendWeight;
-                    } else if (name == "POSITIONT") {
-                        return VertexSemantic::PositionT;
-                    } else {
-                        return std::nullopt;
-                    }
-                })(std::string_view{spDesc.SemanticName});
-                if (!semOpt.has_value()) {
-                    std::string_view semName{spDesc.SemanticName};
-                    if (semName.starts_with("SV_")) {  // 系统语义, 不处理
-                        continue;
-                    }
-                    RADRAY_ERR_LOG("dxc ID3D12ShaderReflection unknown vertex input semantic {}", spDesc.SemanticName);
-                    return std::nullopt;
-                }
                 auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
-                vi.Semantic = semOpt.value();
+                vi.Semantic = spDesc.SemanticName;
                 vi.SemanticIndex = spDesc.SemanticIndex;
                 uint32_t comps = static_cast<uint32_t>(std::log2(spDesc.Mask));
                 vi.Format = ([](D3D_REGISTER_COMPONENT_TYPE type, uint32_t coms) noexcept -> VertexFormat {

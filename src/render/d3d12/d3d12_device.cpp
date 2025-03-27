@@ -744,7 +744,7 @@ Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsP
         D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
         for (const VertexElement& j : i.Elements) {
             auto& ied = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
-            ied.SemanticName = format_as(j.Semantic).data();
+            ied.SemanticName = j.Semantic.c_str();
             ied.SemanticIndex = j.SemanticIndex;
             ied.Format = MapType(j.Format);
             ied.InputSlot = (UINT)index;
