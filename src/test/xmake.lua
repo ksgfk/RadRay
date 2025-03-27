@@ -34,4 +34,4 @@ target("test_block_alloc")
 target_end()
 
 includes("hello_world_dx12")
--- includes("direct_light")
+includes("direct_light")

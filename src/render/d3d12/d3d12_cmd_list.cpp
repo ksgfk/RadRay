@@ -1,5 +1,7 @@
 #include "d3d12_cmd_list.h"
 
+#include "d3d12_device.h"
+#include "d3d12_descriptor_heap.h"
 #include "d3d12_buffer.h"
 #include "d3d12_texture.h"
 #include "d3d12_descriptor_heap.h"
@@ -15,6 +17,8 @@ void CmdListD3D12::Destroy() noexcept {
 void CmdListD3D12::Begin() noexcept {
     _cmdAlloc->Reset();
     _cmdList->Reset(_cmdAlloc.Get(), nullptr);
+    ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
+    _cmdList->SetDescriptorHeaps(radray::ArrayLength(heaps), heaps);
 }
 
 void CmdListD3D12::End() noexcept {

@@ -107,6 +107,9 @@ public:
 
     void Destroy(DescriptorHeapView view) noexcept;
 
+    ID3D12DescriptorHeap* GetNative() const noexcept { return _heap->Get(); }
+    DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
+
 private:
     ID3D12Device* _device;
     radray::unique_ptr<DescriptorHeap> _heap;

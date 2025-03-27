@@ -29,15 +29,16 @@ static void DestroyImpl(DeviceD3D12* d) noexcept {
             j->Wait();
         }
     }
-    for (auto&& i : d->_queues) {
-        i.clear();
-    }
 
     d->_cpuResAlloc = nullptr;
     d->_cpuRtvAlloc = nullptr;
     d->_cpuDsvAlloc = nullptr;
     d->_gpuResHeap = nullptr;
     d->_gpuSamplerHeap = nullptr;
+
+    for (auto&& i : d->_queues) {
+        i.clear();
+    }
 
     d->_mainAlloc = nullptr;
 
@@ -56,6 +57,16 @@ DeviceD3D12::DeviceD3D12(
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)) {
     _features.Init(_device.Get());
+
+    _gpuResHeap = radray::make_unique<GpuDescriptorAllocator>(
+        _device.Get(),
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        1 << 16);
+
+    _gpuSamplerHeap = radray::make_unique<GpuDescriptorAllocator>(
+        _device.Get(),
+        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+        1 << 8);
 }
 
 DeviceD3D12::~DeviceD3D12() noexcept { DestroyImpl(this); }
@@ -1440,22 +1451,10 @@ CpuDescriptorAllocator* DeviceD3D12::GetDsvAllocator() noexcept {
 }
 
 GpuDescriptorAllocator* DeviceD3D12::GetGpuResAllocator() noexcept {
-    if (_gpuResHeap == nullptr) {
-        _gpuResHeap = radray::make_unique<GpuDescriptorAllocator>(
-            _device.Get(),
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            1 << 16);
-    }
     return _gpuResHeap.get();
 }
 
 GpuDescriptorAllocator* DeviceD3D12::GetGpuSamplerAllocator() noexcept {
-    if (_gpuSamplerHeap == nullptr) {
-        _gpuSamplerHeap = radray::make_unique<GpuDescriptorAllocator>(
-            _device.Get(),
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
-            1 << 8);
-    }
     return _gpuSamplerHeap.get();
 }
 

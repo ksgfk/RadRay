@@ -14,6 +14,7 @@
 #include <radray/render/command_buffer.h>
 #include <radray/render/command_encoder.h>
 #include <radray/render/swap_chain.h>
+#include <radray/render/dxc.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -142,7 +143,7 @@ public:
         DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.refl).value();
         shared_ptr<Shader> vs = _device->CreateShader(
                                            outv.data,
-                                           reflv,
+                                           ShaderBlobCategory::DXIL,
                                            ShaderStage::Vertex,
                                            "VSMain",
                                            "colorVS")
@@ -160,7 +161,7 @@ public:
         DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.refl).value();
         shared_ptr<Shader> ps = _device->CreateShader(
                                            outp.data,
-                                           reflp,
+                                           ShaderBlobCategory::DXIL,
                                            ShaderStage::Pixel,
                                            "PSMain",
                                            "colorPS")
@@ -200,8 +201,10 @@ public:
             })();
             e.Location = v;
         }
-        Shader* shaders[] = {vs.get(), ps.get()};
-        _rootSig = _device->CreateRootSignature(shaders).Unwrap();
+        RootSignatureDescriptor rsDesc{};
+        RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
+        rsDesc.RootConstants = rsInfos;
+        _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = _rootSig.get();
         psoDesc.VS = vs.get();
@@ -344,7 +347,7 @@ public:
     shared_ptr<Dxc> _dxc;
 
     shared_ptr<Texture> _depthTex;
-    shared_ptr<TextureView> _depthView;
+    shared_ptr<ResourceView> _depthView;
 
     shared_ptr<Buffer> _cubeVb;
     VertexBufferView _cubeVbv;
@@ -447,7 +450,7 @@ public:
         PreObject preObj{};
         preObj.model = m.matrix();
         preObj.mvp = _proj * _view * preObj.model;
-        pass->PushConstants(_rootSig.get(), 0, &preObj, sizeof(preObj));
+        pass->PushConstants(0, &preObj, sizeof(preObj));
         VertexBufferView vbv[] = {_cubeVbv};
         pass->BindVertexBuffers(vbv);
         pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);

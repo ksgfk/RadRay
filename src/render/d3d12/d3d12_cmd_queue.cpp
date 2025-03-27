@@ -22,6 +22,7 @@ Nullable<radray::shared_ptr<CommandBuffer>> CmdQueueD3D12::CreateCommandBuffer()
         SUCCEEDED(hr)) {
         RADRAY_DX_CHECK(list->Close());
         return radray::make_shared<CmdListD3D12>(
+            _device,
             std::move(alloc),
             std::move(list),
             _type);
