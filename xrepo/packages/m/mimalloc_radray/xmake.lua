@@ -9,6 +9,7 @@ package("mimalloc_radray")
     add_versions("v2.1.9", "a3070dc57fa03a43cae9079a2a879a66cec8f715")
     add_patches("v2.1.9", "patches/v2.1.9/0001-Merge-branch-dev-into-dev2.patch", "814650c4fa64ca33ca8f845d49fe88291c6762b9686be1c645d47afe6994e37e")
     add_versions("v2.2.2", "f81bf1b31af819a31195e08f9546dc80f8931587")
+    add_versions("v2.2.3", "94036de6fe20bfd8a73d4a6d142fcf532ea604d9")
 
     add_deps("cmake")
 

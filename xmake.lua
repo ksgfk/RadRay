@@ -21,6 +21,7 @@ option("enable_mimalloc")
     set_default(true)
     set_showmenu(true)
 option_end()
+-- shader compiler
 option("enable_dxc")
     set_values(true, false)
     set_default(true)
@@ -29,6 +30,12 @@ option_end()
 option("enable_spirv_cross")
     set_values(true, false)
     set_default(false)
+    set_showmenu(true)
+option_end()
+-- resource rw
+option("enable_png")
+    set_values(true, false)
+    set_default(true)
     set_showmenu(true)
 option_end()
 
@@ -61,7 +68,7 @@ add_requires("fmt_radray 11.1.4", {
         header_only = false
     }
 })
-add_requires("spdlog_radray v1.15.1", {
+add_requires("spdlog_radray v1.15.2", {
     alias = "spdlog",
     debug = is_mode("debug"),
     configs = {
@@ -83,7 +90,7 @@ add_requireconfs("spdlog_radray.fmt_radray", {
 })
 add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
-    add_requires("mimalloc_radray v2.2.2", {debug = is_mode("debug"), configs = {shared = false}}) 
+    add_requires("mimalloc_radray v2.2.3", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
 add_requires("xxhash v0.8.3", {debug = is_mode("debug"), configs = {shared = false, dispatch = true}})
 add_requires("glfw 3.4", {
@@ -106,6 +113,11 @@ if get_config("enable_spirv_cross") then
 end
 if get_config("build_test") then
     add_requires("gtest v1.15.2", {debug = is_mode("debug")})
+end
+if get_config("enable_png") then
+    add_requires("zlib v1.3.1", {debug = is_mode("debug")})
+    add_requires("libpng v1.6.47", {debug = is_mode("debug")})
+    add_requireconfs("libpng.zlib", {version = "v1.3.1",debug = is_mode("debug")})
 end
 
 -- 编译目标

@@ -1,5 +1,9 @@
 #include <radray/image_data.h>
 
+#ifdef RADRAY_ENABLE_PNG
+#include <png.h>
+#endif
+
 #include <radray/utility.h>
 
 namespace radray {
@@ -32,6 +36,41 @@ size_t GetImageFormatSize(ImageFormat format) noexcept {
     }
     Unreachable();
 }
+
+#ifdef RADRAY_ENABLE_PNG
+static void radray_libpng_user_error_fn(png_structp png_ptr, png_const_charp msg) noexcept {
+    RADRAY_UNUSED(png_ptr);
+    RADRAY_ERR_LOG("libpng error: {}", msg);
+}
+static void radray_libpng_user_warn_fn(png_structp png_ptr, png_const_charp msg) noexcept {
+    RADRAY_UNUSED(png_ptr);
+    RADRAY_WARN_LOG("libpng warn: {}", msg);
+}
+static void* radray_libpng_malloc_fn(png_structp png_ptr, png_size_t size) noexcept {
+    RADRAY_UNUSED(png_ptr);
+    return radray::Malloc(size);
+}
+static void radray_libpng_free_fn(png_structp png_ptr, void* ptr) noexcept {
+    RADRAY_UNUSED(png_ptr);
+    radray::Free(ptr);
+}
+static void radray_libpng_read_fn(png_structp png_ptr, png_bytep data, png_size_t length) noexcept {
+    auto* stream = static_cast<std::istream*>(png_get_io_ptr(png_ptr));
+    stream->read(reinterpret_cast<char*>(data), length);
+}
+std::optional<ImageData> LoadPNG(std::istream* stream) {
+    png_structp png_ptr = nullptr;
+    auto guard_png_ptr = MakeScopeGuard([&]() {
+        if (png_ptr) png_destroy_read_struct(&png_ptr, nullptr, nullptr);
+    });
+    png_ptr = png_create_read_struct_2(
+        PNG_LIBPNG_VER_STRING,
+        nullptr, radray_libpng_user_error_fn, radray_libpng_user_warn_fn,
+        nullptr, radray_libpng_malloc_fn, radray_libpng_free_fn);
+    png_set_read_fn(png_ptr, stream, radray_libpng_read_fn);
+    return std::nullopt;
+}
+#endif
 
 std::string_view to_string(ImageFormat val) noexcept {
     switch (val) {

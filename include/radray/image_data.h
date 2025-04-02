@@ -2,6 +2,8 @@
 
 #include <span>
 #include <string_view>
+#include <optional>
+#include <istream>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -39,6 +41,10 @@ public:
     uint32_t Height;
     ImageFormat Format;
 };
+
+#ifdef RADRAY_ENABLE_PNG
+std::optional<ImageData> LoadPNG(std::istream* stream);
+#endif
 
 std::string_view to_string(ImageFormat val) noexcept;
 

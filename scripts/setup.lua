@@ -80,11 +80,7 @@ rule("radray_basic_setting")
             end
         end
         -- simd
-        if is_arch("arm64") then
-            target:add("vectorexts", "neon")
-        else
-            target:add("vectorexts", "avx", "avx2")
-        end
+        target:add("vectorexts", "all")
         -- fma
         if is_arch("x64", "x86_64") then target:add("cxflags", "-mfma", {tools = {"clang", "gcc"}}) end
         -- link
