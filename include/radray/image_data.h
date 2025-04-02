@@ -43,7 +43,8 @@ public:
 };
 
 #ifdef RADRAY_ENABLE_PNG
-std::optional<ImageData> LoadPNG(std::istream* stream);
+bool IsPNG(std::istream& stream) noexcept;
+std::optional<ImageData> LoadPNG(std::istream& stream);
 #endif
 
 std::string_view to_string(ImageFormat val) noexcept;
