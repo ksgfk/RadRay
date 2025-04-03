@@ -11,22 +11,25 @@
 namespace radray {
 
 enum class ImageFormat {
-    R8_BYTE,
-    R16_USHORT,
-    R16_HALF,
-    R32_FLOAT,
+    R8_BYTE,       // 1
+    R16_USHORT,    // 2
+    R16_HALF,      // 2
+    R32_FLOAT,     // 4
 
-    RG8_BYTE,
-    RG16_USHORT,
-    RG16_HALF,
-    RG32_FLOAT,
+    RG8_BYTE,      // 2
+    RG16_USHORT,   // 4
+    RG16_HALF,     // 4
+    RG32_FLOAT,    // 8
 
-    RGB32_FLOAT,
+    RGB32_FLOAT,   // 12
 
-    RGBA8_BYTE,
-    RGBA16_USHORT,
-    RGBA16_HALF,
-    RGBA32_FLOAT,
+    RGBA8_BYTE,    // 4
+    RGBA16_USHORT, // 8
+    RGBA16_HALF,   // 8
+    RGBA32_FLOAT,  // 16
+
+    RGB8_BYTE,     // 3
+    RGB16_USHORT   // 6
 };
 
 size_t GetImageFormatSize(ImageFormat format) noexcept;
@@ -43,7 +46,7 @@ public:
 };
 
 #ifdef RADRAY_ENABLE_PNG
-bool IsPNG(std::istream& stream) noexcept;
+bool IsPNG(std::istream& stream);
 std::optional<ImageData> LoadPNG(std::istream& stream);
 #endif
 
