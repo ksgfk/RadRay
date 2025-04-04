@@ -33,28 +33,20 @@ function clear_dst_dir_no_exist_file(from, to)
     end
 end
 
-function copy_shader_lib(rhi_target, is_install)
-    local src_dir = path.join(rhi_target:scriptdir(), "shader_lib")
+function copy_app_data(target, is_install, from, to)
+    local src_dir = path.join(target:scriptdir(), from)
     local dst_dir
     if is_install then
-        dst_dir = path.join(rhi_target:installdir(), "bin", "shader_lib")
+        dst_dir = path.join(target:installdir(), "bin", to and to or from)
     else
-        dst_dir = path.join(rhi_target:targetdir(), "shader_lib")
+        dst_dir = path.join(target:targetdir(), to and to or from)
     end
     copy_dir_if_newer_recursive(src_dir, dst_dir)
     clear_dst_dir_no_exist_file(src_dir, dst_dir)
 end
 
 function copy_example_shaders(target, is_install)
-    local shader_src = path.join(target:scriptdir(), "shaders")
-    local shader_dst
-    if is_install then
-        shader_dst = path.join(target:installdir(), "bin", "shaders", target:name())
-    else
-        shader_dst = path.join(target:targetdir(), "shaders", target:name())
-    end
-    copy_dir_if_newer_recursive(shader_src, shader_dst)
-    clear_dst_dir_no_exist_file(shader_src, shader_dst)
+    copy_app_data(target, is_install, "shaders", path.join("shaders", target:name()))
 end
 
 function copy_dxil_dll(target)
@@ -69,8 +61,4 @@ function copy_dxil_dll(target)
             copy_file_if_newer(dxil, bin_dir)
         end
     end
-end
-
-function enable_lto(target)
-    target:set("policy", "build.optimization.lto", true)
 end
