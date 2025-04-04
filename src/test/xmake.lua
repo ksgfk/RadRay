@@ -33,5 +33,7 @@ target("test_block_alloc")
     add_tests("default")
 target_end()
 
+includes("test_img_rw")
+
 includes("hello_world_dx12")
 includes("direct_light")

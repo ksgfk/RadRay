@@ -170,6 +170,7 @@ std::optional<ImageData> LoadPNG(std::istream& stream) {
             }
             default: throw LibpngException("unsupported PNG color type");
         }
+        RADRAY_ASSERT(rowbytes * height == imgData.GetSize());
         return std::make_optional(std::move(imgData));
     } catch (LibpngException& e) {
         RADRAY_ERR_LOG("libpng error: {}", e.what());
