@@ -1,10 +1,13 @@
 #include <thread>
+#include <fstream>
+#include <filesystem>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
 #include <radray/camera_control.h>
+#include <radray/image_data.h>
 
 #include <radray/window/glfw_window.h>
 
@@ -15,6 +18,7 @@
 #include <radray/render/command_encoder.h>
 #include <radray/render/swap_chain.h>
 #include <radray/render/dxc.h>
+#include <radray/render/tool_utility.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -39,6 +43,7 @@ public:
         _cubeVb = nullptr;
         _cubeIb = nullptr;
         _cubeCb = nullptr;
+        _cubeBaseColor = nullptr;
         _rootSig = nullptr;
         _pso = nullptr;
 
@@ -64,7 +69,7 @@ public:
         D3D12DeviceDescriptor d3d12Desc{
             std::nullopt,
             true,
-            true};
+            false};
         _device = CreateDevice(d3d12Desc).Unwrap();
         CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
         _cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
@@ -126,6 +131,7 @@ public:
         _cubePos = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
         _SetupCubeMesh(vd);
         _SetupCubeMaterial(vd);
+        _SetupCubeTexture();
     }
 
     void _SetupCubeMaterial(const VertexData& vd) {
@@ -307,6 +313,31 @@ public:
         cmdQueue->Wait();
     }
 
+    void _SetupCubeTexture() {
+        auto filename = std::filesystem::path{"assets"} / "wall.png";
+        std::ifstream file{filename, std::ios::binary};
+        radray::ImageData png = radray::LoadPNG(file).value();
+        if (png.Format == radray::ImageFormat::RGB8_BYTE) {
+            png = png.RGB8ToRGBA8(0xff);
+        }
+
+        _cubeBaseColor = _device->CreateTexture(
+                                    png.Width,
+                                    png.Height,
+                                    1,
+                                    1,
+                                    ImageToTextureFormat(png.Format),
+                                    0,
+                                    1,
+                                    0,
+                                    ColorClearValue{},
+                                    ResourceType::Texture,
+                                    ResourceState::Common,
+                                    ResourceMemoryTip::Dedicated,
+                                    "wall_tex")
+                             .Unwrap();
+    }
+
     void Start() {
         ShowWindow();
         InitGraphics();
@@ -344,6 +375,7 @@ public:
     shared_ptr<Buffer> _cubeCb;
     void* _cubeCbMapped;
     Eigen::Vector3f _cubePos;
+    shared_ptr<Texture> _cubeBaseColor;
 
     shared_ptr<RootSignature> _rootSig;
     shared_ptr<GraphicsPipelineState> _pso;

@@ -19,6 +19,31 @@ std::span<const byte> ImageData::GetSpan() const noexcept {
     return std::span<const byte>{Data.get(), size};
 }
 
+ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
+    if (Format != ImageFormat::RGB8_BYTE) {
+        RADRAY_ABORT("what");
+    }
+    ImageData dstImg;
+    dstImg.Width = Width;
+    dstImg.Height = Height;
+    dstImg.Format = ImageFormat::RGBA8_BYTE;
+    dstImg.Data = radray::make_unique<byte[]>(dstImg.GetSize());
+
+    size_t row = Width;
+    byte a_ = static_cast<byte>(alpha_);
+    const byte* src_ = Data.get();
+    byte* dst_ = dstImg.Data.get();
+    for (size_t j = 0; j < Height; j++, src_ += Width * 3, dst_ += Width * 4) {
+        const byte* src = src_;
+        byte* dst = dst_;
+        for (size_t i = 0; i < row; i++, src += 3, dst += 4) {
+            byte r = src[0], g = src[1], b = src[2], a = a_;
+            dst[0] = r, dst[1] = g, dst[2] = b, dst[3] = a;
+        }
+    }
+    return dstImg;
+}
+
 size_t GetImageFormatSize(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::R8_BYTE: return 1;
