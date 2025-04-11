@@ -42,7 +42,6 @@ function copy_app_data(target, is_install, from, to)
         dst_dir = path.join(target:targetdir(), to and to or from)
     end
     copy_dir_if_newer_recursive(src_dir, dst_dir)
-    clear_dst_dir_no_exist_file(src_dir, dst_dir)
 end
 
 function copy_example_shaders(target, is_install)
