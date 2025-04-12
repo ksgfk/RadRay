@@ -730,7 +730,6 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     result->_samplerDescTables = std::move(samplerDescTables);
     return result;
     */
-    return nullptr;
 }
 
 Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
