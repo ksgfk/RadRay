@@ -41,6 +41,9 @@ option_end()
 
 set_policy("build.ccache", false)
 set_policy("build.warning", true)
+if not is_mode("debug") then
+    set_policy("build.optimization.lto", true)
+end
 
 -- 本地 xrepo
 add_repositories("radray-xrepo xrepo", {rootdir = os.scriptdir()})
@@ -112,7 +115,7 @@ if get_config("enable_spirv_cross") then
     add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
 end
 if get_config("build_test") then
-    add_requires("gtest v1.15.2", {debug = is_mode("debug")})
+    add_requires("gtest v1.16.0", {debug = is_mode("debug")})
 end
 if get_config("enable_png") then
     add_requires("zlib v1.3.1", {debug = is_mode("debug")})

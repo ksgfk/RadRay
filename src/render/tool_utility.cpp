@@ -20,6 +20,7 @@ TextureFormat ImageToTextureFormat(radray::ImageFormat fmt) noexcept {
         case ImageFormat::RGB8_BYTE: return TextureFormat::UNKNOWN;
         case ImageFormat::RGB16_USHORT: return TextureFormat::UNKNOWN;
     }
+    Unreachable();
 }
 
 }  // namespace radray::render

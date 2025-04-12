@@ -1,7 +1,7 @@
 option("_radray_checkout")
     set_default(false)
     set_showmenu(false)
-    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc", "enable_spirv_cross")
+    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc", "enable_spirv_cross", "enable_png")
     before_check(function(option)
         if path.absolute(path.join(os.projectdir(), "scripts")) == path.absolute(os.scriptdir()) then
             local opts = import("options", {try = true, anonymous = true})
@@ -35,6 +35,7 @@ option("_radray_checkout")
             print("radray is enable mimalloc", option:dep("enable_mimalloc"):enabled())
             print("radray is enable dxc", option:dep("enable_dxc"):enabled())
             print("radray is enable spirv-cross", option:dep("enable_spirv_cross"):enabled())
+            print("radray is enable libpng", option:dep("enable_png"):enabled())
         end
     end)
 option_end()
@@ -59,7 +60,7 @@ rule("radray_basic_setting")
             target:add("defines", "RADRAY_IS_DEBUG", {public = true})
         end
         -- warning
-        target:set("warnings", "allextra")
+        target:set("warnings", "allextra", "pedantic")
         -- optimize
         if is_mode("debug") then target:set("optimize", "none") else target:set("optimize", "aggressive") end
         -- exception
@@ -80,11 +81,10 @@ rule("radray_basic_setting")
             end
         end
         -- simd
-        target:add("vectorexts", "all")
+        target:add("vectorexts", "sse", "sse2", "sse3", "ssse3", "sse4.2", "avx", "avx2", "fma", "neon")
         -- fma
         if is_arch("x64", "x86_64") then target:add("cxflags", "-mfma", {tools = {"clang", "gcc"}}) end
         -- link
-        if is_mode("release") then target:set("policy", "build.optimization.lto", true) end
         -- if is_mode("release") then target:set("symbols", "debug") end
     end)
 rule_end()

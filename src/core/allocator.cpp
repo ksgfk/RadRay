@@ -142,36 +142,37 @@ std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
     if (size == 0 || size > _capacity) {
         return std::nullopt;
     }
-    for (auto iter = _sizeQuery.lower_bound(size); iter != _sizeQuery.end(); iter++) {
-        FreeListAllocator::LinkNode* node = iter->second;
-        if (node->_length == size) {
-            _sizeQuery.erase(iter);
-            node->_state = FreeListAllocator::NodeState::Used;
-            return std::make_optional(node->_start);
-        } else {
-            RADRAY_ASSERT(node->_length > size);
-            size_t newStart = node->_start + size;
-            size_t newLength = node->_length - size;
-            auto [newIter, isInsert] = _nodes.emplace(
-                newStart,
-                radray::make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
-            RADRAY_ASSERT(isInsert);
-            FreeListAllocator::LinkNode* newNode = newIter->second.get();
-            node->_state = FreeListAllocator::NodeState::Used;
-            node->_length = size;
-            newNode->_state = FreeListAllocator::NodeState::Free;
-            newNode->_prev = node;
-            newNode->_next = node->_next;
-            node->_next = newNode;
-            if (newNode->_next != nullptr) {
-                newNode->_next->_prev = newNode;
-            }
-            _sizeQuery.erase(iter);
-            _sizeQuery.emplace(newNode->_length, newNode);
-            return std::make_optional(node->_start);
-        }
+    auto iter = _sizeQuery.lower_bound(size);
+    if (iter == _sizeQuery.end()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    FreeListAllocator::LinkNode* node = iter->second;
+    if (node->_length == size) {
+        _sizeQuery.erase(iter);
+        node->_state = FreeListAllocator::NodeState::Used;
+        return std::make_optional(node->_start);
+    } else {
+        RADRAY_ASSERT(node->_length > size);
+        size_t newStart = node->_start + size;
+        size_t newLength = node->_length - size;
+        auto [newIter, isInsert] = _nodes.emplace(
+            newStart,
+            radray::make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
+        RADRAY_ASSERT(isInsert);
+        FreeListAllocator::LinkNode* newNode = newIter->second.get();
+        node->_state = FreeListAllocator::NodeState::Used;
+        node->_length = size;
+        newNode->_state = FreeListAllocator::NodeState::Free;
+        newNode->_prev = node;
+        newNode->_next = node->_next;
+        node->_next = newNode;
+        if (newNode->_next != nullptr) {
+            newNode->_next->_prev = newNode;
+        }
+        _sizeQuery.erase(iter);
+        _sizeQuery.emplace(newNode->_length, newNode);
+        return std::make_optional(node->_start);
+    }
 }
 
 void FreeListAllocator::Destroy(size_t offset) noexcept {
