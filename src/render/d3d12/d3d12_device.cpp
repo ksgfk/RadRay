@@ -927,7 +927,8 @@ Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
             std::move(color),
             ComPtr<D3D12MA::Allocation>{},
             D3D12_RESOURCE_STATE_PRESENT,
-            ResourceType::RenderTarget);
+            ResourceType::RenderTarget,
+            scDesc.Format);
         colors.emplace_back(std::move(tex));
     }
     UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
@@ -1112,7 +1113,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         return nullptr;
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
-    return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type);
+    return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type, rawFormat);
 }
 
 Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(

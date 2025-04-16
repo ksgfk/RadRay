@@ -94,6 +94,39 @@ void CmdListD3D12::CopyBuffer(Buffer* src_, uint64_t srcOffset, Buffer* dst_, ui
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
+void CmdListD3D12::CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept {
+    uint32_t subresource = SubresourceIndex(
+        mipLevel,
+        arrayLayer,
+        0,
+        1,
+        layerCount);
+    BufferD3D12* srcBuf = static_cast<BufferD3D12*>(src);
+    TextureD3D12* dstTex = static_cast<TextureD3D12*>(dst);
+    D3D12_RESOURCE_DESC& dstDesc = dstTex->_desc;
+    D3D12_TEXTURE_COPY_LOCATION cpSrc{};
+    cpSrc.pResource = srcBuf->_buf.Get();
+    cpSrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    UINT row;
+    UINT64 rowSize, total;
+    _device->_device->GetCopyableFootprints(
+        &dstDesc,
+        subresource,
+        1,
+        srcOffset,
+        &cpSrc.PlacedFootprint,
+        &row,
+        &rowSize,
+        &total);
+    RADRAY_DEBUG_LOG("d3d12 CmdListD3D12::CopyTexture row:{} rowSize:{} total:{}", row, rowSize, total);
+    cpSrc.PlacedFootprint.Offset = srcOffset;
+    D3D12_TEXTURE_COPY_LOCATION cpDst{};
+    cpDst.pResource = dstTex->_tex.Get();
+    cpDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    cpDst.SubresourceIndex = subresource;
+    _cmdList->CopyTextureRegion(&cpDst, 0, 0, 0, &cpSrc, nullptr);
+}
+
 Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDesc& desc) noexcept {
     if (_isRenderPassActive) {
         RADRAY_ERR_LOG("Render pass already active, cannot begin another render pass");

@@ -12,7 +12,8 @@ public:
         ComPtr<ID3D12Resource> tex,
         ComPtr<D3D12MA::Allocation> alloc,
         const D3D12_RESOURCE_STATES& initState,
-        ResourceType type) noexcept;
+        ResourceType type,
+        DXGI_FORMAT rawFormat) noexcept;
     ~TextureD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -26,6 +27,7 @@ public:
     D3D12_RESOURCE_DESC _desc;
     D3D12_RESOURCE_STATES _initState;
     ResourceType _type;
+    DXGI_FORMAT _rawFormat;
 };
 
 struct TextureViewD3D12Desc {

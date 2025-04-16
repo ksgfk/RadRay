@@ -320,7 +320,6 @@ public:
         if (png.Format == radray::ImageFormat::RGB8_BYTE) {
             png = png.RGB8ToRGBA8(0xff);
         }
-
         _cubeBaseColor = _device->CreateTexture(
                                     png.Width,
                                     png.Height,
@@ -336,6 +335,43 @@ public:
                                     ResourceMemoryTip::Dedicated,
                                     "wall_tex")
                              .Unwrap();
+        auto upload = _device->CreateBuffer(
+                                 png.GetSize(),
+                                 ResourceType::Buffer,
+                                 ResourceUsage::Upload,
+                                 ResourceState::GenericRead,
+                                 ResourceMemoryTip::None)
+                          .Unwrap();
+        {
+            auto ptr = upload->Map(0, upload->GetSize()).Unwrap();
+            std::memcpy(ptr, png.Data.get(), png.GetSize());
+            upload->Unmap();
+        }
+        _cmdBuffer->Begin();
+        {
+            TextureBarrier barriers[] = {
+                {_cubeBaseColor.get(),
+                 ResourceState::Common,
+                 ResourceState::CopyDestination,
+                 0, 0, false}};
+            ResourceBarriers rb{{}, barriers};
+            _cmdBuffer->ResourceBarrier(rb);
+        }
+        _cmdBuffer->CopyTexture(upload.get(), 0, _cubeBaseColor.get(), 0, 0, 1);
+        {
+            TextureBarrier barriers[] = {
+                {_cubeBaseColor.get(),
+                 ResourceState::CopyDestination,
+                 ResourceState::Common,
+                 0, 0, false}};
+            ResourceBarriers rb{{}, barriers};
+            _cmdBuffer->ResourceBarrier(rb);
+        }
+        _cmdBuffer->End();
+        CommandBuffer* t[] = {_cmdBuffer.get()};
+        auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+        cmdQueue->Submit(t, Nullable<Fence>{});
+        cmdQueue->Wait();
     }
 
     void Start() {
