@@ -8,11 +8,13 @@ TextureD3D12::TextureD3D12(
     ComPtr<ID3D12Resource> tex,
     ComPtr<D3D12MA::Allocation> alloc,
     const D3D12_RESOURCE_STATES& initState,
-    ResourceType type) noexcept
+    ResourceType type,
+    DXGI_FORMAT rawFormat) noexcept
     : _tex(std::move(tex)),
       _alloc(std::move(alloc)),
       _initState(initState),
-      _type(type) {
+      _type(type),
+      _rawFormat(rawFormat) {
     _desc = _tex->GetDesc();
 }
 

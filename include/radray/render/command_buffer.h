@@ -83,6 +83,8 @@ public:
 
     virtual void CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept = 0;
 
+    virtual void CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept = 0;
+
     virtual Nullable<radray::unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept = 0;
 
     virtual void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept = 0;
