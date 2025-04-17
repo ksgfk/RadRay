@@ -335,18 +335,15 @@ public:
                                     ResourceMemoryTip::Dedicated,
                                     "wall_tex")
                              .Unwrap();
+        uint64_t needSize = _cubeBaseColor->GetUploadNeedSize(0, 0, 1);
         auto upload = _device->CreateBuffer(
-                                 png.GetSize(),
+                                 needSize,
                                  ResourceType::Buffer,
                                  ResourceUsage::Upload,
                                  ResourceState::GenericRead,
                                  ResourceMemoryTip::None)
                           .Unwrap();
-        {
-            auto ptr = upload->Map(0, upload->GetSize()).Unwrap();
-            std::memcpy(ptr, png.Data.get(), png.GetSize());
-            upload->Unmap();
-        }
+        _cubeBaseColor->HelpCopyDataToUpload(upload.get(), png.Data.get(), png.GetSize(), 0, 0, 1);
         _cmdBuffer->Begin();
         {
             TextureBarrier barriers[] = {

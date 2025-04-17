@@ -924,11 +924,11 @@ Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
             return nullptr;
         }
         auto tex = radray::make_shared<TextureD3D12>(
+            this,
             std::move(color),
             ComPtr<D3D12MA::Allocation>{},
             D3D12_RESOURCE_STATE_PRESENT,
-            ResourceType::RenderTarget,
-            scDesc.Format);
+            ResourceType::RenderTarget);
         colors.emplace_back(std::move(tex));
     }
     UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
@@ -963,6 +963,12 @@ Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     }
     if (usage == ResourceUsage::Readback) {
         desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    }
+    UINT64 paddedSize;
+    _device->GetCopyableFootprints(&desc, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
+    if (paddedSize != UINT64_MAX) {
+        size = paddedSize;
+        desc.Width = paddedSize;
     }
     if (usage == ResourceUsage::Upload) {
         initState = (ResourceStates)ResourceState::GenericRead;
@@ -1113,7 +1119,12 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         return nullptr;
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
-    return radray::make_shared<TextureD3D12>(std::move(texture), std::move(allocRes), startState, type, rawFormat);
+    return radray::make_shared<TextureD3D12>(
+        this,
+        std::move(texture),
+        std::move(allocRes),
+        startState,
+        type);
 }
 
 Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
