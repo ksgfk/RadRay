@@ -216,7 +216,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             }
         }
     }
-    size_t bindStart = 0;
+    size_t bindStart = rootParmas.size();
     size_t offset = 0;
     radray::vector<DescriptorSetElementInfo> bindDescs{};
     for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
@@ -312,8 +312,22 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
     rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
     rsDesc.pParameters = rootParmas.data();
-    rsDesc.NumStaticSamplers = 0;
-    rsDesc.pStaticSamplers = nullptr;
+    D3D12_STATIC_SAMPLER_DESC ss[] = { // TODO: move to desc
+        {D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+         0,
+         0,
+         D3D12_COMPARISON_FUNC_LESS_EQUAL,
+         D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
+         0,
+         0,
+         0,
+         0,
+         D3D12_SHADER_VISIBILITY_ALL}};
+    rsDesc.NumStaticSamplers = ArrayLength(ss);
+    rsDesc.pStaticSamplers = ss;
     D3D12_ROOT_SIGNATURE_FLAGS flag =
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
         D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |

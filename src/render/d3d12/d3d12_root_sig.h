@@ -42,6 +42,8 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
+    void SetResources(uint32_t start,std::span<ResourceView*> views) noexcept override;
+
     DescriptorHeapView _heapView;
     GpuDescriptorAllocator* _allocator;
     ResourceType _type;

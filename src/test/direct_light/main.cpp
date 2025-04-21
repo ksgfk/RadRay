@@ -17,6 +17,7 @@
 #include <radray/render/command_buffer.h>
 #include <radray/render/command_encoder.h>
 #include <radray/render/swap_chain.h>
+#include <radray/render/descriptor_set.h>
 #include <radray/render/dxc.h>
 #include <radray/render/tool_utility.h>
 
@@ -43,7 +44,9 @@ public:
         _cubeVb = nullptr;
         _cubeIb = nullptr;
         _cubeCb = nullptr;
+        _cubeBaseColorView = nullptr;
         _cubeBaseColor = nullptr;
+        _cubeDescSet = nullptr;
         _rootSig = nullptr;
         _pso = nullptr;
 
@@ -135,7 +138,7 @@ public:
     }
 
     void _SetupCubeMaterial(const VertexData& vd) {
-        radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "normal.hlsl").value();
+        radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
         DxcOutput outv = _dxc->Compile(
                                  color,
                                  "VSMain",
@@ -196,7 +199,10 @@ public:
         }
         RootSignatureDescriptor rsDesc{};
         RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
+        DescriptorSetInfo dsInfos[] = {
+            {{DescriptorSetElementInfo{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics}}}};
         rsDesc.RootConstants = rsInfos;
+        rsDesc.DescriptorSets = dsInfos;
         _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = _rootSig.get();
@@ -369,6 +375,20 @@ public:
         auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
         cmdQueue->Submit(t, Nullable<Fence>{});
         cmdQueue->Wait();
+
+        _cubeBaseColorView = _device->CreateTextureView(
+                                        _cubeBaseColor.get(),
+                                        ResourceType::Texture,
+                                        TextureFormat::RGBA8_UNORM,
+                                        TextureDimension::Dim2D,
+                                        0,
+                                        0,
+                                        0,
+                                        1)
+                                 .Unwrap();
+
+        DescriptorSetElementInfo info{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics};
+        _cubeDescSet = _device->CreateDescriptorSet(info).Unwrap();
     }
 
     void Start() {
@@ -409,6 +429,8 @@ public:
     void* _cubeCbMapped;
     Eigen::Vector3f _cubePos;
     shared_ptr<Texture> _cubeBaseColor;
+    shared_ptr<ResourceView> _cubeBaseColorView;
+    shared_ptr<DescriptorSet> _cubeDescSet;
 
     shared_ptr<RootSignature> _rootSig;
     shared_ptr<GraphicsPipelineState> _pso;
@@ -503,6 +525,9 @@ public:
         preObj.model = m.matrix();
         preObj.mvp = _proj * _view * preObj.model;
         pass->PushConstants(0, &preObj, sizeof(preObj));
+        ResourceView* texViews[] = {_cubeBaseColorView.get()};
+        _cubeDescSet->SetResources(0, texViews);
+        pass->BindDescriptorSet(0, _cubeDescSet.get());
         VertexBufferView vbv[] = {_cubeVbv};
         pass->BindVertexBuffers(vbv);
         pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);

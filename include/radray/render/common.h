@@ -98,7 +98,9 @@ enum class ShaderStage : uint32_t {
     UNKNOWN = 0x0,
     Vertex = 0x1,
     Pixel = 0x2,
-    Compute = 0x4
+    Compute = 0x4,
+
+    Graphics = Vertex | Pixel
 };
 
 enum class ShaderBlobCategory {

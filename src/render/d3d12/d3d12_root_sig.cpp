@@ -50,16 +50,30 @@ void GpuDescriptorHeapView::Destroy() noexcept {
     DestroyGpuDescriptorHeapView(this);
 }
 
-// void GpuDescriptorHeapView::SetResources(std::span<ResourceView*> views) noexcept {
-//     for (ResourceView* rv : views) {
-//         auto type = rv->GetViewType();
-//         if (type == ResourceView::Type::Buffer) {
-//             // TODO:
-//             // BufferViewD3D12* bv = static_cast<BufferViewD3D12*>(rv);
-//             // const auto& desc = bv->_desc;
-//             // desc.heap->CopyTo(desc.heapIndex, 1, _shaderResHeap.Value(), _shaderResStart);
-//         }
-//     }
-// }
+void GpuDescriptorHeapView::SetResources(uint32_t start, std::span<ResourceView*> views) noexcept {
+    if (views.size() == 0) {
+        return;
+    }
+    if (views.size() > _heapView.Length - start) {
+        RADRAY_WARN_LOG("d3d12 set desc view out of range. all {}, start {}, input {}", _heapView.Length, start, views.size());
+    }
+    size_t len = std::min(_heapView.Length, (UINT)views.size());
+    for (size_t i = 0; i < len; i++) {
+        auto view = views[i];
+        auto rawBase = static_cast<ResourceViewD3D12*>(view);
+        switch (rawBase->GetViewType()) {
+            case ResourceView::Type::Buffer: {
+                auto raw = static_cast<BufferViewD3D12*>(rawBase);
+                raw->CopyTo(_heapView.Heap, _heapView.Start + start + i);
+                break;
+            }
+            case ResourceView::Type::Texture: {
+                auto raw = static_cast<TextureViewD3D12*>(rawBase);
+                raw->CopyTo(_heapView.Heap, _heapView.Start + start + i);
+                break;
+            }
+        }
+    }
+}
 
 }  // namespace radray::render::d3d12

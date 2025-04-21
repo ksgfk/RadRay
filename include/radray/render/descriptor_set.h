@@ -8,7 +8,7 @@ class DescriptorSet : public RenderBase {
 public:
     virtual ~DescriptorSet() noexcept = default;
 
-    // virtual void SetResources(std::span<ResourceView*> views) noexcept = 0;
+    virtual void SetResources(uint32_t start, std::span<ResourceView*> views) noexcept = 0;
 };
 
 }  // namespace radray::render
