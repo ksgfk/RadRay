@@ -69,4 +69,8 @@ void BufferViewD3D12::Destroy() noexcept {
     _desc.buffer = nullptr;
 }
 
+void BufferViewD3D12::CopyTo(DescriptorHeap* dst, UINT dstStart) noexcept {
+    _desc.heapView.Heap->CopyTo(_desc.heapView.Start, 1, dst, dstStart);
+}
+
 }  // namespace radray::render::d3d12

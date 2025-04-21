@@ -120,4 +120,8 @@ void TextureViewD3D12::Destroy() noexcept {
     }
 }
 
+void TextureViewD3D12::CopyTo(DescriptorHeap* dst, UINT dstStart) noexcept {
+    _desc.heapView.Heap->CopyTo(_desc.heapView.Start, 1, dst, dstStart);
+}
+
 }  // namespace radray::render::d3d12

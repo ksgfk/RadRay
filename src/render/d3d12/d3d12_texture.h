@@ -63,6 +63,8 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
 
+    void CopyTo(DescriptorHeap* dst, UINT dstStart) noexcept;
+
 public:
     TextureViewD3D12Desc _desc;
 };

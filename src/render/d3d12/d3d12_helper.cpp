@@ -252,12 +252,10 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
 
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {
     switch (v) {
-        case ShaderStage::UNKNOWN: return D3D12_SHADER_VISIBILITY_ALL;
         case ShaderStage::Vertex: return D3D12_SHADER_VISIBILITY_VERTEX;
         case ShaderStage::Pixel: return D3D12_SHADER_VISIBILITY_PIXEL;
-        case ShaderStage::Compute: return D3D12_SHADER_VISIBILITY_ALL;
+        default: return D3D12_SHADER_VISIBILITY_ALL;
     }
-    Unreachable();
 }
 
 D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
