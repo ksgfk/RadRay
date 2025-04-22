@@ -104,8 +104,16 @@ void TextureD3D12::HelpCopyDataToUpload(
     dstBuf->Unmap();
 }
 
+static void TextureViewD3D12DestroyImpl(TextureViewD3D12& that) noexcept {
+    if (that.IsValid()) {
+        that._desc.heapAlloc->Destroy(that._desc.heapView);
+        that._desc.heapView = DescriptorHeapView::Invalid();
+        that._desc.texture = nullptr;
+    }
+}
+
 TextureViewD3D12::~TextureViewD3D12() noexcept {
-    Destroy();
+    TextureViewD3D12DestroyImpl(*this);
 }
 
 bool TextureViewD3D12::IsValid() const noexcept {
@@ -113,11 +121,7 @@ bool TextureViewD3D12::IsValid() const noexcept {
 }
 
 void TextureViewD3D12::Destroy() noexcept {
-    if (IsValid()) {
-        _desc.heapAlloc->Destroy(_desc.heapView);
-        _desc.heapView = DescriptorHeapView::Invalid();
-        _desc.texture = nullptr;
-    }
+    TextureViewD3D12DestroyImpl(*this);
 }
 
 void TextureViewD3D12::CopyTo(DescriptorHeap* dst, UINT dstStart) noexcept {

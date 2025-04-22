@@ -8,6 +8,7 @@
 #include <radray/render/common.h>
 #include <radray/render/root_signature.h>
 #include <radray/render/pipeline_state.h>
+#include <radray/render/sampler.h>
 
 namespace radray::render {
 
@@ -102,6 +103,8 @@ public:
         uint32_t mipLevelCount) noexcept = 0;
 
     virtual Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept = 0;
+
+    virtual Nullable<radray::shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
