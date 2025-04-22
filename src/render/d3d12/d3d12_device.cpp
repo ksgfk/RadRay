@@ -10,6 +10,7 @@
 #include "d3d12_cmd_allocator.h"
 #include "d3d12_cmd_list.h"
 #include "d3d12_fence.h"
+#include "d3d12_sampler.h"
 
 namespace radray::render::d3d12 {
 
@@ -312,20 +313,20 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
     rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
     rsDesc.pParameters = rootParmas.data();
-    D3D12_STATIC_SAMPLER_DESC ss[] = { // TODO: move to desc
-        {D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
-         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-         0,
-         0,
-         D3D12_COMPARISON_FUNC_LESS_EQUAL,
-         D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
-         0,
-         0,
-         0,
-         0,
-         D3D12_SHADER_VISIBILITY_ALL}};
+    D3D12_STATIC_SAMPLER_DESC ss[] = {// TODO: move to desc
+                                      {D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                       0,
+                                       0,
+                                       D3D12_COMPARISON_FUNC_LESS_EQUAL,
+                                       D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
+                                       0,
+                                       0,
+                                       0,
+                                       0,
+                                       D3D12_SHADER_VISIBILITY_ALL}};
     rsDesc.NumStaticSamplers = ArrayLength(ss);
     rsDesc.pStaticSamplers = ss;
     D3D12_ROOT_SIGNATURE_FLAGS flag =
@@ -1445,6 +1446,32 @@ Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(con
         info.Type);
 }
 
+Nullable<radray::shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    D3D12_SAMPLER_DESC rawDesc{};
+    rawDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.HasCompare, desc.AnisotropyClamp);
+    rawDesc.AddressU = MapType(desc.AddressS);
+    rawDesc.AddressV = MapType(desc.AddressT);
+    rawDesc.AddressW = MapType(desc.AddressR);
+    rawDesc.MipLODBias = 0;
+    rawDesc.MaxAnisotropy = desc.AnisotropyClamp;
+    rawDesc.ComparisonFunc = desc.HasCompare ? MapType(desc.Compare) : D3D12_COMPARISON_FUNC_NEVER;
+    rawDesc.BorderColor[0] = 0;
+    rawDesc.BorderColor[1] = 0;
+    rawDesc.BorderColor[2] = 0;
+    rawDesc.BorderColor[3] = 0;
+    rawDesc.MinLOD = desc.LodMin;
+    rawDesc.MaxLOD = desc.LodMax;
+    auto alloc = this->GetCpuSamplerAllocator();
+    auto opt = alloc->Allocate(1);
+    if (!opt.has_value()) {
+        RADRAY_ERR_LOG("d3d12 cannot allocate sampler, out of memory");
+        return nullptr;
+    }
+    DescriptorHeapView heapView = opt.value();
+    _device->CreateSampler(&rawDesc, heapView.HandleCpu());
+    return radray::make_shared<SamplerD3D12>(heapView, alloc, desc, rawDesc);
+}
+
 CpuDescriptorAllocator* DeviceD3D12::GetCpuResAllocator() noexcept {
     if (_cpuResAlloc == nullptr) {
         _cpuResAlloc = radray::make_unique<CpuDescriptorAllocator>(
@@ -1473,6 +1500,16 @@ CpuDescriptorAllocator* DeviceD3D12::GetDsvAllocator() noexcept {
             128);
     }
     return _cpuDsvAlloc.get();
+}
+
+CpuDescriptorAllocator* DeviceD3D12::GetCpuSamplerAllocator() noexcept {
+    if (_cpuSamplerAlloc == nullptr) {
+        _cpuSamplerAlloc = radray::make_unique<CpuDescriptorAllocator>(
+            _device.Get(),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            64);
+    }
+    return _cpuSamplerAlloc.get();
 }
 
 GpuDescriptorAllocator* DeviceD3D12::GetGpuResAllocator() noexcept {

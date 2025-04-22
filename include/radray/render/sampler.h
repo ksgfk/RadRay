@@ -21,4 +21,11 @@ struct SamplerDescriptor {
 bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
 bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
 
+class Sampler : public RenderBase {
+public:
+    ~Sampler() noexcept override = default;
+
+    virtual SamplerDescriptor GetDesc() const noexcept = 0;
+};
+
 }  // namespace radray::render

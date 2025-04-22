@@ -91,11 +91,14 @@ public:
 
     Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept override;
 
+    Nullable<radray::shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
+
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
     CpuDescriptorAllocator* GetCpuResAllocator() noexcept;
     CpuDescriptorAllocator* GetRtvAllocator() noexcept;
     CpuDescriptorAllocator* GetDsvAllocator() noexcept;
+    CpuDescriptorAllocator* GetCpuSamplerAllocator() noexcept;
     GpuDescriptorAllocator* GetGpuResAllocator() noexcept;
     GpuDescriptorAllocator* GetGpuSamplerAllocator() noexcept;
 
@@ -108,6 +111,7 @@ public:
     radray::unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
     radray::unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
     radray::unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
+    radray::unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     radray::unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     radray::unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     CD3DX12FeatureSupport _features;

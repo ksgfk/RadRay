@@ -31,6 +31,7 @@ class SwapChainD3D12;
 class TextureD3D12;
 class BufferD3D12;
 class DescriptorHeap;
+class SamplerD3D12;
 
 using Microsoft::WRL::ComPtr;
 

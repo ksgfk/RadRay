@@ -52,8 +52,17 @@ void BufferD3D12::Unmap() noexcept {
     _buf->Unmap(0, nullptr);
 }
 
+static void BufferViewD3D12DestroyImpl(BufferViewD3D12& that) noexcept {
+    if (!that.IsValid()) {
+        return;
+    }
+    that._desc.heapAlloc->Destroy(that._desc.heapView);
+    that._desc.heapView = DescriptorHeapView::Invalid();
+    that._desc.buffer = nullptr;
+}
+
 BufferViewD3D12::~BufferViewD3D12() noexcept {
-    Destroy();
+    BufferViewD3D12DestroyImpl(*this);
 }
 
 bool BufferViewD3D12::IsValid() const noexcept {
@@ -61,12 +70,7 @@ bool BufferViewD3D12::IsValid() const noexcept {
 }
 
 void BufferViewD3D12::Destroy() noexcept {
-    if (!IsValid()) {
-        return;
-    }
-    _desc.heapAlloc->Destroy(_desc.heapView);
-    _desc.heapView = DescriptorHeapView::Invalid();
-    _desc.buffer = nullptr;
+    BufferViewD3D12DestroyImpl(*this);
 }
 
 void BufferViewD3D12::CopyTo(DescriptorHeap* dst, UINT dstStart) noexcept {
