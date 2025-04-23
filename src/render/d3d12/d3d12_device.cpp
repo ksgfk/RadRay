@@ -307,28 +307,32 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         }
     }
     bindDescs.shrink_to_fit();
+    radray::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
+    staticSamplers.reserve(info.StaticSamplers.size());
+    for (const StaticSamplerInfo& desc : info.StaticSamplers) {
+        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+        ssDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.HasCompare, desc.AnisotropyClamp);
+        ssDesc.AddressU = MapType(desc.AddressS);
+        ssDesc.AddressV = MapType(desc.AddressT);
+        ssDesc.AddressW = MapType(desc.AddressR);
+        ssDesc.MipLODBias = 0;
+        ssDesc.MaxAnisotropy = desc.AnisotropyClamp;
+        ssDesc.ComparisonFunc = desc.HasCompare ? MapType(desc.Compare) : D3D12_COMPARISON_FUNC_NEVER;
+        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        ssDesc.MinLOD = desc.LodMin;
+        ssDesc.MaxLOD = desc.LodMax;
+        ssDesc.ShaderRegister = desc.Slot;
+        ssDesc.RegisterSpace = desc.Space;
+        ssDesc.ShaderVisibility = MapShaderStages(desc.Stages);
+    }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
     D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
     rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
     rsDesc.pParameters = rootParmas.data();
-    D3D12_STATIC_SAMPLER_DESC ss[] = {// TODO: move to desc
-                                      {D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
-                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-                                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-                                       0,
-                                       0,
-                                       D3D12_COMPARISON_FUNC_LESS_EQUAL,
-                                       D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK,
-                                       0,
-                                       0,
-                                       0,
-                                       0,
-                                       D3D12_SHADER_VISIBILITY_ALL}};
-    rsDesc.NumStaticSamplers = ArrayLength(ss);
-    rsDesc.pStaticSamplers = ss;
+    rsDesc.NumStaticSamplers = static_cast<UINT>(staticSamplers.size());
+    rsDesc.pStaticSamplers = staticSamplers.data();
     D3D12_ROOT_SIGNATURE_FLAGS flag =
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
         D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
