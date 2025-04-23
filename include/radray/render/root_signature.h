@@ -31,10 +31,28 @@ public:
     radray::vector<DescriptorSetElementInfo> Elements;
 };
 
+struct StaticSamplerInfo {
+    uint32_t Slot;
+    uint32_t Space;
+    ShaderStages Stages;
+    AddressMode AddressS;
+    AddressMode AddressT;
+    AddressMode AddressR;
+    FilterMode MigFilter;
+    FilterMode MagFilter;
+    FilterMode MipmapFilter;
+    float LodMin;
+    float LodMax;
+    CompareFunction Compare;
+    uint32_t AnisotropyClamp;
+    bool HasCompare;
+};
+
 struct RootSignatureDescriptor {
     std::span<RootConstantInfo> RootConstants;
     std::span<RootDescriptorInfo> RootDescriptors;
     std::span<DescriptorSetInfo> DescriptorSets;
+    std::span<StaticSamplerInfo> StaticSamplers;
 };
 
 class RootSignature : public RenderBase {

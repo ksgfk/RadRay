@@ -201,8 +201,13 @@ public:
         RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
         DescriptorSetInfo dsInfos[] = {
             {{DescriptorSetElementInfo{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics}}}};
+        StaticSamplerInfo ssInfos[] = {
+            {0, 0, ShaderStage::Graphics, AddressMode::ClampToEdge, AddressMode::ClampToEdge,
+             AddressMode::ClampToEdge, FilterMode::Linear, FilterMode::Linear,
+             FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
         rsDesc.RootConstants = rsInfos;
         rsDesc.DescriptorSets = dsInfos;
+        rsDesc.StaticSamplers = ssInfos;
         _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = _rootSig.get();
