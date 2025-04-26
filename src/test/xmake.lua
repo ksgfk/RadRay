@@ -33,6 +33,13 @@ target("test_block_alloc")
     add_tests("default")
 target_end()
 
+target("test_wavefront_obj")
+    add_rules("radray_basic_setting", "radray_test")
+    add_files("test_wavefront_obj.cpp", "test_main.cpp")
+    add_deps("radray_core")
+    add_tests("default")
+target_end()
+
 includes("test_img_rw")
 
 includes("hello_world_dx12")
