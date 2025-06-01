@@ -989,12 +989,13 @@ Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
         size = paddedSize;
         desc.Width = paddedSize;
     }
-    if (usage == ResourceUsage::Upload) {
-        initState = (ResourceStates)ResourceState::GenericRead;
-    } else if (usage == ResourceUsage::Readback) {
-        initState = (ResourceStates)ResourceState::CopyDestination;
+    D3D12_RESOURCE_STATES rawInitState;
+    switch (usage) {
+        case ResourceUsage::Default: rawInitState = D3D12_RESOURCE_STATE_COMMON; break;
+        case ResourceUsage::Upload: rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ; break;
+        case ResourceUsage::Readback: rawInitState = D3D12_RESOURCE_STATE_COPY_DEST; break;
     }
-    D3D12_RESOURCE_STATES rawInitState = MapTypeResStates(initState);
+    D3D12_RESOURCE_STATES userInitState = MapTypeResStates(initState);
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(usage);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
@@ -1039,7 +1040,7 @@ Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     }
     SetObjectName(name, buffer.Get(), allocRes.Get());
     RADRAY_DEBUG_LOG("d3d12 create buffer, size={}, type={}, usage={}", size, type, usage);
-    return radray::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), rawInitState, type);
+    return radray::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), userInitState, type);
 }
 
 Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
