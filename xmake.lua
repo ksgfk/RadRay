@@ -64,14 +64,14 @@ if is_plat("windows") then
 end
 
 -- 第三方库
-add_requires("fmt_radray 11.1.4", {
+add_requires("fmt_radray 11.2.0", {
     debug = is_mode("debug"),
     configs = {
         shared = false,
         header_only = false
     }
 })
-add_requires("spdlog_radray v1.15.2", {
+add_requires("spdlog_radray v1.15.3", {
     alias = "spdlog",
     debug = is_mode("debug"),
     configs = {
@@ -84,7 +84,7 @@ add_requires("spdlog_radray v1.15.2", {
         no_default_logger = true
     }})
 add_requireconfs("spdlog_radray.fmt_radray", {
-    version = "11.1.4",
+    version = "11.2.0",
     debug = is_mode("debug"),
     configs = {
         shared = false,
@@ -102,11 +102,11 @@ add_requires("glfw 3.4", {
         shared = false
     }})
 if get_config("enable_d3d12") then
-    add_requires("directx-headers v1.615.0", {debug = is_mode("debug")})
-    add_requires("d3d12-memory-allocator_radray v2.0.1", {debug = is_mode("debug")})
+    add_requires("directx-headers v1.616.0", {debug = is_mode("debug")})
+    add_requires("d3d12-memory-allocator_radray v3.0.1", {debug = is_mode("debug")})
 end
 if get_config("enable_dxc") then
-    add_requires("directxshadercompiler_radray v1.8.2502")
+    add_requires("directxshadercompiler_radray v1.8.2505")
 end
 if get_config("enable_metal") then 
     add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
