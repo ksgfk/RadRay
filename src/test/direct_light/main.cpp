@@ -8,6 +8,7 @@
 #include <radray/vertex_data.h>
 #include <radray/camera_control.h>
 #include <radray/image_data.h>
+#include <radray/wavefront_obj.h>
 
 #include <radray/window/glfw_window.h>
 
@@ -33,6 +34,28 @@ struct PreObject {
     Eigen::Matrix4f model;
 };
 
+struct alignas(16) ObjectMaterial {
+    Eigen::Vector3f baseColor;
+};
+
+class TestMesh {
+public:
+    u8string name;
+
+    shared_ptr<Buffer> _vb;
+    shared_ptr<Buffer> _ib;
+    shared_ptr<Buffer> _upVb;
+    shared_ptr<Buffer> _upIb;
+
+    shared_ptr<Buffer> _cb;
+    shared_ptr<ResourceView> _cbView;
+
+    shared_ptr<RootSignature> _rs;
+    shared_ptr<GraphicsPipelineState> _pso;
+
+    uint32_t _vertexIndexCount = 0;
+};
+
 class TestApp1 {
 public:
     TestApp1() {
@@ -49,6 +72,7 @@ public:
         _cubeDescSet = nullptr;
         _rootSig = nullptr;
         _pso = nullptr;
+        _meshes.clear();
 
         _depthView = nullptr;
         _depthTex = nullptr;
@@ -116,10 +140,10 @@ public:
 
     void SetupCamera() {
         using namespace std::placeholders;
-        _camPos = Eigen::Vector3f(0.0f, 0.0f, -2.0f);
-        _camRot = Eigen::Quaternionf::Identity();
+        _camPos = Eigen::Vector3f(2.78f, 2.73f, 7.5f);
+        _camRot = Eigen::AngleAxisf{Radian(180.0f), Eigen::Vector3f::UnitY()};
         _camCtrl.Distance = std::abs(_camPos.z());
-        _fovDeg = 90.0f;
+        _fovDeg = 54.4322f;
         _zNear = 0.1f;
         _zFar = 100.0f;
         _onMouseClick = {std::bind(&TestApp1::OnMouseClick, this, _1, _2, _3, _4), _window->EventMouseButtonCall()};
@@ -139,13 +163,14 @@ public:
 
     void _SetupCubeMaterial(const VertexData& vd) {
         radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
+        std::string_view defines[] = {"BASE_COLOR_USE_TEXTURE"};
         DxcOutput outv = _dxc->Compile(
                                  color,
                                  "VSMain",
                                  ShaderStage::Vertex,
                                  HlslShaderModel::SM60,
                                  true,
-                                 {},
+                                 defines,
                                  {},
                                  false)
                              .value();
@@ -163,7 +188,7 @@ public:
                                  ShaderStage::Pixel,
                                  HlslShaderModel::SM60,
                                  true,
-                                 {},
+                                 defines,
                                  {},
                                  false)
                              .value();
@@ -199,6 +224,8 @@ public:
         }
         RootSignatureDescriptor rsDesc{};
         RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
+        RootDescriptorInfo rdInfos[] = {
+            RootDescriptorInfo{1, 0, ResourceType::CBuffer, ShaderStage::Graphics}};
         DescriptorSetInfo dsInfos[] = {
             {{DescriptorSetElementInfo{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics}}}};
         StaticSamplerInfo ssInfos[] = {
@@ -206,6 +233,7 @@ public:
              AddressMode::ClampToEdge, FilterMode::Linear, FilterMode::Linear,
              FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
         rsDesc.RootConstants = rsInfos;
+        rsDesc.RootDescriptors = rdInfos;
         rsDesc.DescriptorSets = dsInfos;
         rsDesc.StaticSamplers = ssInfos;
         _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
@@ -378,7 +406,7 @@ public:
         _cmdBuffer->End();
         CommandBuffer* t[] = {_cmdBuffer.get()};
         auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
-        cmdQueue->Submit(t, Nullable<Fence>{});
+        cmdQueue->Submit(t, nullptr);
         cmdQueue->Wait();
 
         _cubeBaseColorView = _device->CreateTextureView(
@@ -396,11 +424,188 @@ public:
         _cubeDescSet = _device->CreateDescriptorSet(info).Unwrap();
     }
 
+    void SetupCbox() {
+        {
+            auto v = std::filesystem::path{"assets"} / "box.obj";
+            WavefrontObjReader reader{v};
+            reader.Read();
+            if (reader.HasError()) {
+                RADRAY_ERR_LOG("{}", reader.Error());
+            }
+            for (const auto& obj : reader.Objects()) {
+                TestMesh tm{};
+                tm.name = obj.Name;
+                TriangleMesh mesh{};
+                reader.ToTriangleMesh(obj.Name, &mesh);
+                VertexData meshVd{};
+                mesh.ToVertexData(&meshVd);
+                auto vbName = tm.name + u8"_vb";
+                tm._vb = _device->CreateBuffer(
+                                    meshVd.VertexSize,
+                                    ResourceType::Buffer,
+                                    ResourceUsage::Default,
+                                    ResourceState::VertexAndConstantBuffer,
+                                    ResourceMemoryTip::None,
+                                    std::string_view{(char*)vbName.data(), vbName.size()})
+                             .Unwrap();
+                auto ibName = tm.name + u8"_ib";
+                tm._ib = _device->CreateBuffer(
+                                    meshVd.IndexSize,
+                                    ResourceType::Buffer,
+                                    ResourceUsage::Default,
+                                    ResourceState::IndexBuffer,
+                                    ResourceMemoryTip::None,
+                                    std::string_view{(char*)ibName.data(), ibName.size()})
+                             .Unwrap();
+                tm._upVb = _device->CreateBuffer(
+                                      meshVd.VertexSize,
+                                      ResourceType::Buffer,
+                                      ResourceUsage::Upload,
+                                      ResourceState::GenericRead,
+                                      ResourceMemoryTip::None)
+                               .Unwrap();
+                auto ptrVb = tm._upVb->Map(0, tm._upVb->GetSize()).Unwrap();
+                std::memcpy(ptrVb, meshVd.VertexData.get(), meshVd.VertexSize);
+                tm._upVb->Unmap();
+                tm._upIb = _device->CreateBuffer(
+                                      meshVd.IndexSize,
+                                      ResourceType::Buffer,
+                                      ResourceUsage::Upload,
+                                      ResourceState::GenericRead,
+                                      ResourceMemoryTip::None)
+                               .Unwrap();
+                auto ptrIb = tm._upIb->Map(0, tm._upIb->GetSize()).Unwrap();
+                std::memcpy(ptrIb, meshVd.IndexData.get(), meshVd.IndexSize);
+                tm._upIb->Unmap();
+                tm._vertexIndexCount = meshVd.IndexCount;
+                _meshes.emplace_back(std::move(tm));
+            }
+            vector<BufferBarrier> barriers;
+            for (const auto& mesh : _meshes) {
+                barriers.emplace_back(BufferBarrier{
+                    mesh._vb.get(),
+                    ResourceState::VertexAndConstantBuffer,
+                    ResourceState::CopyDestination});
+                barriers.emplace_back(BufferBarrier{
+                    mesh._ib.get(),
+                    ResourceState::IndexBuffer,
+                    ResourceState::CopyDestination});
+            }
+            _cmdBuffer->Begin();
+            ResourceBarriers rb{barriers, {}};
+            _cmdBuffer->ResourceBarrier(rb);
+            for (const auto& mesh : _meshes) {
+                _cmdBuffer->CopyBuffer(mesh._upVb.get(), 0, mesh._vb.get(), 0, mesh._upVb->GetSize());
+                _cmdBuffer->CopyBuffer(mesh._upIb.get(), 0, mesh._ib.get(), 0, mesh._upIb->GetSize());
+            }
+            barriers.clear();
+            for (const auto& mesh : _meshes) {
+                barriers.emplace_back(BufferBarrier{
+                    mesh._vb.get(),
+                    ResourceState::CopyDestination,
+                    ResourceState::VertexAndConstantBuffer});
+                barriers.emplace_back(BufferBarrier{
+                    mesh._ib.get(),
+                    ResourceState::CopyDestination,
+                    ResourceState::IndexBuffer});
+            }
+            rb = {barriers, {}};
+            _cmdBuffer->ResourceBarrier(rb);
+            _cmdBuffer->End();
+            CommandBuffer* t[] = {_cmdBuffer.get()};
+            auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+            cmdQueue->Submit(t, nullptr);
+            cmdQueue->Wait();
+        }
+        {
+            RootSignatureDescriptor rsDesc{};
+            RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
+            RootDescriptorInfo rdInfos[] = {
+                RootDescriptorInfo{1, 0, ResourceType::CBuffer, ShaderStage::Graphics}};
+            StaticSamplerInfo ssInfos[] = {
+                {0, 0, ShaderStage::Graphics, AddressMode::ClampToEdge, AddressMode::ClampToEdge,
+                 AddressMode::ClampToEdge, FilterMode::Linear, FilterMode::Linear,
+                 FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
+            rsDesc.RootConstants = rsInfos;
+            rsDesc.RootDescriptors = rdInfos;
+            rsDesc.StaticSamplers = ssInfos;
+            auto setColor = _device->CreateRootSignature(rsDesc).Unwrap();
+            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
+            shared_ptr<Shader> setColorVS, setColorPS;
+            {
+                DxcOutput outv = _dxc->Compile(color, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, false).value();
+                DxcOutput outp = _dxc->Compile(color, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, {}, {}, false).value();
+                setColorVS = _device->CreateShader(outv.Data, ShaderBlobCategory::DXIL, ShaderStage::Vertex, "VSMain", "setColorVS").Unwrap();
+                setColorPS = _device->CreateShader(outp.Data, ShaderBlobCategory::DXIL, ShaderStage::Pixel, "PSMain", "setColorPS").Unwrap();
+            }
+            radray::shared_ptr<GraphicsPipelineState> pntPipe;
+            {
+                GraphicsPipelineStateDescriptor psoDesc{};
+                psoDesc.RootSig = setColor.get();
+                psoDesc.VS = setColorVS.get();
+                psoDesc.PS = setColorPS.get();
+                vector<VertexElement> elements = {
+                    VertexElement{0, "POSITION", 0, VertexFormat::FLOAT32X3, 0},
+                    VertexElement{12, "NORMAL", 0, VertexFormat::FLOAT32X3, 1},
+                    VertexElement{24, "TEXCOORD", 0, VertexFormat::FLOAT32X2, 2}};
+                psoDesc.VertexBuffers.emplace_back(VertexBufferLayout{
+                    .ArrayStride = 32,
+                    .StepMode = VertexStepMode::Vertex,
+                    .Elements = elements});
+                psoDesc.Primitive = DefaultPrimitiveState();
+                psoDesc.DepthStencil = DefaultDepthStencilState();
+                psoDesc.MultiSample = DefaultMultiSampleState();
+                psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
+                psoDesc.DepthStencilEnable = true;
+                psoDesc.Primitive.StripIndexFormat = IndexFormat::UINT16;
+                pntPipe = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
+            }
+            Eigen::Vector3f colors[] = {
+                {0.5f, 0.5f, 0.5f},
+                {0.5f, 0.5f, 0.5f},
+                {0.5f, 0.5f, 0.5f},
+                {1.0f, 0.0f, 0.0f},
+                {0.0f, 0.0f, 1.0f},
+                {0.5f, 0.7f, 0.3f},
+                {0.2f, 0.3f, 0.6f}};
+            size_t i = 0;
+            for (auto& mesh : _meshes) {
+                mesh._rs = setColor;
+                mesh._pso = pntPipe;
+
+                auto cbName = mesh.name + u8"_cb";
+                mesh._cb = _device->CreateBuffer(
+                                      sizeof(ObjectMaterial),
+                                      ResourceType::Buffer,
+                                      ResourceUsage::Upload,
+                                      ResourceState::GenericRead,
+                                      ResourceMemoryTip::None,
+                                      std::string_view{(char*)cbName.data(), cbName.size()})
+                               .Unwrap();
+                auto ptrCb = mesh._cb->Map(0, sizeof(ObjectMaterial)).Unwrap();
+                ObjectMaterial mat{
+                    colors[i % ArrayLength(colors)]};
+                i = (i + 1) % ArrayLength(colors);
+                std::memcpy(ptrCb, &mat, sizeof(ObjectMaterial));
+                mesh._cb->Unmap();
+                mesh._cbView = _device->CreateBufferView(
+                                          mesh._cb.get(),
+                                          ResourceType::CBuffer,
+                                          TextureFormat::UNKNOWN,
+                                          0,
+                                          0,
+                                          0)
+                                   .Unwrap();
+            }
+        }
+    }
+
     void Start() {
         ShowWindow();
         InitGraphics();
         SetupCamera();
         SetupCube();
+        SetupCbox();
     }
 
     void Update() {
@@ -439,6 +644,8 @@ public:
 
     shared_ptr<RootSignature> _rootSig;
     shared_ptr<GraphicsPipelineState> _pso;
+
+    vector<TestMesh> _meshes;
 
     CameraControl _camCtrl;
     float _fovDeg;
@@ -523,20 +730,36 @@ public:
         radray::unique_ptr<CommandEncoder> pass = _cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         pass->SetViewport({0.0f, 0.0f, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
         pass->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
-        pass->BindRootSignature(_rootSig.get());
-        pass->BindPipelineState(_pso.get());
-        Eigen::Affine3f m{Eigen::Translation3f(_cubePos)};
-        PreObject preObj{};
-        preObj.model = m.matrix();
-        preObj.mvp = _proj * _view * preObj.model;
-        pass->PushConstants(0, &preObj, sizeof(preObj));
-        ResourceView* texViews[] = {_cubeBaseColorView.get()};
-        _cubeDescSet->SetResources(0, texViews);
-        pass->BindDescriptorSet(0, _cubeDescSet.get());
-        VertexBufferView vbv[] = {_cubeVbv};
-        pass->BindVertexBuffers(vbv);
-        pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);
-        pass->DrawIndexed(_cubeIbCount, 0, 0);
+        // pass->BindRootSignature(_rootSig.get());
+        // pass->BindPipelineState(_pso.get());
+        // Eigen::Affine3f m{Eigen::Translation3f(_cubePos)};
+        // PreObject preObj{};
+        // preObj.model = m.matrix();
+        // preObj.mvp = _proj * _view * preObj.model;
+        // pass->PushConstants(0, &preObj, sizeof(preObj));
+        // ResourceView* texViews[] = {_cubeBaseColorView.get()};
+        // _cubeDescSet->SetResources(0, texViews);
+        // pass->BindDescriptorSet(0, _cubeDescSet.get());
+        // VertexBufferView vbv[] = {_cubeVbv};
+        // pass->BindVertexBuffers(vbv);
+        // pass->BindIndexBuffer(_cubeIb.get(), _cubeIbStride, 0);
+        // pass->DrawIndexed(_cubeIbCount, 0, 0);
+
+        for (const auto& mesh : _meshes) {
+            pass->BindRootSignature(mesh._rs.get());
+            pass->BindPipelineState(mesh._pso.get());
+            Eigen::Affine3f m{Eigen::Translation3f(0, 0, 0)};
+            PreObject preObj{};
+            preObj.model = m.matrix();
+            preObj.mvp = _proj * _view * preObj.model;
+            pass->PushConstants(0, &preObj, sizeof(preObj));
+            pass->BindRootDescriptor(0, mesh._cbView.get());
+            VertexBufferView vbv[] = {{mesh._vb.get(), 32, 0}};
+            pass->BindVertexBuffers(vbv);
+            pass->BindIndexBuffer(mesh._ib.get(), 2, 0);
+            pass->DrawIndexed(mesh._vertexIndexCount, 0, 0);
+        }
+
         _cmdBuffer->EndRenderPass(std::move(pass));
         {
             TextureBarrier barriers[] = {
