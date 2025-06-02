@@ -5,12 +5,14 @@
 #include <cctype>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
+#include <radray/triangle_mesh.h>
 
 namespace radray {
 
 static bool IsStringWhiteSpace(std::string_view str) noexcept {
     for (char c : str) {
-        if (!std::isspace(c)) {
+        if (c < -1 || !std::isspace(c)) {
             return false;
         }
     }
@@ -31,7 +33,8 @@ static std::string_view TrimStart(std::string_view str) noexcept {
 static std::string_view TrimEnd(std::string_view str) noexcept {
     size_t end = str.size() - 1;
     for (; end >= 0; end--) {
-        if (!std::isspace(str[end])) {
+        auto v = str[end];
+        if (v < -1 || !std::isspace(str[end])) {
             break;
         }
     }
@@ -212,7 +215,7 @@ WavefrontObjReader::WavefrontObjReader(std::istream* stream)
     : _stream(stream) {}
 
 WavefrontObjReader::WavefrontObjReader(const std::filesystem::path& file) {
-    _myStream = radray::make_unique<std::ifstream>(file);
+    _myStream = radray::make_unique<std::ifstream>(file, std::ios::in);
     _stream = _myStream.get();
     if (!_stream->good()) {
         RADRAY_ERR_LOG("cannot open file: {}", file.string());
@@ -293,8 +296,8 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         }
     } else if (cmd == "o" || cmd == "g") {
         std::string_view nameView = TrimEnd(data);
-        radray::string name(nameView.data(), nameView.size());
-        auto obj = _objects.emplace_back(WavefrontObjObject{});
+        radray::u8string name((char8_t*)nameView.data(), nameView.size());
+        auto& obj = _objects.emplace_back(WavefrontObjObject{});
         obj.Name = std::move(name);
     } else if (cmd == "mtllib") {
         std::string_view v = TrimEnd(data);
@@ -302,7 +305,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
     } else if (cmd == "usemtl") {
         if (_objects.size() > 0) {
             std::string_view v = TrimEnd(data);
-            _objects.rbegin()->Material = radray::string{v};
+            _objects.rbegin()->Material = radray::u8string{(char8_t*)v.data(), v.size()};
         }
     } else if (cmd == "s") {
         if (_objects.size() > 0) {
@@ -330,25 +333,97 @@ static size_t CvtIdx(int f, size_t count) noexcept {
     return f >= 0 ? f - 1 : count + f;
 }
 
-std::tuple<Eigen::Vector3f, Eigen::Vector3f, Eigen::Vector3f> WavefrontObjReader::GetPosition(size_t faceIndex) const {
+WavefrontObjReader::TrianglePosition WavefrontObjReader::GetPosition(size_t faceIndex) const {
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _pos.size();
     size_t a = CvtIdx(f.V1, count), b = CvtIdx(f.V2, count), c = CvtIdx(f.V3, count);
-    return std::make_tuple(_pos[a], _pos[b], _pos[c]);
+    return {_pos[a], _pos[b], _pos[c]};
 }
 
-std::tuple<Eigen::Vector3f, Eigen::Vector3f, Eigen::Vector3f> WavefrontObjReader::GetNormal(size_t faceIndex) const {
+WavefrontObjReader::TriangleNormal WavefrontObjReader::GetNormal(size_t faceIndex) const {
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _normal.size();
     size_t a = CvtIdx(f.Vn1, count), b = CvtIdx(f.Vn2, count), c = CvtIdx(f.Vn3, count);
-    return std::make_tuple(_normal[a], _normal[b], _normal[c]);
+    return {_normal[a], _normal[b], _normal[c]};
 }
 
-std::tuple<Eigen::Vector2f, Eigen::Vector2f, Eigen::Vector2f> WavefrontObjReader::GetUV(size_t faceIndex) const {
+WavefrontObjReader::TriangleTexcoord WavefrontObjReader::GetUV(size_t faceIndex) const {
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _uv.size();
     size_t a = CvtIdx(f.Vt1, count), b = CvtIdx(f.Vt2, count), c = CvtIdx(f.Vt3, count);
-    return std::make_tuple(_uv[a], _uv[b], _uv[c]);
+    return {_uv[a], _uv[b], _uv[c]};
+}
+
+struct VertexCombine {
+    int32_t P, N, T;
+
+    bool operator==(const VertexCombine& other) const noexcept {
+        return P == other.P && N == other.N && T == other.T;
+    }
+};
+
+struct VertexCombineHash {
+    size_t operator()(const VertexCombine& v) const noexcept {
+        return radray::HashData(&v, sizeof(v));
+    }
+};
+
+void WavefrontObjReader::ToTriangleMesh(std::span<const WavefrontObjFace> faces, TriangleMesh* mesh) const {
+    unordered_map<VertexCombine, uint32_t, VertexCombineHash> unique;
+    vector<Eigen::Vector3f> p;
+    vector<Eigen::Vector3f> n;
+    vector<Eigen::Vector2f> u;
+    vector<uint32_t> ind;
+    uint32_t count = 0;
+    VertexCombine v[3];
+    for (const WavefrontObjFace& f : faces) {
+        v[0] = VertexCombine{f.V1, f.Vn1, f.Vt1};
+        v[1] = VertexCombine{f.V2, f.Vn2, f.Vt2};
+        v[2] = VertexCombine{f.V3, f.Vn3, f.Vt3};
+        for (size_t j = 0; j < 3; j++) {
+            auto iter = unique.find(v[j]);
+            uint32_t index;
+            if (iter == unique.end()) {
+                unique.emplace(v[j], count);
+                index = count;
+                p.push_back(_pos[CvtIdx(v[j].P, _pos.size())]);
+                if (v[j].N != 0) {
+                    n.push_back(_normal[CvtIdx(v[j].N, _normal.size())]);
+                }
+                if (v[j].T != 0) {
+                    u.push_back(_uv[CvtIdx(v[j].T, _uv.size())]);
+                }
+                count++;
+            } else {
+                index = iter->second;
+            }
+            ind.push_back(index);
+        }
+    }
+
+    mesh->Indices = std::move(ind);
+    mesh->Positions = std::move(p);
+    mesh->Normals = std::move(n);
+    mesh->UV0 = std::move(u);
+}
+
+void WavefrontObjReader::ToTriangleMesh(TriangleMesh* mesh) const {
+    this->ToTriangleMesh(_faces, mesh);
+}
+
+bool WavefrontObjReader::ToTriangleMesh(std::u8string_view objName, TriangleMesh* mesh) const {
+    for (const auto& obj : _objects) {
+        if (obj.Name == objName) {
+            vector<WavefrontObjFace> faces;
+            faces.reserve(obj.Faces.size());
+            for (size_t i : obj.Faces) {
+                faces.push_back(_faces[i]);
+            }
+            this->ToTriangleMesh(faces, mesh);
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace radray

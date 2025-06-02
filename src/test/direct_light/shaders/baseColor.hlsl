@@ -15,10 +15,17 @@ struct PreObject {
     float4x4 model;
 };
 
-ConstantBuffer<PreObject> g_PreObject: register(b0);
-Texture2D<float4> g_BaseColor: register(t0);
+struct ObjectMaterial {
+    float3 baseColor;
+};
 
-SamplerState g_GlobalSampler: register(s0);
+ConstantBuffer<PreObject> g_PreObject: register(b0);
+ConstantBuffer<ObjectMaterial> g_Material: register(b1);
+
+#ifdef BASE_COLOR_USE_TEXTURE
+Texture2D<float4> g_BaseColor: register(t0);
+SamplerState g_BaseColorSampler: register(s0);
+#endif
 
 V2P VSMain(VertexInput v) {
     V2P v2p;
@@ -29,6 +36,10 @@ V2P VSMain(VertexInput v) {
 }
 
 float4 PSMain(V2P v2p) : SV_Target {
-    float3 color = g_BaseColor.Sample(g_GlobalSampler, v2p.uv0);
+#ifdef BASE_COLOR_USE_TEXTURE
+    float3 color = g_BaseColor.Sample(g_BaseColorSampler, v2p.uv0);
+#else
+    float3 color = g_Material.baseColor;
+#endif
     return float4(color, 1);
 }
