@@ -9,6 +9,7 @@ namespace radray {
 
 bool TriangleMesh::IsValid() const noexcept {
     return Indices.size() > 0 &&
+           Indices.size() % 3 == 0 &&
            Positions.size() > 0 &&
            Positions.size() <= std::numeric_limits<uint32_t>::max() &&
            (Normals.size() == 0 || Normals.size() == Positions.size()) &&
@@ -258,6 +259,73 @@ void TriangleMesh::InitAsUVSphere(float radius, uint32_t numberSlices) noexcept 
             Indices[indexIndices++] = i * (numberSlices + 1) + (j + 1);
         }
     }
+}
+
+void TriangleMesh::CalculateTangent() noexcept {
+    if (Normals.size() == 0 || UV0.size() == 0) {
+        Tangents.resize(Positions.size(), Eigen::Vector4f{1.0f, 0.0f, 0.0f, 1.0f});
+        return;
+    }
+    if (Indices.size() % 3 != 0) {
+        return;
+    }
+    // https://terathon.com/blog/tangent-space.html
+    // Foundations of Game Engine Development, Volume 2: Rendering, 2019.
+    vector<Eigen::Vector3f> tan1, tan2;
+    tan1.resize(Positions.size(), Eigen::Vector3f{0.0f, 0.0f, 0.0f});
+    tan2.resize(Positions.size(), Eigen::Vector3f{0.0f, 0.0f, 0.0f});
+    vector<Eigen::Vector4f> tangent;
+    tangent.resize(Positions.size(), Eigen::Vector4f{0.0f, 0.0f, 0.0f, 0.0f});
+    for (size_t a = 0; a < Indices.size(); a += 3) {
+        uint32_t i1 = Indices[a];
+        uint32_t i2 = Indices[a + 1];
+        uint32_t i3 = Indices[a + 2];
+
+        Eigen::Vector3f v1 = Positions[i1];
+        Eigen::Vector3f v2 = Positions[i2];
+        Eigen::Vector3f v3 = Positions[i3];
+
+        Eigen::Vector2f w1 = UV0[i1];
+        Eigen::Vector2f w2 = UV0[i2];
+        Eigen::Vector2f w3 = UV0[i3];
+
+        float x1 = v2.x() - v1.x();
+        float x2 = v3.x() - v1.x();
+        float y1 = v2.y() - v1.y();
+        float y2 = v3.y() - v1.y();
+        float z1 = v2.z() - v1.z();
+        float z2 = v3.z() - v1.z();
+
+        float s1 = w2.x() - w1.x();
+        float s2 = w3.x() - w1.x();
+        float t1 = w2.y() - w1.y();
+        float t2 = w3.y() - w1.y();
+
+        float r = 1.0f / (s1 * t2 - s2 * t1);
+        Eigen::Vector3f sdir{(t2 * x1 - t1 * x2) * r, (t2 * y1 - t1 * y2) * r,
+                             (t2 * z1 - t1 * z2) * r};
+        Eigen::Vector3f tdir{(s1 * x2 - s2 * x1) * r, (s1 * y2 - s2 * y1) * r,
+                             (s1 * z2 - s2 * z1) * r};
+
+        tan1[i1] += sdir;
+        tan1[i2] += sdir;
+        tan1[i3] += sdir;
+
+        tan2[i1] += tdir;
+        tan2[i2] += tdir;
+        tan2[i3] += tdir;
+    }
+    size_t vertexCount = Positions.size();
+    for (size_t a = 0; a < vertexCount; a++) {
+        const Eigen::Vector3f& n = Normals[a];
+        const Eigen::Vector3f& t = tan1[a];
+
+        Eigen::Vector3f xyz = (t - n * n.dot(t)).normalized();
+        float w = n.cross(t).dot(tan2[a]);
+
+        tangent[a] = Eigen::Vector4f{xyz.x(), xyz.y(), xyz.z(), w < 0.0f ? -1.0f : 1.0f};
+    }
+    this->Tangents = std::move(tangent);
 }
 
 }  // namespace radray
