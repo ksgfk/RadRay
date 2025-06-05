@@ -21,16 +21,6 @@ public:
     ResourceType GetType() const noexcept override;
     ResourceStates GetInitState() const noexcept override;
 
-    uint64_t GetUploadNeedSize(uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) const noexcept override;
-
-    void HelpCopyDataToUpload(
-        Resource* dst,
-        const void* src,
-        size_t srcSize,
-        uint32_t mipLevel,
-        uint32_t arrayLayer,
-        uint32_t layerCount) const noexcept override;
-
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _tex;

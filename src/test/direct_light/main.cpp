@@ -20,7 +20,6 @@
 #include <radray/render/swap_chain.h>
 #include <radray/render/descriptor_set.h>
 #include <radray/render/dxc.h>
-#include <radray/render/tool_utility.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -55,6 +54,10 @@ public:
 
     uint32_t _vertexIndexCount = 0;
 
+    shared_ptr<ResourceView> _baseColorView;
+    shared_ptr<ResourceView> _normalMapView;
+    shared_ptr<DescriptorSet> _descSet;
+
     Eigen::Vector3f _pos = Eigen::Vector3f::Zero();
 };
 
@@ -74,6 +77,7 @@ public:
         // _cubeDescSet = nullptr;
         _rootSig = nullptr;
         _pso = nullptr;
+        _textures.clear();
         _meshes.clear();
 
         _depthView = nullptr;
@@ -427,9 +431,75 @@ public:
     // }
 
     void SetupCbox() {
+        DescriptorSetElementInfo texs{0, 0, 2, ResourceType::Texture, ShaderStage::Graphics};
+        DescriptorSetInfo dsInfos[] = {{{texs}}};
         {
-            auto v = std::filesystem::path{"assets"} / "sutr_tmave_sedy.obj";
-            WavefrontObjReader reader{v};
+            auto baseColorPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy.png";
+            std::ifstream baseColorFile{baseColorPath, std::ios::binary | std::ios::in};
+            radray::ImageData baseColorData = radray::LoadPNG(baseColorFile).value();
+            if (baseColorData.Format == radray::ImageFormat::RGB8_BYTE) {
+                baseColorData = baseColorData.RGB8ToRGBA8(0xff);
+            }
+            auto baseColorTex = _device->CreateTexture(
+                                           baseColorData.Width,
+                                           baseColorData.Height,
+                                           1,
+                                           1,
+                                           ImageToTextureFormat(baseColorData.Format),
+                                           0,
+                                           1,
+                                           0,
+                                           ColorClearValue{},
+                                           ResourceType::Texture,
+                                           ResourceState::Common,
+                                           ResourceMemoryTip::Dedicated,
+                                           "baseColor_tex")
+                                    .Unwrap();
+            _textures.emplace_back(baseColorTex);
+            uint64_t baseColorUploadSize = _device->GetUploadBufferNeedSize(baseColorTex.get(), 0, 0, 1);
+            auto baseColorUpload = _device->CreateBuffer(
+                                              baseColorUploadSize,
+                                              ResourceType::Buffer,
+                                              ResourceUsage::Upload,
+                                              ResourceState::GenericRead,
+                                              ResourceMemoryTip::None)
+                                       .Unwrap();
+            _device->CopyDataToUploadBuffer(baseColorUpload.get(), baseColorData.Data.get(), baseColorData.GetSize(), 0, 0, 1);
+
+            auto normalMapPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy_NormalsMap.png";
+            std::ifstream normalMapFile{normalMapPath, std::ios::binary | std::ios::in};
+            radray::ImageData normalMapData = radray::LoadPNG(normalMapFile).value();
+            if (normalMapData.Format == radray::ImageFormat::RGB8_BYTE) {
+                normalMapData = normalMapData.RGB8ToRGBA8(0xff);
+            }
+            auto normalMapTex = _device->CreateTexture(
+                                           normalMapData.Width,
+                                           normalMapData.Height,
+                                           1,
+                                           1,
+                                           ImageToTextureFormat(normalMapData.Format),
+                                           0,
+                                           1,
+                                           0,
+                                           ColorClearValue{},
+                                           ResourceType::Texture,
+                                           ResourceState::Common,
+                                           ResourceMemoryTip::Dedicated,
+                                           "baseColor_tex")
+                                    .Unwrap();
+            _textures.emplace_back(normalMapTex);
+            uint64_t normalMapUploadSize = _device->GetUploadBufferNeedSize(normalMapTex.get(), 0, 0, 1);
+            auto normalMapUpload = _device->CreateBuffer(
+                                              normalMapUploadSize,
+                                              ResourceType::Buffer,
+                                              ResourceUsage::Upload,
+                                              ResourceState::GenericRead,
+                                              ResourceMemoryTip::None)
+                                       .Unwrap();
+            _device->CopyDataToUploadBuffer(normalMapUpload.get(), normalMapData.Data.get(), normalMapData.GetSize(), 0, 0, 1);
+
+            auto modelPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy.obj";
+            WavefrontObjReader reader{modelPath};
             reader.Read();
             if (reader.HasError()) {
                 RADRAY_ERR_LOG("{}", reader.Error());
@@ -482,45 +552,95 @@ public:
                 tm._vertexIndexCount = meshVd.IndexCount;
                 _meshes.emplace_back(std::move(tm));
             }
-            vector<BufferBarrier> barriers;
+            vector<BufferBarrier> bufBarriers;
+            vector<TextureBarrier> texBarriers;
             for (const auto& mesh : _meshes) {
-                barriers.emplace_back(BufferBarrier{
+                bufBarriers.emplace_back(BufferBarrier{
                     mesh._vb.get(),
                     ResourceState::VertexAndConstantBuffer,
                     ResourceState::CopyDestination});
-                barriers.emplace_back(BufferBarrier{
+                bufBarriers.emplace_back(BufferBarrier{
                     mesh._ib.get(),
                     ResourceState::IndexBuffer,
                     ResourceState::CopyDestination});
             }
+            texBarriers.emplace_back(TextureBarrier{
+                baseColorTex.get(),
+                ResourceState::Common,
+                ResourceState::CopyDestination,
+                0, 0, false});
+            texBarriers.emplace_back(TextureBarrier{
+                normalMapTex.get(),
+                ResourceState::Common,
+                ResourceState::CopyDestination,
+                0, 0, false});
             _cmdBuffer->Begin();
-            ResourceBarriers rb{barriers, {}};
+            ResourceBarriers rb{bufBarriers, texBarriers};
             _cmdBuffer->ResourceBarrier(rb);
             for (const auto& mesh : _meshes) {
                 _cmdBuffer->CopyBuffer(mesh._upVb.get(), 0, mesh._vb.get(), 0, mesh._upVb->GetSize());
                 _cmdBuffer->CopyBuffer(mesh._upIb.get(), 0, mesh._ib.get(), 0, mesh._upIb->GetSize());
             }
-            barriers.clear();
+            _cmdBuffer->CopyTexture(baseColorUpload.get(), 0, baseColorTex.get(), 0, 0, 1);
+            _cmdBuffer->CopyTexture(normalMapUpload.get(), 0, normalMapTex.get(), 0, 0, 1);
+            bufBarriers.clear();
+            texBarriers.clear();
             for (const auto& mesh : _meshes) {
-                barriers.emplace_back(BufferBarrier{
+                bufBarriers.emplace_back(BufferBarrier{
                     mesh._vb.get(),
                     ResourceState::CopyDestination,
                     ResourceState::VertexAndConstantBuffer});
-                barriers.emplace_back(BufferBarrier{
+                bufBarriers.emplace_back(BufferBarrier{
                     mesh._ib.get(),
                     ResourceState::CopyDestination,
                     ResourceState::IndexBuffer});
             }
-            rb = {barriers, {}};
+            texBarriers.emplace_back(TextureBarrier{
+                baseColorTex.get(),
+                ResourceState::CopyDestination,
+                ResourceState::Common,
+                0, 0, false});
+            texBarriers.emplace_back(TextureBarrier{
+                normalMapTex.get(),
+                ResourceState::CopyDestination,
+                ResourceState::Common,
+                0, 0, false});
+            rb = {bufBarriers, texBarriers};
             _cmdBuffer->ResourceBarrier(rb);
             _cmdBuffer->End();
             CommandBuffer* t[] = {_cmdBuffer.get()};
             auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
             cmdQueue->Submit(t, nullptr);
             cmdQueue->Wait();
-            for(auto& mesh : _meshes) {
+            auto baseColorView = _device->CreateTextureView(
+                                            baseColorTex.get(),
+                                            ResourceType::Texture,
+                                            TextureFormat::RGBA8_UNORM,
+                                            TextureDimension::Dim2D,
+                                            0,
+                                            0,
+                                            0,
+                                            1)
+                                     .Unwrap();
+            auto normalMapView = _device->CreateTextureView(
+                                            normalMapTex.get(),
+                                            ResourceType::Texture,
+                                            TextureFormat::RGBA8_UNORM,
+                                            TextureDimension::Dim2D,
+                                            0,
+                                            0,
+                                            0,
+                                            1)
+                                     .Unwrap();
+            auto descSet = _device->CreateDescriptorSet(texs).Unwrap();
+            ResourceView* views[] = {baseColorView.get(), normalMapView.get()};
+            descSet->SetResources(0, views);
+            for (auto& mesh : _meshes) {
                 mesh._upIb = nullptr;
                 mesh._upVb = nullptr;
+                mesh._baseColorView = baseColorView;
+                mesh._normalMapView = normalMapView;
+                mesh._descSet = descSet;
             }
         }
         {
@@ -534,13 +654,15 @@ public:
                  FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
             rsDesc.RootConstants = rsInfos;
             rsDesc.RootDescriptors = rdInfos;
+            rsDesc.DescriptorSets = dsInfos;
             rsDesc.StaticSamplers = ssInfos;
             auto setColor = _device->CreateRootSignature(rsDesc).Unwrap();
             radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
             shared_ptr<Shader> setColorVS, setColorPS;
             {
-                DxcOutput outv = _dxc->Compile(color, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, false).value();
-                DxcOutput outp = _dxc->Compile(color, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, {}, {}, false).value();
+                std::string_view defines[] = {"BASE_COLOR_USE_TEXTURE"};
+                DxcOutput outv = _dxc->Compile(color, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, defines, {}, false).value();
+                DxcOutput outp = _dxc->Compile(color, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, defines, {}, false).value();
                 setColorVS = _device->CreateShader(outv.Data, ShaderBlobCategory::DXIL, ShaderStage::Vertex, "VSMain", "setColorVS").Unwrap();
                 setColorPS = _device->CreateShader(outp.Data, ShaderBlobCategory::DXIL, ShaderStage::Pixel, "PSMain", "setColorPS").Unwrap();
             }
@@ -652,6 +774,7 @@ public:
     shared_ptr<GraphicsPipelineState> _pso;
 
     vector<TestMesh> _meshes;
+    vector<shared_ptr<Texture>> _textures;
 
     CameraControl _camCtrl;
     float _fovDeg;
@@ -760,6 +883,7 @@ public:
             preObj.mvp = _proj * _view * preObj.model;
             pass->PushConstants(0, &preObj, sizeof(preObj));
             pass->BindRootDescriptor(0, mesh._cbView.get());
+            pass->BindDescriptorSet(0, mesh._descSet.get());
             VertexBufferView vbv[] = {{mesh._vb.get(), 32, 0}};
             pass->BindVertexBuffers(vbv);
             pass->BindIndexBuffer(mesh._ib.get(), 2, 0);

@@ -27,6 +27,11 @@ Texture2D<float4> g_BaseColor: register(t0);
 SamplerState g_BaseColorSampler: register(s0);
 #endif
 
+#ifdef NORMAL_MAP_ENABLE
+Texture2D<float4> g_NormalMap: register(t1);
+SamplerState g_NormalMapSampler: register(s1);
+#endif
+
 V2P VSMain(VertexInput v) {
     V2P v2p;
     v2p.pos = mul(g_PreObject.mvp, float4(v.position, 1));
@@ -36,11 +41,10 @@ V2P VSMain(VertexInput v) {
 }
 
 float4 PSMain(V2P v2p) : SV_Target {
-// #ifdef BASE_COLOR_USE_TEXTURE
-//     float3 color = g_BaseColor.Sample(g_BaseColorSampler, v2p.uv0);
-// #else
-//     float3 color = g_Material.baseColor;
-// #endif
-    float3 color = normalize(v2p.normal) * 0.5 + 0.5;
+#ifdef BASE_COLOR_USE_TEXTURE
+    float3 color = g_BaseColor.Sample(g_BaseColorSampler, v2p.uv0);
+#else
+    float3 color = g_Material.baseColor;
+#endif
     return float4(color, 1);
 }

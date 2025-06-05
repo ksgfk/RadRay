@@ -6,6 +6,7 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/utility.h>
+#include <radray/image_data.h>
 
 namespace radray::render {
 
@@ -331,6 +332,7 @@ class Shader;
 class RootSignature;
 class GraphicsPipelineState;
 class SwapChain;
+class Resource;
 class Buffer;
 class Texture;
 class ResourceView;
@@ -339,6 +341,7 @@ class Sampler;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
+TextureFormat ImageToTextureFormat(radray::ImageFormat fmt) noexcept;
 
 struct ColorClearValue {
     float R, G, B, A;

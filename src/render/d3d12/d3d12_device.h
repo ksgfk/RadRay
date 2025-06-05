@@ -93,6 +93,16 @@ public:
 
     Nullable<radray::shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
+    uint64_t GetUploadBufferNeedSize(Resource* copyDst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) const noexcept override;
+
+    void CopyDataToUploadBuffer(
+        Resource* dst,
+        const void* src,
+        size_t srcSize,
+        uint32_t mipLevel,
+        uint32_t arrayLayer,
+        uint32_t layerCount) const noexcept override;
+
     const CD3DX12FeatureSupport& GetFeatures() const noexcept { return _features; }
 
     CpuDescriptorAllocator* GetCpuResAllocator() noexcept;

@@ -1477,6 +1477,98 @@ Nullable<radray::shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDe
     return radray::make_shared<SamplerD3D12>(heapView, alloc, desc, rawDesc);
 }
 
+uint64_t DeviceD3D12::GetUploadBufferNeedSize(
+    Resource* copyDst,
+    uint32_t mipLevel,
+    uint32_t arrayLayer,
+    uint32_t layerCount) const noexcept {
+    uint32_t subresource = SubresourceIndex(
+        mipLevel,
+        arrayLayer,
+        0,
+        1,
+        layerCount);
+    UINT64 total;
+    const D3D12_RESOURCE_DESC* desc = nullptr;
+    switch (copyDst->GetType()) {
+        case ResourceType::TextureRW:
+        case ResourceType::DepthStencil:
+        case ResourceType::RenderTarget:
+        case ResourceType::Texture: {
+            desc = &static_cast<TextureD3D12*>(copyDst)->_desc;
+            break;
+        }
+        case ResourceType::PushConstant:
+        case ResourceType::RayTracing:
+        case ResourceType::CBuffer:
+        case ResourceType::BufferRW:
+        case ResourceType::Buffer: {
+            desc = &static_cast<BufferD3D12*>(copyDst)->_desc;
+            break;
+        }
+        default: break;
+    }
+    _device->GetCopyableFootprints(
+        desc,
+        subresource,
+        1,
+        0,
+        nullptr,
+        nullptr,
+        nullptr,
+        &total);
+    return total;
+}
+
+void DeviceD3D12::CopyDataToUploadBuffer(
+    Resource* dst,
+    const void* src,
+    size_t srcSize,
+    uint32_t mipLevel,
+    uint32_t arrayLayer,
+    uint32_t layerCount) const noexcept {
+    RADRAY_ASSERT(dst->GetType() == ResourceType::Buffer);
+    auto* dstBuf = static_cast<BufferD3D12*>(dst);
+    uint32_t subresource = SubresourceIndex(
+        mipLevel,
+        arrayLayer,
+        0,
+        1,
+        layerCount);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout;
+    UINT numRows;
+    UINT64 rowSizeInBytes, total;
+    _device->GetCopyableFootprints(
+        &dstBuf->_desc,
+        subresource,
+        1,
+        0,
+        &layout,
+        &numRows,
+        &rowSizeInBytes,
+        &total);
+    if (dstBuf->GetSize() < total) {
+        RADRAY_ERR_LOG("d3d12 Buffer size is not enough for upload, need {}, but have {}", total, dstBuf->GetSize());
+        return;
+    }
+    auto dstBufMapValue = dstBuf->Map(0, dstBuf->GetSize());
+    if (!dstBufMapValue.HasValue()) {
+        RADRAY_ERR_LOG("d3d12 Buffer map failed, size {}", dstBuf->GetSize());
+        return;
+    }
+    auto* dstPtr = static_cast<BYTE*>(dstBufMapValue.Value());
+    D3D12_MEMCPY_DEST destData{
+        dstPtr + layout.Offset,
+        layout.Footprint.RowPitch,
+        SIZE_T(layout.Footprint.RowPitch) * SIZE_T(numRows)};
+    D3D12_SUBRESOURCE_DATA srcData{
+        src,
+        static_cast<LONG_PTR>(srcSize) / numRows,
+        static_cast<LONG_PTR>(srcSize)};
+    MemcpySubresource(&destData, &srcData, rowSizeInBytes, numRows, layout.Footprint.Depth);
+    dstBuf->Unmap();
+}
+
 CpuDescriptorAllocator* DeviceD3D12::GetCpuResAllocator() noexcept {
     if (_cpuResAlloc == nullptr) {
         _cpuResAlloc = radray::make_unique<CpuDescriptorAllocator>(
