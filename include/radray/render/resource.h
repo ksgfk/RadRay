@@ -15,16 +15,6 @@ public:
 class Texture : public Resource {
 public:
     ~Texture() noexcept override = default;
-
-    virtual uint64_t GetUploadNeedSize(uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) const noexcept = 0;
-
-    virtual void HelpCopyDataToUpload(
-        Resource* dst,
-        const void* src,
-        size_t srcSize,
-        uint32_t mipLevel,
-        uint32_t arrayLayer,
-        uint32_t layerCount) const noexcept = 0;
 };
 
 class Buffer : public Resource {

@@ -105,6 +105,16 @@ public:
     virtual Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept = 0;
 
     virtual Nullable<radray::shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
+
+    virtual uint64_t GetUploadBufferNeedSize(Resource* copyDst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) const noexcept = 0;
+
+    virtual void CopyDataToUploadBuffer(
+        Resource* dst,
+        const void* src,
+        size_t srcSize,
+        uint32_t mipLevel,
+        uint32_t arrayLayer,
+        uint32_t layerCount) const noexcept = 0;
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
