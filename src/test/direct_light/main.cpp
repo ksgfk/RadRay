@@ -54,6 +54,8 @@ public:
     shared_ptr<GraphicsPipelineState> _pso;
 
     uint32_t _vertexIndexCount = 0;
+
+    Eigen::Vector3f _pos = Eigen::Vector3f::Zero();
 };
 
 class TestApp1 {
@@ -64,12 +66,12 @@ public:
     }
 
     ~TestApp1() {
-        _cubeVb = nullptr;
-        _cubeIb = nullptr;
-        _cubeCb = nullptr;
-        _cubeBaseColorView = nullptr;
-        _cubeBaseColor = nullptr;
-        _cubeDescSet = nullptr;
+        // _cubeVb = nullptr;
+        // _cubeIb = nullptr;
+        // _cubeCb = nullptr;
+        // _cubeBaseColorView = nullptr;
+        // _cubeBaseColor = nullptr;
+        // _cubeDescSet = nullptr;
         _rootSig = nullptr;
         _pso = nullptr;
         _meshes.clear();
@@ -140,293 +142,293 @@ public:
 
     void SetupCamera() {
         using namespace std::placeholders;
-        _camPos = Eigen::Vector3f(2.78f, 2.73f, 7.5f);
-        _camRot = Eigen::AngleAxisf{Radian(180.0f), Eigen::Vector3f::UnitY()};
+        _camPos = Eigen::Vector3f(0, 0, -5.0f);
+        _camRot = Eigen::AngleAxisf{Radian(0.0f), Eigen::Vector3f::UnitY()};
         _camCtrl.Distance = std::abs(_camPos.z());
-        _fovDeg = 54.4322f;
+        _fovDeg = 30.0f;
         _zNear = 0.1f;
         _zFar = 100.0f;
         _onMouseClick = {std::bind(&TestApp1::OnMouseClick, this, _1, _2, _3, _4), _window->EventMouseButtonCall()};
         _onMouseMove = {std::bind(&TestApp1::OnMouseMove, this, _1), _window->EventCursorPosition()};
     }
 
-    void SetupCube() {
-        TriangleMesh cube{};
-        cube.InitAsCube(0.5f);
-        VertexData vd{};
-        cube.ToVertexData(&vd);
-        _cubePos = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
-        _SetupCubeMesh(vd);
-        _SetupCubeMaterial(vd);
-        _SetupCubeTexture();
-    }
+    // void SetupCube() {
+    //     TriangleMesh cube{};
+    //     cube.InitAsCube(0.5f);
+    //     VertexData vd{};
+    //     cube.ToVertexData(&vd);
+    //     _cubePos = Eigen::Vector3f(0.0f, 0.0f, 0.0f);
+    //     _SetupCubeMesh(vd);
+    //     _SetupCubeMaterial(vd);
+    //     _SetupCubeTexture();
+    // }
 
-    void _SetupCubeMaterial(const VertexData& vd) {
-        radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
-        std::string_view defines[] = {"BASE_COLOR_USE_TEXTURE"};
-        DxcOutput outv = _dxc->Compile(
-                                 color,
-                                 "VSMain",
-                                 ShaderStage::Vertex,
-                                 HlslShaderModel::SM60,
-                                 true,
-                                 defines,
-                                 {},
-                                 false)
-                             .value();
-        DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.Refl).value();
-        shared_ptr<Shader> vs = _device->CreateShader(
-                                           outv.Data,
-                                           ShaderBlobCategory::DXIL,
-                                           ShaderStage::Vertex,
-                                           "VSMain",
-                                           "colorVS")
-                                    .Unwrap();
-        DxcOutput outp = _dxc->Compile(
-                                 color,
-                                 "PSMain",
-                                 ShaderStage::Pixel,
-                                 HlslShaderModel::SM60,
-                                 true,
-                                 defines,
-                                 {},
-                                 false)
-                             .value();
-        DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.Refl).value();
-        shared_ptr<Shader> ps = _device->CreateShader(
-                                           outp.Data,
-                                           ShaderBlobCategory::DXIL,
-                                           ShaderStage::Pixel,
-                                           "PSMain",
-                                           "colorPS")
-                                    .Unwrap();
+    // void _SetupCubeMaterial(const VertexData& vd) {
+    //     radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
+    //     std::string_view defines[] = {"BASE_COLOR_USE_TEXTURE"};
+    //     DxcOutput outv = _dxc->Compile(
+    //                              color,
+    //                              "VSMain",
+    //                              ShaderStage::Vertex,
+    //                              HlslShaderModel::SM60,
+    //                              true,
+    //                              defines,
+    //                              {},
+    //                              false)
+    //                          .value();
+    //     DxilReflection reflv = _dxc->GetDxilReflection(ShaderStage::Vertex, outv.Refl).value();
+    //     shared_ptr<Shader> vs = _device->CreateShader(
+    //                                        outv.Data,
+    //                                        ShaderBlobCategory::DXIL,
+    //                                        ShaderStage::Vertex,
+    //                                        "VSMain",
+    //                                        "colorVS")
+    //                                 .Unwrap();
+    //     DxcOutput outp = _dxc->Compile(
+    //                              color,
+    //                              "PSMain",
+    //                              ShaderStage::Pixel,
+    //                              HlslShaderModel::SM60,
+    //                              true,
+    //                              defines,
+    //                              {},
+    //                              false)
+    //                          .value();
+    //     DxilReflection reflp = _dxc->GetDxilReflection(ShaderStage::Pixel, outp.Refl).value();
+    //     shared_ptr<Shader> ps = _device->CreateShader(
+    //                                        outp.Data,
+    //                                        ShaderBlobCategory::DXIL,
+    //                                        ShaderStage::Pixel,
+    //                                        "PSMain",
+    //                                        "colorPS")
+    //                                 .Unwrap();
 
-        uint64_t stride = 0;
-        radray::vector<VertexElement> elements{};
-        elements.reserve(vd.Layouts.size());
-        for (size_t v = 0; v < vd.Layouts.size(); v++) {
-            const auto& i = vd.Layouts[v];
-            stride += i.Size;
-            auto& e = elements.emplace_back(VertexElement{});
-            e.Offset = i.Offset;
-            e.Semantic = i.Semantic;
-            e.SemanticIndex = i.SemanticIndex;
-            e.Format = ([&]() {
-                switch (i.Size) {
-                    case sizeof(float): return VertexFormat::FLOAT32;
-                    case sizeof(float) * 2: return VertexFormat::FLOAT32X2;
-                    case sizeof(float) * 3: return VertexFormat::FLOAT32X3;
-                    case sizeof(float) * 4: return VertexFormat::FLOAT32X4;
-                    default: return VertexFormat::UNKNOWN;
-                }
-            })();
-            e.Location = v;
-        }
-        RootSignatureDescriptor rsDesc{};
-        RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
-        RootDescriptorInfo rdInfos[] = {
-            RootDescriptorInfo{1, 0, ResourceType::CBuffer, ShaderStage::Graphics}};
-        DescriptorSetInfo dsInfos[] = {
-            {{DescriptorSetElementInfo{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics}}}};
-        StaticSamplerInfo ssInfos[] = {
-            {0, 0, ShaderStage::Graphics, AddressMode::ClampToEdge, AddressMode::ClampToEdge,
-             AddressMode::ClampToEdge, FilterMode::Linear, FilterMode::Linear,
-             FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
-        rsDesc.RootConstants = rsInfos;
-        rsDesc.RootDescriptors = rdInfos;
-        rsDesc.DescriptorSets = dsInfos;
-        rsDesc.StaticSamplers = ssInfos;
-        _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
-        GraphicsPipelineStateDescriptor psoDesc{};
-        psoDesc.RootSig = _rootSig.get();
-        psoDesc.VS = vs.get();
-        psoDesc.PS = ps.get();
-        psoDesc.VertexBuffers.emplace_back(VertexBufferLayout{
-            .ArrayStride = stride,
-            .StepMode = VertexStepMode::Vertex,
-            .Elements = elements});
-        psoDesc.Primitive = DefaultPrimitiveState();
-        psoDesc.DepthStencil = DefaultDepthStencilState();
-        psoDesc.MultiSample = DefaultMultiSampleState();
-        psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
-        psoDesc.DepthStencilEnable = true;
-        psoDesc.Primitive.StripIndexFormat = ([&]() {
-            switch (vd.IndexType) {
-                case VertexIndexType::UInt16: return IndexFormat::UINT16;
-                case VertexIndexType::UInt32: return IndexFormat::UINT32;
-            }
-        })();
-        _pso = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
+    //     uint64_t stride = 0;
+    //     radray::vector<VertexElement> elements{};
+    //     elements.reserve(vd.Layouts.size());
+    //     for (size_t v = 0; v < vd.Layouts.size(); v++) {
+    //         const auto& i = vd.Layouts[v];
+    //         stride += i.Size;
+    //         auto& e = elements.emplace_back(VertexElement{});
+    //         e.Offset = i.Offset;
+    //         e.Semantic = i.Semantic;
+    //         e.SemanticIndex = i.SemanticIndex;
+    //         e.Format = ([&]() {
+    //             switch (i.Size) {
+    //                 case sizeof(float): return VertexFormat::FLOAT32;
+    //                 case sizeof(float) * 2: return VertexFormat::FLOAT32X2;
+    //                 case sizeof(float) * 3: return VertexFormat::FLOAT32X3;
+    //                 case sizeof(float) * 4: return VertexFormat::FLOAT32X4;
+    //                 default: return VertexFormat::UNKNOWN;
+    //             }
+    //         })();
+    //         e.Location = v;
+    //     }
+    //     RootSignatureDescriptor rsDesc{};
+    //     RootConstantInfo rsInfos[] = {RootConstantInfo{0, 0, sizeof(PreObject), ShaderStage::Vertex}};
+    //     RootDescriptorInfo rdInfos[] = {
+    //         RootDescriptorInfo{1, 0, ResourceType::CBuffer, ShaderStage::Graphics}};
+    //     DescriptorSetInfo dsInfos[] = {
+    //         {{DescriptorSetElementInfo{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics}}}};
+    //     StaticSamplerInfo ssInfos[] = {
+    //         {0, 0, ShaderStage::Graphics, AddressMode::ClampToEdge, AddressMode::ClampToEdge,
+    //          AddressMode::ClampToEdge, FilterMode::Linear, FilterMode::Linear,
+    //          FilterMode::Linear, 0.0f, 0.0f, CompareFunction::Never, 1, false}};
+    //     rsDesc.RootConstants = rsInfos;
+    //     rsDesc.RootDescriptors = rdInfos;
+    //     rsDesc.DescriptorSets = dsInfos;
+    //     rsDesc.StaticSamplers = ssInfos;
+    //     _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
+    //     GraphicsPipelineStateDescriptor psoDesc{};
+    //     psoDesc.RootSig = _rootSig.get();
+    //     psoDesc.VS = vs.get();
+    //     psoDesc.PS = ps.get();
+    //     psoDesc.VertexBuffers.emplace_back(VertexBufferLayout{
+    //         .ArrayStride = stride,
+    //         .StepMode = VertexStepMode::Vertex,
+    //         .Elements = elements});
+    //     psoDesc.Primitive = DefaultPrimitiveState();
+    //     psoDesc.DepthStencil = DefaultDepthStencilState();
+    //     psoDesc.MultiSample = DefaultMultiSampleState();
+    //     psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
+    //     psoDesc.DepthStencilEnable = true;
+    //     psoDesc.Primitive.StripIndexFormat = ([&]() {
+    //         switch (vd.IndexType) {
+    //             case VertexIndexType::UInt16: return IndexFormat::UINT16;
+    //             case VertexIndexType::UInt32: return IndexFormat::UINT32;
+    //         }
+    //     })();
+    //     _pso = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
 
-        _cubeVbv = {_cubeVb.get(), (uint32_t)stride, 0};
-        _cubeIbStride = ([&]() {
-            switch (vd.IndexType) {
-                case VertexIndexType::UInt16: return sizeof(uint16_t);
-                case VertexIndexType::UInt32: return sizeof(uint32_t);
-            }
-        })();
-        _cubeIbCount = vd.IndexCount;
-    }
+    //     _cubeVbv = {_cubeVb.get(), (uint32_t)stride, 0};
+    //     _cubeIbStride = ([&]() {
+    //         switch (vd.IndexType) {
+    //             case VertexIndexType::UInt16: return sizeof(uint16_t);
+    //             case VertexIndexType::UInt32: return sizeof(uint32_t);
+    //         }
+    //     })();
+    //     _cubeIbCount = vd.IndexCount;
+    // }
 
-    void _SetupCubeMesh(const VertexData& vd) {
-        _cubeVb = _device->CreateBuffer(
-                             vd.VertexSize,
-                             ResourceType::Buffer,
-                             ResourceUsage::Default,
-                             ResourceState::VertexAndConstantBuffer,
-                             ResourceMemoryTip::None,
-                             "cube_vb")
-                      .Unwrap();
-        _cubeIb = _device->CreateBuffer(
-                             vd.IndexSize,
-                             ResourceType::Buffer,
-                             ResourceUsage::Default,
-                             ResourceState::IndexBuffer,
-                             ResourceMemoryTip::None,
-                             "cube_ib")
-                      .Unwrap();
+    // void _SetupCubeMesh(const VertexData& vd) {
+    //     _cubeVb = _device->CreateBuffer(
+    //                          vd.VertexSize,
+    //                          ResourceType::Buffer,
+    //                          ResourceUsage::Default,
+    //                          ResourceState::VertexAndConstantBuffer,
+    //                          ResourceMemoryTip::None,
+    //                          "cube_vb")
+    //                   .Unwrap();
+    //     _cubeIb = _device->CreateBuffer(
+    //                          vd.IndexSize,
+    //                          ResourceType::Buffer,
+    //                          ResourceUsage::Default,
+    //                          ResourceState::IndexBuffer,
+    //                          ResourceMemoryTip::None,
+    //                          "cube_ib")
+    //                   .Unwrap();
 
-        auto uploadVb = _device->CreateBuffer(
-                                   vd.VertexSize,
-                                   ResourceType::Buffer,
-                                   ResourceUsage::Upload,
-                                   ResourceState::GenericRead,
-                                   ResourceMemoryTip::None)
-                            .Unwrap();
-        {
-            auto ptr = uploadVb->Map(0, uploadVb->GetSize()).Unwrap();
-            std::memcpy(ptr, vd.VertexData.get(), vd.VertexSize);
-            uploadVb->Unmap();
-        }
-        auto uploadIb = _device->CreateBuffer(
-                                   vd.IndexSize,
-                                   ResourceType::Buffer,
-                                   ResourceUsage::Upload,
-                                   ResourceState::GenericRead,
-                                   ResourceMemoryTip::None)
-                            .Unwrap();
-        {
-            auto ptr = uploadIb->Map(0, uploadIb->GetSize()).Unwrap();
-            std::memcpy(ptr, vd.IndexData.get(), vd.IndexSize);
-            uploadIb->Unmap();
-        }
-        _cubeCb = _device->CreateBuffer(
-                             sizeof(PreObject),
-                             ResourceType::Buffer,
-                             ResourceUsage::Upload,
-                             ResourceState::GenericRead,
-                             ResourceMemoryTip::None,
-                             "cube_cb")
-                      .Unwrap();
-        _cubeCbMapped = _cubeCb->Map(0, _cubeCb->GetSize()).Unwrap();
+    //     auto uploadVb = _device->CreateBuffer(
+    //                                vd.VertexSize,
+    //                                ResourceType::Buffer,
+    //                                ResourceUsage::Upload,
+    //                                ResourceState::GenericRead,
+    //                                ResourceMemoryTip::None)
+    //                         .Unwrap();
+    //     {
+    //         auto ptr = uploadVb->Map(0, uploadVb->GetSize()).Unwrap();
+    //         std::memcpy(ptr, vd.VertexData.get(), vd.VertexSize);
+    //         uploadVb->Unmap();
+    //     }
+    //     auto uploadIb = _device->CreateBuffer(
+    //                                vd.IndexSize,
+    //                                ResourceType::Buffer,
+    //                                ResourceUsage::Upload,
+    //                                ResourceState::GenericRead,
+    //                                ResourceMemoryTip::None)
+    //                         .Unwrap();
+    //     {
+    //         auto ptr = uploadIb->Map(0, uploadIb->GetSize()).Unwrap();
+    //         std::memcpy(ptr, vd.IndexData.get(), vd.IndexSize);
+    //         uploadIb->Unmap();
+    //     }
+    //     _cubeCb = _device->CreateBuffer(
+    //                          sizeof(PreObject),
+    //                          ResourceType::Buffer,
+    //                          ResourceUsage::Upload,
+    //                          ResourceState::GenericRead,
+    //                          ResourceMemoryTip::None,
+    //                          "cube_cb")
+    //                   .Unwrap();
+    //     _cubeCbMapped = _cubeCb->Map(0, _cubeCb->GetSize()).Unwrap();
 
-        _cmdBuffer->Begin();
-        {
-            BufferBarrier barriers[] = {
-                {_cubeVb.get(),
-                 ResourceState::VertexAndConstantBuffer,
-                 ResourceState::CopyDestination},
-                {_cubeIb.get(),
-                 ResourceState::IndexBuffer,
-                 ResourceState::CopyDestination}};
-            ResourceBarriers rb{barriers, {}};
-            _cmdBuffer->ResourceBarrier(rb);
-        }
-        _cmdBuffer->CopyBuffer(uploadVb.get(), 0, _cubeVb.get(), 0, vd.VertexSize);
-        _cmdBuffer->CopyBuffer(uploadIb.get(), 0, _cubeIb.get(), 0, vd.IndexSize);
-        {
-            BufferBarrier barriers[] = {
-                {_cubeVb.get(),
-                 ResourceState::CopyDestination,
-                 ResourceState::VertexAndConstantBuffer},
-                {_cubeIb.get(),
-                 ResourceState::CopyDestination,
-                 ResourceState::IndexBuffer}};
-            ResourceBarriers rb{barriers, {}};
-            _cmdBuffer->ResourceBarrier(rb);
-        }
-        _cmdBuffer->End();
-        CommandBuffer* t[] = {_cmdBuffer.get()};
-        auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
-        cmdQueue->Submit(t, Nullable<Fence>{});
-        cmdQueue->Wait();
-    }
+    //     _cmdBuffer->Begin();
+    //     {
+    //         BufferBarrier barriers[] = {
+    //             {_cubeVb.get(),
+    //              ResourceState::VertexAndConstantBuffer,
+    //              ResourceState::CopyDestination},
+    //             {_cubeIb.get(),
+    //              ResourceState::IndexBuffer,
+    //              ResourceState::CopyDestination}};
+    //         ResourceBarriers rb{barriers, {}};
+    //         _cmdBuffer->ResourceBarrier(rb);
+    //     }
+    //     _cmdBuffer->CopyBuffer(uploadVb.get(), 0, _cubeVb.get(), 0, vd.VertexSize);
+    //     _cmdBuffer->CopyBuffer(uploadIb.get(), 0, _cubeIb.get(), 0, vd.IndexSize);
+    //     {
+    //         BufferBarrier barriers[] = {
+    //             {_cubeVb.get(),
+    //              ResourceState::CopyDestination,
+    //              ResourceState::VertexAndConstantBuffer},
+    //             {_cubeIb.get(),
+    //              ResourceState::CopyDestination,
+    //              ResourceState::IndexBuffer}};
+    //         ResourceBarriers rb{barriers, {}};
+    //         _cmdBuffer->ResourceBarrier(rb);
+    //     }
+    //     _cmdBuffer->End();
+    //     CommandBuffer* t[] = {_cmdBuffer.get()};
+    //     auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+    //     cmdQueue->Submit(t, Nullable<Fence>{});
+    //     cmdQueue->Wait();
+    // }
 
-    void _SetupCubeTexture() {
-        auto filename = std::filesystem::path{"assets"} / "wall.png";
-        std::ifstream file{filename, std::ios::binary};
-        radray::ImageData png = radray::LoadPNG(file).value();
-        if (png.Format == radray::ImageFormat::RGB8_BYTE) {
-            png = png.RGB8ToRGBA8(0xff);
-        }
-        _cubeBaseColor = _device->CreateTexture(
-                                    png.Width,
-                                    png.Height,
-                                    1,
-                                    1,
-                                    ImageToTextureFormat(png.Format),
-                                    0,
-                                    1,
-                                    0,
-                                    ColorClearValue{},
-                                    ResourceType::Texture,
-                                    ResourceState::Common,
-                                    ResourceMemoryTip::Dedicated,
-                                    "wall_tex")
-                             .Unwrap();
-        uint64_t needSize = _cubeBaseColor->GetUploadNeedSize(0, 0, 1);
-        auto upload = _device->CreateBuffer(
-                                 needSize,
-                                 ResourceType::Buffer,
-                                 ResourceUsage::Upload,
-                                 ResourceState::GenericRead,
-                                 ResourceMemoryTip::None)
-                          .Unwrap();
-        _cubeBaseColor->HelpCopyDataToUpload(upload.get(), png.Data.get(), png.GetSize(), 0, 0, 1);
-        _cmdBuffer->Begin();
-        {
-            TextureBarrier barriers[] = {
-                {_cubeBaseColor.get(),
-                 ResourceState::Common,
-                 ResourceState::CopyDestination,
-                 0, 0, false}};
-            ResourceBarriers rb{{}, barriers};
-            _cmdBuffer->ResourceBarrier(rb);
-        }
-        _cmdBuffer->CopyTexture(upload.get(), 0, _cubeBaseColor.get(), 0, 0, 1);
-        {
-            TextureBarrier barriers[] = {
-                {_cubeBaseColor.get(),
-                 ResourceState::CopyDestination,
-                 ResourceState::Common,
-                 0, 0, false}};
-            ResourceBarriers rb{{}, barriers};
-            _cmdBuffer->ResourceBarrier(rb);
-        }
-        _cmdBuffer->End();
-        CommandBuffer* t[] = {_cmdBuffer.get()};
-        auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
-        cmdQueue->Submit(t, nullptr);
-        cmdQueue->Wait();
+    // void _SetupCubeTexture() {
+    //     auto filename = std::filesystem::path{"assets"} / "wall.png";
+    //     std::ifstream file{filename, std::ios::binary};
+    //     radray::ImageData png = radray::LoadPNG(file).value();
+    //     if (png.Format == radray::ImageFormat::RGB8_BYTE) {
+    //         png = png.RGB8ToRGBA8(0xff);
+    //     }
+    //     _cubeBaseColor = _device->CreateTexture(
+    //                                 png.Width,
+    //                                 png.Height,
+    //                                 1,
+    //                                 1,
+    //                                 ImageToTextureFormat(png.Format),
+    //                                 0,
+    //                                 1,
+    //                                 0,
+    //                                 ColorClearValue{},
+    //                                 ResourceType::Texture,
+    //                                 ResourceState::Common,
+    //                                 ResourceMemoryTip::Dedicated,
+    //                                 "wall_tex")
+    //                          .Unwrap();
+    //     uint64_t needSize = _cubeBaseColor->GetUploadNeedSize(0, 0, 1);
+    //     auto upload = _device->CreateBuffer(
+    //                              needSize,
+    //                              ResourceType::Buffer,
+    //                              ResourceUsage::Upload,
+    //                              ResourceState::GenericRead,
+    //                              ResourceMemoryTip::None)
+    //                       .Unwrap();
+    //     _cubeBaseColor->HelpCopyDataToUpload(upload.get(), png.Data.get(), png.GetSize(), 0, 0, 1);
+    //     _cmdBuffer->Begin();
+    //     {
+    //         TextureBarrier barriers[] = {
+    //             {_cubeBaseColor.get(),
+    //              ResourceState::Common,
+    //              ResourceState::CopyDestination,
+    //              0, 0, false}};
+    //         ResourceBarriers rb{{}, barriers};
+    //         _cmdBuffer->ResourceBarrier(rb);
+    //     }
+    //     _cmdBuffer->CopyTexture(upload.get(), 0, _cubeBaseColor.get(), 0, 0, 1);
+    //     {
+    //         TextureBarrier barriers[] = {
+    //             {_cubeBaseColor.get(),
+    //              ResourceState::CopyDestination,
+    //              ResourceState::Common,
+    //              0, 0, false}};
+    //         ResourceBarriers rb{{}, barriers};
+    //         _cmdBuffer->ResourceBarrier(rb);
+    //     }
+    //     _cmdBuffer->End();
+    //     CommandBuffer* t[] = {_cmdBuffer.get()};
+    //     auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+    //     cmdQueue->Submit(t, nullptr);
+    //     cmdQueue->Wait();
 
-        _cubeBaseColorView = _device->CreateTextureView(
-                                        _cubeBaseColor.get(),
-                                        ResourceType::Texture,
-                                        TextureFormat::RGBA8_UNORM,
-                                        TextureDimension::Dim2D,
-                                        0,
-                                        0,
-                                        0,
-                                        1)
-                                 .Unwrap();
+    //     _cubeBaseColorView = _device->CreateTextureView(
+    //                                     _cubeBaseColor.get(),
+    //                                     ResourceType::Texture,
+    //                                     TextureFormat::RGBA8_UNORM,
+    //                                     TextureDimension::Dim2D,
+    //                                     0,
+    //                                     0,
+    //                                     0,
+    //                                     1)
+    //                              .Unwrap();
 
-        DescriptorSetElementInfo info{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics};
-        _cubeDescSet = _device->CreateDescriptorSet(info).Unwrap();
-    }
+    //     DescriptorSetElementInfo info{0, 0, 1, ResourceType::Texture, ShaderStage::Graphics};
+    //     _cubeDescSet = _device->CreateDescriptorSet(info).Unwrap();
+    // }
 
     void SetupCbox() {
         {
-            auto v = std::filesystem::path{"assets"} / "box.obj";
+            auto v = std::filesystem::path{"assets"} / "sutr_tmave_sedy.obj";
             WavefrontObjReader reader{v};
             reader.Read();
             if (reader.HasError()) {
@@ -516,6 +518,10 @@ public:
             auto cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
             cmdQueue->Submit(t, nullptr);
             cmdQueue->Wait();
+            for(auto& mesh : _meshes) {
+                mesh._upIb = nullptr;
+                mesh._upVb = nullptr;
+            }
         }
         {
             RootSignatureDescriptor rsDesc{};
@@ -604,7 +610,7 @@ public:
         ShowWindow();
         InitGraphics();
         SetupCamera();
-        SetupCube();
+        // SetupCube();
         SetupCbox();
     }
 
@@ -630,17 +636,17 @@ public:
     shared_ptr<Texture> _depthTex;
     shared_ptr<ResourceView> _depthView;
 
-    shared_ptr<Buffer> _cubeVb;
-    VertexBufferView _cubeVbv;
-    shared_ptr<Buffer> _cubeIb;
-    uint32_t _cubeIbStride;
-    uint32_t _cubeIbCount;
-    shared_ptr<Buffer> _cubeCb;
-    void* _cubeCbMapped;
-    Eigen::Vector3f _cubePos;
-    shared_ptr<Texture> _cubeBaseColor;
-    shared_ptr<ResourceView> _cubeBaseColorView;
-    shared_ptr<DescriptorSet> _cubeDescSet;
+    // shared_ptr<Buffer> _cubeVb;
+    // VertexBufferView _cubeVbv;
+    // shared_ptr<Buffer> _cubeIb;
+    // uint32_t _cubeIbStride;
+    // uint32_t _cubeIbCount;
+    // shared_ptr<Buffer> _cubeCb;
+    // void* _cubeCbMapped;
+    // Eigen::Vector3f _cubePos;
+    // shared_ptr<Texture> _cubeBaseColor;
+    // shared_ptr<ResourceView> _cubeBaseColorView;
+    // shared_ptr<DescriptorSet> _cubeDescSet;
 
     shared_ptr<RootSignature> _rootSig;
     shared_ptr<GraphicsPipelineState> _pso;
@@ -748,7 +754,7 @@ public:
         for (const auto& mesh : _meshes) {
             pass->BindRootSignature(mesh._rs.get());
             pass->BindPipelineState(mesh._pso.get());
-            Eigen::Affine3f m{Eigen::Translation3f(0, 0, 0)};
+            Eigen::Affine3f m{Eigen::Translation3f(mesh._pos)};
             PreObject preObj{};
             preObj.model = m.matrix();
             preObj.mvp = _proj * _view * preObj.model;

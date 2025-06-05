@@ -36,10 +36,11 @@ V2P VSMain(VertexInput v) {
 }
 
 float4 PSMain(V2P v2p) : SV_Target {
-#ifdef BASE_COLOR_USE_TEXTURE
-    float3 color = g_BaseColor.Sample(g_BaseColorSampler, v2p.uv0);
-#else
-    float3 color = g_Material.baseColor;
-#endif
+// #ifdef BASE_COLOR_USE_TEXTURE
+//     float3 color = g_BaseColor.Sample(g_BaseColorSampler, v2p.uv0);
+// #else
+//     float3 color = g_Material.baseColor;
+// #endif
+    float3 color = normalize(v2p.normal) * 0.5 + 0.5;
     return float4(color, 1);
 }
