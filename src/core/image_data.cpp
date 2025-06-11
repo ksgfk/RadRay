@@ -44,6 +44,21 @@ ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     return dstImg;
 }
 
+ImageData ImageData::FlipY() const noexcept {
+    ImageData flipped;
+    flipped.Width = Width;
+    flipped.Height = Height;
+    flipped.Format = Format;
+    size_t row_bytes = GetImageFormatSize(Format) * Width;
+    flipped.Data = radray::make_unique<byte[]>(GetSize());
+    const byte* src = Data.get();
+    byte* dst = flipped.Data.get();
+    for (size_t y = 0; y < Height; ++y) {
+        std::memcpy(dst + y * row_bytes, src + (Height - 1 - y) * row_bytes, row_bytes);
+    }
+    return flipped;
+}
+
 size_t GetImageFormatSize(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::R8_BYTE: return 1;

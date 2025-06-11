@@ -46,5 +46,6 @@ float4 PSMain(V2P v2p) : SV_Target {
 #else
     float3 color = g_Material.baseColor;
 #endif
+    // float3 color = float3(v2p.uv0, 0);
     return float4(color, 1);
 }

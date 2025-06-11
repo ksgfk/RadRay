@@ -330,7 +330,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
 }
 
 static size_t CvtIdx(int f, size_t count) noexcept {
-    return f >= 0 ? f - 1 : count + f;
+    return f >= 1 ? f - 1 : count + f;
 }
 
 WavefrontObjReader::TrianglePosition WavefrontObjReader::GetPosition(size_t faceIndex) const {

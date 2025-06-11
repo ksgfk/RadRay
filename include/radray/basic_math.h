@@ -55,27 +55,29 @@ template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> PerspectiveLH(T fovy, T aspect, T zNear, T zFar) noexcept {
     T tanHalfFovy = std::tan(fovy / T(2));
-    Eigen::Matrix<T, 4, 4> result = Eigen::Matrix<T, 4, 4>::Zero();
-    result.coeffRef(0, 0) = T(1) / (aspect * tanHalfFovy);
-    result.coeffRef(1, 1) = T(1) / tanHalfFovy;
-    result.coeffRef(2, 2) = zFar / (zFar - zNear);
-    result.coeffRef(3, 2) = T(1);
-    result.coeffRef(2, 3) = -(zFar * zNear) / (zFar - zNear);
-    return result;
+    Eigen::Matrix<T, 4, 4> persp = Eigen::Matrix<T, 4, 4>::Zero();
+    persp(0, 0) = T(1) / (aspect * tanHalfFovy);
+    persp(1, 1) = T(1) / tanHalfFovy;
+    persp(2, 2) = zFar / (zFar - zNear);
+    persp(3, 2) = T(1);
+    persp(2, 3) = -zNear * persp(2, 2);
+    return persp;
 }
 
 template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> LookAtFrontLH(const Eigen::Vector<T, 3>& eye, const Eigen::Vector<T, 3>& front, const Eigen::Vector<T, 3>& up) noexcept {
-    Eigen::Vector<T, 3> f = front;
-    Eigen::Vector<T, 3> s = up.cross(f).normalized();
-    Eigen::Vector<T, 3> u = f.cross(s);
-    Eigen::Matrix<T, 4, 4> result;
-    result << s.x(), s.y(), s.z(), -s.dot(eye),
-        u.x(), u.y(), u.z(), -u.dot(eye),
-        f.x(), f.y(), f.z(), -f.dot(eye),
-        0, 0, 0, 1;
-    return result;
+    Eigen::Vector<T, 3> zAxis = front.normalized();
+    Eigen::Vector<T, 3> xAxis = up.cross(zAxis).normalized();
+    Eigen::Vector<T, 3> yAxis = zAxis.cross(xAxis);
+    Eigen::Matrix<T, 4, 4> view = Eigen::Matrix<T, 4, 4>::Identity();
+    view.template block<1, 3>(0, 0) = xAxis.transpose();
+    view.template block<1, 3>(1, 0) = yAxis.transpose();
+    view.template block<1, 3>(2, 0) = zAxis.transpose();
+    view(0, 3) = -xAxis.dot(eye);
+    view(1, 3) = -yAxis.dot(eye);
+    view(2, 3) = -zAxis.dot(eye);
+    return view;
 }
 
 template <class T>
