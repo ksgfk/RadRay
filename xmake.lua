@@ -93,7 +93,7 @@ add_requireconfs("spdlog_radray.fmt_radray", {
 })
 add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
-    add_requires("mimalloc_radray v2.2.3", {debug = is_mode("debug"), configs = {shared = false}}) 
+    add_requires("mimalloc_radray v2.2.4", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
 add_requires("xxhash v0.8.3", {debug = is_mode("debug"), configs = {shared = false, dispatch = true}})
 add_requires("glfw 3.4", {
@@ -103,7 +103,7 @@ add_requires("glfw 3.4", {
     }})
 if get_config("enable_d3d12") then
     add_requires("directx-headers v1.616.0", {debug = is_mode("debug")})
-    add_requires("d3d12-memory-allocator_radray v3.0.1", {debug = is_mode("debug")})
+    add_requires("d3d12-memory-allocator v3.0.1", {debug = is_mode("debug")})
 end
 if get_config("enable_dxc") then
     add_requires("directxshadercompiler_radray v1.8.2505")

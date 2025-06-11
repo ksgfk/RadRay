@@ -2,6 +2,7 @@ package("mimalloc_radray")
     set_base("mimalloc")
 
     add_versions("v2.2.3", "94036de6fe20bfd8a73d4a6d142fcf532ea604d9")
+    add_versions("v2.2.4", "fbd8b99c2b828428947d70fdc046bb55609be93e")
 
     on_install(function (package)
         if package:is_plat("windows") and package:config("shared") then
