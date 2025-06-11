@@ -53,6 +53,7 @@ public:
     shared_ptr<GraphicsPipelineState> _pso;
 
     uint32_t _vertexIndexCount = 0;
+    uint32_t _ibStride = 0;
 
     shared_ptr<ResourceView> _baseColorView;
     shared_ptr<ResourceView> _normalMapView;
@@ -146,12 +147,12 @@ public:
 
     void SetupCamera() {
         using namespace std::placeholders;
-        _camPos = Eigen::Vector3f(0, 0, -5.0f);
+        _camPos = Eigen::Vector3f(0, 0, -1.8f);
         _camRot = Eigen::AngleAxisf{Radian(0.0f), Eigen::Vector3f::UnitY()};
         _camCtrl.Distance = std::abs(_camPos.z());
-        _fovDeg = 30.0f;
-        _zNear = 0.1f;
-        _zFar = 100.0f;
+        _fovDeg = 60.0f;
+        _zNear = 0.3f;
+        _zFar = 1000.0f;
         _onMouseClick = {std::bind(&TestApp1::OnMouseClick, this, _1, _2, _3, _4), _window->EventMouseButtonCall()};
         _onMouseMove = {std::bind(&TestApp1::OnMouseMove, this, _1), _window->EventCursorPosition()};
     }
@@ -433,6 +434,7 @@ public:
     void SetupCbox() {
         DescriptorSetElementInfo texs{0, 0, 2, ResourceType::Texture, ShaderStage::Graphics};
         DescriptorSetInfo dsInfos[] = {{{texs}}};
+        VertexIndexType vit;
         {
             auto baseColorPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy.png";
             std::ifstream baseColorFile{baseColorPath, std::ios::binary | std::ios::in};
@@ -440,6 +442,7 @@ public:
             if (baseColorData.Format == radray::ImageFormat::RGB8_BYTE) {
                 baseColorData = baseColorData.RGB8ToRGBA8(0xff);
             }
+            baseColorData = baseColorData.FlipY();
             auto baseColorTex = _device->CreateTexture(
                                            baseColorData.Width,
                                            baseColorData.Height,
@@ -472,6 +475,7 @@ public:
             if (normalMapData.Format == radray::ImageFormat::RGB8_BYTE) {
                 normalMapData = normalMapData.RGB8ToRGBA8(0xff);
             }
+            normalMapData = normalMapData.FlipY();
             auto normalMapTex = _device->CreateTexture(
                                            normalMapData.Width,
                                            normalMapData.Height,
@@ -504,54 +508,70 @@ public:
             if (reader.HasError()) {
                 RADRAY_ERR_LOG("{}", reader.Error());
             }
-            for (const auto& obj : reader.Objects()) {
-                TestMesh tm{};
-                tm.name = obj.Name;
-                TriangleMesh mesh{};
-                reader.ToTriangleMesh(obj.Name, &mesh);
-                VertexData meshVd{};
-                mesh.ToVertexData(&meshVd);
-                auto vbName = tm.name + u8"_vb";
-                tm._vb = _device->CreateBuffer(
-                                    meshVd.VertexSize,
-                                    ResourceType::Buffer,
-                                    ResourceUsage::Default,
-                                    ResourceState::VertexAndConstantBuffer,
-                                    ResourceMemoryTip::None,
-                                    std::string_view{(char*)vbName.data(), vbName.size()})
-                             .Unwrap();
-                auto ibName = tm.name + u8"_ib";
-                tm._ib = _device->CreateBuffer(
-                                    meshVd.IndexSize,
-                                    ResourceType::Buffer,
-                                    ResourceUsage::Default,
-                                    ResourceState::IndexBuffer,
-                                    ResourceMemoryTip::None,
-                                    std::string_view{(char*)ibName.data(), ibName.size()})
-                             .Unwrap();
-                tm._upVb = _device->CreateBuffer(
-                                      meshVd.VertexSize,
-                                      ResourceType::Buffer,
-                                      ResourceUsage::Upload,
-                                      ResourceState::GenericRead,
-                                      ResourceMemoryTip::None)
-                               .Unwrap();
-                auto ptrVb = tm._upVb->Map(0, tm._upVb->GetSize()).Unwrap();
-                std::memcpy(ptrVb, meshVd.VertexData.get(), meshVd.VertexSize);
-                tm._upVb->Unmap();
-                tm._upIb = _device->CreateBuffer(
-                                      meshVd.IndexSize,
-                                      ResourceType::Buffer,
-                                      ResourceUsage::Upload,
-                                      ResourceState::GenericRead,
-                                      ResourceMemoryTip::None)
-                               .Unwrap();
-                auto ptrIb = tm._upIb->Map(0, tm._upIb->GetSize()).Unwrap();
-                std::memcpy(ptrIb, meshVd.IndexData.get(), meshVd.IndexSize);
-                tm._upIb->Unmap();
-                tm._vertexIndexCount = meshVd.IndexCount;
-                _meshes.emplace_back(std::move(tm));
-            }
+
+            TestMesh tm{};
+            tm.name = u8"sutr_tmave_sedy";
+            TriangleMesh mesh{};
+            reader.ToTriangleMesh(&mesh);
+            // for (auto& i : mesh.Positions) {
+            //     i.x() *= -1;
+            // }
+            // for (auto& i : mesh.Normals) {
+            //     i.x() *= -1;
+            // }
+            // for (auto& i : mesh.UV0) {
+            //     i.y() = 1.0f - i.y();
+            // }
+            VertexData meshVd{};
+            mesh.ToVertexData(&meshVd);
+            vit = meshVd.IndexType;
+            auto vbName = tm.name + u8"_vb";
+            tm._vb = _device->CreateBuffer(
+                                meshVd.VertexSize,
+                                ResourceType::Buffer,
+                                ResourceUsage::Default,
+                                ResourceState::VertexAndConstantBuffer,
+                                ResourceMemoryTip::None,
+                                std::string_view{(char*)vbName.data(), vbName.size()})
+                         .Unwrap();
+            auto ibName = tm.name + u8"_ib";
+            tm._ib = _device->CreateBuffer(
+                                meshVd.IndexSize,
+                                ResourceType::Buffer,
+                                ResourceUsage::Default,
+                                ResourceState::IndexBuffer,
+                                ResourceMemoryTip::None,
+                                std::string_view{(char*)ibName.data(), ibName.size()})
+                         .Unwrap();
+            tm._upVb = _device->CreateBuffer(
+                                  meshVd.VertexSize,
+                                  ResourceType::Buffer,
+                                  ResourceUsage::Upload,
+                                  ResourceState::GenericRead,
+                                  ResourceMemoryTip::None)
+                           .Unwrap();
+            auto ptrVb = tm._upVb->Map(0, tm._upVb->GetSize()).Unwrap();
+            std::memcpy(ptrVb, meshVd.VertexData.get(), meshVd.VertexSize);
+            tm._upVb->Unmap();
+            tm._upIb = _device->CreateBuffer(
+                                  meshVd.IndexSize,
+                                  ResourceType::Buffer,
+                                  ResourceUsage::Upload,
+                                  ResourceState::GenericRead,
+                                  ResourceMemoryTip::None)
+                           .Unwrap();
+            auto ptrIb = tm._upIb->Map(0, tm._upIb->GetSize()).Unwrap();
+            std::memcpy(ptrIb, meshVd.IndexData.get(), meshVd.IndexSize);
+            tm._upIb->Unmap();
+            tm._vertexIndexCount = meshVd.IndexCount;
+            tm._ibStride = ([&]() {
+                switch (vit) {
+                    case VertexIndexType::UInt16: return sizeof(uint16_t);
+                    case VertexIndexType::UInt32: return sizeof(uint32_t);
+                }
+            })();
+            _meshes.emplace_back(std::move(tm));
+
             vector<BufferBarrier> bufBarriers;
             vector<TextureBarrier> texBarriers;
             for (const auto& mesh : _meshes) {
@@ -685,7 +705,13 @@ public:
                 psoDesc.MultiSample = DefaultMultiSampleState();
                 psoDesc.ColorTargets.emplace_back(DefaultColorTargetState(TextureFormat::RGBA8_UNORM));
                 psoDesc.DepthStencilEnable = true;
-                psoDesc.Primitive.StripIndexFormat = IndexFormat::UINT16;
+                psoDesc.Primitive.Cull = CullMode::None;
+                psoDesc.Primitive.StripIndexFormat = ([&]() {
+                    switch (vit) {
+                        case VertexIndexType::UInt16: return IndexFormat::UINT16;
+                        case VertexIndexType::UInt32: return IndexFormat::UINT32;
+                    }
+                })();
                 pntPipe = _device->CreateGraphicsPipeline(psoDesc).Unwrap();
             }
             Eigen::Vector3f colors[] = {
@@ -880,13 +906,13 @@ public:
             Eigen::Affine3f m{Eigen::Translation3f(mesh._pos)};
             PreObject preObj{};
             preObj.model = m.matrix();
-            preObj.mvp = _proj * _view * preObj.model;
+            preObj.mvp = _proj * _view;
             pass->PushConstants(0, &preObj, sizeof(preObj));
             pass->BindRootDescriptor(0, mesh._cbView.get());
             pass->BindDescriptorSet(0, mesh._descSet.get());
             VertexBufferView vbv[] = {{mesh._vb.get(), 32, 0}};
             pass->BindVertexBuffers(vbv);
-            pass->BindIndexBuffer(mesh._ib.get(), 2, 0);
+            pass->BindIndexBuffer(mesh._ib.get(), mesh._ibStride, 0);
             pass->DrawIndexed(mesh._vertexIndexCount, 0, 0);
         }
 

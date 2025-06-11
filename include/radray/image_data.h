@@ -40,6 +40,7 @@ public:
     std::span<const byte> GetSpan() const noexcept;
 
     ImageData RGB8ToRGBA8(uint8_t alpha) const noexcept;
+    ImageData FlipY() const noexcept;
 
     radray::unique_ptr<byte[]> Data;
     uint32_t Width;
