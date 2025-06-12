@@ -87,6 +87,41 @@ rule("radray_basic_setting")
         -- link
         -- if is_mode("release") then target:set("symbols", "debug") end
     end)
+    on_config(function (target)
+        if is_plat("windows") then
+            local toolchain_settings = target:toolchain("msvc")
+            if not toolchain_settings then
+                toolchain_settings = target:toolchain("clang-cl")
+            end
+            if not toolchain_settings then
+                toolchain_settings = target:toolchain("llvm")
+            end
+            if toolchain_settings then
+                local sdk_version = toolchain_settings:runenvs().WindowsSDKVersion
+                local legal_sdk = false
+                if sdk_version then
+                    local parts = {}
+                    for part in sdk_version:gmatch("[^%.]+") do
+                        table.insert(parts, part)
+                    end
+                    if #parts > 0 then
+                        if tonumber(parts[1]) > 10 then
+                            legal_sdk = true
+                        elseif tonumber(parts[1]) == 10 then
+                            if #parts > 2 then
+                                if tonumber(parts[3]) >= 22000 then
+                                    legal_sdk = true
+                                end
+                            end
+                        end
+                    end
+                end
+                if not legal_sdk then
+                    os.raise(target:name(), ": windows SDK version is too low, please update to 10.0.22000.0 or higher", "detect windows SDK", sdk_version)
+                end
+            end
+        end
+    end)
 rule_end()
 
 rule("radray_app")
@@ -111,6 +146,13 @@ rule("radray_test")
     on_config(function (target)
         target:set("kind", "binary")
         target:add("packages", "gtest")
+    end)
+rule_end()
+
+rule("radray_bench")
+    on_config(function (target)
+        target:set("kind", "binary")
+        target:add("packages", "benchmark")
     end)
 rule_end()
 

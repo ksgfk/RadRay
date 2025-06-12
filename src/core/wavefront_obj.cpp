@@ -227,6 +227,11 @@ WavefrontObjReader::WavefrontObjReader(radray::string&& text) {
     _stream = _myStream.get();
 }
 
+WavefrontObjReader::WavefrontObjReader(const radray::string& text) {
+    _myStream = radray::make_unique<std::basic_istringstream<char, std::char_traits<char>, radray::allocator<char>>>(text, std::ios::in, radray::allocator<char>{});
+    _stream = _myStream.get();
+}
+
 bool WavefrontObjReader::HasError() const {
     return !_error.empty();
 }

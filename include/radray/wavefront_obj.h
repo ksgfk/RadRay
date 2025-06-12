@@ -40,6 +40,7 @@ public:
     explicit WavefrontObjReader(std::istream* stream);
     explicit WavefrontObjReader(const std::filesystem::path& file);
     explicit WavefrontObjReader(radray::string&& text);
+    explicit WavefrontObjReader(const radray::string& text);
 
     bool HasError() const;
     std::string_view Error() const { return _error; }
