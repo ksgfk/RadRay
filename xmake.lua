@@ -116,6 +116,9 @@ if get_config("enable_spirv_cross") then
 end
 if get_config("build_test") then
     add_requires("gtest v1.16.0", {debug = is_mode("debug")})
+    if is_mode("release") then
+        add_requires("benchmark v1.9.4")
+    end
 end
 if get_config("enable_png") then
     add_requires("zlib v1.3.1", {debug = is_mode("debug")})

@@ -2,3 +2,4 @@
 * text=auto
 
 src/render/ext/* linguist-vendored
+src/test/direct_light/assets/* linguist-vendored
