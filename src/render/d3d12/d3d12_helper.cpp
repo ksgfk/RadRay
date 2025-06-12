@@ -237,7 +237,7 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept {
         case DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE:
         case DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE:
         case DXGI_FORMAT_FORCE_UINT: 
-        case DXGI_FORMAT_A4B4G4R4_UNORM: return DXGI_FORMAT_UNKNOWN;
+        default: return DXGI_FORMAT_UNKNOWN;
     }
     Unreachable();
 }
