@@ -338,12 +338,7 @@ public:
                                 case 3: return VertexFormat::FLOAT32X4;
                                 default: return VertexFormat::UNKNOWN;
                             }
-                        case D3D_REGISTER_COMPONENT_UINT16:
-                        case D3D_REGISTER_COMPONENT_SINT16:
-                        case D3D_REGISTER_COMPONENT_FLOAT16:
-                        case D3D_REGISTER_COMPONENT_UINT64:
-                        case D3D_REGISTER_COMPONENT_SINT64:
-                        case D3D_REGISTER_COMPONENT_FLOAT64: return VertexFormat::UNKNOWN;
+                        default: return VertexFormat::UNKNOWN;
                     }
                     return VertexFormat::UNKNOWN;
                 })(spDesc.ComponentType, comps);
