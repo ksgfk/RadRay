@@ -9,6 +9,44 @@
 
 namespace radray {
 
+ImageData::ImageData(const ImageData& other) noexcept : Width(other.Width), Height(other.Height), Format(other.Format) {
+    if (other.Data) {
+        Data = radray::make_unique<byte[]>(other.GetSize());
+        std::memcpy(Data.get(), other.Data.get(), other.GetSize());
+    } else {
+        Data = nullptr;
+    }
+}
+
+ImageData::ImageData(ImageData&& other) noexcept : Width(other.Width), Height(other.Height), Format(other.Format) {
+    Data = std::move(other.Data);
+}
+
+ImageData& ImageData::operator=(const ImageData& other) noexcept {
+    if (this != &other) {
+        Width = other.Width;
+        Height = other.Height;
+        Format = other.Format;
+        if (other.Data) {
+            Data = radray::make_unique<byte[]>(other.GetSize());
+            std::memcpy(Data.get(), other.Data.get(), other.GetSize());
+        } else {
+            Data = nullptr;
+        }
+    }
+    return *this;
+}
+
+ImageData& ImageData::operator=(ImageData&& other) noexcept {
+    if (this != &other) {
+        Width = other.Width;
+        Height = other.Height;
+        Format = other.Format;
+        Data = std::move(other.Data);
+    }
+    return *this;
+}
+
 size_t ImageData::GetSize() const noexcept {
     auto bs = GetImageFormatSize(Format);
     return bs * Width * Height;
@@ -44,19 +82,19 @@ ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     return dstImg;
 }
 
-ImageData ImageData::FlipY() const noexcept {
-    ImageData flipped;
-    flipped.Width = Width;
-    flipped.Height = Height;
-    flipped.Format = Format;
-    size_t row_bytes = GetImageFormatSize(Format) * Width;
-    flipped.Data = radray::make_unique<byte[]>(GetSize());
-    const byte* src = Data.get();
-    byte* dst = flipped.Data.get();
-    for (size_t y = 0; y < Height; ++y) {
-        std::memcpy(dst + y * row_bytes, src + (Height - 1 - y) * row_bytes, row_bytes);
+void ImageData::FlipY() noexcept {
+    if (!Data) {
+        return;
     }
-    return flipped;
+    size_t row_bytes = GetImageFormatSize(Format) * Width;
+    byte* data_ptr = Data.get();
+    for (size_t y = 0; y < Height / 2; ++y) {
+        byte* row_top = data_ptr + y * row_bytes;
+        byte* row_bottom = data_ptr + (Height - 1 - y) * row_bytes;
+        for (size_t i = 0; i < row_bytes; ++i) {
+            std::swap(row_top[i], row_bottom[i]);
+        }
+    }
 }
 
 size_t GetImageFormatSize(ImageFormat format) noexcept {
