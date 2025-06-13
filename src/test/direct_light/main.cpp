@@ -160,15 +160,14 @@ public:
     }
 
     void SetupCamera() {
-        using namespace std::placeholders;
         _camPos = Eigen::Vector3f(0, 0, -1.8f);
         _camRot = Eigen::AngleAxisf{Radian(0.0f), Eigen::Vector3f::UnitY()};
         _camCtrl.Distance = std::abs(_camPos.z());
         _fovDeg = 60.0f;
         _zNear = 0.3f;
         _zFar = 1000.0f;
-        _onMouseClick = {std::bind(&TestApp1::OnMouseClick, this, _1, _2, _3, _4), _window->EventMouseButtonCall()};
-        _onMouseMove = {std::bind(&TestApp1::OnMouseMove, this, _1), _window->EventCursorPosition()};
+        _onMouseClick = {&TestApp1::OnMouseClick, this, _window->EventMouseButtonCall()};
+        _onMouseMove = {&TestApp1::OnMouseMove, this, _window->EventCursorPosition()};
     }
 
     void SetupCbox() {
