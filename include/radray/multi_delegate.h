@@ -27,6 +27,7 @@ public:
     using CallableType = void(Args...);
 
     DelegateHandle() noexcept = default;
+
     DelegateHandle(
         std::function<CallableType>&& func,
         radray::shared_ptr<MultiDelegate<CallableType>> md) noexcept
@@ -34,6 +35,16 @@ public:
           _md(radray::weak_ptr<MultiDelegate<CallableType>>{md}) {
         md->Add(_func);
     }
+
+    template <class T>
+    DelegateHandle(void (T::*memberFunc)(Args...), T* instance, radray::shared_ptr<MultiDelegate<CallableType>> md) noexcept {
+        _func = radray::make_shared<std::function<CallableType>>([=](Args&&... args) {
+            (instance->*memberFunc)(std::forward<Args>(args)...);
+        });
+        _md = radray::weak_ptr<MultiDelegate<CallableType>>{md};
+        md->Add(_func);
+    }
+
     DelegateHandle(const DelegateHandle& other) noexcept = default;
     DelegateHandle(DelegateHandle&& other) noexcept {
         if (other.IsEmpty()) {
