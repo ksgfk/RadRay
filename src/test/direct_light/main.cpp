@@ -182,7 +182,7 @@ public:
             if (baseColorData.Format == radray::ImageFormat::RGB8_BYTE) {
                 baseColorData = baseColorData.RGB8ToRGBA8(0xff);
             }
-            baseColorData = baseColorData.FlipY();
+            baseColorData.FlipY();
             auto baseColorTex = _device->CreateTexture(
                                            baseColorData.Width,
                                            baseColorData.Height,
@@ -215,7 +215,7 @@ public:
             if (normalMapData.Format == radray::ImageFormat::RGB8_BYTE) {
                 normalMapData = normalMapData.RGB8ToRGBA8(0xff);
             }
-            normalMapData = normalMapData.FlipY();
+            normalMapData.FlipY();
             auto normalMapTex = _device->CreateTexture(
                                            normalMapData.Width,
                                            normalMapData.Height,
