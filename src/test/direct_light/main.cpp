@@ -178,11 +178,7 @@ public:
         {
             auto baseColorPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy.png";
             std::ifstream baseColorFile{baseColorPath, std::ios::binary | std::ios::in};
-            radray::ImageData baseColorData = radray::LoadPNG(baseColorFile).value();
-            if (baseColorData.Format == radray::ImageFormat::RGB8_BYTE) {
-                baseColorData = baseColorData.RGB8ToRGBA8(0xff);
-            }
-            baseColorData.FlipY();
+            radray::ImageData baseColorData = radray::LoadPNG(baseColorFile, {0xFF, true}).value();
             auto baseColorTex = _device->CreateTexture(
                                            baseColorData.Width,
                                            baseColorData.Height,
@@ -211,11 +207,7 @@ public:
 
             auto normalMapPath = std::filesystem::path{"assets"} / "sutr_tmave_sedy_NormalsMap.png";
             std::ifstream normalMapFile{normalMapPath, std::ios::binary | std::ios::in};
-            radray::ImageData normalMapData = radray::LoadPNG(normalMapFile).value();
-            if (normalMapData.Format == radray::ImageFormat::RGB8_BYTE) {
-                normalMapData = normalMapData.RGB8ToRGBA8(0xff);
-            }
-            normalMapData.FlipY();
+            radray::ImageData normalMapData = radray::LoadPNG(normalMapFile, {0xFF, true}).value();
             auto normalMapTex = _device->CreateTexture(
                                            normalMapData.Width,
                                            normalMapData.Height,

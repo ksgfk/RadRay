@@ -56,8 +56,13 @@ public:
 };
 
 #ifdef RADRAY_ENABLE_PNG
+class PNGLoadSettings {
+public:
+    std::optional<uint32_t> AddAlphaIfRGB;
+    bool IsFlipY{false};
+};
 bool IsPNG(std::istream& stream);
-std::optional<ImageData> LoadPNG(std::istream& stream);
+std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
 #endif
 
 std::string_view to_string(ImageFormat val) noexcept;
