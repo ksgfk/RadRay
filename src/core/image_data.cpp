@@ -161,7 +161,7 @@ bool IsPNG(std::istream& stream) {
     stream.seekg(0, std::ios::beg);
     return (isPng == 0);
 }
-std::optional<ImageData> LoadPNG(std::istream& stream) {
+std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings) {
     png_structp png_ptr = nullptr;
     png_infop info_ptr = nullptr;
     auto guard_png_ptr = MakeScopeGuard([&]() {if (png_ptr) png_destroy_read_struct(&png_ptr, nullptr, nullptr); });
@@ -192,8 +192,8 @@ std::optional<ImageData> LoadPNG(std::istream& stream) {
             png_set_tRNS_to_alpha(png_ptr);
         if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
             png_set_expand_gray_1_2_4_to_8(png_ptr);
-        if (color_type == PNG_COLOR_TYPE_RGB)
-            png_set_add_alpha(png_ptr, 0xFF, PNG_FILLER_AFTER);
+        if (settings.AddAlphaIfRGB.has_value() && color_type == PNG_COLOR_TYPE_RGB)
+            png_set_add_alpha(png_ptr, *settings.AddAlphaIfRGB, PNG_FILLER_AFTER);
         png_read_update_info(png_ptr, info_ptr);
         width = png_get_image_width(png_ptr, info_ptr);
         height = png_get_image_height(png_ptr, info_ptr);
@@ -205,8 +205,14 @@ std::optional<ImageData> LoadPNG(std::istream& stream) {
         static_assert(std::is_trivial_v<radray::byte> && std::is_trivial_v<png_byte>, "what");
         static_assert(std::is_standard_layout_v<radray::byte> && std::is_standard_layout_v<png_byte>, "what");
         radray::vector<png_bytep> row_pointers(height);
-        for (size_t i = 0; i < height; ++i) {
-            row_pointers[i] = reinterpret_cast<png_bytep>(image_data.get()) + i * rowbytes;
+        if (settings.IsFlipY) {
+            for (size_t i = 0; i < height; ++i) {
+                row_pointers[i] = reinterpret_cast<png_bytep>(image_data.get()) + (height - 1 - i) * rowbytes;
+            }
+        } else {
+            for (size_t i = 0; i < height; ++i) {
+                row_pointers[i] = reinterpret_cast<png_bytep>(image_data.get()) + i * rowbytes;
+            }
         }
         png_read_image(png_ptr, row_pointers.data());
         ImageData imgData;
