@@ -1,7 +1,7 @@
 option("_radray_checkout")
     set_default(false)
     set_showmenu(false)
-    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_mimalloc", "enable_dxc", "enable_spirv_cross", "enable_png")
+    add_deps("build_test", "enable_d3d12", "enable_metal", "enable_vulkan", "enable_mimalloc", "enable_dxc", "enable_spirv_cross", "enable_png")
     before_check(function(option)
         if path.absolute(path.join(os.projectdir(), "scripts")) == path.absolute(os.scriptdir()) then
             local opts = import("options", {try = true, anonymous = true})
@@ -29,9 +29,11 @@ option("_radray_checkout")
                 end
                 enable_metal:enable(false, {force = true})
             end
+            local enable_vulkan = option:dep("enable_vulkan")
 
             print("radray is enable d3d12", enable_d3d12:enabled())
             print("radray is enable metal", enable_metal:enabled())
+            print("radray is enable vulkan", enable_vulkan:enabled())
             print("radray is enable mimalloc", option:dep("enable_mimalloc"):enabled())
             print("radray is enable dxc", option:dep("enable_dxc"):enabled())
             print("radray is enable spirv-cross", option:dep("enable_spirv_cross"):enabled())

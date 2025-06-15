@@ -10,6 +10,10 @@
 #include "metal/metal_device.h"
 #endif
 
+#ifdef RADRAY_ENABLE_VULKAN
+#include "vk/vulkan_device.h"
+#endif
+
 namespace radray::render {
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
@@ -31,13 +35,29 @@ Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) 
                 return nullptr;
 #endif
             } else if constexpr (std::is_same_v<T, VulkanDeviceDescriptor>) {
-                RADRAY_ERR_LOG("Vulkan is planing");
+#ifdef RADRAY_ENABLE_VULKAN
+                return vulkan::CreateDevice(arg);
+#else
+                RADRAY_ERR_LOG("Vulkan is not enable");
                 return nullptr;
+#endif
             } else {
                 static_assert(false, "unreachable");
             }
         },
         desc);
+}
+
+void GlobalInitGraphics() {
+#ifdef RADRAY_ENABLE_VULKAN
+    vulkan::GlobalInit();
+#endif
+}
+
+void GlobalTerminateGraphics() {
+#ifdef RADRAY_ENABLE_VULKAN
+    vulkan::GlobalTerminate();
+#endif
 }
 
 }  // namespace radray::render
