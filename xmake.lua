@@ -16,6 +16,11 @@ option("enable_metal")
     set_default(true)
     set_showmenu(true)
 option_end()
+option("enable_vulkan")
+    set_values(true, false)
+    set_default(true)
+    set_showmenu(true)
+option_end()
 option("enable_mimalloc")
     set_values(true, false)
     set_default(true)
@@ -113,6 +118,11 @@ if get_config("enable_metal") then
 end
 if get_config("enable_spirv_cross") then
     add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
+end
+if get_config("enable_vulkan") then
+    add_requires("vulkan-headers 1.4.309", {debug = is_mode("debug")})
+    add_requires("volk 1.4.309", {debug = is_mode("debug")})
+    add_requireconfs("volk.vulkan-headers", {version = "1.4.309",debug = is_mode("debug")})
 end
 if get_config("build_test") then
     add_requires("gtest v1.16.0", {debug = is_mode("debug")})

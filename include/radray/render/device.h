@@ -26,6 +26,8 @@ public:
 
 class VulkanDeviceDescriptor {
 public:
+    bool IsEnableDebugLayer;
+    bool IsEnableGpuBasedValid;
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
@@ -118,5 +120,9 @@ public:
 };
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
+
+void GlobalInitGraphics();
+
+void GlobalTerminateGraphics();
 
 }  // namespace radray::render

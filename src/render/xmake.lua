@@ -23,6 +23,11 @@ target("radray_render")
         add_packages("metal-cpp")
         add_frameworks("Foundation", "Metal", "QuartzCore")
     end
+    if get_config("enable_vulkan") then
+        add_defines("RADRAY_ENABLE_VULKAN", {public = true})
+        add_files("vk/*.cpp")
+        add_packages("vulkan-headers", "volk")
+    end
 
     on_install(function (target)
         local helper = import("scripts.helper", {rootdir = os.projectdir()})
