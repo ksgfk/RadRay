@@ -5,13 +5,14 @@ radray_toolchain = {
 
 	-- toolchain = "llvm-macos-brew",
 }
+
 function get_options()
-	return {
-		build_test = true,
-		enable_d3d12 = true,
-		enable_metal = true,
-		enable_mimalloc = true,
-		enable_dxc = true,
-		enable_spirv_cross = true
-	}
+	return {}
+end
+
+function get_test_assets_config()
+    return {
+        src_path = "assets",
+        dst_dir = "assets"
+    }
 end

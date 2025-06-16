@@ -4,4 +4,4 @@ build
 bin
 
 scripts/options.lua
-*.obj
+assets

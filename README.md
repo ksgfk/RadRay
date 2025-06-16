@@ -7,6 +7,7 @@
 tips:
 * make file `options.lua` use template `options.lua.template` in `scripts` folder. can set many settings in `options.lua`
 * cmd command `xmake i -o bin` can export binaries to bin dir
+* [optional] cmd `xmake lua scripts/after_build_test.lua [install]` to copy test assets to build dir
 
 ## dev env
 * vscode
