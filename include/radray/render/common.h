@@ -13,7 +13,9 @@ namespace radray::render {
 enum class Backend {
     D3D12,
     Vulkan,
-    Metal
+    Metal,
+
+    MAX_VALUE = Metal + 1
 };
 
 enum class TextureFormat {

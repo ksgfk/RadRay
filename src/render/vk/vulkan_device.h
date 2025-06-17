@@ -97,7 +97,7 @@ public:
 
 Nullable<DeviceVulkan> CreateDevice(const VulkanDeviceDescriptor& desc);
 
-void GlobalInit();
+bool GlobalInit(std::span<BackendInitDescriptor> desc);
 
 void GlobalTerminate();
 

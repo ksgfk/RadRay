@@ -12,6 +12,22 @@
 
 namespace radray::render {
 
+class D3D12BackendInitDescriptor {
+public:
+};
+
+class MetalBackendInitDescriptor {
+public:
+};
+
+class VulkanBackendInitDdescriptor {
+public:
+    bool IsEnableDebugLayer;
+    bool IsEnableGpuBasedValid;
+};
+
+using BackendInitDescriptor = std::variant<D3D12BackendInitDescriptor, MetalBackendInitDescriptor, VulkanBackendInitDdescriptor>;
+
 class D3D12DeviceDescriptor {
 public:
     std::optional<uint32_t> AdapterIndex;
@@ -26,8 +42,7 @@ public:
 
 class VulkanDeviceDescriptor {
 public:
-    bool IsEnableDebugLayer;
-    bool IsEnableGpuBasedValid;
+    std::optional<uint32_t> PhysicalDeviceIndex;
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
@@ -121,7 +136,7 @@ public:
 
 Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
 
-void GlobalInitGraphics();
+void GlobalInitGraphics(std::span<BackendInitDescriptor> desc);
 
 void GlobalTerminateGraphics();
 

@@ -1,5 +1,7 @@
 #include <radray/render/device.h>
 
+#include <array>
+
 #include <radray/logger.h>
 
 #ifdef RADRAY_ENABLE_D3D12
@@ -48,15 +50,18 @@ Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) 
         desc);
 }
 
-void GlobalInitGraphics() {
+static std::array<bool, static_cast<std::underlying_type_t<Backend>>(Backend::MAX_VALUE)> g_supportedBackends;
+
+void GlobalInitGraphics(std::span<BackendInitDescriptor> desc) {
 #ifdef RADRAY_ENABLE_VULKAN
-    vulkan::GlobalInit();
+    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = vulkan::GlobalInit(desc);
 #endif
 }
 
 void GlobalTerminateGraphics() {
 #ifdef RADRAY_ENABLE_VULKAN
     vulkan::GlobalTerminate();
+    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = false;
 #endif
 }
 

@@ -123,7 +123,7 @@ struct Nullable<std::unique_ptr<T, D>> {
     constexpr Nullable(std::unique_ptr<U, D> ptr) noexcept : Ptr(std::move(ptr)) {}
     template <typename U>
     constexpr Nullable& operator=(std::unique_ptr<U, D> other) noexcept {
-        Ptr = std::move(other.Ptr);
+        Ptr = std::move(other);
         return *this;
     }
     template <typename U>
@@ -170,7 +170,7 @@ struct Nullable<std::shared_ptr<T>> {
     constexpr Nullable(std::shared_ptr<U> ptr) noexcept : Ptr(ptr) {}
     template <typename U>
     constexpr Nullable& operator=(std::shared_ptr<U> other) noexcept {
-        Ptr = other.Ptr;
+        Ptr = other;
         return *this;
     }
     template <typename U>

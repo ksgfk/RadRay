@@ -10,6 +10,7 @@ option("_radray_checkout")
                 for k, v in pairs(opt) do
                     if v ~= nil then
                         option:dep(k):enable(v)
+                        print("set option:", k, v)
                     end
                 end
             end

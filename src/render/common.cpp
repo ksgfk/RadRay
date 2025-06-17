@@ -78,6 +78,7 @@ std::string_view format_as(Backend v) noexcept {
         case Backend::D3D12: return "D3D12";
         case Backend::Vulkan: return "Vulkan";
         case Backend::Metal: return "Metal";
+        default: return "Unknown";
     }
     Unreachable();
 }

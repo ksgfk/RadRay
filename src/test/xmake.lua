@@ -43,6 +43,7 @@ target_end()
 includes("test_img_rw")
 
 includes("hello_world_dx12")
+includes("hello_world_vk")
 includes("direct_light")
 
 if is_mode("release") then
