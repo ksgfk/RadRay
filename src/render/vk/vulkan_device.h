@@ -8,6 +8,9 @@ namespace radray::render::vulkan {
 
 class DeviceVulkan : public Device {
 public:
+    DeviceVulkan() = default;
+    ~DeviceVulkan() noexcept override;
+
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
@@ -93,12 +96,18 @@ public:
         uint32_t mipLevel,
         uint32_t arrayLayer,
         uint32_t layerCount) const noexcept override;
+
+public:
+    VkPhysicalDevice _physicalDevice;
+    VkDevice _device;
+
+    VolkDeviceTable _vtb;
 };
 
-Nullable<DeviceVulkan> CreateDevice(const VulkanDeviceDescriptor& desc);
+Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& desc);
 
-bool GlobalInit(std::span<BackendInitDescriptor> desc);
+bool GlobalInitVulkan(std::span<BackendInitDescriptor> desc);
 
-void GlobalTerminate();
+void GlobalTerminateVulkan();
 
 }  // namespace radray::render::vulkan

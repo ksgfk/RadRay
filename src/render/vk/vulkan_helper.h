@@ -35,6 +35,32 @@ constexpr void SetVkStructPtrToLast(TBase* v, TNext* pNext) noexcept {
     }
 }
 
+template <typename T, typename F, typename... Ts>
+auto GetVector(radray::vector<T>& out, F&& f, Ts&&... ts) -> VkResult {
+    uint32_t count = 0;
+    if constexpr (std::is_same_v<std::invoke_result_t<F, Ts..., uint32_t*, T*>, void>) {
+        f(ts..., &count, nullptr);
+        out.resize(count);
+        f(ts..., &count, out.data());
+        out.resize(count);
+        return VK_SUCCESS;
+    } else {
+        VkResult err;
+        do {
+            err = f(ts..., &count, nullptr);
+            if (err != VK_SUCCESS) {
+                return err;
+            }
+            out.resize(count);
+            err = f(ts..., &count, out.data());
+            out.resize(count);
+        } while (err == VK_INCOMPLETE);
+        return err;
+    }
+}
+
+uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept;
+
 std::string_view formatVkDebugMsgType(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 
 }  // namespace radray::render::vulkan

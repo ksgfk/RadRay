@@ -2,9 +2,53 @@
 
 namespace radray::render::vulkan {
 
-bool DeviceVulkan::IsValid() const noexcept { return false; }
+class InstanceVulkan {
+public:
+    InstanceVulkan() = default;
+    InstanceVulkan(const InstanceVulkan&) = delete;
+    InstanceVulkan& operator=(const InstanceVulkan&) = delete;
+    InstanceVulkan(InstanceVulkan&&) = delete;
+    InstanceVulkan& operator=(InstanceVulkan&&) = delete;
+    ~InstanceVulkan() {
+        if (_instance != nullptr) {
+            const VkAllocationCallbacks* allocCbPtr = GetAllocationCallbacks();
+            vkDestroyInstance(_instance, allocCbPtr);
+            _instance = nullptr;
+        }
+    }
 
-void DeviceVulkan::Destroy() noexcept {}
+    const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept {
+        return _allocCb.has_value() ? &_allocCb.value() : nullptr;
+    }
+
+public:
+    VkInstance _instance;
+    std::optional<VkAllocationCallbacks> _allocCb;
+    radray::vector<radray::string> _exts;
+    radray::vector<radray::string> _layers;
+};
+
+static Nullable<std::unique_ptr<InstanceVulkan>> g_instance;
+
+static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
+    if (d.IsValid()) {
+        d._vtb.vkDestroyDevice(d._device, g_instance->GetAllocationCallbacks());
+        d._device = VK_NULL_HANDLE;
+        d._physicalDevice = VK_NULL_HANDLE;
+    }
+}
+
+DeviceVulkan::~DeviceVulkan() noexcept {
+    DeviceVulkanDestroy(*this);
+}
+
+bool DeviceVulkan::IsValid() const noexcept {
+    return _device != VK_NULL_HANDLE && _physicalDevice != VK_NULL_HANDLE;
+}
+
+void DeviceVulkan::Destroy() noexcept {
+    DeviceVulkanDestroy(*this);
+}
 
 Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept { return nullptr; }
 
@@ -104,47 +148,176 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     return VK_FALSE;
 }
 
-class InstanceVulkan {
-public:
-    InstanceVulkan() = default;
-    InstanceVulkan(const InstanceVulkan&) = delete;
-    InstanceVulkan& operator=(const InstanceVulkan&) = delete;
-    InstanceVulkan(InstanceVulkan&&) = delete;
-    InstanceVulkan& operator=(InstanceVulkan&&) = delete;
-    ~InstanceVulkan() {
-        if (_instance != nullptr) {
-            VkAllocationCallbacks* allocCbPtr = _allocCb.has_value() ? &_allocCb.value() : nullptr;
-            vkDestroyInstance(_instance, allocCbPtr);
-            _instance = nullptr;
-        }
-    }
+Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& desc) {
+    struct PhyDeviceInfo {
+        VkPhysicalDevice device;
+        VkPhysicalDeviceProperties properties;
+        VkPhysicalDeviceMemoryProperties memory;
+        size_t index;
+    };
 
-public:
-    VkInstance _instance;
-    std::optional<VkAllocationCallbacks> _allocCb;
-    radray::vector<radray::string> _exts;
-    radray::vector<radray::string> _layers;
-};
-
-static Nullable<std::unique_ptr<InstanceVulkan>> g_instance;
-
-Nullable<DeviceVulkan> CreateDevice(const VulkanDeviceDescriptor& desc) {
     if (!g_instance.HasValue()) {
         RADRAY_ERR_LOG("vk not init");
         return nullptr;
     }
     VkInstance instance = g_instance->_instance;
-    uint32_t physicalDeviceCount = 0;
-    if (vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, nullptr) != VK_SUCCESS) {
+    radray::vector<VkPhysicalDevice> physicalDevices;
+    if (GetVector(physicalDevices, vkEnumeratePhysicalDevices, instance) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumeratePhysicalDevices failed");
         return nullptr;
     }
-    radray::vector<VkPhysicalDevice> physicalDevices{physicalDeviceCount};
-    vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.data());
-    return nullptr;
+    if (physicalDevices.size() == 0) {
+        RADRAY_ERR_LOG("vk no physical device found");
+        return nullptr;
+    }
+    radray::vector<PhyDeviceInfo> physicalDeviceProps{};
+    for (size_t i = 0; i < physicalDevices.size(); ++i) {
+        const auto& phyDevice = physicalDevices[i];
+        VkPhysicalDeviceProperties deviceProps;
+        vkGetPhysicalDeviceProperties(phyDevice, &deviceProps);
+        VkPhysicalDeviceMemoryProperties memory;
+        vkGetPhysicalDeviceMemoryProperties(phyDevice, &memory);
+        uint64_t total = GetPhysicalDeviceMemoryAllSize(memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+        RADRAY_INFO_LOG("vk find device: {}, memory: {}MB", deviceProps.deviceName, total / (1024 * 1024));
+        physicalDeviceProps.emplace_back(PhyDeviceInfo{phyDevice, deviceProps, memory, i});
+    }
+    size_t selectPhysicalDeviceIndex = std::numeric_limits<size_t>::max();
+    if (desc.PhysicalDeviceIndex.has_value()) {
+        uint32_t index = desc.PhysicalDeviceIndex.value();
+        if (index >= physicalDevices.size()) {
+            RADRAY_ERR_LOG("vk PhysicalDeviceIndex {} out of range, max {}", index, physicalDevices.size());
+            return nullptr;
+        }
+        selectPhysicalDeviceIndex = index;
+    } else {
+        auto cpy = physicalDeviceProps;
+        std::sort(cpy.begin(), cpy.end(), [](const PhyDeviceInfo& lhs, const PhyDeviceInfo& rhs) noexcept {
+            if (lhs.properties.deviceType != rhs.properties.deviceType) {
+                static auto typeScore = [](VkPhysicalDeviceType t) noexcept {
+                    switch (t) {
+                        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 4;
+                        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
+                        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 2;
+                        case VK_PHYSICAL_DEVICE_TYPE_CPU: return 1;
+                        default: return 0;
+                    }
+                };
+                int lscore = typeScore(lhs.properties.deviceType);
+                int rscore = typeScore(rhs.properties.deviceType);
+                if (lscore != rscore) {
+                    return lscore > rscore;
+                }
+            }
+            if (lhs.properties.apiVersion != rhs.properties.apiVersion) {
+                return lhs.properties.apiVersion > rhs.properties.apiVersion;
+            }
+            auto l = GetPhysicalDeviceMemoryAllSize(lhs.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+            auto r = GetPhysicalDeviceMemoryAllSize(rhs.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+            return l > r;
+        });
+        selectPhysicalDeviceIndex = cpy[0].index;
+    }
+
+    const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
+    RADRAY_INFO_LOG("vk select device: {}", selectPhyDevice.properties.deviceName);
+
+    radray::vector<VkQueueFamilyProperties> queueFamilyProps;
+    GetVector(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
+    if (queueFamilyProps.empty()) {
+        RADRAY_ERR_LOG("vk no queue family found");
+        return nullptr;
+    }
+    const auto invalid = std::numeric_limits<uint32_t>::max();
+    uint32_t graphicsQueue = invalid;
+    uint32_t computeQueue = invalid;
+    uint32_t transferQueue = invalid;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
+        const auto& props = queueFamilyProps[i];
+        if ((props.queueFlags & VK_QUEUE_GRAPHICS_BIT) && graphicsQueue == invalid) {
+            graphicsQueue = i;
+        }
+        if ((props.queueFlags & VK_QUEUE_COMPUTE_BIT) && computeQueue == invalid) {
+            if (i != graphicsQueue) {
+                computeQueue = i;
+            }
+        }
+        if ((props.queueFlags & VK_QUEUE_TRANSFER_BIT) && transferQueue == invalid) {
+            if (i != graphicsQueue && i != computeQueue) {
+                transferQueue = i;
+            }
+        }
+    }
+    if (graphicsQueue == invalid) {
+        RADRAY_ERR_LOG("vk cannot find graphics queue");
+        return nullptr;
+    }
+    if (computeQueue == invalid) {
+        computeQueue = graphicsQueue;
+    }
+    if (transferQueue == invalid) {
+        transferQueue = graphicsQueue;
+    }
+
+    radray::vector<VkDeviceQueueCreateInfo> queueInfos;
+    {
+        auto& graphicsQueueInfo = queueInfos.emplace_back();
+        graphicsQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        graphicsQueueInfo.pNext = nullptr;
+        graphicsQueueInfo.flags = 0;
+        graphicsQueueInfo.queueFamilyIndex = graphicsQueue;
+        graphicsQueueInfo.queueCount = 1;
+        float queuePriority = 1.0f;
+        graphicsQueueInfo.pQueuePriorities = &queuePriority;
+    }
+    if (computeQueue != graphicsQueue) {
+        auto& computeQueueInfo = queueInfos.emplace_back();
+        computeQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        computeQueueInfo.pNext = nullptr;
+        computeQueueInfo.flags = 0;
+        computeQueueInfo.queueFamilyIndex = computeQueue;
+        computeQueueInfo.queueCount = 1;
+        float queuePriority = 1.0f;
+        computeQueueInfo.pQueuePriorities = &queuePriority;
+    }
+    if (transferQueue != graphicsQueue && transferQueue != computeQueue) {
+        auto& transferQueueInfo = queueInfos.emplace_back();
+        transferQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        transferQueueInfo.pNext = nullptr;
+        transferQueueInfo.flags = 0;
+        transferQueueInfo.queueFamilyIndex = transferQueue;
+        transferQueueInfo.queueCount = 1;
+        float queuePriority = 1.0f;
+        transferQueueInfo.pQueuePriorities = &queuePriority;
+    }
+
+    radray::vector<const char*> deviceExts;
+    deviceExts.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+    VkDeviceCreateInfo deviceInfo{};
+    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceInfo.pNext = nullptr;
+    deviceInfo.flags = 0;
+    deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
+    deviceInfo.pQueueCreateInfos = queueInfos.data();
+    deviceInfo.enabledLayerCount = 0;
+    deviceInfo.ppEnabledLayerNames = nullptr;
+    deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
+    deviceInfo.ppEnabledExtensionNames = deviceExts.data();
+    deviceInfo.pEnabledFeatures = nullptr;
+
+    VkDevice device = VK_NULL_HANDLE;
+    if (vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_instance->GetAllocationCallbacks(), &device) != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk create device fail");
+        return nullptr;
+    }
+    auto deviceR = radray::make_shared<DeviceVulkan>();
+    deviceR->_physicalDevice = selectPhyDevice.device;
+    deviceR->_device = device;
+    volkLoadDeviceTable(&deviceR->_vtb, device);
+    return deviceR;
 }
 
-bool GlobalInit(std::span<BackendInitDescriptor> _desc) {
+bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
     if (g_instance.HasValue()) {
         RADRAY_WARN_LOG("vk already init");
         return true;
@@ -180,20 +353,16 @@ bool GlobalInit(std::span<BackendInitDescriptor> _desc) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceVersion failed");
         return false;
     }
-    uint32_t extCount = 0;
-    if (vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr) != VK_SUCCESS) {
+    radray::vector<VkExtensionProperties> extProps;
+    if (GetVector(extProps, vkEnumerateInstanceExtensionProperties, nullptr) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceExtensionProperties failed");
         return false;
     }
-    radray::vector<VkExtensionProperties> extProps{extCount};
-    vkEnumerateInstanceExtensionProperties(nullptr, &extCount, extProps.data());
-    uint32_t layerCount = 0;
-    if (vkEnumerateInstanceLayerProperties(&layerCount, nullptr) != VK_SUCCESS) {
+    radray::vector<VkLayerProperties> layerProps;
+    if (GetVector(layerProps, vkEnumerateInstanceLayerProperties) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceLayerProperties failed");
         return false;
     }
-    radray::vector<VkLayerProperties> layerProps{layerCount};
-    vkEnumerateInstanceLayerProperties(&layerCount, layerProps.data());
 
     auto findLayer = [&](std::string_view name) noexcept {
         return std::find_if(layerProps.begin(), layerProps.end(), [&](const VkLayerProperties& i) noexcept { return i.layerName == name; });
@@ -221,10 +390,8 @@ bool GlobalInit(std::span<BackendInitDescriptor> _desc) {
         } else {
             needLayers.emplace(validName);
             needExts.emplace(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-            uint32_t dbgExtCount = 0;
-            vkEnumerateInstanceExtensionProperties(validName, &dbgExtCount, nullptr);
-            radray::vector<VkExtensionProperties> dbgExtProps{dbgExtCount};
-            vkEnumerateInstanceExtensionProperties(validName, &dbgExtCount, dbgExtProps.data());
+            radray::vector<VkExtensionProperties> dbgExtProps;
+            GetVector(dbgExtProps, vkEnumerateInstanceExtensionProperties, validName);
             for (const auto& i : dbgExtProps) {
                 if (std::strcmp(i.extensionName, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME) == 0) {
                     isValidFeatureExtEnable = true;
@@ -335,7 +502,7 @@ bool GlobalInit(std::span<BackendInitDescriptor> _desc) {
         SetVkStructPtrToLast(&createInfo, &validFeature);
         SetVkStructPtrToLast(&createInfo, &debugCreateInfo);
     }
-    VkInstance instance = nullptr;
+    VkInstance instance = VK_NULL_HANDLE;
     if (vkCreateInstance(&createInfo, allocCbPtr, &instance) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkCreateInstance failed");
         return false;
@@ -349,7 +516,7 @@ bool GlobalInit(std::span<BackendInitDescriptor> _desc) {
     return true;
 }
 
-void GlobalTerminate() {
+void GlobalTerminateVulkan() {
     g_instance = nullptr;
     volkFinalize();
 }

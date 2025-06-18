@@ -54,15 +54,17 @@ static std::array<bool, static_cast<std::underlying_type_t<Backend>>(Backend::MA
 
 void GlobalInitGraphics(std::span<BackendInitDescriptor> desc) {
 #ifdef RADRAY_ENABLE_VULKAN
-    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = vulkan::GlobalInit(desc);
+    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = vulkan::GlobalInitVulkan(desc);
 #endif
 }
 
 void GlobalTerminateGraphics() {
 #ifdef RADRAY_ENABLE_VULKAN
-    vulkan::GlobalTerminate();
-    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = false;
+    vulkan::GlobalTerminateVulkan();
 #endif
+    for(auto& supported : g_supportedBackends) {
+        supported = false;
+    }
 }
 
 }  // namespace radray::render
