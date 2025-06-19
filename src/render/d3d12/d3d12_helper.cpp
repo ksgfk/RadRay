@@ -85,7 +85,7 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
         }
         obj->SetName(L"");
     } else {
-        std::optional<radray::wstring> wco = ToWideChar(str);
+        std::optional<wstring> wco = ToWideChar(str);
         if (wco.has_value()) {
             const wchar_t* debugName = wco.value().c_str();
             if (alloc) {

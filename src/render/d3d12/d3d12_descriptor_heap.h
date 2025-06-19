@@ -70,7 +70,7 @@ public:
 
     ~CpuDescriptorAllocatorImpl() noexcept override = default;
 
-    radray::unique_ptr<DescriptorHeap> CreateHeap(size_t size) noexcept;
+    unique_ptr<DescriptorHeap> CreateHeap(size_t size) noexcept;
 
     BuddyAllocator CreateSubAllocator(size_t size) noexcept;
 
@@ -112,7 +112,7 @@ public:
 
 private:
     ID3D12Device* _device;
-    radray::unique_ptr<DescriptorHeap> _heap;
+    unique_ptr<DescriptorHeap> _heap;
     FreeListAllocator _allocator;
 };
 

@@ -9,7 +9,7 @@ class CommandQueue : public RenderBase {
 public:
     virtual ~CommandQueue() noexcept = default;
 
-    virtual Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept = 0;
+    virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept = 0;
 
     virtual void Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept = 0;
 

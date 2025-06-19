@@ -49,7 +49,7 @@ public:
     ImageData RGB8ToRGBA8(uint8_t alpha) const noexcept;
     void FlipY() noexcept;
 
-    radray::unique_ptr<byte[]> Data;
+    unique_ptr<byte[]> Data;
     uint32_t Width;
     uint32_t Height;
     ImageFormat Format;

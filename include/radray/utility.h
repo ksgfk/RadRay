@@ -104,13 +104,13 @@ struct StringHash {
     size_t operator()(std::basic_string<Char, Traits, Alloc> const& str) const noexcept { return hash_type{}(str); }
 };
 
-std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept;
+std::optional<string> ReadText(const std::filesystem::path& filepath) noexcept;
 
-std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept;
+std::optional<wstring> ToWideChar(std::string_view str) noexcept;
 
-std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept;
+std::optional<string> ToMultiByte(std::wstring_view str) noexcept;
 
-radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
+vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
 
 [[noreturn]] inline void Unreachable() noexcept {
 #ifdef __cpp_lib_unreachable

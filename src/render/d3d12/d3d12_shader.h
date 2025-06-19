@@ -21,7 +21,7 @@ public:
     D3D12_SHADER_BYTECODE ToByteCode() const noexcept;
 
 public:
-    radray::vector<byte> _dxil;
+    vector<byte> _dxil;
 };
 
 }  // namespace radray::render::d3d12

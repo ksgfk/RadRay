@@ -18,9 +18,9 @@
 
 namespace radray::render {
 
-Nullable<radray::shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
+Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
     return std::visit(
-        [](auto&& arg) -> Nullable<radray::shared_ptr<Device>> {
+        [](auto&& arg) -> Nullable<shared_ptr<Device>> {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, D3D12DeviceDescriptor>) {
 #ifdef RADRAY_ENABLE_D3D12

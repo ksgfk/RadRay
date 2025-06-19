@@ -9,7 +9,7 @@ class GraphicsPsoD3D12 : public GraphicsPipelineState {
 public:
     GraphicsPsoD3D12(
         ComPtr<ID3D12PipelineState> pso,
-        radray::vector<uint64_t> arrayStrides,
+        vector<uint64_t> arrayStrides,
         D3D12_PRIMITIVE_TOPOLOGY topo) noexcept
         : _pso(std::move(pso)),
           _arrayStrides(std::move(arrayStrides)),
@@ -21,7 +21,7 @@ public:
 
 public:
     ComPtr<ID3D12PipelineState> _pso;
-    radray::vector<uint64_t> _arrayStrides;
+    vector<uint64_t> _arrayStrides;
     D3D12_PRIMITIVE_TOPOLOGY _topo;
 };
 

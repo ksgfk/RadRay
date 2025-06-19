@@ -215,20 +215,20 @@ WavefrontObjReader::WavefrontObjReader(std::istream* stream)
     : _stream(stream) {}
 
 WavefrontObjReader::WavefrontObjReader(const std::filesystem::path& file) {
-    _myStream = radray::make_unique<std::ifstream>(file, std::ios::in);
+    _myStream = make_unique<std::ifstream>(file, std::ios::in);
     _stream = _myStream.get();
     if (!_stream->good()) {
         RADRAY_ERR_LOG("cannot open file: {}", file.string());
     }
 }
 
-WavefrontObjReader::WavefrontObjReader(radray::string&& text) {
-    _myStream = radray::make_unique<std::basic_istringstream<char, std::char_traits<char>, radray::allocator<char>>>(std::move(text), std::ios::in, radray::allocator<char>{});
+WavefrontObjReader::WavefrontObjReader(string&& text) {
+    _myStream = make_unique<std::basic_istringstream<char, std::char_traits<char>, allocator<char>>>(std::move(text), std::ios::in, allocator<char>{});
     _stream = _myStream.get();
 }
 
-WavefrontObjReader::WavefrontObjReader(const radray::string& text) {
-    _myStream = radray::make_unique<std::basic_istringstream<char, std::char_traits<char>, radray::allocator<char>>>(text, std::ios::in, radray::allocator<char>{});
+WavefrontObjReader::WavefrontObjReader(const string& text) {
+    _myStream = make_unique<std::basic_istringstream<char, std::char_traits<char>, allocator<char>>>(text, std::ios::in, allocator<char>{});
     _stream = _myStream.get();
 }
 
@@ -242,7 +242,7 @@ void WavefrontObjReader::Read() {
         return;
     }
     uint32_t allLine = 0;
-    radray::string buffer;
+    string buffer;
     buffer.reserve(512);
     while (std::getline(*_stream, buffer)) {
         allLine++;
@@ -301,16 +301,16 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         }
     } else if (cmd == "o" || cmd == "g") {
         std::string_view nameView = TrimEnd(data);
-        radray::u8string name((char8_t*)nameView.data(), nameView.size());
+        u8string name((char8_t*)nameView.data(), nameView.size());
         auto& obj = _objects.emplace_back(WavefrontObjObject{});
         obj.Name = std::move(name);
     } else if (cmd == "mtllib") {
         std::string_view v = TrimEnd(data);
-        _mtllibs.emplace_back(radray::string{v});
+        _mtllibs.emplace_back(string{v});
     } else if (cmd == "usemtl") {
         if (_objects.size() > 0) {
             std::string_view v = TrimEnd(data);
-            _objects.rbegin()->Material = radray::u8string{(char8_t*)v.data(), v.size()};
+            _objects.rbegin()->Material = u8string{(char8_t*)v.data(), v.size()};
         }
     } else if (cmd == "s") {
         if (_objects.size() > 0) {

@@ -108,8 +108,8 @@ std::optional<SpvcMslOutput> SpirvToMsl(
     auto dword = ByteToDWORD({reinterpret_cast<uint8_t*>(spirv.data()), spirv.size()});
     auto [verMaj, verMin] = GetMslVersionNumber(ver);
     try {
-        radray::string msl;
-        radray::vector<SpvcEntryPoint> ep;
+        string msl;
+        vector<SpvcEntryPoint> ep;
         {
             spirv_cross::CompilerMSL mslc{dword.data(), dword.size()};
             {
@@ -119,7 +119,7 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                 opts.invariant_float_math = true;
                 mslc.set_msl_options(opts);
             }
-            msl = radray::string{mslc.compile()};
+            msl = string{mslc.compile()};
             ep.reserve(mslc.get_entry_points_and_stages().size());
             for (const auto& i : mslc.get_entry_points_and_stages()) {
                 const auto& spvEP = mslc.get_entry_point(i.name, i.execution_model);
@@ -128,7 +128,7 @@ std::optional<SpvcMslOutput> SpirvToMsl(
                     RADRAY_ERR_LOG("cannot convert SPIR-V execution model to stage {}", spvEP.model);
                     return std::nullopt;
                 }
-                ep.emplace_back(SpvcEntryPoint{radray::string{spvEP.name}, stage.value()});
+                ep.emplace_back(SpvcEntryPoint{string{spvEP.name}, stage.value()});
                 // spirv_cross::ShaderResources res = mslc.get_shader_resources(mslc.get_active_interface_variables());
                 // for (const auto& j : res.uniform_buffers) {
                 //     auto set = mslc.get_decoration(j.id, spv::DecorationDescriptorSet);

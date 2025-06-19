@@ -32,9 +32,9 @@ public:
 
     void CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept override;
 
-    Nullable<radray::unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept override;
+    Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept override;
 
-    void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept override;
+    void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
 
 public:
     DeviceD3D12* _device;

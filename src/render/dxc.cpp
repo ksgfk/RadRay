@@ -132,7 +132,7 @@ public:
     std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
         bool isSpirv = false;
         bool isStripRefl = false;
-        radray::vector<radray::wstring> wargs;
+        vector<wstring> wargs;
         wargs.reserve(args.size());
         for (auto i : args) {
             if (i == "-spirv") {
@@ -148,7 +148,7 @@ public:
             }
             wargs.emplace_back(std::move(w.value()));
         }
-        radray::vector<LPCWSTR> argsref;
+        vector<LPCWSTR> argsref;
         argsref.reserve(wargs.size());
         for (auto&& i : wargs) {
             argsref.emplace_back(i.c_str());
@@ -189,8 +189,8 @@ public:
             return std::nullopt;
         }
         auto blobStart = reinterpret_cast<byte const*>(blob->GetBufferPointer());
-        radray::vector<byte> blobData{blobStart, blobStart + blob->GetBufferSize()};
-        radray::vector<byte> reflData{};
+        vector<byte> blobData{blobStart, blobStart + blob->GetBufferSize()};
+        vector<byte> reflData{};
         if (!isSpirv && !isStripRefl) {
             ComPtr<IDxcBlob> reflBlob;
             if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
@@ -362,7 +362,7 @@ public:
     ComPtr<IDxcIncludeHandler> _inc;
 };
 
-Nullable<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
+Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
@@ -390,14 +390,14 @@ Nullable<radray::shared_ptr<Dxc>> CreateDxc() noexcept {
         RADRAY_ERR_LOG("cannot create IDxcIncludeHandler, code={}", hr);
         return nullptr;
     }
-    auto implPtr = radray::make_unique<DxcImpl>(
+    auto implPtr = make_unique<DxcImpl>(
 #ifdef RADRAY_ENABLE_MIMALLOC
         std::move(mi),
 #endif
         std::move(dxc),
         std::move(utils),
         std::move(incHandler));
-    return radray::make_shared<Dxc>(std::move(implPtr));
+    return make_shared<Dxc>(std::move(implPtr));
 }
 
 void Dxc::Destroy() noexcept {
@@ -417,8 +417,8 @@ std::optional<DxcOutput> Dxc::Compile(
     std::span<std::string_view> defines,
     std::span<std::string_view> includes,
     bool isSpirv) noexcept {
-    radray::string smStr = ([stage, sm]() noexcept {
-        using oss = std::basic_ostringstream<char, std::char_traits<char>, radray::allocator<char>>;
+    string smStr = ([stage, sm]() noexcept {
+        using oss = std::basic_ostringstream<char, std::char_traits<char>, allocator<char>>;
         oss s{};
         switch (stage) {
             case ShaderStage::Vertex: s << "vs_"; break;
@@ -435,10 +435,10 @@ std::optional<DxcOutput> Dxc::Compile(
             case HlslShaderModel::SM65: s << "6_5"; break;
             case HlslShaderModel::SM66: s << "6_6"; break;
         }
-        radray::string result = s.str();
+        string result = s.str();
         return result;
     })();
-    radray::vector<std::string_view> args{};
+    vector<std::string_view> args{};
     if (isSpirv) {
         args.emplace_back("-spirv");
     }

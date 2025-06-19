@@ -11,7 +11,7 @@ namespace radray {
 
 ImageData::ImageData(const ImageData& other) noexcept : Width(other.Width), Height(other.Height), Format(other.Format) {
     if (other.Data) {
-        Data = radray::make_unique<byte[]>(other.GetSize());
+        Data = make_unique<byte[]>(other.GetSize());
         std::memcpy(Data.get(), other.Data.get(), other.GetSize());
     } else {
         Data = nullptr;
@@ -28,7 +28,7 @@ ImageData& ImageData::operator=(const ImageData& other) noexcept {
         Height = other.Height;
         Format = other.Format;
         if (other.Data) {
-            Data = radray::make_unique<byte[]>(other.GetSize());
+            Data = make_unique<byte[]>(other.GetSize());
             std::memcpy(Data.get(), other.Data.get(), other.GetSize());
         } else {
             Data = nullptr;
@@ -65,7 +65,7 @@ ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     dstImg.Width = Width;
     dstImg.Height = Height;
     dstImg.Format = ImageFormat::RGBA8_BYTE;
-    dstImg.Data = radray::make_unique<byte[]>(dstImg.GetSize());
+    dstImg.Data = make_unique<byte[]>(dstImg.GetSize());
 
     size_t row = Width;
     byte a_ = static_cast<byte>(alpha_);
@@ -162,6 +162,10 @@ bool IsPNG(std::istream& stream) {
     return (isPng == 0);
 }
 std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings) {
+    if (stream.fail() || !stream.good()) {
+        RADRAY_ERR_LOG("libpng error: {}", "stream is not good");
+        return std::nullopt;
+    }
     png_structp png_ptr = nullptr;
     png_infop info_ptr = nullptr;
     auto guard_png_ptr = MakeScopeGuard([&]() {if (png_ptr) png_destroy_read_struct(&png_ptr, nullptr, nullptr); });
@@ -200,11 +204,11 @@ std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings)
         bit_depth = png_get_bit_depth(png_ptr, info_ptr);
         color_type = png_get_color_type(png_ptr, info_ptr);
         size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
-        auto image_data = radray::make_unique<radray::byte[]>(rowbytes * height);
+        auto image_data = make_unique<radray::byte[]>(rowbytes * height);
         static_assert(sizeof(radray::byte) == sizeof(png_byte), "what");
         static_assert(std::is_trivial_v<radray::byte> && std::is_trivial_v<png_byte>, "what");
         static_assert(std::is_standard_layout_v<radray::byte> && std::is_standard_layout_v<png_byte>, "what");
-        radray::vector<png_bytep> row_pointers(height);
+        vector<png_bytep> row_pointers(height);
         if (settings.IsFlipY) {
             for (size_t i = 0; i < height; ++i) {
                 row_pointers[i] = reinterpret_cast<png_bytep>(image_data.get()) + (height - 1 - i) * rowbytes;

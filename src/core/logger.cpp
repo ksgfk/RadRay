@@ -7,7 +7,7 @@
 namespace radray {
 
 static spdlog::logger g_logger = []() {
-    auto sink = radray::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    auto sink = make_shared<spdlog::sinks::stdout_color_sink_mt>();
     spdlog::logger l{"console", sink};
     l.flush_on(spdlog::level::err);
 #if defined(RADRAY_IS_DEBUG)

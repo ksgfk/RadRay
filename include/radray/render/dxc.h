@@ -11,21 +11,21 @@ class DxilReflection {
 public:
     class Variable {
     public:
-        radray::string Name;
+        string Name;
         uint32_t Start;
         uint32_t Size;
     };
 
     class CBuffer {
     public:
-        radray::string Name;
-        radray::vector<Variable> Vars;
+        string Name;
+        vector<Variable> Vars;
         uint32_t Size;
     };
 
     class BindResource {
     public:
-        radray::string Name;
+        string Name;
         ShaderResourceType Type;
         TextureDimension Dim;
         uint32_t Space;
@@ -35,21 +35,21 @@ public:
 
     class StaticSampler : public SamplerDescriptor {
     public:
-        radray::string Name;
+        string Name;
     };
 
     class VertexInput {
     public:
-        radray::string Semantic;
+        string Semantic;
         uint32_t SemanticIndex;
         VertexFormat Format;
     };
 
 public:
-    radray::vector<CBuffer> CBuffers;
-    radray::vector<BindResource> Binds;
-    radray::vector<VertexInput> VertexInputs;
-    radray::vector<StaticSampler> StaticSamplers;
+    vector<CBuffer> CBuffers;
+    vector<BindResource> Binds;
+    vector<VertexInput> VertexInputs;
+    vector<StaticSampler> StaticSamplers;
     std::array<uint32_t, 3> GroupSize;
 };
 
@@ -80,19 +80,19 @@ enum class HlslShaderModel {
 
 class DxcOutput {
 public:
-    radray::vector<byte> Data;
-    radray::vector<byte> Refl;
+    vector<byte> Data;
+    vector<byte> Refl;
     ShaderBlobCategory Category;
 };
 
-class Dxc : public RenderBase, public radray::enable_shared_from_this<Dxc> {
+class Dxc : public RenderBase, public enable_shared_from_this<Dxc> {
 public:
     class Impl {
     public:
         virtual ~Impl() noexcept = default;
     };
 
-    explicit Dxc(radray::unique_ptr<Impl> impl) noexcept : _impl(std::move(impl)) {}
+    explicit Dxc(unique_ptr<Impl> impl) noexcept : _impl(std::move(impl)) {}
     ~Dxc() noexcept override = default;
 
     bool IsValid() const noexcept override { return _impl != nullptr; }
@@ -113,10 +113,10 @@ public:
     std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept;
 
 private:
-    radray::unique_ptr<Impl> _impl;
+    unique_ptr<Impl> _impl;
 };
 
-Nullable<radray::shared_ptr<Dxc>> CreateDxc() noexcept;
+Nullable<shared_ptr<Dxc>> CreateDxc() noexcept;
 
 }  // namespace radray::render
 

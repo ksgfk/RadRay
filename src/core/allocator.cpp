@@ -134,7 +134,7 @@ void BuddyAllocator::Destroy(size_t offset) noexcept {
 FreeListAllocator::FreeListAllocator(
     size_t capacity) noexcept
     : _capacity(capacity) {
-    auto iter = _nodes.emplace(0, radray::make_unique<FreeListAllocator::LinkNode>(0, _capacity));
+    auto iter = _nodes.emplace(0, make_unique<FreeListAllocator::LinkNode>(0, _capacity));
     _sizeQuery.emplace(_capacity, iter.first->second.get());
 }
 
@@ -157,7 +157,7 @@ std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
         size_t newLength = node->_length - size;
         auto [newIter, isInsert] = _nodes.emplace(
             newStart,
-            radray::make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
+            make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
         RADRAY_ASSERT(isInsert);
         FreeListAllocator::LinkNode* newNode = newIter->second.get();
         node->_state = FreeListAllocator::NodeState::Used;

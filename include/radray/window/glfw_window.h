@@ -26,7 +26,7 @@ public:
         virtual ~Impl() noexcept = default;
     };
 
-    GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable = false, bool fullScreen = false) noexcept;
+    GlfwWindow(string name, uint32_t width, uint32_t height, bool resizable = false, bool fullScreen = false) noexcept;
     ~GlfwWindow() noexcept;
     GlfwWindow(const GlfwWindow&) = delete;
     GlfwWindow(GlfwWindow&&) = default;
@@ -40,16 +40,16 @@ public:
 
     void Destroy() noexcept;
 
-    radray::shared_ptr<MultiDelegate<MouseButtonCallback>> EventMouseButtonCall() const noexcept;
-    radray::shared_ptr<MultiDelegate<CursorPositionCallback>> EventCursorPosition() const noexcept;
-    radray::shared_ptr<MultiDelegate<KeyCallback>> EventKey() const noexcept;
-    radray::shared_ptr<MultiDelegate<ScrollCallback>> EventScroll() const noexcept;
-    radray::shared_ptr<MultiDelegate<WindowResizeCallback>> EventWindwResize() const noexcept;
-    radray::shared_ptr<MultiDelegate<FrameResizeCallback>> EventFrameResize() const noexcept;
-    radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> EventWindowRefresh() const noexcept;
+    shared_ptr<MultiDelegate<MouseButtonCallback>> EventMouseButtonCall() const noexcept;
+    shared_ptr<MultiDelegate<CursorPositionCallback>> EventCursorPosition() const noexcept;
+    shared_ptr<MultiDelegate<KeyCallback>> EventKey() const noexcept;
+    shared_ptr<MultiDelegate<ScrollCallback>> EventScroll() const noexcept;
+    shared_ptr<MultiDelegate<WindowResizeCallback>> EventWindwResize() const noexcept;
+    shared_ptr<MultiDelegate<FrameResizeCallback>> EventFrameResize() const noexcept;
+    shared_ptr<MultiDelegate<WindowRefreshCallback>> EventWindowRefresh() const noexcept;
 
 private:
-    radray::unique_ptr<Impl> _impl;
+    unique_ptr<Impl> _impl;
 };
 
 }  // namespace radray::window

@@ -28,7 +28,7 @@ const GraphicsPipelineStateDescriptor DEFAULT_PSO_DESC{
     {VertexBufferLayout{
         12,
         VertexStepMode::Vertex,
-        {VertexElement{0, radray::string{VertexSemantic::POSITION}, 0, VertexFormat::FLOAT32X3, 0}}}},
+        {VertexElement{0, string{VertexSemantic::POSITION}, 0, VertexFormat::FLOAT32X3, 0}}}},
     PrimitiveState{
         PrimitiveTopology::TriangleList,
         IndexFormat::UINT32,
@@ -89,7 +89,7 @@ public:
 
     void Start() {
         GlobalInitGlfw();
-        window = radray::make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
+        window = make_unique<GlfwWindow>(RADRAY_APPNAME, 1280, 720);
         device = CreateDevice(
                      D3D12DeviceDescriptor{
                          std::nullopt,
@@ -104,7 +104,7 @@ public:
         // #elif defined(RADRAY_PLATFORM_WINDOWS)
         //         bool isSpirv = false;
         // #endif
-        //         radray::shared_ptr<Shader> vs, ps;
+        //         shared_ptr<Shader> vs, ps;
         //         {
         //             std::string_view includes[] = {std::string_view{"shaders"}};
         //             auto color = ReadText(std::filesystem::path("shaders") / "DefaultVS.hlsl").value();
@@ -124,7 +124,7 @@ public:
         //             // RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
         //             // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         //             std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
-        //             radray::string entry = msl.EntryPoints.at(0).Name;
+        //             string entry = msl.EntryPoints.at(0).Name;
         //             ShaderReflection refl = MslReflection{};
         // #elif defined(RADRAY_PLATFORM_WINDOWS)
         //             std::span<const byte> blob = outp.data;
@@ -154,7 +154,7 @@ public:
         //             // RADRAY_INFO_LOG("to msl\n{}", msl.Msl);
         //             // RADRAY_INFO_LOG("refl\n{}", msl.SpvReflJson);
         //             std::span<const byte> blob{reinterpret_cast<const byte*>(msl.Msl.data()), msl.Msl.size()};
-        //             radray::string entry = msl.EntryPoints.at(0).Name;
+        //             string entry = msl.EntryPoints.at(0).Name;
         //             ShaderReflection refl = MslReflection{};
         // #elif defined(RADRAY_PLATFORM_WINDOWS)
         //             std::span<const byte> blob = outp.data;
@@ -185,7 +185,7 @@ public:
         //             pso = device->CreateGraphicsPipeline(desc).value();
         //         }
         {
-            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+            string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
             std::string_view includes[] = {"shaders"};
             DxcOutput outv = *dxc->Compile(
                 color,
@@ -348,15 +348,15 @@ public:
     }
 
 public:
-    radray::unique_ptr<GlfwWindow> window;
-    radray::shared_ptr<Device> device;
-    radray::shared_ptr<CommandBuffer> cmdBuffer;
-    radray::shared_ptr<SwapChain> swapchain;
-    radray::shared_ptr<Dxc> dxc;
+    unique_ptr<GlfwWindow> window;
+    shared_ptr<Device> device;
+    shared_ptr<CommandBuffer> cmdBuffer;
+    shared_ptr<SwapChain> swapchain;
+    shared_ptr<Dxc> dxc;
 
-    radray::shared_ptr<RootSignature> rootSig;
-    radray::shared_ptr<GraphicsPipelineState> pso;
-    radray::shared_ptr<Buffer> verts;
+    shared_ptr<RootSignature> rootSig;
+    shared_ptr<GraphicsPipelineState> pso;
+    shared_ptr<Buffer> verts;
 };
 
 int main() {

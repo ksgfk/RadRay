@@ -19,9 +19,9 @@ struct WavefrontObjFace {
 
 class WavefrontObjObject {
 public:
-    radray::u8string Name;
-    radray::u8string Material;
-    radray::vector<size_t> Faces;
+    u8string Name;
+    u8string Material;
+    vector<size_t> Faces;
     bool IsSmooth;
 };
 
@@ -39,8 +39,8 @@ public:
 
     explicit WavefrontObjReader(std::istream* stream);
     explicit WavefrontObjReader(const std::filesystem::path& file);
-    explicit WavefrontObjReader(radray::string&& text);
-    explicit WavefrontObjReader(const radray::string& text);
+    explicit WavefrontObjReader(string&& text);
+    explicit WavefrontObjReader(const string& text);
 
     bool HasError() const;
     std::string_view Error() const { return _error; }
@@ -48,7 +48,7 @@ public:
     std::span<const Eigen::Vector2f> UVs() const { return _uv; }
     std::span<const Eigen::Vector3f> Normals() const { return _normal; }
     std::span<const WavefrontObjFace> Faces() const { return _faces; }
-    std::span<const radray::string> Mtllibs() const { return _mtllibs; }
+    std::span<const string> Mtllibs() const { return _mtllibs; }
     std::span<const WavefrontObjObject> Objects() const { return _objects; }
 
     void Read();
@@ -64,15 +64,15 @@ private:
     void Parse(std::string_view line, int lineNum);
 
     std::istream* _stream;
-    radray::unique_ptr<std::istream> _myStream;
-    radray::string _error;
+    unique_ptr<std::istream> _myStream;
+    string _error;
 
-    radray::vector<Eigen::Vector3f> _pos;
-    radray::vector<Eigen::Vector2f> _uv;
-    radray::vector<Eigen::Vector3f> _normal;
-    radray::vector<WavefrontObjFace> _faces;
-    radray::vector<radray::string> _mtllibs;
-    radray::vector<WavefrontObjObject> _objects;
+    vector<Eigen::Vector3f> _pos;
+    vector<Eigen::Vector2f> _uv;
+    vector<Eigen::Vector3f> _normal;
+    vector<WavefrontObjFace> _faces;
+    vector<string> _mtllibs;
+    vector<WavefrontObjObject> _objects;
 };
 
 }  // namespace radray

@@ -39,7 +39,7 @@ constexpr void SetVkStructPtrToLast(TBase* v, TNext* pNext) noexcept {
 
 template <typename T, typename F, typename... Args>
 requires std::invocable<F, Args..., uint32_t*, T*>
-auto GetVector(radray::vector<T>& out, F&& f, Args&&... ts) noexcept -> VkResult {
+auto GetVector(vector<T>& out, F&& f, Args&&... ts) noexcept -> VkResult {
     uint32_t count = 0;
     if constexpr (std::is_same_v<std::invoke_result_t<F, Args..., uint32_t*, T*>, void>) {
         f(ts..., &count, nullptr);

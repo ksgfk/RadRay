@@ -29,7 +29,7 @@ enum class VertexIndexType {
 
 class VertexLayout {
 public:
-    radray::string Semantic;
+    string Semantic;
     uint32_t SemanticIndex;
     uint32_t Size;
     uint32_t Offset;
@@ -37,9 +37,9 @@ public:
 
 class VertexData {
 public:
-    radray::vector<VertexLayout> Layouts;
-    radray::unique_ptr<byte[]> VertexData;
-    radray::unique_ptr<byte[]> IndexData;
+    vector<VertexLayout> Layouts;
+    unique_ptr<byte[]> VertexData;
+    unique_ptr<byte[]> IndexData;
     uint32_t VertexSize;
     uint32_t IndexSize;
     VertexIndexType IndexType;

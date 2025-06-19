@@ -49,11 +49,11 @@ static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?"
 static_assert(sizeof(FARPROC) == sizeof(void*), "size of FARPROC not equal ptr?");
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
-    radray::string name;
+    string name;
     if (name_.ends_with(".dll")) {
-        name = radray::string{name_};
+        name = string{name_};
     } else {
-        name = radray::string{name_} + ".dll";
+        name = string{name_} + ".dll";
     }
     HMODULE m = LoadLibraryA(name.c_str());
     if (m == nullptr) [[unlikely]] {
@@ -70,7 +70,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
-    radray::string name{name_};
+    string name{name_};
     auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
@@ -98,18 +98,18 @@ void AlignedFree(void* ptr) noexcept {
 }
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
-    radray::string name;
+    string name;
 #ifdef RADRAY_PLATFORM_MACOS
     if (name_.starts_with("lib") && name_.ends_with(".dylib")) {
-        name = radray::string{name_};
+        name = string{name_};
     } else {
-        name = "lib" + radray::string{name_} + ".dylib";
+        name = "lib" + string{name_} + ".dylib";
     }
 #elif RADRAY_PLATFORM_LINUX
     if (name_.starts_with("lib") && name_.ends_with(".so")) {
-        name = radray::string{name_};
+        name = string{name_};
     } else {
-        name = "lib" + radray::string{name_} + ".so";
+        name = "lib" + string{name_} + ".so";
     }
 #else
 #error "unknown platform"
@@ -129,7 +129,7 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
-    radray::string name{name_};
+    string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot load symbol {}, reason: {}", name, dlerror());

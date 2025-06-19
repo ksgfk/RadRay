@@ -19,7 +19,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
+    Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
 
     void Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept override;
 

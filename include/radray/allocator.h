@@ -33,7 +33,7 @@ private:
         Full = 3
     };
 
-    radray::vector<NodeState> _tree;
+    vector<NodeState> _tree;
     size_t _capacity;
 };
 
@@ -74,7 +74,7 @@ public:
         }
         {
             size_t needSize = std::max(size, _basicSize);
-            radray::unique_ptr<BlockAllocator::Block> newBlock = radray::make_unique<BlockAllocator::Block>(
+            unique_ptr<BlockAllocator::Block> newBlock = make_unique<BlockAllocator::Block>(
                 static_cast<TDerived*>(this)->CreateHeap(needSize),
                 static_cast<TDerived*>(this)->CreateSubAllocator(needSize),
                 needSize);
@@ -108,7 +108,7 @@ private:
     class Block {
     public:
         Block(
-            radray::unique_ptr<THeap> heap,
+            unique_ptr<THeap> heap,
             TSubAlloc&& allocator,
             size_t heapSize) noexcept
             : _freeSize(heapSize),
@@ -118,7 +118,7 @@ private:
 
         size_t _freeSize;
         size_t _initSize;
-        radray::unique_ptr<THeap> _heap;
+        unique_ptr<THeap> _heap;
         TSubAlloc _allocator;
     };
 
@@ -150,9 +150,9 @@ private:
         }
     }
 
-    radray::unordered_map<THeap*, radray::unique_ptr<BlockAllocator::Block>> _blocks;
-    radray::multimap<size_t, BlockAllocator::Block*> _sizeQuery;
-    radray::unordered_set<BlockAllocator::Block*> _unused;
+    unordered_map<THeap*, unique_ptr<BlockAllocator::Block>> _blocks;
+    multimap<size_t, BlockAllocator::Block*> _sizeQuery;
+    unordered_set<BlockAllocator::Block*> _unused;
     size_t _basicSize;
     size_t _destroyThreshold;
 };
@@ -182,8 +182,8 @@ private:
         NodeState _state;
     };
 
-    radray::unordered_map<size_t, radray::unique_ptr<FreeListAllocator::LinkNode>> _nodes;
-    radray::multimap<size_t, FreeListAllocator::LinkNode*> _sizeQuery;
+    unordered_map<size_t, unique_ptr<FreeListAllocator::LinkNode>> _nodes;
+    multimap<size_t, FreeListAllocator::LinkNode*> _sizeQuery;
     size_t _capacity;
 };
 

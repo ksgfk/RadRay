@@ -110,29 +110,29 @@ void DecomposeTransform(const Eigen::Matrix<T, 4, 4>& m, Eigen::Vector<T, 3>& tr
 }
 
 template <class Type, int Size>
-radray::string to_string(const Eigen::Vector<Type, Size>& v) {
-    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, radray::allocator<char>>;
+string to_string(const Eigen::Vector<Type, Size>& v) {
+    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, allocator<char>>;
     Eigen::IOFormat efmt{Eigen::FullPrecision, Eigen::DontAlignCols, "", ", ", "", "", "<", ">"};
     str_buf buf{};
     std::basic_ostream<char> output{&buf};
     output << v.format(efmt);
     output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
-    return radray::string{buf.view()};
+    return string{buf.view()};
 }
 
 template <class Type, int Rows, int Cols>
-radray::string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
-    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, radray::allocator<char>>;
+string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
+    using str_buf = std::basic_stringbuf<char, std::char_traits<char>, allocator<char>>;
     Eigen::IOFormat efmt{Eigen::FullPrecision, 0, ", ", "\n", "", "", "[", "]"};
     str_buf buf{};
     std::basic_ostream<char> output{&buf};
     output << v.format(efmt);
     output.exceptions(std::ios_base::failbit | std::ios_base::badbit);
-    return radray::string{buf.view()};
+    return string{buf.view()};
 }
 
 template <class Type>
-radray::string to_string(const Eigen::Quaternion<Type>& v) {
+string to_string(const Eigen::Quaternion<Type>& v) {
     return radray::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
 }
 

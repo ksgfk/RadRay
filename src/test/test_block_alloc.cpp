@@ -30,7 +30,7 @@ public:
     Heap(int* counter, size_t size) noexcept : Size(size), Internal{make_unique<HeapInternal>(counter, size)} {}
 
     size_t Size;
-    radray::unique_ptr<HeapInternal> Internal;
+    unique_ptr<HeapInternal> Internal;
 };
 
 class TestAllocator : public BlockAllocator<BuddyAllocator, Heap, TestAllocator> {
@@ -44,8 +44,8 @@ public:
 
     ~TestAllocator() noexcept override = default;
 
-    radray::unique_ptr<Heap> CreateHeap(size_t size) noexcept {
-        return radray::make_unique<Heap>(Counter, size);
+    unique_ptr<Heap> CreateHeap(size_t size) noexcept {
+        return make_unique<Heap>(Counter, size);
     }
 
     BuddyAllocator CreateSubAllocator(size_t size) noexcept { return BuddyAllocator{size}; }
@@ -54,7 +54,7 @@ public:
 };
 
 TEST(Core_Allocator_BlockAllocator, Basic) {
-    radray::unique_ptr<int> counter = radray::make_unique<int>(0);
+    unique_ptr<int> counter = make_unique<int>(0);
 
     TestAllocator alloc{counter.get(), 2, 0};
     auto a = alloc.Allocate(1);
@@ -99,7 +99,7 @@ TEST(Core_Allocator_BlockAllocator, Basic) {
 }
 
 TEST(Core_Allocator_BlockAllocator, AllocateAndDestroyMultiple) {
-    radray::unique_ptr<int> counter = radray::make_unique<int>(0);
+    unique_ptr<int> counter = make_unique<int>(0);
 
     TestAllocator alloc{counter.get(), 4, 1};
 
@@ -139,7 +139,7 @@ TEST(Core_Allocator_BlockAllocator, AllocateAndDestroyMultiple) {
 }
 
 TEST(Core_Allocator_BlockAllocator, AllocateExceedingCapacity) {
-    radray::unique_ptr<int> counter = radray::make_unique<int>(0);
+    unique_ptr<int> counter = make_unique<int>(0);
 
     TestAllocator alloc{counter.get(), 4, 1};
 
@@ -150,7 +150,7 @@ TEST(Core_Allocator_BlockAllocator, AllocateExceedingCapacity) {
 }
 
 TEST(Core_Allocator_BlockAllocator, DestroyInvalidAllocation) {
-    radray::unique_ptr<int> counter = radray::make_unique<int>(0);
+    unique_ptr<int> counter = make_unique<int>(0);
 
     TestAllocator alloc{counter.get(), 4, 1};
 
@@ -168,7 +168,7 @@ TEST(Core_Allocator_BlockAllocator, DestroyInvalidAllocation) {
 }
 
 TEST(Core_Allocator_BlockAllocator, ReuseFreedBlocks) {
-    radray::unique_ptr<int> counter = radray::make_unique<int>(0);
+    unique_ptr<int> counter = make_unique<int>(0);
 
     TestAllocator alloc{counter.get(), 4, 1};
 

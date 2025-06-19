@@ -100,7 +100,7 @@
 //         }
 //     }
 //     for (uint32_t i = 0, all = rootSig->GetDescriptorSetCount(); i < all; i++) {
-//         radray::vector<render::DescriptorLayout> descLayouts = rootSig->GetDescriptorSetLayout(i);
+//         vector<render::DescriptorLayout> descLayouts = rootSig->GetDescriptorSetLayout(i);
 //         for (render::DescriptorLayout& descLayout : descLayouts) {
 //             size_t v = _descLayouts.size();
 //             auto [exist, isInsert] = _slots.try_emplace(

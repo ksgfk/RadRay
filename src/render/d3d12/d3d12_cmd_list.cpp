@@ -26,7 +26,7 @@ void CmdListD3D12::End() noexcept {
 }
 
 void CmdListD3D12::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
-    radray::vector<D3D12_RESOURCE_BARRIER> rawBarriers;
+    vector<D3D12_RESOURCE_BARRIER> rawBarriers;
     rawBarriers.reserve(barriers.Buffers.size() + barriers.Textures.size());
     for (const BufferBarrier& bb : barriers.Buffers) {
         BufferD3D12* buf = static_cast<BufferD3D12*>(bb.Buffer);
@@ -127,7 +127,7 @@ void CmdListD3D12::CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, ui
     _cmdList->CopyTextureRegion(&cpDst, 0, 0, 0, &cpSrc, nullptr);
 }
 
-Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDesc& desc) noexcept {
+Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDesc& desc) noexcept {
     if (_isRenderPassActive) {
         RADRAY_ERR_LOG("Render pass already active, cannot begin another render pass");
         return nullptr;
@@ -138,7 +138,7 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
         RADRAY_ERR_LOG("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
         return nullptr;
     }
-    radray::vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
     rtDescs.reserve(desc.ColorAttachments.size());
     for (const ColorAttachment& color : desc.ColorAttachments) {
         auto v = static_cast<TextureViewD3D12*>(color.Target);
@@ -180,10 +180,10 @@ Nullable<radray::unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const
     }
     cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
     _isRenderPassActive = true;
-    return {radray::make_unique<CmdRenderPassD3D12>(this)};
+    return {make_unique<CmdRenderPassD3D12>(this)};
 }
 
-void CmdListD3D12::EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept {
+void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
     CmdRenderPassD3D12* pass = static_cast<CmdRenderPassD3D12*>(encoder.get());
     if (pass->_cmdList != this) {
         RADRAY_ABORT("Render pass does not belong to this command list");
@@ -317,7 +317,7 @@ void CmdRenderPassD3D12::BindVertexBuffers(std::span<VertexBufferView> vbvs) noe
     if (vbvs.size() == 0) {
         return;
     }
-    radray::vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
+    vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
     rawVbvs.reserve(vbvs.size());
     for (const VertexBufferView& i : vbvs) {
         D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();

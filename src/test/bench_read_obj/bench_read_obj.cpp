@@ -3,9 +3,12 @@
 
 #include <benchmark/benchmark.h>
 
+#include <radray/types.h>
 #include <radray/wavefront_obj.h>
 
-static radray::string obj_data;
+using namespace radray;
+
+static string obj_data;
 
 static void ReadObjFileOnce() {
     static bool loaded = false;

@@ -68,34 +68,34 @@ using allocator = std::allocator<T>;
 #endif
 
 template <class T>
-using vector = std::vector<T, radray::allocator<T>>;
+using vector = std::vector<T, allocator<T>>;
 
 template <class T>
-using deque = std::deque<T, radray::allocator<T>>;
+using deque = std::deque<T, allocator<T>>;
 
 template <class T>
-using queue = std::queue<T, radray::deque<T>>;
+using queue = std::queue<T, deque<T>>;
 
 template <class T>
-using stack = std::stack<T, radray::deque<T>>;
+using stack = std::stack<T, deque<T>>;
 
 template <class K, class V, class Cmp = std::less<K>>
-using map = std::map<K, V, Cmp, radray::allocator<std::pair<const K, V>>>;
+using map = std::map<K, V, Cmp, allocator<std::pair<const K, V>>>;
 
 template <class T, class Cmp = std::less<T>>
-using set = std::set<T, Cmp, radray::allocator<T>>;
+using set = std::set<T, Cmp, allocator<T>>;
 
 template <class K, class V, class Hash = std::hash<K>, class Equal = std::equal_to<K>>
-using unordered_map = std::unordered_map<K, V, Hash, Equal, radray::allocator<std::pair<const K, V>>>;
+using unordered_map = std::unordered_map<K, V, Hash, Equal, allocator<std::pair<const K, V>>>;
 
 template <class T, class Hash = std::hash<T>, class Equal = std::equal_to<T>>
-using unordered_set = std::unordered_set<T, Hash, Equal, radray::allocator<T>>;
+using unordered_set = std::unordered_set<T, Hash, Equal, allocator<T>>;
 
 template <class K, class V, class Cmp = std::less<K>>
-using multimap = std::multimap<K, V, Cmp, radray::allocator<std::pair<const K, V>>>;
+using multimap = std::multimap<K, V, Cmp, allocator<std::pair<const K, V>>>;
 
 template <class T, class Cmp = std::less<T>>
-using multiset = std::multiset<T, Cmp, radray::allocator<T>>;
+using multiset = std::multiset<T, Cmp, allocator<T>>;
 
 using std::unique_ptr;
 using std::shared_ptr;
@@ -104,11 +104,11 @@ using std::make_unique;
 using std::make_shared;
 using std::enable_shared_from_this;
 
-using string = std::basic_string<char, std::char_traits<char>, radray::allocator<char>>;
-using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, radray::allocator<wchar_t>>;
-using u8string = std::basic_string<char8_t, std::char_traits<char8_t>, radray::allocator<char8_t>>;
-using u16string = std::basic_string<char16_t, std::char_traits<char16_t>, radray::allocator<char16_t>>;
-using u32string = std::basic_string<char32_t, std::char_traits<char32_t>, radray::allocator<char32_t>>;
+using string = std::basic_string<char, std::char_traits<char>, allocator<char>>;
+using wstring = std::basic_string<wchar_t, std::char_traits<wchar_t>, allocator<wchar_t>>;
+using u8string = std::basic_string<char8_t, std::char_traits<char8_t>, allocator<char8_t>>;
+using u16string = std::basic_string<char16_t, std::char_traits<char16_t>, allocator<char16_t>>;
+using u32string = std::basic_string<char32_t, std::char_traits<char32_t>, allocator<char32_t>>;
 
 void* Malloc(size_t size) noexcept;
 void Free(void* ptr) noexcept;

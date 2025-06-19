@@ -7,7 +7,7 @@ namespace radray::render {
 class VertexElement {
 public:
     uint64_t Offset;
-    radray::string Semantic;
+    string Semantic;
     uint32_t SemanticIndex;
     VertexFormat Format;
     uint32_t Location;
@@ -17,7 +17,7 @@ class VertexBufferLayout {
 public:
     uint64_t ArrayStride;
     VertexStepMode StepMode;
-    radray::vector<VertexElement> Elements;
+    vector<VertexElement> Elements;
 };
 
 struct PrimitiveState {
@@ -155,15 +155,15 @@ inline ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept {
 
 class GraphicsPipelineStateDescriptor {
 public:
-    radray::string Name;
+    string Name;
     RootSignature* RootSig;
     Shader* VS;
     Shader* PS;
-    radray::vector<VertexBufferLayout> VertexBuffers;
+    vector<VertexBufferLayout> VertexBuffers;
     PrimitiveState Primitive;
     DepthStencilState DepthStencil;
     MultiSampleState MultiSample;
-    radray::vector<ColorTargetState> ColorTargets;
+    vector<ColorTargetState> ColorTargets;
     bool DepthStencilEnable;
 };
 

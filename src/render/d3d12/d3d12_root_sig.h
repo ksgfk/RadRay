@@ -23,9 +23,9 @@ public:
 
 public:
     ComPtr<ID3D12RootSignature> _rootSig;
-    radray::vector<RootConstantInfo> _rootConstants;
-    radray::vector<RootDescriptorInfo> _rootDescriptors;
-    radray::vector<DescriptorSetElementInfo> _bindDescriptors;
+    vector<RootConstantInfo> _rootConstants;
+    vector<RootDescriptorInfo> _rootDescriptors;
+    vector<DescriptorSetElementInfo> _bindDescriptors;
     UINT _rootConstStart;
     UINT _rootDescStart;
     UINT _bindDescStart;

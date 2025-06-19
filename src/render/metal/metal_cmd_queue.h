@@ -19,7 +19,7 @@ public:
     bool IsValid() const noexcept override { return _queue.get() != nullptr; }
     void Destroy() noexcept override;
 
-    std::optional<radray::shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
+    std::optional<shared_ptr<CommandPool>> CreateCommandPool() noexcept override;
 
 public:
     DeviceMetal* _device;

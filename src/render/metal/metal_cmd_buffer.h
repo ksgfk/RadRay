@@ -10,7 +10,7 @@ class DeviceMetal;
 class CmdBufferMetal : public CommandBuffer {
 public:
     explicit CmdBufferMetal(
-        radray::shared_ptr<DeviceMetal> device,
+        shared_ptr<DeviceMetal> device,
         NS::SharedPtr<MTL::CommandBuffer> buffer) noexcept
         : _device(std::move(device)),
           _buffer(std::move(buffer)) {}
@@ -20,7 +20,7 @@ public:
     void Destroy() noexcept override;
 
 public:
-    radray::shared_ptr<DeviceMetal> _device;
+    shared_ptr<DeviceMetal> _device;
     NS::SharedPtr<MTL::CommandBuffer> _buffer;
 };
 

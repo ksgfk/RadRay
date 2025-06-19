@@ -15,12 +15,12 @@
 
 namespace radray {
 
-std::optional<radray::string> ReadText(const std::filesystem::path& filepath) noexcept {
+std::optional<string> ReadText(const std::filesystem::path& filepath) noexcept {
     if (!std::filesystem::exists(filepath)) {
         return std::nullopt;
     }
     std::ifstream t{filepath};
-    radray::string str(
+    string str(
         std::istreambuf_iterator<char>{t},
         std::istreambuf_iterator<char>{});
     return str;
@@ -42,7 +42,7 @@ static void LogWinCharCvtErr() {
 }
 #endif
 // TODO: use lib to support utf8 on other platforms
-std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
+std::optional<wstring> ToWideChar(std::string_view str) noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     if (str.size() >= std::numeric_limits<int>::max()) {
         return std::nullopt;
@@ -52,7 +52,7 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
         LogWinCharCvtErr();
         return std::nullopt;
     }
-    radray::wstring to(test, L'\0');
+    wstring to(test, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size());
     return to;
 #else
@@ -62,7 +62,7 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
     if (len == static_cast<size_t>(-1)) {
         return std::nullopt;
     }
-    radray::wstring wstr(len, L'\0');
+    wstring wstr(len, L'\0');
     state = mbstate_t{};
     size_t result = std::mbsrtowcs(&wstr[0], &start, str.size(), &state);
     RADRAY_ASSERT(result == wstr.size());
@@ -70,7 +70,7 @@ std::optional<radray::wstring> ToWideChar(std::string_view str) noexcept {
 #endif
 }
 
-std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
+std::optional<string> ToMultiByte(std::wstring_view str) noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     if (str.size() >= std::numeric_limits<int>::max()) {
         return std::nullopt;
@@ -80,7 +80,7 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
         LogWinCharCvtErr();
         return std::nullopt;
     }
-    radray::string to(test, '\0');
+    string to(test, '\0');
     WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size(), nullptr, nullptr);
     return to;
 #else
@@ -88,17 +88,17 @@ std::optional<radray::string> ToMultiByte(std::wstring_view str) noexcept {
     if (len == static_cast<size_t>(-1)) {
         return std::nullopt;
     }
-    radray::string wstr(len, L'\0');
+    string wstr(len, L'\0');
     size_t result = std::wcstombs(wstr.data(), str.data(), str.size());
     RADRAY_ASSERT(result == str.size());
     return result == static_cast<size_t>(-1) ? std::nullopt : std::make_optional(wstr);
 #endif
 }
 
-radray::vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept {
+vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept {
     size_t quo = bytes.size() / 4;
     size_t remain = bytes.size() % 4;
-    radray::vector<uint32_t> result;
+    vector<uint32_t> result;
     result.resize(quo + (remain == 0 ? 0 : 1));
     for (size_t i = 0; i < quo; i++) {
         size_t p = i * 4;

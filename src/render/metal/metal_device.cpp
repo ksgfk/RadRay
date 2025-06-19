@@ -20,26 +20,26 @@ std::optional<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32
         if (queues.size() <= slot) {
             queues.reserve(slot + 1);
             for (size_t i = queues.size(); i <= slot; i++) {
-                queues.emplace_back(radray::unique_ptr<CmdQueueMetal>{nullptr});
+                queues.emplace_back(unique_ptr<CmdQueueMetal>{nullptr});
             }
         }
-        radray::unique_ptr<CmdQueueMetal>& q = queues[slot];
+        unique_ptr<CmdQueueMetal>& q = queues[slot];
         if (q == nullptr) {
             auto queue = _device->newCommandQueue();
-            auto ins = radray::make_unique<CmdQueueMetal>(this, NS::TransferPtr(queue));
+            auto ins = make_unique<CmdQueueMetal>(this, NS::TransferPtr(queue));
             q = std::move(ins);
         }
         return q->IsValid() ? std::make_optional(q.get()) : std::nullopt;
     });
 }
 
-std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
+std::optional<shared_ptr<Shader>> DeviceMetal::CreateShader(
     std::span<const byte> blob,
     const ShaderReflection& refl,
     ShaderStage stage,
     std::string_view entryPoint,
     std::string_view name) noexcept {
-    return AutoRelease([this, blob, &refl, stage, entryPoint, name]() noexcept -> std::optional<radray::shared_ptr<Shader>> {
+    return AutoRelease([this, blob, &refl, stage, entryPoint, name]() noexcept -> std::optional<shared_ptr<Shader>> {
         if (!std::get_if<MslReflection>(&refl)) {
             RADRAY_ERR_LOG("metal can only use MSL");
             return std::nullopt;
@@ -72,7 +72,7 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
         }
         RADRAY_INFO_LOG("metal function {}", func->name()->utf8String());
         func->setLabel(StringCppToNS(name)->autorelease());
-        auto slm = radray::make_shared<FunctionMetal>(
+        auto slm = make_shared<FunctionMetal>(
             NS::TransferPtr(func),
             name,
             entryPoint,
@@ -81,16 +81,16 @@ std::optional<radray::shared_ptr<Shader>> DeviceMetal::CreateShader(
     });
 }
 
-std::optional<radray::shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(std::span<Shader*> shaders) noexcept {
+std::optional<shared_ptr<RootSignature>> DeviceMetal::CreateRootSignature(std::span<Shader*> shaders) noexcept {
     RADRAY_UNUSED(shaders);
-    return AutoRelease([]() noexcept -> std::optional<radray::shared_ptr<RootSignature>> {
+    return AutoRelease([]() noexcept -> std::optional<shared_ptr<RootSignature>> {
         return std::make_shared<RootSigMetal>();
     });
 }
 
-std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipeline(
+std::optional<shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipeline(
     const GraphicsPipelineStateDescriptor& desc) noexcept {
-    return AutoRelease([this, &desc]() noexcept -> std::optional<radray::shared_ptr<GraphicsPipelineState>> {
+    return AutoRelease([this, &desc]() noexcept -> std::optional<shared_ptr<GraphicsPipelineState>> {
         auto rpd = MTL::RenderPipelineDescriptor::alloc()->init()->autorelease();
         if (desc.Name.size() > 0) {
             rpd->setLabel(StringCppToNS(desc.Name)->autorelease());
@@ -205,7 +205,7 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
         MTL::Winding rawWinding = MapType(desc.Primitive.FaceClockwise);
         MTL::CullMode rawCullMode = MapType(desc.Primitive.Cull);
         MTL::DepthClipMode rawDepthClip = desc.Primitive.UnclippedDepth ? MTL::DepthClipModeClamp : MTL::DepthClipModeClip;
-        auto psoMetal = radray::make_shared<RenderPipelineStateMetal>(
+        auto psoMetal = make_shared<RenderPipelineStateMetal>(
             NS::TransferPtr(pso),
             rawPrimType,
             rawFillMode,
@@ -218,8 +218,8 @@ std::optional<radray::shared_ptr<GraphicsPipelineState>> DeviceMetal::CreateGrap
     });
 }
 
-std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
-    return AutoRelease([&desc]() noexcept -> std::optional<radray::shared_ptr<DeviceMetal>> {
+std::optional<shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDescriptor& desc) noexcept {
+    return AutoRelease([&desc]() noexcept -> std::optional<shared_ptr<DeviceMetal>> {
         MTL::Device* device;
         bool isMac;
 #if defined(RADRAY_PLATFORM_MACOS)
@@ -254,7 +254,7 @@ std::optional<radray::shared_ptr<DeviceMetal>> CreateDevice(const MetalDeviceDes
         } else {
             device = MTL::CreateSystemDefaultDevice();
         }
-        auto result = radray::make_shared<DeviceMetal>(NS::TransferPtr(device));
+        auto result = make_shared<DeviceMetal>(NS::TransferPtr(device));
         RADRAY_INFO_LOG("select device: {}", device->name()->utf8String());
         RADRAY_INFO_LOG("========== Feature ==========");
         NS::ProcessInfo* pi = NS::ProcessInfo::processInfo();

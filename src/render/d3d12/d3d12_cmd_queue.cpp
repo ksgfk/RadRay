@@ -10,7 +10,7 @@ void CmdQueueD3D12::Destroy() noexcept {
     _queue = nullptr;
 }
 
-Nullable<radray::shared_ptr<CommandBuffer>> CmdQueueD3D12::CreateCommandBuffer() noexcept {
+Nullable<shared_ptr<CommandBuffer>> CmdQueueD3D12::CreateCommandBuffer() noexcept {
     ComPtr<ID3D12CommandAllocator> alloc;
     if (HRESULT hr = _device->_device->CreateCommandAllocator(_type, IID_PPV_ARGS(alloc.GetAddressOf()));
         FAILED(hr)) {
@@ -21,7 +21,7 @@ Nullable<radray::shared_ptr<CommandBuffer>> CmdQueueD3D12::CreateCommandBuffer()
     if (HRESULT hr = _device->_device->CreateCommandList(0, _type, alloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         SUCCEEDED(hr)) {
         RADRAY_DX_CHECK(list->Close());
-        return radray::make_shared<CmdListD3D12>(
+        return make_shared<CmdListD3D12>(
             _device,
             std::move(alloc),
             std::move(list),
@@ -37,7 +37,7 @@ void CmdQueueD3D12::Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> si
         RADRAY_ERR_LOG("submit too many command buffers {}", buffers.size());
         return;
     }
-    radray::vector<ID3D12CommandList*> lists{};
+    vector<ID3D12CommandList*> lists{};
     lists.reserve(buffers.size());
     for (CommandBuffer* cmd : buffers) {
         auto list = static_cast<CmdListD3D12*>(cmd);
@@ -58,7 +58,7 @@ void CmdQueueD3D12::Wait() noexcept {
 }
 
 void CmdQueueD3D12::WaitFences(std::span<Fence*> fences) noexcept {
-    radray::vector<HANDLE> events;
+    vector<HANDLE> events;
     for (Fence* i : fences) {
         FenceD3D12* f = static_cast<FenceD3D12*>(i);
         f->_fenceValue++;

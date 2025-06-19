@@ -11,7 +11,7 @@ bool QueueVulkan::IsValid() const noexcept {
 
 void QueueVulkan::Destroy() noexcept {}
 
-Nullable<radray::shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept {
+Nullable<shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept {
     return nullptr;
 }
 

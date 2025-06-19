@@ -25,21 +25,21 @@ public:
 
     Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<radray::shared_ptr<Fence>> CreateFence() noexcept override;
+    Nullable<shared_ptr<Fence>> CreateFence() noexcept override;
 
-    Nullable<radray::shared_ptr<Shader>> CreateShader(
+    Nullable<shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         ShaderBlobCategory category,
         ShaderStage stage,
         std::string_view entryPoint,
         std::string_view name) noexcept override;
 
-    Nullable<radray::shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& info) noexcept override;
+    Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& info) noexcept override;
 
-    Nullable<radray::shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
+    Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipeline(
         const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    Nullable<radray::shared_ptr<SwapChain>> CreateSwapChain(
+    Nullable<shared_ptr<SwapChain>> CreateSwapChain(
         CommandQueue* presentQueue,
         const void* nativeWindow,
         uint32_t width,
@@ -48,7 +48,7 @@ public:
         TextureFormat format,
         bool enableSync) noexcept override;
 
-    Nullable<radray::shared_ptr<Buffer>> CreateBuffer(
+    Nullable<shared_ptr<Buffer>> CreateBuffer(
         uint64_t size,
         ResourceType type,
         ResourceUsage usage,
@@ -56,7 +56,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept override;
 
-    Nullable<radray::shared_ptr<Texture>> CreateTexture(
+    Nullable<shared_ptr<Texture>> CreateTexture(
         uint64_t width,
         uint64_t height,
         uint64_t depth,
@@ -71,7 +71,7 @@ public:
         ResourceMemoryTips tips,
         std::string_view name = {}) noexcept override;
 
-    Nullable<radray::shared_ptr<ResourceView>> CreateBufferView(
+    Nullable<shared_ptr<ResourceView>> CreateBufferView(
         Buffer* buffer,
         ResourceType type,
         TextureFormat format,
@@ -79,7 +79,7 @@ public:
         uint32_t count,
         uint32_t stride) noexcept override;
 
-    Nullable<radray::shared_ptr<ResourceView>> CreateTextureView(
+    Nullable<shared_ptr<ResourceView>> CreateTextureView(
         Texture* texture,
         ResourceType type,
         TextureFormat format,
@@ -89,9 +89,9 @@ public:
         uint32_t baseMipLevel,
         uint32_t mipLevelCount) noexcept override;
 
-    Nullable<radray::shared_ptr<DescriptorSet>> CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept override;
+    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept override;
 
-    Nullable<radray::shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
+    Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
     uint64_t GetUploadBufferNeedSize(Resource* copyDst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) const noexcept override;
 
@@ -117,17 +117,17 @@ public:
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
-    std::array<radray::vector<radray::unique_ptr<CmdQueueD3D12>>, 3> _queues;
-    radray::unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
-    radray::unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
-    radray::unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
-    radray::unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
-    radray::unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
-    radray::unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    std::array<vector<unique_ptr<CmdQueueD3D12>>, 3> _queues;
+    unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
+    unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
+    unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
+    unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
+    unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
+    unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };
 
-Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
+Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 }  // namespace radray::render::d3d12

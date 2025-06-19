@@ -59,12 +59,12 @@ DeviceD3D12::DeviceD3D12(
       _mainAlloc(std::move(mainAlloc)) {
     _features.Init(_device.Get());
 
-    _gpuResHeap = radray::make_unique<GpuDescriptorAllocator>(
+    _gpuResHeap = make_unique<GpuDescriptorAllocator>(
         _device.Get(),
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
         1 << 16);
 
-    _gpuSamplerHeap = radray::make_unique<GpuDescriptorAllocator>(
+    _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(
         _device.Get(),
         D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
         1 << 8);
@@ -81,12 +81,12 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
     if (queues.size() <= slot) {
         queues.reserve(slot + 1);
         for (size_t i = queues.size(); i <= slot; i++) {
-            queues.emplace_back(radray::unique_ptr<CmdQueueD3D12>{nullptr});
+            queues.emplace_back(unique_ptr<CmdQueueD3D12>{nullptr});
         }
     }
-    radray::unique_ptr<CmdQueueD3D12>& q = queues[slot];
+    unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
-        Nullable<radray::shared_ptr<Fence>> fence = CreateFence();
+        Nullable<shared_ptr<Fence>> fence = CreateFence();
         if (!fence) {
             return nullptr;
         }
@@ -95,9 +95,9 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            radray::shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
-            auto ins = radray::make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
-            radray::string debugName = radray::format("Queue {} {}", type, slot);
+            shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
+            auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
+            string debugName = radray::format("Queue {} {}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
         } else {
@@ -107,7 +107,7 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
     return q->IsValid() ? q.get() : nullptr;
 }
 
-Nullable<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+Nullable<shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     ComPtr<ID3D12Fence> fence;
     if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
         FAILED(hr)) {
@@ -118,10 +118,10 @@ Nullable<radray::shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     if (!e.has_value()) {
         return nullptr;
     }
-    return radray::make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
+    return make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
 }
 
-Nullable<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
+Nullable<shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
     ShaderBlobCategory category,
     ShaderStage stage,
@@ -131,12 +131,12 @@ Nullable<radray::shared_ptr<Shader>> DeviceD3D12::CreateShader(
         RADRAY_ERR_LOG("d3d12 can only use dxil shader");
         return nullptr;
     }
-    return radray::make_shared<Dxil>(blob, entryPoint, name, stage);
+    return make_shared<Dxil>(blob, entryPoint, name, stage);
 }
 
-Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootSignatureDescriptor& info) noexcept {
-    radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
-    radray::vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
+Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootSignatureDescriptor& info) noexcept {
+    vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
     ShaderStages allStages = ShaderStage::UNKNOWN;
     size_t rootConstStart = rootParmas.size();
     for (const RootConstantInfo& rootConst : info.RootConstants) {
@@ -219,7 +219,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     }
     size_t bindStart = rootParmas.size();
     size_t offset = 0;
-    radray::vector<DescriptorSetElementInfo> bindDescs{};
+    vector<DescriptorSetElementInfo> bindDescs{};
     for (const DescriptorSetInfo& descSet : info.DescriptorSets) {
         for (const DescriptorSetElementInfo& e : descSet.Elements) {
             switch (e.Type) {
@@ -307,7 +307,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         }
     }
     bindDescs.shrink_to_fit();
-    radray::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     staticSamplers.reserve(info.StaticSamplers.size());
     for (const StaticSamplerInfo& desc : info.StaticSamplers) {
         D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
@@ -370,7 +370,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return nullptr;
     }
-    auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
+    auto result = make_shared<RootSigD3D12>(std::move(rootSig));
     result->_rootConstants = {info.RootConstants.begin(), info.RootConstants.end()};
     result->_rootDescriptors = {info.RootDescriptors.begin(), info.RootDescriptors.end()};
     result->_bindDescriptors = std::move(bindDescs);
@@ -383,8 +383,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     public:
         ShaderStages Stages;
     };
-    radray::unordered_map<radray::string, DxilReflection::CBuffer> cbufferMap{};
-    radray::unordered_map<radray::string, DxilReflection::StaticSampler> staticSamplerMap{};
+    unordered_map<string, DxilReflection::CBuffer> cbufferMap{};
+    unordered_map<string, DxilReflection::StaticSampler> staticSamplerMap{};
     for (Shader* i : shaders) {
         Dxil* dxil = Underlying(i);
         for (const DxilReflection::CBuffer& j : dxil->_refl.CBuffers) {
@@ -413,9 +413,9 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         }
     }
     // 收集所有 bind resource
-    radray::vector<StageResource> resources;
-    radray::vector<StageResource> samplers;
-    radray::vector<StageResource> staticSamplers;
+    vector<StageResource> resources;
+    vector<StageResource> samplers;
+    vector<StageResource> staticSamplers;
     ShaderStages shaderStages{ShaderStage::UNKNOWN};
     for (Shader* i : shaders) {
         Dxil* dxil = Underlying(i);
@@ -437,8 +437,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         }
     }
     // 合并不同 stage 所需相同资源, 也就是 Space 和 Bind 一致的资源. 把 cbuffer 放前面, 其他类型资源放后面, 再按 Space, BindPoint 排序
-    auto check = [](const radray::vector<StageResource>& res) noexcept {
-        radray::vector<StageResource> temp;
+    auto check = [](const vector<StageResource>& res) noexcept {
+        vector<StageResource> temp;
         for (const StageResource& i : res) {
             auto iter = std::find_if(temp.begin(), temp.end(), [&](auto&& v) noexcept {
                 return v.Space == i.Space && v.BindPoint == i.BindPoint && v.Type == i.Type;
@@ -454,8 +454,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         }
         return true;
     };
-    auto merge = [](const radray::vector<StageResource>& res) noexcept {
-        radray::vector<StageResource> result;
+    auto merge = [](const vector<StageResource>& res) noexcept {
+        vector<StageResource> result;
         for (const StageResource& i : res) {
             auto iter = std::find_if(result.begin(), result.end(), [&](auto&& v) noexcept {
                 return v.Space == i.Space && v.BindPoint == i.BindPoint && v.Type == i.Type;
@@ -481,13 +481,13 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             return lhs.Space < rhs.Space;
         }
     };
-    radray::vector<StageResource> mergedCbuffers, mergedResources;
-    radray::unordered_set<uint32_t> cbufferSpaces, resourceSpaces;
+    vector<StageResource> mergedCbuffers, mergedResources;
+    unordered_set<uint32_t> cbufferSpaces, resourceSpaces;
     {
         if (!check(resources)) {
             return nullptr;
         }
-        radray::vector<StageResource> mergeBinds = merge(resources);
+        vector<StageResource> mergeBinds = merge(resources);
         std::sort(mergeBinds.begin(), mergeBinds.end(), resCmp);
         for (StageResource& i : mergeBinds) {
             if (i.Type == ShaderResourceType::CBuffer) {
@@ -512,8 +512,8 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     if (!check(staticSamplers)) {
         return nullptr;
     }
-    radray::vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
-    radray::unordered_set<uint32_t> samplersSpaces;
+    vector<StageResource> mergeSamplers = merge(samplers), mergeStaticSamplers = merge(staticSamplers);
+    unordered_set<uint32_t> samplersSpaces;
     std::sort(mergeSamplers.begin(), mergeSamplers.end(), resCmp);
     std::sort(mergeStaticSamplers.begin(), mergeStaticSamplers.end(), resCmp);
     for (const StageResource& i : mergeSamplers) {
@@ -567,7 +567,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     RADRAY_DEBUG_LOG("all cbuffers use root descriptor. root sig size: {} DWORDs", useRD / 4);
     {
         // 按 space 划分 descriptor table
-        radray::unordered_set<uint32_t> resSpaces;
+        unordered_set<uint32_t> resSpaces;
         std::merge(
             cbufferSpaces.begin(), cbufferSpaces.end(),
             resourceSpaces.begin(), resourceSpaces.end(),
@@ -583,14 +583,14 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             strategy = RootSigStrategy::DescTable;
         }
     }
-    radray::vector<D3D12_ROOT_PARAMETER1> rootParmas{};
-    radray::vector<radray::vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
+    vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> descRanges;
     auto&& setupTableRes = [&rootParmas, &descRanges, &cbufferMap](
-                               const radray::unordered_set<uint32_t>& spaces,
-                               const radray::vector<StageResource>& res,
-                               radray::vector<DescTable>& tbls) noexcept {
+                               const unordered_set<uint32_t>& spaces,
+                               const vector<StageResource>& res,
+                               vector<DescTable>& tbls) noexcept {
         for (uint32_t space : spaces) {
-            auto& ranges = descRanges.emplace_back(radray::vector<D3D12_DESCRIPTOR_RANGE1>{});
+            auto& ranges = descRanges.emplace_back(vector<D3D12_DESCRIPTOR_RANGE1>{});
             ShaderStages tableStages{};
             DescTable tbl{};
             for (const StageResource& r : res) {
@@ -628,10 +628,10 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
             tbls.emplace_back(std::move(tbl));
         }
     };
-    radray::vector<RootConst> rootConsts;
-    radray::vector<CBufferView> cbufferViews;
-    radray::vector<DescTable> resDescTables;
-    radray::vector<DescTable> samplerDescTables;
+    vector<RootConst> rootConsts;
+    vector<CBufferView> cbufferViews;
+    vector<DescTable> resDescTables;
+    vector<DescTable> samplerDescTables;
     if (strategy == RootSigStrategy::CBufferRootConst || strategy == RootSigStrategy::CBufferRootDesc) {
         auto pcIter = std::find_if(
             mergedCbuffers.begin(), mergedCbuffers.end(),
@@ -677,7 +677,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         setupTableRes(resourceSpaces, mergedResources, resDescTables);
         setupTableRes(samplersSpaces, mergeSamplers, samplerDescTables);
     }
-    radray::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplerDescs;
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplerDescs;
     staticSamplerDescs.reserve(mergeStaticSamplers.size());
     for (const StageResource& i : mergeStaticSamplers) {
         const DxilReflection::StaticSampler& rs = staticSamplerMap.find(i.Name)->second;
@@ -742,7 +742,7 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
         RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
         return nullptr;
     }
-    auto result = radray::make_shared<RootSigD3D12>(std::move(rootSig));
+    auto result = make_shared<RootSigD3D12>(std::move(rootSig));
     result->_rootConsts = std::move(rootConsts);
     result->_cbufferViews = std::move(cbufferViews);
     result->_resDescTables = std::move(resDescTables);
@@ -751,11 +751,11 @@ Nullable<radray::shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(con
     */
 }
 
-Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
+Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipeline(
     const GraphicsPipelineStateDescriptor& desc) noexcept {
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
-    radray::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
-    radray::vector<uint64_t> arrayStrides(desc.VertexBuffers.size(), 0);
+    vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    vector<uint64_t> arrayStrides(desc.VertexBuffers.size(), 0);
     for (size_t index = 0; index < desc.VertexBuffers.size(); index++) {
         const VertexBufferLayout& i = desc.VertexBuffers[index];
         arrayStrides[index] = i.ArrayStride;
@@ -877,10 +877,10 @@ Nullable<radray::shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsP
         RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state. reason={} (code:{})", GetErrorName(hr), hr);
         return nullptr;
     }
-    return radray::make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
+    return make_shared<GraphicsPsoD3D12>(std::move(pso), std::move(arrayStrides), topo);
 }
 
-Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
+Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
     CommandQueue* presentQueue,
     const void* nativeWindow,
     uint32_t width,
@@ -933,7 +933,7 @@ Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         RADRAY_ERR_LOG("d3d12 doesn't support IDXGISwapChain3, reason={} (code:{})", GetErrorName(hr), hr);
         return nullptr;
     }
-    radray::vector<radray::shared_ptr<TextureD3D12>> colors;
+    vector<shared_ptr<TextureD3D12>> colors;
     colors.reserve(scDesc.BufferCount);
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
         ComPtr<ID3D12Resource> color;
@@ -942,7 +942,7 @@ Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
             RADRAY_ERR_LOG("d3d12 cannot get back buffer in IDXGISwapChain1, reason={} (code:{})", GetErrorName(hr), hr);
             return nullptr;
         }
-        auto tex = radray::make_shared<TextureD3D12>(
+        auto tex = make_shared<TextureD3D12>(
             this,
             std::move(color),
             ComPtr<D3D12MA::Allocation>{},
@@ -951,10 +951,10 @@ Nullable<radray::shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
         colors.emplace_back(std::move(tex));
     }
     UINT presentFlags = (!enableSync && _isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    return radray::make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
+    return make_shared<SwapChainD3D12>(swapchain, std::move(colors), presentFlags);
 }
 
-Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
+Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     uint64_t size,
     ResourceType type,
     ResourceUsage usage,
@@ -1040,10 +1040,10 @@ Nullable<radray::shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     }
     SetObjectName(name, buffer.Get(), allocRes.Get());
     RADRAY_DEBUG_LOG("d3d12 create buffer, size={}, type={}, usage={}", size, type, usage);
-    return radray::make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), userInitState, type);
+    return make_shared<BufferD3D12>(std::move(buffer), std::move(allocRes), userInitState, type);
 }
 
-Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
+Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     uint64_t width,
     uint64_t height,
     uint64_t depth,
@@ -1139,7 +1139,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         return nullptr;
     }
     SetObjectName(name, texture.Get(), allocRes.Get());
-    return radray::make_shared<TextureD3D12>(
+    return make_shared<TextureD3D12>(
         this,
         std::move(texture),
         std::move(allocRes),
@@ -1147,7 +1147,7 @@ Nullable<radray::shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         type);
 }
 
-Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
+Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
     Buffer* buffer,
     ResourceType type,
     TextureFormat format,
@@ -1205,12 +1205,12 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
         count,
         offset,
         stride};
-    auto result = radray::make_shared<BufferViewD3D12>(bv);
+    auto result = make_shared<BufferViewD3D12>(bv);
     guard.Dismiss();
     return result;
 }
 
-Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
+Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
     Texture* texture,
     ResourceType type,
     TextureFormat format,
@@ -1433,25 +1433,25 @@ Nullable<radray::shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
         arrayLayerCount,
         baseMipLevel,
         mipLevelCount};
-    auto result = radray::make_shared<TextureViewD3D12>(tvd);
+    auto result = make_shared<TextureViewD3D12>(tvd);
     guard.Dismiss();
     return result;
 }
 
-Nullable<radray::shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept {
+Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(const DescriptorSetElementInfo& info) noexcept {
     GpuDescriptorAllocator* heap = info.Type == ResourceType::Sampler ? this->GetGpuResAllocator() : this->GetGpuResAllocator();
     auto heapViewOpt = heap->Allocate(info.Count);
     if (!heapViewOpt.has_value()) {
         RADRAY_ERR_LOG("d3d12 cannot allocate gpu descriptor set, out of memory");
         return nullptr;
     }
-    return radray::make_shared<GpuDescriptorHeapView>(
+    return make_shared<GpuDescriptorHeapView>(
         heapViewOpt.value(),
         heap,
         info.Type);
 }
 
-Nullable<radray::shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+Nullable<shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
     D3D12_SAMPLER_DESC rawDesc{};
     rawDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.HasCompare, desc.AnisotropyClamp);
     rawDesc.AddressU = MapType(desc.AddressS);
@@ -1474,7 +1474,7 @@ Nullable<radray::shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDe
     }
     DescriptorHeapView heapView = opt.value();
     _device->CreateSampler(&rawDesc, heapView.HandleCpu());
-    return radray::make_shared<SamplerD3D12>(heapView, alloc, desc, rawDesc);
+    return make_shared<SamplerD3D12>(heapView, alloc, desc, rawDesc);
 }
 
 uint64_t DeviceD3D12::GetUploadBufferNeedSize(
@@ -1571,7 +1571,7 @@ void DeviceD3D12::CopyDataToUploadBuffer(
 
 CpuDescriptorAllocator* DeviceD3D12::GetCpuResAllocator() noexcept {
     if (_cpuResAlloc == nullptr) {
-        _cpuResAlloc = radray::make_unique<CpuDescriptorAllocator>(
+        _cpuResAlloc = make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             512);
@@ -1581,7 +1581,7 @@ CpuDescriptorAllocator* DeviceD3D12::GetCpuResAllocator() noexcept {
 
 CpuDescriptorAllocator* DeviceD3D12::GetRtvAllocator() noexcept {
     if (_cpuRtvAlloc == nullptr) {
-        _cpuRtvAlloc = radray::make_unique<CpuDescriptorAllocator>(
+        _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
             256);
@@ -1591,7 +1591,7 @@ CpuDescriptorAllocator* DeviceD3D12::GetRtvAllocator() noexcept {
 
 CpuDescriptorAllocator* DeviceD3D12::GetDsvAllocator() noexcept {
     if (_cpuDsvAlloc == nullptr) {
-        _cpuDsvAlloc = radray::make_unique<CpuDescriptorAllocator>(
+        _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
             128);
@@ -1601,7 +1601,7 @@ CpuDescriptorAllocator* DeviceD3D12::GetDsvAllocator() noexcept {
 
 CpuDescriptorAllocator* DeviceD3D12::GetCpuSamplerAllocator() noexcept {
     if (_cpuSamplerAlloc == nullptr) {
-        _cpuSamplerAlloc = radray::make_unique<CpuDescriptorAllocator>(
+        _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(
             _device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
             64);
@@ -1617,7 +1617,7 @@ GpuDescriptorAllocator* DeviceD3D12::GetGpuSamplerAllocator() noexcept {
     return _gpuSamplerHeap.get();
 }
 
-Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
+Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
@@ -1661,7 +1661,7 @@ Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescript
                 DXGI_ADAPTER_DESC1 adapDesc;
                 temp->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
-                    radray::wstring s{adapDesc.Description};
+                    wstring s{adapDesc.Description};
                     RADRAY_INFO_LOG("D3D12 find device: {}", ToMultiByte(s).value());
                 }
             }
@@ -1703,7 +1703,7 @@ Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescript
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
         adapter->GetDesc1(&adapDesc);
-        radray::wstring s{adapDesc.Description};
+        wstring s{adapDesc.Description};
         RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
     }
     ComPtr<D3D12MA::Allocator> alloc;
@@ -1731,7 +1731,7 @@ Nullable<radray::shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescript
             return nullptr;
         }
     }
-    auto result = radray::make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
+    auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;

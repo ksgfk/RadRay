@@ -11,7 +11,7 @@ public:
         DeviceD3D12* device,
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
-        radray::shared_ptr<FenceD3D12> fence) noexcept
+        shared_ptr<FenceD3D12> fence) noexcept
         : _device(device),
           _queue(std::move(queue)),
           _fence(std::move(fence)),
@@ -21,7 +21,7 @@ public:
     bool IsValid() const noexcept override { return _queue.Get() != nullptr; }
     void Destroy() noexcept override;
 
-    Nullable<radray::shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
+    Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept override;
 
     void Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept override;
 
@@ -32,7 +32,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;
-    radray::shared_ptr<FenceD3D12> _fence;
+    shared_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 

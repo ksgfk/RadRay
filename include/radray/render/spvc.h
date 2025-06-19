@@ -8,14 +8,14 @@ class MslReflection {
 public:
     class VertexInput {
     public:
-        radray::string Name;
+        string Name;
         uint32_t Location;
         VertexFormat Format;
-        radray::string Semantic;
+        string Semantic;
         uint32_t SemanticIndex;
     };
 
-    radray::vector<VertexInput> VertexInputs;
+    vector<VertexInput> VertexInputs;
 };
 
 class SpirvReflection {};
@@ -46,14 +46,14 @@ enum class MslPlatform {
 
 class SpvcEntryPoint {
 public:
-    radray::string Name;
+    string Name;
     ShaderStage Stage;
 };
 
 class SpvcMslOutput {
 public:
-    radray::string Msl;
-    radray::vector<SpvcEntryPoint> EntryPoints;
+    string Msl;
+    vector<SpvcEntryPoint> EntryPoints;
 };
 
 std::pair<uint32_t, uint32_t> GetMslVersionNumber(MslVersion ver) noexcept;

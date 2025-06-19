@@ -4,6 +4,8 @@
 
 #include <radray/wavefront_obj.h>
 
+using namespace radray;
+
 const char* objFile = R"(# Blender 4.4.1
 # www.blender.org
 o Floor
@@ -67,7 +69,7 @@ static void SimpleTest(radray::WavefrontObjReader& reader) {
 }
 
 TEST(Core_WaveObjTest, Simple) {
-    radray::WavefrontObjReader reader{radray::string(objFile)};
+    radray::WavefrontObjReader reader{string(objFile)};
     reader.Read();
     SimpleTest(reader);
 }

@@ -30,18 +30,18 @@ public:
 
     DelegateHandle(
         std::function<CallableType>&& func,
-        radray::shared_ptr<MultiDelegate<CallableType>> md) noexcept
-        : _func(radray::make_shared<std::function<CallableType>>(std::move(func))),
-          _md(radray::weak_ptr<MultiDelegate<CallableType>>{md}) {
+        shared_ptr<MultiDelegate<CallableType>> md) noexcept
+        : _func(make_shared<std::function<CallableType>>(std::move(func))),
+          _md(weak_ptr<MultiDelegate<CallableType>>{md}) {
         md->Add(_func);
     }
 
     template <class T>
-    DelegateHandle(void (T::*memberFunc)(Args...), T* instance, radray::shared_ptr<MultiDelegate<CallableType>> md) noexcept {
-        _func = radray::make_shared<std::function<CallableType>>([=](Args&&... args) {
+    DelegateHandle(void (T::*memberFunc)(Args...), T* instance, shared_ptr<MultiDelegate<CallableType>> md) noexcept {
+        _func = make_shared<std::function<CallableType>>([=](Args&&... args) {
             (instance->*memberFunc)(std::forward<Args>(args)...);
         });
-        _md = radray::weak_ptr<MultiDelegate<CallableType>>{md};
+        _md = weak_ptr<MultiDelegate<CallableType>>{md};
         md->Add(_func);
     }
 
@@ -76,8 +76,8 @@ public:
     }
 
 private:
-    radray::shared_ptr<std::function<CallableType>> _func;
-    radray::weak_ptr<MultiDelegate<CallableType>> _md;
+    shared_ptr<std::function<CallableType>> _func;
+    weak_ptr<MultiDelegate<CallableType>> _md;
 };
 
 template <typename... Args>
@@ -86,18 +86,18 @@ public:
     using CallableType = void(Args...);
     using DataType = std::function<CallableType>;
 
-    void Add(const radray::shared_ptr<DataType>& data) noexcept {
-        _list.emplace_back(radray::weak_ptr<DataType>{data});
+    void Add(const shared_ptr<DataType>& data) noexcept {
+        _list.emplace_back(weak_ptr<DataType>{data});
     }
 
-    void Remove(const radray::shared_ptr<DataType>& data) noexcept {
+    void Remove(const shared_ptr<DataType>& data) noexcept {
         _list.erase(std::remove_if(_list.begin(), _list.end(), [&](auto&& t) { return t.lock() == data; }), _list.end());
     }
 
     void Invoke(Args&&... args) {
-        radray::vector<radray::weak_ptr<DataType>> temp{_list.begin(), _list.end()};
+        vector<weak_ptr<DataType>> temp{_list.begin(), _list.end()};
         for (auto&& i : temp) {
-            radray::shared_ptr<DataType> t = i.lock();
+            shared_ptr<DataType> t = i.lock();
             t->operator()(std::forward<Args>(args)...);
         }
     }
@@ -105,7 +105,7 @@ public:
     void operator()(Args&&... args) { return Invoke(std::forward<Args>(args)...); }
 
 private:
-    radray::vector<radray::weak_ptr<DataType>> _list;
+    vector<weak_ptr<DataType>> _list;
 };
 
 }  // namespace radray

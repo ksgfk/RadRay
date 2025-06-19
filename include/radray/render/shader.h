@@ -9,8 +9,8 @@ public:
     virtual ~Shader() noexcept = default;
 
 public:
-    radray::string Name;
-    radray::string EntryPoint;
+    string Name;
+    string EntryPoint;
     ShaderStage Stage;
     ShaderBlobCategory Category;
 };

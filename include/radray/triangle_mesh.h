@@ -8,12 +8,12 @@ class VertexData;
 
 class TriangleMesh {
 public:
-    radray::vector<uint32_t> Indices;
-    radray::vector<Eigen::Vector3f> Positions;
-    radray::vector<Eigen::Vector3f> Normals;
-    radray::vector<Eigen::Vector2f> UV0;
-    radray::vector<Eigen::Vector4f> Tangents;
-    radray::vector<Eigen::Vector4f> Color0;
+    vector<uint32_t> Indices;
+    vector<Eigen::Vector3f> Positions;
+    vector<Eigen::Vector3f> Normals;
+    vector<Eigen::Vector2f> UV0;
+    vector<Eigen::Vector4f> Tangents;
+    vector<Eigen::Vector4f> Color0;
 
     bool IsValid() const noexcept;
     uint64_t GetVertexByteSize() const noexcept;

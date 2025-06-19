@@ -25,13 +25,13 @@ struct SourceLocation {
     const char* funcname;
 };
 
-using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, radray::allocator<char>>;
+using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, allocator<char>>;
 
 template <typename... Args>
-radray::string format(fmt::format_string<Args...> fmtStr, Args&&... args) {
+string format(fmt::format_string<Args...> fmtStr, Args&&... args) {
     fmt_memory_buffer buf{};
     fmt::format_to(std::back_inserter(buf), fmtStr, std::forward<Args>(args)...);
-    return radray::string{buf.data(), buf.size()};
+    return string{buf.data(), buf.size()};
 }
 
 void Log(SourceLocation loc, LogLevel lvl, fmt::string_view msg) noexcept;

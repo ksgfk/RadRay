@@ -401,7 +401,7 @@ public:
             rsDesc.DescriptorSets = dsInfos;
             rsDesc.StaticSamplers = ssInfos;
             auto setColor = _device->CreateRootSignature(rsDesc).Unwrap();
-            radray::string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
+            string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "baseColor.hlsl").value();
             shared_ptr<Shader> setColorVS, setColorPS;
             {
                 std::string_view defines[] = {"BASE_COLOR_USE_TEXTURE"};
@@ -410,7 +410,7 @@ public:
                 setColorVS = _device->CreateShader(outv.Data, ShaderBlobCategory::DXIL, ShaderStage::Vertex, "VSMain", "setColorVS").Unwrap();
                 setColorPS = _device->CreateShader(outp.Data, ShaderBlobCategory::DXIL, ShaderStage::Pixel, "PSMain", "setColorPS").Unwrap();
             }
-            radray::shared_ptr<GraphicsPipelineState> pntPipe;
+            shared_ptr<GraphicsPipelineState> pntPipe;
             {
                 GraphicsPipelineStateDescriptor psoDesc{};
                 psoDesc.RootSig = setColor.get();
@@ -644,7 +644,7 @@ public:
         ColorAttachment colors[] = {DefaultColorAttachment(rtView.get(), {0.0f, 0.2f, 0.4f, 1.0f})};
         rpDesc.ColorAttachments = colors;
         rpDesc.DepthStencilAttachment = DefaultDepthStencilAttachment(_depthView.get());
-        radray::unique_ptr<CommandEncoder> pass = _cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        unique_ptr<CommandEncoder> pass = _cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         pass->SetViewport({0.0f, 0.0f, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
         pass->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
 

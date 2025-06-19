@@ -28,7 +28,7 @@ struct DescriptorSetElementInfo {
 
 class DescriptorSetInfo {
 public:
-    radray::vector<DescriptorSetElementInfo> Elements;
+    vector<DescriptorSetElementInfo> Elements;
 };
 
 struct StaticSamplerInfo {

@@ -96,8 +96,8 @@ CpuDescriptorAllocatorImpl::CpuDescriptorAllocatorImpl(
       _device(device),
       _type(type) {}
 
-radray::unique_ptr<DescriptorHeap> CpuDescriptorAllocatorImpl::CreateHeap(size_t size) noexcept {
-    return radray::make_unique<DescriptorHeap>(
+unique_ptr<DescriptorHeap> CpuDescriptorAllocatorImpl::CreateHeap(size_t size) noexcept {
+    return make_unique<DescriptorHeap>(
         _device,
         D3D12_DESCRIPTOR_HEAP_DESC{
             _type,
@@ -136,7 +136,7 @@ GpuDescriptorAllocator::GpuDescriptorAllocator(
     UINT size) noexcept
     : _device(device),
       _allocator(size) {
-    _heap = radray::make_unique<DescriptorHeap>(
+    _heap = make_unique<DescriptorHeap>(
         _device,
         D3D12_DESCRIPTOR_HEAP_DESC{
             type,

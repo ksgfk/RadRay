@@ -50,18 +50,18 @@ void GlobalTerminateGlfw() noexcept {
 class GlfwWindowImpl : public GlfwWindow::Impl {
 public:
     GlfwWindowImpl(
-        const radray::string& name,
+        const string& name,
         uint32_t width,
         uint32_t height,
         bool resizable,
         bool fullScreen) noexcept
-        : mouseButtonCb(radray::make_shared<MultiDelegate<MouseButtonCallback>>()),
-          cursorPositionCb(radray::make_shared<MultiDelegate<CursorPositionCallback>>()),
-          keyCb(radray::make_shared<MultiDelegate<KeyCallback>>()),
-          scrollCb(radray::make_shared<MultiDelegate<ScrollCallback>>()),
-          windowResizeCb(radray::make_shared<MultiDelegate<WindowResizeCallback>>()),
-          frameResizeCb(radray::make_shared<MultiDelegate<FrameResizeCallback>>()),
-          windowRefreshCb(radray::make_shared<MultiDelegate<WindowRefreshCallback>>()) {
+        : mouseButtonCb(make_shared<MultiDelegate<MouseButtonCallback>>()),
+          cursorPositionCb(make_shared<MultiDelegate<CursorPositionCallback>>()),
+          keyCb(make_shared<MultiDelegate<KeyCallback>>()),
+          scrollCb(make_shared<MultiDelegate<ScrollCallback>>()),
+          windowResizeCb(make_shared<MultiDelegate<WindowResizeCallback>>()),
+          frameResizeCb(make_shared<MultiDelegate<FrameResizeCallback>>()),
+          windowRefreshCb(make_shared<MultiDelegate<WindowRefreshCallback>>()) {
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, resizable);
         window = glfwCreateWindow(width, height, name.c_str(), fullScreen ? glfwGetPrimaryMonitor() : nullptr, nullptr);
@@ -124,17 +124,17 @@ public:
 
     GLFWwindow* window{nullptr};
     const void* nativeHandle{nullptr};
-    radray::shared_ptr<MultiDelegate<MouseButtonCallback>> mouseButtonCb;
-    radray::shared_ptr<MultiDelegate<CursorPositionCallback>> cursorPositionCb;
-    radray::shared_ptr<MultiDelegate<KeyCallback>> keyCb;
-    radray::shared_ptr<MultiDelegate<ScrollCallback>> scrollCb;
-    radray::shared_ptr<MultiDelegate<WindowResizeCallback>> windowResizeCb;
-    radray::shared_ptr<MultiDelegate<FrameResizeCallback>> frameResizeCb;
-    radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> windowRefreshCb;
+    shared_ptr<MultiDelegate<MouseButtonCallback>> mouseButtonCb;
+    shared_ptr<MultiDelegate<CursorPositionCallback>> cursorPositionCb;
+    shared_ptr<MultiDelegate<KeyCallback>> keyCb;
+    shared_ptr<MultiDelegate<ScrollCallback>> scrollCb;
+    shared_ptr<MultiDelegate<WindowResizeCallback>> windowResizeCb;
+    shared_ptr<MultiDelegate<FrameResizeCallback>> frameResizeCb;
+    shared_ptr<MultiDelegate<WindowRefreshCallback>> windowRefreshCb;
 };
 
-GlfwWindow::GlfwWindow(radray::string name, uint32_t width, uint32_t height, bool resizable, bool fullScreen) noexcept
-    : _impl(radray::make_unique<GlfwWindowImpl>(name, width, height, resizable, fullScreen)) {}
+GlfwWindow::GlfwWindow(string name, uint32_t width, uint32_t height, bool resizable, bool fullScreen) noexcept
+    : _impl(make_unique<GlfwWindowImpl>(name, width, height, resizable, fullScreen)) {}
 
 GlfwWindow::~GlfwWindow() noexcept {
     Destroy();
@@ -158,18 +158,18 @@ Eigen::Vector2i GlfwWindow::GetSize() const noexcept {
 
 void GlfwWindow::Destroy() noexcept { _impl.reset(); }
 
-radray::shared_ptr<MultiDelegate<MouseButtonCallback>> GlfwWindow::EventMouseButtonCall() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->mouseButtonCb; }
+shared_ptr<MultiDelegate<MouseButtonCallback>> GlfwWindow::EventMouseButtonCall() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->mouseButtonCb; }
 
-radray::shared_ptr<MultiDelegate<CursorPositionCallback>> GlfwWindow::EventCursorPosition() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->cursorPositionCb; }
+shared_ptr<MultiDelegate<CursorPositionCallback>> GlfwWindow::EventCursorPosition() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->cursorPositionCb; }
 
-radray::shared_ptr<MultiDelegate<KeyCallback>> GlfwWindow::EventKey() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->keyCb; }
+shared_ptr<MultiDelegate<KeyCallback>> GlfwWindow::EventKey() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->keyCb; }
 
-radray::shared_ptr<MultiDelegate<ScrollCallback>> GlfwWindow::EventScroll() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->scrollCb; }
+shared_ptr<MultiDelegate<ScrollCallback>> GlfwWindow::EventScroll() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->scrollCb; }
 
-radray::shared_ptr<MultiDelegate<WindowResizeCallback>> GlfwWindow::EventWindwResize() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->windowResizeCb; }
+shared_ptr<MultiDelegate<WindowResizeCallback>> GlfwWindow::EventWindwResize() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->windowResizeCb; }
 
-radray::shared_ptr<MultiDelegate<FrameResizeCallback>> GlfwWindow::EventFrameResize() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->frameResizeCb; }
+shared_ptr<MultiDelegate<FrameResizeCallback>> GlfwWindow::EventFrameResize() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->frameResizeCb; }
 
-radray::shared_ptr<MultiDelegate<WindowRefreshCallback>> GlfwWindow::EventWindowRefresh() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->windowRefreshCb; }
+shared_ptr<MultiDelegate<WindowRefreshCallback>> GlfwWindow::EventWindowRefresh() const noexcept { return static_cast<GlfwWindowImpl*>(_impl.get())->windowRefreshCb; }
 
 }  // namespace radray::window

@@ -66,7 +66,7 @@ inline DepthStencilAttachment DefaultDepthStencilAttachment(
 
 class RenderPassDesc {
 public:
-    radray::string Name;
+    string Name;
     std::span<ColorAttachment> ColorAttachments;
     std::optional<DepthStencilAttachment> DepthStencilAttachment;
 };
@@ -85,9 +85,9 @@ public:
 
     virtual void CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept = 0;
 
-    virtual Nullable<radray::unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDesc& desc) noexcept = 0;
 
-    virtual void EndRenderPass(radray::unique_ptr<CommandEncoder> encoder) noexcept = 0;
+    virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
 };
 
 }  // namespace radray::render
