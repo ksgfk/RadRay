@@ -8,6 +8,7 @@
 #include <span>
 #include <iterator>
 #include <concepts>
+#include <functional>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -66,6 +67,23 @@ concept IsIterator = requires(Iter ite, size_t n) {
     { std::distance(ite, ite) } -> std::same_as<typename std::iterator_traits<Iter>::difference_type>;
     { std::advance(ite, n) };
 };
+
+template <typename T>
+struct FunctionTraits;
+template <typename Ret, typename... Args>
+struct FunctionTraits<Ret(Args...)> {
+    using ReturnType = Ret;
+    using ArgsTuple = std::tuple<Args...>;
+    static constexpr std::size_t ArgsCount = sizeof...(Args);
+};
+template <typename Ret, typename... Args>
+struct FunctionTraits<Ret (*)(Args...)> : FunctionTraits<Ret(Args...)> {};
+template <typename Ret, typename... Args>
+struct FunctionTraits<std::function<Ret(Args...)>> : FunctionTraits<Ret(Args...)> {};
+template <typename ClassType, typename Ret, typename... Args>
+struct FunctionTraits<Ret (ClassType::*)(Args...)> : FunctionTraits<Ret(Args...)> {};
+template <typename ClassType, typename Ret, typename... Args>
+struct FunctionTraits<Ret (ClassType::*)(Args...) const> : FunctionTraits<Ret(Args...)> {};
 
 class Noncopyable {
 protected:

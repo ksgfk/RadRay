@@ -1,12 +1,22 @@
 #pragma once
 
+#include <array>
+
 #include <radray/render/device.h>
 
 #include "vulkan_helper.h"
+#include "vulkan_cmd_queue.h"
 
 namespace radray::render::vulkan {
 
 class DeviceVulkan : public Device {
+public:
+    VkPhysicalDevice _physicalDevice;
+    VkDevice _device;
+    std::array<radray::vector<radray::unique_ptr<QueueVulkan>>, 3> _queues;
+
+    VolkDeviceTable _vtb;
+
 public:
     DeviceVulkan() = default;
     ~DeviceVulkan() noexcept override;
@@ -97,11 +107,16 @@ public:
         uint32_t arrayLayer,
         uint32_t layerCount) const noexcept override;
 
-public:
-    VkPhysicalDevice _physicalDevice;
-    VkDevice _device;
+    template <typename F, typename... Args>
+    auto CallVk(F VolkDeviceTable::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(std::declval<Args>()...)) {
+        return ((this->_vtb).*member)(std::forward<Args>(args)...);
+    }
 
-    VolkDeviceTable _vtb;
+    template <typename F, typename... Args>
+    requires std::is_same_v<std::tuple_element_t<0, typename FunctionTraits<F>::ArgsTuple>, VkDevice>
+    auto CallVk(F VTable::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(this->_device, std::declval<Args>()...)) {
+        return ((this->_vtb).*member)(this->_device, std::forward<Args>(args)...);
+    }
 };
 
 Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& desc);

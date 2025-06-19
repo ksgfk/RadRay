@@ -28,7 +28,7 @@ public:
     radray::vector<radray::string> _layers;
 };
 
-static Nullable<std::unique_ptr<InstanceVulkan>> g_instance;
+static Nullable<unique_ptr<InstanceVulkan>> g_instance;
 
 static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
     if (d.IsValid()) {
@@ -137,13 +137,15 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     void* pUserData) noexcept {
     RADRAY_UNUSED(pUserData);
     if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        RADRAY_ERR_LOG("vk {}: {}", formatVkDebugMsgType(messageType), pCallbackData->pMessage);
+        RADRAY_ERR_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        RADRAY_WARN_LOG("vk {}: {}", formatVkDebugMsgType(messageType), pCallbackData->pMessage);
+        RADRAY_WARN_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-        RADRAY_INFO_LOG("vk {}: {}", formatVkDebugMsgType(messageType), pCallbackData->pMessage);
+        RADRAY_INFO_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-        RADRAY_DEBUG_LOG("vk {}: {}", formatVkDebugMsgType(messageType), pCallbackData->pMessage);
+        RADRAY_DEBUG_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+    } else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
+        RADRAY_INFO_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     }
     return VK_FALSE;
 }
@@ -191,7 +193,7 @@ Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescri
         selectPhysicalDeviceIndex = index;
     } else {
         auto cpy = physicalDeviceProps;
-        std::sort(cpy.begin(), cpy.end(), [](const PhyDeviceInfo& lhs, const PhyDeviceInfo& rhs) noexcept {
+        std::stable_sort(cpy.begin(), cpy.end(), [](const PhyDeviceInfo& lhs, const PhyDeviceInfo& rhs) noexcept {
             if (lhs.properties.deviceType != rhs.properties.deviceType) {
                 static auto typeScore = [](VkPhysicalDeviceType t) noexcept {
                     switch (t) {
@@ -221,29 +223,41 @@ Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescri
     const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
     RADRAY_INFO_LOG("vk select device: {}", selectPhyDevice.properties.deviceName);
 
+    const auto invalid = std::numeric_limits<uint32_t>::max();
+    struct QueueFamilyUsage {
+        uint32_t familyIndex;
+        VkQueueFlags flags;
+        uint32_t maxCount;
+        uint32_t usedCount;
+    };
+    struct QueueRequest {
+        VkQueueFlags requiredFlag;
+        uint32_t* outFamily;
+        uint32_t* outIndexInFamily;
+    };
     radray::vector<VkQueueFamilyProperties> queueFamilyProps;
     GetVector(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
     if (queueFamilyProps.empty()) {
         RADRAY_ERR_LOG("vk no queue family found");
         return nullptr;
     }
-    const auto invalid = std::numeric_limits<uint32_t>::max();
-    uint32_t graphicsQueue = invalid;
-    uint32_t computeQueue = invalid;
-    uint32_t transferQueue = invalid;
+    radray::vector<QueueFamilyUsage> families;
     for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
-        const auto& props = queueFamilyProps[i];
-        if ((props.queueFlags & VK_QUEUE_GRAPHICS_BIT) && graphicsQueue == invalid) {
-            graphicsQueue = i;
-        }
-        if ((props.queueFlags & VK_QUEUE_COMPUTE_BIT) && computeQueue == invalid) {
-            if (i != graphicsQueue) {
-                computeQueue = i;
-            }
-        }
-        if ((props.queueFlags & VK_QUEUE_TRANSFER_BIT) && transferQueue == invalid) {
-            if (i != graphicsQueue && i != computeQueue) {
-                transferQueue = i;
+        families.push_back({i, queueFamilyProps[i].queueFlags, queueFamilyProps[i].queueCount, 0});
+    }
+    uint32_t graphicsQueue = invalid, computeQueue = invalid, transferQueue = invalid;
+    uint32_t graphicsQueueIndex = invalid, computeQueueIndex = invalid, transferQueueIndex = invalid;
+    QueueRequest requests[] = {
+        {VK_QUEUE_GRAPHICS_BIT, &graphicsQueue, &graphicsQueueIndex},
+        {VK_QUEUE_COMPUTE_BIT, &computeQueue, &computeQueueIndex},
+        {VK_QUEUE_TRANSFER_BIT, &transferQueue, &transferQueueIndex}};
+    for (auto& req : requests) {
+        for (auto& fam : families) {
+            if ((fam.flags & req.requiredFlag) && fam.usedCount < fam.maxCount) {
+                *req.outFamily = fam.familyIndex;
+                *req.outIndexInFamily = fam.usedCount;
+                fam.usedCount++;
+                break;
             }
         }
     }
@@ -252,42 +266,29 @@ Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescri
         return nullptr;
     }
     if (computeQueue == invalid) {
-        computeQueue = graphicsQueue;
+        RADRAY_ERR_LOG("vk cannot find compute queue");
+        return nullptr;
     }
     if (transferQueue == invalid) {
-        transferQueue = graphicsQueue;
+        RADRAY_ERR_LOG("vk cannot find transfer queue");
+        return nullptr;
     }
-
+    radray::unordered_map<uint32_t, uint32_t> familyQueueCounts;
+    familyQueueCounts[graphicsQueue]++;
+    familyQueueCounts[computeQueue]++;
+    familyQueueCounts[transferQueue]++;
     radray::vector<VkDeviceQueueCreateInfo> queueInfos;
-    {
-        auto& graphicsQueueInfo = queueInfos.emplace_back();
-        graphicsQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        graphicsQueueInfo.pNext = nullptr;
-        graphicsQueueInfo.flags = 0;
-        graphicsQueueInfo.queueFamilyIndex = graphicsQueue;
-        graphicsQueueInfo.queueCount = 1;
-        float queuePriority = 1.0f;
-        graphicsQueueInfo.pQueuePriorities = &queuePriority;
-    }
-    if (computeQueue != graphicsQueue) {
-        auto& computeQueueInfo = queueInfos.emplace_back();
-        computeQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        computeQueueInfo.pNext = nullptr;
-        computeQueueInfo.flags = 0;
-        computeQueueInfo.queueFamilyIndex = computeQueue;
-        computeQueueInfo.queueCount = 1;
-        float queuePriority = 1.0f;
-        computeQueueInfo.pQueuePriorities = &queuePriority;
-    }
-    if (transferQueue != graphicsQueue && transferQueue != computeQueue) {
-        auto& transferQueueInfo = queueInfos.emplace_back();
-        transferQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        transferQueueInfo.pNext = nullptr;
-        transferQueueInfo.flags = 0;
-        transferQueueInfo.queueFamilyIndex = transferQueue;
-        transferQueueInfo.queueCount = 1;
-        float queuePriority = 1.0f;
-        transferQueueInfo.pQueuePriorities = &queuePriority;
+    radray::vector<float> queuePriorities;
+    for (const auto& [family, count] : familyQueueCounts) {
+        queuePriorities.resize(queuePriorities.size() + count, 1.0f);
+        VkDeviceQueueCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        info.pNext = nullptr;
+        info.flags = 0;
+        info.queueFamilyIndex = family;
+        info.queueCount = count;
+        info.pQueuePriorities = queuePriorities.data() + (queuePriorities.size() - count);
+        queueInfos.push_back(info);
     }
 
     radray::vector<const char*> deviceExts;
@@ -314,6 +315,13 @@ Nullable<radray::shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescri
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
     volkLoadDeviceTable(&deviceR->_vtb, device);
+    VkQueue graphicsQueuePtr = VK_NULL_HANDLE, computeQueuePtr = VK_NULL_HANDLE, transferQueuePtr = VK_NULL_HANDLE;
+    deviceR->CallVk(&VTable::vkGetDeviceQueue, graphicsQueue, graphicsQueueIndex, &graphicsQueuePtr);
+    deviceR->CallVk(&VTable::vkGetDeviceQueue, computeQueue, computeQueueIndex, &computeQueuePtr);
+    deviceR->CallVk(&VTable::vkGetDeviceQueue, transferQueue, transferQueueIndex, &transferQueuePtr);
+    deviceR->_queues[static_cast<size_t>(QueueType::Direct)].emplace_back(radray::make_unique<QueueVulkan>(deviceR.get(), graphicsQueuePtr));
+    deviceR->_queues[static_cast<size_t>(QueueType::Compute)].emplace_back(radray::make_unique<QueueVulkan>(deviceR.get(), computeQueuePtr));
+    deviceR->_queues[static_cast<size_t>(QueueType::Copy)].emplace_back(radray::make_unique<QueueVulkan>(deviceR.get(), transferQueuePtr));
     return deviceR;
 }
 
@@ -383,13 +391,16 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
     needExts.emplace(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #endif
     if (desc.IsEnableDebugLayer) {
+        if (findExt(VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extProps.end()) {
+            RADRAY_WARN_LOG("vk extension {} is not supported", VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        } else {
+            needExts.emplace(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
         const auto validName = "VK_LAYER_KHRONOS_validation";
-        auto layerIt = findLayer(validName);
-        if (layerIt == layerProps.end()) {
+        if (findLayer(validName) == layerProps.end()) {
             RADRAY_WARN_LOG("vk layer {} is not supported", validName);
         } else {
             needLayers.emplace(validName);
-            needExts.emplace(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             radray::vector<VkExtensionProperties> dbgExtProps;
             GetVector(dbgExtProps, vkEnumerateInstanceExtensionProperties, validName);
             for (const auto& i : dbgExtProps) {
@@ -508,7 +519,7 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
         return false;
     }
     volkLoadInstance(instance);
-    g_instance = std::make_unique<InstanceVulkan>();
+    g_instance = radray::make_unique<InstanceVulkan>();
     g_instance->_instance = instance;
     g_instance->_allocCb = allocCbPtr ? std::make_optional(*allocCbPtr) : std::nullopt;
     g_instance->_exts = {needExts.begin(), needExts.end()};

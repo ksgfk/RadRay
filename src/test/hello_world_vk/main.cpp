@@ -8,7 +8,7 @@ using namespace radray::render;
 int main() {
     VulkanBackendInitDdescriptor vkInitDesc{};
     vkInitDesc.IsEnableDebugLayer = true;
-    vkInitDesc.IsEnableGpuBasedValid = true;
+    vkInitDesc.IsEnableGpuBasedValid = false;
     BackendInitDescriptor initDescs[] = {vkInitDesc};
     GlobalInitGraphics(initDescs);
     VulkanDeviceDescriptor vkDesc{};
