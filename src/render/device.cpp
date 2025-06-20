@@ -50,11 +50,11 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
         desc);
 }
 
-static std::array<bool, static_cast<std::underlying_type_t<Backend>>(Backend::MAX_VALUE)> g_supportedBackends;
+static std::array<bool, (size_t)Backend::MAX_COUNT> g_supportedBackends;
 
 void GlobalInitGraphics(std::span<BackendInitDescriptor> desc) {
 #ifdef RADRAY_ENABLE_VULKAN
-    g_supportedBackends[static_cast<std::underlying_type_t<Backend>>(Backend::Vulkan)] = vulkan::GlobalInitVulkan(desc);
+    g_supportedBackends[(size_t)Backend::Vulkan] = vulkan::GlobalInitVulkan(desc);
 #endif
 }
 

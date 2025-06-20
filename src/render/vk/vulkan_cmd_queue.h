@@ -8,10 +8,15 @@ namespace radray::render::vulkan {
 
 class DeviceVulkan;
 
+struct QueueIndexInFamily {
+    uint32_t Family;
+    uint32_t IndexInFamily;
+};
+
 class QueueVulkan : public CommandQueue {
 public:
-    QueueVulkan(DeviceVulkan* device, VkQueue queue) noexcept
-        : _device(device), _queue(queue) {}
+    QueueVulkan(DeviceVulkan* device, VkQueue queue, QueueIndexInFamily inFamily) noexcept
+        : _device(device), _queue(queue), _inFamily(inFamily) {}
 
     ~QueueVulkan() noexcept override;
 
@@ -30,6 +35,7 @@ public:
 public:
     DeviceVulkan* _device;
     VkQueue _queue;
+    QueueIndexInFamily _inFamily;
 };
 
 }  // namespace radray::render::vulkan

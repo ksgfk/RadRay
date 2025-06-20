@@ -15,7 +15,7 @@ enum class Backend {
     Vulkan,
     Metal,
 
-    MAX_VALUE = Metal + 1
+    MAX_COUNT
 };
 
 enum class TextureFormat {
@@ -95,6 +95,8 @@ enum class QueueType : uint32_t {
     Direct,
     Compute,
     Copy,
+
+    MAX_COUNT
 };
 
 enum class ShaderStage : uint32_t {

@@ -50,7 +50,17 @@ void DeviceVulkan::Destroy() noexcept {
     DeviceVulkanDestroy(*this);
 }
 
-Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept { return nullptr; }
+Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+    if (type >= QueueType::MAX_COUNT) {
+        RADRAY_ERR_LOG("vk invalid queue type: {}", (uint32_t)type);
+        return nullptr;
+    }
+    if (slot >= _queues[(size_t)type].size()) {
+        RADRAY_ERR_LOG("vk invalid queue slot: {}, max {}", slot, _queues[(size_t)type].size());
+        return nullptr;
+    }
+    return _queues[(size_t)type][slot].get();
+}
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept { return nullptr; }
 
@@ -223,72 +233,79 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
     RADRAY_INFO_LOG("vk select device: {}", selectPhyDevice.properties.deviceName);
 
-    const auto invalid = std::numeric_limits<uint32_t>::max();
-    struct QueueFamilyUsage {
-        uint32_t familyIndex;
-        VkQueueFlags flags;
-        uint32_t maxCount;
-        uint32_t usedCount;
-    };
     struct QueueRequest {
+        QueueType rawType;
         VkQueueFlags requiredFlag;
-        uint32_t* outFamily;
-        uint32_t* outIndexInFamily;
+        uint32_t requiredCount;
+        vector<QueueIndexInFamily> queueIndices;
     };
-    vector<VkQueueFamilyProperties> queueFamilyProps;
-    GetVector(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
-    if (queueFamilyProps.empty()) {
-        RADRAY_ERR_LOG("vk no queue family found");
-        return nullptr;
-    }
-    vector<QueueFamilyUsage> families;
-    for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
-        families.push_back({i, queueFamilyProps[i].queueFlags, queueFamilyProps[i].queueCount, 0});
-    }
-    uint32_t graphicsQueue = invalid, computeQueue = invalid, transferQueue = invalid;
-    uint32_t graphicsQueueIndex = invalid, computeQueueIndex = invalid, transferQueueIndex = invalid;
-    QueueRequest requests[] = {
-        {VK_QUEUE_GRAPHICS_BIT, &graphicsQueue, &graphicsQueueIndex},
-        {VK_QUEUE_COMPUTE_BIT, &computeQueue, &computeQueueIndex},
-        {VK_QUEUE_TRANSFER_BIT, &transferQueue, &transferQueueIndex}};
-    for (auto& req : requests) {
-        for (auto& fam : families) {
-            if ((fam.flags & req.requiredFlag) && fam.usedCount < fam.maxCount) {
-                *req.outFamily = fam.familyIndex;
-                *req.outIndexInFamily = fam.usedCount;
-                fam.usedCount++;
-                break;
-            }
-        }
-    }
-    if (graphicsQueue == invalid) {
-        RADRAY_ERR_LOG("vk cannot find graphics queue");
-        return nullptr;
-    }
-    if (computeQueue == invalid) {
-        RADRAY_ERR_LOG("vk cannot find compute queue");
-        return nullptr;
-    }
-    if (transferQueue == invalid) {
-        RADRAY_ERR_LOG("vk cannot find transfer queue");
-        return nullptr;
-    }
-    unordered_map<uint32_t, uint32_t> familyQueueCounts;
-    familyQueueCounts[graphicsQueue]++;
-    familyQueueCounts[computeQueue]++;
-    familyQueueCounts[transferQueue]++;
     vector<VkDeviceQueueCreateInfo> queueInfos;
     vector<float> queuePriorities;
-    for (const auto& [family, count] : familyQueueCounts) {
-        queuePriorities.resize(queuePriorities.size() + count, 1.0f);
-        VkDeviceQueueCreateInfo info{};
-        info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        info.pNext = nullptr;
-        info.flags = 0;
-        info.queueFamilyIndex = family;
-        info.queueCount = count;
-        info.pQueuePriorities = queuePriorities.data() + (queuePriorities.size() - count);
-        queueInfos.push_back(info);
+    vector<QueueRequest> queueRequests;
+    {
+        struct QueueFamilyUsage {
+            uint32_t familyIndex;
+            VkQueueFlags flags;
+            uint32_t maxCount;
+            uint32_t usedCount;
+        };
+        vector<VkQueueFamilyProperties> queueFamilyProps;
+        GetVector(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
+        if (queueFamilyProps.empty()) {
+            RADRAY_ERR_LOG("vk no queue family found");
+            return nullptr;
+        }
+        vector<QueueFamilyUsage> families;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
+            families.push_back({i, queueFamilyProps[i].queueFlags, queueFamilyProps[i].queueCount, 0});
+        }
+        for (const auto& i : desc.Queues) {
+            auto& r = queueRequests.emplace_back();
+            r.rawType = i.Type;
+            r.requiredFlag = MapType(i.Type);
+            if (r.requiredFlag) {
+                r.requiredCount = i.Count;
+            } else {
+                r.requiredCount = 0;
+                RADRAY_WARN_LOG("vk queue type {} not supported", FormatVkQueueFlags(r.requiredFlag));
+            }
+        }
+        for (auto& req : queueRequests) {
+            for (auto& fam : families) {
+                while ((fam.flags & req.requiredFlag) && fam.usedCount < fam.maxCount && req.queueIndices.size() < req.requiredCount) {
+                    req.queueIndices.emplace_back(QueueIndexInFamily{fam.familyIndex, fam.usedCount});
+                    fam.usedCount++;
+                    break;
+                }
+            }
+        }
+        for (const auto& i : queueRequests) {
+            if (i.queueIndices.size() < i.requiredCount) {
+                RADRAY_ERR_LOG("vk not enough queue family for type {}, need {}, got {}", FormatVkQueueFlags(i.requiredFlag), i.requiredCount, i.queueIndices.size());
+                return nullptr;
+            }
+        }
+        unordered_map<uint32_t, uint32_t> familyQueueCounts;
+        for (const auto& i : queueRequests) {
+            for (const auto& j : i.queueIndices) {
+                if (familyQueueCounts.contains(j.Family)) {
+                    familyQueueCounts[j.Family]++;
+                } else {
+                    familyQueueCounts[j.Family] = 1;
+                }
+            }
+        }
+        for (const auto& [family, count] : familyQueueCounts) {
+            queuePriorities.resize(queuePriorities.size() + count, 1.0f);
+            VkDeviceQueueCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            info.pNext = nullptr;
+            info.flags = 0;
+            info.queueFamilyIndex = family;
+            info.queueCount = count;
+            info.pQueuePriorities = queuePriorities.data() + (queuePriorities.size() - count);
+            queueInfos.push_back(info);
+        }
     }
 
     vector<const char*> deviceExts;
@@ -315,13 +332,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
     volkLoadDeviceTable(&deviceR->_vtb, device);
-    VkQueue graphicsQueuePtr = VK_NULL_HANDLE, computeQueuePtr = VK_NULL_HANDLE, transferQueuePtr = VK_NULL_HANDLE;
-    deviceR->CallVk(&VTable::vkGetDeviceQueue, graphicsQueue, graphicsQueueIndex, &graphicsQueuePtr);
-    deviceR->CallVk(&VTable::vkGetDeviceQueue, computeQueue, computeQueueIndex, &computeQueuePtr);
-    deviceR->CallVk(&VTable::vkGetDeviceQueue, transferQueue, transferQueueIndex, &transferQueuePtr);
-    deviceR->_queues[static_cast<size_t>(QueueType::Direct)].emplace_back(make_unique<QueueVulkan>(deviceR.get(), graphicsQueuePtr));
-    deviceR->_queues[static_cast<size_t>(QueueType::Compute)].emplace_back(make_unique<QueueVulkan>(deviceR.get(), computeQueuePtr));
-    deviceR->_queues[static_cast<size_t>(QueueType::Copy)].emplace_back(make_unique<QueueVulkan>(deviceR.get(), transferQueuePtr));
+    for (const auto& i : queueRequests) {
+        for (const auto& j : i.queueIndices) {
+            VkQueue queuePtr = VK_NULL_HANDLE;
+            deviceR->CallVk(&FTbVk::vkGetDeviceQueue, j.Family, j.IndexInFamily, &queuePtr);
+            if (queuePtr == VK_NULL_HANDLE) {
+                RADRAY_ERR_LOG("vk get queue for family {} index {} failed", j.Family, j.IndexInFamily);
+                return nullptr;
+            }
+            auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j);
+            deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
+        }
+    }
     return deviceR;
 }
 

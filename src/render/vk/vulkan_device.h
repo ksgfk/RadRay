@@ -13,7 +13,7 @@ class DeviceVulkan : public Device {
 public:
     VkPhysicalDevice _physicalDevice;
     VkDevice _device;
-    std::array<vector<unique_ptr<QueueVulkan>>, 3> _queues;
+    std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
 
     VolkDeviceTable _vtb;
 
@@ -108,13 +108,13 @@ public:
         uint32_t layerCount) const noexcept override;
 
     template <typename F, typename... Args>
-    auto CallVk(F VolkDeviceTable::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(std::declval<Args>()...)) {
+    constexpr auto CallVk(F FTbVk::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(std::declval<Args>()...)) {
         return ((this->_vtb).*member)(std::forward<Args>(args)...);
     }
 
     template <typename F, typename... Args>
     requires std::is_same_v<std::tuple_element_t<0, typename FunctionTraits<F>::ArgsTuple>, VkDevice>
-    auto CallVk(F VTable::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(this->_device, std::declval<Args>()...)) {
+    constexpr auto CallVk(F FTbVk::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(this->_device, std::declval<Args>()...)) {
         return ((this->_vtb).*member)(this->_device, std::forward<Args>(args)...);
     }
 };

@@ -40,9 +40,15 @@ public:
     std::optional<uint32_t> DeviceIndex;
 };
 
+struct VulkanCommandQueueDescriptor {
+    QueueType Type;
+    uint32_t Count;
+};
+
 class VulkanDeviceDescriptor {
 public:
     std::optional<uint32_t> PhysicalDeviceIndex;
+    std::span<VulkanCommandQueueDescriptor> Queues;
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;

@@ -80,7 +80,6 @@ std::string_view format_as(Backend v) noexcept {
         case Backend::Metal: return "Metal";
         default: return "Unknown";
     }
-    Unreachable();
 }
 
 std::string_view format_as(TextureFormat v) noexcept {
@@ -142,8 +141,8 @@ std::string_view format_as(QueueType v) noexcept {
         case radray::render::QueueType::Direct: return "Direct";
         case radray::render::QueueType::Compute: return "Compute";
         case radray::render::QueueType::Copy: return "Copy";
+        default: return "Unknown";
     }
-    Unreachable();
 }
 
 std::string_view format_as(ShaderBlobCategory v) noexcept {

@@ -117,7 +117,7 @@ public:
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
-    std::array<vector<unique_ptr<CmdQueueD3D12>>, 3> _queues;
+    std::array<vector<unique_ptr<CmdQueueD3D12>>, (size_t)QueueType::MAX_COUNT> _queues;
     unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
