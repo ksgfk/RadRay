@@ -110,7 +110,4 @@ using u8string = std::basic_string<char8_t, std::char_traits<char8_t>, allocator
 using u16string = std::basic_string<char16_t, std::char_traits<char16_t>, allocator<char16_t>>;
 using u32string = std::basic_string<char32_t, std::char_traits<char32_t>, allocator<char32_t>>;
 
-void* Malloc(size_t size) noexcept;
-void Free(void* ptr) noexcept;
-
 }  // namespace radray

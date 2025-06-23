@@ -70,5 +70,14 @@ VkQueueFlags MapType(QueueType v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;
+std::string_view to_string(VkPhysicalDeviceType v) noexcept;
 
 }  // namespace radray::render::vulkan
+
+template <class CharT>
+struct fmt::formatter<VkPhysicalDeviceType, CharT> : fmt::formatter<std::string_view, CharT> {
+    template <class FormatContext>
+    auto format(VkPhysicalDeviceType val, FormatContext& ctx) const {
+        return formatter<std::string_view, CharT>::format(radray::render::vulkan::to_string(val), ctx);
+    }
+};

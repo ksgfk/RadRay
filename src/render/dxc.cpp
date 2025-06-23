@@ -340,7 +340,6 @@ public:
                             }
                         default: return VertexFormat::UNKNOWN;
                     }
-                    return VertexFormat::UNKNOWN;
                 })(spDesc.ComponentType, comps);
                 RADRAY_INFO_LOG(" - attr {}{} {}", vi.Semantic, vi.SemanticIndex, vi.Format);
             }

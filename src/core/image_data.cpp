@@ -6,6 +6,7 @@
 #endif
 
 #include <radray/utility.h>
+#include <radray/platform.h>
 
 namespace radray {
 
@@ -270,7 +271,7 @@ std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings)
 }
 #endif
 
-std::string_view to_string(ImageFormat val) noexcept {
+std::string_view format_as(ImageFormat val) noexcept {
     switch (val) {
         case radray::ImageFormat::R8_BYTE: return "R8_BYTE";
         case radray::ImageFormat::R16_USHORT: return "R16_USHORT";

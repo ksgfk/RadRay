@@ -49,4 +49,15 @@ std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept {
     }
 }
 
+std::string_view to_string(enum VkPhysicalDeviceType v) noexcept {
+    switch (v) {
+        case VK_PHYSICAL_DEVICE_TYPE_OTHER: return "Other";
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated";
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "Discrete";
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "Virtual";
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
+        default: return "Unknown";
+    }
+}
+
 }  // namespace radray::render::vulkan

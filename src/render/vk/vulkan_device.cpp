@@ -32,7 +32,7 @@ static Nullable<unique_ptr<InstanceVulkan>> g_instance;
 
 static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
     if (d.IsValid()) {
-        d._vtb.vkDestroyDevice(d._device, g_instance->GetAllocationCallbacks());
+        d.CallVk(&FTbVk::vkDestroyDevice, g_instance->GetAllocationCallbacks());
         d._device = VK_NULL_HANDLE;
         d._physicalDevice = VK_NULL_HANDLE;
     }
@@ -328,6 +328,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
         RADRAY_ERR_LOG("vk create device fail");
         return nullptr;
     }
+    RADRAY_INFO_LOG("========== Feature ==========");
     auto deviceR = make_shared<DeviceVulkan>();
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
@@ -344,6 +345,38 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
+    {
+        const auto& props = selectPhyDevice.properties;
+        uint32_t driverVersion = props.driverVersion;
+        uint32_t vendorID = props.vendorID;
+        string verStr;
+        // https://pcisig.com/membership/member-companies
+        switch (vendorID) {
+            case 0x10DE: {  // NVIDIA
+                uint32_t major = (driverVersion >> 22) & 0x3ff;
+                uint32_t minor = (driverVersion >> 14) & 0x0ff;
+                uint32_t patch = (driverVersion >> 6) & 0x0ff;
+                uint32_t build = driverVersion & 0x3f;
+                verStr = radray::format("{}.{}.{}.{}", major, minor, patch, build);
+                break;
+            }
+            case 0x8086:  // Intel
+            case 0x1002:  // AMD
+            default: {
+                uint32_t variant = VK_API_VERSION_VARIANT(driverVersion);
+                uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
+                uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
+                uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
+                verStr = radray::format("{}.{}.{}.{}", variant, major, minor, patch);
+                break;
+            }
+        }
+        RADRAY_INFO_LOG("Driver Version: {}", verStr);
+    }
+    {
+        RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
+    }
+    RADRAY_INFO_LOG("=============================");
     return deviceR;
 }
 

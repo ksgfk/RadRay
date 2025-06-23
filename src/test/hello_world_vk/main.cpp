@@ -17,7 +17,9 @@ int main() {
         {QueueType::Compute, 1},
         {QueueType::Copy, 1}};
     vkDesc.Queues = queueDesc;
-    CreateDevice(vkDesc);
+    auto device = CreateDevice(vkDesc).Unwrap();
+    auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
+    device->Destroy();
     GlobalTerminateGraphics();
     return 0;
 }

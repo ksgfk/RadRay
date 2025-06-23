@@ -65,14 +65,6 @@ bool IsPNG(std::istream& stream);
 std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
 #endif
 
-std::string_view to_string(ImageFormat val) noexcept;
+std::string_view format_as(ImageFormat val) noexcept;
 
 }  // namespace radray
-
-template <class CharT>
-struct fmt::formatter<radray::ImageFormat, CharT> : fmt::formatter<std::string_view, CharT> {
-    template <class FormatContext>
-    auto format(radray::ImageFormat val, FormatContext& ctx) const {
-        return formatter<std::string_view, CharT>::format(to_string(val), ctx);
-    }
-};
