@@ -1,6 +1,7 @@
 #include <radray/logger.h>
 
 #include <radray/render/device.h>
+#include <radray/render/fence.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -19,6 +20,8 @@ int main() {
     vkDesc.Queues = queueDesc;
     auto device = CreateDevice(vkDesc).Unwrap();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
+    auto fence = device->CreateFence().Unwrap();
+    fence->Destroy();
     device->Destroy();
     GlobalTerminateGraphics();
     return 0;

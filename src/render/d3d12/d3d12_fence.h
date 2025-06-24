@@ -12,7 +12,7 @@ public:
         Win32Event event) noexcept
         : _fence(std::move(fence)),
           _event(std::move(event)) {}
-    ~FenceD3D12() noexcept override = default;
+    ~FenceD3D12() noexcept override;
 
     bool IsValid() const noexcept override { return _fence.Get() != nullptr; }
     void Destroy() noexcept override;

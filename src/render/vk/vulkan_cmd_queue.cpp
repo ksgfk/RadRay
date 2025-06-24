@@ -2,14 +2,24 @@
 
 namespace radray::render::vulkan {
 
+static void DestroyQueueVulkan(QueueVulkan& q) noexcept {
+    if (q.IsValid()) {
+        q._device = nullptr;
+        q._queue = VK_NULL_HANDLE;
+    }
+}
+
 QueueVulkan::~QueueVulkan() noexcept {
+    DestroyQueueVulkan(*this);
 }
 
 bool QueueVulkan::IsValid() const noexcept {
-    return false;
+    return _device != nullptr && _queue != VK_NULL_HANDLE;
 }
 
-void QueueVulkan::Destroy() noexcept {}
+void QueueVulkan::Destroy() noexcept {
+    DestroyQueueVulkan(*this);
+}
 
 Nullable<shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept {
     return nullptr;

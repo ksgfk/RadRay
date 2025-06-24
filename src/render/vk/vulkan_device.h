@@ -117,6 +117,8 @@ public:
     constexpr auto CallVk(F FTbVk::* member, Args&&... args) const -> decltype(((this->_vtb).*member)(this->_device, std::declval<Args>()...)) {
         return ((this->_vtb).*member)(this->_device, std::forward<Args>(args)...);
     }
+
+    const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 };
 
 Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& desc);

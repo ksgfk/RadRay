@@ -1,5 +1,7 @@
 #include "vulkan_device.h"
 
+#include "vulkan_fence.h"
+
 namespace radray::render::vulkan {
 
 class InstanceVulkan {
@@ -62,7 +64,19 @@ Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t sl
     return _queues[(size_t)type][slot].get();
 }
 
-Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept { return nullptr; }
+Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.pNext = nullptr;
+    fenceInfo.flags = 0;
+    VkFence fence = VK_NULL_HANDLE;
+    if (auto vr = CallVk(&FTbVk::vkCreateFence, &fenceInfo, g_instance->GetAllocationCallbacks(), &fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk create fence failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<FenceVulkan>(this, fence);
+}
 
 Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(
     std::span<const byte> blob,
@@ -139,6 +153,10 @@ void DeviceVulkan::CopyDataToUploadBuffer(
     uint32_t mipLevel,
     uint32_t arrayLayer,
     uint32_t layerCount) const noexcept {}
+
+const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
+    return g_instance->GetAllocationCallbacks();
+}
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -344,6 +362,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
             auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
+    }
+    {
+        auto apiVersion = selectPhyDevice.properties.apiVersion;
+        RADRAY_INFO_LOG("Vulkan API Version: {}.{}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion));
     }
     {
         const auto& props = selectPhyDevice.properties;
@@ -569,8 +591,9 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
         SetVkStructPtrToLast(&createInfo, &debugCreateInfo);
     }
     VkInstance instance = VK_NULL_HANDLE;
-    if (vkCreateInstance(&createInfo, allocCbPtr, &instance) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk call vkCreateInstance failed");
+    if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateInstance failed: {}", vr);
         return false;
     }
     volkLoadInstance(instance);
