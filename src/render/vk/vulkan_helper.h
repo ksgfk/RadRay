@@ -15,6 +15,9 @@
 
 namespace radray::render::vulkan {
 
+class DeviceVulkan;
+class FenceVulkan;
+
 using FTbVk = VolkDeviceTable;
 
 template <typename T>

@@ -6,8 +6,6 @@
 
 namespace radray::render::vulkan {
 
-class DeviceVulkan;
-
 struct QueueIndexInFamily {
     uint32_t Family;
     uint32_t IndexInFamily;
@@ -36,6 +34,7 @@ public:
     DeviceVulkan* _device;
     VkQueue _queue;
     QueueIndexInFamily _inFamily;
+    shared_ptr<FenceVulkan> _fence;
 };
 
 }  // namespace radray::render::vulkan

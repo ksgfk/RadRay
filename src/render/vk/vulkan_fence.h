@@ -5,8 +5,6 @@
 
 namespace radray::render::vulkan {
 
-class DeviceVulkan;
-
 class FenceVulkan : public Fence {
 public:
     FenceVulkan(DeviceVulkan* device, VkFence fence) noexcept

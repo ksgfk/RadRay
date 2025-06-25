@@ -2,16 +2,19 @@
 
 namespace radray::render::d3d12 {
 
-FenceD3D12::~FenceD3D12() noexcept {
-    if (IsValid()) {
-        _fence = nullptr;
-        _event.Destroy();
+static void DestroyFence(FenceD3D12& f) noexcept {
+    if (f.IsValid()) {
+        f._fence = nullptr;
+        f._event.Destroy();
     }
 }
 
+FenceD3D12::~FenceD3D12() noexcept {
+    DestroyFence(*this);
+}
+
 void FenceD3D12::Destroy() noexcept {
-    _fence = nullptr;
-    _event.Destroy();
+    DestroyFence(*this);
 }
 
 void FenceD3D12::Wait() noexcept {
