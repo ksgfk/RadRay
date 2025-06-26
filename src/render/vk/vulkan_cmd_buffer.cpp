@@ -6,15 +6,16 @@
 
 namespace radray::render::vulkan {
 
-static void DestroyCommandPoolVulkan(CommandBufferVulkan& cmdBuffer) noexcept {
+static void DestroyCommandBufferVulkan(CommandBufferVulkan& cmdBuffer) noexcept {
     if (cmdBuffer.IsValid()) {
         cmdBuffer._device->CallVk(&FTbVk::vkFreeCommandBuffers, cmdBuffer._pool->_pool, 1, &cmdBuffer._cmdBuffer);
-        cmdBuffer._pool = VK_NULL_HANDLE;
+        cmdBuffer._cmdBuffer = VK_NULL_HANDLE;
+        cmdBuffer._pool = nullptr;
     }
 }
 
 CommandBufferVulkan::~CommandBufferVulkan() noexcept {
-    DestroyCommandPoolVulkan(*this);
+    DestroyCommandBufferVulkan(*this);
 }
 
 bool CommandBufferVulkan::IsValid() const noexcept {
@@ -22,7 +23,7 @@ bool CommandBufferVulkan::IsValid() const noexcept {
 }
 
 void CommandBufferVulkan::Destroy() noexcept {
-    DestroyCommandPoolVulkan(*this);
+    DestroyCommandBufferVulkan(*this);
 }
 
 void CommandBufferVulkan::Begin() noexcept {}

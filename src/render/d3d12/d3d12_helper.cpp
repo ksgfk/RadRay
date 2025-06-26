@@ -247,8 +247,8 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
         case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;
         case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
         case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
+        default: return D3D12_COMMAND_LIST_TYPE_NONE;
     }
-    Unreachable();
 }
 
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept {

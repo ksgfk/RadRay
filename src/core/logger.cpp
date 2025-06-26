@@ -10,6 +10,7 @@ static spdlog::logger g_logger = []() {
     auto sink = make_shared<spdlog::sinks::stdout_color_sink_mt>();
     spdlog::logger l{"console", sink};
     l.flush_on(spdlog::level::err);
+    l.set_pattern("%^[%Y-%m-%d %T.%e][%n][%l][%@]%$ %v");
 #if defined(RADRAY_IS_DEBUG)
     spdlog::level::level_enum level = spdlog::level::debug;
 #else
@@ -31,11 +32,15 @@ static spdlog::level::level_enum _ToSpdlogLogLevel(LogLevel level) {
     }
 }
 
-void Log(SourceLocation loc, LogLevel lvl, fmt::string_view msg) noexcept {
+void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept {
     g_logger.log(
-        spdlog::source_loc{loc.filename, loc.line, loc.funcname},
+        spdlog::source_loc{loc.file_name(), (int)loc.line(), loc.function_name()},
         _ToSpdlogLogLevel(lvl),
         msg);
+}
+
+bool ShouldLog(LogLevel lvl) noexcept {
+    return g_logger.should_log(_ToSpdlogLogLevel(lvl));
 }
 
 }  // namespace radray

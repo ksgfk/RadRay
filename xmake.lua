@@ -46,7 +46,7 @@ option_end()
 
 set_policy("build.ccache", false)
 set_policy("build.warning", true)
-if not is_mode("debug") then
+if is_mode("release") then
     set_policy("build.optimization.lto", true)
 end
 
