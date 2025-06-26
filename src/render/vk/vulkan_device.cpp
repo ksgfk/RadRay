@@ -1,6 +1,7 @@
 #include "vulkan_device.h"
 
 #include "vulkan_fence.h"
+#include "vulkan_shader_module.h"
 
 namespace radray::render::vulkan {
 
@@ -83,7 +84,25 @@ Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(
     ShaderBlobCategory category,
     ShaderStage stage,
     std::string_view entryPoint,
-    std::string_view name) noexcept { return nullptr; }
+    std::string_view name) noexcept {
+    if (category != ShaderBlobCategory::SPIRV) {
+        RADRAY_ERR_LOG("vk only support SPIRV");
+        return nullptr;
+    }
+    VkShaderModuleCreateInfo moduleInfo{
+        VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        nullptr,
+        0,
+        blob.size(),
+        reinterpret_cast<const uint32_t*>(blob.data())};
+    VkShaderModule shaderModule;
+    if (auto vr = CallVk(&FTbVk::vkCreateShaderModule, &moduleInfo, g_instance->GetAllocationCallbacks(), &shaderModule);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateShaderModule failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<ShaderModuleVulkan>(this, shaderModule, string{name}, string{entryPoint}, stage, category);
+}
 
 Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& info) noexcept { return nullptr; }
 
