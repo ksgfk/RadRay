@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <cctype>
+#include <charconv>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
@@ -42,7 +43,7 @@ static std::string_view TrimEnd(std::string_view str) noexcept {
 }
 
 template <size_t Count>
-static std::pair<bool, size_t> ParseNumberArray(std::string_view str, std::array<float, Count>& arr) noexcept {
+static std::optional<size_t> ParseNumberArray(std::string_view str, std::array<float, Count>& arr) noexcept {
     std::string_view next = TrimEnd(str);
     size_t count = 0;
     while (count < arr.size()) {
@@ -52,10 +53,10 @@ static std::pair<bool, size_t> ParseNumberArray(std::string_view str, std::array
             isEnd = true;
         }
         std::string_view part = isEnd ? next : next.substr(0, partEnd);
-        char* endPtr = nullptr;
-        float result = std::strtof(part.data(), &endPtr);
-        if (endPtr == part.data()) {
-            return std::make_pair(false, 0);
+        float result;
+        auto [_, ee] = std::from_chars(&*part.begin(), &*part.end(), result, std::chars_format::general);
+        if (ee != std::errc{}) {
+            return std::nullopt;
         }
         arr[count++] = result;
         if (isEnd) {
@@ -63,15 +64,15 @@ static std::pair<bool, size_t> ParseNumberArray(std::string_view str, std::array
         }
         next = TrimStart(next.substr(partEnd));
     }
-    return std::make_pair(true, count);
+    return std::make_optional(count);
 }
 
 static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, int& vn) noexcept {
     switch (mode) {
         case 1: {
-            char* endPtr = nullptr;
-            auto v_ = std::strtol(data.data(), &endPtr, 10);
-            if (endPtr == data.data() || v_ >= std::numeric_limits<int>::max()) {
+            int v_ = 0;
+            auto [_, ee] = std::from_chars(&*data.begin(), &*data.end(), v_);
+            if (ee != std::errc{}) {
                 return false;
             }
             v = static_cast<int>(v_);
@@ -85,16 +86,20 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
                 return false;
             }
             std::string_view vData = data.substr(0, delimiter);
-            std::string_view vtData = data.substr(delimiter + 1);
-            char* endPtr = nullptr;
-            auto v_ = std::strtol(vData.data(), &endPtr, 10);
-            if (endPtr == vData.data() || v_ >= std::numeric_limits<int>::max()) {
-                return false;
+            int v_ = 0;
+            {
+                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
-            endPtr = nullptr;
-            auto vt_ = std::strtol(vtData.data(), &endPtr, 10);
-            if (endPtr == vtData.data() || vt_ >= std::numeric_limits<int>::max()) {
-                return false;
+            std::string_view vtData = data.substr(delimiter + 1);
+            int vt_ = 0;
+            {
+                auto [_, ee] = std::from_chars(&*vtData.begin(), &*vtData.end(), vt_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
             v = static_cast<int>(v_);
             vt = static_cast<int>(vt_);
@@ -110,20 +115,24 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             std::string_view vData = data.substr(0, first);
             std::string_view vtData = data.substr(first + 1, second - first - 1);
             std::string_view vnData = data.substr(second + 1);
-            char* endPtr = nullptr;
-            auto v_ = std::strtol(vData.data(), &endPtr, 10);
-            if (endPtr == vData.data() || v_ >= std::numeric_limits<int>::max()) {
-                return false;
+            int v_ = 0, vt_ = 0, vn_ = 0;
+            {
+                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
-            endPtr = nullptr;
-            auto vt_ = std::strtol(vtData.data(), &endPtr, 10);
-            if (endPtr == vtData.data() || vt_ >= std::numeric_limits<int>::max()) {
-                return false;
+            {
+                auto [_, ee] = std::from_chars(&*vtData.begin(), &*vtData.end(), vt_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
-            endPtr = nullptr;
-            auto vn_ = std::strtol(vnData.data(), &endPtr, 10);
-            if (endPtr == vnData.data() || vn_ >= std::numeric_limits<int>::max()) {
-                return false;
+            {
+                auto [_, ee] = std::from_chars(&*vnData.begin(), &*vnData.end(), vn_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
             v = static_cast<int>(v_);
             vt = static_cast<int>(vt_);
@@ -137,15 +146,18 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             }
             std::string_view vData = data.substr(0, delimiter);
             std::string_view vnData = data.substr(delimiter + 2);
-            char* endPtr = nullptr;
-            auto v_ = std::strtol(vData.data(), &endPtr, 10);
-            if (endPtr == vData.data() || v_ >= std::numeric_limits<int>::max()) {
-                return false;
+            int v_ = 0, vn_ = 0;
+            {
+                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
-            endPtr = nullptr;
-            auto vn_ = std::strtol(vnData.data(), &endPtr, 10);
-            if (endPtr == vnData.data() || vn_ >= std::numeric_limits<int>::max()) {
-                return false;
+            {
+                auto [_, ee] = std::from_chars(&*vnData.begin(), &*vnData.end(), vn_);
+                if (ee != std::errc{}) {
+                    return false;
+                }
             }
             v = static_cast<int>(v_);
             vt = 0;
@@ -269,30 +281,36 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
     std::string_view data = TrimStart(view.substr(cmdEnd));
     if (cmd == "v") {
         std::array<float, 4> result;
-        auto [isSuccess, full] = ParseNumberArray(data, result);
-        if (!isSuccess) {
+        auto fullOpt = ParseNumberArray(data, result);
+        if (!fullOpt.has_value()) {
             _error += radray::format("at line {}: can't parse vertex {}\n", lineNum, data);
+            _pos.emplace_back(Eigen::Vector3f::Zero());
+        } else {
+            _pos.emplace_back(SelectData<3>(result, fullOpt.value()));
         }
-        _pos.emplace_back(SelectData<3>(result, full));
     } else if (cmd == "vt") {
         std::array<float, 3> result;
-        auto [isSuccess, full] = ParseNumberArray(data, result);
-        if (!isSuccess) {
-            _error += fmt::format("at line {}: can't parse uv {}\n", lineNum, data);
+        auto fullOpt = ParseNumberArray(data, result);
+        if (!fullOpt.has_value()) {
+            _error += radray::format("at line {}: can't parse uv {}\n", lineNum, data);
+            _uv.emplace_back(Eigen::Vector2f::Zero());
+        } else {
+            _uv.emplace_back(SelectData<2>(result, fullOpt.value()));
         }
-        _uv.emplace_back(SelectData<2>(result, full));
     } else if (cmd == "vn") {
         std::array<float, 3> result;
-        auto [isSuccess, full] = ParseNumberArray(data, result);
-        if (!isSuccess) {
-            _error += fmt::format("at line {}: can't parse normal {}\n", lineNum, data);
+        auto fullOpt = ParseNumberArray(data, result);
+        if (!fullOpt.has_value()) {
+            _error += radray::format("at line {}: can't parse normal {}\n", lineNum, data);
+            _normal.emplace_back(Eigen::Vector3f::Zero());
+        } else {
+            _normal.emplace_back(SelectData<3>(result, fullOpt.value()));
         }
-        _normal.emplace_back(SelectData<3>(result, full));
     } else if (cmd == "f") {
         WavefrontObjFace face;
         bool isSuccess = ParseFace(data, face);
         if (!isSuccess) {
-            _error += fmt::format("at line {}: can't parse face {}\n", lineNum, data);
+            _error += radray::format("at line {}: can't parse face {}\n", lineNum, data);
         }
         size_t index = _faces.size();
         _faces.emplace_back(face);
@@ -324,13 +342,13 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
             } else if (v == "0") {
                 _objects.rbegin()->IsSmooth = false;
             } else {
-                _error += fmt::format("at line {}: unknown smooth value {}\n", lineNum, v);
+                _error += radray::format("at line {}: unknown smooth value {}\n", lineNum, v);
             }
         }
     } else if (cmd == "#") {
         // no op
     } else {
-        _error += fmt::format("at line {}: unknown command {}\n", lineNum, cmd);
+        _error += radray::format("at line {}: unknown command {}\n", lineNum, cmd);
     }
 }
 

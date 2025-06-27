@@ -239,7 +239,6 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept {
         case DXGI_FORMAT_FORCE_UINT: 
         default: return DXGI_FORMAT_UNKNOWN;
     }
-    Unreachable();
 }
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {

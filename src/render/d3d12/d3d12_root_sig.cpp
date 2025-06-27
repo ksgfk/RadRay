@@ -57,8 +57,8 @@ void GpuDescriptorHeapView::SetResources(uint32_t start, std::span<ResourceView*
     if (views.size() > _heapView.Length - start) {
         RADRAY_WARN_LOG("d3d12 set desc view out of range. all {}, start {}, input {}", _heapView.Length, start, views.size());
     }
-    size_t len = std::min(_heapView.Length, (UINT)views.size());
-    for (size_t i = 0; i < len; i++) {
+    UINT len = std::min(_heapView.Length, (UINT)views.size());
+    for (UINT i = 0; i < len; i++) {
         auto view = views[i];
         auto rawBase = static_cast<ResourceViewD3D12*>(view);
         switch (rawBase->GetViewType()) {
