@@ -59,6 +59,8 @@ class RootSignature : public RenderBase {
 public:
     virtual ~RootSignature() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
+
     virtual std::span<const RootConstantInfo> GetRootConstants() const noexcept = 0;
 
     virtual std::span<const RootDescriptorInfo> GetRootDescriptors() const noexcept = 0;

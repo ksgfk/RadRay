@@ -27,7 +27,7 @@ public:
     public:
         string Name;
         ShaderResourceType Type;
-        TextureDimension Dim;
+        TextureViewDimension Dim;
         uint32_t Space;
         uint32_t BindPoint;
         uint32_t BindCount;
@@ -95,6 +95,7 @@ public:
     explicit Dxc(unique_ptr<Impl> impl) noexcept : _impl(std::move(impl)) {}
     ~Dxc() noexcept override = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
     bool IsValid() const noexcept override { return _impl != nullptr; }
     void Destroy() noexcept override;
 

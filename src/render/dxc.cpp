@@ -276,20 +276,20 @@ public:
                 }
                 Unreachable();
             })(bindDesc.Type, bindDesc.Dimension);
-            br.Dim = ([](D3D_SRV_DIMENSION dim) noexcept -> TextureDimension {
+            br.Dim = ([](D3D_SRV_DIMENSION dim) noexcept -> TextureViewDimension {
                 switch (dim) {
-                    case D3D_SRV_DIMENSION_UNKNOWN: return TextureDimension::UNKNOWN;
-                    case D3D_SRV_DIMENSION_BUFFER: return TextureDimension::UNKNOWN;
-                    case D3D_SRV_DIMENSION_TEXTURE1D: return TextureDimension::Dim1D;
-                    case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return TextureDimension::Dim1DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE2D: return TextureDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return TextureDimension::Dim2DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE2DMS: return TextureDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return TextureDimension::Dim2DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE3D: return TextureDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURECUBE: return TextureDimension::Cube;
-                    case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return TextureDimension::CubeArray;
-                    case D3D_SRV_DIMENSION_BUFFEREX: return TextureDimension::UNKNOWN;
+                    case D3D_SRV_DIMENSION_UNKNOWN: return TextureViewDimension::UNKNOWN;
+                    case D3D_SRV_DIMENSION_BUFFER: return TextureViewDimension::UNKNOWN;
+                    case D3D_SRV_DIMENSION_TEXTURE1D: return TextureViewDimension::Dim1D;
+                    case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return TextureViewDimension::Dim1DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE2D: return TextureViewDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return TextureViewDimension::Dim2DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE2DMS: return TextureViewDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return TextureViewDimension::Dim2DArray;
+                    case D3D_SRV_DIMENSION_TEXTURE3D: return TextureViewDimension::Dim2D;
+                    case D3D_SRV_DIMENSION_TEXTURECUBE: return TextureViewDimension::Cube;
+                    case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return TextureViewDimension::CubeArray;
+                    case D3D_SRV_DIMENSION_BUFFEREX: return TextureViewDimension::UNKNOWN;
                 }
                 Unreachable();
             })(bindDesc.Dimension);

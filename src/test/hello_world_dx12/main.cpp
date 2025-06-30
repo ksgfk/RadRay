@@ -246,9 +246,9 @@ public:
             auto upload = device->CreateBuffer(
                 sizeof(vertices),
                 ResourceType::Buffer,
-                ResourceUsage::Upload,
+                ResourceMemoryUsage::Upload,
                 ResourceState::GenericRead,
-                ResourceMemoryTip::None);
+                ResourceMemoryHint::None);
             {
                 auto ptr = upload->Map(0, upload->GetSize());
                 std::memcpy(ptr.Value(), vertices, sizeof(vertices));
@@ -257,9 +257,9 @@ public:
             verts = device->CreateBuffer(
                               sizeof(vertices),
                               ResourceType::Buffer,
-                              ResourceUsage::Default,
+                              ResourceMemoryUsage::Default,
                               ResourceState::Common,
-                              ResourceMemoryTip::None)
+                              ResourceMemoryHint::None)
                         .Unwrap();
             cmdBuffer->Begin();
             {
@@ -308,7 +308,7 @@ public:
                                     rt,
                                     ResourceType::RenderTarget,
                                     TextureFormat::RGBA8_UNORM,
-                                    TextureDimension::Dim2D,
+                                    TextureViewDimension::Dim2D,
                                     0, 0,
                                     0, 0)
                               .Unwrap();

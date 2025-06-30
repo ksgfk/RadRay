@@ -11,6 +11,8 @@ public:
 
     ~CommandPoolVulkan() noexcept override;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;

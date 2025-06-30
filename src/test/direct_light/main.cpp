@@ -145,13 +145,13 @@ public:
                                DepthStencilClearValue{1.0f, 0},
                                ResourceType::DepthStencil,
                                ResourceState::Common,
-                               ResourceMemoryTip::None)
+                               ResourceMemoryHint::None)
                         .Unwrap();
         _depthView = _device->CreateTextureView(
                                 _depthTex.get(),
                                 ResourceType::DepthStencil,
                                 TextureFormat::D24_UNORM_S8_UINT,
-                                TextureDimension::Dim2D,
+                                TextureViewDimension::Dim2D,
                                 0,
                                 0,
                                 0,
@@ -190,7 +190,7 @@ public:
                                            ColorClearValue{},
                                            ResourceType::Texture,
                                            ResourceState::Common,
-                                           ResourceMemoryTip::Dedicated,
+                                           ResourceMemoryHint::Dedicated,
                                            "baseColor_tex")
                                     .Unwrap();
             _textures.emplace_back(baseColorTex);
@@ -198,9 +198,9 @@ public:
             auto baseColorUpload = _device->CreateBuffer(
                                               baseColorUploadSize,
                                               ResourceType::Buffer,
-                                              ResourceUsage::Upload,
+                                              ResourceMemoryUsage::Upload,
                                               ResourceState::GenericRead,
-                                              ResourceMemoryTip::None)
+                                              ResourceMemoryHint::None)
                                        .Unwrap();
             _device->CopyDataToUploadBuffer(baseColorUpload.get(), baseColorData.Data.get(), baseColorData.GetSize(), 0, 0, 1);
 
@@ -219,7 +219,7 @@ public:
                                            ColorClearValue{},
                                            ResourceType::Texture,
                                            ResourceState::Common,
-                                           ResourceMemoryTip::Dedicated,
+                                           ResourceMemoryHint::Dedicated,
                                            "baseColor_tex")
                                     .Unwrap();
             _textures.emplace_back(normalMapTex);
@@ -227,9 +227,9 @@ public:
             auto normalMapUpload = _device->CreateBuffer(
                                               normalMapUploadSize,
                                               ResourceType::Buffer,
-                                              ResourceUsage::Upload,
+                                              ResourceMemoryUsage::Upload,
                                               ResourceState::GenericRead,
-                                              ResourceMemoryTip::None)
+                                              ResourceMemoryHint::None)
                                        .Unwrap();
             _device->CopyDataToUploadBuffer(normalMapUpload.get(), normalMapData.Data.get(), normalMapData.GetSize(), 0, 0, 1);
 
@@ -251,26 +251,26 @@ public:
             tm._vb = _device->CreateBuffer(
                                 meshVd.VertexSize,
                                 ResourceType::Buffer,
-                                ResourceUsage::Default,
+                                ResourceMemoryUsage::Default,
                                 ResourceState::VertexAndConstantBuffer,
-                                ResourceMemoryTip::None,
+                                ResourceMemoryHint::None,
                                 std::string_view{(char*)vbName.data(), vbName.size()})
                          .Unwrap();
             auto ibName = tm.name + u8"_ib";
             tm._ib = _device->CreateBuffer(
                                 meshVd.IndexSize,
                                 ResourceType::Buffer,
-                                ResourceUsage::Default,
+                                ResourceMemoryUsage::Default,
                                 ResourceState::IndexBuffer,
-                                ResourceMemoryTip::None,
+                                ResourceMemoryHint::None,
                                 std::string_view{(char*)ibName.data(), ibName.size()})
                          .Unwrap();
             tm._upVb = _device->CreateBuffer(
                                   meshVd.VertexSize,
                                   ResourceType::Buffer,
-                                  ResourceUsage::Upload,
+                                  ResourceMemoryUsage::Upload,
                                   ResourceState::GenericRead,
-                                  ResourceMemoryTip::None)
+                                  ResourceMemoryHint::None)
                            .Unwrap();
             auto ptrVb = tm._upVb->Map(0, tm._upVb->GetSize()).Unwrap();
             std::memcpy(ptrVb, meshVd.VertexData.get(), meshVd.VertexSize);
@@ -278,9 +278,9 @@ public:
             tm._upIb = _device->CreateBuffer(
                                   meshVd.IndexSize,
                                   ResourceType::Buffer,
-                                  ResourceUsage::Upload,
+                                  ResourceMemoryUsage::Upload,
                                   ResourceState::GenericRead,
-                                  ResourceMemoryTip::None)
+                                  ResourceMemoryHint::None)
                            .Unwrap();
             auto ptrIb = tm._upIb->Map(0, tm._upIb->GetSize()).Unwrap();
             std::memcpy(ptrIb, meshVd.IndexData.get(), meshVd.IndexSize);
@@ -358,7 +358,7 @@ public:
                                             baseColorTex.get(),
                                             ResourceType::Texture,
                                             TextureFormat::RGBA8_UNORM,
-                                            TextureDimension::Dim2D,
+                                            TextureViewDimension::Dim2D,
                                             0,
                                             0,
                                             0,
@@ -368,7 +368,7 @@ public:
                                             normalMapTex.get(),
                                             ResourceType::Texture,
                                             TextureFormat::RGBA8_UNORM,
-                                            TextureDimension::Dim2D,
+                                            TextureViewDimension::Dim2D,
                                             0,
                                             0,
                                             0,
@@ -455,9 +455,9 @@ public:
                 mesh._cb = _device->CreateBuffer(
                                       CBUFFER_SIZE,
                                       ResourceType::Buffer,
-                                      ResourceUsage::Upload,
+                                      ResourceMemoryUsage::Upload,
                                       ResourceState::GenericRead,
-                                      ResourceMemoryTip::None,
+                                      ResourceMemoryHint::None,
                                       std::string_view{(char*)cbName.data(), cbName.size()})
                                .Unwrap();
                 // auto ptrCb = mesh._cb->Map(0, CBUFFER_SIZE).Unwrap();
@@ -633,7 +633,7 @@ public:
                                  rt,
                                  ResourceType::RenderTarget,
                                  TextureFormat::RGBA8_UNORM,
-                                 TextureDimension::Dim2D,
+                                 TextureViewDimension::Dim2D,
                                  0,
                                  0,
                                  0,

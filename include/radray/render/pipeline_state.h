@@ -170,11 +170,15 @@ public:
 class PipelineState : public RenderBase {
 public:
     ~PipelineState() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::PipelineState; }
 };
 
 class GraphicsPipelineState : public PipelineState {
 public:
     ~GraphicsPipelineState() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::GraphicsPipelineState; }
 };
 
 }  // namespace radray::render

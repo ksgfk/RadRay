@@ -25,6 +25,8 @@ class Sampler : public RenderBase {
 public:
     ~Sampler() noexcept override = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
+
     virtual SamplerDescriptor GetDesc() const noexcept = 0;
 };
 

@@ -121,9 +121,9 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
 Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(
     uint64_t size,
     ResourceType type,
-    ResourceUsage usage,
+    ResourceMemoryUsage usage,
     ResourceStates initState,
-    ResourceMemoryTips tips,
+    ResourceMemoryHints tips,
     std::string_view name) noexcept { return nullptr; }
 
 Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
@@ -138,7 +138,7 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
     ClearValue clearValue,
     ResourceType type,
     ResourceStates initState,
-    ResourceMemoryTips tips,
+    ResourceMemoryHints tips,
     std::string_view) noexcept {
     RADRAY_UNUSED(sampleQuality);
 
@@ -195,6 +195,10 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
     return nullptr;
 }
 
+Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDescriptor& desc) noexcept {
+    return nullptr;
+}
+
 Nullable<shared_ptr<ResourceView>> DeviceVulkan::CreateBufferView(
     Buffer* buffer,
     ResourceType type,
@@ -207,7 +211,7 @@ Nullable<shared_ptr<ResourceView>> DeviceVulkan::CreateTextureView(
     Texture* texture,
     ResourceType type,
     TextureFormat format,
-    TextureDimension dim,
+    TextureViewDimension dim,
     uint32_t baseArrayLayer,
     uint32_t arrayLayerCount,
     uint32_t baseMipLevel,

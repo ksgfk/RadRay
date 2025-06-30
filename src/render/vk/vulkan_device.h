@@ -55,9 +55,9 @@ public:
     Nullable<shared_ptr<Buffer>> CreateBuffer(
         uint64_t size,
         ResourceType type,
-        ResourceUsage usage,
+        ResourceMemoryUsage usage,
         ResourceStates initState,
-        ResourceMemoryTips tips,
+        ResourceMemoryHints tips,
         std::string_view name = {}) noexcept override;
 
     Nullable<shared_ptr<Texture>> CreateTexture(
@@ -72,8 +72,10 @@ public:
         ClearValue clearValue,
         ResourceType type,
         ResourceStates initState,
-        ResourceMemoryTips tips,
+        ResourceMemoryHints tips,
         std::string_view name = {}) noexcept override;
+
+    Nullable<shared_ptr<Texture>> CreateTexture(const TextureCreateDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<ResourceView>> CreateBufferView(
         Buffer* buffer,
@@ -87,7 +89,7 @@ public:
         Texture* texture,
         ResourceType type,
         TextureFormat format,
-        TextureDimension dim,
+        TextureViewDimension dim,
         uint32_t baseArrayLayer,
         uint32_t arrayLayerCount,
         uint32_t baseMipLevel,

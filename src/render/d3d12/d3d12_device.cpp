@@ -957,9 +957,9 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(
 Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     uint64_t size,
     ResourceType type,
-    ResourceUsage usage,
+    ResourceMemoryUsage usage,
     ResourceStates initState,
-    ResourceMemoryTips tips,
+    ResourceMemoryHints tips,
     std::string_view name) noexcept {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -980,7 +980,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     if (type == ResourceType::BufferRW) {
         desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
-    if (usage == ResourceUsage::Readback) {
+    if (usage == ResourceMemoryUsage::Readback) {
         desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
     }
     UINT64 paddedSize;
@@ -991,15 +991,15 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     }
     D3D12_RESOURCE_STATES rawInitState;
     switch (usage) {
-        case ResourceUsage::Default: rawInitState = D3D12_RESOURCE_STATE_COMMON; break;
-        case ResourceUsage::Upload: rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ; break;
-        case ResourceUsage::Readback: rawInitState = D3D12_RESOURCE_STATE_COPY_DEST; break;
+        case ResourceMemoryUsage::Default: rawInitState = D3D12_RESOURCE_STATE_COMMON; break;
+        case ResourceMemoryUsage::Upload: rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ; break;
+        case ResourceMemoryUsage::Readback: rawInitState = D3D12_RESOURCE_STATE_COPY_DEST; break;
     }
     D3D12_RESOURCE_STATES userInitState = MapTypeResStates(initState);
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(usage);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
-    if (tips.HasFlag(ResourceMemoryTip::Dedicated)) {
+    if (tips.HasFlag(ResourceMemoryHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> buffer;
@@ -1055,7 +1055,7 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     ClearValue clearValue,
     ResourceType type,
     ResourceStates initState,
-    ResourceMemoryTips tips,
+    ResourceMemoryHints tips,
     std::string_view name) noexcept {
     DXGI_FORMAT rawFormat = MapType(format);
     D3D12_RESOURCE_DESC desc{};
@@ -1122,7 +1122,7 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     }
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (tips.HasFlag(ResourceMemoryTip::Dedicated)) {
+    if (tips.HasFlag(ResourceMemoryHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> texture;
@@ -1145,6 +1145,10 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
         std::move(allocRes),
         startState,
         type);
+}
+
+Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureCreateDescriptor& desc) noexcept {
+    return nullptr; // TODO:
 }
 
 Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(
@@ -1214,7 +1218,7 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
     Texture* texture,
     ResourceType type,
     TextureFormat format,
-    TextureDimension dim,
+    TextureViewDimension dim,
     uint32_t baseArrayLayer,
     uint32_t arrayLayerCount,
     uint32_t baseMipLevel,
@@ -1242,25 +1246,25 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
         srvDesc.Format = MapShaderResourceType(format);
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         switch (dim) {
-            case TextureDimension::Dim1D:
+            case TextureViewDimension::Dim1D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
                 srvDesc.Texture1D.MostDetailedMip = baseMipLevel;
                 srvDesc.Texture1D.MipLevels = mipLevelCount;
                 break;
-            case TextureDimension::Dim1DArray:
+            case TextureViewDimension::Dim1DArray:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
                 srvDesc.Texture1DArray.MostDetailedMip = baseMipLevel;
                 srvDesc.Texture1DArray.MipLevels = mipLevelCount;
                 srvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
                 srvDesc.Texture1DArray.ArraySize = arrayLayerCount;
                 break;
-            case TextureDimension::Dim2D:
+            case TextureViewDimension::Dim2D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 srvDesc.Texture2D.MostDetailedMip = baseMipLevel;
                 srvDesc.Texture2D.MipLevels = mipLevelCount;
                 srvDesc.Texture2D.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim2DArray:
+            case TextureViewDimension::Dim2DArray:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
                 srvDesc.Texture2DArray.MostDetailedMip = baseMipLevel;
                 srvDesc.Texture2DArray.MipLevels = mipLevelCount;
@@ -1268,17 +1272,17 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
                 srvDesc.Texture2DArray.ArraySize = arrayLayerCount;
                 srvDesc.Texture2DArray.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim3D:
+            case TextureViewDimension::Dim3D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
                 srvDesc.Texture3D.MostDetailedMip = baseMipLevel;
                 srvDesc.Texture3D.MipLevels = mipLevelCount;
                 break;
-            case TextureDimension::Cube:
+            case TextureViewDimension::Cube:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
                 srvDesc.TextureCube.MostDetailedMip = baseMipLevel;
                 srvDesc.TextureCube.MipLevels = mipLevelCount;
                 break;
-            case TextureDimension::CubeArray:
+            case TextureViewDimension::CubeArray:
                 // https://learn.microsoft.com/zh-cn/windows/win32/api/d3d12/ns-d3d12-d3d12_texcube_array_srv
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
                 srvDesc.TextureCubeArray.MostDetailedMip = baseMipLevel;
@@ -1303,29 +1307,29 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
         D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
         rtvDesc.Format = MapType(format);
         switch (dim) {
-            case TextureDimension::Dim1D:
+            case TextureViewDimension::Dim1D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
                 rtvDesc.Texture1D.MipSlice = baseMipLevel;
                 break;
-            case TextureDimension::Dim1DArray:
+            case TextureViewDimension::Dim1DArray:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
                 rtvDesc.Texture1DArray.MipSlice = baseMipLevel;
                 rtvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
                 rtvDesc.Texture1DArray.ArraySize = arrayLayerCount;
                 break;
-            case TextureDimension::Dim2D:
+            case TextureViewDimension::Dim2D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
                 rtvDesc.Texture2D.MipSlice = baseMipLevel;
                 rtvDesc.Texture2D.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim2DArray:
+            case TextureViewDimension::Dim2DArray:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
                 rtvDesc.Texture2DArray.MipSlice = baseMipLevel;
                 rtvDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
                 rtvDesc.Texture2DArray.ArraySize = arrayLayerCount;
                 rtvDesc.Texture2DArray.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim3D:
+            case TextureViewDimension::Dim3D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
                 rtvDesc.Texture3D.MipSlice = baseMipLevel;
                 rtvDesc.Texture3D.FirstWSlice = baseArrayLayer;
@@ -1347,21 +1351,21 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = MapType(format);
         switch (dim) {
-            case TextureDimension::Dim1D:
+            case TextureViewDimension::Dim1D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
                 dsvDesc.Texture1D.MipSlice = baseMipLevel;
                 break;
-            case TextureDimension::Dim1DArray:
+            case TextureViewDimension::Dim1DArray:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
                 dsvDesc.Texture1DArray.MipSlice = baseMipLevel;
                 dsvDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
                 dsvDesc.Texture1DArray.ArraySize = arrayLayerCount;
                 break;
-            case TextureDimension::Dim2D:
+            case TextureViewDimension::Dim2D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
                 dsvDesc.Texture2D.MipSlice = baseMipLevel;
                 break;
-            case TextureDimension::Dim2DArray:
+            case TextureViewDimension::Dim2DArray:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
                 dsvDesc.Texture2DArray.MipSlice = baseMipLevel;
                 dsvDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
@@ -1384,29 +1388,29 @@ Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateTextureView(
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = MapShaderResourceType(format);
         switch (dim) {
-            case TextureDimension::Dim1D:
+            case TextureViewDimension::Dim1D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
                 uavDesc.Texture1D.MipSlice = baseMipLevel;
                 break;
-            case TextureDimension::Dim1DArray:
+            case TextureViewDimension::Dim1DArray:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
                 uavDesc.Texture1DArray.MipSlice = baseMipLevel;
                 uavDesc.Texture1DArray.FirstArraySlice = baseArrayLayer;
                 uavDesc.Texture1DArray.ArraySize = arrayLayerCount;
                 break;
-            case TextureDimension::Dim2D:
+            case TextureViewDimension::Dim2D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
                 uavDesc.Texture2D.MipSlice = baseMipLevel;
                 uavDesc.Texture2D.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim2DArray:
+            case TextureViewDimension::Dim2DArray:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
                 uavDesc.Texture2DArray.MipSlice = baseMipLevel;
                 uavDesc.Texture2DArray.FirstArraySlice = baseArrayLayer;
                 uavDesc.Texture2DArray.ArraySize = arrayLayerCount;
                 uavDesc.Texture2DArray.PlaneSlice = 0;
                 break;
-            case TextureDimension::Dim3D:
+            case TextureViewDimension::Dim3D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
                 uavDesc.Texture3D.MipSlice = baseMipLevel;
                 uavDesc.Texture3D.FirstWSlice = baseArrayLayer;

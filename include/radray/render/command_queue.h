@@ -9,6 +9,8 @@ class CommandQueue : public RenderBase {
 public:
     virtual ~CommandQueue() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdQueue; }
+
     virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer() noexcept = 0;
 
     virtual void Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept = 0;

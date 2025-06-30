@@ -94,7 +94,7 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 ResourceStates MapType(D3D12_RESOURCE_STATES v) noexcept;
 D3D12_RESOURCE_STATES MapTypeResStates(ResourceStates v) noexcept;
-D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept;
+D3D12_HEAP_TYPE MapType(ResourceMemoryUsage v) noexcept;
 D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept;
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept;
 

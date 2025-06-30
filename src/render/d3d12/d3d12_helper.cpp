@@ -625,11 +625,11 @@ D3D12_RESOURCE_STATES MapTypeResStates(ResourceStates v) noexcept {
     return result;
 }
 
-D3D12_HEAP_TYPE MapType(ResourceUsage v) noexcept {
+D3D12_HEAP_TYPE MapType(ResourceMemoryUsage v) noexcept {
     switch (v) {
-        case ResourceUsage::Default: return D3D12_HEAP_TYPE_DEFAULT;
-        case ResourceUsage::Upload: return D3D12_HEAP_TYPE_UPLOAD;
-        case ResourceUsage::Readback: return D3D12_HEAP_TYPE_READBACK;
+        case ResourceMemoryUsage::Default: return D3D12_HEAP_TYPE_DEFAULT;
+        case ResourceMemoryUsage::Upload: return D3D12_HEAP_TYPE_UPLOAD;
+        case ResourceMemoryUsage::Readback: return D3D12_HEAP_TYPE_READBACK;
     }
     Unreachable();
 }

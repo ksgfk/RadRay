@@ -84,6 +84,13 @@ enum class TextureDimension {
     UNKNOWN,
     Dim1D,
     Dim2D,
+    Dim3D
+};
+
+enum class TextureViewDimension {
+    UNKNOWN,
+    Dim1D,
+    Dim2D,
     Dim3D,
     Dim1DArray,
     Dim2DArray,
@@ -265,7 +272,6 @@ enum class ColorWrite : uint32_t {
     All = Red | Green | Blue | Alpha
 };
 
-// TODO: as flags
 enum class ResourceType {
     UNKNOWN,
 
@@ -282,6 +288,26 @@ enum class ResourceType {
     BufferRW,
 
     RayTracing
+};
+
+enum class ResourceUsage : uint32_t {
+    UNKNOWN = 0x0,
+
+    Sampler = 0x1,
+
+    Texture = 0x2,
+    RenderTarget = 0x4,
+    DepthStencil = 0x8,
+    TextureRW = 0x10,
+
+    Buffer = 0x20,
+    CBuffer = 0x40,
+    PushConstant = 0x80,
+    VertexBuffer = 0x100,
+    IndexBuffer = 0x200,
+    BufferRW = 0x400,
+
+    RayTracing = 0x800
 };
 
 enum class ResourceState : uint32_t {
@@ -306,13 +332,13 @@ enum class ResourceState : uint32_t {
     Present = 0x1000
 };
 
-enum class ResourceUsage {
+enum class ResourceMemoryUsage {
     Default,
     Upload,
     Readback
 };
 
-enum class ResourceMemoryTip : uint32_t {
+enum class ResourceMemoryHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1
 };
@@ -326,6 +352,26 @@ enum class LoadAction {
 enum class StoreAction {
     Store,
     Discard
+};
+
+enum class RenderObjectTag : uint32_t {
+    UNKNOWN = 0x0,
+    Device = 0x1,
+    CmdQueue = Device << 1,
+    CmdBuffer = CmdQueue << 1,
+    CmdEncoder = CmdBuffer << 1,
+    Fence = CmdEncoder << 1,
+    Shader = Fence << 1,
+    RootSignature = Shader << 1,
+    PipelineState = RootSignature << 1,
+    GraphicsPipelineState = PipelineState | (PipelineState << 1),
+    SwapChain = PipelineState << 2,
+    Resource = SwapChain << 1,
+    Buffer = Resource | (Resource << 1),
+    Texture = Resource | (Resource << 2),
+    ResourceView = Resource << 3,
+    DescriptorSet = ResourceView << 1,
+    Sampler = DescriptorSet << 1
 };
 
 class Device;
@@ -359,14 +405,6 @@ struct DepthStencilClearValue {
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
-class RenderBase : public Noncopyable {
-public:
-    virtual ~RenderBase() noexcept = default;
-
-    virtual bool IsValid() const noexcept = 0;
-    virtual void Destroy() noexcept = 0;
-};
-
 std::string_view format_as(Backend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
@@ -375,8 +413,8 @@ std::string_view format_as(ShaderResourceType v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(ResourceType v) noexcept;
-std::string_view format_as(ResourceUsage v) noexcept;
-std::string_view format_as(TextureDimension v) noexcept;
+std::string_view format_as(ResourceMemoryUsage v) noexcept;
+std::string_view format_as(TextureViewDimension v) noexcept;
 
 }  // namespace radray::render
 
@@ -384,18 +422,35 @@ namespace radray {
 
 template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
-using ShaderStages = EnumFlags<render::ShaderStage>;
-
 template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
-using ColorWrites = EnumFlags<render::ColorWrite>;
-
 template <>
 struct is_flags<render::ResourceState> : public std::true_type {};
-using ResourceStates = EnumFlags<render::ResourceState>;
-
 template <>
-struct is_flags<render::ResourceMemoryTip> : public std::true_type {};
-using ResourceMemoryTips = EnumFlags<render::ResourceMemoryTip>;
+struct is_flags<render::ResourceMemoryHint> : public std::true_type {};
+template <>
+struct is_flags<render::ResourceUsage> : public std::true_type {};
+template <>
+struct is_flags<render::RenderObjectTag> : public std::true_type {};
 
 }  // namespace radray
+
+namespace radray::render {
+
+using ShaderStages = EnumFlags<render::ShaderStage>;
+using ColorWrites = EnumFlags<render::ColorWrite>;
+using ResourceStates = EnumFlags<render::ResourceState>;
+using ResourceMemoryHints = EnumFlags<render::ResourceMemoryHint>;
+using ResourceUsages = EnumFlags<render::ResourceUsage>;
+using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
+
+class RenderBase : public Noncopyable {
+public:
+    virtual ~RenderBase() noexcept = default;
+
+    virtual RenderObjectTags GetTag() const noexcept = 0;
+    virtual bool IsValid() const noexcept = 0;
+    virtual void Destroy() noexcept = 0;
+};
+
+}  // namespace radray::render

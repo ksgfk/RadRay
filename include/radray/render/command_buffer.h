@@ -75,6 +75,8 @@ class CommandBuffer : public RenderBase {
 public:
     virtual ~CommandBuffer() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
+
     virtual void Begin() noexcept = 0;
 
     virtual void End() noexcept = 0;

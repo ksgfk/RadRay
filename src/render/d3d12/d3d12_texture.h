@@ -36,7 +36,7 @@ struct TextureViewD3D12Desc {
     CpuDescriptorAllocator* heapAlloc;
     ResourceType type;
     DXGI_FORMAT format;
-    TextureDimension dim;
+    TextureViewDimension dim;
     uint32_t baseArrayLayer;
     uint32_t arrayLayerCount;
     uint32_t baseMipLevel;

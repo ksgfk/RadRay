@@ -8,6 +8,8 @@ class Shader : public RenderBase {
 public:
     virtual ~Shader() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Shader; }
+
 public:
     string Name;
     string EntryPoint;

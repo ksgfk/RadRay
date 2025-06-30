@@ -5,10 +5,20 @@
 
 #include <radray/types.h>
 #include <radray/utility.h>
+
 #include <radray/render/common.h>
-#include <radray/render/root_signature.h>
+
+#include <radray/render/command_buffer.h>
+#include <radray/render/command_encoder.h>
+#include <radray/render/command_queue.h>
+#include <radray/render/descriptor_set.h>
+#include <radray/render/fence.h>
 #include <radray/render/pipeline_state.h>
+#include <radray/render/resource.h>
+#include <radray/render/root_signature.h>
 #include <radray/render/sampler.h>
+#include <radray/render/shader.h>
+#include <radray/render/swap_chain.h>
 
 namespace radray::render {
 
@@ -57,6 +67,8 @@ class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
+
     virtual Backend GetBackend() noexcept = 0;
 
     virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
@@ -87,9 +99,9 @@ public:
     virtual Nullable<shared_ptr<Buffer>> CreateBuffer(
         uint64_t size,
         ResourceType type,
-        ResourceUsage usage,
+        ResourceMemoryUsage usage,
         ResourceStates initState,
-        ResourceMemoryTips tips,
+        ResourceMemoryHints tips,
         std::string_view name = {}) noexcept = 0;
 
     virtual Nullable<shared_ptr<Texture>> CreateTexture(
@@ -104,8 +116,10 @@ public:
         ClearValue clearValue,
         ResourceType type,
         ResourceStates initState,
-        ResourceMemoryTips tips,
+        ResourceMemoryHints tips,
         std::string_view name = {}) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureCreateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<ResourceView>> CreateBufferView(
         Buffer* buffer,
@@ -119,7 +133,7 @@ public:
         Texture* texture,
         ResourceType type,
         TextureFormat format,
-        TextureDimension dim,
+        TextureViewDimension dim,
         uint32_t baseArrayLayer,
         uint32_t arrayLayerCount,
         uint32_t baseMipLevel,

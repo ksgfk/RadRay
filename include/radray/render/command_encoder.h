@@ -15,6 +15,8 @@ class CommandEncoder : public RenderBase {
 public:
     virtual ~CommandEncoder() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdEncoder; }
+
     virtual void SetViewport(Viewport viewport) noexcept = 0;
 
     virtual void SetScissor(Scissor scissor) noexcept = 0;

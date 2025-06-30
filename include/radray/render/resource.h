@@ -4,6 +4,22 @@
 
 namespace radray::render {
 
+class TextureCreateDescriptor {
+public:
+    std::string_view Name;
+    TextureDimension Dim;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t DepthOrArraySize;
+    uint32_t MipLevels;
+    uint32_t SampleCount;
+    TextureFormat Format;
+    ResourceUsages Usages;
+    ResourceStates InitState;
+    ClearValue Clear;
+    ResourceMemoryHints Hints;
+};
+
 class Resource : public RenderBase {
 public:
     ~Resource() noexcept override = default;
@@ -15,11 +31,15 @@ public:
 class Texture : public Resource {
 public:
     ~Texture() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
 };
 
 class Buffer : public Resource {
 public:
     ~Buffer() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
 
     virtual uint64_t GetSize() const noexcept = 0;
 
@@ -36,6 +56,8 @@ public:
     };
 
     ~ResourceView() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ResourceView; }
 
     virtual ResourceView::Type GetViewType() const noexcept = 0;
 };
