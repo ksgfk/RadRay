@@ -139,7 +139,61 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
     ResourceType type,
     ResourceStates initState,
     ResourceMemoryTips tips,
-    std::string_view) noexcept { return nullptr; }
+    std::string_view) noexcept {
+    RADRAY_UNUSED(sampleQuality);
+
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.pNext = nullptr;
+    imgInfo.flags = 0;
+    if (depth > 1) {
+        imgInfo.imageType = VK_IMAGE_TYPE_3D;
+    } else if (height > 1) {
+        imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    } else {
+        imgInfo.imageType = VK_IMAGE_TYPE_1D;
+    }
+    imgInfo.format = MapType(format);
+    imgInfo.extent.width = static_cast<uint32_t>(width);
+    imgInfo.extent.height = static_cast<uint32_t>(height);
+    imgInfo.extent.depth = static_cast<uint32_t>(depth);
+    imgInfo.mipLevels = mipLevels;
+    imgInfo.arrayLayers = arraySize;
+    imgInfo.samples = ([sampleCount]() noexcept {
+        switch (sampleCount) {
+            case 1: return VK_SAMPLE_COUNT_1_BIT;
+            case 2: return VK_SAMPLE_COUNT_2_BIT;
+            case 4: return VK_SAMPLE_COUNT_4_BIT;
+            case 8: return VK_SAMPLE_COUNT_8_BIT;
+            case 16: return VK_SAMPLE_COUNT_16_BIT;
+            default:
+                RADRAY_ERR_LOG("vk unsupported sample count: {}", sampleCount);
+                return VK_SAMPLE_COUNT_1_BIT;
+        }
+    })();
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = 0;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.queueFamilyIndexCount = 0;
+    imgInfo.pQueueFamilyIndices = nullptr;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // if (type == ResourceType::Texture) {
+    imgInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    // }
+    if (type == ResourceType::TextureRW) {
+        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    if (type == ResourceType::RenderTarget) {
+        imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if (type == ResourceType::DepthStencil) {
+        imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    }
+    // TODO: VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+
+    return nullptr;
+}
 
 Nullable<shared_ptr<ResourceView>> DeviceVulkan::CreateBufferView(
     Buffer* buffer,

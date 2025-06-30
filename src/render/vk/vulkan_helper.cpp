@@ -21,6 +21,58 @@ VkQueueFlags MapType(QueueType v) noexcept {
     }
 }
 
+VkFormat MapType(TextureFormat v) noexcept {
+    switch (v) {
+        case TextureFormat::R8_SINT: return VK_FORMAT_R8_SINT;
+        case TextureFormat::R8_UINT: return VK_FORMAT_R8_UINT;
+        case TextureFormat::R8_SNORM: return VK_FORMAT_R8_SNORM;
+        case TextureFormat::R8_UNORM: return VK_FORMAT_R8_UNORM;
+        case TextureFormat::R16_SINT: return VK_FORMAT_R16_SINT;
+        case TextureFormat::R16_UINT: return VK_FORMAT_R16_UINT;
+        case TextureFormat::R16_SNORM: return VK_FORMAT_R16_SNORM;
+        case TextureFormat::R16_UNORM: return VK_FORMAT_R16_UNORM;
+        case TextureFormat::R16_FLOAT: return VK_FORMAT_R16_SFLOAT;
+        case TextureFormat::RG8_SINT: return VK_FORMAT_R8G8_SINT;
+        case TextureFormat::RG8_UINT: return VK_FORMAT_R8G8_UINT;
+        case TextureFormat::RG8_SNORM: return VK_FORMAT_R8G8_SNORM;
+        case TextureFormat::RG8_UNORM: return VK_FORMAT_R8G8_UNORM;
+        case TextureFormat::R32_SINT: return VK_FORMAT_R32_SINT;
+        case TextureFormat::R32_UINT: return VK_FORMAT_R32_UINT;
+        case TextureFormat::R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
+        case TextureFormat::RG16_SINT: return VK_FORMAT_R16G16_SINT;
+        case TextureFormat::RG16_UINT: return VK_FORMAT_R16G16_UINT;
+        case TextureFormat::RG16_SNORM: return VK_FORMAT_R16G16_SNORM;
+        case TextureFormat::RG16_UNORM: return VK_FORMAT_R16G16_UNORM;
+        case TextureFormat::RG16_FLOAT: return VK_FORMAT_R16G16_SFLOAT;
+        case TextureFormat::RGBA8_SINT: return VK_FORMAT_R8G8B8A8_SINT;
+        case TextureFormat::RGBA8_SNORM: return VK_FORMAT_R8G8B8A8_SNORM;
+        case TextureFormat::RGBA8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+        case TextureFormat::RGBA8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+        case TextureFormat::BGRA8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+        case TextureFormat::BGRA8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+        case TextureFormat::RGB10A2_UINT: return VK_FORMAT_A2B10G10R10_UINT_PACK32;
+        case TextureFormat::RGB10A2_UNORM: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case TextureFormat::RG11B10_FLOAT: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        case TextureFormat::RG32_SINT: return VK_FORMAT_R32G32_SINT;
+        case TextureFormat::RG32_UINT: return VK_FORMAT_R32G32_UINT;
+        case TextureFormat::RG32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
+        case TextureFormat::RGBA16_SINT: return VK_FORMAT_R16G16B16A16_SINT;
+        case TextureFormat::RGBA16_UINT: return VK_FORMAT_R16G16B16A16_UINT;
+        case TextureFormat::RGBA16_SNORM: return VK_FORMAT_R16G16B16A16_SNORM;
+        case TextureFormat::RGBA16_UNORM: return VK_FORMAT_R16G16B16A16_UNORM;
+        case TextureFormat::RGBA16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case TextureFormat::RGBA32_SINT: return VK_FORMAT_R32G32B32A32_SINT;
+        case TextureFormat::RGBA32_UINT: return VK_FORMAT_R32G32B32A32_UINT;
+        case TextureFormat::RGBA32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case TextureFormat::S8: return VK_FORMAT_S8_UINT;
+        case TextureFormat::D16_UNORM: return VK_FORMAT_D16_UNORM;
+        case TextureFormat::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
+        case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
+        case TextureFormat::D32_FLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT_S8_UINT;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

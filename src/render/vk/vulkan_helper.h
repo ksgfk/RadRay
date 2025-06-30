@@ -70,6 +70,7 @@ auto GetVector(vector<T>& out, F&& f, Args&&... ts) noexcept -> VkResult {
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
+VkFormat MapType(TextureFormat v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;
