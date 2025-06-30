@@ -73,6 +73,15 @@ VkFormat MapType(TextureFormat v) noexcept {
     }
 }
 
+VkImageType MapType(TextureDimension v) noexcept {
+    switch (v) {
+        case TextureDimension::Dim1D: return VK_IMAGE_TYPE_1D;
+        case TextureDimension::Dim2D: return VK_IMAGE_TYPE_2D;
+        case TextureDimension::Dim3D: return VK_IMAGE_TYPE_3D;
+        default: return VK_IMAGE_TYPE_MAX_ENUM;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

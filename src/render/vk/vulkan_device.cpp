@@ -196,6 +196,65 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
 }
 
 Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDescriptor& desc) noexcept {
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.pNext = nullptr;
+    imgInfo.flags = 0;
+    imgInfo.imageType = MapType(desc.Dim);
+    imgInfo.format = MapType(desc.Format);
+    imgInfo.extent.width = static_cast<uint32_t>(desc.Width);
+    imgInfo.extent.height = static_cast<uint32_t>(desc.Height);
+    imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
+    imgInfo.mipLevels = desc.MipLevels;
+    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim3D) {
+        imgInfo.arrayLayers = 1;
+    } else {
+        imgInfo.arrayLayers = desc.DepthOrArraySize;
+    }
+    imgInfo.samples = ([](uint32_t sampleCount) noexcept {
+        switch (sampleCount) {
+            case 1: return VK_SAMPLE_COUNT_1_BIT;
+            case 2: return VK_SAMPLE_COUNT_2_BIT;
+            case 4: return VK_SAMPLE_COUNT_4_BIT;
+            case 8: return VK_SAMPLE_COUNT_8_BIT;
+            case 16: return VK_SAMPLE_COUNT_16_BIT;
+            default:
+                RADRAY_ERR_LOG("vk unsupported sample count: {}", sampleCount);
+                return VK_SAMPLE_COUNT_1_BIT;
+        }
+    })(desc.SampleCount);
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = 0;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.queueFamilyIndexCount = 0;
+    imgInfo.pQueueFamilyIndices = nullptr;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (desc.Usages & ResourceUsage::Texture) {
+        imgInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    }
+    if (desc.Usages & ResourceUsage::TextureRW) {
+        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    if (desc.Usages & ResourceUsage::RenderTarget) {
+        imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if (desc.Usages & ResourceUsage::DepthStencil) {
+        if (IsDepthStencilFormat(desc.Format)) {
+            imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        } else {
+            RADRAY_ERR_LOG("vk desc.Usages use DepthStencil but format is not compatible {}", desc.Format);
+            return nullptr;
+        }
+    }
+    if ((imgInfo.usage & VK_IMAGE_USAGE_SAMPLED_BIT) || (imgInfo.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+        imgInfo.usage |= (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    }
+
+    if (desc.Usages & ResourceUsage::Cube) {
+        imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
+
     return nullptr;
 }
 

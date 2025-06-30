@@ -71,6 +71,7 @@ uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& 
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;
+VkImageType MapType(TextureDimension v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;

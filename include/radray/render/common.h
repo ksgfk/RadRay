@@ -295,19 +295,20 @@ enum class ResourceUsage : uint32_t {
 
     Sampler = 0x1,
 
-    Texture = 0x2,
-    RenderTarget = 0x4,
-    DepthStencil = 0x8,
-    TextureRW = 0x10,
+    Texture = Sampler << 1,
+    RenderTarget = Texture << 1,
+    DepthStencil = RenderTarget << 1,
+    Cube = Texture | (DepthStencil << 1),
+    TextureRW = DepthStencil << 2,
 
-    Buffer = 0x20,
-    CBuffer = 0x40,
-    PushConstant = 0x80,
-    VertexBuffer = 0x100,
-    IndexBuffer = 0x200,
-    BufferRW = 0x400,
+    Buffer = TextureRW << 1,
+    CBuffer = Buffer << 1,
+    PushConstant = CBuffer << 1,
+    VertexBuffer = PushConstant << 1,
+    IndexBuffer = VertexBuffer << 1,
+    BufferRW = IndexBuffer << 1,
 
-    RayTracing = 0x800
+    RayTracing = BufferRW << 1
 };
 
 enum class ResourceState : uint32_t {
