@@ -145,7 +145,7 @@ public:
                                DepthStencilClearValue{1.0f, 0},
                                ResourceType::DepthStencil,
                                ResourceState::Common,
-                               ResourceMemoryHint::None)
+                               ResourceHint::None)
                         .Unwrap();
         _depthView = _device->CreateTextureView(
                                 _depthTex.get(),
@@ -190,7 +190,7 @@ public:
                                            ColorClearValue{},
                                            ResourceType::Texture,
                                            ResourceState::Common,
-                                           ResourceMemoryHint::Dedicated,
+                                           ResourceHint::Dedicated,
                                            "baseColor_tex")
                                     .Unwrap();
             _textures.emplace_back(baseColorTex);
@@ -200,7 +200,7 @@ public:
                                               ResourceType::Buffer,
                                               ResourceMemoryUsage::Upload,
                                               ResourceState::GenericRead,
-                                              ResourceMemoryHint::None)
+                                              ResourceHint::None)
                                        .Unwrap();
             _device->CopyDataToUploadBuffer(baseColorUpload.get(), baseColorData.Data.get(), baseColorData.GetSize(), 0, 0, 1);
 
@@ -219,7 +219,7 @@ public:
                                            ColorClearValue{},
                                            ResourceType::Texture,
                                            ResourceState::Common,
-                                           ResourceMemoryHint::Dedicated,
+                                           ResourceHint::Dedicated,
                                            "baseColor_tex")
                                     .Unwrap();
             _textures.emplace_back(normalMapTex);
@@ -229,7 +229,7 @@ public:
                                               ResourceType::Buffer,
                                               ResourceMemoryUsage::Upload,
                                               ResourceState::GenericRead,
-                                              ResourceMemoryHint::None)
+                                              ResourceHint::None)
                                        .Unwrap();
             _device->CopyDataToUploadBuffer(normalMapUpload.get(), normalMapData.Data.get(), normalMapData.GetSize(), 0, 0, 1);
 
@@ -253,7 +253,7 @@ public:
                                 ResourceType::Buffer,
                                 ResourceMemoryUsage::Default,
                                 ResourceState::VertexAndConstantBuffer,
-                                ResourceMemoryHint::None,
+                                ResourceHint::None,
                                 std::string_view{(char*)vbName.data(), vbName.size()})
                          .Unwrap();
             auto ibName = tm.name + u8"_ib";
@@ -262,7 +262,7 @@ public:
                                 ResourceType::Buffer,
                                 ResourceMemoryUsage::Default,
                                 ResourceState::IndexBuffer,
-                                ResourceMemoryHint::None,
+                                ResourceHint::None,
                                 std::string_view{(char*)ibName.data(), ibName.size()})
                          .Unwrap();
             tm._upVb = _device->CreateBuffer(
@@ -270,7 +270,7 @@ public:
                                   ResourceType::Buffer,
                                   ResourceMemoryUsage::Upload,
                                   ResourceState::GenericRead,
-                                  ResourceMemoryHint::None)
+                                  ResourceHint::None)
                            .Unwrap();
             auto ptrVb = tm._upVb->Map(0, tm._upVb->GetSize()).Unwrap();
             std::memcpy(ptrVb, meshVd.VertexData.get(), meshVd.VertexSize);
@@ -280,7 +280,7 @@ public:
                                   ResourceType::Buffer,
                                   ResourceMemoryUsage::Upload,
                                   ResourceState::GenericRead,
-                                  ResourceMemoryHint::None)
+                                  ResourceHint::None)
                            .Unwrap();
             auto ptrIb = tm._upIb->Map(0, tm._upIb->GetSize()).Unwrap();
             std::memcpy(ptrIb, meshVd.IndexData.get(), meshVd.IndexSize);
@@ -457,7 +457,7 @@ public:
                                       ResourceType::Buffer,
                                       ResourceMemoryUsage::Upload,
                                       ResourceState::GenericRead,
-                                      ResourceMemoryHint::None,
+                                      ResourceHint::None,
                                       std::string_view{(char*)cbName.data(), cbName.size()})
                                .Unwrap();
                 // auto ptrCb = mesh._cb->Map(0, CBUFFER_SIZE).Unwrap();

@@ -2,6 +2,7 @@
 
 #include "vulkan_fence.h"
 #include "vulkan_shader_module.h"
+#include "vulkan_image.h"
 
 namespace radray::render::vulkan {
 
@@ -34,11 +35,15 @@ public:
 static Nullable<unique_ptr<InstanceVulkan>> g_instance;
 
 static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
-    if (d.IsValid()) {
+    if (d._alloc != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(d._alloc);
+        d._alloc = VK_NULL_HANDLE;
+    }
+    if (d._device != VK_NULL_HANDLE) {
         d.CallVk(&FTbVk::vkDestroyDevice, g_instance->GetAllocationCallbacks());
         d._device = VK_NULL_HANDLE;
-        d._physicalDevice = VK_NULL_HANDLE;
     }
+    d._physicalDevice = VK_NULL_HANDLE;
 }
 
 DeviceVulkan::~DeviceVulkan() noexcept {
@@ -123,7 +128,7 @@ Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(
     ResourceType type,
     ResourceMemoryUsage usage,
     ResourceStates initState,
-    ResourceMemoryHints tips,
+    ResourceHints tips,
     std::string_view name) noexcept { return nullptr; }
 
 Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
@@ -138,60 +143,8 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(
     ClearValue clearValue,
     ResourceType type,
     ResourceStates initState,
-    ResourceMemoryHints tips,
+    ResourceHints tips,
     std::string_view) noexcept {
-    RADRAY_UNUSED(sampleQuality);
-
-    VkImageCreateInfo imgInfo{};
-    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imgInfo.pNext = nullptr;
-    imgInfo.flags = 0;
-    if (depth > 1) {
-        imgInfo.imageType = VK_IMAGE_TYPE_3D;
-    } else if (height > 1) {
-        imgInfo.imageType = VK_IMAGE_TYPE_2D;
-    } else {
-        imgInfo.imageType = VK_IMAGE_TYPE_1D;
-    }
-    imgInfo.format = MapType(format);
-    imgInfo.extent.width = static_cast<uint32_t>(width);
-    imgInfo.extent.height = static_cast<uint32_t>(height);
-    imgInfo.extent.depth = static_cast<uint32_t>(depth);
-    imgInfo.mipLevels = mipLevels;
-    imgInfo.arrayLayers = arraySize;
-    imgInfo.samples = ([sampleCount]() noexcept {
-        switch (sampleCount) {
-            case 1: return VK_SAMPLE_COUNT_1_BIT;
-            case 2: return VK_SAMPLE_COUNT_2_BIT;
-            case 4: return VK_SAMPLE_COUNT_4_BIT;
-            case 8: return VK_SAMPLE_COUNT_8_BIT;
-            case 16: return VK_SAMPLE_COUNT_16_BIT;
-            default:
-                RADRAY_ERR_LOG("vk unsupported sample count: {}", sampleCount);
-                return VK_SAMPLE_COUNT_1_BIT;
-        }
-    })();
-    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imgInfo.usage = 0;
-    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    imgInfo.queueFamilyIndexCount = 0;
-    imgInfo.pQueueFamilyIndices = nullptr;
-    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    // if (type == ResourceType::Texture) {
-    imgInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-    // }
-    if (type == ResourceType::TextureRW) {
-        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-    }
-    if (type == ResourceType::RenderTarget) {
-        imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    }
-    if (type == ResourceType::DepthStencil) {
-        imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    }
-    // TODO: VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
-
     return nullptr;
 }
 
@@ -230,7 +183,6 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
     imgInfo.queueFamilyIndexCount = 0;
     imgInfo.pQueueFamilyIndices = nullptr;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
     if (desc.Usages & ResourceUsage::Texture) {
         imgInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     }
@@ -251,12 +203,32 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
     if ((imgInfo.usage & VK_IMAGE_USAGE_SAMPLED_BIT) || (imgInfo.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
         imgInfo.usage |= (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     }
-
     if (desc.Usages & ResourceUsage::Cube) {
         imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     }
 
-    return nullptr;
+    VmaAllocationCreateInfo vmaInfo{};
+    vmaInfo.flags = 0;
+    if (desc.Hints & ResourceHint::Dedicated) {
+        vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
+    vmaInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    vmaInfo.requiredFlags = 0;
+    vmaInfo.preferredFlags = 0;
+    vmaInfo.memoryTypeBits = 0;
+    vmaInfo.pool = VK_NULL_HANDLE;
+    vmaInfo.pUserData = nullptr;
+    vmaInfo.priority = 0;
+
+    VkImage vkImg = VK_NULL_HANDLE;
+    VmaAllocation vmaAlloc = VK_NULL_HANDLE;
+    VmaAllocationInfo vmaAllocInfo{};
+    if (auto vr = vmaCreateImage(_alloc, &imgInfo, &vmaInfo, &vkImg, &vmaAlloc, &vmaAllocInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk failed to create image: {}", vr);
+        return nullptr;
+    }
+    return make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
 }
 
 Nullable<shared_ptr<ResourceView>> DeviceVulkan::CreateBufferView(
@@ -488,9 +460,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
     volkLoadDeviceTable(&deviceR->_vtb, device);
-
     VmaVulkanFunctions vmaFunctions{};
-    // TODO:
     VmaAllocatorCreateInfo vmaCreateInfo{};
     vmaCreateInfo.flags = 0;
     vmaCreateInfo.physicalDevice = deviceR->_physicalDevice;
@@ -501,7 +471,20 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     vmaCreateInfo.pHeapSizeLimit = nullptr;
     vmaCreateInfo.pVulkanFunctions = &vmaFunctions;
     vmaCreateInfo.instance = g_instance->_instance;
-    // vmaCreateInfo.vulkanApiVersion = deviceInfo.
+    vmaCreateInfo.vulkanApiVersion = selectPhyDevice.properties.apiVersion;
+#if VMA_EXTERNAL_MEMORY
+    vmaCreateInfo.pTypeExternalMemoryHandleTypes = nullptr;
+#endif
+    if (auto vr = vmaImportVulkanFunctionsFromVolk(&vmaCreateInfo, &vmaFunctions);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vmaImportVulkanFunctionsFromVolk failed: {}", vr);
+        return nullptr;
+    }
+    if (auto vr = vmaCreateAllocator(&vmaCreateInfo, &deviceR->_alloc);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vmaCreateAllocator failed: {}", vr);
+        return nullptr;
+    }
 
     for (const auto& i : queueRequests) {
         for (const auto& j : i.queueIndices) {

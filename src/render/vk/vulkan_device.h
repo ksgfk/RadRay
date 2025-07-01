@@ -11,8 +11,9 @@ namespace radray::render::vulkan {
 
 class DeviceVulkan : public Device {
 public:
-    VkPhysicalDevice _physicalDevice;
-    VkDevice _device;
+    VkPhysicalDevice _physicalDevice = VK_NULL_HANDLE;
+    VkDevice _device = VK_NULL_HANDLE;
+    VmaAllocator _alloc = VK_NULL_HANDLE;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
 
     VolkDeviceTable _vtb;
@@ -57,7 +58,7 @@ public:
         ResourceType type,
         ResourceMemoryUsage usage,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept override;
 
     Nullable<shared_ptr<Texture>> CreateTexture(
@@ -72,7 +73,7 @@ public:
         ClearValue clearValue,
         ResourceType type,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept override;
 
     Nullable<shared_ptr<Texture>> CreateTexture(const TextureCreateDescriptor& desc) noexcept override;

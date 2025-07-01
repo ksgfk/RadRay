@@ -959,7 +959,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     ResourceType type,
     ResourceMemoryUsage usage,
     ResourceStates initState,
-    ResourceMemoryHints tips,
+    ResourceHints tips,
     std::string_view name) noexcept {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -999,7 +999,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(usage);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
-    if (tips.HasFlag(ResourceMemoryHint::Dedicated)) {
+    if (tips.HasFlag(ResourceHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> buffer;
@@ -1055,7 +1055,7 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     ClearValue clearValue,
     ResourceType type,
     ResourceStates initState,
-    ResourceMemoryHints tips,
+    ResourceHints tips,
     std::string_view name) noexcept {
     DXGI_FORMAT rawFormat = MapType(format);
     D3D12_RESOURCE_DESC desc{};
@@ -1122,7 +1122,7 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
     }
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (tips.HasFlag(ResourceMemoryHint::Dedicated)) {
+    if (tips.HasFlag(ResourceHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> texture;

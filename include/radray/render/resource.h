@@ -17,7 +17,7 @@ public:
     ResourceUsages Usages;
     ResourceStates InitState;
     ClearValue Clear;
-    ResourceMemoryHints Hints;
+    ResourceHints Hints;
 };
 
 class Resource : public RenderBase {

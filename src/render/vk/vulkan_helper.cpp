@@ -1,5 +1,8 @@
 #include "vulkan_helper.h"
 
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
 namespace radray::render::vulkan {
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {

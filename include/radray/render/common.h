@@ -339,7 +339,7 @@ enum class ResourceMemoryUsage {
     Readback
 };
 
-enum class ResourceMemoryHint : uint32_t {
+enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1
 };
@@ -428,7 +428,7 @@ struct is_flags<render::ColorWrite> : public std::true_type {};
 template <>
 struct is_flags<render::ResourceState> : public std::true_type {};
 template <>
-struct is_flags<render::ResourceMemoryHint> : public std::true_type {};
+struct is_flags<render::ResourceHint> : public std::true_type {};
 template <>
 struct is_flags<render::ResourceUsage> : public std::true_type {};
 template <>
@@ -441,7 +441,7 @@ namespace radray::render {
 using ShaderStages = EnumFlags<render::ShaderStage>;
 using ColorWrites = EnumFlags<render::ColorWrite>;
 using ResourceStates = EnumFlags<render::ResourceState>;
-using ResourceMemoryHints = EnumFlags<render::ResourceMemoryHint>;
+using ResourceHints = EnumFlags<render::ResourceHint>;
 using ResourceUsages = EnumFlags<render::ResourceUsage>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
 

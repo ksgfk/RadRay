@@ -248,7 +248,7 @@ public:
                 ResourceType::Buffer,
                 ResourceMemoryUsage::Upload,
                 ResourceState::GenericRead,
-                ResourceMemoryHint::None);
+                ResourceHint::None);
             {
                 auto ptr = upload->Map(0, upload->GetSize());
                 std::memcpy(ptr.Value(), vertices, sizeof(vertices));
@@ -259,7 +259,7 @@ public:
                               ResourceType::Buffer,
                               ResourceMemoryUsage::Default,
                               ResourceState::Common,
-                              ResourceMemoryHint::None)
+                              ResourceHint::None)
                         .Unwrap();
             cmdBuffer->Begin();
             {

@@ -101,7 +101,7 @@ public:
         ResourceType type,
         ResourceMemoryUsage usage,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept = 0;
 
     virtual Nullable<shared_ptr<Texture>> CreateTexture(
@@ -116,7 +116,7 @@ public:
         ClearValue clearValue,
         ResourceType type,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept = 0;
 
     virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureCreateDescriptor& desc) noexcept = 0;

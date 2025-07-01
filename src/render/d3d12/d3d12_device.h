@@ -53,7 +53,7 @@ public:
         ResourceType type,
         ResourceMemoryUsage usage,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept override;
 
     Nullable<shared_ptr<Texture>> CreateTexture(
@@ -68,7 +68,7 @@ public:
         ClearValue clearValue,
         ResourceType type,
         ResourceStates initState,
-        ResourceMemoryHints tips,
+        ResourceHints tips,
         std::string_view name = {}) noexcept override;
 
     Nullable<shared_ptr<Texture>> CreateTexture(const TextureCreateDescriptor& desc) noexcept override;
