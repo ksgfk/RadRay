@@ -20,46 +20,27 @@ class FenceVulkan;
 
 using FTbVk = VolkDeviceTable;
 
-template <typename T>
-concept is_vk_struct = requires(T t) {
-    { t.sType } -> std::convertible_to<VkStructureType>;
-    { t.pNext } -> std::convertible_to<const void*>;
-};
-
-template <typename TBase, typename TNext>
-requires is_vk_struct<TBase> && is_vk_struct<TNext>
-constexpr void SetVkStructPtrToLast(TBase* v, TNext* pNext) noexcept {
-    if (v->pNext == nullptr) {
-        v->pNext = pNext;
-    } else {
-        VkBaseOutStructure* current = reinterpret_cast<VkBaseOutStructure*>(v);
-        while (current->pNext != nullptr) {
-            current = current->pNext;
-        }
-        current->pNext = reinterpret_cast<VkBaseOutStructure*>(pNext);
-    }
-}
-
 template <typename T, typename F, typename... Args>
 requires std::invocable<F, Args..., uint32_t*, T*>
 auto GetVector(vector<T>& out, F&& f, Args&&... ts) noexcept -> VkResult {
     uint32_t count = 0;
     if constexpr (std::is_same_v<std::invoke_result_t<F, Args..., uint32_t*, T*>, void>) {
-        f(ts..., &count, nullptr);
+        f(std::forward<Args>(ts)..., &count, nullptr);
+        if (count == 0) {
+            return VK_SUCCESS;
+        }
         out.resize(count);
-        f(ts..., &count, out.data());
-        out.resize(count);
+        f(std::forward<Args>(ts)..., &count, out.data());
         return VK_SUCCESS;
     } else if constexpr (std::is_same_v<std::invoke_result_t<F, Args..., uint32_t*, T*>, VkResult>) {
         VkResult err;
         do {
-            err = f(ts..., &count, nullptr);
+            err = f(std::forward<Args>(ts)..., &count, nullptr);
             if (err != VK_SUCCESS) {
                 return err;
             }
             out.resize(count);
-            err = f(ts..., &count, out.data());
-            out.resize(count);
+            err = f(std::forward<Args>(ts)..., &count, out.data());
         } while (err == VK_INCOMPLETE);
         return err;
     } else {

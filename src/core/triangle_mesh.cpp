@@ -53,25 +53,25 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
         }
         data->VertexData = make_unique<byte[]>(byteSize);
         data->VertexSize = (uint32_t)byteSize;
-        float* target = std::launder(reinterpret_cast<float*>(data->VertexData.get()));
+        std::byte* target = reinterpret_cast<std::byte*>(data->VertexData.get());
         for (size_t i = 0; i < Positions.size(); i++) {
-            std::copy(Positions[i].begin(), Positions[i].end(), target);
-            target += 3;
+            std::memcpy(target, Positions[i].data(), sizeof(float) * 3);
+            target += sizeof(float) * 3;
             if (Normals.size() > 0) {
-                std::copy(Normals[i].begin(), Normals[i].end(), target);
-                target += 3;
+                std::memcpy(target, Normals[i].data(), sizeof(float) * 3);
+                target += sizeof(float) * 3;
             }
             if (UV0.size() > 0) {
-                std::copy(UV0[i].begin(), UV0[i].end(), target);
-                target += 2;
+                std::memcpy(target, UV0[i].data(), sizeof(float) * 2);
+                target += sizeof(float) * 2;
             }
             if (Tangents.size() > 0) {
-                std::copy(Tangents[i].begin(), Tangents[i].end(), target);
-                target += 4;
+                std::memcpy(target, Tangents[i].data(), sizeof(float) * 4);
+                target += sizeof(float) * 4;
             }
             if (Color0.size() > 0) {
-                std::copy(Color0[i].begin(), Color0[i].end(), target);
-                target += 4;
+                std::memcpy(target, Color0[i].data(), sizeof(float) * 4);
+                target += sizeof(float) * 4;
             }
         }
     }
@@ -86,10 +86,11 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
             data->IndexSize = (uint32_t)byteSize;
             data->IndexData = make_unique<byte[]>(data->IndexSize);
             data->IndexCount = (uint32_t)Indices.size();
-            uint16_t* target = std::launder(reinterpret_cast<uint16_t*>(data->IndexData.get()));
+            std::byte* target = reinterpret_cast<std::byte*>(data->IndexData.get());
             for (auto&& i : Indices) {
-                *target = static_cast<uint16_t>(i);
-                target++;
+                uint16_t value = static_cast<uint16_t>(i);
+                std::memcpy(target, &value, sizeof(uint16_t));
+                target += sizeof(uint16_t);
             }
         } else if (Positions.size() <= std::numeric_limits<uint32_t>::max()) {
             uint64_t byteSize = Indices.size() * sizeof(uint32_t);
@@ -301,7 +302,11 @@ void TriangleMesh::CalculateTangent() noexcept {
         float t1 = w2.y() - w1.y();
         float t2 = w3.y() - w1.y();
 
-        float r = 1.0f / (s1 * t2 - s2 * t1);
+        float denom = s1 * t2 - s2 * t1;
+        if (std::abs(denom) <= std::numeric_limits<float>::epsilon()) {
+            continue;
+        }
+        float r = 1.0f / denom;
         Eigen::Vector3f sdir{(t2 * x1 - t1 * x2) * r, (t2 * y1 - t1 * y2) * r,
                              (t2 * z1 - t1 * z2) * r};
         Eigen::Vector3f tdir{(s1 * x2 - s2 * x1) * r, (s1 * y2 - s2 * y1) * r,

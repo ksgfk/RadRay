@@ -32,6 +32,9 @@ static std::string_view TrimStart(std::string_view str) noexcept {
 }
 
 static std::string_view TrimEnd(std::string_view str) noexcept {
+    if (str.empty()) {
+        return str;
+    }
     size_t end = str.size() - 1;
     for (; end >= 0; end--) {
         auto v = str[end];
@@ -54,7 +57,7 @@ static std::optional<size_t> ParseNumberArray(std::string_view str, std::array<f
         }
         std::string_view part = isEnd ? next : next.substr(0, partEnd);
         float result;
-        auto [_, ee] = std::from_chars(&*part.begin(), &*part.end(), result, std::chars_format::general);
+        auto [_, ee] = std::from_chars(part.data(), part.data() + part.size(), result, std::chars_format::general);
         if (ee != std::errc{}) {
             return std::nullopt;
         }
@@ -71,7 +74,7 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
     switch (mode) {
         case 1: {
             int v_ = 0;
-            auto [_, ee] = std::from_chars(&*data.begin(), &*data.end(), v_);
+            auto [_, ee] = std::from_chars(data.data(), data.data() + data.size(), v_);
             if (ee != std::errc{}) {
                 return false;
             }
@@ -88,7 +91,7 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             std::string_view vData = data.substr(0, delimiter);
             int v_ = 0;
             {
-                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                auto [_, ee] = std::from_chars(vData.data(), vData.data() + vData.size(), v_);
                 if (ee != std::errc{}) {
                     return false;
                 }
@@ -96,7 +99,7 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             std::string_view vtData = data.substr(delimiter + 1);
             int vt_ = 0;
             {
-                auto [_, ee] = std::from_chars(&*vtData.begin(), &*vtData.end(), vt_);
+                auto [_, ee] = std::from_chars(vtData.data(), vtData.data() + vtData.size(), vt_);
                 if (ee != std::errc{}) {
                     return false;
                 }
@@ -117,19 +120,19 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             std::string_view vnData = data.substr(second + 1);
             int v_ = 0, vt_ = 0, vn_ = 0;
             {
-                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                auto [_, ee] = std::from_chars(vData.data(), vData.data() + vData.size(), v_);
                 if (ee != std::errc{}) {
                     return false;
                 }
             }
             {
-                auto [_, ee] = std::from_chars(&*vtData.begin(), &*vtData.end(), vt_);
+                auto [_, ee] = std::from_chars(vtData.data(), vtData.data() + vtData.size(), vt_);
                 if (ee != std::errc{}) {
                     return false;
                 }
             }
             {
-                auto [_, ee] = std::from_chars(&*vnData.begin(), &*vnData.end(), vn_);
+                auto [_, ee] = std::from_chars(vnData.data(), vnData.data() + vnData.size(), vn_);
                 if (ee != std::errc{}) {
                     return false;
                 }
@@ -148,13 +151,13 @@ static bool ParseFaceVertex(std::string_view data, int mode, int& v, int& vt, in
             std::string_view vnData = data.substr(delimiter + 2);
             int v_ = 0, vn_ = 0;
             {
-                auto [_, ee] = std::from_chars(&*vData.begin(), &*vData.end(), v_);
+                auto [_, ee] = std::from_chars(vData.data(), vData.data() + vData.size(), v_);
                 if (ee != std::errc{}) {
                     return false;
                 }
             }
             {
-                auto [_, ee] = std::from_chars(&*vnData.begin(), &*vnData.end(), vn_);
+                auto [_, ee] = std::from_chars(vnData.data(), vnData.data() + vnData.size(), vn_);
                 if (ee != std::errc{}) {
                     return false;
                 }
@@ -360,6 +363,9 @@ WavefrontObjReader::TrianglePosition WavefrontObjReader::GetPosition(size_t face
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _pos.size();
     size_t a = CvtIdx(f.V1, count), b = CvtIdx(f.V2, count), c = CvtIdx(f.V3, count);
+    if (a >= _pos.size() || b >= _pos.size() || c >= _pos.size()) {
+        RADRAY_ABORT("face index out of range: {}, {}, {}", a, b, c);
+    }
     return {_pos[a], _pos[b], _pos[c]};
 }
 
@@ -367,6 +373,9 @@ WavefrontObjReader::TriangleNormal WavefrontObjReader::GetNormal(size_t faceInde
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _normal.size();
     size_t a = CvtIdx(f.Vn1, count), b = CvtIdx(f.Vn2, count), c = CvtIdx(f.Vn3, count);
+    if (a >= _normal.size() || b >= _normal.size() || c >= _normal.size()) {
+        RADRAY_ABORT("normal index out of range: {}, {}, {}", a, b, c);
+    }
     return {_normal[a], _normal[b], _normal[c]};
 }
 
@@ -374,6 +383,9 @@ WavefrontObjReader::TriangleTexcoord WavefrontObjReader::GetUV(size_t faceIndex)
     const WavefrontObjFace& f = _faces[faceIndex];
     size_t count = _uv.size();
     size_t a = CvtIdx(f.Vt1, count), b = CvtIdx(f.Vt2, count), c = CvtIdx(f.Vt3, count);
+    if (a >= _uv.size() || b >= _uv.size() || c >= _uv.size()) {
+        RADRAY_ABORT("UV index out of range: {}, {}, {}", a, b, c);
+    }
     return {_uv[a], _uv[b], _uv[c]};
 }
 

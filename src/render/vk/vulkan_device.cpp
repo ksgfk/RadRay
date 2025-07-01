@@ -723,8 +723,8 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
     createInfo.enabledLayerCount = static_cast<uint32_t>(needLayersCStr.size());
     createInfo.ppEnabledLayerNames = needLayersCStr.empty() ? nullptr : needLayersCStr.data();
     if (isValidFeatureExtEnable) {
-        SetVkStructPtrToLast(&createInfo, &validFeature);
-        SetVkStructPtrToLast(&createInfo, &debugCreateInfo);
+        createInfo.pNext = &validFeature;
+        validFeature.pNext = &debugCreateInfo;
     }
     VkInstance instance = VK_NULL_HANDLE;
     if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
