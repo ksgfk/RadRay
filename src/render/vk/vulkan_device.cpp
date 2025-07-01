@@ -218,6 +218,7 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
             case 4: return VK_SAMPLE_COUNT_4_BIT;
             case 8: return VK_SAMPLE_COUNT_8_BIT;
             case 16: return VK_SAMPLE_COUNT_16_BIT;
+            case 32: return VK_SAMPLE_COUNT_32_BIT;
             default:
                 RADRAY_ERR_LOG("vk unsupported sample count: {}", sampleCount);
                 return VK_SAMPLE_COUNT_1_BIT;
@@ -487,6 +488,21 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
     volkLoadDeviceTable(&deviceR->_vtb, device);
+
+    VmaVulkanFunctions vmaFunctions{};
+    // TODO:
+    VmaAllocatorCreateInfo vmaCreateInfo{};
+    vmaCreateInfo.flags = 0;
+    vmaCreateInfo.physicalDevice = deviceR->_physicalDevice;
+    vmaCreateInfo.device = deviceR->_device;
+    vmaCreateInfo.preferredLargeHeapBlockSize = 0;
+    vmaCreateInfo.pAllocationCallbacks = g_instance->GetAllocationCallbacks();
+    vmaCreateInfo.pDeviceMemoryCallbacks = nullptr;
+    vmaCreateInfo.pHeapSizeLimit = nullptr;
+    vmaCreateInfo.pVulkanFunctions = &vmaFunctions;
+    vmaCreateInfo.instance = g_instance->_instance;
+    // vmaCreateInfo.vulkanApiVersion = deviceInfo.
+
     for (const auto& i : queueRequests) {
         for (const auto& j : i.queueIndices) {
             VkQueue queuePtr = VK_NULL_HANDLE;

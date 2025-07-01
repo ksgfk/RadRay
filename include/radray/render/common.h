@@ -298,8 +298,8 @@ enum class ResourceUsage : uint32_t {
     Texture = Sampler << 1,
     RenderTarget = Texture << 1,
     DepthStencil = RenderTarget << 1,
-    Cube = Texture | (DepthStencil << 1),
-    TextureRW = DepthStencil << 2,
+    Cube = DepthStencil << 1,
+    TextureRW = Cube << 1,
 
     Buffer = TextureRW << 1,
     CBuffer = Buffer << 1,
