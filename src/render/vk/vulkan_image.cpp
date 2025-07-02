@@ -5,13 +5,11 @@
 namespace radray::render::vulkan {
 
 static void DestroyImageVulkan(ImageVulkan& img) noexcept {
-    if (img._allocation == VK_NULL_HANDLE) {
-        if (img._image != VK_NULL_HANDLE) {
+    if (img._image != VK_NULL_HANDLE) {
+        if (img._allocation == VK_NULL_HANDLE) {
             img._device->CallVk(&FTbVk::vkDestroyImage, img._image, img._device->GetAllocationCallbacks());
             img._image = VK_NULL_HANDLE;
-        }
-    } else {
-        if (img._image != VK_NULL_HANDLE) {
+        } else {
             vmaDestroyImage(img._device->_alloc, img._image, img._allocation);
             img._image = VK_NULL_HANDLE;
             img._allocation = VK_NULL_HANDLE;

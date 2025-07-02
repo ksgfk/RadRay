@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include <radray/platform.h>
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -8,6 +10,7 @@
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #define VK_USE_PLATFORM_WIN32_KHR
+#include <windows.h>
 #endif
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -50,6 +53,8 @@ auto GetVector(vector<T>& out, F&& f, Args&&... ts) noexcept -> VkResult {
 }
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept;
+bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtensionProperties> available) noexcept;
+bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;

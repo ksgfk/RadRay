@@ -35,6 +35,10 @@ public:
 static Nullable<unique_ptr<InstanceVulkan>> g_instance;
 
 static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
+    // if (d._surface != VK_NULL_HANDLE) {
+    //     vkDestroySurfaceKHR(g_instance->_instance, d._surface, g_instance->GetAllocationCallbacks());
+    //     d._surface = VK_NULL_HANDLE;
+    // }
     if (d._alloc != VK_NULL_HANDLE) {
         vmaDestroyAllocator(d._alloc);
         d._alloc = VK_NULL_HANDLE;
@@ -121,7 +125,27 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     uint32_t height,
     uint32_t backBufferCount,
     TextureFormat format,
-    bool enableSync) noexcept { return nullptr; }
+    bool enableSync) noexcept {
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    HMODULE hInstance;
+    if (!GetModuleHandleEx(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (const WCHAR*)g_instance.Ptr.get(),
+            &hInstance)) {
+                // TODO:
+    }
+    VkWin32SurfaceCreateInfoKHR win32SurfaceInfo{};
+    win32SurfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    win32SurfaceInfo.pNext = nullptr;
+    win32SurfaceInfo.flags = 0;
+    win32SurfaceInfo.hinstance = hInstance;
+    win32SurfaceInfo.hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
+    // vkCreateWin32SurfaceKHR(g_instance->_instance, )
+#else
+#endif
+
+    return nullptr;
+}
 
 Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(
     uint64_t size,
@@ -435,8 +459,27 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
         }
     }
 
-    vector<const char*> deviceExts;
-    deviceExts.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    unordered_set<string> needExts;
+    needExts.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+    vector<VkExtensionProperties> deviceExtsAvailable;
+    if (GetVector(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr) != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkEnumerateDeviceExtensionProperties failed");
+        return nullptr;
+    }
+    for (const auto& ext : needExts) {
+        const char* exts[] = {ext.c_str()};
+        if (!IsValidateExtensions(exts, deviceExtsAvailable)) {
+            RADRAY_ERR_LOG("vk device extension {} not supported", ext);
+            return nullptr;
+        }
+    }
+
+    vector<const char*> deviceExts{};
+    deviceExts.reserve(needExts.size());
+    for (const auto& ext : needExts) {
+        deviceExts.emplace_back(ext.c_str());
+    }
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -584,13 +627,6 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
         return false;
     }
 
-    auto findLayer = [&](std::string_view name) noexcept {
-        return std::find_if(layerProps.begin(), layerProps.end(), [&](const VkLayerProperties& i) noexcept { return i.layerName == name; });
-    };
-    auto findExt = [&](std::string_view name) noexcept {
-        return std::find_if(extProps.begin(), extProps.end(), [&](const VkExtensionProperties& i) noexcept { return i.extensionName == name; });
-    };
-
     unordered_set<string> needExts;
     unordered_set<string> needLayers;
     bool isValidFeatureExtEnable = false;
@@ -603,36 +639,32 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
     needExts.emplace(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #endif
     if (desc.IsEnableDebugLayer) {
-        if (findExt(VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extProps.end()) {
-            RADRAY_WARN_LOG("vk extension {} is not supported", VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        const auto requireExt = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        const char* requireExts[] = {requireExt};
+        if (!IsValidateExtensions(requireExts, extProps)) {
+            RADRAY_WARN_LOG("vk extension {} is not supported", requireExt);
         } else {
-            needExts.emplace(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            needExts.emplace(requireExt);
         }
         const auto validName = "VK_LAYER_KHRONOS_validation";
-        if (findLayer(validName) == layerProps.end()) {
+        const char* requireLayer[] = {validName};
+        if (!IsValidateLayers(requireLayer, layerProps)) {
             RADRAY_WARN_LOG("vk layer {} is not supported", validName);
         } else {
             needLayers.emplace(validName);
-            vector<VkExtensionProperties> dbgExtProps;
-            GetVector(dbgExtProps, vkEnumerateInstanceExtensionProperties, validName);
-            for (const auto& i : dbgExtProps) {
-                if (std::strcmp(i.extensionName, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME) == 0) {
-                    isValidFeatureExtEnable = true;
-                    break;
-                }
-            }
+            isValidFeatureExtEnable = true;
         }
     }
     for (const auto& i : needLayers) {
-        auto layerIt = findLayer(i);
-        if (layerIt == layerProps.end()) {
+        const char* require[] = {i.c_str()};
+        if (!IsValidateLayers(require, layerProps)) {
             RADRAY_ERR_LOG("vk layer {} is not supported", i);
             return false;
         }
     }
     for (const auto& i : needExts) {
-        auto extIt = findExt(i);
-        if (extIt == extProps.end()) {
+        const char* require[] = {i.c_str()};
+        if (!IsValidateExtensions(require, extProps)) {
             RADRAY_ERR_LOG("vk extension {} is not supported", i);
             return false;
         }

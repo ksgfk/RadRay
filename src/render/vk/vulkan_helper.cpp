@@ -1,5 +1,7 @@
 #include "vulkan_helper.h"
 
+#include <cstring>
+
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 
@@ -13,6 +15,40 @@ uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& 
         }
     }
     return total;
+}
+
+bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtensionProperties> available) noexcept {
+    bool allFound = true;
+    for (const auto* extensionName : required) {
+        bool found = false;
+        for (const auto& availableExtension : available) {
+            if (std::strcmp(availableExtension.extensionName, extensionName) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            allFound = false;
+        }
+    }
+    return allFound;
+}
+
+bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept {
+    bool allFound = true;
+    for (const auto* layerName : required) {
+        bool found = false;
+        for (const auto& availableLayer : available) {
+            if (std::strcmp(availableLayer.layerName, layerName) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            allFound = false;
+        }
+    }
+    return allFound;
 }
 
 VkQueueFlags MapType(QueueType v) noexcept {
