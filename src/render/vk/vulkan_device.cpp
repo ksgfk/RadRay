@@ -126,24 +126,124 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     uint32_t backBufferCount,
     TextureFormat format,
     bool enableSync) noexcept {
+    VkObjectWrapper<VkSurfaceKHR> surface{};
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
-    HMODULE hInstance;
-    if (!GetModuleHandleEx(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (const WCHAR*)g_instance.Ptr.get(),
-            &hInstance)) {
-                // TODO:
+    {
+        HMODULE hInstance;
+        if (!GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)g_instance.Ptr.get(),
+                &hInstance)) {
+            RADRAY_ERR_LOG("vk call win32 GetModuleHandleExA failed. (code={})", GetLastError());
+            return nullptr;
+        }
+        VkWin32SurfaceCreateInfoKHR win32SurfaceInfo{};
+        win32SurfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        win32SurfaceInfo.pNext = nullptr;
+        win32SurfaceInfo.flags = 0;
+        win32SurfaceInfo.hinstance = hInstance;
+        win32SurfaceInfo.hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
+        VkSurfaceKHR vkSurfaceKHR = VK_NULL_HANDLE;
+        if (auto vr = vkCreateWin32SurfaceKHR(g_instance->_instance, &win32SurfaceInfo, g_instance->GetAllocationCallbacks(), &vkSurfaceKHR);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vk call vkCreateWin32SurfaceKHR failed: {}", vr);
+            return nullptr;
+        }
+        surface = {vkSurfaceKHR, {g_instance->_instance, g_instance->GetAllocationCallbacks()}};
     }
-    VkWin32SurfaceCreateInfoKHR win32SurfaceInfo{};
-    win32SurfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    win32SurfaceInfo.pNext = nullptr;
-    win32SurfaceInfo.flags = 0;
-    win32SurfaceInfo.hinstance = hInstance;
-    win32SurfaceInfo.hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
-    // vkCreateWin32SurfaceKHR(g_instance->_instance, )
 #else
 #endif
-
+    if (!surface.IsValid()) {
+        RADRAY_ERR_LOG("vk create VkSurfaceKHR failed");
+        return nullptr;
+    }
+    VkSurfaceCapabilitiesKHR surfaceProperties;
+    if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, surface.Get(), &surfaceProperties);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
+        return nullptr;
+    }
+    if (backBufferCount < surfaceProperties.minImageCount || backBufferCount > surfaceProperties.maxImageCount) {
+        RADRAY_ERR_LOG("vk back buffer count {} not in range [{}, {}]", backBufferCount, surfaceProperties.minImageCount, surfaceProperties.maxImageCount);
+        return nullptr;
+    }
+    VkExtent2D swapchainSize;
+    if (surfaceProperties.currentExtent.width == 0xFFFFFFFF) {
+        swapchainSize.width = width;
+        swapchainSize.height = height;
+    } else {
+        swapchainSize = surfaceProperties.currentExtent;
+    }
+    VkSurfaceTransformFlagBitsKHR preTransform;
+    if (surfaceProperties.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    } else {
+        preTransform = surfaceProperties.currentTransform;
+    }
+    VkCompositeAlphaFlagBitsKHR composite = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+    }
+    VkFormat rawFormat = MapType(format);
+    vector<VkSurfaceFormatKHR> supportedFormats;
+    if (auto vr = GetVector(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, this->_physicalDevice, surface.Get());
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
+        return nullptr;
+    }
+    auto needFormatIter = std::ranges::find_if(supportedFormats, [rawFormat](VkSurfaceFormatKHR i) { return i.format == rawFormat; });
+    if (needFormatIter == supportedFormats.end()) {
+        RADRAY_ERR_LOG("vk surface format {} not supported", rawFormat);
+        return nullptr;
+    }
+    const VkSurfaceFormatKHR& needFormat = *needFormatIter;
+    vector<VkPresentModeKHR> supportedPresentModes;
+    if (auto vr = GetVector(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, this->_physicalDevice, surface.Get());
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
+        return nullptr;
+    }
+    VkPresentModeKHR needPresentMode = enableSync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
+    if (std::ranges::find(supportedPresentModes, needPresentMode) == supportedPresentModes.end()) {
+        RADRAY_ERR_LOG("vk present mode {} not supported", needPresentMode);
+        return nullptr;
+    }
+    VkSwapchainCreateInfoKHR swapchianCreateInfo{};
+    swapchianCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchianCreateInfo.pNext = nullptr;
+    swapchianCreateInfo.flags = 0;
+    swapchianCreateInfo.surface = surface.Get();
+    swapchianCreateInfo.minImageCount = backBufferCount;
+    swapchianCreateInfo.imageFormat = needFormat.format;
+    swapchianCreateInfo.imageColorSpace = needFormat.colorSpace;
+    swapchianCreateInfo.imageExtent = swapchainSize;
+    swapchianCreateInfo.imageArrayLayers = 1;
+    swapchianCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapchianCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    swapchianCreateInfo.queueFamilyIndexCount = 0;
+    swapchianCreateInfo.pQueueFamilyIndices = nullptr;
+    swapchianCreateInfo.preTransform = preTransform;
+    swapchianCreateInfo.compositeAlpha = composite;
+    swapchianCreateInfo.presentMode = needPresentMode;
+    swapchianCreateInfo.clipped = VK_TRUE;
+    swapchianCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+    VkObjectWrapper<VkSwapchainKHR> swapchain{};
+    {
+        VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
+        if (auto vr = this->CallVk(&FTbVk::vkCreateSwapchainKHR, &swapchianCreateInfo, this->GetAllocationCallbacks(), &vkSwapchain);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vk call vkCreateSwapchainKHR failed: {}", vr);
+            return nullptr;
+        }
+        swapchain = {vkSwapchain, {this}};
+    }
+    // TODO: create swapchain image views
     return nullptr;
 }
 
