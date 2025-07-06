@@ -11,6 +11,7 @@ namespace radray::render::vulkan {
 
 class DeviceVulkan : public Device {
 public:
+    VkInstance _instance = VK_NULL_HANDLE;
     VkPhysicalDevice _physicalDevice = VK_NULL_HANDLE;
     VkDevice _device = VK_NULL_HANDLE;
     VmaAllocator _alloc = VK_NULL_HANDLE;

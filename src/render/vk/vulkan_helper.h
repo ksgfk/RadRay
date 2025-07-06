@@ -9,13 +9,9 @@
 #include <radray/utility.h>
 #include <radray/render/common.h>
 
-#ifdef RADRAY_PLATFORM_WINDOWS
-#define VK_USE_PLATFORM_WIN32_KHR
-#endif
-#define VK_NO_PROTOTYPES
-#include <vulkan/vulkan.h>
-#include <volk.h>
-#include <vk_mem_alloc.h>
+#include "vulkan_common.h"
+#include "volk.h"
+#include "vk_mem_alloc.h"
 
 namespace radray::render::vulkan {
 
@@ -76,7 +72,7 @@ public:
     }
 
     constexpr ~VkObjectWrapper() noexcept {
-        this->Release();
+        this->Destroy();
     }
 
     friend constexpr void swap(VkObjectWrapper& l, VkObjectWrapper& r) noexcept {
@@ -89,15 +85,21 @@ public:
         return _obj;
     }
 
-    constexpr void Release() noexcept {
-        if (this->IsValid()) {
-            _deleter.operator()(_obj);
-            _obj = VK_NULL_HANDLE;
-        }
+    constexpr auto Release() noexcept {
+        T temp = _obj;
+        _obj = VK_NULL_HANDLE;
+        return temp;
     }
 
     constexpr bool IsValid() const noexcept {
         return _obj != VK_NULL_HANDLE;
+    }
+
+    constexpr void Destroy() noexcept {
+        if (this->IsValid()) {
+            _deleter.operator()(_obj);
+            _obj = VK_NULL_HANDLE;
+        }
     }
 
 public:

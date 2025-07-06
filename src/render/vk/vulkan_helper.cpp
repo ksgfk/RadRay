@@ -2,9 +2,6 @@
 
 #include <cstring>
 
-#define VMA_IMPLEMENTATION
-#include <vk_mem_alloc.h>
-
 #include "vulkan_device.h"
 
 namespace radray::render::vulkan {

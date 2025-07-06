@@ -272,6 +272,7 @@ enum class ColorWrite : uint32_t {
     All = Red | Green | Blue | Alpha
 };
 
+/** @deprecated */
 enum class ResourceType {
     UNKNOWN,
 

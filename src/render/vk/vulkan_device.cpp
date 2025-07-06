@@ -3,6 +3,7 @@
 #include "vulkan_fence.h"
 #include "vulkan_shader_module.h"
 #include "vulkan_image.h"
+#include "vulkan_swapchain.h"
 
 namespace radray::render::vulkan {
 
@@ -35,10 +36,6 @@ public:
 static Nullable<unique_ptr<InstanceVulkan>> g_instance;
 
 static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
-    // if (d._surface != VK_NULL_HANDLE) {
-    //     vkDestroySurfaceKHR(g_instance->_instance, d._surface, g_instance->GetAllocationCallbacks());
-    //     d._surface = VK_NULL_HANDLE;
-    // }
     if (d._alloc != VK_NULL_HANDLE) {
         vmaDestroyAllocator(d._alloc);
         d._alloc = VK_NULL_HANDLE;
@@ -48,6 +45,7 @@ static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
         d._device = VK_NULL_HANDLE;
     }
     d._physicalDevice = VK_NULL_HANDLE;
+    d._instance = VK_NULL_HANDLE;
 }
 
 DeviceVulkan::~DeviceVulkan() noexcept {
@@ -152,6 +150,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         surface = {vkSurfaceKHR, {g_instance->_instance, g_instance->GetAllocationCallbacks()}};
     }
 #else
+#error "unsupported platform for Vulkan surface creation"
 #endif
     if (!surface.IsValid()) {
         RADRAY_ERR_LOG("vk create VkSurfaceKHR failed");
@@ -243,8 +242,18 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         }
         swapchain = {vkSwapchain, {this}};
     }
-    // TODO: create swapchain image views
-    return nullptr;
+    vector<VkImage> swapchainImages;
+    if (auto vr = GetVector(swapchainImages, _vtb.vkGetSwapchainImagesKHR, _device, swapchain.Get());
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetSwapchainImagesKHR failed: {}", vr);
+        return nullptr;
+    }
+    vector<shared_ptr<ImageVulkan>> swapchainColorImages;
+    swapchainColorImages.reserve(swapchainImages.size());
+    for (VkImage img : swapchainImages) {
+        swapchainColorImages.emplace_back(make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}));
+    }
+    return make_shared<SwapChainVulkan>(this, surface.Release(), swapchain.Release(), std::move(swapchainColorImages));
 }
 
 Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(
@@ -598,8 +607,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
         RADRAY_ERR_LOG("vk create device fail");
         return nullptr;
     }
-    RADRAY_INFO_LOG("========== Feature ==========");
     auto deviceR = make_shared<DeviceVulkan>();
+    deviceR->_instance = g_instance->_instance;
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
     volkLoadDeviceTable(&deviceR->_vtb, device);
@@ -629,6 +638,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
         return nullptr;
     }
 
+    RADRAY_INFO_LOG("========== Feature ==========");
     for (const auto& i : queueRequests) {
         for (const auto& j : i.queueIndices) {
             VkQueue queuePtr = VK_NULL_HANDLE;

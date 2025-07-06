@@ -121,10 +121,6 @@ if get_config("enable_spirv_cross") then
 end
 if get_config("enable_vulkan") then
     add_requires("vulkan-headers 1.4.309", {debug = is_mode("debug")})
-    add_requires("volk 1.4.309", {debug = is_mode("debug")})
-    add_requireconfs("volk.vulkan-headers", {version = "1.4.309",debug = is_mode("debug")})
-    add_requires("vulkan-memory-allocator v3.3.0", {debug = is_mode("debug")})
-    add_requireconfs("vulkan-memory-allocator.vulkan-headers", {version = "1.4.309",debug = is_mode("debug")})
 end
 if get_config("build_test") then
     add_requires("gtest v1.16.0", {debug = is_mode("debug")})
@@ -134,7 +130,7 @@ if get_config("build_test") then
 end
 if get_config("enable_png") then
     add_requires("zlib v1.3.1", {debug = is_mode("debug")})
-    add_requires("libpng v1.6.47", {debug = is_mode("debug")})
+    add_requires("libpng v1.6.50", {debug = is_mode("debug")})
     add_requireconfs("libpng.zlib", {version = "v1.3.1",debug = is_mode("debug")})
 end
 
