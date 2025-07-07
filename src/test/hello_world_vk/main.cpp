@@ -7,67 +7,74 @@
 #include <radray/render/command_buffer.h>
 #include <radray/render/shader.h>
 
+#include <radray/window/glfw_window.h>
+
 using namespace radray;
 using namespace radray::render;
+using namespace radray::window;
 
-int main() {
-    auto dxc = CreateDxc().Unwrap();
-    string color = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
-    std::string_view includes[] = {"shaders"};
+constexpr int WIN_WIDTH = 1280;
+constexpr int WIN_HEIGHT = 720;
 
-    DxcOutput outv = *dxc->Compile(
-        color,
-        "VSMain",
-        ShaderStage::Vertex,
-        HlslShaderModel::SM60,
-        true,
-        {},
-        includes,
-        true);
-    DxcOutput outp = *dxc->Compile(
-        color,
-        "PSMain",
-        ShaderStage::Pixel,
-        HlslShaderModel::SM60,
-        true,
-        {},
-        includes,
-        true);
+unique_ptr<GlfwWindow> glfw;
+shared_ptr<Dxc> dxc;
+shared_ptr<Device> device;
+shared_ptr<CommandBuffer> cmdBuffer;
+shared_ptr<SwapChain> swapchain;
 
+void InitGraphics() {
     VulkanBackendInitDdescriptor vkInitDesc{};
     vkInitDesc.IsEnableDebugLayer = true;
     vkInitDesc.IsEnableGpuBasedValid = false;
     BackendInitDescriptor initDescs[] = {vkInitDesc};
     GlobalInitGraphics(initDescs);
+}
+
+void InitDevice() {
     VulkanDeviceDescriptor vkDesc{};
     VulkanCommandQueueDescriptor queueDesc[] = {
         {QueueType::Direct, 1},
         {QueueType::Compute, 1},
         {QueueType::Copy, 1}};
     vkDesc.Queues = queueDesc;
-    auto device = CreateDevice(vkDesc).Unwrap();
+    device = CreateDevice(vkDesc).Unwrap();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
-    auto fence = device->CreateFence().Unwrap();
-    auto cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
-    auto vs = device->CreateShader(
-                        outv.Data,
-                        outv.Category,
-                        ShaderStage::Vertex,
-                        "VSMain",
-                        "colorVS")
-                  .Unwrap();
-    auto ps = device->CreateShader(
-                        outp.Data,
-                        outp.Category,
-                        ShaderStage::Pixel,
-                        "PSMain",
-                        "colorPS")
-                  .Unwrap();
-    vs->Destroy();
-    ps->Destroy();
-    cmdBuffer->Destroy();
-    fence->Destroy();
-    device->Destroy();
+    cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
+    swapchain = device->CreateSwapChain(cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, 2, TextureFormat::RGBA8_UNORM, true).Unwrap();
+}
+
+void Init() {
+    GlobalInitGlfw();
+    glfw = make_unique<GlfwWindow>(RADRAY_APPNAME, WIN_WIDTH, WIN_HEIGHT, false, false);
+
+    dxc = CreateDxc().Unwrap();
+
+    InitGraphics();
+    InitDevice();
+}
+
+void End() {
+    swapchain = nullptr;
+    cmdBuffer = nullptr;
+    device = nullptr;
+
     GlobalTerminateGraphics();
+
+    dxc = nullptr;
+
+    glfw = nullptr;
+    GlobalTerminateGlfw();
+}
+
+bool Update() {
+    GlobalPollEventsGlfw();
+    return !glfw->ShouldClose();
+}
+
+int main() {
+    Init();
+    while (Update()) {
+    }
+    End();
     return 0;
 }

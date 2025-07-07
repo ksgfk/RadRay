@@ -32,6 +32,17 @@ tips:
         "--background-index-priority=normal",
         "--header-insertion=never",
         "--pch-storage=memory"
+    ],
+    "VSCodeCounter.exclude": [
+        "**/.gitignore",
+        "**/.vscode/**",
+        "**/build/**",
+        "**/.xmake/**",
+        "**/ext/**",
+        "**/volk.h",
+        "**/volk.c",
+        "**/vk_mem_alloc.h",
+        "**/vk_mem_alloc.cpp",
     ]
 }
 ```

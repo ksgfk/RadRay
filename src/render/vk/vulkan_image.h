@@ -27,6 +27,8 @@ public:
 
     ResourceStates GetInitState() const noexcept override;
 
+    void DangerousDestroy() noexcept;
+
 public:
     DeviceVulkan* _device;
     VkImage _image;

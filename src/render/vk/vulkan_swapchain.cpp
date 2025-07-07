@@ -5,14 +5,17 @@
 namespace radray::render::vulkan {
 
 static void DestroySwapChainVulkan(SwapChainVulkan& s) noexcept {
-    s._colors.clear();
-    if (s._surface != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(s._device->_instance, s._surface, s._device->GetAllocationCallbacks());
-        s._surface = VK_NULL_HANDLE;
+    for (auto& i : s._colors) {
+        i->DangerousDestroy();
     }
+    s._colors.clear();
     if (s._swapchain != VK_NULL_HANDLE) {
         s._device->CallVk(&FTbVk::vkDestroySwapchainKHR, s._swapchain, s._device->GetAllocationCallbacks());
         s._swapchain = VK_NULL_HANDLE;
+    }
+    if (s._surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(s._device->_instance, s._surface, s._device->GetAllocationCallbacks());
+        s._surface = VK_NULL_HANDLE;
     }
 }
 

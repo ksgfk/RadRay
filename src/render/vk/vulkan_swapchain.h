@@ -9,15 +9,7 @@ namespace radray::render::vulkan {
 
 class SwapChainVulkan : public SwapChain {
 public:
-    SwapChainVulkan(
-        DeviceVulkan* device,
-        VkSurfaceKHR surface,
-        VkSwapchainKHR swapchain,
-        vector<shared_ptr<ImageVulkan>> colors) noexcept
-        : _device(device),
-          _surface(surface),
-          _swapchain(swapchain),
-          _colors(std::move(colors)) {}
+    SwapChainVulkan() noexcept = default;
 
     ~SwapChainVulkan() noexcept;
 

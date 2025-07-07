@@ -37,4 +37,9 @@ ResourceStates ImageVulkan::GetInitState() const noexcept {
     return ResourceState::Common;
 }
 
+void ImageVulkan::DangerousDestroy() noexcept {
+    _allocation = VK_NULL_HANDLE;
+    _image = VK_NULL_HANDLE;
+}
+
 }  // namespace radray::render::vulkan

@@ -14,9 +14,9 @@ public:
     InstanceVulkan& operator=(const InstanceVulkan&) = delete;
     InstanceVulkan(InstanceVulkan&&) = delete;
     InstanceVulkan& operator=(InstanceVulkan&&) = delete;
-    ~InstanceVulkan() {
+    ~InstanceVulkan() noexcept {
         if (_instance != nullptr) {
-            const VkAllocationCallbacks* allocCbPtr = GetAllocationCallbacks();
+            const VkAllocationCallbacks* allocCbPtr = this->GetAllocationCallbacks();
             vkDestroyInstance(_instance, allocCbPtr);
             _instance = nullptr;
         }
@@ -41,7 +41,7 @@ static void DeviceVulkanDestroy(DeviceVulkan& d) noexcept {
         d._alloc = VK_NULL_HANDLE;
     }
     if (d._device != VK_NULL_HANDLE) {
-        d.CallVk(&FTbVk::vkDestroyDevice, g_instance->GetAllocationCallbacks());
+        d.CallVk(&FTbVk::vkDestroyDevice, d.GetAllocationCallbacks());
         d._device = VK_NULL_HANDLE;
     }
     d._physicalDevice = VK_NULL_HANDLE;
@@ -78,7 +78,7 @@ Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
     fenceInfo.pNext = nullptr;
     fenceInfo.flags = 0;
     VkFence fence = VK_NULL_HANDLE;
-    if (auto vr = CallVk(&FTbVk::vkCreateFence, &fenceInfo, g_instance->GetAllocationCallbacks(), &fence);
+    if (auto vr = CallVk(&FTbVk::vkCreateFence, &fenceInfo, this->GetAllocationCallbacks(), &fence);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk create fence failed: {}", vr);
         return nullptr;
@@ -103,7 +103,7 @@ Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(
         blob.size(),
         reinterpret_cast<const uint32_t*>(blob.data())};
     VkShaderModule shaderModule;
-    if (auto vr = CallVk(&FTbVk::vkCreateShaderModule, &moduleInfo, g_instance->GetAllocationCallbacks(), &shaderModule);
+    if (auto vr = CallVk(&FTbVk::vkCreateShaderModule, &moduleInfo, this->GetAllocationCallbacks(), &shaderModule);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkCreateShaderModule failed: {}", vr);
         return nullptr;
@@ -124,15 +124,15 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     uint32_t backBufferCount,
     TextureFormat format,
     bool enableSync) noexcept {
-    VkObjectWrapper<VkSurfaceKHR> surface{};
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     {
         HMODULE hInstance;
-        if (!GetModuleHandleExA(
+        if (GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                (LPCSTR)g_instance.Ptr.get(),
-                &hInstance)) {
-            RADRAY_ERR_LOG("vk call win32 GetModuleHandleExA failed. (code={})", GetLastError());
+                (LPCWSTR)(void*)&g_instance,
+                &hInstance) == 0) {
+            RADRAY_ERR_LOG("vk call win32 GetModuleHandleExW failed. (code={})", GetLastError());
             return nullptr;
         }
         VkWin32SurfaceCreateInfoKHR win32SurfaceInfo{};
@@ -141,23 +141,26 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         win32SurfaceInfo.flags = 0;
         win32SurfaceInfo.hinstance = hInstance;
         win32SurfaceInfo.hwnd = reinterpret_cast<HWND>(const_cast<void*>(nativeWindow));
-        VkSurfaceKHR vkSurfaceKHR = VK_NULL_HANDLE;
-        if (auto vr = vkCreateWin32SurfaceKHR(g_instance->_instance, &win32SurfaceInfo, g_instance->GetAllocationCallbacks(), &vkSurfaceKHR);
+        if (auto vr = vkCreateWin32SurfaceKHR(_instance, &win32SurfaceInfo, this->GetAllocationCallbacks(), &surface);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vk call vkCreateWin32SurfaceKHR failed: {}", vr);
             return nullptr;
         }
-        surface = {vkSurfaceKHR, {g_instance->_instance, g_instance->GetAllocationCallbacks()}};
     }
 #else
 #error "unsupported platform for Vulkan surface creation"
 #endif
-    if (!surface.IsValid()) {
+    if (surface == nullptr) {
         RADRAY_ERR_LOG("vk create VkSurfaceKHR failed");
         return nullptr;
     }
+
+    auto result = make_shared<SwapChainVulkan>();
+    result->_device = this;
+    result->_surface = surface;
+
     VkSurfaceCapabilitiesKHR surfaceProperties;
-    if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, surface.Get(), &surfaceProperties);
+    if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, surface, &surfaceProperties);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
         return nullptr;
@@ -191,7 +194,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     }
     VkFormat rawFormat = MapType(format);
     vector<VkSurfaceFormatKHR> supportedFormats;
-    if (auto vr = GetVector(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, this->_physicalDevice, surface.Get());
+    if (auto vr = GetVector(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, this->_physicalDevice, surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
         return nullptr;
@@ -203,7 +206,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     }
     const VkSurfaceFormatKHR& needFormat = *needFormatIter;
     vector<VkPresentModeKHR> supportedPresentModes;
-    if (auto vr = GetVector(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, this->_physicalDevice, surface.Get());
+    if (auto vr = GetVector(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, this->_physicalDevice, surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
         return nullptr;
@@ -217,7 +220,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     swapchianCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     swapchianCreateInfo.pNext = nullptr;
     swapchianCreateInfo.flags = 0;
-    swapchianCreateInfo.surface = surface.Get();
+    swapchianCreateInfo.surface = surface;
     swapchianCreateInfo.minImageCount = backBufferCount;
     swapchianCreateInfo.imageFormat = needFormat.format;
     swapchianCreateInfo.imageColorSpace = needFormat.colorSpace;
@@ -232,18 +235,15 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     swapchianCreateInfo.presentMode = needPresentMode;
     swapchianCreateInfo.clipped = VK_TRUE;
     swapchianCreateInfo.oldSwapchain = VK_NULL_HANDLE;
-    VkObjectWrapper<VkSwapchainKHR> swapchain{};
-    {
-        VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
-        if (auto vr = this->CallVk(&FTbVk::vkCreateSwapchainKHR, &swapchianCreateInfo, this->GetAllocationCallbacks(), &vkSwapchain);
-            vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("vk call vkCreateSwapchainKHR failed: {}", vr);
-            return nullptr;
-        }
-        swapchain = {vkSwapchain, {this}};
+    VkSwapchainKHR swapchain{};
+    if (auto vr = this->CallVk(&FTbVk::vkCreateSwapchainKHR, &swapchianCreateInfo, this->GetAllocationCallbacks(), &swapchain);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSwapchainKHR failed: {}", vr);
+        return nullptr;
     }
+    result->_swapchain = swapchain;
     vector<VkImage> swapchainImages;
-    if (auto vr = GetVector(swapchainImages, _vtb.vkGetSwapchainImagesKHR, _device, swapchain.Get());
+    if (auto vr = GetVector(swapchainImages, _vtb.vkGetSwapchainImagesKHR, _device, swapchain);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkGetSwapchainImagesKHR failed: {}", vr);
         return nullptr;
@@ -253,7 +253,8 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     for (VkImage img : swapchainImages) {
         swapchainColorImages.emplace_back(make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}));
     }
-    return make_shared<SwapChainVulkan>(this, surface.Release(), swapchain.Release(), std::move(swapchainColorImages));
+    result->_colors = std::move(swapchainColorImages);
+    return result;
 }
 
 Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(
@@ -611,18 +612,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
     deviceR->_instance = g_instance->_instance;
     deviceR->_physicalDevice = selectPhyDevice.device;
     deviceR->_device = device;
-    volkLoadDeviceTable(&deviceR->_vtb, device);
+    volkLoadDeviceTable(&deviceR->_vtb, deviceR->_device);
     VmaVulkanFunctions vmaFunctions{};
     VmaAllocatorCreateInfo vmaCreateInfo{};
     vmaCreateInfo.flags = 0;
     vmaCreateInfo.physicalDevice = deviceR->_physicalDevice;
     vmaCreateInfo.device = deviceR->_device;
     vmaCreateInfo.preferredLargeHeapBlockSize = 0;
-    vmaCreateInfo.pAllocationCallbacks = g_instance->GetAllocationCallbacks();
+    vmaCreateInfo.pAllocationCallbacks = deviceR->GetAllocationCallbacks();
     vmaCreateInfo.pDeviceMemoryCallbacks = nullptr;
     vmaCreateInfo.pHeapSizeLimit = nullptr;
     vmaCreateInfo.pVulkanFunctions = &vmaFunctions;
-    vmaCreateInfo.instance = g_instance->_instance;
+    vmaCreateInfo.instance = deviceR->_instance;
     vmaCreateInfo.vulkanApiVersion = selectPhyDevice.properties.apiVersion;
 #if VMA_EXTERNAL_MEMORY
     vmaCreateInfo.pTypeExternalMemoryHandleTypes = nullptr;
