@@ -158,3 +158,6 @@ void LogErrorSPrintf(std::source_location loc, std::string_view fmt, Args&&... a
         auto tmp___ = ::radray::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
         throw type(tmp___.c_str());                                     \
     } while (0)
+
+#define RADRAY_UNIMPLEMENTED() \
+    RADRAY_ABORT("unimplemented");

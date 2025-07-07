@@ -30,10 +30,12 @@ void ImageVulkan::Destroy() noexcept {
 }
 
 ResourceType ImageVulkan::GetType() const noexcept {
+    RADRAY_UNIMPLEMENTED();
     return ResourceType::UNKNOWN;
 }
 
 ResourceStates ImageVulkan::GetInitState() const noexcept {
+    RADRAY_UNIMPLEMENTED();
     return ResourceState::Common;
 }
 

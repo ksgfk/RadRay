@@ -26,20 +26,33 @@ void CommandBufferVulkan::Destroy() noexcept {
     DestroyCommandBufferVulkan(*this);
 }
 
-void CommandBufferVulkan::Begin() noexcept {}
+void CommandBufferVulkan::Begin() noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
-void CommandBufferVulkan::End() noexcept {}
+void CommandBufferVulkan::End() noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
-void CommandBufferVulkan::ResourceBarrier(const ResourceBarriers& barriers) noexcept {}
+void CommandBufferVulkan::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
-void CommandBufferVulkan::CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept {}
+void CommandBufferVulkan::CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
-void CommandBufferVulkan::CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept {}
+void CommandBufferVulkan::CopyTexture(Buffer* src, uint64_t srcOffset, Texture* dst, uint32_t mipLevel, uint32_t arrayLayer, uint32_t layerCount) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
 Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassDesc& desc) noexcept {
+    RADRAY_UNIMPLEMENTED();
     return nullptr;
 }
 
-void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {}
+void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
 }  // namespace radray::render::vulkan

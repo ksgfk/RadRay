@@ -32,13 +32,17 @@ void SwapChainVulkan::Destroy() noexcept {
 }
 
 Nullable<Texture> SwapChainVulkan::AcquireNextRenderTarget() noexcept {
+    RADRAY_UNIMPLEMENTED();
     return nullptr;
 }
 
 Texture* SwapChainVulkan::GetCurrentRenderTarget() noexcept {
+    RADRAY_UNIMPLEMENTED();
     return nullptr;
 }
 
-void SwapChainVulkan::Present() noexcept {}
+void SwapChainVulkan::Present() noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
 
 }  // namespace radray::render::vulkan

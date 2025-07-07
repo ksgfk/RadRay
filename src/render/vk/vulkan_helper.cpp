@@ -11,7 +11,7 @@ void VkObjectDeleter<VkSurfaceKHR>::operator()(VkSurfaceKHR surface) const noexc
 }
 
 void VkObjectDeleter<VkSwapchainKHR>::operator()(VkSwapchainKHR swapchain) const noexcept {
-    _device->CallVk(&FTbVk::vkDestroySwapchainKHR, swapchain, _device->GetAllocationCallbacks());
+    f(_device, swapchain, _allocCb);
 }
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {

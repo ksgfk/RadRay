@@ -39,7 +39,9 @@ public:
     void operator()(VkSwapchainKHR swapchain) const noexcept;
 
 public:
-    DeviceVulkan* _device{nullptr};
+    PFN_vkDestroySwapchainKHR f{nullptr};
+    VkDevice _device{VK_NULL_HANDLE};
+    const VkAllocationCallbacks* _allocCb{nullptr};
 };
 
 template <typename T, typename TDeleter = VkObjectDeleter<T>>
@@ -61,7 +63,10 @@ public:
 
     constexpr VkObjectWrapper(VkObjectWrapper&& other) noexcept
         : _obj(std::move(other._obj)),
-          _deleter(std::move(other._deleter)) {}
+          _deleter(std::move(other._deleter)) {
+        other._obj = VK_NULL_HANDLE;
+        other._deleter = TDeleter{};
+    }
 
     constexpr VkObjectWrapper& operator=(VkObjectWrapper&& other) noexcept {
         if (this != &other) {
