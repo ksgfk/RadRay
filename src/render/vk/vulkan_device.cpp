@@ -155,8 +155,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         return nullptr;
     }
 
-    auto result = make_shared<SwapChainVulkan>();
-    result->_device = this;
+    auto result = make_shared<SwapChainVulkan>(this, static_cast<QueueVulkan*>(presentQueue));
     result->_surface = surface;
 
     VkSurfaceCapabilitiesKHR surfaceProperties;
@@ -399,6 +398,20 @@ void DeviceVulkan::CopyDataToUploadBuffer(
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
     return g_instance->GetAllocationCallbacks();
+}
+
+Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateSemaphoreVk() noexcept {
+    VkSemaphoreCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    info.pNext = nullptr;
+    info.flags = 0;
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    if (auto vr = this->CallVk(&FTbVk::vkCreateSemaphore, &info, this->GetAllocationCallbacks(), &semaphore);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSemaphore failed {}", vr);
+        return nullptr;
+    }
+    return make_shared<SemaphoreVulkan>(this, semaphore);
 }
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(

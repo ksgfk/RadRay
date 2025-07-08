@@ -17,6 +17,9 @@ namespace radray::render::vulkan {
 
 class DeviceVulkan;
 class FenceVulkan;
+class QueueVulkan;
+class ImageVulkan;
+class SemaphoreVulkan;
 
 using FTbVk = VolkDeviceTable;
 

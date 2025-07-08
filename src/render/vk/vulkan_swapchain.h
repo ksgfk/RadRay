@@ -7,9 +7,17 @@
 
 namespace radray::render::vulkan {
 
+class SwapChainFrame {
+public:
+    unique_ptr<ImageVulkan> _color;
+    unique_ptr<SemaphoreVulkan> _acquireSemaphore;
+    unique_ptr<SemaphoreVulkan> _releaseSemaphore;
+};
+
 class SwapChainVulkan : public SwapChain {
 public:
-    SwapChainVulkan() noexcept = default;
+    SwapChainVulkan(DeviceVulkan* device, QueueVulkan* queue) noexcept
+        : _device(device), _queue(queue) {}
 
     ~SwapChainVulkan() noexcept;
 
@@ -25,9 +33,12 @@ public:
 
 public:
     DeviceVulkan* _device;
-    VkSurfaceKHR _surface;
-    VkSwapchainKHR _swapchain;
+    QueueVulkan* _queue;
+    VkSurfaceKHR _surface{VK_NULL_HANDLE};
+    VkSwapchainKHR _swapchain{VK_NULL_HANDLE};
     vector<shared_ptr<ImageVulkan>> _colors;
+    vector<SwapChainFrame> _frames;
+    uint32_t _currentFrameIndex{0};
 };
 
 }  // namespace radray::render::vulkan

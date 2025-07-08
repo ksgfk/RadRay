@@ -1,3 +1,5 @@
+#include <thread>
+
 #include <radray/logger.h>
 
 #include <radray/render/dxc.h>
@@ -68,12 +70,31 @@ void End() {
 
 bool Update() {
     GlobalPollEventsGlfw();
+
+    // swapchain->AcquireNextRenderTarget();
+    // cmdBuffer->Begin();
+    // ColorAttachment colorAttachment[] = {
+    //     DefaultColorAttachment(nullptr)};
+    // RenderPassDesc renderPassDesc{
+    //     "Clear",
+    //     colorAttachment,
+    //     std::nullopt};
+    // auto cmdEncoder = cmdBuffer->BeginRenderPass(renderPassDesc).Unwrap();
+    // cmdBuffer->EndRenderPass(std::move(cmdEncoder));
+    // cmdBuffer->End();
+    // auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
+    // CommandBuffer* submits[] = {cmdBuffer.get()};
+    // cmdQueue->Submit(submits, nullptr);
+    // swapchain->Present();
+    // cmdQueue->Wait();
+
     return !glfw->ShouldClose();
 }
 
 int main() {
     Init();
     while (Update()) {
+        std::this_thread::yield();
     }
     End();
     return 0;
