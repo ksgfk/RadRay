@@ -48,10 +48,12 @@ Nullable<Texture> SwapChainVulkan::AcquireNextRenderTarget() noexcept {
         return nullptr;
     }
     auto& frame = _frames[imageIndex];
-    if (frame._submitFence.HasValue()) {
+    if (!frame._submitFence.HasValue()) {
+        frame._submitFence = std::static_pointer_cast<FenceVulkan>(_device->CreateFence().Unwrap());
+    } else {
         frame._submitFence->Wait();
-        frame._submitFence->Reset();
     }
+    frame._submitFence->Reset();
     if (frame._acquireSemaphore.HasValue()) {
         _semaphorePool.emplace_back(frame._acquireSemaphore.Release());
         frame._acquireSemaphore = nullptr;
@@ -62,16 +64,44 @@ Nullable<Texture> SwapChainVulkan::AcquireNextRenderTarget() noexcept {
 }
 
 Texture* SwapChainVulkan::GetCurrentRenderTarget() noexcept {
-    RADRAY_UNIMPLEMENTED();
-    return nullptr;
+    return _frames[_currentFrameIndex]._color.get();
 }
 
 void SwapChainVulkan::Present() noexcept {
-    // VkSubmitInfo submitInfo{};
-    // submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    // submitInfo.pNext = nullptr;
-    // submitInfo.waitSemaphoreCount = 1;
-    RADRAY_UNIMPLEMENTED();
+    auto& frame = _frames[_currentFrameIndex];
+    if (!frame._releaseSemaphore.HasValue()) {
+        frame._releaseSemaphore = _device->CreateSemaphoreVk().Unwrap();
+    }
+    VkPipelineStageFlags waitStage{VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = nullptr;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &frame._acquireSemaphore->_semaphore;
+    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.commandBufferCount = 0;
+    submitInfo.pCommandBuffers = nullptr;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &frame._releaseSemaphore->_semaphore;
+    if (auto vr = _device->CallVk(&FTbVk::vkQueueSubmit, _queue->_queue, 1, &submitInfo, frame._submitFence->_fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkQueueSubmit failed: {}", vr);
+        return;
+    }
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.pNext = nullptr;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &frame._releaseSemaphore->_semaphore;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &_swapchain;
+    presentInfo.pImageIndices = &_currentFrameIndex;
+    presentInfo.pResults = nullptr;
+    if (auto vr = _device->CallVk(&FTbVk::vkQueuePresentKHR, _queue->_queue, &presentInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkQueuePresentKHR failed: {}", vr);
+        return;
+    }
 }
 
 }  // namespace radray::render::vulkan

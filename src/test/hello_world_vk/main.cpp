@@ -71,7 +71,7 @@ void End() {
 bool Update() {
     GlobalPollEventsGlfw();
 
-    // swapchain->AcquireNextRenderTarget();
+    swapchain->AcquireNextRenderTarget();
     // cmdBuffer->Begin();
     // ColorAttachment colorAttachment[] = {
     //     DefaultColorAttachment(nullptr)};
@@ -82,11 +82,11 @@ bool Update() {
     // auto cmdEncoder = cmdBuffer->BeginRenderPass(renderPassDesc).Unwrap();
     // cmdBuffer->EndRenderPass(std::move(cmdEncoder));
     // cmdBuffer->End();
-    // auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
+    auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
     // CommandBuffer* submits[] = {cmdBuffer.get()};
     // cmdQueue->Submit(submits, nullptr);
-    // swapchain->Present();
-    // cmdQueue->Wait();
+    swapchain->Present();
+    cmdQueue->Wait();
 
     return !glfw->ShouldClose();
 }
