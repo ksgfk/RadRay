@@ -247,12 +247,15 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         RADRAY_ERR_LOG("vk call vkGetSwapchainImagesKHR failed: {}", vr);
         return nullptr;
     }
-    vector<shared_ptr<ImageVulkan>> swapchainColorImages;
-    swapchainColorImages.reserve(swapchainImages.size());
+    vector<SwapChainFrame> frames;
+    frames.reserve(swapchainImages.size());
     for (VkImage img : swapchainImages) {
-        swapchainColorImages.emplace_back(make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}));
+        auto color = make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        SwapChainFrame frame{};
+        frame._color = std::move(color);
+        frames.emplace_back(std::move(frame));
     }
-    result->_colors = std::move(swapchainColorImages);
+    result->_frames = std::move(frames);
     return result;
 }
 

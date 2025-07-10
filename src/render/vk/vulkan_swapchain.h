@@ -4,14 +4,17 @@
 
 #include "vulkan_helper.h"
 #include "vulkan_image.h"
+#include "vulkan_semaphore.h"
+#include "vulkan_fence.h"
 
 namespace radray::render::vulkan {
 
 class SwapChainFrame {
 public:
-    unique_ptr<ImageVulkan> _color;
-    unique_ptr<SemaphoreVulkan> _acquireSemaphore;
-    unique_ptr<SemaphoreVulkan> _releaseSemaphore;
+    shared_ptr<ImageVulkan> _color;
+    Nullable<shared_ptr<SemaphoreVulkan>> _acquireSemaphore;
+    Nullable<shared_ptr<SemaphoreVulkan>> _releaseSemaphore;
+    Nullable<shared_ptr<FenceVulkan>> _submitFence;
 };
 
 class SwapChainVulkan : public SwapChain {
@@ -36,8 +39,8 @@ public:
     QueueVulkan* _queue;
     VkSurfaceKHR _surface{VK_NULL_HANDLE};
     VkSwapchainKHR _swapchain{VK_NULL_HANDLE};
-    vector<shared_ptr<ImageVulkan>> _colors;
     vector<SwapChainFrame> _frames;
+    vector<shared_ptr<SemaphoreVulkan>> _semaphorePool;
     uint32_t _currentFrameIndex{0};
 };
 
