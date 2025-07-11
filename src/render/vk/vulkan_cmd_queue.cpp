@@ -30,7 +30,7 @@ Nullable<shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept 
     VkCommandPoolCreateInfo poolInfo{
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         nullptr,
-        0,
+        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         _inFamily.Family};
     VkCommandPool pool{VK_NULL_HANDLE};
     if (auto vr = _device->CallVk(&FTbVk::vkCreateCommandPool, _device->_device, &poolInfo, _device->GetAllocationCallbacks(), &pool);
@@ -51,7 +51,7 @@ Nullable<shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept 
         RADRAY_ERR_LOG("vk call vkAllocateCommandBuffers failed: {}", vr);
         return nullptr;
     }
-    return make_shared<CommandBufferVulkan>(_device, std::move(mPool), cmdBuf);
+    return make_shared<CommandBufferVulkan>(_device, this, std::move(mPool), cmdBuf);
 }
 
 void QueueVulkan::Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> singalFence) noexcept {

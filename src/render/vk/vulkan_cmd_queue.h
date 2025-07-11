@@ -13,8 +13,15 @@ struct QueueIndexInFamily {
 
 class QueueVulkan : public CommandQueue {
 public:
-    QueueVulkan(DeviceVulkan* device, VkQueue queue, QueueIndexInFamily inFamily) noexcept
-        : _device(device), _queue(queue), _inFamily(inFamily) {}
+    QueueVulkan(
+        DeviceVulkan* device,
+        VkQueue queue,
+        QueueIndexInFamily inFamily,
+        QueueType type) noexcept
+        : _device(device),
+          _queue(queue),
+          _inFamily(inFamily),
+          _type(type) {}
 
     ~QueueVulkan() noexcept override;
 
@@ -34,7 +41,7 @@ public:
     DeviceVulkan* _device;
     VkQueue _queue;
     QueueIndexInFamily _inFamily;
-    shared_ptr<FenceVulkan> _fence;
+    QueueType _type;
 };
 
 }  // namespace radray::render::vulkan

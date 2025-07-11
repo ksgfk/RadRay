@@ -11,9 +11,11 @@ class CommandBufferVulkan : public CommandBuffer {
 public:
     CommandBufferVulkan(
         DeviceVulkan* device,
+        QueueVulkan* queue,
         unique_ptr<CommandPoolVulkan> pool,
         VkCommandBuffer cmdBuffer) noexcept
         : _device(device),
+          _queue(queue),
           _pool(std::move(pool)),
           _cmdBuffer(cmdBuffer) {};
 
@@ -39,6 +41,7 @@ public:
 
 public:
     DeviceVulkan* _device;
+    QueueVulkan* _queue;
     unique_ptr<CommandPoolVulkan> _pool;
     VkCommandBuffer _cmdBuffer;
 };

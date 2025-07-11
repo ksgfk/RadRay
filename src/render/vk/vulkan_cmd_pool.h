@@ -17,6 +17,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void Reset() const noexcept;
+
 public:
     DeviceVulkan* _device;
     VkCommandPool _pool;

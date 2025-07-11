@@ -48,10 +48,10 @@ Nullable<Texture> SwapChainVulkan::AcquireNextRenderTarget() noexcept {
         return nullptr;
     }
     auto& frame = _frames[imageIndex];
-    if (!frame._submitFence.HasValue()) {
-        frame._submitFence = std::static_pointer_cast<FenceVulkan>(_device->CreateFence().Unwrap());
-    } else {
+    if (frame._submitFence.HasValue()) {
         frame._submitFence->Wait();
+    } else {
+        frame._submitFence = std::static_pointer_cast<FenceVulkan>(_device->CreateFence().Unwrap());
     }
     frame._submitFence->Reset();
     if (frame._acquireSemaphore.HasValue()) {

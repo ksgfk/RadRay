@@ -76,6 +76,66 @@ std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSu
     return it != supported.end() ? *it : supported[0];
 }
 
+VkImageAspectFlags ToImageAspectFlags(VkFormat v) noexcept {
+    switch (v) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+        case VK_FORMAT_D32_SFLOAT:
+            return VK_IMAGE_ASPECT_DEPTH_BIT;
+        case VK_FORMAT_S8_UINT:
+            return VK_IMAGE_ASPECT_STENCIL_BIT;
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        default:
+            return VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+}
+
+VkPipelineStageFlags DeterminePipelineStageFlags(VkAccessFlags accessFlags, QueueType queueType) noexcept {
+    VkPipelineStageFlags flags = 0;
+    switch (queueType) {
+        case QueueType::Direct: {
+            if ((accessFlags & (VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)) != 0)
+                flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+            if ((accessFlags & (VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)) != 0) {
+                flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+                flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            }
+            if ((accessFlags & VK_ACCESS_INPUT_ATTACHMENT_READ_BIT) != 0)
+                flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            if ((accessFlags & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)) != 0)
+                flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            if ((accessFlags & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)) != 0)
+                flags |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            break;
+        }
+        case QueueType::Compute: {
+            if ((accessFlags & (VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)) != 0 ||
+                (accessFlags & VK_ACCESS_INPUT_ATTACHMENT_READ_BIT) != 0 ||
+                (accessFlags & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)) != 0 ||
+                (accessFlags & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)) != 0)
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            if ((accessFlags & (VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)) != 0)
+                flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            break;
+        }
+        case QueueType::Copy: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        default: break;
+    }
+    if ((accessFlags & VK_ACCESS_INDIRECT_COMMAND_READ_BIT) != 0)
+        flags |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if ((accessFlags & (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)) != 0)
+        flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if ((accessFlags & (VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT)) != 0)
+        flags |= VK_PIPELINE_STAGE_HOST_BIT;
+    if (flags == 0)
+        flags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    return flags;
+}
+
 VkQueueFlags MapType(QueueType v) noexcept {
     switch (v) {
         case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT;
@@ -144,6 +204,72 @@ VkImageType MapType(TextureDimension v) noexcept {
         case TextureDimension::Dim3D: return VK_IMAGE_TYPE_3D;
         default: return VK_IMAGE_TYPE_MAX_ENUM;
     }
+}
+
+VkAccessFlags MapAccessMask(ResourceStates v) noexcept {
+    VkAccessFlags ret = VK_ACCESS_NONE;
+    if (v.HasFlag(ResourceState::CopySource)) {
+        ret |= VK_ACCESS_TRANSFER_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::CopyDestination)) {
+        ret |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+    if (v.HasFlag(ResourceState::VertexAndConstantBuffer)) {
+        ret |= VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::IndexBuffer)) {
+        ret |= VK_ACCESS_INDEX_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::UnorderedAccess)) {
+        ret |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    if (v.HasFlag(ResourceState::IndirectArgument)) {
+        ret |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::RenderTarget)) {
+        ret |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    if (v.HasFlag(ResourceState::DepthWrite)) {
+        ret |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    }
+    if (v.HasFlag(ResourceState::DepthRead)) {
+        ret |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::ShaderResource)) {
+        ret |= VK_ACCESS_SHADER_READ_BIT;
+    }
+    if (v.HasFlag(ResourceState::Present)) {
+        ret |= VK_ACCESS_NONE;
+    }
+    return ret;
+}
+
+VkImageLayout MapImageLayout(ResourceStates v) noexcept {
+    if (v.HasFlag(ResourceState::CopySource)) {
+        return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::CopyDestination)) {
+        return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::RenderTarget)) {
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::DepthRead) && !v.HasFlag(ResourceState::DepthWrite)) {
+        return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::DepthWrite)) {
+        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::ShaderResource)) {
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    if (v.HasFlag(ResourceState::Present)) {
+        return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
+    if (v.HasFlag(ResourceState::Common)) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    }
+    return VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {

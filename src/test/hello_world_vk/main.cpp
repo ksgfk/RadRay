@@ -72,19 +72,21 @@ bool Update() {
     GlobalPollEventsGlfw();
 
     swapchain->AcquireNextRenderTarget();
-    // cmdBuffer->Begin();
-    // ColorAttachment colorAttachment[] = {
-    //     DefaultColorAttachment(nullptr)};
-    // RenderPassDesc renderPassDesc{
-    //     "Clear",
-    //     colorAttachment,
-    //     std::nullopt};
-    // auto cmdEncoder = cmdBuffer->BeginRenderPass(renderPassDesc).Unwrap();
-    // cmdBuffer->EndRenderPass(std::move(cmdEncoder));
-    // cmdBuffer->End();
+    cmdBuffer->Begin();
+    Texture* rt = swapchain->GetCurrentRenderTarget();
+    {
+        TextureBarrier barriers[] = {
+            {rt,
+             ResourceState::Common,
+             ResourceState::Present,
+             0, 0, false}};
+        ResourceBarriers rb{{}, barriers};
+        cmdBuffer->ResourceBarrier(rb);
+    }
+    cmdBuffer->End();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
-    // CommandBuffer* submits[] = {cmdBuffer.get()};
-    // cmdQueue->Submit(submits, nullptr);
+    CommandBuffer* submits[] = {cmdBuffer.get()};
+    cmdQueue->Submit(submits, nullptr);
     swapchain->Present();
     cmdQueue->Wait();
 

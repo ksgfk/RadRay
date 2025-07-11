@@ -34,6 +34,7 @@ public:
     VkImage _image;
     VmaAllocation _allocation;
     VmaAllocationInfo _info;
+    VkFormat _rawFormat;
 };
 
 }  // namespace radray::render::vulkan

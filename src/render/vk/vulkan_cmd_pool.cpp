@@ -23,4 +23,11 @@ void CommandPoolVulkan::Destroy() noexcept {
     DestroyCommandPoolVulkan(*this);
 }
 
+void CommandPoolVulkan::Reset() const noexcept {
+    if (auto vr = _device->CallVk(&FTbVk::vkResetCommandPool, _pool, 0);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkResetCommandPool failed: {}", vr);
+    }
+}
+
 }  // namespace radray::render::vulkan

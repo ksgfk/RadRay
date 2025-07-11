@@ -664,7 +664,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& de
                 RADRAY_ERR_LOG("vk get queue for family {} index {} failed", j.Family, j.IndexInFamily);
                 return nullptr;
             }
-            auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j);
+            auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j, i.rawType);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
