@@ -250,7 +250,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
     vector<SwapChainFrame> frames;
     frames.reserve(swapchainImages.size());
     for (VkImage img : swapchainImages) {
-        auto color = make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        auto color = make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}, ImageVulkanDescriptor{});
         SwapChainFrame frame{};
         frame._color = std::move(color);
         frames.emplace_back(std::move(frame));
@@ -293,7 +293,11 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
     imgInfo.format = MapType(desc.Format);
     imgInfo.extent.width = static_cast<uint32_t>(desc.Width);
     imgInfo.extent.height = static_cast<uint32_t>(desc.Height);
-    imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
+    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim3D) {
+        imgInfo.extent.depth = 1;
+    } else {
+        imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
+    }
     imgInfo.mipLevels = desc.MipLevels;
     if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim3D) {
         imgInfo.arrayLayers = 1;
@@ -319,33 +323,31 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
     imgInfo.queueFamilyIndexCount = 0;
     imgInfo.pQueueFamilyIndices = nullptr;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (desc.Usages & ResourceUsage::Texture) {
+    if (desc.Dim == TextureDimension::Dim1D && desc.DepthOrArraySize % 6 == 0 && desc.SampleCount == 1 && desc.Width == desc.Height) {
+        imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::CopySource)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::CopyDestination)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::Resource)) {
         imgInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     }
-    if (desc.Usages & ResourceUsage::TextureRW) {
-        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-    }
-    if (desc.Usages & ResourceUsage::RenderTarget) {
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
         imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
-    if (desc.Usages & ResourceUsage::DepthStencil) {
-        if (IsDepthStencilFormat(desc.Format)) {
-            imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        } else {
-            RADRAY_ERR_LOG("vk desc.Usages use DepthStencil but format is not compatible {}", desc.Format);
-            return nullptr;
-        }
+    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     }
-    if ((imgInfo.usage & VK_IMAGE_USAGE_SAMPLED_BIT) || (imgInfo.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
-        imgInfo.usage |= (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    }
-    if (desc.Usages & ResourceUsage::Cube) {
-        imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    if (desc.Usage.HasFlag(TextureUse::StorageRead) || desc.Usage.HasFlag(TextureUse::StorageWrite) || desc.Usage.HasFlag(TextureUse::StorageRW)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     }
 
     VmaAllocationCreateInfo vmaInfo{};
     vmaInfo.flags = 0;
-    if (desc.Hints & ResourceHint::Dedicated) {
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
     vmaInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
@@ -364,7 +366,9 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
         RADRAY_ERR_LOG("vk failed to create image: {}", vr);
         return nullptr;
     }
-    return make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
+    auto imgDesc = ImageVulkanDescriptor::FromRaw(desc);
+    imgDesc._rawFormat = imgInfo.format;
+    return make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo, imgDesc);
 }
 
 Nullable<shared_ptr<ResourceView>> DeviceVulkan::CreateBufferView(

@@ -14,9 +14,7 @@ public:
     uint32_t MipLevels;
     uint32_t SampleCount;
     TextureFormat Format;
-    ResourceUsages Usages;
-    ResourceStates InitState;
-    ClearValue Clear;
+    TextureUses Usage;
     ResourceHints Hints;
 };
 

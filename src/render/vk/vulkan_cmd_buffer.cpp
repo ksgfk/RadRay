@@ -53,10 +53,10 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
-    VkAccessFlags srcAccessFlags = 0;
-    VkAccessFlags dstAccessFlags = 0;
+    // VkAccessFlags srcAccessFlags = 0;
+    // VkAccessFlags dstAccessFlags = 0;
 
-    vector<VkBufferMemoryBarrier> bmbs;
+    // vector<VkBufferMemoryBarrier> bmbs;
     // TODO: buffer barrier
     // bmbs.reserve(barriers.Buffers.size());
     // for (const auto& i : barriers.Buffers) {
@@ -72,61 +72,97 @@ void CommandBufferVulkan::ResourceBarrier(const ResourceBarriers& barriers) noex
     //     }
     // }
 
-    vector<VkImageMemoryBarrier> imbs;
-    imbs.reserve(barriers.Textures.size());
-    for (const auto& i : barriers.Textures) {
-        VkImageMemoryBarrier* pImb = nullptr;
-        if (i.Before.HasFlag(ResourceState::UnorderedAccess) && i.After.HasFlag(ResourceState::UnorderedAccess)) {
-            auto& imb = imbs.emplace_back();
-            imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            imb.pNext = nullptr;
-            imb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            imb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-            imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            pImb = &imb;
-        } else {
-            auto& imb = imbs.emplace_back();
-            imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            imb.pNext = nullptr;
-            imb.srcAccessMask = MapAccessMask(i.Before);
-            imb.dstAccessMask = MapAccessMask(i.After);
-            imb.oldLayout = MapImageLayout(i.Before);
-            imb.newLayout = MapImageLayout(i.After);
-            pImb = &imb;
-        }
-        if (pImb != nullptr) {
-            auto tex = static_cast<ImageVulkan*>(i.Texture);
-            pImb->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            pImb->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            pImb->image = tex->_image;
-            VkImageSubresourceRange subresRange{};
-            subresRange.aspectMask = ToImageAspectFlags(tex->_rawFormat);
-            subresRange.baseMipLevel = i.IsSubresourceBarrier ? i.MipLevel : 0;
-            subresRange.levelCount = i.IsSubresourceBarrier ? 1 : VK_REMAINING_MIP_LEVELS;
-            subresRange.baseArrayLayer = i.IsSubresourceBarrier ? i.ArrayLayer : 0;
-            subresRange.layerCount = i.IsSubresourceBarrier ? 1 : VK_REMAINING_ARRAY_LAYERS;
-            pImb->subresourceRange = subresRange;
+    // vector<VkImageMemoryBarrier> imbs;
+    // imbs.reserve(barriers.Textures.size());
+    // for (const auto& i : barriers.Textures) {
+    //     VkImageMemoryBarrier* pImb = nullptr;
+    //     if (i.Before.HasFlag(ResourceState::UnorderedAccess) && i.After.HasFlag(ResourceState::UnorderedAccess)) {
+    //         auto& imb = imbs.emplace_back();
+    //         imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //         imb.pNext = nullptr;
+    //         imb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    //         imb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    //         imb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    //         imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    //         pImb = &imb;
+    //     } else {
+    //         auto& imb = imbs.emplace_back();
+    //         imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //         imb.pNext = nullptr;
+    //         imb.srcAccessMask = MapAccessMask(i.Before);
+    //         imb.dstAccessMask = MapAccessMask(i.After);
+    //         imb.oldLayout = MapImageLayout(i.Before);
+    //         imb.newLayout = MapImageLayout(i.After);
+    //         pImb = &imb;
+    //     }
+    //     if (pImb != nullptr) {
+    //         auto tex = static_cast<ImageVulkan*>(i.Texture);
+    //         pImb->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //         pImb->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //         pImb->image = tex->_image;
+    //         VkImageSubresourceRange subresRange{};
+    //         subresRange.aspectMask = ToImageAspectFlags(tex->_rawFormat);
+    //         subresRange.baseMipLevel = i.IsSubresourceBarrier ? i.MipLevel : 0;
+    //         subresRange.levelCount = i.IsSubresourceBarrier ? 1 : VK_REMAINING_MIP_LEVELS;
+    //         subresRange.baseArrayLayer = i.IsSubresourceBarrier ? i.ArrayLayer : 0;
+    //         subresRange.layerCount = i.IsSubresourceBarrier ? 1 : VK_REMAINING_ARRAY_LAYERS;
+    //         pImb->subresourceRange = subresRange;
 
-            srcAccessFlags |= pImb->srcAccessMask;
-            dstAccessFlags |= pImb->dstAccessMask;
-        }
-    }
-    VkPipelineStageFlags srcStageMask = DeterminePipelineStageFlags(srcAccessFlags, _queue->_type);
-    VkPipelineStageFlags dstStageMask = DeterminePipelineStageFlags(dstAccessFlags, _queue->_type);
-    if (!bmbs.empty() || !imbs.empty()) {
-        _device->CallVk(
-            &FTbVk::vkCmdPipelineBarrier,
-            _cmdBuffer,
-            srcStageMask,
-            dstStageMask,
-            0,
-            0,
-            nullptr,
-            static_cast<uint32_t>(bmbs.size()),
-            bmbs.data(),
-            static_cast<uint32_t>(imbs.size()),
-            imbs.data());
+    //         srcAccessFlags |= pImb->srcAccessMask;
+    //         dstAccessFlags |= pImb->dstAccessMask;
+    //     }
+    // }
+    // VkPipelineStageFlags srcStageMask = DeterminePipelineStageFlags(srcAccessFlags, _queue->_type);
+    // VkPipelineStageFlags dstStageMask = DeterminePipelineStageFlags(dstAccessFlags, _queue->_type);
+    // if (!bmbs.empty() || !imbs.empty()) {
+    //     _device->CallVk(
+    //         &FTbVk::vkCmdPipelineBarrier,
+    //         _cmdBuffer,
+    //         srcStageMask,
+    //         dstStageMask,
+    //         0,
+    //         0,
+    //         nullptr,
+    //         static_cast<uint32_t>(bmbs.size()),
+    //         bmbs.data(),
+    //         static_cast<uint32_t>(imbs.size()),
+    //         imbs.data());
+    // }
+}
+
+void CommandBufferVulkan::TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept {
+    VkAccessFlags srcAccessFlags = VK_ACCESS_NONE;
+    VkAccessFlags dstAccessFlags = VK_ACCESS_NONE;
+
+    vector<VkBufferMemoryBarrier> bmbs;
+
+    vector<VkImageMemoryBarrier> imbs;
+    for (const auto& i : textures) {
+        auto tex = static_cast<ImageVulkan*>(i.Texture);
+        auto& imb = imbs.emplace_back();
+
+        imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imb.pNext = nullptr;
+        // imb.srcAccessMask = MapAccessMask(i.Before);
+        // imb.dstAccessMask = MapAccessMask(i.After);
+        // imb.oldLayout = MapImageLayout(i.Before);
+        // imb.newLayout = MapImageLayout(i.After);
+        // TextureUseToBarrier(i.Before, imb.srcStageMask, imb.srcAccessMask);
+        // TextureUseToBarrier(i.After, imb.dstStageMask, imb.dstAccessMask);
+
+        imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imb.image = tex->_image;
+        VkImageSubresourceRange subresRange{};
+        subresRange.aspectMask = ToImageAspectFlags(tex->_desc._rawFormat);
+        subresRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
+        subresRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+        subresRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
+        subresRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+        imb.subresourceRange = subresRange;
+
+        srcAccessFlags |= imb.srcAccessMask;
+        dstAccessFlags |= imb.dstAccessMask;
     }
 }
 

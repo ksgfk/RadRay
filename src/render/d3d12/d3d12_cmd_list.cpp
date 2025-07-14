@@ -88,6 +88,10 @@ void CmdListD3D12::ResourceBarrier(const ResourceBarriers& barriers) noexcept {
     }
 }
 
+void CmdListD3D12::TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
+
 void CmdListD3D12::CopyBuffer(Buffer* src_, uint64_t srcOffset, Buffer* dst_, uint64_t dstOffset, uint64_t size) noexcept {
     BufferD3D12* src = static_cast<BufferD3D12*>(src_);
     BufferD3D12* dst = static_cast<BufferD3D12*>(dst_);

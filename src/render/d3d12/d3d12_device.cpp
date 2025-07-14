@@ -1148,7 +1148,8 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(
 }
 
 Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureCreateDescriptor& desc) noexcept {
-    return nullptr; // TODO:
+    RADRAY_UNIMPLEMENTED();
+    return nullptr;  // TODO:
 }
 
 Nullable<shared_ptr<ResourceView>> DeviceD3D12::CreateBufferView(

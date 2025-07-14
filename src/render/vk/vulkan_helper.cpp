@@ -136,6 +136,10 @@ VkPipelineStageFlags DeterminePipelineStageFlags(VkAccessFlags accessFlags, Queu
     return flags;
 }
 
+void TextureUseToBarrier(TextureUses v, VkPipelineStageFlags& pipeStage, VkAccessFlags& access) noexcept {
+    RADRAY_UNIMPLEMENTED();
+}
+
 VkQueueFlags MapType(QueueType v) noexcept {
     switch (v) {
         case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT;

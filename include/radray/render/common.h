@@ -272,8 +272,7 @@ enum class ColorWrite : uint32_t {
     All = Red | Green | Blue | Alpha
 };
 
-/** @deprecated */
-enum class ResourceType {
+enum class [[deprecated]] ResourceType {
     UNKNOWN,
 
     Sampler,
@@ -291,7 +290,7 @@ enum class ResourceType {
     RayTracing
 };
 
-enum class ResourceUsage : uint32_t {
+enum class [[deprecated]] ResourceUsage : uint32_t {
     UNKNOWN = 0x0,
 
     Sampler = 0x1,
@@ -312,7 +311,22 @@ enum class ResourceUsage : uint32_t {
     RayTracing = BufferRW << 1
 };
 
-enum class ResourceState : uint32_t {
+enum class TextureUse : uint32_t {
+    UNKNOWN = 0x0,
+    Uninitialized = 0x1,
+    Present = Uninitialized << 1,
+    CopySource = Present << 1,
+    CopyDestination = CopySource << 1,
+    Resource = CopyDestination << 1,
+    RenderTarget = Resource << 1,
+    DepthStencilRead = RenderTarget << 1,
+    DepthStencilWrite = DepthStencilRead << 1,
+    StorageRead = DepthStencilWrite << 1,
+    StorageWrite = StorageRead << 1,
+    StorageRW = StorageWrite << 1
+};
+
+enum class [[deprecated]] ResourceState : uint32_t {
     Common = 0x0,
 
     VertexAndConstantBuffer = 0x1,
@@ -434,6 +448,8 @@ template <>
 struct is_flags<render::ResourceUsage> : public std::true_type {};
 template <>
 struct is_flags<render::RenderObjectTag> : public std::true_type {};
+template <>
+struct is_flags<render::TextureUse> : public std::true_type {};
 
 }  // namespace radray
 
@@ -445,6 +461,7 @@ using ResourceStates = EnumFlags<render::ResourceState>;
 using ResourceHints = EnumFlags<render::ResourceHint>;
 using ResourceUsages = EnumFlags<render::ResourceUsage>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
+using TextureUses = EnumFlags<render::TextureUse>;
 
 class RenderBase : public Noncopyable {
 public:

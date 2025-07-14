@@ -24,6 +24,23 @@ struct ResourceBarriers {
     std::span<TextureBarrier> Textures;
 };
 
+struct TransitionBufferDescriptor {
+    Buffer* Texture;
+    TextureUses Before;
+    TextureUses After;
+};
+
+struct TransitionTextureDescriptor {
+    Texture* Texture;
+    TextureUses Before;
+    TextureUses After;
+    bool IsSubresourceBarrier;
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+};
+
 struct ColorAttachment {
     ResourceView* Target;
     LoadAction Load;
@@ -82,6 +99,8 @@ public:
     virtual void End() noexcept = 0;
 
     virtual void ResourceBarrier(const ResourceBarriers& barriers) noexcept = 0;
+
+    virtual void TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept = 0;
 
     virtual void CopyBuffer(Buffer* src, uint64_t srcOffset, Buffer* dst, uint64_t dstOffset, uint64_t size) noexcept = 0;
 

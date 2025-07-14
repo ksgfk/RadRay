@@ -4,6 +4,21 @@
 
 namespace radray::render::vulkan {
 
+ImageVulkanDescriptor ImageVulkanDescriptor::FromRaw(const TextureCreateDescriptor& desc) noexcept {
+    ImageVulkanDescriptor result;
+    result.Name = desc.Name;
+    result.Dim = desc.Dim;
+    result.Width = desc.Width;
+    result.Height = desc.Height;
+    result.DepthOrArraySize = desc.DepthOrArraySize;
+    result.MipLevels = desc.MipLevels;
+    result.SampleCount = desc.SampleCount;
+    result.Format = desc.Format;
+    result.Usage = desc.Usage;
+    result.Hints = desc.Hints;
+    return result;
+}
+
 static void DestroyImageVulkan(ImageVulkan& img) noexcept {
     if (img._image != VK_NULL_HANDLE) {
         if (img._allocation == VK_NULL_HANDLE) {

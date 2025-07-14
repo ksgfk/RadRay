@@ -149,6 +149,7 @@ bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperti
 std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSurfaceKHR surface, std::span<VkFormat> preferred) noexcept;
 VkImageAspectFlags ToImageAspectFlags(VkFormat v) noexcept;
 VkPipelineStageFlags DeterminePipelineStageFlags(VkAccessFlags accessFlags, QueueType queueType) noexcept;
+void TextureUseToBarrier(TextureUses v, VkPipelineStageFlags& pipeStage, VkAccessFlags& access) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;
