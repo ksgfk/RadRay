@@ -293,7 +293,7 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureCreateDes
     imgInfo.format = MapType(desc.Format);
     imgInfo.extent.width = static_cast<uint32_t>(desc.Width);
     imgInfo.extent.height = static_cast<uint32_t>(desc.Height);
-    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim3D) {
+    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D) {
         imgInfo.extent.depth = 1;
     } else {
         imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);

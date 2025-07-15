@@ -147,9 +147,9 @@ uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& 
 bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtensionProperties> available) noexcept;
 bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept;
 std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSurfaceKHR surface, std::span<VkFormat> preferred) noexcept;
-VkImageAspectFlags ToImageAspectFlags(VkFormat v) noexcept;
-VkPipelineStageFlags DeterminePipelineStageFlags(VkAccessFlags accessFlags, QueueType queueType) noexcept;
+VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept;
 void TextureUseToBarrier(TextureUses v, VkPipelineStageFlags& pipeStage, VkAccessFlags& access) noexcept;
+VkImageLayout TextureUseToLayout(TextureUses v) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;

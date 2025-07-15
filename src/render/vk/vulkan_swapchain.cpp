@@ -47,6 +47,7 @@ Nullable<Texture> SwapChainVulkan::AcquireNextRenderTarget() noexcept {
         _semaphorePool.emplace_back(std::move(acquireSemaphore));
         return nullptr;
     }
+    // RADRAY_INFO_LOG("vk acquire next image index: {}", imageIndex);
     auto& frame = _frames[imageIndex];
     if (frame._submitFence.HasValue()) {
         frame._submitFence->Wait();

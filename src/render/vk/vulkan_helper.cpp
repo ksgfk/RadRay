@@ -76,7 +76,7 @@ std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSu
     return it != supported.end() ? *it : supported[0];
 }
 
-VkImageAspectFlags ToImageAspectFlags(VkFormat v) noexcept {
+VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept {
     switch (v) {
         case VK_FORMAT_D16_UNORM:
         case VK_FORMAT_X8_D24_UNORM_PACK32:
@@ -93,51 +93,71 @@ VkImageAspectFlags ToImageAspectFlags(VkFormat v) noexcept {
     }
 }
 
-VkPipelineStageFlags DeterminePipelineStageFlags(VkAccessFlags accessFlags, QueueType queueType) noexcept {
-    VkPipelineStageFlags flags = 0;
-    switch (queueType) {
-        case QueueType::Direct: {
-            if ((accessFlags & (VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)) != 0)
-                flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
-            if ((accessFlags & (VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)) != 0) {
-                flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
-                flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-                flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            }
-            if ((accessFlags & VK_ACCESS_INPUT_ATTACHMENT_READ_BIT) != 0)
-                flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            if ((accessFlags & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)) != 0)
-                flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            if ((accessFlags & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)) != 0)
-                flags |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-            break;
-        }
-        case QueueType::Compute: {
-            if ((accessFlags & (VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)) != 0 ||
-                (accessFlags & VK_ACCESS_INPUT_ATTACHMENT_READ_BIT) != 0 ||
-                (accessFlags & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)) != 0 ||
-                (accessFlags & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)) != 0)
-                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-            if ((accessFlags & (VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)) != 0)
-                flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            break;
-        }
-        case QueueType::Copy: return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        default: break;
+void TextureUseToBarrier(TextureUses v, VkPipelineStageFlags& pipeStage, VkAccessFlags& access) noexcept {
+    if (v == TextureUse::Uninitialized || v == TextureUse::Present) {
+        pipeStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        access = VK_ACCESS_NONE;
+        return;
     }
-    if ((accessFlags & VK_ACCESS_INDIRECT_COMMAND_READ_BIT) != 0)
-        flags |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
-    if ((accessFlags & (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)) != 0)
-        flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
-    if ((accessFlags & (VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT)) != 0)
-        flags |= VK_PIPELINE_STAGE_HOST_BIT;
-    if (flags == 0)
-        flags = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    return flags;
+    pipeStage = VK_PIPELINE_STAGE_NONE;
+    access = VK_ACCESS_NONE;
+    const VkPipelineStageFlags allShaderStages =
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+        VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (v.HasFlag(TextureUse::CopySource)) {
+        pipeStage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+        access |= VK_ACCESS_TRANSFER_READ_BIT;
+    }
+    if (v.HasFlag(TextureUse::CopyDestination)) {
+        pipeStage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+        access |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+    if (v.HasFlag(TextureUse::Resource)) {
+        pipeStage |= allShaderStages;
+        access |= VK_ACCESS_SHADER_READ_BIT;
+    }
+    if (v.HasFlag(TextureUse::RenderTarget)) {
+        pipeStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    if (v.HasFlag(TextureUse::DepthStencilRead)) {
+        pipeStage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    }
+    if (v.HasFlag(TextureUse::DepthStencilWrite)) {
+        pipeStage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    }
+    if (v.HasFlag(TextureUse::StorageWrite) || v.HasFlag(TextureUse::StorageRW)) {
+        pipeStage |= allShaderStages;
+        access |= VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    if (v.HasFlag(TextureUse::StorageRead) || v.HasFlag(TextureUse::StorageRW)) {
+        pipeStage |= allShaderStages;
+        access |= VK_ACCESS_SHADER_READ_BIT;
+    }
 }
 
-void TextureUseToBarrier(TextureUses v, VkPipelineStageFlags& pipeStage, VkAccessFlags& access) noexcept {
-    RADRAY_UNIMPLEMENTED();
+VkImageLayout TextureUseToLayout(TextureUses v) noexcept {
+    switch (v) {
+        case TextureUse::Present: return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        case TextureUse::CopySource: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        case TextureUse::CopyDestination: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        case TextureUse::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        case TextureUse::DepthStencilRead: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        case TextureUse::DepthStencilWrite: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureUse::Resource: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        case TextureUse::StorageRead:
+        case TextureUse::StorageWrite:
+        case TextureUse::StorageRW: return VK_IMAGE_LAYOUT_GENERAL;
+        case TextureUse::UNKNOWN:
+        case TextureUse::Uninitialized:
+        default: return VK_IMAGE_LAYOUT_UNDEFINED;
+    }
 }
 
 VkQueueFlags MapType(QueueType v) noexcept {

@@ -131,8 +131,8 @@ void CommandBufferVulkan::ResourceBarrier(const ResourceBarriers& barriers) noex
 }
 
 void CommandBufferVulkan::TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept {
-    VkAccessFlags srcAccessFlags = VK_ACCESS_NONE;
-    VkAccessFlags dstAccessFlags = VK_ACCESS_NONE;
+    VkPipelineStageFlags srcStageFlags = 0;
+    VkPipelineStageFlags dstStageFlags = 0;
 
     vector<VkBufferMemoryBarrier> bmbs;
 
@@ -140,29 +140,48 @@ void CommandBufferVulkan::TransitionResource(std::span<TransitionBufferDescripto
     for (const auto& i : textures) {
         auto tex = static_cast<ImageVulkan*>(i.Texture);
         auto& imb = imbs.emplace_back();
-
         imb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         imb.pNext = nullptr;
-        // imb.srcAccessMask = MapAccessMask(i.Before);
-        // imb.dstAccessMask = MapAccessMask(i.After);
-        // imb.oldLayout = MapImageLayout(i.Before);
-        // imb.newLayout = MapImageLayout(i.After);
-        // TextureUseToBarrier(i.Before, imb.srcStageMask, imb.srcAccessMask);
-        // TextureUseToBarrier(i.After, imb.dstStageMask, imb.dstAccessMask);
-
+        VkPipelineStageFlags srcStage;
+        VkAccessFlags srcAccess;
+        TextureUseToBarrier(i.Before, srcStage, srcAccess);
+        VkImageLayout oldLayout = TextureUseToLayout(i.Before);
+        VkPipelineStageFlags dstStage;
+        VkAccessFlags dstAccess;
+        TextureUseToBarrier(i.After, dstStage, dstAccess);
+        VkImageLayout newLayout = TextureUseToLayout(i.After);
+        imb.srcAccessMask = srcAccess;
+        imb.dstAccessMask = dstAccess;
+        imb.oldLayout = oldLayout;
+        imb.newLayout = newLayout;
         imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         imb.image = tex->_image;
         VkImageSubresourceRange subresRange{};
-        subresRange.aspectMask = ToImageAspectFlags(tex->_desc._rawFormat);
+        subresRange.aspectMask = ImageFormatToAspectFlags(tex->_desc._rawFormat);
         subresRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
         subresRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
         subresRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
         subresRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
         imb.subresourceRange = subresRange;
 
-        srcAccessFlags |= imb.srcAccessMask;
-        dstAccessFlags |= imb.dstAccessMask;
+        srcStageFlags |= srcStage;
+        dstStageFlags |= dstStage;
+    }
+
+    if (!bmbs.empty() || !imbs.empty()) {
+        _device->CallVk(
+            &FTbVk::vkCmdPipelineBarrier,
+            _cmdBuffer,
+            srcStageFlags,
+            dstStageFlags,
+            0,
+            0,
+            nullptr,
+            static_cast<uint32_t>(bmbs.size()),
+            bmbs.data(),
+            static_cast<uint32_t>(imbs.size()),
+            imbs.data());
     }
 }
 

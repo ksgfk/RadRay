@@ -64,13 +64,17 @@ void QueueVulkan::Submit(std::span<CommandBuffer*> buffers, Nullable<Fence> sing
         rawSignalFence = static_cast<FenceVulkan*>(singalFence.Value())->_fence;
     }
     vector<VkCommandBuffer> cmdBufs;
+    for (auto i : buffers) {
+        auto v = static_cast<CommandBufferVulkan*>(i);
+        cmdBufs.emplace_back(v->_cmdBuffer);
+    }
     VkSubmitInfo info{
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
         0,
         nullptr,
         nullptr,
-        (uint32_t)cmdBufs.size(),
+        static_cast<uint32_t>(cmdBufs.size()),
         cmdBufs.data(),
         0,
         nullptr};

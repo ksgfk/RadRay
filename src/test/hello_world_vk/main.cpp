@@ -42,7 +42,7 @@ void InitDevice() {
     device = CreateDevice(vkDesc).Unwrap();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
     cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
-    swapchain = device->CreateSwapChain(cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, 2, TextureFormat::RGBA8_UNORM, true).Unwrap();
+    swapchain = device->CreateSwapChain(cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, 2, TextureFormat::RGBA8_UNORM, false).Unwrap();
 }
 
 void Init() {
@@ -75,13 +75,9 @@ bool Update() {
     cmdBuffer->Begin();
     Texture* rt = swapchain->GetCurrentRenderTarget();
     {
-        TextureBarrier barriers[] = {
-            {rt,
-             ResourceState::Common,
-             ResourceState::Present,
-             0, 0, false}};
-        ResourceBarriers rb{{}, barriers};
-        cmdBuffer->ResourceBarrier(rb);
+        TransitionTextureDescriptor texBarriers[] = {
+            {rt, TextureUse::Uninitialized, TextureUse::Present, false, 0, 0, 0, 0}};
+        cmdBuffer->TransitionResource({}, texBarriers);
     }
     cmdBuffer->End();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
