@@ -30,7 +30,7 @@ Nullable<shared_ptr<CommandBuffer>> QueueVulkan::CreateCommandBuffer() noexcept 
     VkCommandPoolCreateInfo poolInfo{
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         nullptr,
-        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        0,
         _inFamily.Family};
     VkCommandPool pool{VK_NULL_HANDLE};
     if (auto vr = _device->CallVk(&FTbVk::vkCreateCommandPool, _device->_device, &poolInfo, _device->GetAllocationCallbacks(), &pool);

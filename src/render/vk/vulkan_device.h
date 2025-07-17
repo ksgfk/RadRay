@@ -124,7 +124,9 @@ public:
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
-    Nullable<shared_ptr<SemaphoreVulkan>> CreateSemaphoreVk() noexcept;
+    Nullable<shared_ptr<SemaphoreVulkan>> CreateSemaphoreVk(VkSemaphoreCreateFlags flags) noexcept;
+
+    Nullable<shared_ptr<FenceVulkan>> CreateFenceVk(VkFenceCreateFlags flags) noexcept;
 };
 
 Nullable<shared_ptr<DeviceVulkan>> CreateDevice(const VulkanDeviceDescriptor& desc);

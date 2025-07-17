@@ -29,10 +29,6 @@ void CommandBufferVulkan::Destroy() noexcept {
 }
 
 void CommandBufferVulkan::Begin() noexcept {
-    if (auto vr = _device->CallVk(&FTbVk::vkResetCommandBuffer, _cmdBuffer, 0);
-        vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkResetCommandBuffer failed: {}", vr);
-    }
     _pool->Reset();
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

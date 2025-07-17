@@ -42,7 +42,7 @@ void InitDevice() {
     device = CreateDevice(vkDesc).Unwrap();
     auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
     cmdBuffer = cmdQueue->CreateCommandBuffer().Unwrap();
-    swapchain = device->CreateSwapChain(cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, 2, TextureFormat::RGBA8_UNORM, false).Unwrap();
+    swapchain = device->CreateSwapChain(cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, 2, TextureFormat::RGBA8_UNORM, true).Unwrap();
 }
 
 void Init() {
@@ -56,6 +56,9 @@ void Init() {
 }
 
 void End() {
+    auto cmdQueue = device->GetCommandQueue(QueueType::Direct).Unwrap();
+    cmdQueue->Wait();
+
     swapchain = nullptr;
     cmdBuffer = nullptr;
     device = nullptr;
@@ -84,7 +87,7 @@ bool Update() {
     CommandBuffer* submits[] = {cmdBuffer.get()};
     cmdQueue->Submit(submits, nullptr);
     swapchain->Present();
-    cmdQueue->Wait();
+    // cmdQueue->Wait();
 
     return !glfw->ShouldClose();
 }

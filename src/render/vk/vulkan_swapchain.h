@@ -40,7 +40,6 @@ public:
     VkSurfaceKHR _surface{VK_NULL_HANDLE};
     VkSwapchainKHR _swapchain{VK_NULL_HANDLE};
     vector<SwapChainFrame> _frames;
-    vector<shared_ptr<SemaphoreVulkan>> _semaphorePool;
     uint32_t _currentFrameIndex{0};
 };
 

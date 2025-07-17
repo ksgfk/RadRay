@@ -73,17 +73,7 @@ Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t sl
 }
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.pNext = nullptr;
-    fenceInfo.flags = 0;
-    VkFence fence = VK_NULL_HANDLE;
-    if (auto vr = CallVk(&FTbVk::vkCreateFence, &fenceInfo, this->GetAllocationCallbacks(), &fence);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk create fence failed: {}", vr);
-        return nullptr;
-    }
-    return make_shared<FenceVulkan>(this, fence);
+    return this->CreateFenceVk(VK_FENCE_CREATE_SIGNALED_BIT);
 }
 
 Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(
@@ -253,6 +243,9 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(
         auto color = make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}, ImageVulkanDescriptor{});
         SwapChainFrame frame{};
         frame._color = std::move(color);
+        frame._acquireSemaphore = nullptr;
+        frame._releaseSemaphore = this->CreateSemaphoreVk(0).Unwrap();
+        frame._submitFence = this->CreateFenceVk(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
         frames.emplace_back(std::move(frame));
     }
     result->_frames = std::move(frames);
@@ -407,11 +400,11 @@ const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexce
     return g_instance->GetAllocationCallbacks();
 }
 
-Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateSemaphoreVk() noexcept {
+Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateSemaphoreVk(VkSemaphoreCreateFlags flags) noexcept {
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = nullptr;
-    info.flags = 0;
+    info.flags = flags;
     VkSemaphore semaphore = VK_NULL_HANDLE;
     if (auto vr = this->CallVk(&FTbVk::vkCreateSemaphore, &info, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
@@ -419,6 +412,20 @@ Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateSemaphoreVk() noexcept
         return nullptr;
     }
     return make_shared<SemaphoreVulkan>(this, semaphore);
+}
+
+Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFenceVk(VkFenceCreateFlags flags) noexcept {
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.pNext = nullptr;
+    fenceInfo.flags = flags;
+    VkFence fence = VK_NULL_HANDLE;
+    if (auto vr = CallVk(&FTbVk::vkCreateFence, &fenceInfo, this->GetAllocationCallbacks(), &fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk create fence failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<FenceVulkan>(this, fence);
 }
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(

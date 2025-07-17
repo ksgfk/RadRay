@@ -170,14 +170,14 @@ struct Nullable<std::shared_ptr<T>> {
     constexpr Nullable(std::shared_ptr<U> ptr) noexcept : Ptr(ptr) {}
     template <typename U>
     constexpr Nullable& operator=(std::shared_ptr<U> other) noexcept {
-        Ptr = other;
+        Ptr = std::move(other);
         return *this;
     }
     template <typename U>
     constexpr Nullable(Nullable<U>&& other) noexcept : Ptr(other.Ptr) {}
     template <typename U>
     constexpr Nullable& operator=(Nullable<U> other) noexcept {
-        Ptr = other.Ptr;
+        Ptr = std::move(other.Ptr);
         return *this;
     }
 
