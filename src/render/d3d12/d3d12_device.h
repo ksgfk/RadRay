@@ -27,6 +27,8 @@ public:
 
     Nullable<shared_ptr<Fence>> CreateFence() noexcept override;
 
+    Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept override;
+
     Nullable<shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         ShaderBlobCategory category,

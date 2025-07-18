@@ -121,6 +121,11 @@ Nullable<shared_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     return make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
 }
 
+Nullable<shared_ptr<Semaphore>> DeviceD3D12::CreateGpuSemaphore() noexcept {
+    RADRAY_UNIMPLEMENTED();
+    return nullptr;
+}
+
 Nullable<shared_ptr<Shader>> DeviceD3D12::CreateShader(
     std::span<const byte> blob,
     ShaderBlobCategory category,

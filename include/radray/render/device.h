@@ -75,6 +75,8 @@ public:
 
     virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
 
+    virtual Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept = 0;
+
     virtual Nullable<shared_ptr<Shader>> CreateShader(
         std::span<const byte> blob,
         ShaderBlobCategory category,

@@ -76,6 +76,11 @@ Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
     return this->CreateFenceVk(VK_FENCE_CREATE_SIGNALED_BIT);
 }
 
+Nullable<shared_ptr<Semaphore>> DeviceVulkan::CreateGpuSemaphore() noexcept {
+    RADRAY_UNIMPLEMENTED();
+    return nullptr;
+}
+
 Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(
     std::span<const byte> blob,
     ShaderBlobCategory category,

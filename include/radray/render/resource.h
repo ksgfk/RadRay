@@ -48,16 +48,30 @@ public:
 
 class ResourceView : public RenderBase {
 public:
-    enum class Type {
+    enum class [[deprecated]] Type {
         Buffer,
         Texture
     };
 
     ~ResourceView() noexcept override = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ResourceView; }
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::ResourceView; }
 
-    virtual ResourceView::Type GetViewType() const noexcept = 0;
+    [[deprecated]] virtual ResourceView::Type GetViewType() const noexcept = 0;
+};
+
+class BufferView : public ResourceView {
+public:
+    ~BufferView() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BufferView; }
+};
+
+class TextureView : public ResourceView {
+public:
+    ~TextureView() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
 
 }  // namespace radray::render

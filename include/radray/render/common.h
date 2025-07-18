@@ -348,7 +348,7 @@ enum class [[deprecated]] ResourceState : uint32_t {
     Present = 0x1000
 };
 
-enum class ResourceMemoryUsage {
+enum class [[deprecated]] ResourceMemoryUsage {
     Default,
     Upload,
     Readback
@@ -377,7 +377,8 @@ enum class RenderObjectTag : uint32_t {
     CmdBuffer = CmdQueue << 1,
     CmdEncoder = CmdBuffer << 1,
     Fence = CmdEncoder << 1,
-    Shader = Fence << 1,
+    Semaphore = Fence << 1,
+    Shader = Semaphore << 1,
     RootSignature = Shader << 1,
     PipelineState = RootSignature << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
@@ -386,7 +387,9 @@ enum class RenderObjectTag : uint32_t {
     Buffer = Resource | (Resource << 1),
     Texture = Resource | (Resource << 2),
     ResourceView = Resource << 3,
-    DescriptorSet = ResourceView << 1,
+    BufferView = ResourceView | (ResourceView << 1),
+    TextureView = ResourceView | (ResourceView << 2),
+    DescriptorSet = ResourceView << 3,
     Sampler = DescriptorSet << 1
 };
 
@@ -395,14 +398,18 @@ class CommandQueue;
 class CommandBuffer;
 class CommandEncoder;
 class Fence;
+class Semaphore;
 class Shader;
 class RootSignature;
+class PipelineState;
 class GraphicsPipelineState;
 class SwapChain;
 class Resource;
 class Buffer;
 class Texture;
 class ResourceView;
+class BufferView;
+class TextureView;
 class DescriptorSet;
 class Sampler;
 
