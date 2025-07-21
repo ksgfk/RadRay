@@ -1,6 +1,9 @@
 #pragma once
 
 #ifdef RADRAY_PLATFORM_WINDOWS
+#define NOMINMAX
+#define _WINDOWS
+#define _CRT_SECURE_NO_WARNINGS
 #define VK_USE_PLATFORM_WIN32_KHR
 #else
 #error "unknown platform"

@@ -1,13 +1,5 @@
 #pragma once
 
-#ifdef RADRAY_PLATFORM_WINDOWS
-#define UNICODE
-#define _UNICODE
-#define NOMINMAX
-#define _WINDOWS
-#define _CRT_SECURE_NO_WARNINGS
-#endif
-
 #include <cstddef>
 #include <utility>
 #include <string_view>

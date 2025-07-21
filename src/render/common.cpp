@@ -1,8 +1,102 @@
 #include <radray/render/common.h>
 
-#include <radray/utility.h>
+#include <radray/logger.h>
+
+#ifdef RADRAY_ENABLE_D3D12
+#include "d3d12/d3d12_device.h"
+#endif
+
+#ifdef RADRAY_ENABLE_METAL
+#include "metal/metal_device.h
+#endif
+
+#ifdef RADRAY_ENABLE_VULKAN
+#include "vk/vulkan_impl.h"
+#endif
 
 namespace radray::render {
+
+bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs) {
+    for (const auto& desc : descs) {
+        bool isSucc = std::visit(
+            [](auto&& arg) -> bool {
+                using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, VulkanBackendInitDescriptor>) {
+#ifdef RADRAY_ENABLE_VULKAN
+                    return vulkan::GlobalInitVulkan(arg);
+#else
+                    RADRAY_ERR_LOG("Vulkan is not enabled");
+                    return false;
+#endif
+                } else if constexpr (std::is_same_v<T, D3D12BackendInitDescriptor>) {
+                    return true;
+                } else if constexpr (std::is_same_v<T, MetalBackendInitDescriptor>) {
+                    return true;
+                } else {
+                    return true;
+                }
+            },
+            desc);
+        if (!isSucc) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void GlobalTerminateGraphics() {
+#ifdef RADRAY_ENABLE_VULKAN
+    vulkan::GlobalTerminateVulkan();
+#endif
+}
+
+Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
+    return std::visit(
+        [](auto&& arg) -> Nullable<shared_ptr<Device>> {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, D3D12DeviceDescriptor>) {
+#ifdef RADRAY_ENABLE_D3D12
+                return d3d12::CreateDevice(arg);
+#else
+                RADRAY_ERR_LOG("D3D12 is not enable");
+                return nullptr;
+#endif
+            } else if constexpr (std::is_same_v<T, MetalDeviceDescriptor>) {
+#ifdef RADRAY_ENABLE_METAL
+                return metal::CreateDevice(arg);
+#else
+                RADRAY_ERR_LOG("Metal is not enable");
+                return nullptr;
+#endif
+            } else if constexpr (std::is_same_v<T, VulkanDeviceDescriptor>) {
+#ifdef RADRAY_ENABLE_VULKAN
+                return vulkan::CreateDeviceVulkan(arg);
+#else
+                RADRAY_ERR_LOG("Vulkan is not enable");
+                return nullptr;
+#endif
+            }
+        },
+        desc);
+}
+
+bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
+    return lhs.AddressS == rhs.AddressS &&
+           lhs.AddressT == rhs.AddressT &&
+           lhs.AddressR == rhs.AddressR &&
+           lhs.MigFilter == rhs.MigFilter &&
+           lhs.MagFilter == rhs.MagFilter &&
+           lhs.MipmapFilter == rhs.MipmapFilter &&
+           lhs.LodMin == rhs.LodMin &&
+           lhs.LodMax == rhs.LodMax &&
+           lhs.Compare == rhs.Compare &&
+           lhs.AnisotropyClamp == rhs.AnisotropyClamp &&
+           lhs.HasCompare == rhs.HasCompare;
+}
+
+bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
+    return !(lhs == rhs);
+}
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
@@ -47,30 +141,9 @@ uint32_t GetVertexFormatSize(VertexFormat format) noexcept {
         case VertexFormat::UINT32X4:
         case VertexFormat::SINT32X4:
         case VertexFormat::FLOAT32X4: return 16;
-        case VertexFormat::UNKNOWN: return 0;
+        case VertexFormat::UNKNOWN:
+        default: return 0;
     }
-    Unreachable();
-}
-
-TextureFormat ImageToTextureFormat(radray::ImageFormat fmt) noexcept {
-    switch (fmt) {
-        case ImageFormat::R8_BYTE: return TextureFormat::R8_UNORM;
-        case ImageFormat::R16_USHORT: return TextureFormat::R16_UINT;
-        case ImageFormat::R16_HALF: return TextureFormat::R16_FLOAT;
-        case ImageFormat::R32_FLOAT: return TextureFormat::R32_FLOAT;
-        case ImageFormat::RG8_BYTE: return TextureFormat::RG8_UNORM;
-        case ImageFormat::RG16_USHORT: return TextureFormat::RG16_UINT;
-        case ImageFormat::RG16_HALF: return TextureFormat::RG16_FLOAT;
-        case ImageFormat::RG32_FLOAT: return TextureFormat::RG32_FLOAT;
-        case ImageFormat::RGB32_FLOAT: return TextureFormat::UNKNOWN;
-        case ImageFormat::RGBA8_BYTE: return TextureFormat::RGBA8_UNORM;
-        case ImageFormat::RGBA16_USHORT: return TextureFormat::RGBA16_UINT;
-        case ImageFormat::RGBA16_HALF: return TextureFormat::RGBA16_FLOAT;
-        case ImageFormat::RGBA32_FLOAT: return TextureFormat::RGBA32_FLOAT;
-        case ImageFormat::RGB8_BYTE: return TextureFormat::UNKNOWN;
-        case ImageFormat::RGB16_USHORT: return TextureFormat::UNKNOWN;
-    }
-    Unreachable();
 }
 
 std::string_view format_as(Backend v) noexcept {
@@ -78,7 +151,7 @@ std::string_view format_as(Backend v) noexcept {
         case Backend::D3D12: return "D3D12";
         case Backend::Vulkan: return "Vulkan";
         case Backend::Metal: return "Metal";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
@@ -132,8 +205,8 @@ std::string_view format_as(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return "D32_FLOAT";
         case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
         case TextureFormat::D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(QueueType v) noexcept {
@@ -141,7 +214,7 @@ std::string_view format_as(QueueType v) noexcept {
         case radray::render::QueueType::Direct: return "Direct";
         case radray::render::QueueType::Compute: return "Compute";
         case radray::render::QueueType::Copy: return "Copy";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
@@ -150,8 +223,8 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
         case ShaderBlobCategory::DXIL: return "DXIL";
         case ShaderBlobCategory::SPIRV: return "SPIR-V";
         case ShaderBlobCategory::MSL: return "MSL";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(VertexFormat v) noexcept {
@@ -187,8 +260,8 @@ std::string_view format_as(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return "float2";
         case VertexFormat::FLOAT32X3: return "float3";
         case VertexFormat::FLOAT32X4: return "float4";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(PolygonMode v) noexcept {
@@ -196,34 +269,8 @@ std::string_view format_as(PolygonMode v) noexcept {
         case PolygonMode::Fill: return "Fill";
         case PolygonMode::Line: return "Line";
         case PolygonMode::Point: return "Point";
+        default: return "UNKNOWN";
     }
-    Unreachable();
-}
-
-std::string_view format_as(ResourceType v) noexcept {
-    switch (v) {
-        case ResourceType::UNKNOWN: return "UNKNOWN";
-        case ResourceType::Sampler: return "Sampler";
-        case ResourceType::Texture: return "Texture";
-        case ResourceType::RenderTarget: return "RenderTarget";
-        case ResourceType::DepthStencil: return "DepthStencil";
-        case ResourceType::TextureRW: return "TextureRW";
-        case ResourceType::Buffer: return "Buffer";
-        case ResourceType::CBuffer: return "CBuffer";
-        case ResourceType::PushConstant: return "PushConstant";
-        case ResourceType::BufferRW: return "BufferRW";
-        case ResourceType::RayTracing: return "RayTracing";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(ResourceMemoryUsage v) noexcept {
-    switch (v) {
-        case ResourceMemoryUsage::Default: return "Default";
-        case ResourceMemoryUsage::Upload: return "Upload";
-        case ResourceMemoryUsage::Readback: return "Readback";
-    }
-    Unreachable();
 }
 
 std::string_view format_as(TextureViewDimension v) noexcept {
@@ -236,8 +283,8 @@ std::string_view format_as(TextureViewDimension v) noexcept {
         case TextureViewDimension::Dim2DArray: return "2DArray";
         case TextureViewDimension::Cube: return "Cube";
         case TextureViewDimension::CubeArray: return "CubeArray";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 }  // namespace radray::render

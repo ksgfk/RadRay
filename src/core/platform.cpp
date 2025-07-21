@@ -34,6 +34,9 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 
+#define NOMINMAX
+#define _WINDOWS
+#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 
 namespace radray {

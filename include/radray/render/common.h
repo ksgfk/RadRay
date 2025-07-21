@@ -1,12 +1,12 @@
 #pragma once
 
 #include <variant>
+#include <optional>
+#include <span>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
-#include <radray/utility.h>
-#include <radray/image_data.h>
 
 namespace radray::render {
 
@@ -261,43 +261,19 @@ enum class ColorWrite : uint32_t {
     All = Red | Green | Blue | Alpha
 };
 
-enum class [[deprecated]] ResourceType {
-    UNKNOWN,
-
-    Sampler,
-
-    Texture,
-    RenderTarget,
-    DepthStencil,
-    TextureRW,
-
-    Buffer,
-    CBuffer,
-    PushConstant,
-    BufferRW,
-
-    RayTracing
-};
-
-enum class [[deprecated]] ResourceUsage : uint32_t {
+enum struct BufferUse : uint32_t {
     UNKNOWN = 0x0,
-
-    Sampler = 0x1,
-
-    Texture = Sampler << 1,
-    RenderTarget = Texture << 1,
-    DepthStencil = RenderTarget << 1,
-    Cube = DepthStencil << 1,
-    TextureRW = Cube << 1,
-
-    Buffer = TextureRW << 1,
-    CBuffer = Buffer << 1,
-    PushConstant = CBuffer << 1,
-    VertexBuffer = PushConstant << 1,
-    IndexBuffer = VertexBuffer << 1,
-    BufferRW = IndexBuffer << 1,
-
-    RayTracing = BufferRW << 1
+    MapRead = 0x1,
+    MapWrite = MapRead << 1,
+    CopySource = MapWrite << 1,
+    CopyDestination = CopySource << 1,
+    Index = CopyDestination << 1,
+    Vertex = Index << 1,
+    CBuffer = Vertex << 1,
+    StorageRead = CBuffer << 1,
+    StorageRW = StorageRead << 1,
+    Indirect = StorageRW << 1,
+    QueryResolve = Indirect << 1,
 };
 
 enum class TextureUse : uint32_t {
@@ -315,34 +291,6 @@ enum class TextureUse : uint32_t {
     StorageRW = StorageWrite << 1
 };
 
-enum class [[deprecated]] ResourceState : uint32_t {
-    Common = 0x0,
-
-    VertexAndConstantBuffer = 0x1,
-    IndexBuffer = 0x2,
-    ShaderResource = 0x4,
-    IndirectArgument = 0x8,
-    CopySource = 0x10,
-    GenericRead = VertexAndConstantBuffer | IndexBuffer | ShaderResource | IndirectArgument | CopySource,
-
-    RenderTarget = 0x20,
-    StreamOut = 0x40,
-    CopyDestination = 0x80,
-
-    UnorderedAccess = 0x100,
-
-    DepthWrite = 0x200,
-    DepthRead = 0x400,
-    AccelerationStructure = 0x800,
-    Present = 0x1000
-};
-
-enum class [[deprecated]] ResourceMemoryUsage {
-    Default,
-    Upload,
-    Readback
-};
-
 enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1
@@ -357,6 +305,12 @@ enum class LoadAction {
 enum class StoreAction {
     Store,
     Discard
+};
+
+enum class FenceState {
+    Complete,
+    Incomplete,
+    NotSubmitted
 };
 
 enum class RenderObjectTag : uint32_t {
@@ -382,29 +336,37 @@ enum class RenderObjectTag : uint32_t {
     Sampler = DescriptorSet << 1
 };
 
-class Device;
-class CommandQueue;
-class CommandBuffer;
-class CommandEncoder;
-class Fence;
-class Semaphore;
-class Shader;
-class RootSignature;
-class PipelineState;
-class GraphicsPipelineState;
-class SwapChain;
-class Resource;
-class Buffer;
-class Texture;
-class ResourceView;
-class BufferView;
-class TextureView;
-class DescriptorSet;
-class Sampler;
+}  // namespace radray::render
 
-bool IsDepthStencilFormat(TextureFormat format) noexcept;
-uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
-TextureFormat ImageToTextureFormat(radray::ImageFormat fmt) noexcept;
+namespace radray {
+
+template <>
+struct is_flags<render::ShaderStage> : public std::true_type {};
+template <>
+struct is_flags<render::ColorWrite> : public std::true_type {};
+template <>
+struct is_flags<render::ResourceHint> : public std::true_type {};
+template <>
+struct is_flags<render::RenderObjectTag> : public std::true_type {};
+template <>
+struct is_flags<render::BufferUse> : public std::true_type {};
+template <>
+struct is_flags<render::TextureUse> : public std::true_type {};
+
+namespace render {
+
+using ShaderStages = EnumFlags<render::ShaderStage>;
+using ColorWrites = EnumFlags<render::ColorWrite>;
+using ResourceHints = EnumFlags<render::ResourceHint>;
+using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
+using BufferUses = EnumFlags<render::BufferUse>;
+using TextureUses = EnumFlags<render::TextureUse>;
+
+}  // namespace render
+
+}  // namespace radray
+
+namespace radray::render {
 
 struct ColorClearValue {
     float R, G, B, A;
@@ -417,60 +379,28 @@ struct DepthStencilClearValue {
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
-std::string_view format_as(Backend v) noexcept;
-std::string_view format_as(TextureFormat v) noexcept;
-std::string_view format_as(QueueType v) noexcept;
-std::string_view format_as(ShaderBlobCategory v) noexcept;
-std::string_view format_as(VertexFormat v) noexcept;
-std::string_view format_as(PolygonMode v) noexcept;
-std::string_view format_as(ResourceType v) noexcept;
-std::string_view format_as(ResourceMemoryUsage v) noexcept;
-std::string_view format_as(TextureViewDimension v) noexcept;
+class Device;
+class CommandQueue;
+class CommandBuffer;
+class Fence;
+class Semaphore;
+class SwapChain;
+class Buffer;
+class Texture;
 
-}  // namespace radray::render
-
-namespace radray {
-
-template <>
-struct is_flags<render::ShaderStage> : public std::true_type {};
-template <>
-struct is_flags<render::ColorWrite> : public std::true_type {};
-template <>
-struct is_flags<render::ResourceState> : public std::true_type {};
-template <>
-struct is_flags<render::ResourceHint> : public std::true_type {};
-template <>
-struct is_flags<render::ResourceUsage> : public std::true_type {};
-template <>
-struct is_flags<render::RenderObjectTag> : public std::true_type {};
-template <>
-struct is_flags<render::TextureUse> : public std::true_type {};
-
-}  // namespace radray
-
-namespace radray::render {
-
-using ShaderStages = EnumFlags<render::ShaderStage>;
-using ColorWrites = EnumFlags<render::ColorWrite>;
-using ResourceStates = EnumFlags<render::ResourceState>;
-using ResourceHints = EnumFlags<render::ResourceHint>;
-using ResourceUsages = EnumFlags<render::ResourceUsage>;
-using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
-using TextureUses = EnumFlags<render::TextureUse>;
-
-class Device1;
-class CommandQueue1;
-class CommandBuffer1;
-class Fence1;
-class Semaphore1;
-class SwapChain1;
-
-class RenderBase : public Noncopyable {
+class RenderBase {
 public:
+    RenderBase() noexcept = default;
     virtual ~RenderBase() noexcept = default;
+    RenderBase(const RenderBase&) = delete;
+    RenderBase(RenderBase&&) = default;
+    RenderBase& operator=(const RenderBase&) = delete;
+    RenderBase& operator=(RenderBase&&) = default;
 
     virtual RenderObjectTags GetTag() const noexcept = 0;
+
     virtual bool IsValid() const noexcept = 0;
+
     virtual void Destroy() noexcept = 0;
 };
 
@@ -517,7 +447,7 @@ using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescript
 
 class SwapChainDescriptor {
 public:
-    CommandQueue1* PresentQueue;
+    CommandQueue* PresentQueue;
     const void* NativeHandler;
     uint32_t Width;
     uint32_t Height;
@@ -525,58 +455,164 @@ public:
     TextureFormat Format;
 };
 
-class Device1 : public enable_shared_from_this<Device1>, public RenderBase {
+struct SamplerDescriptor {
+    AddressMode AddressS;
+    AddressMode AddressT;
+    AddressMode AddressR;
+    FilterMode MigFilter;
+    FilterMode MagFilter;
+    FilterMode MipmapFilter;
+    float LodMin;
+    float LodMax;
+    CompareFunction Compare;
+    uint32_t AnisotropyClamp;
+    bool HasCompare;
+
+    friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
+    friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
+};
+
+struct CommandQueueSubmitDescriptor {
+    std::span<CommandBuffer*> CmdBuffers;
+    Fence* SignalFence;
+    std::span<Semaphore*> WaitSemaphores;
+    std::span<Semaphore*> SignalSemaphores;
+};
+
+struct CommandQueuePresentDescriptor {
+    SwapChain* Target;
+    std::span<Semaphore*> WaitSemaphores;
+};
+
+struct TransitionBufferDescriptor {
+    Buffer* Texture;
+    BufferUses Before;
+    BufferUses After;
+};
+
+struct TransitionTextureDescriptor {
+    Texture* Texture;
+    TextureUses Before;
+    TextureUses After;
+    bool IsSubresourceBarrier;
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+};
+
+struct SwapChainAcquireNextDescriptor {
+    Semaphore* SignalSemaphore;
+    Fence* WaitFence;
+};
+
+class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
-    virtual ~Device1() noexcept = default;
+    virtual ~Device() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
 
     virtual Backend GetBackend() noexcept = 0;
 
-    virtual Nullable<CommandQueue1> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
+    virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual Nullable<shared_ptr<CommandBuffer1>> CreateCommandBuffer(CommandQueue1* queue) noexcept = 0;
+    virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Fence1>> CreateFence() noexcept = 0;
+    virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
 
-    virtual Nullable<shared_ptr<Semaphore1>> CreateGpuSemaphore() noexcept = 0;
+    virtual Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept = 0;
 
-    virtual Nullable<shared_ptr<SwapChain1>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
+    virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 };
 
-class CommandQueue1 : public RenderBase {
+class CommandQueue : public RenderBase {
 public:
-    virtual ~CommandQueue1() noexcept = default;
+    virtual ~CommandQueue() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdQueue; }
+
+    virtual void Submit(const CommandQueueSubmitDescriptor& desc) noexcept = 0;
+
+    virtual void Present(const CommandQueuePresentDescriptor& desc) noexcept = 0;
+
+    virtual void WaitIdle() noexcept = 0;
 };
 
-class CommandBuffer1 : public RenderBase {
+class CommandBuffer : public RenderBase {
 public:
-    virtual ~CommandBuffer1() noexcept = default;
+    virtual ~CommandBuffer() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
+
+    virtual void Begin() noexcept = 0;
+
+    virtual void End() noexcept = 0;
+
+    virtual void TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept = 0;
 };
 
-class Fence1 : public RenderBase {
+class Fence : public RenderBase {
 public:
-    virtual ~Fence1() noexcept = default;
+    virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+
+    virtual FenceState GetState() const noexcept = 0;
 };
 
-class Semaphore1 : public RenderBase {
+class Semaphore : public RenderBase {
 public:
-    virtual ~Semaphore1() noexcept = default;
+    virtual ~Semaphore() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Semaphore; }
 };
 
-class SwapChain1 : public RenderBase {
+class SwapChain : public RenderBase {
 public:
-    virtual ~SwapChain1() noexcept = default;
+    virtual ~SwapChain() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
+
+    virtual Nullable<Texture> AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<Texture> GetCurrentBackBuffer() noexcept = 0;
 };
+
+class Resource : public RenderBase {
+public:
+    virtual ~Resource() noexcept = default;
+};
+
+class Buffer : public Resource {
+public:
+    virtual ~Buffer() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
+};
+
+class Texture : public Resource {
+public:
+    virtual ~Texture() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
+};
+
+bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);
+
+void GlobalTerminateGraphics();
+
+Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
+
+bool IsDepthStencilFormat(TextureFormat format) noexcept;
+
+uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
+
+std::string_view format_as(Backend v) noexcept;
+std::string_view format_as(TextureFormat v) noexcept;
+std::string_view format_as(QueueType v) noexcept;
+std::string_view format_as(ShaderBlobCategory v) noexcept;
+std::string_view format_as(VertexFormat v) noexcept;
+std::string_view format_as(PolygonMode v) noexcept;
+std::string_view format_as(TextureViewDimension v) noexcept;
 
 }  // namespace radray::render

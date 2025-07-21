@@ -48,8 +48,8 @@ std::string_view format_as(ShaderResourceType v) noexcept {
         case ShaderResourceType::Sampler: return "Sampler";
         case ShaderResourceType::PushConstant: return "PushConstant";
         case ShaderResourceType::RayTracing: return "RayTracing";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 }  // namespace radray::render
@@ -65,6 +65,9 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform.h>
+#define NOMINMAX
+#define _WINDOWS
+#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;

@@ -3,7 +3,6 @@
 #include <array>
 
 #include <radray/render/common.h>
-#include <radray/render/sampler.h>
 
 namespace radray::render {
 
@@ -25,6 +24,9 @@ public:
         string Name;
         uint32_t Start;
         uint32_t Size;
+
+        friend bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
+        friend bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
     };
 
     class CBuffer {
@@ -32,6 +34,9 @@ public:
         string Name;
         vector<Variable> Vars;
         uint32_t Size;
+
+        friend bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
+        friend bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
     };
 
     class BindResource {
@@ -47,6 +52,9 @@ public:
     class StaticSampler : public SamplerDescriptor {
     public:
         string Name;
+
+        friend bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
+        friend bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
     };
 
     class VertexInput {
@@ -63,13 +71,6 @@ public:
     vector<StaticSampler> StaticSamplers;
     std::array<uint32_t, 3> GroupSize;
 };
-
-bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
-bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
-bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
-bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
-bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
-bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
 
 std::string_view format_as(ShaderResourceType v) noexcept;
 

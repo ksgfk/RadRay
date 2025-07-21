@@ -11,12 +11,12 @@ target("radray_render")
         add_defines("RADRAY_ENABLE_SPIRV_CROSS", {public = true})
         add_packages("spirv-cross_radray")
     end
-    if get_config("enable_d3d12") then
-        add_defines("RADRAY_ENABLE_D3D12", {public = true})
-        add_files("d3d12/*.cpp")
-        add_packages("directx-headers", "d3d12-memory-allocator")
-        add_syslinks("d3d12", "dxgi", "dxguid")
-    end
+    -- if get_config("enable_d3d12") then
+    --     add_defines("RADRAY_ENABLE_D3D12", {public = true})
+    --     add_files("d3d12/*.cpp")
+    --     add_packages("directx-headers", "d3d12-memory-allocator")
+    --     add_syslinks("d3d12", "dxgi", "dxguid")
+    -- end
     if get_config("enable_metal") then
         add_defines("RADRAY_ENABLE_METAL", {public = true})
         add_files("metal/*.cpp")

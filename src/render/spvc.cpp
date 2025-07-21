@@ -37,7 +37,7 @@ std::string_view format_as(ExecutionModel v) noexcept {
 namespace spirv_cross {
 std::string_view format_as(SPIRType::BaseType v) noexcept {
     switch (v) {
-        case SPIRType::Unknown: return "Unknown";
+        case SPIRType::Unknown: return "UNKNOWN";
         case SPIRType::Void: return "Void";
         case SPIRType::Boolean: return "Boolean";
         case SPIRType::SByte: return "SByte";

@@ -2,17 +2,7 @@
 
 #include <cstring>
 
-#include "vulkan_device.h"
-
 namespace radray::render::vulkan {
-
-void VkObjectDeleter<VkSurfaceKHR>::operator()(VkSurfaceKHR surface) const noexcept {
-    vkDestroySurfaceKHR(_instance, surface, _allocCb);
-}
-
-void VkObjectDeleter<VkSwapchainKHR>::operator()(VkSwapchainKHR swapchain) const noexcept {
-    f(_device, swapchain, _allocCb);
-}
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {
     uint64_t total = 0;
@@ -60,7 +50,7 @@ bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperti
 
 std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSurfaceKHR surface, std::span<VkFormat> preferred) noexcept {
     vector<VkSurfaceFormatKHR> supported;
-    GetVector(supported, vkGetPhysicalDeviceSurfaceFormatsKHR, gpu, surface);
+    EnumerateVectorFromVkFunc(supported, vkGetPhysicalDeviceSurfaceFormatsKHR, gpu, surface);
     if (supported.empty()) {
         return std::nullopt;
     }
@@ -230,72 +220,6 @@ VkImageType MapType(TextureDimension v) noexcept {
     }
 }
 
-VkAccessFlags MapAccessMask(ResourceStates v) noexcept {
-    VkAccessFlags ret = VK_ACCESS_NONE;
-    if (v.HasFlag(ResourceState::CopySource)) {
-        ret |= VK_ACCESS_TRANSFER_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::CopyDestination)) {
-        ret |= VK_ACCESS_TRANSFER_WRITE_BIT;
-    }
-    if (v.HasFlag(ResourceState::VertexAndConstantBuffer)) {
-        ret |= VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::IndexBuffer)) {
-        ret |= VK_ACCESS_INDEX_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::UnorderedAccess)) {
-        ret |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    }
-    if (v.HasFlag(ResourceState::IndirectArgument)) {
-        ret |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::RenderTarget)) {
-        ret |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    }
-    if (v.HasFlag(ResourceState::DepthWrite)) {
-        ret |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    }
-    if (v.HasFlag(ResourceState::DepthRead)) {
-        ret |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::ShaderResource)) {
-        ret |= VK_ACCESS_SHADER_READ_BIT;
-    }
-    if (v.HasFlag(ResourceState::Present)) {
-        ret |= VK_ACCESS_NONE;
-    }
-    return ret;
-}
-
-VkImageLayout MapImageLayout(ResourceStates v) noexcept {
-    if (v.HasFlag(ResourceState::CopySource)) {
-        return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::CopyDestination)) {
-        return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::RenderTarget)) {
-        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::DepthRead) && !v.HasFlag(ResourceState::DepthWrite)) {
-        return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::DepthWrite)) {
-        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::ShaderResource)) {
-        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-    if (v.HasFlag(ResourceState::Present)) {
-        return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    }
-    if (v.HasFlag(ResourceState::Common)) {
-        return VK_IMAGE_LAYOUT_GENERAL;
-    }
-    return VK_IMAGE_LAYOUT_UNDEFINED;
-}
-
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";
@@ -306,7 +230,7 @@ std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFl
     } else if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) {
         return "DeviceAddressBinding";
     } else {
-        return "Unknown";
+        return "UNKNOWN";
     }
 }
 
@@ -320,7 +244,7 @@ std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept {
     } else if (v & VK_QUEUE_SPARSE_BINDING_BIT) {
         return "SparseBinding";
     } else {
-        return "Unknown";
+        return "UNKNOWN";
     }
 }
 
@@ -331,7 +255,7 @@ std::string_view to_string(enum VkPhysicalDeviceType v) noexcept {
         case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "Discrete";
         case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "Virtual";
         case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
@@ -355,7 +279,7 @@ std::string_view to_string(VkResult v) noexcept {
         case VK_ERROR_TOO_MANY_OBJECTS: return "ErrorTooManyObjects";
         case VK_ERROR_FORMAT_NOT_SUPPORTED: return "ErrorFormatNotSupported";
         case VK_ERROR_FRAGMENTED_POOL: return "ErrorFragmentedPool";
-        case VK_ERROR_UNKNOWN: return "ErrorUnknown";
+        case VK_ERROR_UNKNOWN: return "ErrorUNKNOWN";
         case VK_ERROR_OUT_OF_POOL_MEMORY: return "ErrorOutOfPoolMemory";
         case VK_ERROR_INVALID_EXTERNAL_HANDLE: return "ErrorInvalidExternalHandle";
         case VK_ERROR_FRAGMENTATION: return "ErrorFragmentation";
@@ -386,7 +310,7 @@ std::string_view to_string(VkResult v) noexcept {
         case VK_INCOMPATIBLE_SHADER_BINARY_EXT: return "IncompatibleShaderBinaryEXT";
         case VK_PIPELINE_BINARY_MISSING_KHR: return "PipelineBinaryMissingKHR";
         case VK_ERROR_NOT_ENOUGH_SPACE_KHR: return "ErrorNotEnoughSpaceKHR";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
@@ -642,7 +566,7 @@ std::string_view to_string(VkFormat v) noexcept {
         case VK_FORMAT_PVRTC2_2BPP_SRGB_BLOCK_IMG: return "PVRTC2_2BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_PVRTC2_4BPP_SRGB_BLOCK_IMG: return "PVRTC2_4BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_R16G16_SFIXED5_NV: return "R16G16_SFIXED5_NV";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
@@ -654,7 +578,7 @@ std::string_view to_string(VkPresentModeKHR v) noexcept {
         case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED_KHR";
         case VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR: return "SHARED_DEMAND_REFRESH_KHR";
         case VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR: return "SHARED_CONTINUOUS_REFRESH_KHR";
-        default: return "Unknown";
+        default: return "UNKNOWN";
     }
 }
 
