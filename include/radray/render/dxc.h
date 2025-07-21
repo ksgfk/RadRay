@@ -7,6 +7,17 @@
 
 namespace radray::render {
 
+enum class ShaderResourceType {
+    CBuffer,
+    Texture,
+    Buffer,
+    RWTexture,
+    RWBuffer,
+    Sampler,
+    PushConstant,
+    RayTracing
+};
+
 class DxilReflection {
 public:
     class Variable {
@@ -59,6 +70,8 @@ bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffe
 bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
 bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
 bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
+
+std::string_view format_as(ShaderResourceType v) noexcept;
 
 }  // namespace radray::render
 

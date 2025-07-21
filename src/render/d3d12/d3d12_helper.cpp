@@ -278,20 +278,6 @@ D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
     return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
 }
 
-D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept {
-    switch (v) {
-        case ShaderResourceType::CBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-        case ShaderResourceType::Texture: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        case ShaderResourceType::Buffer: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        case ShaderResourceType::RWTexture: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        case ShaderResourceType::RWBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        case ShaderResourceType::Sampler: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-        case ShaderResourceType::PushConstant: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-        case ShaderResourceType::RayTracing: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    }
-    Unreachable();
-}
-
 D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ResourceType v) noexcept {
     switch (v) {
         case ResourceType::UNKNOWN: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;

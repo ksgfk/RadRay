@@ -154,20 +154,6 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(ShaderResourceType v) noexcept {
-    switch (v) {
-        case ShaderResourceType::CBuffer: return "CBuffer";
-        case ShaderResourceType::Texture: return "Texture";
-        case ShaderResourceType::Buffer: return "Buffer";
-        case ShaderResourceType::RWTexture: return "RWTexture";
-        case ShaderResourceType::RWBuffer: return "RWBuffer";
-        case ShaderResourceType::Sampler: return "Sampler";
-        case ShaderResourceType::PushConstant: return "PushConstant";
-        case ShaderResourceType::RayTracing: return "RayTracing";
-    }
-    Unreachable();
-}
-
 std::string_view format_as(VertexFormat v) noexcept {
     switch (v) {
         case VertexFormat::UNKNOWN: return "UNKNOWN";

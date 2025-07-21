@@ -25,7 +25,7 @@ shared_ptr<CommandBuffer> cmdBuffer;
 shared_ptr<SwapChain> swapchain;
 
 void InitGraphics() {
-    VulkanBackendInitDdescriptor vkInitDesc{};
+    VulkanBackendInitDescriptor vkInitDesc{};
     vkInitDesc.IsEnableDebugLayer = true;
     vkInitDesc.IsEnableGpuBasedValid = false;
     BackendInitDescriptor initDescs[] = {vkInitDesc};

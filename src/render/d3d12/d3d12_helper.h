@@ -73,7 +73,6 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 D3D12_SHADER_VISIBILITY MapType(ShaderStage v) noexcept;
 D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept;
-D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ShaderResourceType v) noexcept;
 D3D12_DESCRIPTOR_RANGE_TYPE MapDescRangeType(ResourceType v) noexcept;
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;

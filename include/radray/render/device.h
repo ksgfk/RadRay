@@ -22,47 +22,6 @@
 
 namespace radray::render {
 
-class D3D12BackendInitDescriptor {
-public:
-};
-
-class MetalBackendInitDescriptor {
-public:
-};
-
-class VulkanBackendInitDdescriptor {
-public:
-    bool IsEnableDebugLayer;
-    bool IsEnableGpuBasedValid;
-};
-
-using BackendInitDescriptor = std::variant<D3D12BackendInitDescriptor, MetalBackendInitDescriptor, VulkanBackendInitDdescriptor>;
-
-class D3D12DeviceDescriptor {
-public:
-    std::optional<uint32_t> AdapterIndex;
-    bool IsEnableDebugLayer;
-    bool IsEnableGpuBasedValid;
-};
-
-class MetalDeviceDescriptor {
-public:
-    std::optional<uint32_t> DeviceIndex;
-};
-
-struct VulkanCommandQueueDescriptor {
-    QueueType Type;
-    uint32_t Count;
-};
-
-class VulkanDeviceDescriptor {
-public:
-    std::optional<uint32_t> PhysicalDeviceIndex;
-    std::span<VulkanCommandQueueDescriptor> Queues;
-};
-
-using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
-
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;

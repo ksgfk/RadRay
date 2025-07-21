@@ -732,14 +732,14 @@ bool GlobalInitVulkan(std::span<BackendInitDescriptor> _desc) {
         RADRAY_ERR_LOG("vk volk init fail");
         return false;
     }
-    VulkanBackendInitDdescriptor* descPtr = nullptr;
+    VulkanBackendInitDescriptor* descPtr = nullptr;
     for (auto&& d : _desc) {
-        if (std::holds_alternative<VulkanBackendInitDdescriptor>(d)) {
-            descPtr = &std::get<VulkanBackendInitDdescriptor>(d);
+        if (std::holds_alternative<VulkanBackendInitDescriptor>(d)) {
+            descPtr = &std::get<VulkanBackendInitDescriptor>(d);
             break;
         }
     }
-    VulkanBackendInitDdescriptor desc;
+    VulkanBackendInitDescriptor desc;
     if (descPtr == nullptr) {
         desc = {
 #ifdef RADRAY_IS_DEBUG

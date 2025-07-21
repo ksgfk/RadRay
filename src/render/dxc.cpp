@@ -38,6 +38,20 @@ bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::
     return !(lhs == rhs);
 }
 
+std::string_view format_as(ShaderResourceType v) noexcept {
+    switch (v) {
+        case ShaderResourceType::CBuffer: return "CBuffer";
+        case ShaderResourceType::Texture: return "Texture";
+        case ShaderResourceType::Buffer: return "Buffer";
+        case ShaderResourceType::RWTexture: return "RWTexture";
+        case ShaderResourceType::RWBuffer: return "RWBuffer";
+        case ShaderResourceType::Sampler: return "Sampler";
+        case ShaderResourceType::PushConstant: return "PushConstant";
+        case ShaderResourceType::RayTracing: return "RayTracing";
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_DXC

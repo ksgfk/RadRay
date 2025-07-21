@@ -109,8 +109,8 @@ enum class QueueType : uint32_t {
 enum class ShaderStage : uint32_t {
     UNKNOWN = 0x0,
     Vertex = 0x1,
-    Pixel = 0x2,
-    Compute = 0x4,
+    Pixel = Vertex << 1,
+    Compute = Pixel << 1,
 
     Graphics = Vertex | Pixel
 };
@@ -119,17 +119,6 @@ enum class ShaderBlobCategory {
     DXIL,
     SPIRV,
     MSL
-};
-
-enum class ShaderResourceType {
-    CBuffer,
-    Texture,
-    Buffer,
-    RWTexture,
-    RWBuffer,
-    Sampler,
-    PushConstant,
-    RayTracing
 };
 
 enum class AddressMode {
@@ -432,7 +421,6 @@ std::string_view format_as(Backend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;
-std::string_view format_as(ShaderResourceType v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(ResourceType v) noexcept;
@@ -470,6 +458,13 @@ using ResourceUsages = EnumFlags<render::ResourceUsage>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
 using TextureUses = EnumFlags<render::TextureUse>;
 
+class Device1;
+class CommandQueue1;
+class CommandBuffer1;
+class Fence1;
+class Semaphore1;
+class SwapChain1;
+
 class RenderBase : public Noncopyable {
 public:
     virtual ~RenderBase() noexcept = default;
@@ -477,6 +472,111 @@ public:
     virtual RenderObjectTags GetTag() const noexcept = 0;
     virtual bool IsValid() const noexcept = 0;
     virtual void Destroy() noexcept = 0;
+};
+
+class D3D12BackendInitDescriptor {
+public:
+};
+
+class MetalBackendInitDescriptor {
+public:
+};
+
+class VulkanBackendInitDescriptor {
+public:
+    bool IsEnableDebugLayer;
+    bool IsEnableGpuBasedValid;
+};
+
+using BackendInitDescriptor = std::variant<D3D12BackendInitDescriptor, MetalBackendInitDescriptor, VulkanBackendInitDescriptor>;
+
+class D3D12DeviceDescriptor {
+public:
+    std::optional<uint32_t> AdapterIndex;
+    bool IsEnableDebugLayer;
+    bool IsEnableGpuBasedValid;
+};
+
+class MetalDeviceDescriptor {
+public:
+    std::optional<uint32_t> DeviceIndex;
+};
+
+struct VulkanCommandQueueDescriptor {
+    QueueType Type;
+    uint32_t Count;
+};
+
+class VulkanDeviceDescriptor {
+public:
+    std::optional<uint32_t> PhysicalDeviceIndex;
+    std::span<VulkanCommandQueueDescriptor> Queues;
+};
+
+using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
+
+class SwapChainDescriptor {
+public:
+    CommandQueue1* PresentQueue;
+    const void* NativeHandler;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t BackBufferCount;
+    TextureFormat Format;
+};
+
+class Device1 : public enable_shared_from_this<Device1>, public RenderBase {
+public:
+    virtual ~Device1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
+
+    virtual Backend GetBackend() noexcept = 0;
+
+    virtual Nullable<CommandQueue1> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
+
+    virtual Nullable<shared_ptr<CommandBuffer1>> CreateCommandBuffer(CommandQueue1* queue) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Fence1>> CreateFence() noexcept = 0;
+
+    virtual Nullable<shared_ptr<Semaphore1>> CreateGpuSemaphore() noexcept = 0;
+
+    virtual Nullable<shared_ptr<SwapChain1>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
+};
+
+class CommandQueue1 : public RenderBase {
+public:
+    virtual ~CommandQueue1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdQueue; }
+};
+
+class CommandBuffer1 : public RenderBase {
+public:
+    virtual ~CommandBuffer1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
+};
+
+class Fence1 : public RenderBase {
+public:
+    virtual ~Fence1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+};
+
+class Semaphore1 : public RenderBase {
+public:
+    virtual ~Semaphore1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Semaphore; }
+};
+
+class SwapChain1 : public RenderBase {
+public:
+    virtual ~SwapChain1() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 };
 
 }  // namespace radray::render
