@@ -2,46 +2,7 @@
 
 namespace radray::render::vulkan {
 
-class InstanceVulkan final : public RenderBase {
-public:
-    InstanceVulkan(
-        VkInstance instance,
-        std::optional<VkAllocationCallbacks> allocCb,
-        vector<string> exts,
-        vector<string> layers)
-        : _instance(instance),
-          _allocCb(allocCb),
-          _exts(std::move(exts)),
-          _layers(std::move(layers)) {}
-
-    ~InstanceVulkan() noexcept override {
-        this->DestroyImpl();
-    }
-
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
-
-    bool IsValid() const noexcept override { return _instance != nullptr; }
-
-    void Destroy() noexcept override { this->DestroyImpl(); }
-
-    const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept {
-        return _allocCb.has_value() ? &_allocCb.value() : nullptr;
-    }
-
-public:
-    void DestroyImpl() noexcept {
-        if (_instance != nullptr) {
-            const VkAllocationCallbacks* allocCbPtr = this->GetAllocationCallbacks();
-            vkDestroyInstance(_instance, allocCbPtr);
-            _instance = nullptr;
-        }
-    }
-
-    VkInstance _instance;
-    std::optional<VkAllocationCallbacks> _allocCb;
-    vector<string> _exts;
-    vector<string> _layers;
-};
+static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -65,32 +26,256 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     return VK_FALSE;
 }
 
-DeviceVulkan::~DeviceVulkan() noexcept { this->DestroyImpl(); }
+InstanceVulkan::InstanceVulkan(
+    VkInstance instance,
+    std::optional<VkAllocationCallbacks> allocCb,
+    vector<string> exts,
+    vector<string> layers) noexcept
+    : _instance(instance),
+      _allocCb(std::move(allocCb)),
+      _exts(std::move(exts)),
+      _layers(std::move(layers)) {}
+
+InstanceVulkan::~InstanceVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool InstanceVulkan::IsValid() const noexcept { return _instance != nullptr; }
+
+void InstanceVulkan::Destroy() noexcept { this->DestroyImpl(); }
+
+const VkAllocationCallbacks* InstanceVulkan::GetAllocationCallbacks() const noexcept {
+    return _allocCb.has_value() ? &_allocCb.value() : nullptr;
+}
+
+void InstanceVulkan::DestroyImpl() noexcept {
+    if (_instance != nullptr) {
+        const VkAllocationCallbacks* allocCbPtr = this->GetAllocationCallbacks();
+        vkDestroyInstance(_instance, allocCbPtr);
+        _instance = nullptr;
+    }
+}
+
+DeviceVulkan::~DeviceVulkan() noexcept {
+    this->DestroyImpl();
+}
 
 bool DeviceVulkan::IsValid() const noexcept {
     return _device != nullptr && _alloc != VK_NULL_HANDLE;
 }
 
-void DeviceVulkan::Destroy() noexcept { this->DestroyImpl(); }
-
-Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
-    return nullptr;  // TODO:
+void DeviceVulkan::Destroy() noexcept {
+    this->DestroyImpl();
 }
 
-Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue) noexcept {
-    return nullptr;  // TODO:
+Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+    return _queues[static_cast<std::underlying_type_t<QueueType>>(type)][slot].get();
+}
+
+Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
+    auto queue = CastVkObject(queue_);
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.pNext = nullptr;
+    poolInfo.flags = 0;
+    poolInfo.queueFamilyIndex = queue->_family.Family;
+    VkCommandPool pool{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateCommandPool failed: {}", vr);
+        return nullptr;
+    }
+    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
+    VkCommandBufferAllocateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    bufferInfo.pNext = nullptr;
+    bufferInfo.commandPool = cmdPool->_cmdPool;
+    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    bufferInfo.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkAllocateCommandBuffers failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
 }
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return nullptr;  // TODO:
+    return this->CreateFence(VK_FENCE_CREATE_SIGNALED_BIT);
 }
 
 Nullable<shared_ptr<Semaphore>> DeviceVulkan::CreateGpuSemaphore() noexcept {
-    return nullptr;  // TODO:
+    return this->CreateGpuSemaphore(VK_FENCE_CREATE_SIGNALED_BIT);
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
-    return nullptr;  // TODO:
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    {
+        HMODULE hInstance;
+        if (GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCWSTR)(void*)&g_instance,
+                &hInstance) == 0) {
+            RADRAY_ERR_LOG("vk call win32 GetModuleHandleExW failed. (code={})", GetLastError());
+            return nullptr;
+        }
+        VkWin32SurfaceCreateInfoKHR win32SurfaceInfo{};
+        win32SurfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        win32SurfaceInfo.pNext = nullptr;
+        win32SurfaceInfo.flags = 0;
+        win32SurfaceInfo.hinstance = hInstance;
+        win32SurfaceInfo.hwnd = reinterpret_cast<HWND>(const_cast<void*>(desc.NativeHandler));
+        if (auto vr = vkCreateWin32SurfaceKHR(_instance->_instance, &win32SurfaceInfo, this->GetAllocationCallbacks(), &surface);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vk call vkCreateWin32SurfaceKHR failed: {}", vr);
+            return nullptr;
+        }
+    }
+#else
+#error "unsupported platform for Vulkan surface creation"
+#endif
+    if (surface == nullptr) {
+        RADRAY_ERR_LOG("vk create VkSurfaceKHR failed");
+        return nullptr;
+    }
+
+    auto presentQueue = CastVkObject(desc.PresentQueue);
+    auto result = make_shared<SwapChainVulkan>(this, presentQueue);
+    result->_surface = surface;
+
+    VkSurfaceCapabilitiesKHR surfaceProperties;
+    if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, surface, &surfaceProperties);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
+        return nullptr;
+    }
+    if (desc.BackBufferCount < surfaceProperties.minImageCount || desc.BackBufferCount > surfaceProperties.maxImageCount) {
+        RADRAY_ERR_LOG("vk back buffer count {} not in range [{}, {}]", desc.BackBufferCount, surfaceProperties.minImageCount, surfaceProperties.maxImageCount);
+        return nullptr;
+    }
+    VkExtent2D swapchainSize;
+    if (surfaceProperties.currentExtent.width == 0xFFFFFFFF) {
+        swapchainSize.width = desc.Width;
+        swapchainSize.height = desc.Height;
+    } else {
+        swapchainSize = surfaceProperties.currentExtent;
+    }
+    VkSurfaceTransformFlagBitsKHR preTransform;
+    if (surfaceProperties.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+        preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    } else {
+        preTransform = surfaceProperties.currentTransform;
+    }
+    VkCompositeAlphaFlagBitsKHR composite = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    } else if (surfaceProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) {
+        composite = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+    }
+    VkFormat rawFormat = MapType(desc.Format);
+    vector<VkSurfaceFormatKHR> supportedFormats;
+    if (auto vr = EnumerateVectorFromVkFunc(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, this->_physicalDevice, surface);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
+        return nullptr;
+    }
+    auto needFormatIter = std::ranges::find_if(supportedFormats, [rawFormat](VkSurfaceFormatKHR i) { return i.format == rawFormat; });
+    if (needFormatIter == supportedFormats.end()) {
+        RADRAY_ERR_LOG("vk surface format {} not supported", rawFormat);
+        return nullptr;
+    }
+    const VkSurfaceFormatKHR& needFormat = *needFormatIter;
+    vector<VkPresentModeKHR> supportedPresentModes;
+    if (auto vr = EnumerateVectorFromVkFunc(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, this->_physicalDevice, surface);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
+        return nullptr;
+    }
+    VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;  // TODO:
+    if (std::ranges::find(supportedPresentModes, needPresentMode) == supportedPresentModes.end()) {
+        RADRAY_ERR_LOG("vk present mode {} not supported", needPresentMode);
+        return nullptr;
+    }
+    VkSwapchainCreateInfoKHR swapchianCreateInfo{};
+    swapchianCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchianCreateInfo.pNext = nullptr;
+    swapchianCreateInfo.flags = 0;
+    swapchianCreateInfo.surface = surface;
+    swapchianCreateInfo.minImageCount = desc.BackBufferCount;
+    swapchianCreateInfo.imageFormat = needFormat.format;
+    swapchianCreateInfo.imageColorSpace = needFormat.colorSpace;
+    swapchianCreateInfo.imageExtent = swapchainSize;
+    swapchianCreateInfo.imageArrayLayers = 1;
+    swapchianCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapchianCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    swapchianCreateInfo.queueFamilyIndexCount = 0;
+    swapchianCreateInfo.pQueueFamilyIndices = nullptr;
+    swapchianCreateInfo.preTransform = preTransform;
+    swapchianCreateInfo.compositeAlpha = composite;
+    swapchianCreateInfo.presentMode = needPresentMode;
+    swapchianCreateInfo.clipped = VK_TRUE;
+    swapchianCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain{};
+    if (auto vr = _ftb.vkCreateSwapchainKHR(_device, &swapchianCreateInfo, this->GetAllocationCallbacks(), &swapchain);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSwapchainKHR failed: {}", vr);
+        return nullptr;
+    }
+    result->_swapchain = swapchain;
+    vector<VkImage> swapchainImages;
+    if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, _ftb.vkGetSwapchainImagesKHR, _device, swapchain);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkGetSwapchainImagesKHR failed: {}", vr);
+        return nullptr;
+    }
+    vector<SwapChainFrame> frames;
+    frames.reserve(swapchainImages.size());
+    // TODO:
+    for (VkImage img : swapchainImages) {
+        // auto color = make_shared<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{}, ImageVulkanDescriptor{});
+        SwapChainFrame frame{};
+        // frame._color = std::move(color);
+        frame._acquireSemaphore = nullptr;
+        // frame._releaseSemaphore = this->CreateSemaphoreVk(0).Unwrap();
+        // frame._submitFence = this->CreateFenceVk(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
+        frames.emplace_back(std::move(frame));
+    }
+    result->_frames = std::move(frames);
+    return result;
+}
+
+Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFence(VkFenceCreateFlags flags) noexcept {
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.pNext = nullptr;
+    fenceInfo.flags = flags;
+    VkFence fence = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateFence(_device, &fenceInfo, this->GetAllocationCallbacks(), &fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk create fence failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<FenceVulkan>(this, fence);
+}
+
+Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateGpuSemaphore(VkSemaphoreCreateFlags flags) noexcept {
+    VkSemaphoreCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    info.pNext = nullptr;
+    info.flags = flags;
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateSemaphore(_device, &info, this->GetAllocationCallbacks(), &semaphore);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSemaphore failed {}", vr);
+        return nullptr;
+    }
+    return make_shared<SemaphoreVulkan>(this, semaphore);
 }
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
@@ -101,6 +286,9 @@ void DeviceVulkan::DestroyImpl() noexcept {
     if (_alloc != VK_NULL_HANDLE) {
         vmaDestroyAllocator(_alloc);
         _alloc = VK_NULL_HANDLE;
+    }
+    for (auto&& i : _queues) {
+        i.clear();
     }
     if (_device != VK_NULL_HANDLE) {
         _ftb.vkDestroyDevice(_device, this->GetAllocationCallbacks());
@@ -510,18 +698,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     RADRAY_INFO_LOG("========== Feature ==========");
-    // for (const auto& i : queueRequests) {
-    //     for (const auto& j : i.queueIndices) {
-    //         VkQueue queuePtr = VK_NULL_HANDLE;
-    //         deviceR->_ftb.vkGetDeviceQueue(deviceR->_device, j.Family, j.IndexInFamily, &queuePtr);
-    //         if (queuePtr == VK_NULL_HANDLE) {
-    //             RADRAY_ERR_LOG("vk get queue for family {} index {} failed", j.Family, j.IndexInFamily);
-    //             return nullptr;
-    //         }
-    //         auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j, i.rawType);
-    //         deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
-    //     }
-    // }
+    for (const auto& i : queueRequests) {
+        for (const auto& j : i.queueIndices) {
+            VkQueue queuePtr = VK_NULL_HANDLE;
+            deviceR->_ftb.vkGetDeviceQueue(deviceR->_device, j.Family, j.IndexInFamily, &queuePtr);
+            if (queuePtr == VK_NULL_HANDLE) {
+                RADRAY_ERR_LOG("vk get queue for family {} index {} failed", j.Family, j.IndexInFamily);
+                return nullptr;
+            }
+            auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j, i.rawType);
+            deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
+        }
+    }
     {
         auto apiVersion = selectPhyDevice.properties.apiVersion;
         RADRAY_INFO_LOG("Vulkan API Version: {}.{}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion));
@@ -559,6 +747,229 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     RADRAY_INFO_LOG("=============================");
     return deviceR;
+}
+
+QueueVulkan::QueueVulkan(
+    DeviceVulkan* device,
+    VkQueue queue,
+    QueueIndexInFamily family,
+    QueueType type) noexcept
+    : _device(device),
+      _queue(queue),
+      _family(family),
+      _type(type) {}
+
+QueueVulkan::~QueueVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool QueueVulkan::IsValid() const noexcept {
+    return _queue != VK_NULL_HANDLE;
+}
+
+void QueueVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    // TODO:
+}
+
+void QueueVulkan::Present(const CommandQueuePresentDescriptor& desc) noexcept {
+    // TODO:
+}
+
+void QueueVulkan::WaitIdle() noexcept {
+    // TODO:
+}
+
+void QueueVulkan::DestroyImpl() noexcept {
+    if (_queue != VK_NULL_HANDLE) {
+        _queue = VK_NULL_HANDLE;
+    }
+}
+
+CommandPoolVulkan::CommandPoolVulkan(
+    DeviceVulkan* device,
+    VkCommandPool cmdPool) noexcept
+    : _device(device),
+      _cmdPool(cmdPool) {}
+
+CommandPoolVulkan::~CommandPoolVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool CommandPoolVulkan::IsValid() const noexcept {
+    return _cmdPool != VK_NULL_HANDLE;
+}
+
+void CommandPoolVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void CommandPoolVulkan::Reset() const noexcept {
+    if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkResetCommandPool failed: {}", vr);
+    }
+}
+
+void CommandPoolVulkan::DestroyImpl() noexcept {
+    if (_cmdPool != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyCommandPool(_device->_device, _cmdPool, _device->GetAllocationCallbacks());
+        _cmdPool = VK_NULL_HANDLE;
+    }
+}
+
+CommandBufferVulkan::CommandBufferVulkan(
+    DeviceVulkan* device,
+    QueueVulkan* queue,
+    unique_ptr<CommandPoolVulkan> cmdPool,
+    VkCommandBuffer cmdBuffer) noexcept
+    : _device(device),
+      _queue(queue),
+      _cmdPool(std::move(cmdPool)),
+      _cmdBuffer(cmdBuffer) {}
+
+CommandBufferVulkan::~CommandBufferVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool CommandBufferVulkan::IsValid() const noexcept {
+    return _cmdPool != nullptr && _cmdBuffer != VK_NULL_HANDLE;
+}
+
+void CommandBufferVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void CommandBufferVulkan::DestroyImpl() noexcept {
+    if (_cmdBuffer != VK_NULL_HANDLE) {
+        _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
+        _cmdBuffer = VK_NULL_HANDLE;
+    }
+    _cmdPool.reset();
+}
+
+void CommandBufferVulkan::Begin() noexcept {
+    _cmdPool->Reset();
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.pNext = nullptr;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    beginInfo.pInheritanceInfo = nullptr;
+    if (auto vr = _device->_ftb.vkBeginCommandBuffer(_cmdBuffer, &beginInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkBeginCommandBuffer failed: {}", vr);
+    }
+}
+
+void CommandBufferVulkan::End() noexcept {
+    if (auto vr = _device->_ftb.vkEndCommandBuffer(_cmdBuffer);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkEndCommandBuffer failed: {}", vr);
+    }
+}
+
+void CommandBufferVulkan::TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept {
+    // TODO:
+}
+
+FenceVulkan::FenceVulkan(
+    DeviceVulkan* device,
+    VkFence fence) noexcept
+    : _device(device),
+      _fence(fence) {}
+
+FenceVulkan::~FenceVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool FenceVulkan::IsValid() const noexcept {
+    return _fence != VK_NULL_HANDLE;
+}
+
+void FenceVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void FenceVulkan::DestroyImpl() noexcept {
+    if (_fence != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyFence(_device->_device, _fence, _device->GetAllocationCallbacks());
+        _fence = VK_NULL_HANDLE;
+    }
+}
+
+FenceState FenceVulkan::FenceVulkan::GetState() const noexcept {
+    return FenceState::Complete;  // TODO:
+}
+
+VkResult FenceVulkan::GetStatus() const noexcept {
+    return _device->_ftb.vkGetFenceStatus(_device->_device, _fence);
+}
+
+SemaphoreVulkan::SemaphoreVulkan(
+    DeviceVulkan* device,
+    VkSemaphore semaphore) noexcept
+    : _device(device),
+      _semaphore(semaphore) {}
+
+SemaphoreVulkan::~SemaphoreVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool SemaphoreVulkan::IsValid() const noexcept {
+    return _semaphore != VK_NULL_HANDLE;
+}
+
+void SemaphoreVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void SemaphoreVulkan::DestroyImpl() noexcept {
+    if (_semaphore != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySemaphore(_device->_device, _semaphore, _device->GetAllocationCallbacks());
+        _semaphore = VK_NULL_HANDLE;
+    }
+}
+
+SwapChainVulkan::SwapChainVulkan(
+    DeviceVulkan* device,
+    QueueVulkan* queue) noexcept
+    : _device(device),
+      _queue(queue) {}
+
+SwapChainVulkan::~SwapChainVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool SwapChainVulkan::IsValid() const noexcept {
+    return _surface != VK_NULL_HANDLE && _swapchain != VK_NULL_HANDLE;
+}
+
+void SwapChainVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void SwapChainVulkan::DestroyImpl() noexcept {
+    if (_swapchain != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
+        _swapchain = VK_NULL_HANDLE;
+    }
+    if (_surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(_device->_instance->_instance, _surface, _device->GetAllocationCallbacks());
+        _surface = VK_NULL_HANDLE;
+    }
+}
+
+Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept {
+    // TODO:
+    return nullptr;
+}
+
+Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
+    // TODO:
+    return nullptr;
 }
 
 }  // namespace radray::render::vulkan
