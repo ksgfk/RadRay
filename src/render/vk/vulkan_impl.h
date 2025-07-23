@@ -14,7 +14,9 @@ class CommandPoolVulkan;
 class CommandBufferVulkan;
 class FenceVulkan;
 class SemaphoreVulkan;
+class SurfaceVulkan;
 class SwapChainVulkan;
+class ImageVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -63,6 +65,8 @@ public:
     Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
     Nullable<shared_ptr<Fence>> CreateFence() noexcept override;
+
+    void WaitFences(std::span<Fence*> fences) noexcept override;
 
     Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept override;
 
@@ -180,14 +184,12 @@ public:
 
     FenceState GetState() const noexcept override;
 
-    /** @return VK_SUCCESS or VK_NOT_READY */
-    VkResult GetStatus() const noexcept;
-
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkFence _fence;
+    bool _isSubmitted{false};
 };
 
 class SemaphoreVulkan final : public Semaphore {
@@ -209,19 +211,34 @@ public:
     VkSemaphore _semaphore;
 };
 
-class SwapChainFrame {
+class SurfaceVulkan final : public RenderBase {
 public:
-    // shared_ptr<TextureVulkan> _rt;
-    Nullable<shared_ptr<SemaphoreVulkan>> _acquireSemaphore;
-    Nullable<shared_ptr<SemaphoreVulkan>> _releaseSemaphore;
-    Nullable<shared_ptr<FenceVulkan>> _submitFence;
+    SurfaceVulkan(
+        DeviceVulkan* device,
+        VkSurfaceKHR surface) noexcept;
+
+    ~SurfaceVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSurfaceKHR _surface;
 };
 
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(
         DeviceVulkan* device,
-        QueueVulkan* queue) noexcept;
+        QueueVulkan* queue,
+        unique_ptr<SurfaceVulkan> surface,
+        VkSwapchainKHR swapchain) noexcept;
 
     ~SwapChainVulkan() noexcept;
 
@@ -238,10 +255,33 @@ public:
 
     DeviceVulkan* _device;
     QueueVulkan* _queue;
-    VkSurfaceKHR _surface{VK_NULL_HANDLE};
-    VkSwapchainKHR _swapchain{VK_NULL_HANDLE};
-    vector<SwapChainFrame> _frames;
+    unique_ptr<SurfaceVulkan> _surface;
+    VkSwapchainKHR _swapchain;
+    vector<unique_ptr<ImageVulkan>> _frames;
     uint32_t _currentFrameIndex{0};
+};
+
+class ImageVulkan final : public Texture {
+public:
+    ImageVulkan(
+        DeviceVulkan* device,
+        VkImage image,
+        VmaAllocation allocation,
+        VmaAllocationInfo allocInfo) noexcept;
+
+    ~ImageVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkImage _image;
+    VmaAllocation _allocation;
+    VmaAllocationInfo _allocInfo;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);

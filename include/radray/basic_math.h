@@ -46,6 +46,12 @@ T Lerp(T a, T b, T t) noexcept {
     return std::fma(b, t, std::fma(-a, t, a));  // a + (b - a) * t
 }
 
+template <class T>
+requires(std::is_integral_v<T> || std::is_floating_point_v<T>)
+constexpr T Clamp(T value, T min, T max) noexcept {
+    return std::max(min, std::min(max, value));
+}
+
 template <class LhsDerived, class RhsDerived>
 typename Eigen::ScalarBinaryOpTraits<typename LhsDerived::Scalar, typename RhsDerived::Scalar>::ReturnType AbsDot(const Eigen::MatrixBase<LhsDerived>& lhs, const Eigen::MatrixBase<RhsDerived>& rhs) noexcept {
     return std::abs(lhs.dot(rhs));

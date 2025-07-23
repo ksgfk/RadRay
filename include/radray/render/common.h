@@ -453,6 +453,7 @@ public:
     uint32_t Height;
     uint32_t BackBufferCount;
     TextureFormat Format;
+    bool EnableSync;
 };
 
 struct SamplerDescriptor {
@@ -474,7 +475,7 @@ struct SamplerDescriptor {
 
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers;
-    Fence* SignalFence;
+    Nullable<Fence> SignalFence;
     std::span<Semaphore*> WaitSemaphores;
     std::span<Semaphore*> SignalSemaphores;
 };
@@ -519,6 +520,8 @@ public:
     virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
     virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
+
+    virtual void WaitFences(std::span<Fence*> fences) noexcept = 0;
 
     virtual Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept = 0;
 
