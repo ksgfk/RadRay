@@ -9,6 +9,8 @@ static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return sta
 static SemaphoreVulkan* CastVkObject(Semaphore* p) noexcept { return static_cast<SemaphoreVulkan*>(p); }
 static FenceVulkan* CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
 static SwapChainVulkan* CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
+static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
+static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -62,12 +64,42 @@ void InstanceVulkan::DestroyImpl() noexcept {
     }
 }
 
+VMA::VMA(VmaAllocator vma) noexcept
+    : _vma(vma) {}
+
+VMA::~VMA() noexcept {
+    this->DestroyImpl();
+}
+
+bool VMA::IsValid() const noexcept {
+    return _vma != VK_NULL_HANDLE;
+}
+
+void VMA::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void VMA::DestroyImpl() noexcept {
+    if (_vma != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(_vma);
+        _vma = VK_NULL_HANDLE;
+    }
+}
+
+DeviceVulkan::DeviceVulkan(
+    InstanceVulkan* instance,
+    VkPhysicalDevice physicalDevice,
+    VkDevice device) noexcept
+    : _instance(instance),
+      _physicalDevice(physicalDevice),
+      _device(device) {}
+
 DeviceVulkan::~DeviceVulkan() noexcept {
     this->DestroyImpl();
 }
 
 bool DeviceVulkan::IsValid() const noexcept {
-    return _device != nullptr && _alloc != VK_NULL_HANDLE;
+    return _device != VK_NULL_HANDLE && _vma != nullptr;
 }
 
 void DeviceVulkan::Destroy() noexcept {
@@ -316,10 +348,7 @@ const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexce
 }
 
 void DeviceVulkan::DestroyImpl() noexcept {
-    if (_alloc != VK_NULL_HANDLE) {
-        vmaDestroyAllocator(_alloc);
-        _alloc = VK_NULL_HANDLE;
-    }
+    _vma.reset();
     for (auto&& i : _queues) {
         i.clear();
     }
@@ -699,10 +728,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_ERR_LOG("vk create device fail");
         return nullptr;
     }
-    auto deviceR = make_shared<DeviceVulkan>();
-    deviceR->_instance = g_instance.Ptr.get();
-    deviceR->_physicalDevice = selectPhyDevice.device;
-    deviceR->_device = device;
+    auto deviceR = make_shared<DeviceVulkan>(
+        g_instance.Ptr.get(),
+        selectPhyDevice.device,
+        device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
     VmaVulkanFunctions vmaFunctions{};
     VmaAllocatorCreateInfo vmaCreateInfo{};
@@ -724,11 +753,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_ERR_LOG("vk call vmaImportVulkanFunctionsFromVolk failed: {}", vr);
         return nullptr;
     }
-    if (auto vr = vmaCreateAllocator(&vmaCreateInfo, &deviceR->_alloc);
+    VmaAllocator vma;
+    if (auto vr = vmaCreateAllocator(&vmaCreateInfo, &vma);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vmaCreateAllocator failed: {}", vr);
         return nullptr;
     }
+    deviceR->_vma = make_unique<VMA>(vma);
 
     RADRAY_INFO_LOG("========== Feature ==========");
     for (const auto& i : queueRequests) {
@@ -987,8 +1018,90 @@ void CommandBufferVulkan::End() noexcept {
     }
 }
 
-void CommandBufferVulkan::TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept {
-    // TODO:
+void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
+    VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_NONE;
+    VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_NONE;
+    vector<VkBufferMemoryBarrier> bufferBarriers;
+    bufferBarriers.reserve(buffers.size());
+    for (const auto& i : buffers) {
+        auto buf = CastVkObject(i.Target);
+        auto& bufBarrier = bufferBarriers.emplace_back();
+        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bufBarrier.pNext = nullptr;
+        bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
+        bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
+        if (i.OtherQueue.HasValue()) {
+            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            if (i.IsFromOrToOtherQueue) {
+                bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+            } else {
+                bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+            }
+        } else {
+            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        }
+        bufBarrier.buffer = buf->_buffer;
+        bufBarrier.offset = 0;
+        bufBarrier.size = buf->_allocInfo.size;
+
+        auto srcStage = BufferUseToPipelineStageFlags(i.Before);
+        auto dstStage = BufferUseToPipelineStageFlags(i.After);
+        srcStageMask |= srcStage;
+        dstStageMask |= dstStage;
+    }
+    vector<VkImageMemoryBarrier> imageBarriers;
+    imageBarriers.reserve(textures.size());
+    for (const auto& i : textures) {
+        auto tex = CastVkObject(i.Target);
+        auto& imgBarrier = imageBarriers.emplace_back();
+        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imgBarrier.pNext = nullptr;
+        imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
+        imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
+        imgBarrier.oldLayout = TextureUseToLayout(i.Before);
+        imgBarrier.newLayout = TextureUseToLayout(i.After);
+        if (i.OtherQueue.HasValue()) {
+            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            if (i.IsFromOrToOtherQueue) {
+                imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+            } else {
+                imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+            }
+        } else {
+            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        }
+        imgBarrier.image = tex->_image;
+        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
+        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
+        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
+        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+
+        auto srcStage = TextureUseToPipelineStageFlags(i.Before);
+        auto dstStage = TextureUseToPipelineStageFlags(i.After);
+        srcStageMask |= srcStage;
+        dstStageMask |= dstStage;
+    }
+    if (srcStageMask == VK_PIPELINE_STAGE_NONE) {
+        srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    }
+    if (dstStageMask == VK_PIPELINE_STAGE_NONE) {
+        dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+    _device->_ftb.vkCmdPipelineBarrier(
+        _cmdBuffer,
+        srcStageMask,
+        dstStageMask,
+        0,
+        0, nullptr,
+        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
+        static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
 }
 
 FenceVulkan::FenceVulkan(
@@ -1109,13 +1222,67 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 }
 
 Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept {
-    // TODO:
-    return nullptr;
+    auto signalSemaphore = desc.SignalSemaphore.HasValue() ? CastVkObject(desc.SignalSemaphore.Value()) : nullptr;
+    auto waitFence = desc.WaitFence.HasValue() ? CastVkObject(desc.WaitFence.Value()) : nullptr;
+    uint32_t nextFrameIndex;
+    VkResult vres = _device->_ftb.vkAcquireNextImageKHR(
+        _device->_device,
+        _swapchain,
+        std::numeric_limits<uint64_t>::max(),
+        signalSemaphore ? signalSemaphore->_semaphore : VK_NULL_HANDLE,
+        waitFence ? waitFence->_fence : VK_NULL_HANDLE,
+        &nextFrameIndex);
+    if (vres == VK_SUCCESS) {
+        if (waitFence) {
+            waitFence->_isSubmitted = true;
+        }
+        _currentFrameIndex = nextFrameIndex;
+        return _frames[_currentFrameIndex].get();
+    } else {
+        waitFence->_isSubmitted = false;
+        _device->_ftb.vkResetFences(_device->_device, 1, &waitFence->_fence);
+        RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vres);
+        return nullptr;
+    }
 }
 
 Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
-    // TODO:
-    return nullptr;
+    return _frames[_currentFrameIndex].get();
+}
+
+BufferVulkan::BufferVulkan(
+    DeviceVulkan* device,
+    VkBuffer buffer,
+    VmaAllocation allocation,
+    VmaAllocationInfo allocInfo) noexcept
+    : _device(device),
+      _buffer(buffer),
+      _allocation(allocation),
+      _allocInfo(allocInfo) {}
+
+BufferVulkan::~BufferVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool BufferVulkan::IsValid() const noexcept {
+    return _buffer != VK_NULL_HANDLE;
+}
+
+void BufferVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void BufferVulkan::DestroyImpl() noexcept {
+    if (_buffer != VK_NULL_HANDLE) {
+        if (_allocation == VK_NULL_HANDLE) {
+            _device->_ftb.vkDestroyBuffer(_device->_device, _buffer, _device->GetAllocationCallbacks());
+            _buffer = VK_NULL_HANDLE;
+        } else {
+            vmaDestroyBuffer(_device->_vma->_vma, _buffer, _allocation);
+            _buffer = VK_NULL_HANDLE;
+            _allocation = VK_NULL_HANDLE;
+        }
+    }
 }
 
 ImageVulkan::ImageVulkan(
@@ -1146,7 +1313,7 @@ void ImageVulkan::DestroyImpl() noexcept {
             _device->_ftb.vkDestroyImage(_device->_device, _image, _device->GetAllocationCallbacks());
             _image = VK_NULL_HANDLE;
         } else {
-            vmaDestroyImage(_device->_alloc, _image, _allocation);
+            vmaDestroyImage(_device->_vma->_vma, _image, _allocation);
             _image = VK_NULL_HANDLE;
             _allocation = VK_NULL_HANDLE;
         }

@@ -272,8 +272,7 @@ enum struct BufferUse : uint32_t {
     CBuffer = Vertex << 1,
     StorageRead = CBuffer << 1,
     StorageRW = StorageRead << 1,
-    Indirect = StorageRW << 1,
-    QueryResolve = Indirect << 1,
+    Indirect = StorageRW << 1
 };
 
 enum class TextureUse : uint32_t {
@@ -485,16 +484,20 @@ struct CommandQueuePresentDescriptor {
     std::span<Semaphore*> WaitSemaphores;
 };
 
-struct TransitionBufferDescriptor {
-    Buffer* Texture;
+struct BarrierBufferDescriptor {
+    Buffer* Target;
     BufferUses Before;
     BufferUses After;
+    Nullable<CommandQueue> OtherQueue;
+    bool IsFromOrToOtherQueue; // true: from, false: to
 };
 
-struct TransitionTextureDescriptor {
-    Texture* Texture;
+struct BarrierTextureDescriptor {
+    Texture* Target;
     TextureUses Before;
     TextureUses After;
+    Nullable<CommandQueue> OtherQueue;
+    bool IsFromOrToOtherQueue;
     bool IsSubresourceBarrier;
     uint32_t BaseArrayLayer;
     uint32_t ArrayLayerCount;
@@ -503,8 +506,8 @@ struct TransitionTextureDescriptor {
 };
 
 struct SwapChainAcquireNextDescriptor {
-    Semaphore* SignalSemaphore;
-    Fence* WaitFence;
+    Nullable<Semaphore> SignalSemaphore;
+    Nullable<Fence> WaitFence;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -551,7 +554,7 @@ public:
 
     virtual void End() noexcept = 0;
 
-    virtual void TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept = 0;
+    virtual void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept = 0;
 };
 
 class Fence : public RenderBase {

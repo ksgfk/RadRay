@@ -8,6 +8,7 @@
 namespace radray::render::vulkan {
 
 class InstanceVulkan;
+class VMA;
 class DeviceVulkan;
 class QueueVulkan;
 class CommandPoolVulkan;
@@ -16,6 +17,7 @@ class FenceVulkan;
 class SemaphoreVulkan;
 class SurfaceVulkan;
 class SwapChainVulkan;
+class BufferVulkan;
 class ImageVulkan;
 
 struct QueueIndexInFamily {
@@ -50,8 +52,31 @@ public:
     vector<string> _layers;
 };
 
+class VMA final : public RenderBase {
+public:
+    explicit VMA(VmaAllocator alloc) noexcept;
+
+    ~VMA() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    VmaAllocator _vma;
+};
+
 class DeviceVulkan final : public Device {
 public:
+    DeviceVulkan(
+        InstanceVulkan* instance,
+        VkPhysicalDevice physicalDevice,
+        VkDevice device) noexcept;
+
     ~DeviceVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -81,10 +106,10 @@ public:
 
     void DestroyImpl() noexcept;
 
-    InstanceVulkan* _instance = nullptr;
-    VkPhysicalDevice _physicalDevice = VK_NULL_HANDLE;
-    VkDevice _device = VK_NULL_HANDLE;
-    VmaAllocator _alloc = VK_NULL_HANDLE;
+    InstanceVulkan* _instance;
+    VkPhysicalDevice _physicalDevice;
+    VkDevice _device;
+    std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
 };
@@ -159,7 +184,7 @@ public:
 
     void End() noexcept override;
 
-    void TransitionResource(std::span<TransitionBufferDescriptor> buffers, std::span<TransitionTextureDescriptor> textures) noexcept override;
+    void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -261,6 +286,29 @@ public:
     uint32_t _currentFrameIndex{0};
 };
 
+class BufferVulkan final : public Buffer {
+public:
+    BufferVulkan(
+        DeviceVulkan* device,
+        VkBuffer buffer,
+        VmaAllocation allocation,
+        VmaAllocationInfo allocInfo) noexcept;
+
+    ~BufferVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkBuffer _buffer;
+    VmaAllocation _allocation;
+    VmaAllocationInfo _allocInfo;
+};
+
 class ImageVulkan final : public Texture {
 public:
     ImageVulkan(
@@ -282,6 +330,7 @@ public:
     VkImage _image;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
+    VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);
