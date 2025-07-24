@@ -217,7 +217,7 @@ VkPipelineStageFlags TextureUseToPipelineStageFlags(TextureUses v) noexcept {
         stage |= PipelineShaderStages;
     }
     if (v.HasFlag(TextureUse::Present) || v.HasFlag(TextureUse::Uninitialized)) {
-        stage |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     }
     return stage;
 }

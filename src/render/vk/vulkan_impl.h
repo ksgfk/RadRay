@@ -275,6 +275,8 @@ public:
 
     Nullable<Texture> GetCurrentBackBuffer() noexcept override;
 
+    uint32_t GetCurrentBackBufferIndex() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

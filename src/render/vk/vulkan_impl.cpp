@@ -140,7 +140,7 @@ Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
 }
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return this->CreateFence(VK_FENCE_CREATE_SIGNALED_BIT);
+    return this->CreateFence(0);
 }
 
 void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
@@ -163,7 +163,7 @@ void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
 }
 
 Nullable<shared_ptr<Semaphore>> DeviceVulkan::CreateGpuSemaphore() noexcept {
-    return this->CreateGpuSemaphore(VK_FENCE_CREATE_SIGNALED_BIT);
+    return this->CreateGpuSemaphore(0);
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
@@ -326,7 +326,13 @@ Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFence(VkFenceCreateFlags f
         RADRAY_ERR_LOG("vk create fence failed: {}", vr);
         return nullptr;
     }
-    return make_shared<FenceVulkan>(this, fence);
+    auto v = make_shared<FenceVulkan>(this, fence);
+    if (flags & VK_FENCE_CREATE_SIGNALED_BIT) {
+        v->_isSubmitted = true;
+    } else {
+        v->_isSubmitted = false;
+    }
+    return v;
 }
 
 Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateGpuSemaphore(VkSemaphoreCreateFlags flags) noexcept {
@@ -1092,7 +1098,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     }
     if (dstStageMask == VK_PIPELINE_STAGE_NONE) {
-        dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        dstStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     }
     _device->_ftb.vkCmdPipelineBarrier(
         _cmdBuffer,
@@ -1247,7 +1253,14 @@ Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNext
 }
 
 Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
+    if (_currentFrameIndex >= _frames.size()) {
+        return nullptr;
+    }
     return _frames[_currentFrameIndex].get();
+}
+
+uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
+    return _currentFrameIndex;
 }
 
 BufferVulkan::BufferVulkan(

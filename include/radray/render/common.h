@@ -582,6 +582,8 @@ public:
     virtual Nullable<Texture> AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept = 0;
 
     virtual Nullable<Texture> GetCurrentBackBuffer() noexcept = 0;
+
+    virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
 };
 
 class Resource : public RenderBase {
