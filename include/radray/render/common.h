@@ -489,7 +489,7 @@ struct BarrierBufferDescriptor {
     BufferUses Before;
     BufferUses After;
     Nullable<CommandQueue> OtherQueue;
-    bool IsFromOrToOtherQueue; // true: from, false: to
+    bool IsFromOrToOtherQueue;  // true: from, false: to
 };
 
 struct BarrierTextureDescriptor {
@@ -525,6 +525,8 @@ public:
     virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
 
     virtual void WaitFences(std::span<Fence*> fences) noexcept = 0;
+
+    virtual void ResetFences(std::span<Fence*> fences) noexcept = 0;
 
     virtual Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept = 0;
 

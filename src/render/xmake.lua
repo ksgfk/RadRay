@@ -27,7 +27,7 @@ target("radray_render")
         add_defines("RADRAY_ENABLE_VULKAN", {public = true})
         add_files("vk/*.cpp")
         add_files("vk/*.c")
-        add_packages("vulkan-headers")
+        add_packages("vulkan-headers", {public = true})
     end
 
     on_install(function (target)

@@ -152,8 +152,19 @@ void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
             vkFences.push_back(fence->_fence);
         }
     }
-    if (vkFences.size() > 0) {
+    if (!vkFences.empty()) {
         _ftb.vkWaitForFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data(), VK_TRUE, UINT64_MAX);
+    }
+}
+
+void DeviceVulkan::ResetFences(std::span<Fence*> fences) noexcept {
+    vector<VkFence> vkFences;
+    vkFences.reserve(fences.size());
+    for (auto* i : fences) {
+        auto fence = CastVkObject(i);
+        vkFences.push_back(fence->_fence);
+    }
+    if (!vkFences.empty()) {
         _ftb.vkResetFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data());
     }
     for (auto* i : fences) {
@@ -1238,18 +1249,12 @@ Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNext
         signalSemaphore ? signalSemaphore->_semaphore : VK_NULL_HANDLE,
         waitFence ? waitFence->_fence : VK_NULL_HANDLE,
         &nextFrameIndex);
-    if (vres == VK_SUCCESS) {
-        if (waitFence) {
-            waitFence->_isSubmitted = true;
-        }
-        _currentFrameIndex = nextFrameIndex;
-        return _frames[_currentFrameIndex].get();
-    } else {
-        waitFence->_isSubmitted = false;
-        _device->_ftb.vkResetFences(_device->_device, 1, &waitFence->_fence);
+    if (vres != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vres);
         return nullptr;
     }
+    _currentFrameIndex = nextFrameIndex;
+    return _frames[nextFrameIndex].get();
 }
 
 Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {

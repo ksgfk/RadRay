@@ -93,6 +93,8 @@ public:
 
     void WaitFences(std::span<Fence*> fences) noexcept override;
 
+    void ResetFences(std::span<Fence*> fences) noexcept override;
+
     Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept override;
 
     Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
