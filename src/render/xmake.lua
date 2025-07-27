@@ -25,9 +25,12 @@ target("radray_render")
     end
     if get_config("enable_vulkan") then
         add_defines("RADRAY_ENABLE_VULKAN", {public = true})
+        add_includedirs("vk/ext/Vulkan-Headers/include", {public = true})
+        add_includedirs("vk/ext/volk/include", {public = true})
+        add_includedirs("vk/ext/VulkanMemoryAllocator/include", {public = true})
         add_files("vk/*.cpp")
-        add_files("vk/*.c")
-        add_packages("vulkan-headers", {public = true})
+        add_files("vk/ext/volk/src/*.c")
+        add_files("vk/ext/VulkanMemoryAllocator/src/*.cpp")
     end
 
     on_install(function (target)

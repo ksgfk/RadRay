@@ -586,6 +586,8 @@ public:
     virtual Nullable<Texture> GetCurrentBackBuffer() noexcept = 0;
 
     virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
+
+    virtual uint32_t GetBackBufferCount() const noexcept = 0;
 };
 
 class Resource : public RenderBase {

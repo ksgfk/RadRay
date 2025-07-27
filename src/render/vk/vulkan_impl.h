@@ -279,6 +279,8 @@ public:
 
     uint32_t GetCurrentBackBufferIndex() const noexcept override;
 
+    uint32_t GetBackBufferCount() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -326,6 +328,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void DangerousDestroy() noexcept;
 
 public:
     void DestroyImpl() noexcept;

@@ -1230,6 +1230,9 @@ void SwapChainVulkan::Destroy() noexcept {
 }
 
 void SwapChainVulkan::DestroyImpl() noexcept {
+    for (auto& i : _frames) {
+        i->DangerousDestroy();
+    }
     _frames.clear();
     if (_swapchain != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
@@ -1266,6 +1269,10 @@ Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
 
 uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
     return _currentFrameIndex;
+}
+
+uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
+    return static_cast<uint32_t>(_frames.size());
 }
 
 BufferVulkan::BufferVulkan(
@@ -1323,6 +1330,11 @@ bool ImageVulkan::IsValid() const noexcept {
 
 void ImageVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void ImageVulkan::DangerousDestroy() noexcept {
+    _image = VK_NULL_HANDLE;
+    _allocation = VK_NULL_HANDLE;
 }
 
 void ImageVulkan::DestroyImpl() noexcept {

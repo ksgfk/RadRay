@@ -120,7 +120,7 @@ if get_config("enable_spirv_cross") then
     add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
 end
 if get_config("enable_vulkan") then
-    add_requires("vulkan-headers 1.4.309", {debug = is_mode("debug")})
+    -- add_requires("vulkan-headers 1.4.309", {debug = is_mode("debug")})
 end
 if get_config("build_test") then
     add_requires("gtest v1.16.0", {debug = is_mode("debug")})
