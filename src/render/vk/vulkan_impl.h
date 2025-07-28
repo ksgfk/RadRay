@@ -91,12 +91,6 @@ public:
 
     Nullable<shared_ptr<Fence>> CreateFence() noexcept override;
 
-    void WaitFences(std::span<Fence*> fences) noexcept override;
-
-    void ResetFences(std::span<Fence*> fences) noexcept override;
-
-    Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept override;
-
     Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
 public:
@@ -209,23 +203,22 @@ public:
 
     void Destroy() noexcept override;
 
-    FenceState GetState() const noexcept override;
-
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkFence _fence;
-    bool _isSubmitted{false};
 };
 
-class SemaphoreVulkan final : public Semaphore {
+class SemaphoreVulkan final : public RenderBase {
 public:
     SemaphoreVulkan(
         DeviceVulkan* device,
         VkSemaphore semaphore) noexcept;
 
-    ~SemaphoreVulkan() noexcept override;
+    ~SemaphoreVulkan() noexcept;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 

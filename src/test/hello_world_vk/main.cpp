@@ -17,12 +17,12 @@ constexpr int RT_COUNT = 2;
 unique_ptr<GlfwWindow> glfw;
 shared_ptr<vulkan::DeviceVulkan> device;
 vulkan::QueueVulkan* cmdQueue = nullptr;
+shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
 shared_ptr<vulkan::SwapChainVulkan> swapchain;
 
 void Init() {
     GlobalInitGlfw();
     glfw = make_unique<GlfwWindow>(RADRAY_APPNAME, WIN_WIDTH, WIN_HEIGHT, false, false);
-
     VulkanBackendInitDescriptor backendDesc{};
     backendDesc.IsEnableDebugLayer = true;
     vulkan::GlobalInitVulkan(backendDesc);
@@ -32,6 +32,7 @@ void Init() {
     deviceDesc.Queues = queueDesc;
     device = vulkan::CreateDeviceVulkan(deviceDesc).Unwrap();
     cmdQueue = static_cast<vulkan::QueueVulkan*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
+    cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     SwapChainDescriptor swapchainDesc{};
     swapchainDesc.PresentQueue = cmdQueue;
     swapchainDesc.NativeHandler = glfw->GetNativeHandle();
@@ -45,6 +46,7 @@ void Init() {
 
 void End() {
     swapchain = nullptr;
+    cmdBuffer = nullptr;
     cmdQueue = nullptr;
     device = nullptr;
     vulkan::GlobalTerminateVulkan();
@@ -55,6 +57,10 @@ void End() {
 bool Update() {
     GlobalPollEventsGlfw();
     bool isClose = glfw->ShouldClose();
+
+    // SwapChainAcquireNextDescriptor acquireDesc{};
+    // acquireDesc.SignalSemaphore = presentSemaphore[nowPresentIndex].get();
+    // Texture* rt = swapchain->AcquireNextTexture(acquireDesc).Value();
 
     return !isClose;
 }

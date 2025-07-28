@@ -306,12 +306,6 @@ enum class StoreAction {
     Discard
 };
 
-enum class FenceState {
-    Complete,
-    Incomplete,
-    NotSubmitted
-};
-
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -319,8 +313,7 @@ enum class RenderObjectTag : uint32_t {
     CmdBuffer = CmdQueue << 1,
     CmdEncoder = CmdBuffer << 1,
     Fence = CmdEncoder << 1,
-    Semaphore = Fence << 1,
-    Shader = Semaphore << 1,
+    Shader = Fence << 1,
     RootSignature = Shader << 1,
     PipelineState = RootSignature << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
@@ -382,7 +375,6 @@ class Device;
 class CommandQueue;
 class CommandBuffer;
 class Fence;
-class Semaphore;
 class SwapChain;
 class Buffer;
 class Texture;
@@ -475,13 +467,13 @@ struct SamplerDescriptor {
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers;
     Nullable<Fence> SignalFence;
-    std::span<Semaphore*> WaitSemaphores;
-    std::span<Semaphore*> SignalSemaphores;
+    // std::span<Semaphore*> WaitSemaphores;
+    // std::span<Semaphore*> SignalSemaphores;
 };
 
 struct CommandQueuePresentDescriptor {
     SwapChain* Target;
-    std::span<Semaphore*> WaitSemaphores;
+    // std::span<Semaphore*> WaitSemaphores;
 };
 
 struct BarrierBufferDescriptor {
@@ -506,8 +498,8 @@ struct BarrierTextureDescriptor {
 };
 
 struct SwapChainAcquireNextDescriptor {
-    Nullable<Semaphore> SignalSemaphore;
-    Nullable<Fence> WaitFence;
+    // Nullable<Semaphore> SignalSemaphore;
+    // Nullable<Fence> WaitFence;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -523,12 +515,6 @@ public:
     virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
     virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
-
-    virtual void WaitFences(std::span<Fence*> fences) noexcept = 0;
-
-    virtual void ResetFences(std::span<Fence*> fences) noexcept = 0;
-
-    virtual Nullable<shared_ptr<Semaphore>> CreateGpuSemaphore() noexcept = 0;
 
     virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 };
@@ -564,15 +550,6 @@ public:
     virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
-
-    virtual FenceState GetState() const noexcept = 0;
-};
-
-class Semaphore : public RenderBase {
-public:
-    virtual ~Semaphore() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Semaphore; }
 };
 
 class SwapChain : public RenderBase {

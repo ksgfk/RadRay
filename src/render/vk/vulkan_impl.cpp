@@ -6,7 +6,6 @@ namespace radray::render::vulkan {
 
 static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-static SemaphoreVulkan* CastVkObject(Semaphore* p) noexcept { return static_cast<SemaphoreVulkan*>(p); }
 static FenceVulkan* CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
 static SwapChainVulkan* CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
@@ -143,39 +142,35 @@ Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
     return this->CreateFence(0);
 }
 
-void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
-    vector<VkFence> vkFences;
-    vkFences.reserve(fences.size());
-    for (auto* i : fences) {
-        auto fence = CastVkObject(i);
-        if (fence->_isSubmitted) {
-            vkFences.push_back(fence->_fence);
-        }
-    }
-    if (!vkFences.empty()) {
-        _ftb.vkWaitForFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data(), VK_TRUE, UINT64_MAX);
-    }
-}
+// void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
+//     vector<VkFence> vkFences;
+//     vkFences.reserve(fences.size());
+//     for (auto* i : fences) {
+//         auto fence = CastVkObject(i);
+//         if (fence->_isSubmitted) {
+//             vkFences.push_back(fence->_fence);
+//         }
+//     }
+//     if (!vkFences.empty()) {
+//         _ftb.vkWaitForFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data(), VK_TRUE, UINT64_MAX);
+//     }
+// }
 
-void DeviceVulkan::ResetFences(std::span<Fence*> fences) noexcept {
-    vector<VkFence> vkFences;
-    vkFences.reserve(fences.size());
-    for (auto* i : fences) {
-        auto fence = CastVkObject(i);
-        vkFences.push_back(fence->_fence);
-    }
-    if (!vkFences.empty()) {
-        _ftb.vkResetFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data());
-    }
-    for (auto* i : fences) {
-        auto fence = CastVkObject(i);
-        fence->_isSubmitted = false;
-    }
-}
-
-Nullable<shared_ptr<Semaphore>> DeviceVulkan::CreateGpuSemaphore() noexcept {
-    return this->CreateGpuSemaphore(0);
-}
+// void DeviceVulkan::ResetFences(std::span<Fence*> fences) noexcept {
+//     vector<VkFence> vkFences;
+//     vkFences.reserve(fences.size());
+//     for (auto* i : fences) {
+//         auto fence = CastVkObject(i);
+//         vkFences.push_back(fence->_fence);
+//     }
+//     if (!vkFences.empty()) {
+//         _ftb.vkResetFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data());
+//     }
+//     for (auto* i : fences) {
+//         auto fence = CastVkObject(i);
+//         fence->_isSubmitted = false;
+//     }
+// }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
     SwapChainDescriptor desc = desc_;
@@ -338,11 +333,6 @@ Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFence(VkFenceCreateFlags f
         return nullptr;
     }
     auto v = make_shared<FenceVulkan>(this, fence);
-    if (flags & VK_FENCE_CREATE_SIGNALED_BIT) {
-        v->_isSubmitted = true;
-    } else {
-        v->_isSubmitted = false;
-    }
     return v;
 }
 
@@ -391,6 +381,11 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceVersion failed");
         return false;
     }
+    RADRAY_INFO_LOG("vk instance version: {}.{}.{}", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
+    if (version < VK_API_VERSION_1_2) {
+        RADRAY_ERR_LOG("vk instance version need at least 1.2");
+        return false;
+    }
     vector<VkExtensionProperties> extProps;
     if (EnumerateVectorFromVkFunc(extProps, vkEnumerateInstanceExtensionProperties, nullptr) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceExtensionProperties failed");
@@ -412,6 +407,7 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
     unordered_set<string> needLayers;
     bool isValidFeatureExtEnable = false;
     needExts.emplace(VK_KHR_SURFACE_EXTENSION_NAME);
+    needExts.emplace(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     needExts.emplace(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
@@ -521,11 +517,7 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "null";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    if (version < VK_API_VERSION_1_1) {
-        appInfo.apiVersion = VK_API_VERSION_1_0;
-    } else {
-        appInfo.apiVersion = VK_API_VERSION_1_3;
-    }
+    appInfo.apiVersion = version;
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -629,6 +621,15 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
+    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_2) {
+        RADRAY_ERR_LOG(
+            "vk physical device {} api version {}.{}.{} is not supported, need at least 1.2",
+            selectPhyDevice.properties.deviceName,
+            VK_VERSION_MAJOR(selectPhyDevice.properties.apiVersion),
+            VK_VERSION_MINOR(selectPhyDevice.properties.apiVersion),
+            VK_VERSION_PATCH(selectPhyDevice.properties.apiVersion));
+        return nullptr;
+    }
     RADRAY_INFO_LOG("vk select device: {}", selectPhyDevice.properties.deviceName);
 
     struct QueueRequest {
@@ -708,6 +709,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
     unordered_set<string> needExts;
     needExts.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 
     vector<VkExtensionProperties> deviceExtsAvailable;
     if (EnumerateVectorFromVkFunc(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr) != VK_SUCCESS) {
@@ -853,91 +855,91 @@ void QueueVulkan::Destroy() noexcept {
 }
 
 void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    if (desc.CmdBuffers.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk cmd buffers count: {}, max: {}", desc.CmdBuffers.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    if (desc.SignalSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk signal semaphores count: {}, max: {}", desc.SignalSemaphores.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    vector<VkSemaphore> waitSemaphores;
-    waitSemaphores.reserve(desc.WaitSemaphores.size());
-    vector<VkPipelineStageFlags> waitStages;
-    waitStages.reserve(desc.WaitSemaphores.size());
-    for (auto i : desc.WaitSemaphores) {
-        auto semaphore = CastVkObject(i);
-        waitSemaphores.emplace_back(semaphore->_semaphore);
-        waitStages.emplace_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
-    }
-    vector<VkCommandBuffer> cmdBufs;
-    cmdBufs.reserve(desc.CmdBuffers.size());
-    for (auto i : desc.CmdBuffers) {
-        auto cmdBuffer = CastVkObject(i);
-        cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
-    }
-    vector<VkSemaphore> signalSemaphores;
-    signalSemaphores.reserve(desc.SignalSemaphores.size());
-    for (auto i : desc.SignalSemaphores) {
-        auto semaphore = CastVkObject(i);
-        signalSemaphores.emplace_back(semaphore->_semaphore);
-    }
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.pNext = nullptr;
-    submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
-    submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
-    submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
-    submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
-    submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
-    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(desc.SignalSemaphores.size());
-    submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
-    VkFence signalFence = VK_NULL_HANDLE;
-    if (desc.SignalFence.HasValue()) {
-        auto fence = CastVkObject(desc.SignalFence.Value());
-        signalFence = fence->_fence;
-    }
-    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
-        vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkQueueSubmit failed: {}", vr);
-        return;
-    }
-    if (desc.SignalFence.HasValue()) {
-        auto fence = CastVkObject(desc.SignalFence.Value());
-        fence->_isSubmitted = true;
-    }
+    // if (desc.CmdBuffers.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+    //     RADRAY_ABORT("vk cmd buffers count: {}, max: {}", desc.CmdBuffers.size(), std::numeric_limits<uint32_t>::max());
+    //     return;
+    // }
+    // if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+    //     RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
+    //     return;
+    // }
+    // if (desc.SignalSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+    //     RADRAY_ABORT("vk signal semaphores count: {}, max: {}", desc.SignalSemaphores.size(), std::numeric_limits<uint32_t>::max());
+    //     return;
+    // }
+    // vector<VkSemaphore> waitSemaphores;
+    // waitSemaphores.reserve(desc.WaitSemaphores.size());
+    // vector<VkPipelineStageFlags> waitStages;
+    // waitStages.reserve(desc.WaitSemaphores.size());
+    // for (auto i : desc.WaitSemaphores) {
+    //     auto semaphore = CastVkObject(i);
+    //     waitSemaphores.emplace_back(semaphore->_semaphore);
+    //     waitStages.emplace_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    // }
+    // vector<VkCommandBuffer> cmdBufs;
+    // cmdBufs.reserve(desc.CmdBuffers.size());
+    // for (auto i : desc.CmdBuffers) {
+    //     auto cmdBuffer = CastVkObject(i);
+    //     cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
+    // }
+    // vector<VkSemaphore> signalSemaphores;
+    // signalSemaphores.reserve(desc.SignalSemaphores.size());
+    // for (auto i : desc.SignalSemaphores) {
+    //     auto semaphore = CastVkObject(i);
+    //     signalSemaphores.emplace_back(semaphore->_semaphore);
+    // }
+    // VkSubmitInfo submitInfo{};
+    // submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    // submitInfo.pNext = nullptr;
+    // submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+    // submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
+    // submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
+    // submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
+    // submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
+    // submitInfo.signalSemaphoreCount = static_cast<uint32_t>(desc.SignalSemaphores.size());
+    // submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
+    // VkFence signalFence = VK_NULL_HANDLE;
+    // if (desc.SignalFence.HasValue()) {
+    //     auto fence = CastVkObject(desc.SignalFence.Value());
+    //     signalFence = fence->_fence;
+    // }
+    // if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
+    //     vr != VK_SUCCESS) {
+    //     RADRAY_ABORT("vk call vkQueueSubmit failed: {}", vr);
+    //     return;
+    // }
+    // if (desc.SignalFence.HasValue()) {
+    //     auto fence = CastVkObject(desc.SignalFence.Value());
+    //     fence->_isSubmitted = true;
+    // }
 }
 
 void QueueVulkan::Present(const CommandQueuePresentDescriptor& desc) noexcept {
-    if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    auto swapchain = CastVkObject(desc.Target);
-    vector<VkSemaphore> waitSemaphores;
-    waitSemaphores.reserve(desc.WaitSemaphores.size());
-    for (auto i : desc.WaitSemaphores) {
-        auto semaphore = CastVkObject(i);
-        waitSemaphores.emplace_back(semaphore->_semaphore);
-    }
-    VkPresentInfoKHR presentInfo{};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.pNext = nullptr;
-    presentInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
-    presentInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &swapchain->_swapchain;
-    presentInfo.pImageIndices = &swapchain->_currentFrameIndex;
-    presentInfo.pResults = nullptr;
-    if (auto vr = _device->_ftb.vkQueuePresentKHR(_queue, &presentInfo);
-        vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkQueuePresentKHR failed: {}", vr);
-        return;
-    }
+    // if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+    //     RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
+    //     return;
+    // }
+    // auto swapchain = CastVkObject(desc.Target);
+    // vector<VkSemaphore> waitSemaphores;
+    // waitSemaphores.reserve(desc.WaitSemaphores.size());
+    // for (auto i : desc.WaitSemaphores) {
+    //     auto semaphore = CastVkObject(i);
+    //     waitSemaphores.emplace_back(semaphore->_semaphore);
+    // }
+    // VkPresentInfoKHR presentInfo{};
+    // presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    // presentInfo.pNext = nullptr;
+    // presentInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+    // presentInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
+    // presentInfo.swapchainCount = 1;
+    // presentInfo.pSwapchains = &swapchain->_swapchain;
+    // presentInfo.pImageIndices = &swapchain->_currentFrameIndex;
+    // presentInfo.pResults = nullptr;
+    // if (auto vr = _device->_ftb.vkQueuePresentKHR(_queue, &presentInfo);
+    //     vr != VK_SUCCESS) {
+    //     RADRAY_ABORT("vk call vkQueuePresentKHR failed: {}", vr);
+    //     return;
+    // }
 }
 
 void QueueVulkan::WaitIdle() noexcept {
@@ -1036,89 +1038,90 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
-    VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_NONE;
-    VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_NONE;
-    vector<VkBufferMemoryBarrier> bufferBarriers;
-    bufferBarriers.reserve(buffers.size());
-    for (const auto& i : buffers) {
-        auto buf = CastVkObject(i.Target);
-        auto& bufBarrier = bufferBarriers.emplace_back();
-        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        bufBarrier.pNext = nullptr;
-        bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
-        bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
-        if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Value());
-            if (i.IsFromOrToOtherQueue) {
-                bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-            } else {
-                bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-            }
-        } else {
-            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        }
-        bufBarrier.buffer = buf->_buffer;
-        bufBarrier.offset = 0;
-        bufBarrier.size = buf->_allocInfo.size;
+    // TODO:
+    // VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_NONE;
+    // VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_NONE;
+    // vector<VkBufferMemoryBarrier> bufferBarriers;
+    // bufferBarriers.reserve(buffers.size());
+    // for (const auto& i : buffers) {
+    //     auto buf = CastVkObject(i.Target);
+    //     auto& bufBarrier = bufferBarriers.emplace_back();
+    //     bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    //     bufBarrier.pNext = nullptr;
+    //     bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
+    //     bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
+    //     if (i.OtherQueue.HasValue()) {
+    //         auto otherQ = CastVkObject(i.OtherQueue.Value());
+    //         if (i.IsFromOrToOtherQueue) {
+    //             bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+    //             bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+    //         } else {
+    //             bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+    //             bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+    //         }
+    //     } else {
+    //         bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //         bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //     }
+    //     bufBarrier.buffer = buf->_buffer;
+    //     bufBarrier.offset = 0;
+    //     bufBarrier.size = buf->_allocInfo.size;
 
-        auto srcStage = BufferUseToPipelineStageFlags(i.Before);
-        auto dstStage = BufferUseToPipelineStageFlags(i.After);
-        srcStageMask |= srcStage;
-        dstStageMask |= dstStage;
-    }
-    vector<VkImageMemoryBarrier> imageBarriers;
-    imageBarriers.reserve(textures.size());
-    for (const auto& i : textures) {
-        auto tex = CastVkObject(i.Target);
-        auto& imgBarrier = imageBarriers.emplace_back();
-        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        imgBarrier.pNext = nullptr;
-        imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
-        imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
-        imgBarrier.oldLayout = TextureUseToLayout(i.Before);
-        imgBarrier.newLayout = TextureUseToLayout(i.After);
-        if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Value());
-            if (i.IsFromOrToOtherQueue) {
-                imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-            } else {
-                imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-            }
-        } else {
-            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        }
-        imgBarrier.image = tex->_image;
-        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
-        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
-        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
-        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+    //     auto srcStage = BufferUseToPipelineStageFlags(i.Before);
+    //     auto dstStage = BufferUseToPipelineStageFlags(i.After);
+    //     srcStageMask |= srcStage;
+    //     dstStageMask |= dstStage;
+    // }
+    // vector<VkImageMemoryBarrier> imageBarriers;
+    // imageBarriers.reserve(textures.size());
+    // for (const auto& i : textures) {
+    //     auto tex = CastVkObject(i.Target);
+    //     auto& imgBarrier = imageBarriers.emplace_back();
+    //     imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    //     imgBarrier.pNext = nullptr;
+    //     imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
+    //     imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
+    //     imgBarrier.oldLayout = TextureUseToLayout(i.Before);
+    //     imgBarrier.newLayout = TextureUseToLayout(i.After);
+    //     if (i.OtherQueue.HasValue()) {
+    //         auto otherQ = CastVkObject(i.OtherQueue.Value());
+    //         if (i.IsFromOrToOtherQueue) {
+    //             imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+    //             imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+    //         } else {
+    //             imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+    //             imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+    //         }
+    //     } else {
+    //         imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //         imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    //     }
+    //     imgBarrier.image = tex->_image;
+    //     imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
+    //     imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
+    //     imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+    //     imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
+    //     imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
 
-        auto srcStage = TextureUseToPipelineStageFlags(i.Before);
-        auto dstStage = TextureUseToPipelineStageFlags(i.After);
-        srcStageMask |= srcStage;
-        dstStageMask |= dstStage;
-    }
-    if (srcStageMask == VK_PIPELINE_STAGE_NONE) {
-        srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    }
-    if (dstStageMask == VK_PIPELINE_STAGE_NONE) {
-        dstStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    }
-    _device->_ftb.vkCmdPipelineBarrier(
-        _cmdBuffer,
-        srcStageMask,
-        dstStageMask,
-        0,
-        0, nullptr,
-        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
-        static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
+    //     auto srcStage = TextureUseToPipelineStageFlags(i.Before);
+    //     auto dstStage = TextureUseToPipelineStageFlags(i.After);
+    //     srcStageMask |= srcStage;
+    //     dstStageMask |= dstStage;
+    // }
+    // if (srcStageMask == VK_PIPELINE_STAGE_NONE) {
+    //     srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    // }
+    // if (dstStageMask == VK_PIPELINE_STAGE_NONE) {
+    //     dstStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    // }
+    // _device->_ftb.vkCmdPipelineBarrier(
+    //     _cmdBuffer,
+    //     srcStageMask,
+    //     dstStageMask,
+    //     0,
+    //     0, nullptr,
+    //     static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
+    //     static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
 }
 
 FenceVulkan::FenceVulkan(
@@ -1144,17 +1147,6 @@ void FenceVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroyFence(_device->_device, _fence, _device->GetAllocationCallbacks());
         _fence = VK_NULL_HANDLE;
     }
-}
-
-FenceState FenceVulkan::GetState() const noexcept {
-    VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, _fence);
-    FenceState result;
-    if (_isSubmitted) {
-        result = status == VK_SUCCESS ? FenceState::Complete : FenceState::Incomplete;
-    } else {
-        result = FenceState::NotSubmitted;
-    }
-    return result;
 }
 
 SemaphoreVulkan::SemaphoreVulkan(
@@ -1242,22 +1234,22 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 }
 
 Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept {
-    auto signalSemaphore = desc.SignalSemaphore.HasValue() ? CastVkObject(desc.SignalSemaphore.Value()) : nullptr;
-    auto waitFence = desc.WaitFence.HasValue() ? CastVkObject(desc.WaitFence.Value()) : nullptr;
-    uint32_t nextFrameIndex;
-    VkResult vres = _device->_ftb.vkAcquireNextImageKHR(
-        _device->_device,
-        _swapchain,
-        std::numeric_limits<uint64_t>::max(),
-        signalSemaphore ? signalSemaphore->_semaphore : VK_NULL_HANDLE,
-        waitFence ? waitFence->_fence : VK_NULL_HANDLE,
-        &nextFrameIndex);
-    if (vres != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vres);
-        return nullptr;
-    }
-    _currentFrameIndex = nextFrameIndex;
-    return _frames[nextFrameIndex].get();
+    // auto signalSemaphore = desc.SignalSemaphore.HasValue() ? CastVkObject(desc.SignalSemaphore.Value()) : nullptr;
+    // auto waitFence = desc.WaitFence.HasValue() ? CastVkObject(desc.WaitFence.Value()) : nullptr;
+    // uint32_t nextFrameIndex;
+    // VkResult vres = _device->_ftb.vkAcquireNextImageKHR(
+    //     _device->_device,
+    //     _swapchain,
+    //     std::numeric_limits<uint64_t>::max(),
+    //     signalSemaphore ? signalSemaphore->_semaphore : VK_NULL_HANDLE,
+    //     waitFence ? waitFence->_fence : VK_NULL_HANDLE,
+    //     &nextFrameIndex);
+    // if (vres != VK_SUCCESS) {
+    //     RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vres);
+    //     return nullptr;
+    // }
+    // _currentFrameIndex = nextFrameIndex;
+    // return _frames[nextFrameIndex].get();
 }
 
 Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
