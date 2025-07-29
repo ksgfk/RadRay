@@ -267,18 +267,28 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         RADRAY_ERR_LOG("vk call vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
         return nullptr;
     }
-    VkPresentModeKHR preferredModeList[] = {
-        VK_PRESENT_MODE_IMMEDIATE_KHR,
-        VK_PRESENT_MODE_MAILBOX_KHR,
-        VK_PRESENT_MODE_FIFO_RELAXED_KHR,
-        VK_PRESENT_MODE_FIFO_KHR};
     VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;
-    uint32_t preferredModeStartIndex = desc.EnableSync ? 1 : 0;
-    for (uint32_t j = preferredModeStartIndex; j < ArrayLength(preferredModeList); ++j) {
-        VkPresentModeKHR preferredMode = preferredModeList[j];
-        if (std::ranges::find(supportedPresentModes, preferredMode) != supportedPresentModes.end()) {
-            needPresentMode = preferredMode;
-            break;
+    {
+        const VkPresentModeKHR vsyncOffModes[] = {
+            VK_PRESENT_MODE_IMMEDIATE_KHR,
+            VK_PRESENT_MODE_MAILBOX_KHR,
+            VK_PRESENT_MODE_FIFO_KHR};
+        const VkPresentModeKHR vsyncOnModes[] = {
+            VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+            VK_PRESENT_MODE_FIFO_KHR,
+            VK_PRESENT_MODE_IMMEDIATE_KHR,
+            VK_PRESENT_MODE_MAILBOX_KHR};
+        std::span<const VkPresentModeKHR> lookupPresentModes;
+        if (desc.EnableSync) {
+            lookupPresentModes = vsyncOnModes;
+        } else {
+            lookupPresentModes = vsyncOffModes;
+        }
+        for (const auto& i : lookupPresentModes) {
+            if (std::ranges::find(supportedPresentModes, i) != supportedPresentModes.end()) {
+                needPresentMode = i;
+                break;
+            }
         }
     }
     VkSwapchainCreateInfoKHR swapchianCreateInfo{};
@@ -1250,6 +1260,7 @@ Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNext
     // }
     // _currentFrameIndex = nextFrameIndex;
     // return _frames[nextFrameIndex].get();
+    return nullptr;
 }
 
 Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
