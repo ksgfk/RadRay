@@ -69,13 +69,7 @@ if is_plat("windows") then
 end
 
 -- 第三方库
-add_requires("fmt_radray 11.2.0", {
-    debug = is_mode("debug"),
-    configs = {
-        shared = false,
-        header_only = false
-    }
-})
+add_requires("fmt 11.2.0", {debug = is_mode("debug"), configs = {shared = false, header_only = false}})
 add_requires("spdlog_radray v1.15.3", {
     alias = "spdlog",
     debug = is_mode("debug"),
@@ -88,24 +82,13 @@ add_requires("spdlog_radray v1.15.3", {
         no_thread_id = true,
         no_default_logger = true
     }})
-add_requireconfs("spdlog_radray.fmt_radray", {
-    version = "11.2.0",
-    debug = is_mode("debug"),
-    configs = {
-        shared = false,
-        header_only = false
-    }
-})
+add_requireconfs("spdlog_radray.fmt", {version = "11.2.0",debug = is_mode("debug"), configs = {shared = false, header_only = false}})
 add_requires("eigen 3.4.0")
 if get_config("enable_mimalloc") then
     add_requires("mimalloc_radray v2.2.4", {debug = is_mode("debug"), configs = {shared = false}}) 
 end
 add_requires("xxhash v0.8.3", {debug = is_mode("debug"), configs = {shared = false, dispatch = true}})
-add_requires("glfw 3.4", {
-    debug = is_mode("debug"),
-    configs = { 
-        shared = false
-    }})
+add_requires("glfw 3.4", {debug = is_mode("debug"), configs = {shared = false}})
 if get_config("enable_d3d12") then
     add_requires("directx-headers v1.616.0", {debug = is_mode("debug")})
     add_requires("d3d12-memory-allocator v3.0.1", {debug = is_mode("debug")})
@@ -120,7 +103,6 @@ if get_config("enable_spirv_cross") then
     add_requires("spirv-cross_radray 1.3.296", {debug = is_mode("debug")})
 end
 if get_config("enable_vulkan") then
-    -- add_requires("vulkan-headers 1.4.309", {debug = is_mode("debug")})
 end
 if get_config("build_test") then
     add_requires("gtest v1.16.0", {debug = is_mode("debug")})

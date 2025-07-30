@@ -21,7 +21,7 @@ package("mimalloc_radray")
             "-DMI_BUILD_SHARED=" .. (package:config("shared") and "ON" or "OFF"),
             "-DMI_INSTALL_TOPLEVEL=ON"
         }
-        import("package.tools.cmake").build(package, configs, {buildir = "build"})
+        import("package.tools.cmake").build(package, configs, {builddir = "build"})
         if package:is_plat("windows") then
             os.trycp("build/**.dll", package:installdir("bin"))
             os.trycp("build/**.lib", package:installdir("lib"))

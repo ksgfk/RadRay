@@ -325,8 +325,11 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     }
     result->_frames.reserve(swapchainImages.size());
     for (VkImage img : swapchainImages) {
-        auto rt = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
-        result->_frames.emplace_back(std::move(rt));
+        SwapChainVulkan::Frame& f = result->_frames.emplace_back();
+        f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        f.fence = this->CreateFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
+        f.imageAvailableSemaphore = this->CreateGpuSemaphore(0).Unwrap();
+        f.renderFinishedSemaphore = this->CreateGpuSemaphore(0).Unwrap();
     }
     return result;
 }
@@ -924,35 +927,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     // }
 }
 
-void QueueVulkan::Present(const CommandQueuePresentDescriptor& desc) noexcept {
-    // if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-    //     RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
-    //     return;
-    // }
-    // auto swapchain = CastVkObject(desc.Target);
-    // vector<VkSemaphore> waitSemaphores;
-    // waitSemaphores.reserve(desc.WaitSemaphores.size());
-    // for (auto i : desc.WaitSemaphores) {
-    //     auto semaphore = CastVkObject(i);
-    //     waitSemaphores.emplace_back(semaphore->_semaphore);
-    // }
-    // VkPresentInfoKHR presentInfo{};
-    // presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    // presentInfo.pNext = nullptr;
-    // presentInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
-    // presentInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
-    // presentInfo.swapchainCount = 1;
-    // presentInfo.pSwapchains = &swapchain->_swapchain;
-    // presentInfo.pImageIndices = &swapchain->_currentFrameIndex;
-    // presentInfo.pResults = nullptr;
-    // if (auto vr = _device->_ftb.vkQueuePresentKHR(_queue, &presentInfo);
-    //     vr != VK_SUCCESS) {
-    //     RADRAY_ABORT("vk call vkQueuePresentKHR failed: {}", vr);
-    //     return;
-    // }
-}
-
-void QueueVulkan::WaitIdle() noexcept {
+void QueueVulkan::Wait() noexcept {
     if (auto vr = _device->_ftb.vkQueueWaitIdle(_queue);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vk call vkQueueWaitIdle failed: {}", vr);
@@ -1233,7 +1208,7 @@ void SwapChainVulkan::Destroy() noexcept {
 
 void SwapChainVulkan::DestroyImpl() noexcept {
     for (auto& i : _frames) {
-        i->DangerousDestroy();
+        i.image->DangerousDestroy();
     }
     _frames.clear();
     if (_swapchain != VK_NULL_HANDLE) {
@@ -1243,35 +1218,100 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-Nullable<Texture> SwapChainVulkan::AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept {
-    // auto signalSemaphore = desc.SignalSemaphore.HasValue() ? CastVkObject(desc.SignalSemaphore.Value()) : nullptr;
-    // auto waitFence = desc.WaitFence.HasValue() ? CastVkObject(desc.WaitFence.Value()) : nullptr;
-    // uint32_t nextFrameIndex;
-    // VkResult vres = _device->_ftb.vkAcquireNextImageKHR(
-    //     _device->_device,
-    //     _swapchain,
-    //     std::numeric_limits<uint64_t>::max(),
-    //     signalSemaphore ? signalSemaphore->_semaphore : VK_NULL_HANDLE,
-    //     waitFence ? waitFence->_fence : VK_NULL_HANDLE,
-    //     &nextFrameIndex);
-    // if (vres != VK_SUCCESS) {
-    //     RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vres);
-    //     return nullptr;
-    // }
-    // _currentFrameIndex = nextFrameIndex;
-    // return _frames[nextFrameIndex].get();
-    return nullptr;
-}
-
-Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() noexcept {
-    if (_currentFrameIndex >= _frames.size()) {
+Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
+    Frame& frameData = _frames[_currentFrameIndex];
+    _device->_ftb.vkWaitForFences(_device->_device, 1, &frameData.fence->_fence, VK_TRUE, UINT64_MAX);
+    _device->_ftb.vkResetFences(_device->_device, 1, &frameData.fence->_fence);
+    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
+    if (auto vr = _device->_ftb.vkAcquireNextImageKHR(
+            _device->_device,
+            _swapchain,
+            UINT64_MAX,
+            frameData.imageAvailableSemaphore->_semaphore, // signal rt available
+            VK_NULL_HANDLE,
+            &_currentTextureIndex);
+        vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
+        RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vr);
         return nullptr;
     }
-    return _frames[_currentFrameIndex].get();
+    _queue->_swapchainSync.fence = frameData.fence;
+    _queue->_swapchainSync.imageAvailableSemaphore = frameData.imageAvailableSemaphore;
+    _queue->_swapchainSync.renderFinishedSemaphore = frameData.renderFinishedSemaphore;
+    return _frames[_currentTextureIndex].image.get();
+}
+
+void SwapChainVulkan::Present() noexcept {
+    Frame& frameData = _frames[_currentFrameIndex];
+    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+    // 如果直到present, queue 还没有提交过命令
+    // 在提交前需要将当前 back buffer 转换到 PRESENT 状态
+    if (_queue->_swapchainSync.fence != nullptr) {
+        if (frameData.internalCmdBuffer == nullptr) {
+            frameData.internalCmdBuffer = std::static_pointer_cast<CommandBufferVulkan>(_device->CreateCommandBuffer(_queue).Unwrap());
+        }
+        auto cmdBuffer = frameData.internalCmdBuffer.get();
+        cmdBuffer->Begin();
+        VkImageMemoryBarrier imgBarrier{};
+        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imgBarrier.pNext = nullptr;
+        imgBarrier.srcAccessMask = 0;
+        imgBarrier.dstAccessMask = 0;
+        imgBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imgBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        imgBarrier.image = frameData.image->_image;
+        imgBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imgBarrier.subresourceRange.baseMipLevel = 0;
+        imgBarrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        imgBarrier.subresourceRange.baseArrayLayer = 0;
+        imgBarrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        _device->_ftb.vkCmdPipelineBarrier(
+            cmdBuffer->_cmdBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            1, &imgBarrier);
+        cmdBuffer->End();
+        VkPipelineStageFlags waitStage{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.pNext = nullptr;
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = &_queue->_swapchainSync.imageAvailableSemaphore->_semaphore;
+        submitInfo.pWaitDstStageMask = &waitStage;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmdBuffer->_cmdBuffer;
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = &_queue->_swapchainSync.renderFinishedSemaphore->_semaphore; // signal cmd finish
+        _device->_ftb.vkQueueSubmit(_queue->_queue, 1, &submitInfo, _queue->_swapchainSync.fence->_fence); // signal host that cmd finish
+        _queue->_swapchainSync.fence = nullptr;
+        _queue->_swapchainSync.imageAvailableSemaphore = nullptr;
+        _queue->_swapchainSync.renderFinishedSemaphore = nullptr;
+    }
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.pNext = nullptr;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &frameData.renderFinishedSemaphore->_semaphore; // wait cmd finish to present
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &_swapchain;
+    presentInfo.pImageIndices = &_currentTextureIndex;
+    presentInfo.pResults = nullptr;
+    _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+}
+
+Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
+    if (_currentTextureIndex >= _frames.size()) {
+        return nullptr;
+    }
+    return _frames[_currentTextureIndex].image.get();
 }
 
 uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
-    return _currentFrameIndex;
+    return _currentTextureIndex;
 }
 
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {

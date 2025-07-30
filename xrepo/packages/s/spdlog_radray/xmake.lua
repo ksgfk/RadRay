@@ -18,7 +18,7 @@ package("spdlog_radray")
             package:add("defines", "SPDLOG_USE_STD_FORMAT")
         elseif package:config("fmt_external") or package:config("fmt_external_ho") then
             package:add("defines", "SPDLOG_FMT_EXTERNAL")
-            package:add("deps", "fmt_radray", {configs = {header_only = package:config("header_only")}})
+            package:add("deps", "fmt", {configs = {header_only = package:config("header_only")}})
         end
         if not package:config("header_only") and package:config("fmt_external_ho") then
             package:add("defines", "FMT_HEADER_ONLY=1")
@@ -52,5 +52,5 @@ package("spdlog_radray")
         table.insert(configs, "-DSPDLOG_WCHAR_SUPPORT=" .. (package:config("wchar") and "ON" or "OFF"))
         table.insert(configs, "-DSPDLOG_NO_THREAD_ID=" .. (package:config("no_thread_id") and "ON" or "OFF"))
         table.insert(configs, "-DSPDLOG_DISABLE_DEFAULT_LOGGER=" .. (package:config("no_default_logger") and "ON" or "OFF"))
-        import("package.tools.cmake").install(package, configs, {packages = "fmt_radray"})
+        import("package.tools.cmake").install(package, configs, {packages = "fmt"})
     end)

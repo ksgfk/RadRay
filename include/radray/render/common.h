@@ -466,14 +466,8 @@ struct SamplerDescriptor {
 
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers;
-    Nullable<Fence> SignalFence;
-    // std::span<Semaphore*> WaitSemaphores;
-    // std::span<Semaphore*> SignalSemaphores;
-};
-
-struct CommandQueuePresentDescriptor {
-    SwapChain* Target;
-    // std::span<Semaphore*> WaitSemaphores;
+    std::span<Fence*> WaitFences;
+    std::span<Fence*> SignalFences;
 };
 
 struct BarrierBufferDescriptor {
@@ -495,11 +489,6 @@ struct BarrierTextureDescriptor {
     uint32_t ArrayLayerCount;
     uint32_t BaseMipLevel;
     uint32_t MipLevelCount;
-};
-
-struct SwapChainAcquireNextDescriptor {
-    // Nullable<Semaphore> SignalSemaphore;
-    // Nullable<Fence> WaitFence;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -527,9 +516,7 @@ public:
 
     virtual void Submit(const CommandQueueSubmitDescriptor& desc) noexcept = 0;
 
-    virtual void Present(const CommandQueuePresentDescriptor& desc) noexcept = 0;
-
-    virtual void WaitIdle() noexcept = 0;
+    virtual void Wait() noexcept = 0;
 };
 
 class CommandBuffer : public RenderBase {
@@ -558,9 +545,11 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture> AcquireNextTexture(const SwapChainAcquireNextDescriptor& desc) noexcept = 0;
+    virtual Nullable<Texture> AcquireNext() noexcept = 0;
 
-    virtual Nullable<Texture> GetCurrentBackBuffer() noexcept = 0;
+    virtual void Present() noexcept = 0;
+
+    virtual Nullable<Texture> GetCurrentBackBuffer() const noexcept = 0;
 
     virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
 

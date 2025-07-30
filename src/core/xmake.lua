@@ -8,7 +8,7 @@ target("radray_core")
         add_defines("RADRAY_ENABLE_MIMALLOC", {public = true})
         add_packages("mimalloc_radray", {public = true})
     end
-    add_packages("fmt_radray", "eigen", {public = true})
+    add_packages("fmt", "eigen", {public = true})
     if get_config("enable_png") then
         add_defines("RADRAY_ENABLE_PNG", {public = true})
         add_packages("libpng", {public = true})
