@@ -96,12 +96,12 @@ public:
 
     Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
-    Nullable<shared_ptr<Fence>> CreateFence() noexcept override;
+    Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
 
     Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
 public:
-    Nullable<shared_ptr<FenceVulkan>> CreateFence(VkFenceCreateFlags flags) noexcept;
+    Nullable<shared_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
     Nullable<shared_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
 
@@ -258,6 +258,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    uint64_t GetCompletedValue() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;

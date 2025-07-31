@@ -467,7 +467,9 @@ struct SamplerDescriptor {
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers;
     std::span<Fence*> WaitFences;
+    std::span<uint64_t> WaitFenceValues;
     std::span<Fence*> SignalFences;
+    std::span<uint64_t> SignalFenceValues;
 };
 
 struct BarrierBufferDescriptor {
@@ -503,7 +505,7 @@ public:
 
     virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Fence>> CreateFence() noexcept = 0;
+    virtual Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
 
     virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 };
@@ -537,6 +539,8 @@ public:
     virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+
+    virtual uint64_t GetCompletedValue() const noexcept = 0;
 };
 
 class SwapChain : public RenderBase {

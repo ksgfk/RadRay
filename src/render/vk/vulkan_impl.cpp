@@ -6,6 +6,7 @@ namespace radray::render::vulkan {
 
 static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
+static TimelineSemaphoreVulkan* CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
 static SwapChainVulkan* CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
@@ -137,8 +138,8 @@ Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
     return make_shared<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
 }
 
-Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return this->CreateTimelineSemaphore(0);
+Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence(uint64_t initValue) noexcept {
+    return this->CreateTimelineSemaphore(initValue);
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
@@ -296,14 +297,14 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
-        f.fence = this->CreateFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
+        f.fence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
         f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
         f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
     }
     return result;
 }
 
-Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFence(VkFenceCreateFlags flags) noexcept {
+Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.pNext = nullptr;
@@ -894,63 +895,97 @@ void QueueVulkan::Destroy() noexcept {
 }
 
 void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    // if (desc.CmdBuffers.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-    //     RADRAY_ABORT("vk cmd buffers count: {}, max: {}", desc.CmdBuffers.size(), std::numeric_limits<uint32_t>::max());
-    //     return;
-    // }
-    // if (desc.WaitSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-    //     RADRAY_ABORT("vk wait semaphores count: {}, max: {}", desc.WaitSemaphores.size(), std::numeric_limits<uint32_t>::max());
-    //     return;
-    // }
-    // if (desc.SignalSemaphores.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-    //     RADRAY_ABORT("vk signal semaphores count: {}, max: {}", desc.SignalSemaphores.size(), std::numeric_limits<uint32_t>::max());
-    //     return;
-    // }
-    // vector<VkSemaphore> waitSemaphores;
-    // waitSemaphores.reserve(desc.WaitSemaphores.size());
-    // vector<VkPipelineStageFlags> waitStages;
-    // waitStages.reserve(desc.WaitSemaphores.size());
-    // for (auto i : desc.WaitSemaphores) {
-    //     auto semaphore = CastVkObject(i);
-    //     waitSemaphores.emplace_back(semaphore->_semaphore);
-    //     waitStages.emplace_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
-    // }
-    // vector<VkCommandBuffer> cmdBufs;
-    // cmdBufs.reserve(desc.CmdBuffers.size());
-    // for (auto i : desc.CmdBuffers) {
-    //     auto cmdBuffer = CastVkObject(i);
-    //     cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
-    // }
-    // vector<VkSemaphore> signalSemaphores;
-    // signalSemaphores.reserve(desc.SignalSemaphores.size());
-    // for (auto i : desc.SignalSemaphores) {
-    //     auto semaphore = CastVkObject(i);
-    //     signalSemaphores.emplace_back(semaphore->_semaphore);
-    // }
-    // VkSubmitInfo submitInfo{};
-    // submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    // submitInfo.pNext = nullptr;
-    // submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
-    // submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
-    // submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
-    // submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
-    // submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
-    // submitInfo.signalSemaphoreCount = static_cast<uint32_t>(desc.SignalSemaphores.size());
-    // submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
-    // VkFence signalFence = VK_NULL_HANDLE;
-    // if (desc.SignalFence.HasValue()) {
-    //     auto fence = CastVkObject(desc.SignalFence.Value());
-    //     signalFence = fence->_fence;
-    // }
-    // if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
-    //     vr != VK_SUCCESS) {
-    //     RADRAY_ABORT("vk call vkQueueSubmit failed: {}", vr);
-    //     return;
-    // }
-    // if (desc.SignalFence.HasValue()) {
-    //     auto fence = CastVkObject(desc.SignalFence.Value());
-    //     fence->_isSubmitted = true;
-    // }
+    if (desc.CmdBuffers.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+        RADRAY_ABORT("vk cmd buffers count: {}, max: {}", desc.CmdBuffers.size(), std::numeric_limits<uint32_t>::max());
+        return;
+    }
+    if (desc.WaitFences.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+        RADRAY_ABORT("vk wait fences count: {}, max: {}", desc.WaitFences.size(), std::numeric_limits<uint32_t>::max());
+        return;
+    }
+    if (desc.SignalFences.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
+        RADRAY_ABORT("vk signal fences count: {}, max: {}", desc.SignalFences.size(), std::numeric_limits<uint32_t>::max());
+        return;
+    }
+    if (desc.WaitFences.size() != desc.WaitFenceValues.size()) [[unlikely]] {
+        RADRAY_ABORT("vk wait fences count: {}, wait values count: {}", desc.WaitFences.size(), desc.WaitFenceValues.size());
+        return;
+    }
+    if (desc.SignalFences.size() != desc.SignalFenceValues.size()) [[unlikely]] {
+        RADRAY_ABORT("vk signal fences count: {}, signal values count: {}", desc.SignalFences.size(), desc.SignalFenceValues.size());
+        return;
+    }
+    vector<VkCommandBuffer> cmdBufs;
+    cmdBufs.reserve(desc.CmdBuffers.size());
+    for (auto i : desc.CmdBuffers) {
+        auto cmdBuffer = CastVkObject(i);
+        cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
+    }
+    vector<VkSemaphore> waitSemaphores;
+    vector<uint64_t> waitValues;
+    vector<VkPipelineStageFlags> waitStages;
+    size_t waitCount = desc.WaitFences.size();
+    size_t waitCapacity = desc.WaitFences.size() + (_swapchainSync.imageAvailableSemaphore ? 1 : 0);
+    waitSemaphores.reserve(waitCapacity);
+    waitValues.reserve(waitCapacity);
+    waitStages.reserve(waitCapacity);
+    if (_swapchainSync.imageAvailableSemaphore) {
+        waitSemaphores.emplace_back(_swapchainSync.imageAvailableSemaphore->_semaphore);
+        waitValues.emplace_back(0);
+        waitStages.emplace_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        _swapchainSync.imageAvailableSemaphore = nullptr;
+    }
+    for (size_t i = 0; i < waitCount; i++) {
+        auto timelineSemaphore = CastVkObject(desc.WaitFences[i]);
+        auto fenceValue = desc.WaitFenceValues[i];
+        waitSemaphores.emplace_back(timelineSemaphore->_semaphore);
+        waitValues.emplace_back(fenceValue);
+        waitStages.emplace_back(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    }
+    vector<VkSemaphore> signalSemaphores;
+    vector<uint64_t> signalValues;
+    size_t signalCount = desc.SignalFences.size();
+    size_t signalCapacity = desc.SignalFences.size() + (_swapchainSync.renderFinishedSemaphore ? 1 : 0);
+    signalSemaphores.reserve(signalCapacity);
+    signalValues.reserve(signalCapacity);
+    if (_swapchainSync.renderFinishedSemaphore) {
+        signalSemaphores.emplace_back(_swapchainSync.renderFinishedSemaphore->_semaphore);
+        signalValues.emplace_back(0);
+        _swapchainSync.renderFinishedSemaphore = nullptr;
+    }
+    for (size_t i = 0; i < signalCount; i++) {
+        auto timelineSemaphore = CastVkObject(desc.SignalFences[i]);
+        auto fenceValue = desc.SignalFenceValues[i];
+        signalSemaphores.emplace_back(timelineSemaphore->_semaphore);
+        signalValues.emplace_back(fenceValue);
+    }
+    VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
+    timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineSubmitInfo.pNext = nullptr;
+    timelineSubmitInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size());
+    timelineSubmitInfo.pWaitSemaphoreValues = waitValues.empty() ? nullptr : waitValues.data();
+    timelineSubmitInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalValues.size());
+    timelineSubmitInfo.pSignalSemaphoreValues = signalValues.empty() ? nullptr : signalValues.data();
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineSubmitInfo;
+    submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+    submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
+    submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
+    submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
+    submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
+    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
+    submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
+    VkFence signalFence = VK_NULL_HANDLE;
+    if (_swapchainSync.fence) {
+        signalFence = _swapchainSync.fence->_fence;
+        _swapchainSync.fence = nullptr;
+    }
+    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkQueueSubmit failed: {}", vr);
+        return;
+    }
 }
 
 void QueueVulkan::Wait() noexcept {
@@ -1208,6 +1243,15 @@ void TimelineSemaphoreVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroySemaphore(_device->_device, _semaphore, _device->GetAllocationCallbacks());
         _semaphore = VK_NULL_HANDLE;
     }
+}
+
+uint64_t TimelineSemaphoreVulkan::GetCompletedValue() const noexcept {
+    uint64_t result;
+    if (auto vr = _device->_ftb.vkGetSemaphoreCounterValue(_device->_device, _semaphore, &result);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vk call vkGetSemaphoreCounterValue failed: {}", vr);
+    }
+    return result;
 }
 
 SurfaceVulkan::SurfaceVulkan(
