@@ -6,7 +6,6 @@ namespace radray::render::vulkan {
 
 static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-static FenceVulkan* CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
 static SwapChainVulkan* CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
@@ -139,38 +138,8 @@ Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
 }
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return this->CreateFence(0);
+    return this->CreateTimelineSemaphore(0);
 }
-
-// void DeviceVulkan::WaitFences(std::span<Fence*> fences) noexcept {
-//     vector<VkFence> vkFences;
-//     vkFences.reserve(fences.size());
-//     for (auto* i : fences) {
-//         auto fence = CastVkObject(i);
-//         if (fence->_isSubmitted) {
-//             vkFences.push_back(fence->_fence);
-//         }
-//     }
-//     if (!vkFences.empty()) {
-//         _ftb.vkWaitForFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data(), VK_TRUE, UINT64_MAX);
-//     }
-// }
-
-// void DeviceVulkan::ResetFences(std::span<Fence*> fences) noexcept {
-//     vector<VkFence> vkFences;
-//     vkFences.reserve(fences.size());
-//     for (auto* i : fences) {
-//         auto fence = CastVkObject(i);
-//         vkFences.push_back(fence->_fence);
-//     }
-//     if (!vkFences.empty()) {
-//         _ftb.vkResetFences(_device, static_cast<uint32_t>(vkFences.size()), vkFences.data());
-//     }
-//     for (auto* i : fences) {
-//         auto fence = CastVkObject(i);
-//         fence->_isSubmitted = false;
-//     }
-// }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
     SwapChainDescriptor desc = desc_;
@@ -328,8 +297,8 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
         f.fence = this->CreateFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
-        f.imageAvailableSemaphore = this->CreateGpuSemaphore(0).Unwrap();
-        f.renderFinishedSemaphore = this->CreateGpuSemaphore(0).Unwrap();
+        f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
+        f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
     }
     return result;
 }
@@ -349,7 +318,7 @@ Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateFence(VkFenceCreateFlags f
     return v;
 }
 
-Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateGpuSemaphore(VkSemaphoreCreateFlags flags) noexcept {
+Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = nullptr;
@@ -361,6 +330,29 @@ Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateGpuSemaphore(VkSemapho
         return nullptr;
     }
     return make_shared<SemaphoreVulkan>(this, semaphore);
+}
+
+Nullable<shared_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
+    if (!_extFeatures.feature12.timelineSemaphore) {
+        RADRAY_ERR_LOG("vk timeline semaphore not supported");
+        return nullptr;
+    }
+    VkSemaphoreTypeCreateInfo timelineCreateInfo{};
+    timelineCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timelineCreateInfo.pNext = nullptr;
+    timelineCreateInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    timelineCreateInfo.initialValue = initValue;
+    VkSemaphoreCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    createInfo.pNext = &timelineCreateInfo;
+    createInfo.flags = 0;
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateSemaphore(_device, &createInfo, this->GetAllocationCallbacks(), &semaphore);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSemaphore failed {}", vr);
+        return nullptr;
+    }
+    return make_shared<TimelineSemaphoreVulkan>(this, semaphore);
 }
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
@@ -395,10 +387,6 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
         return false;
     }
     RADRAY_INFO_LOG("vk instance version: {}.{}.{}", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
-    if (version < VK_API_VERSION_1_2) {
-        RADRAY_ERR_LOG("vk instance version need at least 1.2");
-        return false;
-    }
     vector<VkExtensionProperties> extProps;
     if (EnumerateVectorFromVkFunc(extProps, vkEnumerateInstanceExtensionProperties, nullptr) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceExtensionProperties failed");
@@ -431,18 +419,18 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
     if (desc.IsEnableDebugLayer) {
         const auto requireExt = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
         const char* requireExts[] = {requireExt};
-        if (!IsValidateExtensions(requireExts, extProps)) {
-            RADRAY_WARN_LOG("vk extension {} is not supported", requireExt);
-        } else {
+        if (IsValidateExtensions(requireExts, extProps)) {
             needExts.emplace(requireExt);
+        } else {
+            RADRAY_WARN_LOG("vk extension {} is not supported", requireExt);
         }
         const auto validName = "VK_LAYER_KHRONOS_validation";
         const char* requireLayer[] = {validName};
-        if (!IsValidateLayers(requireLayer, layerProps)) {
-            RADRAY_WARN_LOG("vk layer {} is not supported", validName);
-        } else {
+        if (IsValidateLayers(requireLayer, layerProps)) {
             needLayers.emplace(validName);
             isValidFeatureExtEnable = true;
+        } else {
+            RADRAY_WARN_LOG("vk layer {} is not supported", validName);
         }
     }
     for (const auto& i : needLayers) {
@@ -497,6 +485,7 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
     validFeature.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
     validFeature.pNext = nullptr;
     if (isValidFeatureExtEnable) {
+        validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
         validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
         if (desc.IsEnableGpuBasedValid) {
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
@@ -543,10 +532,21 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
         createInfo.pNext = &validFeature;
         validFeature.pNext = &debugCreateInfo;
     }
+    uint32_t apiVersionsToTry[] = {
+        VK_API_VERSION_1_3,
+        VK_API_VERSION_1_2,
+        VK_API_VERSION_1_1,
+        VK_API_VERSION_1_0};
     VkInstance instance = VK_NULL_HANDLE;
-    if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk call vkCreateInstance failed: {}", vr);
+    for (uint32_t apiVersion : apiVersionsToTry) {
+        appInfo.apiVersion = apiVersion;
+        if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
+            vr == VK_SUCCESS) {
+            break;
+        }
+    }
+    if (instance == VK_NULL_HANDLE) {
+        RADRAY_ERR_LOG("vk call vkCreateInstance failed");
         return false;
     }
     volkLoadInstance(instance);
@@ -608,7 +608,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         auto cpy = physicalDeviceProps;
         std::stable_sort(cpy.begin(), cpy.end(), [](const PhyDeviceInfo& lhs, const PhyDeviceInfo& rhs) noexcept {
             if (lhs.properties.deviceType != rhs.properties.deviceType) {
-                static auto typeScore = [](VkPhysicalDeviceType t) noexcept {
+                auto typeScore = [](VkPhysicalDeviceType t) noexcept {
                     switch (t) {
                         case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 4;
                         case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
@@ -634,15 +634,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
-    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_2) {
-        RADRAY_ERR_LOG(
-            "vk physical device {} api version {}.{}.{} is not supported, need at least 1.2",
-            selectPhyDevice.properties.deviceName,
-            VK_VERSION_MAJOR(selectPhyDevice.properties.apiVersion),
-            VK_VERSION_MINOR(selectPhyDevice.properties.apiVersion),
-            VK_VERSION_PATCH(selectPhyDevice.properties.apiVersion));
-        return nullptr;
-    }
     RADRAY_INFO_LOG("vk select device: {}", selectPhyDevice.properties.deviceName);
 
     struct QueueRequest {
@@ -743,6 +734,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         deviceExts.emplace_back(ext.c_str());
     }
 
+    VkPhysicalDeviceFeatures deviceFeatures{};
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = nullptr;
@@ -753,7 +745,32 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceInfo.ppEnabledLayerNames = nullptr;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
     deviceInfo.ppEnabledExtensionNames = deviceExts.data();
-    deviceInfo.pEnabledFeatures = nullptr;
+    deviceInfo.pEnabledFeatures = &deviceFeatures;
+    auto extFeatures = make_unique<ExtFeaturesVulkan>();
+    VkPhysicalDeviceFeatures2 deviceFeatures2{};
+    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    deviceFeatures2.pNext = nullptr;
+    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceFeatures2) {
+        extFeatures->feature11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        extFeatures->feature11.pNext = nullptr;
+        deviceFeatures2.pNext = &extFeatures->feature11;
+
+        extFeatures->feature12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        extFeatures->feature12.pNext = nullptr;
+        if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2) {
+            extFeatures->feature11.pNext = &extFeatures->feature12;
+        }
+
+        extFeatures->feature13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        extFeatures->feature13.pNext = nullptr;
+        if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_3) {
+            extFeatures->feature12.pNext = &extFeatures->feature13;
+        }
+
+        vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
+        deviceInfo.pNext = &deviceFeatures2;
+        deviceInfo.pEnabledFeatures = nullptr;
+    }
 
     VkDevice device = VK_NULL_HANDLE;
     if (vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_instance->GetAllocationCallbacks(), &device) != VK_SUCCESS) {
@@ -792,8 +809,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         return nullptr;
     }
     deviceR->_vma = make_unique<VMA>(vma);
-
-    RADRAY_INFO_LOG("========== Feature ==========");
     for (const auto& i : queueRequests) {
         for (const auto& j : i.queueIndices) {
             VkQueue queuePtr = VK_NULL_HANDLE;
@@ -806,6 +821,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
+    if (deviceInfo.pEnabledFeatures) {
+        deviceR->_feature = *deviceInfo.pEnabledFeatures;
+    } else {
+        deviceR->_feature = deviceFeatures2.features;
+    }
+    deviceR->_extFeatures = *extFeatures;
+
+    RADRAY_INFO_LOG("========== Feature ==========");
     {
         auto apiVersion = selectPhyDevice.properties.apiVersion;
         RADRAY_INFO_LOG("Vulkan API Version: {}.{}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion));
@@ -840,6 +863,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     {
         RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
+    }
+    {
+        RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
     }
     RADRAY_INFO_LOG("=============================");
     return deviceR;
@@ -1159,6 +1185,31 @@ void SemaphoreVulkan::DestroyImpl() noexcept {
     }
 }
 
+TimelineSemaphoreVulkan::TimelineSemaphoreVulkan(
+    DeviceVulkan* device,
+    VkSemaphore semaphore) noexcept
+    : _device(device),
+      _semaphore(semaphore) {}
+
+TimelineSemaphoreVulkan::~TimelineSemaphoreVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool TimelineSemaphoreVulkan::IsValid() const noexcept {
+    return _semaphore != VK_NULL_HANDLE;
+}
+
+void TimelineSemaphoreVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void TimelineSemaphoreVulkan::DestroyImpl() noexcept {
+    if (_semaphore != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySemaphore(_device->_device, _semaphore, _device->GetAllocationCallbacks());
+        _semaphore = VK_NULL_HANDLE;
+    }
+}
+
 SurfaceVulkan::SurfaceVulkan(
     DeviceVulkan* device,
     VkSurfaceKHR surface) noexcept
@@ -1227,7 +1278,7 @@ Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
             _device->_device,
             _swapchain,
             UINT64_MAX,
-            frameData.imageAvailableSemaphore->_semaphore, // signal rt available
+            frameData.imageAvailableSemaphore->_semaphore,  // signal rt available
             VK_NULL_HANDLE,
             &_currentTextureIndex);
         vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -1243,7 +1294,7 @@ Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
 void SwapChainVulkan::Present() noexcept {
     Frame& frameData = _frames[_currentFrameIndex];
     _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
-    // 如果直到present, queue 还没有提交过命令
+    // 如果直到 present, queue 还没有提交过命令
     // 在提交前需要将当前 back buffer 转换到 PRESENT 状态
     if (_queue->_swapchainSync.fence != nullptr) {
         if (frameData.internalCmdBuffer == nullptr) {
@@ -1285,8 +1336,8 @@ void SwapChainVulkan::Present() noexcept {
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &cmdBuffer->_cmdBuffer;
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &_queue->_swapchainSync.renderFinishedSemaphore->_semaphore; // signal cmd finish
-        _device->_ftb.vkQueueSubmit(_queue->_queue, 1, &submitInfo, _queue->_swapchainSync.fence->_fence); // signal host that cmd finish
+        submitInfo.pSignalSemaphores = &_queue->_swapchainSync.renderFinishedSemaphore->_semaphore;         // signal cmd finish
+        _device->_ftb.vkQueueSubmit(_queue->_queue, 1, &submitInfo, _queue->_swapchainSync.fence->_fence);  // signal host that cmd finish
         _queue->_swapchainSync.fence = nullptr;
         _queue->_swapchainSync.imageAvailableSemaphore = nullptr;
         _queue->_swapchainSync.renderFinishedSemaphore = nullptr;
@@ -1295,7 +1346,7 @@ void SwapChainVulkan::Present() noexcept {
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.pNext = nullptr;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &frameData.renderFinishedSemaphore->_semaphore; // wait cmd finish to present
+    presentInfo.pWaitSemaphores = &frameData.renderFinishedSemaphore->_semaphore;  // wait cmd finish to present
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &_currentTextureIndex;

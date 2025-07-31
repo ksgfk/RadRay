@@ -15,6 +15,7 @@ class CommandPoolVulkan;
 class CommandBufferVulkan;
 class FenceVulkan;
 class SemaphoreVulkan;
+class TimelineSemaphoreVulkan;
 class SurfaceVulkan;
 class SwapChainVulkan;
 class BufferVulkan;
@@ -23,6 +24,12 @@ class ImageVulkan;
 struct QueueIndexInFamily {
     uint32_t Family;
     uint32_t IndexInFamily;
+};
+
+struct ExtFeaturesVulkan {
+    VkPhysicalDeviceVulkan11Features feature11;
+    VkPhysicalDeviceVulkan12Features feature12;
+    VkPhysicalDeviceVulkan13Features feature13;
 };
 
 class InstanceVulkan final : public RenderBase {
@@ -96,7 +103,9 @@ public:
 public:
     Nullable<shared_ptr<FenceVulkan>> CreateFence(VkFenceCreateFlags flags) noexcept;
 
-    Nullable<shared_ptr<SemaphoreVulkan>> CreateGpuSemaphore(VkSemaphoreCreateFlags flags) noexcept;
+    Nullable<shared_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+
+    Nullable<shared_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -108,6 +117,8 @@ public:
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
+    VkPhysicalDeviceFeatures _feature;
+    ExtFeaturesVulkan _extFeatures;
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -194,13 +205,15 @@ public:
     VkCommandBuffer _cmdBuffer;
 };
 
-class FenceVulkan final : public Fence {
+class FenceVulkan final : public RenderBase {
 public:
     FenceVulkan(
         DeviceVulkan* device,
         VkFence fence) noexcept;
 
     ~FenceVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -222,6 +235,25 @@ public:
     ~SemaphoreVulkan() noexcept;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSemaphore _semaphore;
+};
+
+class TimelineSemaphoreVulkan final : public Fence {
+public:
+    TimelineSemaphoreVulkan(
+        DeviceVulkan* device,
+        VkSemaphore semaphore) noexcept;
+
+    ~TimelineSemaphoreVulkan() noexcept;
 
     bool IsValid() const noexcept override;
 
