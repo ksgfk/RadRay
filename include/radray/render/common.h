@@ -270,9 +270,8 @@ enum struct BufferUse : uint32_t {
     Index = CopyDestination << 1,
     Vertex = Index << 1,
     CBuffer = Vertex << 1,
-    StorageRead = CBuffer << 1,
-    StorageRW = StorageRead << 1,
-    Indirect = StorageRW << 1
+    UnorderedAccess = CBuffer << 1,
+    Indirect = UnorderedAccess << 1
 };
 
 enum class TextureUse : uint32_t {
@@ -285,9 +284,7 @@ enum class TextureUse : uint32_t {
     RenderTarget = Resource << 1,
     DepthStencilRead = RenderTarget << 1,
     DepthStencilWrite = DepthStencilRead << 1,
-    StorageRead = DepthStencilWrite << 1,
-    StorageWrite = StorageRead << 1,
-    StorageRW = StorageWrite << 1
+    UnorderedAccess = DepthStencilWrite << 1,
 };
 
 enum class ResourceHint : uint32_t {

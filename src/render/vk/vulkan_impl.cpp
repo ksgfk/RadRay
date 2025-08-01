@@ -932,7 +932,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (_swapchainSync.imageAvailableSemaphore) {
         waitSemaphores.emplace_back(_swapchainSync.imageAvailableSemaphore->_semaphore);
         waitValues.emplace_back(0);
-        waitStages.emplace_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        waitStages.emplace_back(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         _swapchainSync.imageAvailableSemaphore = nullptr;
     }
     for (size_t i = 0; i < waitCount; i++) {
@@ -1084,90 +1084,83 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
-    // TODO:
-    // VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_NONE;
-    // VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_NONE;
-    // vector<VkBufferMemoryBarrier> bufferBarriers;
-    // bufferBarriers.reserve(buffers.size());
-    // for (const auto& i : buffers) {
-    //     auto buf = CastVkObject(i.Target);
-    //     auto& bufBarrier = bufferBarriers.emplace_back();
-    //     bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    //     bufBarrier.pNext = nullptr;
-    //     bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
-    //     bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
-    //     if (i.OtherQueue.HasValue()) {
-    //         auto otherQ = CastVkObject(i.OtherQueue.Value());
-    //         if (i.IsFromOrToOtherQueue) {
-    //             bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-    //             bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-    //         } else {
-    //             bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-    //             bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-    //         }
-    //     } else {
-    //         bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //         bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //     }
-    //     bufBarrier.buffer = buf->_buffer;
-    //     bufBarrier.offset = 0;
-    //     bufBarrier.size = buf->_allocInfo.size;
+    VkPipelineStageFlags srcStageMask = 0;
+    VkPipelineStageFlags dstStageMask = 0;
+    vector<VkBufferMemoryBarrier> bufferBarriers;
+    bufferBarriers.reserve(buffers.size());
+    for (const auto& i : buffers) {
+        auto buf = CastVkObject(i.Target);
+        auto& bufBarrier = bufferBarriers.emplace_back();
+        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bufBarrier.pNext = nullptr;
+        bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
+        bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
+        if (i.OtherQueue.HasValue()) {
+            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            if (i.IsFromOrToOtherQueue) {
+                bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+            } else {
+                bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+            }
+        } else {
+            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        }
+        bufBarrier.buffer = buf->_buffer;
+        bufBarrier.offset = 0;
+        bufBarrier.size = buf->_allocInfo.size;
 
-    //     auto srcStage = BufferUseToPipelineStageFlags(i.Before);
-    //     auto dstStage = BufferUseToPipelineStageFlags(i.After);
-    //     srcStageMask |= srcStage;
-    //     dstStageMask |= dstStage;
-    // }
-    // vector<VkImageMemoryBarrier> imageBarriers;
-    // imageBarriers.reserve(textures.size());
-    // for (const auto& i : textures) {
-    //     auto tex = CastVkObject(i.Target);
-    //     auto& imgBarrier = imageBarriers.emplace_back();
-    //     imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    //     imgBarrier.pNext = nullptr;
-    //     imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
-    //     imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
-    //     imgBarrier.oldLayout = TextureUseToLayout(i.Before);
-    //     imgBarrier.newLayout = TextureUseToLayout(i.After);
-    //     if (i.OtherQueue.HasValue()) {
-    //         auto otherQ = CastVkObject(i.OtherQueue.Value());
-    //         if (i.IsFromOrToOtherQueue) {
-    //             imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-    //             imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-    //         } else {
-    //             imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-    //             imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-    //         }
-    //     } else {
-    //         imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //         imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    //     }
-    //     imgBarrier.image = tex->_image;
-    //     imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-    //     imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
-    //     imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
-    //     imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
-    //     imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+        auto srcStage = BufferUseToPipelineStageFlags(i.Before);
+        auto dstStage = BufferUseToPipelineStageFlags(i.After);
+        srcStageMask |= srcStage;
+        dstStageMask |= dstStage;
+    }
+    vector<VkImageMemoryBarrier> imageBarriers;
+    imageBarriers.reserve(textures.size());
+    for (const auto& i : textures) {
+        auto tex = CastVkObject(i.Target);
+        auto& imgBarrier = imageBarriers.emplace_back();
+        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        imgBarrier.pNext = nullptr;
+        imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
+        imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
+        imgBarrier.oldLayout = TextureUseToLayout(i.Before);
+        imgBarrier.newLayout = TextureUseToLayout(i.After);
+        if (i.OtherQueue.HasValue()) {
+            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            if (i.IsFromOrToOtherQueue) {
+                imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+            } else {
+                imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+            }
+        } else {
+            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        }
+        imgBarrier.image = tex->_image;
+        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
+        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
+        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
+        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
 
-    //     auto srcStage = TextureUseToPipelineStageFlags(i.Before);
-    //     auto dstStage = TextureUseToPipelineStageFlags(i.After);
-    //     srcStageMask |= srcStage;
-    //     dstStageMask |= dstStage;
-    // }
-    // if (srcStageMask == VK_PIPELINE_STAGE_NONE) {
-    //     srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    // }
-    // if (dstStageMask == VK_PIPELINE_STAGE_NONE) {
-    //     dstStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    // }
-    // _device->_ftb.vkCmdPipelineBarrier(
-    //     _cmdBuffer,
-    //     srcStageMask,
-    //     dstStageMask,
-    //     0,
-    //     0, nullptr,
-    //     static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
-    //     static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
+        auto srcStage = TextureUseToPipelineStageFlags(i.Before, true);
+        auto dstStage = TextureUseToPipelineStageFlags(i.After, false);
+        srcStageMask |= srcStage;
+        dstStageMask |= dstStage;
+    }
+    _device->_ftb.vkCmdPipelineBarrier(
+        _cmdBuffer,
+        srcStageMask,
+        dstStageMask,
+        0,
+        0, nullptr,
+        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
+        static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
 }
 
 FenceVulkan::FenceVulkan(

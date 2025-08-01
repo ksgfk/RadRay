@@ -24,8 +24,6 @@ vulkan::QueueVulkan* cmdQueue = nullptr;
 shared_ptr<vulkan::SwapChainVulkan> swapchain;
 vector<FrameData> frames;
 uint32_t currentFrameIndex = 0;
-uint32_t currentTextureIndex = 0;
-FrameData* submitSync = nullptr;
 
 void Init() {
     GlobalInitGlfw();
@@ -53,6 +51,7 @@ void Init() {
         auto& f = frames.emplace_back();
         f.cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     }
+    currentFrameIndex = 0;
 }
 
 void End() {
@@ -70,8 +69,28 @@ bool Update() {
     GlobalPollEventsGlfw();
     bool isClose = glfw->ShouldClose();
 
+    auto& frameData = frames[currentFrameIndex];
     swapchain->AcquireNext();
+    frameData.cmdBuffer->Begin();
+    BarrierTextureDescriptor texDesc[] = {
+        {swapchain->GetCurrentBackBuffer().Unwrap(),
+         TextureUse::Uninitialized,
+         TextureUse::Present,
+         {},
+         false,
+         0,
+         0,
+         0,
+         0,
+         0}};
+    frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    frameData.cmdBuffer->End();
+    CommandBuffer* submitCmdBuffer[] = {frameData.cmdBuffer.get()};
+    CommandQueueSubmitDescriptor submitDesc{};
+    submitDesc.CmdBuffers = submitCmdBuffer;
+    cmdQueue->Submit(submitDesc);
     swapchain->Present();
+    currentFrameIndex = (currentFrameIndex + 1) % frames.size();
 
     return !isClose;
 }
