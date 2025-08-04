@@ -13,6 +13,9 @@ class DeviceVulkan;
 class QueueVulkan;
 class CommandPoolVulkan;
 class CommandBufferVulkan;
+class SimulateCommandEncoderVulkan;
+class RenderPassVulkan;
+class FrameBufferVulkan;
 class FenceVulkan;
 class SemaphoreVulkan;
 class TimelineSemaphoreVulkan;
@@ -20,6 +23,7 @@ class SurfaceVulkan;
 class SwapChainVulkan;
 class BufferVulkan;
 class ImageVulkan;
+class ImageViewVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -213,6 +217,69 @@ public:
     VkCommandBuffer _cmdBuffer;
 };
 
+class SimulateCommandEncoderVulkan final : public CommandEncoder {
+public:
+    SimulateCommandEncoderVulkan(
+        DeviceVulkan* device,
+        CommandBufferVulkan* cmdBuffer) noexcept;
+
+    ~SimulateCommandEncoderVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    CommandBufferVulkan* _cmdBuffer;
+    unique_ptr<RenderPassVulkan> _pass;
+    unique_ptr<FrameBufferVulkan> _framebuffer;
+};
+
+class RenderPassVulkan final : public RenderBase {
+public:
+    RenderPassVulkan(
+        DeviceVulkan* device,
+        VkRenderPass renderPass) noexcept;
+
+    ~RenderPassVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkRenderPass _renderPass;
+};
+
+class FrameBufferVulkan final : public RenderBase {
+public:
+    FrameBufferVulkan(
+        DeviceVulkan* device,
+        VkFramebuffer framebuffer) noexcept;
+
+    ~FrameBufferVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkFramebuffer _framebuffer;
+};
+
 class FenceVulkan final : public RenderBase {
 public:
     FenceVulkan(
@@ -388,6 +455,30 @@ public:
     VkImage _image;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
+    TextureDescriptor _mdesc;
+    VkImageCreateInfo _rawInfo;
+};
+
+class ImageViewVulkan final : public TextureView {
+public:
+    ImageViewVulkan(
+        DeviceVulkan* device,
+        ImageVulkan* image,
+        VkImageView view) noexcept;
+
+    ~ImageViewVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    ImageVulkan* _image;
+    VkImageView _imageView;
+    TextureViewDescriptor _mdesc;
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 

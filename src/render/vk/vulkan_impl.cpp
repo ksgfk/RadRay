@@ -7,9 +7,9 @@ namespace radray::render::vulkan {
 static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
 static TimelineSemaphoreVulkan* CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
-static SwapChainVulkan* CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
+static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -297,6 +297,36 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        f.image->_mdesc = TextureDescriptor{
+            TextureDimension::Dim2D,
+            swapchianCreateInfo.imageExtent.width,
+            swapchianCreateInfo.imageExtent.height,
+            1,
+            1,
+            1,
+            desc.Format,
+            TextureUse::RenderTarget,
+            ResourceHint::None,
+            {}};
+        f.image->_rawInfo = VkImageCreateInfo{
+            VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            nullptr,
+            0,
+            VK_IMAGE_TYPE_2D,
+            swapchianCreateInfo.imageFormat,
+            VkExtent3D{
+                swapchianCreateInfo.imageExtent.width,
+                swapchianCreateInfo.imageExtent.height,
+                1},
+            1,
+            1,
+            VK_SAMPLE_COUNT_1_BIT,
+            VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            VK_SHARING_MODE_EXCLUSIVE,
+            0,
+            nullptr,
+            VK_IMAGE_LAYOUT_UNDEFINED};
         f.fence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
         f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
         f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
@@ -305,13 +335,109 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
 }
 
 Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
-    // TODO:
-    return nullptr;
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.pNext = nullptr;
+    imgInfo.flags = 0;
+    imgInfo.imageType = MapType(desc.Dim);
+    imgInfo.format = MapType(desc.Format);
+    imgInfo.extent.width = static_cast<uint32_t>(desc.Width);
+    imgInfo.extent.height = static_cast<uint32_t>(desc.Height);
+    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D) {
+        imgInfo.extent.depth = 1;
+    } else {
+        imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
+    }
+    imgInfo.mipLevels = desc.MipLevels;
+    if (desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim3D) {
+        imgInfo.arrayLayers = 1;
+    } else {
+        imgInfo.arrayLayers = desc.DepthOrArraySize;
+    }
+    imgInfo.samples = MapSampleCount(desc.SampleCount);
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage = 0;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.queueFamilyIndexCount = 0;
+    imgInfo.pQueueFamilyIndices = nullptr;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (desc.Dim == TextureDimension::Dim2D && desc.DepthOrArraySize % 6 == 0 && desc.SampleCount == 1 && desc.Width == desc.Height) {
+        imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::CopySource)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::CopyDestination)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::Resource)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    }
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    VmaAllocationCreateInfo vmaInfo{};
+    vmaInfo.flags = 0;
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+        vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
+    vmaInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    vmaInfo.requiredFlags = 0;
+    vmaInfo.preferredFlags = 0;
+    vmaInfo.memoryTypeBits = 0;
+    vmaInfo.pool = VK_NULL_HANDLE;
+    vmaInfo.pUserData = nullptr;
+    vmaInfo.priority = 0;
+    VkImage vkImg = VK_NULL_HANDLE;
+    VmaAllocation vmaAlloc = VK_NULL_HANDLE;
+    VmaAllocationInfo vmaAllocInfo{};
+    if (auto vr = vmaCreateImage(_vma->_vma, &imgInfo, &vmaInfo, &vkImg, &vmaAlloc, &vmaAllocInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk failed to create image: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
+    result->_mdesc = desc;
+    result->_rawInfo = imgInfo;
+    return result;
 }
 
 Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
-    // TODO:
-    return nullptr;
+    auto image = CastVkObject(desc.Target);
+    VkImageViewCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.image = image->_image;
+    createInfo.viewType = MapType(desc.Dim);
+    createInfo.format = MapType(desc.Format);
+    createInfo.components = VkComponentMapping{
+        VK_COMPONENT_SWIZZLE_R,
+        VK_COMPONENT_SWIZZLE_G,
+        VK_COMPONENT_SWIZZLE_B,
+        VK_COMPONENT_SWIZZLE_A};
+    createInfo.subresourceRange = {
+        ImageFormatToAspectFlags(createInfo.format),
+        desc.BaseMipLevel,
+        desc.MipLevelCount.value_or(VK_REMAINING_MIP_LEVELS),
+        desc.BaseArrayLayer,
+        desc.ArrayLayerCount.value_or(VK_REMAINING_ARRAY_LAYERS)};
+    VkImageView imageView = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateImageView failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<ImageViewVulkan>(this, image, imageView);
+    result->_mdesc = desc;
+    result->_rawFormat = createInfo.format;
+    return result;
 }
 
 Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -1152,7 +1278,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
             imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         }
         imgBarrier.image = tex->_image;
-        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
+        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawInfo.format);
         imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
         imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
         imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
@@ -1175,11 +1301,112 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
 
 unique_ptr<CommandEncoder> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
     // TODO:
-    return nullptr;
+    vector<VkAttachmentDescription> colors;
+    colors.reserve(desc.ColorAttachments.size());
+    for (const auto& i : desc.ColorAttachments) {
+        auto imageView = CastVkObject(i.Target);
+        auto attachDesc = colors.emplace_back();
+        attachDesc.flags = 0;
+        attachDesc.format = imageView->_rawFormat;
+        attachDesc.samples = imageView->_image->_rawInfo.samples;
+        attachDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachDesc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    VkRenderPassCreateInfo passInfo{};
+    passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    passInfo.pNext = nullptr;
+    passInfo.flags = 0;
+    passInfo.attachmentCount = static_cast<uint32_t>(desc.ColorAttachments.size());
+    passInfo.pAttachments = colors.empty() ? nullptr : colors.data();
+    // VkFramebufferCreateInfo fbInfo{};
+    VkRenderPassBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    beginInfo.pNext = nullptr;
+    // info.renderPass = ;
+    _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    return make_unique<SimulateCommandEncoderVulkan>(_device, this);
 }
 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
-    // TODO:
+    _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
+    encoder->Destroy();
+}
+
+SimulateCommandEncoderVulkan::SimulateCommandEncoderVulkan(
+    DeviceVulkan* device,
+    CommandBufferVulkan* cmdBuffer) noexcept
+    : _device(device),
+      _cmdBuffer(cmdBuffer) {}
+
+SimulateCommandEncoderVulkan::~SimulateCommandEncoderVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool SimulateCommandEncoderVulkan::IsValid() const noexcept {
+    return _pass != nullptr && _framebuffer != nullptr;
+}
+
+void SimulateCommandEncoderVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
+    _framebuffer.reset();
+    _pass.reset();
+}
+
+RenderPassVulkan::RenderPassVulkan(
+    DeviceVulkan* device,
+    VkRenderPass renderPass) noexcept
+    : _device(device),
+      _renderPass(renderPass) {}
+
+RenderPassVulkan::~RenderPassVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool RenderPassVulkan::IsValid() const noexcept {
+    return _renderPass != VK_NULL_HANDLE;
+}
+
+void RenderPassVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void RenderPassVulkan::DestroyImpl() noexcept {
+    if (_renderPass != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyRenderPass(_device->_device, _renderPass, _device->GetAllocationCallbacks());
+        _renderPass = VK_NULL_HANDLE;
+    }
+}
+
+FrameBufferVulkan::FrameBufferVulkan(
+    DeviceVulkan* device,
+    VkFramebuffer framebuffer) noexcept
+    : _device(device),
+      _framebuffer(framebuffer) {}
+
+FrameBufferVulkan::~FrameBufferVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool FrameBufferVulkan::IsValid() const noexcept {
+    return _framebuffer != VK_NULL_HANDLE;
+}
+
+void FrameBufferVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void FrameBufferVulkan::DestroyImpl() noexcept {
+    if (_framebuffer != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyFramebuffer(_device->_device, _framebuffer, _device->GetAllocationCallbacks());
+        _framebuffer = VK_NULL_HANDLE;
+    }
 }
 
 FenceVulkan::FenceVulkan(
@@ -1497,6 +1724,33 @@ void ImageVulkan::DestroyImpl() noexcept {
             _image = VK_NULL_HANDLE;
             _allocation = VK_NULL_HANDLE;
         }
+    }
+}
+
+ImageViewVulkan::ImageViewVulkan(
+    DeviceVulkan* device,
+    ImageVulkan* image,
+    VkImageView view) noexcept
+    : _device(device),
+      _image(image),
+      _imageView(view) {}
+
+ImageViewVulkan::~ImageViewVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool ImageViewVulkan::IsValid() const noexcept {
+    return _imageView != VK_NULL_HANDLE;
+}
+
+void ImageViewVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void ImageViewVulkan::DestroyImpl() noexcept {
+    if (_imageView != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyImageView(_device->_device, _imageView, _device->GetAllocationCallbacks());
+        _imageView = VK_NULL_HANDLE;
     }
 }
 

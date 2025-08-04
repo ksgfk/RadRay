@@ -291,6 +291,32 @@ VkImageType MapType(TextureDimension v) noexcept {
     }
 }
 
+VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept {
+    switch (v) {
+        case 1: return VK_SAMPLE_COUNT_1_BIT;
+        case 2: return VK_SAMPLE_COUNT_2_BIT;
+        case 4: return VK_SAMPLE_COUNT_4_BIT;
+        case 8: return VK_SAMPLE_COUNT_8_BIT;
+        case 16: return VK_SAMPLE_COUNT_16_BIT;
+        case 32: return VK_SAMPLE_COUNT_32_BIT;
+        case 64: return VK_SAMPLE_COUNT_64_BIT;
+        default: return VK_SAMPLE_COUNT_1_BIT;
+    }
+}
+
+VkImageViewType MapType(TextureViewDimension v) noexcept {
+    switch (v) {
+        case TextureViewDimension::Dim1D: return VK_IMAGE_VIEW_TYPE_1D;
+        case TextureViewDimension::Dim2D: return VK_IMAGE_VIEW_TYPE_2D;
+        case TextureViewDimension::Dim3D: return VK_IMAGE_VIEW_TYPE_3D;
+        case TextureViewDimension::Dim1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+        case TextureViewDimension::Dim2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        case TextureViewDimension::Cube: return VK_IMAGE_VIEW_TYPE_CUBE;
+        case TextureViewDimension::CubeArray: return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+        default: return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

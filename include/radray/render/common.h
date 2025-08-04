@@ -524,17 +524,17 @@ struct TextureDescriptor {
     TextureFormat Format;
     TextureUses Usage;
     ResourceHints Hints;
-    std::optional<ClearValue> OptimalClearValue;
     std::string_view Name;
 };
 
 struct TextureViewDescriptor {
     Texture* Target;
+    TextureViewDimension Dim;
     TextureFormat Format;
     uint32_t BaseArrayLayer;
-    uint32_t ArrayLayerCount;
+    std::optional<uint32_t> ArrayLayerCount;
     uint32_t BaseMipLevel;
-    uint32_t MipLevelCount;
+    std::optional<uint32_t> MipLevelCount;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
