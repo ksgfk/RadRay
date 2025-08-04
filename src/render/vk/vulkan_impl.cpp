@@ -304,6 +304,16 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     return result;
 }
 
+Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
+    // TODO:
+    return nullptr;
+}
+
+Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    // TODO:
+    return nullptr;
+}
+
 Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1161,6 +1171,15 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         0, nullptr,
         static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
         static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
+}
+
+unique_ptr<CommandEncoder> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+    // TODO:
+    return nullptr;
+}
+
+void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+    // TODO:
 }
 
 FenceVulkan::FenceVulkan(

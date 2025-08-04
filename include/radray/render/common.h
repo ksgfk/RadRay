@@ -371,10 +371,12 @@ using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 class Device;
 class CommandQueue;
 class CommandBuffer;
+class CommandEncoder;
 class Fence;
 class SwapChain;
 class Buffer;
 class Texture;
+class TextureView;
 
 class RenderBase {
 public:
@@ -490,6 +492,51 @@ struct BarrierTextureDescriptor {
     uint32_t MipLevelCount;
 };
 
+struct ColorAttachment {
+    TextureView* Target;
+    LoadAction Load;
+    StoreAction Store;
+    ColorClearValue ClearValue;
+};
+
+struct DepthStencilAttachment {
+    TextureView* Target;
+    LoadAction DepthLoad;
+    StoreAction DepthStore;
+    LoadAction StencilLoad;
+    StoreAction StencilStore;
+    DepthStencilClearValue ClearValue;
+};
+
+struct RenderPassDescriptor {
+    std::span<ColorAttachment> ColorAttachments;
+    std::optional<DepthStencilAttachment> DepthStencilAttachment;
+    std::string_view Name;
+};
+
+struct TextureDescriptor {
+    TextureDimension Dim;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t DepthOrArraySize;
+    uint32_t MipLevels;
+    uint32_t SampleCount;
+    TextureFormat Format;
+    TextureUses Usage;
+    ResourceHints Hints;
+    std::optional<ClearValue> OptimalClearValue;
+    std::string_view Name;
+};
+
+struct TextureViewDescriptor {
+    Texture* Target;
+    TextureFormat Format;
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -505,6 +552,10 @@ public:
     virtual Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
 
     virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -529,6 +580,17 @@ public:
     virtual void End() noexcept = 0;
 
     virtual void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept = 0;
+
+    virtual unique_ptr<CommandEncoder> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
+
+    virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
+};
+
+class CommandEncoder : public RenderBase {
+public:
+    virtual ~CommandEncoder() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdEncoder; }
 };
 
 class Fence : public RenderBase {
@@ -574,6 +636,13 @@ public:
     virtual ~Texture() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
+};
+
+class TextureView : public RenderBase {
+public:
+    virtual ~TextureView() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
 
 bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);

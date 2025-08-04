@@ -100,6 +100,10 @@ public:
 
     Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
+    Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
+
+    Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+
 public:
     Nullable<shared_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
@@ -195,6 +199,10 @@ public:
     void End() noexcept override;
 
     void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept override;
+
+    unique_ptr<CommandEncoder> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+
+    void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
