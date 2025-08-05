@@ -317,6 +317,23 @@ VkImageViewType MapType(TextureViewDimension v) noexcept {
     }
 }
 
+VkAttachmentLoadOp MapType(LoadAction v) noexcept {
+    switch (v) {
+        case LoadAction::Load: return VK_ATTACHMENT_LOAD_OP_LOAD;
+        case LoadAction::Clear: return VK_ATTACHMENT_LOAD_OP_CLEAR;
+        case LoadAction::DontCare: return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        default: return VK_ATTACHMENT_LOAD_OP_MAX_ENUM;
+    }
+}
+
+VkAttachmentStoreOp MapType(StoreAction v) noexcept {
+    switch (v) {
+        case StoreAction::Store: return VK_ATTACHMENT_STORE_OP_STORE;
+        case StoreAction::Discard: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        default: return VK_ATTACHMENT_STORE_OP_MAX_ENUM;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

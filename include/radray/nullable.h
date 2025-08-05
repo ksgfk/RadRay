@@ -119,10 +119,10 @@ struct Nullable<std::unique_ptr<T, D>> {
     constexpr Nullable(Nullable&&) = default;
     constexpr Nullable& operator=(const Nullable&) = delete;
     constexpr Nullable& operator=(Nullable&&) = default;
-    template <typename U>
-    constexpr Nullable(std::unique_ptr<U, D> ptr) noexcept : Ptr(std::move(ptr)) {}
-    template <typename U>
-    constexpr Nullable& operator=(std::unique_ptr<U, D> other) noexcept {
+    template <typename U, typename X>
+    constexpr Nullable(std::unique_ptr<U, X> ptr) noexcept : Ptr(std::move(ptr)) {}
+    template <typename U, typename X>
+    constexpr Nullable& operator=(std::unique_ptr<U, X> other) noexcept {
         Ptr = std::move(other);
         return *this;
     }

@@ -581,7 +581,7 @@ public:
 
     virtual void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept = 0;
 
-    virtual unique_ptr<CommandEncoder> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 
     virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
 };

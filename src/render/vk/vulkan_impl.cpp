@@ -1299,36 +1299,135 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
 }
 
-unique_ptr<CommandEncoder> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
-    // TODO:
-    vector<VkAttachmentDescription> colors;
-    colors.reserve(desc.ColorAttachments.size());
+Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+    vector<VkAttachmentDescription> attachs;
+    vector<VkAttachmentReference> colorRefs;
+    vector<VkImageView> fbs;
+    vector<VkClearValue> clearValues;
+    VkAttachmentReference depthRef{};
+    attachs.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment.has_value() ? 1 : 0));
+    colorRefs.reserve(desc.ColorAttachments.size());
+    fbs.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment.has_value() ? 1 : 0));
+    clearValues.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment.has_value() ? 1 : 0));
+    uint32_t width = std::numeric_limits<uint32_t>::max(), height = std::numeric_limits<uint32_t>::max();
     for (const auto& i : desc.ColorAttachments) {
         auto imageView = CastVkObject(i.Target);
-        auto attachDesc = colors.emplace_back();
+        auto attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
         attachDesc.samples = imageView->_image->_rawInfo.samples;
-        attachDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachDesc.loadOp = MapType(i.Load);
+        attachDesc.storeOp = MapType(i.Store);
+        attachDesc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachDesc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        auto& colorRef = colorRefs.emplace_back();
+        colorRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
+        colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        fbs.emplace_back(imageView->_imageView);
+        if (width == std::numeric_limits<uint32_t>::max()) {
+            width = imageView->_image->_mdesc.Width;
+        } else {
+            if (width != imageView->_image->_mdesc.Width) {
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
+                return nullptr;
+            }
+        }
+        if (height == std::numeric_limits<uint32_t>::max()) {
+            height = imageView->_image->_mdesc.Height;
+        } else if (height != imageView->_image->_mdesc.Height) {
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
+            return nullptr;
+        }
+        // auto clear = clearValues.emplace_back();
     }
+    if (desc.DepthStencilAttachment.has_value()) {
+        auto imageView = CastVkObject(desc.DepthStencilAttachment->Target);
+        auto attachDesc = attachs.emplace_back();
+        attachDesc.flags = 0;
+        attachDesc.format = imageView->_rawFormat;
+        attachDesc.samples = imageView->_image->_rawInfo.samples;
+        attachDesc.loadOp = MapType(desc.DepthStencilAttachment->DepthLoad);
+        attachDesc.storeOp = MapType(desc.DepthStencilAttachment->DepthStore);
+        attachDesc.stencilLoadOp = MapType(desc.DepthStencilAttachment->StencilLoad);
+        attachDesc.stencilStoreOp = MapType(desc.DepthStencilAttachment->StencilStore);
+        attachDesc.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        attachDesc.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthRef = {
+            static_cast<uint32_t>(attachs.size() - 1),
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        fbs.emplace_back(imageView->_imageView);
+        if (width == std::numeric_limits<uint32_t>::max()) {
+            width = imageView->_image->_mdesc.Width;
+        } else {
+            if (width != imageView->_image->_mdesc.Width) {
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
+                return nullptr;
+            }
+        }
+        if (height == std::numeric_limits<uint32_t>::max()) {
+            height = imageView->_image->_mdesc.Height;
+        } else if (height != imageView->_image->_mdesc.Height) {
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
+            return nullptr;
+        }
+    }
+    VkSubpassDescription subpassDesc{};
+    subpassDesc.flags = 0;
+    subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpassDesc.inputAttachmentCount = 0;
+    subpassDesc.pInputAttachments = nullptr;
+    subpassDesc.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
+    subpassDesc.pColorAttachments = colorRefs.empty() ? nullptr : colorRefs.data();
+    subpassDesc.pResolveAttachments = nullptr;
+    subpassDesc.pDepthStencilAttachment = desc.DepthStencilAttachment.has_value() ? &depthRef : nullptr;
+    subpassDesc.preserveAttachmentCount = 0;
+    subpassDesc.pPreserveAttachments = nullptr;
     VkRenderPassCreateInfo passInfo{};
     passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     passInfo.pNext = nullptr;
     passInfo.flags = 0;
     passInfo.attachmentCount = static_cast<uint32_t>(desc.ColorAttachments.size());
-    passInfo.pAttachments = colors.empty() ? nullptr : colors.data();
-    // VkFramebufferCreateInfo fbInfo{};
+    passInfo.pAttachments = attachs.empty() ? nullptr : attachs.data();
+    passInfo.subpassCount = 1;
+    passInfo.pSubpasses = &subpassDesc;
+    passInfo.dependencyCount = 0;
+    passInfo.pDependencies = nullptr;
+    VkRenderPass pass;
+    if (auto vr = _device->_ftb.vkCreateRenderPass(_device->_device, &passInfo, _device->GetAllocationCallbacks(), &pass);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateRenderPass failed: {}", vr);
+        return nullptr;
+    }
+    auto passR = make_unique<RenderPassVulkan>(_device, pass);
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.pNext = nullptr;
+    fbInfo.flags = 0;
+    fbInfo.attachmentCount = static_cast<uint32_t>(fbs.size());
+    fbInfo.pAttachments = fbs.empty() ? nullptr : fbs.data();
+    fbInfo.width = width;
+    fbInfo.height = height;
+    fbInfo.layers = 1;
+    VkFramebuffer framebuffer;
+    if (auto vr = _device->_ftb.vkCreateFramebuffer(_device->_device, &fbInfo, _device->GetAllocationCallbacks(), &framebuffer);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateFramebuffer failed: {}", vr);
+        return nullptr;
+    }
+    auto fbR = make_unique<FrameBufferVulkan>(_device, framebuffer);
     VkRenderPassBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     beginInfo.pNext = nullptr;
-    // info.renderPass = ;
+    beginInfo.renderPass = pass;
+    beginInfo.framebuffer = framebuffer;
+    beginInfo.renderArea = {{0, 0}, {fbInfo.width, fbInfo.height}};
+    beginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    beginInfo.pClearValues = clearValues.size() == 0 ? nullptr : clearValues.data();
     _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
-    return make_unique<SimulateCommandEncoderVulkan>(_device, this);
+    auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
+    encoder->_pass = std::move(passR);
+    encoder->_framebuffer = std::move(fbR);
+    return encoder;
 }
 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {

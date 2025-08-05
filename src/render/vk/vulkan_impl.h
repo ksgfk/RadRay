@@ -204,7 +204,7 @@ public:
 
     void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept override;
 
-    unique_ptr<CommandEncoder> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
 
