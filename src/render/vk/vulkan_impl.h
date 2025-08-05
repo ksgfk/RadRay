@@ -215,6 +215,7 @@ public:
     QueueVulkan* _queue;
     unique_ptr<CommandPoolVulkan> _cmdPool;
     VkCommandBuffer _cmdBuffer;
+    vector<unique_ptr<CommandEncoder>> _endedEncoders;
 };
 
 class SimulateCommandEncoderVulkan final : public CommandEncoder {

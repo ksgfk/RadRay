@@ -1200,6 +1200,7 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
 }
 
 void CommandBufferVulkan::Begin() noexcept {
+    _endedEncoders.clear();
     _cmdPool->Reset();
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1324,6 +1325,11 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
         colorRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
         colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         fbs.emplace_back(imageView->_imageView);
+        auto clear = clearValues.emplace_back();
+        clear.color.float32[0] = i.ClearValue.R;
+        clear.color.float32[1] = i.ClearValue.G;
+        clear.color.float32[2] = i.ClearValue.B;
+        clear.color.float32[3] = i.ClearValue.A;
         if (width == std::numeric_limits<uint32_t>::max()) {
             width = imageView->_image->_mdesc.Width;
         } else {
@@ -1338,24 +1344,27 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
             RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
             return nullptr;
         }
-        // auto clear = clearValues.emplace_back();
     }
     if (desc.DepthStencilAttachment.has_value()) {
-        auto imageView = CastVkObject(desc.DepthStencilAttachment->Target);
+        auto& i = desc.DepthStencilAttachment.value();
+        auto imageView = CastVkObject(i.Target);
         auto attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
         attachDesc.samples = imageView->_image->_rawInfo.samples;
-        attachDesc.loadOp = MapType(desc.DepthStencilAttachment->DepthLoad);
-        attachDesc.storeOp = MapType(desc.DepthStencilAttachment->DepthStore);
-        attachDesc.stencilLoadOp = MapType(desc.DepthStencilAttachment->StencilLoad);
-        attachDesc.stencilStoreOp = MapType(desc.DepthStencilAttachment->StencilStore);
+        attachDesc.loadOp = MapType(i.DepthLoad);
+        attachDesc.storeOp = MapType(i.DepthStore);
+        attachDesc.stencilLoadOp = MapType(i.StencilLoad);
+        attachDesc.stencilStoreOp = MapType(i.StencilStore);
         attachDesc.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         attachDesc.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthRef = {
             static_cast<uint32_t>(attachs.size() - 1),
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
         fbs.emplace_back(imageView->_imageView);
+        auto clear = clearValues.emplace_back();
+        clear.depthStencil.depth = i.ClearValue.Depth;
+        clear.depthStencil.stencil = i.ClearValue.Stencil;
         if (width == std::numeric_limits<uint32_t>::max()) {
             width = imageView->_image->_mdesc.Width;
         } else {
@@ -1432,7 +1441,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
-    encoder->Destroy();
+    _endedEncoders.emplace_back(std::move(encoder));
 }
 
 SimulateCommandEncoderVulkan::SimulateCommandEncoderVulkan(
