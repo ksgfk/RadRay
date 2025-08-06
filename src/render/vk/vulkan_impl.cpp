@@ -1313,7 +1313,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     uint32_t width = std::numeric_limits<uint32_t>::max(), height = std::numeric_limits<uint32_t>::max();
     for (const auto& i : desc.ColorAttachments) {
         auto imageView = CastVkObject(i.Target);
-        auto attachDesc = attachs.emplace_back();
+        auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
         attachDesc.samples = imageView->_image->_rawInfo.samples;
@@ -1325,7 +1325,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
         colorRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
         colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         fbs.emplace_back(imageView->_imageView);
-        auto clear = clearValues.emplace_back();
+        auto& clear = clearValues.emplace_back();
         clear.color.float32[0] = i.ClearValue.R;
         clear.color.float32[1] = i.ClearValue.G;
         clear.color.float32[2] = i.ClearValue.B;
@@ -1348,7 +1348,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     if (desc.DepthStencilAttachment.has_value()) {
         auto& i = desc.DepthStencilAttachment.value();
         auto imageView = CastVkObject(i.Target);
-        auto attachDesc = attachs.emplace_back();
+        auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
         attachDesc.samples = imageView->_image->_rawInfo.samples;
@@ -1362,7 +1362,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
             static_cast<uint32_t>(attachs.size() - 1),
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
         fbs.emplace_back(imageView->_imageView);
-        auto clear = clearValues.emplace_back();
+        auto& clear = clearValues.emplace_back();
         clear.depthStencil.depth = i.ClearValue.Depth;
         clear.depthStencil.stencil = i.ClearValue.Stencil;
         if (width == std::numeric_limits<uint32_t>::max()) {
@@ -1412,6 +1412,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.pNext = nullptr;
     fbInfo.flags = 0;
+    fbInfo.renderPass = passR->_renderPass;
     fbInfo.attachmentCount = static_cast<uint32_t>(fbs.size());
     fbInfo.pAttachments = fbs.empty() ? nullptr : fbs.data();
     fbInfo.width = width;

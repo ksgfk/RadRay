@@ -1,6 +1,7 @@
 #include <thread>
 
 #include <radray/logger.h>
+#include <radray/stopwatch.h>
 #include <radray/render/common.h>
 #include <radray/window/glfw_window.h>
 
@@ -12,7 +13,7 @@ using namespace radray::window;
 
 constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
-constexpr int RT_COUNT = 2;
+constexpr int RT_COUNT = 3;
 
 struct FrameData {
     shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
@@ -23,7 +24,12 @@ shared_ptr<vulkan::DeviceVulkan> device;
 vulkan::QueueVulkan* cmdQueue = nullptr;
 shared_ptr<vulkan::SwapChainVulkan> swapchain;
 vector<FrameData> frames;
+unordered_map<Texture*, shared_ptr<vulkan::ImageViewVulkan>> rtViews;
 uint32_t currentFrameIndex = 0;
+ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
+int clearIndex = 0;
+Stopwatch sw;
+uint64_t last;
 
 void Init() {
     GlobalInitGlfw();
@@ -52,10 +58,14 @@ void Init() {
         f.cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     }
     currentFrameIndex = 0;
+    sw.Reset();
+    sw.Start();
+    last = 0;
 }
 
 void End() {
     cmdQueue->Wait();
+    rtViews.clear();
     frames.clear();
     swapchain = nullptr;
     cmdQueue = nullptr;
@@ -66,24 +76,72 @@ void End() {
 }
 
 bool Update() {
+    uint64_t now = sw.RunningMilliseconds();
+    auto delta = now - last;
+    last = now;
+
     GlobalPollEventsGlfw();
     bool isClose = glfw->ShouldClose();
 
+    float* v = nullptr;
+    if (clearIndex >= 0 && clearIndex < 2) {
+        v = &clear.R;
+    } else if (clearIndex >= 2 && clearIndex < 4) {
+        v = &clear.G;
+    } else if (clearIndex >= 4 && clearIndex < 6) {
+        v = &clear.B;
+    }
+    if (clearIndex % 2 == 0) {
+        *v += delta / 1000.0f;
+        if (*v >= 1.0f) {
+            *v = 1.0f;
+            clearIndex++;
+        }
+    } else {
+        *v -= delta / 1000.0f;
+        if (*v <= 0.0f) {
+            *v = 0.0f;
+            clearIndex++;
+            if (clearIndex >= 5) clearIndex = 0;
+        }
+    }
+
     auto& frameData = frames[currentFrameIndex];
     swapchain->AcquireNext();
+    auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
+    shared_ptr<vulkan::ImageViewVulkan> rtView = nullptr;
+    {
+        auto it = rtViews.find(rt);
+        if (it == rtViews.end()) {
+            TextureViewDescriptor rtViewDesc{};
+            rtViewDesc.Target = rt;
+            rtViewDesc.Dim = TextureViewDimension::Dim2D;
+            rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+            rtViewDesc.BaseMipLevel = 0;
+            rtViewDesc.MipLevelCount = std::nullopt;
+            rtViewDesc.BaseArrayLayer = 0;
+            rtViewDesc.ArrayLayerCount = std::nullopt;
+            it = rtViews.emplace(rt, std::static_pointer_cast<vulkan::ImageViewVulkan>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
+        }
+        rtView = it->second;
+    }
     frameData.cmdBuffer->Begin();
-    BarrierTextureDescriptor texDesc[] = {
-        {swapchain->GetCurrentBackBuffer().Unwrap(),
-         TextureUse::Uninitialized,
-         TextureUse::Present,
-         {},
-         false,
-         0,
-         0,
-         0,
-         0,
-         0}};
-    frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    {
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, 0, 0, 0, 0, 0}};
+        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    }
+    {
+        ColorAttachment rpColorAttch[] = {{rtView.get(), LoadAction::Clear, StoreAction::Store, clear}};
+        RenderPassDescriptor rpDesc{};
+        rpDesc.ColorAttachments = rpColorAttch;
+        rpDesc.DepthStencilAttachment = std::nullopt;
+        auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        frameData.cmdBuffer->EndRenderPass(std::move(rp));
+    }
+    {
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, 0, 0, 0, 0, 0}};
+        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    }
     frameData.cmdBuffer->End();
     CommandBuffer* submitCmdBuffer[] = {frameData.cmdBuffer.get()};
     CommandQueueSubmitDescriptor submitDesc{};
