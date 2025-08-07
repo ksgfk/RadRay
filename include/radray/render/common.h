@@ -270,7 +270,8 @@ enum struct BufferUse : uint32_t {
     Index = CopyDestination << 1,
     Vertex = Index << 1,
     CBuffer = Vertex << 1,
-    UnorderedAccess = CBuffer << 1,
+    Resource = CBuffer << 1,
+    UnorderedAccess = Resource << 1,
     Indirect = UnorderedAccess << 1
 };
 
@@ -301,6 +302,12 @@ enum class LoadAction {
 enum class StoreAction {
     Store,
     Discard
+};
+
+enum class MemoryType {
+    Device,
+    Upload,
+    ReadBack,
 };
 
 enum class RenderObjectTag : uint32_t {
@@ -375,6 +382,7 @@ class CommandEncoder;
 class Fence;
 class SwapChain;
 class Buffer;
+class BufferView;
 class Texture;
 class TextureView;
 
@@ -537,6 +545,26 @@ struct TextureViewDescriptor {
     std::optional<uint32_t> MipLevelCount;
 };
 
+struct BufferDescriptor {
+    uint64_t Size;
+    MemoryType Memory;
+    BufferUses Usage;
+    ResourceHints Hints;
+    std::string_view Name;
+};
+
+struct BufferRange {
+    uint64_t Offset;
+    uint64_t Size;
+};
+
+struct BufferViewDescriptor {
+    Buffer* Target;
+    BufferRange Range;
+    TextureFormat Format;
+    BufferUses Usage;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -552,6 +580,10 @@ public:
     virtual Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
 
     virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
@@ -624,11 +656,23 @@ public:
     virtual ~Resource() noexcept = default;
 };
 
+class ResourceView : public RenderBase {
+public:
+    virtual ~ResourceView() noexcept = default;
+};
+
 class Buffer : public Resource {
 public:
     virtual ~Buffer() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
+};
+
+class BufferView : public ResourceView {
+public:
+    virtual ~BufferView() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BufferView; }
 };
 
 class Texture : public Resource {
@@ -638,7 +682,7 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
 };
 
-class TextureView : public RenderBase {
+class TextureView : public ResourceView {
 public:
     virtual ~TextureView() noexcept = default;
 

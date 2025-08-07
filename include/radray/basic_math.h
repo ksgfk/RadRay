@@ -28,7 +28,7 @@ struct Scissor {
     int32_t Height;
 };
 
-constexpr uint64_t CalcAlign(uint64_t value, uint64_t align) noexcept {
+constexpr uint64_t Align(uint64_t value, uint64_t align) noexcept {
     return (value + (align - 1)) & ~(align - 1);
 }
 

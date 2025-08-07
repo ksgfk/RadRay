@@ -22,6 +22,8 @@ class TimelineSemaphoreVulkan;
 class SurfaceVulkan;
 class SwapChainVulkan;
 class BufferVulkan;
+class BufferViewVulkan;
+class SimulateBufferViewVulkan;
 class ImageVulkan;
 class ImageViewVulkan;
 
@@ -104,6 +106,10 @@ public:
 
     Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
+    Nullable<shared_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
+
+    Nullable<shared_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
+
     Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
@@ -114,6 +120,8 @@ public:
     Nullable<shared_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
 
     Nullable<shared_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
+
+    Nullable<shared_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -431,6 +439,52 @@ public:
     VkBuffer _buffer;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
+    BufferDescriptor _mdesc;
+    VkBufferCreateInfo _rawInfo;
+};
+
+class BufferViewVulkan final : public RenderBase {
+public:
+    BufferViewVulkan(
+        DeviceVulkan* device,
+        VkBufferView view) noexcept;
+
+    ~BufferViewVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkBufferView _bufferView;
+    VkBufferViewCreateInfo _rawInfo;
+};
+
+class SimulateBufferViewVulkan final : public BufferView {
+public:
+    SimulateBufferViewVulkan(
+        DeviceVulkan* device,
+        BufferVulkan* buffer,
+        BufferRange range) noexcept;
+
+    ~SimulateBufferViewVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    BufferVulkan* _buffer;
+    BufferRange _range;
+    shared_ptr<BufferViewVulkan> _texelView;
 };
 
 class ImageVulkan final : public Texture {

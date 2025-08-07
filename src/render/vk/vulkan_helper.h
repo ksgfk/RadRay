@@ -68,6 +68,7 @@ VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept;
 VkImageViewType MapType(TextureViewDimension v) noexcept;
 VkAttachmentLoadOp MapType(LoadAction v) noexcept;
 VkAttachmentStoreOp MapType(StoreAction v) noexcept;
+VmaMemoryUsage MapType(MemoryType v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;

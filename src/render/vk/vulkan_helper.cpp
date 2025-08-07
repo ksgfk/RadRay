@@ -334,6 +334,15 @@ VkAttachmentStoreOp MapType(StoreAction v) noexcept {
     }
 }
 
+VmaMemoryUsage MapType(MemoryType v) noexcept {
+    switch (v) {
+        case MemoryType::Device: return VMA_MEMORY_USAGE_GPU_ONLY;
+        case MemoryType::Upload: return VMA_MEMORY_USAGE_CPU_TO_GPU;
+        case MemoryType::ReadBack: return VMA_MEMORY_USAGE_GPU_TO_CPU;
+        default: return VMA_MEMORY_USAGE_UNKNOWN;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

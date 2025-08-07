@@ -334,6 +334,89 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     return result;
 }
 
+Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.pNext = nullptr;
+    bufInfo.flags = 0;
+    bufInfo.size = desc.Size;
+    bufInfo.usage = 0;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    bufInfo.queueFamilyIndexCount = 0;
+    bufInfo.pQueueFamilyIndices = nullptr;
+    if (desc.Usage.HasFlag(BufferUse::MapRead) || desc.Usage.HasFlag(BufferUse::CopySource)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Usage.HasFlag(BufferUse::CopyDestination)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::Index)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::Vertex)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::Resource)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::Indirect)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    }
+    VmaAllocationCreateInfo vmaInfo{};
+    vmaInfo.flags = 0;
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+        vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
+    vmaInfo.usage = MapType(desc.Memory);
+    vmaInfo.requiredFlags = 0;
+    vmaInfo.preferredFlags = 0;
+    vmaInfo.memoryTypeBits = 0;
+    vmaInfo.pool = VK_NULL_HANDLE;
+    vmaInfo.pUserData = nullptr;
+    vmaInfo.priority = 0;
+    VkBuffer vkBuf = VK_NULL_HANDLE;
+    VmaAllocation vmaAlloc = VK_NULL_HANDLE;
+    VmaAllocationInfo vmaAllocInfo{};
+    if (auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &vmaInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk failed to create buffer: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
+    result->_mdesc = desc;
+    result->_rawInfo = bufInfo;
+    return result;
+}
+
+Nullable<shared_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
+    auto buf = CastVkObject(desc.Target);
+    shared_ptr<BufferViewVulkan> texelView;
+    if (buf->_mdesc.Usage.HasFlag(BufferUse::Resource) || buf->_mdesc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+        VkBufferViewCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+        info.pNext = nullptr;
+        info.flags = 0;
+        info.buffer = buf->_buffer;
+        info.format = MapType(desc.Format);
+        info.offset = desc.Range.Offset;
+        info.range = desc.Range.Size;
+        auto bv = this->CreateBufferView(info);
+        if (!bv->IsValid()) {
+            return nullptr;
+        }
+        texelView = bv.Release();
+    }
+    auto result = make_shared<SimulateBufferViewVulkan>(this, buf, desc.Range);
+    result->_texelView = std::move(texelView);
+    return result;
+}
+
 Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -490,6 +573,16 @@ Nullable<shared_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaph
         return nullptr;
     }
     return make_shared<TimelineSemaphoreVulkan>(this, semaphore);
+}
+
+Nullable<shared_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBufferViewCreateInfo& info) noexcept {
+    VkBufferView bufferView = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateBufferView(_device, &info, this->GetAllocationCallbacks(), &bufferView);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateBufferView failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<BufferViewVulkan>(this, bufferView);
 }
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
@@ -1794,6 +1887,56 @@ void BufferVulkan::DestroyImpl() noexcept {
             _allocation = VK_NULL_HANDLE;
         }
     }
+}
+
+BufferViewVulkan::BufferViewVulkan(
+    DeviceVulkan* device,
+    VkBufferView view) noexcept
+    : _device(device),
+      _bufferView(view) {}
+
+BufferViewVulkan::~BufferViewVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool BufferViewVulkan::IsValid() const noexcept {
+    return _bufferView != VK_NULL_HANDLE;
+}
+
+void BufferViewVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void BufferViewVulkan::DestroyImpl() noexcept {
+    if (_bufferView != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyBufferView(_device->_device, _bufferView, _device->GetAllocationCallbacks());
+        _bufferView = VK_NULL_HANDLE;
+    }
+}
+
+SimulateBufferViewVulkan::SimulateBufferViewVulkan(
+    DeviceVulkan* device,
+    BufferVulkan* buffer,
+    BufferRange range) noexcept
+    : _device(device),
+      _buffer(buffer),
+      _range(range) {}
+
+SimulateBufferViewVulkan::~SimulateBufferViewVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool SimulateBufferViewVulkan::IsValid() const noexcept {
+    return _buffer != nullptr;
+}
+
+void SimulateBufferViewVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void SimulateBufferViewVulkan::DestroyImpl() noexcept {
+    _texelView.reset();
+    _buffer = nullptr;
 }
 
 ImageVulkan::ImageVulkan(
