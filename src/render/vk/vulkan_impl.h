@@ -2,10 +2,14 @@
 
 #include <array>
 
+#include <radray/render/common.h>
+
 #include "vulkan_common.h"
-#include "vulkan_helper.h"
+#include "vk_mem_alloc.h"
 
 namespace radray::render::vulkan {
+
+using DeviceFuncTable = VolkDeviceTable;
 
 class InstanceVulkan;
 class VMA;
@@ -215,6 +219,8 @@ public:
     Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
+
+    void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -431,6 +437,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept override;
 
 public:
     void DestroyImpl() noexcept;

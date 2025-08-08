@@ -1,6 +1,9 @@
 #include "vulkan_impl.h"
 
 #include <bit>
+#include <cstring>
+
+#include "vulkan_helper.h"
 
 namespace radray::render::vulkan {
 
@@ -1340,7 +1343,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         }
         bufBarrier.buffer = buf->_buffer;
         bufBarrier.offset = 0;
-        bufBarrier.size = buf->_allocInfo.size;
+        bufBarrier.size = buf->_rawInfo.size;
 
         auto srcStage = BufferUseToPipelineStageFlags(i.Before);
         auto dstStage = BufferUseToPipelineStageFlags(i.After);
@@ -1536,6 +1539,16 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
     _endedEncoders.emplace_back(std::move(encoder));
+}
+
+void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
+    auto dst = CastVkObject(dst_);
+    auto src = CastVkObject(src_);
+    VkBufferCopy copyInfo{};
+    copyInfo.srcOffset = srcOffset;
+    copyInfo.dstOffset = dstOffset;
+    copyInfo.size = size;
+    _device->_ftb.vkCmdCopyBuffer(_cmdBuffer, src->_buffer, dst->_buffer, 1, &copyInfo);
 }
 
 SimulateCommandEncoderVulkan::SimulateCommandEncoderVulkan(
@@ -1887,6 +1900,17 @@ void BufferVulkan::DestroyImpl() noexcept {
             _allocation = VK_NULL_HANDLE;
         }
     }
+}
+
+void BufferVulkan::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
+    void* mappedData = nullptr;
+    if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vma call vmaMapMemory failed: {}", vr);
+        return;
+    }
+    std::memcpy(static_cast<byte*>(mappedData) + offset, data.data(), data.size());
+    vmaUnmapMemory(_device->_vma->_vma, _allocation);
 }
 
 BufferViewVulkan::BufferViewVulkan(

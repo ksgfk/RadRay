@@ -16,8 +16,6 @@
 
 namespace radray::render::vulkan {
 
-using DeviceFuncTable = VolkDeviceTable;
-
 template <typename T, typename TAllocator, typename TFunc, typename... Args>
 requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::invoke_result_t<TFunc, Args..., uint32_t*, T*>, void>
 auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&&... args) noexcept {

@@ -2,6 +2,8 @@
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
+#include <radray/triangle_mesh.h>
+#include <radray/vertex_data.h>
 #include <radray/render/common.h>
 #include <radray/window/glfw_window.h>
 
@@ -30,6 +32,8 @@ ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
 int clearIndex = 0;
 Stopwatch sw;
 uint64_t last;
+shared_ptr<vulkan::BufferVulkan> vertBuf;
+shared_ptr<vulkan::BufferVulkan> idxBuf;
 
 void Init() {
     GlobalInitGlfw();
@@ -61,10 +65,46 @@ void Init() {
     sw.Reset();
     sw.Start();
     last = 0;
+
+    TriangleMesh mesh;
+    mesh.InitAsCube(0.5f);
+    VertexData model;
+    mesh.ToVertexData(&model);
+    auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto vert = device->CreateBuffer({model.VertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
+    auto idxUpload = device->CreateBuffer({model.IndexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto idx = device->CreateBuffer({model.IndexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
+    vertBuf = std::static_pointer_cast<vulkan::BufferVulkan>(vert);
+    idxBuf = std::static_pointer_cast<vulkan::BufferVulkan>(idx);
+
+    auto cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
+    cmdBuffer->Begin();
+    {
+        BarrierBufferDescriptor barriers[] = {
+            {vert.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
+            {idx.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
+        cmdBuffer->ResourceBarrier(barriers, {});
+    }
+    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, model.VertexSize);
+    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, model.IndexSize);
+    {
+        BarrierBufferDescriptor barriers[] = {
+            {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
+            {idx.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+        cmdBuffer->ResourceBarrier(barriers, {});
+    }
+    cmdBuffer->End();
+    CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
+    cmdQueue->Submit({submitCmdBuffers, {}, {}, {}, {}});
+    cmdQueue->Wait();
 }
 
 void End() {
     cmdQueue->Wait();
+
+    vertBuf.reset();
+    idxBuf.reset();
+
     rtViews.clear();
     frames.clear();
     swapchain = nullptr;

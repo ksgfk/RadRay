@@ -263,7 +263,8 @@ enum class ColorWrite : uint32_t {
 
 enum struct BufferUse : uint32_t {
     UNKNOWN = 0x0,
-    MapRead = 0x1,
+    Common = 0x1,
+    MapRead = Common << 1,
     MapWrite = MapRead << 1,
     CopySource = MapWrite << 1,
     CopyDestination = CopySource << 1,
@@ -616,6 +617,8 @@ public:
     virtual Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 
     virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
+
+    virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 };
 
 class CommandEncoder : public RenderBase {
@@ -666,6 +669,8 @@ public:
     virtual ~Buffer() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
+
+    virtual void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept = 0;
 };
 
 class BufferView : public ResourceView {
