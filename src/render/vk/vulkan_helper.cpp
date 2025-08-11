@@ -343,6 +343,26 @@ VmaMemoryUsage MapType(MemoryType v) noexcept {
     }
 }
 
+VkShaderStageFlags MapType(ShaderStages v) noexcept {
+    VkShaderStageFlags flags = 0;
+    if (v.HasFlag(ShaderStage::Vertex)) flags |= VK_SHADER_STAGE_VERTEX_BIT;
+    if (v.HasFlag(ShaderStage::Pixel)) flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (v.HasFlag(ShaderStage::Compute)) flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+    return flags;
+}
+
+VkDescriptorType MapType(ResourceBindType v) noexcept {
+    switch (v) {
+        case ResourceBindType::CBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case ResourceBindType::Buffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case ResourceBindType::Texture: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case ResourceBindType::Sampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
+        case ResourceBindType::RWBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case ResourceBindType::RWTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        default: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

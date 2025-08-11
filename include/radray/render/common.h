@@ -311,6 +311,16 @@ enum class MemoryType {
     ReadBack,
 };
 
+enum class ResourceBindType {
+    UNKNOWN,
+    CBuffer,
+    Buffer,
+    Texture,
+    Sampler,
+    RWBuffer,
+    RWTexture
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -386,6 +396,7 @@ class Buffer;
 class BufferView;
 class Texture;
 class TextureView;
+class RootSignature;
 
 class RenderBase {
 public:
@@ -566,6 +577,43 @@ struct BufferViewDescriptor {
     BufferUses Usage;
 };
 
+struct ShaderSource {
+    std::span<byte> Src;
+    ShaderBlobCategory Category;
+};
+
+struct RootSignatureConstant {
+    uint32_t Slot;
+    uint32_t Space;
+    uint32_t Size;
+    ShaderStages Stages;
+};
+
+struct RootSignatureBinding {
+    uint32_t Slot;
+    uint32_t Space;
+    ResourceBindType Type;
+    ShaderStages Stages;
+};
+
+struct RootSignatureSetElement {
+    uint32_t Slot;
+    uint32_t Space;
+    ResourceBindType Type;
+    uint32_t Count;
+    ShaderStages Stages;
+};
+
+struct RootSignatureBindingSet {
+    std::span<RootSignatureSetElement> Elements;
+};
+
+struct RootSignatureDescriptor {
+    std::span<RootSignatureBinding> RootBindings;
+    std::span<RootSignatureBindingSet> BindingSets;
+    std::optional<RootSignatureConstant> Constant;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -589,6 +637,8 @@ public:
     virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -692,6 +742,13 @@ public:
     virtual ~TextureView() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
+};
+
+class RootSignature : public RenderBase {
+public:
+    virtual ~RootSignature() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
 };
 
 bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);

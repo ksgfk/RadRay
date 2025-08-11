@@ -142,7 +142,11 @@ Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
 }
 
 Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence(uint64_t initValue) noexcept {
-    return this->CreateTimelineSemaphore(initValue);
+    auto fence = this->CreateTimelineSemaphore(initValue);
+    if (!fence.HasValue()) {
+        return nullptr;
+    }
+    return shared_ptr<Fence>{fence.Release()};
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
@@ -526,7 +530,89 @@ Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     return result;
 }
 
-Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
+Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
+    vector<VkDescriptorSetLayoutBinding> bindings;
+    vector<unique_ptr<DescriptorSetLayoutVulkan>> descSetLayouts;
+    if (!desc.RootBindings.empty()) {
+        for (const auto& i : desc.RootBindings) {
+            auto& binding = bindings.emplace_back();
+            binding.binding = i.Slot;
+            binding.descriptorType = MapType(i.Type);
+            binding.descriptorCount = 1;
+            binding.stageFlags = MapType(i.Stages);
+            binding.pImmutableSamplers = nullptr;
+        }
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.pNext = nullptr;
+        dslci.flags = 0;
+        dslci.bindingCount = static_cast<uint32_t>(bindings.size());
+        dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
+        auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
+        if (!descSetLayoutVk.HasValue()) {
+            return nullptr;
+        }
+        auto descSetLayoutV = descSetLayoutVk.Release();
+        descSetLayoutV->_rootBindings = {desc.RootBindings.begin(), desc.RootBindings.end()};
+        descSetLayouts.emplace_back(std::move(descSetLayoutV));
+    }
+    for (const auto& i : desc.BindingSets) {
+        bindings.clear();
+        for (const auto& j : i.Elements) {
+            auto& binding = bindings.emplace_back();
+            binding.binding = j.Slot;
+            binding.descriptorType = MapType(j.Type);
+            binding.descriptorCount = j.Count;
+            binding.stageFlags = MapType(j.Stages);
+            binding.pImmutableSamplers = nullptr;
+        }
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.pNext = nullptr;
+        dslci.flags = 0;
+        dslci.bindingCount = static_cast<uint32_t>(bindings.size());
+        dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
+        auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
+        if (!descSetLayoutVk.HasValue()) {
+            return nullptr;
+        }
+        auto descSetLayoutV = descSetLayoutVk.Release();
+        descSetLayoutV->_bindingElements = {i.Elements.begin(), i.Elements.end()};
+        descSetLayouts.emplace_back(std::move(descSetLayoutV));
+    }
+    VkPushConstantRange pushConstant{};
+    VkPushConstantRange* pushConstantPtr = nullptr;
+    if (desc.Constant.has_value()) {
+        pushConstant.stageFlags = MapType(desc.Constant->Stages);
+        pushConstant.offset = 0;
+        pushConstant.size = desc.Constant->Size;
+        pushConstantPtr = &pushConstant;
+    }
+    vector<VkDescriptorSetLayout> vkDescSetLayouts;
+    vkDescSetLayouts.reserve(descSetLayouts.size());
+    for (const auto& layout : descSetLayouts) {
+        vkDescSetLayouts.emplace_back(layout->_layout);
+    }
+    VkPipelineLayoutCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.setLayoutCount = static_cast<uint32_t>(vkDescSetLayouts.size());
+    createInfo.pSetLayouts = vkDescSetLayouts.empty() ? nullptr : vkDescSetLayouts.data();
+    createInfo.pushConstantRangeCount = pushConstantPtr == nullptr ? 0 : 1;
+    createInfo.pPushConstantRanges = pushConstantPtr;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreatePipelineLayout(_device, &createInfo, this->GetAllocationCallbacks(), &pipelineLayout);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreatePipelineLayout failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<PipelineLayoutVulkan>(this, pipelineLayout);
+    result->_descSetLayouts = std::move(descSetLayouts);
+    return result;
+}
+
+Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.pNext = nullptr;
@@ -537,11 +623,11 @@ Nullable<shared_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateF
         RADRAY_ERR_LOG("vk create fence failed: {}", vr);
         return nullptr;
     }
-    auto v = make_shared<FenceVulkan>(this, fence);
+    auto v = make_unique<FenceVulkan>(this, fence);
     return v;
 }
 
-Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
+Nullable<unique_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = nullptr;
@@ -552,10 +638,10 @@ Nullable<shared_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSema
         RADRAY_ERR_LOG("vk call vkCreateSemaphore failed {}", vr);
         return nullptr;
     }
-    return make_shared<SemaphoreVulkan>(this, semaphore);
+    return make_unique<SemaphoreVulkan>(this, semaphore);
 }
 
-Nullable<shared_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
+Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
     if (!_extFeatures.feature12.timelineSemaphore) {
         RADRAY_ERR_LOG("vk timeline semaphore not supported");
         return nullptr;
@@ -575,17 +661,27 @@ Nullable<shared_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaph
         RADRAY_ERR_LOG("vk call vkCreateSemaphore failed {}", vr);
         return nullptr;
     }
-    return make_shared<TimelineSemaphoreVulkan>(this, semaphore);
+    return make_unique<TimelineSemaphoreVulkan>(this, semaphore);
 }
 
-Nullable<shared_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBufferViewCreateInfo& info) noexcept {
+Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBufferViewCreateInfo& info) noexcept {
     VkBufferView bufferView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateBufferView(_device, &info, this->GetAllocationCallbacks(), &bufferView);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkCreateBufferView failed: {}", vr);
         return nullptr;
     }
-    return make_shared<BufferViewVulkan>(this, bufferView);
+    return make_unique<BufferViewVulkan>(this, bufferView);
+}
+
+Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &info, this->GetAllocationCallbacks(), &layout);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateDescriptorSetLayout failed: {}", vr);
+        return nullptr;
+    }
+    return make_unique<DescriptorSetLayoutVulkan>(this, layout);
 }
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
@@ -2027,6 +2123,56 @@ void ImageViewVulkan::DestroyImpl() noexcept {
     if (_imageView != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyImageView(_device->_device, _imageView, _device->GetAllocationCallbacks());
         _imageView = VK_NULL_HANDLE;
+    }
+}
+
+DescriptorSetLayoutVulkan::DescriptorSetLayoutVulkan(
+    DeviceVulkan* device,
+    VkDescriptorSetLayout layout) noexcept
+    : _device(device),
+      _layout(layout) {}
+
+DescriptorSetLayoutVulkan::~DescriptorSetLayoutVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool DescriptorSetLayoutVulkan::IsValid() const noexcept {
+    return _layout != VK_NULL_HANDLE;
+}
+
+void DescriptorSetLayoutVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
+    if (_layout != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+        _layout = VK_NULL_HANDLE;
+    }
+}
+
+PipelineLayoutVulkan::PipelineLayoutVulkan(
+    DeviceVulkan* device,
+    VkPipelineLayout layout) noexcept
+    : _device(device),
+      _layout(layout) {}
+
+PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool PipelineLayoutVulkan::IsValid() const noexcept {
+    return _layout != VK_NULL_HANDLE;
+}
+
+void PipelineLayoutVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void PipelineLayoutVulkan::DestroyImpl() noexcept {
+    if (_layout != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+        _layout = VK_NULL_HANDLE;
     }
 }
 

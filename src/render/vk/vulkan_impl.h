@@ -30,6 +30,8 @@ class BufferViewVulkan;
 class SimulateBufferViewVulkan;
 class ImageVulkan;
 class ImageViewVulkan;
+class DescriptorSetLayoutVulkan;
+class PipelineLayoutVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -118,14 +120,18 @@ public:
 
     Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
+
 public:
-    Nullable<shared_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
+    Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
-    Nullable<shared_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+    Nullable<unique_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
 
-    Nullable<shared_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
+    Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
-    Nullable<shared_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
+    Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
+
+    Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -543,6 +549,49 @@ public:
     VkImageView _imageView;
     TextureViewDescriptor _mdesc;
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
+};
+
+class DescriptorSetLayoutVulkan final : public RenderBase {
+public:
+    DescriptorSetLayoutVulkan(
+        DeviceVulkan* device,
+        VkDescriptorSetLayout layout) noexcept;
+
+    ~DescriptorSetLayoutVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkDescriptorSetLayout _layout;
+    vector<RootSignatureBinding> _rootBindings;
+    vector<RootSignatureSetElement> _bindingElements;
+};
+
+class PipelineLayoutVulkan final : public RootSignature {
+public:
+    PipelineLayoutVulkan(
+        DeviceVulkan* device,
+        VkPipelineLayout layout) noexcept;
+
+    ~PipelineLayoutVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkPipelineLayout _layout;
+    vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);
