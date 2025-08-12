@@ -13,6 +13,7 @@ static TimelineSemaphoreVulkan* CastVkObject(Fence* p) noexcept { return static_
 static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+static ShaderModuleVulkan* CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -530,6 +531,33 @@ Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     return result;
 }
 
+Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
+    static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
+    if (desc.Category != ShaderBlobCategory::SPIRV) {
+        RADRAY_ERR_LOG("vk only support SPIR-V");
+        return nullptr;
+    }
+    if (desc.Source.size() % 4 != 0) {
+        RADRAY_ERR_LOG("vk SPIR-V code byte size must be a multiple of 4");
+        return nullptr;
+    }
+    size_t realSize = desc.Source.size();
+    const uint32_t* code = std::bit_cast<const uint32_t*>(desc.Source.data());
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.codeSize = realSize;
+    createInfo.pCode = code;
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateShaderModule(_device, &createInfo, this->GetAllocationCallbacks(), &shaderModule);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateShaderModule failed: {}", vr);
+        return nullptr;
+    }
+    return make_shared<ShaderModuleVulkan>(this, shaderModule);
+}
+
 Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> descSetLayouts;
@@ -613,10 +641,69 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
 }
 
 Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    vector<VkPipelineShaderStageCreateInfo> shaderStages;
+    {
+        struct ShaderWithStage {
+            std::optional<ShaderEntry> shader;
+            VkShaderStageFlagBits stage;
+        };
+        ShaderWithStage ss[] = {
+            {desc.VS, VK_SHADER_STAGE_VERTEX_BIT},
+            {desc.PS, VK_SHADER_STAGE_FRAGMENT_BIT}};
+        size_t cnt = 0;
+        for (const auto& i : ss) {
+            if (i.shader.has_value()) cnt++;
+        }
+        shaderStages.reserve(cnt);
+        for (const auto& i : ss) {
+            if (!i.shader.has_value()) continue;
+            const auto& src = i.shader.value();
+            auto shaderVulkan = CastVkObject(src.Target);
+            auto& stage = shaderStages.emplace_back();
+            stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stage.pNext = nullptr;
+            stage.flags = 0;
+            stage.stage = i.stage;
+            stage.module = shaderVulkan->_shaderModule;
+            stage.pName = src.EntryPoint.data();
+            stage.pSpecializationInfo = nullptr;
+        }
+    }
+    vector<VkVertexInputBindingDescription> vertexInputBindings;
+    vector<VkVertexInputAttributeDescription> vertexInputAttributes;
+    {
+        vertexInputBindings.reserve(desc.VertexBuffers.size());
+        for (size_t i = 0; i < desc.VertexBuffers.size(); i++) {
+            const auto& vbl = desc.VertexBuffers[i];
+            auto& bindingDesc = vertexInputBindings.emplace_back();
+            bindingDesc.binding = static_cast<uint32_t>(i);
+            bindingDesc.stride = static_cast<uint32_t>(vbl.ArrayStride);
+            bindingDesc.inputRate = MapType(vbl.StepMode);
+            for (auto&& j : vbl.Elements) {
+                auto& attributeDesc = vertexInputAttributes.emplace_back();
+                attributeDesc.location = static_cast<uint32_t>(j.Location);
+                attributeDesc.binding = bindingDesc.binding;
+                attributeDesc.format = MapType(j.Format);
+                attributeDesc.offset = static_cast<uint32_t>(j.Offset);
+            }
+        }
+    }
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.pNext = nullptr;
+    vertexInputInfo.flags = 0;
+    vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexInputBindings.size());
+    vertexInputInfo.pVertexBindingDescriptions = vertexInputBindings.empty() ? nullptr : vertexInputBindings.data();
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInputAttributes.size());
+    vertexInputInfo.pVertexAttributeDescriptions = vertexInputAttributes.empty() ? nullptr : vertexInputAttributes.data();
+    // TODO:
     VkGraphicsPipelineCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     createInfo.pNext = nullptr;
     createInfo.flags = 0;
+    createInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+    createInfo.pStages = shaderStages.empty() ? nullptr : shaderStages.data();
+    createInfo.pVertexInputState = &vertexInputInfo;
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
@@ -2213,6 +2300,31 @@ void GraphicsPipelineVulkan::DestroyImpl() noexcept {
     if (_pipeline != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;
+    }
+}
+
+ShaderModuleVulkan::ShaderModuleVulkan(
+    DeviceVulkan* device,
+    VkShaderModule shaderModule) noexcept
+    : _device(device),
+      _shaderModule(shaderModule) {}
+
+ShaderModuleVulkan::~ShaderModuleVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool ShaderModuleVulkan::IsValid() const noexcept {
+    return _shaderModule != VK_NULL_HANDLE;
+}
+
+void ShaderModuleVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void ShaderModuleVulkan::DestroyImpl() noexcept {
+    if (_shaderModule != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyShaderModule(_device->_device, _shaderModule, _device->GetAllocationCallbacks());
+        _shaderModule = VK_NULL_HANDLE;
     }
 }
 

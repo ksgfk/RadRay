@@ -398,6 +398,7 @@ class Buffer;
 class BufferView;
 class Texture;
 class TextureView;
+class Shader;
 class RootSignature;
 class PipelineState;
 class GraphicsPipelineState;
@@ -581,8 +582,8 @@ struct BufferViewDescriptor {
     BufferUses Usage;
 };
 
-struct ShaderSource {
-    std::span<byte> Src;
+struct ShaderDescriptor {
+    std::span<const byte> Source;
     ShaderBlobCategory Category;
 };
 
@@ -695,10 +696,15 @@ struct ColorTargetState {
     bool BlendEnable;
 };
 
+struct ShaderEntry {
+    Shader* Target;
+    std::string_view EntryPoint;
+};
+
 struct GraphicsPipelineStateDescriptor {
     RootSignature* RootSig;
-    Nullable<ShaderSource> VS;
-    Nullable<ShaderSource> PS;
+    std::optional<ShaderEntry> VS;
+    std::optional<ShaderEntry> PS;
     std::span<VertexBufferLayout> VertexBuffers;
     PrimitiveState Primitive;
     DepthStencilState DepthStencil;
@@ -730,6 +736,8 @@ public:
     virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
 
@@ -837,6 +845,13 @@ public:
     virtual ~TextureView() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
+};
+
+class Shader : public Resource {
+public:
+    virtual ~Shader() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Shader; }
 };
 
 class RootSignature : public RenderBase {

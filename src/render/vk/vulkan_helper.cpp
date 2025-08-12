@@ -363,6 +363,50 @@ VkDescriptorType MapType(ResourceBindType v) noexcept {
     }
 }
 
+VkVertexInputRate MapType(VertexStepMode v) noexcept {
+    switch (v) {
+        case VertexStepMode::Vertex: return VK_VERTEX_INPUT_RATE_VERTEX;
+        case VertexStepMode::Instance: return VK_VERTEX_INPUT_RATE_INSTANCE;
+        default: return VK_VERTEX_INPUT_RATE_MAX_ENUM;
+    }
+}
+
+VkFormat MapType(VertexFormat v) noexcept {
+    switch (v) {
+        case VertexFormat::UINT8X2: return VK_FORMAT_R8G8_UINT;
+        case VertexFormat::UINT8X4: return VK_FORMAT_R8G8B8A8_UINT;
+        case VertexFormat::SINT8X2: return VK_FORMAT_R8G8_SINT;
+        case VertexFormat::SINT8X4: return VK_FORMAT_R8G8B8A8_SINT;
+        case VertexFormat::UNORM8X2: return VK_FORMAT_R8G8_UNORM;
+        case VertexFormat::UNORM8X4: return VK_FORMAT_R8G8B8A8_UNORM;
+        case VertexFormat::SNORM8X2: return VK_FORMAT_R8G8_SNORM;
+        case VertexFormat::SNORM8X4: return VK_FORMAT_R8G8B8A8_SNORM;
+        case VertexFormat::UINT16X2: return VK_FORMAT_R16G16_UINT;
+        case VertexFormat::UINT16X4: return VK_FORMAT_R16G16B16A16_UINT;
+        case VertexFormat::SINT16X2: return VK_FORMAT_R16G16_SINT;
+        case VertexFormat::SINT16X4: return VK_FORMAT_R16G16B16A16_SINT;
+        case VertexFormat::UNORM16X2: return VK_FORMAT_R16G16_UNORM;
+        case VertexFormat::UNORM16X4: return VK_FORMAT_R16G16B16A16_UNORM;
+        case VertexFormat::SNORM16X2: return VK_FORMAT_R16G16_SNORM;
+        case VertexFormat::SNORM16X4: return VK_FORMAT_R16G16B16A16_SNORM;
+        case VertexFormat::FLOAT16X2: return VK_FORMAT_R16G16_SFLOAT;
+        case VertexFormat::FLOAT16X4: return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case VertexFormat::UINT32: return VK_FORMAT_R32_UINT;
+        case VertexFormat::UINT32X2: return VK_FORMAT_R32G32_UINT;
+        case VertexFormat::UINT32X3: return VK_FORMAT_R32G32B32_UINT;
+        case VertexFormat::UINT32X4: return VK_FORMAT_R32G32B32A32_UINT;
+        case VertexFormat::SINT32: return VK_FORMAT_R32_SINT;
+        case VertexFormat::SINT32X2: return VK_FORMAT_R32G32_SINT;
+        case VertexFormat::SINT32X3: return VK_FORMAT_R32G32B32_SINT;
+        case VertexFormat::SINT32X4: return VK_FORMAT_R32G32B32A32_SINT;
+        case VertexFormat::FLOAT32: return VK_FORMAT_R32_SFLOAT;
+        case VertexFormat::FLOAT32X2: return VK_FORMAT_R32G32_SFLOAT;
+        case VertexFormat::FLOAT32X3: return VK_FORMAT_R32G32B32_SFLOAT;
+        case VertexFormat::FLOAT32X4: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

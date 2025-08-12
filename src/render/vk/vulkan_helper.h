@@ -69,6 +69,8 @@ VkAttachmentStoreOp MapType(StoreAction v) noexcept;
 VmaMemoryUsage MapType(MemoryType v) noexcept;
 VkShaderStageFlags MapType(ShaderStages v) noexcept;
 VkDescriptorType MapType(ResourceBindType v) noexcept;
+VkVertexInputRate MapType(VertexStepMode v) noexcept;
+VkFormat MapType(VertexFormat v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;

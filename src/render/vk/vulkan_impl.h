@@ -33,6 +33,7 @@ class ImageViewVulkan;
 class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
 class GraphicsPipelineVulkan;
+class ShaderModuleVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -120,6 +121,8 @@ public:
     Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+
+    Nullable<shared_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
@@ -614,6 +617,25 @@ public:
 
     DeviceVulkan* _device;
     VkPipeline _pipeline;
+};
+
+class ShaderModuleVulkan final : public Shader {
+public:
+    ShaderModuleVulkan(
+        DeviceVulkan* device,
+        VkShaderModule shaderModule) noexcept;
+
+    ~ShaderModuleVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkShaderModule _shaderModule;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);
