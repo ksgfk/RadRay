@@ -392,11 +392,15 @@ class CommandBuffer;
 class CommandEncoder;
 class Fence;
 class SwapChain;
+class Resource;
+class ResourceView;
 class Buffer;
 class BufferView;
 class Texture;
 class TextureView;
 class RootSignature;
+class PipelineState;
+class GraphicsPipelineState;
 
 class RenderBase {
 public:
@@ -614,6 +618,95 @@ struct RootSignatureDescriptor {
     std::optional<RootSignatureConstant> Constant;
 };
 
+struct VertexElement {
+    uint64_t Offset;
+    std::string_view Semantic;
+    uint32_t SemanticIndex;
+    VertexFormat Format;
+    uint32_t Location;
+};
+
+struct VertexBufferLayout {
+    uint64_t ArrayStride;
+    VertexStepMode StepMode;
+    std::span<VertexElement> Elements;
+};
+
+struct PrimitiveState {
+    PrimitiveTopology Topology;
+    IndexFormat StripIndexFormat;
+    FrontFace FaceClockwise;
+    CullMode Cull;
+    PolygonMode Poly;
+    bool UnclippedDepth;
+    bool Conservative;
+};
+
+struct StencilFaceState {
+    CompareFunction Compare;
+    StencilOperation FailOp;
+    StencilOperation DepthFailOp;
+    StencilOperation PassOp;
+};
+
+struct StencilState {
+    StencilFaceState Front;
+    StencilFaceState Back;
+    uint32_t ReadMask;
+    uint32_t WriteMask;
+};
+
+struct DepthBiasState {
+    int32_t Constant;
+    float SlopScale;
+    float Clamp;
+};
+
+struct DepthStencilState {
+    TextureFormat Format;
+    CompareFunction DepthCompare;
+    StencilState Stencil;
+    DepthBiasState DepthBias;
+    bool DepthWriteEnable;
+    bool StencilEnable;
+};
+
+struct MultiSampleState {
+    uint32_t Count;
+    uint64_t Mask;
+    bool AlphaToCoverageEnable;
+};
+
+struct BlendComponent {
+    BlendFactor Src;
+    BlendFactor Dst;
+    BlendOperation Op;
+};
+
+struct BlendState {
+    BlendComponent Color;
+    BlendComponent Alpha;
+};
+
+struct ColorTargetState {
+    TextureFormat Format;
+    BlendState Blend;
+    ColorWrites WriteMask;
+    bool BlendEnable;
+};
+
+struct GraphicsPipelineStateDescriptor {
+    RootSignature* RootSig;
+    Nullable<ShaderSource> VS;
+    Nullable<ShaderSource> PS;
+    std::span<VertexBufferLayout> VertexBuffers;
+    PrimitiveState Primitive;
+    DepthStencilState DepthStencil;
+    MultiSampleState MultiSample;
+    std::span<ColorTargetState> ColorTargets;
+    bool DepthStencilEnable;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -639,6 +732,8 @@ public:
     virtual Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -749,6 +844,18 @@ public:
     virtual ~RootSignature() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
+};
+
+class PipelineState : public RenderBase {
+public:
+    virtual ~PipelineState() noexcept = default;
+};
+
+class GraphicsPipelineState : public PipelineState {
+public:
+    virtual ~GraphicsPipelineState() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsPipelineState; }
 };
 
 bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);

@@ -32,6 +32,7 @@ class ImageVulkan;
 class ImageViewVulkan;
 class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
+class GraphicsPipelineVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -121,6 +122,8 @@ public:
     Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
+
+    Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
@@ -592,6 +595,25 @@ public:
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
+};
+
+class GraphicsPipelineVulkan final : public GraphicsPipelineState {
+public:
+    GraphicsPipelineVulkan(
+        DeviceVulkan* device,
+        VkPipeline pipeline) noexcept;
+
+    ~GraphicsPipelineVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkPipeline _pipeline;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);

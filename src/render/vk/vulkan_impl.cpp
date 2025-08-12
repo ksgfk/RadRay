@@ -612,6 +612,21 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     return result;
 }
 
+Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    VkGraphicsPipelineCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateGraphicsPipelines failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<GraphicsPipelineVulkan>(this, pipeline);
+    return result;
+}
+
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -2173,6 +2188,31 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     if (_layout != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
         _layout = VK_NULL_HANDLE;
+    }
+}
+
+GraphicsPipelineVulkan::GraphicsPipelineVulkan(
+    DeviceVulkan* device,
+    VkPipeline pipeline) noexcept
+    : _device(device),
+      _pipeline(pipeline) {}
+
+GraphicsPipelineVulkan::~GraphicsPipelineVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool GraphicsPipelineVulkan::IsValid() const noexcept {
+    return _pipeline != VK_NULL_HANDLE;
+}
+
+void GraphicsPipelineVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void GraphicsPipelineVulkan::DestroyImpl() noexcept {
+    if (_pipeline != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
+        _pipeline = VK_NULL_HANDLE;
     }
 }
 
