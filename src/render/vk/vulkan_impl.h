@@ -46,6 +46,10 @@ struct ExtFeaturesVulkan {
     VkPhysicalDeviceVulkan13Features feature13;
 };
 
+struct ExtPropertiesVulkan {
+    std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
+};
+
 class InstanceVulkan final : public RenderBase {
 public:
     InstanceVulkan(
@@ -151,6 +155,8 @@ public:
     DeviceFuncTable _ftb;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
+    VkPhysicalDeviceProperties _properties;
+    ExtPropertiesVulkan _extProperties;
 };
 
 class QueueVulkan final : public CommandQueue {

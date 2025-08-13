@@ -14,6 +14,7 @@ static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<Buffe
 static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
 static ShaderModuleVulkan* CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+static PipelineLayoutVulkan* CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -672,9 +673,9 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vector<VkVertexInputBindingDescription> vertexInputBindings;
     vector<VkVertexInputAttributeDescription> vertexInputAttributes;
     {
-        vertexInputBindings.reserve(desc.VertexBuffers.size());
-        for (size_t i = 0; i < desc.VertexBuffers.size(); i++) {
-            const auto& vbl = desc.VertexBuffers[i];
+        vertexInputBindings.reserve(desc.VertexLayouts.size());
+        for (size_t i = 0; i < desc.VertexLayouts.size(); i++) {
+            const auto& vbl = desc.VertexLayouts[i];
             auto& bindingDesc = vertexInputBindings.emplace_back();
             bindingDesc.binding = static_cast<uint32_t>(i);
             bindingDesc.stride = static_cast<uint32_t>(vbl.ArrayStride);
@@ -696,7 +697,124 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vertexInputInfo.pVertexBindingDescriptions = vertexInputBindings.empty() ? nullptr : vertexInputBindings.data();
     vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInputAttributes.size());
     vertexInputInfo.pVertexAttributeDescriptions = vertexInputAttributes.empty() ? nullptr : vertexInputAttributes.data();
-    // TODO:
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo{};
+    inputAssemblyInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssemblyInfo.pNext = nullptr;
+    inputAssemblyInfo.flags = 0;
+    inputAssemblyInfo.topology = MapType(desc.Primitive.Topology);
+    inputAssemblyInfo.primitiveRestartEnable = desc.Primitive.StripIndexFormat.has_value() ? VK_TRUE : VK_FALSE;
+    VkPipelineViewportStateCreateInfo viewportInfo{};
+    viewportInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportInfo.pNext = nullptr;
+    viewportInfo.flags = 0;
+    viewportInfo.viewportCount = 1;
+    viewportInfo.pViewports = nullptr;
+    viewportInfo.scissorCount = 1;
+    viewportInfo.pScissors = nullptr;
+    VkPipelineRasterizationStateCreateInfo rasterInfo{};
+    rasterInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterInfo.pNext = nullptr;
+    rasterInfo.flags = 0;
+    rasterInfo.depthClampEnable = desc.Primitive.UnclippedDepth;
+    rasterInfo.rasterizerDiscardEnable = VK_FALSE;
+    rasterInfo.polygonMode = MapType(desc.Primitive.Poly);
+    rasterInfo.cullMode = MapType(desc.Primitive.Cull);
+    rasterInfo.frontFace = MapType(desc.Primitive.FaceClockwise);
+    rasterInfo.depthBiasEnable = VK_FALSE;
+    rasterInfo.depthBiasConstantFactor = 0.0f;
+    rasterInfo.depthBiasClamp = 0.0f;
+    rasterInfo.depthBiasSlopeFactor = 0.0f;
+    rasterInfo.lineWidth = 1.0f;
+    VkPipelineRasterizationConservativeStateCreateInfoEXT rasterConservativeInfo{};
+    if (desc.Primitive.Conservative && _extProperties.conservativeRasterization.has_value()) {
+        rasterConservativeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT;
+        rasterConservativeInfo.pNext = nullptr;
+        rasterConservativeInfo.flags = 0;
+        rasterConservativeInfo.conservativeRasterizationMode = VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+        rasterConservativeInfo.extraPrimitiveOverestimationSize = 0.0f;
+        AddToHeadVulkanStruct(rasterInfo, rasterConservativeInfo);
+    }
+    VkPipelineDepthStencilStateCreateInfo depthStencilInfo{};
+    depthStencilInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencilInfo.pNext = nullptr;
+    depthStencilInfo.flags = 0;
+    depthStencilInfo.depthTestEnable = VK_FALSE;
+    depthStencilInfo.stencilTestEnable = VK_FALSE;
+    if (desc.DepthStencil.has_value()) {
+        const auto& ds = desc.DepthStencil.value();
+        if (ds.DepthBias.Constant != 0.0f || ds.DepthBias.SlopScale != 0.0f) {
+            rasterInfo.depthBiasEnable = VK_TRUE;
+            rasterInfo.depthBiasConstantFactor = ds.DepthBias.Constant;
+            rasterInfo.depthBiasClamp = ds.DepthBias.Clamp;
+            rasterInfo.depthBiasSlopeFactor = ds.DepthBias.SlopScale;
+        }
+        depthStencilInfo.depthTestEnable = VK_TRUE;
+        depthStencilInfo.depthWriteEnable = ds.DepthWriteEnable ? VK_TRUE : VK_FALSE;
+        depthStencilInfo.depthCompareOp = MapType(ds.DepthCompare);
+        depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
+        depthStencilInfo.minDepthBounds = 0.0f;
+        depthStencilInfo.maxDepthBounds = 0.0f;
+        if (ds.Stencil.has_value()) {
+            const auto& stencil = ds.Stencil.value();
+            depthStencilInfo.stencilTestEnable = VK_TRUE;
+            depthStencilInfo.front = MapType(stencil.Front, stencil.ReadMask, stencil.WriteMask);
+            depthStencilInfo.back = MapType(stencil.Back, stencil.ReadMask, stencil.WriteMask);
+        }
+    }
+    VkSampleMask sampleMask[2] = {
+        static_cast<VkSampleMask>(desc.MultiSample.Mask & 0xFFFFFFFF),
+        static_cast<VkSampleMask>((desc.MultiSample.Mask >> 32) & 0xFFFFFFFF)};
+    VkPipelineMultisampleStateCreateInfo multisampleInfo{};
+    multisampleInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampleInfo.pNext = nullptr;
+    multisampleInfo.flags = 0;
+    multisampleInfo.rasterizationSamples = MapSampleCount(desc.MultiSample.Count);
+    multisampleInfo.sampleShadingEnable = VK_FALSE;
+    multisampleInfo.minSampleShading = 0.0f;
+    multisampleInfo.pSampleMask = sampleMask;
+    multisampleInfo.alphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable ? VK_TRUE : VK_FALSE;
+    multisampleInfo.alphaToOneEnable = VK_FALSE;
+    vector<VkPipelineColorBlendAttachmentState> blendAttachments;
+    for (const auto& target : desc.ColorTargets) {
+        auto& blend = blendAttachments.emplace_back();
+        blend.blendEnable = target.Blend.has_value() ? VK_TRUE : VK_FALSE;
+        blend.colorWriteMask = MapType(target.WriteMask);
+        if (target.Blend.has_value()) {
+            const auto& b = target.Blend.value();
+            auto [colorOp, colorSrc, colorDst] = MapType(b.Color);
+            auto [alphaOp, alphaSrc, alphaDst] = MapType(b.Alpha);
+            blend.colorBlendOp = colorOp;
+            blend.srcColorBlendFactor = colorSrc;
+            blend.dstColorBlendFactor = colorDst;
+            blend.alphaBlendOp = alphaOp;
+            blend.srcAlphaBlendFactor = alphaSrc;
+            blend.dstAlphaBlendFactor = alphaDst;
+        }
+    }
+    VkPipelineColorBlendStateCreateInfo blendInfo{};
+    blendInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blendInfo.pNext = nullptr;
+    blendInfo.flags = 0;
+    blendInfo.logicOpEnable = VK_FALSE;
+    blendInfo.logicOp = VK_LOGIC_OP_COPY;
+    blendInfo.attachmentCount = static_cast<uint32_t>(desc.ColorTargets.size());
+    blendInfo.pAttachments = blendAttachments.empty() ? nullptr : blendAttachments.data();
+    blendInfo.blendConstants[0] = 0.0f;
+    blendInfo.blendConstants[1] = 0.0f;
+    blendInfo.blendConstants[2] = 0.0f;
+    blendInfo.blendConstants[3] = 0.0f;
+    vector<VkDynamicState> dynStates;
+    dynStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
+    dynStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
+    dynStates.emplace_back(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
+    dynStates.emplace_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
+    VkPipelineDynamicStateCreateInfo dynStateInfo{};
+    dynStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynStateInfo.pNext = nullptr;
+    dynStateInfo.flags = 0;
+    dynStateInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
+    dynStateInfo.pDynamicStates = dynStates.empty() ? nullptr : dynStates.data();
+    auto rs = CastVkObject(desc.RootSig);
     VkGraphicsPipelineCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -704,6 +822,16 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
     createInfo.pStages = shaderStages.empty() ? nullptr : shaderStages.data();
     createInfo.pVertexInputState = &vertexInputInfo;
+    createInfo.pInputAssemblyState = &inputAssemblyInfo;
+    createInfo.pTessellationState = nullptr;
+    createInfo.pViewportState = &viewportInfo;
+    createInfo.pRasterizationState = &rasterInfo;
+    createInfo.pMultisampleState = &multisampleInfo;
+    createInfo.pDepthStencilState = &depthStencilInfo;
+    createInfo.pColorBlendState = &blendInfo;
+    createInfo.pDynamicState = &dynStateInfo;
+    createInfo.layout = rs->_layout;
+    // TODO:
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
@@ -1142,14 +1270,26 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         }
     }
 
+    auto extProperties = make_unique<ExtPropertiesVulkan>();
     unordered_set<string> needExts;
     needExts.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-
     vector<VkExtensionProperties> deviceExtsAvailable;
-    if (EnumerateVectorFromVkFunc(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr) != VK_SUCCESS) {
+    if (auto vr = EnumerateVectorFromVkFunc(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr);
+        vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateDeviceExtensionProperties failed");
         return nullptr;
+    }
+    VkPhysicalDeviceProperties2 deviceProperties2{};
+    deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    deviceProperties2.pNext = nullptr;
+    if (IsValidateExtensions(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, deviceExtsAvailable)) {
+        needExts.emplace(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+        extProperties->conservativeRasterization = VkPhysicalDeviceConservativeRasterizationPropertiesEXT{};
+        auto& cr = extProperties->conservativeRasterization.value();
+        cr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT;
+        cr.pNext = nullptr;
+        AddToHeadVulkanStruct(deviceProperties2, cr);
     }
     for (const auto& ext : needExts) {
         const char* exts[] = {ext.c_str()};
@@ -1157,6 +1297,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             RADRAY_ERR_LOG("vk device extension {} not supported", ext);
             return nullptr;
         }
+    }
+    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceProperties2) {
+        vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
     }
 
     vector<const char*> deviceExts{};
@@ -1183,19 +1326,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceFeatures2.pNext = nullptr;
     if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceFeatures2) {
         extFeatures->feature11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-        extFeatures->feature11.pNext = nullptr;
-        deviceFeatures2.pNext = &extFeatures->feature11;
+        AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature11);
 
         extFeatures->feature12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         extFeatures->feature12.pNext = nullptr;
         if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2) {
-            extFeatures->feature11.pNext = &extFeatures->feature12;
+            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature12);
         }
 
         extFeatures->feature13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         extFeatures->feature13.pNext = nullptr;
         if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_3) {
-            extFeatures->feature12.pNext = &extFeatures->feature13;
+            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature13);
         }
 
         vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
@@ -1258,6 +1400,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         deviceR->_feature = deviceFeatures2.features;
     }
     deviceR->_extFeatures = *extFeatures;
+    deviceR->_properties = selectPhyDevice.properties;
+    deviceR->_extProperties = *extProperties;
 
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -1297,6 +1441,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     {
         RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
+    }
+    {
+        RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     }
     RADRAY_INFO_LOG("=============================");
     return deviceR;

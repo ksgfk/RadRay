@@ -627,7 +627,7 @@ struct VertexElement {
     uint32_t Location;
 };
 
-struct VertexBufferLayout {
+struct VertexLayout {
     uint64_t ArrayStride;
     VertexStepMode StepMode;
     std::span<VertexElement> Elements;
@@ -635,10 +635,10 @@ struct VertexBufferLayout {
 
 struct PrimitiveState {
     PrimitiveTopology Topology;
-    IndexFormat StripIndexFormat;
     FrontFace FaceClockwise;
     CullMode Cull;
     PolygonMode Poly;
+    std::optional<IndexFormat> StripIndexFormat;
     bool UnclippedDepth;
     bool Conservative;
 };
@@ -666,10 +666,9 @@ struct DepthBiasState {
 struct DepthStencilState {
     TextureFormat Format;
     CompareFunction DepthCompare;
-    StencilState Stencil;
     DepthBiasState DepthBias;
+    std::optional<StencilState> Stencil;
     bool DepthWriteEnable;
-    bool StencilEnable;
 };
 
 struct MultiSampleState {
@@ -691,9 +690,8 @@ struct BlendState {
 
 struct ColorTargetState {
     TextureFormat Format;
-    BlendState Blend;
+    std::optional<BlendState> Blend;
     ColorWrites WriteMask;
-    bool BlendEnable;
 };
 
 struct ShaderEntry {
@@ -705,12 +703,11 @@ struct GraphicsPipelineStateDescriptor {
     RootSignature* RootSig;
     std::optional<ShaderEntry> VS;
     std::optional<ShaderEntry> PS;
-    std::span<VertexBufferLayout> VertexBuffers;
+    std::span<VertexLayout> VertexLayouts;
     PrimitiveState Primitive;
-    DepthStencilState DepthStencil;
+    std::optional<DepthStencilState> DepthStencil;
     MultiSampleState MultiSample;
     std::span<ColorTargetState> ColorTargets;
-    bool DepthStencilEnable;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {

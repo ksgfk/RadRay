@@ -31,6 +31,15 @@ bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtension
     return allFound;
 }
 
+bool IsValidateExtensions(std::string_view required, std::span<VkExtensionProperties> available) noexcept {
+    for (const auto& availableExtension : available) {
+        if (std::strcmp(availableExtension.extensionName, required.data()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept {
     bool allFound = true;
     for (const auto* layerName : required) {
@@ -404,6 +413,135 @@ VkFormat MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X3: return VK_FORMAT_R32G32B32_SFLOAT;
         case VertexFormat::FLOAT32X4: return VK_FORMAT_R32G32B32A32_SFLOAT;
         default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
+VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept {
+    switch (v) {
+        case PrimitiveTopology::PointList: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        case PrimitiveTopology::LineList: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        case PrimitiveTopology::LineStrip: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+        case PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        case PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        default: return VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    }
+}
+
+VkPolygonMode MapType(PolygonMode v) noexcept {
+    switch (v) {
+        case PolygonMode::Fill: return VK_POLYGON_MODE_FILL;
+        case PolygonMode::Line: return VK_POLYGON_MODE_LINE;
+        case PolygonMode::Point: return VK_POLYGON_MODE_POINT;
+        default: return VK_POLYGON_MODE_MAX_ENUM;
+    }
+}
+
+VkCullModeFlags MapType(CullMode v) noexcept {
+    switch (v) {
+        case CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
+        case CullMode::Back: return VK_CULL_MODE_BACK_BIT;
+        case CullMode::None: return VK_CULL_MODE_NONE;
+        default: return VK_CULL_MODE_FLAG_BITS_MAX_ENUM;
+    }
+}
+
+VkFrontFace MapType(FrontFace v) noexcept {
+    switch (v) {
+        case FrontFace::CCW: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        case FrontFace::CW: return VK_FRONT_FACE_CLOCKWISE;
+        default: return VK_FRONT_FACE_MAX_ENUM;
+    }
+}
+
+VkCompareOp MapType(CompareFunction v) noexcept {
+    switch (v) {
+        case CompareFunction::Never: return VK_COMPARE_OP_NEVER;
+        case CompareFunction::Less: return VK_COMPARE_OP_LESS;
+        case CompareFunction::Equal: return VK_COMPARE_OP_EQUAL;
+        case CompareFunction::LessEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case CompareFunction::Greater: return VK_COMPARE_OP_GREATER;
+        case CompareFunction::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+        case CompareFunction::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case CompareFunction::Always: return VK_COMPARE_OP_ALWAYS;
+        default: return VK_COMPARE_OP_MAX_ENUM;
+    }
+}
+
+VkStencilOpState MapType(StencilFaceState v, uint32_t readMask, uint32_t writeMask) noexcept {
+    return VkStencilOpState{
+        MapType(v.FailOp),
+        MapType(v.PassOp),
+        MapType(v.DepthFailOp),
+        MapType(v.Compare),
+        readMask,
+        writeMask,
+        0};
+}
+
+VkStencilOp MapType(StencilOperation v) noexcept {
+    switch (v) {
+        case StencilOperation::Keep: return VK_STENCIL_OP_KEEP;
+        case StencilOperation::Zero: return VK_STENCIL_OP_ZERO;
+        case StencilOperation::Replace: return VK_STENCIL_OP_REPLACE;
+        case StencilOperation::Invert: return VK_STENCIL_OP_INVERT;
+        case StencilOperation::IncrementClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        case StencilOperation::DecrementClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+        case StencilOperation::IncrementWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        case StencilOperation::DecrementWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+        default: return VK_STENCIL_OP_MAX_ENUM;
+    }
+}
+
+BlendComponentVulkan MapType(BlendComponent v) noexcept {
+    return BlendComponentVulkan{
+        MapType(v.Op),
+        MapType(v.Src),
+        MapType(v.Dst)};
+}
+
+VkBlendOp MapType(BlendOperation v) noexcept {
+    switch (v) {
+        case BlendOperation::Add: return VK_BLEND_OP_ADD;
+        case BlendOperation::Subtract: return VK_BLEND_OP_SUBTRACT;
+        case BlendOperation::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case BlendOperation::Min: return VK_BLEND_OP_MIN;
+        case BlendOperation::Max: return VK_BLEND_OP_MAX;
+        default: return VK_BLEND_OP_MAX_ENUM;
+    }
+}
+
+VkBlendFactor MapType(BlendFactor v) noexcept {
+    switch (v) {
+        case BlendFactor::Zero: return VK_BLEND_FACTOR_ZERO;
+        case BlendFactor::One: return VK_BLEND_FACTOR_ONE;
+        case BlendFactor::Src: return VK_BLEND_FACTOR_SRC_COLOR;
+        case BlendFactor::OneMinusSrc: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case BlendFactor::SrcAlpha: return VK_BLEND_FACTOR_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case BlendFactor::Dst: return VK_BLEND_FACTOR_DST_COLOR;
+        case BlendFactor::OneMinusDst: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case BlendFactor::DstAlpha: return VK_BLEND_FACTOR_DST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        case BlendFactor::SrcAlphaSaturated: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+        case BlendFactor::Constant: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+        case BlendFactor::OneMinusConstant: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+        case BlendFactor::Src1: return VK_BLEND_FACTOR_SRC1_COLOR;
+        case BlendFactor::OneMinusSrc1: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+        case BlendFactor::Src1Alpha: return VK_BLEND_FACTOR_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1Alpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+        default: return VK_BLEND_FACTOR_MAX_ENUM;
+    }
+}
+
+VkColorComponentFlags MapType(ColorWrites v) noexcept {
+    switch (v) {
+        case ColorWrite::Red: return VK_COLOR_COMPONENT_R_BIT;
+        case ColorWrite::Green: return VK_COLOR_COMPONENT_G_BIT;
+        case ColorWrite::Blue: return VK_COLOR_COMPONENT_B_BIT;
+        case ColorWrite::Alpha: return VK_COLOR_COMPONENT_A_BIT;
+        case ColorWrite::Color: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
+        case ColorWrite::All: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        default: return VK_COLOR_COMPONENT_FLAG_BITS_MAX_ENUM;
     }
 }
 

@@ -45,8 +45,16 @@ auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&
     return err;
 }
 
+template <class T, class N>
+void AddToHeadVulkanStruct(T& target, N& add) noexcept {
+    void* t = target.pNext;
+    target.pNext = &add;
+    add.pNext = t;
+}
+
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept;
 bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtensionProperties> available) noexcept;
+bool IsValidateExtensions(std::string_view required, std::span<VkExtensionProperties> available) noexcept;
 bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept;
 std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSurfaceKHR surface, std::span<VkFormat> preferred) noexcept;
 
@@ -71,6 +79,22 @@ VkShaderStageFlags MapType(ShaderStages v) noexcept;
 VkDescriptorType MapType(ResourceBindType v) noexcept;
 VkVertexInputRate MapType(VertexStepMode v) noexcept;
 VkFormat MapType(VertexFormat v) noexcept;
+VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept;
+VkPolygonMode MapType(PolygonMode v) noexcept;
+VkCullModeFlags MapType(CullMode v) noexcept;
+VkFrontFace MapType(FrontFace v) noexcept;
+VkCompareOp MapType(CompareFunction v) noexcept;
+VkStencilOpState MapType(StencilFaceState v, uint32_t readMask, uint32_t writeMask) noexcept;
+VkStencilOp MapType(StencilOperation v) noexcept;
+struct BlendComponentVulkan {
+    VkBlendOp op;
+    VkBlendFactor src;
+    VkBlendFactor dst;
+};
+BlendComponentVulkan MapType(BlendComponent v) noexcept;
+VkBlendOp MapType(BlendOperation v) noexcept;
+VkBlendFactor MapType(BlendFactor v) noexcept;
+VkColorComponentFlags MapType(ColorWrites v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;
