@@ -47,7 +47,7 @@ auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&
 
 template <class T, class N>
 void AddToHeadVulkanStruct(T& target, N& add) noexcept {
-    void* t = target.pNext;
+    auto t = target.pNext;
     target.pNext = &add;
     add.pNext = t;
 }

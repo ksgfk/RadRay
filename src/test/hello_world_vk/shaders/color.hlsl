@@ -5,13 +5,13 @@ const static float3 g_Color[3] = {
 
 struct V2P {
     float4 pos : SV_POSITION;
-    float3 color: COLOR0;
+    [[vk::location(0)]] float3 color: COLOR0;
 };
 
-V2P VSMain(float3 v_vert: POSITION, uint vertId: SV_VertexID) {
+V2P VSMain([[vk::location(0)]] float3 v_vert: POSITION, uint vertId: SV_VertexID) {
     V2P v2p;
     v2p.pos = float4(v_vert, 1);
-    v2p.color = g_Color[vertId];
+    v2p.color = g_Color[vertId % 3];
     return v2p;
 }
 

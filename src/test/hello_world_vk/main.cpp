@@ -4,7 +4,9 @@
 #include <radray/stopwatch.h>
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
+#include <radray/utility.h>
 #include <radray/render/common.h>
+#include <radray/render/dxc.h>
 #include <radray/window/glfw_window.h>
 
 #include "../src/render/vk/vulkan_impl.h"
@@ -34,6 +36,7 @@ Stopwatch sw;
 uint64_t last;
 shared_ptr<vulkan::BufferVulkan> vertBuf;
 shared_ptr<vulkan::BufferVulkan> idxBuf;
+shared_ptr<Dxc> dxc;
 
 void Init() {
     GlobalInitGlfw();
@@ -97,6 +100,24 @@ void Init() {
     CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
     cmdQueue->Submit({submitCmdBuffers, {}, {}, {}, {}});
     cmdQueue->Wait();
+
+    dxc = CreateDxc().Unwrap();
+    {
+        auto hlslStr = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+        auto vsSpv = dxc->Compile(hlslStr, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, true).value();
+        auto psSpv = dxc->Compile(hlslStr, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, true).value();
+        ShaderDescriptor vsDesc{};
+        vsDesc.Source = vsSpv.Data;
+        vsDesc.Category = vsSpv.Category;
+        ShaderDescriptor psDesc{};
+        psDesc.Source = psSpv.Data;
+        psDesc.Category = psSpv.Category;
+        auto vs = device->CreateShader(vsDesc).Unwrap();
+        auto ps = device->CreateShader(psDesc).Unwrap();
+
+        RootSignatureDescriptor rootSigDesc{};
+        auto rootSig = device->CreateRootSignature(rootSigDesc).Unwrap();
+    }
 }
 
 void End() {

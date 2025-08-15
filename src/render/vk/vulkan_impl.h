@@ -143,6 +143,8 @@ public:
 
     Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept;
 
+    Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
+
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
     void DestroyImpl() noexcept;
@@ -623,6 +625,7 @@ public:
 
     DeviceVulkan* _device;
     VkPipeline _pipeline;
+    unique_ptr<RenderPassVulkan> _renderPass;
 };
 
 class ShaderModuleVulkan final : public Shader {

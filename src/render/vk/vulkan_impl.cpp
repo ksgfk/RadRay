@@ -797,7 +797,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     blendInfo.flags = 0;
     blendInfo.logicOpEnable = VK_FALSE;
     blendInfo.logicOp = VK_LOGIC_OP_COPY;
-    blendInfo.attachmentCount = static_cast<uint32_t>(desc.ColorTargets.size());
+    blendInfo.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
     blendInfo.pAttachments = blendAttachments.empty() ? nullptr : blendAttachments.data();
     blendInfo.blendConstants[0] = 0.0f;
     blendInfo.blendConstants[1] = 0.0f;
@@ -814,6 +814,77 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     dynStateInfo.flags = 0;
     dynStateInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
     dynStateInfo.pDynamicStates = dynStates.empty() ? nullptr : dynStates.data();
+    unique_ptr<RenderPassVulkan> renderPass;
+    {
+        vector<VkAttachmentDescription> attachs;
+        vector<VkAttachmentReference> colorRefs;
+        VkAttachmentReference depthRef{};
+        for (const auto& i : desc.ColorTargets) {
+            auto& attach = attachs.emplace_back();
+            attach.flags = 0;
+            attach.format = MapType(i.Format);
+            attach.samples = MapSampleCount(desc.MultiSample.Count);
+            attach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attach.finalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            auto& colorRef = colorRefs.emplace_back();
+            colorRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
+            colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+        if (desc.DepthStencil.has_value()) {
+            const auto& ds = desc.DepthStencil.value();
+            auto& attach = attachs.emplace_back();
+            attach.flags = 0;
+            attach.format = MapType(ds.Format);
+            attach.samples = MapSampleCount(desc.MultiSample.Count);
+            attach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            if (ds.Stencil.has_value()) {
+                attach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                attach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+            } else {
+                attach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            }
+            attach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attach.finalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            depthRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
+            if (desc.DepthStencil->Stencil.has_value()) {
+                depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            } else {
+                depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            }
+        }
+        VkSubpassDescription subpassDesc{};
+        subpassDesc.flags = 0;
+        subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpassDesc.inputAttachmentCount = 0;
+        subpassDesc.pInputAttachments = nullptr;
+        subpassDesc.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
+        subpassDesc.pColorAttachments = colorRefs.empty() ? nullptr : colorRefs.data();
+        subpassDesc.pResolveAttachments = nullptr;
+        subpassDesc.pDepthStencilAttachment = desc.DepthStencil.has_value() ? &depthRef : nullptr;
+        subpassDesc.preserveAttachmentCount = 0;
+        subpassDesc.pPreserveAttachments = nullptr;
+        VkRenderPassCreateInfo passInfo{};
+        passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        passInfo.pNext = nullptr;
+        passInfo.flags = 0;
+        passInfo.attachmentCount = static_cast<uint32_t>(attachs.size());
+        passInfo.pAttachments = attachs.empty() ? nullptr : attachs.data();
+        passInfo.subpassCount = 1;
+        passInfo.pSubpasses = &subpassDesc;
+        passInfo.dependencyCount = 0;
+        passInfo.pDependencies = nullptr;
+        auto renderPassOpt = this->CreateRenderPass(passInfo);
+        if (!renderPassOpt.HasValue()) {
+            return nullptr;
+        }
+        renderPass = renderPassOpt.Release();
+    }
     auto rs = CastVkObject(desc.RootSig);
     VkGraphicsPipelineCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -831,7 +902,10 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.pColorBlendState = &blendInfo;
     createInfo.pDynamicState = &dynStateInfo;
     createInfo.layout = rs->_layout;
-    // TODO:
+    createInfo.renderPass = renderPass->_renderPass;
+    createInfo.subpass = 0;
+    createInfo.basePipelineHandle = VK_NULL_HANDLE;
+    createInfo.basePipelineIndex = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
@@ -839,6 +913,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         return nullptr;
     }
     auto result = make_shared<GraphicsPipelineVulkan>(this, pipeline);
+    result->_renderPass = std::move(renderPass);
     return result;
 }
 
@@ -912,6 +987,16 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         return nullptr;
     }
     return make_unique<DescriptorSetLayoutVulkan>(this, layout);
+}
+
+Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept {
+    VkRenderPass pass;
+    if (auto vr = _ftb.vkCreateRenderPass(_device, &info, this->GetAllocationCallbacks(), &pass);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateRenderPass failed: {}", vr);
+        return nullptr;
+    }
+    return make_unique<RenderPassVulkan>(this, pass);
 }
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
@@ -1836,19 +1921,17 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     passInfo.pNext = nullptr;
     passInfo.flags = 0;
-    passInfo.attachmentCount = static_cast<uint32_t>(desc.ColorAttachments.size());
+    passInfo.attachmentCount = static_cast<uint32_t>(attachs.size());
     passInfo.pAttachments = attachs.empty() ? nullptr : attachs.data();
     passInfo.subpassCount = 1;
     passInfo.pSubpasses = &subpassDesc;
     passInfo.dependencyCount = 0;
     passInfo.pDependencies = nullptr;
-    VkRenderPass pass;
-    if (auto vr = _device->_ftb.vkCreateRenderPass(_device->_device, &passInfo, _device->GetAllocationCallbacks(), &pass);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk call vkCreateRenderPass failed: {}", vr);
+    auto passOpt = _device->CreateRenderPass(passInfo);
+    if (!passOpt.HasValue()) {
         return nullptr;
     }
-    auto passR = make_unique<RenderPassVulkan>(_device, pass);
+    auto passR = passOpt.Release();
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.pNext = nullptr;
@@ -1869,7 +1952,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     VkRenderPassBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     beginInfo.pNext = nullptr;
-    beginInfo.renderPass = pass;
+    beginInfo.renderPass = passR->_renderPass;
     beginInfo.framebuffer = framebuffer;
     beginInfo.renderArea = {{0, 0}, {fbInfo.width, fbInfo.height}};
     beginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
