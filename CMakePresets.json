@@ -1,0 +1,79 @@
+{
+    "version": 10,
+    "configurePresets": [
+        {
+            "name": "win",
+            "generator": "Visual Studio 17 2022"
+        },
+        {
+            "name": "clangcl",
+            "inherits": [
+                "win"
+            ],
+            "toolset": {
+                "value": "ClangCL",
+                "strategy": "set"
+            }
+        },
+        {
+            "name": "x64",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            }
+        },
+        {
+            "name": "debug",
+            "binaryDir": "build_debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "release",
+            "binaryDir": "build_release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "win-x64-debug",
+            "inherits": [
+                "debug",
+                "x64",
+                "win"
+            ]
+        },
+        {
+            "name": "win-x64-release",
+            "inherits": [
+                "release",
+                "x64",
+                "win"
+            ]
+        },
+        {
+            "name": "win-x64-debug-clangcl",
+            "inherits": [
+                "debug",
+                "x64",
+                "clangcl"
+            ]
+        },
+        {
+            "name": "win-x64-release-clangcl",
+            "inherits": [
+                "release",
+                "x64",
+                "clangcl"
+            ]
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "max-parallel",
+            "configurePreset": "win",
+            "jobs": 0
+        }
+    ]
+}

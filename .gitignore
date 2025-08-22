@@ -5,3 +5,6 @@ bin
 
 scripts/options.lua
 assets
+
+build_debug/
+build_release/

@@ -33,7 +33,7 @@ target("radray_render")
         add_files("vk/ext/VulkanMemoryAllocator/src/*.cpp")
     end
 
-    on_install(function (target)
-        local helper = import("scripts.helper", {rootdir = os.projectdir()})
-        helper.copy_dxil_dll(target)
-    end)
+    -- on_install(function (target)
+    --     local helper = import("scripts.helper", {rootdir = os.projectdir()})
+    --     helper.copy_dxil_dll(target)
+    -- end)

@@ -94,7 +94,7 @@ if get_config("enable_d3d12") then
     add_requires("d3d12-memory-allocator v3.0.1", {debug = is_mode("debug")})
 end
 if get_config("enable_dxc") then
-    add_requires("directxshadercompiler_radray v1.8.2505")
+    add_requires("directxshadercompiler_radray v1.8.2505.1")
 end
 if get_config("enable_metal") then 
     add_requires("metal-cpp macOS15_iOS18", {debug = is_mode("debug")})
