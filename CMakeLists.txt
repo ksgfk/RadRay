@@ -112,7 +112,6 @@ if (RADRAY_ENABLE_LIBPNG)
     endif()
     set(PNG_TESTS OFF CACHE BOOL "" FORCE)
     set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
-    set(PNG_EXECUTABLES OFF CACHE BOOL "" FORCE)
     set(PNG_SHARED OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         libpng

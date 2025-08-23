@@ -1,24 +1,21 @@
 # RadRay
 
 ## compile
-* xmake f -m debug/release -v
-* xmake -v
 
-* cmake --preset win-x64-debug/win-x64-release
+* cmake config
+  * cmake --preset win-x64-debug
+  * cmake --preset win-x64-release
 
-tips:
-* make file `options.lua` use template `options.lua.template` in `scripts` folder. can set many settings in `options.lua`
-* cmd command `xmake i -o bin` can export binaries to bin dir
-* [optional] cmd `xmake lua scripts/after_build_test.lua [install]` to copy test assets to build dir
+* generate compile_commands.json on win
+  * .\win_gen_compile_commands.ps1 -BuildDir .\build_debug -Configuration Debug
+  * .\win_gen_compile_commands.ps1 -BuildDir .\build_release -Configuration Release
 
 ## dev env
 * vscode
-  * install extensions: C/C++, XMake, clangd
+  * install extensions: C/C++, clangd
 * suggest settings.json
 ```json
 {
-    "xmake.additionalConfigArguments": [],
-    "xmake.compileCommandsDirectory": ".vscode",
     "C_Cpp.codeAnalysis.runAutomatically": false,
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.formatting": "disabled",
@@ -34,17 +31,6 @@ tips:
         "--background-index-priority=normal",
         "--header-insertion=never",
         "--pch-storage=memory"
-    ],
-    "VSCodeCounter.exclude": [
-        "**/.gitignore",
-        "**/.vscode/**",
-        "**/build/**",
-        "**/.xmake/**",
-        "**/ext/**",
-        "**/volk.h",
-        "**/volk.c",
-        "**/vk_mem_alloc.h",
-        "**/vk_mem_alloc.cpp",
     ]
 }
 ```
