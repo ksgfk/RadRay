@@ -17,8 +17,8 @@ if (MSVC)
     add_compile_options(/MP)
 endif()
 
-option(RADRAY_BUILD_TESTS "Build the RadRay tests" OFF)
-option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" OFF)
+option(RADRAY_BUILD_TESTS "Build the RadRay tests" ON)
+option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" ON)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
 option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" OFF)
@@ -27,6 +27,13 @@ option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
 option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON)
+
+if (NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    if (RADRAY_BUILD_BENCHMARKS)
+        message(STATUS "Force disabling RADRAY_BUILD_BENCHMARKS because build type is not Release.")
+    endif()
+    set(RADRAY_BUILD_BENCHMARKS OFF CACHE BOOL "Build the RadRay benchmarks" FORCE)
+endif()
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
@@ -134,6 +141,11 @@ if (RADRAY_ENABLE_VULKAN)
         GIT_TAG v1.4.321
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(Vulkan-Headers)
+    if (DEFINED vulkan-headers_SOURCE_DIR)
+        set(VULKAN_HEADERS_INSTALL_DIR "${vulkan-headers_SOURCE_DIR}" CACHE PATH "" FORCE)
+    endif()
+    set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)
+    set(VOLK_HEADERS_ONLY ON CACHE BOOL "" FORCE)
     FetchContent_Declare(
         volk
         GIT_REPOSITORY https://github.com/zeux/volk.git
@@ -147,5 +159,36 @@ if (RADRAY_ENABLE_VULKAN)
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(VulkanMemoryAllocator)
 endif()
+if (RADRAY_BUILD_TESTS)
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.17.0
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(googletest)
+    if (RADRAY_BUILD_BENCHMARKS)
+        set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_USE_BUNDLED_GTEST OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+            googlebenchmark
+            GIT_REPOSITORY https://github.com/google/benchmark.git
+            GIT_TAG v1.9.4
+            GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        FetchContent_MakeAvailable(googlebenchmark)
+    endif()
+endif()
 
 add_subdirectory(modules)
+if (RADRAY_BUILD_TESTS)
+    enable_testing()
+    include(GoogleTest)
+    add_subdirectory(tests)
+    if (RADRAY_BUILD_BENCHMARKS)
+        add_subdirectory(benchmarks)
+    endif()
+endif()

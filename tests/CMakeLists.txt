@@ -1,0 +1,7 @@
+add_subdirectory(test_block_alloc)
+add_subdirectory(test_buddy_alloc)
+add_subdirectory(test_byte_to_dword)
+add_subdirectory(test_free_list_alloc)
+add_subdirectory(test_str_convert)
+add_subdirectory(test_wavefront_obj)
+add_subdirectory(test_img_rw)

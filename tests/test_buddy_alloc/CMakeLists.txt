@@ -1,0 +1,3 @@
+add_executable(test_buddy_alloc test_buddy_alloc.cpp)
+target_link_libraries(test_buddy_alloc radraycore GTest::gtest_main)
+gtest_discover_tests(test_buddy_alloc)

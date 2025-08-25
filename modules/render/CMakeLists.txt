@@ -10,7 +10,7 @@ target_include_directories(radrayrender PUBLIC include)
 target_link_libraries(radrayrender PUBLIC
     radraycore
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:Vulkan::Headers>
-    $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:volk::volk>
+    $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:volk::volk_headers>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:GPUOpen::VulkanMemoryAllocator>)
 target_link_libraries(radrayrender PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_DXC}>:dxc::dxcompiler>)
