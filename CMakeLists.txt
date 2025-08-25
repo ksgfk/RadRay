@@ -20,6 +20,7 @@ endif()
 option(RADRAY_BUILD_TESTS "Build the RadRay tests" OFF)
 option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" OFF)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
+option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
 option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" OFF)
 option(RADRAY_ENABLE_METAL "Enable Metal backend" OFF)
 option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON)
@@ -91,6 +92,11 @@ if (RADRAY_ENABLE_MIMALLOC)
     FetchContent_MakeAvailable(mimalloc)
 endif()
 if (RADRAY_ENABLE_DXC)
+    set(RADRAY_DXC_VERSION "1.8.2505.1")
+    set(RADRAY_DXC_HASH_WINDOWS_X64 "SHA256=97bf7e1d6fef09f90696dd37877540906c29d04be6263d7d2cd1429d56801c1b")
+    set(RADRAY_DXC_HASH_LINUX_X64 "SHA256=5840824ec40e16cb83da8aa2057a5240ce59cbb2d6d84c580dabafc8d0efe534")
+    set(RADRAY_DXC_HASH_MACOS_ARM64 "SHA256=5d14598aeacc9c594a33bf91e2c668231e3572c72fc32021bb4c4cd399088920")
+    include(cmake/FetchDXC.cmake)
 endif()
 if (RADRAY_ENABLE_LIBPNG)
     set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -119,6 +125,27 @@ if (RADRAY_ENABLE_LIBPNG)
         GIT_TAG v1.6.50
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(libpng)
+endif()
+if (RADRAY_ENABLE_VULKAN)
+    set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        Vulkan-Headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+        GIT_TAG v1.4.321
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(Vulkan-Headers)
+    FetchContent_Declare(
+        volk
+        GIT_REPOSITORY https://github.com/zeux/volk.git
+        GIT_TAG 1.4.304
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(volk)
+    FetchContent_Declare(
+        VulkanMemoryAllocator
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG v3.3.0
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(VulkanMemoryAllocator)
 endif()
 
 add_subdirectory(modules)

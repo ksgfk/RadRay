@@ -5,14 +5,18 @@ add_library(radraycore STATIC ${RADRAY_CORE_SRC} ${RADRAY_CORE_INC})
 target_include_directories(radraycore PUBLIC include)
 target_link_libraries(radraycore PUBLIC
     fmt::fmt
-    Eigen3::Eigen)
+    Eigen3::Eigen
+    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-static>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
-    $<BOOL:${RADRAY_ENABLE_LIBPNG}:png_static>)
+    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
-    $<$<NOT:$<CONFIG:Release>>:RADRAY_DEBUG>)
+    $<$<NOT:$<CONFIG:Release>>:RADRAY_DEBUG>
+    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>)
+target_compile_definitions(radraycore PRIVATE
+    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
 if (MSVC)
     target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
     target_compile_options(radraycore PRIVATE /W4)
