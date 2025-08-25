@@ -19,7 +19,7 @@ endif()
 
 option(RADRAY_BUILD_TESTS "Build the RadRay tests" OFF)
 option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" OFF)
-option(RADRAY_BUILD_WINDOW "Build the RadRay window" OFF)
+option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" OFF)
 option(RADRAY_ENABLE_METAL "Enable Metal backend" OFF)
 option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON)

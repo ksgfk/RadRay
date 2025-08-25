@@ -3,7 +3,8 @@
     "configurePresets": [
         {
             "name": "win",
-            "generator": "Visual Studio 17 2022"
+            "generator": "Visual Studio 17 2022",
+            "hidden": true
         },
         {
             "name": "clangcl",
@@ -13,28 +14,32 @@
             "toolset": {
                 "value": "ClangCL",
                 "strategy": "set"
-            }
+            },
+            "hidden": true
         },
         {
             "name": "x64",
             "architecture": {
                 "value": "x64",
                 "strategy": "external"
-            }
+            },
+            "hidden": true
         },
         {
             "name": "debug",
             "binaryDir": "build_debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
-            }
+            },
+            "hidden": true
         },
         {
             "name": "release",
             "binaryDir": "build_release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
-            }
+            },
+            "hidden": true
         },
         {
             "name": "win-x64-debug",
@@ -42,7 +47,8 @@
                 "debug",
                 "x64",
                 "win"
-            ]
+            ],
+            "hidden": false
         },
         {
             "name": "win-x64-release",
@@ -50,7 +56,8 @@
                 "release",
                 "x64",
                 "win"
-            ]
+            ],
+            "hidden": false
         },
         {
             "name": "win-x64-debug-clangcl",
@@ -58,7 +65,8 @@
                 "debug",
                 "x64",
                 "clangcl"
-            ]
+            ],
+            "hidden": false
         },
         {
             "name": "win-x64-release-clangcl",
@@ -66,7 +74,8 @@
                 "release",
                 "x64",
                 "clangcl"
-            ]
+            ],
+            "hidden": false
         }
     ],
     "buildPresets": [
