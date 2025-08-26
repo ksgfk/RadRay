@@ -1,0 +1,2 @@
+add_executable(hello_world_vk hello_world_vk.cpp)
+target_link_libraries(hello_world_vk PRIVATE radraywindow radrayrender)

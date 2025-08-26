@@ -9,7 +9,7 @@
 #include <radray/render/dxc.h>
 #include <radray/window/glfw_window.h>
 
-#include "../src/render/vk/vulkan_impl.h"
+#include "../../modules/render/src/vk/vulkan_impl.h"
 
 using namespace radray;
 using namespace radray::render;
@@ -18,6 +18,7 @@ using namespace radray::window;
 constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
 constexpr int RT_COUNT = 3;
+const char* RADRAY_APPNAME = "hello_world_vk";
 
 struct FrameData {
     shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;

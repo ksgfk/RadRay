@@ -1,5 +1,7 @@
 # RadRay
 
+TODO
+
 ## compile
 
 * cmake config
@@ -11,9 +13,13 @@
   * .\win_gen_compile_commands.ps1 -BuildDir .\build_release -Configuration Release
 
 ## dev env
-* vscode
-  * install extensions: C/C++, clangd
-* suggest settings.json
+
+### vscode 
+
+install extensions: C/C++ Extension Pack, clangd
+
+### settings.json
+
 ```json
 {
     "C_Cpp.codeAnalysis.runAutomatically": false,
@@ -34,3 +40,37 @@
     ]
 }
 ```
+
+### launch.json
+
+example
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(msvc) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${env:PATH}:${command:cmake.getLaunchTargetDirectory}"
+                }
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
+```
+
+#### special launch settings
+
+##### bench_read_obj
+
+* "cwd": "${workspaceFolder}"
