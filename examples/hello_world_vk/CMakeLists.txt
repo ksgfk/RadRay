@@ -1,2 +1,3 @@
 add_executable(hello_world_vk hello_world_vk.cpp)
 target_link_libraries(hello_world_vk PRIVATE radraywindow radrayrender)
+radray_example_files(hello_world_vk ${CMAKE_CURRENT_SOURCE_DIR}/shaders)

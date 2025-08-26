@@ -1,5 +1,8 @@
 #include <thread>
 
+#include <cstdlib>
+#include <iostream>
+
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
 #include <radray/triangle_mesh.h>
@@ -216,6 +219,14 @@ bool Update() {
 }
 
 int main() {
+    // Print PATH environment variable
+    const char* pathEnv = std::getenv("PATH");
+    if (pathEnv) {
+        std::cout << "PATH=" << pathEnv << std::endl;
+    } else {
+        std::cout << "PATH (not set)" << std::endl;
+    }
+
     Init();
     while (Update()) {
         std::this_thread::yield();

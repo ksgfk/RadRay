@@ -60,7 +60,7 @@ example
             "environment": [
                 {
                     "name": "PATH",
-                    "value": "${env:PATH}:${command:cmake.getLaunchTargetDirectory}"
+                    "value": "${command:cmake.getLaunchTargetDirectory}:${env:PATH}"
                 }
             ],
             "console": "integratedTerminal"
@@ -70,7 +70,3 @@ example
 ```
 
 #### special launch settings
-
-##### bench_read_obj
-
-* "cwd": "${workspaceFolder}"
