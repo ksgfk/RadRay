@@ -1,0 +1,1 @@
+add_subdirectory(bench_read_obj)

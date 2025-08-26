@@ -1,0 +1,6 @@
+if (RADRAY_ENABLE_LIBPNG)
+    add_executable(test_img_rw test_img_rw.cpp)
+    target_link_libraries(test_img_rw radraycore GTest::gtest_main)
+    gtest_discover_tests(test_img_rw
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()

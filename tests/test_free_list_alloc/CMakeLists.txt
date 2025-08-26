@@ -1,0 +1,3 @@
+add_executable(test_free_list_alloc test_free_list_alloc.cpp)
+target_link_libraries(test_free_list_alloc radraycore GTest::gtest_main)
+gtest_discover_tests(test_free_list_alloc)

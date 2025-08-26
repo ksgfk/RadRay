@@ -2,6 +2,10 @@
 .xmake
 build
 bin
+.vs
 
 scripts/options.lua
 assets
+
+build_debug/
+build_release/

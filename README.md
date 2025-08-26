@@ -1,22 +1,27 @@
 # RadRay
 
-## compile
-* xmake f -m debug/release -v
-* xmake -v
+TODO
 
-tips:
-* make file `options.lua` use template `options.lua.template` in `scripts` folder. can set many settings in `options.lua`
-* cmd command `xmake i -o bin` can export binaries to bin dir
-* [optional] cmd `xmake lua scripts/after_build_test.lua [install]` to copy test assets to build dir
+## compile
+
+* cmake config
+  * cmake --preset win-x64-debug
+  * cmake --preset win-x64-release
+
+* generate compile_commands.json on win
+  * .\win_gen_compile_commands.ps1 -BuildDir .\build_debug -Configuration Debug
+  * .\win_gen_compile_commands.ps1 -BuildDir .\build_release -Configuration Release
 
 ## dev env
-* vscode
-  * install extensions: C/C++, XMake, clangd
-* suggest settings.json
+
+### vscode 
+
+install extensions: C/C++ Extension Pack, clangd
+
+### settings.json
+
 ```json
 {
-    "xmake.additionalConfigArguments": [],
-    "xmake.compileCommandsDirectory": ".vscode",
     "C_Cpp.codeAnalysis.runAutomatically": false,
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.formatting": "disabled",
@@ -32,17 +37,40 @@ tips:
         "--background-index-priority=normal",
         "--header-insertion=never",
         "--pch-storage=memory"
-    ],
-    "VSCodeCounter.exclude": [
-        "**/.gitignore",
-        "**/.vscode/**",
-        "**/build/**",
-        "**/.xmake/**",
-        "**/ext/**",
-        "**/volk.h",
-        "**/volk.c",
-        "**/vk_mem_alloc.h",
-        "**/vk_mem_alloc.cpp",
     ]
 }
 ```
+
+### launch.json
+
+example
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(msvc) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${env:PATH}:${command:cmake.getLaunchTargetDirectory}"
+                }
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
+```
+
+#### special launch settings
+
+##### bench_read_obj
+
+* "cwd": "${workspaceFolder}"

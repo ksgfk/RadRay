@@ -1,0 +1,3 @@
+add_executable(test_str_convert test_str_convert.cpp)
+target_link_libraries(test_str_convert radraycore GTest::gtest_main)
+gtest_discover_tests(test_str_convert)

@@ -1,0 +1,7 @@
+add_subdirectory(core)
+if (RADRAY_BUILD_WINDOW)
+    add_subdirectory(window)
+endif()
+if (RADRAY_BUILD_RENDER)
+    add_subdirectory(render)
+endif()

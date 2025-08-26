@@ -1,0 +1,3 @@
+add_executable(test_byte_to_dword test_byte_to_dword.cpp)
+target_link_libraries(test_byte_to_dword radraycore GTest::gtest_main)
+gtest_discover_tests(test_byte_to_dword)

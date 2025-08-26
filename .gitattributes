@@ -4,7 +4,4 @@
 src/render/ext/* linguist-vendored
 src/test/direct_light/assets/* linguist-vendored
 
-src/render/vk/volk.c linguist-vendored
-src/render/vk/volk.h linguist-vendored
-src/render/vk/vk_mem_alloc.cpp linguist-vendored
-src/render/vk/vk_mem_alloc.h linguist-vendored
+src/render/vk/ext/* linguist-vendored
