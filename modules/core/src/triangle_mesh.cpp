@@ -262,6 +262,32 @@ void TriangleMesh::InitAsUVSphere(float radius, uint32_t numberSlices) noexcept 
     }
 }
 
+void TriangleMesh::InitAsRectXY(float width, float height) noexcept {
+    Positions = {
+        {-width / 2, -height / 2, 0},
+        {width / 2, -height / 2, 0},
+        {width / 2, height / 2, 0},
+        {-width / 2, height / 2, 0}};
+    Normals = {
+        {0, 0, 1},
+        {0, 0, 1},
+        {0, 0, 1},
+        {0, 0, 1}};
+    UV0 = {
+        {0, 0},
+        {1, 0},
+        {1, 1},
+        {0, 1}};
+    Tangents = {
+        {1, 0, 0, 1},
+        {1, 0, 0, 1},
+        {1, 0, 0, 1},
+        {1, 0, 0, 1}};
+    Indices = {
+        0, 1, 2,
+        0, 2, 3};
+}
+
 void TriangleMesh::CalculateTangent() noexcept {
     if (Normals.size() == 0 || UV0.size() == 0) {
         Tangents.resize(Positions.size(), Eigen::Vector4f{1.0f, 0.0f, 0.0f, 1.0f});

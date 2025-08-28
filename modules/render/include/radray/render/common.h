@@ -627,7 +627,7 @@ struct VertexElement {
     uint32_t Location;
 };
 
-struct VertexLayout {
+struct VertexInfo {
     uint64_t ArrayStride;
     VertexStepMode StepMode;
     std::span<VertexElement> Elements;
@@ -703,7 +703,7 @@ struct GraphicsPipelineStateDescriptor {
     RootSignature* RootSig;
     std::optional<ShaderEntry> VS;
     std::optional<ShaderEntry> PS;
-    std::span<VertexLayout> VertexLayouts;
+    std::span<VertexInfo> VertexLayouts;
     PrimitiveState Primitive;
     std::optional<DepthStencilState> DepthStencil;
     MultiSampleState MultiSample;

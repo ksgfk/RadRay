@@ -1,8 +1,5 @@
 #include <thread>
 
-#include <cstdlib>
-#include <iostream>
-
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
 #include <radray/triangle_mesh.h>
@@ -41,6 +38,8 @@ uint64_t last;
 shared_ptr<vulkan::BufferVulkan> vertBuf;
 shared_ptr<vulkan::BufferVulkan> idxBuf;
 shared_ptr<Dxc> dxc;
+shared_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
+shared_ptr<vulkan::GraphicsPipelineVulkan> pso;
 
 void Init() {
     GlobalInitGlfw();
@@ -74,7 +73,7 @@ void Init() {
     last = 0;
 
     TriangleMesh mesh;
-    mesh.InitAsCube(0.5f);
+    mesh.InitAsRectXY(1, 1);
     VertexData model;
     mesh.ToVertexData(&model);
     auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
@@ -107,7 +106,7 @@ void Init() {
 
     dxc = CreateDxc().Unwrap();
     {
-        auto hlslStr = ReadText(std::filesystem::path("shaders") / RADRAY_APPNAME / "color.hlsl").value();
+        auto hlslStr = ReadText(std::filesystem::path("assets") / RADRAY_APPNAME / "color.hlsl").value();
         auto vsSpv = dxc->Compile(hlslStr, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, true).value();
         auto psSpv = dxc->Compile(hlslStr, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, true).value();
         ShaderDescriptor vsDesc{};
@@ -120,12 +119,29 @@ void Init() {
         auto ps = device->CreateShader(psDesc).Unwrap();
 
         RootSignatureDescriptor rootSigDesc{};
-        auto rootSig = device->CreateRootSignature(rootSigDesc).Unwrap();
+        pipelineLayout = std::static_pointer_cast<vulkan::PipelineLayoutVulkan>(device->CreateRootSignature(rootSigDesc).Unwrap());
+
+        VertexElement ve[] = {
+            {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+        VertexInfo vl[] = {
+            {model.VertexSize,
+             VertexStepMode::Vertex,
+             ve}};
+        GraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = pipelineLayout.get();
+        psoDesc.VS = {vs.get(), "VSMain"};
+        psoDesc.PS = {ps.get(), "PSMain"};
+        psoDesc.VertexLayouts = vl;
+        // TODO:
+        pso = std::static_pointer_cast<vulkan::GraphicsPipelineVulkan>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
     }
 }
 
 void End() {
     cmdQueue->Wait();
+
+    pso.reset();
+    pipelineLayout.reset();
 
     vertBuf.reset();
     idxBuf.reset();
@@ -219,14 +235,6 @@ bool Update() {
 }
 
 int main() {
-    // Print PATH environment variable
-    const char* pathEnv = std::getenv("PATH");
-    if (pathEnv) {
-        std::cout << "PATH=" << pathEnv << std::endl;
-    } else {
-        std::cout << "PATH (not set)" << std::endl;
-    }
-
     Init();
     while (Update()) {
         std::this_thread::yield();

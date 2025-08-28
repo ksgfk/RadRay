@@ -21,6 +21,7 @@ public:
 
     void InitAsCube(float halfExtend) noexcept;
     void InitAsUVSphere(float radius, uint32_t numberSlices) noexcept;
+    void InitAsRectXY(float width, float height) noexcept;
 
     void CalculateTangent() noexcept;
 };
