@@ -3,4 +3,5 @@ if (RADRAY_ENABLE_LIBPNG)
     target_link_libraries(test_img_rw radraycore GTest::gtest_main)
     gtest_discover_tests(test_img_rw
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    radray_set_build_path(test_img_rw)
 endif()

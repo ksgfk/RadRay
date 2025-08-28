@@ -22,3 +22,4 @@ if (MSVC)
     target_compile_options(radrayrender PRIVATE
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-nullability-completeness>)
 endif()
+radray_set_build_path(radrayrender)

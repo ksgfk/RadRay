@@ -10,3 +10,4 @@ target_link_libraries(radraywindow PRIVATE
 if (MSVC)
     target_compile_options(radraywindow PRIVATE /W4)
 endif()
+radray_set_build_path(radraywindow)

@@ -17,6 +17,14 @@ if (MSVC)
     add_compile_options(/MP)
 endif()
 
+set(RADRAY_BUILD_PATH "" CACHE PATH "RadRay build binary path")
+if (NOT RADRAY_BUILD_PATH)
+    if (DEFINED CMAKE_VS_MSBUILD_COMMAND)
+        set(RADRAY_BUILD_PATH "${CMAKE_BINARY_DIR}/_build" CACHE PATH "RadRay build binary path" FORCE)
+    else()
+        set(RADRAY_BUILD_PATH "${CMAKE_BINARY_DIR}/_build/${CMAKE_BUILD_TYPE}" CACHE PATH "RadRay build binary path" FORCE)
+    endif()
+endif()
 option(RADRAY_BUILD_TESTS "Build the RadRay tests" ON)
 option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" ON)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
@@ -27,6 +35,14 @@ option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
 option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON)
+
+function(radray_set_build_path TARGET)
+    set_target_properties(${TARGET} PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
+        LIBRARY_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
+        RUNTIME_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
+        PDB_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH})
+endfunction()
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     if (RADRAY_BUILD_BENCHMARKS)
@@ -54,6 +70,7 @@ FetchContent_Declare(
     GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
     OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(fmt)
+radray_set_build_path(fmt)
 set(SPDLOG_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
 set(SPDLOG_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
@@ -65,6 +82,7 @@ FetchContent_Declare(
     GIT_TAG v1.15.3
     GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
 FetchContent_MakeAvailable(spdlog)
+radray_set_build_path(spdlog)
 set(EIGEN_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
@@ -82,6 +100,7 @@ FetchContent_Declare(
     GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
     SOURCE_SUBDIR cmake_unofficial)
 FetchContent_MakeAvailable(xxHash)
+radray_set_build_path(xxhash)
 if (RADRAY_BUILD_WINDOW)
     set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -93,6 +112,7 @@ if (RADRAY_BUILD_WINDOW)
         GIT_TAG 3.4
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(glfw)
+    radray_set_build_path(glfw)
 endif()
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
@@ -104,6 +124,7 @@ if (RADRAY_ENABLE_MIMALLOC)
         GIT_TAG v2.2.4
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(mimalloc)
+    radray_set_build_path(mimalloc-static)
 endif()
 if (RADRAY_ENABLE_DXC)
     set(RADRAY_DXC_VERSION "1.8.2505.1")
@@ -111,6 +132,29 @@ if (RADRAY_ENABLE_DXC)
     set(RADRAY_DXC_HASH_LINUX_X64 "SHA256=5840824ec40e16cb83da8aa2057a5240ce59cbb2d6d84c580dabafc8d0efe534")
     set(RADRAY_DXC_HASH_MACOS_ARM64 "SHA256=5d14598aeacc9c594a33bf91e2c668231e3572c72fc32021bb4c4cd399088920")
     include(cmake/FetchDXC.cmake)
+    # 构建后复制 dxc 运行时到统一输出目录
+    if (RADRAY_DXC_COPY_RUNTIME AND DEFINED RADRAY_DXC_RUNTIME_DLLS)
+        # VS/MSBuild 多配置生成器：按配置放入子目录
+        if (DEFINED CMAKE_VS_MSBUILD_COMMAND)
+            set(_DXC_RUNTIME_DEST "${RADRAY_BUILD_PATH}/$<CONFIG>")
+        else()
+            set(_DXC_RUNTIME_DEST "${RADRAY_BUILD_PATH}")
+        endif()
+        set(_DXC_COPY_CMDS COMMAND ${CMAKE_COMMAND} -E make_directory "${_DXC_RUNTIME_DEST}")
+        foreach(_dll IN LISTS RADRAY_DXC_RUNTIME_DLLS)
+            if (EXISTS "${_dll}")
+                list(APPEND _DXC_COPY_CMDS COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${_DXC_RUNTIME_DEST}")
+            endif()
+        endforeach()
+        if (_DXC_COPY_CMDS)
+            add_custom_target(radray_copy_dxc_runtime ALL
+                ${_DXC_COPY_CMDS}
+                BYPRODUCTS ${RADRAY_DXC_RUNTIME_DLLS}
+                COMMENT "Copy DXC runtime binaries to ${_DXC_RUNTIME_DEST}")
+        endif()
+        unset(_DXC_COPY_CMDS)
+        unset(_DXC_RUNTIME_DEST)
+    endif()
 endif()
 if (RADRAY_ENABLE_LIBPNG)
     set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -125,6 +169,7 @@ if (RADRAY_ENABLE_LIBPNG)
         OVERRIDE_FIND_PACKAGE
         PATCH_COMMAND git apply --whitespace=fix "${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch")
     FetchContent_MakeAvailable(zlib)
+    radray_set_build_path(zlibstatic)
 endif()
 if (RADRAY_ENABLE_LIBPNG)
     if (TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
@@ -139,6 +184,7 @@ if (RADRAY_ENABLE_LIBPNG)
         GIT_TAG v1.6.50
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(libpng)
+    radray_set_build_path(png_static)
 endif()
 if (RADRAY_ENABLE_VULKAN)
     set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
@@ -168,12 +214,15 @@ if (RADRAY_ENABLE_VULKAN)
 endif()
 if (RADRAY_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG v1.17.0
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(googletest)
+    radray_set_build_path(gtest_main)
     if (RADRAY_BUILD_BENCHMARKS)
         set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
         set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
@@ -187,6 +236,7 @@ if (RADRAY_BUILD_TESTS)
             GIT_TAG v1.9.4
             GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
         FetchContent_MakeAvailable(googlebenchmark)
+        radray_set_build_path(benchmark)
     endif()
 endif()
 
