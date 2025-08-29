@@ -127,12 +127,17 @@ void Init() {
             {model.VertexSize,
              VertexStepMode::Vertex,
              ve}};
+        ColorTargetState cts[] = {
+            DefaultColorTargetState(TextureFormat::RGBA8_UNORM)};
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = pipelineLayout.get();
         psoDesc.VS = {vs.get(), "VSMain"};
         psoDesc.PS = {ps.get(), "PSMain"};
         psoDesc.VertexLayouts = vl;
-        // TODO:
+        psoDesc.Primitive = DefaultPrimitiveState();
+        psoDesc.DepthStencil = std::nullopt;
+        psoDesc.MultiSample = DefaultMultiSampleState();
+        psoDesc.ColorTargets = cts;
         pso = std::static_pointer_cast<vulkan::GraphicsPipelineVulkan>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
     }
 }

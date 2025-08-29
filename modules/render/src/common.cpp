@@ -146,6 +146,72 @@ uint32_t GetVertexFormatSize(VertexFormat format) noexcept {
     }
 }
 
+PrimitiveState DefaultPrimitiveState() noexcept {
+    return {
+        PrimitiveTopology::TriangleList,
+        FrontFace::CW,
+        CullMode::Back,
+        PolygonMode::Fill,
+        IndexFormat::UINT32,
+        true,
+        false};
+}
+
+DepthStencilState DefaultDepthStencilState() noexcept {
+    return {
+        TextureFormat::D24_UNORM_S8_UINT,
+        CompareFunction::Less,
+        {
+            0,
+            0.0f,
+            0.0f,
+        },
+        std::nullopt,
+        true};
+}
+
+StencilState DefaultStencilState() noexcept {
+    return {
+        {
+            CompareFunction::Always,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        },
+        {
+            CompareFunction::Always,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        },
+        0xFF,
+        0xFF};
+}
+
+MultiSampleState DefaultMultiSampleState() noexcept {
+    return {
+        .Count = 1,
+        .Mask = 0xFFFFFFFF,
+        .AlphaToCoverageEnable = false};
+}
+
+ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept {
+    return {
+        format,
+        std::nullopt,
+        ColorWrite::All};
+}
+
+BlendState DefaultBlendState() noexcept {
+    return {
+        {BlendFactor::One,
+         BlendFactor::Zero,
+         BlendOperation::Add},
+        {BlendFactor::One,
+         BlendFactor::Zero,
+         BlendOperation::Add}};
+}
+
 std::string_view format_as(Backend v) noexcept {
     switch (v) {
         case Backend::D3D12: return "D3D12";

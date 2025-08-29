@@ -880,6 +880,18 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept;
 
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 
+PrimitiveState DefaultPrimitiveState() noexcept;
+
+DepthStencilState DefaultDepthStencilState() noexcept;
+
+StencilState DefaultStencilState() noexcept;
+
+MultiSampleState DefaultMultiSampleState() noexcept;
+
+ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept;
+
+BlendState DefaultBlendState() noexcept;
+
 std::string_view format_as(Backend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
