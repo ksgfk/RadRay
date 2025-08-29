@@ -21,11 +21,11 @@ struct Viewport {
     float MaxDepth;
 };
 
-struct Scissor {
+struct Rect {
     int32_t X;
     int32_t Y;
-    int32_t Width;
-    int32_t Height;
+    uint32_t Width;
+    uint32_t Height;
 };
 
 constexpr uint64_t Align(uint64_t value, uint64_t align) noexcept {

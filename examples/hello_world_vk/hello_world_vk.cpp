@@ -73,7 +73,8 @@ void Init() {
     last = 0;
 
     TriangleMesh mesh;
-    mesh.InitAsRectXY(1, 1);
+    mesh.Positions = {{0, 0.5f, 0}, {-0.5f, -0.366f, 0}, {0.5f, -0.366f, 0}};
+    mesh.Indices = {0, 2, 1};
     VertexData model;
     mesh.ToVertexData(&model);
     auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
@@ -222,6 +223,8 @@ bool Update() {
         rpDesc.ColorAttachments = rpColorAttch;
         rpDesc.DepthStencilAttachment = std::nullopt;
         auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        rp->SetViewport({0, 0, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
+        rp->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
         frameData.cmdBuffer->EndRenderPass(std::move(rp));
     }
     {

@@ -826,8 +826,8 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
             attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             attach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             attach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attach.finalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attach.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attach.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             auto& colorRef = colorRefs.emplace_back();
             colorRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
             colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -847,12 +847,14 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
                 attach.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 attach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             }
-            attach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attach.finalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             depthRef.attachment = static_cast<uint32_t>(attachs.size() - 1);
             if (desc.DepthStencil->Stencil.has_value()) {
+                attach.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                attach.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
                 depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             } else {
+                attach.initialLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+                attach.finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
                 depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             }
         }
@@ -1998,6 +2000,26 @@ void SimulateCommandEncoderVulkan::Destroy() noexcept {
 void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _framebuffer.reset();
     _pass.reset();
+}
+
+void SimulateCommandEncoderVulkan::SetViewport(Viewport vp) noexcept {
+    VkViewport v{
+        vp.X,
+        vp.Y,
+        vp.Width,
+        vp.Height,
+        vp.MinDepth,
+        vp.MaxDepth};
+    _device->_ftb.vkCmdSetViewport(_cmdBuffer->_cmdBuffer, 0, 1, &v);
+}
+
+void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
+    VkRect2D s{
+        {rect.X,
+         rect.Y},
+        {rect.Width,
+         rect.Height}};
+    _device->_ftb.vkCmdSetScissor(_cmdBuffer->_cmdBuffer, 0, 1, &s);
 }
 
 RenderPassVulkan::RenderPassVulkan(

@@ -152,7 +152,7 @@ PrimitiveState DefaultPrimitiveState() noexcept {
         FrontFace::CW,
         CullMode::Back,
         PolygonMode::Fill,
-        IndexFormat::UINT32,
+        std::nullopt,
         true,
         false};
 }

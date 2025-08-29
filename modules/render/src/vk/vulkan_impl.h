@@ -263,6 +263,10 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetViewport(Viewport vp) noexcept override;
+
+    void SetScissor(Rect rect) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

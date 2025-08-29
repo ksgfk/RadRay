@@ -7,6 +7,7 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
+#include <radray/basic_math.h>
 
 namespace radray::render {
 
@@ -776,6 +777,10 @@ public:
     virtual ~CommandEncoder() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdEncoder; }
+
+    virtual void SetViewport(Viewport vp) noexcept = 0;
+
+    virtual void SetScissor(Rect rect) noexcept = 0;
 };
 
 class Fence : public RenderBase {
