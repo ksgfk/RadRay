@@ -63,6 +63,7 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <radray/logger.h>
 #include <radray/utility.h>
 
+#include <directx/d3d12shader.h>
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform.h>
 #ifndef NOMINMAX
@@ -78,18 +79,10 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
 #else
-#define __EMULATE_UUID
-#include <WinAdapter.h>
-template <class T>
-class ComPtr : public CComPtr<T> {
-public:
-    T* Get() noexcept { return this->p; }
-    T* Get() const noexcept { return this->p; }
-};
+//TODO:
 #endif
 
 #include <dxcapi.h>
-#include "ext/d3d12shader.h"
 
 namespace radray::render {
 

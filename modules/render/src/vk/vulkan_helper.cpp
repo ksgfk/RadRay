@@ -1,7 +1,10 @@
 #include "vulkan_helper.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
 #define VOLK_IMPLEMENTATION
 #include <volk.h>
+#pragma clang diagnostic pop
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored  "-Wnullability-completeness"
 #pragma clang diagnostic ignored  "-Wunused-parameter"

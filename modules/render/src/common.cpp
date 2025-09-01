@@ -3,7 +3,7 @@
 #include <radray/logger.h>
 
 #ifdef RADRAY_ENABLE_D3D12
-#include "d3d12/d3d12_device.h"
+#include "d3d12/d3d12_impl.h"
 #endif
 
 #ifdef RADRAY_ENABLE_METAL
@@ -29,11 +29,11 @@ bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs) {
                     return false;
 #endif
                 } else if constexpr (std::is_same_v<T, D3D12BackendInitDescriptor>) {
-                    return true;
+                    return false;
                 } else if constexpr (std::is_same_v<T, MetalBackendInitDescriptor>) {
-                    return true;
+                    return false;
                 } else {
-                    return true;
+                    return false;
                 }
             },
             desc);
@@ -56,7 +56,9 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, D3D12DeviceDescriptor>) {
 #ifdef RADRAY_ENABLE_D3D12
-                return d3d12::CreateDevice(arg);
+                // return d3d12::CreateDevice(arg);
+                RADRAY_ERR_LOG("D3D12 is not enable");
+                return nullptr;
 #else
                 RADRAY_ERR_LOG("D3D12 is not enable");
                 return nullptr;

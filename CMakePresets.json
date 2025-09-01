@@ -83,6 +83,16 @@
             "name": "max-parallel",
             "configurePreset": "win",
             "jobs": 0
+        },
+        {
+            "name": "release_build",
+            "configurePreset": "win-x64-release",
+            "configuration": "Release"
+        },
+        {
+            "name": "release_build_clang",
+            "configurePreset": "win-x64-release-clangcl",
+            "configuration": "Release"
         }
     ]
 }

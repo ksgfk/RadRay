@@ -29,7 +29,7 @@ option(RADRAY_BUILD_TESTS "Build the RadRay tests" ON)
 option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks" ON)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
-option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" OFF)
+option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON)
 option(RADRAY_ENABLE_METAL "Enable Metal backend" OFF)
 option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
@@ -211,6 +211,28 @@ if (RADRAY_ENABLE_VULKAN)
         GIT_TAG v3.3.0
         GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
     FetchContent_MakeAvailable(VulkanMemoryAllocator)
+endif()
+if (DEFINED RADRAY_ENABLE_DXC OR DEFINED RADRAY_ENABLE_D3D12)
+    set(DXHEADERS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+    set(DXHEADERS_INSTALL OFF CACHE BOOL "" FORCE)
+    set(DXHEADERS_BUILD_GOOGLE_TEST OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        DirectX-Headers
+        GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
+        GIT_TAG v1.616.0
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(DirectX-Headers)
+    FetchContent_Declare(
+        D3D12MemoryAllocator
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
+        GIT_TAG v3.0.1
+        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    FetchContent_MakeAvailable(D3D12MemoryAllocator)
+    target_compile_options(D3D12MemoryAllocator PRIVATE 
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-variable>
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-switch>
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-const-variable>
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-function>)
 endif()
 if (RADRAY_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)

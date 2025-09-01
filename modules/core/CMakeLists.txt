@@ -18,6 +18,7 @@ target_compile_definitions(radraycore PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
 if (MSVC)
     target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
-    target_compile_options(radraycore PRIVATE /W4)
 endif()
+target_compile_options(radraycore PRIVATE
+    $<$<BOOL:MSVC>:/W4>)
 radray_set_build_path(radraycore)
