@@ -711,6 +711,18 @@ struct GraphicsPipelineStateDescriptor {
     std::span<ColorTargetState> ColorTargets;
 };
 
+struct VertexBufferView {
+    Buffer* Target;
+    uint64_t Offset;
+    uint64_t Size;
+};
+
+struct IndexBufferView {
+    Buffer* Target;
+    uint32_t Offset;
+    uint32_t Stride;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -781,6 +793,18 @@ public:
     virtual void SetViewport(Viewport vp) noexcept = 0;
 
     virtual void SetScissor(Rect rect) noexcept = 0;
+
+    virtual void BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept = 0;
+
+    virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
+
+    virtual void BindRootSignature(RootSignature* rootSig) noexcept = 0;
+
+    virtual void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept = 0;
+
+    virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
+
+    virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
 };
 
 class Fence : public RenderBase {

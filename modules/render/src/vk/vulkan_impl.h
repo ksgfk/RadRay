@@ -267,6 +267,18 @@ public:
 
     void SetScissor(Rect rect) noexcept override;
 
+    void BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept override;
+
+    void BindIndexBuffer(IndexBufferView ibv) noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
+
+    void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
+
+    void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

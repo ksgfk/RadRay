@@ -13,6 +13,7 @@ static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<Image
 static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
 static ShaderModuleVulkan* CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 static PipelineLayoutVulkan* CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+static GraphicsPipelineVulkan* CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -379,6 +380,9 @@ Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     vmaInfo.flags = 0;
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::MapWrite)) {
+        vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
     vmaInfo.usage = MapType(desc.Memory);
     vmaInfo.requiredFlags = 0;
@@ -2022,6 +2026,40 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
     _device->_ftb.vkCmdSetScissor(_cmdBuffer->_cmdBuffer, 0, 1, &s);
 }
 
+void SimulateCommandEncoderVulkan::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
+    vector<VkBuffer> buffers;
+    vector<VkDeviceSize> offsets;
+    for (const auto& view : vbv) {
+        auto buffer = CastVkObject(view.Target);
+        buffers.push_back(buffer->_buffer);
+        offsets.push_back(view.Offset);
+    }
+    _device->_ftb.vkCmdBindVertexBuffers(_cmdBuffer->_cmdBuffer, 0, static_cast<uint32_t>(buffers.size()), buffers.data(), offsets.data());
+}
+
+void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept {
+    auto buffer = CastVkObject(ibv.Target);
+    auto indexType = MapIndexType(ibv.Stride);
+    _device->_ftb.vkCmdBindIndexBuffer(_cmdBuffer->_cmdBuffer, buffer->_buffer, ibv.Offset, indexType);
+}
+
+void SimulateCommandEncoderVulkan::BindRootSignature(RootSignature* rootSig) noexcept {
+    RADRAY_UNUSED(rootSig);
+}
+
+void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
+    auto p = CastVkObject(pso);
+    _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
+}
+
+void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
+    _device->_ftb.vkCmdDraw(_cmdBuffer->_cmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
+    _device->_ftb.vkCmdDrawIndexed(_cmdBuffer->_cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
 RenderPassVulkan::RenderPassVulkan(
     DeviceVulkan* device,
     VkRenderPass renderPass) noexcept
@@ -2352,13 +2390,21 @@ void BufferVulkan::DestroyImpl() noexcept {
 
 void BufferVulkan::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
     void* mappedData = nullptr;
-    if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
-        vr != VK_SUCCESS) {
-        RADRAY_ABORT("vma call vmaMapMemory failed: {}", vr);
-        return;
+    bool isMapped = false;
+    if (_allocInfo.pMappedData) {
+        mappedData = _allocInfo.pMappedData;
+    } else {
+        if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vma call vmaMapMemory failed: {}", vr);
+            return;
+        }
+        isMapped = true;
     }
     std::memcpy(static_cast<byte*>(mappedData) + offset, data.data(), data.size());
-    vmaUnmapMemory(_device->_vma->_vma, _allocation);
+    if (isMapped) {
+        vmaUnmapMemory(_device->_vma->_vma, _allocation);
+    }
 }
 
 BufferViewVulkan::BufferViewVulkan(

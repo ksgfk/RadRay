@@ -556,6 +556,14 @@ VkColorComponentFlags MapType(ColorWrites v) noexcept {
     }
 }
 
+VkIndexType MapIndexType(uint32_t v) noexcept {
+    switch (v) {
+        case 2: return VK_INDEX_TYPE_UINT16;
+        case 4: return VK_INDEX_TYPE_UINT32;
+        default: return VK_INDEX_TYPE_MAX_ENUM;
+    }
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";

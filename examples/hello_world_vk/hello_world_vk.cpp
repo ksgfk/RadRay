@@ -74,7 +74,7 @@ void Init() {
 
     TriangleMesh mesh;
     mesh.Positions = {{0, 0.5f, 0}, {-0.5f, -0.366f, 0}, {0.5f, -0.366f, 0}};
-    mesh.Indices = {0, 2, 1};
+    mesh.Indices = {0, 1, 2};
     VertexData model;
     mesh.ToVertexData(&model);
     auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
@@ -83,6 +83,8 @@ void Init() {
     auto idx = device->CreateBuffer({model.IndexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
     vertBuf = std::static_pointer_cast<vulkan::BufferVulkan>(vert);
     idxBuf = std::static_pointer_cast<vulkan::BufferVulkan>(idx);
+    vertUpload->CopyFromHost({model.VertexData.get(), model.VertexSize}, 0);
+    idxUpload->CopyFromHost({model.IndexData.get(), model.IndexSize}, 0);
 
     auto cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     cmdBuffer->Begin();
@@ -125,7 +127,7 @@ void Init() {
         VertexElement ve[] = {
             {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
         VertexInfo vl[] = {
-            {model.VertexSize,
+            {12,
              VertexStepMode::Vertex,
              ve}};
         ColorTargetState cts[] = {
@@ -223,8 +225,15 @@ bool Update() {
         rpDesc.ColorAttachments = rpColorAttch;
         rpDesc.DepthStencilAttachment = std::nullopt;
         auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        rp->BindRootSignature(pipelineLayout.get());
+        rp->BindGraphicsPipelineState(pso.get());
         rp->SetViewport({0, 0, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
         rp->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
+        VertexBufferView vbv[] = {
+            {vertBuf.get(), 0, vertBuf->_mdesc.Size}};
+        rp->BindVertexBuffer(vbv);
+        rp->BindIndexBuffer({idxBuf.get(), 0, 2});
+        rp->DrawIndexed(3, 1, 0, 0, 0);
         frameData.cmdBuffer->EndRenderPass(std::move(rp));
     }
     {
