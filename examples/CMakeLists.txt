@@ -1,3 +1,6 @@
 if (RADRAY_ENABLE_VULKAN)
     add_subdirectory(hello_world_vk)
 endif()
+if (RADRAY_ENABLE_D3D12)
+    add_subdirectory(hello_world_d3d12)
+endif()

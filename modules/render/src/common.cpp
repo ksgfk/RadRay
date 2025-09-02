@@ -56,9 +56,7 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, D3D12DeviceDescriptor>) {
 #ifdef RADRAY_ENABLE_D3D12
-                // return d3d12::CreateDevice(arg);
-                RADRAY_ERR_LOG("D3D12 is not enable");
-                return nullptr;
+                return d3d12::CreateDevice(arg);
 #else
                 RADRAY_ERR_LOG("D3D12 is not enable");
                 return nullptr;
