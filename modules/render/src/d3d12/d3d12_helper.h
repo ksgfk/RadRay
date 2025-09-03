@@ -55,6 +55,7 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;
+D3D12_HEAP_TYPE MapType(MemoryType v) noexcept;
 
 }  // namespace radray::render::d3d12
 

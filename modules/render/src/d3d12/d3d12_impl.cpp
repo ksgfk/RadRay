@@ -352,8 +352,87 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     return result;
 }
 
-Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc) noexcept {
-    return nullptr;
+Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& inputDesc) noexcept {
+    BufferDescriptor desc = inputDesc;
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_desc
+    resDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    // D3D12 要求 cbuffer 是 256 字节对齐
+    // https://github.com/d3dcoder/d3d12book/blob/master/Common/d3dUtil.h#L99
+    resDesc.Width = desc.Usage.HasFlag(BufferUse::CBuffer) ? Align(desc.Size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) : desc.Size;
+    resDesc.Height = 1;
+    resDesc.DepthOrArraySize = 1;
+    resDesc.MipLevels = 1;
+    resDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resDesc.SampleDesc.Count = 1;
+    resDesc.SampleDesc.Quality = 0;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (desc.Memory == MemoryType::ReadBack) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    }
+    UINT64 paddedSize;
+    _device->GetCopyableFootprints(&resDesc, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
+    if (paddedSize != UINT64_MAX) {
+        desc.Size = paddedSize;
+        resDesc.Width = paddedSize;
+    }
+    D3D12_RESOURCE_STATES rawInitState;
+    switch (desc.Memory) {
+        case MemoryType::Device: rawInitState = D3D12_RESOURCE_STATE_COMMON; break;
+        case MemoryType::Upload: rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ; break;
+        case MemoryType::ReadBack: rawInitState = D3D12_RESOURCE_STATE_COPY_DEST; break;
+    }
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = MapType(desc.Memory);
+    allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+    ComPtr<ID3D12Resource> buffer;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    if (allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT && (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
+        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+        heapProps.VisibleNodeMask = 0;
+        heapProps.CreationNodeMask = 0;
+        if (rawInitState == D3D12_RESOURCE_STATE_GENERIC_READ) {
+            rawInitState = D3D12_RESOURCE_STATE_COMMON;
+        }
+        if (HRESULT hr = _device->CreateCommittedResource(
+                &heapProps,
+                allocDesc.ExtraHeapFlags,
+                &resDesc,
+                rawInitState,
+                nullptr,
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    } else {
+        if (HRESULT hr = _mainAlloc->CreateResource(
+                &allocDesc,
+                &resDesc,
+                rawInitState,
+                nullptr,
+                allocRes.GetAddressOf(),
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("d3d12 cannot create buffer, reason={} (code:{})", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    }
+    SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
+    RADRAY_DEBUG_LOG("d3d12 create buffer, size={}", resDesc.Width);
+    return make_shared<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
 }
 
 Nullable<shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewDescriptor& desc) noexcept {

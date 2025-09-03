@@ -157,6 +157,15 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
     }
 }
 
+D3D12_HEAP_TYPE MapType(MemoryType v) noexcept {
+    switch (v) {
+        case MemoryType::Device: return D3D12_HEAP_TYPE_DEFAULT;
+        case MemoryType::Upload: return D3D12_HEAP_TYPE_UPLOAD;
+        case MemoryType::ReadBack: return D3D12_HEAP_TYPE_READBACK;
+        default: return D3D12_HEAP_TYPE_DEFAULT;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
