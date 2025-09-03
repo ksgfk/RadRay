@@ -344,16 +344,33 @@ public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _buf;
     ComPtr<D3D12MA::Allocation> _alloc;
-    D3D12_RESOURCE_DESC _desc;
+    D3D12_RESOURCE_DESC _rawDesc;
+    D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
+    BufferDescriptor _desc;
 };
 
 class BufferViewD3D12 final : public BufferView {
 public:
-    ~BufferViewD3D12() noexcept override = default;
+    BufferViewD3D12(
+        DeviceD3D12* device,
+        BufferD3D12* buffer,
+        DescriptorHeapView heapView,
+        CpuDescriptorAllocator* heapAlloc) noexcept;
+    ~BufferViewD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceD3D12* _device;
+    BufferD3D12* _buffer;
+    DescriptorHeapView _heapView;
+    CpuDescriptorAllocator* _heapAlloc;
+    BufferViewDescriptor _desc;
+    DXGI_FORMAT _rawFormat;
 };
 
 class TextureD3D12 final : public Texture {
@@ -372,25 +389,49 @@ public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _tex;
     ComPtr<D3D12MA::Allocation> _alloc;
-    D3D12_RESOURCE_DESC _desc;
+    D3D12_RESOURCE_DESC _rawDesc;
+    D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
+    TextureDescriptor _desc;
 };
 
 class TextureViewD3D12 final : public TextureView {
 public:
-    ~TextureViewD3D12() noexcept override = default;
+    TextureViewD3D12(
+        DeviceD3D12* device,
+        TextureD3D12* texture,
+        DescriptorHeapView heapView,
+        CpuDescriptorAllocator* heapAlloc) noexcept;
+    ~TextureViewD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceD3D12* _device;
+    TextureD3D12* _texture;
+    DescriptorHeapView _heapView;
+    CpuDescriptorAllocator* _heapAlloc;
+    TextureViewDescriptor _desc;
+    DXGI_FORMAT _rawFormat;
 };
 
 class Dxil final : public Shader {
 public:
+    Dxil() noexcept = default;
+    template <class TIter>
+    requires std::is_same_v<typename std::iterator_traits<TIter>::value_type, byte>
+    Dxil(TIter begin, TIter end) noexcept : _dxil{begin, end} {}
     ~Dxil() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    vector<byte> _dxil;
 };
 
 class RootSigD3D12 final : public RootSignature {

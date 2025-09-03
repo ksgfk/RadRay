@@ -53,9 +53,14 @@ std::string_view GetErrorName(HRESULT hr) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
 
+DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
+
+DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
+
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;
 D3D12_HEAP_TYPE MapType(MemoryType v) noexcept;
+D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept;
 
 }  // namespace radray::render::d3d12
 

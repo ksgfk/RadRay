@@ -561,6 +561,7 @@ struct TextureViewDescriptor {
     std::optional<uint32_t> ArrayLayerCount;
     uint32_t BaseMipLevel;
     std::optional<uint32_t> MipLevelCount;
+    TextureUses Usage;
 };
 
 struct BufferDescriptor {
@@ -579,6 +580,7 @@ struct BufferRange {
 struct BufferViewDescriptor {
     Buffer* Target;
     BufferRange Range;
+    uint32_t Stride;
     TextureFormat Format;
     BufferUses Usage;
 };
