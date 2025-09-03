@@ -51,7 +51,15 @@ std::optional<Win32Event> MakeWin32Event() noexcept;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
 
+void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
+
+D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
+DXGI_FORMAT MapType(TextureFormat v) noexcept;
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept;
 std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
+std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
+std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;

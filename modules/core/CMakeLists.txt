@@ -13,7 +13,7 @@ target_link_libraries(radraycore PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
-    $<$<NOT:$<CONFIG:Release>>:RADRAY_DEBUG>
+    $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
 if (MSVC)

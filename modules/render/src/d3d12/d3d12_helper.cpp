@@ -76,6 +76,87 @@ std::string_view GetErrorName(HRESULT hr) noexcept {
     }
 }
 
+void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc) noexcept {
+    if (str.length() == 0) {
+        if (alloc) {
+            alloc->SetName(nullptr);
+        }
+        obj->SetName(L"");
+    } else {
+        std::optional<wstring> wco = ToWideChar(str);
+        if (wco.has_value()) {
+            const wchar_t* debugName = wco.value().c_str();
+            if (alloc) {
+                alloc->SetName(debugName);
+            }
+            obj->SetName(debugName);
+        }
+    }
+}
+
+D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
+    switch (v) {
+        case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;
+        case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
+        default: return D3D12_COMMAND_LIST_TYPE_NONE;
+    }
+}
+
+DXGI_FORMAT MapType(TextureFormat v) noexcept {
+    switch (v) {
+        case TextureFormat::UNKNOWN: return DXGI_FORMAT_UNKNOWN;
+        case TextureFormat::R8_SINT: return DXGI_FORMAT_R8_SINT;
+        case TextureFormat::R8_UINT: return DXGI_FORMAT_R8_UINT;
+        case TextureFormat::R8_SNORM: return DXGI_FORMAT_R8_SNORM;
+        case TextureFormat::R8_UNORM: return DXGI_FORMAT_R8_UNORM;
+        case TextureFormat::R16_SINT: return DXGI_FORMAT_R16_SINT;
+        case TextureFormat::R16_UINT: return DXGI_FORMAT_R16_UINT;
+        case TextureFormat::R16_SNORM: return DXGI_FORMAT_R16_SNORM;
+        case TextureFormat::R16_UNORM: return DXGI_FORMAT_R16_UNORM;
+        case TextureFormat::R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
+        case TextureFormat::RG8_SINT: return DXGI_FORMAT_R8G8_SINT;
+        case TextureFormat::RG8_UINT: return DXGI_FORMAT_R8G8_UINT;
+        case TextureFormat::RG8_SNORM: return DXGI_FORMAT_R8G8_SNORM;
+        case TextureFormat::RG8_UNORM: return DXGI_FORMAT_R8G8_UNORM;
+        case TextureFormat::R32_SINT: return DXGI_FORMAT_R32_SINT;
+        case TextureFormat::R32_UINT: return DXGI_FORMAT_R32_UINT;
+        case TextureFormat::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
+        case TextureFormat::RG16_SINT: return DXGI_FORMAT_R16G16_SINT;
+        case TextureFormat::RG16_UINT: return DXGI_FORMAT_R16G16_UINT;
+        case TextureFormat::RG16_SNORM: return DXGI_FORMAT_R16G16_SNORM;
+        case TextureFormat::RG16_UNORM: return DXGI_FORMAT_R16G16_UNORM;
+        case TextureFormat::RG16_FLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+        case TextureFormat::RGBA8_SINT: return DXGI_FORMAT_R8G8B8A8_SINT;
+        case TextureFormat::RGBA8_UINT: return DXGI_FORMAT_R8G8B8A8_UINT;
+        case TextureFormat::RGBA8_SNORM: return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case TextureFormat::RGBA8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case TextureFormat::RGBA8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case TextureFormat::BGRA8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case TextureFormat::BGRA8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        case TextureFormat::RGB10A2_UINT: return DXGI_FORMAT_R10G10B10A2_UINT;
+        case TextureFormat::RGB10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case TextureFormat::RG11B10_FLOAT: return DXGI_FORMAT_R11G11B10_FLOAT;
+        case TextureFormat::RG32_SINT: return DXGI_FORMAT_R32G32_SINT;
+        case TextureFormat::RG32_UINT: return DXGI_FORMAT_R32G32_UINT;
+        case TextureFormat::RG32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+        case TextureFormat::RGBA16_SINT: return DXGI_FORMAT_R16G16B16A16_SINT;
+        case TextureFormat::RGBA16_UINT: return DXGI_FORMAT_R16G16B16A16_UINT;
+        case TextureFormat::RGBA16_SNORM: return DXGI_FORMAT_R16G16B16A16_SNORM;
+        case TextureFormat::RGBA16_UNORM: return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case TextureFormat::RGBA16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case TextureFormat::RGBA32_SINT: return DXGI_FORMAT_R32G32B32A32_SINT;
+        case TextureFormat::RGBA32_UINT: return DXGI_FORMAT_R32G32B32A32_UINT;
+        case TextureFormat::RGBA32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case TextureFormat::S8: return DXGI_FORMAT_R8_UINT;
+        case TextureFormat::D16_UNORM: return DXGI_FORMAT_D16_UNORM;
+        case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
+        case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        case TextureFormat::D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
@@ -102,6 +183,33 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
         case D3D_SHADER_MODEL_6_7: return "6.7";
         case D3D_SHADER_MODEL_6_8: return "6.8";
         case D3D_SHADER_MODEL_6_9: return "6.9";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
+    switch (v) {
+        case D3D12_RESOURCE_HEAP_TIER_1: return "1";
+        case D3D12_RESOURCE_HEAP_TIER_2: return "2";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
+    switch (v) {
+        case D3D12_RESOURCE_BINDING_TIER_1: return "1";
+        case D3D12_RESOURCE_BINDING_TIER_2: return "2";
+        case D3D12_RESOURCE_BINDING_TIER_3: return "3";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
+    switch (v) {
+        case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV: return "CBV_SRV_UAV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
+        case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
         default: return "UNKNOWN";
     }
 }

@@ -1,6 +1,171 @@
 #include "d3d12_impl.h"
 
+#include <bit>
+
 namespace radray::render::d3d12 {
+
+static CmdQueueD3D12* CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
+
+DescriptorHeap::DescriptorHeap(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
+    : _device(device) {
+    if (FAILED(_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf())))) {
+        RADRAY_ABORT("d3d12 create DescriptorHeap failed");
+    }
+    _desc = _heap->GetDesc();
+    _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
+    _gpuStart = IsShaderVisible() ? _heap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{0};
+    _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
+    RADRAY_DEBUG_LOG(
+        "D3D12 create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)",
+        _desc.Type,
+        IsShaderVisible(),
+        _incrementSize,
+        _desc.NumDescriptors,
+        UINT64(_desc.NumDescriptors) * _incrementSize);
+}
+
+ID3D12DescriptorHeap* DescriptorHeap::Get() const noexcept {
+    return _heap.Get();
+}
+
+D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeap::GetHeapType() const noexcept {
+    return _desc.Type;
+}
+
+UINT DescriptorHeap::GetLength() const noexcept {
+    return _desc.NumDescriptors;
+}
+
+bool DescriptorHeap::IsShaderVisible() const noexcept {
+    return (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGpu(UINT index) const noexcept {
+    return {_gpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleCpu(UINT index) const noexcept {
+    return {_cpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateUnorderedAccessView(resource, nullptr, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateShaderResourceView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateConstantBufferView(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateRenderTargetView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateDepthStencilView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept {
+    _device->CreateSampler(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap::CopyTo(UINT start, UINT count, DescriptorHeap* dst, UINT dstStart) noexcept {
+    _device->CopyDescriptorsSimple(
+        count,
+        dst->HandleCpu(dstStart),
+        HandleCpu(start),
+        _desc.Type);
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeapView::HandleGpu() const noexcept {
+    return Heap->HandleGpu(Start);
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeapView::HandleCpu() const noexcept {
+    return Heap->HandleCpu(Start);
+}
+
+bool DescriptorHeapView::IsValid() const noexcept {
+    return Heap != nullptr;
+}
+
+CpuDescriptorAllocatorImpl::CpuDescriptorAllocatorImpl(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT basicSize) noexcept
+    : BlockAllocator(basicSize, 1),
+      _device(device),
+      _type(type) {}
+
+unique_ptr<DescriptorHeap> CpuDescriptorAllocatorImpl::CreateHeap(size_t size) noexcept {
+    return make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            _type,
+            static_cast<UINT>(size),
+            D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            0});
+}
+
+BuddyAllocator CpuDescriptorAllocatorImpl::CreateSubAllocator(size_t size) noexcept { return BuddyAllocator{size}; }
+
+CpuDescriptorAllocator::CpuDescriptorAllocator(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT basicSize) noexcept
+    : _impl(device, type, basicSize) {}
+
+std::optional<DescriptorHeapView> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    auto allocation = _impl.Allocate(count);
+    if (!allocation.has_value()) {
+        return std::nullopt;
+    }
+    auto v = allocation.value();
+    return std::make_optional(DescriptorHeapView{
+        v.Heap,
+        static_cast<UINT>(v.Start),
+        static_cast<UINT>(v.Length)});
+}
+
+void CpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
+    _impl.Destroy({view.Heap, view.Start, view.Length});
+}
+
+GpuDescriptorAllocator::GpuDescriptorAllocator(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT size) noexcept
+    : _device(device),
+      _allocator(size) {
+    _heap = make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            type,
+            static_cast<UINT>(size),
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            0});
+}
+
+std::optional<DescriptorHeapView> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    auto allocation = _allocator.Allocate(count);
+    if (!allocation.has_value()) {
+        return std::nullopt;
+    }
+    auto v = allocation.value();
+    return std::make_optional(DescriptorHeapView{
+        _heap.get(),
+        static_cast<UINT>(v),
+        count});
+}
+
+void GpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
+    _allocator.Destroy(view.Start);
+}
 
 DeviceD3D12::DeviceD3D12(
     ComPtr<ID3D12Device> device,
@@ -11,6 +176,12 @@ DeviceD3D12::DeviceD3D12(
       _dxgiFactory(std::move(dxgiFactory)),
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)) {
+    _cpuResAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 512);
+    _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128);
+    _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128);
+    _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 64);
+    _gpuResHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
+    _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 8);
     _features.Init(_device.Get());
 }
 
@@ -27,6 +198,11 @@ void DeviceD3D12::Destroy() noexcept {
 }
 
 void DeviceD3D12::DestroyImpl() noexcept {
+    _cpuResAlloc = nullptr;
+    _cpuRtvAlloc = nullptr;
+    _cpuDsvAlloc = nullptr;
+    _gpuResHeap = nullptr;
+    _gpuSamplerHeap = nullptr;
     _mainAlloc = nullptr;
     _device = nullptr;
     _dxgiAdapter = nullptr;
@@ -34,19 +210,146 @@ void DeviceD3D12::DestroyImpl() noexcept {
 }
 
 Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
-    return nullptr;
+    uint32_t index = static_cast<size_t>(type);
+    RADRAY_ASSERT(index >= 0 && index < 3);
+    auto& queues = _queues[index];
+    if (queues.size() <= slot) {
+        queues.reserve(slot + 1);
+        for (size_t i = queues.size(); i <= slot; i++) {
+            queues.emplace_back(unique_ptr<CmdQueueD3D12>{nullptr});
+        }
+    }
+    unique_ptr<CmdQueueD3D12>& q = queues[slot];
+    if (q == nullptr) {
+        Nullable<shared_ptr<Fence>> fence = CreateFence(0);
+        if (!fence) {
+            return nullptr;
+        }
+        ComPtr<ID3D12CommandQueue> queue;
+        D3D12_COMMAND_QUEUE_DESC desc{};
+        desc.Type = MapType(type);
+        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
+            SUCCEEDED(hr)) {
+            shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
+            auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
+            string debugName = radray::format("Queue-{}-{}", type, slot);
+            SetObjectName(debugName, ins->_queue.Get());
+            q = std::move(ins);
+        } else {
+            RADRAY_ERR_LOG("d3d12 create ID3D12CommandQueue fail, reason={} (code:{})", GetErrorName(hr), hr);
+        }
+    }
+    return q->IsValid() ? q.get() : nullptr;
 }
 
-Nullable<shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueue* queue) noexcept {
-    return nullptr;
+Nullable<shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueue* queue_) noexcept {
+    auto queue = CastD3D12Object(queue_);
+    ComPtr<ID3D12CommandAllocator> alloc;
+    if (HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("cannot create ID3D12CommandAllocator, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (HRESULT hr = _device->CreateCommandList(0, queue->_type, alloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        SUCCEEDED(hr)) {
+        if (FAILED(list->Close())) {
+            RADRAY_ERR_LOG("cannot close ID3D12GraphicsCommandList");
+            return nullptr;
+        }
+        return make_shared<CmdListD3D12>(
+            this,
+            std::move(alloc),
+            std::move(list),
+            queue->_type);
+    } else {
+        RADRAY_ERR_LOG("cannot create ID3D12GraphicsCommandList, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
 }
 
 Nullable<shared_ptr<Fence>> DeviceD3D12::CreateFence(uint64_t initValue) noexcept {
-    return nullptr;
+    ComPtr<ID3D12Fence> fence;
+    if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 create ID3D12Fence fail, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    std::optional<Win32Event> e = MakeWin32Event();
+    if (!e.has_value()) {
+        return nullptr;
+    }
+    auto result = make_shared<FenceD3D12>(std::move(fence), std::move(e.value()));
+    result->_fenceValue = initValue;
+    return result;
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
-    return nullptr;
+    // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
+    DXGI_SWAP_CHAIN_DESC1 scDesc{};
+    scDesc.Width = desc.Width;
+    scDesc.Height = desc.Height;
+    scDesc.Format = MapType(desc.Format);
+    if (scDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        scDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        scDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        scDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
+        RADRAY_ERR_LOG("d3d12 IDXGISwapChain do not support format {}", desc.Format);
+        return nullptr;
+    }
+    scDesc.Stereo = false;
+    scDesc.SampleDesc.Count = 1;
+    scDesc.SampleDesc.Quality = 0;
+    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scDesc.BufferCount = desc.BackBufferCount;
+    if (scDesc.BufferCount < 2 || scDesc.BufferCount > 16) {
+        RADRAY_ERR_LOG("d3d12 IDXGISwapChain BufferCount must >= 2 and <= 16, cannot be {}", desc.BackBufferCount);
+        return nullptr;
+    }
+    scDesc.Scaling = DXGI_SCALING_STRETCH;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    scDesc.Flags = 0;
+    scDesc.Flags |= _isAllowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    auto queue = CastD3D12Object(desc.PresentQueue);
+    HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
+    ComPtr<IDXGISwapChain1> temp;
+    if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 create IDXGISwapChain1 for HWND fail, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
+        FAILED(hr)) {
+        RADRAY_WARN_LOG("d3d12 make window association DXGI_MWA_NO_ALT_ENTER fail, reason={} (code:{})", GetErrorName(hr), hr);
+    }
+    ComPtr<IDXGISwapChain3> swapchain;
+    if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 query IDXGISwapChain3 fail, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = make_shared<SwapChainD3D12>(this, swapchain, desc);
+    result->_frames.reserve(scDesc.BufferCount);
+    if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(result->_fence.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 create ID3D12Fence fail, reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    result->_fenceValue = 0;
+    for (size_t i = 0; i < scDesc.BufferCount; i++) {
+        auto& frame = result->_frames.emplace_back();
+        ComPtr<ID3D12Resource> rt;
+        if (HRESULT hr = swapchain->GetBuffer((UINT)i, IID_PPV_ARGS(rt.GetAddressOf()));
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("d3d12 get back buffer in IDXGISwapChain1 fail, reason={} (code:{})", GetErrorName(hr), hr);
+            return nullptr;
+        }
+        frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
+        frame.event = MakeWin32Event().value();
+        SetEvent(frame.event.Get());
+    }
+    return result;
 }
 
 Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc) noexcept {
@@ -236,6 +539,249 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     }
     RADRAY_INFO_LOG("=============================");
     return result;
+}
+
+CmdQueueD3D12::CmdQueueD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12CommandQueue> queue,
+    D3D12_COMMAND_LIST_TYPE type,
+    shared_ptr<FenceD3D12> fence) noexcept
+    : _device(device),
+      _queue(std::move(queue)),
+      _fence(std::move(fence)),
+      _type(type) {}
+
+bool CmdQueueD3D12::IsValid() const noexcept {
+    return _queue != nullptr;
+}
+
+void CmdQueueD3D12::Destroy() noexcept {
+    _fence = nullptr;
+    _queue = nullptr;
+}
+
+void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+}
+
+void CmdQueueD3D12::Wait() noexcept {
+}
+
+FenceD3D12::FenceD3D12(
+    ComPtr<ID3D12Fence> fence,
+    Win32Event event) noexcept
+    : _fence(std::move(fence)),
+      _event(std::move(event)) {}
+
+bool FenceD3D12::IsValid() const noexcept {
+    return _fence != nullptr;
+}
+
+void FenceD3D12::Destroy() noexcept {
+    _fence = nullptr;
+    _event.Destroy();
+}
+
+uint64_t FenceD3D12::GetCompletedValue() const noexcept {
+    return _fence->GetCompletedValue();
+}
+
+CmdListD3D12::CmdListD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12CommandAllocator> cmdAlloc,
+    ComPtr<ID3D12GraphicsCommandList> cmdList,
+    D3D12_COMMAND_LIST_TYPE type) noexcept
+    : _device(device),
+      _cmdAlloc(std::move(cmdAlloc)),
+      _cmdList(std::move(cmdList)),
+      _type(type) {}
+
+bool CmdListD3D12::IsValid() const noexcept {
+    return _cmdAlloc != nullptr && _cmdList != nullptr;
+}
+
+void CmdListD3D12::Destroy() noexcept {
+    _cmdAlloc = nullptr;
+    _cmdList = nullptr;
+}
+
+void CmdListD3D12::Begin() noexcept {
+}
+
+void CmdListD3D12::End() noexcept {
+}
+
+void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
+}
+
+Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+    return nullptr;
+}
+
+void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+}
+
+void CmdListD3D12::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept {
+}
+
+bool CmdRenderPassD3D12::IsValid() const noexcept {
+    return false;
+}
+
+void CmdRenderPassD3D12::Destroy() noexcept {
+}
+
+void CmdRenderPassD3D12::SetViewport(Viewport vp) noexcept {
+}
+
+void CmdRenderPassD3D12::SetScissor(Rect rect) noexcept {
+}
+
+void CmdRenderPassD3D12::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
+}
+
+void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
+}
+
+void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
+}
+
+void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
+}
+
+void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
+}
+
+void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
+}
+
+SwapChainD3D12::SwapChainD3D12(
+    DeviceD3D12* device,
+    ComPtr<IDXGISwapChain3> swapchain,
+    const SwapChainDescriptor& desc) noexcept
+    : _device(device),
+      _swapchain(std::move(swapchain)),
+      _desc(desc) {}
+
+SwapChainD3D12::~SwapChainD3D12() noexcept {
+    _frames.clear();
+    _swapchain = nullptr;
+}
+
+bool SwapChainD3D12::IsValid() const noexcept {
+    return _swapchain != nullptr;
+}
+
+void SwapChainD3D12::Destroy() noexcept {
+    _frames.clear();
+    _swapchain = nullptr;
+}
+
+Nullable<Texture> SwapChainD3D12::AcquireNext() noexcept {
+    auto curr = _swapchain->GetCurrentBackBufferIndex();
+    auto& frame = _frames[curr];
+    WaitForSingleObject(frame.event.Get(), INFINITE);
+    ResetEvent(frame.event.Get());
+    return frame.image.get();
+}
+
+void SwapChainD3D12::Present() noexcept {
+    UINT curr = _swapchain->GetCurrentBackBufferIndex();
+    auto& frame = _frames[curr];
+    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
+    UINT syncInterval = _desc.EnableSync ? 1 : 0;
+    UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+        FAILED(hr)) {
+        RADRAY_ABORT("d3d12 IDXGISwapChain3 present fail, reason={} (code:{})", GetErrorName(hr), hr);
+    }
+    _fenceValue++;
+    auto queue = CastD3D12Object(_desc.PresentQueue);
+    queue->_queue->Signal(_fence.Get(), _fenceValue);
+}
+
+Nullable<Texture> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
+    UINT curr = _swapchain->GetCurrentBackBufferIndex();
+    return _frames[curr].image.get();
+}
+
+uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
+    return _swapchain->GetCurrentBackBufferIndex();
+}
+
+uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
+    return static_cast<uint32_t>(_frames.size());
+}
+
+BufferD3D12::BufferD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Resource> buf,
+    ComPtr<D3D12MA::Allocation> alloc) noexcept
+    : _device(device),
+      _buf(std::move(buf)),
+      _alloc(std::move(alloc)) {}
+
+bool BufferD3D12::IsValid() const noexcept {
+    return _buf != nullptr;
+}
+
+void BufferD3D12::Destroy() noexcept {
+    _buf = nullptr;
+    _alloc = nullptr;
+}
+
+void BufferD3D12::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
+}
+
+bool BufferViewD3D12::IsValid() const noexcept {
+    return false;
+}
+
+void BufferViewD3D12::Destroy() noexcept {
+}
+
+TextureD3D12::TextureD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Resource> tex,
+    ComPtr<D3D12MA::Allocation> alloc) noexcept
+    : _device(device),
+      _tex(std::move(tex)),
+      _alloc(std::move(alloc)) {}
+
+bool TextureD3D12::IsValid() const noexcept {
+    return _tex != nullptr;
+}
+
+void TextureD3D12::Destroy() noexcept {
+    _tex = nullptr;
+    _alloc = nullptr;
+}
+
+bool TextureViewD3D12::IsValid() const noexcept {
+    return false;
+}
+
+void TextureViewD3D12::Destroy() noexcept {
+}
+
+bool Dxil::IsValid() const noexcept {
+    return false;
+}
+
+void Dxil::Destroy() noexcept {
+}
+
+bool RootSigD3D12::IsValid() const noexcept {
+    return false;
+}
+
+void RootSigD3D12::Destroy() noexcept {
+}
+
+bool GraphicsPsoD3D12::IsValid() const noexcept {
+    return false;
+}
+
+void GraphicsPsoD3D12::Destroy() noexcept {
 }
 
 }  // namespace radray::render::d3d12

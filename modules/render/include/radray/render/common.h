@@ -873,7 +873,7 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
 
-class Shader : public Resource {
+class Shader : public RenderBase {
 public:
     virtual ~Shader() noexcept = default;
 
