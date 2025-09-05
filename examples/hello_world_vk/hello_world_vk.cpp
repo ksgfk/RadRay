@@ -51,7 +51,7 @@ void Init() {
     VulkanCommandQueueDescriptor queueDesc[] = {
         {QueueType::Direct, 1}};
     deviceDesc.Queues = queueDesc;
-    device = vulkan::CreateDeviceVulkan(deviceDesc).Unwrap();
+    device = std::static_pointer_cast<vulkan::DeviceVulkan>(CreateDevice(deviceDesc).Unwrap());
     cmdQueue = static_cast<vulkan::QueueVulkan*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
     SwapChainDescriptor swapchainDesc{};
     swapchainDesc.PresentQueue = cmdQueue;

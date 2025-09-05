@@ -247,6 +247,10 @@ DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept {
     return fmt;
 }
 
+UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept {
+    return ((MipSlice) + ((ArraySlice) * (MipLevels)) + ((PlaneSlice) * (MipLevels) * (ArraySize)));
+}
+
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
     switch (v) {
         case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -522,6 +526,61 @@ D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
         case IndexFormat::UINT32: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
         default: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
     }
+}
+
+D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept {
+    D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
+    if (v.HasFlag(BufferUse::CopySource)) {
+        result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    }
+    if (v.HasFlag(BufferUse::CopyDestination)) {
+        result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (v.HasFlag(BufferUse::Index)) {
+        result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
+    }
+    if (v.HasFlag(BufferUse::Vertex) || v.HasFlag(BufferUse::CBuffer)) {
+        result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    }
+    if (v.HasFlag(BufferUse::Resource)) {
+        result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (v.HasFlag(BufferUse::UnorderedAccess)) {
+        result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (v.HasFlag(BufferUse::Indirect)) {
+        result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    }
+    return result;
+}
+
+D3D12_RESOURCE_STATES MapType(TextureUses v) noexcept {
+    D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
+    if (v.HasFlag(TextureUse::Present)) {
+        result |= D3D12_RESOURCE_STATE_PRESENT;
+    }
+    if (v.HasFlag(TextureUse::CopySource)) {
+        result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    }
+    if (v.HasFlag(TextureUse::CopyDestination)) {
+        result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    if (v.HasFlag(TextureUse::Resource)) {
+        result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    if (v.HasFlag(TextureUse::RenderTarget)) {
+        result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    if (v.HasFlag(TextureUse::DepthStencilRead)) {
+        result |= D3D12_RESOURCE_STATE_DEPTH_READ;
+    }
+    if (v.HasFlag(TextureUse::DepthStencilWrite)) {
+        result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    if (v.HasFlag(TextureUse::UnorderedAccess)) {
+        result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    return result;
 }
 
 }  // namespace radray::render::d3d12

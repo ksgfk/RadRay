@@ -1406,12 +1406,80 @@ void CmdListD3D12::Destroy() noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
+    _cmdAlloc->Reset();
+    _cmdList->Reset(_cmdAlloc.Get(), nullptr);
+    ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
+    _cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
 }
 
 void CmdListD3D12::End() noexcept {
+    _cmdList->Close();
 }
 
 void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
+    vector<D3D12_RESOURCE_BARRIER> rawBarriers;
+    rawBarriers.reserve(buffers.size() + textures.size());
+    for (const BarrierBufferDescriptor& bb : buffers) {
+        auto buf = CastD3D12Object(bb.Target);
+        D3D12_RESOURCE_BARRIER raw{};
+        if (bb.Before == BufferUse::UnorderedAccess && bb.After == BufferUse::UnorderedAccess) {
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.UAV.pResource = buf->_buf.Get();
+        } else {
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.Transition.pResource = buf->_buf.Get();
+            raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            raw.Transition.StateBefore = MapType(bb.Before);
+            raw.Transition.StateAfter = MapType(bb.After);
+            if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                continue;
+            }
+        }
+        rawBarriers.push_back(raw);
+    }
+    for (const BarrierTextureDescriptor& tb : textures) {
+        auto tex = CastD3D12Object(tb.Target);
+        D3D12_RESOURCE_BARRIER raw{};
+        if (tb.Before == TextureUse::UnorderedAccess && tb.After == TextureUse::UnorderedAccess) {
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.UAV.pResource = tex->_tex.Get();
+        } else {
+            if (tb.Before == tb.After) {
+                continue;
+            }
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.Transition.pResource = tex->_tex.Get();
+            if (tb.IsSubresourceBarrier) {
+                raw.Transition.Subresource = SubresourceIndex(
+                    tb.BaseMipLevel,
+                    tb.MipLevelCount,
+                    0,
+                    tex->_desc.MipLevels,
+                    tex->_desc.DepthOrArraySize);
+            } else {
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            }
+            raw.Transition.StateBefore = MapType(tb.Before);
+            raw.Transition.StateAfter = MapType(tb.After);
+            // D3D12 COMMON 和 PRESENT flag 完全一致
+            if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
+                if (tb.Before == TextureUse::Present || tb.After == TextureUse::Present) {
+                    continue;
+                }
+            }
+            if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                continue;
+            }
+        }
+        rawBarriers.push_back(raw);
+    }
+    if (!rawBarriers.empty()) {
+        _cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
+    }
 }
 
 Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
@@ -1421,7 +1489,10 @@ Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderP
 void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
 }
 
-void CmdListD3D12::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept {
+void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
+    auto src = CastD3D12Object(src_);
+    auto dst = CastD3D12Object(dst_);
+    _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
 bool CmdRenderPassD3D12::IsValid() const noexcept {
@@ -1582,7 +1653,6 @@ TextureD3D12::TextureD3D12(
       _tex(std::move(tex)),
       _alloc(std::move(alloc)) {
     _rawDesc = _tex->GetDesc();
-    _gpuAddr = _tex->GetGPUVirtualAddress();
 }
 
 bool TextureD3D12::IsValid() const noexcept {

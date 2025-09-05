@@ -390,7 +390,6 @@ public:
     ComPtr<ID3D12Resource> _tex;
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _rawDesc;
-    D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
     TextureDescriptor _desc;
 };
 

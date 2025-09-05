@@ -57,6 +57,8 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
 
+UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept;
+
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;
 D3D12_HEAP_TYPE MapType(MemoryType v) noexcept;
@@ -78,6 +80,8 @@ std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept;
 D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept;
 D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
+D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept;
+D3D12_RESOURCE_STATES MapType(TextureUses v) noexcept;
 
 }  // namespace radray::render::d3d12
 
