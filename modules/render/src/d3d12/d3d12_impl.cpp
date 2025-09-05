@@ -8,6 +8,10 @@ namespace radray::render::d3d12 {
 static CmdQueueD3D12* CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
 static BufferD3D12* CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 static TextureD3D12* CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+static FenceD3D12* CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
+static CmdListD3D12* CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
+static RootSigD3D12* CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+static Dxil* CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -945,11 +949,374 @@ Nullable<shared_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& d
 }
 
 Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
-    return nullptr;
+    vector<D3D12_ROOT_PARAMETER1> rootParmas{};
+    vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
+    ShaderStages allStages = ShaderStage::UNKNOWN;
+    size_t rootConstStart = rootParmas.size();
+    if (desc.Constant.has_value()) {
+        const RootSignatureConstant& rootConst = desc.Constant.value();
+        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+        CD3DX12_ROOT_PARAMETER1::InitAsConstants(
+            rp,
+            rootConst.Size / 4,
+            rootConst.Slot,
+            rootConst.Space,
+            MapShaderStages(rootConst.Stages));
+        allStages |= rootConst.Stages;
+    }
+    size_t rootDescStart = rootParmas.size();
+    for (const RootSignatureBinding& rootDesc : desc.RootBindings) {
+        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+        switch (rootDesc.Type) {
+            case ResourceBindType::CBuffer: {
+                CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
+                    rp,
+                    rootDesc.Slot,
+                    rootDesc.Space,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            case ResourceBindType::Buffer:
+            case ResourceBindType::Texture: {
+                CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
+                    rp,
+                    rootDesc.Slot,
+                    0,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            case ResourceBindType::RWBuffer:
+            case ResourceBindType::RWTexture: {
+                CD3DX12_ROOT_PARAMETER1::InitAsUnorderedAccessView(
+                    rp,
+                    rootDesc.Slot,
+                    0,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+                    MapShaderStages(rootDesc.Stages));
+                break;
+            }
+            default: {
+                RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {}", rootDesc.Type);
+                return nullptr;
+            }
+        }
+        allStages |= rootDesc.Stages;
+    }
+    // 我们约定, hlsl 中定义的单个资源独占一个 range
+    // 资源数组占一个 range
+    for (const RootSignatureBindingSet& descSet : desc.BindingSets) {
+        for (const RootSignatureSetElement& e : descSet.Elements) {
+            switch (e.Type) {
+                case ResourceBindType::CBuffer:
+                case ResourceBindType::Buffer:
+                case ResourceBindType::RWBuffer:
+                case ResourceBindType::Texture:
+                case ResourceBindType::RWTexture:
+                case ResourceBindType::Sampler:
+                    descRanges.emplace_back();
+                    allStages |= e.Stages;
+                    break;
+                default: {
+                    RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {}", e.Type);
+                    return nullptr;
+                }
+            }
+        }
+    }
+    size_t bindStart = rootParmas.size();
+    size_t offset = 0;
+    vector<RootSignatureSetElement> bindDescs{};
+    for (const RootSignatureBindingSet& descSet : desc.BindingSets) {
+        for (const RootSignatureSetElement& e : descSet.Elements) {
+            switch (e.Type) {
+                case ResourceBindType::Sampler: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+                        e.Count,
+                        e.Slot,
+                        e.Space);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
+                    break;
+                }
+                case ResourceBindType::Texture:
+                case ResourceBindType::Buffer: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                        e.Count,
+                        e.Slot,
+                        e.Space);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
+                    break;
+                }
+                case ResourceBindType::CBuffer: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
+                        e.Count,
+                        e.Slot,
+                        e.Space);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
+                    break;
+                }
+                case ResourceBindType::RWTexture:
+                case ResourceBindType::RWBuffer: {
+                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                    offset++;
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(
+                        range,
+                        D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+                        e.Count,
+                        e.Slot,
+                        e.Space);
+                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                        rp,
+                        1,
+                        &range,
+                        MapShaderStages(e.Stages));
+                    bindDescs.emplace_back(e);
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+    }
+    bindDescs.shrink_to_fit();
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
+    // TODO: static sampler?
+    // staticSamplers.reserve(info.StaticSamplers.size());
+    // for (const StaticSamplerInfo& desc : info.StaticSamplers) {
+    //     D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+    //     ssDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.HasCompare, desc.AnisotropyClamp);
+    //     ssDesc.AddressU = MapType(desc.AddressS);
+    //     ssDesc.AddressV = MapType(desc.AddressT);
+    //     ssDesc.AddressW = MapType(desc.AddressR);
+    //     ssDesc.MipLODBias = 0;
+    //     ssDesc.MaxAnisotropy = desc.AnisotropyClamp;
+    //     ssDesc.ComparisonFunc = desc.HasCompare ? MapType(desc.Compare) : D3D12_COMPARISON_FUNC_NEVER;
+    //     ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    //     ssDesc.MinLOD = desc.LodMin;
+    //     ssDesc.MaxLOD = desc.LodMax;
+    //     ssDesc.ShaderRegister = desc.Slot;
+    //     ssDesc.RegisterSpace = desc.Space;
+    //     ssDesc.ShaderVisibility = MapShaderStages(desc.Stages);
+    // }
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
+    versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
+    D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
+    rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
+    rsDesc.pParameters = rootParmas.data();
+    rsDesc.NumStaticSamplers = static_cast<UINT>(staticSamplers.size());
+    rsDesc.pStaticSamplers = staticSamplers.size() > 0 ? staticSamplers.data() : nullptr;
+    D3D12_ROOT_SIGNATURE_FLAGS flag =
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
+    if (!allStages.HasFlag(ShaderStage::Vertex)) {
+        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+    }
+    if (!allStages.HasFlag(ShaderStage::Pixel)) {
+        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+    }
+    rsDesc.Flags = flag;
+    ComPtr<ID3DBlob> rootSigBlob, errorBlob;
+    if (HRESULT hr = D3DX12SerializeVersionedRootSignature(
+            &versionDesc,
+            D3D_ROOT_SIGNATURE_VERSION_1_1,
+            rootSigBlob.GetAddressOf(),
+            errorBlob.GetAddressOf());
+        FAILED(hr)) {
+        const char* errInfoBegin = errorBlob ? reinterpret_cast<const char*>(errorBlob->GetBufferPointer()) : nullptr;
+        const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
+        auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
+        RADRAY_ERR_LOG("d3d12 cannot serialize root sig\n{}", reason);
+        return nullptr;
+    }
+    ComPtr<ID3D12RootSignature> rootSig;
+    if (HRESULT hr = _device->CreateRootSignature(
+            0,
+            rootSigBlob->GetBufferPointer(),
+            rootSigBlob->GetBufferSize(),
+            IID_PPV_ARGS(rootSig.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 cannot create root sig. reason={}, (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = make_shared<RootSigD3D12>(this, std::move(rootSig));
+    result->_rootConstant = desc.Constant;
+    result->_rootDescriptors = {desc.RootBindings.begin(), desc.RootBindings.end()};
+    result->_bindDescriptors = std::move(bindDescs);
+    result->_rootConstStart = (UINT)rootConstStart;
+    result->_rootDescStart = (UINT)rootDescStart;
+    result->_bindDescStart = (UINT)bindStart;
+    return result;
 }
 
 Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
-    return nullptr;
+    auto [topoClass, topo] = MapType(desc.Primitive.Topology);
+    vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    vector<uint64_t> arrayStrides(desc.VertexLayouts.size(), 0);
+    for (size_t index = 0; index < desc.VertexLayouts.size(); index++) {
+        const VertexInfo& i = desc.VertexLayouts[index];
+        arrayStrides[index] = i.ArrayStride;
+        D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
+        for (const VertexElement& j : i.Elements) {
+            auto& ied = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
+            ied.SemanticName = j.Semantic.data();
+            ied.SemanticIndex = j.SemanticIndex;
+            ied.Format = MapType(j.Format);
+            ied.InputSlot = (UINT)index;
+            ied.AlignedByteOffset = (UINT)j.Offset;
+            ied.InputSlotClass = inputClass;
+            ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
+        }
+    }
+    DepthBiasState depBias;
+    if (desc.DepthStencil.has_value()) {
+        depBias = desc.DepthStencil.value().DepthBias;
+    } else {
+        depBias = DepthBiasState{0, 0, 0};
+    }
+    D3D12_RASTERIZER_DESC rawRaster{};
+    if (auto fillMode = MapType(desc.Primitive.Poly);
+        fillMode.has_value()) {
+        rawRaster.FillMode = fillMode.value();
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot set fill mode {}", desc.Primitive.Poly);
+        return nullptr;
+    }
+    rawRaster.CullMode = MapType(desc.Primitive.Cull);
+    rawRaster.FrontCounterClockwise = desc.Primitive.FaceClockwise == FrontFace::CCW;
+    rawRaster.DepthBias = depBias.Constant;
+    rawRaster.DepthBiasClamp = depBias.Clamp;
+    rawRaster.SlopeScaledDepthBias = depBias.SlopScale;
+    rawRaster.DepthClipEnable = !desc.Primitive.UnclippedDepth;
+    rawRaster.MultisampleEnable = desc.MultiSample.Count > 1;
+    rawRaster.AntialiasedLineEnable = false;
+    rawRaster.ForcedSampleCount = 0;
+    rawRaster.ConservativeRaster = desc.Primitive.Conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    D3D12_BLEND_DESC rawBlend{};
+    rawBlend.AlphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable;
+    rawBlend.IndependentBlendEnable = false;
+    for (size_t i = 0; i < ArrayLength(rawBlend.RenderTarget); i++) {
+        D3D12_RENDER_TARGET_BLEND_DESC& rtb = rawBlend.RenderTarget[i];
+        if (i < desc.ColorTargets.size()) {
+            const ColorTargetState& ct = desc.ColorTargets[i];
+            rtb.BlendEnable = ct.Blend.has_value();
+            if (ct.Blend.has_value()) {
+                const auto& ctBlend = ct.Blend.value();
+                rtb.SrcBlend = MapBlendColor(ctBlend.Color.Src);
+                rtb.DestBlend = MapBlendColor(ctBlend.Color.Dst);
+                rtb.BlendOp = MapType(ctBlend.Color.Op);
+                rtb.SrcBlendAlpha = MapBlendAlpha(ctBlend.Alpha.Src);
+                rtb.DestBlendAlpha = MapBlendAlpha(ctBlend.Alpha.Dst);
+                rtb.BlendOpAlpha = MapType(ctBlend.Alpha.Op);
+            }
+            if (auto writeMask = MapColorWrites(ct.WriteMask);
+                writeMask.has_value()) {
+                rtb.RenderTargetWriteMask = (UINT8)writeMask.value();
+            } else {
+                RADRAY_ERR_LOG("d3d12 cannot set color write mask {}", ct.WriteMask);
+                return nullptr;
+            }
+        } else {
+            rtb.BlendEnable = false;
+            rtb.LogicOpEnable = false;
+            rtb.LogicOp = D3D12_LOGIC_OP_CLEAR;
+            rtb.RenderTargetWriteMask = 0;
+        }
+    }
+    D3D12_DEPTH_STENCIL_DESC dsDesc{};
+    if (desc.DepthStencil.has_value()) {
+        const auto& ds = desc.DepthStencil.value();
+        dsDesc.DepthEnable = true;
+        dsDesc.DepthWriteMask = ds.DepthWriteEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        dsDesc.DepthFunc = MapType(ds.DepthCompare);
+        dsDesc.StencilEnable = ds.Stencil.has_value();
+        if (ds.Stencil.has_value()) {
+            const auto& s = ds.Stencil.value();
+            auto ToDsd = [](StencilFaceState v) noexcept {
+                D3D12_DEPTH_STENCILOP_DESC result{};
+                result.StencilFailOp = MapType(v.FailOp);
+                result.StencilDepthFailOp = MapType(v.DepthFailOp);
+                result.StencilPassOp = MapType(v.PassOp);
+                result.StencilFunc = MapType(v.Compare);
+                return result;
+            };
+            dsDesc.StencilReadMask = (UINT8)s.ReadMask;
+            dsDesc.StencilWriteMask = (UINT8)s.WriteMask;
+            dsDesc.FrontFace = ToDsd(s.Front);
+            dsDesc.BackFace = ToDsd(s.Back);
+        }
+    } else {
+        dsDesc.DepthEnable = false;
+        dsDesc.StencilEnable = false;
+    }
+    DXGI_SAMPLE_DESC sampleDesc{desc.MultiSample.Count, 0};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC rawPsoDesc{};
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.RootSig)->_rootSig.Get();
+    rawPsoDesc.VS = desc.VS ? CastD3D12Object(desc.VS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.PS = desc.PS ? CastD3D12Object(desc.PS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.DS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.HS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.GS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.StreamOutput = D3D12_STREAM_OUTPUT_DESC{};
+    rawPsoDesc.BlendState = rawBlend;
+    rawPsoDesc.SampleMask = (UINT)desc.MultiSample.Mask;
+    rawPsoDesc.RasterizerState = rawRaster;
+    rawPsoDesc.DepthStencilState = dsDesc;
+    rawPsoDesc.InputLayout = {inputElements.data(), static_cast<uint32_t>(inputElements.size())};
+    rawPsoDesc.IBStripCutValue = desc.Primitive.StripIndexFormat.has_value() ? MapType(desc.Primitive.StripIndexFormat.value()) : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    rawPsoDesc.PrimitiveTopologyType = topoClass;
+    rawPsoDesc.NumRenderTargets = std::min(static_cast<uint32_t>(desc.ColorTargets.size()), (uint32_t)D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+    for (size_t i = 0; i < rawPsoDesc.NumRenderTargets; i++) {
+        rawPsoDesc.RTVFormats[i] = i < desc.ColorTargets.size() ? MapType(desc.ColorTargets[i].Format) : DXGI_FORMAT_UNKNOWN;
+    }
+    rawPsoDesc.DSVFormat = desc.DepthStencil.has_value() ? MapType(desc.DepthStencil.value().Format) : DXGI_FORMAT_UNKNOWN;
+    rawPsoDesc.SampleDesc = sampleDesc;
+    rawPsoDesc.NodeMask = 0;
+    rawPsoDesc.CachedPSO = D3D12_CACHED_PIPELINE_STATE{};
+    rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    ComPtr<ID3D12PipelineState> pso;
+    if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("d3d12 cannot create graphics pipeline state. reason={} (code:{})", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_shared<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
 }
 
 CmdQueueD3D12::CmdQueueD3D12(
@@ -972,9 +1339,32 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    for (size_t i = 0; i < desc.WaitFences.size(); i++) {
+        auto f = CastD3D12Object(desc.WaitFences[i]);
+        _queue->Wait(f->_fence.Get(), desc.WaitFenceValues[i]);
+    }
+    vector<ID3D12CommandList*> submits;
+    submits.reserve(desc.CmdBuffers.size());
+    for (auto& i : desc.CmdBuffers) {
+        auto cmdList = CastD3D12Object(i);
+        submits.push_back(cmdList->_cmdList.Get());
+    }
+    if (!submits.empty()) {
+        _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
+    }
+    for (size_t i = 0; i < desc.SignalFences.size(); i++) {
+        auto f = CastD3D12Object(desc.SignalFences[i]);
+        _queue->Signal(f->_fence.Get(), desc.SignalFenceValues[i]);
+    }
+    _fence->_fenceValue++;
+    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue);
 }
 
 void CmdQueueD3D12::Wait() noexcept {
+    _fence->_fenceValue++;
+    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue);
+    _fence->_fence->SetEventOnCompletion(_fence->_fenceValue, _fence->_event.Get());
+    WaitForSingleObject(_fence->_event.Get(), INFINITE);
 }
 
 FenceD3D12::FenceD3D12(
@@ -1243,18 +1633,40 @@ void Dxil::Destroy() noexcept {
     _dxil.shrink_to_fit();
 }
 
+D3D12_SHADER_BYTECODE Dxil::ToByteCode() const noexcept {
+    return {_dxil.data(), _dxil.size()};
+}
+
+RootSigD3D12::RootSigD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12RootSignature> rootSig) noexcept
+    : _device(device),
+      _rootSig(std::move(rootSig)) {}
+
 bool RootSigD3D12::IsValid() const noexcept {
-    return false;
+    return _rootSig != nullptr;
 }
 
 void RootSigD3D12::Destroy() noexcept {
+    _rootSig = nullptr;
 }
 
+GraphicsPsoD3D12::GraphicsPsoD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12PipelineState> pso,
+    vector<uint64_t> arrayStrides,
+    D3D12_PRIMITIVE_TOPOLOGY topo) noexcept
+    : _device(device),
+      _pso(std::move(pso)),
+      _arrayStrides(std::move(arrayStrides)),
+      _topo(topo) {}
+
 bool GraphicsPsoD3D12::IsValid() const noexcept {
-    return false;
+    return _pso != nullptr;
 }
 
 void GraphicsPsoD3D12::Destroy() noexcept {
+    _pso = nullptr;
 }
 
 }  // namespace radray::render::d3d12

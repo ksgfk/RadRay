@@ -328,6 +328,202 @@ D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept {
     }
 }
 
+D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
+    if (v == ShaderStage::Compute) {
+        return D3D12_SHADER_VISIBILITY_ALL;
+    }
+    if (v == ShaderStage::UNKNOWN) {
+        return D3D12_SHADER_VISIBILITY_ALL;
+    }
+    D3D12_SHADER_VISIBILITY res = D3D12_SHADER_VISIBILITY_ALL;
+    uint32_t stageCount = 0;
+    if (v.HasFlag(ShaderStage::Vertex)) {
+        res = D3D12_SHADER_VISIBILITY_VERTEX;
+        ++stageCount;
+    }
+    if (v.HasFlag(ShaderStage::Pixel)) {
+        res = D3D12_SHADER_VISIBILITY_PIXEL;
+        ++stageCount;
+    }
+    return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
+}
+
+std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept {
+    switch (v) {
+        case PrimitiveTopology::PointList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT, D3D_PRIMITIVE_TOPOLOGY_POINTLIST};
+        case PrimitiveTopology::LineList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE, D3D_PRIMITIVE_TOPOLOGY_LINELIST};
+        case PrimitiveTopology::LineStrip: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP};
+        case PrimitiveTopology::TriangleList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
+        case PrimitiveTopology::TriangleStrip: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP};
+        default: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED, D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
+    }
+}
+
+D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept {
+    switch (v) {
+        case VertexStepMode::Vertex: return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        case VertexStepMode::Instance: return D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+        default: return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    }
+}
+
+DXGI_FORMAT MapType(VertexFormat v) noexcept {
+    switch (v) {
+        case VertexFormat::UNKNOWN: return DXGI_FORMAT_UNKNOWN;
+        case VertexFormat::UINT8X2: return DXGI_FORMAT_R8G8_UINT;
+        case VertexFormat::UINT8X4: return DXGI_FORMAT_R8G8B8A8_UINT;
+        case VertexFormat::SINT8X2: return DXGI_FORMAT_R8G8_SINT;
+        case VertexFormat::SINT8X4: return DXGI_FORMAT_R8G8B8A8_SINT;
+        case VertexFormat::UNORM8X2: return DXGI_FORMAT_R8G8_UNORM;
+        case VertexFormat::UNORM8X4: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case VertexFormat::SNORM8X2: return DXGI_FORMAT_R8G8_SNORM;
+        case VertexFormat::SNORM8X4: return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case VertexFormat::UINT16X2: return DXGI_FORMAT_R16G16_UINT;
+        case VertexFormat::UINT16X4: return DXGI_FORMAT_R16G16B16A16_UINT;
+        case VertexFormat::SINT16X2: return DXGI_FORMAT_R16G16_SINT;
+        case VertexFormat::SINT16X4: return DXGI_FORMAT_R16G16B16A16_SINT;
+        case VertexFormat::UNORM16X2: return DXGI_FORMAT_R16G16_UNORM;
+        case VertexFormat::UNORM16X4: return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case VertexFormat::SNORM16X2: return DXGI_FORMAT_R16G16_SNORM;
+        case VertexFormat::SNORM16X4: return DXGI_FORMAT_R16G16B16A16_SNORM;
+        case VertexFormat::FLOAT16X2: return DXGI_FORMAT_R16G16_FLOAT;
+        case VertexFormat::FLOAT16X4: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case VertexFormat::UINT32: return DXGI_FORMAT_R32_UINT;
+        case VertexFormat::UINT32X2: return DXGI_FORMAT_R32G32_UINT;
+        case VertexFormat::UINT32X3: return DXGI_FORMAT_R32G32B32_UINT;
+        case VertexFormat::UINT32X4: return DXGI_FORMAT_R32G32B32A32_UINT;
+        case VertexFormat::SINT32: return DXGI_FORMAT_R32_SINT;
+        case VertexFormat::SINT32X2: return DXGI_FORMAT_R32G32_SINT;
+        case VertexFormat::SINT32X3: return DXGI_FORMAT_R32G32B32_SINT;
+        case VertexFormat::SINT32X4: return DXGI_FORMAT_R32G32B32A32_SINT;
+        case VertexFormat::FLOAT32: return DXGI_FORMAT_R32_FLOAT;
+        case VertexFormat::FLOAT32X2: return DXGI_FORMAT_R32G32_FLOAT;
+        case VertexFormat::FLOAT32X3: return DXGI_FORMAT_R32G32B32_FLOAT;
+        case VertexFormat::FLOAT32X4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
+    switch (v) {
+        case PolygonMode::Fill: return D3D12_FILL_MODE_SOLID;
+        case PolygonMode::Line: return D3D12_FILL_MODE_WIREFRAME;
+        case PolygonMode::Point: return std::nullopt;
+        default: return std::nullopt;
+    }
+}
+
+D3D12_CULL_MODE MapType(CullMode v) noexcept {
+    switch (v) {
+        case CullMode::Front: return D3D12_CULL_MODE_FRONT;
+        case CullMode::Back: return D3D12_CULL_MODE_BACK;
+        case CullMode::None: return D3D12_CULL_MODE_NONE;
+        default: return D3D12_CULL_MODE_NONE;
+    }
+}
+
+D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
+    switch (v) {
+        case BlendOperation::Add: return D3D12_BLEND_OP_ADD;
+        case BlendOperation::Subtract: return D3D12_BLEND_OP_SUBTRACT;
+        case BlendOperation::ReverseSubtract: return D3D12_BLEND_OP_REV_SUBTRACT;
+        case BlendOperation::Min: return D3D12_BLEND_OP_MIN;
+        case BlendOperation::Max: return D3D12_BLEND_OP_MAX;
+        default: return D3D12_BLEND_OP_ADD;
+    }
+}
+
+D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
+    switch (v) {
+        case BlendFactor::Zero: return D3D12_BLEND_ZERO;
+        case BlendFactor::One: return D3D12_BLEND_ONE;
+        case BlendFactor::Src: return D3D12_BLEND_SRC_COLOR;
+        case BlendFactor::OneMinusSrc: return D3D12_BLEND_INV_SRC_COLOR;
+        case BlendFactor::SrcAlpha: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::Dst: return D3D12_BLEND_DEST_COLOR;
+        case BlendFactor::OneMinusDst: return D3D12_BLEND_INV_DEST_COLOR;
+        case BlendFactor::DstAlpha: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::SrcAlphaSaturated: return D3D12_BLEND_SRC_ALPHA_SAT;
+        case BlendFactor::Constant: return D3D12_BLEND_BLEND_FACTOR;
+        case BlendFactor::OneMinusConstant: return D3D12_BLEND_INV_BLEND_FACTOR;
+        case BlendFactor::Src1: return D3D12_BLEND_SRC1_COLOR;
+        case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_COLOR;
+        case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
+        default: return D3D12_BLEND_ONE;
+    }
+}
+
+D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
+    switch (v) {
+        case BlendFactor::Zero: return D3D12_BLEND_ZERO;
+        case BlendFactor::One: return D3D12_BLEND_ONE;
+        case BlendFactor::Src: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrc: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::SrcAlpha: return D3D12_BLEND_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return D3D12_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::Dst: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDst: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::DstAlpha: return D3D12_BLEND_DEST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::SrcAlphaSaturated: return D3D12_BLEND_SRC_ALPHA_SAT;
+        case BlendFactor::Constant: return D3D12_BLEND_BLEND_FACTOR;
+        case BlendFactor::OneMinusConstant: return D3D12_BLEND_INV_BLEND_FACTOR;
+        case BlendFactor::Src1: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_ALPHA;
+        case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
+        case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
+        default: return D3D12_BLEND_ONE;
+    }
+}
+
+std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
+    if (v == ColorWrite::Red) return D3D12_COLOR_WRITE_ENABLE_RED;
+    if (v == ColorWrite::Green) return D3D12_COLOR_WRITE_ENABLE_GREEN;
+    if (v == ColorWrite::Blue) return D3D12_COLOR_WRITE_ENABLE_BLUE;
+    if (v == ColorWrite::Alpha) return D3D12_COLOR_WRITE_ENABLE_ALPHA;
+    if (v == ColorWrite::All) return D3D12_COLOR_WRITE_ENABLE_ALL;
+    return std::nullopt;
+}
+
+D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
+    switch (v) {
+        case CompareFunction::Never: return D3D12_COMPARISON_FUNC_NEVER;
+        case CompareFunction::Less: return D3D12_COMPARISON_FUNC_LESS;
+        case CompareFunction::Equal: return D3D12_COMPARISON_FUNC_EQUAL;
+        case CompareFunction::LessEqual: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        case CompareFunction::Greater: return D3D12_COMPARISON_FUNC_GREATER;
+        case CompareFunction::NotEqual: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        case CompareFunction::GreaterEqual: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        case CompareFunction::Always: return D3D12_COMPARISON_FUNC_ALWAYS;
+        default: return D3D12_COMPARISON_FUNC_NONE;
+    }
+}
+
+D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
+    switch (v) {
+        case StencilOperation::Keep: return D3D12_STENCIL_OP_KEEP;
+        case StencilOperation::Zero: return D3D12_STENCIL_OP_ZERO;
+        case StencilOperation::Replace: return D3D12_STENCIL_OP_REPLACE;
+        case StencilOperation::Invert: return D3D12_STENCIL_OP_INVERT;
+        case StencilOperation::IncrementClamp: return D3D12_STENCIL_OP_INCR_SAT;
+        case StencilOperation::DecrementClamp: return D3D12_STENCIL_OP_DECR_SAT;
+        case StencilOperation::IncrementWrap: return D3D12_STENCIL_OP_INCR;
+        case StencilOperation::DecrementWrap: return D3D12_STENCIL_OP_DECR;
+        default: return D3D12_STENCIL_OP_KEEP;
+    }
+}
+
+D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
+    switch (v) {
+        case IndexFormat::UINT16: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+        case IndexFormat::UINT32: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+        default: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

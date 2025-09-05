@@ -930,5 +930,6 @@ std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureViewDimension v) noexcept;
+std::string_view format_as(ResourceBindType v) noexcept;
 
 }  // namespace radray::render

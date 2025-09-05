@@ -353,4 +353,17 @@ std::string_view format_as(TextureViewDimension v) noexcept {
     }
 }
 
+std::string_view format_as(ResourceBindType v) noexcept {
+    switch (v) {
+        case ResourceBindType::CBuffer: return "CBuffer";
+        case ResourceBindType::Buffer: return "Buffer";
+        case ResourceBindType::RWBuffer: return "RWBuffer";
+        case ResourceBindType::Texture: return "Texture";
+        case ResourceBindType::RWTexture: return "RWTexture";
+        case ResourceBindType::Sampler: return "Sampler";
+        case ResourceBindType::UNKNOWN:
+        default: return "UNKNOWN";
+    }
+}
+
 }  // namespace radray::render

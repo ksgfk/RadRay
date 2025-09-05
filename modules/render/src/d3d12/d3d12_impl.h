@@ -430,26 +430,52 @@ public:
 
     void Destroy() noexcept override;
 
+    D3D12_SHADER_BYTECODE ToByteCode() const noexcept;
+
 public:
     vector<byte> _dxil;
 };
 
 class RootSigD3D12 final : public RootSignature {
 public:
+    RootSigD3D12(
+        DeviceD3D12* device,
+        ComPtr<ID3D12RootSignature> rootSig) noexcept;
     ~RootSigD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    ComPtr<ID3D12RootSignature> _rootSig;
+    vector<RootSignatureSetElement> _bindDescriptors;
+    vector<RootSignatureBinding> _rootDescriptors;
+    std::optional<RootSignatureConstant> _rootConstant;
+    UINT _rootConstStart;
+    UINT _rootDescStart;
+    UINT _bindDescStart;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {
 public:
+    GraphicsPsoD3D12(
+        DeviceD3D12* device,
+        ComPtr<ID3D12PipelineState> pso,
+        vector<uint64_t> arrayStrides,
+        D3D12_PRIMITIVE_TOPOLOGY topo) noexcept;
     ~GraphicsPsoD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    ComPtr<ID3D12PipelineState> _pso;
+    vector<uint64_t> _arrayStrides;
+    D3D12_PRIMITIVE_TOPOLOGY _topo;
 };
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
