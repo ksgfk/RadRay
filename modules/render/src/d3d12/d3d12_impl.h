@@ -266,6 +266,7 @@ public:
 
 class CmdRenderPassD3D12 final : public CommandEncoder {
 public:
+    explicit CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept;
     ~CmdRenderPassD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -287,6 +288,9 @@ public:
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
+
+public:
+    CmdListD3D12* _cmdList;
 };
 
 class SwapChainD3D12 final : public SwapChain {

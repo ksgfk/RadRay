@@ -12,6 +12,7 @@ static FenceD3D12* CastD3D12Object(Fence* v) noexcept { return static_cast<Fence
 static CmdListD3D12* CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 static RootSigD3D12* CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 static Dxil* CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+static TextureViewD3D12* CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -1483,10 +1484,65 @@ void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, s
 }
 
 Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
-    return nullptr;
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        return nullptr;
+    }
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
+    rtDescs.reserve(desc.ColorAttachments.size());
+    for (const ColorAttachment& color : desc.ColorAttachments) {
+        auto v = CastD3D12Object(color.Target);
+        D3D12_CLEAR_VALUE clearColor{};
+        clearColor.Format = v->_rawFormat;
+        clearColor.Color[0] = color.ClearValue.R;
+        clearColor.Color[1] = color.ClearValue.G;
+        clearColor.Color[2] = color.ClearValue.B;
+        clearColor.Color[3] = color.ClearValue.A;
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE beginningAccess = MapType(color.Load);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
+        auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
+        rtDesc.cpuDescriptor = v->_heapView.HandleCpu();
+        rtDesc.BeginningAccess.Type = beginningAccess;
+        rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
+        rtDesc.EndingAccess.Type = endingAccess;
+    }
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC dsDesc{};
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDsDesc = nullptr;
+    if (desc.DepthStencilAttachment.has_value()) {
+        const DepthStencilAttachment& depthStencil = desc.DepthStencilAttachment.value();
+        auto v = CastD3D12Object(depthStencil.Target);
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE depthBeginningAccess = MapType(depthStencil.DepthLoad);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE depthEndingAccess = MapType(depthStencil.DepthStore);
+        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE stencilBeginningAccess = MapType(depthStencil.StencilLoad);
+        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE stencilEndingAccess = MapType(depthStencil.StencilStore);
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = v->_rawFormat;
+        clear.DepthStencil.Depth = depthStencil.ClearValue.Depth;
+        clear.DepthStencil.Stencil = depthStencil.ClearValue.Stencil;
+        dsDesc.cpuDescriptor = v->_heapView.HandleCpu();
+        dsDesc.DepthBeginningAccess.Type = depthBeginningAccess;
+        dsDesc.DepthBeginningAccess.Clear.ClearValue = clear;
+        dsDesc.DepthEndingAccess.Type = depthEndingAccess;
+        dsDesc.StencilBeginningAccess.Type = stencilBeginningAccess;
+        dsDesc.StencilBeginningAccess.Clear.ClearValue = clear;
+        dsDesc.StencilEndingAccess.Type = stencilEndingAccess;
+        pDsDesc = &dsDesc;
+    }
+    cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
+    return make_unique<CmdRenderPassD3D12>(this);
 }
 
 void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ABORT("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        return;
+    }
+    cmdList4->EndRenderPass();
+    encoder->Destroy();
 }
 
 void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
@@ -1495,23 +1551,59 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
+CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
+    : _cmdList(cmdList) {}
+
 bool CmdRenderPassD3D12::IsValid() const noexcept {
-    return false;
+    return _cmdList != nullptr;
 }
 
 void CmdRenderPassD3D12::Destroy() noexcept {
+    _cmdList = nullptr;
 }
 
-void CmdRenderPassD3D12::SetViewport(Viewport vp) noexcept {
+void CmdRenderPassD3D12::SetViewport(Viewport viewport) noexcept {
+    D3D12_VIEWPORT vp{};
+    vp.TopLeftX = viewport.X;
+    vp.TopLeftY = viewport.Y;
+    vp.Width = viewport.Width;
+    vp.Height = viewport.Height;
+    vp.MinDepth = viewport.MinDepth;
+    vp.MaxDepth = viewport.MaxDepth;
+    _cmdList->_cmdList->RSSetViewports(1, &vp);
 }
 
-void CmdRenderPassD3D12::SetScissor(Rect rect) noexcept {
+void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
+    D3D12_RECT rect{};
+    rect.left = scissor.X;
+    rect.top = scissor.Y;
+    rect.right = scissor.X + scissor.Width;
+    rect.bottom = scissor.Y + scissor.Height;
+    _cmdList->_cmdList->RSSetScissorRects(1, &rect);
 }
 
 void CmdRenderPassD3D12::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
+    vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
+    rawVbvs.reserve(vbv.size());
+    for (const VertexBufferView& i : vbv) {
+        D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
+        auto buf = CastD3D12Object(i.Target);
+        raw.BufferLocation = buf->_gpuAddr + i.Offset;
+        raw.SizeInBytes = (UINT)buf->_desc.Size - i.Offset;
+        // TODO: ?
+        // raw.StrideInBytes =
+    }
+    _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());
 }
 
 void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
+    auto buf = CastD3D12Object(ibv.Target);
+    D3D12_INDEX_BUFFER_VIEW view{};
+    view.BufferLocation = buf->_gpuAddr + ibv.Offset;
+    view.SizeInBytes = (UINT)buf->_desc.Size - ibv.Offset;
+    view.Format = ibv.Stride == 1 ? DXGI_FORMAT_R8_UINT : ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT
+                                                                          : DXGI_FORMAT_R32_UINT;
+    _cmdList->_cmdList->IASetIndexBuffer(&view);
 }
 
 void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {

@@ -82,6 +82,8 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept;
 D3D12_RESOURCE_STATES MapType(TextureUses v) noexcept;
+D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept;
+D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept;
 
 }  // namespace radray::render::d3d12
 
