@@ -291,6 +291,8 @@ public:
 
 public:
     CmdListD3D12* _cmdList;
+    GraphicsPsoD3D12* _boundPso{nullptr};
+    vector<VertexBufferView> _boundVbvs;
 };
 
 class SwapChainD3D12 final : public SwapChain {

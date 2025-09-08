@@ -13,6 +13,7 @@ static CmdListD3D12* CastD3D12Object(CommandBuffer* v) noexcept { return static_
 static RootSigD3D12* CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 static Dxil* CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 static TextureViewD3D12* CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
+static GraphicsPsoD3D12* CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -1583,17 +1584,23 @@ void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
 }
 
 void CmdRenderPassD3D12::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
-    vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
-    rawVbvs.reserve(vbv.size());
-    for (const VertexBufferView& i : vbv) {
-        D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
-        auto buf = CastD3D12Object(i.Target);
-        raw.BufferLocation = buf->_gpuAddr + i.Offset;
-        raw.SizeInBytes = (UINT)buf->_desc.Size - i.Offset;
-        // TODO: ?
-        // raw.StrideInBytes =
+    if (_boundPso == nullptr) {
+        _boundVbvs.clear();
+        _boundVbvs.insert(_boundVbvs.end(), vbv.begin(), vbv.end());
+    } else {
+        const auto& strides = _boundPso->_arrayStrides;
+        vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
+        rawVbvs.reserve(vbv.size());
+        for (size_t index = 0; index < std::min(vbv.size(), strides.size()); index++) {
+            const VertexBufferView& i = vbv[index];
+            D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
+            auto buf = CastD3D12Object(i.Target);
+            raw.BufferLocation = buf->_gpuAddr + i.Offset;
+            raw.SizeInBytes = (UINT)buf->_desc.Size - i.Offset;
+            raw.StrideInBytes = (UINT)strides[index];
+        }
+        _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());
     }
-    _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());
 }
 
 void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
@@ -1607,15 +1614,26 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
 }
 
 void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
+    auto rs = CastD3D12Object(rootSig);
+    _cmdList->_cmdList->SetGraphicsRootSignature(rs->_rootSig.Get());
 }
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
+    auto ps = CastD3D12Object(pso);
+    _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
+    _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
+    _boundPso = ps;
+    if (!_boundVbvs.empty()) {
+        this->BindVertexBuffer(_boundVbvs);
+    }
 }
 
 void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
+    _cmdList->_cmdList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
+    _cmdList->_cmdList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
 SwapChainD3D12::SwapChainD3D12(
