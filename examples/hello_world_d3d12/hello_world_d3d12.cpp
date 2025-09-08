@@ -19,6 +19,27 @@ constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
 constexpr int RT_COUNT = 3;
 const char* RADRAY_APPNAME = "hello_world_d3d12";
+const char* SHADER_SRC = R"(
+const static float3 g_Color[3] = {
+    float3(1, 0, 0),
+    float3(0, 1, 0),
+    float3(0, 0, 1)};
+
+struct V2P {
+    float4 pos : SV_POSITION;
+    [[vk::location(0)]] float3 color: COLOR0;
+};
+
+V2P VSMain([[vk::location(0)]] float3 v_vert: POSITION, uint vertId: SV_VertexID) {
+    V2P v2p;
+    v2p.pos = float4(v_vert, 1);
+    v2p.color = g_Color[vertId % 3];
+    return v2p;
+}
+
+float4 PSMain(V2P v2p) : SV_Target {
+    return float4(v2p.color, 1);
+})";
 
 struct FrameData {
     shared_ptr<d3d12::CmdListD3D12> cmdBuffer;
@@ -29,7 +50,7 @@ shared_ptr<d3d12::DeviceD3D12> device;
 d3d12::CmdQueueD3D12* cmdQueue;
 shared_ptr<d3d12::SwapChainD3D12> swapchain;
 vector<FrameData> frames;
-unordered_map<Texture*, shared_ptr<d3d12::TextureD3D12>> rtViews;
+unordered_map<Texture*, shared_ptr<d3d12::TextureViewD3D12>> rtViews;
 uint32_t currentFrameIndex = 0;
 ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
 int clearIndex = 0;
@@ -38,7 +59,7 @@ uint64_t last;
 shared_ptr<d3d12::BufferD3D12> vertBuf;
 shared_ptr<d3d12::BufferD3D12> idxBuf;
 shared_ptr<Dxc> dxc;
-shared_ptr<d3d12::RootSigD3D12> pipelineLayout;
+shared_ptr<d3d12::RootSigD3D12> rootSig;
 shared_ptr<d3d12::GraphicsPsoD3D12> pso;
 
 void Init() {
@@ -91,14 +112,129 @@ void Init() {
     CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
     cmdQueue->Submit({submitCmdBuffers, {}, {}, {}, {}});
     cmdQueue->Wait();
+
+    dxc = CreateDxc().Unwrap();
+    {
+        auto vsSpv = dxc->Compile(SHADER_SRC, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, false).value();
+        auto psSpv = dxc->Compile(SHADER_SRC, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, false).value();
+        ShaderDescriptor vsDesc{};
+        vsDesc.Source = vsSpv.Data;
+        vsDesc.Category = vsSpv.Category;
+        ShaderDescriptor psDesc{};
+        psDesc.Source = psSpv.Data;
+        psDesc.Category = psSpv.Category;
+        auto vs = device->CreateShader(vsDesc).Unwrap();
+        auto ps = device->CreateShader(psDesc).Unwrap();
+
+        RootSignatureDescriptor rootSigDesc{};
+        rootSig = std::static_pointer_cast<d3d12::RootSigD3D12>(device->CreateRootSignature(rootSigDesc).Unwrap());
+
+        VertexElement ve[] = {
+            {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+        VertexInfo vl[] = {
+            {12,
+             VertexStepMode::Vertex,
+             ve}};
+        ColorTargetState cts[] = {
+            DefaultColorTargetState(TextureFormat::RGBA8_UNORM)};
+        GraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = rootSig.get();
+        psoDesc.VS = {vs.get(), "VSMain"};
+        psoDesc.PS = {ps.get(), "PSMain"};
+        psoDesc.VertexLayouts = vl;
+        psoDesc.Primitive = DefaultPrimitiveState();
+        psoDesc.Primitive.FaceClockwise = FrontFace::CCW;
+        psoDesc.DepthStencil = std::nullopt;
+        psoDesc.MultiSample = DefaultMultiSampleState();
+        psoDesc.ColorTargets = cts;
+        pso = std::static_pointer_cast<d3d12::GraphicsPsoD3D12>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
+    }
 }
 
 bool Update() {
+    uint64_t now = sw.RunningMilliseconds();
+    auto delta = now - last;
+    last = now;
+
     GlobalPollEventsGlfw();
     bool isClose = glfw->ShouldClose();
 
+    float* v = nullptr;
+    if (clearIndex >= 0 && clearIndex < 2) {
+        v = &clear.R;
+    } else if (clearIndex >= 2 && clearIndex < 4) {
+        v = &clear.G;
+    } else if (clearIndex >= 4 && clearIndex < 6) {
+        v = &clear.B;
+    }
+    if (clearIndex % 2 == 0) {
+        *v += delta / 1000.0f;
+        if (*v >= 1.0f) {
+            *v = 1.0f;
+            clearIndex++;
+        }
+    } else {
+        *v -= delta / 1000.0f;
+        if (*v <= 0.0f) {
+            *v = 0.0f;
+            clearIndex++;
+            if (clearIndex >= 5) clearIndex = 0;
+        }
+    }
+
+    auto& frameData = frames[currentFrameIndex];
     swapchain->AcquireNext();
+    auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
+    shared_ptr<d3d12::TextureViewD3D12> rtView = nullptr;
+    {
+        auto it = rtViews.find(rt);
+        if (it == rtViews.end()) {
+            TextureViewDescriptor rtViewDesc{};
+            rtViewDesc.Target = rt;
+            rtViewDesc.Dim = TextureViewDimension::Dim2D;
+            rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+            rtViewDesc.BaseMipLevel = 0;
+            rtViewDesc.MipLevelCount = std::nullopt;
+            rtViewDesc.BaseArrayLayer = 0;
+            rtViewDesc.ArrayLayerCount = std::nullopt;
+            rtViewDesc.Usage = TextureUse::RenderTarget;
+            it = rtViews.emplace(rt, std::static_pointer_cast<d3d12::TextureViewD3D12>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
+        }
+        rtView = it->second;
+    }
+    frameData.cmdBuffer->Begin();
+    {
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, 0, 0, 0, 0, 0}};
+        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    }
+    {
+        ColorAttachment rpColorAttch[] = {{rtView.get(), LoadAction::Clear, StoreAction::Store, clear}};
+        RenderPassDescriptor rpDesc{};
+        rpDesc.ColorAttachments = rpColorAttch;
+        rpDesc.DepthStencilAttachment = std::nullopt;
+        auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        rp->BindRootSignature(rootSig.get());
+        rp->BindGraphicsPipelineState(pso.get());
+        rp->SetViewport({0, 0, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
+        rp->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
+        VertexBufferView vbv[] = {
+            {vertBuf.get(), 0, vertBuf->_desc.Size}};
+        rp->BindVertexBuffer(vbv);
+        rp->BindIndexBuffer({idxBuf.get(), 0, 2});
+        rp->DrawIndexed(3, 1, 0, 0, 0);
+        frameData.cmdBuffer->EndRenderPass(std::move(rp));
+    }
+    {
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, 0, 0, 0, 0, 0}};
+        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
+    }
+    frameData.cmdBuffer->End();
+    CommandBuffer* submitCmdBuffer[] = {frameData.cmdBuffer.get()};
+    CommandQueueSubmitDescriptor submitDesc{};
+    submitDesc.CmdBuffers = submitCmdBuffer;
+    cmdQueue->Submit(submitDesc);
     swapchain->Present();
+    currentFrameIndex = (currentFrameIndex + 1) % frames.size();
 
     return !isClose;
 }
@@ -107,7 +243,7 @@ void End() {
     cmdQueue->Wait();
 
     pso.reset();
-    pipelineLayout.reset();
+    rootSig.reset();
 
     vertBuf.reset();
     idxBuf.reset();

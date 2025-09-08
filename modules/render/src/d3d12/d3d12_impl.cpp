@@ -1669,15 +1669,15 @@ Nullable<Texture> SwapChainD3D12::AcquireNext() noexcept {
 void SwapChainD3D12::Present() noexcept {
     UINT curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
-    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
     UINT syncInterval = _desc.EnableSync ? 1 : 0;
     UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
-        FAILED(hr)) {
+    FAILED(hr)) {
         RADRAY_ABORT("d3d12 IDXGISwapChain3 present fail, reason={} (code:{})", GetErrorName(hr), hr);
     }
     _fenceValue++;
     auto queue = CastD3D12Object(_desc.PresentQueue);
+    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
     queue->_queue->Signal(_fence.Get(), _fenceValue);
 }
 
