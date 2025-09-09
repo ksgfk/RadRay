@@ -1003,6 +1003,42 @@ Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRe
     return make_unique<RenderPassVulkan>(this, pass);
 }
 
+Nullable<unique_ptr<DescriptorPoolVulkan>> DeviceVulkan::CreateDescriptorPool() noexcept {
+    const uint32_t maxCnt = 8192;
+    vector<VkDescriptorPoolSize> poolSizes{};
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, maxCnt});
+    if (_extFeatures.feature13.inlineUniformBlock) {
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, maxCnt});
+    }
+    VkDescriptorPoolCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    info.pNext = nullptr;
+    info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    info.maxSets = maxCnt;
+    info.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    info.pPoolSizes = poolSizes.data();
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateDescriptorPool(_device, &info, this->GetAllocationCallbacks(), &pool);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateDescriptorPool failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_unique<DescriptorPoolVulkan>(this, pool);
+    result->_sizes = std::move(poolSizes);
+    result->_maxSets = info.maxSets;
+    return result;
+}
+
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
     return _instance->GetAllocationCallbacks();
 }
@@ -1197,7 +1233,7 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
         RADRAY_ERR_LOG("vk call vkCreateInstance failed");
         return false;
     }
-    volkLoadInstance(instance);
+    volkLoadInstanceOnly(instance);
     g_instance = make_unique<InstanceVulkan>(
         instance,
         allocCbPtr ? std::make_optional(*allocCbPtr) : std::nullopt,
@@ -2621,6 +2657,58 @@ void ShaderModuleVulkan::DestroyImpl() noexcept {
     if (_shaderModule != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyShaderModule(_device->_device, _shaderModule, _device->GetAllocationCallbacks());
         _shaderModule = VK_NULL_HANDLE;
+    }
+}
+
+DescriptorPoolVulkan::DescriptorPoolVulkan(
+    DeviceVulkan* device,
+    VkDescriptorPool pool) noexcept
+    : _device(device),
+      _pool(pool) {}
+
+DescriptorPoolVulkan::~DescriptorPoolVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool DescriptorPoolVulkan::IsValid() const noexcept {
+    return _pool != VK_NULL_HANDLE;
+}
+
+void DescriptorPoolVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void DescriptorPoolVulkan::DestroyImpl() noexcept {
+    if (_pool != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyDescriptorPool(_device->_device, _pool, _device->GetAllocationCallbacks());
+        _pool = VK_NULL_HANDLE;
+    }
+}
+
+DescriptorSetVulkan::DescriptorSetVulkan(
+    DeviceVulkan* device,
+    DescriptorPoolVulkan* pool,
+    VkDescriptorSet set) noexcept
+    : _device(device),
+      _pool(pool),
+      _set(set) {}
+
+DescriptorSetVulkan::~DescriptorSetVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool DescriptorSetVulkan::IsValid() const noexcept {
+    return _set != VK_NULL_HANDLE;
+}
+
+void DescriptorSetVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void DescriptorSetVulkan::DestroyImpl() noexcept {
+    if (_set != VK_NULL_HANDLE) {
+        _device->_ftb.vkFreeDescriptorSets(_device->_device, _pool->_pool, 1, &_set);
+        _set = VK_NULL_HANDLE;
     }
 }
 

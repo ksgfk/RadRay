@@ -33,6 +33,8 @@ class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
 class GraphicsPipelineVulkan;
 class ShaderModuleVulkan;
+class DescriptorPoolVulkan;
+class DescriptorSetVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -143,6 +145,8 @@ public:
     Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept;
 
     Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
+
+    Nullable<unique_ptr<DescriptorPoolVulkan>> CreateDescriptorPool() noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -660,6 +664,50 @@ public:
 
     DeviceVulkan* _device;
     VkShaderModule _shaderModule;
+};
+
+class DescriptorPoolVulkan final : public RenderBase {
+public:
+    DescriptorPoolVulkan(
+        DeviceVulkan* device,
+        VkDescriptorPool pool) noexcept;
+    ~DescriptorPoolVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkDescriptorPool _pool;
+    vector<VkDescriptorPoolSize> _sizes;
+    uint32_t _maxSets{0};
+};
+
+class DescriptorSetVulkan final : public RenderBase {
+public:
+    DescriptorSetVulkan(
+        DeviceVulkan* device,
+        DescriptorPoolVulkan* pool,
+        VkDescriptorSet set) noexcept;
+    ~DescriptorSetVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    DescriptorPoolVulkan* _pool;
+    VkDescriptorSet _set;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);
