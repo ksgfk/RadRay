@@ -35,6 +35,7 @@ class GraphicsPipelineVulkan;
 class ShaderModuleVulkan;
 class DescriptorPoolVulkan;
 class DescriptorSetVulkan;
+class DescPoolAllocator;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -133,6 +134,8 @@ public:
 
     Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
+    Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
+
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
@@ -157,6 +160,7 @@ public:
     VkDevice _device;
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
+    std::unique_ptr<DescPoolAllocator> _poolAlloc;
     DeviceFuncTable _ftb;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
@@ -584,15 +588,13 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
-class DescriptorSetLayoutVulkan final : public RenderBase {
+class DescriptorSetLayoutVulkan final : public DescriptorSetLayout {
 public:
     DescriptorSetLayoutVulkan(
         DeviceVulkan* device,
         VkDescriptorSetLayout layout) noexcept;
 
     ~DescriptorSetLayoutVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -708,6 +710,21 @@ public:
     DeviceVulkan* _device;
     DescriptorPoolVulkan* _pool;
     VkDescriptorSet _set;
+};
+
+class DescPoolAllocator {
+public:
+    explicit DescPoolAllocator(DeviceVulkan* device);
+
+    vector<unique_ptr<DescriptorSetVulkan>> Allocate(std::span<VkDescriptorSetLayout> layouts);
+
+private:
+    DescriptorPoolVulkan* NewPoolToBack();
+
+    DescriptorPoolVulkan* GetMaybeEmptyPool();
+
+    DeviceVulkan* _device;
+    vector<unique_ptr<DescriptorPoolVulkan>> _pools;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);

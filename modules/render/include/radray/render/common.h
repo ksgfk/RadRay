@@ -341,7 +341,8 @@ enum class RenderObjectTag : uint32_t {
     BufferView = ResourceView | (ResourceView << 1),
     TextureView = ResourceView | (ResourceView << 2),
     DescriptorSet = ResourceView << 3,
-    Sampler = DescriptorSet << 1
+    DescriptorSetLayout = DescriptorSet << 1,
+    Sampler = DescriptorSetLayout << 1
 };
 
 }  // namespace radray::render
@@ -403,6 +404,8 @@ class Shader;
 class RootSignature;
 class PipelineState;
 class GraphicsPipelineState;
+class DescriptorSet;
+class DescriptorSetLayout;
 
 class RenderBase {
 public:
@@ -754,6 +757,8 @@ public:
     virtual Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -899,6 +904,20 @@ public:
     virtual ~GraphicsPipelineState() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsPipelineState; }
+};
+
+class DescriptorSet : public RenderBase {
+public:
+    virtual ~DescriptorSet() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
+};
+
+class DescriptorSetLayout : public RenderBase {
+public:
+    virtual ~DescriptorSetLayout() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSetLayout; }
 };
 
 bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);

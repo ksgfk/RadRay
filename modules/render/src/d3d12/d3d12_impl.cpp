@@ -1321,6 +1321,12 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     return make_shared<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
 }
 
+Nullable<shared_ptr<DescriptorSetLayout>> DeviceD3D12::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
+    auto result = make_shared<SimulateDescriptorSetLayoutD3D12>();
+    result->_elems = {desc.Elements.begin(), desc.Elements.end()};
+    return result;
+}
+
 CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
@@ -1672,7 +1678,7 @@ void SwapChainD3D12::Present() noexcept {
     UINT syncInterval = _desc.EnableSync ? 1 : 0;
     UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
-    FAILED(hr)) {
+        FAILED(hr)) {
         RADRAY_ABORT("d3d12 IDXGISwapChain3 present fail, reason={} (code:{})", GetErrorName(hr), hr);
     }
     _fenceValue++;
@@ -1848,5 +1854,11 @@ bool GraphicsPsoD3D12::IsValid() const noexcept {
 void GraphicsPsoD3D12::Destroy() noexcept {
     _pso = nullptr;
 }
+
+bool SimulateDescriptorSetLayoutD3D12::IsValid() const noexcept {
+    return true;
+}
+
+void SimulateDescriptorSetLayoutD3D12::Destroy() noexcept {}
 
 }  // namespace radray::render::d3d12

@@ -20,6 +20,7 @@ class TextureD3D12;
 class TextureViewD3D12;
 class RootSigD3D12;
 class GraphicsPsoD3D12;
+class SimulateDescriptorSetLayoutD3D12;
 
 class DescriptorHeap {
 public:
@@ -170,6 +171,8 @@ public:
     Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+
+    Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -481,6 +484,16 @@ public:
     ComPtr<ID3D12PipelineState> _pso;
     vector<uint64_t> _arrayStrides;
     D3D12_PRIMITIVE_TOPOLOGY _topo;
+};
+
+class SimulateDescriptorSetLayoutD3D12 final : public DescriptorSetLayout {
+public:
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    vector<RootSignatureSetElement> _elems;
 };
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);

@@ -921,6 +921,29 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     return result;
 }
 
+Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
+    vector<VkDescriptorSetLayoutBinding> bindings;
+    for (const auto& j : desc.Elements) {
+        auto& binding = bindings.emplace_back();
+        binding.binding = j.Slot;
+        binding.descriptorType = MapType(j.Type);
+        binding.descriptorCount = j.Count;
+        binding.stageFlags = MapType(j.Stages);
+        binding.pImmutableSamplers = nullptr;
+    }
+    VkDescriptorSetLayoutCreateInfo dslci{};
+    dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslci.pNext = nullptr;
+    dslci.flags = 0;
+    dslci.bindingCount = static_cast<uint32_t>(bindings.size());
+    dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
+    auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
+    if (!descSetLayoutVk.HasValue()) {
+        return nullptr;
+    }
+    return shared_ptr<DescriptorSetLayout>{descSetLayoutVk.Release()};
+}
+
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1004,27 +1027,26 @@ Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRe
 }
 
 Nullable<unique_ptr<DescriptorPoolVulkan>> DeviceVulkan::CreateDescriptorPool() noexcept {
-    const uint32_t maxCnt = 8192;
     vector<VkDescriptorPoolSize> poolSizes{};
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, maxCnt});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, maxCnt});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8192});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 2048});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8192});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024});
+    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024});
     if (_extFeatures.feature13.inlineUniformBlock) {
-        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, maxCnt});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, 1024});
     }
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     info.pNext = nullptr;
     info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    info.maxSets = maxCnt;
+    info.maxSets = 1024;
     info.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     info.pPoolSizes = poolSizes.data();
     VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -1519,6 +1541,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
+    deviceR->_poolAlloc = make_unique<DescPoolAllocator>(deviceR.get());
     if (deviceInfo.pEnabledFeatures) {
         deviceR->_feature = *deviceInfo.pEnabledFeatures;
     } else {
@@ -2710,6 +2733,75 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkFreeDescriptorSets(_device->_device, _pool->_pool, 1, &_set);
         _set = VK_NULL_HANDLE;
     }
+}
+
+DescPoolAllocator::DescPoolAllocator(DeviceVulkan* device)
+    : _device(device) {}
+
+vector<unique_ptr<DescriptorSetVulkan>> DescPoolAllocator::Allocate(std::span<VkDescriptorSetLayout> layouts) {
+    auto mapToResult = [this](std::span<VkDescriptorSet> handle, DescriptorPoolVulkan* pool) {
+        vector<unique_ptr<DescriptorSetVulkan>> result;
+        result.reserve(handle.size());
+        for (auto i : handle) {
+            auto set = make_unique<DescriptorSetVulkan>(_device, pool, i);
+            result.emplace_back(std::move(set));
+        }
+        return result;
+    };
+    auto tryAlloc = [this, layouts, &mapToResult](DescriptorPoolVulkan* pool) -> std::optional<vector<unique_ptr<DescriptorSetVulkan>>> {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.pNext = nullptr;
+        allocInfo.descriptorPool = pool->_pool;
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+        allocInfo.pSetLayouts = layouts.data();
+        vector<VkDescriptorSet> sets;
+        sets.resize(allocInfo.descriptorSetCount, VK_NULL_HANDLE);
+        if (auto vr = _device->_ftb.vkAllocateDescriptorSets(_device->_device, &allocInfo, sets.data());
+            vr == VK_SUCCESS) {
+            return mapToResult(sets, pool);
+        } else {
+            return std::nullopt;
+        }
+    };
+    {
+        auto pool = GetMaybeEmptyPool();
+        auto tryRes = tryAlloc(pool);
+        if (tryRes.has_value()) {
+            auto result = std::move(tryRes.value());
+            return result;
+        }
+    }
+    for (size_t i = 0; i < _pools.size() - 1; i++) {
+        auto pool = _pools[i].get();
+        auto tryRes = tryAlloc(pool);
+        if (tryRes.has_value()) {
+            auto result = std::move(tryRes.value());
+            return result;
+        }
+    }
+    {
+        auto pool = NewPoolToBack();
+        auto tryRes = tryAlloc(pool);
+        if (!tryRes.has_value()) {
+            RADRAY_ABORT("vk alloc desc set fail");
+            return {};
+        }
+        auto result = std::move(tryRes.value());
+        return result;
+    }
+}
+
+DescriptorPoolVulkan* DescPoolAllocator::NewPoolToBack() {
+    auto pool = _device->CreateDescriptorPool().Unwrap();
+    return _pools.emplace_back(std::move(pool)).get();
+}
+
+DescriptorPoolVulkan* DescPoolAllocator::GetMaybeEmptyPool() {
+    if (!_pools.empty()) {
+        return _pools.back().get();
+    }
+    return NewPoolToBack();
 }
 
 }  // namespace radray::render::vulkan
