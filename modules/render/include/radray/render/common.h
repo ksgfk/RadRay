@@ -621,7 +621,7 @@ struct RootSignatureBindingSet {
 
 struct RootSignatureDescriptor {
     std::span<RootSignatureBinding> RootBindings;
-    std::span<RootSignatureBindingSet> BindingSets;
+    std::span<DescriptorSetLayout*> BindingSets;
     std::optional<RootSignatureConstant> Constant;
 };
 
@@ -809,6 +809,10 @@ public:
 
     virtual void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
+    virtual void PushConstant(const void* data, size_t length) noexcept = 0;
+
+    virtual void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept = 0;
+
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
@@ -950,5 +954,6 @@ std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureViewDimension v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
+std::string_view format_as(RenderObjectTag v) noexcept;
 
 }  // namespace radray::render

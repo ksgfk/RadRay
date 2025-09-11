@@ -14,6 +14,7 @@ static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_ca
 static ShaderModuleVulkan* CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 static PipelineLayoutVulkan* CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 static GraphicsPipelineVulkan* CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+static DescriptorSetLayoutVulkan* CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -147,7 +148,7 @@ Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence(uint64_t initValue) noexce
     if (!fence.HasValue()) {
         return nullptr;
     }
-    return shared_ptr<Fence>{fence.Release()};
+    return shared_ptr{fence.Release()};
 }
 
 Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
@@ -563,7 +564,7 @@ Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
 
 Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
-    vector<unique_ptr<DescriptorSetLayoutVulkan>> descSetLayouts;
+    unique_ptr<DescriptorSetLayoutVulkan> rootSetLayout;
     if (!desc.RootBindings.empty()) {
         for (const auto& i : desc.RootBindings) {
             auto& binding = bindings.emplace_back();
@@ -585,31 +586,11 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         }
         auto descSetLayoutV = descSetLayoutVk.Release();
         descSetLayoutV->_rootBindings = {desc.RootBindings.begin(), desc.RootBindings.end()};
-        descSetLayouts.emplace_back(std::move(descSetLayoutV));
+        rootSetLayout = std::move(descSetLayoutV);
     }
-    for (const auto& i : desc.BindingSets) {
-        bindings.clear();
-        for (const auto& j : i.Elements) {
-            auto& binding = bindings.emplace_back();
-            binding.binding = j.Slot;
-            binding.descriptorType = MapType(j.Type);
-            binding.descriptorCount = j.Count;
-            binding.stageFlags = MapType(j.Stages);
-            binding.pImmutableSamplers = nullptr;
-        }
-        VkDescriptorSetLayoutCreateInfo dslci{};
-        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslci.pNext = nullptr;
-        dslci.flags = 0;
-        dslci.bindingCount = static_cast<uint32_t>(bindings.size());
-        dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
-        auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
-        if (!descSetLayoutVk.HasValue()) {
-            return nullptr;
-        }
-        auto descSetLayoutV = descSetLayoutVk.Release();
-        descSetLayoutV->_bindingElements = {i.Elements.begin(), i.Elements.end()};
-        descSetLayouts.emplace_back(std::move(descSetLayoutV));
+    unique_ptr<DescriptorSetVulkan> rootSet;
+    if (rootSetLayout != nullptr) {
+        rootSet = _poolAlloc->Allocate(rootSetLayout->_layout);
     }
     VkPushConstantRange pushConstant{};
     VkPushConstantRange* pushConstantPtr = nullptr;
@@ -620,8 +601,12 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         pushConstantPtr = &pushConstant;
     }
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
-    vkDescSetLayouts.reserve(descSetLayouts.size());
-    for (const auto& layout : descSetLayouts) {
+    vkDescSetLayouts.reserve((rootSetLayout == nullptr ? 0 : 1) + desc.BindingSets.size());
+    if (rootSetLayout != nullptr) {
+        vkDescSetLayouts.emplace_back(rootSetLayout->_layout);
+    }
+    for (auto i : desc.BindingSets) {
+        auto layout = CastVkObject(i);
         vkDescSetLayouts.emplace_back(layout->_layout);
     }
     VkPipelineLayoutCreateInfo createInfo{};
@@ -639,7 +624,18 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         return nullptr;
     }
     auto result = make_shared<PipelineLayoutVulkan>(this, pipelineLayout);
-    result->_descSetLayouts = std::move(descSetLayouts);
+    result->_rootSetLayout = std::move(rootSetLayout);
+    result->_rootSet = std::move(rootSet);
+    result->_sets.reserve(desc.BindingSets.size());
+    for (auto i : desc.BindingSets) {
+        auto layout = CastVkObject(i);
+        result->_sets.emplace_back(layout);
+    }
+    if (pushConstantPtr == nullptr) {
+        result->_pushConst = std::nullopt;
+    } else {
+        result->_pushConst = *pushConstantPtr;
+    }
     return result;
 }
 
@@ -941,7 +937,9 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
     if (!descSetLayoutVk.HasValue()) {
         return nullptr;
     }
-    return shared_ptr<DescriptorSetLayout>{descSetLayoutVk.Release()};
+    auto result = descSetLayoutVk.Release();
+    result->_bindingElements = {desc.Elements.begin(), desc.Elements.end()};
+    return shared_ptr{std::move(result)};
 }
 
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -2103,12 +2101,68 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
 }
 
 void SimulateCommandEncoderVulkan::BindRootSignature(RootSignature* rootSig) noexcept {
-    RADRAY_UNUSED(rootSig);
+    auto layout = CastVkObject(rootSig);
+    _boundPipeLayout = layout;
+
+    // TODO:?
+    // if (layout->_rootSetLayout && layout->_rootSet) {
+    //     DescriptorSetLayoutVulkan* rootSetLayout = layout->_rootSetLayout.get();
+    //     DescriptorSetVulkan* rootSet = layout->_rootSet.get();
+    //     _device->_ftb.vkCmdBindDescriptorSets(
+    //         _cmdBuffer->_cmdBuffer,
+    //         VK_PIPELINE_BIND_POINT_GRAPHICS,
+    //         _boundPipeLayout->_layout,
+    //         rootSetLayout->_rootBindings,
+    //         1,
+    //         &rootSet->_set,
+    //         0, nullptr);
+    // }
 }
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto p = CastVkObject(pso);
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
+}
+
+void SimulateCommandEncoderVulkan::PushConstant(const void* data, size_t length) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("vk push constant without pipelinelayout");
+        return;
+    }
+    if (!_boundPipeLayout->_pushConst.has_value()) {
+        RADRAY_ERR_LOG("vk push constant but pipelinelayout has no push constant");
+        return;
+    }
+    const auto& pc = _boundPipeLayout->_pushConst.value();
+    if (length > pc.size) {
+        RADRAY_ERR_LOG("vk push constant length {} exceeds pipelinelayout push constant size {}", length, pc.size);
+        return;
+    }
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+}
+
+void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("vk BindRootDescriptor without pipelinelayout");
+        return;
+    }
+    if (!_boundPipeLayout->_rootSetLayout || !_boundPipeLayout->_rootSet) {
+        RADRAY_ERR_LOG("vk BindRootDescriptor but pipelinelayout has no root descriptor");
+        return;
+    }
+    DescriptorSetLayoutVulkan* rootSetLayout = _boundPipeLayout->_rootSetLayout.get();
+    DescriptorSetVulkan* rootSet = _boundPipeLayout->_rootSet.get();
+    if (slot >= rootSetLayout->_rootBindings.size()) {
+        RADRAY_ERR_LOG("vk BindRootDescriptor slot {} exceeds pipelinelayout root descriptor count {}", slot, rootSetLayout->_rootBindings.size());
+        return;
+    }
+    // TODO:?
+    // const auto& rb = rootSetLayout->_rootBindings[slot];
+    // VkWriteDescriptorSet writeDesc{};
+    // writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    // writeDesc.pNext = nullptr;
+    // writeDesc.dstSet = rootSet->_set;
+    // _device->_ftb.vkUpdateDescriptorSets(_device->_device, 1, &writeDesc, 0, nullptr);
 }
 
 void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
@@ -2790,6 +2844,16 @@ vector<unique_ptr<DescriptorSetVulkan>> DescPoolAllocator::Allocate(std::span<Vk
         auto result = std::move(tryRes.value());
         return result;
     }
+}
+
+unique_ptr<DescriptorSetVulkan> DescPoolAllocator::Allocate(VkDescriptorSetLayout layout) {
+    VkDescriptorSetLayout t[] = {layout};
+    auto r = this->Allocate(t);
+    if (r.size() != 1) {
+        RADRAY_ABORT("vk alloc desc set fail");
+        return nullptr;
+    }
+    return std::move(r[0]);
 }
 
 DescriptorPoolVulkan* DescPoolAllocator::NewPoolToBack() {

@@ -283,6 +283,10 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -294,6 +298,7 @@ public:
     CommandBufferVulkan* _cmdBuffer;
     unique_ptr<RenderPassVulkan> _pass;
     unique_ptr<FrameBufferVulkan> _framebuffer;
+    PipelineLayoutVulkan* _boundPipeLayout{nullptr};
 };
 
 class RenderPassVulkan final : public RenderBase {
@@ -626,7 +631,10 @@ public:
 
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
-    vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
+    unique_ptr<DescriptorSetLayoutVulkan> _rootSetLayout;
+    unique_ptr<DescriptorSetVulkan> _rootSet;
+    vector<DescriptorSetLayoutVulkan*> _sets;
+    std::optional<VkPushConstantRange> _pushConst;
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
@@ -717,6 +725,8 @@ public:
     explicit DescPoolAllocator(DeviceVulkan* device);
 
     vector<unique_ptr<DescriptorSetVulkan>> Allocate(std::span<VkDescriptorSetLayout> layouts);
+
+    unique_ptr<DescriptorSetVulkan> Allocate(VkDescriptorSetLayout layout);
 
 private:
     DescriptorPoolVulkan* NewPoolToBack();

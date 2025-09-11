@@ -288,6 +288,10 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -296,6 +300,7 @@ public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     vector<VertexBufferView> _boundVbvs;
+    RootSigD3D12* _boundRootSig{nullptr};
 };
 
 class SwapChainD3D12 final : public SwapChain {

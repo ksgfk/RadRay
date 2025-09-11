@@ -366,4 +366,30 @@ std::string_view format_as(ResourceBindType v) noexcept {
     }
 }
 
+std::string_view format_as(RenderObjectTag v) noexcept {
+    switch (v) {
+        case RenderObjectTag::UNKNOWN: return "UNKNOWN";
+        case RenderObjectTag::Device: return "Device";
+        case RenderObjectTag::CmdQueue: return "CmdQueue";
+        case RenderObjectTag::CmdBuffer: return "CmdBuffer";
+        case RenderObjectTag::CmdEncoder: return "CmdEncoder";
+        case RenderObjectTag::Fence: return "Fence";
+        case RenderObjectTag::Shader: return "Shader";
+        case RenderObjectTag::RootSignature: return "RootSignature";
+        case RenderObjectTag::PipelineState: return "PipelineState";
+        case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
+        case RenderObjectTag::SwapChain: return "SwapChain";
+        case RenderObjectTag::Resource: return "Resource";
+        case RenderObjectTag::Buffer: return "Buffer";
+        case RenderObjectTag::Texture: return "Texture";
+        case RenderObjectTag::ResourceView: return "ResourceView";
+        case RenderObjectTag::BufferView: return "BufferView";
+        case RenderObjectTag::TextureView: return "TextureView";
+        case RenderObjectTag::DescriptorSet: return "DescriptorSet";
+        case RenderObjectTag::DescriptorSetLayout: return "DescriptorSetLayout";
+        case RenderObjectTag::Sampler: return "Sampler";
+        default: return "UNKNOWN";
+    }
+}
+
 }  // namespace radray::render

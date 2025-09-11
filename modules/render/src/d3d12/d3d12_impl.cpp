@@ -14,6 +14,7 @@ static RootSigD3D12* CastD3D12Object(RootSignature* v) noexcept { return static_
 static Dxil* CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 static TextureViewD3D12* CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
 static GraphicsPsoD3D12* CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+static SimulateDescriptorSetLayoutD3D12* CastD3D12Object(DescriptorSetLayout* v) noexcept { return static_cast<SimulateDescriptorSetLayoutD3D12*>(v); }
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -1008,8 +1009,9 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     // 我们约定, hlsl 中定义的单个资源独占一个 range
     // 资源数组占一个 range
-    for (const RootSignatureBindingSet& descSet : desc.BindingSets) {
-        for (const RootSignatureSetElement& e : descSet.Elements) {
+    for (auto i : desc.BindingSets) {
+        auto descSet = CastD3D12Object(i);
+        for (const RootSignatureSetElement& e : descSet->_elems) {
             switch (e.Type) {
                 case ResourceBindType::CBuffer:
                 case ResourceBindType::Buffer:
@@ -1030,8 +1032,9 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     size_t bindStart = rootParmas.size();
     size_t offset = 0;
     vector<RootSignatureSetElement> bindDescs{};
-    for (const RootSignatureBindingSet& descSet : desc.BindingSets) {
-        for (const RootSignatureSetElement& e : descSet.Elements) {
+    for (auto i : desc.BindingSets) {
+        auto descSet = CastD3D12Object(i);
+        for (const RootSignatureSetElement& e : descSet->_elems) {
             switch (e.Type) {
                 case ResourceBindType::Sampler: {
                     D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
@@ -1622,6 +1625,7 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
 void CmdRenderPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
     auto rs = CastD3D12Object(rootSig);
     _cmdList->_cmdList->SetGraphicsRootSignature(rs->_rootSig.Get());
+    _boundRootSig = rs;
 }
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -1631,6 +1635,56 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
     _boundPso = ps;
     if (!_boundVbvs.empty()) {
         this->BindVertexBuffer(_boundVbvs);
+        _boundVbvs.clear();
+    }
+}
+
+void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot call SetGraphicsRoot32BitConstants, root signature not bound");
+        return;
+    }
+    if (!_boundRootSig->_rootConstant.has_value()) {
+        RADRAY_ERR_LOG("d3d12 cannot call SetGraphicsRoot32BitConstants, root signature has no root constant");
+        return;
+    }
+    const auto& rc = _boundRootSig->_rootConstant.value();
+    if (length > rc.Size) {
+        RADRAY_ERR_LOG("d3d12 cannot call SetGraphicsRoot32BitConstants, param 'length' too large {}, max {}", length, rc.Size);
+        return;
+    }
+    UINT rootParamIndex = _boundRootSig->_rootConstStart;
+    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(rootParamIndex, static_cast<UINT>(length / 4), data, 0);
+}
+
+void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, root signature not bound");
+        return;
+    }
+    if (slot >= _boundRootSig->_rootDescriptors.size()) {
+        RADRAY_ABORT("d3d12 cannot BindRootDescriptor, param 'slot' out of range {} of {}", slot, _boundRootSig->_rootDescriptors.size());
+        return;
+    }
+    UINT rootParamIndex = _boundRootSig->_rootDescStart + slot;
+    auto tag = view->GetTag();
+    if (tag == RenderObjectTag::BufferView) {
+        BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
+        D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferView->_buffer->_gpuAddr + bufferView->_desc.Range.Offset;
+        auto usage = bufferView->_desc.Usage;
+        if (usage.HasFlag(BufferUse::Resource)) {
+            _cmdList->_cmdList->SetGraphicsRootShaderResourceView(rootParamIndex, gpuAddr);
+        } else if (usage.HasFlag(BufferUse::CBuffer)) {
+            _cmdList->_cmdList->SetGraphicsRootConstantBufferView(rootParamIndex, gpuAddr);
+        } else if (usage.HasFlag(BufferUse::UnorderedAccess)) {
+            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(rootParamIndex, gpuAddr);
+        } else {
+            RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, unsupported buffer usage {}", usage);
+        }
+    } else if (tag == RenderObjectTag::TextureView) {
+        RADRAY_ERR_LOG("d3d12 cannot bind texture as root descriptor");
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot BindRootDescriptor, unsupported tag {}", tag);
     }
 }
 
