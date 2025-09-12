@@ -602,9 +602,11 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     }
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
     vkDescSetLayouts.reserve((rootSetLayout == nullptr ? 0 : 1) + desc.BindingSets.size());
+    uint32_t rootSetStart = static_cast<uint32_t>(vkDescSetLayouts.size());
     if (rootSetLayout != nullptr) {
         vkDescSetLayouts.emplace_back(rootSetLayout->_layout);
     }
+    uint32_t descSetsStart = static_cast<uint32_t>(vkDescSetLayouts.size());
     for (auto i : desc.BindingSets) {
         auto layout = CastVkObject(i);
         vkDescSetLayouts.emplace_back(layout->_layout);
@@ -636,6 +638,8 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     } else {
         result->_pushConst = *pushConstantPtr;
     }
+    result->_rootSetStart = rootSetStart;
+    result->_setsStart = descSetsStart;
     return result;
 }
 
@@ -2103,20 +2107,6 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
 void SimulateCommandEncoderVulkan::BindRootSignature(RootSignature* rootSig) noexcept {
     auto layout = CastVkObject(rootSig);
     _boundPipeLayout = layout;
-
-    // TODO:?
-    // if (layout->_rootSetLayout && layout->_rootSet) {
-    //     DescriptorSetLayoutVulkan* rootSetLayout = layout->_rootSetLayout.get();
-    //     DescriptorSetVulkan* rootSet = layout->_rootSet.get();
-    //     _device->_ftb.vkCmdBindDescriptorSets(
-    //         _cmdBuffer->_cmdBuffer,
-    //         VK_PIPELINE_BIND_POINT_GRAPHICS,
-    //         _boundPipeLayout->_layout,
-    //         rootSetLayout->_rootBindings,
-    //         1,
-    //         &rootSet->_set,
-    //         0, nullptr);
-    // }
 }
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -2156,13 +2146,45 @@ void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceVie
         RADRAY_ERR_LOG("vk BindRootDescriptor slot {} exceeds pipelinelayout root descriptor count {}", slot, rootSetLayout->_rootBindings.size());
         return;
     }
-    // TODO:?
-    // const auto& rb = rootSetLayout->_rootBindings[slot];
-    // VkWriteDescriptorSet writeDesc{};
-    // writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    // writeDesc.pNext = nullptr;
-    // writeDesc.dstSet = rootSet->_set;
-    // _device->_ftb.vkUpdateDescriptorSets(_device->_device, 1, &writeDesc, 0, nullptr);
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _boundPipeLayout->_layout,
+        _boundPipeLayout->_rootSetStart,
+        1,
+        &rootSet->_set,
+        0, nullptr);
+    const auto& rb = rootSetLayout->_rootBindings[slot];
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = rootSet->_set;
+    writeDesc.dstBinding = rb.Slot;
+    writeDesc.dstArrayElement = 0;
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = MapType(rb.Type);
+    auto tag = view->GetTag();
+    VkDescriptorBufferInfo bufInfo{};
+    if (tag == RenderObjectTag::BufferView) {
+        auto bv = static_cast<SimulateBufferViewVulkan*>(view);
+        bufInfo.buffer = bv->_buffer->_buffer;
+        bufInfo.offset = bv->_range.Offset;
+        bufInfo.range = bv->_range.Size;
+        writeDesc.pBufferInfo = &bufInfo;
+    } else if (tag == RenderObjectTag::TextureView) {
+        // TODO: support image view as root descriptor
+        RADRAY_ERR_LOG("vk cannot bind texture as root descriptor");
+        return;
+    } else {
+        RADRAY_ERR_LOG("vk cannot BindRootDescriptor, unsupported tag {}", tag);
+        return;
+    }
+    _device->_ftb.vkUpdateDescriptorSets(
+        _device->_device,
+        1,
+        &writeDesc,
+        0,
+        nullptr);
 }
 
 void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {

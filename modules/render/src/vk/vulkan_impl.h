@@ -635,6 +635,8 @@ public:
     unique_ptr<DescriptorSetVulkan> _rootSet;
     vector<DescriptorSetLayoutVulkan*> _sets;
     std::optional<VkPushConstantRange> _pushConst;
+    uint32_t _rootSetStart{0};
+    uint32_t _setsStart{0};
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
