@@ -759,6 +759,8 @@ public:
     virtual Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept = 0;
+
+    virtual Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {

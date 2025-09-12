@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include <radray/allocator.h>
 
 #include "d3d12_helper.h"
@@ -8,6 +10,8 @@ namespace radray::render::d3d12 {
 
 class DescriptorHeap;
 struct DescriptorHeapView;
+class CpuDescriptorAllocator;
+class GpuDescriptorAllocator;
 class DeviceD3D12;
 class CmdQueueD3D12;
 class FenceD3D12;
@@ -77,6 +81,66 @@ struct DescriptorHeapView {
     bool IsValid() const noexcept;
 };
 
+template <class TAllocator>
+requires is_allocator<TAllocator, DescriptorHeapView>
+class DescriptorHeapViewRAII {
+public:
+    DescriptorHeapViewRAII() noexcept
+        : _heapView(DescriptorHeapView::Invalid()),
+          _allocator(nullptr) {}
+    DescriptorHeapViewRAII(
+        DescriptorHeapView heapView,
+        TAllocator* allocator) noexcept
+        : _heapView(heapView),
+          _allocator(allocator) {}
+    DescriptorHeapViewRAII(const DescriptorHeapViewRAII&) = delete;
+    DescriptorHeapViewRAII(DescriptorHeapViewRAII&& other) noexcept
+        : _heapView(other._heapView),
+          _allocator(other._allocator) {
+        other._heapView = DescriptorHeapView::Invalid();
+        other._allocator = nullptr;
+    }
+    DescriptorHeapViewRAII& operator=(const DescriptorHeapViewRAII&) = delete;
+    DescriptorHeapViewRAII& operator=(DescriptorHeapViewRAII&& other) noexcept {
+        DescriptorHeapViewRAII tmp{std::move(other)};
+        swap(*this, tmp);
+        return *this;
+    }
+    ~DescriptorHeapViewRAII() noexcept { Destroy(); }
+
+    bool IsValid() const noexcept {
+        return _heapView.IsValid() && _allocator != nullptr;
+    }
+
+    void Destroy() noexcept {
+        if (IsValid()) {
+            _allocator->Destroy(_heapView);
+            _heapView = DescriptorHeapView::Invalid();
+            _allocator = nullptr;
+        }
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept { return _heapView.HandleGpu(); }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu() const noexcept { return _heapView.HandleCpu(); }
+
+    UINT GetStart() const noexcept { return _heapView.Start; }
+
+    UINT GetLength() const noexcept { return _heapView.Length; }
+
+    DescriptorHeap* GetHeap() const noexcept { return _heapView.Heap; }
+
+    friend constexpr void swap(DescriptorHeapViewRAII& lhs, DescriptorHeapViewRAII& rhs) noexcept {
+        using std::swap;
+        swap(lhs._heapView, rhs._heapView);
+        swap(lhs._allocator, rhs._allocator);
+    }
+
+private:
+    DescriptorHeapView _heapView;
+    TAllocator* _allocator;
+};
+
 class CpuDescriptorAllocatorImpl final : public BlockAllocator<BuddyAllocator, DescriptorHeap, CpuDescriptorAllocatorImpl> {
 public:
     CpuDescriptorAllocatorImpl(
@@ -134,6 +198,9 @@ private:
 
 static_assert(is_allocator<GpuDescriptorAllocator, DescriptorHeapView>, "GpuDescriptorAllocator is not an allocator");
 
+using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator>;
+using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator>;
+
 class DeviceD3D12 final : public Device {
 public:
     DeviceD3D12(
@@ -173,6 +240,8 @@ public:
     Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
     Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
+
+    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -368,21 +437,17 @@ public:
     BufferViewD3D12(
         DeviceD3D12* device,
         BufferD3D12* buffer,
-        DescriptorHeapView heapView,
-        CpuDescriptorAllocator* heapAlloc) noexcept;
-    ~BufferViewD3D12() noexcept override;
+        CpuDescriptorHeapViewRAII heapView) noexcept;
+    ~BufferViewD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceD3D12* _device;
     BufferD3D12* _buffer;
-    DescriptorHeapView _heapView;
-    CpuDescriptorAllocator* _heapAlloc;
+    CpuDescriptorHeapViewRAII _heapView;
     BufferViewDescriptor _desc;
     DXGI_FORMAT _rawFormat;
 };
@@ -412,21 +477,17 @@ public:
     TextureViewD3D12(
         DeviceD3D12* device,
         TextureD3D12* texture,
-        DescriptorHeapView heapView,
-        CpuDescriptorAllocator* heapAlloc) noexcept;
-    ~TextureViewD3D12() noexcept override;
+        CpuDescriptorHeapViewRAII heapView) noexcept;
+    ~TextureViewD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceD3D12* _device;
     TextureD3D12* _texture;
-    DescriptorHeapView _heapView;
-    CpuDescriptorAllocator* _heapAlloc;
+    CpuDescriptorHeapViewRAII _heapView;
     TextureViewDescriptor _desc;
     DXGI_FORMAT _rawFormat;
 };
@@ -498,6 +559,25 @@ public:
     void Destroy() noexcept override;
 
 public:
+    vector<RootSignatureSetElement> _elems;
+};
+
+class GpuDescriptorHeapViews final : public DescriptorSet {
+public:
+    GpuDescriptorHeapViews(
+        DeviceD3D12* device,
+        GpuDescriptorHeapViewRAII resHeapView,
+        GpuDescriptorHeapViewRAII samplerHeapView) noexcept;
+    ~GpuDescriptorHeapViews() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    GpuDescriptorHeapViewRAII _resHeapView;
+    GpuDescriptorHeapViewRAII _samplerHeapView;
     vector<RootSignatureSetElement> _elems;
 };
 

@@ -136,6 +136,8 @@ public:
 
     Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
 
+    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
+
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
@@ -700,15 +702,13 @@ public:
     uint32_t _maxSets{0};
 };
 
-class DescriptorSetVulkan final : public RenderBase {
+class DescriptorSetVulkan final : public DescriptorSet {
 public:
     DescriptorSetVulkan(
         DeviceVulkan* device,
         DescriptorPoolVulkan* pool,
         VkDescriptorSet set) noexcept;
     ~DescriptorSetVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 

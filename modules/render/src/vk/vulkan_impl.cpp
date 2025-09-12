@@ -946,6 +946,12 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
     return shared_ptr{std::move(result)};
 }
 
+Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
+    auto layout = CastVkObject(layout_);
+    auto descSet = _poolAlloc->Allocate(layout->_layout);
+    return shared_ptr{std::move(descSet)};
+}
+
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -2176,7 +2182,7 @@ void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceVie
         RADRAY_ERR_LOG("vk cannot bind texture as root descriptor");
         return;
     } else {
-        RADRAY_ERR_LOG("vk cannot BindRootDescriptor, unsupported tag {}", tag);
+        RADRAY_ERR_LOG("vk cannot BindRootDescriptor, unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
         return;
     }
     _device->_ftb.vkUpdateDescriptorSets(
