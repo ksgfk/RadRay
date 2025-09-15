@@ -6,10 +6,10 @@
 #include <volk.h>
 #pragma clang diagnostic pop
 #pragma clang diagnostic push
-#pragma clang diagnostic ignored  "-Wnullability-completeness"
-#pragma clang diagnostic ignored  "-Wunused-parameter"
-#pragma clang diagnostic ignored  "-Wmissing-field-initializers"
-#pragma clang diagnostic ignored  "-Wunused-variable"
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#pragma clang diagnostic ignored "-Wunused-variable"
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
 #pragma clang diagnostic pop
@@ -564,6 +564,31 @@ VkIndexType MapIndexType(uint32_t v) noexcept {
         case 2: return VK_INDEX_TYPE_UINT16;
         case 4: return VK_INDEX_TYPE_UINT32;
         default: return VK_INDEX_TYPE_MAX_ENUM;
+    }
+}
+
+VkFilter MapTypeFilter(FilterMode v) noexcept {
+    switch (v) {
+        case FilterMode::Nearest: return VK_FILTER_NEAREST;
+        case FilterMode::Linear: return VK_FILTER_LINEAR;
+        default: return VK_FILTER_MAX_ENUM;
+    }
+}
+
+VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept {
+    switch (v) {
+        case FilterMode::Nearest: return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        case FilterMode::Linear: return VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        default: return VK_SAMPLER_MIPMAP_MODE_MAX_ENUM;
+    }
+}
+
+VkSamplerAddressMode MapType(AddressMode v) noexcept {
+    switch (v) {
+        case AddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        default: return VK_SAMPLER_ADDRESS_MODE_MAX_ENUM;
     }
 }
 

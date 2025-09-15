@@ -37,6 +37,7 @@ class DescriptorPoolVulkan;
 class DescriptorSetVulkan;
 class DescPoolAllocator;
 class DescriptorSetVulkanWrapper;
+class SamplerVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -138,6 +139,8 @@ public:
     Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
 
     Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
+
+    Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
@@ -761,6 +764,25 @@ private:
 
     DeviceVulkan* _device;
     vector<unique_ptr<DescriptorPoolVulkan>> _pools;
+};
+
+class SamplerVulkan final : public Sampler {
+public:
+    SamplerVulkan(
+        DeviceVulkan* device,
+        VkSampler sampler) noexcept;
+    ~SamplerVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSampler _sampler;
+    SamplerDescriptor _mdesc;
 };
 
 bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);

@@ -1109,30 +1109,29 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     bindDescs.shrink_to_fit();
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
-    // TODO: static sampler?
-    // staticSamplers.reserve(info.StaticSamplers.size());
-    // for (const StaticSamplerInfo& desc : info.StaticSamplers) {
-    //     D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
-    //     ssDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.HasCompare, desc.AnisotropyClamp);
-    //     ssDesc.AddressU = MapType(desc.AddressS);
-    //     ssDesc.AddressV = MapType(desc.AddressT);
-    //     ssDesc.AddressW = MapType(desc.AddressR);
-    //     ssDesc.MipLODBias = 0;
-    //     ssDesc.MaxAnisotropy = desc.AnisotropyClamp;
-    //     ssDesc.ComparisonFunc = desc.HasCompare ? MapType(desc.Compare) : D3D12_COMPARISON_FUNC_NEVER;
-    //     ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-    //     ssDesc.MinLOD = desc.LodMin;
-    //     ssDesc.MaxLOD = desc.LodMax;
-    //     ssDesc.ShaderRegister = desc.Slot;
-    //     ssDesc.RegisterSpace = desc.Space;
-    //     ssDesc.ShaderVisibility = MapShaderStages(desc.Stages);
-    // }
+    staticSamplers.reserve(desc.StaticSamplers.size());
+    for (const auto& desc : desc.StaticSamplers) {
+        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+        ssDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
+        ssDesc.AddressU = MapType(desc.AddressS);
+        ssDesc.AddressV = MapType(desc.AddressT);
+        ssDesc.AddressW = MapType(desc.AddressR);
+        ssDesc.MipLODBias = 0;
+        ssDesc.MaxAnisotropy = desc.AnisotropyClamp;
+        ssDesc.ComparisonFunc = desc.Compare.has_value() ? MapType(desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        ssDesc.MinLOD = desc.LodMin;
+        ssDesc.MaxLOD = desc.LodMax;
+        ssDesc.ShaderRegister = desc.Slot;
+        ssDesc.RegisterSpace = desc.Space;
+        ssDesc.ShaderVisibility = MapShaderStages(desc.Stages);
+    }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
     D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
     rsDesc.NumParameters = static_cast<UINT>(rootParmas.size());
-    rsDesc.pParameters = rootParmas.data();
+    rsDesc.pParameters = rootParmas.size() > 0 ? rootParmas.data() : nullptr;
     rsDesc.NumStaticSamplers = static_cast<UINT>(staticSamplers.size());
     rsDesc.pStaticSamplers = staticSamplers.size() > 0 ? staticSamplers.data() : nullptr;
     D3D12_ROOT_SIGNATURE_FLAGS flag =
@@ -1156,9 +1155,14 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             rootSigBlob.GetAddressOf(),
             errorBlob.GetAddressOf());
         FAILED(hr)) {
-        const char* errInfoBegin = errorBlob ? reinterpret_cast<const char*>(errorBlob->GetBufferPointer()) : nullptr;
-        const char* errInfoEnd = errInfoBegin + (errorBlob ? errorBlob->GetBufferSize() : 0);
-        auto reason = errInfoBegin == nullptr ? GetErrorName(hr) : std::string_view{errInfoBegin, errInfoEnd};
+        std::string_view reason;
+        if (errorBlob) {
+            const char* errInfoBegin = std::bit_cast<const char*>(errorBlob->GetBufferPointer());
+            const char* errInfoEnd = errInfoBegin + errorBlob->GetBufferSize();
+            reason = std::string_view{errInfoBegin, errInfoEnd};
+        } else {
+            reason = GetErrorName(hr);
+        }
         RADRAY_ERR_LOG("d3d12 cannot serialize root sig\n{}", reason);
         return nullptr;
     }
@@ -1368,6 +1372,35 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
     result->_elems = layout->_elems;
     result->_elemToHeapOffset = std::move(offset);
     return result;
+}
+
+Nullable<shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    D3D12_SAMPLER_DESC rawDesc{};
+    rawDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
+    rawDesc.AddressU = MapType(desc.AddressS);
+    rawDesc.AddressV = MapType(desc.AddressT);
+    rawDesc.AddressW = MapType(desc.AddressR);
+    rawDesc.MipLODBias = 0;
+    rawDesc.MaxAnisotropy = desc.AnisotropyClamp;
+    rawDesc.ComparisonFunc = desc.Compare.has_value() ? MapType(desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+    rawDesc.BorderColor[0] = 0;
+    rawDesc.BorderColor[1] = 0;
+    rawDesc.BorderColor[2] = 0;
+    rawDesc.BorderColor[3] = 0;
+    rawDesc.MinLOD = desc.LodMin;
+    rawDesc.MaxLOD = desc.LodMax;
+    auto alloc = this->_cpuSamplerAlloc.get();
+    CpuDescriptorHeapViewRAII heapView{};
+    {
+        auto opt = alloc->Allocate(1);
+        if (!opt.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot allocate sampler, out of memory");
+            return nullptr;
+        }
+        heapView = {opt.value(), alloc};
+    }
+    heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
+    return make_shared<SamplerD3D12>(this, std::move(heapView));
 }
 
 CmdQueueD3D12::CmdQueueD3D12(
@@ -1980,6 +2013,20 @@ void GpuDescriptorHeapViews::SetResource(uint32_t index, ResourceView* view) noe
     } else {
         RADRAY_ERR_LOG("d3d12 cannot SetResource, unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
     }
+}
+
+SamplerD3D12::SamplerD3D12(
+    DeviceD3D12* device,
+    CpuDescriptorHeapViewRAII heapView) noexcept
+    : _device(device),
+      _samplerView(std::move(heapView)) {}
+
+bool SamplerD3D12::IsValid() const noexcept {
+    return _samplerView.IsValid();
+}
+
+void SamplerD3D12::Destroy() noexcept {
+    _samplerView.Destroy();
 }
 
 }  // namespace radray::render::d3d12

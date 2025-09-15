@@ -116,6 +116,9 @@ VkBlendOp MapType(BlendOperation v) noexcept;
 VkBlendFactor MapType(BlendFactor v) noexcept;
 VkColorComponentFlags MapType(ColorWrites v) noexcept;
 VkIndexType MapIndexType(uint32_t v) noexcept;
+VkFilter MapTypeFilter(FilterMode v) noexcept;
+VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept;
+VkSamplerAddressMode MapType(AddressMode v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;

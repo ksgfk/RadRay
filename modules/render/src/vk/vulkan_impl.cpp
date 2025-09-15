@@ -955,6 +955,42 @@ Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(Descriptor
     return result;
 }
 
+Nullable<shared_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    VkSamplerCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.magFilter = MapTypeFilter(desc.MagFilter);
+    createInfo.minFilter = MapTypeFilter(desc.MigFilter);
+    createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
+    createInfo.addressModeU = MapType(desc.AddressS);
+    createInfo.addressModeV = MapType(desc.AddressT);
+    createInfo.addressModeW = MapType(desc.AddressR);
+    createInfo.mipLodBias = 0;
+    if (desc.AnisotropyClamp > 1.0f) {
+        createInfo.anisotropyEnable = VK_TRUE;
+        createInfo.maxAnisotropy = desc.AnisotropyClamp;
+    } else {
+        createInfo.anisotropyEnable = VK_FALSE;
+        createInfo.maxAnisotropy = 1.0f;
+    }
+    createInfo.compareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
+    createInfo.compareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
+    createInfo.minLod = desc.LodMin;
+    createInfo.maxLod = desc.LodMax;
+    createInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    createInfo.unnormalizedCoordinates = VK_FALSE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateSampler(_device, &createInfo, this->GetAllocationCallbacks(), &sampler);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vk call vkCreateSampler failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_shared<SamplerVulkan>(this, sampler);
+    result->_mdesc = desc;
+    return result;
+}
+
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -2977,6 +3013,31 @@ DescriptorPoolVulkan* DescPoolAllocator::GetMaybeEmptyPool() {
         return _pools.back().get();
     }
     return NewPoolToBack();
+}
+
+SamplerVulkan::SamplerVulkan(
+    DeviceVulkan* device,
+    VkSampler sampler) noexcept
+    : _device(device),
+      _sampler(sampler) {}
+
+SamplerVulkan::~SamplerVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool SamplerVulkan::IsValid() const noexcept {
+    return _sampler != VK_NULL_HANDLE;
+}
+
+void SamplerVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void SamplerVulkan::DestroyImpl() noexcept {
+    if (_sampler != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySampler(_device->_device, _sampler, _device->GetAllocationCallbacks());
+        _sampler = VK_NULL_HANDLE;
+    }
 }
 
 }  // namespace radray::render::vulkan

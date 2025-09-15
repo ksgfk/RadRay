@@ -25,6 +25,8 @@ class TextureViewD3D12;
 class RootSigD3D12;
 class GraphicsPsoD3D12;
 class SimulateDescriptorSetLayoutD3D12;
+class GpuDescriptorHeapViews;
+class SamplerD3D12;
 
 class DescriptorHeap {
 public:
@@ -247,6 +249,8 @@ public:
     Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
 
     Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
+
+    Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -589,6 +593,22 @@ public:
     GpuDescriptorHeapViewRAII _samplerHeapView;
     vector<RootSignatureSetElement> _elems;
     vector<uint32_t> _elemToHeapOffset;
+};
+
+class SamplerD3D12 final : public Sampler {
+public:
+    SamplerD3D12(
+        DeviceD3D12* device,
+        CpuDescriptorHeapViewRAII heapView) noexcept;
+    ~SamplerD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    CpuDescriptorHeapViewRAII _samplerView;
 };
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);

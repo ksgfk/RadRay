@@ -600,6 +600,39 @@ D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept {
     }
 }
 
+D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
+    switch (v) {
+        case FilterMode::Nearest: return D3D12_FILTER_TYPE_POINT;
+        case FilterMode::Linear: return D3D12_FILTER_TYPE_LINEAR;
+        default: return D3D12_FILTER_TYPE_POINT;
+    }
+}
+
+D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept {
+    D3D12_FILTER_TYPE minFilter = MapType(mig);
+    D3D12_FILTER_TYPE magFilter = MapType(mag);
+    D3D12_FILTER_TYPE mipmapFilter = MapType(mipmap);
+    D3D12_FILTER_REDUCTION_TYPE reduction = hasCompare ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    if (aniso > 1) {
+        if (mipmapFilter == D3D12_FILTER_TYPE_POINT) {
+            return D3D12_ENCODE_MIN_MAG_ANISOTROPIC_MIP_POINT_FILTER(reduction);
+        } else {
+            return D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
+        }
+    } else {
+        return D3D12_ENCODE_BASIC_FILTER(minFilter, magFilter, mipmapFilter, reduction);
+    }
+}
+
+D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
+    switch (v) {
+        case AddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        default: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    }
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

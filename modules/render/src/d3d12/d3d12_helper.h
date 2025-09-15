@@ -84,6 +84,9 @@ D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept;
 D3D12_RESOURCE_STATES MapType(TextureUses v) noexcept;
 D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept;
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept;
+D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
+D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
+D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
 
 }  // namespace radray::render::d3d12
 

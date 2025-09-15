@@ -90,11 +90,21 @@ bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noex
            lhs.LodMin == rhs.LodMin &&
            lhs.LodMax == rhs.LodMax &&
            lhs.Compare == rhs.Compare &&
-           lhs.AnisotropyClamp == rhs.AnisotropyClamp &&
-           lhs.HasCompare == rhs.HasCompare;
+           lhs.AnisotropyClamp == rhs.AnisotropyClamp;
 }
 
 bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
+bool operator==(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept {
+    return operator==(static_cast<const SamplerDescriptor&>(lhs), static_cast<const SamplerDescriptor&>(rhs)) &&
+           lhs.Slot == rhs.Slot &&
+           lhs.Space == rhs.Space &&
+           lhs.Stages == rhs.Stages;
+}
+
+bool operator!=(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept {
     return !(lhs == rhs);
 }
 

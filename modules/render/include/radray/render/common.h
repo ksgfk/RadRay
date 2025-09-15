@@ -406,6 +406,7 @@ class PipelineState;
 class GraphicsPipelineState;
 class DescriptorSet;
 class DescriptorSetLayout;
+class Sampler;
 
 class RenderBase {
 public:
@@ -484,9 +485,8 @@ struct SamplerDescriptor {
     FilterMode MipmapFilter;
     float LodMin;
     float LodMax;
-    CompareFunction Compare;
+    std::optional<CompareFunction> Compare;
     uint32_t AnisotropyClamp;
-    bool HasCompare;
 
     friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
     friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
@@ -619,10 +619,20 @@ struct RootSignatureBindingSet {
     std::span<RootSignatureSetElement> Elements;
 };
 
+struct StaticSamplerDescriptor : SamplerDescriptor {
+    uint32_t Slot;
+    uint32_t Space;
+    ShaderStages Stages;
+
+    friend bool operator==(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept;
+    friend bool operator!=(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept;
+};
+
 struct RootSignatureDescriptor {
     std::span<RootSignatureBinding> RootBindings;
     std::span<DescriptorSetLayout*> BindingSets;
     std::optional<RootSignatureConstant> Constant;
+    std::span<StaticSamplerDescriptor> StaticSamplers;
 };
 
 struct VertexElement {
@@ -761,6 +771,8 @@ public:
     virtual Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept = 0;
 
     virtual Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept = 0;
+
+    virtual Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -928,6 +940,13 @@ public:
     virtual ~DescriptorSetLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSetLayout; }
+};
+
+class Sampler : public RenderBase {
+public:
+    virtual ~Sampler() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
 };
 
 bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);
