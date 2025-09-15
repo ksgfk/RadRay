@@ -130,6 +130,11 @@ public:
 
     DescriptorHeap* GetHeap() const noexcept { return _heapView.Heap; }
 
+    template <class T>
+    void CopyTo(UINT start, UINT count, DescriptorHeapViewRAII<T>& dst, UINT dstStart) noexcept {
+        this->GetHeap()->CopyTo(this->GetStart() + start, count, dst.GetHeap(), dst.GetStart() + dstStart);
+    }
+
     friend constexpr void swap(DescriptorHeapViewRAII& lhs, DescriptorHeapViewRAII& rhs) noexcept {
         using std::swap;
         swap(lhs._heapView, rhs._heapView);
@@ -361,6 +366,8 @@ public:
 
     void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
 
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -574,11 +581,14 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetResource(uint32_t index, ResourceView* view) noexcept override;
+
 public:
     DeviceD3D12* _device;
     GpuDescriptorHeapViewRAII _resHeapView;
     GpuDescriptorHeapViewRAII _samplerHeapView;
     vector<RootSignatureSetElement> _elems;
+    vector<uint32_t> _elemToHeapOffset;
 };
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);

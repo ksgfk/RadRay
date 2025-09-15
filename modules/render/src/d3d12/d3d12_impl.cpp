@@ -5,16 +5,17 @@
 
 namespace radray::render::d3d12 {
 
-static CmdQueueD3D12* CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
-static BufferD3D12* CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
-static TextureD3D12* CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-static FenceD3D12* CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
-static CmdListD3D12* CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
-static RootSigD3D12* CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
-static Dxil* CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
-static TextureViewD3D12* CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
-static GraphicsPsoD3D12* CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
-static SimulateDescriptorSetLayoutD3D12* CastD3D12Object(DescriptorSetLayout* v) noexcept { return static_cast<SimulateDescriptorSetLayoutD3D12*>(v); }
+static auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
+static auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
+static auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+static auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
+static auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
+static auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+static auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+static auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
+static auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+static auto CastD3D12Object(DescriptorSetLayout* v) noexcept { return static_cast<SimulateDescriptorSetLayoutD3D12*>(v); }
+static auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -1324,20 +1325,20 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceD3D12::CreateDescriptorSetLayout
 Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
     auto layout = CastD3D12Object(layout_);
     UINT resCount = 0, samplerCount = 0;
+    vector<uint32_t> offset;
+    offset.reserve(layout->_elems.size());
     for (const RootSignatureSetElement& e : layout->_elems) {
         switch (e.Type) {
             case ResourceBindType::CBuffer:
-                resCount += e.Count;
-                break;
             case ResourceBindType::Buffer:
             case ResourceBindType::Texture:
-                resCount += e.Count;
-                break;
             case ResourceBindType::RWBuffer:
             case ResourceBindType::RWTexture:
+                offset.push_back(resCount);
                 resCount += e.Count;
                 break;
             case ResourceBindType::Sampler:
+                offset.push_back(samplerCount);
                 samplerCount += e.Count;
                 break;
             default:
@@ -1365,6 +1366,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
     }
     auto result = make_shared<GpuDescriptorHeapViews>(this, std::move(resHeapView), std::move(samplerHeapView));
     result->_elems = layout->_elems;
+    result->_elemToHeapOffset = std::move(offset);
     return result;
 }
 
@@ -1726,6 +1728,26 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
     }
 }
 
+void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot BindDescriptorSet, root signature not bound");
+        return;
+    }
+    if (slot >= _boundRootSig->_bindDescriptors.size()) {
+        RADRAY_ABORT("d3d12 cannot BindDescriptorSet, param 'slot' out of range {} of {}", slot, _boundRootSig->_rootDescriptors.size());
+        return;
+    }
+    auto descHeapView = CastD3D12Object(set);
+    if (descHeapView->_resHeapView.IsValid()) {
+        UINT rootParamIndex = _boundRootSig->_bindDescStart + slot;
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, descHeapView->_resHeapView.HandleGpu());
+    }
+    if (descHeapView->_samplerHeapView.IsValid()) {
+        UINT rootParamIndex = _boundRootSig->_bindDescStart + slot;
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(rootParamIndex, descHeapView->_samplerHeapView.HandleGpu());
+    }
+}
+
 void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
     _cmdList->_cmdList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -1940,6 +1962,24 @@ bool GpuDescriptorHeapViews::IsValid() const noexcept {
 void GpuDescriptorHeapViews::Destroy() noexcept {
     _resHeapView.Destroy();
     _samplerHeapView.Destroy();
+}
+
+void GpuDescriptorHeapViews::SetResource(uint32_t index, ResourceView* view) noexcept {
+    if (index >= _elems.size()) {
+        RADRAY_ABORT("d3d12 cannot SetResource, param 'index' out of range {} of {}", index, _elems.size());
+        return;
+    }
+    auto tag = view->GetTag();
+    auto offset = _elemToHeapOffset[index];
+    if (tag.HasFlag(RenderObjectTag::BufferView)) {
+        BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
+        bufferView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+        TextureViewD3D12* texView = static_cast<TextureViewD3D12*>(view);
+        texView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    } else {
+        RADRAY_ERR_LOG("d3d12 cannot SetResource, unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
+    }
 }
 
 }  // namespace radray::render::d3d12

@@ -36,6 +36,7 @@ class ShaderModuleVulkan;
 class DescriptorPoolVulkan;
 class DescriptorSetVulkan;
 class DescPoolAllocator;
+class DescriptorSetVulkanWrapper;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -288,6 +289,8 @@ public:
     void PushConstant(const void* data, size_t length) noexcept override;
 
     void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
+
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -702,13 +705,15 @@ public:
     uint32_t _maxSets{0};
 };
 
-class DescriptorSetVulkan final : public DescriptorSet {
+class DescriptorSetVulkan final : public RenderBase {
 public:
     DescriptorSetVulkan(
         DeviceVulkan* device,
         DescriptorPoolVulkan* pool,
         VkDescriptorSet set) noexcept;
     ~DescriptorSetVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -720,6 +725,25 @@ public:
     DeviceVulkan* _device;
     DescriptorPoolVulkan* _pool;
     VkDescriptorSet _set;
+};
+
+class DescriptorSetVulkanWrapper final : public DescriptorSet {
+public:
+    DescriptorSetVulkanWrapper(
+        DeviceVulkan* device,
+        unique_ptr<DescriptorSetVulkan> set) noexcept;
+    ~DescriptorSetVulkanWrapper() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetResource(uint32_t index, ResourceView* view) noexcept override;
+
+public:
+    DeviceVulkan* _device;
+    unique_ptr<DescriptorSetVulkan> _set;
+    vector<RootSignatureSetElement> _bindingElements;
 };
 
 class DescPoolAllocator {

@@ -5,16 +5,17 @@
 
 namespace radray::render::vulkan {
 
-static QueueVulkan* CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
-static CommandBufferVulkan* CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-static TimelineSemaphoreVulkan* CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
-static BufferVulkan* CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
-static ImageVulkan* CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
-static ImageViewVulkan* CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
-static ShaderModuleVulkan* CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
-static PipelineLayoutVulkan* CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
-static GraphicsPipelineVulkan* CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
-static DescriptorSetLayoutVulkan* CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
+static auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
+static auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
+static auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
+static auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
+static auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
+static auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+static auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+static auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+static auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+static auto CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
+static auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
 
 static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
 
@@ -949,7 +950,9 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
 Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
     auto layout = CastVkObject(layout_);
     auto descSet = _poolAlloc->Allocate(layout->_layout);
-    return shared_ptr{std::move(descSet)};
+    auto result = std::make_shared<DescriptorSetVulkanWrapper>(this, std::move(descSet));
+    result->_bindingElements = layout->_bindingElements;
+    return result;
 }
 
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -2193,6 +2196,26 @@ void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceVie
         nullptr);
 }
 
+void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("vk BindDescriptorSet without pipelinelayout");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_sets.size()) {
+        RADRAY_ERR_LOG("vk BindDescriptorSet slot {} exceeds pipelinelayout descriptor set count {}", slot, _boundPipeLayout->_sets.size());
+        return;
+    }
+    auto descSet = CastVkObject(set);
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _boundPipeLayout->_layout,
+        _boundPipeLayout->_setsStart + slot,
+        1,
+        &descSet->_set->_set,
+        0, nullptr);
+}
+
 void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
     _device->_ftb.vkCmdDraw(_cmdBuffer->_cmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -2815,6 +2838,66 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkFreeDescriptorSets(_device->_device, _pool->_pool, 1, &_set);
         _set = VK_NULL_HANDLE;
     }
+}
+
+DescriptorSetVulkanWrapper::DescriptorSetVulkanWrapper(
+    DeviceVulkan* device,
+    unique_ptr<DescriptorSetVulkan> set) noexcept
+    : _device(device),
+      _set(std::move(set)) {}
+
+bool DescriptorSetVulkanWrapper::IsValid() const noexcept {
+    return _set != nullptr && _set->IsValid();
+}
+
+void DescriptorSetVulkanWrapper::Destroy() noexcept {
+    _set.reset();
+}
+
+void DescriptorSetVulkanWrapper::SetResource(uint32_t index, ResourceView* view) noexcept {
+    if (index >= _bindingElements.size()) {
+        RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource index out of range {} of {}", index, _bindingElements.size());
+        return;
+    }
+    auto tag = view->GetTag();
+    const auto& e = _bindingElements[index];
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = _set->_set;
+    writeDesc.dstBinding = e.Slot;
+    writeDesc.dstArrayElement = 0;
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = MapType(e.Type);
+    writeDesc.pBufferInfo = nullptr;
+    writeDesc.pImageInfo = nullptr;
+    writeDesc.pTexelBufferView = nullptr;
+    VkDescriptorBufferInfo bufInfo{};
+    VkDescriptorImageInfo imgInfo{};
+    if (tag.HasFlag(RenderObjectTag::BufferView)) {
+        auto bv = static_cast<SimulateBufferViewVulkan*>(view);
+        if (bv->_texelView) {
+            writeDesc.pTexelBufferView = &bv->_texelView->_bufferView;
+        } else {
+            bufInfo.buffer = bv->_buffer->_buffer;
+            bufInfo.offset = bv->_range.Offset;
+            bufInfo.range = bv->_range.Size;
+            writeDesc.pBufferInfo = &bufInfo;
+        }
+    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+        auto tv = static_cast<ImageViewVulkan*>(view);
+        imgInfo.imageView = tv->_imageView;
+        imgInfo.imageLayout = TextureUseToLayout(tv->_mdesc.Usage);
+    } else {
+        RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
+        return;
+    }
+    _device->_ftb.vkUpdateDescriptorSets(
+        _device->_device,
+        1,
+        &writeDesc,
+        0,
+        nullptr);
 }
 
 DescPoolAllocator::DescPoolAllocator(DeviceVulkan* device)

@@ -815,6 +815,8 @@ public:
 
     virtual void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept = 0;
 
+    virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept = 0;
+
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
@@ -917,6 +919,8 @@ public:
     virtual ~DescriptorSet() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
+
+    virtual void SetResource(uint32_t index, ResourceView* view) noexcept = 0;
 };
 
 class DescriptorSetLayout : public RenderBase {
