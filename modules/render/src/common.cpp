@@ -97,17 +97,6 @@ bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noex
     return !(lhs == rhs);
 }
 
-bool operator==(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept {
-    return operator==(static_cast<const SamplerDescriptor&>(lhs), static_cast<const SamplerDescriptor&>(rhs)) &&
-           lhs.Slot == rhs.Slot &&
-           lhs.Space == rhs.Space &&
-           lhs.Stages == rhs.Stages;
-}
-
-bool operator!=(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept {
-    return !(lhs == rhs);
-}
-
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
         case TextureFormat::S8:

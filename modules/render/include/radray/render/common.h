@@ -613,26 +613,17 @@ struct RootSignatureSetElement {
     ResourceBindType Type;
     uint32_t Count;
     ShaderStages Stages;
+    std::optional<SamplerDescriptor> StaticSampler;
 };
 
 struct RootSignatureBindingSet {
     std::span<RootSignatureSetElement> Elements;
 };
 
-struct StaticSamplerDescriptor : SamplerDescriptor {
-    uint32_t Slot;
-    uint32_t Space;
-    ShaderStages Stages;
-
-    friend bool operator==(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept;
-    friend bool operator!=(const StaticSamplerDescriptor& lhs, const StaticSamplerDescriptor& rhs) noexcept;
-};
-
 struct RootSignatureDescriptor {
     std::span<RootSignatureBinding> RootBindings;
     std::span<DescriptorSetLayout*> BindingSets;
     std::optional<RootSignatureConstant> Constant;
-    std::span<StaticSamplerDescriptor> StaticSamplers;
 };
 
 struct VertexElement {

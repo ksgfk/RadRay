@@ -620,6 +620,7 @@ public:
     VkDescriptorSetLayout _layout;
     vector<RootSignatureBinding> _rootBindings;
     vector<RootSignatureSetElement> _bindingElements;
+    vector<shared_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
 class PipelineLayoutVulkan final : public RootSignature {

@@ -1010,10 +1010,16 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 case ResourceBindType::RWBuffer:
                 case ResourceBindType::Texture:
                 case ResourceBindType::RWTexture:
-                case ResourceBindType::Sampler:
                     descRanges.emplace_back();
                     allStages |= e.Stages;
                     break;
+                case ResourceBindType::Sampler: {
+                    if (!e.StaticSampler.has_value()) {
+                        descRanges.emplace_back();
+                        allStages |= e.Stages;
+                        break;
+                    }
+                }
                 default: {
                     RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {}", e.Type);
                     return nullptr;
@@ -1024,26 +1030,45 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     size_t bindStart = rootParmas.size();
     size_t offset = 0;
     vector<RootSignatureSetElement> bindDescs{};
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     for (auto i : desc.BindingSets) {
         auto descSet = CastD3D12Object(i);
         for (const RootSignatureSetElement& e : descSet->_elems) {
             switch (e.Type) {
                 case ResourceBindType::Sampler: {
-                    D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
-                    offset++;
-                    CD3DX12_DESCRIPTOR_RANGE1::Init(
-                        range,
-                        D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
-                        e.Count,
-                        e.Slot,
-                        e.Space);
-                    D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
-                    CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
-                        rp,
-                        1,
-                        &range,
-                        MapShaderStages(e.Stages));
-                    bindDescs.emplace_back(e);
+                    if (e.StaticSampler.has_value()) {
+                        const auto& ss = e.StaticSampler.value();
+                        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+                        ssDesc.Filter = MapType(ss.MigFilter, ss.MagFilter, ss.MipmapFilter, ss.Compare.has_value(), ss.AnisotropyClamp);
+                        ssDesc.AddressU = MapType(ss.AddressS);
+                        ssDesc.AddressV = MapType(ss.AddressT);
+                        ssDesc.AddressW = MapType(ss.AddressR);
+                        ssDesc.MipLODBias = 0;
+                        ssDesc.MaxAnisotropy = ss.AnisotropyClamp;
+                        ssDesc.ComparisonFunc = ss.Compare.has_value() ? MapType(ss.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+                        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+                        ssDesc.MinLOD = ss.LodMin;
+                        ssDesc.MaxLOD = ss.LodMax;
+                        ssDesc.ShaderRegister = e.Slot;
+                        ssDesc.RegisterSpace = e.Space;
+                        ssDesc.ShaderVisibility = MapShaderStages(e.Stages);
+                    } else {
+                        D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
+                        offset++;
+                        CD3DX12_DESCRIPTOR_RANGE1::Init(
+                            range,
+                            D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+                            e.Count,
+                            e.Slot,
+                            e.Space);
+                        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+                        CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                            rp,
+                            1,
+                            &range,
+                            MapShaderStages(e.Stages));
+                        bindDescs.emplace_back(e);
+                    }
                     break;
                 }
                 case ResourceBindType::Texture:
@@ -1108,24 +1133,6 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         }
     }
     bindDescs.shrink_to_fit();
-    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
-    staticSamplers.reserve(desc.StaticSamplers.size());
-    for (const auto& desc : desc.StaticSamplers) {
-        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
-        ssDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
-        ssDesc.AddressU = MapType(desc.AddressS);
-        ssDesc.AddressV = MapType(desc.AddressT);
-        ssDesc.AddressW = MapType(desc.AddressR);
-        ssDesc.MipLODBias = 0;
-        ssDesc.MaxAnisotropy = desc.AnisotropyClamp;
-        ssDesc.ComparisonFunc = desc.Compare.has_value() ? MapType(desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
-        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-        ssDesc.MinLOD = desc.LodMin;
-        ssDesc.MaxLOD = desc.LodMax;
-        ssDesc.ShaderRegister = desc.Slot;
-        ssDesc.RegisterSpace = desc.Space;
-        ssDesc.ShaderVisibility = MapShaderStages(desc.Stages);
-    }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};

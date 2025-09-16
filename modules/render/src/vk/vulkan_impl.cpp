@@ -924,12 +924,25 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
 
 Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
+    vector<shared_ptr<SamplerVulkan>> staticSamplers;
     for (const auto& j : desc.Elements) {
         auto& binding = bindings.emplace_back();
         binding.binding = j.Slot;
         binding.descriptorType = MapType(j.Type);
         binding.descriptorCount = j.Count;
         binding.stageFlags = MapType(j.Stages);
+        if (j.StaticSampler.has_value()) {
+            const auto& ss = j.StaticSampler.value();
+            auto samplerOpt = this->CreateSampler(ss);
+            if (!samplerOpt.HasValue()) {
+                return nullptr;
+            }
+            auto sampler = std::static_pointer_cast<SamplerVulkan>(samplerOpt.Release());
+            binding.pImmutableSamplers = &sampler->_sampler;
+            staticSamplers.emplace_back(std::move(sampler));
+        } else {
+            binding.pImmutableSamplers = nullptr;
+        }
         binding.pImmutableSamplers = nullptr;
     }
     VkDescriptorSetLayoutCreateInfo dslci{};
@@ -944,6 +957,7 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
     }
     auto result = descSetLayoutVk.Release();
     result->_bindingElements = {desc.Elements.begin(), desc.Elements.end()};
+    result->_immutableSamplers = std::move(staticSamplers);
     return shared_ptr{std::move(result)};
 }
 
