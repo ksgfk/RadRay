@@ -613,7 +613,7 @@ struct RootSignatureSetElement {
     ResourceBindType Type;
     uint32_t Count;
     ShaderStages Stages;
-    std::optional<SamplerDescriptor> StaticSampler;
+    std::span<SamplerDescriptor> StaticSamplers;
 };
 
 struct RootSignatureBindingSet {

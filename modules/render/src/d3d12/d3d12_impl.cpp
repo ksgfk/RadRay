@@ -1014,11 +1014,11 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     allStages |= e.Stages;
                     break;
                 case ResourceBindType::Sampler: {
-                    if (!e.StaticSampler.has_value()) {
+                    if (e.StaticSamplers.empty()) {
                         descRanges.emplace_back();
                         allStages |= e.Stages;
-                        break;
                     }
+                    break;
                 }
                 default: {
                     RADRAY_ERR_LOG("d3d12 root sig unsupported resource type {}", e.Type);
@@ -1036,23 +1036,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         for (const RootSignatureSetElement& e : descSet->_elems) {
             switch (e.Type) {
                 case ResourceBindType::Sampler: {
-                    if (e.StaticSampler.has_value()) {
-                        const auto& ss = e.StaticSampler.value();
-                        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
-                        ssDesc.Filter = MapType(ss.MigFilter, ss.MagFilter, ss.MipmapFilter, ss.Compare.has_value(), ss.AnisotropyClamp);
-                        ssDesc.AddressU = MapType(ss.AddressS);
-                        ssDesc.AddressV = MapType(ss.AddressT);
-                        ssDesc.AddressW = MapType(ss.AddressR);
-                        ssDesc.MipLODBias = 0;
-                        ssDesc.MaxAnisotropy = ss.AnisotropyClamp;
-                        ssDesc.ComparisonFunc = ss.Compare.has_value() ? MapType(ss.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
-                        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-                        ssDesc.MinLOD = ss.LodMin;
-                        ssDesc.MaxLOD = ss.LodMax;
-                        ssDesc.ShaderRegister = e.Slot;
-                        ssDesc.RegisterSpace = e.Space;
-                        ssDesc.ShaderVisibility = MapShaderStages(e.Stages);
-                    } else {
+                    if (e.StaticSamplers.empty()) {
                         D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
                         offset++;
                         CD3DX12_DESCRIPTOR_RANGE1::Init(
@@ -1068,6 +1052,28 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                             &range,
                             MapShaderStages(e.Stages));
                         bindDescs.emplace_back(e);
+                    } else {
+                        if (e.StaticSamplers.size() != e.Count) {
+                            RADRAY_ERR_LOG("d3d12 static sampler count mismatch {} need {}", e.StaticSamplers.size(), e.Count);
+                            return nullptr;
+                        }
+                        for (size_t t = 0; t < e.StaticSamplers.size(); t++) {
+                            const SamplerDescriptor& ss = e.StaticSamplers[t];
+                            D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+                            ssDesc.Filter = MapType(ss.MigFilter, ss.MagFilter, ss.MipmapFilter, ss.Compare.has_value(), ss.AnisotropyClamp);
+                            ssDesc.AddressU = MapType(ss.AddressS);
+                            ssDesc.AddressV = MapType(ss.AddressT);
+                            ssDesc.AddressW = MapType(ss.AddressR);
+                            ssDesc.MipLODBias = 0;
+                            ssDesc.MaxAnisotropy = ss.AnisotropyClamp;
+                            ssDesc.ComparisonFunc = ss.Compare.has_value() ? MapType(ss.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+                            ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+                            ssDesc.MinLOD = ss.LodMin;
+                            ssDesc.MaxLOD = ss.LodMax;
+                            ssDesc.ShaderRegister = e.Slot + t;
+                            ssDesc.RegisterSpace = e.Space;
+                            ssDesc.ShaderVisibility = MapShaderStages(e.Stages);
+                        }
                     }
                     break;
                 }

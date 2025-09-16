@@ -925,23 +925,34 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
 Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
     vector<shared_ptr<SamplerVulkan>> staticSamplers;
+    vector<vector<VkSampler>> tmpSS;
     for (const auto& j : desc.Elements) {
         auto& binding = bindings.emplace_back();
         binding.binding = j.Slot;
         binding.descriptorType = MapType(j.Type);
         binding.descriptorCount = j.Count;
         binding.stageFlags = MapType(j.Stages);
-        if (j.StaticSampler.has_value()) {
-            const auto& ss = j.StaticSampler.value();
-            auto samplerOpt = this->CreateSampler(ss);
-            if (!samplerOpt.HasValue()) {
+        if (j.StaticSamplers.empty()) {
+            binding.pImmutableSamplers = nullptr;
+        } else {
+            if (j.StaticSamplers.size() != j.Count) {
+                RADRAY_ERR_LOG("vk static sampler count mismatch {} need {}", j.StaticSamplers.size(), j.Count);
                 return nullptr;
             }
-            auto sampler = std::static_pointer_cast<SamplerVulkan>(samplerOpt.Release());
-            binding.pImmutableSamplers = &sampler->_sampler;
-            staticSamplers.emplace_back(std::move(sampler));
-        } else {
-            binding.pImmutableSamplers = nullptr;
+            vector<VkSampler> sss;
+            sss.reserve(j.StaticSamplers.size());
+            for (size_t t = 0; t < j.StaticSamplers.size(); t++) {
+                const SamplerDescriptor& ss = j.StaticSamplers[t];
+                auto samplerOpt = this->CreateSampler(ss);
+                if (!samplerOpt.HasValue()) {
+                    return nullptr;
+                }
+                auto sampler = std::static_pointer_cast<SamplerVulkan>(samplerOpt.Release());
+                sss.emplace_back(sampler->_sampler);
+                staticSamplers.emplace_back(std::move(sampler));
+            }
+            const auto& tsss = tmpSS.emplace_back(std::move(sss));
+            binding.pImmutableSamplers = tsss.data();
         }
     }
     VkDescriptorSetLayoutCreateInfo dslci{};
@@ -956,6 +967,7 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
     }
     auto result = descSetLayoutVk.Release();
     result->_bindingElements = {desc.Elements.begin(), desc.Elements.end()};
+    staticSamplers.shrink_to_fit();
     result->_immutableSamplers = std::move(staticSamplers);
     return shared_ptr{std::move(result)};
 }
