@@ -943,7 +943,6 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
         } else {
             binding.pImmutableSamplers = nullptr;
         }
-        binding.pImmutableSamplers = nullptr;
     }
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
