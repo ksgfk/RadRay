@@ -57,7 +57,7 @@ static auto _Win32LastErrMessage() {
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPTSTR)&buffer,
         0, nullptr);
-    auto msg = fmt::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
+    auto msg = format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
     LocalFree(buffer);
     return msg;
 }
@@ -109,6 +109,10 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
         RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
     }
     return reinterpret_cast<void*>(symbol);
+}
+
+string FormatLastErrorMessageWin32() noexcept {
+    return _Win32LastErrMessage();
 }
 
 }  // namespace radray

@@ -4,6 +4,8 @@
 #include <utility>
 #include <string_view>
 
+#include <radray/types.h>
+
 namespace radray {
 
 [[nodiscard]] void* Malloc(size_t size) noexcept;
@@ -41,5 +43,9 @@ public:
 private:
     void* _handle{nullptr};
 };
+
+#if defined(RADRAY_PLATFORM_WINDOWS)
+string FormatLastErrorMessageWin32() noexcept;
+#endif
 
 }  // namespace radray

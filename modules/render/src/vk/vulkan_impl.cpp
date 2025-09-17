@@ -157,9 +157,9 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     {
-        LPCWSTR instanceAddr = std::bit_cast<LPCWSTR>(&g_instance);
+        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&g_instance);
         HMODULE hInstance;
-        if (GetModuleHandleExW(
+        if (GetModuleHandleEx(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 instanceAddr,
                 &hInstance) == 0) {
