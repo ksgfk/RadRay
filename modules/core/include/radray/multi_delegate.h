@@ -94,15 +94,15 @@ public:
         _list.erase(std::remove_if(_list.begin(), _list.end(), [&](auto&& t) { return t.lock() == data; }), _list.end());
     }
 
-    void Invoke(Args&&... args) {
+    void Invoke(Args... args) {
         vector<weak_ptr<DataType>> temp{_list.begin(), _list.end()};
         for (auto&& i : temp) {
             shared_ptr<DataType> t = i.lock();
-            t->operator()(std::forward<Args>(args)...);
+            t->operator()(std::forward<Args&&>(args)...);
         }
     }
 
-    void operator()(Args&&... args) { return Invoke(std::forward<Args>(args)...); }
+    void operator()(Args&&... args) { return Invoke(std::forward<Args&&>(args)...); }
 
 private:
     vector<weak_ptr<DataType>> _list;

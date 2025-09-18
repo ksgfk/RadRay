@@ -41,18 +41,20 @@ private:
 
 class Win32Window : public NativeWindow {
 public:
-    Win32Window() noexcept = default;
+    Win32Window() noexcept;
     ~Win32Window() noexcept override;
 
     bool IsValid() const noexcept override;
-
     void Destroy() noexcept override;
 
     void DispatchEvents() noexcept override;
 
     bool ShouldClose() const noexcept override;
-
     WindowNativeHandler GetNativeHandler() const noexcept override;
+
+    shared_ptr<MultiDelegate<NativeWindowBeginResizeDelegate>> EventBeginResize() const noexcept override;
+    shared_ptr<MultiDelegate<NativeWindowResizingDelegate>> EventResizing() const noexcept override;
+    shared_ptr<MultiDelegate<NativeWindowEndResizeDelegate>> EventEndResize() const noexcept override;
 
     bool EnterFullscreen();
     bool ExitFullscreen();
@@ -66,7 +68,11 @@ public:
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
     bool _isFullscreen{false};
+    bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};
+    shared_ptr<MultiDelegate<NativeWindowBeginResizeDelegate>> _eventBeginResize{};
+    shared_ptr<MultiDelegate<NativeWindowResizingDelegate>> _eventResizing{};
+    shared_ptr<MultiDelegate<NativeWindowEndResizeDelegate>> _eventEndResize{};
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;
