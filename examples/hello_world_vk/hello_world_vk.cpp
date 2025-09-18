@@ -7,13 +7,12 @@
 #include <radray/utility.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
-#include <radray/window/glfw_window.h>
+#include <radray/window/native_window.h>
 
 #include "../../modules/render/src/vk/vulkan_impl.h"
 
 using namespace radray;
 using namespace radray::render;
-using namespace radray::window;
 
 constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
@@ -24,7 +23,7 @@ struct FrameData {
     shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
 };
 
-unique_ptr<GlfwWindow> glfw;
+unique_ptr<NativeWindow> window;
 shared_ptr<vulkan::DeviceVulkan> device;
 vulkan::QueueVulkan* cmdQueue = nullptr;
 shared_ptr<vulkan::SwapChainVulkan> swapchain;
@@ -42,8 +41,22 @@ shared_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
 shared_ptr<vulkan::GraphicsPipelineVulkan> pso;
 
 void Init() {
-    GlobalInitGlfw();
-    glfw = make_unique<GlfwWindow>(RADRAY_APPNAME, WIN_WIDTH, WIN_HEIGHT, false, false);
+#ifdef RADRAY_PLATFORM_WINDOWS
+    Win32WindowCreateDescriptor windowDesc{
+        RADRAY_APPNAME,
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        -1,
+        -1,
+        true,
+        false,
+        false};
+    window = CreateNativeWindow(windowDesc).Unwrap();
+#endif
+    if (!window) {
+        RADRAY_ABORT("no window");
+        return;
+    }
     VulkanBackendInitDescriptor backendDesc{};
     backendDesc.IsEnableDebugLayer = true;
     vulkan::GlobalInitVulkan(backendDesc);
@@ -55,7 +68,7 @@ void Init() {
     cmdQueue = static_cast<vulkan::QueueVulkan*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
     SwapChainDescriptor swapchainDesc{};
     swapchainDesc.PresentQueue = cmdQueue;
-    swapchainDesc.NativeHandler = glfw->GetNativeHandle();
+    swapchainDesc.NativeHandler = window->GetNativeHandler().Handle;
     swapchainDesc.Width = WIN_WIDTH;
     swapchainDesc.Height = WIN_HEIGHT;
     swapchainDesc.BackBufferCount = RT_COUNT;
@@ -160,17 +173,13 @@ void End() {
     cmdQueue = nullptr;
     device = nullptr;
     vulkan::GlobalTerminateVulkan();
-    glfw = nullptr;
-    GlobalTerminateGlfw();
+    window = nullptr;
 }
 
-bool Update() {
+void Update() {
     uint64_t now = sw.RunningMilliseconds();
     auto delta = now - last;
     last = now;
-
-    GlobalPollEventsGlfw();
-    bool isClose = glfw->ShouldClose();
 
     float* v = nullptr;
     if (clearIndex >= 0 && clearIndex < 2) {
@@ -247,15 +256,27 @@ bool Update() {
     cmdQueue->Submit(submitDesc);
     swapchain->Present();
     currentFrameIndex = (currentFrameIndex + 1) % frames.size();
-
-    return !isClose;
 }
 
 int main() {
     Init();
-    while (Update()) {
+    std::thread renderThread{[]() {
+        while (true) {
+            Update();
+            if (window->ShouldClose()) {
+                break;
+            }
+            std::this_thread::yield();
+        }
+    }};
+    while (true) {
+        window->DispatchEvents();
+        if (window->ShouldClose()) {
+            break;
+        }
         std::this_thread::yield();
     }
+    renderThread.join();
     End();
     return 0;
 }

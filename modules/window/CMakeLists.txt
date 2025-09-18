@@ -9,8 +9,6 @@ if (WIN32)
 endif()
 target_link_libraries(radraywindow PUBLIC
     radraycore)
-target_link_libraries(radraywindow PRIVATE
-    glfw)
 target_compile_options(radraywindow PRIVATE
     $<$<BOOL:MSVC>:/W4>)
 radray_set_build_path(radraywindow)

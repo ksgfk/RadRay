@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -50,20 +52,21 @@ public:
 
     bool ShouldClose() const noexcept override;
 
+    WindowNativeHandler GetNativeHandler() const noexcept override;
+
     bool EnterFullscreen();
     bool ExitFullscreen();
 
 public:
     void DestroyImpl() noexcept;
 
-    unique_ptr<WndClassRAII> _wndClass;
     HWND _hwnd{nullptr};
     HMONITOR _monitor{nullptr};
     RECT _windowedRect{0, 0, 0, 0};
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
     bool _isFullscreen{false};
-    bool _closeRequested{false};
+    std::atomic_bool _closeRequested{false};
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;

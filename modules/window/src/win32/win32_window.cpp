@@ -6,6 +6,9 @@
 namespace radray {
 
 static const wchar_t* RADRAY_WIN32_WINDOW_PROP = L"RADRAY_WIN32_WINDOW_PTR";
+static const wchar_t* RADRAY_WIN32_WNDCLASS_NAME = L"RADRAY_WIN32_WNDCLASS";
+
+static unique_ptr<WndClassRAII> g_wndClass;
 
 static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
@@ -13,22 +16,23 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             auto cs = std::bit_cast<CREATESTRUCT*>(lParam);
             auto window = std::bit_cast<Win32Window*>(cs->lpCreateParams);
             SetProp(hWnd, RADRAY_WIN32_WINDOW_PROP, window);
-            break;
+            return 0;
         }
         case WM_DESTROY: {
             RemoveProp(hWnd, RADRAY_WIN32_WINDOW_PROP);
-            break;
+            return 0;
         }
         case WM_CLOSE: {
             auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_closeRequested = true;
             }
-            break;
+            return 0;
         }
-        default: break;
+        default: {
+            return DefWindowProc(hWnd, uMsg, wParam, lParam);
+        }
     }
-    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 WndClassRAII::WndClassRAII(ATOM clazz, HINSTANCE hInstance, std::wstring_view className) noexcept
@@ -48,31 +52,41 @@ std::wstring_view WndClassRAII::GetName() const noexcept { return _name; }
 HINSTANCE WndClassRAII::GetHInstance() const noexcept { return _hInstance; }
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept {
-    wstring className = ToWideChar(desc.ClassName).value();
-    unique_ptr<WndClassRAII> wc;
+    HMODULE hInstance;
     {
+        LPCWSTR moduleAddr = std::bit_cast<LPCWSTR>(&_RadrayWin32WindowProc);
+        if (GetModuleHandleEx(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                moduleAddr,
+                &hInstance) == 0) {
+            auto fmtErr = FormatLastErrorMessageWin32();
+            RADRAY_ERR_LOG("win32 GetModuleHandleEx failed, reason: {} (code={})", fmtErr, GetLastError());
+            return nullptr;
+        }
+    }
+    if (!g_wndClass) {
         WNDCLASSEX wce{};
         wce.cbSize = sizeof(wce);
         wce.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
         wce.lpfnWndProc = _RadrayWin32WindowProc;
         wce.cbClsExtra = 0;
         wce.cbWndExtra = 0;
-        wce.hInstance = GetModuleHandleW(nullptr);
+        wce.hInstance = hInstance;
         wce.hIcon = nullptr;
         wce.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wce.hbrBackground = nullptr;
         wce.lpszMenuName = nullptr;
-        wce.lpszClassName = className.data();
+        wce.lpszClassName = RADRAY_WIN32_WNDCLASS_NAME;
         ATOM clazz = RegisterClassEx(&wce);
         if (!clazz) {
             auto fmtErr = FormatLastErrorMessageWin32();
             RADRAY_ERR_LOG("win32 RegisterClassEx failed, reason: {} (code={})", fmtErr, GetLastError());
             return nullptr;
         }
-        wc = std::make_unique<WndClassRAII>(clazz, wce.hInstance, className);
+        g_wndClass = std::make_unique<WndClassRAII>(clazz, wce.hInstance, RADRAY_WIN32_WNDCLASS_NAME);
     }
-    auto win = std::make_unique<Win32Window>();
 
+    auto win = std::make_unique<Win32Window>();
     DWORD style = WS_OVERLAPPEDWINDOW;
     if (!desc.Resizable) {
         style &= ~WS_THICKFRAME;
@@ -99,14 +113,14 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     wstring title = ToWideChar(desc.Title).value();
     HWND hwnd = CreateWindowEx(
         exStyle,
-        wc->GetName().data(),
+        g_wndClass->GetName().data(),
         title.c_str(),
         style,
         x, y,
         w, h,
         nullptr,
         nullptr,
-        wc->GetHInstance(),
+        g_wndClass->GetHInstance(),
         win.get());
     if (!hwnd) {
         auto fmtErr = FormatLastErrorMessageWin32();
@@ -124,8 +138,6 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     if (desc.Fullscreen) {
         win->EnterFullscreen();
     }
-
-    win->_wndClass = std::move(wc);
 
     return win;
 }
@@ -161,6 +173,10 @@ bool Win32Window::ShouldClose() const noexcept {
     return _closeRequested;
 }
 
+WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
+    return WindowNativeHandler{WindowHandlerTag::HWND, _hwnd};
+}
+
 bool Win32Window::EnterFullscreen() {
     if (!_hwnd || _isFullscreen) return false;
     _monitor = MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST);
@@ -172,11 +188,12 @@ bool Win32Window::EnterFullscreen() {
     _windowedStyle = GetWindowLong(_hwnd, GWL_STYLE);
     _windowedExStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
     SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle & ~(WS_OVERLAPPEDWINDOW));
-    SetWindowPos(_hwnd, HWND_TOP,
-                 mi.rcMonitor.left, mi.rcMonitor.top,
-                 mi.rcMonitor.right - mi.rcMonitor.left,
-                 mi.rcMonitor.bottom - mi.rcMonitor.top,
-                 SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    SetWindowPos(
+        _hwnd, HWND_TOP,
+        mi.rcMonitor.left, mi.rcMonitor.top,
+        mi.rcMonitor.right - mi.rcMonitor.left,
+        mi.rcMonitor.bottom - mi.rcMonitor.top,
+        SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
     _isFullscreen = true;
     return true;
 }

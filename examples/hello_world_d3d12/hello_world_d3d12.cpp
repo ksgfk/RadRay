@@ -7,13 +7,12 @@
 #include <radray/utility.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
-#include <radray/window/glfw_window.h>
+#include <radray/window/native_window.h>
 
 #include "../../modules/render/src/d3d12/d3d12_impl.h"
 
 using namespace radray;
 using namespace radray::render;
-using namespace radray::window;
 
 constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
@@ -45,7 +44,7 @@ struct FrameData {
     shared_ptr<d3d12::CmdListD3D12> cmdBuffer;
 };
 
-unique_ptr<GlfwWindow> glfw;
+unique_ptr<NativeWindow> window;
 shared_ptr<d3d12::DeviceD3D12> device;
 d3d12::CmdQueueD3D12* cmdQueue;
 shared_ptr<d3d12::SwapChainD3D12> swapchain;
@@ -63,11 +62,19 @@ shared_ptr<d3d12::RootSigD3D12> rootSig;
 shared_ptr<d3d12::GraphicsPsoD3D12> pso;
 
 void Init() {
-    GlobalInitGlfw();
-    glfw = make_unique<GlfwWindow>(RADRAY_APPNAME, WIN_WIDTH, WIN_HEIGHT, false, false);
+    Win32WindowCreateDescriptor windowDesc{
+        RADRAY_APPNAME,
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        -1,
+        -1,
+        true,
+        false,
+        false};
+    window = CreateNativeWindow(windowDesc).Unwrap();
     device = std::static_pointer_cast<d3d12::DeviceD3D12>(CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap());
     cmdQueue = static_cast<d3d12::CmdQueueD3D12*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
-    swapchain = std::static_pointer_cast<d3d12::SwapChainD3D12>(device->CreateSwapChain({cmdQueue, glfw->GetNativeHandle(), WIN_WIDTH, WIN_HEIGHT, RT_COUNT, TextureFormat::RGBA8_UNORM, false}).Unwrap());
+    swapchain = std::static_pointer_cast<d3d12::SwapChainD3D12>(device->CreateSwapChain({cmdQueue, window->GetNativeHandler().Handle, WIN_WIDTH, WIN_HEIGHT, RT_COUNT, TextureFormat::RGBA8_UNORM, false}).Unwrap());
     frames.reserve(swapchain->_frames.size());
     for (size_t i = 0; i < swapchain->_frames.size(); ++i) {
         auto& f = frames.emplace_back();
@@ -151,13 +158,10 @@ void Init() {
     }
 }
 
-bool Update() {
+void Update() {
     uint64_t now = sw.RunningMilliseconds();
     auto delta = now - last;
     last = now;
-
-    GlobalPollEventsGlfw();
-    bool isClose = glfw->ShouldClose();
 
     float* v = nullptr;
     if (clearIndex >= 0 && clearIndex < 2) {
@@ -235,8 +239,6 @@ bool Update() {
     cmdQueue->Submit(submitDesc);
     swapchain->Present();
     currentFrameIndex = (currentFrameIndex + 1) % frames.size();
-
-    return !isClose;
 }
 
 void End() {
@@ -253,15 +255,28 @@ void End() {
     swapchain = nullptr;
     cmdQueue = nullptr;
     device.reset();
-    glfw.reset();
-    GlobalTerminateGlfw();
+    window.reset();
 }
 
 int main() {
     Init();
-    while (Update()) {
+    std::thread renderThread{[]() {
+        while (true) {
+            Update();
+            if (window->ShouldClose()) {
+                break;
+            }
+            std::this_thread::yield();
+        }
+    }};
+    while (true) {
+        window->DispatchEvents();
+        if (window->ShouldClose()) {
+            break;
+        }
         std::this_thread::yield();
     }
+    renderThread.join();
     End();
     return 0;
 }

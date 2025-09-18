@@ -102,17 +102,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(xxHash)
 radray_set_build_path(xxhash)
 if (RADRAY_BUILD_WINDOW)
-    set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    set(GLFW_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
-    FetchContent_Declare(
-        glfw
-        GIT_REPOSITORY https://github.com/glfw/glfw.git
-        GIT_TAG 3.4
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
-    FetchContent_MakeAvailable(glfw)
-    radray_set_build_path(glfw)
+    # set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
+    # set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    # set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    # set(GLFW_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+    # FetchContent_Declare(
+    #     glfw
+    #     GIT_REPOSITORY https://github.com/glfw/glfw.git
+    #     GIT_TAG 3.4
+    #     GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    # FetchContent_MakeAvailable(glfw)
+    # radray_set_build_path(glfw)
 endif()
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)

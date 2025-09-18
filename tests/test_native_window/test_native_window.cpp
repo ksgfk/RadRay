@@ -5,7 +5,6 @@ int main() {
     radray::unique_ptr<radray::NativeWindow> window;
 #ifdef RADRAY_PLATFORM_WINDOWS
     radray::Win32WindowCreateDescriptor desc{
-        "RADRAY_TEST_NATIVE_WINDOW_WIN32",
         "Test Native Window Win32",
         1280,
         720,

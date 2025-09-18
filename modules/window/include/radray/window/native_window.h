@@ -8,8 +8,17 @@
 
 namespace radray {
 
+enum class WindowHandlerTag {
+    UNKNOWN,
+    HWND
+};
+
+struct WindowNativeHandler {
+    WindowHandlerTag Type;
+    void* Handle;
+};
+
 struct Win32WindowCreateDescriptor {
-    std::string_view ClassName;
     std::string_view Title;
     int Width;
     int Height;
@@ -33,6 +42,8 @@ public:
     virtual void DispatchEvents() noexcept = 0;
 
     virtual bool ShouldClose() const noexcept = 0;
+
+    virtual WindowNativeHandler GetNativeHandler() const noexcept = 0;
 };
 
 Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDescriptor& desc) noexcept;
