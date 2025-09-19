@@ -25,29 +25,26 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 RECT rc{};
                 GetClientRect(hWnd, &rc);
                 window->_windowedRect = rc;
-                window->_eventBeginResize->Invoke(rc.right - rc.left, rc.bottom - rc.top);
             }
             return 0;
         }
-        case WM_SIZING: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window) {
-                RECT rc{};
-                GetClientRect(hWnd, &rc);
-                window->_windowedRect = rc;
-                window->_eventResizing->Invoke(rc.right - rc.left, rc.bottom - rc.top);
-            }
-            return 0;
-        }
+        // case WM_SIZING: {
+        //     auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+        //     if (window) {
+        //         RECT rc{};
+        //         GetClientRect(hWnd, &rc);
+        //         window->_windowedRect = rc;
+        //         window->_eventResizing->Invoke(rc.right - rc.left, rc.bottom - rc.top);
+        //     }
+        //     return 0;
+        // }
         case WM_SIZE: {
             auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 int width = LOWORD(lParam);
                 int height = HIWORD(lParam);
-                if (window->_inSizeMove) {
-                    window->_eventResizing->Invoke(width, height);
-                } else {
-                    window->_eventEndResize->Invoke(width, height);
+                if (!window->_inSizeMove) {
+                    window->_eventResized(width, height);
                 }
             }
             return 0;
@@ -58,7 +55,14 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 window->_inSizeMove = false;
                 RECT rc{};
                 GetClientRect(hWnd, &rc);
-                window->_eventEndResize->Invoke(rc.right - rc.left, rc.bottom - rc.top);
+                int width = rc.right - rc.left;
+                int height = rc.bottom - rc.top;
+                int oldWidth = window->_windowedRect.right - window->_windowedRect.left;
+                int oldHeight = window->_windowedRect.bottom - window->_windowedRect.top;
+                window->_windowedRect = rc;
+                if (width != oldWidth || height != oldHeight) {
+                    window->_eventResized(width, height);
+                }
             }
             return 0;
         }
@@ -186,10 +190,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     return win;
 }
 
-Win32Window::Win32Window() noexcept
-    : _eventBeginResize{make_shared<MultiDelegate<NativeWindowBeginResizeDelegate>>()},
-      _eventResizing{make_shared<MultiDelegate<NativeWindowResizingDelegate>>()},
-      _eventEndResize{make_shared<MultiDelegate<NativeWindowEndResizeDelegate>>()} {}
+Win32Window::Win32Window() noexcept {}
 
 Win32Window::~Win32Window() noexcept {
     this->DestroyImpl();
@@ -226,16 +227,8 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
     return WindowNativeHandler{WindowHandlerTag::HWND, _hwnd};
 }
 
-shared_ptr<MultiDelegate<NativeWindowBeginResizeDelegate>> Win32Window::EventBeginResize() const noexcept {
-    return _eventBeginResize;
-}
-
-shared_ptr<MultiDelegate<NativeWindowResizingDelegate>> Win32Window::EventResizing() const noexcept {
-    return _eventResizing;
-}
-
-shared_ptr<MultiDelegate<NativeWindowEndResizeDelegate>> Win32Window::EventEndResize() const noexcept {
-    return _eventEndResize;
+sigslot::signal<int, int>& Win32Window::EventResized() noexcept {
+    return _eventResized;
 }
 
 bool Win32Window::EnterFullscreen() {

@@ -52,9 +52,7 @@ public:
     bool ShouldClose() const noexcept override;
     WindowNativeHandler GetNativeHandler() const noexcept override;
 
-    shared_ptr<MultiDelegate<NativeWindowBeginResizeDelegate>> EventBeginResize() const noexcept override;
-    shared_ptr<MultiDelegate<NativeWindowResizingDelegate>> EventResizing() const noexcept override;
-    shared_ptr<MultiDelegate<NativeWindowEndResizeDelegate>> EventEndResize() const noexcept override;
+    sigslot::signal<int, int>& EventResized() noexcept override;
 
     bool EnterFullscreen();
     bool ExitFullscreen();
@@ -70,9 +68,8 @@ public:
     bool _isFullscreen{false};
     bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};
-    shared_ptr<MultiDelegate<NativeWindowBeginResizeDelegate>> _eventBeginResize{};
-    shared_ptr<MultiDelegate<NativeWindowResizingDelegate>> _eventResizing{};
-    shared_ptr<MultiDelegate<NativeWindowEndResizeDelegate>> _eventEndResize{};
+
+    sigslot::signal<int, int> _eventResized;
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;

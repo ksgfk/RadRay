@@ -6,6 +6,7 @@ target_include_directories(radraycore PUBLIC include)
 target_link_libraries(radraycore PUBLIC
     fmt::fmt
     Eigen3::Eigen
+    Pal::Sigslot
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-static>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog

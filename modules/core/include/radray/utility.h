@@ -10,6 +10,8 @@
 #include <concepts>
 #include <functional>
 
+#include <sigslot/signal.hpp>
+
 #include <radray/types.h>
 #include <radray/logger.h>
 

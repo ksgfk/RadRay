@@ -17,7 +17,10 @@
 #include <string>
 
 #ifdef RADRAY_ENABLE_MIMALLOC
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-copy"
 #include <mimalloc.h>
+#pragma clang diagnostic pop
 #endif
 
 namespace radray {
@@ -34,34 +37,7 @@ using std::uint64_t;
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 template <class T>
-class MiAllocator {
-public:
-    using value_type = T;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-    using propagate_on_container_move_assignment = std::true_type;
-
-    constexpr MiAllocator() noexcept = default;
-    constexpr ~MiAllocator() noexcept = default;
-    MiAllocator(const MiAllocator&) noexcept = default;
-    MiAllocator(MiAllocator&&) noexcept = default;
-    MiAllocator& operator=(const MiAllocator&) noexcept = default;
-    MiAllocator& operator=(MiAllocator&&) noexcept = default;
-    template <class U>
-    MiAllocator(const MiAllocator<U>&) noexcept {}
-    template <class U>
-    MiAllocator& operator=(const MiAllocator<U>&) noexcept {}
-
-    [[nodiscard]] constexpr T* allocate(size_type count) { return static_cast<T*>(mi_new_n(count, sizeof(T))); }
-    constexpr void deallocate(T* p, size_type) { mi_free(p); }
-};
-template <class T1, class T2>
-bool operator==(const MiAllocator<T1>&, const MiAllocator<T2>&) noexcept { return true; }
-template <class T1, class T2>
-bool operator!=(const MiAllocator<T1>&, const MiAllocator<T2>&) noexcept { return false; }
-
-template <class T>
-using allocator = MiAllocator<T>;
+using allocator = mi_stl_allocator<T>;
 #else
 template <class T>
 using allocator = std::allocator<T>;

@@ -101,6 +101,12 @@ FetchContent_Declare(
     SOURCE_SUBDIR cmake_unofficial)
 FetchContent_MakeAvailable(xxHash)
 radray_set_build_path(xxhash)
+FetchContent_Declare(
+    sigslot
+    GIT_REPOSITORY https://github.com/palacaze/sigslot
+    GIT_TAG v1.2.3
+    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+FetchContent_MakeAvailable(sigslot)
 if (RADRAY_BUILD_WINDOW)
     # set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
     # set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -118,6 +124,8 @@ if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MI_XMALLOC ON CACHE BOOL "" FORCE)
+    set(MI_OPT_ARCH ON CACHE BOOL "" FORCE)
     FetchContent_Declare(
         mimalloc
         GIT_REPOSITORY https://github.com/microsoft/mimalloc.git

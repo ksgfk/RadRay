@@ -14,6 +14,9 @@ int main() {
         false,
         false};
     window = radray::CreateNativeWindow(desc).Unwrap();
+    sigslot::scoped_connection conn = window->EventResized().connect([](int w, int h) {
+        RADRAY_INFO_LOG("Window resized: {}x{}", w, h);
+    });
 #endif
     if (!window) {
         RADRAY_ERR_LOG("Failed to create native window");
@@ -25,5 +28,6 @@ int main() {
             break;
         }
     }
+    conn.disconnect();
     return 0;
 }
