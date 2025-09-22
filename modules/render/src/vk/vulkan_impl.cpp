@@ -2483,6 +2483,7 @@ Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
     _device->_ftb.vkWaitForFences(_device->_device, 1, &frameData.fence->_fence, VK_TRUE, UINT64_MAX);
     _device->_ftb.vkResetFences(_device->_device, 1, &frameData.fence->_fence);
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
+    // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
     if (auto vr = _device->_ftb.vkAcquireNextImageKHR(
             _device->_device,
             _swapchain,
@@ -2491,7 +2492,11 @@ Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
             VK_NULL_HANDLE,
             &_currentTextureIndex);
         vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
-        RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vr);
+        if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
+            RADRAY_DEBUG_LOG("vk call vkAcquireNextImageKHR return VK_ERROR_OUT_OF_DATE_KHR");
+        } else {
+            RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vr);
+        }
         return nullptr;
     }
     _queue->_swapchainSync.fence = frameData.fence;

@@ -1,4 +1,5 @@
 #include <thread>
+#include <mutex>
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
@@ -60,12 +61,18 @@ shared_ptr<d3d12::BufferD3D12> idxBuf;
 shared_ptr<Dxc> dxc;
 shared_ptr<d3d12::RootSigD3D12> rootSig;
 shared_ptr<d3d12::GraphicsPsoD3D12> pso;
+Eigen::Vector2i winSize{WIN_WIDTH, WIN_HEIGHT};
+sigslot::connection resizedConn;
+sigslot::connection resizingConn;
+std::mutex mtx;
+std::optional<Eigen::Vector2i> resizeVal;
+bool isResizing = false;
 
 void Init() {
     Win32WindowCreateDescriptor windowDesc{
         RADRAY_APPNAME,
-        WIN_WIDTH,
-        WIN_HEIGHT,
+        winSize.x(),
+        winSize.y(),
         -1,
         -1,
         true,
@@ -74,7 +81,7 @@ void Init() {
     window = CreateNativeWindow(windowDesc).Unwrap();
     device = std::static_pointer_cast<d3d12::DeviceD3D12>(CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap());
     cmdQueue = static_cast<d3d12::CmdQueueD3D12*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
-    swapchain = std::static_pointer_cast<d3d12::SwapChainD3D12>(device->CreateSwapChain({cmdQueue, window->GetNativeHandler().Handle, WIN_WIDTH, WIN_HEIGHT, RT_COUNT, TextureFormat::RGBA8_UNORM, false}).Unwrap());
+    swapchain = std::static_pointer_cast<d3d12::SwapChainD3D12>(device->CreateSwapChain({cmdQueue, window->GetNativeHandler().Handle, (uint32_t)winSize.x(), (uint32_t)winSize.y(), RT_COUNT, TextureFormat::RGBA8_UNORM, false}).Unwrap());
     frames.reserve(swapchain->_frames.size());
     for (size_t i = 0; i < swapchain->_frames.size(); ++i) {
         auto& f = frames.emplace_back();
@@ -186,6 +193,40 @@ void Update() {
         }
     }
 
+    bool mresize = false;
+    std::optional<Eigen::Vector2i> mr;
+    {
+        std::lock_guard<std::mutex> lock{mtx};
+        if (isResizing || resizeVal.has_value()) {
+            mresize = true;
+        }
+        mr = resizeVal;
+        resizeVal = std::nullopt;
+    }
+    if (mresize) {
+        if (mr.has_value()) {
+            Eigen::Vector2i sz = mr.value();
+            if (sz.x() == 0 || sz.y() == 0) {
+                return;
+            }
+            cmdQueue->Wait();
+            rtViews.clear();
+            swapchain->Destroy();
+            swapchain = std::static_pointer_cast<d3d12::SwapChainD3D12>(
+                device->CreateSwapChain(
+                          {cmdQueue,
+                           window->GetNativeHandler().Handle,
+                           (uint32_t)sz.x(),
+                           (uint32_t)sz.y(),
+                           RT_COUNT,
+                           TextureFormat::RGBA8_UNORM,
+                           false})
+                    .Unwrap());
+            winSize = sz;
+        }
+        return;
+    }
+
     auto& frameData = frames[currentFrameIndex];
     swapchain->AcquireNext();
     auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
@@ -219,8 +260,8 @@ void Update() {
         auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         rp->BindRootSignature(rootSig.get());
         rp->BindGraphicsPipelineState(pso.get());
-        rp->SetViewport({0, 0, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
-        rp->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
+        rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
+        rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
         VertexBufferView vbv[] = {
             {vertBuf.get(), 0, vertBuf->_desc.Size}};
         rp->BindVertexBuffer(vbv);
@@ -255,11 +296,23 @@ void End() {
     swapchain = nullptr;
     cmdQueue = nullptr;
     device.reset();
+    resizedConn.disconnect();
+    resizingConn.disconnect();
     window.reset();
 }
 
 int main() {
     Init();
+    resizedConn = window->EventResized().connect([](int width, int height) {
+        std::lock_guard<std::mutex> lock{mtx};
+        isResizing = false;
+        resizeVal = Eigen::Vector2i(width, height);
+    });
+    resizingConn = window->EventResizing().connect([](int width, int height) {
+        std::lock_guard<std::mutex> lock{mtx};
+        isResizing = true;
+        resizeVal = Eigen::Vector2i(width, height);
+    });
     std::thread renderThread{[]() {
         while (true) {
             Update();

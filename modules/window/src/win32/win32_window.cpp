@@ -25,25 +25,30 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 RECT rc{};
                 GetClientRect(hWnd, &rc);
                 window->_windowedRect = rc;
+                int width = rc.right - rc.left;
+                int height = rc.bottom - rc.top;
+                window->_eventResizing(width, height);
             }
             return 0;
         }
-        // case WM_SIZING: {
-        //     auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-        //     if (window) {
-        //         RECT rc{};
-        //         GetClientRect(hWnd, &rc);
-        //         window->_windowedRect = rc;
-        //         window->_eventResizing->Invoke(rc.right - rc.left, rc.bottom - rc.top);
-        //     }
-        //     return 0;
-        // }
+        case WM_SIZING: {
+            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window) {
+                RECT rc{};
+                GetClientRect(hWnd, &rc);
+                window->_windowedRect = rc;
+                int width = rc.right - rc.left;
+                int height = rc.bottom - rc.top;
+                window->_eventResizing(width, height);
+            }
+            return 0;
+        }
         case WM_SIZE: {
             auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 int width = LOWORD(lParam);
                 int height = HIWORD(lParam);
-                if (!window->_inSizeMove) {
+                if (!window->_inSizeMove) {  // 最大最小化
                     window->_eventResized(width, height);
                 }
             }
@@ -55,14 +60,10 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 window->_inSizeMove = false;
                 RECT rc{};
                 GetClientRect(hWnd, &rc);
+                window->_windowedRect = rc;
                 int width = rc.right - rc.left;
                 int height = rc.bottom - rc.top;
-                int oldWidth = window->_windowedRect.right - window->_windowedRect.left;
-                int oldHeight = window->_windowedRect.bottom - window->_windowedRect.top;
-                window->_windowedRect = rc;
-                if (width != oldWidth || height != oldHeight) {
-                    window->_eventResized(width, height);
-                }
+                window->_eventResized(width, height);
             }
             return 0;
         }
@@ -229,6 +230,10 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
 
 sigslot::signal<int, int>& Win32Window::EventResized() noexcept {
     return _eventResized;
+}
+
+sigslot::signal<int, int>& Win32Window::EventResizing() noexcept {
+    return _eventResizing;
 }
 
 bool Win32Window::EnterFullscreen() {

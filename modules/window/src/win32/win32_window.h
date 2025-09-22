@@ -53,6 +53,7 @@ public:
     WindowNativeHandler GetNativeHandler() const noexcept override;
 
     sigslot::signal<int, int>& EventResized() noexcept override;
+    sigslot::signal<int, int>& EventResizing() noexcept override;
 
     bool EnterFullscreen();
     bool ExitFullscreen();
@@ -70,6 +71,7 @@ public:
     std::atomic_bool _closeRequested{false};
 
     sigslot::signal<int, int> _eventResized;
+    sigslot::signal<int, int> _eventResizing;
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;

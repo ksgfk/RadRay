@@ -45,6 +45,7 @@ public:
     virtual WindowNativeHandler GetNativeHandler() const noexcept = 0;
 
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;
+    virtual sigslot::signal<int, int>& EventResizing() noexcept = 0;
 };
 
 Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDescriptor& desc) noexcept;

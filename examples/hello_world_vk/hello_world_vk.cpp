@@ -1,4 +1,5 @@
 #include <thread>
+#include <mutex>
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
@@ -39,13 +40,19 @@ shared_ptr<vulkan::BufferVulkan> idxBuf;
 shared_ptr<Dxc> dxc;
 shared_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
 shared_ptr<vulkan::GraphicsPipelineVulkan> pso;
+Eigen::Vector2i winSize{WIN_WIDTH, WIN_HEIGHT};
+sigslot::connection resizedConn;
+sigslot::connection resizingConn;
+std::mutex mtx;
+std::optional<Eigen::Vector2i> resizeVal;
+bool isResizing = false;
 
 void Init() {
 #ifdef RADRAY_PLATFORM_WINDOWS
     Win32WindowCreateDescriptor windowDesc{
         RADRAY_APPNAME,
-        WIN_WIDTH,
-        WIN_HEIGHT,
+        winSize.x(),
+        winSize.y(),
         -1,
         -1,
         true,
@@ -69,8 +76,8 @@ void Init() {
     SwapChainDescriptor swapchainDesc{};
     swapchainDesc.PresentQueue = cmdQueue;
     swapchainDesc.NativeHandler = window->GetNativeHandler().Handle;
-    swapchainDesc.Width = WIN_WIDTH;
-    swapchainDesc.Height = WIN_HEIGHT;
+    swapchainDesc.Width = (uint32_t)winSize.x();
+    swapchainDesc.Height = (uint32_t)winSize.y();
     swapchainDesc.BackBufferCount = RT_COUNT;
     swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
     swapchainDesc.EnableSync = false;
@@ -173,6 +180,8 @@ void End() {
     cmdQueue = nullptr;
     device = nullptr;
     vulkan::GlobalTerminateVulkan();
+    resizedConn.disconnect();
+    resizingConn.disconnect();
     window = nullptr;
 }
 
@@ -204,8 +213,45 @@ void Update() {
         }
     }
 
+    bool mresize = false;
+    std::optional<Eigen::Vector2i> mr;
+    {
+        std::lock_guard<std::mutex> lock{mtx};
+        if (isResizing || resizeVal.has_value()) {
+            mresize = true;
+        }
+        mr = resizeVal;
+        resizeVal = std::nullopt;
+    }
+    if (mresize) {
+        if (mr.has_value()) {
+            Eigen::Vector2i sz = mr.value();
+            if (sz.x() == 0 || sz.y() == 0) {
+                return;
+            }
+            cmdQueue->Wait();
+            rtViews.clear();
+            swapchain->Destroy();
+            swapchain = std::static_pointer_cast<vulkan::SwapChainVulkan>(
+                device->CreateSwapChain(
+                          {cmdQueue,
+                           window->GetNativeHandler().Handle,
+                           (uint32_t)sz.x(),
+                           (uint32_t)sz.y(),
+                           RT_COUNT,
+                           TextureFormat::RGBA8_UNORM,
+                           false})
+                    .Unwrap());
+            winSize = sz;
+        }
+        return;
+    }
+
     auto& frameData = frames[currentFrameIndex];
-    swapchain->AcquireNext();
+    auto acqRes = swapchain->AcquireNext();
+    if (!acqRes) {
+        return;
+    }
     auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
     shared_ptr<vulkan::ImageViewVulkan> rtView = nullptr;
     {
@@ -236,8 +282,8 @@ void Update() {
         auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         rp->BindRootSignature(pipelineLayout.get());
         rp->BindGraphicsPipelineState(pso.get());
-        rp->SetViewport({0, 0, WIN_WIDTH, WIN_HEIGHT, 0.0f, 1.0f});
-        rp->SetScissor({0, 0, WIN_WIDTH, WIN_HEIGHT});
+        rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
+        rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
         VertexBufferView vbv[] = {
             {vertBuf.get(), 0, vertBuf->_mdesc.Size}};
         rp->BindVertexBuffer(vbv);
@@ -260,6 +306,16 @@ void Update() {
 
 int main() {
     Init();
+    resizedConn = window->EventResized().connect([](int width, int height) {
+        std::lock_guard<std::mutex> lock{mtx};
+        isResizing = false;
+        resizeVal = Eigen::Vector2i(width, height);
+    });
+    resizingConn = window->EventResizing().connect([](int width, int height) {
+        std::lock_guard<std::mutex> lock{mtx};
+        isResizing = true;
+        resizeVal = Eigen::Vector2i(width, height);
+    });
     std::thread renderThread{[]() {
         while (true) {
             Update();
