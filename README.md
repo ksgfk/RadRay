@@ -37,7 +37,14 @@ install extensions: C/C++ Extension Pack, clangd
         "--background-index-priority=normal",
         "--header-insertion=never",
         "--pch-storage=memory"
-    ]
+    ],
+        "VSCodeCounter.exclude": [
+        "**/.gitignore",
+        "**/.vscode/**",
+        "**/build**/**",
+        "**/assets/**",
+        "**/third_party/**",
+    ],
 }
 ```
 

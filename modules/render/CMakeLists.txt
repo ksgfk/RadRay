@@ -18,7 +18,8 @@ target_link_libraries(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:GPUOpen::VulkanMemoryAllocator>
     $<$<OR:$<BOOL:${RADRAY_ENABLE_DXC}>,$<BOOL:${RADRAY_ENABLE_D3D12}>>:Microsoft::DirectX-Headers>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Guids>
-    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:D3D12MemoryAllocator>)
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:D3D12MemoryAllocator>
+    $<$<BOOL:${RADRAY_ENABLE_IMGUI}>:radrayimgui>)
 target_link_libraries(radrayrender PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_DXC}>:dxc::dxcompiler>)
 target_compile_definitions(radrayrender PUBLIC

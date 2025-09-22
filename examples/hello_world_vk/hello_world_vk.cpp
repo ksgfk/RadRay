@@ -46,6 +46,7 @@ sigslot::connection resizingConn;
 std::mutex mtx;
 std::optional<Eigen::Vector2i> resizeVal;
 bool isResizing = false;
+bool isMinimized = false;
 
 void Init() {
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -225,10 +226,12 @@ void Update() {
     }
     if (mresize) {
         if (mr.has_value()) {
-            Eigen::Vector2i sz = mr.value();
-            if (sz.x() == 0 || sz.y() == 0) {
+            winSize = mr.value();
+            if (winSize.x() == 0 || winSize.y() == 0) {
+                isMinimized = true;
                 return;
             }
+            isMinimized = false;
             cmdQueue->Wait();
             rtViews.clear();
             swapchain->Destroy();
@@ -236,14 +239,17 @@ void Update() {
                 device->CreateSwapChain(
                           {cmdQueue,
                            window->GetNativeHandler().Handle,
-                           (uint32_t)sz.x(),
-                           (uint32_t)sz.y(),
+                           (uint32_t)winSize.x(),
+                           (uint32_t)winSize.y(),
                            RT_COUNT,
                            TextureFormat::RGBA8_UNORM,
                            false})
                     .Unwrap());
-            winSize = sz;
         }
+        return;
+    }
+
+    if (isMinimized) {
         return;
     }
 

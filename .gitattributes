@@ -1,7 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
-src/render/ext/* linguist-vendored
-src/test/direct_light/assets/* linguist-vendored
-
-src/render/vk/ext/* linguist-vendored
+modules/third_party/* linguist-vendored
