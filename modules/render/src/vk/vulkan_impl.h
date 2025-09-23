@@ -10,7 +10,7 @@ namespace radray::render::vulkan {
 
 using DeviceFuncTable = VolkDeviceTable;
 
-class InstanceVulkan;
+class InstanceVulkanImpl;
 class VMA;
 class DeviceVulkan;
 class QueueVulkan;
@@ -54,17 +54,15 @@ struct ExtPropertiesVulkan {
     std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
 };
 
-class InstanceVulkan final : public RenderBase {
+class InstanceVulkanImpl final : public InstanceVulkan {
 public:
-    InstanceVulkan(
+    InstanceVulkanImpl(
         VkInstance instance,
         std::optional<VkAllocationCallbacks> allocCb,
         vector<string> exts,
         vector<string> layers) noexcept;
 
-    ~InstanceVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+    ~InstanceVulkanImpl() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -102,7 +100,7 @@ public:
 class DeviceVulkan final : public Device {
 public:
     DeviceVulkan(
-        InstanceVulkan* instance,
+        InstanceVulkanImpl* instance,
         VkPhysicalDevice physicalDevice,
         VkDevice device) noexcept;
 
@@ -161,7 +159,7 @@ public:
 
     void DestroyImpl() noexcept;
 
-    InstanceVulkan* _instance;
+    InstanceVulkanImpl* _instance;
     VkPhysicalDevice _physicalDevice;
     VkDevice _device;
     std::unique_ptr<VMA> _vma;
@@ -786,10 +784,10 @@ public:
     SamplerDescriptor _mdesc;
 };
 
-bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc);
-
-void GlobalTerminateVulkan();
-
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
+
+Nullable<unique_ptr<InstanceVulkanImpl>> CreateInstanceVulkanImpl(const InstanceVulkanDescriptor& desc);
+
+void DestroyInstanceVulkanImpl(unique_ptr<InstanceVulkan> instance) noexcept;
 
 }  // namespace radray::render::vulkan

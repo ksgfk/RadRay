@@ -342,7 +342,9 @@ enum class RenderObjectTag : uint32_t {
     TextureView = ResourceView | (ResourceView << 2),
     DescriptorSet = ResourceView << 3,
     DescriptorSetLayout = DescriptorSet << 1,
-    Sampler = DescriptorSetLayout << 1
+    Sampler = DescriptorSetLayout << 1,
+
+    VkInstance = Sampler << 1
 };
 
 }  // namespace radray::render
@@ -407,6 +409,7 @@ class GraphicsPipelineState;
 class DescriptorSet;
 class DescriptorSetLayout;
 class Sampler;
+class InstanceVulkan;
 
 class RenderBase {
 public:
@@ -424,21 +427,15 @@ public:
     virtual void Destroy() noexcept = 0;
 };
 
-class D3D12BackendInitDescriptor {
+class InstanceVulkanDescriptor {
 public:
-};
-
-class MetalBackendInitDescriptor {
-public:
-};
-
-class VulkanBackendInitDescriptor {
-public:
+    std::string_view AppName;
+    uint32_t AppVersion;
+    std::string_view EngineName;
+    uint32_t EngineVersion;
     bool IsEnableDebugLayer;
     bool IsEnableGpuBasedValid;
 };
-
-using BackendInitDescriptor = std::variant<D3D12BackendInitDescriptor, MetalBackendInitDescriptor, VulkanBackendInitDescriptor>;
 
 class D3D12DeviceDescriptor {
 public:
@@ -940,11 +937,23 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
 };
 
-bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs);
+class InstanceVulkan : public RenderBase {
+public:
+    InstanceVulkan() noexcept = default;
+    InstanceVulkan(const InstanceVulkan&) = delete;
+    InstanceVulkan(InstanceVulkan&&) = delete;
+    InstanceVulkan& operator=(const InstanceVulkan&) = delete;
+    InstanceVulkan& operator=(InstanceVulkan&&) = delete;
+    virtual ~InstanceVulkan() noexcept = default;
 
-void GlobalTerminateGraphics();
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
+};
 
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
+
+Nullable<unique_ptr<InstanceVulkan>> CreateInstanceVulkan(const InstanceVulkanDescriptor& desc);
+
+void DestroyInstanceVulkan(unique_ptr<InstanceVulkan> instance) noexcept;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 

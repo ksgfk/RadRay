@@ -1,6 +1,7 @@
 #include <radray/render/common.h>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 
 #ifdef RADRAY_ENABLE_D3D12
 #include "d3d12/d3d12_impl.h"
@@ -15,40 +16,6 @@
 #endif
 
 namespace radray::render {
-
-bool GlobalInitGraphics(std::span<BackendInitDescriptor> descs) {
-    for (const auto& desc : descs) {
-        bool isSucc = std::visit(
-            [](auto&& arg) -> bool {
-                using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, VulkanBackendInitDescriptor>) {
-#ifdef RADRAY_ENABLE_VULKAN
-                    return vulkan::GlobalInitVulkan(arg);
-#else
-                    RADRAY_ERR_LOG("Vulkan is not enabled");
-                    return false;
-#endif
-                } else if constexpr (std::is_same_v<T, D3D12BackendInitDescriptor>) {
-                    return false;
-                } else if constexpr (std::is_same_v<T, MetalBackendInitDescriptor>) {
-                    return false;
-                } else {
-                    return false;
-                }
-            },
-            desc);
-        if (!isSucc) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void GlobalTerminateGraphics() {
-#ifdef RADRAY_ENABLE_VULKAN
-    vulkan::GlobalTerminateVulkan();
-#endif
-}
 
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
     return std::visit(
@@ -78,6 +45,25 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
             }
         },
         desc);
+}
+
+Nullable<unique_ptr<InstanceVulkan>> CreateInstanceVulkan(const InstanceVulkanDescriptor& desc) {
+#ifdef RADRAY_ENABLE_VULKAN
+    return vulkan::CreateInstanceVulkanImpl(desc);
+#else
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("Vulkan is not enable");
+    return nullptr;
+#endif
+}
+
+void DestroyInstanceVulkan(unique_ptr<InstanceVulkan> instance) noexcept {
+#ifdef RADRAY_ENABLE_VULKAN
+    return vulkan::DestroyInstanceVulkanImpl(std::move(instance));
+#else
+    RADRAY_UNUSED(instance);
+    RADRAY_ERR_LOG("Vulkan is not enable");
+#endif
 }
 
 bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {

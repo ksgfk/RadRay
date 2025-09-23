@@ -25,6 +25,7 @@ struct FrameData {
 };
 
 unique_ptr<NativeWindow> window;
+unique_ptr<InstanceVulkan> vkInstance;
 shared_ptr<vulkan::DeviceVulkan> device;
 vulkan::QueueVulkan* cmdQueue = nullptr;
 shared_ptr<vulkan::SwapChainVulkan> swapchain;
@@ -65,9 +66,13 @@ void Init() {
         RADRAY_ABORT("no window");
         return;
     }
-    VulkanBackendInitDescriptor backendDesc{};
-    backendDesc.IsEnableDebugLayer = true;
-    vulkan::GlobalInitVulkan(backendDesc);
+    InstanceVulkanDescriptor vkInsDesc{};
+    vkInsDesc.AppName = RADRAY_APPNAME;
+    vkInsDesc.AppVersion = 1;
+    vkInsDesc.EngineName = "RadRay";
+    vkInsDesc.EngineVersion = 1;
+    vkInsDesc.IsEnableDebugLayer = true;
+    vkInstance = CreateInstanceVulkan(vkInsDesc).Unwrap();
     VulkanDeviceDescriptor deviceDesc{};
     VulkanCommandQueueDescriptor queueDesc[] = {
         {QueueType::Direct, 1}};
@@ -180,7 +185,7 @@ void End() {
     swapchain = nullptr;
     cmdQueue = nullptr;
     device = nullptr;
-    vulkan::GlobalTerminateVulkan();
+    DestroyInstanceVulkan(std::move(vkInstance));
     resizedConn.disconnect();
     resizingConn.disconnect();
     window = nullptr;
@@ -214,43 +219,44 @@ void Update() {
         }
     }
 
-    bool mresize = false;
-    std::optional<Eigen::Vector2i> mr;
     {
+        bool mresize = false;
+        std::optional<Eigen::Vector2i> mr;
         std::lock_guard<std::mutex> lock{mtx};
         if (isResizing || resizeVal.has_value()) {
             mresize = true;
         }
         mr = resizeVal;
         resizeVal = std::nullopt;
-    }
-    if (mresize) {
-        if (mr.has_value()) {
-            winSize = mr.value();
-            if (winSize.x() == 0 || winSize.y() == 0) {
-                isMinimized = true;
-                return;
-            }
-            isMinimized = false;
-            cmdQueue->Wait();
-            rtViews.clear();
-            swapchain->Destroy();
-            swapchain = std::static_pointer_cast<vulkan::SwapChainVulkan>(
-                device->CreateSwapChain(
-                          {cmdQueue,
-                           window->GetNativeHandler().Handle,
-                           (uint32_t)winSize.x(),
-                           (uint32_t)winSize.y(),
-                           RT_COUNT,
-                           TextureFormat::RGBA8_UNORM,
-                           false})
-                    .Unwrap());
-        }
-        return;
-    }
 
-    if (isMinimized) {
-        return;
+        if (mresize) {
+            if (mr.has_value()) {
+                winSize = mr.value();
+                if (winSize.x() == 0 || winSize.y() == 0) {
+                    isMinimized = true;
+                    return;
+                }
+                isMinimized = false;
+                cmdQueue->Wait();
+                rtViews.clear();
+                swapchain->Destroy();
+                swapchain = std::static_pointer_cast<vulkan::SwapChainVulkan>(
+                    device->CreateSwapChain(
+                              {cmdQueue,
+                               window->GetNativeHandler().Handle,
+                               (uint32_t)winSize.x(),
+                               (uint32_t)winSize.y(),
+                               RT_COUNT,
+                               TextureFormat::RGBA8_UNORM,
+                               false})
+                        .Unwrap());
+            }
+            return;
+        }
+
+        if (isMinimized) {
+            return;
+        }
     }
 
     auto& frameData = frames[currentFrameIndex];

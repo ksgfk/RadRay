@@ -17,7 +17,7 @@ static auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast
 static auto CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
 static auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
 
-static Nullable<unique_ptr<InstanceVulkan>> g_instance = nullptr;
+static Nullable<InstanceVulkanImpl> g_vkInstance = nullptr;
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -39,7 +39,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     return VK_FALSE;
 }
 
-InstanceVulkan::InstanceVulkan(
+InstanceVulkanImpl::InstanceVulkanImpl(
     VkInstance instance,
     std::optional<VkAllocationCallbacks> allocCb,
     vector<string> exts,
@@ -49,19 +49,19 @@ InstanceVulkan::InstanceVulkan(
       _exts(std::move(exts)),
       _layers(std::move(layers)) {}
 
-InstanceVulkan::~InstanceVulkan() noexcept {
+InstanceVulkanImpl::~InstanceVulkanImpl() noexcept {
     this->DestroyImpl();
 }
 
-bool InstanceVulkan::IsValid() const noexcept { return _instance != nullptr; }
+bool InstanceVulkanImpl::IsValid() const noexcept { return _instance != nullptr; }
 
-void InstanceVulkan::Destroy() noexcept { this->DestroyImpl(); }
+void InstanceVulkanImpl::Destroy() noexcept { this->DestroyImpl(); }
 
-const VkAllocationCallbacks* InstanceVulkan::GetAllocationCallbacks() const noexcept {
+const VkAllocationCallbacks* InstanceVulkanImpl::GetAllocationCallbacks() const noexcept {
     return _allocCb.has_value() ? &_allocCb.value() : nullptr;
 }
 
-void InstanceVulkan::DestroyImpl() noexcept {
+void InstanceVulkanImpl::DestroyImpl() noexcept {
     if (_instance != nullptr) {
         const VkAllocationCallbacks* allocCbPtr = this->GetAllocationCallbacks();
         vkDestroyInstance(_instance, allocCbPtr);
@@ -92,7 +92,7 @@ void VMA::DestroyImpl() noexcept {
 }
 
 DeviceVulkan::DeviceVulkan(
-    InstanceVulkan* instance,
+    InstanceVulkanImpl* instance,
     VkPhysicalDevice physicalDevice,
     VkDevice device) noexcept
     : _instance(instance),
@@ -157,7 +157,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     {
-        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&g_instance);
+        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&CreateInstanceVulkanImpl);
         HMODULE hInstance;
         if (GetModuleHandleEx(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1150,30 +1150,30 @@ void DeviceVulkan::DestroyImpl() noexcept {
     _instance = nullptr;
 }
 
-bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
-    if (g_instance.HasValue()) {
-        RADRAY_WARN_LOG("vk already init");
-        return true;
+Nullable<unique_ptr<InstanceVulkanImpl>> CreateInstanceVulkanImpl(const InstanceVulkanDescriptor& desc) {
+    if (g_vkInstance.HasValue()) {
+        RADRAY_ERR_LOG("vk has active VkInstance");
+        return nullptr;
     }
     if (volkInitialize() != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk volk init fail");
-        return false;
+        return nullptr;
     }
     uint32_t version = 0;
     if (vkEnumerateInstanceVersion(&version) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceVersion failed");
-        return false;
+        return nullptr;
     }
     RADRAY_INFO_LOG("vk instance version: {}.{}.{}", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
     vector<VkExtensionProperties> extProps;
     if (EnumerateVectorFromVkFunc(extProps, vkEnumerateInstanceExtensionProperties, nullptr) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceExtensionProperties failed");
-        return false;
+        return nullptr;
     }
     vector<VkLayerProperties> layerProps;
     if (EnumerateVectorFromVkFunc(layerProps, vkEnumerateInstanceLayerProperties) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumerateInstanceLayerProperties failed");
-        return false;
+        return nullptr;
     }
     for (auto& i : extProps) {
         RADRAY_DEBUG_LOG("vk instance extension: {} version: {}", i.extensionName, i.specVersion);
@@ -1215,14 +1215,14 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
         const char* require[] = {i.c_str()};
         if (!IsValidateLayers(require, layerProps)) {
             RADRAY_ERR_LOG("vk layer {} is not supported", i);
-            return false;
+            return nullptr;
         }
     }
     for (const auto& i : needExts) {
         const char* require[] = {i.c_str()};
         if (!IsValidateExtensions(require, extProps)) {
             RADRAY_ERR_LOG("vk extension {} is not supported", i);
-            return false;
+            return nullptr;
         }
     }
 
@@ -1293,10 +1293,10 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
 
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "RadRay";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "null";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pApplicationName = desc.AppName.data();
+    appInfo.applicationVersion = desc.AppVersion;
+    appInfo.pEngineName = desc.EngineName.data();
+    appInfo.engineVersion = desc.EngineVersion;
     appInfo.apiVersion = version;
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -1325,19 +1325,21 @@ bool GlobalInitVulkan(const VulkanBackendInitDescriptor& desc) {
     }
     if (instance == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("vk call vkCreateInstance failed");
-        return false;
+        return nullptr;
     }
     volkLoadInstanceOnly(instance);
-    g_instance = make_unique<InstanceVulkan>(
+    auto result = make_unique<InstanceVulkanImpl>(
         instance,
         allocCbPtr ? std::make_optional(*allocCbPtr) : std::nullopt,
         vector<string>{needExts.begin(), needExts.end()},
         vector<string>{needLayers.begin(), needLayers.end()});
-    return true;
+    g_vkInstance = result.get();
+    return result;
 }
 
-void GlobalTerminateVulkan() {
-    g_instance = nullptr;
+void DestroyInstanceVulkanImpl(unique_ptr<InstanceVulkan> instance) noexcept {
+    g_vkInstance = nullptr;
+    instance.reset();
     volkFinalize();
 }
 
@@ -1349,11 +1351,11 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         size_t index;
     };
 
-    if (!g_instance.HasValue()) {
+    if (!g_vkInstance.HasValue()) {
         RADRAY_ERR_LOG("vk not init");
         return nullptr;
     }
-    VkInstance instance = g_instance->_instance;
+    VkInstance instance = g_vkInstance->_instance;
     vector<VkPhysicalDevice> physicalDevices;
     if (EnumerateVectorFromVkFunc(physicalDevices, vkEnumeratePhysicalDevices, instance) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk call vkEnumeratePhysicalDevices failed");
@@ -1565,12 +1567,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     VkDevice device = VK_NULL_HANDLE;
-    if (vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_instance->GetAllocationCallbacks(), &device) != VK_SUCCESS) {
+    if (vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_vkInstance->GetAllocationCallbacks(), &device) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vk create device fail");
         return nullptr;
     }
     auto deviceR = make_shared<DeviceVulkan>(
-        g_instance.Ptr.get(),
+        g_vkInstance.Ptr,
         selectPhyDevice.device,
         device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
