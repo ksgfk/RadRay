@@ -29,3 +29,21 @@ target_compile_definitions(radrayrender PUBLIC
 target_compile_options(radrayrender PRIVATE
     $<$<BOOL:MSVC>:/W4>)
 radray_set_build_path(radrayrender)
+if (RADRAY_ENABLE_DXC)
+    # 构建后复制 dxc 运行时到统一输出目录
+    if (DEFINED RADRAY_DXC_RUNTIME_DLLS)
+        set(_DXC_RUNTIME_DLLS ${RADRAY_DXC_RUNTIME_DLLS})
+    else()
+        set(_DXC_RUNTIME_DLLS "$<TARGET_FILE:dxc::dxcompiler>")
+    endif()
+    set(_DXC_COPY_CMDS COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:radrayrender>")
+    foreach(_dll IN LISTS _DXC_RUNTIME_DLLS)
+        list(APPEND _DXC_COPY_CMDS
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:radrayrender>")
+    endforeach()
+    add_custom_command(TARGET radrayrender POST_BUILD
+        ${_DXC_COPY_CMDS}
+        COMMENT "Copy DXC runtime libraries to radrayrender output directory")
+    unset(_DXC_COPY_CMDS)
+    unset(_DXC_RUNTIME_DLLS)
+endif()

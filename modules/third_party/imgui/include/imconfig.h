@@ -145,3 +145,5 @@ namespace ImGui
     void MyFunction(const char* name, MyMatrix44* mtx);
 }
 */
+
+#define IMGUI_DEBUG_PRINTF(...) RADRAY_INFO_LOG_CSTYLE(__VA_ARGS__)
