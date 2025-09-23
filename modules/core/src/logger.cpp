@@ -32,15 +32,23 @@ static spdlog::level::level_enum _ToSpdlogLogLevel(LogLevel level) {
     }
 }
 
-void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept {
+void LogLoc(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept {
     g_logger.log(
         spdlog::source_loc{loc.file_name(), (int)loc.line(), loc.function_name()},
         _ToSpdlogLogLevel(lvl),
         msg);
 }
 
+void Log(LogLevel lvl, fmt::string_view msg) noexcept {
+    g_logger.log(_ToSpdlogLogLevel(lvl), msg);
+}
+
 bool ShouldLog(LogLevel lvl) noexcept {
     return g_logger.should_log(_ToSpdlogLogLevel(lvl));
+}
+
+void FlushLog() noexcept {
+    g_logger.flush();
 }
 
 }  // namespace radray

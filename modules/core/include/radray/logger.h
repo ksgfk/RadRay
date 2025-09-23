@@ -42,94 +42,140 @@ string sprintf(const S& fmt, const T&... args) {
     return radray::vsprintf(fmt::detail::to_string_view(fmt), fmt::make_format_args<fmt::basic_printf_context<Char>>(args...));
 }
 
-void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
+void LogLoc(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
+
+void Log(LogLevel lvl, fmt::string_view msg) noexcept;
 
 bool ShouldLog(LogLevel lvl) noexcept;
 
+void FlushLog() noexcept;
+
+template <typename... Args>
+void LogFormat(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    if (!ShouldLog(lvl)) {
+        return;
+    }
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    Log(lvl, str);
+}
+
+template <typename... Args>
+void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    if (!ShouldLog(lvl)) {
+        return;
+    }
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    LogLoc(loc, lvl, str);
+}
+
+template <typename... Args>
+void LogFormatSPrintf(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    if (!ShouldLog(lvl)) {
+        return;
+    }
+    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
+    Log(lvl, str);
+}
+
+template <typename... Args>
+void LogFormatSPrintfLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    if (!ShouldLog(lvl)) {
+        return;
+    }
+    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
+    LogLoc(loc, lvl, str);
+}
+
+template <typename... Args>
+void LogDebug(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    LogFormat(LogLevel::Debug, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogInfo(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    LogFormat(LogLevel::Info, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogWarn(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    LogFormat(LogLevel::Warn, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogError(fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+    LogFormat(LogLevel::Err, fmt, std::forward<Args>(args)...);
+}
+
 template <typename... Args>
 void LogAbort(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Critical, str);
+    LogFormatLoc(loc, LogLevel::Critical, fmt, std::forward<Args>(args)...);
     std::abort();
 }
 
 template <typename... Args>
 void LogDebugLoc(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Debug)) {
-        return;
-    }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Debug, str);
+    LogFormatLoc(loc, LogLevel::Debug, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void LogInfoLoc(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Info)) {
-        return;
-    }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Info, str);
+    LogFormatLoc(loc, LogLevel::Info, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void LogWarnLoc(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Warn)) {
-        return;
-    }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Warn, str);
+    LogFormatLoc(loc, LogLevel::Warn, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void LogErrorLoc(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Err)) {
-        return;
-    }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Err, str);
+    LogFormatLoc(loc, LogLevel::Err, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void LogAbortSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Critical, str);
+    LogFormatSPrintfLoc(loc, LogLevel::Critical, fmt, std::forward<Args>(args)...);
     std::abort();
 }
 
 template <typename... Args>
-void LogDebugSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Debug)) {
-        return;
-    }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Debug, str);
+void LogDebugSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintfLoc(loc, LogLevel::Debug, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
-void LogInfoSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Info)) {
-        return;
-    }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Info, str);
+void LogInfoSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintfLoc(loc, LogLevel::Info, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
-void LogWarnSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Warn)) {
-        return;
-    }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Warn, str);
+void LogWarnSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintfLoc(loc, LogLevel::Warn, fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
-void LogErrorSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
-    if (!ShouldLog(LogLevel::Err)) {
-        return;
-    }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(loc, LogLevel::Err, str);
+void LogErrorSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintfLoc(loc, LogLevel::Err, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogDebugSPrintf(std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintf(LogLevel::Debug, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogInfoSPrintf(std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintf(LogLevel::Info, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogWarnSPrintf(std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintf(LogLevel::Warn, fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void LogErrorSPrintf(std::string_view fmt, Args&&... args) noexcept {
+    LogFormatSPrintf(LogLevel::Err, fmt, std::forward<Args>(args)...);
 }
 
 }  // namespace radray
@@ -140,11 +186,11 @@ void LogErrorSPrintf(std::source_location loc, std::string_view fmt, Args&&... a
 #define RADRAY_ERR_LOG(fmt, ...) ::radray::LogErrorLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
-#define RADRAY_DEBUG_LOG_CSTYLE(fmt, ...) ::radray::LogDebugSPrintf(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_INFO_LOG_CSTYLE(fmt, ...) ::radray::LogInfoSPrintf(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_WARN_LOG_CSTYLE(fmt, ...) ::radray::LogWarnSPrintf(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintf(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ABORT_CSTYLE(fmt, ...) ::radray::LogAbortSPrintf(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_DEBUG_LOG_CSTYLE(fmt, ...) ::radray::LogDebugSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_INFO_LOG_CSTYLE(fmt, ...) ::radray::LogInfoSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_WARN_LOG_CSTYLE(fmt, ...) ::radray::LogWarnSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_ABORT_CSTYLE(fmt, ...) ::radray::LogAbortSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
 #define RADRAY_ASSERT(x)                              \
     do {                                              \

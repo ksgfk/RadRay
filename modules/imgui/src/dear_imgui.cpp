@@ -1,4 +1,4 @@
-#include <radray/render/dear_imgui.h>
+#include <radray/imgui/dear_imgui.h>
 
 #include <cstdlib>
 
@@ -6,7 +6,7 @@
 
 #ifdef RADRAY_ENABLE_IMGUI
 
-namespace radray::render {
+namespace radray {
 
 static void* _ImguiAllocBridge(size_t size, void* user_data) noexcept {
     RADRAY_UNUSED(user_data);

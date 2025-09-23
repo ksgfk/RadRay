@@ -4,12 +4,12 @@
 
 #include <imgui.h>
 
-namespace radray::render {
+namespace radray {
 
 bool GlobalInitDearImGui();
 
 void GlobalTerminateDearImGui();
 
-}  // namespace radray::render
+}  // namespace radray
 
 #endif
