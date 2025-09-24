@@ -3,10 +3,18 @@
 #include <cstddef>
 #include <utility>
 #include <string_view>
+#include <bit>
 
 #include <radray/types.h>
 
 namespace radray {
+
+enum class PlatformId {
+    UNKNOWN,
+    Windows,
+    Linux,
+    MacOS
+};
 
 [[nodiscard]] void* Malloc(size_t size) noexcept;
 
@@ -15,6 +23,8 @@ void Free(void* ptr) noexcept;
 [[nodiscard]] void* AlignedAlloc(size_t alignment, size_t size) noexcept;
 
 void AlignedFree(void* ptr) noexcept;
+
+PlatformId GetPlatform() noexcept;
 
 class DynamicLibrary {
 public:
@@ -31,7 +41,7 @@ public:
     template <class T>
     requires std::is_function_v<T>
     auto GetFunction(std::string_view name) const noexcept {
-        return reinterpret_cast<std::add_pointer_t<T>>(GetSymbol(name));
+        return std::bit_cast<std::add_pointer_t<T>>(GetSymbol(name));
     }
 
     constexpr bool IsValid() const noexcept { return _handle != nullptr; }

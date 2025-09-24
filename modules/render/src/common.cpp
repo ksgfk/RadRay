@@ -47,9 +47,9 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
         desc);
 }
 
-Nullable<unique_ptr<InstanceVulkan>> CreateInstanceVulkan(const InstanceVulkanDescriptor& desc) {
+Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDescriptor& desc) {
 #ifdef RADRAY_ENABLE_VULKAN
-    return vulkan::CreateInstanceVulkanImpl(desc);
+    return vulkan::CreateVulkanInstanceImpl(desc);
 #else
     RADRAY_UNUSED(desc);
     RADRAY_ERR_LOG("Vulkan is not enable");
@@ -57,9 +57,9 @@ Nullable<unique_ptr<InstanceVulkan>> CreateInstanceVulkan(const InstanceVulkanDe
 #endif
 }
 
-void DestroyInstanceVulkan(unique_ptr<InstanceVulkan> instance) noexcept {
+void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept {
 #ifdef RADRAY_ENABLE_VULKAN
-    return vulkan::DestroyInstanceVulkanImpl(std::move(instance));
+    return vulkan::DestroyVulkanInstanceImpl(std::move(instance));
 #else
     RADRAY_UNUSED(instance);
     RADRAY_ERR_LOG("Vulkan is not enable");
@@ -197,11 +197,11 @@ BlendState DefaultBlendState() noexcept {
          BlendOperation::Add}};
 }
 
-std::string_view format_as(Backend v) noexcept {
+std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
-        case Backend::D3D12: return "D3D12";
-        case Backend::Vulkan: return "Vulkan";
-        case Backend::Metal: return "Metal";
+        case RenderBackend::D3D12: return "D3D12";
+        case RenderBackend::Vulkan: return "Vulkan";
+        case RenderBackend::Metal: return "Metal";
         default: return "UNKNOWN";
     }
 }

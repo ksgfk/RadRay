@@ -47,6 +47,8 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 namespace radray {
 
+PlatformId GetPlatform() noexcept { return PlatformId::Windows; }
+
 static auto _Win32LastErrMessage() {
     void* buffer = nullptr;
     auto errCode = GetLastError();
@@ -97,18 +99,18 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 
 DynamicLibrary::~DynamicLibrary() noexcept {
     if (_handle != nullptr) {
-        FreeLibrary(reinterpret_cast<HMODULE>(_handle));
+        FreeLibrary(std::bit_cast<HMODULE>(_handle));
         _handle = nullptr;
     }
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
-    auto symbol = GetProcAddress(reinterpret_cast<HMODULE>(_handle), name.c_str());
+    auto symbol = GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
     }
-    return reinterpret_cast<void*>(symbol);
+    return std::bit_cast<void*>(symbol);
 }
 
 string FormatLastErrorMessageWin32() noexcept {
@@ -125,6 +127,11 @@ string FormatLastErrorMessageWin32() noexcept {
 #include <string>
 
 namespace radray {
+
+PlatformId GetPlatform() noexcept {
+    // TODO:
+    return PlatformId::UNKNOWN;
+}
 
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
 #ifdef RADRAY_ENABLE_MIMALLOC

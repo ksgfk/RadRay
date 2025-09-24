@@ -228,6 +228,29 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
     return WindowNativeHandler{WindowHandlerTag::HWND, _hwnd};
 }
 
+WindowVec2i Win32Window::GetSize() const noexcept {
+    if (!_hwnd) return WindowVec2i{0, 0};
+    RECT rc{};
+    GetClientRect(_hwnd, &rc);
+    return WindowVec2i{rc.right - rc.left, rc.bottom - rc.top};
+}
+
+void Win32Window::SetSize(int width, int height) noexcept {
+    if (!_hwnd) return;
+    if (width <= 0 || height <= 0) return;
+    if (_isFullscreen) {
+        RADRAY_ERR_LOG("win32 cannot set size when in fullscreen mode");
+        return;
+    }
+    RECT rc{0, 0, width, height};
+    DWORD style = GetWindowLong(_hwnd, GWL_STYLE);
+    DWORD exStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
+    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    SetWindowPos(_hwnd, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+}
+
 sigslot::signal<int, int>& Win32Window::EventResized() noexcept {
     return _eventResized;
 }

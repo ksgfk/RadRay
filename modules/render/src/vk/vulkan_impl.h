@@ -110,7 +110,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Backend GetBackend() noexcept override { return Backend::Vulkan; }
+    RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
 
     Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
@@ -786,8 +786,8 @@ public:
 
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
 
-Nullable<unique_ptr<InstanceVulkanImpl>> CreateInstanceVulkanImpl(const InstanceVulkanDescriptor& desc);
+Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc);
 
-void DestroyInstanceVulkanImpl(unique_ptr<InstanceVulkan> instance) noexcept;
+void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept;
 
 }  // namespace radray::render::vulkan

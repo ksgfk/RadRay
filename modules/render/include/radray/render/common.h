@@ -11,7 +11,7 @@
 
 namespace radray::render {
 
-enum class Backend {
+enum class RenderBackend {
     D3D12,
     Vulkan,
     Metal,
@@ -427,7 +427,7 @@ public:
     virtual void Destroy() noexcept = 0;
 };
 
-class InstanceVulkanDescriptor {
+class VulkanInstanceDescriptor {
 public:
     std::string_view AppName;
     uint32_t AppVersion;
@@ -732,7 +732,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
 
-    virtual Backend GetBackend() noexcept = 0;
+    virtual RenderBackend GetBackend() noexcept = 0;
 
     virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
@@ -951,9 +951,9 @@ public:
 
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
 
-Nullable<unique_ptr<InstanceVulkan>> CreateInstanceVulkan(const InstanceVulkanDescriptor& desc);
+Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDescriptor& desc);
 
-void DestroyInstanceVulkan(unique_ptr<InstanceVulkan> instance) noexcept;
+void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 
@@ -971,7 +971,7 @@ ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept;
 
 BlendState DefaultBlendState() noexcept;
 
-std::string_view format_as(Backend v) noexcept;
+std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;

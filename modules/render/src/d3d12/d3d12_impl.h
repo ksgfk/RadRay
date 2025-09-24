@@ -222,7 +222,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Backend GetBackend() noexcept override { return Backend::D3D12; }
+    RenderBackend GetBackend() noexcept override { return RenderBackend::D3D12; }
 
     Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 

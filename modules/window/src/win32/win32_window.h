@@ -51,6 +51,9 @@ public:
 
     bool ShouldClose() const noexcept override;
     WindowNativeHandler GetNativeHandler() const noexcept override;
+    WindowVec2i GetSize() const noexcept override;
+
+    void SetSize(int width, int height) noexcept override;
 
     sigslot::signal<int, int>& EventResized() noexcept override;
     sigslot::signal<int, int>& EventResizing() noexcept override;

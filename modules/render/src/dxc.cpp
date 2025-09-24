@@ -194,7 +194,7 @@ public:
                 RADRAY_ERR_LOG("dxc error, code={}", hr);
                 return std::nullopt;
             }
-            std::string_view errStr{reinterpret_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
+            std::string_view errStr{std::bit_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
             RADRAY_ERR_LOG("dxc compile error\n{}", errStr);
             return std::nullopt;
         }
@@ -204,14 +204,14 @@ public:
             RADRAY_ERR_LOG("dxc error, code={}", hr);
             return std::nullopt;
         }
-        auto blobStart = reinterpret_cast<byte const*>(blob->GetBufferPointer());
+        auto blobStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
         vector<byte> blobData{blobStart, blobStart + blob->GetBufferSize()};
         vector<byte> reflData{};
         if (!isSpirv && !isStripRefl) {
             ComPtr<IDxcBlob> reflBlob;
             if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
                 SUCCEEDED(hr)) {
-                auto reflStart = reinterpret_cast<byte const*>(reflBlob->GetBufferPointer());
+                auto reflStart = std::bit_cast<byte const*>(reflBlob->GetBufferPointer());
                 reflData = {reflStart, reflStart + reflBlob->GetBufferSize()};
             } else {
                 RADRAY_ERR_LOG("dxc cannot get reflection, code={}", hr);

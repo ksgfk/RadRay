@@ -157,7 +157,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     {
-        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&CreateInstanceVulkanImpl);
+        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&DestroyVulkanInstanceImpl);
         HMODULE hInstance;
         if (GetModuleHandleEx(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1150,7 +1150,7 @@ void DeviceVulkan::DestroyImpl() noexcept {
     _instance = nullptr;
 }
 
-Nullable<unique_ptr<InstanceVulkanImpl>> CreateInstanceVulkanImpl(const InstanceVulkanDescriptor& desc) {
+Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc) {
     if (g_vkInstance.HasValue()) {
         RADRAY_ERR_LOG("vk has active VkInstance");
         return nullptr;
@@ -1337,7 +1337,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateInstanceVulkanImpl(const Instance
     return result;
 }
 
-void DestroyInstanceVulkanImpl(unique_ptr<InstanceVulkan> instance) noexcept {
+void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept {
     g_vkInstance = nullptr;
     instance.reset();
     volkFinalize();

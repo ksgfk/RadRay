@@ -66,13 +66,13 @@ void Init() {
         RADRAY_ABORT("no window");
         return;
     }
-    InstanceVulkanDescriptor vkInsDesc{};
+    VulkanInstanceDescriptor vkInsDesc{};
     vkInsDesc.AppName = RADRAY_APPNAME;
     vkInsDesc.AppVersion = 1;
     vkInsDesc.EngineName = "RadRay";
     vkInsDesc.EngineVersion = 1;
     vkInsDesc.IsEnableDebugLayer = true;
-    vkInstance = CreateInstanceVulkan(vkInsDesc).Unwrap();
+    vkInstance = CreateVulkanInstance(vkInsDesc).Unwrap();
     VulkanDeviceDescriptor deviceDesc{};
     VulkanCommandQueueDescriptor queueDesc[] = {
         {QueueType::Direct, 1}};
@@ -185,7 +185,7 @@ void End() {
     swapchain = nullptr;
     cmdQueue = nullptr;
     device = nullptr;
-    DestroyInstanceVulkan(std::move(vkInstance));
+    DestroyVulkanInstance(std::move(vkInstance));
     resizedConn.disconnect();
     resizingConn.disconnect();
     window = nullptr;
