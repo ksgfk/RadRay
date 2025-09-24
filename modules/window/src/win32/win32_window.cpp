@@ -11,6 +11,14 @@ static const wchar_t* RADRAY_WIN32_WNDCLASS_NAME = L"RADRAY_WIN32_WNDCLASS";
 static unique_ptr<WndClassRAII> g_wndClass;
 
 static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    {
+        auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+        if (window) {
+            for (auto proc : window->_extraWndProcs) {
+                proc(hWnd, uMsg, wParam, lParam);
+            }
+        }
+    }
     switch (uMsg) {
         case WM_CREATE: {
             auto cs = std::bit_cast<CREATESTRUCT*>(lParam);
@@ -180,6 +188,11 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     GetWindowRect(hwnd, &win->_windowedRect);
     win->_windowedStyle = style;
     win->_windowedExStyle = exStyle;
+    win->_extraWndProcs.reserve(desc.ExtraWndProcs.size());
+    for(auto i : desc.ExtraWndProcs) {
+        auto v = std::bit_cast<WNDPROC>(i);
+        win->_extraWndProcs.push_back(v);
+    }
 
     ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
     UpdateWindow(hwnd);

@@ -77,7 +77,8 @@ void Init() {
         -1,
         true,
         false,
-        false};
+        false,
+        {}};
     window = CreateNativeWindow(windowDesc).Unwrap();
     device = std::static_pointer_cast<d3d12::DeviceD3D12>(CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap());
     cmdQueue = static_cast<d3d12::CmdQueueD3D12*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());

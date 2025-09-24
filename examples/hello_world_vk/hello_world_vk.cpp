@@ -59,7 +59,8 @@ void Init() {
         -1,
         true,
         false,
-        false};
+        false,
+        {}};
     window = CreateNativeWindow(windowDesc).Unwrap();
 #endif
     if (!window) {

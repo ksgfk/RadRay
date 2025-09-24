@@ -14,6 +14,16 @@ const char* RADRAY_APP_NAME = "Hello Dear ImGui";
 using namespace radray;
 using namespace radray::render;
 
+class HelloImguiException;
+class HelloImguiFrame;
+class HelloImguiApp;
+
+vector<unique_ptr<HelloImguiApp>> g_apps;
+bool g_anyResize = false;
+bool g_lastAnyResize = false;
+WindowVec2i g_lastSize;
+sigslot::signal<> g_closeSig;
+
 class HelloImguiException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -28,6 +38,11 @@ private:
     string _msg;
 };
 
+class HelloImguiFrame {
+public:
+    shared_ptr<CommandBuffer> _cmdBuffer;
+};
+
 class HelloImguiApp {
 public:
     HelloImguiApp(
@@ -39,40 +54,108 @@ public:
           _device(std::move(device)) {
         _window->EventResizing().connect(&HelloImguiApp::OnResizing, this);
         _window->EventResized().connect(&HelloImguiApp::OnResized, this);
+        _closeCb = g_closeSig.connect(&HelloImguiApp::OnGlobalClose, this);
+
+        _cmdQueue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+        SetSwapChain();
+        _frames.reserve(_swapchain->GetBackBufferCount());
+        for (size_t i = 0; i < _swapchain->GetBackBufferCount(); ++i) {
+            auto& f = _frames.emplace_back();
+            f._cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
+        }
+        _currentFrameIndex = 0;
+
+        _renderThread = std::thread{&HelloImguiApp::Render, this};
     }
 
     ~HelloImguiApp() noexcept {
         Close();
     }
 
-    void Close() {
+    void Close() noexcept {
+        _renderThread.join();
+        _cmdQueue->Wait();
+        _frames.clear();
+        _swapchain.reset();
+        _cmdQueue = nullptr;
         _device.reset();
         if (_vkIns) DestroyVulkanInstance(std::move(_vkIns));
         if (_resizedCb.valid()) _resizedCb.disconnect();
         if (_resizingCb.valid()) _resizingCb.disconnect();
         if (_mainLoopResizeCb.valid()) _mainLoopResizeCb.disconnect();
+        if (_closeCb.valid()) _closeCb.disconnect();
         _window.reset();
+    }
+
+    void Render() {
+        while (true) {
+            ThreadSafeParams params;
+            {
+                std::lock_guard lock(_mutex);
+                params = _safeParams;
+            }
+
+            if (params.isCloseRequested) {
+                break;
+            }
+
+            Nullable<Texture> acqTex = _swapchain->AcquireNext();
+            if (!acqTex) {
+                continue;
+            }
+            _swapchain->Present();
+            _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+        }
     }
 
     void OnResizing(int, int) {
         std::lock_guard lock(_mutex);
-        _isResizing = true;
+        _safeParams.isResizing = true;
     }
 
     void OnResized(int, int) {
         std::lock_guard lock(_mutex);
-        _isResizing = false;
+        _safeParams.isResizing = false;
+    }
+
+    void OnGlobalClose() {
+        std::lock_guard lock(_mutex);
+        _safeParams.isCloseRequested = true;
+    }
+
+    void SetSwapChain() {
+        _swapchain.reset();
+        auto [winW, winH] = _window->GetSize();
+        SwapChainDescriptor swapchainDesc{};
+        swapchainDesc.PresentQueue = _cmdQueue;
+        swapchainDesc.NativeHandler = _window->GetNativeHandler().Handle;
+        swapchainDesc.Width = (uint32_t)winW;
+        swapchainDesc.Height = (uint32_t)winH;
+        swapchainDesc.BackBufferCount = 3;
+        swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
+        swapchainDesc.EnableSync = false;
+        _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     }
 
     unique_ptr<NativeWindow> _window;
     unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
-    sigslot::scoped_connection _resizedCb;
-    sigslot::scoped_connection _resizingCb;
+    CommandQueue* _cmdQueue;
+    shared_ptr<SwapChain> _swapchain;
+    vector<HelloImguiFrame> _frames;
+    uint32_t _currentFrameIndex;
+
+    std::thread _renderThread;
+    sigslot::connection _resizedCb;
+    sigslot::connection _resizingCb;
     sigslot::connection _mainLoopResizeCb;
+    sigslot::connection _closeCb;
 
     mutable std::mutex _mutex{};
-    bool _isResizing = false;
+    struct ThreadSafeParams {
+        bool isResizing = false;
+        bool isCloseRequested = false;
+    } _safeParams;
 };
 
 unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
@@ -122,11 +205,6 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     return result;
 }
 
-vector<unique_ptr<HelloImguiApp>> g_apps;
-bool g_anyResize = false;
-bool g_lastAnyResize = false;
-WindowVec2i g_lastSize;
-
 int main() {
     GlobalInitDearImGui();
 
@@ -161,6 +239,8 @@ int main() {
         }
         std::this_thread::yield();
     }
+
+    g_closeSig();
 
     g_apps.clear();
 

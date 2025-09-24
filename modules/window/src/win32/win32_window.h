@@ -69,6 +69,7 @@ public:
     RECT _windowedRect{0, 0, 0, 0};
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
+    vector<WNDPROC> _extraWndProcs;
     bool _isFullscreen{false};
     bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};

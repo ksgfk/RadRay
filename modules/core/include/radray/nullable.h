@@ -61,6 +61,62 @@ struct Nullable {
     constexpr operator bool() const noexcept { return HasValue(); }
 };
 
+template <typename T>
+struct Nullable<T*> {
+    T* Ptr{nullptr};
+
+    constexpr Nullable() noexcept = default;
+    constexpr Nullable(std::nullptr_t) noexcept : Ptr(nullptr) {}
+    constexpr Nullable(T* ptr) noexcept : Ptr(ptr) {}
+    template <typename U>
+    requires std::convertible_to<U*, T*>
+    constexpr Nullable(U* ptr) noexcept : Ptr(ptr) {}
+    constexpr Nullable(const Nullable& other) noexcept = default;
+    constexpr Nullable(Nullable&& other) noexcept = default;
+    constexpr Nullable& operator=(const Nullable& other) noexcept = default;
+    constexpr Nullable& operator=(Nullable&& other) noexcept = default;
+    template <typename U>
+    requires std::convertible_to<U*, T*>
+    constexpr Nullable(const Nullable<U>& other) noexcept : Ptr(other.Ptr) {}
+    template <typename U>
+    requires std::convertible_to<U*, T*>
+    constexpr Nullable(Nullable<U>&& other) noexcept : Ptr(other.Ptr) {}
+    template <typename U>
+    requires std::convertible_to<U*, T*>
+    constexpr Nullable& operator=(const Nullable<U>& other) noexcept {
+        Ptr = other.Ptr;
+        return *this;
+    }
+    template <typename U>
+    requires std::convertible_to<U*, T*>
+    constexpr Nullable& operator=(Nullable<U>&& other) noexcept {
+        Ptr = other.Ptr;
+        return *this;
+    }
+
+    constexpr bool HasValue() const noexcept { return Ptr != nullptr; }
+    constexpr T* Value() const noexcept { return Ptr; }
+    constexpr T* Unwrap() const noexcept {
+        RADRAY_ASSERT(HasValue());
+        return Ptr;
+    }
+    constexpr T* GetValueOrDefault(T* defaultPtr) const noexcept { return HasValue() ? Ptr : defaultPtr; }
+    constexpr T* Release() noexcept {
+        T* tmp = Ptr;
+        Ptr = nullptr;
+        return tmp;
+    }
+    constexpr T* operator->() const noexcept {
+        RADRAY_ASSERT(HasValue());
+        return Ptr;
+    }
+    constexpr T& operator*() const noexcept {
+        RADRAY_ASSERT(HasValue());
+        return *Ptr;
+    }
+    constexpr operator bool() const noexcept { return HasValue(); }
+};
+
 template <>
 struct Nullable<void> {
     void* Ptr{nullptr};

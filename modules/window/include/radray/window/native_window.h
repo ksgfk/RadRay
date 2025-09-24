@@ -14,6 +14,8 @@ enum class WindowHandlerTag {
     HWND
 };
 
+using Win32WNDPROC = int64_t (*)(void* hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
+
 struct WindowNativeHandler {
     WindowHandlerTag Type;
     void* Handle;
@@ -28,6 +30,7 @@ struct Win32WindowCreateDescriptor {
     bool Resizable;
     bool StartMaximized;
     bool Fullscreen;
+    std::span<Win32WNDPROC> ExtraWndProcs;
 };
 
 using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor>;
