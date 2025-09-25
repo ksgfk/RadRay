@@ -206,8 +206,6 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 }
 
 int main() {
-    GlobalInitDearImGui();
-
     g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
     g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
     for (auto& app : g_apps) {
@@ -244,7 +242,6 @@ int main() {
 
     g_apps.clear();
 
-    GlobalTerminateDearImGui();
     FlushLog();
     return 0;
 }

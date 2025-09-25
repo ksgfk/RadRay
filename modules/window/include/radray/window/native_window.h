@@ -6,6 +6,7 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/utility.h>
+#include <radray/platform.h>
 
 namespace radray {
 
@@ -14,7 +15,7 @@ enum class WindowHandlerTag {
     HWND
 };
 
-using Win32WNDPROC = int64_t (*)(void* hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
+using Win32WNDPROC = int64_t (*)(HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
 
 struct WindowNativeHandler {
     WindowHandlerTag Type;

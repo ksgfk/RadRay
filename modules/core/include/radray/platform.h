@@ -7,6 +7,11 @@
 
 #include <radray/types.h>
 
+#ifndef _WINDEF_
+struct HWND__;
+using HWND = struct HWND__*;
+#endif
+
 namespace radray {
 
 enum class PlatformId {

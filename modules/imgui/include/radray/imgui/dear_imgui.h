@@ -11,9 +11,11 @@
 
 namespace radray {
 
-bool GlobalInitDearImGui();
+bool InitImGui();
 
-void GlobalTerminateDearImGui();
+bool InitPlatformImGui();
+
+void TerminateImGui();
 
 }  // namespace radray
 

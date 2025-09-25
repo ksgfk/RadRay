@@ -188,11 +188,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     GetWindowRect(hwnd, &win->_windowedRect);
     win->_windowedStyle = style;
     win->_windowedExStyle = exStyle;
-    win->_extraWndProcs.reserve(desc.ExtraWndProcs.size());
-    for(auto i : desc.ExtraWndProcs) {
-        auto v = std::bit_cast<WNDPROC>(i);
-        win->_extraWndProcs.push_back(v);
-    }
+    win->_extraWndProcs = {desc.ExtraWndProcs.begin(), desc.ExtraWndProcs.end()};
 
     ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
     UpdateWindow(hwnd);
