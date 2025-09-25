@@ -51,8 +51,8 @@ PlatformId GetPlatform() noexcept { return PlatformId::Windows; }
 
 static auto _Win32LastErrMessage() {
     void* buffer = nullptr;
-    auto errCode = GetLastError();
-    FormatMessage(
+    auto errCode = ::GetLastError();
+    ::FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         nullptr,
         errCode,
@@ -60,7 +60,7 @@ static auto _Win32LastErrMessage() {
         (LPTSTR)&buffer,
         0, nullptr);
     auto msg = format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
-    LocalFree(buffer);
+    ::LocalFree(buffer);
     return msg;
 }
 
@@ -90,7 +90,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     } else {
         name = string{name_} + ".dll";
     }
-    HMODULE m = LoadLibraryA(name.c_str());
+    HMODULE m = ::LoadLibraryA(name.c_str());
     if (m == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot load dynamic library {}, reason: {}", name, _Win32LastErrMessage());
     }
@@ -99,14 +99,14 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 
 DynamicLibrary::~DynamicLibrary() noexcept {
     if (_handle != nullptr) {
-        FreeLibrary(std::bit_cast<HMODULE>(_handle));
+        ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
         _handle = nullptr;
     }
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
-    auto symbol = GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
+    auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
         RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
     }

@@ -224,7 +224,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+        if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             if (desc.IsEnableGpuBasedValid) {
@@ -240,7 +240,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     ComPtr<IDXGIFactory4> dxgiFactory;
-    if (HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
+    if (HRESULT hr = ::CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 create IDXGIFactory4 fail, reason={} (code:{})", GetErrorName(hr), hr);
         return nullptr;
@@ -275,7 +275,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 DXGI_ADAPTER_DESC1 adapDesc;
                 temp->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
-                    if (SUCCEEDED(D3D12CreateDevice(temp.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
+                    if (SUCCEEDED(::D3D12CreateDevice(temp.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
                         break;
                     }
                 }
@@ -287,7 +287,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 DXGI_ADAPTER_DESC1 adapDesc;
                 adapter->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ||
-                    FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
+                    FAILED(::D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr))) {
                     adapter = nullptr;
                 }
             }
@@ -298,7 +298,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         return nullptr;
     }
     ComPtr<ID3D12Device> device;
-    if (HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
+    if (HRESULT hr = ::D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
         FAILED(hr)) {
         RADRAY_ERR_LOG("d3d12 create ID3D12Device fail, reason={} (code:{})", GetErrorName(hr), hr);
         return nullptr;
@@ -519,7 +519,7 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         }
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
         frame.event = MakeWin32Event().value();
-        SetEvent(frame.event.Get());
+        ::SetEvent(frame.event.Get());
     }
     return result;
 }
@@ -1162,7 +1162,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     rsDesc.Flags = flag;
     ComPtr<ID3DBlob> rootSigBlob, errorBlob;
-    if (HRESULT hr = D3DX12SerializeVersionedRootSignature(
+    if (HRESULT hr = ::D3DX12SerializeVersionedRootSignature(
             &versionDesc,
             D3D_ROOT_SIGNATURE_VERSION_1_1,
             rootSigBlob.GetAddressOf(),
@@ -1461,7 +1461,7 @@ void CmdQueueD3D12::Wait() noexcept {
     _fence->_fenceValue++;
     _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue);
     _fence->_fence->SetEventOnCompletion(_fence->_fenceValue, _fence->_event.Get());
-    WaitForSingleObject(_fence->_event.Get(), INFINITE);
+    ::WaitForSingleObject(_fence->_event.Get(), INFINITE);
 }
 
 FenceD3D12::FenceD3D12(
@@ -1827,8 +1827,8 @@ void SwapChainD3D12::Destroy() noexcept {
 Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
     auto curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
-    WaitForSingleObject(frame.event.Get(), INFINITE);
-    ResetEvent(frame.event.Get());
+    ::WaitForSingleObject(frame.event.Get(), INFINITE);
+    ::ResetEvent(frame.event.Get());
     return frame.image.get();
 }
 

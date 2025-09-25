@@ -37,7 +37,7 @@ std::optional<string> ReadText(const std::filesystem::path& filepath) noexcept {
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 static void LogWinCharCvtErr() {
-    DWORD err = GetLastError();
+    DWORD err = ::GetLastError();
     std::string_view strErr = ([err]() {
         switch (err) {
             case ERROR_INSUFFICIENT_BUFFER: return "insufficient buffer";
@@ -56,13 +56,13 @@ std::optional<wstring> ToWideChar(std::string_view str) noexcept {
     if (str.size() >= std::numeric_limits<int>::max()) {
         return std::nullopt;
     }
-    int test = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+    int test = ::MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
     if (test == 0) {
         LogWinCharCvtErr();
         return std::nullopt;
     }
     wstring to(test, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size());
+    ::MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size());
     return to;
 #else
     const char* start = str.data();
@@ -84,13 +84,13 @@ std::optional<string> ToMultiByte(std::wstring_view str) noexcept {
     if (str.size() >= std::numeric_limits<int>::max()) {
         return std::nullopt;
     }
-    int test = WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0, nullptr, nullptr);
+    int test = ::WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0, nullptr, nullptr);
     if (test == 0) {
         LogWinCharCvtErr();
         return std::nullopt;
     }
     string to(test, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size(), nullptr, nullptr);
+    ::WideCharToMultiByte(CP_UTF8, 0, str.data(), (int)str.size(), to.data(), (int)to.size(), nullptr, nullptr);
     return to;
 #else
     size_t len = std::wcstombs(nullptr, str.data(), str.size());

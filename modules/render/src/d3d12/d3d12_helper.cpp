@@ -21,15 +21,15 @@ Win32Event::~Win32Event() noexcept {
 
 void Win32Event::Destroy() noexcept {
     if (_event) {
-        CloseHandle(_event);
+        ::CloseHandle(_event);
         _event = nullptr;
     }
 }
 
 std::optional<Win32Event> MakeWin32Event() noexcept {
-    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
-        DWORD err = GetLastError();
+        DWORD err = ::GetLastError();
         RADRAY_ERR_LOG("cannot create WIN32 event, code:{}", err);
         return std::nullopt;
     }

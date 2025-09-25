@@ -12,7 +12,7 @@ static unique_ptr<WndClassRAII> g_wndClass;
 
 static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     {
-        auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+        auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
         if (window) {
             for (auto proc : window->_extraWndProcs) {
                 proc(hWnd, uMsg, wParam, lParam);
@@ -23,15 +23,15 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
         case WM_CREATE: {
             auto cs = std::bit_cast<CREATESTRUCT*>(lParam);
             auto window = std::bit_cast<Win32Window*>(cs->lpCreateParams);
-            SetProp(hWnd, RADRAY_WIN32_WINDOW_PROP, window);
+            ::SetProp(hWnd, RADRAY_WIN32_WINDOW_PROP, window);
             return 0;
         }
         case WM_ENTERSIZEMOVE: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_inSizeMove = true;
                 RECT rc{};
-                GetClientRect(hWnd, &rc);
+                ::GetClientRect(hWnd, &rc);
                 window->_windowedRect = rc;
                 int width = rc.right - rc.left;
                 int height = rc.bottom - rc.top;
@@ -40,10 +40,10 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             return 0;
         }
         case WM_SIZING: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 RECT rc{};
-                GetClientRect(hWnd, &rc);
+                ::GetClientRect(hWnd, &rc);
                 window->_windowedRect = rc;
                 int width = rc.right - rc.left;
                 int height = rc.bottom - rc.top;
@@ -52,7 +52,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             return 0;
         }
         case WM_SIZE: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 int width = LOWORD(lParam);
                 int height = HIWORD(lParam);
@@ -63,11 +63,11 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             return 0;
         }
         case WM_EXITSIZEMOVE: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_inSizeMove = false;
                 RECT rc{};
-                GetClientRect(hWnd, &rc);
+                ::GetClientRect(hWnd, &rc);
                 window->_windowedRect = rc;
                 int width = rc.right - rc.left;
                 int height = rc.bottom - rc.top;
@@ -76,18 +76,18 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             return 0;
         }
         case WM_DESTROY: {
-            RemoveProp(hWnd, RADRAY_WIN32_WINDOW_PROP);
+            ::RemoveProp(hWnd, RADRAY_WIN32_WINDOW_PROP);
             return 0;
         }
         case WM_CLOSE: {
-            auto window = std::bit_cast<Win32Window*>(GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_closeRequested = true;
             }
             return 0;
         }
         default: {
-            return DefWindowProc(hWnd, uMsg, wParam, lParam);
+            return ::DefWindowProc(hWnd, uMsg, wParam, lParam);
         }
     }
 }
@@ -97,7 +97,7 @@ WndClassRAII::WndClassRAII(ATOM clazz, HINSTANCE hInstance, std::wstring_view cl
 
 WndClassRAII::~WndClassRAII() noexcept {
     if (_clazz) {
-        UnregisterClass(_name.c_str(), _hInstance);
+        ::UnregisterClass(_name.c_str(), _hInstance);
         _clazz = 0;
     }
 }
@@ -112,12 +112,12 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     HMODULE hInstance;
     {
         LPCWSTR moduleAddr = std::bit_cast<LPCWSTR>(&_RadrayWin32WindowProc);
-        if (GetModuleHandleEx(
+        if (::GetModuleHandleEx(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 moduleAddr,
                 &hInstance) == 0) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("win32 GetModuleHandleEx failed, reason: {} (code={})", fmtErr, GetLastError());
+            RADRAY_ERR_LOG("win32 GetModuleHandleEx failed, reason: {} (code={})", fmtErr, ::GetLastError());
             return nullptr;
         }
     }
@@ -130,14 +130,14 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         wce.cbWndExtra = 0;
         wce.hInstance = hInstance;
         wce.hIcon = nullptr;
-        wce.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wce.hCursor = ::LoadCursor(nullptr, IDC_ARROW);
         wce.hbrBackground = nullptr;
         wce.lpszMenuName = nullptr;
         wce.lpszClassName = RADRAY_WIN32_WNDCLASS_NAME;
-        ATOM clazz = RegisterClassEx(&wce);
+        ATOM clazz = ::RegisterClassEx(&wce);
         if (!clazz) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("win32 RegisterClassEx failed, reason: {} (code={})", fmtErr, GetLastError());
+            RADRAY_ERR_LOG("win32 RegisterClassEx failed, reason: {} (code={})", fmtErr, ::GetLastError());
             return nullptr;
         }
         g_wndClass = std::make_unique<WndClassRAII>(clazz, wce.hInstance, RADRAY_WIN32_WNDCLASS_NAME);
@@ -162,13 +162,13 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
 
     if (style & WS_OVERLAPPEDWINDOW) {
         RECT rc{0, 0, w, h};
-        AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+        ::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
         w = rc.right - rc.left;
         h = rc.bottom - rc.top;
     }
 
     wstring title = ToWideChar(desc.Title).value();
-    HWND hwnd = CreateWindowEx(
+    HWND hwnd = ::CreateWindowEx(
         exStyle,
         g_wndClass->GetName().data(),
         title.c_str(),
@@ -181,17 +181,17 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         win.get());
     if (!hwnd) {
         auto fmtErr = FormatLastErrorMessageWin32();
-        RADRAY_ERR_LOG("win32 CreateWindowEx failed: {} (code={})", fmtErr, GetLastError());
+        RADRAY_ERR_LOG("win32 CreateWindowEx failed: {} (code={})", fmtErr, ::GetLastError());
         return nullptr;
     }
     win->_hwnd = hwnd;
-    GetWindowRect(hwnd, &win->_windowedRect);
+    ::GetWindowRect(hwnd, &win->_windowedRect);
     win->_windowedStyle = style;
     win->_windowedExStyle = exStyle;
     win->_extraWndProcs = {desc.ExtraWndProcs.begin(), desc.ExtraWndProcs.end()};
 
-    ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
-    UpdateWindow(hwnd);
+    ::ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
+    ::UpdateWindow(hwnd);
 
     if (desc.Fullscreen) {
         win->EnterFullscreen();
@@ -216,16 +216,16 @@ void Win32Window::Destroy() noexcept {
 
 void Win32Window::DestroyImpl() noexcept {
     if (_hwnd) {
-        DestroyWindow(_hwnd);
+        ::DestroyWindow(_hwnd);
         _hwnd = nullptr;
     }
 }
 
 void Win32Window::DispatchEvents() noexcept {
     MSG msg;
-    while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+    while (::PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        ::TranslateMessage(&msg);
+        ::DispatchMessage(&msg);
     }
 }
 
@@ -240,7 +240,7 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
 WindowVec2i Win32Window::GetSize() const noexcept {
     if (!_hwnd) return WindowVec2i{0, 0};
     RECT rc{};
-    GetClientRect(_hwnd, &rc);
+    ::GetClientRect(_hwnd, &rc);
     return WindowVec2i{rc.right - rc.left, rc.bottom - rc.top};
 }
 
@@ -252,12 +252,12 @@ void Win32Window::SetSize(int width, int height) noexcept {
         return;
     }
     RECT rc{0, 0, width, height};
-    DWORD style = GetWindowLong(_hwnd, GWL_STYLE);
-    DWORD exStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
-    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    DWORD style = ::GetWindowLong(_hwnd, GWL_STYLE);
+    DWORD exStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
+    ::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    SetWindowPos(_hwnd, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    ::SetWindowPos(_hwnd, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
 }
 
 sigslot::signal<int, int>& Win32Window::EventResized() noexcept {
@@ -270,16 +270,16 @@ sigslot::signal<int, int>& Win32Window::EventResizing() noexcept {
 
 bool Win32Window::EnterFullscreen() {
     if (!_hwnd || _isFullscreen) return false;
-    _monitor = MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST);
+    _monitor = ::MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{};
     mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfo(_monitor, &mi)) return false;
+    if (!::GetMonitorInfo(_monitor, &mi)) return false;
 
-    GetWindowRect(_hwnd, &_windowedRect);
-    _windowedStyle = GetWindowLong(_hwnd, GWL_STYLE);
-    _windowedExStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
-    SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle & ~(WS_OVERLAPPEDWINDOW));
-    SetWindowPos(
+    ::GetWindowRect(_hwnd, &_windowedRect);
+    _windowedStyle = ::GetWindowLong(_hwnd, GWL_STYLE);
+    _windowedExStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
+    ::SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle & ~(WS_OVERLAPPEDWINDOW));
+    ::SetWindowPos(
         _hwnd, HWND_TOP,
         mi.rcMonitor.left, mi.rcMonitor.top,
         mi.rcMonitor.right - mi.rcMonitor.left,
@@ -291,9 +291,9 @@ bool Win32Window::EnterFullscreen() {
 
 bool Win32Window::ExitFullscreen() {
     if (!_hwnd || !_isFullscreen) return false;
-    SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle);
-    SetWindowLong(_hwnd, GWL_EXSTYLE, _windowedExStyle);
-    SetWindowPos(
+    ::SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle);
+    ::SetWindowLong(_hwnd, GWL_EXSTYLE, _windowedExStyle);
+    ::SetWindowPos(
         _hwnd, nullptr,
         _windowedRect.left, _windowedRect.top,
         _windowedRect.right - _windowedRect.left,
