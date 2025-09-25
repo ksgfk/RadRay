@@ -11,11 +11,19 @@
 
 namespace radray {
 
+class ImGuiPlatformInitDescriptor {
+public:
+    PlatformId Platform;
+
+    void* Hwnd;
+};
+
 bool InitImGui();
-
-bool InitPlatformImGui();
-
+bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc);
+void TerminatePlatformImGui();
 void TerminateImGui();
+
+Nullable<Win32WNDPROC> GetWin32WNDPROCImGui() noexcept;
 
 }  // namespace radray
 

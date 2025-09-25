@@ -10,7 +10,21 @@ static spdlog::logger g_logger = []() {
     auto sink = make_shared<spdlog::sinks::stdout_color_sink_mt>();
     spdlog::logger l{"console", sink};
     l.flush_on(spdlog::level::err);
-    l.set_pattern("%^[%Y-%m-%d %T.%e][%n][%l][%@]%$ %v");
+    // l.set_pattern("%^[%Y-%m-%d %T.%e][%n][%l][%@]%$ %v");
+    l.set_pattern("%^[%Y-%m-%d %T.%e][%l]%$ %v");
+#if defined(RADRAY_IS_DEBUG)
+    spdlog::level::level_enum level = spdlog::level::debug;
+#else
+    spdlog::level::level_enum level = spdlog::level::info;
+#endif
+    l.set_level(level);
+    return l;
+}();
+static spdlog::logger g_loggerLoc = []() {
+    auto sink = make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    spdlog::logger l{"console", sink};
+    l.flush_on(spdlog::level::err);
+    l.set_pattern("%^[%Y-%m-%d %T.%e][%l][%@]%$ %v");
 #if defined(RADRAY_IS_DEBUG)
     spdlog::level::level_enum level = spdlog::level::debug;
 #else
@@ -33,7 +47,7 @@ static spdlog::level::level_enum _ToSpdlogLogLevel(LogLevel level) {
 }
 
 void LogLoc(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept {
-    g_logger.log(
+    g_loggerLoc.log(
         spdlog::source_loc{loc.file_name(), (int)loc.line(), loc.function_name()},
         _ToSpdlogLogLevel(lvl),
         msg);
@@ -47,8 +61,13 @@ bool ShouldLog(LogLevel lvl) noexcept {
     return g_logger.should_log(_ToSpdlogLogLevel(lvl));
 }
 
+bool ShouldLogLoc(LogLevel lvl) noexcept {
+    return g_loggerLoc.should_log(_ToSpdlogLogLevel(lvl));
+}
+
 void FlushLog() noexcept {
     g_logger.flush();
+    g_loggerLoc.flush();
 }
 
 }  // namespace radray

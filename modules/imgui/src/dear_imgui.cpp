@@ -19,7 +19,6 @@
 #endif
 #include <windows.h>
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);
 #endif
 
 namespace radray {
@@ -52,12 +51,35 @@ bool InitImGui() {
     return true;
 }
 
-bool InitPlatformImGui() {
+bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc) {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    if (desc.Platform == PlatformId::Windows) {
+        ImGuiStyle& style = ImGui::GetStyle();
+        float mainScale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+        style.ScaleAllSizes(mainScale);
+        style.FontScaleDpi = mainScale;
+        ImGui_ImplWin32_Init(desc.Hwnd);
+    }
+#endif
     return true;
+}
+
+void TerminatePlatformImGui() {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    ImGui_ImplWin32_Shutdown();
+#endif
 }
 
 void TerminateImGui() {
     ImGui::DestroyContext();
+}
+
+Nullable<Win32WNDPROC> GetWin32WNDPROCImGui() noexcept {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    return ImGui_ImplWin32_WndProcHandler;
+#else
+    return nullptr;
+#endif
 }
 
 }  // namespace radray

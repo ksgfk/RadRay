@@ -163,6 +163,8 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     PlatformId platform = GetPlatform();
     if (platform == PlatformId::Windows) {
         string name = format("{} - {}", RADRAY_APP_NAME, backend);
+        vector<Win32WNDPROC> extraWndProcs;
+        extraWndProcs.push_back(GetWin32WNDPROCImGui().Unwrap());
         Win32WindowCreateDescriptor desc{};
         desc.Title = name;
         desc.Width = 1280;
@@ -172,6 +174,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         desc.Resizable = true;
         desc.StartMaximized = false;
         desc.Fullscreen = false;
+        desc.ExtraWndProcs = extraWndProcs;
         window = CreateNativeWindow(desc).Unwrap();
     }
     if (!window) {
@@ -208,6 +211,15 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 int main() {
     g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
     g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+
+    InitImGui();
+    if (GetPlatform() == PlatformId::Windows) {
+        ImGuiPlatformInitDescriptor desc{};
+        desc.Platform = PlatformId::Windows;
+        desc.Hwnd = g_apps[0]->_window->GetNativeHandler().Handle;
+        InitPlatformImGui(desc);
+    }
+
     for (auto& app : g_apps) {
         app->_mainLoopResizeCb = app->_window->EventResized().connect([](int width, int height) {
             g_anyResize = true;
@@ -239,6 +251,9 @@ int main() {
     }
 
     g_closeSig();
+
+    TerminatePlatformImGui();
+    TerminateImGui();
 
     g_apps.clear();
 
