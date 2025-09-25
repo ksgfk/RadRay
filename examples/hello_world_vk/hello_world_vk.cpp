@@ -262,7 +262,7 @@ void Update() {
 
     auto& frameData = frames[currentFrameIndex];
     auto acqRes = swapchain->AcquireNext();
-    if (!acqRes) {
+    if (acqRes == nullptr) {
         return;
     }
     auto rt = swapchain->GetCurrentBackBuffer().Unwrap();

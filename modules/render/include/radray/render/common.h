@@ -501,7 +501,7 @@ struct BarrierBufferDescriptor {
     Buffer* Target;
     BufferUses Before;
     BufferUses After;
-    Nullable<CommandQueue> OtherQueue;
+    Nullable<CommandQueue*> OtherQueue;
     bool IsFromOrToOtherQueue;  // true: from, false: to
 };
 
@@ -509,7 +509,7 @@ struct BarrierTextureDescriptor {
     Texture* Target;
     TextureUses Before;
     TextureUses After;
-    Nullable<CommandQueue> OtherQueue;
+    Nullable<CommandQueue*> OtherQueue;
     bool IsFromOrToOtherQueue;
     bool IsSubresourceBarrier;
     uint32_t BaseArrayLayer;
@@ -734,7 +734,7 @@ public:
 
     virtual RenderBackend GetBackend() noexcept = 0;
 
-    virtual Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
+    virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
     virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
@@ -837,11 +837,11 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture> AcquireNext() noexcept = 0;
+    virtual Nullable<Texture*> AcquireNext() noexcept = 0;
 
     virtual void Present() noexcept = 0;
 
-    virtual Nullable<Texture> GetCurrentBackBuffer() const noexcept = 0;
+    virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
 
     virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
 

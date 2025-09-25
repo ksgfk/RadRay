@@ -381,7 +381,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     return result;
 }
 
-Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     uint32_t index = static_cast<size_t>(type);
     RADRAY_ASSERT(index >= 0 && index < 3);
     auto& queues = _queues[index];
@@ -394,7 +394,7 @@ Nullable<CommandQueue> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slo
     unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
         Nullable<shared_ptr<Fence>> fence = CreateFence(0);
-        if (!fence) {
+        if (fence == nullptr) {
             return nullptr;
         }
         ComPtr<ID3D12CommandQueue> queue;
@@ -1824,7 +1824,7 @@ void SwapChainD3D12::Destroy() noexcept {
     _swapchain = nullptr;
 }
 
-Nullable<Texture> SwapChainD3D12::AcquireNext() noexcept {
+Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
     auto curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
     WaitForSingleObject(frame.event.Get(), INFINITE);
@@ -1847,7 +1847,7 @@ void SwapChainD3D12::Present() noexcept {
     queue->_queue->Signal(_fence.Get(), _fenceValue);
 }
 
-Nullable<Texture> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
+Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
     UINT curr = _swapchain->GetCurrentBackBufferIndex();
     return _frames[curr].image.get();
 }

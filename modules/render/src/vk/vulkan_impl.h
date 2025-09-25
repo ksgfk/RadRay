@@ -112,7 +112,7 @@ public:
 
     RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
 
-    Nullable<CommandQueue> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
+    Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
@@ -447,11 +447,11 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture> AcquireNext() noexcept override;
+    Nullable<Texture*> AcquireNext() noexcept override;
 
     void Present() noexcept override;
 
-    Nullable<Texture> GetCurrentBackBuffer() const noexcept override;
+    Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
     uint32_t GetCurrentBackBufferIndex() const noexcept override;
 

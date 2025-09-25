@@ -17,7 +17,7 @@ static auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast
 static auto CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
 static auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
 
-static Nullable<InstanceVulkanImpl> g_vkInstance = nullptr;
+static Nullable<InstanceVulkanImpl*> g_vkInstance = nullptr;
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -111,7 +111,7 @@ void DeviceVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-Nullable<CommandQueue> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     return _queues[static_cast<std::underlying_type_t<QueueType>>(type)][slot].get();
 }
 
@@ -2480,7 +2480,7 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-Nullable<Texture> SwapChainVulkan::AcquireNext() noexcept {
+Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
     Frame& frameData = _frames[_currentFrameIndex];
     _device->_ftb.vkWaitForFences(_device->_device, 1, &frameData.fence->_fence, VK_TRUE, UINT64_MAX);
     _device->_ftb.vkResetFences(_device->_device, 1, &frameData.fence->_fence);
@@ -2570,7 +2570,7 @@ void SwapChainVulkan::Present() noexcept {
     _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
 }
 
-Nullable<Texture> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
+Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
     if (_currentTextureIndex >= _frames.size()) {
         return nullptr;
     }

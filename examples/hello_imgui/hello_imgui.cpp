@@ -99,8 +99,8 @@ public:
                 break;
             }
 
-            Nullable<Texture> acqTex = _swapchain->AcquireNext();
-            if (!acqTex) {
+            Nullable<Texture*> acqTex = _swapchain->AcquireNext();
+            if (acqTex == nullptr) {
                 continue;
             }
             _swapchain->Present();
