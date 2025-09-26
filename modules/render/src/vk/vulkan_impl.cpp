@@ -1111,8 +1111,14 @@ Nullable<unique_ptr<DescriptorPoolVulkan>> DeviceVulkan::CreateDescriptorPool() 
     poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8192});
     poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024});
     poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024});
+    VkDescriptorPoolInlineUniformBlockCreateInfo inlineInfo{};
+    VkDescriptorPoolInlineUniformBlockCreateInfo* pInlineInfo = nullptr;
     if (_extFeatures.feature13.inlineUniformBlock) {
         poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, 1024});
+        pInlineInfo = &inlineInfo;
+        inlineInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO;
+        inlineInfo.pNext = nullptr;
+        inlineInfo.maxInlineUniformBlockBindings = 1024;
     }
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1121,6 +1127,9 @@ Nullable<unique_ptr<DescriptorPoolVulkan>> DeviceVulkan::CreateDescriptorPool() 
     info.maxSets = 1024;
     info.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     info.pPoolSizes = poolSizes.data();
+    if (pInlineInfo != nullptr) {
+        info.pNext = pInlineInfo;
+    }
     VkDescriptorPool pool = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateDescriptorPool(_device, &info, this->GetAllocationCallbacks(), &pool);
         vr != VK_SUCCESS) {
@@ -1138,6 +1147,7 @@ const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexce
 }
 
 void DeviceVulkan::DestroyImpl() noexcept {
+    _poolAlloc.reset();
     _vma.reset();
     for (auto&& i : _queues) {
         i.clear();

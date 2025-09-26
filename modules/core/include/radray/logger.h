@@ -70,8 +70,8 @@ void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Arg
     LogLoc(loc, lvl, str);
 }
 
-template <typename... Args>
-void LogFormatSPrintf(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogFormatSPrintf(LogLevel lvl, const S& fmt, Args&&... args) noexcept {
     if (!ShouldLog(lvl)) {
         return;
     }
@@ -134,49 +134,49 @@ void LogErrorLoc(std::source_location loc, fmt::format_string<Args...> fmt, Args
     LogFormatLoc(loc, LogLevel::Err, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogAbortSPrintf(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogAbortSPrintf(std::source_location loc, const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintfLoc(loc, LogLevel::Critical, fmt, std::forward<Args>(args)...);
     std::abort();
 }
 
-template <typename... Args>
-void LogDebugSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogDebugSPrintfLoc(std::source_location loc, const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintfLoc(loc, LogLevel::Debug, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogInfoSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogInfoSPrintfLoc(std::source_location loc, const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintfLoc(loc, LogLevel::Info, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogWarnSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogWarnSPrintfLoc(std::source_location loc, const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintfLoc(loc, LogLevel::Warn, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogErrorSPrintfLoc(std::source_location loc, std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogErrorSPrintfLoc(std::source_location loc, const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintfLoc(loc, LogLevel::Err, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogDebugSPrintf(std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogDebugSPrintf(const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintf(LogLevel::Debug, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogInfoSPrintf(std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogInfoSPrintf(const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintf(LogLevel::Info, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogWarnSPrintf(std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogWarnSPrintf(const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintf(LogLevel::Warn, fmt, std::forward<Args>(args)...);
 }
 
-template <typename... Args>
-void LogErrorSPrintf(std::string_view fmt, Args&&... args) noexcept {
+template <typename S, typename... Args>
+void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
     LogFormatSPrintf(LogLevel::Err, fmt, std::forward<Args>(args)...);
 }
 

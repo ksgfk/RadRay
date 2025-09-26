@@ -23,6 +23,7 @@ bool g_anyResize = false;
 bool g_lastAnyResize = false;
 WindowVec2i g_lastSize;
 sigslot::signal<> g_closeSig;
+bool g_showDemo = true;
 
 class HelloImguiException : public std::runtime_error {
 public:
@@ -64,6 +65,7 @@ public:
             f._cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
         _currentFrameIndex = 0;
+        _imguiDrawContext = CreateImGuiDrawContext(_device.get()).Unwrap();
 
         _renderThread = std::thread{&HelloImguiApp::Render, this};
     }
@@ -75,6 +77,7 @@ public:
     void Close() noexcept {
         _renderThread.join();
         _cmdQueue->Wait();
+        _imguiDrawContext.reset();
         _frames.clear();
         _swapchain.reset();
         _cmdQueue = nullptr;
@@ -144,6 +147,7 @@ public:
     shared_ptr<SwapChain> _swapchain;
     vector<HelloImguiFrame> _frames;
     uint32_t _currentFrameIndex;
+    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
 
     std::thread _renderThread;
     sigslot::connection _resizedCb;
@@ -216,9 +220,12 @@ int main() {
     if (GetPlatform() == PlatformId::Windows) {
         ImGuiPlatformInitDescriptor desc{};
         desc.Platform = PlatformId::Windows;
-        desc.Hwnd = g_apps[0]->_window->GetNativeHandler().Handle;
+        desc.Window = g_apps[0]->_window.get();
         InitPlatformImGui(desc);
+    } else {
+        throw HelloImguiException("Unsupported platform");
     }
+    InitRendererImGui();
 
     for (auto& app : g_apps) {
         app->_mainLoopResizeCb = app->_window->EventResized().connect([](int width, int height) {
@@ -247,11 +254,20 @@ int main() {
         if (shouldClose) {
             break;
         }
+
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        if (g_showDemo) {
+            ImGui::ShowDemoWindow(&g_showDemo);
+        }
+        ImGui::Render();
+
         std::this_thread::yield();
     }
 
     g_closeSig();
 
+    TerminateRendererImGui();
     TerminatePlatformImGui();
     TerminateImGui();
 

@@ -146,4 +146,4 @@ namespace ImGui
 }
 */
 
-#define IMGUI_DEBUG_PRINTF(...) ::radray::LogInfo(__VA_ARGS__)
+#define IMGUI_DEBUG_PRINTF(...) ::radray::LogInfoSPrintf(__VA_ARGS__)
