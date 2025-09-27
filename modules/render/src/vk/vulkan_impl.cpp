@@ -341,6 +341,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
         f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
     }
+    result->_desc = desc;
     return result;
 }
 
@@ -2593,6 +2594,10 @@ uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
+}
+
+SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
+    return _desc;
 }
 
 BufferVulkan::BufferVulkan(

@@ -631,7 +631,7 @@ struct VertexElement {
     uint32_t Location;
 };
 
-struct VertexInfo {
+struct VertexBufferLayout {
     uint64_t ArrayStride;
     VertexStepMode StepMode;
     std::span<VertexElement> Elements;
@@ -707,7 +707,7 @@ struct GraphicsPipelineStateDescriptor {
     RootSignature* RootSig;
     std::optional<ShaderEntry> VS;
     std::optional<ShaderEntry> PS;
-    std::span<VertexInfo> VertexLayouts;
+    std::span<VertexBufferLayout> VertexLayouts;
     PrimitiveState Primitive;
     std::optional<DepthStencilState> DepthStencil;
     MultiSampleState MultiSample;
@@ -846,6 +846,8 @@ public:
     virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
+
+    virtual SwapChainDescriptor GetDesc() const noexcept = 0;
 };
 
 class Resource : public RenderBase {

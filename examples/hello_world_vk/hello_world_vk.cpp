@@ -153,7 +153,7 @@ void Init() {
 
         VertexElement ve[] = {
             {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
-        VertexInfo vl[] = {
+        VertexBufferLayout vl[] = {
             {12,
              VertexStepMode::Vertex,
              ve}};

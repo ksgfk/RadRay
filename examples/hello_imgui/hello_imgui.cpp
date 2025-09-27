@@ -65,7 +65,7 @@ public:
             f._cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
         _currentFrameIndex = 0;
-        _imguiDrawContext = CreateImGuiDrawContext(_device.get()).Unwrap();
+        _imguiDrawContext = CreateImGuiDrawContext(_device.get(), _swapchain->GetDesc().Format).Unwrap();
 
         _renderThread = std::thread{&HelloImguiApp::Render, this};
     }
@@ -168,7 +168,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     if (platform == PlatformId::Windows) {
         string name = format("{} - {}", RADRAY_APP_NAME, backend);
         vector<Win32WNDPROC> extraWndProcs;
-        extraWndProcs.push_back(GetWin32WNDPROCImGui().Unwrap());
+        extraWndProcs.push_back(GetImGuiWin32WNDPROC().Unwrap());
         Win32WindowCreateDescriptor desc{};
         desc.Title = name;
         desc.Width = 1280;
@@ -214,7 +214,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 
 int main() {
     g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+    // g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {

@@ -457,6 +457,8 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
+    SwapChainDescriptor GetDesc() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -476,6 +478,7 @@ public:
     vector<Frame> _frames;
     uint32_t _currentTextureIndex{0};
     uint32_t _currentFrameIndex{0};
+    SwapChainDescriptor _desc;
 };
 
 class BufferVulkan final : public Buffer {

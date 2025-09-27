@@ -1204,7 +1204,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
     vector<uint64_t> arrayStrides(desc.VertexLayouts.size(), 0);
     for (size_t index = 0; index < desc.VertexLayouts.size(); index++) {
-        const VertexInfo& i = desc.VertexLayouts[index];
+        const VertexBufferLayout& i = desc.VertexLayouts[index];
         arrayStrides[index] = i.ArrayStride;
         D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
         for (const VertexElement& j : i.Elements) {
@@ -1297,7 +1297,16 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         }
     } else {
         dsDesc.DepthEnable = false;
+        dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        dsDesc.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
         dsDesc.StencilEnable = false;
+        dsDesc.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+        dsDesc.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+        dsDesc.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        dsDesc.BackFace = dsDesc.FrontFace;
     }
     DXGI_SAMPLE_DESC sampleDesc{desc.MultiSample.Count, 0};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC rawPsoDesc{};
@@ -1858,6 +1867,10 @@ uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
+}
+
+SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
+    return _desc;
 }
 
 BufferD3D12::BufferD3D12(

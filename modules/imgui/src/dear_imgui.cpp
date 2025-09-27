@@ -105,7 +105,7 @@ void TerminateImGui() {
     ImGui::DestroyContext();
 }
 
-Nullable<Win32WNDPROC> GetWin32WNDPROCImGui() noexcept {
+Nullable<Win32WNDPROC> GetImGuiWin32WNDPROC() noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     return ImGui_ImplWin32_WndProcHandler;
 #else
@@ -113,9 +113,10 @@ Nullable<Win32WNDPROC> GetWin32WNDPROCImGui() noexcept {
 #endif
 }
 
-Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(render::Device* device) noexcept {
+Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDescriptor& desc) noexcept {
     using namespace ::radray::render;
 
+    auto device = desc.Device;
     RenderBackend backendType = device->GetBackend();
     shared_ptr<Shader> shaderVS;
     shared_ptr<Shader> shaderPS;
@@ -143,23 +144,31 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(render::Device* de
     }
 
     SamplerDescriptor samplerDesc[1];
-    samplerDesc[0].AddressS = AddressMode::ClampToEdge;
-    samplerDesc[0].AddressT = AddressMode::ClampToEdge;
-    samplerDesc[0].AddressR = AddressMode::ClampToEdge;
-    samplerDesc[0].MigFilter = FilterMode::Linear;
-    samplerDesc[0].MagFilter = FilterMode::Linear;
-    samplerDesc[0].MipmapFilter = FilterMode::Linear;
-    samplerDesc[0].LodMin = 0.0f;
-    samplerDesc[0].LodMax = std::numeric_limits<float>::max();
-    samplerDesc[0].Compare = CompareFunction::Always;
-    samplerDesc[0].AnisotropyClamp = 0.0f;
-    RootSignatureSetElement rsElems[1];
-    rsElems[0].Slot = 0;
-    rsElems[0].Space = 0;
-    rsElems[0].Type = ResourceBindType::Sampler;
-    rsElems[0].Count = 1;
-    rsElems[0].Stages = ShaderStage::Pixel;
-    rsElems[0].StaticSamplers = samplerDesc;
+    SamplerDescriptor& sampler = samplerDesc[0];
+    sampler.AddressS = AddressMode::ClampToEdge;
+    sampler.AddressT = AddressMode::ClampToEdge;
+    sampler.AddressR = AddressMode::ClampToEdge;
+    sampler.MigFilter = FilterMode::Linear;
+    sampler.MagFilter = FilterMode::Linear;
+    sampler.MipmapFilter = FilterMode::Linear;
+    sampler.LodMin = 0.0f;
+    sampler.LodMax = std::numeric_limits<float>::max();
+    sampler.Compare = CompareFunction::Always;
+    sampler.AnisotropyClamp = 0.0f;
+    RootSignatureSetElement rsElems[2];
+    RootSignatureSetElement& rsTex = rsElems[0];
+    rsTex.Slot = 0;
+    rsTex.Space = 0;
+    rsTex.Type = ResourceBindType::Texture;
+    rsTex.Count = 1;
+    rsTex.Stages = ShaderStage::Pixel;
+    RootSignatureSetElement& rsSampler = rsElems[1];
+    rsSampler.Slot = 0;
+    rsSampler.Space = 0;
+    rsSampler.Type = ResourceBindType::Sampler;
+    rsSampler.Count = 1;
+    rsSampler.Stages = ShaderStage::Pixel;
+    rsSampler.StaticSamplers = samplerDesc;
     RootSignatureBindingSet rsSet;
     rsSet.Elements = rsElems;
     auto layout = device->CreateDescriptorSetLayout(rsSet).Unwrap();
@@ -169,23 +178,159 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(render::Device* de
     rsConst.Space = 0;
     rsConst.Size = 64;
     rsConst.Stages = ShaderStage::Vertex;
-    RootSignatureBinding rsBind[1];
-    rsBind[0].Slot = 0;
-    rsBind[0].Space = 0;
-    rsBind[0].Type = ResourceBindType::Texture;
-    rsBind[0].Stages = ShaderStage::Pixel;
     DescriptorSetLayout* layouts[1];
     layouts[0] = layout.get();
     RootSignatureDescriptor rsDesc{};
     rsDesc.Constant = rsConst;
-    rsDesc.RootBindings = rsBind;
     rsDesc.BindingSets = layouts;
     auto rs = device->CreateRootSignature(rsDesc).Unwrap();
 
+    VertexElement vertexElems[3];
+    VertexElement& posElem = vertexElems[0];
+    posElem.Offset = offsetof(ImDrawVert, pos);
+    posElem.Semantic = "POSITION";
+    posElem.SemanticIndex = 0;
+    posElem.Format = VertexFormat::FLOAT32X2;
+    posElem.Location = 0;
+    VertexElement& uvElem = vertexElems[1];
+    uvElem.Offset = offsetof(ImDrawVert, uv);
+    uvElem.Semantic = "TEXCOORD";
+    uvElem.SemanticIndex = 0;
+    uvElem.Format = VertexFormat::FLOAT32X2;
+    uvElem.Location = 0;
+    VertexElement& colorElem = vertexElems[2];
+    colorElem.Offset = offsetof(ImDrawVert, col);
+    colorElem.Semantic = "COLOR";
+    colorElem.SemanticIndex = 0;
+    colorElem.Format = VertexFormat::UNORM8X4;
+    colorElem.Location = 0;
+    VertexBufferLayout vbLayout[1];
+    vbLayout[0].ArrayStride = sizeof(ImDrawVert);
+    vbLayout[0].StepMode = VertexStepMode::Vertex;
+    vbLayout[0].Elements = vertexElems;
+    PrimitiveState primState{};
+    primState.Topology = PrimitiveTopology::TriangleList;
+    primState.FaceClockwise = FrontFace::CW;
+    primState.Cull = CullMode::None;
+    primState.Poly = PolygonMode::Fill;
+    primState.StripIndexFormat = std::nullopt;
+    primState.UnclippedDepth = false;
+    primState.Conservative = false;
+    MultiSampleState msState{};
+    msState.Count = 1;
+    msState.Mask = std::numeric_limits<uint32_t>::max();
+    msState.AlphaToCoverageEnable = false;
+    ColorTargetState rtStates[1];
+    BlendState rtBlendState{};
+    rtBlendState.Color.Src = BlendFactor::SrcAlpha;
+    rtBlendState.Color.Dst = BlendFactor::OneMinusSrcAlpha;
+    rtBlendState.Color.Op = BlendOperation::Add;
+    rtBlendState.Alpha.Src = BlendFactor::One;
+    rtBlendState.Alpha.Dst = BlendFactor::OneMinusSrcAlpha;
+    rtBlendState.Alpha.Op = BlendOperation::Add;
+    ColorTargetState& rtState = rtStates[0];
+    rtState.Format = desc.RTFormat;
+    rtState.Blend = rtBlendState;
+    rtState.WriteMask = ColorWrite::All;
+    GraphicsPipelineStateDescriptor psoDesc{};
+    psoDesc.RootSig = rs.get();
+    psoDesc.VS = ShaderEntry{shaderVS.get(), "VSMain"};
+    psoDesc.PS = ShaderEntry{shaderPS.get(), "PSMain"};
+    psoDesc.VertexLayouts = vbLayout;
+    psoDesc.Primitive = primState;
+    psoDesc.DepthStencil = std::nullopt;
+    psoDesc.MultiSample = msState;
+    psoDesc.ColorTargets = rtStates;
+    auto pso = device->CreateGraphicsPipelineState(psoDesc).Unwrap();
+
     auto result = make_unique<ImGuiDrawContext>();
+    result->_device = device;
     result->_rsLayout = layout;
     result->_rs = rs;
+    result->_pso = pso;
+    result->_desc = desc;
     return result;
+}
+
+ImGuiDrawTexture::ImGuiDrawTexture(
+    shared_ptr<render::Texture> tex,
+    shared_ptr<render::TextureView> srv) noexcept
+    : _tex(std::move(tex)),
+      _srv(std::move(srv)) {}
+
+ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
+    _srv.reset();
+    _tex.reset();
+}
+
+void ImGuiDrawContext::Draw(ImDrawData* draw_data) {
+    if (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f) {
+        return;
+    }
+
+    if (draw_data->Textures != nullptr) {
+        for (ImTextureData* tex : *draw_data->Textures) {
+            if (tex->Status != ImTextureStatus_OK) {
+                this->UpdateTexture(tex);
+            }
+        }
+    }
+
+    // TODO: draw
+}
+
+void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
+    using namespace ::radray::render;
+
+    if (tex->Status == ImTextureStatus_WantCreate) {
+        IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
+        IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+
+        string texName = format("imgui_tex_{}", tex->UniqueID);
+        TextureDescriptor texDesc{};
+        texDesc.Dim = TextureDimension::Dim2D;
+        texDesc.Width = tex->Width;
+        texDesc.Height = tex->Height;
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.Format = TextureFormat::RGBA8_UNORM;
+        texDesc.Usage = TextureUse::Resource;
+        texDesc.Name = texName;
+        shared_ptr<Texture> texObj = _device->CreateTexture(texDesc).Unwrap();
+
+        TextureViewDescriptor viewDesc{};
+        viewDesc.Target = texObj.get();
+        viewDesc.Dim = TextureViewDimension::Dim2D;
+        viewDesc.Format = TextureFormat::RGBA8_UNORM;
+        viewDesc.BaseArrayLayer = 0;
+        viewDesc.BaseMipLevel = 0;
+        viewDesc.Usage = TextureUse::Resource;
+        shared_ptr<TextureView> srv = _device->CreateTextureView(viewDesc).Unwrap();
+
+        auto texId = std::bit_cast<ImU64>(srv.get());
+        tex->SetTexID(texId);
+        tex->BackendUserData = texObj.get();
+
+        _texs.emplace(texObj.get(), make_unique<ImGuiDrawTexture>(std::move(texObj), std::move(srv)));
+    }
+
+    if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
+        auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
+        ImGuiDrawTexture* drawTex = nullptr;
+        {
+            auto it = _texs.find(texObjPtr);
+            if (it == _texs.end()) {
+                RADRAY_ABORT("radrayimgui texture not found");
+            }
+            drawTex = it->second.get();
+        }
+        IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+        // TODO: upload data
+    }
+
+    if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
+        // TODO: destroy texture
+    }
 }
 
 }  // namespace radray

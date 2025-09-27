@@ -405,6 +405,8 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
+    SwapChainDescriptor GetDesc() const noexcept override;
+
 public:
     class Frame {
     public:
