@@ -112,6 +112,8 @@ public:
 
     RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
 
+    DeviceDetail GetDetail() const noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -170,6 +172,7 @@ public:
     ExtFeaturesVulkan _extFeatures;
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
+    DeviceDetail _detail;
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -496,6 +499,13 @@ public:
     void Destroy() noexcept override;
 
     void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept override;
+
+    void CopyImageFromHost(
+        const TextureDescriptor& texDesc,
+        uint32_t baseArrayLayer,
+        uint32_t baseMipLevel,
+        std::span<byte> cpuData,
+        uint64_t bufOffset) noexcept override;
 
 public:
     void DestroyImpl() noexcept;

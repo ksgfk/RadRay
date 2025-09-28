@@ -57,8 +57,6 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
 
-UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept;
-
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;
 D3D12_HEAP_TYPE MapType(MemoryType v) noexcept;

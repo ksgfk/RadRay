@@ -247,10 +247,6 @@ DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept {
     return fmt;
 }
 
-UINT SubresourceIndex(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, UINT MipLevels, UINT ArraySize) noexcept {
-    return ((MipSlice) + ((ArraySlice) * (MipLevels)) + ((PlaneSlice) * (MipLevels) * (ArraySize)));
-}
-
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
     switch (v) {
         case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;

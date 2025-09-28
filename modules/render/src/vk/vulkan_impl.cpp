@@ -111,6 +111,10 @@ void DeviceVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+DeviceDetail DeviceVulkan::GetDetail() const noexcept {
+    return _detail;
+}
+
 Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     return _queues[static_cast<std::underlying_type_t<QueueType>>(type)][slot].get();
 }
@@ -1635,6 +1639,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceR->_extFeatures = *extFeatures;
     deviceR->_properties = selectPhyDevice.properties;
     deviceR->_extProperties = *extProperties;
+    {
+        DeviceDetail& detail = deviceR->_detail;
+        detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
+        detail.UploadTextureAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
+        detail.UploadTextureRowAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
+    }
 
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -2652,6 +2662,18 @@ void BufferVulkan::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept 
     if (isMapped) {
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
     }
+}
+
+void BufferVulkan::CopyImageFromHost(
+    const TextureDescriptor& texDesc,
+    uint32_t baseArrayLayer,
+    uint32_t baseMipLevel,
+    std::span<byte> cpuData,
+    uint64_t bufOffset) noexcept {
+    RADRAY_UNUSED(texDesc);
+    RADRAY_UNUSED(baseArrayLayer);
+    RADRAY_UNUSED(baseMipLevel);
+    this->CopyFromHost(cpuData, bufOffset);
 }
 
 BufferViewVulkan::BufferViewVulkan(

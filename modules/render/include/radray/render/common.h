@@ -726,6 +726,19 @@ struct IndexBufferView {
     uint32_t Stride;
 };
 
+struct DeviceDetail {
+    uint32_t CBufferAlignment;
+    uint32_t UploadTextureAlignment;
+    uint32_t UploadTextureRowAlignment;
+};
+
+struct SubresourceRange {
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+};
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -733,6 +746,8 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
 
     virtual RenderBackend GetBackend() noexcept = 0;
+
+    virtual DeviceDetail GetDetail() const noexcept = 0;
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
@@ -791,6 +806,8 @@ public:
     virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
+
+    // virtual void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept = 0;
 };
 
 class CommandEncoder : public RenderBase {
@@ -867,6 +884,13 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
 
     virtual void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept = 0;
+
+    virtual void CopyImageFromHost(
+        const TextureDescriptor& texDesc,
+        uint32_t baseArrayLayer,
+        uint32_t baseMipLevel,
+        std::span<byte> cpuData,
+        uint64_t bufOffset) noexcept = 0;
 };
 
 class BufferView : public ResourceView {

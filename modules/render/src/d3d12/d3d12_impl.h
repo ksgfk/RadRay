@@ -224,6 +224,8 @@ public:
 
     RenderBackend GetBackend() noexcept override { return RenderBackend::D3D12; }
 
+    DeviceDetail GetDetail() const noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -255,6 +257,8 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    D3D12_RESOURCE_DESC MapTextureDesc(const TextureDescriptor& desc) noexcept;
+
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
@@ -266,6 +270,7 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
 };
@@ -435,6 +440,13 @@ public:
     void Destroy() noexcept override;
 
     void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept override;
+
+    void CopyImageFromHost(
+        const TextureDescriptor& texDesc,
+        uint32_t baseArrayLayer,
+        uint32_t baseMipLevel,
+        std::span<byte> cpuData,
+        uint64_t bufOffset) noexcept override;
 
 public:
     DeviceD3D12* _device;

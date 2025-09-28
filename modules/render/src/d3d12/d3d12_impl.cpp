@@ -335,6 +335,12 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
+    {
+        DeviceDetail& detail = result->_detail;
+        detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+        detail.UploadTextureAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        detail.UploadTextureRowAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
@@ -379,6 +385,10 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     }
     RADRAY_INFO_LOG("=============================");
     return result;
+}
+
+DeviceDetail DeviceD3D12::GetDetail() const noexcept {
+    return _detail;
 }
 
 Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
@@ -661,28 +671,7 @@ Nullable<shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
 
 Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
     TextureDescriptor desc = desc_;
-    DXGI_FORMAT rawFormat = MapType(desc.Format);
-    D3D12_RESOURCE_DESC resDesc{};
-    resDesc.Dimension = MapType(desc.Dim);
-    resDesc.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
-    resDesc.Width = desc.Width;
-    resDesc.Height = desc.Height;
-    resDesc.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
-    resDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
-    resDesc.Format = FormatToTypeless(rawFormat);
-    resDesc.SampleDesc.Count = desc.SampleCount ? desc.SampleCount : 1;
-    resDesc.SampleDesc.Quality = 0;
-    resDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    }
-    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    }
-    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    }
+    D3D12_RESOURCE_DESC resDesc = MapTextureDesc(desc);
     D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
     // D3D12_CLEAR_VALUE clear{};
     // clear.Format = rawFormat;
@@ -1425,6 +1414,32 @@ Nullable<shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
     return make_shared<SamplerD3D12>(this, std::move(heapView));
 }
 
+D3D12_RESOURCE_DESC DeviceD3D12::MapTextureDesc(const TextureDescriptor& desc) noexcept {
+    DXGI_FORMAT rawFormat = MapType(desc.Format);
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = MapType(desc.Dim);
+    resDesc.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+    resDesc.Width = desc.Width;
+    resDesc.Height = desc.Height;
+    resDesc.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
+    resDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
+    resDesc.Format = FormatToTypeless(rawFormat);
+    resDesc.SampleDesc.Count = desc.SampleCount ? desc.SampleCount : 1;
+    resDesc.SampleDesc.Quality = 0;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
+    return resDesc;
+}
+
 CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
@@ -1560,7 +1575,7 @@ void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, s
             raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
             raw.Transition.pResource = tex->_tex.Get();
             if (tb.IsSubresourceBarrier) {
-                raw.Transition.Subresource = SubresourceIndex(
+                raw.Transition.Subresource = D3D12CalcSubresource(
                     tb.BaseMipLevel,
                     tb.MipLevelCount,
                     0,
@@ -1655,6 +1670,40 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
     auto dst = CastD3D12Object(dst_);
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
+
+// void CmdListD3D12::CopyBufferToTexture(
+//     Texture* dst,
+//     uint32_t dstMipLevel,
+//     uint32_t dstBaseArrayLayer,
+//     uint32_t dstArrayLayerCount,
+//     Buffer* src,
+//     uint64_t srcOffset) noexcept {
+//     uint32_t subresource = SubresourceIndex(dstMipLevel, dstBaseArrayLayer, 0, 1, dstArrayLayerCount);
+//     BufferD3D12* srcBuf = static_cast<BufferD3D12*>(src);
+//     TextureD3D12* dstTex = static_cast<TextureD3D12*>(dst);
+//     D3D12_RESOURCE_DESC dstDesc = dstTex->_tex->GetDesc();
+//     D3D12_TEXTURE_COPY_LOCATION cpSrc{};
+//     cpSrc.pResource = srcBuf->_buf.Get();
+//     cpSrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+//     UINT row;
+//     UINT64 rowSize, total;
+//     _device->_device->GetCopyableFootprints(
+//         &dstDesc,
+//         subresource,
+//         1,
+//         srcOffset,
+//         &cpSrc.PlacedFootprint,
+//         &row,
+//         &rowSize,
+//         &total);
+//     RADRAY_DEBUG_LOG("d3d12 CmdListD3D12::CopyTexture row:{} rowSize:{} total:{}", row, rowSize, total);
+//     cpSrc.PlacedFootprint.Offset = srcOffset;
+//     D3D12_TEXTURE_COPY_LOCATION cpDst{};
+//     cpDst.pResource = dstTex->_tex.Get();
+//     cpDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+//     cpDst.SubresourceIndex = subresource;
+//     _cmdList->CopyTextureRegion(&cpDst, 0, 0, 0, &cpSrc, nullptr);
+// }
 
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
     : _cmdList(cmdList) {}
@@ -1898,10 +1947,63 @@ void BufferD3D12::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &range, &ptr);
         FAILED(hr)) {
-        RADRAY_ABORT("cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
+        RADRAY_ABORT("d3d12 cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
     }
     std::memcpy(ptr, data.data(), data.size());
     _buf->Unmap(0, &range);
+}
+
+void BufferD3D12::CopyImageFromHost(
+    const TextureDescriptor& texDesc,
+    uint32_t baseArrayLayer,
+    uint32_t baseMipLevel,
+    std::span<byte> cpuData,
+    uint64_t bufOffset) noexcept {
+    D3D12_RESOURCE_DESC rawDesc = _device->MapTextureDesc(texDesc);
+    UINT subresStart = D3D12CalcSubresource(baseMipLevel, baseArrayLayer, 0, rawDesc.MipLevels, rawDesc.DepthOrArraySize);
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0, totalBytes = 0;
+    _device->_device->GetCopyableFootprints(
+        &rawDesc,
+        subresStart,
+        1,
+        bufOffset,
+        &layout,
+        &numRows,
+        &rowSizeInBytes,
+        &totalBytes);
+    if (layout.Offset != bufOffset) {
+        RADRAY_ABORT("d3d12 CopyImageFromHost: bufOffset not aligned. expect {} got {}", layout.Offset, bufOffset);
+        return;
+    }
+    UINT rowPitch = layout.Footprint.RowPitch;
+    UINT sliceDepth = layout.Footprint.Depth;
+    UINT64 slicePitch = static_cast<UINT64>(rowPitch) * numRows;
+    const UINT64 cpuTightSize = rowSizeInBytes * numRows * sliceDepth;
+    if (cpuData.size() < cpuTightSize) {
+        RADRAY_ABORT("d3d12 CopyImageFromHost: cpuData not enough. need {} bytes, got {} bytes", cpuTightSize, cpuData.size());
+        return;
+    }
+    D3D12_RANGE mapRange{layout.Offset, layout.Offset + totalBytes};
+    void* mapped = nullptr;
+    if (HRESULT hr = _buf->Map(0, &mapRange, &mapped);
+        FAILED(hr)) {
+        RADRAY_ABORT("d3d12 cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
+        return;
+    }
+    auto* dstBase = reinterpret_cast<uint8_t*>(mapped) + bufOffset;
+    auto* srcBase = reinterpret_cast<const uint8_t*>(cpuData.data());
+    for (UINT z = 0; z < sliceDepth; ++z) {
+        UINT64 srcSliceOffset = static_cast<UINT64>(z) * numRows * rowSizeInBytes;
+        UINT64 dstSliceOffset = static_cast<UINT64>(z) * slicePitch;
+        for (UINT y = 0; y < numRows; ++y) {
+            const uint8_t* srcRow = srcBase + srcSliceOffset + static_cast<UINT64>(y) * rowSizeInBytes;
+            uint8_t* dstRow = dstBase + dstSliceOffset + static_cast<UINT64>(y) * rowPitch;
+            std::memcpy(dstRow, srcRow, static_cast<size_t>(rowSizeInBytes));
+        }
+    }
+    _buf->Unmap(0, &mapRange);
 }
 
 BufferViewD3D12::BufferViewD3D12(
