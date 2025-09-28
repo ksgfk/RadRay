@@ -1672,6 +1672,26 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
+void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
+    auto src = CastD3D12Object(src_);
+    auto dst = CastD3D12Object(dst_);
+
+    UINT subres = D3D12CalcSubresource(dstRange.BaseMipLevel, dstRange.BaseArrayLayer, 0, 1, dst->_desc.DepthOrArraySize);
+    const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
+
+    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    srcLoc.pResource = src->_buf.Get();
+    _device->_device->GetCopyableFootprints(&srcDesc, subres, 1, srcOffset, &srcLoc.PlacedFootprint, nullptr, nullptr, nullptr);
+    srcLoc.PlacedFootprint.Offset = srcOffset;
+    D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstLoc.pResource = dst->_tex.Get();
+    dstLoc.SubresourceIndex = subres;
+
+    _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+}
+
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
     : _cmdList(cmdList) {}
 

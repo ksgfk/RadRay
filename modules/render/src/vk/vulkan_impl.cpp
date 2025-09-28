@@ -2138,6 +2138,25 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
     _device->_ftb.vkCmdCopyBuffer(_cmdBuffer, src->_buffer, dst->_buffer, 1, &copyInfo);
 }
 
+void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
+    auto dst = CastVkObject(dst_);
+    auto src = CastVkObject(src_);
+    const uint64_t width = std::max(1u, dst->_mdesc.Width >> dstRange.BaseMipLevel);
+    const uint64_t height = std::max(1u, dst->_mdesc.Height >> dstRange.BaseMipLevel);
+    const uint64_t depth = std::max(1u, dst->_mdesc.DepthOrArraySize >> dstRange.BaseMipLevel);
+    VkBufferImageCopy copyInfo{};
+    copyInfo.bufferOffset = srcOffset;
+    copyInfo.bufferRowLength = 0;
+    copyInfo.bufferImageHeight = 0;
+    copyInfo.imageSubresource.aspectMask = ImageFormatToAspectFlags(dst->_rawInfo.format);
+    copyInfo.imageSubresource.mipLevel = dstRange.BaseMipLevel;
+    copyInfo.imageSubresource.baseArrayLayer = dstRange.BaseArrayLayer;
+    copyInfo.imageSubresource.layerCount = dstRange.ArrayLayerCount;
+    copyInfo.imageOffset = {0, 0, 0};
+    copyInfo.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth)};
+    _device->_ftb.vkCmdCopyBufferToImage(_cmdBuffer, src->_buffer, dst->_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyInfo);
+}
+
 SimulateCommandEncoderVulkan::SimulateCommandEncoderVulkan(
     DeviceVulkan* device,
     CommandBufferVulkan* cmdBuffer) noexcept

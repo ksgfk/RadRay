@@ -343,6 +343,8 @@ public:
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
+    void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
