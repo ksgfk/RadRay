@@ -439,14 +439,9 @@ public:
 
     void Destroy() noexcept override;
 
-    void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept override;
+    void* Map(uint64_t offset, uint64_t size) noexcept override;
 
-    void CopyImageFromHost(
-        const TextureDescriptor& texDesc,
-        uint32_t baseArrayLayer,
-        uint32_t baseMipLevel,
-        std::span<byte> cpuData,
-        uint64_t bufOffset) noexcept override;
+    void Unmap(uint64_t offset, uint64_t size) noexcept override;
 
 public:
     DeviceD3D12* _device;

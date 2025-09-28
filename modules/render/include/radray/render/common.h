@@ -505,6 +505,15 @@ struct BarrierBufferDescriptor {
     bool IsFromOrToOtherQueue;  // true: from, false: to
 };
 
+struct SubresourceRange {
+    uint32_t BaseArrayLayer;
+    uint32_t ArrayLayerCount;
+    uint32_t BaseMipLevel;
+    uint32_t MipLevelCount;
+
+    static constexpr auto All = std::numeric_limits<uint32_t>::max();
+};
+
 struct BarrierTextureDescriptor {
     Texture* Target;
     TextureUses Before;
@@ -512,10 +521,7 @@ struct BarrierTextureDescriptor {
     Nullable<CommandQueue*> OtherQueue;
     bool IsFromOrToOtherQueue;
     bool IsSubresourceBarrier;
-    uint32_t BaseArrayLayer;
-    uint32_t ArrayLayerCount;
-    uint32_t BaseMipLevel;
-    uint32_t MipLevelCount;
+    SubresourceRange Range;
 };
 
 struct ColorAttachment {
@@ -557,10 +563,7 @@ struct TextureViewDescriptor {
     Texture* Target;
     TextureViewDimension Dim;
     TextureFormat Format;
-    uint32_t BaseArrayLayer;
-    std::optional<uint32_t> ArrayLayerCount;
-    uint32_t BaseMipLevel;
-    std::optional<uint32_t> MipLevelCount;
+    SubresourceRange Range;
     TextureUses Usage;
 };
 
@@ -730,13 +733,7 @@ struct DeviceDetail {
     uint32_t CBufferAlignment;
     uint32_t UploadTextureAlignment;
     uint32_t UploadTextureRowAlignment;
-};
-
-struct SubresourceRange {
-    uint32_t BaseArrayLayer;
-    uint32_t ArrayLayerCount;
-    uint32_t BaseMipLevel;
-    uint32_t MipLevelCount;
+    uint32_t MapAlignment;
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -883,14 +880,9 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
 
-    virtual void CopyFromHost(std::span<byte> data, uint64_t offset) noexcept = 0;
+    virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
 
-    virtual void CopyImageFromHost(
-        const TextureDescriptor& texDesc,
-        uint32_t baseArrayLayer,
-        uint32_t baseMipLevel,
-        std::span<byte> cpuData,
-        uint64_t bufOffset) noexcept = 0;
+    virtual void Unmap(uint64_t offset, uint64_t size) noexcept = 0;
 };
 
 class BufferView : public ResourceView {

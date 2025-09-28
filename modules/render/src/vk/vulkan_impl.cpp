@@ -525,10 +525,10 @@ Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         VK_COMPONENT_SWIZZLE_A};
     createInfo.subresourceRange = {
         ImageFormatToAspectFlags(createInfo.format),
-        desc.BaseMipLevel,
-        desc.MipLevelCount.value_or(VK_REMAINING_MIP_LEVELS),
-        desc.BaseArrayLayer,
-        desc.ArrayLayerCount.value_or(VK_REMAINING_ARRAY_LAYERS)};
+        desc.Range.BaseMipLevel,
+        desc.Range.MipLevelCount == SubresourceRange::All ? VK_REMAINING_MIP_LEVELS : desc.Range.MipLevelCount,
+        desc.Range.BaseArrayLayer,
+        desc.Range.ArrayLayerCount == SubresourceRange::All ? VK_REMAINING_ARRAY_LAYERS : desc.Range.ArrayLayerCount};
     VkImageView imageView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
         vr != VK_SUCCESS) {
@@ -1644,6 +1644,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
         detail.UploadTextureAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
         detail.UploadTextureRowAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
+        detail.MapAlignment = deviceR->_properties.limits.nonCoherentAtomSize;
     }
 
     RADRAY_INFO_LOG("========== Feature ==========");
@@ -1964,10 +1965,10 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         }
         imgBarrier.image = tex->_image;
         imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawInfo.format);
-        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.BaseMipLevel : 0;
-        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.MipLevelCount : VK_REMAINING_MIP_LEVELS;
-        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.BaseArrayLayer : 0;
-        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.Range.BaseMipLevel : 0;
+        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.Range.BaseArrayLayer : 0;
+        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
 
         auto srcStage = TextureUseToPipelineStageFlags(i.Before, true);
         auto dstStage = TextureUseToPipelineStageFlags(i.After, false);
@@ -2645,35 +2646,27 @@ void BufferVulkan::DestroyImpl() noexcept {
     }
 }
 
-void BufferVulkan::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
+void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(size);
     void* mappedData = nullptr;
-    bool isMapped = false;
     if (_allocInfo.pMappedData) {
-        mappedData = _allocInfo.pMappedData;
+        mappedData = static_cast<byte*>(_allocInfo.pMappedData) + offset;
     } else {
         if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
             vr != VK_SUCCESS) {
-            RADRAY_ABORT("vma call vmaMapMemory failed: {}", vr);
-            return;
+            RADRAY_ABORT("vk call vmaMapMemory failed: {}", vr);
         }
-        isMapped = true;
+        mappedData = static_cast<byte*>(mappedData) + offset;
     }
-    std::memcpy(static_cast<byte*>(mappedData) + offset, data.data(), data.size());
-    if (isMapped) {
-        vmaUnmapMemory(_device->_vma->_vma, _allocation);
-    }
+    return mappedData;
 }
 
-void BufferVulkan::CopyImageFromHost(
-    const TextureDescriptor& texDesc,
-    uint32_t baseArrayLayer,
-    uint32_t baseMipLevel,
-    std::span<byte> cpuData,
-    uint64_t bufOffset) noexcept {
-    RADRAY_UNUSED(texDesc);
-    RADRAY_UNUSED(baseArrayLayer);
-    RADRAY_UNUSED(baseMipLevel);
-    this->CopyFromHost(cpuData, bufOffset);
+void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(offset);
+    RADRAY_UNUSED(size);
+    if (_allocInfo.pMappedData && !_mdesc.Usage.HasFlag(BufferUse::MapWrite)) {
+        vmaUnmapMemory(_device->_vma->_vma, _allocation);
+    }
 }
 
 BufferViewVulkan::BufferViewVulkan(

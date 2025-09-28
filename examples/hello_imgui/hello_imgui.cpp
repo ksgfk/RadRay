@@ -65,7 +65,11 @@ public:
             f._cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
         _currentFrameIndex = 0;
-        _imguiDrawContext = CreateImGuiDrawContext(_device.get(), _swapchain->GetDesc().Format).Unwrap();
+        ImGuiDrawDescriptor desc{};
+        desc.Device = _device.get();
+        desc.RTFormat = TextureFormat::RGBA8_UNORM;
+        desc.FrameCount = (int)_frames.size();
+        _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
 
         _renderThread = std::thread{&HelloImguiApp::Render, this};
     }

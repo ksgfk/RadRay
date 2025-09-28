@@ -104,8 +104,16 @@ void Init() {
     auto idx = device->CreateBuffer({model.IndexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
     vertBuf = std::static_pointer_cast<d3d12::BufferD3D12>(vert);
     idxBuf = std::static_pointer_cast<d3d12::BufferD3D12>(idx);
-    vertUpload->CopyFromHost({model.VertexData.get(), model.VertexSize}, 0);
-    idxUpload->CopyFromHost({model.IndexData.get(), model.IndexSize}, 0);
+    {
+        void* vertMap = vertUpload->Map(0, model.VertexSize);
+        std::memcpy(vertMap, model.VertexData.get(), model.VertexSize);
+        vertUpload->Unmap(0, model.VertexSize);
+    }
+    {
+        void* idxMap = idxUpload->Map(0, model.IndexSize);
+        std::memcpy(idxMap, model.IndexData.get(), model.IndexSize);
+        idxUpload->Unmap(0, model.IndexSize);
+    }
 
     auto cmdBuffer = std::static_pointer_cast<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     cmdBuffer->Begin();
@@ -239,10 +247,10 @@ void Update() {
             rtViewDesc.Target = rt;
             rtViewDesc.Dim = TextureViewDimension::Dim2D;
             rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
-            rtViewDesc.BaseMipLevel = 0;
-            rtViewDesc.MipLevelCount = std::nullopt;
-            rtViewDesc.BaseArrayLayer = 0;
-            rtViewDesc.ArrayLayerCount = std::nullopt;
+            rtViewDesc.Range.BaseMipLevel = 0;
+            rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
+            rtViewDesc.Range.BaseArrayLayer = 0;
+            rtViewDesc.Range.ArrayLayerCount = SubresourceRange::All;
             rtViewDesc.Usage = TextureUse::RenderTarget;
             it = rtViews.emplace(rt, std::static_pointer_cast<d3d12::TextureViewD3D12>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
         }
@@ -250,7 +258,7 @@ void Update() {
     }
     frameData.cmdBuffer->Begin();
     {
-        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, 0, 0, 0, 0, 0}};
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, false, {}}};
         frameData.cmdBuffer->ResourceBarrier({}, texDesc);
     }
     {
@@ -271,7 +279,7 @@ void Update() {
         frameData.cmdBuffer->EndRenderPass(std::move(rp));
     }
     {
-        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, 0, 0, 0, 0, 0}};
+        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, false, {}}};
         frameData.cmdBuffer->ResourceBarrier({}, texDesc);
     }
     frameData.cmdBuffer->End();

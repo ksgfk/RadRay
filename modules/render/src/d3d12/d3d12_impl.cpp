@@ -340,6 +340,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
         detail.UploadTextureAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
         detail.UploadTextureRowAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+        detail.MapAlignment = 1;
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -734,47 +735,47 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         switch (desc.Dim) {
             case TextureViewDimension::Dim1D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
-                srvDesc.Texture1D.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.Texture1D.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
+                srvDesc.Texture1D.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture1D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 break;
             case TextureViewDimension::Dim1DArray:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
-                srvDesc.Texture1DArray.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.Texture1DArray.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
-                srvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
-                srvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                srvDesc.Texture1DArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture1DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                srvDesc.Texture1DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                srvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureViewDimension::Dim2D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                srvDesc.Texture2D.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.Texture2D.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
+                srvDesc.Texture2D.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture2D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 srvDesc.Texture2D.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim2DArray:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-                srvDesc.Texture2DArray.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.Texture2DArray.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
-                srvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
-                srvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                srvDesc.Texture2DArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture2DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                srvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                srvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 srvDesc.Texture2DArray.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim3D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-                srvDesc.Texture3D.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.Texture3D.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
+                srvDesc.Texture3D.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture3D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 break;
             case TextureViewDimension::Cube:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-                srvDesc.TextureCube.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.TextureCube.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
+                srvDesc.TextureCube.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.TextureCube.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 break;
             case TextureViewDimension::CubeArray:
                 // https://learn.microsoft.com/zh-cn/windows/win32/api/d3d12/ns-d3d12-d3d12_texcube_array_srv
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
-                srvDesc.TextureCubeArray.MostDetailedMip = desc.BaseMipLevel;
-                srvDesc.TextureCubeArray.MipLevels = desc.MipLevelCount.value_or(static_cast<UINT>(-1));
-                srvDesc.TextureCubeArray.First2DArrayFace = desc.BaseArrayLayer;
-                srvDesc.TextureCubeArray.NumCubes = desc.ArrayLayerCount.value_or(1);
+                srvDesc.TextureCubeArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.TextureCubeArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                srvDesc.TextureCubeArray.First2DArrayFace = desc.Range.BaseArrayLayer;
+                srvDesc.TextureCubeArray.NumCubes = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 cannot create texture view");
@@ -797,31 +798,31 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         switch (desc.Dim) {
             case TextureViewDimension::Dim1D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
-                rtvDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
                 break;
             case TextureViewDimension::Dim1DArray:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
-                rtvDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
-                rtvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
-                rtvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                rtvDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                rtvDesc.Texture1DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                rtvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureViewDimension::Dim2D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-                rtvDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                rtvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
                 rtvDesc.Texture2D.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim2DArray:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-                rtvDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
-                rtvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
-                rtvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                rtvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                rtvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                rtvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 rtvDesc.Texture2DArray.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim3D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
-                rtvDesc.Texture3D.MipSlice = desc.BaseMipLevel;
-                rtvDesc.Texture3D.FirstWSlice = desc.BaseArrayLayer;
-                rtvDesc.Texture3D.WSize = desc.ArrayLayerCount.value_or(1);
+                rtvDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
+                rtvDesc.Texture3D.FirstWSlice = desc.Range.BaseArrayLayer;
+                rtvDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
             default:
                 RADRAY_ERR_LOG("d3d12 cannot create texture view");
                 return nullptr;
@@ -843,23 +844,23 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         switch (desc.Dim) {
             case TextureViewDimension::Dim1D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
-                dsvDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                dsvDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
                 break;
             case TextureViewDimension::Dim1DArray:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
-                dsvDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
-                dsvDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
-                dsvDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                dsvDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                dsvDesc.Texture1DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                dsvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureViewDimension::Dim2D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-                dsvDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                dsvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
                 break;
             case TextureViewDimension::Dim2DArray:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-                dsvDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
-                dsvDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
-                dsvDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                dsvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                dsvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                dsvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 cannot create texture view");
@@ -882,31 +883,31 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         switch (desc.Dim) {
             case TextureViewDimension::Dim1D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
-                uavDesc.Texture1D.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
                 break;
             case TextureViewDimension::Dim1DArray:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
-                uavDesc.Texture1DArray.MipSlice = desc.BaseMipLevel;
-                uavDesc.Texture1DArray.FirstArraySlice = desc.BaseArrayLayer;
-                uavDesc.Texture1DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                uavDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture1DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                uavDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureViewDimension::Dim2D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                uavDesc.Texture2D.MipSlice = desc.BaseMipLevel;
+                uavDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
                 uavDesc.Texture2D.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim2DArray:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                uavDesc.Texture2DArray.MipSlice = desc.BaseMipLevel;
-                uavDesc.Texture2DArray.FirstArraySlice = desc.BaseArrayLayer;
-                uavDesc.Texture2DArray.ArraySize = desc.ArrayLayerCount.value_or(1);
+                uavDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                uavDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 uavDesc.Texture2DArray.PlaneSlice = 0;
                 break;
             case TextureViewDimension::Dim3D:
                 uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-                uavDesc.Texture3D.MipSlice = desc.BaseMipLevel;
-                uavDesc.Texture3D.FirstWSlice = desc.BaseArrayLayer;
-                uavDesc.Texture3D.WSize = desc.ArrayLayerCount.value_or(1);
+                uavDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture3D.FirstWSlice = desc.Range.BaseArrayLayer;
+                uavDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 cannot create texture view");
@@ -1576,8 +1577,8 @@ void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, s
             raw.Transition.pResource = tex->_tex.Get();
             if (tb.IsSubresourceBarrier) {
                 raw.Transition.Subresource = D3D12CalcSubresource(
-                    tb.BaseMipLevel,
-                    tb.MipLevelCount,
+                    tb.Range.BaseMipLevel,
+                    tb.Range.BaseArrayLayer,
                     0,
                     tex->_desc.MipLevels,
                     tex->_desc.DepthOrArraySize);
@@ -1670,40 +1671,6 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
     auto dst = CastD3D12Object(dst_);
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
-
-// void CmdListD3D12::CopyBufferToTexture(
-//     Texture* dst,
-//     uint32_t dstMipLevel,
-//     uint32_t dstBaseArrayLayer,
-//     uint32_t dstArrayLayerCount,
-//     Buffer* src,
-//     uint64_t srcOffset) noexcept {
-//     uint32_t subresource = SubresourceIndex(dstMipLevel, dstBaseArrayLayer, 0, 1, dstArrayLayerCount);
-//     BufferD3D12* srcBuf = static_cast<BufferD3D12*>(src);
-//     TextureD3D12* dstTex = static_cast<TextureD3D12*>(dst);
-//     D3D12_RESOURCE_DESC dstDesc = dstTex->_tex->GetDesc();
-//     D3D12_TEXTURE_COPY_LOCATION cpSrc{};
-//     cpSrc.pResource = srcBuf->_buf.Get();
-//     cpSrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-//     UINT row;
-//     UINT64 rowSize, total;
-//     _device->_device->GetCopyableFootprints(
-//         &dstDesc,
-//         subresource,
-//         1,
-//         srcOffset,
-//         &cpSrc.PlacedFootprint,
-//         &row,
-//         &rowSize,
-//         &total);
-//     RADRAY_DEBUG_LOG("d3d12 CmdListD3D12::CopyTexture row:{} rowSize:{} total:{}", row, rowSize, total);
-//     cpSrc.PlacedFootprint.Offset = srcOffset;
-//     D3D12_TEXTURE_COPY_LOCATION cpDst{};
-//     cpDst.pResource = dstTex->_tex.Get();
-//     cpDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-//     cpDst.SubresourceIndex = subresource;
-//     _cmdList->CopyTextureRegion(&cpDst, 0, 0, 0, &cpSrc, nullptr);
-// }
 
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
     : _cmdList(cmdList) {}
@@ -1942,68 +1909,19 @@ void BufferD3D12::Destroy() noexcept {
     _alloc = nullptr;
 }
 
-void BufferD3D12::CopyFromHost(std::span<byte> data, uint64_t offset) noexcept {
-    D3D12_RANGE range{offset, offset + data.size()};
+void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
+    D3D12_RANGE range{offset, offset + size};
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &range, &ptr);
         FAILED(hr)) {
         RADRAY_ABORT("d3d12 cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
     }
-    std::memcpy(ptr, data.data(), data.size());
-    _buf->Unmap(0, &range);
+    return ptr;
 }
 
-void BufferD3D12::CopyImageFromHost(
-    const TextureDescriptor& texDesc,
-    uint32_t baseArrayLayer,
-    uint32_t baseMipLevel,
-    std::span<byte> cpuData,
-    uint64_t bufOffset) noexcept {
-    D3D12_RESOURCE_DESC rawDesc = _device->MapTextureDesc(texDesc);
-    UINT subresStart = D3D12CalcSubresource(baseMipLevel, baseArrayLayer, 0, rawDesc.MipLevels, rawDesc.DepthOrArraySize);
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0, totalBytes = 0;
-    _device->_device->GetCopyableFootprints(
-        &rawDesc,
-        subresStart,
-        1,
-        bufOffset,
-        &layout,
-        &numRows,
-        &rowSizeInBytes,
-        &totalBytes);
-    if (layout.Offset != bufOffset) {
-        RADRAY_ABORT("d3d12 CopyImageFromHost: bufOffset not aligned. expect {} got {}", layout.Offset, bufOffset);
-        return;
-    }
-    UINT rowPitch = layout.Footprint.RowPitch;
-    UINT sliceDepth = layout.Footprint.Depth;
-    UINT64 slicePitch = static_cast<UINT64>(rowPitch) * numRows;
-    const UINT64 cpuTightSize = rowSizeInBytes * numRows * sliceDepth;
-    if (cpuData.size() < cpuTightSize) {
-        RADRAY_ABORT("d3d12 CopyImageFromHost: cpuData not enough. need {} bytes, got {} bytes", cpuTightSize, cpuData.size());
-        return;
-    }
-    D3D12_RANGE mapRange{layout.Offset, layout.Offset + totalBytes};
-    void* mapped = nullptr;
-    if (HRESULT hr = _buf->Map(0, &mapRange, &mapped);
-        FAILED(hr)) {
-        RADRAY_ABORT("d3d12 cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
-        return;
-    }
-    auto* dstBase = reinterpret_cast<uint8_t*>(mapped) + bufOffset;
-    auto* srcBase = reinterpret_cast<const uint8_t*>(cpuData.data());
-    for (UINT z = 0; z < sliceDepth; ++z) {
-        UINT64 srcSliceOffset = static_cast<UINT64>(z) * numRows * rowSizeInBytes;
-        UINT64 dstSliceOffset = static_cast<UINT64>(z) * slicePitch;
-        for (UINT y = 0; y < numRows; ++y) {
-            const uint8_t* srcRow = srcBase + srcSliceOffset + static_cast<UINT64>(y) * rowSizeInBytes;
-            uint8_t* dstRow = dstBase + dstSliceOffset + static_cast<UINT64>(y) * rowPitch;
-            std::memcpy(dstRow, srcRow, static_cast<size_t>(rowSizeInBytes));
-        }
-    }
-    _buf->Unmap(0, &mapRange);
+void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
+    D3D12_RANGE range{offset, offset + size};
+    _buf->Unmap(0, &range);
 }
 
 BufferViewD3D12::BufferViewD3D12(

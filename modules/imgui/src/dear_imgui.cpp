@@ -302,8 +302,8 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
         viewDesc.Target = texObj.get();
         viewDesc.Dim = TextureViewDimension::Dim2D;
         viewDesc.Format = TextureFormat::RGBA8_UNORM;
-        viewDesc.BaseArrayLayer = 0;
-        viewDesc.BaseMipLevel = 0;
+        viewDesc.Range.BaseArrayLayer = 0;
+        viewDesc.Range.BaseMipLevel = 0;
         viewDesc.Usage = TextureUse::Resource;
         shared_ptr<TextureView> srv = _device->CreateTextureView(viewDesc).Unwrap();
 
@@ -327,20 +327,20 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
         IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
         // TODO: upload data
 
-        const int upload_x = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.x;
-        const int upload_y = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.y;
-        const int upload_w = (tex->Status == ImTextureStatus_WantCreate) ? tex->Width : tex->UpdateRect.w;
-        const int upload_h = (tex->Status == ImTextureStatus_WantCreate) ? tex->Height : tex->UpdateRect.h;
-        int upload_pitch_src = upload_w * tex->BytesPerPixel;
-        int upload_size = upload_pitch_src * upload_h;
+        // const int upload_x = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.x;
+        // const int upload_y = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.y;
+        // const int upload_w = (tex->Status == ImTextureStatus_WantCreate) ? tex->Width : tex->UpdateRect.w;
+        // const int upload_h = (tex->Status == ImTextureStatus_WantCreate) ? tex->Height : tex->UpdateRect.h;
+        // int upload_pitch_src = upload_w * tex->BytesPerPixel;
+        // int upload_size = upload_pitch_src * upload_h;
 
-        string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
-        BufferDescriptor uploadDesc{};
-        uploadDesc.Size = upload_size;
-        uploadDesc.Memory = MemoryType::Upload;
-        uploadDesc.Usage = BufferUse::CopySource;
-        uploadDesc.Name = uploadName;
-        shared_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
+        // string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
+        // BufferDescriptor uploadDesc{};
+        // uploadDesc.Size = upload_size;
+        // uploadDesc.Memory = MemoryType::Upload;
+        // uploadDesc.Usage = BufferUse::CopySource;
+        // uploadDesc.Name = uploadName;
+        // shared_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
 
         
     }
