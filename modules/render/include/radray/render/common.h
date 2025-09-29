@@ -512,6 +512,10 @@ struct SubresourceRange {
     uint32_t MipLevelCount;
 
     static constexpr auto All = std::numeric_limits<uint32_t>::max();
+
+    static constexpr SubresourceRange AllSub() noexcept {
+        return SubresourceRange{0, SubresourceRange::All, 0, SubresourceRange::All};
+    }
 };
 
 struct BarrierTextureDescriptor {

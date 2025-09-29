@@ -302,8 +302,7 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
         viewDesc.Target = texObj.get();
         viewDesc.Dim = TextureViewDimension::Dim2D;
         viewDesc.Format = TextureFormat::RGBA8_UNORM;
-        viewDesc.Range.BaseArrayLayer = 0;
-        viewDesc.Range.BaseMipLevel = 0;
+        viewDesc.Range = SubresourceRange::AllSub();
         viewDesc.Usage = TextureUse::Resource;
         shared_ptr<TextureView> srv = _device->CreateTextureView(viewDesc).Unwrap();
 
@@ -311,7 +310,8 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
         tex->SetTexID(texId);
         tex->BackendUserData = texObj.get();
 
-        _texs.emplace(texObj.get(), make_unique<ImGuiDrawTexture>(std::move(texObj), std::move(srv)));
+        auto key = texObj.get();
+        _texs.emplace(key, make_unique<ImGuiDrawTexture>(std::move(texObj), std::move(srv)));
     }
 
     if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
@@ -325,28 +325,63 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
             drawTex = it->second.get();
         }
         IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
-        // TODO: upload data
 
-        // const int upload_x = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.x;
-        // const int upload_y = (tex->Status == ImTextureStatus_WantCreate) ? 0 : tex->UpdateRect.y;
-        // const int upload_w = (tex->Status == ImTextureStatus_WantCreate) ? tex->Width : tex->UpdateRect.w;
-        // const int upload_h = (tex->Status == ImTextureStatus_WantCreate) ? tex->Height : tex->UpdateRect.h;
-        // int upload_pitch_src = upload_w * tex->BytesPerPixel;
-        // int upload_size = upload_pitch_src * upload_h;
+        const int upload_w = tex->Width;
+        const int upload_h = tex->Height;
+        int upload_pitch_src = upload_w * tex->BytesPerPixel;
+        int upload_size = upload_pitch_src * upload_h;
 
-        // string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
-        // BufferDescriptor uploadDesc{};
-        // uploadDesc.Size = upload_size;
-        // uploadDesc.Memory = MemoryType::Upload;
-        // uploadDesc.Usage = BufferUse::CopySource;
-        // uploadDesc.Name = uploadName;
-        // shared_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
+        string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
+        BufferDescriptor uploadDesc{};
+        uploadDesc.Size = Align(upload_size, _device->GetDetail().UploadTextureAlignment);
+        uploadDesc.Memory = MemoryType::Upload;
+        uploadDesc.Usage = BufferUse::CopySource;
+        uploadDesc.Name = uploadName;
+        shared_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
+        {
+            void* dst = uploadBuffer->Map(0, upload_size);
+            std::memcpy(dst, tex->GetPixels(), upload_size);
+            uploadBuffer->Unmap(0, upload_size);
+        }
+        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct).Unwrap();
+        shared_ptr<CommandBuffer> cmdBuffer = _device->CreateCommandBuffer(cmdQueue).Unwrap();
+        cmdBuffer->Begin();
+        {
+            BarrierTextureDescriptor barrierBefore{};
+            barrierBefore.Target = drawTex->_tex.get();
+            barrierBefore.Before = TextureUse::Uninitialized;
+            barrierBefore.After = TextureUse::CopyDestination;
+            barrierBefore.IsFromOrToOtherQueue = false;
+            barrierBefore.IsSubresourceBarrier = false;
+            cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
+        }
+        cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), SubresourceRange::AllSub(), uploadBuffer.get(), 0);
+        {
+            BarrierTextureDescriptor barrierBefore{};
+            barrierBefore.Target = drawTex->_tex.get();
+            barrierBefore.Before = TextureUse::CopyDestination;
+            barrierBefore.After = TextureUse::Resource;
+            barrierBefore.IsFromOrToOtherQueue = false;
+            barrierBefore.IsSubresourceBarrier = false;
+            cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
+        }
+        cmdBuffer->End();
+        CommandQueueSubmitDescriptor submitDesc{};
+        CommandBuffer* cmdBuffers[] = {cmdBuffer.get()};
+        submitDesc.CmdBuffers = cmdBuffers;
+        cmdQueue->Submit(submitDesc);
+        cmdQueue->Wait();
 
-        
+        tex->SetStatus(ImTextureStatus_OK);
     }
 
     if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
-        // TODO: destroy texture
+        auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
+        _texs.erase(texObjPtr);
+
+        tex->SetTexID(ImTextureID_Invalid);
+        tex->SetStatus(ImTextureStatus_Destroyed);
+        tex->BackendUserData = nullptr;
     }
 }
 

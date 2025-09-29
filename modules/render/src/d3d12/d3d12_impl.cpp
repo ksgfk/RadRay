@@ -1677,12 +1677,12 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
     auto dst = CastD3D12Object(dst_);
 
     UINT subres = D3D12CalcSubresource(dstRange.BaseMipLevel, dstRange.BaseArrayLayer, 0, 1, dst->_desc.DepthOrArraySize);
-    const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
+    const D3D12_RESOURCE_DESC& dstDesc = dst->_rawDesc;
 
     D3D12_TEXTURE_COPY_LOCATION srcLoc{};
     srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     srcLoc.pResource = src->_buf.Get();
-    _device->_device->GetCopyableFootprints(&srcDesc, subres, 1, srcOffset, &srcLoc.PlacedFootprint, nullptr, nullptr, nullptr);
+    _device->_device->GetCopyableFootprints(&dstDesc, subres, 1, srcOffset, &srcLoc.PlacedFootprint, nullptr, nullptr, nullptr);
     srcLoc.PlacedFootprint.Offset = srcOffset;
     D3D12_TEXTURE_COPY_LOCATION dstLoc{};
     dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;

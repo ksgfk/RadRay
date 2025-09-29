@@ -69,7 +69,7 @@ public:
         desc.Device = _device.get();
         desc.RTFormat = TextureFormat::RGBA8_UNORM;
         desc.FrameCount = (int)_frames.size();
-        _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
+        // _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
 
         _renderThread = std::thread{&HelloImguiApp::Render, this};
     }
@@ -81,7 +81,7 @@ public:
     void Close() noexcept {
         _renderThread.join();
         _cmdQueue->Wait();
-        _imguiDrawContext.reset();
+        // _imguiDrawContext.reset();
         _frames.clear();
         _swapchain.reset();
         _cmdQueue = nullptr;
@@ -151,7 +151,7 @@ public:
     shared_ptr<SwapChain> _swapchain;
     vector<HelloImguiFrame> _frames;
     uint32_t _currentFrameIndex;
-    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
+    // unique_ptr<ImGuiDrawContext> _imguiDrawContext;
 
     std::thread _renderThread;
     sigslot::connection _resizedCb;
@@ -217,8 +217,8 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 }
 
 int main() {
-    g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    // g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+    // g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
+    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {
@@ -230,6 +230,15 @@ int main() {
         throw HelloImguiException("Unsupported platform");
     }
     InitRendererImGui();
+
+    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
+    {
+        ImGuiDrawDescriptor desc{};
+        desc.Device = g_apps[0]->_device.get();
+        desc.RTFormat = TextureFormat::RGBA8_UNORM;
+        desc.FrameCount = 3;
+        _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
+    }
 
     for (auto& app : g_apps) {
         app->_mainLoopResizeCb = app->_window->EventResized().connect([](int width, int height) {
@@ -260,16 +269,21 @@ int main() {
         }
 
         ImGui_ImplWin32_NewFrame();
+
         ImGui::NewFrame();
         if (g_showDemo) {
             ImGui::ShowDemoWindow(&g_showDemo);
         }
         ImGui::Render();
 
+        _imguiDrawContext->Draw(ImGui::GetDrawData());
+
         std::this_thread::yield();
     }
 
     g_closeSig();
+
+    _imguiDrawContext.reset();
 
     TerminateRendererImGui();
     TerminatePlatformImGui();
