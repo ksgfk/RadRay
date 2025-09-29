@@ -73,6 +73,10 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
 #endif
 
 // imgui shader hlsl
+// .\dxc.exe -all_resources_bound -HV 2021 -O3 -Ges -T vs_6_0 -E VSMain -Qstrip_reflect -Fo imgui_vs.dxil imgui.hlsl
+// .\dxc.exe -all_resources_bound -HV 2021 -O3 -Ges -T ps_6_0 -E PSMain -Qstrip_reflect -Fo imgui_ps.dxil imgui.hlsl
+// .\dxc.exe -spirv -all_resources_bound -HV 2021 -O3 -Ges -T vs_6_0 -E VSMain -Fo imgui_vs.spv imgui.hlsl
+// .\dxc.exe -spirv -all_resources_bound -HV 2021 -O3 -Ges -T ps_6_0 -E PSMain -Fo imgui_ps.spv imgui.hlsl
 /*
 struct VS_INPUT
 {
@@ -88,17 +92,19 @@ struct PS_INPUT
     [[vk::location(1)]] float2 uv  : TEXCOORD0;
 };
 
-cbuffer vertexBuffer : register(b0)
+struct PreObject
 {
     float4x4 ProjectionMatrix;
 };
-SamplerState sampler0 : register(s0);
-Texture2D texture0 : register(t0);
+
+[[vk::push_constant]] PreObject g_preObj : register(b0);
+[[vk::binding(0)]] Texture2D texture0 : register(t0);
+[[vk::binding(1)]] SamplerState sampler0 : register(s0);
 
 PS_INPUT VSMain(VS_INPUT input)
 {
     PS_INPUT output;
-    output.pos = mul( ProjectionMatrix, float4(input.pos.xy, 0.f, 1.f));
+    output.pos = mul(g_preObj.ProjectionMatrix, float4(input.pos.xy, 0.f, 1.f));
     output.col = input.col;
     output.uv  = input.uv;
     return output;

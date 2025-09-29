@@ -143,8 +143,7 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
         return nullptr;
     }
 
-    SamplerDescriptor samplerDesc[1];
-    SamplerDescriptor& sampler = samplerDesc[0];
+    SamplerDescriptor sampler{};
     sampler.AddressS = AddressMode::ClampToEdge;
     sampler.AddressT = AddressMode::ClampToEdge;
     sampler.AddressR = AddressMode::ClampToEdge;
@@ -163,12 +162,16 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     rsTex.Count = 1;
     rsTex.Stages = ShaderStage::Pixel;
     RootSignatureSetElement& rsSampler = rsElems[1];
-    rsSampler.Slot = 0;
+    if (backendType == RenderBackend::D3D12) {
+        rsSampler.Slot = 0;
+    } else if (backendType == RenderBackend::Vulkan) {
+        rsSampler.Slot = 1;
+    }
     rsSampler.Space = 0;
     rsSampler.Type = ResourceBindType::Sampler;
     rsSampler.Count = 1;
     rsSampler.Stages = ShaderStage::Pixel;
-    rsSampler.StaticSamplers = samplerDesc;
+    rsSampler.StaticSamplers = std::span(&sampler, 1);
     RootSignatureBindingSet rsSet;
     rsSet.Elements = rsElems;
     auto layout = device->CreateDescriptorSetLayout(rsSet).Unwrap();
@@ -178,11 +181,10 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     rsConst.Space = 0;
     rsConst.Size = 64;
     rsConst.Stages = ShaderStage::Vertex;
-    DescriptorSetLayout* layouts[1];
-    layouts[0] = layout.get();
+    DescriptorSetLayout* layouts = layout.get();
     RootSignatureDescriptor rsDesc{};
     rsDesc.Constant = rsConst;
-    rsDesc.BindingSets = layouts;
+    rsDesc.BindingSets = std::span(&layouts, 1);
     auto rs = device->CreateRootSignature(rsDesc).Unwrap();
 
     VertexElement vertexElems[3];
@@ -197,17 +199,17 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     uvElem.Semantic = "TEXCOORD";
     uvElem.SemanticIndex = 0;
     uvElem.Format = VertexFormat::FLOAT32X2;
-    uvElem.Location = 0;
+    uvElem.Location = 2;
     VertexElement& colorElem = vertexElems[2];
     colorElem.Offset = offsetof(ImDrawVert, col);
     colorElem.Semantic = "COLOR";
     colorElem.SemanticIndex = 0;
     colorElem.Format = VertexFormat::UNORM8X4;
-    colorElem.Location = 0;
-    VertexBufferLayout vbLayout[1];
-    vbLayout[0].ArrayStride = sizeof(ImDrawVert);
-    vbLayout[0].StepMode = VertexStepMode::Vertex;
-    vbLayout[0].Elements = vertexElems;
+    colorElem.Location = 1;
+    VertexBufferLayout vbLayout{};
+    vbLayout.ArrayStride = sizeof(ImDrawVert);
+    vbLayout.StepMode = VertexStepMode::Vertex;
+    vbLayout.Elements = vertexElems;
     PrimitiveState primState{};
     primState.Topology = PrimitiveTopology::TriangleList;
     primState.FaceClockwise = FrontFace::CW;
@@ -220,7 +222,6 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     msState.Count = 1;
     msState.Mask = std::numeric_limits<uint32_t>::max();
     msState.AlphaToCoverageEnable = false;
-    ColorTargetState rtStates[1];
     BlendState rtBlendState{};
     rtBlendState.Color.Src = BlendFactor::SrcAlpha;
     rtBlendState.Color.Dst = BlendFactor::OneMinusSrcAlpha;
@@ -228,7 +229,7 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     rtBlendState.Alpha.Src = BlendFactor::One;
     rtBlendState.Alpha.Dst = BlendFactor::OneMinusSrcAlpha;
     rtBlendState.Alpha.Op = BlendOperation::Add;
-    ColorTargetState& rtState = rtStates[0];
+    ColorTargetState rtState{};
     rtState.Format = desc.RTFormat;
     rtState.Blend = rtBlendState;
     rtState.WriteMask = ColorWrite::All;
@@ -236,11 +237,11 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     psoDesc.RootSig = rs.get();
     psoDesc.VS = ShaderEntry{shaderVS.get(), "VSMain"};
     psoDesc.PS = ShaderEntry{shaderPS.get(), "PSMain"};
-    psoDesc.VertexLayouts = vbLayout;
+    psoDesc.VertexLayouts = std::span(&vbLayout, 1);
     psoDesc.Primitive = primState;
     psoDesc.DepthStencil = std::nullopt;
     psoDesc.MultiSample = msState;
-    psoDesc.ColorTargets = rtStates;
+    psoDesc.ColorTargets = std::span(&rtState, 1);
     auto pso = device->CreateGraphicsPipelineState(psoDesc).Unwrap();
 
     auto result = make_unique<ImGuiDrawContext>();
