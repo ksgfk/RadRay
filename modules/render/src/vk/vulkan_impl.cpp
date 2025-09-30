@@ -406,6 +406,7 @@ Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
         RADRAY_ERR_LOG("vk failed to create buffer: {}", vr);
         return nullptr;
     }
+    this->SetObjectName(desc.Name, vkBuf);
     auto result = make_shared<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
     result->_mdesc = desc;
     result->_rawInfo = bufInfo;
@@ -503,6 +504,7 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
         RADRAY_ERR_LOG("vk failed to create image: {}", vr);
         return nullptr;
     }
+    this->SetObjectName(desc.Name, vkImg);
     auto result = make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
     result->_mdesc = desc;
     result->_rawInfo = imgInfo;
@@ -1149,6 +1151,30 @@ Nullable<unique_ptr<DescriptorPoolVulkan>> DeviceVulkan::CreateDescriptorPool() 
 
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
     return _instance->GetAllocationCallbacks();
+}
+
+void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void* vkObject) const noexcept {
+    bool hasDebugUtils = false;
+    for (const string& ext : _instance->_exts) {
+        if (ext == VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
+            hasDebugUtils = true;
+            break;
+        }
+    }
+    if (!hasDebugUtils) {
+        return;
+    }
+    if (vkSetDebugUtilsObjectNameEXT == nullptr) {
+        return;
+    }
+    std::string cpyName{name};
+    VkDebugUtilsObjectNameInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    info.pNext = nullptr;
+    info.objectType = type;
+    info.objectHandle = std::bit_cast<uint64_t>(vkObject);
+    info.pObjectName = cpyName.c_str();
+    vkSetDebugUtilsObjectNameEXT(_device, &info);
 }
 
 void DeviceVulkan::DestroyImpl() noexcept {
@@ -2091,6 +2117,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
         return nullptr;
     }
     auto passR = passOpt.Release();
+    _device->SetObjectName(desc.Name, passR->_renderPass);
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.pNext = nullptr;
@@ -2683,7 +2710,7 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
 void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
-    if (_allocInfo.pMappedData && !_mdesc.Usage.HasFlag(BufferUse::MapWrite)) {
+    if (!_allocInfo.pMappedData && !_mdesc.Usage.HasFlag(BufferUse::MapWrite)) {
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
     }
 }

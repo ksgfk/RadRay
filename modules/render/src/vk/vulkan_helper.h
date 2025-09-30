@@ -28,13 +28,126 @@
 #include <vulkan/vulkan.h>
 #include <volk.h>
 #pragma clang diagnostic push
-#pragma clang diagnostic ignored  "-Wnullability-completeness"
-#pragma clang diagnostic ignored  "-Wunused-parameter"
-#pragma clang diagnostic ignored  "-Wmissing-field-initializers"
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #include <vk_mem_alloc.h>
 #pragma clang diagnostic pop
 
 namespace radray::render::vulkan {
+
+template <class T>
+struct VulkanObjectTrait {
+    static_assert(false, "unknown vulkan object type");
+};
+
+template <class T>
+struct VulkanObjectTrait<T const> : VulkanObjectTrait<T> {};
+template <class T>
+struct VulkanObjectTrait<T volatile> : VulkanObjectTrait<T> {};
+template <class T>
+struct VulkanObjectTrait<T const volatile> : VulkanObjectTrait<T> {};
+
+template <>
+struct VulkanObjectTrait<VkInstance> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_INSTANCE;
+};
+template <>
+struct VulkanObjectTrait<VkPhysicalDevice> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+};
+template <>
+struct VulkanObjectTrait<VkDevice> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DEVICE;
+};
+template <>
+struct VulkanObjectTrait<VkQueue> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_QUEUE;
+};
+template <>
+struct VulkanObjectTrait<VkSemaphore> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SEMAPHORE;
+};
+template <>
+struct VulkanObjectTrait<VkCommandBuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_COMMAND_BUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkFence> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_FENCE;
+};
+template <>
+struct VulkanObjectTrait<VkDeviceMemory> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DEVICE_MEMORY;
+};
+template <>
+struct VulkanObjectTrait<VkBuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_BUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkImage> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_IMAGE;
+};
+template <>
+struct VulkanObjectTrait<VkEvent> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_EVENT;
+};
+template <>
+struct VulkanObjectTrait<VkQueryPool> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_QUERY_POOL;
+};
+template <>
+struct VulkanObjectTrait<VkBufferView> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_BUFFER_VIEW;
+};
+template <>
+struct VulkanObjectTrait<VkImageView> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_IMAGE_VIEW;
+};
+template <>
+struct VulkanObjectTrait<VkShaderModule> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SHADER_MODULE;
+};
+template <>
+struct VulkanObjectTrait<VkPipelineCache> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_CACHE;
+};
+template <>
+struct VulkanObjectTrait<VkPipelineLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
+};
+template <>
+struct VulkanObjectTrait<VkRenderPass> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_RENDER_PASS;
+};
+template <>
+struct VulkanObjectTrait<VkPipeline> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE;
+};
+template <>
+struct VulkanObjectTrait<VkDescriptorSetLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+};
+template <>
+struct VulkanObjectTrait<VkSampler> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SAMPLER;
+};
+template <>
+struct VulkanObjectTrait<VkDescriptorPool> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_POOL;
+};
+template <>
+struct VulkanObjectTrait<VkDescriptorSet> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
+};
+template <>
+struct VulkanObjectTrait<VkFramebuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_FRAMEBUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkCommandPool> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_COMMAND_POOL;
+};
 
 template <typename T, typename TAllocator, typename TFunc, typename... Args>
 requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::invoke_result_t<TFunc, Args..., uint32_t*, T*>, void>

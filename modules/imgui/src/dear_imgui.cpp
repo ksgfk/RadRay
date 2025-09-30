@@ -295,7 +295,7 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
         texDesc.DepthOrArraySize = 1;
         texDesc.MipLevels = 1;
         texDesc.Format = TextureFormat::RGBA8_UNORM;
-        texDesc.Usage = TextureUse::Resource;
+        texDesc.Usage = TextureUse::Resource | TextureUse::CopyDestination;
         texDesc.Name = texName;
         shared_ptr<Texture> texObj = _device->CreateTexture(texDesc).Unwrap();
 
@@ -344,7 +344,7 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
             std::memcpy(dst, tex->GetPixels(), upload_size);
             uploadBuffer->Unmap(0, upload_size);
         }
-        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Direct).Unwrap();
+        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Copy).Unwrap();
         shared_ptr<CommandBuffer> cmdBuffer = _device->CreateCommandBuffer(cmdQueue).Unwrap();
         cmdBuffer->Begin();
         {
@@ -356,7 +356,12 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
             barrierBefore.IsSubresourceBarrier = false;
             cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
         }
-        cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), SubresourceRange::AllSub(), uploadBuffer.get(), 0);
+        SubresourceRange range{};
+        range.BaseArrayLayer = 0;
+        range.ArrayLayerCount = 1;
+        range.BaseMipLevel = 0;
+        range.MipLevelCount = 1;
+        cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), range, uploadBuffer.get(), 0);
         {
             BarrierTextureDescriptor barrierBefore{};
             barrierBefore.Target = drawTex->_tex.get();

@@ -159,6 +159,12 @@ public:
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
+    void SetObjectName(std::string_view name, VkObjectType type, void* vkObject) const noexcept;
+    template <class T>
+    void SetObjectName(std::string_view name, T vkObject) const noexcept {
+        SetObjectName(name, VulkanObjectTrait<T>::type, vkObject);
+    }
+
     void DestroyImpl() noexcept;
 
     InstanceVulkanImpl* _instance;

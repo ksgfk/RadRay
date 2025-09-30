@@ -202,7 +202,9 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         insDesc.EngineVersion = 1;
         insDesc.IsEnableDebugLayer = true;
         instance = CreateVulkanInstance(insDesc).Unwrap();
-        VulkanCommandQueueDescriptor queueDesc[] = {{QueueType::Direct, 1}};
+        VulkanCommandQueueDescriptor queueDesc[] = {
+            {QueueType::Direct, 1},
+            {QueueType::Copy, 1}};
         VulkanDeviceDescriptor devDesc{};
         devDesc.Queues = queueDesc;
         device = CreateDevice(devDesc).Unwrap();
