@@ -1531,7 +1531,9 @@ void CmdListD3D12::Begin() noexcept {
     _cmdAlloc->Reset();
     _cmdList->Reset(_cmdAlloc.Get(), nullptr);
     ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
-    _cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
+    if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
+        _cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
+    }
 }
 
 void CmdListD3D12::End() noexcept {

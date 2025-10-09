@@ -1,6 +1,7 @@
 #include <thread>
 #include <mutex>
 #include <stdexcept>
+#include <atomic>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -19,11 +20,9 @@ class HelloImguiFrame;
 class HelloImguiApp;
 
 vector<unique_ptr<HelloImguiApp>> g_apps;
-bool g_anyResize = false;
-bool g_lastAnyResize = false;
-WindowVec2i g_lastSize;
 sigslot::signal<> g_closeSig;
 bool g_showDemo = true;
+std::atomic_bool g_isBroadcastingResize{false};
 
 class HelloImguiException : public std::runtime_error {
 public:
@@ -105,7 +104,16 @@ public:
             if (params.isCloseRequested) {
                 break;
             }
-
+            if (params.isResizing) {
+                continue;
+            }
+            if (params.isResized) {
+                std::lock_guard lock(_mutex);
+                _cmdQueue->Wait();
+                SetSwapChain();
+                _safeParams.isResized = false;
+                continue;
+            }
             Nullable<Texture*> acqTex = _swapchain->AcquireNext();
             if (acqTex == nullptr) {
                 continue;
@@ -123,6 +131,7 @@ public:
     void OnResized(int, int) {
         std::lock_guard lock(_mutex);
         _safeParams.isResizing = false;
+        _safeParams.isResized = true;
     }
 
     void OnGlobalClose() {
@@ -144,6 +153,8 @@ public:
         _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     }
 
+    bool _isMain;
+
     unique_ptr<NativeWindow> _window;
     unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
@@ -162,11 +173,12 @@ public:
     mutable std::mutex _mutex{};
     struct ThreadSafeParams {
         bool isResizing = false;
+        bool isResized = false;
         bool isCloseRequested = false;
     } _safeParams;
 };
 
-unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
+unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend, bool isMain) {
     unique_ptr<NativeWindow> window;
     PlatformId platform = GetPlatform();
     if (platform == PlatformId::Windows) {
@@ -203,8 +215,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         insDesc.IsEnableDebugLayer = true;
         instance = CreateVulkanInstance(insDesc).Unwrap();
         VulkanCommandQueueDescriptor queueDesc[] = {
-            {QueueType::Direct, 1},
-            {QueueType::Copy, 1}};
+            {QueueType::Direct, 1}};
         VulkanDeviceDescriptor devDesc{};
         devDesc.Queues = queueDesc;
         device = CreateDevice(devDesc).Unwrap();
@@ -215,12 +226,13 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         throw HelloImguiException("Failed to create device");
     }
     auto result = make_unique<HelloImguiApp>(std::move(window), std::move(instance), std::move(device));
+    result->_isMain = isMain;
     return result;
 }
 
 int main() {
-    // g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+    g_apps.emplace_back(CreateApp(RenderBackend::D3D12, true));
+    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan, false));
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {
@@ -233,29 +245,32 @@ int main() {
     }
     InitRendererImGui();
 
-    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
-    {
-        ImGuiDrawDescriptor desc{};
-        desc.Device = g_apps[0]->_device.get();
-        desc.RTFormat = TextureFormat::RGBA8_UNORM;
-        desc.FrameCount = 3;
-        _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
-    }
+    // unique_ptr<ImGuiDrawContext> _imguiDrawContext;
+    // {
+    //     ImGuiDrawDescriptor desc{};
+    //     desc.Device = g_apps[0]->_device.get();
+    //     desc.RTFormat = TextureFormat::RGBA8_UNORM;
+    //     desc.FrameCount = 3;
+    //     _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
+    // }
 
-    for (auto& app : g_apps) {
-        app->_mainLoopResizeCb = app->_window->EventResized().connect([](int width, int height) {
-            g_anyResize = true;
-            g_lastSize = {width, height};
-        });
+    {
+        for (auto& app : g_apps) {
+            HelloImguiApp* self = app.get();
+            app->_mainLoopResizeCb = app->_window->EventResized().connect([self](int w, int h) {
+                if (g_isBroadcastingResize.exchange(true)) {
+                    return;
+                }
+                for (const auto& other : g_apps) {
+                    if (other.get() != self) {
+                        other->_window->SetSize(w, h);
+                    }
+                }
+                g_isBroadcastingResize = false;
+            });
+        }
     }
     while (true) {
-        if (g_lastAnyResize) {
-            for (const auto& app : g_apps) {
-                app->_window->SetSize(g_lastSize.X, g_lastSize.Y);
-            }
-        }
-        g_lastAnyResize = g_anyResize;
-        g_anyResize = false;
         for (const auto& app : g_apps) {
             app->_window->DispatchEvents();
         }
@@ -278,14 +293,14 @@ int main() {
         }
         ImGui::Render();
 
-        _imguiDrawContext->Draw(ImGui::GetDrawData());
+        // _imguiDrawContext->Draw(ImGui::GetDrawData());
 
         std::this_thread::yield();
     }
 
     g_closeSig();
 
-    _imguiDrawContext.reset();
+    // _imguiDrawContext.reset();
 
     TerminateRendererImGui();
     TerminatePlatformImGui();
