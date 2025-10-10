@@ -42,13 +42,28 @@ public:
 
 class ImGuiDrawContext {
 public:
-    void Draw(ImDrawData* drawData);
-    void UpdateTexture(ImTextureData* tex);
+    void NewFrame();
+    void EndFrame();
+    void UpdateDrawData(ImDrawData* drawData, render::CommandBuffer* cmdBuffer);
+    void EndUpdateDrawData(ImDrawData* drawData);
+    void UpdateTexture(ImTextureData* tex, render::CommandBuffer* cmdBuffer);
+    // void Draw(ImDrawData* drawData, render::CommandBuffer* cmdBuffer);
+
+    class Frame {
+    public:
+        vector<shared_ptr<render::Buffer>> _uploads;
+        shared_ptr<render::Buffer> _vb;
+        shared_ptr<render::Buffer> _ib;
+        int32_t _vbSize{0};
+        int32_t _ibSize{0};
+    };
 
     render::Device* _device;
     shared_ptr<render::DescriptorSetLayout> _rsLayout;
     shared_ptr<render::RootSignature> _rs;
     shared_ptr<render::GraphicsPipelineState> _pso;
+    vector<Frame> _frames;
+    uint64_t _currentFrameIndex{0};
     unordered_map<render::Texture*, unique_ptr<ImGuiDrawTexture>> _texs;
 
     ImGuiDrawDescriptor _desc;

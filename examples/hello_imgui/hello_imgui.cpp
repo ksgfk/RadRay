@@ -1,7 +1,8 @@
 #include <thread>
 #include <mutex>
-#include <stdexcept>
 #include <atomic>
+#include <condition_variable>
+#include <stdexcept>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -22,7 +23,6 @@ class HelloImguiApp;
 vector<unique_ptr<HelloImguiApp>> g_apps;
 sigslot::signal<> g_closeSig;
 bool g_showDemo = true;
-std::atomic_bool g_isBroadcastingResize{false};
 
 class HelloImguiException : public std::runtime_error {
 public:
@@ -40,7 +40,10 @@ private:
 
 class HelloImguiFrame {
 public:
-    shared_ptr<CommandBuffer> _cmdBuffer;
+    shared_ptr<CommandBuffer> _cmdBuffer{};
+    std::mutex _mtx{};
+    std::condition_variable _cv{};
+    std::atomic_bool _isWaiting{false};
 };
 
 class HelloImguiApp {
@@ -60,15 +63,17 @@ public:
         SetSwapChain();
         _frames.reserve(_swapchain->GetBackBufferCount());
         for (size_t i = 0; i < _swapchain->GetBackBufferCount(); ++i) {
-            auto& f = _frames.emplace_back();
-            f._cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
+            auto& f = _frames.emplace_back(std::make_unique<HelloImguiFrame>());
+            f->_cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
-        _currentFrameIndex = 0;
+        _currentRenderFrameIndex = 0;
+        _currentLogicFrameIndex = 0;
+
         ImGuiDrawDescriptor desc{};
         desc.Device = _device.get();
         desc.RTFormat = TextureFormat::RGBA8_UNORM;
         desc.FrameCount = (int)_frames.size();
-        // _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
+        _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
 
         _renderThread = std::thread{&HelloImguiApp::Render, this};
     }
@@ -78,9 +83,12 @@ public:
     }
 
     void Close() noexcept {
+        for (auto& frame : _frames) {
+            frame->_cv.notify_one();
+        }
         _renderThread.join();
         _cmdQueue->Wait();
-        // _imguiDrawContext.reset();
+        _imguiDrawContext.reset();
         _frames.clear();
         _swapchain.reset();
         _cmdQueue = nullptr;
@@ -94,32 +102,54 @@ public:
     }
 
     void Render() {
-        while (true) {
-            ThreadSafeParams params;
-            {
-                std::lock_guard lock(_mutex);
-                params = _safeParams;
-            }
+        auto readParam = [this]() {
+            std::lock_guard lock(_mutex);
+            return _safeParams;
+        };
 
-            if (params.isCloseRequested) {
-                break;
-            }
-            if (params.isResizing) {
-                continue;
-            }
-            if (params.isResized) {
-                std::lock_guard lock(_mutex);
-                _cmdQueue->Wait();
-                SetSwapChain();
-                _safeParams.isResized = false;
-                continue;
+        while (true) {
+            {
+                auto [isResizing, isResized, isCloseRequested] = readParam();
+                if (isCloseRequested) {
+                    break;
+                }
+                if (isResizing) {
+                    continue;
+                }
+                if (isResized) {
+                    std::lock_guard lock(_mutex);
+                    _cmdQueue->Wait();
+                    SetSwapChain();
+                    _safeParams.isResized = false;
+                    continue;
+                }
             }
             Nullable<Texture*> acqTex = _swapchain->AcquireNext();
             if (acqTex == nullptr) {
                 continue;
             }
+            auto& currFrame = _frames[_currentRenderFrameIndex];
+            {
+                std::unique_lock<std::mutex> lk{currFrame->_mtx};
+                currFrame->_isWaiting = true;
+                currFrame->_cv.wait(lk);
+                auto [isResizing, isResized, isCloseRequested] = readParam();
+                if (isCloseRequested) {
+                    break;
+                }
+                if (isResizing) {
+                    continue;
+                }
+                currFrame->_isWaiting = false;
+            }
+            {
+                CommandQueueSubmitDescriptor submitDesc{};
+                auto cmdBuffer = currFrame->_cmdBuffer.get();
+                submitDesc.CmdBuffers = std::span{&cmdBuffer, 1};
+                _cmdQueue->Submit(submitDesc);
+            }
             _swapchain->Present();
-            _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+            _currentRenderFrameIndex = (_currentRenderFrameIndex + 1) % _frames.size();
         }
     }
 
@@ -153,16 +183,15 @@ public:
         _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     }
 
-    bool _isMain;
-
     unique_ptr<NativeWindow> _window;
     unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
     CommandQueue* _cmdQueue;
     shared_ptr<SwapChain> _swapchain;
-    vector<HelloImguiFrame> _frames;
-    uint32_t _currentFrameIndex;
-    // unique_ptr<ImGuiDrawContext> _imguiDrawContext;
+    vector<unique_ptr<HelloImguiFrame>> _frames;
+    uint64_t _currentRenderFrameIndex;
+    uint64_t _currentLogicFrameIndex;
+    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
 
     std::thread _renderThread;
     sigslot::connection _resizedCb;
@@ -178,7 +207,7 @@ public:
     } _safeParams;
 };
 
-unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend, bool isMain) {
+unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     unique_ptr<NativeWindow> window;
     PlatformId platform = GetPlatform();
     if (platform == PlatformId::Windows) {
@@ -226,13 +255,12 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend, bool isMain) {
         throw HelloImguiException("Failed to create device");
     }
     auto result = make_unique<HelloImguiApp>(std::move(window), std::move(instance), std::move(device));
-    result->_isMain = isMain;
     return result;
 }
 
 int main() {
-    g_apps.emplace_back(CreateApp(RenderBackend::D3D12, true));
-    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan, false));
+    g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
+    // g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {
@@ -244,29 +272,15 @@ int main() {
         throw HelloImguiException("Unsupported platform");
     }
     InitRendererImGui();
-
-    // unique_ptr<ImGuiDrawContext> _imguiDrawContext;
-    // {
-    //     ImGuiDrawDescriptor desc{};
-    //     desc.Device = g_apps[0]->_device.get();
-    //     desc.RTFormat = TextureFormat::RGBA8_UNORM;
-    //     desc.FrameCount = 3;
-    //     _imguiDrawContext = CreateImGuiDrawContext(desc).Unwrap();
-    // }
-
     {
         for (auto& app : g_apps) {
             HelloImguiApp* self = app.get();
             app->_mainLoopResizeCb = app->_window->EventResized().connect([self](int w, int h) {
-                if (g_isBroadcastingResize.exchange(true)) {
-                    return;
-                }
                 for (const auto& other : g_apps) {
                     if (other.get() != self) {
                         other->_window->SetSize(w, h);
                     }
                 }
-                g_isBroadcastingResize = false;
             });
         }
     }
@@ -293,14 +307,25 @@ int main() {
         }
         ImGui::Render();
 
-        // _imguiDrawContext->Draw(ImGui::GetDrawData());
+        for (const auto& app : g_apps) {
+            auto& frame = app->_frames[app->_currentLogicFrameIndex];
+            if (!frame->_isWaiting) {
+                continue;
+            }
+            frame->_cmdBuffer->Begin();
+            app->_imguiDrawContext->NewFrame();
+            app->_imguiDrawContext->UpdateDrawData(ImGui::GetDrawData(), frame->_cmdBuffer.get());
+            app->_imguiDrawContext->EndUpdateDrawData(ImGui::GetDrawData());
+            app->_imguiDrawContext->EndFrame();
+            frame->_cmdBuffer->End();
+            app->_currentLogicFrameIndex = (app->_currentLogicFrameIndex + 1) % app->_frames.size();
+            frame->_cv.notify_one();
+        }
 
         std::this_thread::yield();
     }
 
     g_closeSig();
-
-    // _imguiDrawContext.reset();
 
     TerminateRendererImGui();
     TerminatePlatformImGui();

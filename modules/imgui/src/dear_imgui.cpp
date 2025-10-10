@@ -250,6 +250,10 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     result->_rs = rs;
     result->_pso = pso;
     result->_desc = desc;
+    result->_frames.reserve(desc.FrameCount);
+    for (int i = 0; i < desc.FrameCount; i++) {
+        result->_frames.emplace_back(ImGuiDrawContext::Frame{});
+    }
     return result;
 }
 
@@ -264,23 +268,96 @@ ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
     _tex.reset();
 }
 
-void ImGuiDrawContext::Draw(ImDrawData* draw_data) {
-    if (draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f) {
+void ImGuiDrawContext::NewFrame() {
+    auto& frame = _frames[_currentFrameIndex];
+    frame._uploads.clear();
+}
+
+void ImGuiDrawContext::EndFrame() {
+    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+}
+
+void ImGuiDrawContext::UpdateDrawData(ImDrawData* drawData, render::CommandBuffer* cmdBuffer) {
+    using namespace ::radray::render;
+
+    if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
-
-    if (draw_data->Textures != nullptr) {
-        for (ImTextureData* tex : *draw_data->Textures) {
+    auto& frame = _frames[_currentFrameIndex];
+    if (drawData->Textures != nullptr) {
+        for (ImTextureData* tex : *drawData->Textures) {
             if (tex->Status != ImTextureStatus_OK) {
-                this->UpdateTexture(tex);
+                this->UpdateTexture(tex, cmdBuffer);
             }
         }
     }
-
-    // TODO: draw
+    if (frame._vb == nullptr || frame._vbSize < drawData->TotalVtxCount) {
+        int vertCount = drawData->TotalVtxCount + 5000;
+        BufferDescriptor desc{};
+        desc.Size = vertCount * sizeof(ImDrawVert);
+        desc.Memory = MemoryType::Upload;
+        desc.Usage = BufferUse::Vertex | BufferUse::CopySource;
+        desc.Hints = ResourceHint::Dedicated;
+        string vbName = radray::format("imgui_vb_{}", _currentFrameIndex);
+        desc.Name = vbName;
+        frame._vb = _device->CreateBuffer(desc).Unwrap();
+        frame._vbSize = vertCount;
+    }
+    if (frame._ib == nullptr || frame._ibSize < drawData->TotalIdxCount) {
+        int idxCount = drawData->TotalIdxCount + 10000;
+        BufferDescriptor desc{};
+        desc.Size = idxCount * sizeof(ImDrawIdx);
+        desc.Memory = MemoryType::Upload;
+        desc.Usage = BufferUse::Index | BufferUse::CopySource;
+        desc.Hints = ResourceHint::Dedicated;
+        string ibName = radray::format("imgui_ib_{}", _currentFrameIndex);
+        desc.Name = ibName;
+        frame._ib = _device->CreateBuffer(desc).Unwrap();
+        frame._ibSize = idxCount;
+    }
+    {
+        void* dst = frame._vb->Map(0, drawData->TotalVtxCount * sizeof(ImDrawVert));
+        for (const ImDrawList* drawList : drawData->CmdLists) {
+            std::memcpy(dst, drawList->VtxBuffer.Data, drawList->VtxBuffer.Size * sizeof(ImDrawVert));
+            dst = static_cast<ImDrawVert*>(dst) + drawList->VtxBuffer.Size;
+        }
+        frame._vb->Unmap(0, drawData->TotalVtxCount * sizeof(ImDrawVert));
+    }
+    {
+        void* dst = frame._ib->Map(0, drawData->TotalIdxCount * sizeof(ImDrawIdx));
+        for (const ImDrawList* drawList : drawData->CmdLists) {
+            std::memcpy(dst, drawList->IdxBuffer.Data, drawList->IdxBuffer.Size * sizeof(ImDrawIdx));
+            dst = static_cast<ImDrawIdx*>(dst) + drawList->IdxBuffer.Size;
+        }
+        frame._ib->Unmap(0, drawData->TotalIdxCount * sizeof(ImDrawIdx));
+    }
 }
 
-void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
+void ImGuiDrawContext::EndUpdateDrawData(ImDrawData* drawData) {
+    using namespace ::radray::render;
+
+    if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
+        return;
+    }
+    if (drawData->Textures != nullptr) {
+        for (ImTextureData* tex : *drawData->Textures) {
+            if (tex->Status != ImTextureStatus_OK) {
+                if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
+                    tex->SetStatus(ImTextureStatus_OK);
+                }
+                if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
+                    auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
+                    _texs.erase(texObjPtr);
+                    tex->SetTexID(ImTextureID_Invalid);
+                    tex->SetStatus(ImTextureStatus_Destroyed);
+                    tex->BackendUserData = nullptr;
+                }
+            }
+        }
+    }
+}
+
+void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* cmdBuffer) {
     using namespace ::radray::render;
 
     if (tex->Status == ImTextureStatus_WantCreate) {
@@ -344,9 +421,6 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
             std::memcpy(dst, tex->GetPixels(), upload_size);
             uploadBuffer->Unmap(0, upload_size);
         }
-        CommandQueue* cmdQueue = _device->GetCommandQueue(QueueType::Copy).Unwrap();
-        shared_ptr<CommandBuffer> cmdBuffer = _device->CreateCommandBuffer(cmdQueue).Unwrap();
-        cmdBuffer->Begin();
         {
             BarrierTextureDescriptor barrierBefore{};
             barrierBefore.Target = drawTex->_tex.get();
@@ -371,25 +445,30 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex) {
             barrierBefore.IsSubresourceBarrier = false;
             cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
         }
-        cmdBuffer->End();
-        CommandQueueSubmitDescriptor submitDesc{};
-        CommandBuffer* cmdBuffers[] = {cmdBuffer.get()};
-        submitDesc.CmdBuffers = cmdBuffers;
-        cmdQueue->Submit(submitDesc);
-        cmdQueue->Wait();
 
-        tex->SetStatus(ImTextureStatus_OK);
-    }
-
-    if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
-        auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
-        _texs.erase(texObjPtr);
-
-        tex->SetTexID(ImTextureID_Invalid);
-        tex->SetStatus(ImTextureStatus_Destroyed);
-        tex->BackendUserData = nullptr;
+        auto& frame = _frames[_currentFrameIndex];
+        frame._uploads.emplace_back(std::move(uploadBuffer));
     }
 }
+
+// void ImGuiDrawContext::Draw(ImDrawData* draw_data, render::CommandBuffer* cmdBuffer) {
+//     using namespace ::radray::render;
+
+//     RenderPassDescriptor rpDesc{};
+//     auto pass = cmdBuffer->BeginRenderPass(rpDesc);
+
+//     float L = draw_data->DisplayPos.x;
+//     float R = draw_data->DisplayPos.x + draw_data->DisplaySize.x;
+//     float T = draw_data->DisplayPos.y;
+//     float B = draw_data->DisplayPos.y + draw_data->DisplaySize.y;
+
+//     Viewport vp{};
+//     vp.Width = draw_data->DisplaySize.x * draw_data->FramebufferScale.x;
+//     vp.Height = draw_data->DisplaySize.y * draw_data->FramebufferScale.y;
+//     vp.MinDepth = 0.0f;
+//     vp.MaxDepth = 1.0f;
+//     pass->SetViewport(vp);
+// }
 
 }  // namespace radray
 
