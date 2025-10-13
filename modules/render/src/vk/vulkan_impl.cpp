@@ -2711,6 +2711,7 @@ void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
     if (!_allocInfo.pMappedData && !_mdesc.Usage.HasFlag(BufferUse::MapWrite)) {
+        vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, size);
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
     }
 }

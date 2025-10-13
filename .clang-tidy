@@ -1,0 +1,10 @@
+Checks: "
+        -*,
+        clang-analyzer-*, 
+        cppcoreguidelines-*,
+        modernize-*,
+        performance-*,
+        -cppcoreguidelines-avoid-do-while,
+        -cppcoreguidelines-pro-type-union-access,
+        -modernize-use-trailing-return-type,
+        "

@@ -22,13 +22,24 @@ install extensions: C/C++ Extension Pack, clangd
 
 ```json
 {
-    "C_Cpp.codeAnalysis.runAutomatically": false,
+    "xmake.additionalConfigArguments": [],
+    "C_Cpp.codeAnalysis.runAutomatically": true,
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.formatting": "disabled",
     "C_Cpp.autoAddFileAssociations": false,
     "C_Cpp.autocompleteAddParentheses": false,
     "C_Cpp.autocomplete": "disabled",
     "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.codeFolding": "disabled",
+    "C_Cpp.configurationWarnings": "disabled",
+    "C_Cpp.default.enableConfigurationSquiggles": false,
+    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+    "C_Cpp.codeAnalysis.clangTidy.args": [
+        "--config-file=${workspaceFolder}/.clang-tidy",
+        "-p",
+        "${workspaceFolder}/.vscode"
+    ],
+    "clangd.enable": true,
     "clangd.arguments": [
         "--compile-commands-dir=${workspaceFolder}/.vscode",
         "--log=error",
@@ -38,13 +49,12 @@ install extensions: C/C++ Extension Pack, clangd
         "--header-insertion=never",
         "--pch-storage=memory"
     ],
-        "VSCodeCounter.exclude": [
+    "VSCodeCounter.exclude": [
         "**/.gitignore",
         "**/.vscode/**",
-        "**/build**/**",
-        "**/assets/**",
-        "**/third_party/**",
-    ],
+        "**/node_modules/**",
+        "**/build_debug/**",
+    ]
 }
 ```
 

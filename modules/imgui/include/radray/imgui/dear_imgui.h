@@ -26,6 +26,10 @@ public:
 class ImGuiDrawTexture {
 public:
     ImGuiDrawTexture(shared_ptr<render::Texture> tex, shared_ptr<render::TextureView> srv) noexcept;
+    ImGuiDrawTexture(const ImGuiDrawTexture&) = default;
+    ImGuiDrawTexture& operator=(const ImGuiDrawTexture&) = default;
+    ImGuiDrawTexture(ImGuiDrawTexture&&) = default;
+    ImGuiDrawTexture& operator=(ImGuiDrawTexture&&) = default;
     ~ImGuiDrawTexture() noexcept;
 
 public:
