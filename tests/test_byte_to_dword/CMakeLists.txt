@@ -1,4 +1,5 @@
 add_executable(test_byte_to_dword test_byte_to_dword.cpp)
 target_link_libraries(test_byte_to_dword radraycore GTest::gtest_main)
 gtest_discover_tests(test_byte_to_dword)
+radray_compile_flag_auto_simd(test_byte_to_dword)
 radray_set_build_path(test_byte_to_dword)

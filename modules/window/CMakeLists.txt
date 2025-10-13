@@ -11,4 +11,6 @@ target_link_libraries(radraywindow PUBLIC
     radraycore)
 target_compile_options(radraywindow PRIVATE
     $<$<BOOL:MSVC>:/W4>)
+radray_compile_flag_auto_simd(radraywindow)
+radray_compile_flag_lto(radraywindow)
 radray_set_build_path(radraywindow)

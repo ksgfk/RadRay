@@ -12,4 +12,6 @@ target_compile_options(radrayimgui PRIVATE
     $<$<BOOL:MSVC>:/W4>)
 target_compile_definitions(radrayimgui PUBLIC
     RADRAY_ENABLE_IMGUI)
+radray_compile_flag_auto_simd(radrayimgui)
+radray_compile_flag_lto(radrayimgui)
 radray_set_build_path(radrayimgui)

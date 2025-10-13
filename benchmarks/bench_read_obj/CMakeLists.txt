@@ -1,3 +1,6 @@
 add_executable(bench_read_obj bench_read_obj.cpp)
 target_link_libraries(bench_read_obj PRIVATE radraycore benchmark::benchmark)
+radray_compile_flag_auto_simd(bench_read_obj)
+radray_compile_flag_lto(bench_read_obj)
+radray_link_flag_lto(bench_read_obj)
 radray_set_build_path(bench_read_obj)

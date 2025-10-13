@@ -6,6 +6,8 @@ endif()
 
 project(RadRay)
 
+include(cmake/Utility.cmake)
+
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -42,14 +44,6 @@ option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADRAY_ENABLE_ZLIB AND RADRAY_ENABLE_LIBPNG" OFF)
 
-function(radray_set_build_path TARGET)
-    set_target_properties(${TARGET} PROPERTIES
-        ARCHIVE_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
-        LIBRARY_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
-        RUNTIME_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH}
-        PDB_OUTPUT_DIRECTORY ${RADRAY_BUILD_PATH})
-endfunction()
-
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 include(FetchContent)
@@ -58,8 +52,7 @@ set(FMT_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 11.2.0
-    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
+    GIT_TAG 12.0.0
     OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(fmt)
 radray_set_build_path(fmt)
@@ -71,17 +64,16 @@ set(SPDLOG_DISABLE_DEFAULT_LOGGER ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.15.3
-    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    GIT_TAG v1.16.0)
 FetchContent_MakeAvailable(spdlog)
 radray_set_build_path(spdlog)
+set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     eigen
     GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG 3.4
-    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    GIT_TAG 5.0)
 FetchContent_MakeAvailable(eigen)
 set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
 set(DISPATCH ON CACHE BOOL "" FORCE)
@@ -89,15 +81,13 @@ FetchContent_Declare(
     xxHash
     GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
     GIT_TAG v0.8.3
-    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
     SOURCE_SUBDIR cmake_unofficial)
 FetchContent_MakeAvailable(xxHash)
 radray_set_build_path(xxhash)
 FetchContent_Declare(
     sigslot
     GIT_REPOSITORY https://github.com/palacaze/sigslot
-    GIT_TAG v1.2.3
-    GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    GIT_TAG v1.2.3)
 FetchContent_MakeAvailable(sigslot)
 if (RADRAY_BUILD_WINDOW)
     # set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
@@ -107,8 +97,7 @@ if (RADRAY_BUILD_WINDOW)
     # FetchContent_Declare(
     #     glfw
     #     GIT_REPOSITORY https://github.com/glfw/glfw.git
-    #     GIT_TAG 3.4
-    #     GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+    #     GIT_TAG 3.4)
     # FetchContent_MakeAvailable(glfw)
     # radray_set_build_path(glfw)
 endif()
@@ -121,8 +110,7 @@ if (RADRAY_ENABLE_MIMALLOC)
     FetchContent_Declare(
         mimalloc
         GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
-        GIT_TAG v2.2.4
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v2.2.4)
     FetchContent_MakeAvailable(mimalloc)
     radray_set_build_path(mimalloc-static)
 endif()
@@ -142,7 +130,6 @@ if (RADRAY_ENABLE_ZLIB)
         zlib
         GIT_REPOSITORY https://github.com/madler/zlib.git
         GIT_TAG v1.3.1
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
         OVERRIDE_FIND_PACKAGE
         PATCH_COMMAND git apply --whitespace=fix "${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch")
     FetchContent_MakeAvailable(zlib)
@@ -159,7 +146,6 @@ if (RADRAY_ENABLE_LIBPNG)
         libpng
         GIT_REPOSITORY https://github.com/pnggroup/libpng.git
         GIT_TAG v1.6.50
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
         OVERRIDE_FIND_PACKAGE)
     FetchContent_MakeAvailable(libpng)
     radray_set_build_path(png_static)
@@ -174,8 +160,7 @@ if (RADRAY_ENABLE_FREETYPE)
     FetchContent_Declare(
         freetype
         GIT_REPOSITORY https://github.com/freetype/freetype.git
-        GIT_TAG VER-2-14-1
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG VER-2-14-1)
     FetchContent_MakeAvailable(freetype)
     radray_set_build_path(freetype)
 endif()
@@ -184,8 +169,7 @@ if (RADRAY_ENABLE_VULKAN)
     FetchContent_Declare(
         Vulkan-Headers
         GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-        GIT_TAG v1.4.321
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v1.4.321)
     FetchContent_MakeAvailable(Vulkan-Headers)
     if (DEFINED vulkan-headers_SOURCE_DIR)
         set(VULKAN_HEADERS_INSTALL_DIR "${vulkan-headers_SOURCE_DIR}" CACHE PATH "" FORCE)
@@ -195,14 +179,12 @@ if (RADRAY_ENABLE_VULKAN)
     FetchContent_Declare(
         volk
         GIT_REPOSITORY https://github.com/zeux/volk.git
-        GIT_TAG 1.4.304
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG 1.4.304)
     FetchContent_MakeAvailable(volk)
     FetchContent_Declare(
         VulkanMemoryAllocator
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG v3.3.0
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v3.3.0)
     FetchContent_MakeAvailable(VulkanMemoryAllocator)
 endif()
 if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
@@ -212,14 +194,12 @@ if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
     FetchContent_Declare(
         DirectX-Headers
         GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
-        GIT_TAG v1.616.0
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v1.616.0)
     FetchContent_MakeAvailable(DirectX-Headers)
     FetchContent_Declare(
         D3D12MemoryAllocator
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
-        GIT_TAG v3.0.1
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v3.0.1)
     FetchContent_MakeAvailable(D3D12MemoryAllocator)
     target_compile_options(D3D12MemoryAllocator PRIVATE 
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-variable>
@@ -234,8 +214,7 @@ if (RADRAY_BUILD_TESTS)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.17.0
-        GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+        GIT_TAG v1.17.0)
     FetchContent_MakeAvailable(googletest)
     radray_set_build_path(gtest_main)
     if (RADRAY_BUILD_BENCHMARKS)
@@ -248,8 +227,7 @@ if (RADRAY_BUILD_TESTS)
         FetchContent_Declare(
             googlebenchmark
             GIT_REPOSITORY https://github.com/google/benchmark.git
-            GIT_TAG v1.9.4
-            GIT_SHALLOW ON GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+            GIT_TAG v1.9.4)
         FetchContent_MakeAvailable(googlebenchmark)
         radray_set_build_path(benchmark)
     endif()
@@ -259,7 +237,6 @@ add_subdirectory(modules)
 if (RADRAY_BUILD_TESTS)
     enable_testing()
     include(GoogleTest)
-    include(cmake/ExampleHelper.cmake)
     add_subdirectory(tests)
     add_subdirectory(examples)
     if (RADRAY_BUILD_BENCHMARKS)

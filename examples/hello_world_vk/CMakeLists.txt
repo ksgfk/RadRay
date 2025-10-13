@@ -1,5 +1,8 @@
 add_executable(hello_world_vk hello_world_vk.cpp)
 target_link_libraries(hello_world_vk PRIVATE radraywindow radrayrender)
 target_compile_options(hello_world_vk PRIVATE $<$<BOOL:MSVC>:/W4>)
+radray_compile_flag_auto_simd(hello_world_vk)
+radray_compile_flag_lto(hello_world_vk)
+radray_link_flag_lto(hello_world_vk)
 radray_example_files(hello_world_vk ${CMAKE_CURRENT_SOURCE_DIR}/color.hlsl)
 radray_set_build_path(hello_world_vk)
