@@ -76,21 +76,23 @@ function(radray_compile_flag_auto_simd target)
         message(FATAL_ERROR "radray_compile_flag_auto_simd: '${target}' is not a valid target")
     endif()
 
-    # 仅在 x86/x64 上尝试设置 SIMD 相关编译标志
-    if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|x86|i[3-6]86)$")
+    # 仅在 x64 上尝试设置 SIMD 相关编译标志（不考虑 32 位）
+    if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
         message(STATUS "Architecture '${CMAKE_SYSTEM_PROCESSOR}' is not x86/x64; skipping SIMD flags for target ${target}")
-        # 记录跳过结果，避免后续 target 重复判断
-        if (NOT DEFINED RADRAY_CACHED_SIMD_FLAG)
-            set(RADRAY_CACHED_SIMD_FLAG "SKIP" CACHE STRING "Cached SIMD flag selection result (SKIP/NONE/<flag>)" FORCE)
+        # 记录跳过结果，避免后续 target 重复判断（仅在本次配置会话内）
+        get_property(_simd_cached GLOBAL PROPERTY RADRAY_DETECTED_SIMD_FLAG)
+        if (NOT _simd_cached)
+            set_property(GLOBAL PROPERTY RADRAY_DETECTED_SIMD_FLAG "SKIP")
         endif()
         return()
     endif()
 
     # 若已有缓存结果，直接复用
-    if (DEFINED RADRAY_CACHED_SIMD_FLAG)
-        if (RADRAY_CACHED_SIMD_FLAG AND NOT RADRAY_CACHED_SIMD_FLAG STREQUAL "NONE" AND NOT RADRAY_CACHED_SIMD_FLAG STREQUAL "SKIP")
-            target_compile_options(${target} PRIVATE ${RADRAY_CACHED_SIMD_FLAG})
-            message(STATUS "Applied cached SIMD flag '${RADRAY_CACHED_SIMD_FLAG}' to target ${target}.")
+    get_property(_simd_cached GLOBAL PROPERTY RADRAY_DETECTED_SIMD_FLAG)
+    if (_simd_cached)
+        if (NOT _simd_cached STREQUAL "NONE" AND NOT _simd_cached STREQUAL "SKIP")
+            target_compile_options(${target} PRIVATE ${_simd_cached})
+            message(STATUS "Applied cached SIMD flag '${_simd_cached}' to target ${target}.")
         else()
             message(STATUS "SIMD flag detection previously found none/skip; skipping for target ${target}.")
         endif()
@@ -106,23 +108,10 @@ function(radray_compile_flag_auto_simd target)
         set(_is_msvc_frontend TRUE)
     endif()
 
-    # 区分 x86(32) 与 x64(64)，部分标志仅适用于 x86
-    set(_is_x86 FALSE)
-    set(_is_x64 FALSE)
-    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86|i[3-6]86)$")
-        set(_is_x86 TRUE)
-    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-        set(_is_x64 TRUE)
-    endif()
-
     set(_candidate_flags)
     if (_is_msvc_frontend)
         # MSVC/clang-cl 使用 /arch:*
-        list(APPEND _candidate_flags "/arch:AVX2" "/arch:AVX")
-        if (_is_x86)
-            # 仅在 32 位下再回退到 SSE2/SSE
-            list(APPEND _candidate_flags "/arch:SSE2" "/arch:SSE")
-        endif()
+        list(APPEND _candidate_flags "/arch:AVX2" "/arch:AVX" "/arch:SSE2" "/arch:SSE")
     else()
         # GNU/Clang 前端使用 -m*
         list(APPEND _candidate_flags "-mavx2" "-mavx" "-msse4.2" "-msse2" "-msse")
@@ -143,11 +132,26 @@ function(radray_compile_flag_auto_simd target)
     endforeach()
 
     if (_applied_flag STREQUAL "")
-        set(RADRAY_CACHED_SIMD_FLAG "NONE" CACHE STRING "Cached SIMD flag selection result (SKIP/NONE/<flag>)" FORCE)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_SIMD_FLAG "NONE")
         message(WARNING "No supported SIMD flag (fallback AVX2→AVX→SSE*) found for target ${target} with compiler '${CMAKE_CXX_COMPILER_ID}'.")
     else()
-        set(RADRAY_CACHED_SIMD_FLAG "${_applied_flag}" CACHE STRING "Cached SIMD flag selection result (SKIP/NONE/<flag>)" FORCE)
-        message(STATUS "Applied SIMD flag '${_applied_flag}' to target ${target}.")
+        # 若为 GNU/Clang 且已至少为 AVX 级别，额外尝试开启 FMA（-mfma）
+        set(_final_flags "${_applied_flag}")
+        if (NOT _is_msvc_frontend AND ("${_applied_flag}" STREQUAL "-mavx2" OR "${_applied_flag}" STREQUAL "-mavx"))
+            set(_fma_var "HAVE_FLAG__mfma")
+            unset(${_fma_var} CACHE)
+            check_cxx_compiler_flag("-mfma" ${_fma_var})
+            if (${_fma_var})
+                target_compile_options(${target} PRIVATE -mfma)
+                list(APPEND _final_flags "-mfma")
+                message(STATUS "Also enabled FMA with '-mfma' for target ${target}.")
+            endif()
+        endif()
+
+        # 缓存组合后的标志列表（本次配置会话内）
+        list(JOIN _final_flags ";" _final_flags_joined)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_SIMD_FLAG "${_final_flags_joined}")
+        message(STATUS "Applied SIMD flag(s) '${_final_flags_joined}' to target ${target}.")
     endif()
 endfunction()
 
@@ -159,19 +163,12 @@ function(radray_link_flag_lto target)
         message(FATAL_ERROR "radray_link_flag_lto: '${target}' is not a valid target")
     endif()
 
-    # 若为单配置生成器（如 Ninja/Makefiles），且当前构建类型不是 Release，则跳过
-    if (NOT DEFINED CMAKE_CONFIGURATION_TYPES)
-        if (DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
-            message(STATUS "Skipping LTO for target ${target} because CMAKE_BUILD_TYPE='${CMAKE_BUILD_TYPE}' is not Release.")
-            return()
-        endif()
-    endif()
-
-    # 若已有缓存结果，直接复用（多配置生成器也仅在 Release 下生效）
-    if (DEFINED RADRAY_CACHED_LTO_LINK_FLAG)
-        if (RADRAY_CACHED_LTO_LINK_FLAG AND NOT RADRAY_CACHED_LTO_LINK_FLAG STREQUAL "NONE")
-            target_link_options(${target} PRIVATE $<$<CONFIG:Release>:${RADRAY_CACHED_LTO_LINK_FLAG}>)
-            message(STATUS "Applied cached LTO linker flag '${RADRAY_CACHED_LTO_LINK_FLAG}' to target ${target} (Release only).")
+    # 若已有缓存结果，直接复用（仅在当前配置会话内）
+    get_property(_lto_link_cached GLOBAL PROPERTY RADRAY_DETECTED_LTO_LINK_FLAG)
+    if (_lto_link_cached)
+        if (NOT _lto_link_cached STREQUAL "NONE")
+            target_link_options(${target} PRIVATE $<$<CONFIG:Release>:${_lto_link_cached}>)
+            message(STATUS "Applied cached LTO linker flag '${_lto_link_cached}' to target ${target} (Release only).")
         else()
             message(STATUS "LTO linker flag detection previously found none; skipping for target ${target}.")
         endif()
@@ -187,21 +184,21 @@ function(radray_link_flag_lto target)
         set(_is_msvc_frontend TRUE)
     endif()
 
+    # 区分 clang-cl 与 纯 MSVC
+    set(_is_clang_cl FALSE)
+    if (_is_msvc_frontend AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(_is_clang_cl TRUE)
+    endif()
+
+    # 仅对纯 MSVC 传递链接期 LTO 标志；GCC/Clang/clang-cl 无需显式链接标志
     set(_candidate_link_flags)
-    if (_is_msvc_frontend)
-        # MSVC/clang-cl 通常通过 /LTCG 进行 LTO，是否增量由工具链版本决定
+    if (_is_msvc_frontend AND NOT _is_clang_cl)
+        # 纯 MSVC: /LTCG 及其可选增量模式
         list(APPEND _candidate_link_flags "/LTCG" "/LTCG:incremental")
     else()
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-            # Clang: 优先 ThinLTO，其次常规 LTO
-            list(APPEND _candidate_link_flags "-flto=thin" "-flto")
-        elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            # GCC: 常规 LTO，次选 auto（新版本支持）
-            list(APPEND _candidate_link_flags "-flto" "-flto=auto")
-        else()
-            # 兜底（未知编译器），尝试通用 -flto
-            list(APPEND _candidate_link_flags "-flto")
-        endif()
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_LTO_LINK_FLAG "NONE")
+        message(STATUS "Toolchain '${CMAKE_CXX_COMPILER_ID}' does not require explicit LTO link flags; skipping for target ${target}.")
+        return()
     endif()
 
     set(_applied_link_flag "")
@@ -211,7 +208,7 @@ function(radray_link_flag_lto target)
         unset(${_var_name} CACHE)
         check_linker_flag(CXX "${_lflag}" ${_var_name})
         if (${_var_name})
-            # 仅在 Release 配置生效（多配置生成器），单配置生成器在上面已做过滤
+            # 仅在 Release 配置生效
             target_link_options(${target} PRIVATE $<$<CONFIG:Release>:${_lflag}>)
             set(_applied_link_flag "${_lflag}")
             break()
@@ -219,10 +216,10 @@ function(radray_link_flag_lto target)
     endforeach()
 
     if (_applied_link_flag STREQUAL "")
-        set(RADRAY_CACHED_LTO_LINK_FLAG "NONE" CACHE STRING "Cached LTO linker flag selection (NONE/<flag>)" FORCE)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_LTO_LINK_FLAG "NONE")
         message(WARNING "No supported LTO linker flag found for target ${target} (compiler='${CMAKE_CXX_COMPILER_ID}').")
     else()
-        set(RADRAY_CACHED_LTO_LINK_FLAG "${_applied_link_flag}" CACHE STRING "Cached LTO linker flag selection (NONE/<flag>)" FORCE)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_LTO_LINK_FLAG "${_applied_link_flag}")
         message(STATUS "Applied LTO linker flag '${_applied_link_flag}' to target ${target} (Release only).")
     endif()
 endfunction()
@@ -235,18 +232,17 @@ function(radray_compile_flag_lto target)
     endif()
 
     # 单配置生成器且非 Release 直接跳过
-    if (NOT DEFINED CMAKE_CONFIGURATION_TYPES)
-        if (DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
-            message(STATUS "Skipping compile-time LTO for target ${target} because CMAKE_BUILD_TYPE='${CMAKE_BUILD_TYPE}' is not Release.")
-            return()
-        endif()
+    if (DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(STATUS "Skipping compile-time LTO for target ${target} because CMAKE_BUILD_TYPE='${CMAKE_BUILD_TYPE}' is not Release.")
+        return()
     endif()
 
-    # 缓存命中直接应用
-    if (DEFINED RADRAY_CACHED_LTO_COMPILE_FLAG)
-        if (RADRAY_CACHED_LTO_COMPILE_FLAG AND NOT RADRAY_CACHED_LTO_COMPILE_FLAG STREQUAL "NONE")
-            target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:${RADRAY_CACHED_LTO_COMPILE_FLAG}>)
-            message(STATUS "Applied cached LTO compile flag '${RADRAY_CACHED_LTO_COMPILE_FLAG}' to target ${target} (Release only).")
+    # 缓存命中直接应用（仅在当前配置会话内）
+    get_property(_lto_compile_cached GLOBAL PROPERTY RADRAY_DETECTED_LTO_COMPILE_FLAG)
+    if (_lto_compile_cached)
+        if (NOT _lto_compile_cached STREQUAL "NONE")
+            target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:${_lto_compile_cached}>)
+            message(STATUS "Applied cached LTO compile flag '${_lto_compile_cached}' to target ${target} (Release only).")
         else()
             message(STATUS "LTO compile flag detection previously found none; skipping for target ${target}.")
         endif()
@@ -262,9 +258,18 @@ function(radray_compile_flag_lto target)
         set(_is_msvc_frontend TRUE)
     endif()
 
+    # 区分 clang-cl 与 纯 MSVC
+    set(_is_clang_cl FALSE)
+    if (_is_msvc_frontend AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(_is_clang_cl TRUE)
+    endif()
+
     set(_candidate_compile_flags)
-    if (_is_msvc_frontend)
-        # MSVC/clang-cl: /GL 开启 LTCG
+    if (_is_clang_cl)
+        # clang-cl 优先 -flto=thin/-flto，必要时回退 /GL
+        list(APPEND _candidate_compile_flags "-flto=thin" "-flto" "/GL")
+    elseif (_is_msvc_frontend)
+        # 纯 MSVC: /GL 开启 LTCG
         list(APPEND _candidate_compile_flags "/GL")
     else()
         if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -291,10 +296,10 @@ function(radray_compile_flag_lto target)
     endforeach()
 
     if (_applied_compile_flag STREQUAL "")
-        set(RADRAY_CACHED_LTO_COMPILE_FLAG "NONE" CACHE STRING "Cached LTO compile flag selection (NONE/<flag>)" FORCE)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_LTO_COMPILE_FLAG "NONE")
         message(WARNING "No supported LTO compile flag found for target ${target} (compiler='${CMAKE_CXX_COMPILER_ID}').")
     else()
-        set(RADRAY_CACHED_LTO_COMPILE_FLAG "${_applied_compile_flag}" CACHE STRING "Cached LTO compile flag selection (NONE/<flag>)" FORCE)
+        set_property(GLOBAL PROPERTY RADRAY_DETECTED_LTO_COMPILE_FLAG "${_applied_compile_flag}")
         message(STATUS "Applied LTO compile flag '${_applied_compile_flag}' to target ${target} (Release only).")
     endif()
 endfunction()
