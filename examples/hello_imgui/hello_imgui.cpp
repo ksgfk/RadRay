@@ -42,9 +42,6 @@ class HelloImguiFrame {
 public:
     shared_ptr<CommandBuffer> _cmdBuffer{};
     Texture* _rt{};
-    std::mutex _mtx{};
-    std::condition_variable _cv{};
-    std::atomic_bool _isWaiting{false};
 };
 
 class HelloImguiApp {
@@ -68,7 +65,6 @@ public:
             f->_cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
         _currentRenderFrameIndex = 0;
-        _currentLogicFrameIndex = 0;
 
         ImGuiDrawDescriptor desc{};
         desc.Device = _device.get();
@@ -84,9 +80,13 @@ public:
     }
 
     void Close() noexcept {
-        for (auto& frame : _frames) {
-            frame->_cv.notify_one();
+        if (_context != nullptr) {
+            ImGui::DestroyContext(_context);
+            _context = nullptr;
         }
+
+        _isWaiting = false;
+        _cv.notify_one();
         _renderThread.join();
         _cmdQueue->Wait();
         _rtViews.clear();
@@ -133,10 +133,10 @@ public:
             }
             auto& currFrame = _frames[_currentRenderFrameIndex];
             {
-                std::unique_lock<std::mutex> lk{currFrame->_mtx};
+                std::unique_lock<std::mutex> lk{_mtx};
                 currFrame->_rt = acqTex.Unwrap();
-                currFrame->_isWaiting = true;
-                currFrame->_cv.wait(lk);
+                _isWaiting = true;
+                _cv.wait(lk, [this]() { return !_isWaiting.load(); });
                 auto [isResizing, isResized, isCloseRequested] = readParam();
                 if (isCloseRequested) {
                     break;
@@ -144,7 +144,6 @@ public:
                 if (isResizing) {
                     continue;
                 }
-                currFrame->_isWaiting = false;
             }
             {
                 CommandQueueSubmitDescriptor submitDesc{};
@@ -188,6 +187,7 @@ public:
         _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     }
 
+    ImGuiContext* _context{nullptr};
     unique_ptr<NativeWindow> _window;
     unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
@@ -195,7 +195,6 @@ public:
     shared_ptr<SwapChain> _swapchain;
     vector<unique_ptr<HelloImguiFrame>> _frames;
     uint64_t _currentRenderFrameIndex;
-    uint64_t _currentLogicFrameIndex;
     unique_ptr<ImGuiDrawContext> _imguiDrawContext;
     unordered_map<Texture*, shared_ptr<TextureView>> _rtViews;
 
@@ -204,6 +203,10 @@ public:
     sigslot::connection _resizingCb;
     sigslot::connection _mainLoopResizeCb;
     sigslot::connection _closeCb;
+
+    std::mutex _mtx{};
+    std::condition_variable _cv{};
+    std::atomic_bool _isWaiting{false};
 
     mutable std::mutex _mutex{};
     struct ThreadSafeParams {
@@ -240,6 +243,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     if (platform == PlatformId::Windows && backend == RenderBackend::D3D12) {
         D3D12DeviceDescriptor desc{};
         desc.IsEnableDebugLayer = true;
+        desc.IsEnableGpuBasedValid = true;
         device = CreateDevice(desc).Unwrap();
     } else if (backend == RenderBackend::Vulkan) {
         VulkanInstanceDescriptor insDesc{};
@@ -266,18 +270,26 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 
 int main() {
     g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    // g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+
+    if (g_apps.size() == 0) {
+        throw HelloImguiException("No app created");
+    }
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {
-        ImGuiPlatformInitDescriptor desc{};
-        desc.Platform = PlatformId::Windows;
-        desc.Window = g_apps[0]->_window.get();
-        InitPlatformImGui(desc);
+        for (auto& app : g_apps) {
+            ImGuiPlatformInitDescriptor desc{};
+            desc.Platform = PlatformId::Windows;
+            desc.Window = app->_window.get();
+            desc.Context = ImGui::CreateContext();
+            InitPlatformImGui(desc);
+            InitRendererImGui(desc.Context);
+            app->_context = desc.Context;
+        }
     } else {
         throw HelloImguiException("Unsupported platform");
     }
-    InitRendererImGui();
     {
         for (auto& app : g_apps) {
             HelloImguiApp* self = app.get();
@@ -292,6 +304,7 @@ int main() {
     }
     while (true) {
         for (const auto& app : g_apps) {
+            ImGui::SetCurrentContext(app->_context);
             app->_window->DispatchEvents();
         }
         bool shouldClose = false;
@@ -305,80 +318,96 @@ int main() {
             break;
         }
 
-        ImGui_ImplWin32_NewFrame();
-
-        ImGui::NewFrame();
-        if (g_showDemo) {
-            ImGui::ShowDemoWindow(&g_showDemo);
-        }
-        ImGui::Render();
-
         for (const auto& app : g_apps) {
-            auto& frame = app->_frames[app->_currentLogicFrameIndex];
-            if (!frame->_isWaiting) {
-                continue;
+            ImGui::SetCurrentContext(app->_context);
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+            if (g_showDemo) {
+                ImGui::ShowDemoWindow(&g_showDemo);
             }
-            frame->_cmdBuffer->Begin();
-            app->_imguiDrawContext->NewFrame();
-            app->_imguiDrawContext->UpdateDrawData(ImGui::GetDrawData(), frame->_cmdBuffer.get());
-            app->_imguiDrawContext->EndUpdateDrawData(ImGui::GetDrawData());
-            {
-                BarrierTextureDescriptor barrier{};
-                barrier.Target = frame->_rt;
-                barrier.Before = TextureUse::Uninitialized;
-                barrier.After = TextureUse::RenderTarget;
-                barrier.IsFromOrToOtherQueue = false;
-                barrier.IsSubresourceBarrier = false;
-                frame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-            }
-            unique_ptr<CommandEncoder> pass;
-            {
-                RenderPassDescriptor rpDesc{};
-                ColorAttachment rtAttach{};
-                if (app->_rtViews.contains(frame->_rt)) {
-                    rtAttach.Target = app->_rtViews[frame->_rt].get();
-                } else {
-                    TextureViewDescriptor rtViewDesc{};
-                    rtViewDesc.Target = frame->_rt;
-                    rtViewDesc.Dim = TextureViewDimension::Dim2D;
-                    rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
-                    rtViewDesc.Range = SubresourceRange::AllSub();
-                    rtViewDesc.Usage = TextureUse::RenderTarget;
-                    auto rtView = app->_device->CreateTextureView(rtViewDesc).Unwrap();
-                    app->_rtViews[frame->_rt] = rtView;
-                    rtAttach.Target = rtView.get();
-                }
-                rtAttach.Load = LoadAction::Clear;
-                rtAttach.Store = StoreAction::Store;
-                rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
-                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-                pass = frame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
-            }
-            app->_imguiDrawContext->Draw(ImGui::GetDrawData(), pass.get());
-            frame->_cmdBuffer->EndRenderPass(std::move(pass));
-            {
-                BarrierTextureDescriptor barrier{};
-                barrier.Target = frame->_rt;
-                barrier.Before = TextureUse::RenderTarget;
-                barrier.After = TextureUse::Present;
-                barrier.IsFromOrToOtherQueue = false;
-                barrier.IsSubresourceBarrier = false;
-                frame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-            }
-            frame->_cmdBuffer->End();
-            app->_imguiDrawContext->EndFrame();
-            app->_currentLogicFrameIndex = (app->_currentLogicFrameIndex + 1) % app->_frames.size();
-            frame->_cv.notify_one();
+            ImGui::Render();
         }
 
-        std::this_thread::yield();
+        bool canRender = true;
+        for (const auto& app : g_apps) {
+            if (!app->_isWaiting) {
+                canRender = false;
+                break;
+            }
+        }
+        if (canRender) {
+            for (const auto& app : g_apps) {
+                ImGui::SetCurrentContext(app->_context);
+                auto& frame = app->_frames[app->_currentRenderFrameIndex];
+                frame->_cmdBuffer->Begin();
+                app->_imguiDrawContext->NewFrame();
+                app->_imguiDrawContext->UpdateDrawData(ImGui::GetDrawData(), frame->_cmdBuffer.get());
+                app->_imguiDrawContext->EndUpdateDrawData(ImGui::GetDrawData());
+            }
+            for (const auto& app : g_apps) {
+                ImGui::SetCurrentContext(app->_context);
+                auto& frame = app->_frames[app->_currentRenderFrameIndex];
+                {
+                    BarrierTextureDescriptor barrier{};
+                    barrier.Target = frame->_rt;
+                    barrier.Before = TextureUse::Uninitialized;
+                    barrier.After = TextureUse::RenderTarget;
+                    barrier.IsFromOrToOtherQueue = false;
+                    barrier.IsSubresourceBarrier = false;
+                    frame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+                }
+                unique_ptr<CommandEncoder> pass;
+                {
+                    RenderPassDescriptor rpDesc{};
+                    ColorAttachment rtAttach{};
+                    if (app->_rtViews.contains(frame->_rt)) {
+                        rtAttach.Target = app->_rtViews[frame->_rt].get();
+                    } else {
+                        TextureViewDescriptor rtViewDesc{};
+                        rtViewDesc.Target = frame->_rt;
+                        rtViewDesc.Dim = TextureViewDimension::Dim2D;
+                        rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+                        rtViewDesc.Range = SubresourceRange::AllSub();
+                        rtViewDesc.Usage = TextureUse::RenderTarget;
+                        auto rtView = app->_device->CreateTextureView(rtViewDesc).Unwrap();
+                        app->_rtViews[frame->_rt] = rtView;
+                        rtAttach.Target = rtView.get();
+                    }
+                    rtAttach.Load = LoadAction::Clear;
+                    rtAttach.Store = StoreAction::Store;
+                    rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
+                    rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                    pass = frame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+                }
+                app->_imguiDrawContext->Draw(ImGui::GetDrawData(), pass.get());
+                frame->_cmdBuffer->EndRenderPass(std::move(pass));
+                {
+                    BarrierTextureDescriptor barrier{};
+                    barrier.Target = frame->_rt;
+                    barrier.Before = TextureUse::RenderTarget;
+                    barrier.After = TextureUse::Present;
+                    barrier.IsFromOrToOtherQueue = false;
+                    barrier.IsSubresourceBarrier = false;
+                    frame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+                }
+            }
+            for (const auto& app : g_apps) {
+                ImGui::SetCurrentContext(app->_context);
+                auto& frame = app->_frames[app->_currentRenderFrameIndex];
+                frame->_cmdBuffer->End();
+                app->_imguiDrawContext->EndFrame();
+                app->_isWaiting = false;
+                app->_cv.notify_one();
+            }
+        }
     }
 
     g_closeSig();
 
-    TerminateRendererImGui();
-    TerminatePlatformImGui();
-    TerminateImGui();
+    for (auto& app : g_apps) {
+        TerminateRendererImGui(app->_context);
+        TerminatePlatformImGui(app->_context);
+    }
 
     g_apps.clear();
 

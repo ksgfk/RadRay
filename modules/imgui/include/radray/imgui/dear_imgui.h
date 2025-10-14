@@ -15,7 +15,7 @@ namespace radray {
 class ImGuiPlatformInitDescriptor {
 public:
     PlatformId Platform;
-
+    ImGuiContext* Context;
     NativeWindow* Window;
 };
 
@@ -61,7 +61,8 @@ public:
 
     class Frame {
     public:
-        shared_ptr<render::DescriptorSet> _descSet;
+        vector<shared_ptr<render::DescriptorSet>> _descSets;
+        size_t _usableDescSetIndex{0};
         vector<shared_ptr<render::Buffer>> _uploads;
         shared_ptr<render::Buffer> _vb;
         shared_ptr<render::Buffer> _ib;
@@ -82,10 +83,9 @@ public:
 
 bool InitImGui();
 bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc);
-bool InitRendererImGui();
-void TerminateRendererImGui();
-void TerminatePlatformImGui();
-void TerminateImGui();
+bool InitRendererImGui(ImGuiContext* context);
+void TerminateRendererImGui(ImGuiContext* context);
+void TerminatePlatformImGui(ImGuiContext* context);
 
 Nullable<Win32WNDPROC> GetImGuiWin32WNDPROC() noexcept;
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

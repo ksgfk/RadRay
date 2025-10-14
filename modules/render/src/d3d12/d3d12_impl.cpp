@@ -1892,8 +1892,8 @@ void SwapChainD3D12::Present() noexcept {
     }
     _fenceValue++;
     auto queue = CastD3D12Object(_desc.PresentQueue);
-    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
     queue->_queue->Signal(_fence.Get(), _fenceValue);
+    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
 }
 
 Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {

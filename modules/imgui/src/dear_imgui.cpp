@@ -48,7 +48,6 @@ bool InitImGui() {
     ImGui_ImplWin32_EnableDpiAwareness();
 #endif
     ImGui::SetAllocatorFunctions(_ImguiAllocBridge, _ImguiFreeBridge, nullptr);
-    ImGui::CreateContext();
     return true;
 }
 
@@ -60,6 +59,11 @@ bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc) {
             RADRAY_ERR_LOG("radrayimgui only supports HWND on Windows platform.");
             return false;
         }
+
+        auto old = ImGui::GetCurrentContext();
+        auto ctxGuard = MakeScopeGuard([old]() { ImGui::SetCurrentContext(old); });
+        ImGui::SetCurrentContext(desc.Context);
+
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::StyleColorsDark();
@@ -69,12 +73,18 @@ bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc) {
         style.FontScaleDpi = mainScale;
         ImGui_ImplWin32_Init(wnh.Handle);
         io.Fonts->AddFontDefault();
+
+        ImGui::SetCurrentContext(old);
     }
 #endif
     return true;
 }
 
-bool InitRendererImGui() {
+bool InitRendererImGui(ImGuiContext* context) {
+    auto old = ImGui::GetCurrentContext();
+    auto ctxGuard = MakeScopeGuard([old]() { ImGui::SetCurrentContext(old); });
+    ImGui::SetCurrentContext(context);
+
     IMGUI_CHECKVERSION();
     ImGuiIO& io = ImGui::GetIO();
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
@@ -86,7 +96,8 @@ bool InitRendererImGui() {
     return true;
 }
 
-void TerminateRendererImGui() {
+void TerminateRendererImGui(ImGuiContext* context) {
+    ImGui::SetCurrentContext(context);
     ImGuiIO& io = ImGui::GetIO();
     ImGuiRendererData* bd = (ImGuiRendererData*)io.BackendRendererUserData;
     IM_ASSERT(bd != nullptr && "No renderer backend to shutdown, or already shutdown?");
@@ -96,14 +107,11 @@ void TerminateRendererImGui() {
     IM_DELETE(bd);
 }
 
-void TerminatePlatformImGui() {
+void TerminatePlatformImGui(ImGuiContext* context) {
+    ImGui::SetCurrentContext(context);
 #ifdef RADRAY_PLATFORM_WINDOWS
     ImGui_ImplWin32_Shutdown();
 #endif
-}
-
-void TerminateImGui() {
-    ImGui::DestroyContext();
 }
 
 Nullable<Win32WNDPROC> GetImGuiWin32WNDPROC() noexcept {
@@ -253,8 +261,7 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     result->_desc = desc;
     result->_frames.reserve(desc.FrameCount);
     for (int i = 0; i < desc.FrameCount; i++) {
-        auto& frame = result->_frames.emplace_back(ImGuiDrawContext::Frame{});
-        frame._descSet = device->CreateDescriptorSet(result->_rsLayout.get()).Unwrap();
+        result->_frames.emplace_back(ImGuiDrawContext::Frame{});
     }
     return result;
 }
@@ -273,6 +280,7 @@ ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
 void ImGuiDrawContext::NewFrame() {
     auto& frame = _frames[_currentFrameIndex];
     frame._uploads.clear();
+    frame._usableDescSetIndex = 0;
 }
 
 void ImGuiDrawContext::EndFrame() {
@@ -475,6 +483,7 @@ void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encode
     ImVec2 clip_scale = drawData->FramebufferScale;
     int global_vtx_offset = 0;
     int global_idx_offset = 0;
+    TextureView* lastBindTex = nullptr;
     for (const ImDrawList* draw_list : drawData->CmdLists) {
         for (int cmd_i = 0; cmd_i < draw_list->CmdBuffer.Size; cmd_i++) {
             const ImDrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
@@ -509,8 +518,17 @@ void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encode
                 scissor.Height = (int)(clip_max.y - clip_min.y);
                 encoder->SetScissor(scissor);
                 auto texView = std::bit_cast<TextureView*>(pcmd->GetTexID());
-                frame._descSet->SetResource(0, texView);
-                encoder->BindDescriptorSet(0, frame._descSet.get());
+                if (lastBindTex != texView) {
+                    if (frame._usableDescSetIndex >= frame._descSets.size()) {
+                        shared_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rsLayout.get()).Unwrap();
+                        frame._descSets.emplace_back(std::move(descSet));
+                    }
+                    auto descSet = frame._descSets[frame._usableDescSetIndex].get();
+                    descSet->SetResource(0, texView);
+                    encoder->BindDescriptorSet(0, descSet);
+                    frame._usableDescSetIndex++;
+                    lastBindTex = texView;
+                }
                 encoder->DrawIndexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, pcmd->VtxOffset + global_vtx_offset, 0);
             }
         }
@@ -552,6 +570,10 @@ void ImGuiDrawContext::SetupRenderState(ImDrawData* drawData, render::CommandEnc
     vp.Y = 0.0f;
     vp.Width = (float)fbWidth;
     vp.Height = (float)fbHeight;
+    if (_device->GetBackend() == RenderBackend::Vulkan) {
+        vp.Y = (float)fbHeight;
+        vp.Height = -(float)fbHeight;
+    }
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     encoder->SetViewport(vp);

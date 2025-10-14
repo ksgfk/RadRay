@@ -3033,6 +3033,7 @@ void DescriptorSetVulkanWrapper::SetResource(uint32_t index, ResourceView* view)
         auto tv = static_cast<ImageViewVulkan*>(view);
         imgInfo.imageView = tv->_imageView;
         imgInfo.imageLayout = TextureUseToLayout(tv->_mdesc.Usage);
+        writeDesc.pImageInfo = &imgInfo;
     } else {
         RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
         return;
