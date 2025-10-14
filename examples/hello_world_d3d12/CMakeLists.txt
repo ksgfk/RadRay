@@ -1,7 +1,5 @@
 add_executable(hello_world_d3d12 hello_world_d3d12.cpp)
 target_link_libraries(hello_world_d3d12 PRIVATE radraywindow radrayrender)
 target_compile_options(hello_world_d3d12 PRIVATE $<$<BOOL:MSVC>:/W4>)
-radray_compile_flag_auto_simd(hello_world_d3d12)
-radray_compile_flag_lto(hello_world_d3d12)
-radray_link_flag_lto(hello_world_d3d12)
+radray_optimize_flags_binary(hello_world_d3d12)
 radray_set_build_path(hello_world_d3d12)

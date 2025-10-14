@@ -22,6 +22,5 @@ if (MSVC)
 endif()
 target_compile_options(radraycore PRIVATE
     $<$<BOOL:MSVC>:/W4>)
-radray_compile_flag_auto_simd(radraycore)
-radray_compile_flag_lto(radraycore)
+radray_optimize_flags_library(radraycore)
 radray_set_build_path(radraycore)

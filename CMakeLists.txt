@@ -55,6 +55,7 @@ FetchContent_Declare(
     GIT_TAG 12.0.0
     OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(fmt)
+radray_optimize_flags_library(fmt)
 radray_set_build_path(fmt)
 set(SPDLOG_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
@@ -66,6 +67,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
     GIT_TAG v1.16.0)
 FetchContent_MakeAvailable(spdlog)
+radray_optimize_flags_library(spdlog)
 radray_set_build_path(spdlog)
 set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -83,6 +85,7 @@ FetchContent_Declare(
     GIT_TAG v0.8.3
     SOURCE_SUBDIR cmake_unofficial)
 FetchContent_MakeAvailable(xxHash)
+radray_optimize_flags_library(xxhash)
 radray_set_build_path(xxhash)
 FetchContent_Declare(
     sigslot
@@ -112,6 +115,7 @@ if (RADRAY_ENABLE_MIMALLOC)
         GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
         GIT_TAG v2.2.4)
     FetchContent_MakeAvailable(mimalloc)
+    radray_optimize_flags_library(mimalloc-static)
     radray_set_build_path(mimalloc-static)
 endif()
 if (RADRAY_ENABLE_DXC)
@@ -133,6 +137,7 @@ if (RADRAY_ENABLE_ZLIB)
         OVERRIDE_FIND_PACKAGE
         PATCH_COMMAND git apply --whitespace=fix "${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch")
     FetchContent_MakeAvailable(zlib)
+    radray_optimize_flags_library(zlibstatic)
     radray_set_build_path(zlibstatic)
     if (TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
         add_library(ZLIB::ZLIB ALIAS zlibstatic)
@@ -148,6 +153,7 @@ if (RADRAY_ENABLE_LIBPNG)
         GIT_TAG v1.6.50
         OVERRIDE_FIND_PACKAGE)
     FetchContent_MakeAvailable(libpng)
+    radray_optimize_flags_library(png_static)
     radray_set_build_path(png_static)
 endif()
 if (RADRAY_ENABLE_FREETYPE)
@@ -162,6 +168,7 @@ if (RADRAY_ENABLE_FREETYPE)
         GIT_REPOSITORY https://github.com/freetype/freetype.git
         GIT_TAG VER-2-14-1)
     FetchContent_MakeAvailable(freetype)
+    radray_optimize_flags_library(freetype)
     radray_set_build_path(freetype)
 endif()
 if (RADRAY_ENABLE_VULKAN)
@@ -206,6 +213,8 @@ if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-switch>
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-const-variable>
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-function>)
+    radray_optimize_flags_library(D3D12MemoryAllocator)
+    radray_set_build_path(D3D12MemoryAllocator)
 endif()
 if (RADRAY_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -216,6 +225,7 @@ if (RADRAY_BUILD_TESTS)
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG v1.17.0)
     FetchContent_MakeAvailable(googletest)
+    radray_optimize_flags_library(gtest_main)
     radray_set_build_path(gtest_main)
     if (RADRAY_BUILD_BENCHMARKS)
         set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -229,6 +239,7 @@ if (RADRAY_BUILD_TESTS)
             GIT_REPOSITORY https://github.com/google/benchmark.git
             GIT_TAG v1.9.4)
         FetchContent_MakeAvailable(googlebenchmark)
+        radray_optimize_flags_library(benchmark)
         radray_set_build_path(benchmark)
     endif()
 endif()

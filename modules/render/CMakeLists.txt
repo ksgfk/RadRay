@@ -27,8 +27,7 @@ target_compile_definitions(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>)
 target_compile_options(radrayrender PRIVATE
     $<$<BOOL:MSVC>:/W4>)
-radray_compile_flag_auto_simd(radrayrender)
-radray_compile_flag_lto(radrayrender)
+radray_optimize_flags_library(radrayrender)
 radray_set_build_path(radrayrender)
 if (RADRAY_ENABLE_DXC)
     # 构建后复制 dxc 运行时到统一输出目录

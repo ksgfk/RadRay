@@ -1,5 +1,5 @@
 add_executable(test_buddy_alloc test_buddy_alloc.cpp)
 target_link_libraries(test_buddy_alloc radraycore GTest::gtest_main)
 gtest_discover_tests(test_buddy_alloc)
-radray_compile_flag_auto_simd(test_buddy_alloc)
+radray_optimize_flags_binary(test_buddy_alloc)
 radray_set_build_path(test_buddy_alloc)
