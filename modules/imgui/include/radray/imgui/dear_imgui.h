@@ -23,6 +23,11 @@ class ImGuiRendererData {
 public:
 };
 
+class ImGuiRenderState {
+public:
+    render::CommandEncoder* _encoder{nullptr};
+};
+
 class ImGuiDrawTexture {
 public:
     ImGuiDrawTexture(shared_ptr<render::Texture> tex, shared_ptr<render::TextureView> srv) noexcept;
@@ -51,10 +56,12 @@ public:
     void UpdateDrawData(ImDrawData* drawData, render::CommandBuffer* cmdBuffer);
     void EndUpdateDrawData(ImDrawData* drawData);
     void UpdateTexture(ImTextureData* tex, render::CommandBuffer* cmdBuffer);
-    // void Draw(ImDrawData* drawData, render::CommandBuffer* cmdBuffer);
+    void Draw(ImDrawData* drawData, render::CommandEncoder* encoder);
+    void SetupRenderState(ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
 
     class Frame {
     public:
+        shared_ptr<render::DescriptorSet> _descSet;
         vector<shared_ptr<render::Buffer>> _uploads;
         shared_ptr<render::Buffer> _vb;
         shared_ptr<render::Buffer> _ib;

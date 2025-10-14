@@ -6,6 +6,7 @@ bin
 
 scripts/options.lua
 assets
+imgui.ini
 
 build_debug/
 build_release/

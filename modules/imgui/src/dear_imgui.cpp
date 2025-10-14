@@ -4,6 +4,7 @@
 #include <bit>
 
 #include <radray/utility.h>
+#include <radray/basic_math.h>
 
 #ifdef RADRAY_ENABLE_IMGUI
 
@@ -252,7 +253,8 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     result->_desc = desc;
     result->_frames.reserve(desc.FrameCount);
     for (int i = 0; i < desc.FrameCount; i++) {
-        result->_frames.emplace_back(ImGuiDrawContext::Frame{});
+        auto& frame = result->_frames.emplace_back(ImGuiDrawContext::Frame{});
+        frame._descSet = device->CreateDescriptorSet(result->_rsLayout.get()).Unwrap();
     }
     return result;
 }
@@ -451,24 +453,115 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* 
     }
 }
 
-// void ImGuiDrawContext::Draw(ImDrawData* draw_data, render::CommandBuffer* cmdBuffer) {
-//     using namespace ::radray::render;
+void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encoder) {
+    using namespace ::radray::render;
 
-//     RenderPassDescriptor rpDesc{};
-//     auto pass = cmdBuffer->BeginRenderPass(rpDesc);
+    if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
+        return;
+    }
 
-//     float L = draw_data->DisplayPos.x;
-//     float R = draw_data->DisplayPos.x + draw_data->DisplaySize.x;
-//     float T = draw_data->DisplayPos.y;
-//     float B = draw_data->DisplayPos.y + draw_data->DisplaySize.y;
+    auto& frame = _frames[_currentFrameIndex];
 
-//     Viewport vp{};
-//     vp.Width = draw_data->DisplaySize.x * draw_data->FramebufferScale.x;
-//     vp.Height = draw_data->DisplaySize.y * draw_data->FramebufferScale.y;
-//     vp.MinDepth = 0.0f;
-//     vp.MaxDepth = 1.0f;
-//     pass->SetViewport(vp);
-// }
+    int fbWidth = (int)(drawData->DisplaySize.x * drawData->FramebufferScale.x);
+    int fbHeight = (int)(drawData->DisplaySize.y * drawData->FramebufferScale.y);
+    this->SetupRenderState(drawData, encoder, fbWidth, fbHeight);
+
+    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    ImGuiRenderState rs{};
+    rs._encoder = encoder;
+    platform_io.Renderer_RenderState = &rs;
+
+    ImVec2 clip_off = drawData->DisplayPos;
+    ImVec2 clip_scale = drawData->FramebufferScale;
+    int global_vtx_offset = 0;
+    int global_idx_offset = 0;
+    for (const ImDrawList* draw_list : drawData->CmdLists) {
+        for (int cmd_i = 0; cmd_i < draw_list->CmdBuffer.Size; cmd_i++) {
+            const ImDrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
+            if (pcmd->UserCallback != nullptr) {
+                if (pcmd->UserCallback == ImDrawCallback_ResetRenderState) {
+                    this->SetupRenderState(drawData, encoder, fbWidth, fbHeight);
+                } else {
+                    pcmd->UserCallback(draw_list, pcmd);
+                }
+            } else {
+                ImVec2 clip_min((pcmd->ClipRect.x - clip_off.x) * clip_scale.x, (pcmd->ClipRect.y - clip_off.y) * clip_scale.y);
+                ImVec2 clip_max((pcmd->ClipRect.z - clip_off.x) * clip_scale.x, (pcmd->ClipRect.w - clip_off.y) * clip_scale.y);
+                if (clip_min.x < 0.0f) {
+                    clip_min.x = 0.0f;
+                }
+                if (clip_min.y < 0.0f) {
+                    clip_min.y = 0.0f;
+                }
+                if (clip_max.x > (float)fbWidth) {
+                    clip_max.x = (float)fbWidth;
+                }
+                if (clip_max.y > (float)fbHeight) {
+                    clip_max.y = (float)fbHeight;
+                }
+                if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) {
+                    continue;
+                }
+                Rect scissor{};
+                scissor.X = (int)clip_min.x;
+                scissor.Y = (int)clip_min.y;
+                scissor.Width = (int)(clip_max.x - clip_min.x);
+                scissor.Height = (int)(clip_max.y - clip_min.y);
+                encoder->SetScissor(scissor);
+                auto texView = std::bit_cast<TextureView*>(pcmd->GetTexID());
+                frame._descSet->SetResource(0, texView);
+                encoder->BindDescriptorSet(0, frame._descSet.get());
+                encoder->DrawIndexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, pcmd->VtxOffset + global_vtx_offset, 0);
+            }
+        }
+        global_idx_offset += draw_list->IdxBuffer.Size;
+        global_vtx_offset += draw_list->VtxBuffer.Size;
+    }
+    platform_io.Renderer_RenderState = nullptr;
+    {
+        Rect scissor{};
+        scissor.X = 0;
+        scissor.Y = 0;
+        scissor.Width = fbWidth;
+        scissor.Height = fbHeight;
+        encoder->SetScissor(scissor);
+    }
+}
+
+void ImGuiDrawContext::SetupRenderState(ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
+    using namespace ::radray::render;
+
+    auto& frame = _frames[_currentFrameIndex];
+
+    encoder->BindRootSignature(_rs.get());
+    encoder->BindGraphicsPipelineState(_pso.get());
+    if (drawData->TotalVtxCount > 0) {
+        VertexBufferView vbv{};
+        vbv.Target = frame._vb.get();
+        vbv.Offset = 0;
+        vbv.Size = frame._vbSize * sizeof(ImDrawVert);
+        encoder->BindVertexBuffer(std::span{&vbv, 1});
+        IndexBufferView ibv{};
+        ibv.Target = frame._ib.get();
+        ibv.Offset = 0;
+        ibv.Stride = sizeof(ImDrawIdx);
+        encoder->BindIndexBuffer(ibv);
+    }
+    Viewport vp{};
+    vp.X = 0.0f;
+    vp.Y = 0.0f;
+    vp.Width = (float)fbWidth;
+    vp.Height = (float)fbHeight;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    encoder->SetViewport(vp);
+    float L = drawData->DisplayPos.x;
+    float R = drawData->DisplayPos.x + drawData->DisplaySize.x;
+    float T = drawData->DisplayPos.y;
+    float B = drawData->DisplayPos.y + drawData->DisplaySize.y;
+    Eigen::Matrix4f proj = ::radray::OrthoLH(L, R, B, T, 0.0f, 1.0f);
+    encoder->PushConstant(proj.data(), sizeof(proj));
+}
 
 }  // namespace radray
 

@@ -72,6 +72,25 @@ Eigen::Matrix<T, 4, 4> PerspectiveLH(T fovy, T aspect, T zNear, T zFar) noexcept
 
 template <class T>
 requires(std::is_floating_point_v<T>)
+Eigen::Matrix<T, 4, 4> OrthoLH(T left, T right, T bottom, T top, T zNear, T zFar) noexcept {
+    Eigen::Matrix<T, 4, 4> ortho = Eigen::Matrix<T, 4, 4>::Zero();
+    const T invWidth = T(1) / (right - left);
+    const T invHeight = T(1) / (top - bottom);
+    const T invDepth = T(1) / (zFar - zNear);
+
+    ortho(0, 0) = T(2) * invWidth;
+    ortho(1, 1) = T(2) * invHeight;
+    ortho(2, 2) = invDepth;
+    ortho(0, 3) = -(right + left) * invWidth;
+    ortho(1, 3) = -(top + bottom) * invHeight;
+    ortho(2, 3) = -zNear * invDepth;
+    ortho(3, 3) = T(1);
+
+    return ortho;
+}
+
+template <class T>
+requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> LookAtFrontLH(const Eigen::Vector<T, 3>& eye, const Eigen::Vector<T, 3>& front, const Eigen::Vector<T, 3>& up) noexcept {
     Eigen::Vector<T, 3> zAxis = front.normalized();
     Eigen::Vector<T, 3> xAxis = up.cross(zAxis).normalized();

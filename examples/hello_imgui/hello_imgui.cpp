@@ -266,7 +266,7 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
 
 int main() {
     g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
+    // g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
 
     InitImGui();
     if (GetPlatform() == PlatformId::Windows) {
@@ -354,6 +354,7 @@ int main() {
                 rpDesc.ColorAttachments = std::span(&rtAttach, 1);
                 pass = frame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
             }
+            app->_imguiDrawContext->Draw(ImGui::GetDrawData(), pass.get());
             frame->_cmdBuffer->EndRenderPass(std::move(pass));
             {
                 BarrierTextureDescriptor barrier{};

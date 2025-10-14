@@ -1354,8 +1354,10 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
                 resCount += e.Count;
                 break;
             case ResourceBindType::Sampler:
-                offset.push_back(samplerCount);
-                samplerCount += e.Count;
+                if (e.StaticSamplers.empty()) {
+                    offset.push_back(samplerCount);
+                    samplerCount += e.Count;
+                }
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 descriptor set unsupported resource type {}", e.Type);
