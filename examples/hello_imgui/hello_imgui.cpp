@@ -80,16 +80,18 @@ public:
     }
 
     void Close() noexcept {
-        if (_context != nullptr) {
-            ImGui::DestroyContext(_context);
-            _context = nullptr;
-        }
-
         _isWaiting = false;
         _cv.notify_one();
         _renderThread.join();
         _cmdQueue->Wait();
         _rtViews.clear();
+        _imguiProc.reset();
+        if (_context != nullptr) {
+            TerminateRendererImGui(_context);
+            TerminatePlatformImGui(_context);
+            ImGui::DestroyContext(_context);
+            _context = nullptr;
+        }
         _imguiDrawContext.reset();
         _frames.clear();
         _swapchain.reset();
@@ -114,6 +116,10 @@ public:
                 auto [isResizing, isResized, isCloseRequested] = readParam();
                 if (isCloseRequested) {
                     break;
+                }
+                auto [x, y] = _window->GetSize();
+                if (x == 0 || y == 0) {
+                    continue;
                 }
                 if (isResizing) {
                     continue;
@@ -188,6 +194,7 @@ public:
     }
 
     ImGuiContext* _context{nullptr};
+    shared_ptr<std::function<Win32WNDPROC>> _imguiProc;
     unique_ptr<NativeWindow> _window;
     unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
@@ -219,10 +226,17 @@ public:
 unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     unique_ptr<NativeWindow> window;
     PlatformId platform = GetPlatform();
+
+    ImGuiContext* imguiContext = nullptr;
+    auto imguiContextGuard = MakeScopeGuard([imguiContext]() { if (imguiContext) ImGui::DestroyContext(imguiContext); });
+
+    shared_ptr<std::function<Win32WNDPROC>> imguiProc;
+
     if (platform == PlatformId::Windows) {
+        imguiContext = ImGui::CreateContext();
         string name = format("{} - {}", RADRAY_APP_NAME, backend);
-        vector<Win32WNDPROC> extraWndProcs;
-        extraWndProcs.push_back(GetImGuiWin32WNDPROC().Unwrap());
+        imguiProc = make_shared<std::function<Win32WNDPROC>>(GetImGuiWin32WNDPROCEx(imguiContext).Unwrap());
+        weak_ptr<std::function<Win32WNDPROC>> weakImguiProc = imguiProc;
         Win32WindowCreateDescriptor desc{};
         desc.Title = name;
         desc.Width = 1280;
@@ -232,8 +246,14 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         desc.Resizable = true;
         desc.StartMaximized = false;
         desc.Fullscreen = false;
-        desc.ExtraWndProcs = extraWndProcs;
+        desc.ExtraWndProcs = std::span{&weakImguiProc, 1};
         window = CreateNativeWindow(desc).Unwrap();
+        ImGuiPlatformInitDescriptor imguiDesc{};
+        imguiDesc.Platform = PlatformId::Windows;
+        imguiDesc.Window = window.get();
+        imguiDesc.Context = imguiContext;
+        InitPlatformImGui(imguiDesc);
+        InitRendererImGui(imguiDesc.Context);
     }
     if (!window) {
         throw HelloImguiException("Failed to create native window");
@@ -242,8 +262,13 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
     shared_ptr<Device> device;
     if (platform == PlatformId::Windows && backend == RenderBackend::D3D12) {
         D3D12DeviceDescriptor desc{};
+#ifdef RADRAY_IS_DEBUG
         desc.IsEnableDebugLayer = true;
         desc.IsEnableGpuBasedValid = true;
+#else
+        desc.IsEnableDebugLayer = false;
+        desc.IsEnableGpuBasedValid = false;
+#endif
         device = CreateDevice(desc).Unwrap();
     } else if (backend == RenderBackend::Vulkan) {
         VulkanInstanceDescriptor insDesc{};
@@ -251,7 +276,11 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         insDesc.AppVersion = 1;
         insDesc.EngineName = "RadRay";
         insDesc.EngineVersion = 1;
+#ifdef RADRAY_IS_DEBUG
         insDesc.IsEnableDebugLayer = true;
+#else
+        insDesc.IsEnableDebugLayer = false;
+#endif
         instance = CreateVulkanInstance(insDesc).Unwrap();
         VulkanCommandQueueDescriptor queueDesc[] = {
             {QueueType::Direct, 1}};
@@ -265,42 +294,25 @@ unique_ptr<HelloImguiApp> CreateApp(RenderBackend backend) {
         throw HelloImguiException("Failed to create device");
     }
     auto result = make_unique<HelloImguiApp>(std::move(window), std::move(instance), std::move(device));
+    result->_context = imguiContext;
+    result->_imguiProc = imguiProc;
+    imguiContextGuard.Dismiss();
     return result;
 }
 
 int main() {
-    g_apps.emplace_back(CreateApp(RenderBackend::D3D12));
-    g_apps.emplace_back(CreateApp(RenderBackend::Vulkan));
-
-    if (g_apps.size() == 0) {
-        throw HelloImguiException("No app created");
-    }
-
     InitImGui();
-    if (GetPlatform() == PlatformId::Windows) {
-        for (auto& app : g_apps) {
-            ImGuiPlatformInitDescriptor desc{};
-            desc.Platform = PlatformId::Windows;
-            desc.Window = app->_window.get();
-            desc.Context = ImGui::CreateContext();
-            InitPlatformImGui(desc);
-            InitRendererImGui(desc.Context);
-            app->_context = desc.Context;
+
+    if (::radray::GetPlatform() == PlatformId::Windows) {
+        RenderBackend backends[] = {RenderBackend::D3D12, RenderBackend::Vulkan};
+        for (RenderBackend b : backends) {
+            g_apps.emplace_back(CreateApp(b));
         }
     } else {
         throw HelloImguiException("Unsupported platform");
     }
-    {
-        for (auto& app : g_apps) {
-            HelloImguiApp* self = app.get();
-            app->_mainLoopResizeCb = app->_window->EventResized().connect([self](int w, int h) {
-                for (const auto& other : g_apps) {
-                    if (other.get() != self) {
-                        other->_window->SetSize(w, h);
-                    }
-                }
-            });
-        }
+    if (g_apps.size() == 0) {
+        throw HelloImguiException("No app created");
     }
     while (true) {
         for (const auto& app : g_apps) {
@@ -403,11 +415,6 @@ int main() {
     }
 
     g_closeSig();
-
-    for (auto& app : g_apps) {
-        TerminateRendererImGui(app->_context);
-        TerminatePlatformImGui(app->_context);
-    }
 
     g_apps.clear();
 

@@ -2,6 +2,7 @@
 
 #include <variant>
 #include <string_view>
+#include <functional>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -15,7 +16,7 @@ enum class WindowHandlerTag {
     HWND
 };
 
-using Win32WNDPROC = int64_t (*)(HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
+using Win32WNDPROC = int64_t(HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
 
 struct WindowNativeHandler {
     WindowHandlerTag Type;
@@ -31,7 +32,7 @@ struct Win32WindowCreateDescriptor {
     bool Resizable;
     bool StartMaximized;
     bool Fullscreen;
-    std::span<Win32WNDPROC> ExtraWndProcs;
+    std::span<std::weak_ptr<std::function<Win32WNDPROC>>> ExtraWndProcs;
 };
 
 using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor>;

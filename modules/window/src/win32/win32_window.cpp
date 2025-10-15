@@ -14,8 +14,15 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
     {
         auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
         if (window) {
-            for (auto proc : window->_extraWndProcs) {
-                proc(hWnd, uMsg, wParam, lParam);
+            for (auto& proc : window->_extraWndProcs) {
+                if (proc.expired()) {
+                    continue;
+                }
+                auto procPtr = proc.lock();
+                LRESULT r = (*procPtr)(hWnd, uMsg, wParam, lParam);
+                if (r) {
+                    return r;
+                }
             }
         }
     }
@@ -185,7 +192,11 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         return nullptr;
     }
     win->_hwnd = hwnd;
-    ::GetWindowRect(hwnd, &win->_windowedRect);
+    {
+        RECT rc{};
+        ::GetClientRect(hwnd, &rc);
+        win->_windowedRect = rc;
+    }
     win->_windowedStyle = style;
     win->_windowedExStyle = exStyle;
     win->_extraWndProcs = {desc.ExtraWndProcs.begin(), desc.ExtraWndProcs.end()};
@@ -239,8 +250,7 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
 
 WindowVec2i Win32Window::GetSize() const noexcept {
     if (!_hwnd) return WindowVec2i{0, 0};
-    RECT rc{};
-    ::GetClientRect(_hwnd, &rc);
+    RECT rc = _windowedRect;
     return WindowVec2i{rc.right - rc.left, rc.bottom - rc.top};
 }
 
@@ -275,7 +285,9 @@ bool Win32Window::EnterFullscreen() {
     mi.cbSize = sizeof(mi);
     if (!::GetMonitorInfo(_monitor, &mi)) return false;
 
-    ::GetWindowRect(_hwnd, &_windowedRect);
+    RECT rc{};
+    ::GetWindowRect(_hwnd, &rc);
+    _windowedRect = rc;
     _windowedStyle = ::GetWindowLong(_hwnd, GWL_STYLE);
     _windowedExStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
     ::SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle & ~(WS_OVERLAPPEDWINDOW));
@@ -293,11 +305,12 @@ bool Win32Window::ExitFullscreen() {
     if (!_hwnd || !_isFullscreen) return false;
     ::SetWindowLong(_hwnd, GWL_STYLE, _windowedStyle);
     ::SetWindowLong(_hwnd, GWL_EXSTYLE, _windowedExStyle);
+    RECT rc = _windowedRect.load();
     ::SetWindowPos(
         _hwnd, nullptr,
-        _windowedRect.left, _windowedRect.top,
-        _windowedRect.right - _windowedRect.left,
-        _windowedRect.bottom - _windowedRect.top,
+        rc.left, rc.top,
+        rc.right - rc.left,
+        rc.bottom - rc.top,
         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
     _isFullscreen = false;
     return true;

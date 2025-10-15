@@ -66,10 +66,10 @@ public:
 
     HWND _hwnd{nullptr};
     HMONITOR _monitor{nullptr};
-    RECT _windowedRect{0, 0, 0, 0};
+    std::atomic<RECT> _windowedRect{};
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
-    vector<WNDPROC> _extraWndProcs;
+    vector<weak_ptr<std::function<Win32WNDPROC>>> _extraWndProcs;
     bool _isFullscreen{false};
     bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};

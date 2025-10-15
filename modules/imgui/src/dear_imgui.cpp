@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);
 #endif
 
 namespace radray {
@@ -45,7 +46,7 @@ static void _ImguiFreeBridge(void* ptr, void* user_data) noexcept {
 bool InitImGui() {
     IMGUI_CHECKVERSION();
 #ifdef RADRAY_PLATFORM_WINDOWS
-    ImGui_ImplWin32_EnableDpiAwareness();
+    // ImGui_ImplWin32_EnableDpiAwareness(); // maybe we donot need this?
 #endif
     ImGui::SetAllocatorFunctions(_ImguiAllocBridge, _ImguiFreeBridge, nullptr);
     return true;
@@ -114,9 +115,23 @@ void TerminatePlatformImGui(ImGuiContext* context) {
 #endif
 }
 
-Nullable<Win32WNDPROC> GetImGuiWin32WNDPROC() noexcept {
+Nullable<Win32WNDPROC*> GetImGuiWin32WNDPROC() noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     return ImGui_ImplWin32_WndProcHandler;
+#else
+    return nullptr;
+#endif
+}
+
+Nullable<std::function<Win32WNDPROC>> GetImGuiWin32WNDPROCEx(ImGuiContext* context) noexcept {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    auto old = ImGui::GetCurrentContext();
+    auto ctxGuard = MakeScopeGuard([old]() { ImGui::SetCurrentContext(old); });
+    ImGui::SetCurrentContext(context);
+    ImGuiIO* io = &ImGui::GetIO();
+    return [io](HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam) -> LRESULT {
+        return ImGui_ImplWin32_WndProcHandlerEx(hwnd, uMsg, wParam, lParam, *io);
+    };
 #else
     return nullptr;
 #endif
@@ -434,7 +449,11 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* 
         {
             BarrierTextureDescriptor barrierBefore{};
             barrierBefore.Target = drawTex->_tex.get();
-            barrierBefore.Before = TextureUse::Uninitialized;
+            if (tex->Status == ImTextureStatus_WantCreate) {
+                barrierBefore.Before = TextureUse::Uninitialized;
+            } else {
+                barrierBefore.Before = TextureUse::Resource;
+            }
             barrierBefore.After = TextureUse::CopyDestination;
             barrierBefore.IsFromOrToOtherQueue = false;
             barrierBefore.IsSubresourceBarrier = false;

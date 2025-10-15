@@ -87,7 +87,8 @@ bool InitRendererImGui(ImGuiContext* context);
 void TerminateRendererImGui(ImGuiContext* context);
 void TerminatePlatformImGui(ImGuiContext* context);
 
-Nullable<Win32WNDPROC> GetImGuiWin32WNDPROC() noexcept;
+Nullable<Win32WNDPROC*> GetImGuiWin32WNDPROC() noexcept;
+Nullable<std::function<Win32WNDPROC>> GetImGuiWin32WNDPROCEx(ImGuiContext* context) noexcept;
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;
 std::span<const byte> GetImGuiShaderDXIL_PS() noexcept;
 std::span<const byte> GetImGuiShaderSPIRV_VS() noexcept;
