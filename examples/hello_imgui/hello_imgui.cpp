@@ -142,7 +142,8 @@ public:
                 std::unique_lock<std::mutex> lk{_mtx};
                 currFrame->_rt = acqTex.Unwrap();
                 _isWaiting = true;
-                _cv.wait(lk, [this]() { return !_isWaiting.load(); });
+                _cv.wait(lk);
+                _isWaiting = false;
                 auto [isResizing, isResized, isCloseRequested] = readParam();
                 if (isCloseRequested) {
                     break;
@@ -408,7 +409,6 @@ int main() {
                 auto& frame = app->_frames[app->_currentRenderFrameIndex];
                 frame->_cmdBuffer->End();
                 app->_imguiDrawContext->EndFrame();
-                app->_isWaiting = false;
                 app->_cv.notify_one();
             }
         }

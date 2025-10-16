@@ -993,6 +993,17 @@ ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept;
 
 BlendState DefaultBlendState() noexcept;
 
+class RootSignatureSetElementContainer {
+public:
+    explicit RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept;
+
+    static vector<RootSignatureSetElementContainer> FromView(std::span<const RootSignatureSetElement> elems) noexcept;
+
+public:
+    RootSignatureSetElement _elem;
+    vector<SamplerDescriptor> _staticSamplers;
+};
+
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;

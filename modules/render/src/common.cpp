@@ -197,6 +197,21 @@ BlendState DefaultBlendState() noexcept {
          BlendOperation::Add}};
 }
 
+RootSignatureSetElementContainer::RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept
+    : _elem(elem),
+      _staticSamplers(elem.StaticSamplers.begin(), elem.StaticSamplers.end()) {
+    _elem.StaticSamplers = std::span{_staticSamplers};
+}
+
+vector<RootSignatureSetElementContainer> RootSignatureSetElementContainer::FromView(std::span<const RootSignatureSetElement> elems) noexcept {
+    vector<RootSignatureSetElementContainer> result;
+    result.reserve(elems.size());
+    for (const auto& i : elems) {
+        result.emplace_back(i);
+    }
+    return result;
+}
+
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";

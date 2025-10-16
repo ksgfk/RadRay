@@ -2,6 +2,8 @@
 
 #include <bit>
 #include <cstring>
+#include <algorithm>
+#include <ranges>
 
 namespace radray::render::d3d12 {
 
@@ -616,6 +618,8 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
     auto result = make_shared<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
     result->_desc = desc;
+    result->_name = desc.Name;
+    result->_desc.Name = result->_name;
     return result;
 }
 
@@ -710,6 +714,8 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     SetObjectName(desc.Name, texture.Get(), allocRes.Get());
     auto result = make_shared<TextureD3D12>(this, std::move(texture), std::move(allocRes));
     result->_desc = desc;
+    result->_name = desc.Name;
+    result->_desc.Name = result->_name;
     return result;
 }
 
@@ -993,7 +999,8 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     // 资源数组占一个 range
     for (auto i : desc.BindingSets) {
         auto descSet = CastD3D12Object(i);
-        for (const RootSignatureSetElement& e : descSet->_elems) {
+        for (const RootSignatureSetElementContainer& c : descSet->_elems) {
+            const RootSignatureSetElement& e = c._elem;
             switch (e.Type) {
                 case ResourceBindType::CBuffer:
                 case ResourceBindType::Buffer:
@@ -1007,6 +1014,11 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     if (e.StaticSamplers.empty()) {
                         descRanges.emplace_back();
                         allStages |= e.Stages;
+                    } else {
+                        if (e.StaticSamplers.size() != e.Count) {
+                            RADRAY_ERR_LOG("d3d12 static sampler count mismatch {} need {}", e.StaticSamplers.size(), e.Count);
+                            return nullptr;
+                        }
                     }
                     break;
                 }
@@ -1023,7 +1035,8 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     for (auto i : desc.BindingSets) {
         auto descSet = CastD3D12Object(i);
-        for (const RootSignatureSetElement& e : descSet->_elems) {
+        for (const RootSignatureSetElementContainer& c : descSet->_elems) {
+            const RootSignatureSetElement& e = c._elem;
             switch (e.Type) {
                 case ResourceBindType::Sampler: {
                     if (e.StaticSamplers.empty()) {
@@ -1160,9 +1173,9 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         FAILED(hr)) {
         std::string_view reason;
         if (errorBlob) {
-            const char* errInfoBegin = std::bit_cast<const char*>(errorBlob->GetBufferPointer());
-            const char* errInfoEnd = errInfoBegin + errorBlob->GetBufferSize();
-            reason = std::string_view{errInfoBegin, errInfoEnd};
+            const char* const errInfoBegin = std::bit_cast<const char*>(errorBlob->GetBufferPointer());
+            auto errInfoSize = static_cast<size_t>(errorBlob->GetBufferSize());
+            reason = std::string_view{errInfoBegin, errInfoSize};
         } else {
             reason = GetErrorName(hr);
         }
@@ -1182,7 +1195,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     auto result = make_shared<RootSigD3D12>(this, std::move(rootSig));
     result->_rootConstant = desc.Constant;
     result->_rootDescriptors = {desc.RootBindings.begin(), desc.RootBindings.end()};
-    result->_bindDescriptors = std::move(bindDescs);
+    result->_bindDescriptors = RootSignatureSetElementContainer::FromView(bindDescs);
     result->_rootConstStart = (UINT)rootConstStart;
     result->_rootDescStart = (UINT)rootDescStart;
     result->_bindDescStart = (UINT)bindStart;
@@ -1334,7 +1347,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 
 Nullable<shared_ptr<DescriptorSetLayout>> DeviceD3D12::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
     auto result = make_shared<SimulateDescriptorSetLayoutD3D12>();
-    result->_elems = {desc.Elements.begin(), desc.Elements.end()};
+    result->_elems = RootSignatureSetElementContainer::FromView(desc.Elements);
     return result;
 }
 
@@ -1343,7 +1356,8 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
     UINT resCount = 0, samplerCount = 0;
     vector<uint32_t> offset;
     offset.reserve(layout->_elems.size());
-    for (const RootSignatureSetElement& e : layout->_elems) {
+    for (const RootSignatureSetElementContainer& c : layout->_elems) {
+        const RootSignatureSetElement& e = c._elem;
         switch (e.Type) {
             case ResourceBindType::CBuffer:
             case ResourceBindType::Buffer:

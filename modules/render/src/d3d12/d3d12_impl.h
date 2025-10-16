@@ -452,6 +452,7 @@ public:
     D3D12_RESOURCE_DESC _rawDesc;
     D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
     BufferDescriptor _desc;
+    string _name;
 };
 
 class BufferViewD3D12 final : public BufferView {
@@ -492,6 +493,7 @@ public:
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _rawDesc;
     TextureDescriptor _desc;
+    string _name;
 };
 
 class TextureViewD3D12 final : public TextureView {
@@ -546,7 +548,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
-    vector<RootSignatureSetElement> _bindDescriptors;
+    vector<RootSignatureSetElementContainer> _bindDescriptors;
     vector<RootSignatureBinding> _rootDescriptors;
     std::optional<RootSignatureConstant> _rootConstant;
     UINT _rootConstStart;
@@ -581,7 +583,7 @@ public:
     void Destroy() noexcept override;
 
 public:
-    vector<RootSignatureSetElement> _elems;
+    vector<RootSignatureSetElementContainer> _elems;
 };
 
 class GpuDescriptorHeapViews final : public DescriptorSet {
@@ -602,7 +604,7 @@ public:
     DeviceD3D12* _device;
     GpuDescriptorHeapViewRAII _resHeapView;
     GpuDescriptorHeapViewRAII _samplerHeapView;
-    vector<RootSignatureSetElement> _elems;
+    vector<RootSignatureSetElementContainer> _elems;
     vector<uint32_t> _elemToHeapOffset;
 };
 
