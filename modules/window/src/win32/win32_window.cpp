@@ -249,9 +249,13 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
 }
 
 WindowVec2i Win32Window::GetSize() const noexcept {
-    if (!_hwnd) return WindowVec2i{0, 0};
-    RECT rc = _windowedRect;
+    RECT rc;
+    ::GetClientRect(_hwnd, &rc);
     return WindowVec2i{rc.right - rc.left, rc.bottom - rc.top};
+}
+
+bool Win32Window::IsMinimized() const noexcept {
+    return ::IsIconic(_hwnd) != 0;
 }
 
 void Win32Window::SetSize(int width, int height) noexcept {

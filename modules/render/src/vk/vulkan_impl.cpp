@@ -311,7 +311,8 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
-        f.image->_mdesc = TextureDescriptor{
+        string name = radray::format("SwapChain Image {}", result->_frames.size() - 1);
+        TextureDescriptor texDesc{
             TextureDimension::Dim2D,
             swapchianCreateInfo.imageExtent.width,
             swapchianCreateInfo.imageExtent.height,
@@ -321,26 +322,8 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
             desc.Format,
             TextureUse::RenderTarget,
             ResourceHint::None,
-            {}};
-        f.image->_rawInfo = VkImageCreateInfo{
-            VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-            nullptr,
-            0,
-            VK_IMAGE_TYPE_2D,
-            swapchianCreateInfo.imageFormat,
-            VkExtent3D{
-                swapchianCreateInfo.imageExtent.width,
-                swapchianCreateInfo.imageExtent.height,
-                1},
-            1,
-            1,
-            VK_SAMPLE_COUNT_1_BIT,
-            VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            VK_SHARING_MODE_EXCLUSIVE,
-            0,
-            nullptr,
-            VK_IMAGE_LAYOUT_UNDEFINED};
+            name};
+        f.image->SetExtData(texDesc);
         f.fence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
         f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
         f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
@@ -409,7 +392,8 @@ Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     this->SetObjectName(desc.Name, vkBuf);
     auto result = make_shared<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
     result->_mdesc = desc;
-    result->_rawInfo = bufInfo;
+    result->_name = desc.Name;
+    result->_mdesc.Name = result->_name;
     return result;
 }
 
@@ -506,8 +490,7 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     }
     this->SetObjectName(desc.Name, vkImg);
     auto result = make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
-    result->_mdesc = desc;
-    result->_rawInfo = imgInfo;
+    result->SetExtData(desc);
     return result;
 }
 
@@ -973,7 +956,7 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
         return nullptr;
     }
     auto result = descSetLayoutVk.Release();
-    result->_bindingElements = {desc.Elements.begin(), desc.Elements.end()};
+    result->_bindingElements = RootSignatureSetElementContainer::FromView(desc.Elements);
     staticSamplers.shrink_to_fit();
     result->_immutableSamplers = std::move(staticSamplers);
     return shared_ptr{std::move(result)};
@@ -1958,7 +1941,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         }
         bufBarrier.buffer = buf->_buffer;
         bufBarrier.offset = 0;
-        bufBarrier.size = buf->_rawInfo.size;
+        bufBarrier.size = buf->_allocInfo.size;
 
         auto srcStage = BufferUseToPipelineStageFlags(i.Before);
         auto dstStage = BufferUseToPipelineStageFlags(i.After);
@@ -1990,7 +1973,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
             imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         }
         imgBarrier.image = tex->_image;
-        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawInfo.format);
+        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
         imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.Range.BaseMipLevel : 0;
         imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
         imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.Range.BaseArrayLayer : 0;
@@ -2027,7 +2010,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
         auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
-        attachDesc.samples = imageView->_image->_rawInfo.samples;
+        attachDesc.samples = MapSampleCount(imageView->_image->_mdesc.SampleCount);
         attachDesc.loadOp = MapType(i.Load);
         attachDesc.storeOp = MapType(i.Store);
         attachDesc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2062,7 +2045,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
         auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
-        attachDesc.samples = imageView->_image->_rawInfo.samples;
+        attachDesc.samples = MapSampleCount(imageView->_image->_mdesc.SampleCount);
         attachDesc.loadOp = MapType(i.DepthLoad);
         attachDesc.storeOp = MapType(i.DepthStore);
         attachDesc.stencilLoadOp = MapType(i.StencilLoad);
@@ -2175,7 +2158,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
     copyInfo.bufferOffset = srcOffset;
     copyInfo.bufferRowLength = 0;
     copyInfo.bufferImageHeight = 0;
-    copyInfo.imageSubresource.aspectMask = ImageFormatToAspectFlags(dst->_rawInfo.format);
+    copyInfo.imageSubresource.aspectMask = ImageFormatToAspectFlags(dst->_rawFormat);
     copyInfo.imageSubresource.mipLevel = dstRange.BaseMipLevel;
     copyInfo.imageSubresource.baseArrayLayer = dstRange.BaseArrayLayer;
     copyInfo.imageSubresource.layerCount = dstRange.ArrayLayerCount;
@@ -2806,6 +2789,13 @@ void ImageVulkan::DestroyImpl() noexcept {
     }
 }
 
+void ImageVulkan::SetExtData(const TextureDescriptor& desc) noexcept {
+    _mdesc = desc;
+    _name = desc.Name;
+    _mdesc.Name = _name;
+    _rawFormat = MapType(_mdesc.Format);
+}
+
 ImageViewVulkan::ImageViewVulkan(
     DeviceVulkan* device,
     ImageVulkan* image,
@@ -3010,10 +3000,10 @@ void DescriptorSetVulkanWrapper::SetResource(uint32_t index, ResourceView* view)
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;
     writeDesc.dstSet = _set->_set;
-    writeDesc.dstBinding = e.Slot;
+    writeDesc.dstBinding = e._elem.Slot;
     writeDesc.dstArrayElement = 0;
     writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = MapType(e.Type);
+    writeDesc.descriptorType = MapType(e._elem.Type);
     writeDesc.pBufferInfo = nullptr;
     writeDesc.pImageInfo = nullptr;
     writeDesc.pTexelBufferView = nullptr;

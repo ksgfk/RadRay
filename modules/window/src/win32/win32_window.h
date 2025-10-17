@@ -52,6 +52,7 @@ public:
     bool ShouldClose() const noexcept override;
     WindowNativeHandler GetNativeHandler() const noexcept override;
     WindowVec2i GetSize() const noexcept override;
+    bool IsMinimized() const noexcept override;
 
     void SetSize(int width, int height) noexcept override;
 

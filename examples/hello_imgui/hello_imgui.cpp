@@ -143,7 +143,6 @@ public:
                 currFrame->_rt = acqTex.Unwrap();
                 _isWaiting = true;
                 _cv.wait(lk);
-                _isWaiting = false;
                 auto [isResizing, isResized, isCloseRequested] = readParam();
                 if (isCloseRequested) {
                     break;
@@ -349,6 +348,9 @@ int main() {
             }
         }
         if (canRender) {
+            for (const auto& app : g_apps) {
+                app->_isWaiting = false;
+            }
             for (const auto& app : g_apps) {
                 ImGui::SetCurrentContext(app->_context);
                 auto& frame = app->_frames[app->_currentRenderFrameIndex];

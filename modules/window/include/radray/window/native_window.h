@@ -54,6 +54,7 @@ public:
     virtual bool ShouldClose() const noexcept = 0;
     virtual WindowNativeHandler GetNativeHandler() const noexcept = 0;
     virtual WindowVec2i GetSize() const noexcept = 0;
+    virtual bool IsMinimized() const noexcept = 0;
 
     virtual void SetSize(int width, int height) noexcept = 0;
 

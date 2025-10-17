@@ -518,7 +518,7 @@ public:
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
     BufferDescriptor _mdesc;
-    VkBufferCreateInfo _rawInfo;
+    string _name;
 };
 
 class BufferViewVulkan final : public RenderBase {
@@ -584,12 +584,15 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    void SetExtData(const TextureDescriptor& desc) noexcept;
+
     DeviceVulkan* _device;
     VkImage _image;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
     TextureDescriptor _mdesc;
-    VkImageCreateInfo _rawInfo;
+    string _name;
+    VkFormat _rawFormat;
 };
 
 class ImageViewVulkan final : public TextureView {
@@ -633,7 +636,7 @@ public:
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
     vector<RootSignatureBinding> _rootBindings;
-    vector<RootSignatureSetElement> _bindingElements;
+    vector<RootSignatureSetElementContainer> _bindingElements;
     vector<shared_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
@@ -761,7 +764,7 @@ public:
 public:
     DeviceVulkan* _device;
     unique_ptr<DescriptorSetVulkan> _set;
-    vector<RootSignatureSetElement> _bindingElements;
+    vector<RootSignatureSetElementContainer> _bindingElements;
 };
 
 class DescPoolAllocator {
