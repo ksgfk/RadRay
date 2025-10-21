@@ -12,6 +12,30 @@
 
 namespace radray {
 
+class ImGuiContextRAII {
+public:
+    explicit ImGuiContextRAII(ImFontAtlas* sharedFontAtlas = nullptr);
+    ImGuiContextRAII(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII(ImGuiContextRAII&&) noexcept;
+    ImGuiContextRAII& operator=(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII& operator=(ImGuiContextRAII&&) noexcept;
+    ~ImGuiContextRAII() noexcept;
+
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+    ImGuiContext* Get() const noexcept;
+
+    void SetCurrent();
+
+    friend constexpr void swap(ImGuiContextRAII& a, ImGuiContextRAII& b) noexcept {
+        using std::swap;
+        swap(a._ctx, b._ctx);
+    }
+
+private:
+    ImGuiContext* _ctx{nullptr};
+};
+
 class ImGuiPlatformInitDescriptor {
 public:
     PlatformId Platform;
@@ -51,13 +75,13 @@ public:
 
 class ImGuiDrawContext {
 public:
-    void NewFrame();
-    void EndFrame();
-    void UpdateDrawData(ImDrawData* drawData, render::CommandBuffer* cmdBuffer);
-    void EndUpdateDrawData(ImDrawData* drawData);
-    void UpdateTexture(ImTextureData* tex, render::CommandBuffer* cmdBuffer);
-    void Draw(ImDrawData* drawData, render::CommandEncoder* encoder);
-    void SetupRenderState(ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
+    // void NewFrame();
+    // void EndFrame();
+    void ExtractDrawData(int frame, ImDrawData* drawData);
+    void ExtractTexture(int frame, ImTextureData* tex);
+
+    void Draw(int frame, ImDrawData* drawData, render::CommandEncoder* encoder);
+    void SetupRenderState(int frame, ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
 
     class Frame {
     public:
@@ -75,10 +99,15 @@ public:
     shared_ptr<render::RootSignature> _rs;
     shared_ptr<render::GraphicsPipelineState> _pso;
     vector<Frame> _frames;
-    uint64_t _currentFrameIndex{0};
     unordered_map<render::Texture*, unique_ptr<ImGuiDrawTexture>> _texs;
 
     ImGuiDrawDescriptor _desc;
+};
+
+class ImGuiApplication {
+public:
+public:
+    ImGuiContextRAII _context;
 };
 
 bool InitImGui();

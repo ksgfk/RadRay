@@ -25,6 +25,41 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT m
 
 namespace radray {
 
+ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)
+    : _ctx(ImGui::CreateContext(sharedFontAtlas)) {}
+
+ImGuiContextRAII::ImGuiContextRAII(ImGuiContextRAII&& other) noexcept
+    : _ctx(other._ctx) {
+    other._ctx = nullptr;
+}
+
+ImGuiContextRAII& ImGuiContextRAII::operator=(ImGuiContextRAII&& other) noexcept {
+    ImGuiContextRAII temp{std::move(other)};
+    swap(*this, temp);
+    return *this;
+}
+
+ImGuiContextRAII::~ImGuiContextRAII() noexcept {
+    this->Destroy();
+}
+
+bool ImGuiContextRAII::IsValid() const noexcept {
+    return _ctx != nullptr;
+}
+
+void ImGuiContextRAII::Destroy() noexcept {
+    if (_ctx != nullptr) {
+        ImGui::DestroyContext(_ctx);
+        _ctx = nullptr;
+    }
+}
+
+ImGuiContext* ImGuiContextRAII::Get() const noexcept { return _ctx; }
+
+void ImGuiContextRAII::SetCurrent() {
+    ImGui::SetCurrentContext(_ctx);
+}
+
 static void* _ImguiAllocBridge(size_t size, void* user_data) noexcept {
     RADRAY_UNUSED(user_data);
 #ifdef RADRAY_ENABLE_MIMALLOC
@@ -76,9 +111,10 @@ bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc) {
         io.Fonts->AddFontDefault();
 
         ImGui::SetCurrentContext(old);
+        return true;
     }
 #endif
-    return true;
+    return false;
 }
 
 bool InitRendererImGui(ImGuiContext* context) {
@@ -292,27 +328,27 @@ ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
     _tex.reset();
 }
 
-void ImGuiDrawContext::NewFrame() {
-    auto& frame = _frames[_currentFrameIndex];
-    frame._uploads.clear();
-    frame._usableDescSetIndex = 0;
-}
+// void ImGuiDrawContext::NewFrame() {
+//     auto& frame = _frames[_currentFrameIndex];
+//     frame._uploads.clear();
+//     frame._usableDescSetIndex = 0;
+// }
 
-void ImGuiDrawContext::EndFrame() {
-    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
-}
+// void ImGuiDrawContext::EndFrame() {
+//     _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+// }
 
-void ImGuiDrawContext::UpdateDrawData(ImDrawData* drawData, render::CommandBuffer* cmdBuffer) {
+void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
     using namespace ::radray::render;
 
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
-    auto& frame = _frames[_currentFrameIndex];
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
     if (drawData->Textures != nullptr) {
         for (ImTextureData* tex : *drawData->Textures) {
             if (tex->Status != ImTextureStatus_OK) {
-                this->UpdateTexture(tex, cmdBuffer);
+                this->ExtractTexture(frameIndex, tex);
             }
         }
     }
@@ -323,7 +359,7 @@ void ImGuiDrawContext::UpdateDrawData(ImDrawData* drawData, render::CommandBuffe
         desc.Memory = MemoryType::Upload;
         desc.Usage = BufferUse::Vertex | BufferUse::CopySource;
         desc.Hints = ResourceHint::Dedicated;
-        string vbName = radray::format("imgui_vb_{}", _currentFrameIndex);
+        string vbName = radray::format("imgui_vb_{}", frameIndex);
         desc.Name = vbName;
         frame._vb = _device->CreateBuffer(desc).Unwrap();
         frame._vbSize = vertCount;
@@ -335,7 +371,7 @@ void ImGuiDrawContext::UpdateDrawData(ImDrawData* drawData, render::CommandBuffe
         desc.Memory = MemoryType::Upload;
         desc.Usage = BufferUse::Index | BufferUse::CopySource;
         desc.Hints = ResourceHint::Dedicated;
-        string ibName = radray::format("imgui_ib_{}", _currentFrameIndex);
+        string ibName = radray::format("imgui_ib_{}", frameIndex);
         desc.Name = ibName;
         frame._ib = _device->CreateBuffer(desc).Unwrap();
         frame._ibSize = idxCount;
@@ -358,31 +394,7 @@ void ImGuiDrawContext::UpdateDrawData(ImDrawData* drawData, render::CommandBuffe
     }
 }
 
-void ImGuiDrawContext::EndUpdateDrawData(ImDrawData* drawData) {
-    using namespace ::radray::render;
-
-    if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
-        return;
-    }
-    if (drawData->Textures != nullptr) {
-        for (ImTextureData* tex : *drawData->Textures) {
-            if (tex->Status != ImTextureStatus_OK) {
-                if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
-                    tex->SetStatus(ImTextureStatus_OK);
-                }
-                if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
-                    auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
-                    _texs.erase(texObjPtr);
-                    tex->SetTexID(ImTextureID_Invalid);
-                    tex->SetStatus(ImTextureStatus_Destroyed);
-                    tex->BackendUserData = nullptr;
-                }
-            }
-        }
-    }
-}
-
-void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* cmdBuffer) {
+void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
     using namespace ::radray::render;
 
     if (tex->Status == ImTextureStatus_WantCreate) {
@@ -419,13 +431,8 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* 
 
     if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
         auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
-        ImGuiDrawTexture* drawTex = nullptr;
-        {
-            auto it = _texs.find(texObjPtr);
-            if (it == _texs.end()) {
-                RADRAY_ABORT("radrayimgui texture not found");
-            }
-            drawTex = it->second.get();
+        if (_texs.find(texObjPtr) == _texs.end()) {
+            RADRAY_ABORT("radrayimgui texture not found");
         }
         IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
 
@@ -446,52 +453,62 @@ void ImGuiDrawContext::UpdateTexture(ImTextureData* tex, render::CommandBuffer* 
             std::memcpy(dst, tex->GetPixels(), upload_size);
             uploadBuffer->Unmap(0, upload_size);
         }
-        {
-            BarrierTextureDescriptor barrierBefore{};
-            barrierBefore.Target = drawTex->_tex.get();
-            if (tex->Status == ImTextureStatus_WantCreate) {
-                barrierBefore.Before = TextureUse::Uninitialized;
-            } else {
-                barrierBefore.Before = TextureUse::Resource;
-            }
-            barrierBefore.After = TextureUse::CopyDestination;
-            barrierBefore.IsFromOrToOtherQueue = false;
-            barrierBefore.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
-        }
-        SubresourceRange range{};
-        range.BaseArrayLayer = 0;
-        range.ArrayLayerCount = 1;
-        range.BaseMipLevel = 0;
-        range.MipLevelCount = 1;
-        cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), range, uploadBuffer.get(), 0);
-        {
-            BarrierTextureDescriptor barrierBefore{};
-            barrierBefore.Target = drawTex->_tex.get();
-            barrierBefore.Before = TextureUse::CopyDestination;
-            barrierBefore.After = TextureUse::Resource;
-            barrierBefore.IsFromOrToOtherQueue = false;
-            barrierBefore.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
-        }
+        tex->SetStatus(ImTextureStatus_OK);
 
-        auto& frame = _frames[_currentFrameIndex];
-        frame._uploads.emplace_back(std::move(uploadBuffer));
+        // {
+        //     BarrierTextureDescriptor barrierBefore{};
+        //     barrierBefore.Target = drawTex->_tex.get();
+        //     if (tex->Status == ImTextureStatus_WantCreate) {
+        //         barrierBefore.Before = TextureUse::Uninitialized;
+        //     } else {
+        //         barrierBefore.Before = TextureUse::Resource;
+        //     }
+        //     barrierBefore.After = TextureUse::CopyDestination;
+        //     barrierBefore.IsFromOrToOtherQueue = false;
+        //     barrierBefore.IsSubresourceBarrier = false;
+        //     cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
+        // }
+        // SubresourceRange range{};
+        // range.BaseArrayLayer = 0;
+        // range.ArrayLayerCount = 1;
+        // range.BaseMipLevel = 0;
+        // range.MipLevelCount = 1;
+        // cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), range, uploadBuffer.get(), 0);
+        // {
+        //     BarrierTextureDescriptor barrierBefore{};
+        //     barrierBefore.Target = drawTex->_tex.get();
+        //     barrierBefore.Before = TextureUse::CopyDestination;
+        //     barrierBefore.After = TextureUse::Resource;
+        //     barrierBefore.IsFromOrToOtherQueue = false;
+        //     barrierBefore.IsSubresourceBarrier = false;
+        //     cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
+        // }
+
+        // auto& frame = _frames[_currentFrameIndex];
+        // frame._uploads.emplace_back(std::move(uploadBuffer));
+    }
+    if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
+        // TODO: wait to destroy
+        // auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
+        // _texs.erase(texObjPtr);
+        tex->SetTexID(ImTextureID_Invalid);
+        tex->SetStatus(ImTextureStatus_Destroyed);
+        tex->BackendUserData = nullptr;
     }
 }
 
-void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encoder) {
+void ImGuiDrawContext::Draw(int frameIndex, ImDrawData* drawData, render::CommandEncoder* encoder) {
     using namespace ::radray::render;
 
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
 
-    auto& frame = _frames[_currentFrameIndex];
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     int fbWidth = (int)(drawData->DisplaySize.x * drawData->FramebufferScale.x);
     int fbHeight = (int)(drawData->DisplaySize.y * drawData->FramebufferScale.y);
-    this->SetupRenderState(drawData, encoder, fbWidth, fbHeight);
+    this->SetupRenderState(frameIndex, drawData, encoder, fbWidth, fbHeight);
 
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     ImGuiRenderState rs{};
@@ -508,7 +525,7 @@ void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encode
             const ImDrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
             if (pcmd->UserCallback != nullptr) {
                 if (pcmd->UserCallback == ImDrawCallback_ResetRenderState) {
-                    this->SetupRenderState(drawData, encoder, fbWidth, fbHeight);
+                    this->SetupRenderState(frameIndex, drawData, encoder, fbWidth, fbHeight);
                 } else {
                     pcmd->UserCallback(draw_list, pcmd);
                 }
@@ -565,10 +582,10 @@ void ImGuiDrawContext::Draw(ImDrawData* drawData, render::CommandEncoder* encode
     }
 }
 
-void ImGuiDrawContext::SetupRenderState(ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
+void ImGuiDrawContext::SetupRenderState(int frameIndex, ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
     using namespace ::radray::render;
 
-    auto& frame = _frames[_currentFrameIndex];
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     encoder->BindRootSignature(_rs.get());
     encoder->BindGraphicsPipelineState(_pso.get());
