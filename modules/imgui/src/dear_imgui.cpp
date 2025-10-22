@@ -328,16 +328,6 @@ ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
     _tex.reset();
 }
 
-// void ImGuiDrawContext::NewFrame() {
-//     auto& frame = _frames[_currentFrameIndex];
-//     frame._uploads.clear();
-//     frame._usableDescSetIndex = 0;
-// }
-
-// void ImGuiDrawContext::EndFrame() {
-//     _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
-// }
-
 void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
     using namespace ::radray::render;
 
@@ -345,6 +335,11 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         return;
     }
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+
+    frame._needCopyTexs.clear();
+    frame._tempUploadBuffers.clear();
+    frame._drawData.Clear();
+
     if (drawData->Textures != nullptr) {
         for (ImTextureData* tex : *drawData->Textures) {
             if (tex->Status != ImTextureStatus_OK) {
@@ -392,10 +387,35 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         }
         frame._ib->Unmap(0, drawData->TotalIdxCount * sizeof(ImDrawIdx));
     }
+
+    {
+        frame._drawData.DisplayPos = drawData->DisplayPos;
+        frame._drawData.DisplaySize = drawData->DisplaySize;
+        frame._drawData.FramebufferScale = drawData->FramebufferScale;
+        frame._drawData.TotalVtxCount = drawData->TotalVtxCount;
+        frame._drawData.CmdLists.reserve(drawData->CmdLists.Size);
+        for (const ImDrawList* drawList : drawData->CmdLists) {
+            ImGuiDrawContext::DrawList& dl = frame._drawData.CmdLists.emplace_back();
+            dl.VtxBufferSize = drawList->VtxBuffer.Size;
+            dl.IdxBufferSize = drawList->IdxBuffer.Size;
+            dl.CmdBuffer.reserve(drawList->CmdBuffer.Size);
+            for (const ImDrawCmd& cmd : drawList->CmdBuffer) {
+                ImGuiDrawContext::DrawCmd& dc = dl.CmdBuffer.emplace_back();
+                dc.ClipRect = cmd.ClipRect;
+                dc.TexRef = cmd.TexRef;
+                dc.VtxOffset = cmd.VtxOffset;
+                dc.IdxOffset = cmd.IdxOffset;
+                dc.ElemCount = cmd.ElemCount;
+                dc.UserCallback = cmd.UserCallback;
+            }
+        }
+    }
 }
 
 void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
     using namespace ::radray::render;
+
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     if (tex->Status == ImTextureStatus_WantCreate) {
         IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
@@ -453,105 +473,114 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
             std::memcpy(dst, tex->GetPixels(), upload_size);
             uploadBuffer->Unmap(0, upload_size);
         }
+        frame._tempUploadBuffers.emplace_back(uploadBuffer);
+        frame._needCopyTexs.emplace_back(UploadTexturePayload{texObjPtr, uploadBuffer.get(), tex->Status == ImTextureStatus_WantCreate});
         tex->SetStatus(ImTextureStatus_OK);
-
-        // {
-        //     BarrierTextureDescriptor barrierBefore{};
-        //     barrierBefore.Target = drawTex->_tex.get();
-        //     if (tex->Status == ImTextureStatus_WantCreate) {
-        //         barrierBefore.Before = TextureUse::Uninitialized;
-        //     } else {
-        //         barrierBefore.Before = TextureUse::Resource;
-        //     }
-        //     barrierBefore.After = TextureUse::CopyDestination;
-        //     barrierBefore.IsFromOrToOtherQueue = false;
-        //     barrierBefore.IsSubresourceBarrier = false;
-        //     cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
-        // }
-        // SubresourceRange range{};
-        // range.BaseArrayLayer = 0;
-        // range.ArrayLayerCount = 1;
-        // range.BaseMipLevel = 0;
-        // range.MipLevelCount = 1;
-        // cmdBuffer->CopyBufferToTexture(drawTex->_tex.get(), range, uploadBuffer.get(), 0);
-        // {
-        //     BarrierTextureDescriptor barrierBefore{};
-        //     barrierBefore.Target = drawTex->_tex.get();
-        //     barrierBefore.Before = TextureUse::CopyDestination;
-        //     barrierBefore.After = TextureUse::Resource;
-        //     barrierBefore.IsFromOrToOtherQueue = false;
-        //     barrierBefore.IsSubresourceBarrier = false;
-        //     cmdBuffer->ResourceBarrier({}, std::span{&barrierBefore, 1});
-        // }
-
-        // auto& frame = _frames[_currentFrameIndex];
-        // frame._uploads.emplace_back(std::move(uploadBuffer));
     }
     if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
-        // TODO: wait to destroy
-        // auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
-        // _texs.erase(texObjPtr);
+        auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
+        frame._waitDestroyTexs.emplace_back(texObjPtr);
         tex->SetTexID(ImTextureID_Invalid);
         tex->SetStatus(ImTextureStatus_Destroyed);
         tex->BackendUserData = nullptr;
     }
 }
 
-void ImGuiDrawContext::Draw(int frameIndex, ImDrawData* drawData, render::CommandEncoder* encoder) {
+void ImGuiDrawContext::BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuffer) {
     using namespace ::radray::render;
+
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+
+    if (frame._needCopyTexs.size() > 0) {
+        vector<BarrierTextureDescriptor> barriers;
+        barriers.reserve(frame._needCopyTexs.size());
+        for (const ImGuiDrawContext::UploadTexturePayload& payload : frame._needCopyTexs) {
+            BarrierTextureDescriptor& barrierBefore = barriers.emplace_back();
+            barrierBefore.Target = payload._tex;
+            if (payload._isNew) {
+                barrierBefore.Before = TextureUse::Uninitialized;
+            } else {
+                barrierBefore.Before = TextureUse::Resource;
+            }
+            barrierBefore.After = TextureUse::CopyDestination;
+            barrierBefore.IsFromOrToOtherQueue = false;
+            barrierBefore.IsSubresourceBarrier = false;
+        }
+        cmdBuffer->ResourceBarrier({}, barriers);
+        for (const ImGuiDrawContext::UploadTexturePayload& payload : frame._needCopyTexs) {
+            SubresourceRange range{};
+            range.BaseArrayLayer = 0;
+            range.ArrayLayerCount = 1;
+            range.BaseMipLevel = 0;
+            range.MipLevelCount = 1;
+            cmdBuffer->CopyBufferToTexture(payload._tex, range, payload._upload, 0);
+        }
+        barriers.clear();
+        for (const ImGuiDrawContext::UploadTexturePayload& payload : frame._needCopyTexs) {
+            BarrierTextureDescriptor& barrierBefore = barriers.emplace_back();
+            barrierBefore.Target = payload._tex;
+            barrierBefore.Before = TextureUse::CopyDestination;
+            barrierBefore.After = TextureUse::Resource;
+            barrierBefore.IsFromOrToOtherQueue = false;
+            barrierBefore.IsSubresourceBarrier = false;
+        }
+        cmdBuffer->ResourceBarrier({}, barriers);
+    }
+}
+
+void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
+    using namespace ::radray::render;
+
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+    const ImGuiDrawContext::DrawData* drawData = &frame._drawData;
 
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
 
-    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
-
     int fbWidth = (int)(drawData->DisplaySize.x * drawData->FramebufferScale.x);
     int fbHeight = (int)(drawData->DisplaySize.y * drawData->FramebufferScale.y);
-    this->SetupRenderState(frameIndex, drawData, encoder, fbWidth, fbHeight);
+    this->SetupRenderState(frameIndex, encoder, fbWidth, fbHeight);
 
-    ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
-    ImGuiRenderState rs{};
-    rs._encoder = encoder;
-    platform_io.Renderer_RenderState = &rs;
-
-    ImVec2 clip_off = drawData->DisplayPos;
-    ImVec2 clip_scale = drawData->FramebufferScale;
-    int global_vtx_offset = 0;
-    int global_idx_offset = 0;
+    ImVec2 clipOff = drawData->DisplayPos;
+    ImVec2 clipScale = drawData->FramebufferScale;
+    int globalVtxOffset = 0;
+    int globalIdxOffset = 0;
     TextureView* lastBindTex = nullptr;
-    for (const ImDrawList* draw_list : drawData->CmdLists) {
-        for (int cmd_i = 0; cmd_i < draw_list->CmdBuffer.Size; cmd_i++) {
-            const ImDrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
+    for (const ImGuiDrawContext::DrawList& dl : drawData->CmdLists) {
+        const ImGuiDrawContext::DrawList* draw_list = &dl;
+        for (size_t cmd_i = 0; cmd_i < draw_list->CmdBuffer.size(); cmd_i++) {
+            const ImGuiDrawContext::DrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
             if (pcmd->UserCallback != nullptr) {
                 if (pcmd->UserCallback == ImDrawCallback_ResetRenderState) {
-                    this->SetupRenderState(frameIndex, drawData, encoder, fbWidth, fbHeight);
+                    this->SetupRenderState(frameIndex, encoder, fbWidth, fbHeight);
                 } else {
-                    pcmd->UserCallback(draw_list, pcmd);
+                    // pcmd->UserCallback(draw_list, pcmd);
+                    RADRAY_ABORT("radrayimgui does not support ImDrawCmd UserCallback.");
                 }
             } else {
-                ImVec2 clip_min((pcmd->ClipRect.x - clip_off.x) * clip_scale.x, (pcmd->ClipRect.y - clip_off.y) * clip_scale.y);
-                ImVec2 clip_max((pcmd->ClipRect.z - clip_off.x) * clip_scale.x, (pcmd->ClipRect.w - clip_off.y) * clip_scale.y);
-                if (clip_min.x < 0.0f) {
-                    clip_min.x = 0.0f;
+                ImVec2 clipMin((pcmd->ClipRect.x - clipOff.x) * clipScale.x, (pcmd->ClipRect.y - clipOff.y) * clipScale.y);
+                ImVec2 clipMax((pcmd->ClipRect.z - clipOff.x) * clipScale.x, (pcmd->ClipRect.w - clipOff.y) * clipScale.y);
+                if (clipMin.x < 0.0f) {
+                    clipMin.x = 0.0f;
                 }
-                if (clip_min.y < 0.0f) {
-                    clip_min.y = 0.0f;
+                if (clipMin.y < 0.0f) {
+                    clipMin.y = 0.0f;
                 }
-                if (clip_max.x > (float)fbWidth) {
-                    clip_max.x = (float)fbWidth;
+                if (clipMax.x > (float)fbWidth) {
+                    clipMax.x = (float)fbWidth;
                 }
-                if (clip_max.y > (float)fbHeight) {
-                    clip_max.y = (float)fbHeight;
+                if (clipMax.y > (float)fbHeight) {
+                    clipMax.y = (float)fbHeight;
                 }
-                if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) {
+                if (clipMax.x <= clipMin.x || clipMax.y <= clipMin.y) {
                     continue;
                 }
                 Rect scissor{};
-                scissor.X = (int)clip_min.x;
-                scissor.Y = (int)clip_min.y;
-                scissor.Width = (int)(clip_max.x - clip_min.x);
-                scissor.Height = (int)(clip_max.y - clip_min.y);
+                scissor.X = (int)clipMin.x;
+                scissor.Y = (int)clipMin.y;
+                scissor.Width = (int)(clipMax.x - clipMin.x);
+                scissor.Height = (int)(clipMax.y - clipMin.y);
                 encoder->SetScissor(scissor);
                 auto texView = std::bit_cast<TextureView*>(pcmd->GetTexID());
                 if (lastBindTex != texView) {
@@ -565,13 +594,12 @@ void ImGuiDrawContext::Draw(int frameIndex, ImDrawData* drawData, render::Comman
                     frame._usableDescSetIndex++;
                     lastBindTex = texView;
                 }
-                encoder->DrawIndexed(pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, pcmd->VtxOffset + global_vtx_offset, 0);
+                encoder->DrawIndexed(pcmd->ElemCount, 1, pcmd->IdxOffset + globalIdxOffset, pcmd->VtxOffset + globalVtxOffset, 0);
             }
         }
-        global_idx_offset += draw_list->IdxBuffer.Size;
-        global_vtx_offset += draw_list->VtxBuffer.Size;
+        globalIdxOffset += draw_list->IdxBufferSize;
+        globalVtxOffset += draw_list->VtxBufferSize;
     }
-    platform_io.Renderer_RenderState = nullptr;
     {
         Rect scissor{};
         scissor.X = 0;
@@ -582,10 +610,11 @@ void ImGuiDrawContext::Draw(int frameIndex, ImDrawData* drawData, render::Comman
     }
 }
 
-void ImGuiDrawContext::SetupRenderState(int frameIndex, ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
+void ImGuiDrawContext::SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
     using namespace ::radray::render;
 
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+    const ImGuiDrawContext::DrawData* drawData = &frame._drawData;
 
     encoder->BindRootSignature(_rs.get());
     encoder->BindGraphicsPipelineState(_pso.get());
@@ -619,6 +648,18 @@ void ImGuiDrawContext::SetupRenderState(int frameIndex, ImDrawData* drawData, re
     float B = drawData->DisplayPos.y + drawData->DisplaySize.y;
     Eigen::Matrix4f proj = ::radray::OrthoLH(L, R, B, T, 0.0f, 1.0f);
     encoder->PushConstant(proj.data(), sizeof(proj));
+}
+
+ImTextureID ImGuiDrawContext::DrawCmd::GetTexID() const noexcept {
+    ImTextureID tex_id = TexRef._TexData ? TexRef._TexData->TexID : TexRef._TexID;
+    if (TexRef._TexData != NULL) {
+        IM_ASSERT(tex_id != ImTextureID_Invalid && "ImDrawCmd is referring to ImTextureData that wasn't uploaded to graphics system. Backend must call ImTextureData::SetTexID() after handling ImTextureStatus_WantCreate request!");
+    }
+    return tex_id;
+}
+
+void ImGuiDrawContext::DrawData::Clear() noexcept {
+    CmdLists.clear();
 }
 
 }  // namespace radray

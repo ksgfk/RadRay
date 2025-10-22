@@ -43,13 +43,15 @@ public:
     NativeWindow* Window;
 };
 
-class ImGuiRendererData {
+class ImGuiDrawDescriptor {
 public:
+    render::Device* Device;
+    render::TextureFormat RTFormat;
+    int FrameCount;
 };
 
-class ImGuiRenderState {
+class ImGuiRendererData {
 public:
-    render::CommandEncoder* _encoder{nullptr};
 };
 
 class ImGuiDrawTexture {
@@ -66,32 +68,62 @@ public:
     shared_ptr<render::TextureView> _srv;
 };
 
-class ImGuiDrawDescriptor {
-public:
-    render::Device* Device;
-    render::TextureFormat RTFormat;
-    int FrameCount;
-};
-
 class ImGuiDrawContext {
 public:
-    // void NewFrame();
-    // void EndFrame();
     void ExtractDrawData(int frame, ImDrawData* drawData);
     void ExtractTexture(int frame, ImTextureData* tex);
 
-    void Draw(int frame, ImDrawData* drawData, render::CommandEncoder* encoder);
-    void SetupRenderState(int frame, ImDrawData* drawData, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
+    void BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuffer);
+    void Draw(int frame, render::CommandEncoder* encoder);
+    void SetupRenderState(int frame, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
+
+    struct DrawCmd {
+        ImVec4 ClipRect;
+        ImTextureRef TexRef;
+        unsigned int VtxOffset;
+        unsigned int IdxOffset;
+        unsigned int ElemCount;
+        ImDrawCallback UserCallback;
+
+        ImTextureID GetTexID() const noexcept;
+    };
+
+    struct DrawList {
+        vector<DrawCmd> CmdBuffer;
+        int VtxBufferSize;
+        int IdxBufferSize;
+    };
+
+    struct DrawData {
+        vector<DrawList> CmdLists;
+        ImVec2 DisplayPos;
+        ImVec2 DisplaySize;
+        ImVec2 FramebufferScale;
+        int TotalVtxCount;
+
+        void Clear() noexcept;
+    };
+
+    struct UploadTexturePayload {
+        render::Texture* _tex;
+        render::Buffer* _upload;
+        bool _isNew;
+    };
 
     class Frame {
     public:
         vector<shared_ptr<render::DescriptorSet>> _descSets;
         size_t _usableDescSetIndex{0};
-        vector<shared_ptr<render::Buffer>> _uploads;
+        vector<shared_ptr<render::Buffer>> _tempUploadBuffers;
+        vector<UploadTexturePayload> _needCopyTexs;
+        vector<render::Texture*> _waitDestroyTexs;
+
         shared_ptr<render::Buffer> _vb;
         shared_ptr<render::Buffer> _ib;
         int32_t _vbSize{0};
         int32_t _ibSize{0};
+
+        DrawData _drawData;
     };
 
     render::Device* _device;
