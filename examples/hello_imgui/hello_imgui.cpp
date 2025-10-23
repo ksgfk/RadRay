@@ -21,7 +21,6 @@ class HelloImguiFrame;
 class HelloImguiApp;
 
 radray::vector<radray::unique_ptr<HelloImguiApp>> g_apps;
-sigslot::signal<> g_closeSig;
 
 enum class HelloImguiWaitRenderStrategy {
     Wait,
@@ -48,9 +47,6 @@ public:
     radray::shared_ptr<radray::render::CommandBuffer> _cmdBuffer{};
     radray::render::Texture* _rt{};
     radray::render::TextureView* _rtView{};
-    enum class State : uint8_t { Idle = 0, Writing, Ready, Rendering };
-    std::atomic<State> _state{State::Idle};
-    uint64_t _writeSeq{0};
 };
 
 class HelloImguiApp {
@@ -122,8 +118,7 @@ public:
             f->_frameIndex = i;
             f->_cmdBuffer = _device->CreateCommandBuffer(_cmdQueue).Unwrap();
         }
-    _writeIndex = 0;
-    _renderIndex = 0;
+        _currRenderFrame = 0;
         radray::ImGuiDrawDescriptor imguiDrawDesc{};
         imguiDrawDesc.Device = _device.get();
         imguiDrawDesc.RTFormat = radray::render::TextureFormat::RGBA8_UNORM;
@@ -178,39 +173,23 @@ public:
 
     void RunRenderThread() {
         while (true) {
-            if (_needClose) break;
+            if (_needClose) {
+                break;
+            }
             radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
-            if (_needClose) break;
+            if (_needClose) {
+                break;
+            }
             if (!rtOpt.HasValue()) {
                 continue;
             }
 
-            // Wait for the next frame in render order to be ready
-            HelloImguiFrame* frame = nullptr;
-            {
-                std::unique_lock<std::mutex> lk(_mtx);
-                _cv.wait(lk, [&]() noexcept {
-                    return _needClose || _frames[_renderIndex]->_state.load() == HelloImguiFrame::State::Ready;
-                });
-                if (_needClose) break;
-                frame = _frames[_renderIndex].get();
-                frame->_state.store(HelloImguiFrame::State::Rendering);
-            }
-
-            // Bind current back buffer to this frame
+            HelloImguiFrame* frame = _frames[_currRenderFrame].get();
             frame->_rt = rtOpt.Value();
             frame->_rtView = this->SafeGetRTView(frame->_rt);
-
             this->RenderUpdate(frame->_frameIndex);
             _swapchain->Present();
-
-            // Mark frame idle and advance
-            {
-                std::lock_guard<std::mutex> lk(_mtx);
-                frame->_state.store(HelloImguiFrame::State::Idle);
-                _renderIndex = (_renderIndex + 1) % _frames.size();
-            }
-            _cv.notify_all();
+            _currRenderFrame = (_currRenderFrame + 1) % _frames.size();
         }
     }
 
@@ -219,9 +198,9 @@ public:
         _window->DispatchEvents();
         if (_window->ShouldClose()) {
             _needClose = true;
-            g_closeSig();
-            _cv.notify_all();
+            return;
         }
+
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
         if (_showDemo) {
@@ -233,15 +212,7 @@ public:
         if (frameOpt.HasValue()) {
             HelloImguiFrame* frame = frameOpt.Value();
             ImDrawData* drawData = ImGui::GetDrawData();
-            // Write into per-frame imgui cache
             _imguiDrawContext->ExtractDrawData((int)frame->_frameIndex, drawData);
-            // Mark ready and stamp sequence
-            {
-                std::lock_guard<std::mutex> lk(_mtx);
-                frame->_writeSeq = ++_writeSeqCounter;
-                frame->_state.store(HelloImguiFrame::State::Ready);
-            }
-            _cv.notify_all();
         }
     }
 
@@ -290,89 +261,7 @@ public:
     }
 
     radray::Nullable<HelloImguiFrame*> GetAvailableFrame() {
-        if (_needClose) return nullptr;
-        std::unique_lock<std::mutex> lk(_mtx);
-        auto try_select_write_index = [&]() -> HelloImguiFrame* {
-            HelloImguiFrame* f = _frames[_writeIndex].get();
-            auto st = f->_state.load();
-            if (st != HelloImguiFrame::State::Rendering && st != HelloImguiFrame::State::Writing) {
-                f->_state.store(HelloImguiFrame::State::Writing);
-                return f;
-            }
-            return nullptr;
-        };
-
-        if (_waitRenderStrategy == HelloImguiWaitRenderStrategy::Wait) {
-            // Strictly wait until the next in-order frame is writable
-            _cv.wait(lk, [&]() noexcept {
-                if (_needClose) return true;
-                HelloImguiFrame* f = _frames[_writeIndex].get();
-                auto st = f->_state.load();
-                return st == HelloImguiFrame::State::Idle; // wait until writable
-            });
-            if (_needClose) return nullptr;
-            HelloImguiFrame* f = _frames[_writeIndex].get();
-            f->_state.store(HelloImguiFrame::State::Writing);
-            // advance write index for next time (in-order)
-            _writeIndex = (_writeIndex + 1) % _frames.size();
-            return f;
-        } else { // Discard strategy
-            // First try the in-order frame if not rendering
-            if (HelloImguiFrame* sel = try_select_write_index(); sel != nullptr) {
-                // advance only if we wrote to the in-order frame
-                _writeIndex = (_writeIndex + 1) % _frames.size();
-                return sel;
-            }
-            // Otherwise, find the earliest written but not rendered frame (state Ready with smallest writeSeq)
-            HelloImguiFrame* oldestReady = nullptr;
-            uint64_t bestSeq = std::numeric_limits<uint64_t>::max();
-            for (auto& upf : _frames) {
-                HelloImguiFrame* f = upf.get();
-                if (f->_state.load() == HelloImguiFrame::State::Ready) {
-                    if (f->_writeSeq < bestSeq) {
-                        bestSeq = f->_writeSeq;
-                        oldestReady = f;
-                    }
-                }
-            }
-            if (oldestReady) {
-                oldestReady->_state.store(HelloImguiFrame::State::Writing);
-                // do NOT advance _writeIndex because we didn't use the in-order one
-                return oldestReady;
-            }
-            // If none Ready, pick any Idle frame
-            for (auto& upf : _frames) {
-                HelloImguiFrame* f = upf.get();
-                if (f->_state.load() == HelloImguiFrame::State::Idle) {
-                    f->_state.store(HelloImguiFrame::State::Writing);
-                    return f;
-                }
-            }
-            // All are rendering; wait until some becomes writable
-            _cv.wait(lk, [&]() noexcept {
-                if (_needClose) return true;
-                for (auto& upf : _frames) {
-                    auto st = upf->_state.load();
-                    if (st == HelloImguiFrame::State::Idle || st == HelloImguiFrame::State::Ready) return true;
-                }
-                return false;
-            });
-            if (_needClose) return nullptr;
-            // Retry selection quickly
-            if (HelloImguiFrame* sel = try_select_write_index(); sel != nullptr) {
-                _writeIndex = (_writeIndex + 1) % _frames.size();
-                return sel;
-            }
-            for (auto& upf : _frames) {
-                HelloImguiFrame* f = upf.get();
-                auto st = f->_state.load();
-                if (st == HelloImguiFrame::State::Ready || st == HelloImguiFrame::State::Idle) {
-                    f->_state.store(HelloImguiFrame::State::Writing);
-                    return f;
-                }
-            }
-            return nullptr;
-        }
+        return nullptr;
     }
 
     radray::render::TextureView* SafeGetRTView(radray::render::Texture* rt) {
@@ -402,14 +291,9 @@ public:
     radray::unique_ptr<std::thread> _renderThread;
     HelloImguiWaitRenderStrategy _waitRenderStrategy;
 
-    std::mutex _mtx;
-    std::condition_variable _cv;
-    size_t _writeIndex{0};
-    size_t _renderIndex{0};
-    uint64_t _writeSeqCounter{0};
-
     radray::unordered_map<radray::render::Texture*, radray::shared_ptr<radray::render::TextureView>> _rtViews;
     radray::vector<radray::unique_ptr<HelloImguiFrame>> _frames;
+    size_t _currRenderFrame;
     std::atomic_bool _needClose{false};
     bool _showDemo{true};
 };
