@@ -10,6 +10,8 @@
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/platform.h>
+#include <radray/channel.h>
+#include <radray/stopwatch.h>
 #include <radray/window/native_window.h>
 #include <radray/render/common.h>
 #include <radray/imgui/dear_imgui.h>
@@ -44,6 +46,7 @@ private:
 class HelloImguiFrame {
 public:
     size_t _frameIndex;
+    uint64_t _completeFrame{std::numeric_limits<uint64_t>::max()};
     radray::shared_ptr<radray::render::CommandBuffer> _cmdBuffer{};
     radray::render::Texture* _rt{};
     radray::render::TextureView* _rtView{};
@@ -51,9 +54,17 @@ public:
 
 class HelloImguiApp {
 public:
-    explicit HelloImguiApp(radray::render::RenderBackend backend, HelloImguiWaitRenderStrategy strategy)
+    explicit HelloImguiApp(
+        radray::render::RenderBackend backend,
+        HelloImguiWaitRenderStrategy strategy,
+        bool multiThreadRender)
         : _imguiContext(radray::make_unique<radray::ImGuiContextRAII>()),
-          _waitRenderStrategy(strategy) {
+          _waitRenderStrategy(strategy),
+          _useRenderThread(multiThreadRender) {
+        if (!_useRenderThread) {
+            _waitRenderStrategy = HelloImguiWaitRenderStrategy::Discord;
+        }
+
         radray::PlatformId platform = radray::GetPlatform();
         if (platform == radray::PlatformId::Windows) {
             radray::string name = radray::format("{} - {}", RADRAY_APP_NAME, backend);
@@ -124,6 +135,10 @@ public:
         imguiDrawDesc.RTFormat = radray::render::TextureFormat::RGBA8_UNORM;
         imguiDrawDesc.FrameCount = (int)_frames.size();
         _imguiDrawContext = radray::CreateImGuiDrawContext(imguiDrawDesc).Unwrap();
+
+        for (size_t i = 0; i < _frames.size(); i++) {
+            _freeFrame.TryWrite(i);
+        }
     }
 
     ~HelloImguiApp() noexcept {
@@ -156,40 +171,62 @@ public:
         swapchainDesc.Height = (uint32_t)winH;
         swapchainDesc.BackBufferCount = 3;
         swapchainDesc.Format = radray::render::TextureFormat::RGBA8_UNORM;
-        swapchainDesc.EnableSync = false;
+        swapchainDesc.EnableSync = true;
         _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     }
 
     void RunMainThread() {
+        if (_useRenderThread) {
+            this->RunMultiThreadRender();
+        } else {
+            this->RunSingleThreadRender();
+        }
+    }
+
+    void RunMultiThreadRender() {
         _renderThread = radray::make_unique<std::thread>(&HelloImguiApp::RunRenderThread, this);
         while (true) {
+            radray::Stopwatch sw{};
+            sw.Start();
             this->GameUpdate();
             if (_needClose) {
                 break;
             }
+            sw.Stop();
+            _tps = sw.ElapsedNanoseconds() / 1000000.0;
         }
+        _freeFrame.Complete();
+        _waitFrame.Complete();
         _renderThread->join();
+    }
+
+    void RunSingleThreadRender() {
+        while (true) {
+            radray::Stopwatch sw{};
+            sw.Start();
+            this->GameUpdate();
+            sw.Stop();
+            _tps = sw.ElapsedNanoseconds() / 1000000.0;
+            sw.Start();
+            if (_needClose) {
+                break;
+            }
+            this->RenderUpdateST();
+            sw.Stop();
+            _fps = sw.ElapsedNanoseconds() / 1000000.0;
+        }
     }
 
     void RunRenderThread() {
         while (true) {
+            radray::Stopwatch sw{};
+            sw.Start();
             if (_needClose) {
                 break;
             }
-            radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
-            if (_needClose) {
-                break;
-            }
-            if (!rtOpt.HasValue()) {
-                continue;
-            }
-
-            HelloImguiFrame* frame = _frames[_currRenderFrame].get();
-            frame->_rt = rtOpt.Value();
-            frame->_rtView = this->SafeGetRTView(frame->_rt);
-            this->RenderUpdate(frame->_frameIndex);
-            _swapchain->Present();
-            _currRenderFrame = (_currRenderFrame + 1) % _frames.size();
+            this->RenderUpdateMT();
+            sw.Stop();
+            _fps = sw.ElapsedNanoseconds() / 1000000.0;
         }
     }
 
@@ -206,6 +243,28 @@ public:
         if (_showDemo) {
             ImGui::ShowDemoWindow(&_showDemo);
         }
+        {
+            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+            int location = 0;
+            const float PAD = 10.0f;
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            ImVec2 work_pos = viewport->WorkPos;
+            ImVec2 work_size = viewport->WorkSize;
+            ImVec2 window_pos, window_pos_pivot;
+            window_pos.x = (location & 1) ? (work_pos.x + work_size.x - PAD) : (work_pos.x + PAD);
+            window_pos.y = (location & 2) ? (work_pos.y + work_size.y - PAD) : (work_pos.y + PAD);
+            window_pos_pivot.x = (location & 1) ? 1.0f : 0.0f;
+            window_pos_pivot.y = (location & 2) ? 1.0f : 0.0f;
+            ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
+            ImGui::SetNextWindowViewport(viewport->ID);
+            window_flags |= ImGuiWindowFlags_NoMove;
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
+                ImGui::Text("TPS: (%09.4f ms)", _tps);
+                ImGui::Text("FPS: (%09.4f ms)", _fps.load());
+                ImGui::End();
+            }
+        }
         ImGui::Render();
 
         radray::Nullable<HelloImguiFrame*> frameOpt = GetAvailableFrame();
@@ -213,10 +272,77 @@ public:
             HelloImguiFrame* frame = frameOpt.Value();
             ImDrawData* drawData = ImGui::GetDrawData();
             _imguiDrawContext->ExtractDrawData((int)frame->_frameIndex, drawData);
+            _waitFrame.WaitWrite(frame->_frameIndex);
         }
     }
 
-    void RenderUpdate(size_t frameIndex) {
+    void RenderUpdateMT() {
+        radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
+        if (_needClose) {
+            return;
+        }
+        if (!rtOpt.HasValue()) {
+            return;
+        }
+        {
+            size_t completeFrameIndex = _currRenderFrame % _frames.size();
+            if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
+                _imguiDrawContext->AfterDraw(completeFrameIndex);
+                _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
+                if (!_freeFrame.WaitWrite(completeFrameIndex)) {
+                    return;
+                }
+            }
+        }
+        size_t frameIndex = std::numeric_limits<size_t>::max();
+        if (!_waitFrame.WaitRead(frameIndex)) {
+            return;
+        }
+        HelloImguiFrame* frame = _frames[frameIndex].get();
+        frame->_completeFrame = _currRenderFrame + _frames.size();
+        frame->_rt = rtOpt.Value();
+        frame->_rtView = this->SafeGetRTView(frame->_rt);
+        this->OnRender(frame->_frameIndex);
+        _swapchain->Present();
+        _currRenderFrame++;
+    }
+
+    void RenderUpdateST() {
+        radray::Nullable<radray::render::Texture*> rtOpt;
+        if (_acquiredRt) {
+            rtOpt = _swapchain->GetCurrentBackBuffer();
+            _acquiredRt = false;
+        } else {
+            rtOpt = _swapchain->AcquireNext();
+        }
+        if (!rtOpt.HasValue()) {
+            return;
+        }
+        {
+            size_t completeFrameIndex = _currRenderFrame % _frames.size();
+            if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
+                _imguiDrawContext->AfterDraw(completeFrameIndex);
+                _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
+                if (!_freeFrame.WaitWrite(completeFrameIndex)) {
+                    return;
+                }
+            }
+        }
+        size_t frameIndex = std::numeric_limits<size_t>::max();
+        if (!_waitFrame.TryRead(frameIndex)) {
+            _acquiredRt = true;
+            return;
+        }
+        HelloImguiFrame* frame = _frames[frameIndex].get();
+        frame->_completeFrame = _currRenderFrame + _frames.size();
+        frame->_rt = rtOpt.Value();
+        frame->_rtView = this->SafeGetRTView(frame->_rt);
+        this->OnRender(frame->_frameIndex);
+        _swapchain->Present();
+        _currRenderFrame++;
+    }
+
+    void OnRender(size_t frameIndex) {
         HelloImguiFrame* currFrame = _frames[frameIndex].get();
         currFrame->_cmdBuffer->Begin();
         _imguiDrawContext->BeforeDraw((int)currFrame->_frameIndex, currFrame->_cmdBuffer.get());
@@ -261,6 +387,21 @@ public:
     }
 
     radray::Nullable<HelloImguiFrame*> GetAvailableFrame() {
+        if (_waitRenderStrategy == HelloImguiWaitRenderStrategy::Wait) {
+            size_t frameIndex;
+            if (_freeFrame.WaitRead(frameIndex)) {
+                return _frames[frameIndex].get();
+            } else {
+                return nullptr;
+            }
+        } else if (_waitRenderStrategy == HelloImguiWaitRenderStrategy::Discord) {
+            size_t frameIndex;
+            if (_freeFrame.TryRead(frameIndex)) {
+                return _frames[frameIndex].get();
+            } else {
+                return nullptr;
+            }
+        }
         return nullptr;
     }
 
@@ -290,17 +431,24 @@ public:
     radray::unique_ptr<radray::ImGuiDrawContext> _imguiDrawContext;
     radray::unique_ptr<std::thread> _renderThread;
     HelloImguiWaitRenderStrategy _waitRenderStrategy;
+    bool _useRenderThread{false};
 
     radray::unordered_map<radray::render::Texture*, radray::shared_ptr<radray::render::TextureView>> _rtViews;
     radray::vector<radray::unique_ptr<HelloImguiFrame>> _frames;
-    size_t _currRenderFrame;
+    uint64_t _currRenderFrame;
+    radray::BoundedChannel<size_t> _freeFrame{3};
+    radray::BoundedChannel<size_t> _waitFrame{3};
     std::atomic_bool _needClose{false};
+    std::atomic<double> _fps;
+    double _tps;
+    bool _acquiredRt{false};
+    bool _showMonitor{true};
     bool _showDemo{true};
 };
 
 int main() {
     radray::InitImGui();
-    HelloImguiApp app{radray::render::RenderBackend::D3D12, HelloImguiWaitRenderStrategy::Wait};
+    HelloImguiApp app{radray::render::RenderBackend::Vulkan, HelloImguiWaitRenderStrategy::Wait, true};
     app.RunMainThread();
     radray::FlushLog();
     return 0;

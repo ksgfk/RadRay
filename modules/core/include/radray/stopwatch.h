@@ -10,8 +10,9 @@ public:
     void Stop() noexcept;
     void Reset() noexcept;
 
-    uint64_t ElapsedMilliseconds() const noexcept;
-    uint64_t RunningMilliseconds() const noexcept;
+    int64_t ElapsedMilliseconds() const noexcept;
+    int64_t ElapsedNanoseconds() const noexcept;
+    int64_t RunningMilliseconds() const noexcept;
     bool IsRunning() const noexcept;
 
 private:

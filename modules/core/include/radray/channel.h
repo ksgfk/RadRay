@@ -26,51 +26,51 @@ public:
     ~BoundedChannel() noexcept = default;
 
     template <class U>
-    bool TryWrite(U&& value) noexcept {
+    bool TryWrite(U&& value) {
         std::unique_lock<std::mutex> lock(_mtx);
         if (_completed || _queue.size() >= _capacity) {
             return false;
         }
         _queue.emplace_back(std::forward<U>(value));
+        lock.unlock();
         _cv_not_empty.notify_one();
         return true;
     }
 
     template <class U>
-    bool WaitWrite(U&& value) noexcept {
+    bool WaitWrite(U&& value) {
         std::unique_lock<std::mutex> lock(_mtx);
-        _cv_not_full.wait(lock, [this] {
-            return _queue.size() < _capacity || _completed;
-        });
+        _cv_not_full.wait(lock, [this]() noexcept { return _queue.size() < _capacity || _completed; });
         if (_completed) {
             return false;
         }
         _queue.emplace_back(std::forward<U>(value));
+        lock.unlock();
         _cv_not_empty.notify_one();
         return true;
     }
 
-    bool TryRead(T& out) noexcept {
+    bool TryRead(T& out) {
         std::unique_lock<std::mutex> lock(_mtx);
         if (_queue.empty()) {
             return false;
         }
         out = std::move(_queue.front());
         _queue.pop_front();
+        lock.unlock();
         _cv_not_full.notify_one();
         return true;
     }
 
-    bool WaitRead(T& out) noexcept {
+    bool WaitRead(T& out) {
         std::unique_lock<std::mutex> lock(_mtx);
-        _cv_not_empty.wait(lock, [this] {
-            return !_queue.empty() || _completed;
-        });
+        _cv_not_empty.wait(lock, [this]() noexcept { return !_queue.empty() || _completed; });
         if (_queue.empty() && _completed) {
             return false;
         }
         out = std::move(_queue.front());
         _queue.pop_front();
+        lock.unlock();
         _cv_not_full.notify_one();
         return true;
     }

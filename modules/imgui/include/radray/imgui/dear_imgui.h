@@ -75,6 +75,7 @@ public:
 
     void BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuffer);
     void Draw(int frame, render::CommandEncoder* encoder);
+    void AfterDraw(int frameIndex);
     void SetupRenderState(int frame, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
 
     struct DrawCmd {

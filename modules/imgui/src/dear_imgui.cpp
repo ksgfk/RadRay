@@ -336,8 +336,6 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
     }
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
-    frame._needCopyTexs.clear();
-    frame._tempUploadBuffers.clear();
     frame._drawData.Clear();
 
     if (drawData->Textures != nullptr) {
@@ -491,6 +489,8 @@ void ImGuiDrawContext::BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuff
 
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
+    frame._usableDescSetIndex = 0;
+
     if (frame._needCopyTexs.size() > 0) {
         vector<BarrierTextureDescriptor> barriers;
         barriers.reserve(frame._needCopyTexs.size());
@@ -549,8 +549,8 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
     TextureView* lastBindTex = nullptr;
     for (const ImGuiDrawContext::DrawList& dl : drawData->CmdLists) {
         const ImGuiDrawContext::DrawList* draw_list = &dl;
-        for (size_t cmd_i = 0; cmd_i < draw_list->CmdBuffer.size(); cmd_i++) {
-            const ImGuiDrawContext::DrawCmd* pcmd = &draw_list->CmdBuffer[cmd_i];
+        for (size_t cmdi = 0; cmdi < draw_list->CmdBuffer.size(); cmdi++) {
+            const ImGuiDrawContext::DrawCmd* pcmd = &draw_list->CmdBuffer[cmdi];
             if (pcmd->UserCallback != nullptr) {
                 if (pcmd->UserCallback == ImDrawCallback_ResetRenderState) {
                     this->SetupRenderState(frameIndex, encoder, fbWidth, fbHeight);
@@ -608,6 +608,22 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
         scissor.Height = fbHeight;
         encoder->SetScissor(scissor);
     }
+}
+
+void ImGuiDrawContext::AfterDraw(int frameIndex) {
+    using namespace ::radray::render;
+
+    ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+
+    for (Texture* texToDestroy : frame._waitDestroyTexs) {
+        auto it = _texs.find(texToDestroy);
+        if (it != _texs.end()) {
+            _texs.erase(it);
+        }
+    }
+    frame._waitDestroyTexs.clear();
+    frame._needCopyTexs.clear();
+    frame._tempUploadBuffers.clear();
 }
 
 void ImGuiDrawContext::SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
