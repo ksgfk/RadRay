@@ -1544,8 +1544,14 @@ void CmdListD3D12::Destroy() noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
-    _cmdAlloc->Reset();
-    _cmdList->Reset(_cmdAlloc.Get(), nullptr);
+    if (HRESULT hr = _cmdAlloc->Reset();
+        FAILED(hr)) {
+        RADRAY_ABORT("d3d12 cannot reset command allocator. reason={} (code:{})", GetErrorName(hr), hr);
+    }
+    if (HRESULT hr = _cmdList->Reset(_cmdAlloc.Get(), nullptr);
+        FAILED(hr)) {
+        RADRAY_ABORT("d3d12 cannot reset command list. reason={} (code:{})", GetErrorName(hr), hr);
+    }
     ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
         _cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);

@@ -209,7 +209,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
             newValue);
         desc.BackBufferCount = newValue;
     }
-    VkExtent2D swapchainSize;
+    VkExtent2D swapchainSize{};
     if (surfaceProperties.currentExtent.width == 0xFFFFFFFF) {
         swapchainSize.width = desc.Width;
         swapchainSize.height = desc.Height;
@@ -2555,8 +2555,8 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
     }
     Frame& imageFrame = _frames[_currentTextureIndex];
     _queue->_swapchainSync.fence = inflightFrame.fence;
-    _queue->_swapchainSync.imageAvailableSemaphore = inflightFrame.imageAvailableSemaphore; // 让 queue 等待帧资源的 rt 可用
-    _queue->_swapchainSync.renderFinishedSemaphore = imageFrame.renderFinishedSemaphore; // 让 queue signal rt 渲染完成
+    _queue->_swapchainSync.imageAvailableSemaphore = inflightFrame.imageAvailableSemaphore;  // 让 queue 等待帧资源的 rt 可用
+    _queue->_swapchainSync.renderFinishedSemaphore = imageFrame.renderFinishedSemaphore;     // 让 queue signal rt 渲染完成
     return imageFrame.image.get();
 }
 

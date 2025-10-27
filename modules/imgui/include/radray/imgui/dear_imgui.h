@@ -2,11 +2,14 @@
 
 #ifdef RADRAY_ENABLE_IMGUI
 
+#include <stdexcept>
+
 #include <imgui.h>
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <imgui_impl_win32.h>
 #endif
 
+#include <radray/channel.h>
 #include <radray/render/common.h>
 #include <radray/window/native_window.h>
 
@@ -137,10 +140,106 @@ public:
     ImGuiDrawDescriptor _desc;
 };
 
+struct ImGuiApplicationDescriptor {
+    std::string_view AppName;
+    Eigen::Vector2i WindowSize;
+    bool Resizeable;
+    bool IsFullscreen;
+    render::RenderBackend Backend;
+    uint32_t FrameCount;
+    render::TextureFormat RTFormat;
+    bool EnableValidation;
+    bool EnableVSync;
+    bool IsWaitFrame;
+    bool IsRenderMultiThread;
+};
+
+class ImGuiApplicationException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+    template <typename... Args>
+    explicit ImGuiApplicationException(fmt::format_string<Args...> fmt, Args&&... args) : _msg(::radray::format(fmt, std::forward<Args>(args)...)) {}
+    ~ImGuiApplicationException() noexcept override = default;
+
+    const char* what() const noexcept override;
+
+private:
+    string _msg;
+};
+
 class ImGuiApplication {
 public:
-public:
-    ImGuiContextRAII _context;
+    class Frame {
+    public:
+        Frame(size_t index, shared_ptr<render::CommandBuffer> cmdBuffer) noexcept;
+        ~Frame() noexcept = default;
+        Frame(const Frame&) = delete;
+        Frame& operator=(const Frame&) = delete;
+        Frame(Frame&&) noexcept = delete;
+        Frame& operator=(Frame&&) noexcept = delete;
+
+        size_t _frameIndex;
+        uint64_t _completeFrame{std::numeric_limits<uint64_t>::max()};
+        shared_ptr<render::CommandBuffer> _cmdBuffer{};
+        render::Texture* _rt{};
+        render::TextureView* _rtView{};
+    };
+
+    explicit ImGuiApplication(const ImGuiApplicationDescriptor& desc);
+    virtual ~ImGuiApplication() noexcept;
+
+    ImGuiApplication(const ImGuiApplication&) = delete;
+    ImGuiApplication& operator=(const ImGuiApplication&) = delete;
+    ImGuiApplication(ImGuiApplication&&) = delete;
+    ImGuiApplication& operator=(ImGuiApplication&&) = delete;
+
+    void Run();
+
+protected:
+    void RecreateSwapChain();
+
+    virtual void MainUpdate();
+    virtual void RenderUpdateMultiThread();
+    virtual void RenderUpdateSingleThread();
+    void RunMultiThreadRender();
+    void RunSingleThreadRender();
+
+    virtual void OnResizing(int width, int height);
+    virtual void OnResized(int width, int height);
+    virtual void OnUpdate();
+    virtual void OnImGui();
+    virtual void OnRender(size_t frameIndex);
+
+    render::TextureView* SafeGetRTView(radray::render::Texture* rt);
+    Nullable<ImGuiApplication::Frame*> GetAvailableFrame();
+
+private:
+    void OnResizingCb(int width, int height);
+    void OnResizedCb(int width, int height);
+
+    unique_ptr<ImGuiContextRAII> _imguiContext;
+    shared_ptr<std::function<Win32WNDPROC>> _win32ImguiProc;
+    unique_ptr<NativeWindow> _window;
+    unique_ptr<render::InstanceVulkan> _vkIns;
+    shared_ptr<render::Device> _device;
+    render::CommandQueue* _cmdQueue;
+    shared_ptr<render::SwapChain> _swapchain;
+    unique_ptr<ImGuiDrawContext> _imguiDrawContext;
+    unique_ptr<std::thread> _renderThread;
+    BoundedChannel<size_t> _freeFrame;
+    BoundedChannel<size_t> _waitFrame;
+    vector<unique_ptr<Frame>> _frames;
+    uint64_t _currRenderFrame;
+
+    unordered_map<render::Texture*, shared_ptr<render::TextureView>> _rtViews;
+    sigslot::scoped_connection _resizingConn;
+    sigslot::scoped_connection _resizedConn;
+    Eigen::Vector2i _renderRtSize;
+    bool _isResizingRender{false};
+    bool _isRenderAcquiredRt{false};
+    std::atomic_bool _needClose{false};
+
+    ImGuiApplicationDescriptor _desc;
 };
 
 bool InitImGui();
@@ -148,6 +247,7 @@ bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc);
 bool InitRendererImGui(ImGuiContext* context);
 void TerminateRendererImGui(ImGuiContext* context);
 void TerminatePlatformImGui(ImGuiContext* context);
+void SetWin32DpiAwarenessImGui();
 
 Nullable<Win32WNDPROC*> GetImGuiWin32WNDPROC() noexcept;
 Nullable<std::function<Win32WNDPROC>> GetImGuiWin32WNDPROCEx(ImGuiContext* context) noexcept;

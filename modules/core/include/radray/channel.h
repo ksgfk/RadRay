@@ -3,6 +3,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <utility>
+#include <limits>
 
 #include <radray/types.h>
 
@@ -33,20 +34,20 @@ public:
         }
         _queue.emplace_back(std::forward<U>(value));
         lock.unlock();
-        _cv_not_empty.notify_one();
+        _cvNotEmpty.notify_one();
         return true;
     }
 
     template <class U>
     bool WaitWrite(U&& value) {
         std::unique_lock<std::mutex> lock(_mtx);
-        _cv_not_full.wait(lock, [this]() noexcept { return _queue.size() < _capacity || _completed; });
+        _cvNotFull.wait(lock, [this]() noexcept { return _queue.size() < _capacity || _completed; });
         if (_completed) {
             return false;
         }
         _queue.emplace_back(std::forward<U>(value));
         lock.unlock();
-        _cv_not_empty.notify_one();
+        _cvNotEmpty.notify_one();
         return true;
     }
 
@@ -58,20 +59,20 @@ public:
         out = std::move(_queue.front());
         _queue.pop_front();
         lock.unlock();
-        _cv_not_full.notify_one();
+        _cvNotFull.notify_one();
         return true;
     }
 
     bool WaitRead(T& out) {
         std::unique_lock<std::mutex> lock(_mtx);
-        _cv_not_empty.wait(lock, [this]() noexcept { return !_queue.empty() || _completed; });
+        _cvNotEmpty.wait(lock, [this]() noexcept { return !_queue.empty() || _completed; });
         if (_queue.empty() && _completed) {
             return false;
         }
         out = std::move(_queue.front());
         _queue.pop_front();
         lock.unlock();
-        _cv_not_full.notify_one();
+        _cvNotFull.notify_one();
         return true;
     }
 
@@ -80,8 +81,8 @@ public:
             std::lock_guard<std::mutex> lock(_mtx);
             _completed = true;
         }
-        _cv_not_empty.notify_all();
-        _cv_not_full.notify_all();
+        _cvNotEmpty.notify_all();
+        _cvNotFull.notify_all();
     }
 
     bool IsCompleted() const noexcept {
@@ -97,10 +98,96 @@ public:
     size_t Capacity() const noexcept { return _capacity; }
 
 private:
-    size_t _capacity{1};
+    size_t _capacity;
     mutable std::mutex _mtx;
-    std::condition_variable _cv_not_empty;
-    std::condition_variable _cv_not_full;
+    std::condition_variable _cvNotEmpty;
+    std::condition_variable _cvNotFull;
+    deque<T> _queue;
+    bool _completed{false};
+};
+
+template <class T>
+class UnboundedChannel {
+public:
+    UnboundedChannel() noexcept = default;
+
+    UnboundedChannel(const UnboundedChannel&) = delete;
+    UnboundedChannel& operator=(const UnboundedChannel&) = delete;
+    UnboundedChannel(UnboundedChannel&&) = delete;
+    UnboundedChannel& operator=(UnboundedChannel&&) = delete;
+
+    ~UnboundedChannel() noexcept = default;
+
+    template <class U>
+    bool TryWrite(U&& value) {
+        std::unique_lock<std::mutex> lock(_mtx);
+        if (_completed) {
+            return false;
+        }
+        _queue.emplace_back(std::forward<U>(value));
+        lock.unlock();
+        _cvNotEmpty.notify_one();
+        return true;
+    }
+
+    template <class U>
+    bool WaitWrite(U&& value) {
+        std::unique_lock<std::mutex> lock(_mtx);
+        if (_completed) {
+            return false;
+        }
+        _queue.emplace_back(std::forward<U>(value));
+        lock.unlock();
+        _cvNotEmpty.notify_one();
+        return true;
+    }
+
+    bool TryRead(T& out) {
+        std::unique_lock<std::mutex> lock(_mtx);
+        if (_queue.empty()) {
+            return false;
+        }
+        out = std::move(_queue.front());
+        _queue.pop_front();
+        return true;
+    }
+
+    bool WaitRead(T& out) {
+        std::unique_lock<std::mutex> lock(_mtx);
+        _cvNotEmpty.wait(lock, [this]() noexcept { return !_queue.empty() || _completed; });
+        if (_queue.empty() && _completed) {
+            return false;
+        }
+        out = std::move(_queue.front());
+        _queue.pop_front();
+        return true;
+    }
+
+    void Complete() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(_mtx);
+            _completed = true;
+        }
+        _cvNotEmpty.notify_all();
+    }
+
+    bool IsCompleted() const noexcept {
+        std::lock_guard<std::mutex> lock(_mtx);
+        return _completed;
+    }
+
+    size_t Size() const noexcept {
+        std::lock_guard<std::mutex> lock(_mtx);
+        return _queue.size();
+    }
+
+    size_t Capacity() const noexcept {
+        return std::numeric_limits<size_t>::max();
+    }
+
+private:
+    mutable std::mutex _mtx;
+    std::condition_variable _cvNotEmpty;
     deque<T> _queue;
     bool _completed{false};
 };

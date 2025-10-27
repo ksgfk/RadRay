@@ -444,7 +444,6 @@ public:
     VkSurfaceKHR _surface;
 };
 
-// TODO: vkAcquireNextImageKHR 顺序不固定, 要一个可重用frame队列解决
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(
