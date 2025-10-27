@@ -448,7 +448,7 @@ public:
 
 int main() {
     radray::InitImGui();
-    HelloImguiApp app{radray::render::RenderBackend::Vulkan, HelloImguiWaitRenderStrategy::Wait, true};
+    HelloImguiApp app{radray::render::RenderBackend::Vulkan, HelloImguiWaitRenderStrategy::Discord, true};
     app.RunMainThread();
     radray::FlushLog();
     return 0;

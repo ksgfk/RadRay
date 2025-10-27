@@ -2532,16 +2532,17 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 }
 
 Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
-    Frame& frameData = _frames[_currentFrameIndex];
-    _device->_ftb.vkWaitForFences(_device->_device, 1, &frameData.fence->_fence, VK_TRUE, UINT64_MAX);
-    _device->_ftb.vkResetFences(_device->_device, 1, &frameData.fence->_fence);
+    // 等待渲染中的帧资源完成
+    Frame& inflightFrame = _frames[_currentFrameIndex];
+    _device->_ftb.vkWaitForFences(_device->_device, 1, &inflightFrame.fence->_fence, VK_TRUE, UINT64_MAX);
+    _device->_ftb.vkResetFences(_device->_device, 1, &inflightFrame.fence->_fence);
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
     if (auto vr = _device->_ftb.vkAcquireNextImageKHR(
             _device->_device,
             _swapchain,
             UINT64_MAX,
-            frameData.imageAvailableSemaphore->_semaphore,  // signal rt available
+            inflightFrame.imageAvailableSemaphore->_semaphore,  // signal 帧资源可用
             VK_NULL_HANDLE,
             &_currentTextureIndex);
         vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
@@ -2552,22 +2553,23 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
         }
         return nullptr;
     }
-    _queue->_swapchainSync.fence = frameData.fence;
-    _queue->_swapchainSync.imageAvailableSemaphore = frameData.imageAvailableSemaphore;
-    _queue->_swapchainSync.renderFinishedSemaphore = frameData.renderFinishedSemaphore;
-    return _frames[_currentTextureIndex].image.get();
+    Frame& imageFrame = _frames[_currentTextureIndex];
+    _queue->_swapchainSync.fence = inflightFrame.fence;
+    _queue->_swapchainSync.imageAvailableSemaphore = inflightFrame.imageAvailableSemaphore; // 让 queue 等待帧资源的 rt 可用
+    _queue->_swapchainSync.renderFinishedSemaphore = imageFrame.renderFinishedSemaphore; // 让 queue signal rt 渲染完成
+    return imageFrame.image.get();
 }
 
 void SwapChainVulkan::Present() noexcept {
-    Frame& frameData = _frames[_currentFrameIndex];
-    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
+    Frame& imageFrame = _frames[_currentTextureIndex];
+
     // 如果直到 present, queue 还没有提交过命令
     // 在提交前需要将当前 back buffer 转换到 PRESENT 状态
     if (_queue->_swapchainSync.fence != nullptr) {
-        if (frameData.internalCmdBuffer == nullptr) {
-            frameData.internalCmdBuffer = std::static_pointer_cast<CommandBufferVulkan>(_device->CreateCommandBuffer(_queue).Unwrap());
+        if (imageFrame.internalCmdBuffer == nullptr) {
+            imageFrame.internalCmdBuffer = std::static_pointer_cast<CommandBufferVulkan>(_device->CreateCommandBuffer(_queue).Unwrap());
         }
-        auto cmdBuffer = frameData.internalCmdBuffer.get();
+        auto cmdBuffer = imageFrame.internalCmdBuffer.get();
         cmdBuffer->Begin();
         VkImageMemoryBarrier imgBarrier{};
         imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2578,7 +2580,7 @@ void SwapChainVulkan::Present() noexcept {
         imgBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imgBarrier.image = frameData.image->_image;
+        imgBarrier.image = imageFrame.image->_image;
         imgBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         imgBarrier.subresourceRange.baseMipLevel = 0;
         imgBarrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
@@ -2613,12 +2615,13 @@ void SwapChainVulkan::Present() noexcept {
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.pNext = nullptr;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &frameData.renderFinishedSemaphore->_semaphore;  // wait cmd finish to present
+    presentInfo.pWaitSemaphores = &imageFrame.renderFinishedSemaphore->_semaphore;  // 等待之前acquire的rt的渲染完成
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &_currentTextureIndex;
     presentInfo.pResults = nullptr;
     _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
 }
 
 Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
