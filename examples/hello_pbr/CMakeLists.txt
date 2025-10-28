@@ -1,0 +1,5 @@
+add_executable(hello_pbr hello_pbr.cpp)
+target_link_libraries(hello_pbr PRIVATE radraywindow radrayrender radrayimgui)
+target_compile_options(hello_pbr PRIVATE $<$<BOOL:MSVC>:/W4>)
+radray_optimize_flags_binary(hello_pbr)
+radray_set_build_path(hello_pbr)

@@ -39,6 +39,7 @@ cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADR
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_IMGUI "Enable Dear ImGui support" ON "RADRAY_BUILD_RENDER" OFF)
+cmake_dependent_option(RADRAY_DISABLE_IMGUI_DEMO "Enable Dear ImGui demo window" OFF "RADRAY_ENABLE_IMGUI" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)

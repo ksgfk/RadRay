@@ -6,7 +6,7 @@ target_link_libraries(radrayimgui PUBLIC
     radraycore
     radraywindow
     radrayrender
-    imgui)
+    radrayimguiraw)
 target_include_directories(radrayimgui PUBLIC include)
 target_compile_options(radrayimgui PRIVATE
     $<$<BOOL:MSVC>:/W4>)

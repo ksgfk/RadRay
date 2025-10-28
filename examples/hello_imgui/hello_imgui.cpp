@@ -190,6 +190,7 @@ int main(int argc, char** argv) {
     {
         HelloImguiApp app{backend, false, false, isMultiThread};
         app.Run();
+        app.Destroy();
     }
     radray::FlushLog();
     return 0;

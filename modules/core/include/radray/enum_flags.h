@@ -96,31 +96,31 @@ private:
     T _value;
 };
 
+}  // namespace radray
+
 template <class T>
-requires is_enum_flags<T>
-constexpr EnumFlags<T> operator|(T l, T r) noexcept {
+requires radray::is_enum_flags<T>
+constexpr radray::EnumFlags<T> operator|(T l, T r) noexcept {
     return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) | static_cast<std::underlying_type_t<T>>(r));
 }
 
 template <class T>
-requires is_enum_flags<T>
-constexpr EnumFlags<T> operator&(T l, T r) noexcept {
+requires radray::is_enum_flags<T>
+constexpr radray::EnumFlags<T> operator&(T l, T r) noexcept {
     return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) & static_cast<std::underlying_type_t<T>>(r));
 }
 
 template <class T>
-requires is_enum_flags<T>
-constexpr EnumFlags<T> operator^(T l, T r) noexcept {
+requires radray::is_enum_flags<T>
+constexpr radray::EnumFlags<T> operator^(T l, T r) noexcept {
     return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) ^ static_cast<std::underlying_type_t<T>>(r));
 }
 
 template <class T>
-requires is_enum_flags<T>
-constexpr EnumFlags<T> operator~(T v) noexcept {
+requires radray::is_enum_flags<T>
+constexpr radray::EnumFlags<T> operator~(T v) noexcept {
     return static_cast<T>(~static_cast<std::underlying_type_t<T>>(v));
 }
-
-}  // namespace radray
 
 template <class T, class CharT>
 struct fmt::formatter<radray::EnumFlags<T>, CharT> : fmt::formatter<radray::string, CharT> {

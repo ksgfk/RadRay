@@ -194,6 +194,7 @@ public:
     ImGuiApplication& operator=(ImGuiApplication&&) = delete;
 
     void Run();
+    void Destroy() noexcept;
 
 protected:
     void NewSwapChain();
@@ -210,6 +211,7 @@ protected:
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual void OnRender(ImGuiApplication::Frame* frame);
+    virtual void OnDestroy() noexcept;
 
     render::TextureView* SafeGetRTView(radray::render::Texture* rt);
     Nullable<ImGuiApplication::Frame*> GetAvailableFrame();

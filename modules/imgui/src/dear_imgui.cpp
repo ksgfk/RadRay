@@ -791,10 +791,13 @@ ImGuiApplication::ImGuiApplication(const ImGuiApplicationDescriptor& desc_)
     }
 }
 
-ImGuiApplication::~ImGuiApplication() noexcept {
+ImGuiApplication::~ImGuiApplication() noexcept = default;
+
+void ImGuiApplication::Destroy() noexcept {
     _resizingConn.disconnect();
     _resizedConn.disconnect();
     _cmdQueue->Wait();
+    this->OnDestroy();
     _cmdQueue = nullptr;
     ::radray::TerminateRendererImGui(_imguiContext->Get());
     ::radray::TerminatePlatformImGui(_imguiContext->Get());
@@ -1071,6 +1074,8 @@ void ImGuiApplication::OnImGui() {}
 void ImGuiApplication::OnRender(ImGuiApplication::Frame* frame) {
     RADRAY_UNUSED(frame);
 }
+
+void ImGuiApplication::OnDestroy() noexcept {}
 
 }  // namespace radray
 

@@ -6,20 +6,22 @@ file(GLOB _IMGUI_SRC
     "src/imgui_demo.cpp")
 file(GLOB _IMGUI_INC CONFIGURE_DEPENDS "include/*.h")
 
-add_library(imgui STATIC ${_IMGUI_SRC} ${_IMGUI_INC})
-target_sources(imgui PRIVATE
+add_library(radrayimguiraw STATIC ${_IMGUI_SRC} ${_IMGUI_INC})
+target_sources(radrayimguiraw PRIVATE
     $<$<PLATFORM_ID:Windows>:src/imgui_impl_win32.cpp>)
-target_include_directories(imgui PUBLIC include)
-target_link_libraries(imgui PUBLIC
+target_include_directories(radrayimguiraw PUBLIC include)
+target_link_libraries(radrayimguiraw PUBLIC
     radraycore)
 if (RADRAY_ENABLE_FREETYPE)
-    target_sources(imgui PRIVATE "src/misc/freetype/imgui_freetype.cpp")
-    target_link_libraries(imgui PRIVATE freetype)
-    target_compile_definitions(imgui PRIVATE IMGUI_ENABLE_FREETYPE)
+    target_sources(radrayimguiraw PRIVATE "src/misc/freetype/imgui_freetype.cpp")
+    target_link_libraries(radrayimguiraw PRIVATE freetype)
+    target_compile_definitions(radrayimguiraw PRIVATE IMGUI_ENABLE_FREETYPE)
 endif()
-target_compile_definitions(imgui PUBLIC ImTextureID=ImU64)
+target_compile_definitions(radrayimguiraw PUBLIC
+    ImTextureID=ImU64
+    $<$<BOOL:${RADRAY_DISABLE_IMGUI_DEMO}>:IMGUI_DISABLE_DEMO_WINDOWS>)
 if (MSVC)
-    target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
+    target_compile_options(radrayimguiraw PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
 endif()
-radray_optimize_flags_library(imgui)
-radray_set_build_path(imgui)
+radray_optimize_flags_library(radrayimguiraw)
+radray_set_build_path(radrayimguiraw)
