@@ -29,22 +29,37 @@ public:
 class HelloPbr : public ImGuiApplication {
 public:
     HelloPbr(RenderBackend backend, bool multiThread)
-        : ImGuiApplication(
-              {radray::format("{} - {} {}", string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : ""),
-               {1280, 720},
-               true,
-               false,
-               backend,
-               3,
-               TextureFormat::RGBA8_UNORM,
+        : ImGuiApplication(),
+          backend(backend),
+          multiThread(multiThread) {}
+
+    ~HelloPbr() noexcept override = default;
+
+    void OnStart() override {
+        auto name = radray::format("{} - {} {}", string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : "");
+        render::VulkanCommandQueueDescriptor queueDesc[] = {
+            {render::QueueType::Direct, 1},
+            {render::QueueType::Copy, 1}};
+        render::VulkanDeviceDescriptor devDesc{};
+        devDesc.Queues = queueDesc;
+        ImGuiApplicationDescriptor desc{
+            name,
+            {1280, 720},
+            true,
+            false,
+            backend,
+            3,
+            TextureFormat::RGBA8_UNORM,
 #ifdef RADRAY_IS_DEBUG
-               true,
+            true,
 #else
-               false,
+            false,
 #endif
-               false,
-               false,
-               multiThread}) {
+            false,
+            false,
+            multiThread,
+            devDesc};
+        this->Init(desc);
         {
             TriangleMesh sphereMesh{};
             sphereMesh.InitAsUVSphere(0.5f, 32);
@@ -53,22 +68,56 @@ public:
             BufferDescriptor vertDesc{
                 sphereModel.VertexSize,
                 MemoryType::Device,
-                BufferUse::Vertex | BufferUse::CopySource,
+                BufferUse::Vertex | BufferUse::CopyDestination,
                 ResourceHint::None,
                 "sphere_vertex"};
             auto vert = _device->CreateBuffer(vertDesc).Unwrap();
             BufferDescriptor indexDesc{
                 sphereModel.IndexSize,
                 MemoryType::Device,
-                BufferUse::Index | BufferUse::CopySource,
+                BufferUse::Index | BufferUse::CopyDestination,
                 ResourceHint::None,
                 "sphere_index"};
             auto index = _device->CreateBuffer(indexDesc).Unwrap();
             _meshes.emplace_back(HelloMesh{std::move(vert), std::move(index), sphereModel.IndexCount, MapIndexType(sphereModel.IndexType)});
+
+            BufferDescriptor uploadDesc{
+                sphereModel.VertexSize + sphereModel.IndexSize,
+                MemoryType::Upload,
+                BufferUse::CopySource,
+                ResourceHint::None,
+                "sphere_upload"};
+            auto upload = _device->CreateBuffer(uploadDesc).Unwrap();
+            void* dst = upload->Map(0, uploadDesc.Size);
+            std::memcpy(dst, sphereModel.VertexData.get(), sphereModel.VertexSize);
+            std::memcpy(static_cast<uint8_t*>(dst) + sphereModel.VertexSize, sphereModel.IndexData.get(), sphereModel.IndexSize);
+            upload->Unmap(0, uploadDesc.Size);
+
+            CommandQueue* copyQueue = _device->GetCommandQueue(QueueType::Copy).Unwrap();
+            shared_ptr<CommandBuffer> cmdBuffer = _device->CreateCommandBuffer(copyQueue).Unwrap();
+            cmdBuffer->Begin();
+            {
+                BarrierBufferDescriptor barrierBefore[] = {
+                    {vert.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
+                    {index.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
+                cmdBuffer->ResourceBarrier(barrierBefore, {});
+            }
+            cmdBuffer->CopyBufferToBuffer(vert.get(), 0, upload.get(), 0, sphereModel.VertexSize);
+            cmdBuffer->CopyBufferToBuffer(index.get(), 0, upload.get(), sphereModel.VertexSize, sphereModel.IndexSize);
+            {
+                BarrierBufferDescriptor barrierAfter[] = {
+                    {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
+                    {index.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+                cmdBuffer->ResourceBarrier(barrierAfter, {});
+            }
+            cmdBuffer->End();
+            CommandQueueSubmitDescriptor submitDesc{};
+            auto cmdBufferRef = cmdBuffer.get();
+            submitDesc.CmdBuffers = std::span{&cmdBufferRef, 1};
+            copyQueue->Submit(submitDesc);
+            copyQueue->Wait();
         }
     }
-
-    ~HelloPbr() noexcept override = default;
 
     void OnImGui() override {
         {
@@ -173,6 +222,8 @@ public:
 private:
     vector<HelloMesh> _meshes;
 
+    RenderBackend backend;
+    bool multiThread;
     bool _showMonitor{true};
 };
 

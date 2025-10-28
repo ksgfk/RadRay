@@ -42,24 +42,29 @@ private:
 class HelloImguiApp : public radray::ImGuiApplication {
 public:
     explicit HelloImguiApp(radray::render::RenderBackend backend, bool vsync, bool waitFrame, bool multiThread)
-        : radray::ImGuiApplication(
-              {radray::format("{} - {} {}", radray::string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : ""),
-               {1280, 720},
-               true,
-               false,
-               backend,
-               3,
-               radray::render::TextureFormat::RGBA8_UNORM,
-#ifdef RADRAY_IS_DEBUG
-               true,
-#else
-               false,
-#endif
-               vsync,
-               waitFrame,
-               multiThread}) {
-    }
+        : radray::ImGuiApplication(), backend(backend), vsync(vsync), waitFrame(waitFrame), multiThread(multiThread) {}
     ~HelloImguiApp() noexcept override = default;
+
+    void OnStart() override {
+        auto name = radray::format("{} - {} {}", radray::string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : "");
+        radray::ImGuiApplicationDescriptor desc{
+            name,
+            {1280, 720},
+            true,
+            false,
+            backend,
+            3,
+            radray::render::TextureFormat::RGBA8_UNORM,
+#ifdef RADRAY_IS_DEBUG
+            true,
+#else
+            false,
+#endif
+            vsync,
+            waitFrame,
+            multiThread};
+        this->Init(desc);
+    }
 
     void OnImGui() override {
         if (_showDemo) {
@@ -161,6 +166,8 @@ public:
     }
 
 private:
+    radray::render::RenderBackend backend;
+    bool vsync, waitFrame, multiThread;
     bool _showDemo{true};
     bool _showMonitor{true};
 };

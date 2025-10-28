@@ -152,6 +152,8 @@ struct ImGuiApplicationDescriptor {
     bool EnableVSync;
     bool IsWaitFrame;
     bool IsRenderMultiThread;
+
+    std::optional<render::DeviceDescriptor> DeviceDesc{};
 };
 
 class ImGuiApplicationException : public std::runtime_error {
@@ -185,7 +187,7 @@ public:
         render::TextureView* _rtView{};
     };
 
-    explicit ImGuiApplication(const ImGuiApplicationDescriptor& desc);
+    ImGuiApplication() noexcept;
     virtual ~ImGuiApplication() noexcept;
 
     ImGuiApplication(const ImGuiApplication&) = delete;
@@ -200,6 +202,7 @@ protected:
     void NewSwapChain();
     void RecreateSwapChain();
 
+    void Init(const ImGuiApplicationDescriptor& desc);
     // TODO: use strategy pattern
     virtual void MainUpdate();
     virtual void RenderUpdateMultiThread();
@@ -208,6 +211,7 @@ protected:
 
     virtual void OnResizing(int width, int height);
     virtual void OnResized(int width, int height);
+    virtual void OnStart();
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual void OnRender(ImGuiApplication::Frame* frame);
@@ -241,8 +245,8 @@ protected:
     shared_ptr<render::SwapChain> _swapchain;
     unique_ptr<ImGuiDrawContext> _imguiDrawContext;
     unique_ptr<std::thread> _renderThread;
-    BoundedChannel<size_t> _freeFrame;
-    BoundedChannel<size_t> _waitFrame;
+    unique_ptr<BoundedChannel<size_t>> _freeFrame;
+    unique_ptr<BoundedChannel<size_t>> _waitFrame;
     radray::UnboundedChannel<std::function<void(void)>> _beforeAcquire;
     vector<unique_ptr<Frame>> _frames;
     uint64_t _currRenderFrame;

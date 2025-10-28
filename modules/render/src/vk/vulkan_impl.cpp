@@ -1698,6 +1698,16 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
     }
     {
+        RADRAY_INFO_LOG("Queue:");
+        for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
+            const auto& queues = deviceR->_queues[i];
+            QueueType type = static_cast<QueueType>(i);
+            if (queues.size() > 0) {
+                RADRAY_INFO_LOG("\t{}: {}", type, queues.size());
+            }
+        }
+    }
+    {
         RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
     }
     {
