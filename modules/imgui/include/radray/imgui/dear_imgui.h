@@ -196,11 +196,12 @@ public:
     void Run();
 
 protected:
+    void NewSwapChain();
     void RecreateSwapChain();
 
+    // TODO: use strategy pattern
     virtual void MainUpdate();
     virtual void RenderUpdateMultiThread();
-    virtual void RenderUpdateSingleThread();
     void RunMultiThreadRender();
     void RunSingleThreadRender();
 
@@ -208,14 +209,26 @@ protected:
     virtual void OnResized(int width, int height);
     virtual void OnUpdate();
     virtual void OnImGui();
-    virtual void OnRender(size_t frameIndex);
+    virtual void OnRender(ImGuiApplication::Frame* frame);
 
     render::TextureView* SafeGetRTView(radray::render::Texture* rt);
     Nullable<ImGuiApplication::Frame*> GetAvailableFrame();
 
-private:
+    template <class F>
+    void ExecuteOnRenderThreadBeforeAcquire(F&& func) {
+        _beforeAcquire.WaitWrite(std::forward<F>(func));
+    }
+    void ExecuteBeforeAcquire();
+
+protected:
     void OnResizingCb(int width, int height);
     void OnResizedCb(int width, int height);
+
+    uint32_t _frameCount;
+    render::TextureFormat _rtFormat;
+    bool _enableVSync;
+    bool _isWaitFrame;
+    bool _multithreadRender;
 
     unique_ptr<ImGuiContextRAII> _imguiContext;
     shared_ptr<std::function<Win32WNDPROC>> _win32ImguiProc;
@@ -228,6 +241,7 @@ private:
     unique_ptr<std::thread> _renderThread;
     BoundedChannel<size_t> _freeFrame;
     BoundedChannel<size_t> _waitFrame;
+    radray::UnboundedChannel<std::function<void(void)>> _beforeAcquire;
     vector<unique_ptr<Frame>> _frames;
     uint64_t _currRenderFrame;
 
@@ -239,7 +253,8 @@ private:
     bool _isRenderAcquiredRt{false};
     std::atomic_bool _needClose{false};
 
-    ImGuiApplicationDescriptor _desc;
+    double _logicTime{0};
+    std::atomic<double> _renderTime{0};
 };
 
 bool InitImGui();

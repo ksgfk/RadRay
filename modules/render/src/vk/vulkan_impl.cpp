@@ -1823,6 +1823,7 @@ void QueueVulkan::Wait() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vk call vkQueueWaitIdle failed: {}", vr);
     }
+    _swapchainSync = {};
 }
 
 void QueueVulkan::DestroyImpl() noexcept {

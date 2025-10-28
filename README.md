@@ -86,4 +86,34 @@ example
 }
 ```
 
-#### special launch settings
+### special launch settings
+
+#### hello_imgui
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(msvc) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [
+                // "vulkan",
+                "d3d12",
+                // "-st"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${command:cmake.getLaunchTargetDirectory}:${env:PATH}"
+                }
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
+```
