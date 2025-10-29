@@ -624,16 +624,12 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     auto result = make_shared<PipelineLayoutVulkan>(this, pipelineLayout);
     // result->_rootSetLayout = std::move(rootSetLayout);
     // result->_rootSet = std::move(rootSet);
-    result->_sets.reserve(desc.BindingSets.size());
-    for (auto i : desc.BindingSets) {
-        auto layout = CastVkObject(i);
-        result->_sets.emplace_back(layout);
-    }
     if (pushConstantPtr == nullptr) {
         result->_pushConst = std::nullopt;
     } else {
         result->_pushConst = *pushConstantPtr;
     }
+    result->_descSetCount = static_cast<uint32_t>(desc.BindingSets.size());
     // result->_rootSetStart = rootSetStart;
     // result->_setsStart = descSetsStart;
     return result;
@@ -2335,8 +2331,8 @@ void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSe
         RADRAY_ERR_LOG("vk BindDescriptorSet without pipelinelayout");
         return;
     }
-    if (slot >= _boundPipeLayout->_sets.size()) {
-        RADRAY_ERR_LOG("vk BindDescriptorSet slot {} exceeds pipelinelayout descriptor set count {}", slot, _boundPipeLayout->_sets.size());
+    if (slot >= _boundPipeLayout->_descSetCount) {
+        RADRAY_ERR_LOG("vk BindDescriptorSet slot {} exceeds pipelinelayout descriptor set count {}", slot, _boundPipeLayout->_descSetCount);
         return;
     }
     auto descSet = CastVkObject(set);

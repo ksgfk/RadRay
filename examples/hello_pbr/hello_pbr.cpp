@@ -17,8 +17,9 @@ class HelloMesh {
 public:
     shared_ptr<Buffer> _vertexBuffer;
     shared_ptr<Buffer> _indexBuffer;
-    uint32_t _indexCount{0};
-    IndexFormat _indexFormat;
+    uint32_t _vertexSize;
+    uint32_t _indexCount;
+    uint32_t _indexStride;
 };
 
 class HelloPbr : public ImGuiApplication {
@@ -110,7 +111,7 @@ public:
             RootSignatureDescriptor rsDesc{};
             rsDesc.BindingSets = layouts;
             rsDesc.Constant = rscDesc;
-            shared_ptr<RootSignature> rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
+            _rs = _device->CreateRootSignature(rsDesc).Unwrap();
             vector<VertexElement> vertElems;
             {
                 SemanticMapping mapping[] = {
@@ -129,7 +130,7 @@ public:
             vertLayout.Elements = vertElems;
             ColorTargetState rtState = DefaultColorTargetState(TextureFormat::RGBA8_UNORM);
             GraphicsPipelineStateDescriptor psoDesc{};
-            psoDesc.RootSig = rootSig.get();
+            psoDesc.RootSig = _rs.get();
             psoDesc.VS = {vsShader.get(), "VSMain"};
             psoDesc.PS = {psShader.get(), "PSMain"};
             psoDesc.VertexLayouts = std::span{&vertLayout, 1};
@@ -137,7 +138,7 @@ public:
             psoDesc.DepthStencil = DefaultDepthStencilState();
             psoDesc.MultiSample = DefaultMultiSampleState();
             psoDesc.ColorTargets = std::span{&rtState, 1};
-            shared_ptr<GraphicsPipelineState> pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
+            _pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
 
             BufferDescriptor vertDesc{
                 sphereModel.VertexSize,
@@ -190,8 +191,15 @@ public:
             copyQueue->Submit(submitDesc);
             copyQueue->Wait();
 
-            _meshes.emplace_back(HelloMesh{std::move(vert), std::move(index), sphereModel.IndexCount, MapIndexType(sphereModel.IndexType)});
+            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.IndexType));
+            _meshes.emplace_back(HelloMesh{
+                std::move(vert),
+                std::move(index),
+                sphereModel.VertexSize,
+                sphereModel.IndexCount,
+                indexStride});
         }
+        RecreateDepthTexture();
     }
 
     void OnImGui() override {
@@ -242,19 +250,63 @@ public:
             barrier.IsSubresourceBarrier = false;
             currFrame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
-        unique_ptr<CommandEncoder> pass;
         {
-            RenderPassDescriptor rpDesc{};
-            ColorAttachment rtAttach{};
-            rtAttach.Target = currFrame->_rtView;
-            rtAttach.Load = LoadAction::Clear;
-            rtAttach.Store = StoreAction::Store;
-            rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
-            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-            pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            unique_ptr<CommandEncoder> pass;
+            {
+                RenderPassDescriptor rpDesc{};
+                ColorAttachment rtAttach{};
+                rtAttach.Target = currFrame->_rtView;
+                rtAttach.Load = LoadAction::Clear;
+                rtAttach.Store = StoreAction::Store;
+                rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
+                DepthStencilAttachment dsAttach{};
+                dsAttach.Target = _depthTexView.get();
+                dsAttach.DepthLoad = LoadAction::Clear;
+                dsAttach.DepthStore = StoreAction::Store;
+                dsAttach.StencilLoad = LoadAction::DontCare;
+                dsAttach.StencilStore = StoreAction::Discard;
+                dsAttach.ClearValue = DepthStencilClearValue{1.0f, 0};
+                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                rpDesc.DepthStencilAttachment = dsAttach;
+                pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            }
+            pass->BindRootSignature(_rs.get());
+            pass->BindGraphicsPipelineState(_pso.get());
+            pass->SetViewport({0, 0, (float)_renderRtSize.x(), (float)_renderRtSize.y(), 0.0f, 1.0f});
+            pass->SetScissor({0, 0, (uint32_t)_renderRtSize.x(), (uint32_t)_renderRtSize.y()});
+            const HelloMesh& mesh = _meshes[0];
+            {
+                VertexBufferView vbv{};
+                vbv.Target = mesh._vertexBuffer.get();
+                vbv.Offset = 0;
+                vbv.Size = mesh._vertexSize;
+                pass->BindVertexBuffer(std::span{&vbv, 1});
+            }
+            {
+                IndexBufferView ibv{};
+                ibv.Target = mesh._indexBuffer.get();
+                ibv.Offset = 0;
+                ibv.Stride = mesh._indexStride;
+                pass->BindIndexBuffer(ibv);
+            }
+            pass->DrawIndexed(mesh._indexCount, 0, 0, 0, 0);
+            currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
         }
-        _imguiDrawContext->Draw((int)currFrame->_frameIndex, pass.get());
-        currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
+        {
+            unique_ptr<CommandEncoder> pass;
+            {
+                RenderPassDescriptor rpDesc{};
+                ColorAttachment rtAttach{};
+                rtAttach.Target = currFrame->_rtView;
+                rtAttach.Load = LoadAction::Clear;
+                rtAttach.Store = StoreAction::Store;
+                rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
+                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            }
+            _imguiDrawContext->Draw((int)currFrame->_frameIndex, pass.get());
+            currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
+        }
         {
             BarrierTextureDescriptor barrier{};
             barrier.Target = currFrame->_rt;
@@ -274,7 +326,11 @@ public:
     }
 
     void OnDestroy() noexcept override {
+        _pso.reset();
+        _rs.reset();
         _meshes.clear();
+        _depthTexView.reset();
+        _depthTex.reset();
     }
 
     void OnResizing(int width, int height) override {
@@ -290,12 +346,43 @@ public:
             this->_isResizingRender = false;
             if (width > 0 && height > 0) {
                 this->RecreateSwapChain();
+                this->RecreateDepthTexture();
             }
         });
     }
 
 private:
+    void RecreateDepthTexture() {
+        TextureDescriptor depthDesc{
+            TextureDimension::Dim2D,
+            (uint32_t)_renderRtSize.x(),
+            (uint32_t)_renderRtSize.y(),
+            1,
+            1,
+            1,
+            TextureFormat::D32_FLOAT,
+            TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite,
+            ResourceHint::None,
+            "depth_tex"};
+        _depthTex = _device->CreateTexture(depthDesc).Unwrap();
+        _depthTexState = TextureUse::Uninitialized;
+        TextureViewDescriptor depthViewDesc{
+            _depthTex.get(),
+            TextureViewDimension::Dim2D,
+            TextureFormat::D32_FLOAT,
+            SubresourceRange::AllSub(),
+            TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite};
+        _depthTexView = _device->CreateTextureView(depthViewDesc).Unwrap();
+    }
+
     shared_ptr<Dxc> _dxc;
+    shared_ptr<RootSignature> _rs;
+    shared_ptr<GraphicsPipelineState> _pso;
+
+    shared_ptr<Texture> _depthTex;
+    shared_ptr<TextureView> _depthTexView;
+    TextureUse _depthTexState;
+
     vector<HelloMesh> _meshes;
 
     RenderBackend backend;

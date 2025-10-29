@@ -9,6 +9,7 @@
 #include <radray/utility.h>
 #include <radray/basic_math.h>
 #include <radray/render/common.h>
+#include <radray/render/utility.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #ifndef NOMINMAX

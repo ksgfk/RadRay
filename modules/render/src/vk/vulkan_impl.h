@@ -2,8 +2,6 @@
 
 #include <array>
 
-#include <radray/render/common.h>
-
 #include "vulkan_helper.h"
 
 namespace radray::render::vulkan {
@@ -659,8 +657,8 @@ public:
     VkPipelineLayout _layout;
     // unique_ptr<DescriptorSetLayoutVulkan> _rootSetLayout;
     // unique_ptr<DescriptorSetVulkan> _rootSet;
-    vector<DescriptorSetLayoutVulkan*> _sets;
     std::optional<VkPushConstantRange> _pushConst;
+    uint32_t _descSetCount{0};
     // uint32_t _rootSetStart{0};
     // uint32_t _setsStart{0};
 };

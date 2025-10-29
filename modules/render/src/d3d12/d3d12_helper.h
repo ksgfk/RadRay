@@ -6,6 +6,7 @@
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
+#include <radray/render/utility.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
