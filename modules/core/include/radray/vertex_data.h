@@ -37,6 +37,8 @@ public:
 
 class VertexData {
 public:
+    uint32_t GetStride() const noexcept;
+
     vector<VertexLayout> Layouts;
     unique_ptr<byte[]> VertexData;
     unique_ptr<byte[]> IndexData;

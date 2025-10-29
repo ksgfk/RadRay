@@ -1,22 +1,17 @@
 #include <radray/logger.h>
 #include <radray/enum_flags.h>
+#include <radray/utility.h>
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
 #include <radray/render/common.h>
+#include <radray/render/dxc.h>
+#include <radray/render/utility.h>
 #include <radray/imgui/dear_imgui.h>
 
-const char* RADRAY_APP_NAME = "Hello PBR";
+const char* RADRAY_APP_NAME = "hello_pbr";
 
 using namespace radray;
 using namespace radray::render;
-
-constexpr IndexFormat MapIndexType(VertexIndexType type) noexcept {
-    switch (type) {
-        case VertexIndexType::UInt16: return IndexFormat::UINT16;
-        case VertexIndexType::UInt32: return IndexFormat::UINT32;
-        default: return IndexFormat::UINT16;
-    }
-}
 
 class HelloMesh {
 public:
@@ -37,11 +32,15 @@ public:
 
     void OnStart() override {
         auto name = radray::format("{} - {} {}", string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : "");
-        render::VulkanCommandQueueDescriptor queueDesc[] = {
-            {render::QueueType::Direct, 1},
-            {render::QueueType::Copy, 1}};
-        render::VulkanDeviceDescriptor devDesc{};
-        devDesc.Queues = queueDesc;
+        std::optional<DeviceDescriptor> deviceDesc;
+        if (backend == RenderBackend::Vulkan) {
+            render::VulkanCommandQueueDescriptor queueDesc[] = {
+                {render::QueueType::Direct, 1},
+                {render::QueueType::Copy, 1}};
+            render::VulkanDeviceDescriptor devDesc{};
+            devDesc.Queues = queueDesc;
+            deviceDesc = devDesc;
+        }
         ImGuiApplicationDescriptor desc{
             name,
             {1280, 720},
@@ -58,13 +57,88 @@ public:
             false,
             false,
             multiThread,
-            devDesc};
+            deviceDesc};
         this->Init(desc);
+        _dxc = CreateDxc().Unwrap();
+        shared_ptr<Shader> vsShader, psShader;
+        {
+            string hlsl;
+            {
+                auto hlslOpt = ReadText(std::filesystem::path("assets") / RADRAY_APP_NAME / "pbr.hlsl");
+                if (!hlslOpt.has_value()) {
+                    throw ImGuiApplicationException("Failed to read shader file pbr.hlsl");
+                }
+                hlsl = std::move(hlslOpt.value());
+            }
+            DxcOutput vsBin;
+            {
+                auto vs = _dxc->Compile(hlsl, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, backend == RenderBackend::Vulkan);
+                if (!vs.has_value()) {
+                    throw ImGuiApplicationException("Failed to compile vertex shader");
+                }
+                vsBin = std::move(vs.value());
+            }
+            DxcOutput psBin;
+            {
+                auto ps = _dxc->Compile(hlsl, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, backend == RenderBackend::Vulkan);
+                if (!ps.has_value()) {
+                    throw ImGuiApplicationException("Failed to compile pixel shader");
+                }
+                psBin = std::move(ps.value());
+            }
+            ShaderDescriptor vsDesc{vsBin.Data, vsBin.Category};
+            vsShader = _device->CreateShader(vsDesc).Unwrap();
+            ShaderDescriptor psDesc{psBin.Data, psBin.Category};
+            psShader = _device->CreateShader(psDesc).Unwrap();
+        }
         {
             TriangleMesh sphereMesh{};
             sphereMesh.InitAsUVSphere(0.5f, 32);
             VertexData sphereModel{};
             sphereMesh.ToVertexData(&sphereModel);
+
+            RootSignatureSetElement cbLayoutElems[] = {
+                {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
+            RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
+            shared_ptr<DescriptorSetLayout> cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+            RootSignatureConstant rscDesc{};
+            rscDesc.Slot = 0;
+            rscDesc.Space = 0;
+            rscDesc.Size = 128;
+            rscDesc.Stages = ShaderStage::Vertex | ShaderStage::Pixel;
+            DescriptorSetLayout* layouts[] = {cbLayout.get()};
+            RootSignatureDescriptor rsDesc{};
+            rsDesc.BindingSets = layouts;
+            rsDesc.Constant = rscDesc;
+            shared_ptr<RootSignature> rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
+            vector<VertexElement> vertElems;
+            {
+                SemanticMapping mapping[] = {
+                    {VertexSemantic::POSITION, 0, 0, VertexFormat::FLOAT32X3},
+                    {VertexSemantic::NORMAL, 0, 1, VertexFormat::FLOAT32X3},
+                    {VertexSemantic::TEXCOORD, 0, 2, VertexFormat::FLOAT32X2}};
+                auto mves = MapVertexElements(sphereModel.Layouts, mapping);
+                if (!mves.has_value()) {
+                    throw ImGuiApplicationException("Failed to map vertex elements");
+                }
+                vertElems = std::move(mves.value());
+            }
+            VertexBufferLayout vertLayout{};
+            vertLayout.ArrayStride = sphereModel.GetStride();
+            vertLayout.StepMode = VertexStepMode::Vertex;
+            vertLayout.Elements = vertElems;
+            ColorTargetState rtState = DefaultColorTargetState(TextureFormat::RGBA8_UNORM);
+            GraphicsPipelineStateDescriptor psoDesc{};
+            psoDesc.RootSig = rootSig.get();
+            psoDesc.VS = {vsShader.get(), "VSMain"};
+            psoDesc.PS = {psShader.get(), "PSMain"};
+            psoDesc.VertexLayouts = std::span{&vertLayout, 1};
+            psoDesc.Primitive = DefaultPrimitiveState();
+            psoDesc.DepthStencil = DefaultDepthStencilState();
+            psoDesc.MultiSample = DefaultMultiSampleState();
+            psoDesc.ColorTargets = std::span{&rtState, 1};
+            shared_ptr<GraphicsPipelineState> pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
+
             BufferDescriptor vertDesc{
                 sphereModel.VertexSize,
                 MemoryType::Device,
@@ -79,7 +153,6 @@ public:
                 ResourceHint::None,
                 "sphere_index"};
             auto index = _device->CreateBuffer(indexDesc).Unwrap();
-            _meshes.emplace_back(HelloMesh{std::move(vert), std::move(index), sphereModel.IndexCount, MapIndexType(sphereModel.IndexType)});
 
             BufferDescriptor uploadDesc{
                 sphereModel.VertexSize + sphereModel.IndexSize,
@@ -106,8 +179,8 @@ public:
             cmdBuffer->CopyBufferToBuffer(index.get(), 0, upload.get(), sphereModel.VertexSize, sphereModel.IndexSize);
             {
                 BarrierBufferDescriptor barrierAfter[] = {
-                    {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
-                    {index.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+                    {vert.get(), BufferUse::CopyDestination, BufferUse::Common, nullptr, false},
+                    {index.get(), BufferUse::CopyDestination, BufferUse::Common, nullptr, false}};
                 cmdBuffer->ResourceBarrier(barrierAfter, {});
             }
             cmdBuffer->End();
@@ -116,6 +189,8 @@ public:
             submitDesc.CmdBuffers = std::span{&cmdBufferRef, 1};
             copyQueue->Submit(submitDesc);
             copyQueue->Wait();
+
+            _meshes.emplace_back(HelloMesh{std::move(vert), std::move(index), sphereModel.IndexCount, MapIndexType(sphereModel.IndexType)});
         }
     }
 
@@ -220,6 +295,7 @@ public:
     }
 
 private:
+    shared_ptr<Dxc> _dxc;
     vector<HelloMesh> _meshes;
 
     RenderBackend backend;
