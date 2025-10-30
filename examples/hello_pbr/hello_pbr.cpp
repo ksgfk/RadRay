@@ -435,58 +435,65 @@ public:
 
     void OnTouch(int x, int y, MouseButton button, Action action) {
         Eigen::Vector2f curr{(float)x, (float)y};
-
-        auto beginDrag = [&](MouseButton b) {
-            switch (b) {
-                case MouseButton::BUTTON_MIDDLE:
-                    _dragM = true;
-                    _cc.CanPanXY = true;
-                    break;
-                case MouseButton::BUTTON_RIGHT:
-                    _dragR = true;
-                    _cc.CanOrbit = true;
-                    break;
-                default:
-                    break;
-            }
-            _cc.LastPos = curr;
-            _cc.NowPos = curr;
-            _cc.PanDelta = 0.0f;
-        };
-
-        auto endDrag = [&](MouseButton b) {
-            switch (b) {
-                case MouseButton::BUTTON_MIDDLE:
-                    _dragM = false;
-                    _cc.CanPanXY = false;
-                    break;
-                case MouseButton::BUTTON_RIGHT:
-                    _dragR = false;
-                    _cc.CanOrbit = false;
-                    _cc.PanDelta = 0.0f;
-                    break;
-                default:
-                    break;
-            }
-        };
-
         switch (action) {
-            case Action::PRESSED:
-                beginDrag(button);
+            case Action::PRESSED: {
+                switch (button) {
+                    case MouseButton::BUTTON_LEFT:
+                        _dragL = true;
+                        _cc.CanOrbit = true;
+                        _cc.CanFly = false;
+                        break;
+                    case MouseButton::BUTTON_MIDDLE:
+                        _dragM = true;
+                        _cc.CanPanXY = true;
+                        break;
+                    case MouseButton::BUTTON_RIGHT:
+                        _dragR = true;
+                        _cc.CanFly = true;
+                        _cc.CanOrbit = false;
+                        break;
+                    default:
+                        break;
+                }
+                _cc.LastPos = curr;
+                _cc.NowPos = curr;
+                _cc.PanDelta = 0.0f;
                 break;
+            }
             case Action::REPEATED: {
                 _cc.NowPos = curr;
                 if (_dragM) {
                     _cc.CanPanXY = true;
                     _cc.PanXY(_camPos, _camRot);
                 } else if (_dragR) {
+                    _cc.CanFly = true;
+                    _cc.CanOrbit = false;
+                    _cc.Orbit(_camPos, _camRot);
+                } else if (_dragL) {
                     _cc.CanOrbit = true;
+                    _cc.CanFly = false;
                     _cc.Orbit(_camPos, _camRot);
                 }
                 break;
             }
             case Action::RELEASED:
-                endDrag(button);
+                switch (button) {
+                    case MouseButton::BUTTON_LEFT:
+                        _dragL = false;
+                        _cc.CanOrbit = false;
+                        break;
+                    case MouseButton::BUTTON_MIDDLE:
+                        _dragM = false;
+                        _cc.CanPanXY = false;
+                        break;
+                    case MouseButton::BUTTON_RIGHT:
+                        _dragR = false;
+                        _cc.CanFly = false;
+                        _cc.PanDelta = 0.0f;
+                        break;
+                    default:
+                        break;
+                }
                 break;
             default:
                 break;
@@ -555,6 +562,7 @@ private:
     bool multiThread;
     bool _showMonitor{true};
 
+    bool _dragL{false};
     bool _dragM{false};
     bool _dragR{false};
 };
