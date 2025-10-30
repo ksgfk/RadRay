@@ -54,6 +54,8 @@ std::string_view GetErrorName(HRESULT hr) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
 
+bool IsStencilFormatDXGI(DXGI_FORMAT fmt) noexcept;
+
 DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;

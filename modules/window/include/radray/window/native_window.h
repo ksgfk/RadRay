@@ -8,6 +8,7 @@
 #include <radray/nullable.h>
 #include <radray/utility.h>
 #include <radray/platform.h>
+#include <radray/window/input.h>
 
 namespace radray {
 
@@ -60,6 +61,9 @@ public:
 
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;
     virtual sigslot::signal<int, int>& EventResizing() noexcept = 0;
+    virtual sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept = 0;
+    virtual sigslot::signal<KeyCode, Action>& EventKeyboard() noexcept = 0;
+    virtual sigslot::signal<int>& EventMouseWheel() noexcept = 0;
 };
 
 Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDescriptor& desc) noexcept;

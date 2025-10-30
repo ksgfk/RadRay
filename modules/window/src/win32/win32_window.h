@@ -2,6 +2,8 @@
 
 #include <atomic>
 
+#include <radray/window/native_window.h>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -15,8 +17,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 #include <windows.h>
-
-#include <radray/window/native_window.h>
 
 namespace radray {
 
@@ -58,6 +58,9 @@ public:
 
     sigslot::signal<int, int>& EventResized() noexcept override;
     sigslot::signal<int, int>& EventResizing() noexcept override;
+    sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept override;
+    sigslot::signal<KeyCode, Action>& EventKeyboard() noexcept override;
+    sigslot::signal<int>& EventMouseWheel() noexcept override;
 
     bool EnterFullscreen();
     bool ExitFullscreen();
@@ -77,8 +80,14 @@ public:
 
     sigslot::signal<int, int> _eventResized;
     sigslot::signal<int, int> _eventResizing;
+    sigslot::signal<int, int, MouseButton, Action> _eventTouch;
+    sigslot::signal<KeyCode, Action> _eventKeyboard;
+    sigslot::signal<int> _eventMouseWheel;
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;
+
+KeyCode MapWin32VKToKeyCode(WPARAM vk, LPARAM lp) noexcept;
+MouseButton MapWin32MSGToMouseButton(UINT msg, WPARAM wParam) noexcept;
 
 }  // namespace radray

@@ -805,8 +805,8 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
     if (!_window) {
         throw ImGuiApplicationException("failed to create native window");
     }
-    _resizingConn = _window->EventResizing().connect(&ImGuiApplication::OnResizingCb, this);
-    _resizedConn = _window->EventResized().connect(&ImGuiApplication::OnResizedCb, this);
+    _resizingConn = _window->EventResizing().connect(&ImGuiApplication::OnResizing, this);
+    _resizedConn = _window->EventResized().connect(&ImGuiApplication::OnResized, this);
 
     if (platform == PlatformId::Windows && appDesc.Backend == render::RenderBackend::D3D12) {
         render::D3D12DeviceDescriptor desc{};
@@ -1069,14 +1069,6 @@ void ImGuiApplication::OnResizing(int width, int height) {
 void ImGuiApplication::OnResized(int width, int height) {
     RADRAY_UNUSED(width);
     RADRAY_UNUSED(height);
-}
-
-void ImGuiApplication::OnResizingCb(int width, int height) {
-    this->OnResizing(width, height);
-}
-
-void ImGuiApplication::OnResizedCb(int width, int height) {
-    this->OnResized(width, height);
 }
 
 void ImGuiApplication::OnStart() {}

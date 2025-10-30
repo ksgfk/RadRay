@@ -24,7 +24,7 @@ enum class MouseButton {
     BUTTON_MIDDLE = BUTTON_3,
 };
 
-enum class Key {
+enum class KeyCode {
     UNKNOWN,
     SPACE,
     APOSTROPHE, /* ' */

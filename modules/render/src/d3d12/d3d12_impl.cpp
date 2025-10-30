@@ -1662,6 +1662,10 @@ Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderP
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE depthEndingAccess = MapType(depthStencil.DepthStore);
         D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE stencilBeginningAccess = MapType(depthStencil.StencilLoad);
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE stencilEndingAccess = MapType(depthStencil.StencilStore);
+        if (!IsStencilFormatDXGI(v->_rawFormat)) {
+            stencilBeginningAccess = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+            stencilEndingAccess = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+        }
         D3D12_CLEAR_VALUE clear{};
         clear.Format = v->_rawFormat;
         clear.DepthStencil.Depth = depthStencil.ClearValue.Depth;

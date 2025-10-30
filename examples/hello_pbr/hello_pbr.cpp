@@ -233,6 +233,10 @@ public:
                 BufferUse::CBuffer};
             _cbViews.emplace_back(_device->CreateBufferView(bvd).Unwrap());
         }
+
+        _window->EventTouch().connect(&HelloPbr::OnTouch, this);
+        _window->EventMouseWheel().connect(&HelloPbr::OnMouseWheel, this);
+        _cc.Distance = (_modelPos - _camPos).norm();
     }
 
     void OnImGui() override {
@@ -295,113 +299,91 @@ public:
             }
             currFrame->_cmdBuffer->ResourceBarrier({}, barriers);
         }
-        // {
-        //     unique_ptr<CommandEncoder> pass;
-        //     {
-        //         RenderPassDescriptor rpDesc{};
-        //         ColorAttachment rtAttach{};
-        //         rtAttach.Target = currFrame->_rtView;
-        //         rtAttach.Load = LoadAction::Clear;
-        //         rtAttach.Store = StoreAction::Store;
-        //         rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
-        //         DepthStencilAttachment dsAttach{};
-        //         dsAttach.Target = _depthTexView.get();
-        //         dsAttach.DepthLoad = LoadAction::Clear;
-        //         dsAttach.DepthStore = StoreAction::Store;
-        //         dsAttach.StencilLoad = LoadAction::DontCare;
-        //         dsAttach.StencilStore = StoreAction::Discard;
-        //         dsAttach.ClearValue = DepthStencilClearValue{1.0f, 0};
-        //         rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-        //         rpDesc.DepthStencilAttachment = dsAttach;
-        //         pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
-        //     }
-        //     pass->BindRootSignature(_rs.get());
-        //     pass->BindGraphicsPipelineState(_pso.get());
-        //     pass->SetViewport({0, 0, (float)_renderRtSize.x(), (float)_renderRtSize.y(), 0.0f, 1.0f});
-        //     pass->SetScissor({0, 0, (uint32_t)_renderRtSize.x(), (uint32_t)_renderRtSize.y()});
-        //     const HelloMesh& mesh = _meshes[0];
-        //     {
-        //         VertexBufferView vbv{};
-        //         vbv.Target = mesh._vertexBuffer.get();
-        //         vbv.Offset = 0;
-        //         vbv.Size = mesh._vertexSize;
-        //         pass->BindVertexBuffer(std::span{&vbv, 1});
-        //     }
-        //     {
-        //         IndexBufferView ibv{};
-        //         ibv.Target = mesh._indexBuffer.get();
-        //         ibv.Offset = 0;
-        //         ibv.Stride = mesh._indexStride;
-        //         pass->BindIndexBuffer(ibv);
-        //     }
-        //     pass->DrawIndexed(mesh._indexCount, 0, 0, 0, 0);
-        //     currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
-        // }
-
-        unique_ptr<CommandEncoder> pass;
         {
-            RenderPassDescriptor rpDesc{};
-            ColorAttachment rtAttach{};
-            rtAttach.Target = currFrame->_rtView;
-            rtAttach.Load = LoadAction::Clear;
-            rtAttach.Store = StoreAction::Store;
-            rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
-            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-            DepthStencilAttachment dsAttach{};
-            dsAttach.Target = _depthTexView.get();
-            dsAttach.DepthLoad = LoadAction::Clear;
-            dsAttach.DepthStore = StoreAction::Store;
-            dsAttach.StencilLoad = LoadAction::DontCare;
-            dsAttach.StencilStore = StoreAction::Discard;
-            dsAttach.ClearValue = DepthStencilClearValue{1.0f, 0};
-            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-            rpDesc.DepthStencilAttachment = dsAttach;
-            pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            unique_ptr<CommandEncoder> pass;
+            {
+                RenderPassDescriptor rpDesc{};
+                ColorAttachment rtAttach{};
+                rtAttach.Target = currFrame->_rtView;
+                rtAttach.Load = LoadAction::Clear;
+                rtAttach.Store = StoreAction::Store;
+                rtAttach.ClearValue = ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
+                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                DepthStencilAttachment dsAttach{};
+                dsAttach.Target = _depthTexView.get();
+                dsAttach.DepthLoad = LoadAction::Clear;
+                dsAttach.DepthStore = StoreAction::Store;
+                dsAttach.StencilLoad = LoadAction::DontCare;
+                dsAttach.StencilStore = StoreAction::Discard;
+                dsAttach.ClearValue = DepthStencilClearValue{1.0f, 0};
+                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                rpDesc.DepthStencilAttachment = dsAttach;
+                pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            }
+            {
+                pass->BindRootSignature(_rs.get());
+                pass->BindGraphicsPipelineState(_pso.get());
+                Viewport viewport{0, 0, (float)_renderRtSize.x(), (float)_renderRtSize.y(), 0.0f, 1.0f};
+                if (_device->GetBackend() == RenderBackend::Vulkan) {
+                    viewport.Y = (float)_renderRtSize.y();
+                    viewport.Height = -(float)_renderRtSize.y();
+                }
+                pass->SetViewport(viewport);
+                pass->SetScissor({0, 0, (uint32_t)_renderRtSize.x(), (uint32_t)_renderRtSize.y()});
+
+                Eigen::Matrix4f view = Eigen::Matrix4f::Identity();
+                Eigen::Matrix3f invRot = _camRot.conjugate().toRotationMatrix();
+                view.block<3, 3>(0, 0) = invRot;
+                view.block<3, 1>(0, 3) = -invRot * _camPos;
+
+                Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)_renderRtSize.x() / (float)_renderRtSize.y(), _camNear, _camFar);
+
+                Eigen::Translation3f trans{_modelPos};
+                Eigen::AlignedScaling3f scale{_modelScale};
+                Eigen::Matrix4f model = (trans * _modelRot.toRotationMatrix() * scale).matrix();
+
+                Eigen::Matrix4f vp = proj * view;
+                Eigen::Matrix4f mvp = vp * model;
+                byte preModel[128];
+                std::memcpy(preModel, model.data(), sizeof(Eigen::Matrix4f));
+                std::memcpy(preModel + 64, mvp.data(), sizeof(Eigen::Matrix4f));
+                pass->PushConstant(preModel, 128);
+                DescriptorSet* set = _descSets[currFrame->_frameIndex].get();
+                BufferView* cbView = _cbViews[currFrame->_frameIndex].get();
+                HelloCameraData camData{};
+                std::memcpy(camData.view, view.data(), sizeof(Eigen::Matrix4f));
+                std::memcpy(camData.proj, proj.data(), sizeof(Eigen::Matrix4f));
+                std::memcpy(camData.viewProj, vp.data(), sizeof(Eigen::Matrix4f));
+                std::memcpy(camData.posW, _modelPos.data(), sizeof(Eigen::Vector3f));
+                std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + sizeof(HelloCameraData) * currFrame->_frameIndex, &camData, sizeof(HelloCameraData));
+                set->SetResource(0, cbView);
+                pass->BindDescriptorSet(0, set);
+                HelloMesh& mesh = _meshes[0];
+                VertexBufferView vbv{
+                    mesh._vertexBuffer.get(),
+                    0,
+                    mesh._vertexSize};
+                pass->BindVertexBuffer(std::span{&vbv, 1});
+                pass->BindIndexBuffer({mesh._indexBuffer.get(), 0, mesh._indexStride});
+                pass->DrawIndexed(mesh._indexCount, 1, 0, 0, 0);
+            }
+            currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
         }
         {
-            pass->BindRootSignature(_rs.get());
-            pass->BindGraphicsPipelineState(_pso.get());
-            pass->SetViewport({0, 0, (float)_renderRtSize.x(), (float)_renderRtSize.y(), 0.0f, 1.0f});
-            pass->SetScissor({0, 0, (uint32_t)_renderRtSize.x(), (uint32_t)_renderRtSize.y()});
-
-            Eigen::Matrix4f view = Eigen::Matrix4f::Identity();
-            Eigen::Matrix3f invRot = _camRot.conjugate().toRotationMatrix();
-            view.block<3, 3>(0, 0) = invRot;
-            view.block<3, 1>(0, 3) = -invRot * _camPos;
-
-            Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)_renderRtSize.x() / (float)_renderRtSize.y(), _camNear, _camFar);
-
-            Eigen::Translation3f trans{_modelPos};
-            Eigen::AlignedScaling3f scale{_modelScale};
-            Eigen::Matrix4f model = (trans * _modelRot.toRotationMatrix() * scale).matrix();
-
-            Eigen::Matrix4f vp = proj * view;
-            Eigen::Matrix4f mvp = vp * model;
-            byte preModel[128];
-            std::memcpy(preModel, model.data(), sizeof(Eigen::Matrix4f));
-            std::memcpy(preModel + 64, mvp.data(), sizeof(Eigen::Matrix4f));
-            pass->PushConstant(preModel, 128);
-            DescriptorSet* set = _descSets[currFrame->_frameIndex].get();
-            BufferView* cbView = _cbViews[currFrame->_frameIndex].get();
-            HelloCameraData camData{};
-            std::memcpy(camData.view, view.data(), sizeof(Eigen::Matrix4f));
-            std::memcpy(camData.proj, proj.data(), sizeof(Eigen::Matrix4f));
-            std::memcpy(camData.viewProj, vp.data(), sizeof(Eigen::Matrix4f));
-            std::memcpy(camData.posW, _modelPos.data(), sizeof(Eigen::Vector3f));
-            std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + sizeof(HelloCameraData) * currFrame->_frameIndex, &camData, sizeof(HelloCameraData));
-            set->SetResource(0, cbView);
-            pass->BindDescriptorSet(0, set);
-            HelloMesh& mesh = _meshes[0];
-            VertexBufferView vbv{
-                mesh._vertexBuffer.get(),
-                0,
-                mesh._vertexSize};
-            pass->BindVertexBuffer(std::span{&vbv, 1});
-            pass->BindIndexBuffer({mesh._indexBuffer.get(), 0, mesh._indexStride});
-            pass->DrawIndexed(mesh._indexCount, 1, 0, 0, 0);
+            unique_ptr<CommandEncoder> pass;
+            {
+                RenderPassDescriptor rpDesc{};
+                ColorAttachment rtAttach{};
+                rtAttach.Target = currFrame->_rtView;
+                rtAttach.Load = LoadAction::Load;
+                rtAttach.Store = StoreAction::Store;
+                rtAttach.ClearValue = ColorClearValue{};
+                rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+                pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            }
+            _imguiDrawContext->Draw((int)currFrame->_frameIndex, pass.get());
+            currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
         }
-        _imguiDrawContext->Draw((int)currFrame->_frameIndex, pass.get());
-        currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
         {
             BarrierTextureDescriptor barrier{};
             barrier.Target = currFrame->_rt;
@@ -429,6 +411,7 @@ public:
         _cbLayout.reset();
         _descSets.clear();
         _cbViews.clear();
+        _cbuffer->Unmap(0, sizeof(HelloCameraData) * _frameCount);
         _cbuffer.reset();
     }
 
@@ -448,6 +431,73 @@ public:
                 this->RecreateDepthTexture();
             }
         });
+    }
+
+    void OnTouch(int x, int y, MouseButton button, Action action) {
+        Eigen::Vector2f curr{(float)x, (float)y};
+
+        auto beginDrag = [&](MouseButton b) {
+            switch (b) {
+                case MouseButton::BUTTON_MIDDLE:
+                    _dragM = true;
+                    _cc.CanPanXY = true;
+                    break;
+                case MouseButton::BUTTON_RIGHT:
+                    _dragR = true;
+                    _cc.CanOrbit = true;
+                    break;
+                default:
+                    break;
+            }
+            _cc.LastPos = curr;
+            _cc.NowPos = curr;
+            _cc.PanDelta = 0.0f;
+        };
+
+        auto endDrag = [&](MouseButton b) {
+            switch (b) {
+                case MouseButton::BUTTON_MIDDLE:
+                    _dragM = false;
+                    _cc.CanPanXY = false;
+                    break;
+                case MouseButton::BUTTON_RIGHT:
+                    _dragR = false;
+                    _cc.CanOrbit = false;
+                    _cc.PanDelta = 0.0f;
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        switch (action) {
+            case Action::PRESSED:
+                beginDrag(button);
+                break;
+            case Action::REPEATED: {
+                _cc.NowPos = curr;
+                if (_dragM) {
+                    _cc.CanPanXY = true;
+                    _cc.PanXY(_camPos, _camRot);
+                } else if (_dragR) {
+                    _cc.CanOrbit = true;
+                    _cc.Orbit(_camPos, _camRot);
+                }
+                break;
+            }
+            case Action::RELEASED:
+                endDrag(button);
+                break;
+            default:
+                break;
+        }
+    }
+
+    void OnMouseWheel(int delta) {
+        _cc.PanDelta = static_cast<float>(delta) / 120.0f;
+        _cc.CanPanZWithDist = false;
+        _cc.PanZ(_camPos, _camRot);
+        _cc.PanDelta = 0.0f;
     }
 
 private:
@@ -485,7 +535,7 @@ private:
 
     vector<HelloMesh> _meshes;
 
-    Eigen::Vector3f _camPos{0.0f, 0.0f, 3.0f};
+    Eigen::Vector3f _camPos{0.0f, 0.0f, -3.0f};
     Eigen::Quaternionf _camRot{Eigen::Quaternionf::Identity()};
     float _camFovY{45.0f};
     float _camNear{0.1f};
@@ -494,6 +544,7 @@ private:
     Eigen::Vector3f _modelPos{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
     Eigen::Quaternionf _modelRot{Eigen::Quaternionf::Identity()};
+    CameraControl _cc{};
 
     vector<shared_ptr<DescriptorSet>> _descSets;
     vector<shared_ptr<BufferView>> _cbViews;
@@ -503,6 +554,9 @@ private:
     RenderBackend backend;
     bool multiThread;
     bool _showMonitor{true};
+
+    bool _dragM{false};
+    bool _dragR{false};
 };
 
 int main(int argc, char** argv) {

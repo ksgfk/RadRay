@@ -227,8 +227,6 @@ protected:
     void ExecuteBeforeAcquire();
 
 protected:
-    void OnResizingCb(int width, int height);
-    void OnResizedCb(int width, int height);
 
     uint32_t _frameCount;
     render::TextureFormat _rtFormat;
