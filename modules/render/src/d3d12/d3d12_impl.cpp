@@ -835,7 +835,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
         dxgiFormat = rtvDesc.Format;
-    } else if (desc.Usage == TextureUse::DepthStencilRead || desc.Usage == TextureUse::DepthStencilWrite) {
+    } else if (desc.Usage.HasFlag(TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) {
         {
             auto heap = _cpuDsvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
