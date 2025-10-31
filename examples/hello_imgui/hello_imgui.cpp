@@ -71,7 +71,7 @@ public:
             ImGui::ShowDemoWindow(&_showDemo);
         }
         {
-            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
             int location = 0;
             const float PAD = 10.0f;
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -83,7 +83,6 @@ public:
             window_pos_pivot.x = (location & 1) ? 1.0f : 0.0f;
             window_pos_pivot.y = (location & 2) ? 1.0f : 0.0f;
             ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always, window_pos_pivot);
-            ImGui::SetNextWindowViewport(viewport->ID);
             window_flags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {

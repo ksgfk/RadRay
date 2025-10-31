@@ -241,7 +241,7 @@ public:
 
     void OnImGui() override {
         {
-            ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+            ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
             int location = 0;
             const float PAD = 10.0f;
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -253,7 +253,6 @@ public:
             windowPosPivot.x = (location & 1) ? 1.0f : 0.0f;
             windowPosPivot.y = (location & 2) ? 1.0f : 0.0f;
             ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, windowPosPivot);
-            ImGui::SetNextWindowViewport(viewport->ID);
             windowFlags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, windowFlags)) {
