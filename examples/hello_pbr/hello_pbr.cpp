@@ -22,6 +22,20 @@ struct alignas(256) HelloCameraData {
     float posW[3];
 };
 
+struct alignas(256) MaterialData {
+    float albedo[3];
+    float metallic;
+
+    float specularTint[3];
+    float specular;
+
+    float roughness;
+    float anisotropy;
+    float ior;
+};
+
+constexpr size_t CBUFFER_SIZE = sizeof(HelloCameraData) + sizeof(MaterialData);
+
 class HelloMesh {
 public:
     shared_ptr<Buffer> _vertexBuffer;
@@ -108,13 +122,14 @@ public:
             sphereMesh.ToVertexData(&sphereModel);
 
             RootSignatureSetElement cbLayoutElems[] = {
-                {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
+                {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}},
+                {2, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
             RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
             _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
             RootSignatureConstant rscDesc{};
             rscDesc.Slot = 0;
             rscDesc.Space = 0;
-            rscDesc.Size = 128;
+            rscDesc.Size = 64 * 3;
             rscDesc.Stages = ShaderStage::Vertex | ShaderStage::Pixel;
             DescriptorSetLayout* layouts[] = {_cbLayout.get()};
             RootSignatureDescriptor rsDesc{};
@@ -211,7 +226,7 @@ public:
         RecreateDepthTexture();
 
         BufferDescriptor cbDesc{
-            sizeof(HelloCameraData) * _frameCount,
+            CBUFFER_SIZE * _frameCount,
             MemoryType::Upload,
             BufferUse::CBuffer,
             ResourceHint::None,
@@ -223,20 +238,43 @@ public:
             auto set = _device->CreateDescriptorSet(_cbLayout.get()).Unwrap();
             _descSets.emplace_back(std::move(set));
         }
-        _cbViews.reserve(_frameCount);
+        _cbCamViews.reserve(_frameCount);
+        _cbMatViews.reserve(_frameCount);
         for (size_t i = 0; i < _frameCount; i++) {
             BufferViewDescriptor bvd{
                 _cbuffer.get(),
-                {i * sizeof(HelloCameraData), sizeof(HelloCameraData)},
+                {i * CBUFFER_SIZE, sizeof(HelloCameraData)},
                 0,
                 TextureFormat::UNKNOWN,
                 BufferUse::CBuffer};
-            _cbViews.emplace_back(_device->CreateBufferView(bvd).Unwrap());
+            _cbCamViews.emplace_back(_device->CreateBufferView(bvd).Unwrap());
+
+            BufferViewDescriptor mat{
+                _cbuffer.get(),
+                {i * CBUFFER_SIZE + sizeof(HelloCameraData), sizeof(MaterialData)},
+                0,
+                TextureFormat::UNKNOWN,
+                BufferUse::CBuffer};
+            _cbMatViews.emplace_back(_device->CreateBufferView(mat).Unwrap());
         }
 
         _window->EventTouch().connect(&HelloPbr::OnTouch, this);
         _window->EventMouseWheel().connect(&HelloPbr::OnMouseWheel, this);
         _cc.Distance = (_modelPos - _camPos).norm();
+
+        MaterialData matData{};
+        matData.albedo[0] = 1.0f;
+        matData.albedo[1] = 0.766f;
+        matData.albedo[2] = 0.336f;
+        matData.metallic = 1.0;
+        matData.specularTint[0] = 1.0;
+        matData.specularTint[1] = 1.0;
+        matData.specularTint[2] = 1.0;
+        matData.specular = 0.5;
+        matData.roughness = 0.2;
+        matData.anisotropy = 0;
+        matData.ior = 1.5;
+        _mat = matData;
     }
 
     void OnImGui() override {
@@ -340,22 +378,27 @@ public:
                 Eigen::Translation3f trans{_modelPos};
                 Eigen::AlignedScaling3f scale{_modelScale};
                 Eigen::Matrix4f model = (trans * _modelRot.toRotationMatrix() * scale).matrix();
+                Eigen::Matrix4f modelInv = model.inverse();
 
                 Eigen::Matrix4f vp = proj * view;
                 Eigen::Matrix4f mvp = vp * model;
-                byte preModel[128];
+                byte preModel[64 * 3];
                 std::memcpy(preModel, model.data(), sizeof(Eigen::Matrix4f));
                 std::memcpy(preModel + 64, mvp.data(), sizeof(Eigen::Matrix4f));
-                pass->PushConstant(preModel, 128);
+                std::memcpy(preModel + 128, modelInv.data(), sizeof(Eigen::Matrix4f));
+                pass->PushConstant(preModel, sizeof(preModel));
                 DescriptorSet* set = _descSets[currFrame->_frameIndex].get();
-                BufferView* cbView = _cbViews[currFrame->_frameIndex].get();
+                BufferView* cbView = _cbCamViews[currFrame->_frameIndex].get();
                 HelloCameraData camData{};
                 std::memcpy(camData.view, view.data(), sizeof(Eigen::Matrix4f));
                 std::memcpy(camData.proj, proj.data(), sizeof(Eigen::Matrix4f));
                 std::memcpy(camData.viewProj, vp.data(), sizeof(Eigen::Matrix4f));
-                std::memcpy(camData.posW, _modelPos.data(), sizeof(Eigen::Vector3f));
-                std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + sizeof(HelloCameraData) * currFrame->_frameIndex, &camData, sizeof(HelloCameraData));
-                set->SetResource(0, cbView);
+                std::memcpy(camData.posW, _camPos.data(), sizeof(Eigen::Vector3f));
+                std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + CBUFFER_SIZE * currFrame->_frameIndex, &camData, sizeof(HelloCameraData));
+                set->SetResource(1, cbView);
+                BufferView* matView = _cbMatViews[currFrame->_frameIndex].get();
+                std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + CBUFFER_SIZE * currFrame->_frameIndex + sizeof(HelloCameraData), &_mat, sizeof(MaterialData));
+                set->SetResource(0, matView);
                 pass->BindDescriptorSet(0, set);
                 HelloMesh& mesh = _meshes[0];
                 VertexBufferView vbv{
@@ -409,8 +452,9 @@ public:
         _depthTex.reset();
         _cbLayout.reset();
         _descSets.clear();
-        _cbViews.clear();
-        _cbuffer->Unmap(0, sizeof(HelloCameraData) * _frameCount);
+        _cbCamViews.clear();
+        _cbMatViews.clear();
+        _cbuffer->Unmap(0, CBUFFER_SIZE * _frameCount);
         _cbuffer.reset();
     }
 
@@ -551,9 +595,11 @@ private:
     Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
     Eigen::Quaternionf _modelRot{Eigen::Quaternionf::Identity()};
     CameraControl _cc{};
+    MaterialData _mat{};
 
     vector<shared_ptr<DescriptorSet>> _descSets;
-    vector<shared_ptr<BufferView>> _cbViews;
+    vector<shared_ptr<BufferView>> _cbCamViews;
+    vector<shared_ptr<BufferView>> _cbMatViews;
     shared_ptr<Buffer> _cbuffer;
     void* _cbMappedPtr;
 
