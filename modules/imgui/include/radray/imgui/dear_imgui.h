@@ -116,7 +116,6 @@ public:
 
     class Frame {
     public:
-        vector<shared_ptr<render::DescriptorSet>> _descSets;
         size_t _usableDescSetIndex{0};
         vector<shared_ptr<render::Buffer>> _tempUploadBuffers;
         vector<UploadTexturePayload> _needCopyTexs;
@@ -136,6 +135,7 @@ public:
     shared_ptr<render::GraphicsPipelineState> _pso;
     vector<Frame> _frames;
     unordered_map<render::Texture*, unique_ptr<ImGuiDrawTexture>> _texs;
+    unordered_map<render::TextureView*, shared_ptr<render::DescriptorSet>> _descSetCache;
 
     ImGuiDrawDescriptor _desc;
 };

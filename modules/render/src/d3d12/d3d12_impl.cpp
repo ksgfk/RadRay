@@ -2091,13 +2091,18 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
     _samplerHeapView.Destroy();
 }
 
-void GpuDescriptorHeapViews::SetResource(uint32_t index, ResourceView* view) noexcept {
-    if (index >= _elems.size()) {
-        RADRAY_ABORT("d3d12 cannot SetResource, param 'index' out of range {} of {}", index, _elems.size());
+void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
+    if (slot >= _elems.size()) {
+        RADRAY_ABORT("d3d12 cannot SetResource, param '{}' out of range {} of {}", "slot", slot, _elems.size());
+        return;
+    }
+    const auto& e = _elems[slot];
+    if (index >= e._elem.Count) {
+        RADRAY_ABORT("d3d12 cannot SetResource, param '{}' out of range {} of {}", "index", index, e._elem.Count);
         return;
     }
     auto tag = view->GetTag();
-    auto offset = _elemToHeapOffset[index];
+    auto offset = _elemToHeapOffset[slot] + index;
     if (tag.HasFlag(RenderObjectTag::BufferView)) {
         BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
         bufferView->_heapView.CopyTo(0, 1, _resHeapView, offset);

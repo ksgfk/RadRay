@@ -48,12 +48,12 @@ cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADR
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 include(FetchContent)
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "" FORCE)
+set(FETCHCONTENT_UPDATES_DISCONNECTED OFF CACHE BOOL "" FORCE)
 set(FMT_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 12.0.0
+    GIT_TAG 12.1.0
     OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(fmt)
 radray_optimize_flags_library(fmt)
@@ -136,7 +136,8 @@ if (RADRAY_ENABLE_ZLIB)
         GIT_REPOSITORY https://github.com/madler/zlib.git
         GIT_TAG v1.3.1
         OVERRIDE_FIND_PACKAGE
-        PATCH_COMMAND git apply --whitespace=fix "${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch")
+        GIT_REMOTE_UPDATE_STRATEGY REBASE_CHECKOUT
+        PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH_FILE="${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch" -P "${CMAKE_SOURCE_DIR}/cmake/apply_patch.cmake")
     FetchContent_MakeAvailable(zlib)
     radray_optimize_flags_library(zlibstatic)
     radray_set_build_path(zlibstatic)
@@ -202,7 +203,7 @@ if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
     FetchContent_Declare(
         DirectX-Headers
         GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
-        GIT_TAG v1.616.0)
+        GIT_TAG v1.618.2)
     FetchContent_MakeAvailable(DirectX-Headers)
     FetchContent_Declare(
         D3D12MemoryAllocator

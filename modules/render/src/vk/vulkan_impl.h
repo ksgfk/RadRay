@@ -757,7 +757,7 @@ public:
 
     void Destroy() noexcept override;
 
-    void SetResource(uint32_t index, ResourceView* view) noexcept override;
+    void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept override;
 
 public:
     DeviceVulkan* _device;

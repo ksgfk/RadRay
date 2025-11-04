@@ -3008,19 +3008,23 @@ void DescriptorSetVulkanWrapper::Destroy() noexcept {
     _set.reset();
 }
 
-void DescriptorSetVulkanWrapper::SetResource(uint32_t index, ResourceView* view) noexcept {
-    if (index >= _bindingElements.size()) {
-        RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource index out of range {} of {}", index, _bindingElements.size());
+void DescriptorSetVulkanWrapper::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
+    if (slot >= _bindingElements.size()) {
+        RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource '{}' out of range {} of {}", "slot", slot, _bindingElements.size());
+        return;
+    }
+    const auto& e = _bindingElements[slot];
+    if (index >= e._elem.Count) {
+        RADRAY_ERR_LOG("vk DescriptorSetVulkanWrapper::SetResource '{}' out of range {} of {}", "index", index, e._elem.Count);
         return;
     }
     auto tag = view->GetTag();
-    const auto& e = _bindingElements[index];
     VkWriteDescriptorSet writeDesc{};
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;
     writeDesc.dstSet = _set->_set;
     writeDesc.dstBinding = e._elem.Slot;
-    writeDesc.dstArrayElement = 0;
+    writeDesc.dstArrayElement = index;
     writeDesc.descriptorCount = 1;
     writeDesc.descriptorType = MapType(e._elem.Type);
     writeDesc.pBufferInfo = nullptr;

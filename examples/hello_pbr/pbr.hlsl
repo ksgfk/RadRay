@@ -230,8 +230,8 @@ struct PS_INPUT
 };
 
 [[vk::push_constant]] ConstantBuffer<PreObjectData> _Obj : register(b0);
-[[vk::binding(1)]] ConstantBuffer<MaterialData> _Mat : register(b1);
-[[vk::binding(2)]] ConstantBuffer<PreCameraData> _Camera : register(b2);
+[[vk::binding(0, 0)]] ConstantBuffer<MaterialData> _Mat : register(b1);
+[[vk::binding(1, 0)]] ConstantBuffer<PreCameraData> _Camera : register(b2);
 
 PS_INPUT VSMain(VS_INPUT vsIn)
 {

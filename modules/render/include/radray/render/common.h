@@ -942,7 +942,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
 
-    virtual void SetResource(uint32_t index, ResourceView* view) noexcept = 0;
+    virtual void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept = 0;
 };
 
 class DescriptorSetLayout : public RenderBase {

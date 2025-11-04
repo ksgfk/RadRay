@@ -591,14 +591,17 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
                 encoder->SetScissor(scissor);
                 auto texView = std::bit_cast<TextureView*>(pcmd->GetTexID());
                 if (lastBindTex != texView) {
-                    if (frame._usableDescSetIndex >= frame._descSets.size()) {
+                    DescriptorSet* descSetRaw = nullptr;
+                    auto it = _descSetCache.find(texView);
+                    if (it == _descSetCache.end()) {
                         shared_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rsLayout.get()).Unwrap();
-                        frame._descSets.emplace_back(std::move(descSet));
+                        descSet->SetResource(0, 0, texView);
+                        descSetRaw = descSet.get();
+                        _descSetCache.emplace(texView, std::move(descSet));
+                    } else {
+                        descSetRaw = it->second.get();
                     }
-                    auto descSet = frame._descSets[frame._usableDescSetIndex].get();
-                    descSet->SetResource(0, texView);
-                    encoder->BindDescriptorSet(0, descSet);
-                    frame._usableDescSetIndex++;
+                    encoder->BindDescriptorSet(0, descSetRaw);
                     lastBindTex = texView;
                 }
                 encoder->DrawIndexed(pcmd->ElemCount, 1, pcmd->IdxOffset + globalIdxOffset, pcmd->VtxOffset + globalVtxOffset, 0);
@@ -625,6 +628,11 @@ void ImGuiDrawContext::AfterDraw(int frameIndex) {
     for (Texture* texToDestroy : frame._waitDestroyTexs) {
         auto it = _texs.find(texToDestroy);
         if (it != _texs.end()) {
+            TextureView* viewPtr = it->second->_srv.get();
+            auto itSet = _descSetCache.find(viewPtr);
+            if (itSet != _descSetCache.end()) {
+                _descSetCache.erase(itSet);
+            }
             _texs.erase(it);
         }
     }

@@ -121,11 +121,18 @@ public:
             VertexData sphereModel{};
             sphereMesh.ToVertexData(&sphereModel);
 
-            RootSignatureSetElement cbLayoutElems[] = {
-                {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}},
-                {2, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
-            RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
-            _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+            if (backend == RenderBackend::Vulkan) {
+                RootSignatureSetElement cbLayoutElems[] = {
+                    {0, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}},
+                    {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
+                RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
+                _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+            } else if (backend == RenderBackend::D3D12) {
+                RootSignatureSetElement cbLayoutElems[] = {
+                    {1, 0, ResourceBindType::CBuffer, 2, ShaderStage::Graphics, {}}};
+                RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
+                _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+            }
             RootSignatureConstant rscDesc{};
             rscDesc.Slot = 0;
             rscDesc.Space = 0;
@@ -395,10 +402,18 @@ public:
                 std::memcpy(camData.viewProj, vp.data(), sizeof(Eigen::Matrix4f));
                 std::memcpy(camData.posW, _camPos.data(), sizeof(Eigen::Vector3f));
                 std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + CBUFFER_SIZE * currFrame->_frameIndex, &camData, sizeof(HelloCameraData));
-                set->SetResource(1, cbView);
+                if (backend == RenderBackend::Vulkan) {
+                    set->SetResource(1, 0, cbView);
+                } else if (backend == RenderBackend::D3D12) {
+                    set->SetResource(0, 1, cbView);
+                }
                 BufferView* matView = _cbMatViews[currFrame->_frameIndex].get();
                 std::memcpy(static_cast<uint8_t*>(_cbMappedPtr) + CBUFFER_SIZE * currFrame->_frameIndex + sizeof(HelloCameraData), &_mat, sizeof(MaterialData));
-                set->SetResource(0, matView);
+                if (backend == RenderBackend::Vulkan) {
+                    set->SetResource(0, 0, matView);
+                } else if (backend == RenderBackend::D3D12) {
+                    set->SetResource(0, 0, matView);
+                }
                 pass->BindDescriptorSet(0, set);
                 HelloMesh& mesh = _meshes[0];
                 VertexBufferView vbv{
