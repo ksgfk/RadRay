@@ -34,6 +34,26 @@ public:
     ShaderBlobCategory Category;
 };
 
+class DxcCompileParams {
+public:
+    std::string_view Code{};
+    std::string_view EntryPoint{};
+    ShaderStage Stage{};
+    HlslShaderModel SM{};
+    std::span<std::string_view> Defines{};
+    std::span<std::string_view> Includes{};
+    bool IsOptimize{};
+    bool IsSpirv{};
+};
+
+class DxcOutputWithRootSig {
+public:
+    shared_ptr<RootSignature> RootSig;
+    vector<byte> Data;
+    vector<byte> DxilRefl;
+    ShaderBlobCategory Category;
+};
+
 class DxilReflection {
 public:
     class Variable {
@@ -126,6 +146,8 @@ public:
         bool isSpirv = false) noexcept;
 
     std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept;
+
+    std::optional<DxcOutputWithRootSig> Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept;
 
 private:
     unique_ptr<Impl> _impl;

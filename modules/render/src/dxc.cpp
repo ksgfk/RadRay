@@ -63,8 +63,8 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <radray/logger.h>
 #include <radray/utility.h>
 
-#include <directx/d3d12shader.h>
 #ifdef RADRAY_PLATFORM_WINDOWS
+#include <directx/d3d12shader.h>
 #include <radray/platform.h>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -79,10 +79,20 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
 #else
-//TODO:
+// TODO:
 #endif
 
 #include <dxcapi.h>
+
+#ifdef RADRAY_ENABLE_D3D12
+#ifdef max  // make windows.h happy :) :) :)
+#undef max
+#endif
+#ifdef min
+#undef min
+#endif
+#include <radray/render/backend/d3d12_impl.h>
+#endif
 
 namespace radray::render {
 
@@ -124,6 +134,20 @@ private:
 
 class DxcImpl : public Dxc::Impl, public Noncopyable {
 public:
+    class ArgsData {
+    public:
+        ShaderBlobCategory category{};
+        bool isSpirv{false};
+        bool isMetal{false};
+        bool isStripRefl{false};
+    };
+
+    class CompileStateData {
+    public:
+        HRESULT Status;
+        std::string_view ErrMsg;
+    };
+
 #ifdef RADRAY_ENABLE_MIMALLOC
     DxcImpl(
         ComPtr<MiMallocAdapter> mi,
@@ -145,22 +169,31 @@ public:
 #endif
     ~DxcImpl() noexcept override = default;
 
-    std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
-        bool isSpirv = false;
-        bool isStripRefl = false;
+    ArgsData ParseArgs(std::span<std::string_view> args) noexcept {
+        ArgsData result{};
+        for (auto i : args) {
+            if (i == "-spirv") {
+                result.isSpirv = true;
+            }
+            if (i == "-metal") {
+                result.isMetal = true;
+            }
+            if (i == "-Qstrip_reflect") {
+                result.isStripRefl = true;
+            }
+        }
+        result.category = result.isSpirv ? ShaderBlobCategory::SPIRV : (result.isMetal ? ShaderBlobCategory::MSL : ShaderBlobCategory::DXIL);
+        return result;
+    }
+
+    Nullable<ComPtr<IDxcResult>> CompileImpl(std::string_view code, std::span<std::string_view> args) noexcept {
         vector<wstring> wargs;
         wargs.reserve(args.size());
         for (auto i : args) {
-            if (i == "-spirv") {
-                isSpirv = true;
-            }
-            if (i == "-Qstrip_reflect") {
-                isStripRefl = true;
-            }
             auto w = ToWideChar(i);
             if (!w.has_value()) {
                 RADRAY_ERR_LOG("cannot convert to wide str: {}", i);
-                return std::nullopt;
+                return Nullable<ComPtr<IDxcResult>>{nullptr};
             }
             wargs.emplace_back(std::move(w.value()));
         }
@@ -179,48 +212,146 @@ public:
                 IID_PPV_ARGS(&compileResult));
             FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
-            return std::nullopt;
+            return Nullable<ComPtr<IDxcResult>>{nullptr};
         }
-        HRESULT status;
-        if (HRESULT hr = compileResult->GetStatus(&status);
+        return Nullable<ComPtr<IDxcResult>>{std::move(compileResult)};
+    }
+
+    CompileStateData GetCompileState(IDxcResult* compileResult) noexcept {
+        CompileStateData result{};
+        if (HRESULT hr = compileResult->GetStatus(&result.Status);
             FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
-            return std::nullopt;
+            result.Status = hr;
+            return result;
         }
-        if (FAILED(status)) {
-            ComPtr<IDxcBlobEncoding> errBuffer;
+        ComPtr<IDxcBlobEncoding> errBuffer;
+        if (compileResult->HasOutput(DXC_OUT_ERRORS)) {
             if (HRESULT hr = compileResult->GetErrorBuffer(&errBuffer);
                 FAILED(hr)) {
-                RADRAY_ERR_LOG("dxc error, code={}", hr);
-                return std::nullopt;
+                RADRAY_WARN_LOG("dxc error, code={}", hr);
+                errBuffer = nullptr;
             }
-            std::string_view errStr{std::bit_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
-            RADRAY_ERR_LOG("dxc compile error\n{}", errStr);
-            return std::nullopt;
         }
+        if (errBuffer) {
+            result.ErrMsg = {std::bit_cast<char const*>(errBuffer->GetBufferPointer()), errBuffer->GetBufferSize()};
+        }
+        return result;
+    }
+
+    std::span<const byte> GetResultData(IDxcResult* compileResult) noexcept {
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetResult(&blob);
             FAILED(hr)) {
             RADRAY_ERR_LOG("dxc error, code={}", hr);
-            return std::nullopt;
+            return {};
         }
         auto blobStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
-        vector<byte> blobData{blobStart, blobStart + blob->GetBufferSize()};
-        vector<byte> reflData{};
-        if (!isSpirv && !isStripRefl) {
-            ComPtr<IDxcBlob> reflBlob;
-            if (HRESULT hr = compileResult->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&reflBlob), nullptr);
-                SUCCEEDED(hr)) {
-                auto reflStart = std::bit_cast<byte const*>(reflBlob->GetBufferPointer());
-                reflData = {reflStart, reflStart + reflBlob->GetBufferSize()};
-            } else {
-                RADRAY_ERR_LOG("dxc cannot get reflection, code={}", hr);
+        return {blobStart, blob->GetBufferSize()};
+    }
+
+    std::span<const byte> GetBlobData(IDxcResult* compileResult, DXC_OUT_KIND kind) noexcept {
+        ComPtr<IDxcBlob> blob;
+        if (HRESULT hr = compileResult->GetOutput(kind, IID_PPV_ARGS(&blob), nullptr);
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("dxc error, code={}", hr);
+            return {};
+        }
+        auto reflStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
+        return {reflStart, reflStart + blob->GetBufferSize()};
+    }
+
+    std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
+        ComPtr<IDxcResult> compileResult;
+        {
+            auto compileResultOpt = CompileImpl(code, args);
+            if (!compileResultOpt.HasValue()) {
+                return std::nullopt;
+            }
+            compileResult = compileResultOpt.Unwrap();
+        }
+        auto [status, errMsg] = GetCompileState(compileResult.Get());
+        if (!errMsg.empty()) {
+            RADRAY_ERR_LOG("dxc compile message\n{}", errMsg);
+        }
+        if (FAILED(status)) {
+            return std::nullopt;
+        }
+        std::span<const byte> resultData = GetResultData(compileResult.Get());
+        if (resultData.empty()) {
+            return std::nullopt;
+        }
+        std::span<const byte> reflData{};
+        if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
+            reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
+        }
+        auto argsData = ParseArgs(args);
+        return DxcOutput{
+            .Data = {resultData.begin(), resultData.end()},
+            .Refl = {reflData.begin(), reflData.end()},
+            .Category = argsData.category};
+    }
+
+    std::optional<DxcOutputWithRootSig> Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
+        ComPtr<IDxcResult> compileResult;
+        {
+            auto compileResultOpt = CompileImpl(code, args);
+            if (!compileResultOpt.HasValue()) {
+                return std::nullopt;
+            }
+            compileResult = compileResultOpt.Unwrap();
+        }
+        auto argsData = ParseArgs(args);
+        switch (argsData.category) {
+            case ShaderBlobCategory::DXIL: {
+#ifdef RADRAY_ENABLE_D3D12
+                if (device->GetBackend() != RenderBackend::D3D12) {
+                    RADRAY_ERR_LOG("dxc can only serialize root signature for D3D12 backend");
+                    return std::nullopt;
+                }
+                std::span<const byte> serializedRootSig;
+                if (compileResult->HasOutput(DXC_OUT_ROOT_SIGNATURE)) {
+                    serializedRootSig = GetBlobData(compileResult.Get(), DXC_OUT_ROOT_SIGNATURE);
+                    if (serializedRootSig.empty()) {
+                        RADRAY_WARN_LOG("dxc cannot get serialized root sig data. fallback");
+                    }
+                }
+                if (serializedRootSig.empty()) {
+                    std::span<const byte> reflData;
+                    if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
+                        reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
+                    }
+                    if (reflData.empty()) {
+                        RADRAY_ERR_LOG("dxc cannot get reflection data to generate root sig");
+                        return std::nullopt;
+                    } else {
+                        DxcBuffer buf{reflData.data(), reflData.size(), 0};
+                        ComPtr<ID3D12ShaderReflection> sr;
+                        if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
+                            FAILED(hr)) {
+                            RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
+                            return std::nullopt;
+                        }
+                        // TODO:
+                    }
+                } else {
+                    // TODO:
+                }
+                break;
+#else
+                RADRAY_ERR_LOG("dxc cannot serialize dxil root signature without D3D12 backend");
+                return std::nullopt;
+#endif
+            }
+            case ShaderBlobCategory::SPIRV: {
+                // TDOO:
+                break;
+            }
+            case ShaderBlobCategory::MSL: {
+                // TDOO:
+                break;
             }
         }
-        return DxcOutput{
-            .Data = std::move(blobData),
-            .Refl = std::move(reflData),
-            .Category = isSpirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL};
     }
 
     std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
@@ -489,6 +620,10 @@ std::optional<DxcOutput> Dxc::Compile(
 
 std::optional<DxilReflection> Dxc::GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
     return static_cast<DxcImpl*>(_impl.get())->GetDxilReflection(stage, refl);
+}
+
+std::optional<DxcOutputWithRootSig> Dxc::Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->Compile(device, code, args);
 }
 
 }  // namespace radray::render
