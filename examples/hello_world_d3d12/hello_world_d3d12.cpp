@@ -9,8 +9,7 @@
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
 #include <radray/window/native_window.h>
-
-#include "../../modules/render/src/d3d12/d3d12_impl.h"
+#include <radray/render/backend/d3d12_impl.h>
 
 using namespace radray;
 using namespace radray::render;

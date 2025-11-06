@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_D3D12
+
 #include <optional>
 
 #include <radray/types.h>
@@ -96,3 +98,5 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
+
+#endif

@@ -4,7 +4,7 @@
 #include <radray/utility.h>
 
 #ifdef RADRAY_ENABLE_D3D12
-#include "d3d12/d3d12_impl.h"
+#include <radray/render/backend/d3d12_impl.h>
 #endif
 
 #ifdef RADRAY_ENABLE_METAL
@@ -12,7 +12,7 @@
 #endif
 
 #ifdef RADRAY_ENABLE_VULKAN
-#include "vk/vulkan_impl.h"
+#include <radray/render/backend/vulkan_impl.h>
 #endif
 
 namespace radray::render {

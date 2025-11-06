@@ -17,6 +17,23 @@ enum class ShaderResourceType {
     RayTracing
 };
 
+enum class HlslShaderModel {
+    SM60,
+    SM61,
+    SM62,
+    SM63,
+    SM64,
+    SM65,
+    SM66
+};
+
+class DxcOutput {
+public:
+    vector<byte> Data;
+    vector<byte> Refl;
+    ShaderBlobCategory Category;
+};
+
 class DxilReflection {
 public:
     class Variable {
@@ -81,23 +98,6 @@ std::string_view format_as(ShaderResourceType v) noexcept;
 #include <span>
 
 namespace radray::render {
-
-enum class HlslShaderModel {
-    SM60,
-    SM61,
-    SM62,
-    SM63,
-    SM64,
-    SM65,
-    SM66
-};
-
-class DxcOutput {
-public:
-    vector<byte> Data;
-    vector<byte> Refl;
-    ShaderBlobCategory Category;
-};
 
 class Dxc : public RenderBase, public enable_shared_from_this<Dxc> {
 public:

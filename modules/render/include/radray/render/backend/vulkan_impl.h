@@ -2,7 +2,7 @@
 
 #include <array>
 
-#include "vulkan_helper.h"
+#include <radray/render/backend/vulkan_helper.h>
 
 namespace radray::render::vulkan {
 

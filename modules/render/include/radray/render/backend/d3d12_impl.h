@@ -1,10 +1,12 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_D3D12
+
 #include <utility>
 
 #include <radray/allocator.h>
 
-#include "d3d12_helper.h"
+#include <radray/render/backend/d3d12_helper.h>
 
 namespace radray::render::d3d12 {
 
@@ -627,3 +629,5 @@ public:
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 }  // namespace radray::render::d3d12
+
+#endif
