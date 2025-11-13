@@ -695,3 +695,12 @@ std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
         default: return "UNKNOWN";
     }
 }
+
+std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
+    switch (v) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: return "1.0";
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: return "1.1";
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: return "1.2";
+        default: return "UNKNOWN";
+    }
+}

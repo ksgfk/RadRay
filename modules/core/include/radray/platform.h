@@ -44,9 +44,9 @@ public:
     void* GetSymbol(std::string_view name) const noexcept;
 
     template <class T>
-    requires std::is_function_v<T>
-    auto GetFunction(std::string_view name) const noexcept {
-        return std::bit_cast<std::add_pointer_t<T>>(GetSymbol(name));
+    requires std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>
+    T GetFunction(std::string_view name) const noexcept {
+        return std::bit_cast<T>(GetSymbol(name));
     }
 
     constexpr bool IsValid() const noexcept { return _handle != nullptr; }

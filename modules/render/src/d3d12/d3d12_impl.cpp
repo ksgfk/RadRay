@@ -7,18 +7,6 @@
 
 namespace radray::render::d3d12 {
 
-static auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
-static auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
-static auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-static auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
-static auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
-static auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
-static auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
-static auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
-static auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
-static auto CastD3D12Object(DescriptorSetLayout* v) noexcept { return static_cast<SimulateDescriptorSetLayoutD3D12*>(v); }
-static auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
-
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept

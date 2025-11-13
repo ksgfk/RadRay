@@ -35,4 +35,6 @@ BlendState DefaultBlendState() noexcept;
 IndexFormat MapIndexType(VertexIndexType type) noexcept;
 std::optional<vector<VertexElement>> MapVertexElements(std::span<VertexLayout> layouts, std::span<SemanticMapping> semantics) noexcept;
 
+Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
+
 }  // namespace radray::render

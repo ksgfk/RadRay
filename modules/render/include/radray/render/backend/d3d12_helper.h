@@ -98,5 +98,6 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
+std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
 
 #endif

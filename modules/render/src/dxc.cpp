@@ -60,12 +60,7 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <sstream>
 #include <optional>
 
-#include <radray/logger.h>
-#include <radray/utility.h>
-
 #ifdef RADRAY_PLATFORM_WINDOWS
-#include <directx/d3d12shader.h>
-#include <radray/platform.h>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -78,21 +73,16 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 #include <windows.h>
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
+#include <radray/platform.h>
+#include <directx/d3d12shader.h>
 #else
 // TODO:
 #endif
 
 #include <dxcapi.h>
 
-#ifdef RADRAY_ENABLE_D3D12
-#ifdef max  // make windows.h happy :) :) :)
-#undef max
-#endif
-#ifdef min
-#undef min
-#endif
-#include <radray/render/backend/d3d12_impl.h>
-#endif
+#include <radray/logger.h>
+#include <radray/utility.h>
 
 namespace radray::render {
 
@@ -292,67 +282,67 @@ public:
             .Category = argsData.category};
     }
 
-    std::optional<DxcOutputWithRootSig> Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
-        ComPtr<IDxcResult> compileResult;
-        {
-            auto compileResultOpt = CompileImpl(code, args);
-            if (!compileResultOpt.HasValue()) {
-                return std::nullopt;
-            }
-            compileResult = compileResultOpt.Unwrap();
-        }
-        auto argsData = ParseArgs(args);
-        switch (argsData.category) {
-            case ShaderBlobCategory::DXIL: {
-#ifdef RADRAY_ENABLE_D3D12
-                if (device->GetBackend() != RenderBackend::D3D12) {
-                    RADRAY_ERR_LOG("dxc can only serialize root signature for D3D12 backend");
-                    return std::nullopt;
-                }
-                std::span<const byte> serializedRootSig;
-                if (compileResult->HasOutput(DXC_OUT_ROOT_SIGNATURE)) {
-                    serializedRootSig = GetBlobData(compileResult.Get(), DXC_OUT_ROOT_SIGNATURE);
-                    if (serializedRootSig.empty()) {
-                        RADRAY_WARN_LOG("dxc cannot get serialized root sig data. fallback");
-                    }
-                }
-                if (serializedRootSig.empty()) {
-                    std::span<const byte> reflData;
-                    if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
-                        reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
-                    }
-                    if (reflData.empty()) {
-                        RADRAY_ERR_LOG("dxc cannot get reflection data to generate root sig");
-                        return std::nullopt;
-                    } else {
-                        DxcBuffer buf{reflData.data(), reflData.size(), 0};
-                        ComPtr<ID3D12ShaderReflection> sr;
-                        if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
-                            FAILED(hr)) {
-                            RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
-                            return std::nullopt;
-                        }
-                        // TODO:
-                    }
-                } else {
-                    // TODO:
-                }
-                break;
-#else
-                RADRAY_ERR_LOG("dxc cannot serialize dxil root signature without D3D12 backend");
-                return std::nullopt;
-#endif
-            }
-            case ShaderBlobCategory::SPIRV: {
-                // TDOO:
-                break;
-            }
-            case ShaderBlobCategory::MSL: {
-                // TDOO:
-                break;
-            }
-        }
-    }
+    //     std::optional<DxcOutputWithRootSig> Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
+    //         ComPtr<IDxcResult> compileResult;
+    //         {
+    //             auto compileResultOpt = CompileImpl(code, args);
+    //             if (!compileResultOpt.HasValue()) {
+    //                 return std::nullopt;
+    //             }
+    //             compileResult = compileResultOpt.Unwrap();
+    //         }
+    //         auto argsData = ParseArgs(args);
+    //         switch (argsData.category) {
+    //             case ShaderBlobCategory::DXIL: {
+    // #ifdef RADRAY_ENABLE_D3D12
+    //                 if (device->GetBackend() != RenderBackend::D3D12) {
+    //                     RADRAY_ERR_LOG("dxc can only serialize root signature for D3D12 backend");
+    //                     return std::nullopt;
+    //                 }
+    //                 std::span<const byte> serializedRootSig;
+    //                 if (compileResult->HasOutput(DXC_OUT_ROOT_SIGNATURE)) {
+    //                     serializedRootSig = GetBlobData(compileResult.Get(), DXC_OUT_ROOT_SIGNATURE);
+    //                     if (serializedRootSig.empty()) {
+    //                         RADRAY_WARN_LOG("dxc cannot get serialized root sig data. fallback");
+    //                     }
+    //                 }
+    //                 if (serializedRootSig.empty()) {
+    //                     std::span<const byte> reflData;
+    //                     if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
+    //                         reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
+    //                     }
+    //                     if (reflData.empty()) {
+    //                         RADRAY_ERR_LOG("dxc cannot get reflection data to generate root sig");
+    //                         return std::nullopt;
+    //                     } else {
+    //                         DxcBuffer buf{reflData.data(), reflData.size(), 0};
+    //                         ComPtr<ID3D12ShaderReflection> sr;
+    //                         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
+    //                             FAILED(hr)) {
+    //                             RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
+    //                             return std::nullopt;
+    //                         }
+    //                         // TODO:
+    //                     }
+    //                 } else {
+    //                     // TODO:
+    //                 }
+    //                 break;
+    // #else
+    //                 RADRAY_ERR_LOG("dxc cannot serialize dxil root signature without D3D12 backend");
+    //                 return std::nullopt;
+    // #endif
+    //             }
+    //             case ShaderBlobCategory::SPIRV: {
+    //                 // TDOO:
+    //                 break;
+    //             }
+    //             case ShaderBlobCategory::MSL: {
+    //                 // TDOO:
+    //                 break;
+    //             }
+    //         }
+    //     }
 
     std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
         DxcBuffer buf{refl.data(), refl.size(), 0};
@@ -620,10 +610,6 @@ std::optional<DxcOutput> Dxc::Compile(
 
 std::optional<DxilReflection> Dxc::GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
     return static_cast<DxcImpl*>(_impl.get())->GetDxilReflection(stage, refl);
-}
-
-std::optional<DxcOutputWithRootSig> Dxc::Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->Compile(device, code, args);
 }
 
 }  // namespace radray::render
