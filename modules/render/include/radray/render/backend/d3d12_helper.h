@@ -50,6 +50,55 @@ private:
     friend std::optional<Win32Event> MakeWin32Event() noexcept;
 };
 
+class VersionedRootSignatureDescContainer {
+public:
+    class RootConstant {
+    public:
+        D3D12_ROOT_CONSTANTS data;
+        UINT index;
+    };
+
+    class RootDescriptor {
+    public:
+        D3D12_ROOT_DESCRIPTOR1 data;
+        D3D12_ROOT_PARAMETER_TYPE type;
+        UINT index;
+    };
+
+    class DescriptorTable {
+    public:
+        D3D12_ROOT_DESCRIPTOR_TABLE1 data;
+        UINT index;
+    };
+
+    VersionedRootSignatureDescContainer() noexcept = default;
+    explicit VersionedRootSignatureDescContainer(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& desc) noexcept;
+    VersionedRootSignatureDescContainer(const VersionedRootSignatureDescContainer& other) noexcept;
+    VersionedRootSignatureDescContainer(VersionedRootSignatureDescContainer&& other) noexcept;
+    VersionedRootSignatureDescContainer& operator=(const VersionedRootSignatureDescContainer& other) noexcept;
+    VersionedRootSignatureDescContainer& operator=(VersionedRootSignatureDescContainer&& other) noexcept;
+    ~VersionedRootSignatureDescContainer() noexcept = default;
+
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Get() const noexcept { return &_desc; }
+    RootConstant GetRootConstant() const noexcept;
+    RootDescriptor GetRootDescriptor(uint32_t slot) const noexcept;
+    DescriptorTable GetDescriptorTable(uint32_t slot) const noexcept;
+
+    friend void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescContainer& rhs) noexcept;
+
+private:
+    void RefreshDesc() noexcept;
+    void RefreshRanges() noexcept;
+
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
+    vector<D3D12_DESCRIPTOR_RANGE> _ranges;
+    vector<D3D12_DESCRIPTOR_RANGE1> _ranges1;
+    vector<D3D12_ROOT_PARAMETER> _params;
+    vector<D3D12_ROOT_PARAMETER1> _params1;
+    vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplerDescs;
+    vector<D3D12_STATIC_SAMPLER_DESC1> _staticSamplerDescs1;
+};
+
 std::optional<Win32Event> MakeWin32Event() noexcept;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
@@ -99,5 +148,6 @@ std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
+std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept;
 
 #endif

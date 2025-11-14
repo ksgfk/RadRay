@@ -26,6 +26,300 @@ void Win32Event::Destroy() noexcept {
     }
 }
 
+template <class P>
+static size_t _AccumRangeSizeImpl(const vector<P>& param) noexcept {
+    size_t result = 0;
+    for (auto&& i : param) {
+        if (i.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            result += i.DescriptorTable.NumDescriptorRanges;
+        }
+    }
+    return result;
+}
+
+template <class P, class R>
+static void _CtorParamsImpl(vector<P>& params, vector<R>& ranges) noexcept {
+    for (auto&& i : params) {
+        if (i.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            auto&& value = i.DescriptorTable;
+            if (value.NumDescriptorRanges == 0) {
+                value.pDescriptorRanges = nullptr;
+            } else {
+                auto iter = ranges.insert(ranges.end(), value.pDescriptorRanges, value.pDescriptorRanges + value.NumDescriptorRanges);
+                value.pDescriptorRanges = &(*iter);
+            }
+        }
+    }
+};
+
+VersionedRootSignatureDescContainer::VersionedRootSignatureDescContainer(
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& desc) noexcept
+    : _desc(desc) {
+    switch (desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: {
+            auto&& data = desc.Desc_1_0;
+            _params = {data.pParameters, data.pParameters + data.NumParameters};
+            _staticSamplerDescs = {data.pStaticSamplers, data.pStaticSamplers + data.NumStaticSamplers};
+            _ranges.reserve(_AccumRangeSizeImpl(_params));
+            _CtorParamsImpl(_params, _ranges);
+
+            _desc.Desc_1_0.pParameters = _params.size() > 0 ? _params.data() : nullptr;
+            _desc.Desc_1_0.pStaticSamplers = _staticSamplerDescs.size() > 0 ? _staticSamplerDescs.data() : nullptr;
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: {
+            auto&& data = desc.Desc_1_1;
+            _params1 = {data.pParameters, data.pParameters + data.NumParameters};
+            _staticSamplerDescs = {data.pStaticSamplers, data.pStaticSamplers + data.NumStaticSamplers};
+            _ranges1.reserve(_AccumRangeSizeImpl(_params1));
+            _CtorParamsImpl(_params1, _ranges1);
+
+            _desc.Desc_1_1.pParameters = _params1.size() > 0 ? _params1.data() : nullptr;
+            _desc.Desc_1_1.pStaticSamplers = _staticSamplerDescs.size() > 0 ? _staticSamplerDescs.data() : nullptr;
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: {
+            auto&& data = desc.Desc_1_2;
+            _params1 = {data.pParameters, data.pParameters + data.NumParameters};
+            _staticSamplerDescs1 = {data.pStaticSamplers, data.pStaticSamplers + data.NumStaticSamplers};
+            _ranges1.reserve(_AccumRangeSizeImpl(_params1));
+            _CtorParamsImpl(_params1, _ranges1);
+
+            _desc.Desc_1_2.pParameters = _params1.size() > 0 ? _params1.data() : nullptr;
+            _desc.Desc_1_2.pStaticSamplers = _staticSamplerDescs1.size() > 0 ? _staticSamplerDescs1.data() : nullptr;
+            break;
+        }
+    }
+
+    if (_ranges.size() > 0) {
+        _ranges1.reserve(_ranges.size());
+        for (const auto& i : _ranges) {
+            D3D12_DESCRIPTOR_RANGE1& r1 = _ranges1.emplace_back();
+            r1.RangeType = i.RangeType;
+            r1.NumDescriptors = i.NumDescriptors;
+            r1.BaseShaderRegister = i.BaseShaderRegister;
+            r1.RegisterSpace = i.RegisterSpace;
+            r1.OffsetInDescriptorsFromTableStart = i.OffsetInDescriptorsFromTableStart;
+            r1.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        }
+    }
+    if (_ranges1.size() > 0) {
+        _ranges.reserve(_ranges1.size());
+        for (const auto& i : _ranges1) {
+            D3D12_DESCRIPTOR_RANGE& r = _ranges.emplace_back();
+            r.RangeType = i.RangeType;
+            r.NumDescriptors = i.NumDescriptors;
+            r.BaseShaderRegister = i.BaseShaderRegister;
+            r.RegisterSpace = i.RegisterSpace;
+            r.OffsetInDescriptorsFromTableStart = i.OffsetInDescriptorsFromTableStart;
+        }
+    }
+}
+
+VersionedRootSignatureDescContainer::VersionedRootSignatureDescContainer(
+    const VersionedRootSignatureDescContainer& other) noexcept
+    : _desc(other._desc),
+      _ranges(other._ranges),
+      _ranges1(other._ranges1),
+      _params(other._params),
+      _params1(other._params1),
+      _staticSamplerDescs(other._staticSamplerDescs),
+      _staticSamplerDescs1(other._staticSamplerDescs1) {
+    RefreshDesc();
+    RefreshRanges();
+}
+
+VersionedRootSignatureDescContainer::VersionedRootSignatureDescContainer(
+    VersionedRootSignatureDescContainer&& other) noexcept
+    : _desc(other._desc),
+      _ranges(std::move(other._ranges)),
+      _ranges1(std::move(other._ranges1)),
+      _params(std::move(other._params)),
+      _params1(std::move(other._params1)),
+      _staticSamplerDescs(std::move(other._staticSamplerDescs)),
+      _staticSamplerDescs1(std::move(other._staticSamplerDescs1)) {
+    other._desc = {};
+    RefreshDesc();
+    RefreshRanges();
+}
+
+VersionedRootSignatureDescContainer& VersionedRootSignatureDescContainer::operator=(const VersionedRootSignatureDescContainer& other) noexcept {
+    VersionedRootSignatureDescContainer tmp{other};
+    swap(*this, tmp);
+    return *this;
+}
+
+VersionedRootSignatureDescContainer& VersionedRootSignatureDescContainer::operator=(VersionedRootSignatureDescContainer&& other) noexcept {
+    VersionedRootSignatureDescContainer tmp{std::move(other)};
+    swap(*this, tmp);
+    return *this;
+}
+
+void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescContainer& rhs) noexcept {
+    using std::swap;
+    swap(lhs._desc, rhs._desc);
+    swap(lhs._ranges, rhs._ranges);
+    swap(lhs._ranges1, rhs._ranges1);
+    swap(lhs._params, rhs._params);
+    swap(lhs._params1, rhs._params1);
+    swap(lhs._staticSamplerDescs, rhs._staticSamplerDescs);
+    swap(lhs._staticSamplerDescs1, rhs._staticSamplerDescs1);
+
+    lhs.RefreshDesc();
+    rhs.RefreshDesc();
+
+    lhs.RefreshRanges();
+    rhs.RefreshRanges();
+}
+
+template <class T>
+static auto _GetRootConstImpl(const T* params, UINT count) noexcept {
+    for (UINT i = 0; i < count; i++) {
+        const auto& param = params[i];
+        if (param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+            return VersionedRootSignatureDescContainer::RootConstant{param.Constants, i};
+        }
+    }
+    return VersionedRootSignatureDescContainer::RootConstant{{}, std::numeric_limits<UINT>::max()};
+}
+
+VersionedRootSignatureDescContainer::RootConstant VersionedRootSignatureDescContainer::GetRootConstant() const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: return _GetRootConstImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetRootConstImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetRootConstImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters);
+        default: return VersionedRootSignatureDescContainer::RootConstant{{}, std::numeric_limits<UINT>::max()};
+    }
+}
+
+template <class T>
+static auto _GetRootDescriptorImpl(const T* params, UINT count, uint32_t slot) noexcept {
+    uint32_t slots = 0;
+    for (UINT i = 0; i < count; i++) {
+        const auto& param = params[i];
+        if (param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV ||
+            param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV ||
+            param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV) {
+            if (slots == slot) {
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(param.Descriptor)>, D3D12_ROOT_DESCRIPTOR>) {
+                    D3D12_ROOT_DESCRIPTOR1 desc1{};
+                    desc1.ShaderRegister = param.Descriptor.ShaderRegister;
+                    desc1.RegisterSpace = param.Descriptor.RegisterSpace;
+                    desc1.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
+                    return VersionedRootSignatureDescContainer::RootDescriptor{desc1, param.ParameterType, i};
+                } else {
+                    return VersionedRootSignatureDescContainer::RootDescriptor{param.Descriptor, param.ParameterType, i};
+                }
+            }
+            slots++;
+        }
+    }
+    return VersionedRootSignatureDescContainer::RootDescriptor{{}, {}, std::numeric_limits<UINT>::max()};
+}
+
+VersionedRootSignatureDescContainer::RootDescriptor VersionedRootSignatureDescContainer::GetRootDescriptor(uint32_t slot) const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: return _GetRootDescriptorImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, slot);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetRootDescriptorImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, slot);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetRootDescriptorImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, slot);
+        default: return VersionedRootSignatureDescContainer::RootDescriptor{{}, {}, std::numeric_limits<UINT>::max()};
+    }
+}
+
+template <class T>
+static auto _GetDescriptorTableImpl(
+    const T* params,
+    UINT count,
+    uint32_t slot,
+    const vector<D3D12_DESCRIPTOR_RANGE>& ranges,
+    const vector<D3D12_DESCRIPTOR_RANGE1>& ranges1) noexcept {
+    uint32_t slots = 0;
+    for (UINT i = 0; i < count; i++) {
+        const auto& param = params[i];
+        if (param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            if (slots == slot) {
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(param.DescriptorTable)>, D3D12_ROOT_DESCRIPTOR_TABLE>) {
+                    D3D12_ROOT_DESCRIPTOR_TABLE1 desc1{};
+                    desc1.NumDescriptorRanges = param.DescriptorTable.NumDescriptorRanges;
+                    if (desc1.NumDescriptorRanges == 0) {
+                        desc1.pDescriptorRanges = nullptr;
+                    } else {
+                        size_t offset = std::distance(&(*ranges.begin()), param.DescriptorTable.pDescriptorRanges);
+                        desc1.pDescriptorRanges = &ranges1[offset];
+                    }
+                    return VersionedRootSignatureDescContainer::DescriptorTable{desc1, i};
+                } else {
+                    return VersionedRootSignatureDescContainer::DescriptorTable{param.DescriptorTable, i};
+                }
+            }
+            slots++;
+        }
+    }
+    return VersionedRootSignatureDescContainer::DescriptorTable{{}, std::numeric_limits<UINT>::max()};
+}
+
+VersionedRootSignatureDescContainer::DescriptorTable VersionedRootSignatureDescContainer::GetDescriptorTable(uint32_t slot) const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: return _GetDescriptorTableImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, slot, _ranges, _ranges1);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetDescriptorTableImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, slot, _ranges, _ranges1);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetDescriptorTableImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, slot, _ranges, _ranges1);
+        default: return VersionedRootSignatureDescContainer::DescriptorTable{{}, std::numeric_limits<UINT>::max()};
+    }
+}
+
+void VersionedRootSignatureDescContainer::RefreshDesc() noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: {
+            _desc.Desc_1_0.pParameters = _params.size() > 0 ? _params.data() : nullptr;
+            _desc.Desc_1_0.pStaticSamplers = _staticSamplerDescs.size() > 0 ? _staticSamplerDescs.data() : nullptr;
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: {
+            _desc.Desc_1_1.pParameters = _params1.size() > 0 ? _params1.data() : nullptr;
+            _desc.Desc_1_1.pStaticSamplers = _staticSamplerDescs.size() > 0 ? _staticSamplerDescs.data() : nullptr;
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: {
+            _desc.Desc_1_2.pParameters = _params1.size() > 0 ? _params1.data() : nullptr;
+            _desc.Desc_1_2.pStaticSamplers = _staticSamplerDescs1.size() > 0 ? _staticSamplerDescs1.data() : nullptr;
+            break;
+        }
+    }
+}
+
+template <class P, class R>
+static void _RefreshParamsImpl(vector<P>& params, const vector<R>& ranges) noexcept {
+    size_t offset = 0;
+    for (auto&& i : params) {
+        if (i.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            auto&& value = i.DescriptorTable;
+            if (value.NumDescriptorRanges == 0) {
+                value.pDescriptorRanges = nullptr;
+            } else {
+                value.pDescriptorRanges = &ranges[offset];
+            }
+            offset += value.NumDescriptorRanges;
+        }
+    }
+}
+
+void VersionedRootSignatureDescContainer::RefreshRanges() noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1: {
+            _RefreshParamsImpl(_params, _ranges);
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_1: {
+            _RefreshParamsImpl(_params1, _ranges1);
+            break;
+        }
+        case D3D_ROOT_SIGNATURE_VERSION_1_2: {
+            _RefreshParamsImpl(_params1, _ranges1);
+            break;
+        }
+    }
+}
+
 std::optional<Win32Event> MakeWin32Event() noexcept {
     HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
@@ -701,6 +995,17 @@ std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
         case D3D_ROOT_SIGNATURE_VERSION_1: return "1.0";
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return "1.1";
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return "1.2";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
+    switch (v) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: return "DESCRIPTOR_TABLE";
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS: return "32BIT_CONSTANTS";
+        case D3D12_ROOT_PARAMETER_TYPE_CBV: return "CBV";
+        case D3D12_ROOT_PARAMETER_TYPE_SRV: return "SRV";
+        case D3D12_ROOT_PARAMETER_TYPE_UAV: return "UAV";
         default: return "UNKNOWN";
     }
 }

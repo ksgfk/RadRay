@@ -550,12 +550,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
-    vector<RootSignatureSetElementContainer> _bindDescriptors;
-    vector<RootSignatureBinding> _rootDescriptors;
-    std::optional<RootSignatureConstant> _rootConstant;
-    UINT _rootConstStart;
-    UINT _rootDescStart;
-    UINT _bindDescStart;
+    VersionedRootSignatureDescContainer _desc;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {

@@ -219,8 +219,9 @@ Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
         RADRAY_ERR_LOG("d3d12 cannot handle root signature version {}", desc->Version);
         return Nullable<shared_ptr<RootSignature>>{nullptr};
     }
-    const D3D12_ROOT_SIGNATURE_DESC1& rsDesc = desc->Desc_1_1;
-    std::optional<RootSignatureConstant> rootConst;
+    auto result = make_shared<d3d12::RootSigD3D12>(device, std::move(rootSig));
+    result->_desc = d3d12::VersionedRootSignatureDescContainer{*desc};
+    return result;
 #else
     RADRAY_ERR_LOG("only d3d12 backend supports serialized root signature");
     return Nullable<shared_ptr<RootSignature>>{nullptr};
