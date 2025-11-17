@@ -87,6 +87,16 @@ struct FunctionTraits<Ret (ClassType::*)(Args...)> : FunctionTraits<Ret(Args...)
 template <typename ClassType, typename Ret, typename... Args>
 struct FunctionTraits<Ret (ClassType::*)(Args...) const> : FunctionTraits<Ret(Args...)> {};
 
+// Resolves to the more efficient of `const T` or `const T&`, in the context of returning a const-qualified value
+// of type T.
+//
+// Copied from cppfront's implementation of the CppCoreGuidelines F.16 (https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rf-in)
+template <typename T>
+using value_or_reference_return_t = std::conditional_t<
+    sizeof(T) <= 2 * sizeof(void*) && std::is_trivially_copy_constructible<T>::value,
+    const T,
+    const T&>;
+
 class Noncopyable {
 protected:
     constexpr Noncopyable() = default;

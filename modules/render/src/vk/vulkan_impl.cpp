@@ -1597,7 +1597,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         return nullptr;
     }
     auto deviceR = make_shared<DeviceVulkan>(
-        g_vkInstance.Ptr,
+        g_vkInstance.Get(),
         selectPhyDevice.device,
         device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
@@ -1939,7 +1939,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
         bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
         if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            auto otherQ = CastVkObject(i.OtherQueue.Get());
             if (i.IsFromOrToOtherQueue) {
                 bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
                 bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
@@ -1972,7 +1972,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         imgBarrier.oldLayout = TextureUseToLayout(i.Before);
         imgBarrier.newLayout = TextureUseToLayout(i.After);
         if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Value());
+            auto otherQ = CastVkObject(i.OtherQueue.Get());
             if (i.IsFromOrToOtherQueue) {
                 imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
                 imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;

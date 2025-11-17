@@ -403,7 +403,7 @@ Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t sl
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Ptr);
+            shared_ptr<FenceD3D12> f = std::static_pointer_cast<FenceD3D12>(fence.Release());
             auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
             string debugName = radray::format("Queue-{}-{}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());

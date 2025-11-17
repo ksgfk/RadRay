@@ -918,7 +918,7 @@ void ImGuiApplication::RunSingleThreadRender() {
             if (!rtOpt.HasValue()) {
                 continue;
             }
-            rt = rtOpt.Value();
+            rt = rtOpt.Get();
             _isRenderAcquiredRt = true;
         }
         if (_needClose) {
@@ -971,7 +971,7 @@ void ImGuiApplication::MainUpdate() {
 
     Nullable<ImGuiApplication::Frame*> frameOpt = this->GetAvailableFrame();
     if (frameOpt.HasValue()) {
-        ImGuiApplication::Frame* frame = frameOpt.Value();
+        ImGuiApplication::Frame* frame = frameOpt.Get();
         ImDrawData* drawData = ImGui::GetDrawData();
         _imguiDrawContext->ExtractDrawData((int)frame->_frameIndex, drawData);
         _waitFrame->WaitWrite(frame->_frameIndex);
@@ -1021,7 +1021,7 @@ void ImGuiApplication::RenderUpdateMultiThread() {
         }
         ImGuiApplication::Frame* frame = _frames[frameIndex].get();
         frame->_completeFrame = _currRenderFrame + _frames.size();
-        frame->_rt = rtOpt.Value();
+        frame->_rt = rtOpt.Get();
         frame->_rtView = this->SafeGetRTView(frame->_rt);
         this->OnRender(frame);
         _swapchain->Present();
