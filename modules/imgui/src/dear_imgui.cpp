@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <bit>
 
+#include <radray/errors.h>
 #include <radray/utility.h>
 #include <radray/basic_math.h>
 #include <radray/stopwatch.h>
@@ -25,6 +26,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT m
 #endif
 
 namespace radray {
+
+std::string_view Cradrayimgui = "radrayimgui";
 
 ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)
     : _ctx(ImGui::CreateContext(sharedFontAtlas)) {}
@@ -456,9 +459,7 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
 
     if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
         auto texObjPtr = std::bit_cast<Texture*>(tex->BackendUserData);
-        if (_texs.find(texObjPtr) == _texs.end()) {
-            RADRAY_ABORT("radrayimgui texture not found");
-        }
+        IM_ASSERT(_texs.find(texObjPtr) != _texs.end());
         IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
 
         const int upload_w = tex->Width;
@@ -563,7 +564,7 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
                     this->SetupRenderState(frameIndex, encoder, fbWidth, fbHeight);
                 } else {
                     // pcmd->UserCallback(draw_list, pcmd);
-                    RADRAY_ABORT("radrayimgui does not support ImDrawCmd UserCallback.");
+                    RADRAY_ABORT("{} {} '{}'", Cradrayimgui, ECInvalidArgument, "UserCallback");
                 }
             } else {
                 ImVec2 clipMin((pcmd->ClipRect.x - clipOff.x) * clipScale.x, (pcmd->ClipRect.y - clipOff.y) * clipScale.y);

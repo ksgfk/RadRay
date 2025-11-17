@@ -5,21 +5,24 @@
 #include <algorithm>
 #include <ranges>
 
+#include <radray/errors.h>
+
 namespace radray::render::d3d12 {
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
     : _device(device) {
-    if (FAILED(_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf())))) {
-        RADRAY_ABORT("d3d12 create DescriptorHeap failed");
+    if (HRESULT hr = _device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12Device", "CreateDescriptorHeap", GetErrorName(hr), hr);
     }
     _desc = _heap->GetDesc();
     _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
     _gpuStart = IsShaderVisible() ? _heap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{0};
     _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
     RADRAY_DEBUG_LOG(
-        "D3D12 create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)",
+        "{} create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)", ECD3D12,
         _desc.Type,
         IsShaderVisible(),
         _incrementSize,
@@ -1529,11 +1532,11 @@ void CmdListD3D12::Destroy() noexcept {
 void CmdListD3D12::Begin() noexcept {
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
-        RADRAY_ABORT("d3d12 cannot reset command allocator. reason={} (code:{})", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12CommandAllocator", "Reset", GetErrorName(hr), hr);
     }
     if (HRESULT hr = _cmdList->Reset(_cmdAlloc.Get(), nullptr);
         FAILED(hr)) {
-        RADRAY_ABORT("d3d12 cannot reset command list. reason={} (code:{})", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12GraphicsCommandList", "Reset", GetErrorName(hr), hr);
     }
     ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
@@ -1670,7 +1673,7 @@ void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ABORT("ID3D12GraphicsCommandList cannot convert to ID3D12GraphicsCommandList4");
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12GraphicsCommandList", "QueryInterface", GetErrorName(hr), hr);
         return;
     }
     cmdList4->EndRenderPass();
@@ -1806,7 +1809,7 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
     }
     auto [rootDescData, type, index] = _boundRootSig->_desc.GetRootDescriptor(slot);
     if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ABORT("d3d12 cannot BindRootDescriptor, param 'slot' out of range");
+        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "slot");
         return;
     }
     auto tag = view->GetTag();
@@ -1849,7 +1852,7 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) no
     }
     auto [tableData, index] = _boundRootSig->_desc.GetDescriptorTable(slot);
     if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ABORT("d3d12 cannot BindDescriptorSet, param 'slot' out of range");
+        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "slot");
         return;
     }
     auto descHeapView = CastD3D12Object(set);
@@ -1906,7 +1909,7 @@ void SwapChainD3D12::Present() noexcept {
     UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
         FAILED(hr)) {
-        RADRAY_ABORT("d3d12 IDXGISwapChain3 present fail, reason={} (code:{})", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
     }
     _fenceValue++;
     auto queue = CastD3D12Object(_desc.PresentQueue);
@@ -1956,7 +1959,7 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &range, &ptr);
         FAILED(hr)) {
-        RADRAY_ABORT("d3d12 cannot map buffer, reason={} (code:{})", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12Resource", "Map", GetErrorName(hr), hr);
     }
     return ptr;
 }
@@ -2087,12 +2090,12 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
 
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
     if (slot >= _elems.size()) {
-        RADRAY_ABORT("d3d12 cannot SetResource, param '{}' out of range {} of {}", "slot", slot, _elems.size());
+        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "slot");
         return;
     }
     const auto& e = _elems[slot];
     if (index >= e._elem.Count) {
-        RADRAY_ABORT("d3d12 cannot SetResource, param '{}' out of range {} of {}", "index", index, e._elem.Count);
+        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "index");
         return;
     }
     auto tag = view->GetTag();

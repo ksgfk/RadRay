@@ -63,7 +63,7 @@ void Init() {
     window = CreateNativeWindow(windowDesc).Unwrap();
 #endif
     if (!window) {
-        RADRAY_ABORT("no window");
+        throw std::runtime_error("Failed to create native window");
         return;
     }
     VulkanInstanceDescriptor vkInsDesc{};

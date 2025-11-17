@@ -15,6 +15,8 @@
 
 namespace radray {
 
+extern std::string_view Cradrayimgui;
+
 class ImGuiContextRAII {
 public:
     explicit ImGuiContextRAII(ImFontAtlas* sharedFontAtlas = nullptr);

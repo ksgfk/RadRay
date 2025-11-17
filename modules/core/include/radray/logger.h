@@ -182,13 +182,21 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 
 }  // namespace radray
 
+#ifdef RADRAY_IS_DEBUG
 #define RADRAY_DEBUG_LOG(fmt, ...) ::radray::LogDebug(fmt __VA_OPT__(, ) __VA_ARGS__)
+#else
+#define RADRAY_DEBUG_LOG(fmt, ...)
+#endif
 #define RADRAY_INFO_LOG(fmt, ...) ::radray::LogInfo(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_WARN_LOG(fmt, ...) ::radray::LogWarn(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ERR_LOG(fmt, ...) ::radray::LogError(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
+#ifdef RADRAY_IS_DEBUG
 #define RADRAY_DEBUG_LOG_CSTYLE(fmt, ...) ::radray::LogDebugSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
+#else
+#define RADRAY_DEBUG_LOG_CSTYLE(fmt, ...)
+#endif
 #define RADRAY_INFO_LOG_CSTYLE(fmt, ...) ::radray::LogInfoSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_WARN_LOG_CSTYLE(fmt, ...) ::radray::LogWarnSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
@@ -206,6 +214,3 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
         auto tmp___ = ::radray::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
         throw type(tmp___.c_str());                                     \
     } while (0)
-
-#define RADRAY_UNIMPLEMENTED() \
-    RADRAY_ABORT("unimplemented");

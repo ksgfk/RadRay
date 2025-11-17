@@ -3,6 +3,8 @@
 #include <bit>
 #include <cstring>
 
+#include <radray/errors.h>
+
 namespace radray::render::vulkan {
 
 static auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
@@ -32,7 +34,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
         RADRAY_INFO_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-        RADRAY_DEBUG_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        LogDebug("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
         RADRAY_INFO_LOG("vk Validation Layer {}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     }
@@ -1736,26 +1738,6 @@ void QueueVulkan::Destroy() noexcept {
 }
 
 void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    if (desc.CmdBuffers.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk cmd buffers count: {}, max: {}", desc.CmdBuffers.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    if (desc.WaitFences.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk wait fences count: {}, max: {}", desc.WaitFences.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    if (desc.SignalFences.size() >= std::numeric_limits<uint32_t>::max()) [[unlikely]] {
-        RADRAY_ABORT("vk signal fences count: {}, max: {}", desc.SignalFences.size(), std::numeric_limits<uint32_t>::max());
-        return;
-    }
-    if (desc.WaitFences.size() != desc.WaitFenceValues.size()) [[unlikely]] {
-        RADRAY_ABORT("vk wait fences count: {}, wait values count: {}", desc.WaitFences.size(), desc.WaitFenceValues.size());
-        return;
-    }
-    if (desc.SignalFences.size() != desc.SignalFenceValues.size()) [[unlikely]] {
-        RADRAY_ABORT("vk signal fences count: {}, signal values count: {}", desc.SignalFences.size(), desc.SignalFenceValues.size());
-        return;
-    }
     vector<VkCommandBuffer> cmdBufs;
     cmdBufs.reserve(desc.CmdBuffers.size());
     for (auto i : desc.CmdBuffers) {
@@ -1824,7 +1806,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
     if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkQueueSubmit failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkQueueSubmit", vr);
         return;
     }
 }
@@ -1832,7 +1814,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 void QueueVulkan::Wait() noexcept {
     if (auto vr = _device->_ftb.vkQueueWaitIdle(_queue);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkQueueWaitIdle failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkQueueWaitIdle", vr);
     }
     _swapchainSync = {};
 }
@@ -1864,7 +1846,7 @@ void CommandPoolVulkan::Destroy() noexcept {
 void CommandPoolVulkan::Reset() const noexcept {
     if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkResetCommandPool failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkResetCommandPool", vr);
     }
 }
 
@@ -1915,14 +1897,14 @@ void CommandBufferVulkan::Begin() noexcept {
     beginInfo.pInheritanceInfo = nullptr;
     if (auto vr = _device->_ftb.vkBeginCommandBuffer(_cmdBuffer, &beginInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkBeginCommandBuffer failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkBeginCommandBuffer", vr);
     }
 }
 
 void CommandBufferVulkan::End() noexcept {
     if (auto vr = _device->_ftb.vkEndCommandBuffer(_cmdBuffer);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkEndCommandBuffer failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkEndCommandBuffer", vr);
     }
 }
 
@@ -2483,7 +2465,7 @@ uint64_t TimelineSemaphoreVulkan::GetCompletedValue() const noexcept {
     uint64_t result;
     if (auto vr = _device->_ftb.vkGetSemaphoreCounterValue(_device->_device, _semaphore, &result);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("vk call vkGetSemaphoreCounterValue failed: {}", vr);
+        RADRAY_ABORT("{} {} {}", ECVulkan, "vkGetSemaphoreCounterValue", vr);
     }
     return result;
 }
@@ -2563,7 +2545,7 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
             &_currentTextureIndex);
         vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
         if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
-            RADRAY_DEBUG_LOG("vk call vkAcquireNextImageKHR return VK_ERROR_OUT_OF_DATE_KHR");
+            RADRAY_WARN_LOG("vk call vkAcquireNextImageKHR return VK_ERROR_OUT_OF_DATE_KHR");
         } else {
             RADRAY_ERR_LOG("vk call vkAcquireNextImageKHR failed: {}", vr);
         }
@@ -2702,7 +2684,7 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
     } else {
         if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
             vr != VK_SUCCESS) {
-            RADRAY_ABORT("vk call vmaMapMemory failed: {}", vr);
+            RADRAY_ABORT("{} {} {}", ECVulkan, "vmaMapMemory", vr);
         }
         mappedData = static_cast<byte*>(mappedData) + offset;
     }
@@ -3083,6 +3065,7 @@ vector<unique_ptr<DescriptorSetVulkan>> DescPoolAllocator::Allocate(std::span<Vk
         sets.resize(allocInfo.descriptorSetCount, VK_NULL_HANDLE);
         if (auto vr = _device->_ftb.vkAllocateDescriptorSets(_device->_device, &allocInfo, sets.data());
             vr == VK_SUCCESS) {
+            RADRAY_ABORT("{} {} {}", ECVulkan, "vkAllocateDescriptorSets", vr);
             return mapToResult(sets, pool);
         } else {
             return std::nullopt;
@@ -3108,7 +3091,7 @@ vector<unique_ptr<DescriptorSetVulkan>> DescPoolAllocator::Allocate(std::span<Vk
         auto pool = NewPoolToBack();
         auto tryRes = tryAlloc(pool);
         if (!tryRes.has_value()) {
-            RADRAY_ABORT("vk alloc desc set fail");
+            RADRAY_ABORT("");
             return {};
         }
         auto result = std::move(tryRes.value());
@@ -3120,7 +3103,7 @@ unique_ptr<DescriptorSetVulkan> DescPoolAllocator::Allocate(VkDescriptorSetLayou
     VkDescriptorSetLayout t[] = {layout};
     auto r = this->Allocate(t);
     if (r.size() != 1) {
-        RADRAY_ABORT("vk alloc desc set fail");
+        RADRAY_ABORT("");
         return nullptr;
     }
     return std::move(r[0]);

@@ -2,6 +2,8 @@
 
 namespace radray::render::d3d12 {
 
+std::string_view ECD3D12 = "D3D12";
+
 Win32Event::Win32Event(Win32Event&& other) noexcept
     : _event(other._event) {
     other._event = nullptr;

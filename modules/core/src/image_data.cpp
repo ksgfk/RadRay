@@ -5,6 +5,7 @@
 #include <png.h>
 #endif
 
+#include <radray/errors.h>
 #include <radray/utility.h>
 #include <radray/platform.h>
 
@@ -60,7 +61,7 @@ std::span<const byte> ImageData::GetSpan() const noexcept {
 
 ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     if (Format != ImageFormat::RGB8_BYTE) {
-        RADRAY_ABORT("what");
+        RADRAY_ABORT("{} '{}' {}", ECInvalidOperation, "Format", Format);
     }
     ImageData dstImg;
     dstImg.Width = Width;

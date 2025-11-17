@@ -18,6 +18,8 @@
 
 namespace radray::render::vulkan {
 
+std::string_view ECVulkan = "Vulkan";
+
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {
     uint64_t total = 0;
     for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {

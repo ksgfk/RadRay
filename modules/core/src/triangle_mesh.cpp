@@ -3,6 +3,8 @@
 #include <new>
 #include <numbers>
 #include <limits>
+
+#include <radray/errors.h>
 #include <radray/vertex_data.h>
 
 namespace radray {
@@ -49,7 +51,7 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
         uint64_t byteSize = byteOffset * Positions.size();
         RADRAY_ASSERT(byteSize == GetVertexByteSize());
         if (byteSize > std::numeric_limits<uint32_t>::max()) {
-            RADRAY_ABORT("too large mesh {}", byteSize);
+            RADRAY_ABORT("{} '{}'", ECArgumentOutOfRange, "data");
         }
         data->VertexData = make_unique<byte[]>(byteSize);
         data->VertexSize = (uint32_t)byteSize;
@@ -80,7 +82,7 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
         if (Positions.size() <= std::numeric_limits<uint16_t>::max()) {
             uint64_t byteSize = Indices.size() * sizeof(uint16_t);
             if (byteSize > std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ABORT("too large mesh {}", byteSize);
+                RADRAY_ABORT("{} '{}'", ECArgumentOutOfRange, "data");
             }
             data->IndexType = VertexIndexType::UInt16;
             data->IndexSize = (uint32_t)byteSize;
@@ -95,7 +97,7 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
         } else if (Positions.size() <= std::numeric_limits<uint32_t>::max()) {
             uint64_t byteSize = Indices.size() * sizeof(uint32_t);
             if (byteSize > std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ABORT("too large mesh {}", byteSize);
+                RADRAY_ABORT("{} '{}'", ECArgumentOutOfRange, "data");
             }
             data->IndexType = VertexIndexType::UInt32;
             data->IndexSize = (uint32_t)byteSize;
@@ -103,7 +105,7 @@ void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
             data->IndexCount = (uint32_t)Indices.size();
             std::memcpy(data->IndexData.get(), Indices.data(), data->IndexSize);
         } else {
-            RADRAY_ABORT("too large mesh {}", Positions.size());
+            RADRAY_ABORT("{} '{}'", ECArgumentOutOfRange, "data");
         }
     }
 }
