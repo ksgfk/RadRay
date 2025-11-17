@@ -27,7 +27,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT m
 
 namespace radray {
 
-std::string_view Cradrayimgui = "radrayimgui";
+const std::string_view ECradrayimgui = "radrayimgui";
 
 ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)
     : _ctx(ImGui::CreateContext(sharedFontAtlas)) {}
@@ -96,7 +96,7 @@ bool InitPlatformImGui(const ImGuiPlatformInitDescriptor& desc) {
     if (desc.Platform == PlatformId::Windows) {
         WindowNativeHandler wnh = desc.Window->GetNativeHandler();
         if (wnh.Type != WindowHandlerTag::HWND) {
-            RADRAY_ERR_LOG("radrayimgui only supports HWND on Windows platform.");
+            RADRAY_ERR_LOG("{} {}::{}", ECradrayimgui, "desc", "Window");
             return false;
         }
 
@@ -209,7 +209,7 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
         descPS.Category = ShaderBlobCategory::SPIRV;
         shaderPS = device->CreateShader(descPS).Unwrap();
     } else {
-        RADRAY_ERR_LOG("radrayimgui unsupported backend {}", backendType);
+        RADRAY_ERR_LOG("{} {} {}", ECradrayimgui, ECUnsupportedPlatform, backendType);
         return nullptr;
     }
 
@@ -564,7 +564,7 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
                     this->SetupRenderState(frameIndex, encoder, fbWidth, fbHeight);
                 } else {
                     // pcmd->UserCallback(draw_list, pcmd);
-                    RADRAY_ABORT("{} {} '{}'", Cradrayimgui, ECInvalidArgument, "UserCallback");
+                    RADRAY_ABORT("{} {} '{}'", ECradrayimgui, ECInvalidArgument, "UserCallback");
                 }
             } else {
                 ImVec2 clipMin((pcmd->ClipRect.x - clipOff.x) * clipScale.x, (pcmd->ClipRect.y - clipOff.y) * clipScale.y);
@@ -685,7 +685,7 @@ void ImGuiDrawContext::SetupRenderState(int frameIndex, render::CommandEncoder* 
 ImTextureID ImGuiDrawContext::DrawCmd::GetTexID() const noexcept {
     ImTextureID tex_id = TexRef._TexData ? TexRef._TexData->TexID : TexRef._TexID;
     if (TexRef._TexData != NULL) {
-        IM_ASSERT(tex_id != ImTextureID_Invalid && "ImDrawCmd is referring to ImTextureData that wasn't uploaded to graphics system. Backend must call ImTextureData::SetTexID() after handling ImTextureStatus_WantCreate request!");
+        IM_ASSERT(tex_id != ImTextureID_Invalid);
     }
     return tex_id;
 }
@@ -693,8 +693,6 @@ ImTextureID ImGuiDrawContext::DrawCmd::GetTexID() const noexcept {
 void ImGuiDrawContext::DrawData::Clear() noexcept {
     CmdLists.clear();
 }
-
-const char* ImGuiApplicationException::what() const noexcept { return _msg.empty() ? std::runtime_error::what() : _msg.c_str(); }
 
 ImGuiApplication::Frame::Frame(size_t index, shared_ptr<render::CommandBuffer> cmdBuffer) noexcept
     : _frameIndex(index),
@@ -781,7 +779,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
     ImGuiApplicationDescriptor appDesc = desc_;
     if (!appDesc.IsRenderMultiThread) {
         if (appDesc.IsWaitFrame) {
-            RADRAY_WARN_LOG("ImGuiApplication: IsWaitFrame is only effective when IsRenderMultiThread is true.");
+            RADRAY_WARN_LOG("{}: IsWaitFrame is only effective when IsRenderMultiThread is true.", ECradrayimgui);
         }
         appDesc.IsWaitFrame = false;
     }
@@ -812,7 +810,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         ::radray::InitRendererImGui(imguiDesc.Context);
     }
     if (!_window) {
-        throw ImGuiApplicationException("failed to create native window");
+        throw ImGuiApplicationException("{}: {}", ECradrayimgui, "fail create window");
     }
     _resizingConn = _window->EventResizing().connect(&ImGuiApplication::OnResizing, this);
     _resizedConn = _window->EventResized().connect(&ImGuiApplication::OnResized, this);
@@ -844,10 +842,10 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         }
         _device = CreateDevice(devDesc).Release();
     } else {
-        throw ImGuiApplicationException("unsupported platform or backend");
+        throw ImGuiApplicationException("{}: {}", ECradrayimgui, ECUnsupportedPlatform);
     }
     if (!_device) {
-        throw ImGuiApplicationException("failed to create render device");
+        throw ImGuiApplicationException("{}: {}", ECradrayimgui, "fail create device");
     }
 
     _cmdQueue = _device->GetCommandQueue(render::QueueType::Direct, 0).Release();
@@ -857,7 +855,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
     for (size_t i = 0; i < _swapchain->GetBackBufferCount(); ++i) {
         auto cmdBufferOpt = _device->CreateCommandBuffer(_cmdQueue);
         if (!cmdBufferOpt.HasValue()) {
-            throw ImGuiApplicationException("failed to create command buffer for ImGuiApplication frame");
+            throw ImGuiApplicationException("{}: {}", ECradrayimgui, "failed create cmdBuffer");
         }
         _frames.emplace_back(make_unique<ImGuiApplication::Frame>(i, cmdBufferOpt.Release()));
     }
@@ -869,7 +867,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         imguiDrawDesc.FrameCount = static_cast<int>(_frames.size());
         auto ctxOpt = ::radray::CreateImGuiDrawContext(imguiDrawDesc);
         if (!ctxOpt.HasValue()) {
-            throw ImGuiApplicationException("failed to create ImGuiDrawContext");
+            throw ImGuiApplicationException("{}: {}", ECradrayimgui, "failed create ImGuiDrawContext");
         }
         _imguiDrawContext = ctxOpt.Release();
     }

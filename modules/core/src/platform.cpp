@@ -1,5 +1,6 @@
 #include <radray/platform.h>
 
+#include <radray/errors.h>
 #include <radray/logger.h>
 
 namespace radray {
@@ -92,7 +93,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     }
     HMODULE m = ::LoadLibraryA(name.c_str());
     if (m == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("cannot load dynamic library {}, reason: {}", name, _Win32LastErrMessage());
+        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", _Win32LastErrMessage());
     }
     _handle = m;
 }
@@ -108,7 +109,7 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("cannot find symbol {}, reason: {}", name, _Win32LastErrMessage());
+        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", _Win32LastErrMessage());
     }
     return std::bit_cast<void*>(symbol);
 }
@@ -168,7 +169,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 #endif
     auto h = dlopen(name.c_str(), RTLD_LAZY);
     if (h == nullptr) {
-        RADRAY_ERR_LOG("cannot load dynamic library {}, reason: {}", name, dlerror());
+        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", dlerror());
     }
     _handle = h;
 }
@@ -184,7 +185,7 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
     if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("cannot load symbol {}, reason: {}", name, dlerror());
+        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", dlerror());
     }
     return symbol;
 }

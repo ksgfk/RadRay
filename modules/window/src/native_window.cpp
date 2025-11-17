@@ -16,7 +16,7 @@ Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDe
 #if defined(RADRAY_PLATFORM_WINDOWS)
                 return CreateWin32Window(specificDesc);
 #else
-                RADRAY_ERR_LOG("Win32Window is not valid");
+                RADRAY_ERR_LOG("{} {}", "Win32Window", "disable");
                 return nullptr;
 #endif
             }

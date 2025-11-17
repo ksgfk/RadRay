@@ -1,5 +1,6 @@
 #include <radray/render/common.h>
 
+#include <radray/errors.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 
@@ -25,21 +26,21 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
 #ifdef RADRAY_ENABLE_D3D12
                 return d3d12::CreateDevice(arg);
 #else
-                RADRAY_ERR_LOG("D3D12 is not enable");
+                RADRAY_ERR_LOG("{} {}", "D3D12", "disable");
                 return nullptr;
 #endif
             } else if constexpr (std::is_same_v<T, MetalDeviceDescriptor>) {
 #ifdef RADRAY_ENABLE_METAL
                 return metal::CreateDevice(arg);
 #else
-                RADRAY_ERR_LOG("Metal is not enable");
+                RADRAY_ERR_LOG("{} {}", "Metal", "disable");
                 return nullptr;
 #endif
             } else if constexpr (std::is_same_v<T, VulkanDeviceDescriptor>) {
 #ifdef RADRAY_ENABLE_VULKAN
                 return vulkan::CreateDeviceVulkan(arg);
 #else
-                RADRAY_ERR_LOG("Vulkan is not enable");
+                RADRAY_ERR_LOG("{} {}", "Vulkan", "disable");
                 return nullptr;
 #endif
             }
@@ -52,7 +53,7 @@ Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDe
     return vulkan::CreateVulkanInstanceImpl(desc);
 #else
     RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("Vulkan is not enable");
+    RADRAY_ERR_LOG("{} {}", "Vulkan", "disable");
     return nullptr;
 #endif
 }
@@ -62,7 +63,7 @@ void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept {
     return vulkan::DestroyVulkanInstanceImpl(std::move(instance));
 #else
     RADRAY_UNUSED(instance);
-    RADRAY_ERR_LOG("Vulkan is not enable");
+    RADRAY_ERR_LOG("{} {}", "Vulkan", "disable");
 #endif
 }
 

@@ -189,7 +189,7 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 #endif
 #define RADRAY_INFO_LOG(fmt, ...) ::radray::LogInfo(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_WARN_LOG(fmt, ...) ::radray::LogWarn(fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ERR_LOG(fmt, ...) ::radray::LogError(fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_ERR_LOG(fmt, ...) ::radray::LogErrorLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT(fmt, ...) ::radray::LogAbort(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
 #ifdef RADRAY_IS_DEBUG
@@ -199,7 +199,7 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 #endif
 #define RADRAY_INFO_LOG_CSTYLE(fmt, ...) ::radray::LogInfoSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_WARN_LOG_CSTYLE(fmt, ...) ::radray::LogWarnSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
-#define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintf(fmt __VA_OPT__(, ) __VA_ARGS__)
+#define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT_CSTYLE(fmt, ...) ::radray::LogAbortSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
 #define RADRAY_ASSERT(x)                              \

@@ -37,7 +37,7 @@
 
 namespace radray::render::vulkan {
 
-extern std::string_view ECVulkan;
+extern const std::string_view ECVulkan;
 
 template <class T>
 struct VulkanObjectTrait {

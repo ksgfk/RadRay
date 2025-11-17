@@ -1,7 +1,6 @@
 #pragma once
 
 #include <type_traits>
-#include <bitset>
 
 #include <fmt/format.h>
 
@@ -121,14 +120,3 @@ requires radray::is_enum_flags<T>
 constexpr radray::EnumFlags<T> operator~(T v) noexcept {
     return static_cast<T>(~static_cast<std::underlying_type_t<T>>(v));
 }
-
-template <class T, class CharT>
-struct fmt::formatter<radray::EnumFlags<T>, CharT> : fmt::formatter<radray::string, CharT> {
-    template <class FormatContext>
-    auto format(radray::EnumFlags<T> const& val, FormatContext& ctx) const {
-        auto v = val.value();
-        std::bitset<sizeof(v) * 8> bits(v);
-        radray::string binary = bits.template to_string<CharT, std::char_traits<CharT>, radray::allocator<CharT>>();
-        return fmt::formatter<radray::string, CharT>::format(binary, ctx);
-    }
-};

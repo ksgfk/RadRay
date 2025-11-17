@@ -33,8 +33,8 @@ if ($Solution) {
 	if (-not (Test-Path -LiteralPath $Solution)) { Write-Err "指定的 Solution 不存在: $Solution"; exit 1 }
 	$slnPath = Resolve-Path -LiteralPath $Solution | Select-Object -ExpandProperty Path
 } else {
-	$slnCandidates = @(Get-ChildItem -LiteralPath $BuildDir -Filter '*.sln' -File | Sort-Object FullName)
-	if ($slnCandidates.Count -eq 0) { Write-Err "在 $BuildDir 顶层未找到 .sln"; exit 1 }
+	$slnCandidates = @(Get-ChildItem -LiteralPath $BuildDir -Filter '*.slnx' -File | Sort-Object FullName)
+	if ($slnCandidates.Count -eq 0) { Write-Err "在 $BuildDir 顶层未找到 .slnx"; exit 1 }
 	if ($slnCandidates.Count -gt 1) {
 		Write-Warn "顶层找到多个 .sln，使用第一个: $($slnCandidates[0].FullName)"
 	}

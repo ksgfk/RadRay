@@ -15,7 +15,7 @@
 
 namespace radray {
 
-extern std::string_view Cradrayimgui;
+extern const std::string_view ECradrayimgui;
 
 class ImGuiContextRAII {
 public:
@@ -162,13 +162,8 @@ class ImGuiApplicationException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
     template <typename... Args>
-    explicit ImGuiApplicationException(fmt::format_string<Args...> fmt, Args&&... args) : _msg(::radray::format(fmt, std::forward<Args>(args)...)) {}
+    explicit ImGuiApplicationException(fmt::format_string<Args...> fmt, Args&&... args) : std::runtime_error(::fmt::format(fmt, std::forward<Args>(args)...)) {}
     ~ImGuiApplicationException() noexcept override = default;
-
-    const char* what() const noexcept override;
-
-private:
-    string _msg;
 };
 
 class ImGuiApplication {
@@ -229,7 +224,6 @@ protected:
     void ExecuteBeforeAcquire();
 
 protected:
-
     uint32_t _frameCount;
     render::TextureFormat _rtFormat;
     bool _enableVSync;

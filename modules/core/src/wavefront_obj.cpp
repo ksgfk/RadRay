@@ -234,7 +234,7 @@ WavefrontObjReader::WavefrontObjReader(const std::filesystem::path& file) {
     _myStream = make_unique<std::ifstream>(file, std::ios::in);
     _stream = _myStream.get();
     if (!_stream->good()) {
-        RADRAY_ERR_LOG("cannot open file: {}", file.string());
+        RADRAY_ERR_LOG("{} {}", ECInvalidArgument, file.string());
     }
 }
 

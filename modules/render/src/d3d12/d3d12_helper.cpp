@@ -2,7 +2,7 @@
 
 namespace radray::render::d3d12 {
 
-std::string_view ECD3D12 = "D3D12";
+const std::string_view ECD3D12 = "D3D12";
 
 Win32Event::Win32Event(Win32Event&& other) noexcept
     : _event(other._event) {
@@ -326,7 +326,7 @@ std::optional<Win32Event> MakeWin32Event() noexcept {
     HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
         DWORD err = ::GetLastError();
-        RADRAY_ERR_LOG("cannot create WIN32 event, code:{}", err);
+        RADRAY_ERR_LOG("{} {} {}", "WIN32", "CreateEvent", err);
         return std::nullopt;
     }
     Win32Event result{};
