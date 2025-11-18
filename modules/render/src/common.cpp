@@ -89,8 +89,9 @@ std::string_view format_as(RenderBackend v) noexcept {
         case RenderBackend::D3D12: return "D3D12";
         case RenderBackend::Vulkan: return "Vulkan";
         case RenderBackend::Metal: return "Metal";
-        default: return "UNKNOWN";
+        case RenderBackend::MAX_COUNT: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(TextureFormat v) noexcept {
@@ -143,8 +144,8 @@ std::string_view format_as(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return "D32_FLOAT";
         case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
         case TextureFormat::D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(QueueType v) noexcept {
@@ -152,8 +153,9 @@ std::string_view format_as(QueueType v) noexcept {
         case radray::render::QueueType::Direct: return "Direct";
         case radray::render::QueueType::Compute: return "Compute";
         case radray::render::QueueType::Copy: return "Copy";
-        default: return "UNKNOWN";
+        case QueueType::MAX_COUNT: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(ShaderBlobCategory v) noexcept {
@@ -161,8 +163,8 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
         case ShaderBlobCategory::DXIL: return "DXIL";
         case ShaderBlobCategory::SPIRV: return "SPIR-V";
         case ShaderBlobCategory::MSL: return "MSL";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(VertexFormat v) noexcept {
@@ -198,8 +200,8 @@ std::string_view format_as(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return "float2";
         case VertexFormat::FLOAT32X3: return "float3";
         case VertexFormat::FLOAT32X4: return "float4";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(PolygonMode v) noexcept {
@@ -207,8 +209,8 @@ std::string_view format_as(PolygonMode v) noexcept {
         case PolygonMode::Fill: return "Fill";
         case PolygonMode::Line: return "Line";
         case PolygonMode::Point: return "Point";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(TextureViewDimension v) noexcept {
@@ -221,8 +223,8 @@ std::string_view format_as(TextureViewDimension v) noexcept {
         case TextureViewDimension::Dim2DArray: return "2DArray";
         case TextureViewDimension::Cube: return "Cube";
         case TextureViewDimension::CubeArray: return "CubeArray";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(ResourceBindType v) noexcept {
@@ -233,9 +235,9 @@ std::string_view format_as(ResourceBindType v) noexcept {
         case ResourceBindType::Texture: return "Texture";
         case ResourceBindType::RWTexture: return "RWTexture";
         case ResourceBindType::Sampler: return "Sampler";
-        case ResourceBindType::UNKNOWN:
-        default: return "UNKNOWN";
+        case ResourceBindType::UNKNOWN: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view format_as(RenderObjectTag v) noexcept {
@@ -260,8 +262,9 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::DescriptorSet: return "DescriptorSet";
         case RenderObjectTag::DescriptorSetLayout: return "DescriptorSetLayout";
         case RenderObjectTag::Sampler: return "Sampler";
-        default: return "UNKNOWN";
+        case RenderObjectTag::VkInstance: return "VkInstance";
     }
+    Unreachable();
 }
 
 }  // namespace radray::render

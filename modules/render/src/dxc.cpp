@@ -48,8 +48,8 @@ std::string_view format_as(ShaderResourceType v) noexcept {
         case ShaderResourceType::Sampler: return "Sampler";
         case ShaderResourceType::PushConstant: return "PushConstant";
         case ShaderResourceType::RayTracing: return "RayTracing";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 }  // namespace radray::render

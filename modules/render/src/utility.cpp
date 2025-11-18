@@ -70,17 +70,17 @@ uint32_t GetVertexFormatSize(VertexFormat format) noexcept {
         case VertexFormat::UINT32X4:
         case VertexFormat::SINT32X4:
         case VertexFormat::FLOAT32X4: return 16;
-        case VertexFormat::UNKNOWN:
-        default: return 0;
+        case VertexFormat::UNKNOWN: return 0;
     }
+    Unreachable();
 }
 
 uint32_t GetIndexFormatSize(IndexFormat format) noexcept {
     switch (format) {
         case IndexFormat::UINT16: return 2;
         case IndexFormat::UINT32: return 4;
-        default: return 0;
     }
+    Unreachable();
 }
 
 PrimitiveState DefaultPrimitiveState() noexcept {
@@ -153,8 +153,8 @@ IndexFormat MapIndexType(VertexIndexType type) noexcept {
     switch (type) {
         case VertexIndexType::UInt16: return IndexFormat::UINT16;
         case VertexIndexType::UInt32: return IndexFormat::UINT32;
-        default: return IndexFormat::UINT16;
     }
+    Unreachable();
 }
 
 std::optional<vector<VertexElement>> MapVertexElements(std::span<VertexLayout> layouts, std::span<SemanticMapping> semantics) noexcept {

@@ -979,7 +979,8 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     MapShaderStages(rootDesc.Stages));
                 break;
             }
-            default: {
+            case ResourceBindType::UNKNOWN:
+            case ResourceBindType::Sampler: {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
                 return nullptr;
             }
@@ -1013,10 +1014,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     }
                     break;
                 }
-                default: {
-                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
-                    return nullptr;
-                }
+                case ResourceBindType::UNKNOWN: break;
             }
         }
     }
@@ -1127,8 +1125,6 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     bindDescs.emplace_back(e);
                     break;
                 }
-                default:
-                    break;
             }
         }
     }
@@ -1359,9 +1355,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
                     samplerCount += e.Count;
                 }
                 break;
-            default:
-                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
-                return nullptr;
+            case ResourceBindType::UNKNOWN: break;
         }
     }
     GpuDescriptorHeapViewRAII resHeapView{};

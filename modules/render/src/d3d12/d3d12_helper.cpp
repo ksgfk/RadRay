@@ -1,6 +1,7 @@
 #include <radray/render/backend/d3d12_helper.h>
 
 #include <radray/errors.h>
+#include <radray/utility.h>
 
 namespace radray::render::d3d12 {
 
@@ -190,8 +191,8 @@ VersionedRootSignatureDescContainer::RootConstant VersionedRootSignatureDescCont
         case D3D_ROOT_SIGNATURE_VERSION_1: return _GetRootConstImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters);
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetRootConstImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters);
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetRootConstImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters);
-        default: return VersionedRootSignatureDescContainer::RootConstant{{}, std::numeric_limits<UINT>::max()};
     }
+    Unreachable();
 }
 
 template <class T>
@@ -224,8 +225,8 @@ VersionedRootSignatureDescContainer::RootDescriptor VersionedRootSignatureDescCo
         case D3D_ROOT_SIGNATURE_VERSION_1: return _GetRootDescriptorImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, slot);
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetRootDescriptorImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, slot);
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetRootDescriptorImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, slot);
-        default: return VersionedRootSignatureDescContainer::RootDescriptor{{}, {}, std::numeric_limits<UINT>::max()};
     }
+    Unreachable();
 }
 
 template <class T>
@@ -265,8 +266,8 @@ VersionedRootSignatureDescContainer::DescriptorTable VersionedRootSignatureDescC
         case D3D_ROOT_SIGNATURE_VERSION_1: return _GetDescriptorTableImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, slot, _ranges, _ranges1);
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetDescriptorTableImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, slot, _ranges, _ranges1);
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetDescriptorTableImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, slot, _ranges, _ranges1);
-        default: return VersionedRootSignatureDescContainer::DescriptorTable{{}, std::numeric_limits<UINT>::max()};
     }
+    Unreachable();
 }
 
 void VersionedRootSignatureDescContainer::RefreshDesc() noexcept {
@@ -537,8 +538,9 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept {
         case DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE:
         case DXGI_FORMAT_SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE:
         case DXGI_FORMAT_FORCE_UINT:
-        default: return DXGI_FORMAT_UNKNOWN;
+        case DXGI_FORMAT_A4B4G4R4_UNORM: return DXGI_FORMAT_UNKNOWN;
     }
+    Unreachable();
 }
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept {
@@ -558,8 +560,9 @@ D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept {
         case QueueType::Direct: return D3D12_COMMAND_LIST_TYPE_DIRECT;
         case QueueType::Compute: return D3D12_COMMAND_LIST_TYPE_COMPUTE;
         case QueueType::Copy: return D3D12_COMMAND_LIST_TYPE_COPY;
-        default: return D3D12_COMMAND_LIST_TYPE_NONE;
+        case QueueType::MAX_COUNT: return D3D12_COMMAND_LIST_TYPE_NONE;
     }
+    Unreachable();
 }
 
 DXGI_FORMAT MapType(TextureFormat v) noexcept {
@@ -612,8 +615,8 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        default: return DXGI_FORMAT_UNKNOWN;
     }
+    Unreachable();
 }
 
 D3D12_HEAP_TYPE MapType(MemoryType v) noexcept {
@@ -621,8 +624,8 @@ D3D12_HEAP_TYPE MapType(MemoryType v) noexcept {
         case MemoryType::Device: return D3D12_HEAP_TYPE_DEFAULT;
         case MemoryType::Upload: return D3D12_HEAP_TYPE_UPLOAD;
         case MemoryType::ReadBack: return D3D12_HEAP_TYPE_READBACK;
-        default: return D3D12_HEAP_TYPE_DEFAULT;
     }
+    Unreachable();
 }
 
 D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept {
@@ -630,8 +633,9 @@ D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept {
         case TextureDimension::Dim1D: return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
         case TextureDimension::Dim2D: return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         case TextureDimension::Dim3D: return D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        default: return D3D12_RESOURCE_DIMENSION_UNKNOWN;
+        case TextureDimension::UNKNOWN: return D3D12_RESOURCE_DIMENSION_UNKNOWN;
     }
+    Unreachable();
 }
 
 D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
@@ -661,16 +665,16 @@ std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(Primi
         case PrimitiveTopology::LineStrip: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP};
         case PrimitiveTopology::TriangleList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
         case PrimitiveTopology::TriangleStrip: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP};
-        default: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED, D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
     }
+    Unreachable();
 }
 
 D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept {
     switch (v) {
         case VertexStepMode::Vertex: return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
         case VertexStepMode::Instance: return D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
-        default: return D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
     }
+    Unreachable();
 }
 
 DXGI_FORMAT MapType(VertexFormat v) noexcept {
@@ -706,8 +710,8 @@ DXGI_FORMAT MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return DXGI_FORMAT_R32G32_FLOAT;
         case VertexFormat::FLOAT32X3: return DXGI_FORMAT_R32G32B32_FLOAT;
         case VertexFormat::FLOAT32X4: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        default: return DXGI_FORMAT_UNKNOWN;
     }
+    Unreachable();
 }
 
 std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
@@ -715,8 +719,8 @@ std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept {
         case PolygonMode::Fill: return D3D12_FILL_MODE_SOLID;
         case PolygonMode::Line: return D3D12_FILL_MODE_WIREFRAME;
         case PolygonMode::Point: return std::nullopt;
-        default: return std::nullopt;
     }
+    Unreachable();
 }
 
 D3D12_CULL_MODE MapType(CullMode v) noexcept {
@@ -724,8 +728,8 @@ D3D12_CULL_MODE MapType(CullMode v) noexcept {
         case CullMode::Front: return D3D12_CULL_MODE_FRONT;
         case CullMode::Back: return D3D12_CULL_MODE_BACK;
         case CullMode::None: return D3D12_CULL_MODE_NONE;
-        default: return D3D12_CULL_MODE_NONE;
     }
+    Unreachable();
 }
 
 D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
@@ -735,8 +739,8 @@ D3D12_BLEND_OP MapType(BlendOperation v) noexcept {
         case BlendOperation::ReverseSubtract: return D3D12_BLEND_OP_REV_SUBTRACT;
         case BlendOperation::Min: return D3D12_BLEND_OP_MIN;
         case BlendOperation::Max: return D3D12_BLEND_OP_MAX;
-        default: return D3D12_BLEND_OP_ADD;
     }
+    Unreachable();
 }
 
 D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
@@ -758,8 +762,8 @@ D3D12_BLEND MapBlendColor(BlendFactor v) noexcept {
         case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_COLOR;
         case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
         case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
-        default: return D3D12_BLEND_ONE;
     }
+    Unreachable();
 }
 
 D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
@@ -781,8 +785,8 @@ D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
         case BlendFactor::OneMinusSrc1: return D3D12_BLEND_INV_SRC1_ALPHA;
         case BlendFactor::Src1Alpha: return D3D12_BLEND_SRC1_ALPHA;
         case BlendFactor::OneMinusSrc1Alpha: return D3D12_BLEND_INV_SRC1_ALPHA;
-        default: return D3D12_BLEND_ONE;
     }
+    Unreachable();
 }
 
 std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
@@ -804,8 +808,8 @@ D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
         case CompareFunction::NotEqual: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
         case CompareFunction::GreaterEqual: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
         case CompareFunction::Always: return D3D12_COMPARISON_FUNC_ALWAYS;
-        default: return D3D12_COMPARISON_FUNC_NONE;
     }
+    Unreachable();
 }
 
 D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
@@ -818,16 +822,16 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept {
         case StencilOperation::DecrementClamp: return D3D12_STENCIL_OP_DECR_SAT;
         case StencilOperation::IncrementWrap: return D3D12_STENCIL_OP_INCR;
         case StencilOperation::DecrementWrap: return D3D12_STENCIL_OP_DECR;
-        default: return D3D12_STENCIL_OP_KEEP;
     }
+    Unreachable();
 }
 
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
     switch (v) {
         case IndexFormat::UINT16: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
         case IndexFormat::UINT32: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
-        default: return D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
     }
+    Unreachable();
 }
 
 D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept {
@@ -890,24 +894,24 @@ D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept {
         case LoadAction::DontCare: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
         case LoadAction::Load: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
         case LoadAction::Clear: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
-        default: return D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD;
     }
+    Unreachable();
 }
 
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept {
     switch (v) {
         case StoreAction::Store: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
         case StoreAction::Discard: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD;
-        default: return D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD;
     }
+    Unreachable();
 }
 
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept {
     switch (v) {
         case FilterMode::Nearest: return D3D12_FILTER_TYPE_POINT;
         case FilterMode::Linear: return D3D12_FILTER_TYPE_LINEAR;
-        default: return D3D12_FILTER_TYPE_POINT;
     }
+    Unreachable();
 }
 
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept {
@@ -931,8 +935,8 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
-        default: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     }
+    Unreachable();
 }
 
 }  // namespace radray::render::d3d12
@@ -944,8 +948,16 @@ std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
         case D3D_FEATURE_LEVEL_12_0: return "12.0";
         case D3D_FEATURE_LEVEL_12_1: return "12.1";
         case D3D_FEATURE_LEVEL_12_2: return "12.2";
-        default: return "UNKNOWN";
+
+        case D3D_FEATURE_LEVEL_1_0_GENERIC:
+        case D3D_FEATURE_LEVEL_1_0_CORE:
+        case D3D_FEATURE_LEVEL_9_1:
+        case D3D_FEATURE_LEVEL_9_2:
+        case D3D_FEATURE_LEVEL_9_3:
+        case D3D_FEATURE_LEVEL_10_0:
+        case D3D_FEATURE_LEVEL_10_1: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
@@ -961,16 +973,18 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
         case D3D_SHADER_MODEL_6_7: return "6.7";
         case D3D_SHADER_MODEL_6_8: return "6.8";
         case D3D_SHADER_MODEL_6_9: return "6.9";
-        default: return "UNKNOWN";
+
+        case D3D_SHADER_MODEL_NONE: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
     switch (v) {
         case D3D12_RESOURCE_HEAP_TIER_1: return "1";
         case D3D12_RESOURCE_HEAP_TIER_2: return "2";
-        default: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
@@ -978,8 +992,8 @@ std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
         case D3D12_RESOURCE_BINDING_TIER_1: return "1";
         case D3D12_RESOURCE_BINDING_TIER_2: return "2";
         case D3D12_RESOURCE_BINDING_TIER_3: return "3";
-        default: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
@@ -988,8 +1002,10 @@ std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
         case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER: return "SAMPLER";
         case D3D12_DESCRIPTOR_HEAP_TYPE_RTV: return "RTV";
         case D3D12_DESCRIPTOR_HEAP_TYPE_DSV: return "DSV";
-        default: return "UNKNOWN";
+
+        case D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
@@ -997,8 +1013,8 @@ std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
         case D3D_ROOT_SIGNATURE_VERSION_1: return "1.0";
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return "1.1";
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return "1.2";
-        default: return "UNKNOWN";
     }
+    radray::Unreachable();
 }
 
 std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
@@ -1008,6 +1024,6 @@ std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
         case D3D12_ROOT_PARAMETER_TYPE_CBV: return "CBV";
         case D3D12_ROOT_PARAMETER_TYPE_SRV: return "SRV";
         case D3D12_ROOT_PARAMETER_TYPE_UAV: return "UAV";
-        default: return "UNKNOWN";
     }
+    radray::Unreachable();
 }

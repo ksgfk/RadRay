@@ -239,9 +239,9 @@ VkImageLayout TextureUseToLayout(TextureUses v) noexcept {
         case TextureUse::Resource: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         case TextureUse::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
         case TextureUse::UNKNOWN:
-        case TextureUse::Uninitialized:
-        default: return VK_IMAGE_LAYOUT_UNDEFINED;
+        case TextureUse::Uninitialized: return VK_IMAGE_LAYOUT_UNDEFINED;
     }
+    Unreachable();
 }
 
 VkQueueFlags MapType(QueueType v) noexcept {
@@ -249,8 +249,10 @@ VkQueueFlags MapType(QueueType v) noexcept {
         case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT;
         case QueueType::Compute: return VK_QUEUE_COMPUTE_BIT;
         case QueueType::Copy: return VK_QUEUE_TRANSFER_BIT;
-        default: return 0;
+
+        case QueueType::MAX_COUNT: return VK_QUEUE_FLAG_BITS_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkFormat MapType(TextureFormat v) noexcept {
@@ -301,8 +303,8 @@ VkFormat MapType(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT_S8_UINT;
-        default: return VK_FORMAT_UNDEFINED;
     }
+    Unreachable();
 }
 
 VkImageType MapType(TextureDimension v) noexcept {
@@ -310,8 +312,9 @@ VkImageType MapType(TextureDimension v) noexcept {
         case TextureDimension::Dim1D: return VK_IMAGE_TYPE_1D;
         case TextureDimension::Dim2D: return VK_IMAGE_TYPE_2D;
         case TextureDimension::Dim3D: return VK_IMAGE_TYPE_3D;
-        default: return VK_IMAGE_TYPE_MAX_ENUM;
+        case TextureDimension::UNKNOWN: return VK_IMAGE_TYPE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept {
@@ -323,7 +326,7 @@ VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept {
         case 16: return VK_SAMPLE_COUNT_16_BIT;
         case 32: return VK_SAMPLE_COUNT_32_BIT;
         case 64: return VK_SAMPLE_COUNT_64_BIT;
-        default: return VK_SAMPLE_COUNT_1_BIT;
+        default: return VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
     }
 }
 
@@ -336,8 +339,9 @@ VkImageViewType MapType(TextureViewDimension v) noexcept {
         case TextureViewDimension::Dim2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         case TextureViewDimension::Cube: return VK_IMAGE_VIEW_TYPE_CUBE;
         case TextureViewDimension::CubeArray: return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-        default: return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+        case TextureViewDimension::UNKNOWN: return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkAttachmentLoadOp MapType(LoadAction v) noexcept {
@@ -345,16 +349,16 @@ VkAttachmentLoadOp MapType(LoadAction v) noexcept {
         case LoadAction::Load: return VK_ATTACHMENT_LOAD_OP_LOAD;
         case LoadAction::Clear: return VK_ATTACHMENT_LOAD_OP_CLEAR;
         case LoadAction::DontCare: return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        default: return VK_ATTACHMENT_LOAD_OP_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkAttachmentStoreOp MapType(StoreAction v) noexcept {
     switch (v) {
         case StoreAction::Store: return VK_ATTACHMENT_STORE_OP_STORE;
         case StoreAction::Discard: return VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        default: return VK_ATTACHMENT_STORE_OP_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VmaMemoryUsage MapType(MemoryType v) noexcept {
@@ -362,8 +366,8 @@ VmaMemoryUsage MapType(MemoryType v) noexcept {
         case MemoryType::Device: return VMA_MEMORY_USAGE_GPU_ONLY;
         case MemoryType::Upload: return VMA_MEMORY_USAGE_CPU_TO_GPU;
         case MemoryType::ReadBack: return VMA_MEMORY_USAGE_GPU_TO_CPU;
-        default: return VMA_MEMORY_USAGE_UNKNOWN;
     }
+    Unreachable();
 }
 
 VkShaderStageFlags MapType(ShaderStages v) noexcept {
@@ -382,16 +386,17 @@ VkDescriptorType MapType(ResourceBindType v) noexcept {
         case ResourceBindType::Sampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
         case ResourceBindType::RWBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         case ResourceBindType::RWTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        default: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        case ResourceBindType::UNKNOWN: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkVertexInputRate MapType(VertexStepMode v) noexcept {
     switch (v) {
         case VertexStepMode::Vertex: return VK_VERTEX_INPUT_RATE_VERTEX;
         case VertexStepMode::Instance: return VK_VERTEX_INPUT_RATE_INSTANCE;
-        default: return VK_VERTEX_INPUT_RATE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkFormat MapType(VertexFormat v) noexcept {
@@ -426,8 +431,8 @@ VkFormat MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return VK_FORMAT_R32G32_SFLOAT;
         case VertexFormat::FLOAT32X3: return VK_FORMAT_R32G32B32_SFLOAT;
         case VertexFormat::FLOAT32X4: return VK_FORMAT_R32G32B32A32_SFLOAT;
-        default: return VK_FORMAT_UNDEFINED;
     }
+    Unreachable();
 }
 
 VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept {
@@ -437,8 +442,8 @@ VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept {
         case PrimitiveTopology::LineStrip: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
         case PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         case PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-        default: return VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkPolygonMode MapType(PolygonMode v) noexcept {
@@ -446,8 +451,8 @@ VkPolygonMode MapType(PolygonMode v) noexcept {
         case PolygonMode::Fill: return VK_POLYGON_MODE_FILL;
         case PolygonMode::Line: return VK_POLYGON_MODE_LINE;
         case PolygonMode::Point: return VK_POLYGON_MODE_POINT;
-        default: return VK_POLYGON_MODE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkCullModeFlags MapType(CullMode v) noexcept {
@@ -455,16 +460,16 @@ VkCullModeFlags MapType(CullMode v) noexcept {
         case CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
         case CullMode::Back: return VK_CULL_MODE_BACK_BIT;
         case CullMode::None: return VK_CULL_MODE_NONE;
-        default: return VK_CULL_MODE_FLAG_BITS_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkFrontFace MapType(FrontFace v) noexcept {
     switch (v) {
         case FrontFace::CCW: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
         case FrontFace::CW: return VK_FRONT_FACE_CLOCKWISE;
-        default: return VK_FRONT_FACE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkCompareOp MapType(CompareFunction v) noexcept {
@@ -477,8 +482,8 @@ VkCompareOp MapType(CompareFunction v) noexcept {
         case CompareFunction::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
         case CompareFunction::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
         case CompareFunction::Always: return VK_COMPARE_OP_ALWAYS;
-        default: return VK_COMPARE_OP_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkStencilOpState MapType(StencilFaceState v, uint32_t readMask, uint32_t writeMask) noexcept {
@@ -502,8 +507,8 @@ VkStencilOp MapType(StencilOperation v) noexcept {
         case StencilOperation::DecrementClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
         case StencilOperation::IncrementWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
         case StencilOperation::DecrementWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
-        default: return VK_STENCIL_OP_MAX_ENUM;
     }
+    Unreachable();
 }
 
 BlendComponentVulkan MapType(BlendComponent v) noexcept {
@@ -520,8 +525,8 @@ VkBlendOp MapType(BlendOperation v) noexcept {
         case BlendOperation::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
         case BlendOperation::Min: return VK_BLEND_OP_MIN;
         case BlendOperation::Max: return VK_BLEND_OP_MAX;
-        default: return VK_BLEND_OP_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkBlendFactor MapType(BlendFactor v) noexcept {
@@ -543,8 +548,8 @@ VkBlendFactor MapType(BlendFactor v) noexcept {
         case BlendFactor::OneMinusSrc1: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
         case BlendFactor::Src1Alpha: return VK_BLEND_FACTOR_SRC1_ALPHA;
         case BlendFactor::OneMinusSrc1Alpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
-        default: return VK_BLEND_FACTOR_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkColorComponentFlags MapType(ColorWrites v) noexcept {
@@ -555,8 +560,8 @@ VkColorComponentFlags MapType(ColorWrites v) noexcept {
         case ColorWrite::Alpha: return VK_COLOR_COMPONENT_A_BIT;
         case ColorWrite::Color: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
         case ColorWrite::All: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        default: return VK_COLOR_COMPONENT_FLAG_BITS_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkIndexType MapIndexType(uint32_t v) noexcept {
@@ -571,16 +576,16 @@ VkFilter MapTypeFilter(FilterMode v) noexcept {
     switch (v) {
         case FilterMode::Nearest: return VK_FILTER_NEAREST;
         case FilterMode::Linear: return VK_FILTER_LINEAR;
-        default: return VK_FILTER_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept {
     switch (v) {
         case FilterMode::Nearest: return VK_SAMPLER_MIPMAP_MODE_NEAREST;
         case FilterMode::Linear: return VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        default: return VK_SAMPLER_MIPMAP_MODE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 VkSamplerAddressMode MapType(AddressMode v) noexcept {
@@ -588,8 +593,8 @@ VkSamplerAddressMode MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
         case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-        default: return VK_SAMPLER_ADDRESS_MODE_MAX_ENUM;
     }
+    Unreachable();
 }
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
@@ -627,8 +632,9 @@ std::string_view to_string(enum VkPhysicalDeviceType v) noexcept {
         case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "Discrete";
         case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "Virtual";
         case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
-        default: return "UNKNOWN";
+        case VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view to_string(VkResult v) noexcept {
@@ -682,8 +688,8 @@ std::string_view to_string(VkResult v) noexcept {
         case VK_INCOMPATIBLE_SHADER_BINARY_EXT: return "IncompatibleShaderBinaryEXT";
         case VK_PIPELINE_BINARY_MISSING_KHR: return "PipelineBinaryMissingKHR";
         case VK_ERROR_NOT_ENOUGH_SPACE_KHR: return "ErrorNotEnoughSpaceKHR";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view to_string(VkFormat v) noexcept {
@@ -938,8 +944,8 @@ std::string_view to_string(VkFormat v) noexcept {
         case VK_FORMAT_PVRTC2_2BPP_SRGB_BLOCK_IMG: return "PVRTC2_2BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_PVRTC2_4BPP_SRGB_BLOCK_IMG: return "PVRTC2_4BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_R16G16_SFIXED5_NV: return "R16G16_SFIXED5_NV";
-        default: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 std::string_view to_string(VkPresentModeKHR v) noexcept {
@@ -950,8 +956,10 @@ std::string_view to_string(VkPresentModeKHR v) noexcept {
         case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED_KHR";
         case VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR: return "SHARED_DEMAND_REFRESH_KHR";
         case VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR: return "SHARED_CONTINUOUS_REFRESH_KHR";
-        default: return "UNKNOWN";
+        case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR: return "FIFO_LATEST_READY_KHR";
+        case VK_PRESENT_MODE_MAX_ENUM_KHR: return "UNKNOWN";
     }
+    Unreachable();
 }
 
 }  // namespace radray::render::vulkan
