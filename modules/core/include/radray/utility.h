@@ -133,7 +133,7 @@ vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
 #elif defined(__clang__) || defined(__GNUC__)
     __builtin_unreachable();
 #else
-    // no impl
+#error "Unreachable not supported on this compiler"
 #endif
 #endif
 }

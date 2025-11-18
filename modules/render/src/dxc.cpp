@@ -81,12 +81,11 @@ using Microsoft::WRL::ComPtr;
 
 #include <dxcapi.h>
 
+#include <radray/errors.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 
 namespace radray::render {
-
-const std::string_view ECDXC = "dxc";
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 class MiMallocAdapter : public IMalloc {
@@ -184,7 +183,7 @@ public:
         for (auto i : args) {
             auto w = ToWideChar(i);
             if (!w.has_value()) {
-                RADRAY_ERR_LOG("{} {}", ECDXC, i);
+                RADRAY_ERR_LOG("{} {}", Errors::DXC, i);
                 return Nullable<ComPtr<IDxcResult>>{nullptr};
             }
             wargs.emplace_back(std::move(w.value()));
@@ -203,7 +202,7 @@ public:
                 _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", ECDXC, hr);
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
             return Nullable<ComPtr<IDxcResult>>{nullptr};
         }
         return Nullable<ComPtr<IDxcResult>>{std::move(compileResult)};
@@ -213,7 +212,7 @@ public:
         CompileStateData result{};
         if (HRESULT hr = compileResult->GetStatus(&result.Status);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", ECDXC, hr);
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
             result.Status = hr;
             return result;
         }
@@ -221,7 +220,7 @@ public:
         if (compileResult->HasOutput(DXC_OUT_ERRORS)) {
             if (HRESULT hr = compileResult->GetErrorBuffer(&errBuffer);
                 FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}", ECDXC, hr);
+                RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
                 errBuffer = nullptr;
             }
         }
@@ -235,7 +234,7 @@ public:
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetResult(&blob);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", ECDXC, hr);
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
             return {};
         }
         auto blobStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
@@ -246,7 +245,7 @@ public:
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetOutput(kind, IID_PPV_ARGS(&blob), nullptr);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", ECDXC, hr);
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
             return {};
         }
         auto reflStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
@@ -264,7 +263,7 @@ public:
         }
         auto [status, errMsg] = GetCompileState(compileResult.Get());
         if (!errMsg.empty()) {
-            RADRAY_ERR_LOG("{} {}", ECDXC, "compile message");
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, "compile message");
             RADRAY_ERR_LOG("{}", errMsg);
         }
         if (FAILED(status)) {
@@ -352,13 +351,13 @@ public:
         ComPtr<ID3D12ShaderReflection> sr;
         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {}", ECDXC, "IDxcUtils", "CreateReflection", hr);
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "IDxcUtils", "CreateReflection", hr);
             return std::nullopt;
         }
         D3D12_SHADER_DESC shaderDesc{};
         if (HRESULT hr = sr->GetDesc(&shaderDesc);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {}", ECDXC, "ID3D12ShaderReflection", "GetDesc", hr);
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetDesc", hr);
             return std::nullopt;
         }
         DxilReflection result{};
@@ -386,7 +385,7 @@ public:
             D3D12_SHADER_INPUT_BIND_DESC bindDesc;
             if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
                 FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", ECDXC, "ID3D12ShaderReflection", "GetResourceBindingDesc", hr);
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetResourceBindingDesc", hr);
                 return std::nullopt;
             }
             auto&& br = result.Binds.emplace_back(DxilReflection::BindResource{});
@@ -444,7 +443,7 @@ public:
                 D3D12_SIGNATURE_PARAMETER_DESC spDesc;
                 if (HRESULT hr = sr->GetInputParameterDesc(i, &spDesc);
                     FAILED(hr)) {
-                    RADRAY_ERR_LOG("{} {}::{} {}", ECDXC, "ID3D12ShaderReflection", "GetInputParameterDesc", hr);
+                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetInputParameterDesc", hr);
                     return std::nullopt;
                 }
                 auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
@@ -507,26 +506,26 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
     if (HRESULT hr = DxcCreateInstance2(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", ECDXC, "DxcCreateInstance2", hr);
+        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance2", hr);
         return nullptr;
     }
 #else
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", ECDXC, "DxcCreateInstance", hr);
+        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
         return nullptr;
     }
 #endif
     ComPtr<IDxcUtils> utils;
     if (HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", ECDXC, "DxcCreateInstance", hr);
+        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
         return nullptr;
     }
     ComPtr<IDxcIncludeHandler> incHandler;
     if (HRESULT hr = utils->CreateDefaultIncludeHandler(&incHandler);
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", ECDXC, "IDxcUtils", "CreateDefaultIncludeHandler", hr);
+        RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "IDxcUtils", "CreateDefaultIncludeHandler", hr);
         return nullptr;
     }
     auto implPtr = make_unique<DxcImpl>(

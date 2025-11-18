@@ -37,8 +37,6 @@
 
 namespace radray::render::vulkan {
 
-extern const std::string_view ECVulkan;
-
 template <class T>
 struct VulkanObjectTrait {
     static_assert(false, "unknown vulkan object type");

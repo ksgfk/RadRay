@@ -207,7 +207,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
                 moduleAddr,
                 &hInstance) == 0) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("{} {} {} {}", "WIN32", "GetModuleHandleEx", fmtErr, ::GetLastError());
+            RADRAY_ERR_LOG("{} {} {} {}", Errors::WIN, "GetModuleHandleEx", fmtErr, ::GetLastError());
             return nullptr;
         }
     }
@@ -227,7 +227,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         ATOM clazz = ::RegisterClassEx(&wce);
         if (!clazz) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("{} {} {} {}", "WIN32", "RegisterClassEx", fmtErr, ::GetLastError());
+            RADRAY_ERR_LOG("{} {} {} {}", Errors::WIN, "RegisterClassEx", fmtErr, ::GetLastError());
             return nullptr;
         }
         g_wndClass = std::make_unique<WndClassRAII>(clazz, wce.hInstance, RADRAY_WIN32_WNDCLASS_NAME);
@@ -271,7 +271,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         win.get());
     if (!hwnd) {
         auto fmtErr = FormatLastErrorMessageWin32();
-        RADRAY_ERR_LOG("{} {} {} {}", "WIN32", "CreateWindowEx", fmtErr, ::GetLastError());
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::WIN, "CreateWindowEx", fmtErr, ::GetLastError());
         return nullptr;
     }
     win->_hwnd = hwnd;
@@ -345,7 +345,7 @@ void Win32Window::SetSize(int width, int height) noexcept {
     if (!_hwnd) return;
     if (width <= 0 || height <= 0) return;
     if (_isFullscreen) {
-        RADRAY_ERR_LOG("{} {} ", "WIN32", "cannot set size when in fullscreen mode");
+        RADRAY_ERR_LOG("{} {} ", Errors::WIN, "cannot set size when in fullscreen mode");
         return;
     }
     RECT rc{0, 0, width, height};

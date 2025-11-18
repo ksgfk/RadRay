@@ -6,6 +6,7 @@
 
 #include <xxhash.h>
 
+#include <radray/errors.h>
 #include <radray/platform.h>
 #include <radray/logger.h>
 
@@ -47,7 +48,7 @@ static void LogWinCharCvtErr() {
             default: return "UNKNOWN";
         }
     })();
-    RADRAY_ERR_LOG("cannot convert char to wchar, reason={} (code={})", strErr, err);
+    RADRAY_ERR_LOG("{} {} {} {}", Errors::WIN, "cannot convert char to wchar", strErr, err);
 }
 #endif
 // TODO: use lib to support utf8 on other platforms

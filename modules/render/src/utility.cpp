@@ -185,14 +185,14 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<VertexLayout> l
 Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
 #ifdef RADRAY_ENABLE_D3D12
     if (device_->GetBackend() != RenderBackend::D3D12) {
-        RADRAY_ERR_LOG("{} {} {}", d3d12::ECD3D12, ECInvalidArgument, "device");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "device");
         return nullptr;
     }
     auto device = d3d12::CastD3D12Object(device_);
     d3d12::ComPtr<ID3D12RootSignature> rootSig;
     if (HRESULT hr = device->_device->CreateRootSignature(0, data.data(), data.size(), IID_PPV_ARGS(&rootSig));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", d3d12::ECD3D12, "ID3D12Device", "CreateRootSignature", hr);
+        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12Device", "CreateRootSignature", hr);
         return nullptr;
     }
     DynamicLibrary d3d12Dll{"d3d12"};
@@ -206,17 +206,17 @@ Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
     d3d12::ComPtr<ID3D12VersionedRootSignatureDeserializer> deserializer;
     if (HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer_F(data.data(), data.size(), IID_PPV_ARGS(&deserializer));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", d3d12::ECD3D12, "D3D12CreateVersionedRootSignatureDeserializer", d3d12::GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "D3D12CreateVersionedRootSignatureDeserializer", d3d12::GetErrorName(hr), hr);
         return nullptr;
     }
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc;
     if (HRESULT hr = deserializer->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &desc);
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", d3d12::ECD3D12, "ID3D12VersionedRootSignatureDeserializer", "GetRootSignatureDescAtVersion", hr);
+        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12VersionedRootSignatureDeserializer", "GetRootSignatureDescAtVersion", hr);
         return nullptr;
     }
     if (desc->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) {
-        RADRAY_ERR_LOG("{} {} {}", d3d12::ECD3D12, "unknown version", desc->Version);
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, "unknown version", desc->Version);
         return nullptr;
     }
     auto result = make_shared<d3d12::RootSigD3D12>(device, std::move(rootSig));

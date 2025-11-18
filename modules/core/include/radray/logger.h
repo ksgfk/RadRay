@@ -42,11 +42,7 @@ string sprintf(const S& fmt, const T&... args) {
     return radray::vsprintf(fmt::detail::to_string_view(fmt), fmt::make_format_args<fmt::basic_printf_context<Char>>(args...));
 }
 
-void LogLoc(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
-
-void Log(LogLevel lvl, fmt::string_view msg) noexcept;
-
-bool ShouldLogLoc(LogLevel lvl) noexcept;
+void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
 
 bool ShouldLog(LogLevel lvl) noexcept;
 
@@ -58,16 +54,16 @@ void LogFormat(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) no
         return;
     }
     auto str = radray::format(fmt, std::forward<Args>(args)...);
-    Log(lvl, str);
+    Log({}, lvl, str);
 }
 
 template <typename... Args>
 void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLogLoc(lvl)) {
+    if (!ShouldLog(lvl)) {
         return;
     }
     auto str = radray::format(fmt, std::forward<Args>(args)...);
-    LogLoc(loc, lvl, str);
+    Log(loc, lvl, str);
 }
 
 template <typename S, typename... Args>
@@ -76,7 +72,7 @@ void LogFormatSPrintf(LogLevel lvl, const S& fmt, Args&&... args) noexcept {
         return;
     }
     auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    Log(lvl, str);
+    Log({}, lvl, str);
 }
 
 template <typename... Args>
@@ -85,7 +81,7 @@ void LogFormatSPrintfLoc(std::source_location loc, LogLevel lvl, fmt::format_str
         return;
     }
     auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
-    LogLoc(loc, lvl, str);
+    Log(loc, lvl, str);
 }
 
 template <typename... Args>

@@ -93,7 +93,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     }
     HMODULE m = ::LoadLibraryA(name.c_str());
     if (m == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", _Win32LastErrMessage());
+        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", _Win32LastErrMessage());
     }
     _handle = m;
 }
@@ -109,7 +109,7 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", _Win32LastErrMessage());
+        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", _Win32LastErrMessage());
     }
     return std::bit_cast<void*>(symbol);
 }
@@ -169,7 +169,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 #endif
     auto h = dlopen(name.c_str(), RTLD_LAZY);
     if (h == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", dlerror());
+        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", dlerror());
     }
     _handle = h;
 }
@@ -185,7 +185,7 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
     if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", ECInvalidArgument, "name", dlerror());
+        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", dlerror());
     }
     return symbol;
 }

@@ -29,8 +29,6 @@
 
 namespace radray::render::d3d12 {
 
-extern const std::string_view ECD3D12;
-
 using Microsoft::WRL::ComPtr;
 
 class Win32Event {

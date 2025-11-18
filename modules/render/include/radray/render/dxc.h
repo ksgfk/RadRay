@@ -111,8 +111,6 @@ std::string_view format_as(ShaderResourceType v) noexcept;
 
 namespace radray::render {
 
-extern const std::string_view ECDXC;
-
 class Dxc : public RenderBase, public enable_shared_from_this<Dxc> {
 public:
     class Impl {

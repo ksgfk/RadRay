@@ -1,14 +1,28 @@
 #include <radray/errors.h>
 
+#include <radray/utility.h>
+
 namespace radray {
 
-const std::string_view ECInvalidArgument = "Invalid Argument";
-const std::string_view ECInvalidOperation = "Invalid Operation";
-const std::string_view ECIndexOutOfRange = "Index Out Of Range";
-const std::string_view ECArgumentOutOfRange = "Argument Out Of Range";
-const std::string_view ECUnsupportedPlatform = "Unsupported Platform";
-const std::string_view ECOutOfMemory = "Out Of Memory";
+std::string_view format_as(Errors v) noexcept {
+    switch (v) {
+        case Errors::InvalidArgument: return "InvalidArgument";
+        case Errors::InvalidOperation: return "InvalidOperation";
+        case Errors::IndexOutOfRange: return "IndexOutOfRange";
+        case Errors::ArgumentOutOfRange: return "ArgumentOutOfRange";
+        case Errors::UnsupportedPlatform: return "UnsupportedPlatform";
+        case Errors::OutOfMemory: return "OutOfMemory";
+        case Errors::COMException: return "COMException";
 
-const std::string_view ECCOMException = "COM Exception";
+        case Errors::D3D12: return "D3D12";
+        case Errors::VK: return "VK";
+        case Errors::METAL: return "METAL";
+        case Errors::LIBPNG: return "libpng";
+        case Errors::RADRAYIMGUI: return "radrayimgui";
+        case Errors::DXC: return "dxc";
+        case Errors::WIN: return "WINDOWS API";
+    }
+    Unreachable();
+}
 
 }  // namespace radray

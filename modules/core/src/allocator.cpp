@@ -116,7 +116,7 @@ void BuddyAllocator::Destroy(size_t offset) noexcept {
             }
             case NodeState::Unused:
                 [[unlikely]] {
-                    RADRAY_ABORT("{} '{}'", ECInvalidArgument, "offset");
+                    RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
                     return;
                 }
             default: {  // 分裂或者子节点都满的情况，往需要释放的节点找过去
@@ -180,12 +180,12 @@ std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
 void FreeListAllocator::Destroy(size_t offset) noexcept {
     auto iter = _nodes.find(offset);
     if (iter == _nodes.end()) {
-        RADRAY_ABORT("{} '{}'", ECInvalidArgument, "offset");
+        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
         return;
     }
     FreeListAllocator::LinkNode* node = iter->second.get();
     if (node->_state == FreeListAllocator::NodeState::Free) {
-        RADRAY_ABORT("{} '{}'", ECInvalidArgument, "offset");
+        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
         return;
     }
     node->_state = FreeListAllocator::NodeState::Free;

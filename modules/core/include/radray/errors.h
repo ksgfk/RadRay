@@ -4,13 +4,24 @@
 
 namespace radray {
 
-extern const std::string_view ECInvalidArgument;
-extern const std::string_view ECInvalidOperation;
-extern const std::string_view ECIndexOutOfRange;
-extern const std::string_view ECArgumentOutOfRange;
-extern const std::string_view ECUnsupportedPlatform;
-extern const std::string_view ECOutOfMemory;
+enum class Errors {
+    InvalidArgument,
+    InvalidOperation,
+    IndexOutOfRange,
+    ArgumentOutOfRange,
+    UnsupportedPlatform,
+    OutOfMemory,
+    COMException,
 
-extern const std::string_view ECCOMException;
+    D3D12,
+    VK,
+    METAL,
+    LIBPNG,
+    RADRAYIMGUI,
+    DXC,
+    WIN,
+};
+
+std::string_view format_as(Errors v) noexcept;
 
 }  // namespace radray

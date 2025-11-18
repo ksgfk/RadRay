@@ -15,14 +15,14 @@ DescriptorHeap::DescriptorHeap(
     : _device(device) {
     if (HRESULT hr = _device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12Device", "CreateDescriptorHeap", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateDescriptorHeap", GetErrorName(hr), hr);
     }
     _desc = _heap->GetDesc();
     _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
     _gpuStart = IsShaderVisible() ? _heap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{0};
     _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
     RADRAY_DEBUG_LOG(
-        "{} create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)", ECD3D12,
+        "{} create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)", Errors::D3D12,
         _desc.Type,
         IsShaderVisible(),
         _incrementSize,
@@ -225,17 +225,17 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 if (SUCCEEDED(debugController.As(&debug1))) {
                     debug1->SetEnableGPUBasedValidation(true);
                 } else {
-                    RADRAY_WARN_LOG("{} {}::{} {}", ECD3D12, "ID3D12Debug", "As<ID3D12Debug1>", "cannot enable gpu based validation");
+                    RADRAY_WARN_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12Debug", "As<ID3D12Debug1>", "cannot enable gpu based validation");
                 }
             }
         } else {
-            RADRAY_WARN_LOG("{} {} {}", ECD3D12, "D3D12GetDebugInterface", "cannot enable gpu based validation");
+            RADRAY_WARN_LOG("{} {} {}", Errors::D3D12, "D3D12GetDebugInterface", "cannot enable gpu based validation");
         }
     }
     ComPtr<IDXGIFactory4> dxgiFactory;
     if (HRESULT hr = ::CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(dxgiFactory.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, "CreateDXGIFactory2", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, "CreateDXGIFactory2", GetErrorName(hr), hr);
         return nullptr;
     }
     ComPtr<IDXGIAdapter1> adapter;
@@ -243,7 +243,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         uint32_t index = desc.AdapterIndex.value();
         if (HRESULT hr = dxgiFactory->EnumAdapters1(index, adapter.GetAddressOf());
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}({}={}) {} {}", ECD3D12, "EnumAdapters1", "index", index, GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}({}={}) {} {}", Errors::D3D12, "EnumAdapters1", "index", index, GetErrorName(hr), hr);
             return nullptr;
         }
     } else {
@@ -258,7 +258,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 temp->GetDesc1(&adapDesc);
                 if ((adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
                     wstring s{adapDesc.Description};
-                    RADRAY_INFO_LOG("D3D12 find device: {}", ToMultiByte(s).value());
+                    RADRAY_INFO_LOG("{} find device: {}", Errors::D3D12, ToMultiByte(s).value());
                 }
             }
             for (
@@ -287,20 +287,20 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     if (adapter == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, "IDXGIAdapter1", "not found");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, "IDXGIAdapter1", "cannot get adapter");
         return nullptr;
     }
     ComPtr<ID3D12Device> device;
     if (HRESULT hr = ::D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, "D3D12CreateDevice", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, "D3D12CreateDevice", GetErrorName(hr), hr);
         return nullptr;
     }
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
         adapter->GetDesc1(&adapDesc);
         wstring s{adapDesc.Description};
-        RADRAY_INFO_LOG("select device: {}", ToMultiByte(s).value());
+        RADRAY_INFO_LOG("{} select device: {}", Errors::D3D12, ToMultiByte(s).value());
     }
     ComPtr<D3D12MA::Allocator> alloc;
     {
@@ -323,7 +323,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
         if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, "D3D12MA::CreateAllocator", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, "D3D12MA::CreateAllocator", GetErrorName(hr), hr);
             return nullptr;
         }
     }
@@ -350,7 +350,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 quad & mask);
             RADRAY_INFO_LOG("Driver Version: {}", ver);
         } else {
-            RADRAY_WARN_LOG("{} {}::{}", ECD3D12, "IDXGIAdapter", "CheckInterfaceSupport");
+            RADRAY_WARN_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGIAdapter", "CheckInterfaceSupport", GetErrorName(hr), hr);
         }
     }
     {
@@ -362,7 +362,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                     &allowTearing,
                     sizeof(allowTearing));
                 FAILED(hr)) {
-                RADRAY_DEBUG_LOG("query IDXGIFactory6 feature DXGI_FEATURE_PRESENT_ALLOW_TEARING failed, reason={} (code={})", GetErrorName(hr), hr);
+                RADRAY_WARN_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGIFactory6", "CheckFeatureSupport", GetErrorName(hr), hr);
             }
         }
         RADRAY_INFO_LOG("Allow Tearing: {}", static_cast<bool>(allowTearing));
@@ -375,7 +375,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
         RADRAY_INFO_LOG("UMA: {}", static_cast<bool>(fs.UMA()));
     } else {
-        RADRAY_WARN_LOG("{} {}::{}", ECD3D12, "CD3DX12FeatureSupport", "GetStatus");
+        RADRAY_WARN_LOG("{} {}::{}", Errors::D3D12, "CD3DX12FeatureSupport", "GetStatus");
     }
     RADRAY_INFO_LOG("=============================");
     return result;
@@ -412,7 +412,7 @@ Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t sl
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
         } else {
-            RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateCommandQueue", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateCommandQueue", GetErrorName(hr), hr);
         }
     }
     return q->IsValid() ? q.get() : nullptr;
@@ -423,14 +423,14 @@ Nullable<shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
     ComPtr<ID3D12CommandAllocator> alloc;
     if (HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateCommandAllocator", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateCommandAllocator", GetErrorName(hr), hr);
         return nullptr;
     }
     ComPtr<ID3D12GraphicsCommandList> list;
     if (HRESULT hr = _device->CreateCommandList(0, queue->_type, alloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         SUCCEEDED(hr)) {
         if (FAILED(list->Close())) {
-            RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12GraphicsCommandList", "Close", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12GraphicsCommandList", "Close", GetErrorName(hr), hr);
             return nullptr;
         }
         return make_shared<CmdListD3D12>(
@@ -439,7 +439,7 @@ Nullable<shared_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
             std::move(list),
             queue->_type);
     } else {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateCommandList", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateCommandList", GetErrorName(hr), hr);
         return nullptr;
     }
 }
@@ -448,7 +448,7 @@ Nullable<shared_ptr<Fence>> DeviceD3D12::CreateFence(uint64_t initValue) noexcep
     ComPtr<ID3D12Fence> fence;
     if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
         return nullptr;
     }
     std::optional<Win32Event> e = MakeWin32Event();
@@ -470,7 +470,7 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         scDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
         scDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
         scDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, "IDXGISwapChain", "format not supported", desc.Format);
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, "IDXGISwapChain", "format not supported", desc.Format);
         return nullptr;
     }
     scDesc.Stereo = false;
@@ -479,7 +479,7 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scDesc.BufferCount = desc.BackBufferCount;
     if (scDesc.BufferCount < 2 || scDesc.BufferCount > 16) {
-        RADRAY_ERR_LOG("{} IDXGISwapChain BufferCount must >= 2 and <= 16 {}", ECD3D12, desc.BackBufferCount);
+        RADRAY_ERR_LOG("{} IDXGISwapChain BufferCount must >= 2 and <= 16 {}", Errors::D3D12, desc.BackBufferCount);
         return nullptr;
     }
     scDesc.Scaling = DXGI_SCALING_STRETCH;
@@ -492,24 +492,24 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     ComPtr<IDXGISwapChain1> temp;
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "IDXGIFactory", "CreateSwapChainForHwnd", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGIFactory", "CreateSwapChainForHwnd", GetErrorName(hr), hr);
         return nullptr;
     }
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
-        RADRAY_WARN_LOG("{} {}::{} {}", ECD3D12, "IDXGIFactory", "MakeWindowAssociation", hr);
+        RADRAY_WARN_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGIFactory", "MakeWindowAssociation", GetErrorName(hr), hr);
     }
     ComPtr<IDXGISwapChain3> swapchain;
     if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "IDXGISwapChain1", "QueryInterface", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain1", "QueryInterface", GetErrorName(hr), hr);
         return nullptr;
     }
     auto result = make_shared<SwapChainD3D12>(this, swapchain, desc);
     result->_frames.reserve(scDesc.BufferCount);
     if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(result->_fence.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
         return nullptr;
     }
     result->_fenceValue = 0;
@@ -518,7 +518,7 @@ Nullable<shared_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         ComPtr<ID3D12Resource> rt;
         if (HRESULT hr = swapchain->GetBuffer((UINT)i, IID_PPV_ARGS(rt.GetAddressOf()));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "IDXGISwapChain1", "GetBuffer", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain1", "GetBuffer", GetErrorName(hr), hr);
             return nullptr;
         }
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
@@ -590,7 +590,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 nullptr,
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateCommittedResource", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateCommittedResource", GetErrorName(hr), hr);
             return nullptr;
         }
     } else {
@@ -602,7 +602,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 allocRes.GetAddressOf(),
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "D3D12MA::Allocator", "CreateResource", GetErrorName(hr), hr);
+            RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "D3D12MA::Allocator", "CreateResource", GetErrorName(hr), hr);
             return nullptr;
         }
     }
@@ -621,7 +621,7 @@ Nullable<shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
     {
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
         heapView = {heapViewOpt.value(), heap};
@@ -656,7 +656,7 @@ Nullable<shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         heapView.GetHeap()->Create(buf->_buf.Get(), uavDesc, heapView.GetStart());
         dxgiFormat = uavDesc.Format;
     } else {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Usage");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid buffer view usage");
         return nullptr;
     }
     auto result = make_shared<BufferViewD3D12>(this, buf, std::move(heapView));
@@ -699,7 +699,7 @@ Nullable<shared_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
             allocRes.GetAddressOf(),
             IID_PPV_ARGS(texture.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "D3D12MA::Allocator", "CreateResource", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "D3D12MA::Allocator", "CreateResource", GetErrorName(hr), hr);
         return nullptr;
     }
     SetObjectName(desc.Name, texture.Get(), allocRes.Get());
@@ -721,7 +721,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
             auto heap = _cpuResAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
             if (!heapViewOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
             heapView = {heapViewOpt.value(), heap};
@@ -775,7 +775,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 srvDesc.TextureCubeArray.NumCubes = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Dim");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid texture view dimension");
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), srvDesc, heapView.GetStart());
@@ -785,7 +785,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
             auto heap = _cpuRtvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
             if (!heapViewOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
             heapView = {heapViewOpt.value(), heap};
@@ -821,7 +821,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 rtvDesc.Texture3D.FirstWSlice = desc.Range.BaseArrayLayer;
                 rtvDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
             default:
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Dim");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid texture view dimension");
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
@@ -831,7 +831,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
             auto heap = _cpuDsvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
             if (!heapViewOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
             heapView = {heapViewOpt.value(), heap};
@@ -860,7 +860,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 dsvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Dim");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid texture view dimension");
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), dsvDesc, heapView.GetStart());
@@ -870,7 +870,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
             auto heap = _cpuResAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
             if (!heapViewOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
             heapView = {heapViewOpt.value(), heap};
@@ -907,13 +907,13 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 uavDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Dim");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid texture view dimension");
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), uavDesc, heapView.GetStart());
         dxgiFormat = uavDesc.Format;
     } else {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Usage");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid texture view usage");
         return nullptr;
     }
     auto result = make_shared<TextureViewD3D12>(this, tex, std::move(heapView));
@@ -924,7 +924,7 @@ Nullable<shared_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
 
 Nullable<shared_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& desc) noexcept {
     if (desc.Category != ShaderBlobCategory::DXIL) {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Category");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "only support DXIL shader blobs");
         return nullptr;
     }
     return make_shared<Dxil>(desc.Source.begin(), desc.Source.end());
@@ -980,7 +980,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 break;
             }
             default: {
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "RootBindings.Type");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
                 return nullptr;
             }
         }
@@ -1007,15 +1007,14 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         allStages |= e.Stages;
                     } else {
                         if (e.StaticSamplers.size() != e.Count) {
-                            RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "StaticSamplers.Count");
+                            RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid static sampler count");
                             return nullptr;
                         }
                     }
                     break;
                 }
                 default: {
-                    RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "RootBindings.Type");
-
+                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
                     return nullptr;
                 }
             }
@@ -1049,7 +1048,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         bindDescs.emplace_back(e);
                     } else {
                         if (e.StaticSamplers.size() != e.Count) {
-                            RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "StaticSamplers.Count");
+                            RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid static sampler count");
                             return nullptr;
                         }
                         for (size_t t = 0; t < e.StaticSamplers.size(); t++) {
@@ -1171,7 +1170,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         } else {
             reason = GetErrorName(hr);
         }
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, "D3DX12SerializeVersionedRootSignature", reason, hr);
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, "D3DX12SerializeVersionedRootSignature", reason, hr);
         return nullptr;
     }
     ComPtr<ID3D12RootSignature> rootSig;
@@ -1181,7 +1180,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             rootSigBlob->GetBufferSize(),
             IID_PPV_ARGS(rootSig.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateRootSignature", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateRootSignature", GetErrorName(hr), hr);
         return nullptr;
     }
     auto result = make_shared<RootSigD3D12>(this, std::move(rootSig));
@@ -1219,7 +1218,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         fillMode.has_value()) {
         rawRaster.FillMode = fillMode.value();
     } else {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "Primitive.Poly");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid primitive polygon mode");
         return nullptr;
     }
     rawRaster.CullMode = MapType(desc.Primitive.Cull);
@@ -1253,7 +1252,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
                 writeMask.has_value()) {
                 rtb.RenderTargetWriteMask = (UINT8)writeMask.value();
             } else {
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "ColorTargets.WriteMask");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid color target write mask");
                 return nullptr;
             }
         } else {
@@ -1326,7 +1325,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     ComPtr<ID3D12PipelineState> pso;
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12Device", "CreateGraphicsPipelineState", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateGraphicsPipelineState", GetErrorName(hr), hr);
         return nullptr;
     }
     return make_shared<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
@@ -1361,7 +1360,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
                 }
                 break;
             default:
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "desc", "RootBindings.Type");
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "invalid root binding type");
                 return nullptr;
         }
     }
@@ -1369,7 +1368,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
     if (resCount > 0) {
         auto gpuResHeapAllocationOpt = _gpuResHeap->Allocate(resCount);
         if (!gpuResHeapAllocationOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECOutOfMemory, "desc", "DescriptorSet");
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "GpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
         resHeapView = {gpuResHeapAllocationOpt.value(), _gpuResHeap.get()};
@@ -1378,7 +1377,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
     if (samplerCount > 0) {
         auto gpuSamplerHeapAllocationOpt = _gpuSamplerHeap->Allocate(samplerCount);
         if (!gpuSamplerHeapAllocationOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "GpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "GpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
         samplerHeapView = {gpuSamplerHeapAllocationOpt.value(), _gpuSamplerHeap.get()};
@@ -1409,7 +1408,7 @@ Nullable<shared_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
     {
         auto opt = alloc->Allocate(1);
         if (!opt.has_value()) {
-            RADRAY_ERR_LOG("{} {}::{} {}", ECD3D12, "CpuDescriptorAllocator", "Allocate", ECOutOfMemory);
+            RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
         heapView = {opt.value(), alloc};
@@ -1533,11 +1532,11 @@ void CmdListD3D12::Destroy() noexcept {
 void CmdListD3D12::Begin() noexcept {
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12CommandAllocator", "Reset", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "ID3D12CommandAllocator", "Reset", GetErrorName(hr), hr);
     }
     if (HRESULT hr = _cmdList->Reset(_cmdAlloc.Get(), nullptr);
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12GraphicsCommandList", "Reset", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "ID3D12GraphicsCommandList", "Reset", GetErrorName(hr), hr);
     }
     ID3D12DescriptorHeap* heaps[] = {_device->_gpuResHeap->GetNative(), _device->_gpuSamplerHeap->GetNative()};
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
@@ -1619,7 +1618,7 @@ Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderP
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", ECD3D12, "ID3D12GraphicsCommandList", "QueryInterface", GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12GraphicsCommandList", "QueryInterface", GetErrorName(hr), hr);
         return nullptr;
     }
     vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
@@ -1674,7 +1673,7 @@ void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{} {} {}", ECD3D12, "ID3D12GraphicsCommandList", "QueryInterface", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "ID3D12GraphicsCommandList", "QueryInterface", GetErrorName(hr), hr);
         return;
     }
     cmdList4->EndRenderPass();
@@ -1787,17 +1786,17 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
 
 void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept {
     if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, ECInvalidOperation, "unbound root signature");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
     auto [rootConstData, index] = _boundRootSig->_desc.GetRootConstant();
     if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, ECInvalidOperation, "root signature has no root constant");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root signature has no root constant");
         return;
     }
     size_t rcSize = rootConstData.Num32BitValues * 4;
     if (length > rcSize) {
-        RADRAY_ERR_LOG("{} {} '{}'", ECD3D12, ECInvalidArgument, "length");
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "length");
         return;
     }
     _cmdList->_cmdList->SetGraphicsRoot32BitConstants(index, static_cast<UINT>(length / 4), data, 0);
@@ -1805,12 +1804,12 @@ void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept 
 
 void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
     if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, ECInvalidOperation, "unbound root signature");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
     auto [rootDescData, type, index] = _boundRootSig->_desc.GetRootDescriptor(slot);
     if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} '{}'", ECD3D12, ECInvalidArgument, "slot");
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "slot");
         return;
     }
     auto tag = view->GetTag();
@@ -1820,40 +1819,40 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
         auto usage = bufferView->_desc.Usage;
         if (usage.HasFlag(BufferUse::Resource)) {
             if (type != D3D12_ROOT_PARAMETER_TYPE_SRV) {
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "root parameter type mismatch", type);
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
             _cmdList->_cmdList->SetGraphicsRootShaderResourceView(index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::CBuffer)) {
             if (type != D3D12_ROOT_PARAMETER_TYPE_CBV) {
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "root parameter type mismatch", type);
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
             _cmdList->_cmdList->SetGraphicsRootConstantBufferView(index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::UnorderedAccess)) {
             if (type != D3D12_ROOT_PARAMETER_TYPE_UAV) {
-                RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "root parameter type mismatch", type);
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
             _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(index, gpuAddr);
         } else {
-            RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "unsupported buffer usage", static_cast<uint32_t>(usage.value()));
+            RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported buffer view usage");
         }
     } else if (tag == RenderObjectTag::TextureView) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, ECInvalidArgument, "cannot bind texture as root descriptor");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "cannot bind texture as root descriptor");
     } else {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "unsupported tag", static_cast<uint32_t>(tag.value()));
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported tag");
     }
 }
 
 void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", ECD3D12, ECInvalidOperation, "unbound root signature");
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
     auto [tableData, index] = _boundRootSig->_desc.GetDescriptorTable(slot);
     if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} '{}'", ECD3D12, ECInvalidArgument, "slot");
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "slot");
         return;
     }
     auto descHeapView = CastD3D12Object(set);
@@ -1910,7 +1909,7 @@ void SwapChainD3D12::Present() noexcept {
     UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{} {} {}", ECD3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
     }
     _fenceValue++;
     auto queue = CastD3D12Object(_desc.PresentQueue);
@@ -1960,7 +1959,7 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &range, &ptr);
         FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{}\n{}({})", ECD3D12, "ID3D12Resource", "Map", GetErrorName(hr), hr);
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "ID3D12Resource", "Map", GetErrorName(hr), hr);
     }
     return ptr;
 }
@@ -2091,12 +2090,12 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
 
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
     if (slot >= _elems.size()) {
-        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "slot");
+        RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "slot");
         return;
     }
     const auto& e = _elems[slot];
     if (index >= e._elem.Count) {
-        RADRAY_ABORT("{} '{}", ECArgumentOutOfRange, "index");
+        RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "index");
         return;
     }
     auto tag = view->GetTag();
@@ -2108,7 +2107,7 @@ void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, Resource
         TextureViewD3D12* texView = static_cast<TextureViewD3D12*>(view);
         texView->_heapView.CopyTo(0, 1, _resHeapView, offset);
     } else {
-        RADRAY_ERR_LOG("{} {} {} {}", ECD3D12, ECInvalidArgument, "unsupported tag", tag);
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported tag");
     }
 }
 

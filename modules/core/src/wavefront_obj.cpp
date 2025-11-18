@@ -234,7 +234,7 @@ WavefrontObjReader::WavefrontObjReader(const std::filesystem::path& file) {
     _myStream = make_unique<std::ifstream>(file, std::ios::in);
     _stream = _myStream.get();
     if (!_stream->good()) {
-        RADRAY_ERR_LOG("{} {}", ECInvalidArgument, file.string());
+        RADRAY_ERR_LOG("{} {}", Errors::InvalidOperation, file.string());
     }
 }
 
@@ -365,7 +365,7 @@ WavefrontObjReader::TrianglePosition WavefrontObjReader::GetPosition(size_t face
     size_t count = _pos.size();
     size_t a = CvtIdx(f.V1, count), b = CvtIdx(f.V2, count), c = CvtIdx(f.V3, count);
     if (a >= _pos.size() || b >= _pos.size() || c >= _pos.size()) {
-        RADRAY_ABORT("{}", ECIndexOutOfRange);
+        RADRAY_ABORT("{}", Errors::IndexOutOfRange);
     }
     return {_pos[a], _pos[b], _pos[c]};
 }
@@ -375,7 +375,7 @@ WavefrontObjReader::TriangleNormal WavefrontObjReader::GetNormal(size_t faceInde
     size_t count = _normal.size();
     size_t a = CvtIdx(f.Vn1, count), b = CvtIdx(f.Vn2, count), c = CvtIdx(f.Vn3, count);
     if (a >= _normal.size() || b >= _normal.size() || c >= _normal.size()) {
-        RADRAY_ABORT("{}", ECIndexOutOfRange);
+        RADRAY_ABORT("{}", Errors::IndexOutOfRange);
     }
     return {_normal[a], _normal[b], _normal[c]};
 }
@@ -385,7 +385,7 @@ WavefrontObjReader::TriangleTexcoord WavefrontObjReader::GetUV(size_t faceIndex)
     size_t count = _uv.size();
     size_t a = CvtIdx(f.Vt1, count), b = CvtIdx(f.Vt2, count), c = CvtIdx(f.Vt3, count);
     if (a >= _uv.size() || b >= _uv.size() || c >= _uv.size()) {
-        RADRAY_ABORT("{}", ECIndexOutOfRange);
+        RADRAY_ABORT("{}", Errors::IndexOutOfRange);
     }
     return {_uv[a], _uv[b], _uv[c]};
 }

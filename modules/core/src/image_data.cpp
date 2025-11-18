@@ -61,7 +61,7 @@ std::span<const byte> ImageData::GetSpan() const noexcept {
 
 ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     if (Format != ImageFormat::RGB8_BYTE) {
-        RADRAY_ABORT("{} '{}' {}", ECInvalidOperation, "Format", Format);
+        RADRAY_ABORT("{} '{}' {}", Errors::InvalidOperation, "Format", Format);
     }
     ImageData dstImg;
     dstImg.Width = Width;
@@ -121,7 +121,7 @@ size_t GetImageFormatSize(ImageFormat format) noexcept {
 }
 
 #ifdef RADRAY_ENABLE_PNG
-static const std::string_view ECLIBPNG = "libpng";
+
 class LibpngException : public std::exception {
 public:
     LibpngException() : std::exception() {}
@@ -130,12 +130,12 @@ public:
 };
 static void radray_libpng_user_error_fn(png_structp png_ptr, png_const_charp msg) {
     RADRAY_UNUSED(png_ptr);
-    RADRAY_ERR_LOG("{}: {}", ECLIBPNG, msg);
+    RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, msg);
     throw LibpngException(msg);
 }
 static void radray_libpng_user_warn_fn(png_structp png_ptr, png_const_charp msg) {
     RADRAY_UNUSED(png_ptr);
-    RADRAY_WARN_LOG("{}: {}", ECLIBPNG, msg);
+    RADRAY_WARN_LOG("{}: {}", Errors::LIBPNG, msg);
 }
 static void* radray_libpng_malloc_fn(png_structp png_ptr, png_size_t size) {
     RADRAY_UNUSED(png_ptr);
@@ -166,7 +166,7 @@ bool IsPNG(std::istream& stream) {
 }
 std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings) {
     if (stream.fail() || !stream.good()) {
-        RADRAY_ERR_LOG("{}: {}", ECLIBPNG, "stream not good");
+        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, "stream not good");
         return std::nullopt;
     }
     png_structp png_ptr = nullptr;
@@ -264,10 +264,10 @@ std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings)
         RADRAY_ASSERT(rowbytes * height == imgData.GetSize());
         return std::make_optional(std::move(imgData));
     } catch (LibpngException& e) {
-        RADRAY_ERR_LOG("{}: {}", ECLIBPNG, e.what());
+        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, e.what());
         return std::nullopt;
     } catch (...) {
-        RADRAY_ERR_LOG("{}: {}", ECLIBPNG, "unknown error");
+        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, "unknown error");
         return std::nullopt;
     }
 }
