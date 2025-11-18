@@ -49,10 +49,10 @@ public:
     ImageData RGB8ToRGBA8(uint8_t alpha) const noexcept;
     void FlipY() noexcept;
 
-    unique_ptr<byte[]> Data;
-    uint32_t Width;
-    uint32_t Height;
-    ImageFormat Format;
+    unique_ptr<byte[]> Data{};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    ImageFormat Format{ImageFormat::R8_BYTE};
 };
 
 #ifdef RADRAY_ENABLE_PNG

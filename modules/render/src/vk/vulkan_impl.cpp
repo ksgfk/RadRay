@@ -1154,7 +1154,7 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
     if (vkSetDebugUtilsObjectNameEXT == nullptr) {
         return;
     }
-    std::string cpyName{name};
+    string cpyName{name};
     VkDebugUtilsObjectNameInfoEXT info{};
     info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
     info.pNext = nullptr;

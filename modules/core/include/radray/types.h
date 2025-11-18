@@ -17,10 +17,14 @@
 #include <string>
 
 #ifdef RADRAY_ENABLE_MIMALLOC
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-copy"
+#endif
 #include <mimalloc.h>
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
 #endif
 
 namespace radray {

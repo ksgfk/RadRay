@@ -21,7 +21,7 @@ enum class LogLevel {
     Critical
 };
 
-using fmt_memory_buffer = fmt::basic_memory_buffer<char, 128, allocator<char>>;
+using fmt_memory_buffer = fmt::basic_memory_buffer<char, 512, allocator<char>>;
 
 template <typename... Args>
 string format(fmt::format_string<Args...> fmtStr, Args&&... args) noexcept {
