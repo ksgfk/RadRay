@@ -8,10 +8,19 @@ namespace radray::render {
 class RootSignatureSetElementContainer {
 public:
     explicit RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept;
+    RootSignatureSetElementContainer(const RootSignatureSetElementContainer&) noexcept;
+    RootSignatureSetElementContainer(RootSignatureSetElementContainer&&) noexcept;
+    RootSignatureSetElementContainer& operator=(const RootSignatureSetElementContainer&) noexcept;
+    RootSignatureSetElementContainer& operator=(RootSignatureSetElementContainer&&) noexcept;
+    ~RootSignatureSetElementContainer() noexcept = default;
 
     static vector<RootSignatureSetElementContainer> FromView(std::span<const RootSignatureSetElement> elems) noexcept;
 
+    friend void swap(RootSignatureSetElementContainer& lhs, RootSignatureSetElementContainer& rhs) noexcept;
+
 public:
+    void Refresh() noexcept;
+
     RootSignatureSetElement _elem;
     vector<SamplerDescriptor> _staticSamplers;
 };

@@ -26,15 +26,18 @@ public:
     void Destroy(size_t offset) noexcept;
 
 private:
-    enum class NodeState : uint8_t {
-        Unused = 0,
-        Used = 1,
-        Split = 2,
-        Full = 3
-    };
-
-    vector<NodeState> _tree;
     size_t _capacity;
+    size_t _virtualCapacity;
+    vector<size_t> _longest;
+    vector<size_t> _nodeSize;
+    vector<size_t> _nodeOffset;
+    vector<size_t> _actualCapacity;
+    vector<uint8_t> _allocated;
+
+    void UpdateAncestors(size_t index) noexcept;
+    static constexpr size_t LeftChild(size_t index) noexcept { return index * 2 + 1; }
+    static constexpr size_t RightChild(size_t index) noexcept { return index * 2 + 2; }
+    static constexpr size_t Parent(size_t index) noexcept { return (index - 1) / 2; }
 };
 
 static_assert(is_allocator<BuddyAllocator, size_t>, "BuddyAllocator is not an allocator");

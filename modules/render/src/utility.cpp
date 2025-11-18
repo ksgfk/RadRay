@@ -15,6 +15,42 @@ namespace radray::render {
 RootSignatureSetElementContainer::RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept
     : _elem(elem),
       _staticSamplers(elem.StaticSamplers.begin(), elem.StaticSamplers.end()) {
+    Refresh();
+}
+
+RootSignatureSetElementContainer::RootSignatureSetElementContainer(const RootSignatureSetElementContainer& other) noexcept
+    : _elem(other._elem),
+      _staticSamplers(other._staticSamplers) {
+    Refresh();
+}
+
+RootSignatureSetElementContainer::RootSignatureSetElementContainer(RootSignatureSetElementContainer&& other) noexcept
+    : _elem(other._elem),
+      _staticSamplers(std::move(other._staticSamplers)) {
+    Refresh();
+}
+
+RootSignatureSetElementContainer& RootSignatureSetElementContainer::operator=(const RootSignatureSetElementContainer& other) noexcept {
+    RootSignatureSetElementContainer temp{other};
+    swap(*this, temp);
+    return *this;
+}
+
+RootSignatureSetElementContainer& RootSignatureSetElementContainer::operator=(RootSignatureSetElementContainer&& other) noexcept {
+    RootSignatureSetElementContainer temp{std::move(other)};
+    swap(*this, temp);
+    return *this;
+}
+
+void swap(RootSignatureSetElementContainer& lhs, RootSignatureSetElementContainer& rhs) noexcept {
+    using std::swap;
+    swap(lhs._elem, rhs._elem);
+    swap(lhs._staticSamplers, rhs._staticSamplers);
+    lhs.Refresh();
+    rhs.Refresh();
+}
+
+void RootSignatureSetElementContainer::Refresh() noexcept {
     _elem.StaticSamplers = std::span{_staticSamplers};
 }
 
