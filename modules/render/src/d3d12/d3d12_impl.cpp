@@ -1125,6 +1125,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     bindDescs.emplace_back(e);
                     break;
                 }
+                case ResourceBindType::UNKNOWN: break;
             }
         }
     }

@@ -303,6 +303,8 @@ VkFormat MapType(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT_S8_UINT;
+        case TextureFormat::RGBA8_UINT: return VK_FORMAT_R8G8B8A8_UINT;
+        case TextureFormat::UNKNOWN: return VK_FORMAT_UNDEFINED;
     }
     Unreachable();
 }
@@ -431,6 +433,7 @@ VkFormat MapType(VertexFormat v) noexcept {
         case VertexFormat::FLOAT32X2: return VK_FORMAT_R32G32_SFLOAT;
         case VertexFormat::FLOAT32X3: return VK_FORMAT_R32G32B32_SFLOAT;
         case VertexFormat::FLOAT32X4: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case VertexFormat::UNKNOWN: return VK_FORMAT_MAX_ENUM;
     }
     Unreachable();
 }
@@ -688,6 +691,7 @@ std::string_view to_string(VkResult v) noexcept {
         case VK_INCOMPATIBLE_SHADER_BINARY_EXT: return "IncompatibleShaderBinaryEXT";
         case VK_PIPELINE_BINARY_MISSING_KHR: return "PipelineBinaryMissingKHR";
         case VK_ERROR_NOT_ENOUGH_SPACE_KHR: return "ErrorNotEnoughSpaceKHR";
+        case VK_RESULT_MAX_ENUM: return "UNKNOWN";
     }
     Unreachable();
 }
@@ -944,8 +948,9 @@ std::string_view to_string(VkFormat v) noexcept {
         case VK_FORMAT_PVRTC2_2BPP_SRGB_BLOCK_IMG: return "PVRTC2_2BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_PVRTC2_4BPP_SRGB_BLOCK_IMG: return "PVRTC2_4BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_R16G16_SFIXED5_NV: return "R16G16_SFIXED5_NV";
+
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view to_string(VkPresentModeKHR v) noexcept {
