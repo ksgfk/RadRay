@@ -118,8 +118,8 @@ public:
         {
             TriangleMesh sphereMesh{};
             sphereMesh.InitAsUVSphere(0.5f, 32);
-            VertexData sphereModel{};
-            sphereMesh.ToVertexData(&sphereModel);
+            MeshResource sphereModel{};
+            sphereMesh.ToSimpleMeshResource(&sphereModel);
 
             if (backend == RenderBackend::Vulkan) {
                 RootSignatureSetElement cbLayoutElems[] = {
@@ -143,20 +143,21 @@ public:
             rsDesc.BindingSets = layouts;
             rsDesc.Constant = rscDesc;
             _rs = _device->CreateRootSignature(rsDesc).Unwrap();
+            const auto& prim = sphereModel.Primitives[0];
             vector<VertexElement> vertElems;
             {
                 SemanticMapping mapping[] = {
-                    {VertexSemantic::POSITION, 0, 0, VertexFormat::FLOAT32X3},
-                    {VertexSemantic::NORMAL, 0, 1, VertexFormat::FLOAT32X3},
-                    {VertexSemantic::TEXCOORD, 0, 2, VertexFormat::FLOAT32X2}};
-                auto mves = MapVertexElements(sphereModel.Layouts, mapping);
+                    {VertexSemantics::POSITION, 0, 0, VertexFormat::FLOAT32X3},
+                    {VertexSemantics::NORMAL, 0, 1, VertexFormat::FLOAT32X3},
+                    {VertexSemantics::TEXCOORD, 0, 2, VertexFormat::FLOAT32X2}};
+                auto mves = MapVertexElements(prim.VertexBuffers, mapping);
                 if (!mves.has_value()) {
                     throw ImGuiApplicationException("Failed to map vertex elements");
                 }
                 vertElems = std::move(mves.value());
             }
             VertexBufferLayout vertLayout{};
-            vertLayout.ArrayStride = sphereModel.GetStride();
+            // vertLayout.ArrayStride = prim.VertexBuffers.
             vertLayout.StepMode = VertexStepMode::Vertex;
             vertLayout.Elements = vertElems;
             ColorTargetState rtState = DefaultColorTargetState(TextureFormat::RGBA8_UNORM);
@@ -172,14 +173,14 @@ public:
             _pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
 
             BufferDescriptor vertDesc{
-                sphereModel.VertexSize,
+                sphereModel.Bins[0].GetSize(),
                 MemoryType::Device,
                 BufferUse::Vertex | BufferUse::CopyDestination,
                 ResourceHint::None,
                 "sphere_vertex"};
             auto vert = _device->CreateBuffer(vertDesc).Unwrap();
             BufferDescriptor indexDesc{
-                sphereModel.IndexSize,
+                sphereModel.Bins[1].GetSize(),
                 MemoryType::Device,
                 BufferUse::Index | BufferUse::CopyDestination,
                 ResourceHint::None,
@@ -187,15 +188,15 @@ public:
             auto index = _device->CreateBuffer(indexDesc).Unwrap();
 
             BufferDescriptor uploadDesc{
-                sphereModel.VertexSize + sphereModel.IndexSize,
+                sphereModel.Bins[0].GetSize() + sphereModel.Bins[1].GetSize(),
                 MemoryType::Upload,
                 BufferUse::CopySource,
                 ResourceHint::None,
                 "sphere_upload"};
             auto upload = _device->CreateBuffer(uploadDesc).Unwrap();
             void* dst = upload->Map(0, uploadDesc.Size);
-            std::memcpy(dst, sphereModel.VertexData.get(), sphereModel.VertexSize);
-            std::memcpy(static_cast<uint8_t*>(dst) + sphereModel.VertexSize, sphereModel.IndexData.get(), sphereModel.IndexSize);
+            std::memcpy(dst, sphereModel.Bins[0].GetData().data(), sphereModel.Bins[0].GetSize());
+            std::memcpy(static_cast<uint8_t*>(dst) + sphereModel.Bins[0].GetSize(), sphereModel.Bins[1].GetData().data(), sphereModel.Bins[1].GetSize());
             upload->Unmap(0, uploadDesc.Size);
 
             CommandQueue* copyQueue = _device->GetCommandQueue(QueueType::Copy).Unwrap();
@@ -207,8 +208,8 @@ public:
                     {index.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
                 cmdBuffer->ResourceBarrier(barrierBefore, {});
             }
-            cmdBuffer->CopyBufferToBuffer(vert.get(), 0, upload.get(), 0, sphereModel.VertexSize);
-            cmdBuffer->CopyBufferToBuffer(index.get(), 0, upload.get(), sphereModel.VertexSize, sphereModel.IndexSize);
+            cmdBuffer->CopyBufferToBuffer(vert.get(), 0, upload.get(), 0, sphereModel.Bins[0].GetSize());
+            cmdBuffer->CopyBufferToBuffer(index.get(), 0, upload.get(), sphereModel.Bins[0].GetSize(), sphereModel.Bins[1].GetSize());
             {
                 BarrierBufferDescriptor barrierAfter[] = {
                     {vert.get(), BufferUse::CopyDestination, BufferUse::Common, nullptr, false},
@@ -222,12 +223,12 @@ public:
             copyQueue->Submit(submitDesc);
             copyQueue->Wait();
 
-            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.IndexType));
+            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.Primitives[0].IndexBuffer.FormatInBytes));
             _meshes.emplace_back(HelloMesh{
                 std::move(vert),
                 std::move(index),
-                sphereModel.VertexSize,
-                sphereModel.IndexCount,
+                sphereModel.Primitives[0].VertexCount,
+                sphereModel.Primitives[0].IndexBuffer.IndexCount,
                 indexStride});
         }
         RecreateDepthTexture();

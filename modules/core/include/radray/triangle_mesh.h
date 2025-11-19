@@ -4,7 +4,7 @@
 
 namespace radray {
 
-class VertexData;
+class MeshResource;
 
 class TriangleMesh {
 public:
@@ -16,8 +16,7 @@ public:
     vector<Eigen::Vector4f> Color0;
 
     bool IsValid() const noexcept;
-    uint64_t GetVertexByteSize() const noexcept;
-    void ToVertexData(VertexData* data) const noexcept;
+    void ToSimpleMeshResource(MeshResource* outResource) const noexcept;
 
     void InitAsCube(float halfExtend) noexcept;
     void InitAsUVSphere(float radius, uint32_t numberSlices) noexcept;

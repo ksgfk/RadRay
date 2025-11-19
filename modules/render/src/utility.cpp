@@ -185,22 +185,23 @@ BlendState DefaultBlendState() noexcept {
          BlendOperation::Add}};
 }
 
-IndexFormat MapIndexType(VertexIndexType type) noexcept {
-    switch (type) {
-        case VertexIndexType::UInt16: return IndexFormat::UINT16;
-        case VertexIndexType::UInt32: return IndexFormat::UINT32;
+IndexFormat MapIndexType(uint32_t size) noexcept {
+    switch (size) {
+        case 2: return IndexFormat::UINT16;
+        case 4: return IndexFormat::UINT32;
+        default: return IndexFormat::UINT32;
     }
-    Unreachable();
 }
 
-std::optional<vector<VertexElement>> MapVertexElements(std::span<VertexLayout> layouts, std::span<SemanticMapping> semantics) noexcept {
+std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept {
     vector<VertexElement> result;
     result.reserve(semantics.size());
     for (const auto& want : semantics) {
-        const VertexLayout* found = nullptr;
+        uint32_t wantSize = GetVertexFormatSize(want.Format);
+        const VertexBufferEntry* found = nullptr;
         for (const auto& l : layouts) {
-            uint32_t wantSize = GetVertexFormatSize(want.Format);
-            if (l.Semantic == want.Semantic && l.SemanticIndex == want.SemanticIndex && l.Size == wantSize) {
+            uint32_t preSize = GetVertexDataSizeInBytes(l.Type, l.ComponentCount);
+            if (l.Semantic == want.Semantic && l.SemanticIndex == want.SemanticIndex && preSize == wantSize) {
                 found = &l;
                 break;
             }

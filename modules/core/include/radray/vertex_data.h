@@ -1,61 +1,98 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <string_view>
+#include <memory>
 
 #include <radray/types.h>
 #include <radray/logger.h>
 
 namespace radray {
 
-class VertexSemantic {
-public:
-    static constexpr std::string_view POSITION = "POSITION";
-    static constexpr std::string_view NORMAL = "NORMAL";
-    static constexpr std::string_view TEXCOORD = "TEXCOORD";
-    static constexpr std::string_view TANGENT = "TANGENT";
-    static constexpr std::string_view COLOR = "COLOR";
-    static constexpr std::string_view PSIZE = "PSIZE";
-    static constexpr std::string_view BINORMAL = "BINORMAL";
-    static constexpr std::string_view BLENDINDICES = "BLENDINDICES";
-    static constexpr std::string_view BLENDWEIGHT = "BLENDWEIGHT";
-    static constexpr std::string_view POSITIONT = "POSITIONT";
+enum class VertexDataType : uint16_t {
+    FLOAT,
+    UINT,
+    SINT
 };
 
-enum class VertexIndexType {
-    UInt32,
-    UInt16
+class VertexSemantics {
+public:
+    static constexpr const std::string_view POSITION = "POSITION";
+    static constexpr const std::string_view NORMAL = "NORMAL";
+    static constexpr const std::string_view TEXCOORD = "TEXCOORD";
+    static constexpr const std::string_view TANGENT = "TANGENT";
+    static constexpr const std::string_view COLOR = "COLOR";
+    static constexpr const std::string_view PSIZE = "PSIZE";
+    static constexpr const std::string_view BINORMAL = "BINORMAL";
+    static constexpr const std::string_view BLENDINDICES = "BLENDINDICES";
+    static constexpr const std::string_view BLENDWEIGHT = "BLENDWEIGHT";
+    static constexpr const std::string_view POSITIONT = "POSITIONT";
 };
 
-class VertexLayout {
-public:
+struct VertexBufferEntry {
     string Semantic;
-    uint32_t SemanticIndex;
-    uint32_t Size;
-    uint32_t Offset;
+    uint32_t SemanticIndex{0};
+    uint32_t BufferIndex{0};
+    VertexDataType Type{VertexDataType::FLOAT};
+    uint16_t ComponentCount{0};
+    uint32_t Offset{0};
+    uint32_t Stride{0};
 };
 
-class VertexData {
+struct IndexBufferEntry {
+    uint32_t BufferIndex{0};
+    uint32_t IndexCount{0};
+    uint32_t FormatInBytes{0};
+    uint32_t Offset{0};
+    uint32_t Stride{0};
+};
+
+class MeshBuffer {
 public:
-    uint32_t GetStride() const noexcept;
+    MeshBuffer() = default;
+    explicit MeshBuffer(std::span<const byte> data);
+    MeshBuffer(const MeshBuffer& other);
+    MeshBuffer(MeshBuffer&& other) noexcept = default;
+    MeshBuffer& operator=(const MeshBuffer& other);
+    MeshBuffer& operator=(MeshBuffer&& other) noexcept = default;
+    ~MeshBuffer() = default;
 
-    vector<VertexLayout> Layouts;
-    unique_ptr<byte[]> VertexData;
-    unique_ptr<byte[]> IndexData;
-    uint32_t VertexSize;
-    uint32_t IndexSize;
-    VertexIndexType IndexType;
-    uint32_t IndexCount;
+    std::span<const byte> GetData() const noexcept;
+    size_t GetSize() const noexcept { return _size; }
+
+private:
+    void Assign(std::span<const byte> data);
+
+    std::unique_ptr<byte[]> _data;
+    size_t _size{0};
 };
 
-std::string_view to_string(VertexIndexType val) noexcept;
+class MeshPrimitive {
+public:
+    vector<VertexBufferEntry> VertexBuffers;
+    IndexBufferEntry IndexBuffer{};
+    uint32_t VertexCount{0};
+};
+
+class MeshResource {
+public:
+    vector<MeshPrimitive> Primitives;
+    vector<MeshBuffer> Bins;
+    string Name;
+};
+
+constexpr uint32_t GetVertexDataSizeInBytes(VertexDataType type, uint16_t componentCount) noexcept {
+    switch (type) {
+        case VertexDataType::FLOAT:
+            return 4 * componentCount;
+        case VertexDataType::UINT:
+            return 4 * componentCount;
+        case VertexDataType::SINT:
+            return 4 * componentCount;
+        default:
+            return 0;
+    }
+}
 
 }  // namespace radray
-
-template <class CharT>
-struct fmt::formatter<radray::VertexIndexType, CharT> : fmt::formatter<std::string_view, CharT> {
-    template <class FormatContext>
-    auto format(radray::VertexIndexType val, FormatContext& ctx) const {
-        return formatter<std::string_view, CharT>::format(to_string(val), ctx);
-    }
-};

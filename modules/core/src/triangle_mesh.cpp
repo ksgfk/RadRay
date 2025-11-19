@@ -3,6 +3,9 @@
 #include <new>
 #include <numbers>
 #include <limits>
+#include <type_traits>
+#include <utility>
+#include <cstring>
 
 #include <radray/errors.h>
 #include <radray/vertex_data.h>
@@ -20,94 +23,95 @@ bool TriangleMesh::IsValid() const noexcept {
            (Color0.size() == 0 || Color0.size() == Positions.size());
 }
 
-uint64_t TriangleMesh::GetVertexByteSize() const noexcept {
-    return Positions.size() * 12 +
-           Normals.size() * 12 +
-           UV0.size() * 8 +
-           Tangents.size() * 16 +
-           Color0.size() * 16;
-}
+void TriangleMesh::ToSimpleMeshResource(MeshResource* outResource) const noexcept {
+    if (outResource == nullptr) {
+        return;
+    }
+    if (!IsValid()) {
+        return;
+    }
+    MeshResource resource;
+    resource.Name = outResource->Name;
+    MeshPrimitive primitive;
+    primitive.VertexCount = static_cast<uint32_t>(Positions.size());
+    auto pushBuffer = [&](std::span<const byte> data) -> uint32_t {
+        resource.Bins.emplace_back(data);
+        return static_cast<uint32_t>(resource.Bins.size() - 1);
+    };
+    struct AttributeDesc {
+        std::string_view Semantic;
+        uint32_t SemanticIndex;
+        size_t ElementSize;
+        size_t Offset;
+        const byte* BasePtr;
+    };
 
-void TriangleMesh::ToVertexData(VertexData* data) const noexcept {
-    {
-        data->Layouts.emplace_back(VertexLayout{string{VertexSemantic::POSITION}, 0, 12, 0});
-        uint32_t byteOffset = 12;
-        if (Normals.size() > 0) {
-            data->Layouts.emplace_back(VertexLayout{string{VertexSemantic::NORMAL}, 0, 12, byteOffset});
-            byteOffset += 12;
+    vector<AttributeDesc> attributes;
+    size_t vertexStride = 0;
+
+    auto queueAttribute = [&](auto const& container, std::string_view semantic, uint32_t semanticIndex = 0U) {
+        if (container.empty()) {
+            return;
         }
-        if (UV0.size() > 0) {
-            data->Layouts.emplace_back(VertexLayout{string{VertexSemantic::TEXCOORD}, 0, 8, byteOffset});
-            byteOffset += 8;
-        }
-        if (Tangents.size() > 0) {
-            data->Layouts.emplace_back(VertexLayout{string{VertexSemantic::TANGENT}, 0, 16, byteOffset});
-            byteOffset += 16;
-        }
-        if (Color0.size() > 0) {
-            data->Layouts.emplace_back(VertexLayout{string{VertexSemantic::COLOR}, 0, 16, byteOffset});
-            byteOffset += 16;
-        }
-        uint64_t byteSize = byteOffset * Positions.size();
-        RADRAY_ASSERT(byteSize == GetVertexByteSize());
-        if (byteSize > std::numeric_limits<uint32_t>::max()) {
-            RADRAY_ABORT("{} '{}'", Errors::ArgumentOutOfRange, "data");
-        }
-        data->VertexData = make_unique<byte[]>(byteSize);
-        data->VertexSize = (uint32_t)byteSize;
-        std::byte* target = reinterpret_cast<std::byte*>(data->VertexData.get());
-        for (size_t i = 0; i < Positions.size(); i++) {
-            std::memcpy(target, Positions[i].data(), sizeof(float) * 3);
-            target += sizeof(float) * 3;
-            if (Normals.size() > 0) {
-                std::memcpy(target, Normals[i].data(), sizeof(float) * 3);
-                target += sizeof(float) * 3;
-            }
-            if (UV0.size() > 0) {
-                std::memcpy(target, UV0[i].data(), sizeof(float) * 2);
-                target += sizeof(float) * 2;
-            }
-            if (Tangents.size() > 0) {
-                std::memcpy(target, Tangents[i].data(), sizeof(float) * 4);
-                target += sizeof(float) * 4;
-            }
-            if (Color0.size() > 0) {
-                std::memcpy(target, Color0[i].data(), sizeof(float) * 4);
-                target += sizeof(float) * 4;
+        using Container = std::decay_t<decltype(container)>;
+        using ValueType = typename Container::value_type;
+
+        AttributeDesc desc{};
+        desc.Semantic = semantic;
+        desc.SemanticIndex = semanticIndex;
+        desc.ElementSize = sizeof(ValueType);
+        desc.Offset = vertexStride;
+        desc.BasePtr = reinterpret_cast<const byte*>(container.data());
+        vertexStride += desc.ElementSize;
+        attributes.emplace_back(desc);
+    };
+
+    queueAttribute(Positions, VertexSemantics::POSITION);
+    queueAttribute(Normals, VertexSemantics::NORMAL);
+    queueAttribute(UV0, VertexSemantics::TEXCOORD, 0U);
+    queueAttribute(Tangents, VertexSemantics::TANGENT);
+    queueAttribute(Color0, VertexSemantics::COLOR);
+
+    uint32_t vertexBufferIndex = UINT32_MAX;
+    if (!attributes.empty()) {
+        vector<byte> interleaved(vertexStride * primitive.VertexCount, byte{0});
+        for (uint32_t v = 0; v < primitive.VertexCount; ++v) {
+            byte* dst = interleaved.data() + static_cast<size_t>(v) * vertexStride;
+            for (const auto& attr : attributes) {
+                const byte* src = attr.BasePtr + static_cast<size_t>(v) * attr.ElementSize;
+                std::memcpy(dst + attr.Offset, src, attr.ElementSize);
             }
         }
-    }
-    {
-        RADRAY_ASSERT(Indices.size() <= std::numeric_limits<uint32_t>::max());
-        if (Positions.size() <= std::numeric_limits<uint16_t>::max()) {
-            uint64_t byteSize = Indices.size() * sizeof(uint16_t);
-            if (byteSize > std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ABORT("{} '{}'", Errors::ArgumentOutOfRange, "data");
-            }
-            data->IndexType = VertexIndexType::UInt16;
-            data->IndexSize = (uint32_t)byteSize;
-            data->IndexData = make_unique<byte[]>(data->IndexSize);
-            data->IndexCount = (uint32_t)Indices.size();
-            std::byte* target = reinterpret_cast<std::byte*>(data->IndexData.get());
-            for (auto&& i : Indices) {
-                uint16_t value = static_cast<uint16_t>(i);
-                std::memcpy(target, &value, sizeof(uint16_t));
-                target += sizeof(uint16_t);
-            }
-        } else if (Positions.size() <= std::numeric_limits<uint32_t>::max()) {
-            uint64_t byteSize = Indices.size() * sizeof(uint32_t);
-            if (byteSize > std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ABORT("{} '{}'", Errors::ArgumentOutOfRange, "data");
-            }
-            data->IndexType = VertexIndexType::UInt32;
-            data->IndexSize = (uint32_t)byteSize;
-            data->IndexData = make_unique<byte[]>(data->IndexSize);
-            data->IndexCount = (uint32_t)Indices.size();
-            std::memcpy(data->IndexData.get(), Indices.data(), data->IndexSize);
-        } else {
-            RADRAY_ABORT("{} '{}'", Errors::ArgumentOutOfRange, "data");
+
+        std::span<const byte> vertexBytes{interleaved.data(), interleaved.size()};
+        vertexBufferIndex = pushBuffer(vertexBytes);
+
+        const uint32_t stride = static_cast<uint32_t>(vertexStride);
+        for (const auto& attr : attributes) {
+            VertexBufferEntry entry{};
+            entry.Semantic = string{attr.Semantic};
+            entry.SemanticIndex = attr.SemanticIndex;
+            entry.BufferIndex = vertexBufferIndex;
+            entry.Offset = static_cast<uint32_t>(attr.Offset);
+            entry.Stride = stride;
+            primitive.VertexBuffers.emplace_back(entry);
         }
     }
+
+    if (!Indices.empty()) {
+        std::span<const byte> indexBytes{
+            reinterpret_cast<const byte*>(Indices.data()),
+            Indices.size() * sizeof(uint32_t)};
+        primitive.IndexBuffer.BufferIndex = pushBuffer(indexBytes);
+        primitive.IndexBuffer.IndexCount = static_cast<uint32_t>(Indices.size());
+        primitive.IndexBuffer.Offset = 0;
+        primitive.IndexBuffer.Stride = sizeof(uint32_t);
+    }
+
+    resource.Primitives.clear();
+    resource.Primitives.emplace_back(std::move(primitive));
+
+    *outResource = std::move(resource);
 }
 
 void TriangleMesh::InitAsCube(float halfExtend) noexcept {
