@@ -12,6 +12,12 @@
 
 namespace radray {
 
+template <class T>
+struct IsEigenVector : std::false_type {};
+
+template <class Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
+struct IsEigenVector<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> : std::bool_constant<(Rows == 1 || Cols == 1)> {};
+
 struct Viewport {
     float X;
     float Y;

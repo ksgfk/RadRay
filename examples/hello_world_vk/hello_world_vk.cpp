@@ -3,8 +3,6 @@
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
-#include <radray/triangle_mesh.h>
-#include <radray/vertex_data.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
@@ -18,6 +16,27 @@ constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
 constexpr int RT_COUNT = 3;
 const char* RADRAY_APPNAME = "hello_world_vk";
+const char* SHADER_SRC = R"(const static float3 g_Color[3] = {
+    float3(1, 0, 0),
+    float3(0, 1, 0),
+    float3(0, 0, 1)};
+
+struct V2P {
+    float4 pos : SV_POSITION;
+    [[vk::location(0)]] float3 color: COLOR0;
+};
+
+V2P VSMain([[vk::location(0)]] float3 v_vert: POSITION, uint vertId: SV_VertexID) {
+    V2P v2p;
+    v2p.pos = float4(v_vert, 1);
+    v2p.color = g_Color[vertId % 3];
+    return v2p;
+}
+
+float4 PSMain(V2P v2p) : SV_Target {
+    return float4(v2p.color, 1);
+}
+)";
 
 struct FrameData {
     shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
@@ -98,26 +117,25 @@ void Init() {
     sw.Start();
     last = 0;
 
-    TriangleMesh mesh;
-    mesh.Positions = {{0, 0.5f, 0}, {-0.5f, -0.366f, 0}, {0.5f, -0.366f, 0}};
-    mesh.Indices = {0, 1, 2};
-    VertexData model;
-    mesh.ToVertexData(&model);
-    auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto vert = device->CreateBuffer({model.VertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
-    auto idxUpload = device->CreateBuffer({model.IndexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto idx = device->CreateBuffer({model.IndexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
+    float pos[] = {0, 0.5f, 0, -0.5f, -0.366f, 0, 0.5f, -0.366f, 0};
+    uint16_t i[] = {0, 1, 2};
+    const size_t vertexSize = sizeof(pos);
+    const size_t indexSize = sizeof(i);
+    auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
+    auto idxUpload = device->CreateBuffer({indexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
     vertBuf = std::static_pointer_cast<vulkan::BufferVulkan>(vert);
     idxBuf = std::static_pointer_cast<vulkan::BufferVulkan>(idx);
     {
-        void* vertMap = vertUpload->Map(0, model.VertexSize);
-        std::memcpy(vertMap, model.VertexData.get(), model.VertexSize);
-        vertUpload->Unmap(0, model.VertexSize);
+        void* vertMap = vertUpload->Map(0, vertexSize);
+        std::memcpy(vertMap, pos, vertexSize);
+        vertUpload->Unmap(0, vertexSize);
     }
     {
-        void* idxMap = idxUpload->Map(0, model.IndexSize);
-        std::memcpy(idxMap, model.IndexData.get(), model.IndexSize);
-        idxUpload->Unmap(0, model.IndexSize);
+        void* idxMap = idxUpload->Map(0, indexSize);
+        std::memcpy(idxMap, i, indexSize);
+        idxUpload->Unmap(0, indexSize);
     }
 
     auto cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
@@ -128,8 +146,8 @@ void Init() {
             {idx.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
         cmdBuffer->ResourceBarrier(barriers, {});
     }
-    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, model.VertexSize);
-    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, model.IndexSize);
+    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, vertexSize);
+    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, indexSize);
     {
         BarrierBufferDescriptor barriers[] = {
             {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
@@ -143,7 +161,7 @@ void Init() {
 
     dxc = CreateDxc().Unwrap();
     {
-        auto hlslStr = ReadText(std::filesystem::path("assets") / RADRAY_APPNAME / "color.hlsl").value();
+        auto hlslStr = SHADER_SRC;
         auto vsSpv = dxc->Compile(hlslStr, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, true).value();
         auto psSpv = dxc->Compile(hlslStr, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, true).value();
         ShaderDescriptor vsDesc{};

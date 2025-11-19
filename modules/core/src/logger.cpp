@@ -33,7 +33,7 @@ static spdlog::logger g_logger = []() {
     auto sink = make_shared<spdlog::sinks::stdout_color_sink_mt>();
     spdlog::logger l{"default", sink};
     auto formatter = make_unique<spdlog::pattern_formatter>();
-    formatter->add_flag<maybe_print_source_loc_formatter>('q').set_pattern("%^[%Y-%m-%d %T.%e][%l]%q%$%v");
+    formatter->add_flag<maybe_print_source_loc_formatter>('q').set_pattern("%^[%Y-%m-%d %T.%e][%l] %q%$%v");
     l.flush_on(spdlog::level::err);
     // l.set_pattern("%^[%Y-%m-%d %T.%e][%l] %@%$ %v");
     l.set_formatter(std::move(formatter));

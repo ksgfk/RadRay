@@ -328,7 +328,7 @@ VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept {
         case 16: return VK_SAMPLE_COUNT_16_BIT;
         case 32: return VK_SAMPLE_COUNT_32_BIT;
         case 64: return VK_SAMPLE_COUNT_64_BIT;
-        default: return VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
+        default: return VK_SAMPLE_COUNT_1_BIT;
     }
 }
 

@@ -30,88 +30,94 @@ void TriangleMesh::ToSimpleMeshResource(MeshResource* outResource) const noexcep
     if (!IsValid()) {
         return;
     }
-    MeshResource resource;
-    resource.Name = outResource->Name;
-    MeshPrimitive primitive;
+
+    MeshPrimitive primitive{};
     primitive.VertexCount = static_cast<uint32_t>(Positions.size());
-    auto pushBuffer = [&](std::span<const byte> data) -> uint32_t {
-        resource.Bins.emplace_back(data);
-        return static_cast<uint32_t>(resource.Bins.size() - 1);
-    };
-    struct AttributeDesc {
-        std::string_view Semantic;
-        uint32_t SemanticIndex;
-        size_t ElementSize;
-        size_t Offset;
-        const byte* BasePtr;
-    };
 
-    vector<AttributeDesc> attributes;
-    size_t vertexStride = 0;
+    vector<VertexBufferEntry> attrs;
+    vector<vector<byte>> raws;
+    vector<uint32_t> perVertexBytes;
 
-    auto queueAttribute = [&](auto const& container, std::string_view semantic, uint32_t semanticIndex = 0U) {
+    auto pushAttrib = [&](auto const& container, std::string_view semantic, uint32_t semanticIndex) {
         if (container.empty()) {
             return;
         }
-        using Container = std::decay_t<decltype(container)>;
-        using ValueType = typename Container::value_type;
+        using TContainer = std::decay_t<decltype(container)>;
+        using TValueType = typename TContainer::value_type;
+        RADRAY_ASSERT(container.size() == primitive.VertexCount);
+        static_assert(std::is_trivially_copyable_v<TValueType> || IsEigenVector<TValueType>::value, "Attribute type must be trivially copyable or an Eigen vector");
+        using Traits = VertexAttributeTraits<TValueType>;
+        using Scalar = typename Traits::ScalarType;
+        constexpr uint32_t perVertexSize = sizeof(Scalar) * Traits::ComponentCount;
 
-        AttributeDesc desc{};
-        desc.Semantic = semantic;
-        desc.SemanticIndex = semanticIndex;
-        desc.ElementSize = sizeof(ValueType);
-        desc.Offset = vertexStride;
-        desc.BasePtr = reinterpret_cast<const byte*>(container.data());
-        vertexStride += desc.ElementSize;
-        attributes.emplace_back(desc);
-    };
-
-    queueAttribute(Positions, VertexSemantics::POSITION);
-    queueAttribute(Normals, VertexSemantics::NORMAL);
-    queueAttribute(UV0, VertexSemantics::TEXCOORD, 0U);
-    queueAttribute(Tangents, VertexSemantics::TANGENT);
-    queueAttribute(Color0, VertexSemantics::COLOR);
-
-    uint32_t vertexBufferIndex = UINT32_MAX;
-    if (!attributes.empty()) {
-        vector<byte> interleaved(vertexStride * primitive.VertexCount, byte{0});
-        for (uint32_t v = 0; v < primitive.VertexCount; ++v) {
-            byte* dst = interleaved.data() + static_cast<size_t>(v) * vertexStride;
-            for (const auto& attr : attributes) {
-                const byte* src = attr.BasePtr + static_cast<size_t>(v) * attr.ElementSize;
-                std::memcpy(dst + attr.Offset, src, attr.ElementSize);
+        vector<byte> raw;
+        raw.resize(container.size() * perVertexSize);
+        // https://gitlab.com/libeigen/eigen/-/issues/1855
+        if constexpr (std::is_trivially_copyable_v<TValueType>) {  // 理论上以后 Eigen 完成issue后就会走这个路径
+            std::memcpy(raw.data(), reinterpret_cast<const byte*>(container.data()), raw.size());
+        } else if constexpr (IsEigenVector<TValueType>::value) {
+            for (size_t i = 0; i < container.size(); i++) {
+                const auto& value = container[i];
+                const Scalar* src = value.derived().data();
+                std::memcpy(raw.data() + i * perVertexSize, src, perVertexSize);
             }
         }
+        attrs.emplace_back(VertexBufferEntry{
+            .Semantic = string{semantic},
+            .SemanticIndex = semanticIndex,
+            .Type = Traits::Type,
+            .ComponentCount = Traits::ComponentCount});
+        raws.emplace_back(std::move(raw));
+        perVertexBytes.push_back(perVertexSize);
+    };
 
-        std::span<const byte> vertexBytes{interleaved.data(), interleaved.size()};
-        vertexBufferIndex = pushBuffer(vertexBytes);
+    pushAttrib(Positions, VertexSemantics::POSITION, 0);
+    pushAttrib(Normals, VertexSemantics::NORMAL, 0);
+    pushAttrib(UV0, VertexSemantics::TEXCOORD, 0);
+    pushAttrib(Tangents, VertexSemantics::TANGENT, 0);
+    pushAttrib(Color0, VertexSemantics::COLOR, 0);
 
-        const uint32_t stride = static_cast<uint32_t>(vertexStride);
-        for (const auto& attr : attributes) {
-            VertexBufferEntry entry{};
-            entry.Semantic = string{attr.Semantic};
-            entry.SemanticIndex = attr.SemanticIndex;
-            entry.BufferIndex = vertexBufferIndex;
-            entry.Offset = static_cast<uint32_t>(attr.Offset);
-            entry.Stride = stride;
-            primitive.VertexBuffers.emplace_back(entry);
+    if (attrs.empty()) {
+        return;
+    }
+
+    vector<uint32_t> offsets(attrs.size());
+    uint32_t vertexStride = 0;
+    for (size_t i = 0; i < attrs.size(); i++) {
+        offsets[i] = vertexStride;
+        vertexStride += perVertexBytes[i];
+    }
+
+    vector<byte> vertexData(static_cast<size_t>(vertexStride) * primitive.VertexCount);
+    for (size_t v = 0; v < primitive.VertexCount; v++) {
+        byte* dst = vertexData.data() + v * vertexStride;
+        for (size_t a = 0; a < raws.size(); a++) {
+            const byte* src = raws[a].data() + v * perVertexBytes[a];
+            std::memcpy(dst + offsets[a], src, perVertexBytes[a]);
         }
     }
 
-    if (!Indices.empty()) {
-        std::span<const byte> indexBytes{
-            reinterpret_cast<const byte*>(Indices.data()),
-            Indices.size() * sizeof(uint32_t)};
-        primitive.IndexBuffer.BufferIndex = pushBuffer(indexBytes);
-        primitive.IndexBuffer.IndexCount = static_cast<uint32_t>(Indices.size());
-        primitive.IndexBuffer.Offset = 0;
-        primitive.IndexBuffer.Stride = sizeof(uint32_t);
+    for (size_t i = 0; i < attrs.size(); i++) {
+        attrs[i].BufferIndex = 0;
+        attrs[i].Offset = offsets[i];
+        attrs[i].Stride = vertexStride;
     }
 
-    resource.Primitives.clear();
-    resource.Primitives.emplace_back(std::move(primitive));
+    vector<byte> indexData(Indices.size() * sizeof(uint32_t));
+    std::memcpy(indexData.data(), reinterpret_cast<const byte*>(Indices.data()), indexData.size());
 
-    *outResource = std::move(resource);
+    primitive.VertexBuffers = std::move(attrs);
+    primitive.IndexBuffer.BufferIndex = 1;
+    primitive.IndexBuffer.IndexCount = static_cast<uint32_t>(Indices.size());
+    primitive.IndexBuffer.Offset = 0;
+    primitive.IndexBuffer.Stride = sizeof(uint32_t);
+
+    outResource->Primitives.clear();
+    outResource->Bins.clear();
+
+    outResource->Bins.emplace_back(std::span<const byte>{vertexData.data(), vertexData.size()});
+    outResource->Bins.emplace_back(std::span<const byte>{indexData.data(), indexData.size()});
+    outResource->Primitives.emplace_back(std::move(primitive));
 }
 
 void TriangleMesh::InitAsCube(float halfExtend) noexcept {

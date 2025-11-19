@@ -156,8 +156,12 @@ public:
                 }
                 vertElems = std::move(mves.value());
             }
+            uint32_t stride = 0;
+            for (const auto& vb : prim.VertexBuffers) {
+                stride += GetVertexDataSizeInBytes(vb.Type, vb.ComponentCount);
+            }
             VertexBufferLayout vertLayout{};
-            // vertLayout.ArrayStride = prim.VertexBuffers.
+            vertLayout.ArrayStride = stride;
             vertLayout.StepMode = VertexStepMode::Vertex;
             vertLayout.Elements = vertElems;
             ColorTargetState rtState = DefaultColorTargetState(TextureFormat::RGBA8_UNORM);
@@ -223,7 +227,7 @@ public:
             copyQueue->Submit(submitDesc);
             copyQueue->Wait();
 
-            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.Primitives[0].IndexBuffer.FormatInBytes));
+            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.Primitives[0].IndexBuffer.Stride));
             _meshes.emplace_back(HelloMesh{
                 std::move(vert),
                 std::move(index),

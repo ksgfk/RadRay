@@ -7,6 +7,7 @@
 
 #include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/basic_math.h>
 
 namespace radray {
 
@@ -43,7 +44,6 @@ struct VertexBufferEntry {
 struct IndexBufferEntry {
     uint32_t BufferIndex{0};
     uint32_t IndexCount{0};
-    uint32_t FormatInBytes{0};
     uint32_t Offset{0};
     uint32_t Stride{0};
 };
@@ -80,6 +80,46 @@ public:
     vector<MeshPrimitive> Primitives;
     vector<MeshBuffer> Bins;
     string Name;
+};
+
+template <class TValueType, class Enable = void>
+struct VertexAttributeTraits {
+    static_assert(false, "Unsupported vertex attribute container type");
+};
+
+template <class Scalar>
+consteval VertexDataType DeduceVertexDataType() {
+    using Bare = std::remove_cvref_t<Scalar>;
+    static_assert(std::is_arithmetic_v<Bare>, "Vertex attribute scalar must be arithmetic");
+    static_assert(sizeof(Bare) == 4, "Vertex attribute scalar must be 32-bit");
+
+    if constexpr (std::is_floating_point_v<Bare>) {
+        return VertexDataType::FLOAT;
+    } else if constexpr (std::is_integral_v<Bare> && std::is_signed_v<Bare>) {
+        return VertexDataType::SINT;
+    } else if constexpr (std::is_integral_v<Bare> && std::is_unsigned_v<Bare>) {
+        return VertexDataType::UINT;
+    } else {
+        static_assert(false, "Unsupported vertex attribute scalar type");
+    }
+}
+
+template <class TValueType>
+struct VertexAttributeTraits<TValueType, std::enable_if_t<std::is_arithmetic_v<TValueType>>> {
+    using ScalarType = std::remove_cvref_t<TValueType>;
+    static constexpr uint16_t ComponentCount = 1;
+    static constexpr VertexDataType Type = DeduceVertexDataType<TValueType>();
+};
+
+template <class Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
+struct VertexAttributeTraits<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> {
+    using MatrixT = Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>;
+    static constexpr bool kIsVector = (Rows == 1 || Cols == 1);
+    static_assert(kIsVector, "Only Eigen vector attributes are supported");
+    static_assert(MatrixT::SizeAtCompileTime != Eigen::Dynamic, "Dynamic-sized Eigen vectors are not supported");
+    using ScalarType = Scalar;
+    static constexpr uint16_t ComponentCount = static_cast<uint16_t>(MatrixT::SizeAtCompileTime);
+    static constexpr VertexDataType Type = DeduceVertexDataType<Scalar>();
 };
 
 constexpr uint32_t GetVertexDataSizeInBytes(VertexDataType type, uint16_t componentCount) noexcept {

@@ -3,8 +3,6 @@
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
-#include <radray/triangle_mesh.h>
-#include <radray/vertex_data.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
@@ -26,10 +24,10 @@ const static float3 g_Color[3] = {
 
 struct V2P {
     float4 pos : SV_POSITION;
-    [[vk::location(0)]] float3 color: COLOR0;
+    float3 color: COLOR0;
 };
 
-V2P VSMain([[vk::location(0)]] float3 v_vert: POSITION, uint vertId: SV_VertexID) {
+V2P VSMain(float3 v_vert: POSITION, uint vertId: SV_VertexID) {
     V2P v2p;
     v2p.pos = float4(v_vert, 1);
     v2p.color = g_Color[vertId % 3];
@@ -92,26 +90,25 @@ void Init() {
     sw.Start();
     last = 0;
 
-    TriangleMesh mesh;
-    mesh.Positions = {{0, 0.5f, 0}, {-0.5f, -0.366f, 0}, {0.5f, -0.366f, 0}};
-    mesh.Indices = {0, 1, 2};
-    VertexData model;
-    mesh.ToVertexData(&model);
-    auto vertUpload = device->CreateBuffer({model.VertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto vert = device->CreateBuffer({model.VertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
-    auto idxUpload = device->CreateBuffer({model.IndexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto idx = device->CreateBuffer({model.IndexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
+    float pos[] = {0, 0.5f, 0, -0.5f, -0.366f, 0, 0.5f, -0.366f, 0};
+    uint16_t i[] = {0, 1, 2};
+    const size_t vertexSize = sizeof(pos);
+    const size_t indexSize = sizeof(i);
+    auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
+    auto idxUpload = device->CreateBuffer({indexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+    auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
     vertBuf = std::static_pointer_cast<d3d12::BufferD3D12>(vert);
     idxBuf = std::static_pointer_cast<d3d12::BufferD3D12>(idx);
     {
-        void* vertMap = vertUpload->Map(0, model.VertexSize);
-        std::memcpy(vertMap, model.VertexData.get(), model.VertexSize);
-        vertUpload->Unmap(0, model.VertexSize);
+        void* vertMap = vertUpload->Map(0, vertexSize);
+        std::memcpy(vertMap, pos, vertexSize);
+        vertUpload->Unmap(0, vertexSize);
     }
     {
-        void* idxMap = idxUpload->Map(0, model.IndexSize);
-        std::memcpy(idxMap, model.IndexData.get(), model.IndexSize);
-        idxUpload->Unmap(0, model.IndexSize);
+        void* idxMap = idxUpload->Map(0, indexSize);
+        std::memcpy(idxMap, i, indexSize);
+        idxUpload->Unmap(0, indexSize);
     }
 
     auto cmdBuffer = std::static_pointer_cast<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
@@ -122,8 +119,8 @@ void Init() {
             {idx.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
         cmdBuffer->ResourceBarrier(barriers, {});
     }
-    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, model.VertexSize);
-    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, model.IndexSize);
+    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, vertexSize);
+    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, indexSize);
     {
         BarrierBufferDescriptor barriers[] = {
             {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},

@@ -1937,7 +1937,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buf
         }
         bufBarrier.buffer = buf->_buffer;
         bufBarrier.offset = 0;
-        bufBarrier.size = buf->_allocInfo.size;
+        bufBarrier.size = buf->_mdesc.Size;
 
         auto srcStage = BufferUseToPipelineStageFlags(i.Before);
         auto dstStage = BufferUseToPipelineStageFlags(i.After);
