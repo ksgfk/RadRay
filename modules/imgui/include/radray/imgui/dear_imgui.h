@@ -180,6 +180,7 @@ public:
         shared_ptr<render::CommandBuffer> _cmdBuffer{};
         render::Texture* _rt{};
         render::TextureView* _rtView{};
+        uint32_t _rtIndex;
     };
 
     ImGuiApplication() noexcept;
@@ -212,7 +213,7 @@ protected:
     virtual void OnRender(ImGuiApplication::Frame* frame);
     virtual void OnDestroy() noexcept;
 
-    render::TextureView* SafeGetRTView(radray::render::Texture* rt);
+    render::TextureView* SafeGetRTView(uint32_t rtIndex, render::Texture* rt);
     Nullable<ImGuiApplication::Frame*> GetAvailableFrame();
 
     template <class F>
@@ -243,7 +244,7 @@ protected:
     vector<unique_ptr<Frame>> _frames;
     uint64_t _currRenderFrame;
 
-    unordered_map<render::Texture*, shared_ptr<render::TextureView>> _rtViews;
+    vector<shared_ptr<render::TextureView>> _rtViews;
     sigslot::scoped_connection _resizingConn;
     sigslot::scoped_connection _resizedConn;
     Eigen::Vector2i _renderRtSize;

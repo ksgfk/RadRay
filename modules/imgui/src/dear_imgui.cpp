@@ -751,6 +751,7 @@ void ImGuiApplication::RecreateSwapChain() {
         frame->_completeFrame = std::numeric_limits<uint64_t>::max();
     }
     this->NewSwapChain();
+    _rtViews.resize(_swapchain->GetBackBufferCount());
     for (size_t i = 0; i < _frames.size(); i++) {
         _freeFrame->TryWrite(i);
     }
@@ -857,6 +858,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         }
         _frames.emplace_back(make_unique<ImGuiApplication::Frame>(i, cmdBufferOpt.Release()));
     }
+    _rtViews.resize(_swapchain->GetBackBufferCount());
     _currRenderFrame = 0;
     {
         ImGuiDrawDescriptor imguiDrawDesc{};
@@ -937,9 +939,10 @@ void ImGuiApplication::RunSingleThreadRender() {
         }
         _isRenderAcquiredRt = false;
         ImGuiApplication::Frame* frame = _frames[frameIndex].get();
+        frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
         frame->_completeFrame = _currRenderFrame + _frames.size();
         frame->_rt = rt;
-        frame->_rtView = this->SafeGetRTView(frame->_rt);
+        frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
         this->OnRender(frame);
         _swapchain->Present();
         _currRenderFrame++;
@@ -1017,18 +1020,18 @@ void ImGuiApplication::RenderUpdateMultiThread() {
             return;
         }
         ImGuiApplication::Frame* frame = _frames[frameIndex].get();
+        frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
         frame->_completeFrame = _currRenderFrame + _frames.size();
         frame->_rt = rtOpt.Get();
-        frame->_rtView = this->SafeGetRTView(frame->_rt);
+        frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
         this->OnRender(frame);
         _swapchain->Present();
         _currRenderFrame++;
     }
 }
 
-render::TextureView* ImGuiApplication::SafeGetRTView(render::Texture* rt) {
-    auto it = _rtViews.find(rt);
-    if (it == _rtViews.end()) {
+render::TextureView* ImGuiApplication::SafeGetRTView(uint32_t rtIndex, render::Texture* rt) {
+    if (_rtViews[rtIndex] == nullptr) {
         render::TextureViewDescriptor rtViewDesc{};
         rtViewDesc.Target = rt;
         rtViewDesc.Dim = render::TextureViewDimension::Dim2D;
@@ -1036,9 +1039,9 @@ render::TextureView* ImGuiApplication::SafeGetRTView(render::Texture* rt) {
         rtViewDesc.Range = render::SubresourceRange::AllSub();
         rtViewDesc.Usage = render::TextureUse::RenderTarget;
         auto rtView = _device->CreateTextureView(rtViewDesc).Unwrap();
-        it = _rtViews.emplace(rt, rtView).first;
+        _rtViews[rtIndex] = rtView;
     }
-    return it->second.get();
+    return _rtViews[rtIndex].get();
 }
 
 Nullable<ImGuiApplication::Frame*> ImGuiApplication::GetAvailableFrame() {
