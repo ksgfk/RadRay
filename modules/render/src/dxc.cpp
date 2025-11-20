@@ -438,7 +438,6 @@ public:
         }
         if (stage == ShaderStage::Vertex) {
             result.VertexInputs.reserve(shaderDesc.InputParameters);
-            RADRAY_INFO_LOG("- inputs {}", shaderDesc.InputParameters);
             for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
                 D3D12_SIGNATURE_PARAMETER_DESC spDesc;
                 if (HRESULT hr = sr->GetInputParameterDesc(i, &spDesc);
@@ -480,7 +479,6 @@ public:
                         default: return VertexFormat::UNKNOWN;
                     }
                 })(spDesc.ComponentType, comps);
-                RADRAY_INFO_LOG(" - attr {}{} {}", vi.Semantic, vi.SemanticIndex, vi.Format);
             }
         }
         if (stage == ShaderStage::Compute) {

@@ -27,6 +27,30 @@ enum class HlslShaderModel {
     SM66
 };
 
+enum class DxilCBufferType {
+
+};
+
+enum class DxilShaderInputType {
+
+};
+
+enum class DxilResourceReturnType {
+
+};
+
+enum class DxilSRVDimension {
+
+};
+
+enum class DxilSystemValueType {
+
+};
+
+enum class DxilRegisterComponentType {
+
+};
+
 class DxcOutput {
 public:
     vector<byte> Data;
@@ -99,6 +123,49 @@ public:
     vector<VertexInput> VertexInputs;
     vector<StaticSampler> StaticSamplers;
     std::array<uint32_t, 3> GroupSize;
+};
+
+class DxilShaderBufferDesc {
+public:
+    string Name;
+    DxilCBufferType Type;
+    uint32_t Variables;
+    uint32_t Size;
+    uint32_t Flags;
+};
+
+class DxilInputBindDesc {
+public:
+    string Name;
+    DxilShaderInputType Type;
+    uint32_t BindPoint;
+    uint32_t BindCount;
+    uint32_t Flags;
+    DxilResourceReturnType ReturnType;
+    DxilSRVDimension Dimension;
+    uint32_t NumSamples;
+    uint32_t Space;
+};
+
+class DxilSignatureParameterDesc {
+public:
+    string SemanticName;
+    uint32_t SemanticIndex;
+    uint32_t Register;
+    DxilSystemValueType SystemValueType;
+    DxilRegisterComponentType ComponentType;
+    uint32_t Stream;
+};
+
+class DxilShaderDesc {
+public:
+    vector<DxilShaderBufferDesc> ConstantBuffers;
+    vector<DxilInputBindDesc> BoundResources;
+    vector<DxilSignatureParameterDesc> InputParameters;
+    vector<DxilSignatureParameterDesc> OutputParameters;
+    string Creator;
+    uint32_t Version;
+    uint32_t Flags;
 };
 
 std::string_view format_as(ShaderResourceType v) noexcept;
