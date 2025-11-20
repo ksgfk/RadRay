@@ -120,6 +120,16 @@ Eigen::Matrix<T, 4, 4> LookAtLH(const Eigen::Vector<T, 3>& eye, const Eigen::Vec
 
 template <class T>
 requires(std::is_floating_point_v<T>)
+Eigen::Matrix<T, 4, 4> LookAt(const Eigen::Quaternion<T>& quat, const Eigen::Vector<T, 3>& pos) noexcept {
+    Eigen::Matrix<T, 4, 4> view = Eigen::Matrix4f::Identity();
+    Eigen::Matrix<T, 3, 3> invRot = quat.conjugate().toRotationMatrix();
+    view.template block<3, 3>(0, 0) = invRot;
+    view.template block<3, 1>(0, 3) = -invRot * pos;
+    return view;
+}
+
+template <class T>
+requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Eigen::Vector<T, 3>& up) noexcept {
     Eigen::Vector<T, 3> f = forward;
     Eigen::Vector<T, 3> s = up.cross(forward).normalized();

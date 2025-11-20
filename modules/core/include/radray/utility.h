@@ -122,7 +122,7 @@ std::optional<wstring> ToWideChar(std::string_view str) noexcept;
 
 std::optional<string> ToMultiByte(std::wstring_view str) noexcept;
 
-vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept;
+vector<uint32_t> ByteToDWORD(std::span<const uint8_t> bytes) noexcept;
 
 [[noreturn]] inline void Unreachable() noexcept {
 #ifdef __cpp_lib_unreachable

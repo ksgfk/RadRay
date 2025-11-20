@@ -282,8 +282,8 @@ public:
         matData.specularTint[0] = 1.0;
         matData.specularTint[1] = 1.0;
         matData.specularTint[2] = 1.0;
-        matData.specular = 0.5;
-        matData.roughness = 0.2;
+        matData.specular = 0.5f;
+        matData.roughness = 0.2f;
         matData.anisotropy = 0;
         matData.ior = 1.5;
         _mat = matData;
@@ -380,10 +380,7 @@ public:
                 pass->SetViewport(viewport);
                 pass->SetScissor({0, 0, (uint32_t)_renderRtSize.x(), (uint32_t)_renderRtSize.y()});
 
-                Eigen::Matrix4f view = Eigen::Matrix4f::Identity();
-                Eigen::Matrix3f invRot = _camRot.conjugate().toRotationMatrix();
-                view.block<3, 3>(0, 0) = invRot;
-                view.block<3, 1>(0, 3) = -invRot * _camPos;
+                Eigen::Matrix4f view = LookAt(_camRot, _camPos);
 
                 Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)_renderRtSize.x() / (float)_renderRtSize.y(), _camNear, _camFar);
 

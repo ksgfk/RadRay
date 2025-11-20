@@ -20,27 +20,27 @@ enum class WindowHandlerTag {
 using Win32WNDPROC = int64_t(HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
 
 struct WindowNativeHandler {
-    WindowHandlerTag Type;
-    void* Handle;
+    WindowHandlerTag Type{WindowHandlerTag::UNKNOWN};
+    void* Handle{nullptr};
 };
 
 struct Win32WindowCreateDescriptor {
-    std::string_view Title;
-    int Width;
-    int Height;
-    int X;
-    int Y;
-    bool Resizable;
-    bool StartMaximized;
-    bool Fullscreen;
-    std::span<std::weak_ptr<std::function<Win32WNDPROC>>> ExtraWndProcs;
+    std::string_view Title{};
+    int32_t Width{0};
+    int32_t Height{0};
+    int32_t X{0};
+    int32_t Y{0};
+    bool Resizable{false};
+    bool StartMaximized{false};
+    bool Fullscreen{false};
+    std::span<std::weak_ptr<std::function<Win32WNDPROC>>> ExtraWndProcs{};
 };
 
 using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor>;
 
 struct WindowVec2i {
-    int X;
-    int Y;
+    int32_t X;
+    int32_t Y;
 };
 
 class NativeWindow {

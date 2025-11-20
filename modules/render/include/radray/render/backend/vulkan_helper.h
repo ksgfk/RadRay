@@ -28,12 +28,22 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 #include <volk.h>
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#ifdef _MSC_VER
+#pragma warning(push, 1)
+#endif
 #include <vk_mem_alloc.h>
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 namespace radray::render::vulkan {
 

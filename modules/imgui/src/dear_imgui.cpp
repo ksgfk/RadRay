@@ -221,7 +221,7 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     sampler.LodMin = 0.0f;
     sampler.LodMax = std::numeric_limits<float>::max();
     sampler.Compare = CompareFunction::Always;
-    sampler.AnisotropyClamp = 0.0f;
+    sampler.AnisotropyClamp = 0;
     RootSignatureSetElement rsElems[2];
     RootSignatureSetElement& rsTex = rsElems[0];
     rsTex.Slot = 0;
@@ -924,7 +924,7 @@ void ImGuiApplication::RunSingleThreadRender() {
         {
             size_t completeFrameIndex = _currRenderFrame % _frames.size();
             if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
-                _imguiDrawContext->AfterDraw(completeFrameIndex);
+                _imguiDrawContext->AfterDraw((int)completeFrameIndex);
                 _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
                 if (!_freeFrame->WaitWrite(completeFrameIndex)) {
                     break;
@@ -1005,7 +1005,7 @@ void ImGuiApplication::RenderUpdateMultiThread() {
         {
             size_t completeFrameIndex = _currRenderFrame % _frames.size();
             if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
-                _imguiDrawContext->AfterDraw(completeFrameIndex);
+                _imguiDrawContext->AfterDraw((int)completeFrameIndex);
                 _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
                 if (!_freeFrame->WaitWrite(completeFrameIndex)) {
                     return;

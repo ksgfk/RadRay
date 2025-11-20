@@ -1,18 +1,24 @@
 #include <radray/render/backend/vulkan_helper.h>
 
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
+#endif
 #define VOLK_IMPLEMENTATION
 #include <volk.h>
+#ifdef __clang__
 #pragma clang diagnostic pop
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #pragma clang diagnostic ignored "-Wunused-variable"
+#endif
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
 
 #include <cstring>
 

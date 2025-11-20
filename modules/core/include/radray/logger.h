@@ -77,7 +77,7 @@ void LogFormatSPrintf(LogLevel lvl, const S& fmt, Args&&... args) noexcept {
 
 template <typename... Args>
 void LogFormatSPrintfLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {
-    if (!ShouldLogLoc(lvl)) {
+    if (!ShouldLog(lvl)) {
         return;
     }
     auto str = radray::sprintf(fmt, std::forward<Args>(args)...);

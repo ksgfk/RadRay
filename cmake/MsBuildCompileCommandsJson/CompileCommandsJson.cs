@@ -41,27 +41,44 @@ public class CompileCommandsJson : Logger
         try
         {
             if (!IsCompileCommand(cmd)) return;
-            string sourceFile = ExtractSourceFile(cmd);
-            if (sourceFile == null) return;
-            string projectDir = null;
-            if (!string.IsNullOrEmpty(taskArgs.ProjectFile))
-            {
-                try { projectDir = Path.GetDirectoryName(Path.GetFullPath(taskArgs.ProjectFile)); } catch { }
-            }
-            string sourceDir = Path.GetDirectoryName(sourceFile);
-            string commonDir = null;
-            if (!string.IsNullOrEmpty(projectDir))
-            {
-                commonDir = GetCommonDirectory(projectDir, sourceDir);
-            }
-            if (string.IsNullOrEmpty(commonDir)) commonDir = sourceDir; // fallback
-            string relativeFile = GetRelativePath(commonDir, sourceFile);
 
             var arguments = SplitCommandLine(cmd);
             if (arguments == null || arguments.Count == 0) return;
             FixCompilerFirstArgument(arguments);
             FixDefineArguments(arguments);
-            WriteEntry(commonDir, relativeFile, arguments);
+
+            // Collect all source files from tokenized arguments (robust for multi-file cl invocations)
+            var sourceFiles = new List<string>();
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                var a = arguments[i];
+                if (LooksLikeSourceFile(a)) sourceFiles.Add(a);
+            }
+            if (sourceFiles.Count == 0) return; // nothing to emit
+
+            // Normalize once
+            var normalizedSourceFiles = new List<string>(sourceFiles.Count);
+            for (int i = 0; i < sourceFiles.Count; i++) normalizedSourceFiles.Add(NormalizePath(sourceFiles[i]));
+
+            string projectDir = null;
+            if (!string.IsNullOrEmpty(taskArgs.ProjectFile))
+            {
+                try { projectDir = Path.GetDirectoryName(Path.GetFullPath(taskArgs.ProjectFile)); } catch { }
+            }
+
+            for (int i = 0; i < normalizedSourceFiles.Count; i++)
+            {
+                string sourceFile = normalizedSourceFiles[i];
+                string sourceDir = null;
+                try { sourceDir = Path.GetDirectoryName(sourceFile); } catch { sourceDir = Directory.GetCurrentDirectory(); }
+                string commonDir = null;
+                if (!string.IsNullOrEmpty(projectDir)) commonDir = GetCommonDirectory(projectDir, sourceDir);
+                if (string.IsNullOrEmpty(commonDir)) commonDir = sourceDir; // fallback
+                string relativeFile = GetRelativePath(commonDir, sourceFile);
+
+                var argsForThisFile = FilterArgumentsForFile(arguments, normalizedSourceFiles, sourceFile);
+                WriteEntry(commonDir, relativeFile, argsForThisFile);
+            }
         }
         catch (Exception ex)
         {
@@ -101,11 +118,49 @@ public class CompileCommandsJson : Logger
         return null;
     }
 
+    private List<string> ExtractSourceFiles(string cmd)
+    {
+        var files = new List<string>();
+        int i = cmd.Length - 1;
+        while (i >= 0 && char.IsWhiteSpace(cmd[i])) i--;
+        if (i < 0) return files;
+        bool collectedAny = false;
+        while (i >= 0)
+        {
+            string token;
+            if (cmd[i] == '"')
+            {
+                int endQuote = i; i--; int startQuote = cmd.LastIndexOf('"', i); if (startQuote < 0) break;
+                token = cmd.Substring(startQuote + 1, endQuote - startQuote - 1);
+                i = startQuote - 1;
+            }
+            else
+            {
+                int end = i; while (i >= 0 && !char.IsWhiteSpace(cmd[i])) i--; int start = i + 1; token = cmd.Substring(start, end - start + 1);
+            }
+
+            if (LooksLikeSourceFile(token))
+            {
+                files.Add(token);
+                collectedAny = true;
+            }
+            else
+            {
+                // If we've already started collecting trailing source files, stop at first non-source token
+                if (collectedAny) break;
+            }
+
+            while (i >= 0 && char.IsWhiteSpace(cmd[i])) i--;
+        }
+        files.Reverse();
+        return files;
+    }
+
     private string NormalizePath(string p)
     {
         try
         {
-            if (p.IndexOfAny(new[] { '*', '?', '>' , '<', '|' }) >= 0) return p;
+            if (p.IndexOfAny(new[] { '*', '?', '>' , '<', '|' }) >= 0) return p; // avoid Path.GetFullPath on obviously invalid patterns
             if (Path.IsPathRooted(p)) return Path.GetFullPath(p);
             return Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), p));
         }
@@ -114,6 +169,8 @@ public class CompileCommandsJson : Logger
 
     private bool LooksLikeSourceFile(string path)
     {
+        if (string.IsNullOrEmpty(path)) return false;
+        if (path[0] == '/' || path[0] == '-') return false; // exclude switches accidentally ending with source-like extensions
         string ext = Path.GetExtension(path).ToLowerInvariant();
         foreach (var s in SourceFileExtensions) if (ext == s) return true; return false;
     }
@@ -131,6 +188,31 @@ public class CompileCommandsJson : Logger
         sw.Write("]");
         sw.Write("}");
         sw.Flush();
+    }
+
+    private IList<string> FilterArgumentsForFile(IList<string> args, IList<string> allSourceFiles, string targetSource)
+    {
+        var allSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < allSourceFiles.Count; i++) allSet.Add(NormalizePath(allSourceFiles[i]));
+        var result = new List<string>(args.Count);
+        bool hasTarget = false;
+        for (int i = 0; i < args.Count; i++)
+        {
+            string a = args[i];
+            if (LooksLikeSourceFile(a))
+            {
+                string norm = NormalizePath(a);
+                if (string.Equals(norm, targetSource, StringComparison.OrdinalIgnoreCase)) { result.Add(a); hasTarget = true; }
+                else if (!allSet.Contains(norm)) { result.Add(a); }
+                // else skip other source files
+            }
+            else
+            {
+                result.Add(a);
+            }
+        }
+        if (!hasTarget) result.Add(targetSource);
+        return result;
     }
 
     private void SafeWriteComment(string text)

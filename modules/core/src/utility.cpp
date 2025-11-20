@@ -3,6 +3,8 @@
 #include <fstream>
 #include <limits>
 #include <bit>
+#include <cstring>
+#include <cstdint>
 
 #include <xxhash.h>
 
@@ -105,40 +107,49 @@ std::optional<string> ToMultiByte(std::wstring_view str) noexcept {
 #endif
 }
 
-vector<uint32_t> ByteToDWORD(std::span<uint8_t> bytes) noexcept {
-    size_t quo = bytes.size() / 4;
-    size_t remain = bytes.size() % 4;
+vector<uint32_t> ByteToDWORD(std::span<const uint8_t> bytes) noexcept {
     vector<uint32_t> result;
-    result.resize(quo + (remain == 0 ? 0 : 1));
-    for (size_t i = 0; i < quo; i++) {
-        size_t p = i * 4;
-        uint32_t a = (bytes[p]);
-        uint32_t b = (bytes[p + 1]);
-        uint32_t c = (bytes[p + 2]);
-        uint32_t d = (bytes[p + 3]);
-        uint32_t dword;
-        if constexpr (std::endian::native == std::endian::little) {
-            dword = a | (b << 8) | (c << 16) | (d << 24);
-        } else if constexpr (std::endian::native == std::endian::big) {
-            dword = (a << 24) | (b << 16) | (c << 8) | d;
-        } else {
-            static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big, "unknown endian platform");
-        }
-        result[i] = dword;
+    if (bytes.empty()) {
+        return result;
     }
-    if (remain != 0) {
-        uint32_t last = 0;
-        for (size_t i = 0; i < remain; i++) {
-            uint32_t a = (bytes[quo * 4 + i]);
-            if constexpr (std::endian::native == std::endian::little) {
-                last |= a << (i * 8);
-            } else if constexpr (std::endian::native == std::endian::big) {
-                last |= a << (24 - i * 8);
+    const size_t fullWords = bytes.size() / 4;
+    const size_t remainder = bytes.size() % 4;
+    result.resize(fullWords + (remainder ? 1 : 0));
+    const auto* src = bytes.data();
+    auto* dst = result.data();
+    if constexpr (std::endian::native == std::endian::little) {
+        if (fullWords != 0) {
+            if ((reinterpret_cast<std::uintptr_t>(src) & 0x3) == 0) {
+                std::memcpy(dst, src, fullWords * sizeof(uint32_t));
             } else {
-                static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big, "unknown endian platform");
+                for (size_t i = 0; i < fullWords; ++i) {
+                    std::memcpy(dst + i, src + i * 4, sizeof(uint32_t));
+                }
             }
         }
-        result[quo] = last;
+        if (remainder != 0) {
+            uint32_t last = 0;
+            std::memcpy(&last, src + fullWords * 4, remainder);
+            dst[fullWords] = last;
+        }
+    } else if constexpr (std::endian::native == std::endian::big) {
+        for (size_t i = 0; i < fullWords; ++i) {
+            size_t p = i * 4;
+            uint32_t a = src[p];
+            uint32_t b = src[p + 1];
+            uint32_t c = src[p + 2];
+            uint32_t d = src[p + 3];
+            dst[i] = (a << 24) | (b << 16) | (c << 8) | d;
+        }
+        if (remainder != 0) {
+            uint32_t last = 0;
+            for (size_t i = 0; i < remainder; ++i) {
+                last |= static_cast<uint32_t>(src[fullWords * 4 + i]) << (24 - i * 8);
+            }
+            dst[fullWords] = last;
+        }
+    } else {
+        static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big, "unknown endian platform");
     }
     return result;
 }

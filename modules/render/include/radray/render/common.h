@@ -429,87 +429,87 @@ public:
 
 class VulkanInstanceDescriptor {
 public:
-    std::string_view AppName;
-    uint32_t AppVersion;
-    std::string_view EngineName;
-    uint32_t EngineVersion;
-    bool IsEnableDebugLayer;
-    bool IsEnableGpuBasedValid;
+    std::string_view AppName{};
+    uint32_t AppVersion{0};
+    std::string_view EngineName{};
+    uint32_t EngineVersion{0};
+    bool IsEnableDebugLayer{false};
+    bool IsEnableGpuBasedValid{false};
 };
 
 class D3D12DeviceDescriptor {
 public:
-    std::optional<uint32_t> AdapterIndex;
-    bool IsEnableDebugLayer;
-    bool IsEnableGpuBasedValid;
+    std::optional<uint32_t> AdapterIndex{};
+    bool IsEnableDebugLayer{false};
+    bool IsEnableGpuBasedValid{false};
 };
 
 class MetalDeviceDescriptor {
 public:
-    std::optional<uint32_t> DeviceIndex;
+    std::optional<uint32_t> DeviceIndex{};
 };
 
 struct VulkanCommandQueueDescriptor {
-    QueueType Type;
-    uint32_t Count;
+    QueueType Type{QueueType::Direct};
+    uint32_t Count{0};
 };
 
 class VulkanDeviceDescriptor {
 public:
-    std::optional<uint32_t> PhysicalDeviceIndex;
-    std::span<VulkanCommandQueueDescriptor> Queues;
+    std::optional<uint32_t> PhysicalDeviceIndex{};
+    std::span<VulkanCommandQueueDescriptor> Queues{};
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
 
 class SwapChainDescriptor {
 public:
-    CommandQueue* PresentQueue;
-    const void* NativeHandler;
-    uint32_t Width;
-    uint32_t Height;
-    uint32_t BackBufferCount;
-    TextureFormat Format;
-    bool EnableSync;
+    CommandQueue* PresentQueue{nullptr};
+    const void* NativeHandler{nullptr};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t BackBufferCount{0};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    bool EnableSync{false};
 };
 
 struct SamplerDescriptor {
-    AddressMode AddressS;
-    AddressMode AddressT;
-    AddressMode AddressR;
-    FilterMode MigFilter;
-    FilterMode MagFilter;
-    FilterMode MipmapFilter;
-    float LodMin;
-    float LodMax;
-    std::optional<CompareFunction> Compare;
-    uint32_t AnisotropyClamp;
+    AddressMode AddressS{};
+    AddressMode AddressT{};
+    AddressMode AddressR{};
+    FilterMode MigFilter{};
+    FilterMode MagFilter{};
+    FilterMode MipmapFilter{};
+    float LodMin{0.0f};
+    float LodMax{0.0f};
+    std::optional<CompareFunction> Compare{};
+    uint32_t AnisotropyClamp{0};
 
     friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
     friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
 };
 
 struct CommandQueueSubmitDescriptor {
-    std::span<CommandBuffer*> CmdBuffers;
-    std::span<Fence*> WaitFences;
-    std::span<uint64_t> WaitFenceValues;
-    std::span<Fence*> SignalFences;
-    std::span<uint64_t> SignalFenceValues;
+    std::span<CommandBuffer*> CmdBuffers{};
+    std::span<Fence*> WaitFences{};
+    std::span<uint64_t> WaitFenceValues{};
+    std::span<Fence*> SignalFences{};
+    std::span<uint64_t> SignalFenceValues{};
 };
 
 struct BarrierBufferDescriptor {
-    Buffer* Target;
-    BufferUses Before;
-    BufferUses After;
-    Nullable<CommandQueue*> OtherQueue;
-    bool IsFromOrToOtherQueue;  // true: from, false: to
+    Buffer* Target{nullptr};
+    BufferUses Before{BufferUse::UNKNOWN};
+    BufferUses After{BufferUse::UNKNOWN};
+    Nullable<CommandQueue*> OtherQueue{nullptr};
+    bool IsFromOrToOtherQueue{false};  // true: from, false: to
 };
 
 struct SubresourceRange {
-    uint32_t BaseArrayLayer;
-    uint32_t ArrayLayerCount;
-    uint32_t BaseMipLevel;
-    uint32_t MipLevelCount;
+    uint32_t BaseArrayLayer{0};
+    uint32_t ArrayLayerCount{0};
+    uint32_t BaseMipLevel{0};
+    uint32_t MipLevelCount{0};
 
     static constexpr auto All = std::numeric_limits<uint32_t>::max();
 
@@ -519,225 +519,225 @@ struct SubresourceRange {
 };
 
 struct BarrierTextureDescriptor {
-    Texture* Target;
-    TextureUses Before;
-    TextureUses After;
-    Nullable<CommandQueue*> OtherQueue;
-    bool IsFromOrToOtherQueue;
-    bool IsSubresourceBarrier;
-    SubresourceRange Range;
+    Texture* Target{nullptr};
+    TextureUses Before{TextureUse::UNKNOWN};
+    TextureUses After{TextureUse::UNKNOWN};
+    Nullable<CommandQueue*> OtherQueue{nullptr};
+    bool IsFromOrToOtherQueue{false};
+    bool IsSubresourceBarrier{false};
+    SubresourceRange Range{};
 };
 
 struct ColorAttachment {
-    TextureView* Target;
-    LoadAction Load;
-    StoreAction Store;
-    ColorClearValue ClearValue;
+    TextureView* Target{nullptr};
+    LoadAction Load{LoadAction::DontCare};
+    StoreAction Store{StoreAction::Store};
+    ColorClearValue ClearValue{};
 };
 
 struct DepthStencilAttachment {
-    TextureView* Target;
-    LoadAction DepthLoad;
-    StoreAction DepthStore;
-    LoadAction StencilLoad;
-    StoreAction StencilStore;
-    DepthStencilClearValue ClearValue;
+    TextureView* Target{nullptr};
+    LoadAction DepthLoad{};
+    StoreAction DepthStore{};
+    LoadAction StencilLoad{};
+    StoreAction StencilStore{};
+    DepthStencilClearValue ClearValue{};
 };
 
 struct RenderPassDescriptor {
-    std::span<ColorAttachment> ColorAttachments;
-    std::optional<DepthStencilAttachment> DepthStencilAttachment;
-    std::string_view Name;
+    std::span<ColorAttachment> ColorAttachments{};
+    std::optional<DepthStencilAttachment> DepthStencilAttachment{};
+    std::string_view Name{};
 };
 
 struct TextureDescriptor {
-    TextureDimension Dim;
-    uint32_t Width;
-    uint32_t Height;
-    uint32_t DepthOrArraySize;
-    uint32_t MipLevels;
-    uint32_t SampleCount;
-    TextureFormat Format;
-    TextureUses Usage;
-    ResourceHints Hints;
-    std::string_view Name;
+    TextureDimension Dim{TextureDimension::UNKNOWN};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t DepthOrArraySize{0};
+    uint32_t MipLevels{0};
+    uint32_t SampleCount{0};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    TextureUses Usage{TextureUse::UNKNOWN};
+    ResourceHints Hints{ResourceHint::None};
+    std::string_view Name{};
 };
 
 struct TextureViewDescriptor {
-    Texture* Target;
-    TextureViewDimension Dim;
-    TextureFormat Format;
-    SubresourceRange Range;
-    TextureUses Usage;
+    Texture* Target{nullptr};
+    TextureViewDimension Dim{TextureViewDimension::UNKNOWN};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    SubresourceRange Range{};
+    TextureUses Usage{TextureUse::UNKNOWN};
 };
 
 struct BufferDescriptor {
-    uint64_t Size;
-    MemoryType Memory;
-    BufferUses Usage;
-    ResourceHints Hints;
-    std::string_view Name;
+    uint64_t Size{0};
+    MemoryType Memory{};
+    BufferUses Usage{BufferUse::UNKNOWN};
+    ResourceHints Hints{};
+    std::string_view Name{};
 };
 
 struct BufferRange {
-    uint64_t Offset;
-    uint64_t Size;
+    uint64_t Offset{0};
+    uint64_t Size{0};
 };
 
 struct BufferViewDescriptor {
-    Buffer* Target;
-    BufferRange Range;
-    uint32_t Stride;
-    TextureFormat Format;
-    BufferUses Usage;
+    Buffer* Target{nullptr};
+    BufferRange Range{};
+    uint32_t Stride{0};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    BufferUses Usage{BufferUse::UNKNOWN};
 };
 
 struct ShaderDescriptor {
-    std::span<const byte> Source;
-    ShaderBlobCategory Category;
+    std::span<const byte> Source{};
+    ShaderBlobCategory Category{};
 };
 
 struct RootSignatureConstant {
-    uint32_t Slot;
-    uint32_t Space;
-    uint32_t Size;
-    ShaderStages Stages;
+    uint32_t Slot{0};
+    uint32_t Space{0};
+    uint32_t Size{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
 struct RootSignatureBinding {
-    uint32_t Slot;
-    uint32_t Space;
-    ResourceBindType Type;
-    ShaderStages Stages;
+    uint32_t Slot{0};
+    uint32_t Space{0};
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
 struct RootSignatureSetElement {
-    uint32_t Slot;
-    uint32_t Space;
-    ResourceBindType Type;
-    uint32_t Count;
-    ShaderStages Stages;
-    std::span<SamplerDescriptor> StaticSamplers;
+    uint32_t Slot{0};
+    uint32_t Space{0};
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    std::span<SamplerDescriptor> StaticSamplers{};
 };
 
 struct RootSignatureBindingSet {
-    std::span<RootSignatureSetElement> Elements;
+    std::span<RootSignatureSetElement> Elements{};
 };
 
 struct RootSignatureDescriptor {
-    std::span<RootSignatureBinding> RootBindings;
-    std::span<DescriptorSetLayout*> BindingSets;
-    std::optional<RootSignatureConstant> Constant;
+    std::span<RootSignatureBinding> RootBindings{};
+    std::span<DescriptorSetLayout*> BindingSets{};
+    std::optional<RootSignatureConstant> Constant{};
 };
 
 struct VertexElement {
-    uint64_t Offset;
-    std::string_view Semantic;
-    uint32_t SemanticIndex;
-    VertexFormat Format;
-    uint32_t Location;
+    uint64_t Offset{0};
+    std::string_view Semantic{};
+    uint32_t SemanticIndex{0};
+    VertexFormat Format{VertexFormat::UNKNOWN};
+    uint32_t Location{0};
 };
 
 struct VertexBufferLayout {
-    uint64_t ArrayStride;
-    VertexStepMode StepMode;
-    std::span<VertexElement> Elements;
+    uint64_t ArrayStride{0};
+    VertexStepMode StepMode{};
+    std::span<VertexElement> Elements{};
 };
 
 struct PrimitiveState {
-    PrimitiveTopology Topology;
-    FrontFace FaceClockwise;
-    CullMode Cull;
-    PolygonMode Poly;
-    std::optional<IndexFormat> StripIndexFormat;
-    bool UnclippedDepth;
-    bool Conservative;
+    PrimitiveTopology Topology{};
+    FrontFace FaceClockwise{};
+    CullMode Cull{};
+    PolygonMode Poly{};
+    std::optional<IndexFormat> StripIndexFormat{};
+    bool UnclippedDepth{false};
+    bool Conservative{false};
 };
 
 struct StencilFaceState {
-    CompareFunction Compare;
-    StencilOperation FailOp;
-    StencilOperation DepthFailOp;
-    StencilOperation PassOp;
+    CompareFunction Compare{};
+    StencilOperation FailOp{};
+    StencilOperation DepthFailOp{};
+    StencilOperation PassOp{};
 };
 
 struct StencilState {
-    StencilFaceState Front;
-    StencilFaceState Back;
-    uint32_t ReadMask;
-    uint32_t WriteMask;
+    StencilFaceState Front{};
+    StencilFaceState Back{};
+    uint32_t ReadMask{0};
+    uint32_t WriteMask{0};
 };
 
 struct DepthBiasState {
-    int32_t Constant;
-    float SlopScale;
-    float Clamp;
+    int32_t Constant{0};
+    float SlopScale{0.0f};
+    float Clamp{0.0f};
 };
 
 struct DepthStencilState {
-    TextureFormat Format;
-    CompareFunction DepthCompare;
-    DepthBiasState DepthBias;
-    std::optional<StencilState> Stencil;
-    bool DepthWriteEnable;
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    CompareFunction DepthCompare{};
+    DepthBiasState DepthBias{};
+    std::optional<StencilState> Stencil{};
+    bool DepthWriteEnable{false};
 };
 
 struct MultiSampleState {
-    uint32_t Count;
-    uint64_t Mask;
-    bool AlphaToCoverageEnable;
+    uint32_t Count{0};
+    uint64_t Mask{0};
+    bool AlphaToCoverageEnable{false};
 };
 
 struct BlendComponent {
-    BlendFactor Src;
-    BlendFactor Dst;
-    BlendOperation Op;
+    BlendFactor Src{};
+    BlendFactor Dst{};
+    BlendOperation Op{};
 };
 
 struct BlendState {
-    BlendComponent Color;
-    BlendComponent Alpha;
+    BlendComponent Color{};
+    BlendComponent Alpha{};
 };
 
 struct ColorTargetState {
-    TextureFormat Format;
-    std::optional<BlendState> Blend;
-    ColorWrites WriteMask;
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    std::optional<BlendState> Blend{};
+    ColorWrites WriteMask{};
 };
 
 struct ShaderEntry {
-    Shader* Target;
-    std::string_view EntryPoint;
+    Shader* Target{nullptr};
+    std::string_view EntryPoint{};
 };
 
 struct GraphicsPipelineStateDescriptor {
-    RootSignature* RootSig;
-    std::optional<ShaderEntry> VS;
-    std::optional<ShaderEntry> PS;
-    std::span<VertexBufferLayout> VertexLayouts;
-    PrimitiveState Primitive;
-    std::optional<DepthStencilState> DepthStencil;
-    MultiSampleState MultiSample;
-    std::span<ColorTargetState> ColorTargets;
+    RootSignature* RootSig{nullptr};
+    std::optional<ShaderEntry> VS{};
+    std::optional<ShaderEntry> PS{};
+    std::span<VertexBufferLayout> VertexLayouts{};
+    PrimitiveState Primitive{};
+    std::optional<DepthStencilState> DepthStencil{};
+    MultiSampleState MultiSample{};
+    std::span<ColorTargetState> ColorTargets{};
 };
 
 struct VertexBufferView {
-    Buffer* Target;
-    uint64_t Offset;
-    uint64_t Size;
+    Buffer* Target{nullptr};
+    uint64_t Offset{0};
+    uint64_t Size{0};
 };
 
 struct IndexBufferView {
-    Buffer* Target;
-    uint32_t Offset;
-    uint32_t Stride;
+    Buffer* Target{nullptr};
+    uint32_t Offset{0};
+    uint32_t Stride{0};
 };
 
 struct DeviceDetail {
-    uint32_t CBufferAlignment;
-    uint32_t UploadTextureAlignment;
-    uint32_t UploadTextureRowAlignment;
-    uint32_t MapAlignment;
+    uint32_t CBufferAlignment{0};
+    uint32_t UploadTextureAlignment{0};
+    uint32_t UploadTextureRowAlignment{0};
+    uint32_t MapAlignment{0};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
