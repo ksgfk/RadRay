@@ -6,17 +6,6 @@
 
 namespace radray::render {
 
-enum class ShaderResourceType {
-    CBuffer,
-    Texture,
-    Buffer,
-    RWTexture,
-    RWBuffer,
-    Sampler,
-    PushConstant,
-    RayTracing
-};
-
 enum class HlslShaderModel {
     SM60,
     SM61,
@@ -27,28 +16,192 @@ enum class HlslShaderModel {
     SM66
 };
 
-enum class DxilCBufferType {
-
+enum class HlslFeatureLevel {
+    UNKNOWN,
+    LEVEL9_1,
+    LEVEL9_2,
+    LEVEL9_3,
+    LEVEL10_0,
+    LEVEL10_1,
+    LEVEL11_0,
+    LEVEL11_1,
+    LEVEL12_0,
+    LEVEL12_1,
+    LEVEL12_2
 };
 
-enum class DxilShaderInputType {
-
+enum class HlslCBufferType {
+    UNKNOWN,
+    CBUFFER,
+    TBUFFER,
+    INTERFACE_POINTERS,
+    RESOURCE_BIND_INFO
 };
 
-enum class DxilResourceReturnType {
-
+enum class HlslShaderInputType {
+    UNKNOWN,
+    CBUFFER,
+    TBUFFER,
+    TEXTURE,
+    SAMPLER,
+    UAV_RWTYPED,
+    STRUCTURED,
+    UAV_RWSTRUCTURED,
+    BYTEADDRESS,
+    UAV_RWBYTEADDRESS,
+    UAV_APPEND_STRUCTURED,
+    UAV_CONSUME_STRUCTURED,
+    UAV_RWSTRUCTURED_WITH_COUNTER,
+    RTACCELERATIONSTRUCTURE,
+    UAV_FEEDBACKTEXTURE,
 };
 
-enum class DxilSRVDimension {
-
+enum class HlslResourceReturnType {
+    UNKNOWN,
+    UNORM,
+    SNORM,
+    SINT,
+    UINT,
+    FLOAT,
+    MIXED,
+    DOUBLE,
+    CONTINUED
 };
 
-enum class DxilSystemValueType {
-
+enum class HlslSRVDimension {
+    UNKNOWN,
+    BUFFER,
+    TEXTURE1D,
+    TEXTURE1DARRAY,
+    TEXTURE2D,
+    TEXTURE2DARRAY,
+    TEXTURE2DMS,
+    TEXTURE2DMSARRAY,
+    TEXTURE3D,
+    TEXTURECUBE,
+    TEXTURECUBEARRAY,
+    BUFFEREX
 };
 
-enum class DxilRegisterComponentType {
+enum class HlslSystemValueType {
+    UNDEFINED,
+    POSITION,
+    CLIP_DISTANCE,
+    CULL_DISTANCE,
+    RENDER_TARGET_ARRAY_INDEX,
+    VIEWPORT_ARRAY_INDEX,
+    VERTEX_ID,
+    PRIMITIVE_ID,
+    INSTANCE_ID,
+    IS_FRONT_FACE,
+    SAMPLE_INDEX,
+    FINAL_QUAD_EDGE_TESSFACTOR,
+    FINAL_QUAD_INSIDE_TESSFACTOR,
+    FINAL_TRI_EDGE_TESSFACTOR,
+    FINAL_TRI_INSIDE_TESSFACTOR,
+    FINAL_LINE_DETAIL_TESSFACTOR,
+    FINAL_LINE_DENSITY_TESSFACTOR,
+    BARYCENTRICS,
+    SHADINGRATE,
+    CULLPRIMITIVE,
+    TARGET,
+    DEPTH,
+    COVERAGE,
+    DEPTH_GREATER_EQUAL,
+    DEPTH_LESS_EQUAL,
+    STENCIL_REF,
+    INNER_COVERAGE
+};
 
+enum class HlslRegisterComponentType {
+    UNKNOWN,
+    UINT32,
+    SINT32,
+    FLOAT32,
+    UINT16,
+    SINT16,
+    FLOAT16,
+    UINT64,
+    SINT64,
+    FLOAT64,
+};
+
+enum class HlslShaderVariableClass {
+    UNKNOWN,
+    SCALAR,
+    VECTOR,
+    MATRIX_ROWS,
+    MATRIX_COLUMNS,
+    OBJECT,
+    STRUCTURE,
+    ARRAY
+};
+
+enum class HlslShaderVariableType {
+    UNKNOWN,
+    VOID,
+    BOOL,
+    INT,
+    FLOAT,
+    STRING,
+    TEXTURE,
+    TEXTURE1D,
+    TEXTURE2D,
+    TEXTURE3D,
+    TEXTURECUBE,
+    SAMPLER,
+    SAMPLER1D,
+    SAMPLER2D,
+    SAMPLER3D,
+    SAMPLERCUBE,
+    PIXELSHADER,
+    VERTEXSHADER,
+    PIXELFRAGMENT,
+    VERTEXFRAGMENT,
+    UINT,
+    UINT8,
+    GEOMETRYSHADER,
+    RASTERIZER,
+    DEPTHSTENCIL,
+    BLEND,
+    BUFFER,
+    CBUFFER,
+    TBUFFER,
+    TEXTURE1DARRAY,
+    TEXTURE2DARRAY,
+    RENDERTARGETVIEW,
+    DEPTHSTENCILVIEW,
+    TEXTURE2DMS,
+    TEXTURE2DMSARRAY,
+    TEXTURECUBEARRAY,
+    HULLSHADER,
+    DOMAINSHADER,
+    INTERFACE_POINTER,
+    COMPUTESHADER,
+    DOUBLE,
+    RWTEXTURE1D,
+    RWTEXTURE1DARRAY,
+    RWTEXTURE2D,
+    RWTEXTURE2DARRAY,
+    RWTEXTURE3D,
+    RWBUFFER,
+    BYTEADDRESS_BUFFER,
+    RWBYTEADDRESS_BUFFER,
+    STRUCTURED_BUFFER,
+    RWSTRUCTURED_BUFFER,
+    APPEND_STRUCTURED_BUFFER,
+    CONSUME_STRUCTURED_BUFFER,
+    MIN8FLOAT,
+    MIN10FLOAT,
+    MIN16FLOAT,
+    MIN12INT,
+    MIN16INT,
+    MIN16UINT,
+    INT16,
+    UINT16,
+    FLOAT16,
+    INT64,
+    UINT64,
 };
 
 class DxcOutput {
@@ -70,105 +223,92 @@ public:
     bool IsSpirv{};
 };
 
-class DxilReflection {
-public:
-    class Variable {
-    public:
-        string Name;
-        uint32_t Start;
-        uint32_t Size;
+class HlslShaderTypeMember;
 
-        friend bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
-        friend bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept;
-    };
-
-    class CBuffer {
-    public:
-        string Name;
-        vector<Variable> Vars;
-        uint32_t Size;
-
-        friend bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
-        friend bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept;
-    };
-
-    class BindResource {
-    public:
-        string Name;
-        ShaderResourceType Type;
-        TextureViewDimension Dim;
-        uint32_t Space;
-        uint32_t BindPoint;
-        uint32_t BindCount;
-    };
-
-    class StaticSampler : public SamplerDescriptor {
-    public:
-        string Name;
-
-        friend bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
-        friend bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept;
-    };
-
-    class VertexInput {
-    public:
-        string Semantic;
-        uint32_t SemanticIndex;
-        VertexFormat Format;
-    };
-
-public:
-    vector<CBuffer> CBuffers;
-    vector<BindResource> Binds;
-    vector<VertexInput> VertexInputs;
-    vector<StaticSampler> StaticSamplers;
-    std::array<uint32_t, 3> GroupSize;
-};
-
-class DxilShaderBufferDesc {
+class HlslShaderTypeDesc {
 public:
     string Name;
-    DxilCBufferType Type;
-    uint32_t Variables;
-    uint32_t Size;
-    uint32_t Flags;
+    vector<HlslShaderTypeMember> Members;
+    HlslShaderVariableClass Class{HlslShaderVariableClass::UNKNOWN};
+    HlslShaderVariableType Type{HlslShaderVariableType::UNKNOWN};
+    uint32_t Rows{0};
+    uint32_t Columns{0};
+    uint32_t Elements{0};
+    uint32_t Offset{0};
 };
 
-class DxilInputBindDesc {
+class HlslShaderTypeMember {
 public:
     string Name;
-    DxilShaderInputType Type;
-    uint32_t BindPoint;
-    uint32_t BindCount;
-    uint32_t Flags;
-    DxilResourceReturnType ReturnType;
-    DxilSRVDimension Dimension;
-    uint32_t NumSamples;
-    uint32_t Space;
+    const HlslShaderTypeDesc* Type{nullptr};
 };
 
-class DxilSignatureParameterDesc {
+class HlslShaderVariableDesc {
+public:
+    string Name;
+    const HlslShaderTypeDesc* Type{nullptr};
+    uint32_t StartOffset{0};
+    uint32_t Size{0};
+    uint32_t uFlags{0};
+    uint32_t StartTexture{0};
+    uint32_t TextureSize{0};
+    uint32_t StartSampler{0};
+    uint32_t SamplerSize{0};
+};
+
+class HlslShaderBufferDesc {
+public:
+    string Name;
+    vector<const HlslShaderVariableDesc*> Variables;
+    HlslCBufferType Type{HlslCBufferType::UNKNOWN};
+    uint32_t Size{0};
+    uint32_t Flags{0};
+};
+
+class HlslInputBindDesc {
+public:
+    string Name;
+    HlslShaderInputType Type{HlslShaderInputType::UNKNOWN};
+    uint32_t BindPoint{0};
+    uint32_t BindCount{0};
+    uint32_t Flags{0};
+    HlslResourceReturnType ReturnType{HlslResourceReturnType::UNKNOWN};
+    HlslSRVDimension Dimension{HlslSRVDimension::UNKNOWN};
+    uint32_t NumSamples{0};
+    uint32_t Space{0};
+};
+
+class HlslSignatureParameterDesc {
 public:
     string SemanticName;
-    uint32_t SemanticIndex;
-    uint32_t Register;
-    DxilSystemValueType SystemValueType;
-    DxilRegisterComponentType ComponentType;
-    uint32_t Stream;
+    uint32_t SemanticIndex{0};
+    uint32_t Register{0};
+    HlslSystemValueType SystemValueType{HlslSystemValueType::UNDEFINED};
+    HlslRegisterComponentType ComponentType{HlslRegisterComponentType::UNKNOWN};
+    uint32_t Stream{0};
 };
 
-class DxilShaderDesc {
+class HlslShaderDesc {
 public:
-    vector<DxilShaderBufferDesc> ConstantBuffers;
-    vector<DxilInputBindDesc> BoundResources;
-    vector<DxilSignatureParameterDesc> InputParameters;
-    vector<DxilSignatureParameterDesc> OutputParameters;
+    vector<HlslShaderBufferDesc> ConstantBuffers;
+    vector<HlslInputBindDesc> BoundResources;
+    vector<HlslSignatureParameterDesc> InputParameters;
+    vector<HlslSignatureParameterDesc> OutputParameters;
+    vector<HlslShaderVariableDesc> Variables;
+    vector<HlslShaderTypeDesc> Types;
     string Creator;
-    uint32_t Version;
-    uint32_t Flags;
+    uint32_t Version{0};
+    uint32_t Flags{0};
+    HlslFeatureLevel MinFeatureLevel{HlslFeatureLevel::UNKNOWN};
+    uint32_t GroupSizeX{0}, GroupSizeY{0}, GroupSizeZ{0};
 };
 
-std::string_view format_as(ShaderResourceType v) noexcept;
+bool operator==(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept;
+bool operator!=(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept;
+bool operator==(const HlslShaderVariableDesc& lhs, const HlslShaderVariableDesc& rhs) noexcept;
+bool operator!=(const HlslShaderVariableDesc& lhs, const HlslShaderVariableDesc& rhs) noexcept;
+bool operator==(const HlslShaderBufferDesc& lhs, const HlslShaderBufferDesc& rhs) noexcept;
+bool operator!=(const HlslShaderBufferDesc& lhs, const HlslShaderBufferDesc& rhs) noexcept;
 
 }  // namespace radray::render
 
@@ -204,7 +344,7 @@ public:
         std::span<std::string_view> includes = {},
         bool isSpirv = false) noexcept;
 
-    std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept;
+    std::optional<HlslShaderDesc> GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept;
 
 private:
     unique_ptr<Impl> _impl;

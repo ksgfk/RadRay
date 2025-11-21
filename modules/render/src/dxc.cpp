@@ -2,62 +2,72 @@
 
 namespace radray::render {
 
-bool operator==(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept {
-    return lhs.Name == rhs.Name && lhs.Start == rhs.Start && lhs.Size == rhs.Size;
-}
-
-bool operator!=(const DxilReflection::Variable& lhs, const DxilReflection::Variable& rhs) noexcept {
-    return !(lhs == rhs);
-}
-
-bool operator==(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept {
-    if (lhs.Size != rhs.Size) {
+bool operator==(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
+    if (lhs.Name != rhs.Name ||
+        lhs.Class != rhs.Class ||
+        lhs.Type != rhs.Type ||
+        lhs.Rows != rhs.Rows ||
+        lhs.Columns != rhs.Columns ||
+        lhs.Elements != rhs.Elements ||
+        lhs.Offset != rhs.Offset ||
+        lhs.Members.size() != rhs.Members.size()) {
         return false;
     }
-    if (lhs.Vars.size() != rhs.Vars.size()) {
-        return false;
-    }
-    size_t cnt = lhs.Vars.size();
-    for (size_t i = 0; i < cnt; i++) {
-        if (lhs.Vars[i] != rhs.Vars[i]) {
+    for (size_t i = 0; i < lhs.Members.size(); i++) {
+        const auto& lm = lhs.Members[i];
+        const auto& rm = rhs.Members[i];
+        if ((*lm.Type) != (*rm.Type)) {
             return false;
         }
     }
-    return lhs.Name == rhs.Name;
+    return true;
 }
 
-bool operator!=(const DxilReflection::CBuffer& lhs, const DxilReflection::CBuffer& rhs) noexcept {
-    return !(lhs == rhs);
+bool operator!=(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
+    return !(operator==(lhs, rhs));
 }
 
-bool operator==(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept {
-    return operator==(static_cast<SamplerDescriptor>(lhs), rhs) && lhs.Name == rhs.Name;
-}
-
-bool operator!=(const DxilReflection::StaticSampler& lhs, const DxilReflection::StaticSampler& rhs) noexcept {
-    return !(lhs == rhs);
-}
-
-std::string_view format_as(ShaderResourceType v) noexcept {
-    switch (v) {
-        case ShaderResourceType::CBuffer: return "CBuffer";
-        case ShaderResourceType::Texture: return "Texture";
-        case ShaderResourceType::Buffer: return "Buffer";
-        case ShaderResourceType::RWTexture: return "RWTexture";
-        case ShaderResourceType::RWBuffer: return "RWBuffer";
-        case ShaderResourceType::Sampler: return "Sampler";
-        case ShaderResourceType::PushConstant: return "PushConstant";
-        case ShaderResourceType::RayTracing: return "RayTracing";
+bool operator==(const radray::render::HlslShaderVariableDesc& lhs, const radray::render::HlslShaderVariableDesc& rhs) noexcept {
+    if (lhs.Name != rhs.Name ||
+        lhs.StartOffset != rhs.StartOffset ||
+        lhs.Size != rhs.Size ||
+        lhs.StartTexture != rhs.StartTexture ||
+        lhs.TextureSize != rhs.TextureSize ||
+        lhs.StartSampler != rhs.StartSampler ||
+        lhs.SamplerSize != rhs.SamplerSize) {
+        return false;
     }
-    Unreachable();
+    return (*lhs.Type) == (*rhs.Type);
+}
+
+bool operator!=(const radray::render::HlslShaderVariableDesc& lhs, const radray::render::HlslShaderVariableDesc& rhs) noexcept {
+    return !(operator==(lhs, rhs));
+}
+
+bool operator==(const radray::render::HlslShaderBufferDesc& lhs, const radray::render::HlslShaderBufferDesc& rhs) noexcept {
+    if (lhs.Name != rhs.Name || lhs.Size != rhs.Size || lhs.Type != rhs.Type || lhs.Variables.size() != rhs.Variables.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.Variables.size(); i++) {
+        const auto& lv = lhs.Variables[i];
+        const auto& rv = rhs.Variables[i];
+        if ((*lv) != (*rv)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool operator!=(const radray::render::HlslShaderBufferDesc& lhs, const radray::render::HlslShaderBufferDesc& rhs) noexcept {
+    return !(operator==(lhs, rhs));
 }
 
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_DXC
 
-#include <atomic>
-#include <sstream>
+#include <functional>
+#include <limits>
 #include <optional>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -75,6 +85,9 @@ std::string_view format_as(ShaderResourceType v) noexcept {
 using Microsoft::WRL::ComPtr;
 #include <radray/platform.h>
 #include <directx/d3d12shader.h>
+#ifdef VOID
+#undef VOID
+#endif
 #else
 // TODO:
 #endif
@@ -86,6 +99,213 @@ using Microsoft::WRL::ComPtr;
 #include <radray/utility.h>
 
 namespace radray::render {
+
+static HlslCBufferType _MapCBufferType(D3D_CBUFFER_TYPE type) noexcept {
+    switch (type) {
+        case D3D_CT_CBUFFER: return HlslCBufferType::CBUFFER;
+        case D3D_CT_TBUFFER: return HlslCBufferType::TBUFFER;
+        case D3D_CT_INTERFACE_POINTERS: return HlslCBufferType::INTERFACE_POINTERS;
+        case D3D_CT_RESOURCE_BIND_INFO: return HlslCBufferType::RESOURCE_BIND_INFO;
+        default: return HlslCBufferType::UNKNOWN;
+    }
+}
+
+static HlslShaderInputType _MapInputType(D3D_SHADER_INPUT_TYPE type) noexcept {
+    switch (type) {
+        case D3D_SIT_CBUFFER: return HlslShaderInputType::CBUFFER;
+        case D3D_SIT_TBUFFER: return HlslShaderInputType::TBUFFER;
+        case D3D_SIT_TEXTURE: return HlslShaderInputType::TEXTURE;
+        case D3D_SIT_SAMPLER: return HlslShaderInputType::SAMPLER;
+        case D3D_SIT_STRUCTURED: return HlslShaderInputType::STRUCTURED;
+        case D3D_SIT_BYTEADDRESS: return HlslShaderInputType::BYTEADDRESS;
+        case D3D_SIT_UAV_RWTYPED: return HlslShaderInputType::UAV_RWTYPED;
+        case D3D_SIT_UAV_RWSTRUCTURED: return HlslShaderInputType::UAV_RWSTRUCTURED;
+        case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: return HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER;
+        case D3D_SIT_UAV_APPEND_STRUCTURED: return HlslShaderInputType::UAV_APPEND_STRUCTURED;
+        case D3D_SIT_UAV_CONSUME_STRUCTURED: return HlslShaderInputType::UAV_CONSUME_STRUCTURED;
+        case D3D_SIT_UAV_RWBYTEADDRESS: return HlslShaderInputType::UAV_RWBYTEADDRESS;
+        case D3D_SIT_RTACCELERATIONSTRUCTURE: return HlslShaderInputType::RTACCELERATIONSTRUCTURE;
+        case D3D_SIT_UAV_FEEDBACKTEXTURE: return HlslShaderInputType::UAV_FEEDBACKTEXTURE;
+        default: return HlslShaderInputType::UNKNOWN;
+    }
+}
+
+static HlslResourceReturnType _MapReturnType(D3D_RESOURCE_RETURN_TYPE type) noexcept {
+    switch (type) {
+        case D3D_RETURN_TYPE_UNORM: return HlslResourceReturnType::UNORM;
+        case D3D_RETURN_TYPE_SNORM: return HlslResourceReturnType::SNORM;
+        case D3D_RETURN_TYPE_SINT: return HlslResourceReturnType::SINT;
+        case D3D_RETURN_TYPE_UINT: return HlslResourceReturnType::UINT;
+        case D3D_RETURN_TYPE_FLOAT: return HlslResourceReturnType::FLOAT;
+        case D3D_RETURN_TYPE_MIXED: return HlslResourceReturnType::MIXED;
+        case D3D_RETURN_TYPE_DOUBLE: return HlslResourceReturnType::DOUBLE;
+        case D3D_RETURN_TYPE_CONTINUED: return HlslResourceReturnType::CONTINUED;
+        default: return HlslResourceReturnType::UNKNOWN;
+    }
+}
+
+static HlslSRVDimension _MapSRVDimension(D3D_SRV_DIMENSION dim) noexcept {
+    switch (dim) {
+        case D3D_SRV_DIMENSION_BUFFER: return HlslSRVDimension::BUFFER;
+        case D3D_SRV_DIMENSION_TEXTURE1D: return HlslSRVDimension::TEXTURE1D;
+        case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return HlslSRVDimension::TEXTURE1DARRAY;
+        case D3D_SRV_DIMENSION_TEXTURE2D: return HlslSRVDimension::TEXTURE2D;
+        case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return HlslSRVDimension::TEXTURE2DARRAY;
+        case D3D_SRV_DIMENSION_TEXTURE2DMS: return HlslSRVDimension::TEXTURE2DMS;
+        case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return HlslSRVDimension::TEXTURE2DMSARRAY;
+        case D3D_SRV_DIMENSION_TEXTURE3D: return HlslSRVDimension::TEXTURE3D;
+        case D3D_SRV_DIMENSION_TEXTURECUBE: return HlslSRVDimension::TEXTURECUBE;
+        case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return HlslSRVDimension::TEXTURECUBEARRAY;
+        case D3D_SRV_DIMENSION_BUFFEREX: return HlslSRVDimension::BUFFEREX;
+        default: return HlslSRVDimension::UNKNOWN;
+    }
+}
+
+static HlslSystemValueType _MapSystemValue(D3D_NAME name) noexcept {
+    switch (name) {
+        case D3D_NAME_POSITION: return HlslSystemValueType::POSITION;
+        case D3D_NAME_CLIP_DISTANCE: return HlslSystemValueType::CLIP_DISTANCE;
+        case D3D_NAME_CULL_DISTANCE: return HlslSystemValueType::CULL_DISTANCE;
+        case D3D_NAME_RENDER_TARGET_ARRAY_INDEX: return HlslSystemValueType::RENDER_TARGET_ARRAY_INDEX;
+        case D3D_NAME_VIEWPORT_ARRAY_INDEX: return HlslSystemValueType::VIEWPORT_ARRAY_INDEX;
+        case D3D_NAME_VERTEX_ID: return HlslSystemValueType::VERTEX_ID;
+        case D3D_NAME_PRIMITIVE_ID: return HlslSystemValueType::PRIMITIVE_ID;
+        case D3D_NAME_INSTANCE_ID: return HlslSystemValueType::INSTANCE_ID;
+        case D3D_NAME_IS_FRONT_FACE: return HlslSystemValueType::IS_FRONT_FACE;
+        case D3D_NAME_SAMPLE_INDEX: return HlslSystemValueType::SAMPLE_INDEX;
+        case D3D_NAME_FINAL_QUAD_EDGE_TESSFACTOR: return HlslSystemValueType::FINAL_QUAD_EDGE_TESSFACTOR;
+        case D3D_NAME_FINAL_QUAD_INSIDE_TESSFACTOR: return HlslSystemValueType::FINAL_QUAD_INSIDE_TESSFACTOR;
+        case D3D_NAME_FINAL_TRI_EDGE_TESSFACTOR: return HlslSystemValueType::FINAL_TRI_EDGE_TESSFACTOR;
+        case D3D_NAME_FINAL_TRI_INSIDE_TESSFACTOR: return HlslSystemValueType::FINAL_TRI_INSIDE_TESSFACTOR;
+        case D3D_NAME_FINAL_LINE_DETAIL_TESSFACTOR: return HlslSystemValueType::FINAL_LINE_DETAIL_TESSFACTOR;
+        case D3D_NAME_FINAL_LINE_DENSITY_TESSFACTOR: return HlslSystemValueType::FINAL_LINE_DENSITY_TESSFACTOR;
+        case D3D_NAME_BARYCENTRICS: return HlslSystemValueType::BARYCENTRICS;
+        case D3D_NAME_SHADINGRATE: return HlslSystemValueType::SHADINGRATE;
+        case D3D_NAME_CULLPRIMITIVE: return HlslSystemValueType::CULLPRIMITIVE;
+        case D3D_NAME_TARGET: return HlslSystemValueType::TARGET;
+        case D3D_NAME_DEPTH: return HlslSystemValueType::DEPTH;
+        case D3D_NAME_COVERAGE: return HlslSystemValueType::COVERAGE;
+        case D3D_NAME_DEPTH_GREATER_EQUAL: return HlslSystemValueType::DEPTH_GREATER_EQUAL;
+        case D3D_NAME_DEPTH_LESS_EQUAL: return HlslSystemValueType::DEPTH_LESS_EQUAL;
+        case D3D_NAME_STENCIL_REF: return HlslSystemValueType::STENCIL_REF;
+        case D3D_NAME_INNER_COVERAGE: return HlslSystemValueType::INNER_COVERAGE;
+        default: return HlslSystemValueType::UNDEFINED;
+    }
+}
+
+static HlslRegisterComponentType _MapComponentType(D3D_REGISTER_COMPONENT_TYPE type) noexcept {
+    switch (type) {
+        case D3D_REGISTER_COMPONENT_UINT32: return HlslRegisterComponentType::UINT32;
+        case D3D_REGISTER_COMPONENT_SINT32: return HlslRegisterComponentType::SINT32;
+        case D3D_REGISTER_COMPONENT_FLOAT32: return HlslRegisterComponentType::FLOAT32;
+        case D3D_REGISTER_COMPONENT_UINT16: return HlslRegisterComponentType::UINT16;
+        case D3D_REGISTER_COMPONENT_SINT16: return HlslRegisterComponentType::SINT16;
+        case D3D_REGISTER_COMPONENT_FLOAT16: return HlslRegisterComponentType::FLOAT16;
+        case D3D_REGISTER_COMPONENT_UINT64: return HlslRegisterComponentType::UINT64;
+        case D3D_REGISTER_COMPONENT_SINT64: return HlslRegisterComponentType::SINT64;
+        case D3D_REGISTER_COMPONENT_FLOAT64: return HlslRegisterComponentType::FLOAT64;
+        default: return HlslRegisterComponentType::UNKNOWN;
+    }
+}
+
+static HlslFeatureLevel _MapFeatureLevel(D3D_FEATURE_LEVEL level) noexcept {
+    switch (level) {
+        case D3D_FEATURE_LEVEL_9_1: return HlslFeatureLevel::LEVEL9_1;
+        case D3D_FEATURE_LEVEL_9_2: return HlslFeatureLevel::LEVEL9_2;
+        case D3D_FEATURE_LEVEL_9_3: return HlslFeatureLevel::LEVEL9_3;
+        case D3D_FEATURE_LEVEL_10_0: return HlslFeatureLevel::LEVEL10_0;
+        case D3D_FEATURE_LEVEL_10_1: return HlslFeatureLevel::LEVEL10_1;
+        case D3D_FEATURE_LEVEL_11_0: return HlslFeatureLevel::LEVEL11_0;
+        case D3D_FEATURE_LEVEL_11_1: return HlslFeatureLevel::LEVEL11_1;
+        case D3D_FEATURE_LEVEL_12_0: return HlslFeatureLevel::LEVEL12_0;
+        case D3D_FEATURE_LEVEL_12_1: return HlslFeatureLevel::LEVEL12_1;
+        case D3D_FEATURE_LEVEL_12_2: return HlslFeatureLevel::LEVEL12_2;
+        default: return HlslFeatureLevel::UNKNOWN;
+    }
+}
+
+static HlslShaderVariableClass _MapShaderVariableClass(D3D_SHADER_VARIABLE_CLASS cls) noexcept {
+    switch (cls) {
+        case D3D_SVC_SCALAR: return HlslShaderVariableClass::SCALAR;
+        case D3D_SVC_VECTOR: return HlslShaderVariableClass::VECTOR;
+        case D3D_SVC_MATRIX_ROWS: return HlslShaderVariableClass::MATRIX_ROWS;
+        case D3D_SVC_MATRIX_COLUMNS: return HlslShaderVariableClass::MATRIX_COLUMNS;
+        case D3D_SVC_OBJECT: return HlslShaderVariableClass::OBJECT;
+        case D3D_SVC_STRUCT: return HlslShaderVariableClass::STRUCTURE;
+        case D3D_SVC_INTERFACE_CLASS: return HlslShaderVariableClass::OBJECT;
+        case D3D_SVC_INTERFACE_POINTER: return HlslShaderVariableClass::OBJECT;
+        default: return HlslShaderVariableClass::UNKNOWN;
+    }
+}
+
+static HlslShaderVariableType _MapShaderVariableType(D3D_SHADER_VARIABLE_TYPE type) noexcept {
+    switch (type) {
+        case D3D_SVT_VOID: return HlslShaderVariableType::VOID;
+        case D3D_SVT_BOOL: return HlslShaderVariableType::BOOL;
+        case D3D_SVT_INT: return HlslShaderVariableType::INT;
+        case D3D_SVT_FLOAT: return HlslShaderVariableType::FLOAT;
+        case D3D_SVT_STRING: return HlslShaderVariableType::STRING;
+        case D3D_SVT_TEXTURE: return HlslShaderVariableType::TEXTURE;
+        case D3D_SVT_TEXTURE1D: return HlslShaderVariableType::TEXTURE1D;
+        case D3D_SVT_TEXTURE2D: return HlslShaderVariableType::TEXTURE2D;
+        case D3D_SVT_TEXTURE3D: return HlslShaderVariableType::TEXTURE3D;
+        case D3D_SVT_TEXTURECUBE: return HlslShaderVariableType::TEXTURECUBE;
+        case D3D_SVT_SAMPLER: return HlslShaderVariableType::SAMPLER;
+        case D3D_SVT_SAMPLER1D: return HlslShaderVariableType::SAMPLER1D;
+        case D3D_SVT_SAMPLER2D: return HlslShaderVariableType::SAMPLER2D;
+        case D3D_SVT_SAMPLER3D: return HlslShaderVariableType::SAMPLER3D;
+        case D3D_SVT_SAMPLERCUBE: return HlslShaderVariableType::SAMPLERCUBE;
+        case D3D_SVT_PIXELSHADER: return HlslShaderVariableType::PIXELSHADER;
+        case D3D_SVT_VERTEXSHADER: return HlslShaderVariableType::VERTEXSHADER;
+        case D3D_SVT_PIXELFRAGMENT: return HlslShaderVariableType::PIXELFRAGMENT;
+        case D3D_SVT_VERTEXFRAGMENT: return HlslShaderVariableType::VERTEXFRAGMENT;
+        case D3D_SVT_UINT: return HlslShaderVariableType::UINT;
+        case D3D_SVT_UINT8: return HlslShaderVariableType::UINT8;
+        case D3D_SVT_GEOMETRYSHADER: return HlslShaderVariableType::GEOMETRYSHADER;
+        case D3D_SVT_RASTERIZER: return HlslShaderVariableType::RASTERIZER;
+        case D3D_SVT_DEPTHSTENCIL: return HlslShaderVariableType::DEPTHSTENCIL;
+        case D3D_SVT_BLEND: return HlslShaderVariableType::BLEND;
+        case D3D_SVT_BUFFER: return HlslShaderVariableType::BUFFER;
+        case D3D_SVT_CBUFFER: return HlslShaderVariableType::CBUFFER;
+        case D3D_SVT_TBUFFER: return HlslShaderVariableType::TBUFFER;
+        case D3D_SVT_TEXTURE1DARRAY: return HlslShaderVariableType::TEXTURE1DARRAY;
+        case D3D_SVT_TEXTURE2DARRAY: return HlslShaderVariableType::TEXTURE2DARRAY;
+        case D3D_SVT_RENDERTARGETVIEW: return HlslShaderVariableType::RENDERTARGETVIEW;
+        case D3D_SVT_DEPTHSTENCILVIEW: return HlslShaderVariableType::DEPTHSTENCILVIEW;
+        case D3D_SVT_TEXTURE2DMS: return HlslShaderVariableType::TEXTURE2DMS;
+        case D3D_SVT_TEXTURE2DMSARRAY: return HlslShaderVariableType::TEXTURE2DMSARRAY;
+        case D3D_SVT_TEXTURECUBEARRAY: return HlslShaderVariableType::TEXTURECUBEARRAY;
+        case D3D_SVT_HULLSHADER: return HlslShaderVariableType::HULLSHADER;
+        case D3D_SVT_DOMAINSHADER: return HlslShaderVariableType::DOMAINSHADER;
+        case D3D_SVT_INTERFACE_POINTER: return HlslShaderVariableType::INTERFACE_POINTER;
+        case D3D_SVT_COMPUTESHADER: return HlslShaderVariableType::COMPUTESHADER;
+        case D3D_SVT_DOUBLE: return HlslShaderVariableType::DOUBLE;
+        case D3D_SVT_RWTEXTURE1D: return HlslShaderVariableType::RWTEXTURE1D;
+        case D3D_SVT_RWTEXTURE1DARRAY: return HlslShaderVariableType::RWTEXTURE1DARRAY;
+        case D3D_SVT_RWTEXTURE2D: return HlslShaderVariableType::RWTEXTURE2D;
+        case D3D_SVT_RWTEXTURE2DARRAY: return HlslShaderVariableType::RWTEXTURE2DARRAY;
+        case D3D_SVT_RWTEXTURE3D: return HlslShaderVariableType::RWTEXTURE3D;
+        case D3D_SVT_RWBUFFER: return HlslShaderVariableType::RWBUFFER;
+        case D3D_SVT_BYTEADDRESS_BUFFER: return HlslShaderVariableType::BYTEADDRESS_BUFFER;
+        case D3D_SVT_RWBYTEADDRESS_BUFFER: return HlslShaderVariableType::RWBYTEADDRESS_BUFFER;
+        case D3D_SVT_STRUCTURED_BUFFER: return HlslShaderVariableType::STRUCTURED_BUFFER;
+        case D3D_SVT_RWSTRUCTURED_BUFFER: return HlslShaderVariableType::RWSTRUCTURED_BUFFER;
+        case D3D_SVT_APPEND_STRUCTURED_BUFFER: return HlslShaderVariableType::APPEND_STRUCTURED_BUFFER;
+        case D3D_SVT_CONSUME_STRUCTURED_BUFFER: return HlslShaderVariableType::CONSUME_STRUCTURED_BUFFER;
+        case D3D_SVT_MIN8FLOAT: return HlslShaderVariableType::MIN8FLOAT;
+        case D3D_SVT_MIN10FLOAT: return HlslShaderVariableType::MIN10FLOAT;
+        case D3D_SVT_MIN16FLOAT: return HlslShaderVariableType::MIN16FLOAT;
+        case D3D_SVT_MIN12INT: return HlslShaderVariableType::MIN12INT;
+        case D3D_SVT_MIN16INT: return HlslShaderVariableType::MIN16INT;
+        case D3D_SVT_MIN16UINT: return HlslShaderVariableType::MIN16UINT;
+        case D3D_SVT_INT16: return HlslShaderVariableType::INT16;
+        case D3D_SVT_UINT16: return HlslShaderVariableType::UINT16;
+        case D3D_SVT_FLOAT16: return HlslShaderVariableType::FLOAT16;
+        case D3D_SVT_INT64: return HlslShaderVariableType::INT64;
+        case D3D_SVT_UINT64: return HlslShaderVariableType::UINT64;
+        default: return HlslShaderVariableType::UNKNOWN;
+    }
+}
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 class MiMallocAdapter : public IMalloc {
@@ -284,69 +504,10 @@ public:
             .Category = argsData.category};
     }
 
-    //     std::optional<DxcOutputWithRootSig> Compile(Device* device, std::string_view code, std::span<std::string_view> args) noexcept {
-    //         ComPtr<IDxcResult> compileResult;
-    //         {
-    //             auto compileResultOpt = CompileImpl(code, args);
-    //             if (!compileResultOpt.HasValue()) {
-    //                 return std::nullopt;
-    //             }
-    //             compileResult = compileResultOpt.Unwrap();
-    //         }
-    //         auto argsData = ParseArgs(args);
-    //         switch (argsData.category) {
-    //             case ShaderBlobCategory::DXIL: {
-    // #ifdef RADRAY_ENABLE_D3D12
-    //                 if (device->GetBackend() != RenderBackend::D3D12) {
-    //                     RADRAY_ERR_LOG("dxc can only serialize root signature for D3D12 backend");
-    //                     return std::nullopt;
-    //                 }
-    //                 std::span<const byte> serializedRootSig;
-    //                 if (compileResult->HasOutput(DXC_OUT_ROOT_SIGNATURE)) {
-    //                     serializedRootSig = GetBlobData(compileResult.Get(), DXC_OUT_ROOT_SIGNATURE);
-    //                     if (serializedRootSig.empty()) {
-    //                         RADRAY_WARN_LOG("dxc cannot get serialized root sig data. fallback");
-    //                     }
-    //                 }
-    //                 if (serializedRootSig.empty()) {
-    //                     std::span<const byte> reflData;
-    //                     if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
-    //                         reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
-    //                     }
-    //                     if (reflData.empty()) {
-    //                         RADRAY_ERR_LOG("dxc cannot get reflection data to generate root sig");
-    //                         return std::nullopt;
-    //                     } else {
-    //                         DxcBuffer buf{reflData.data(), reflData.size(), 0};
-    //                         ComPtr<ID3D12ShaderReflection> sr;
-    //                         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
-    //                             FAILED(hr)) {
-    //                             RADRAY_ERR_LOG("dxc util cannot create ID3D12ShaderReflection, code={}", hr);
-    //                             return std::nullopt;
-    //                         }
-    //                         // TODO:
-    //                     }
-    //                 } else {
-    //                     // TODO:
-    //                 }
-    //                 break;
-    // #else
-    //                 RADRAY_ERR_LOG("dxc cannot serialize dxil root signature without D3D12 backend");
-    //                 return std::nullopt;
-    // #endif
-    //             }
-    //             case ShaderBlobCategory::SPIRV: {
-    //                 // TDOO:
-    //                 break;
-    //             }
-    //             case ShaderBlobCategory::MSL: {
-    //                 // TDOO:
-    //                 break;
-    //             }
-    //         }
-    //     }
-
-    std::optional<DxilReflection> GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
+    std::optional<HlslShaderDesc> GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept {
+        if (refl.empty()) {
+            return std::nullopt;
+        }
         DxcBuffer buf{refl.data(), refl.size(), 0};
         ComPtr<ID3D12ShaderReflection> sr;
         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
@@ -360,133 +521,234 @@ public:
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetDesc", hr);
             return std::nullopt;
         }
-        DxilReflection result{};
-        result.CBuffers.reserve(shaderDesc.ConstantBuffers);
+        HlslShaderDesc desc{};
+        if (shaderDesc.Creator != nullptr) {
+            desc.Creator = shaderDesc.Creator;
+        }
+        desc.Version = shaderDesc.Version;
+        desc.Flags = shaderDesc.Flags;
+        D3D_FEATURE_LEVEL featureLevel{};
+        if (SUCCEEDED(sr->GetMinFeatureLevel(&featureLevel))) {
+            desc.MinFeatureLevel = _MapFeatureLevel(featureLevel);
+        }
+        if (stage == ShaderStage::Compute) {
+            UINT groupX{}, groupY{}, groupZ{};
+            sr->GetThreadGroupSize(&groupX, &groupY, &groupZ);
+            desc.GroupSizeX = groupX;
+            desc.GroupSizeY = groupY;
+            desc.GroupSizeZ = groupZ;
+        }
+        constexpr size_t invalidTypeIndex = std::numeric_limits<size_t>::max();
+        unordered_map<ID3D12ShaderReflectionType*, size_t> typeIndexCache;
+        struct TypeMemberFix {
+            string Name;
+            size_t TypeIndex;
+        };
+        vector<vector<TypeMemberFix>> typeMemberFixups;
+        struct VariableTypeFix {
+            size_t variableIndex;
+            size_t typeIndex;
+        };
+        vector<VariableTypeFix> pendingVariableTypes;
+        vector<vector<size_t>> cbufferVariableIndices;
+        cbufferVariableIndices.reserve(shaderDesc.ConstantBuffers);
+        std::function<size_t(ID3D12ShaderReflectionType*)> getOrCreateTypeIndex = [&](ID3D12ShaderReflectionType* typeRefl) -> size_t {
+            if (typeRefl == nullptr) {
+                return invalidTypeIndex;
+            }
+            if (auto it = typeIndexCache.find(typeRefl); it != typeIndexCache.end()) {
+                return it->second;
+            }
+            D3D12_SHADER_TYPE_DESC typeDesc{};
+            if (HRESULT hr = typeRefl->GetDesc(&typeDesc);
+                FAILED(hr)) {
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionType", "GetDesc", hr);
+                return invalidTypeIndex;
+            }
+            size_t newIndex = desc.Types.size();
+            typeIndexCache.emplace(typeRefl, newIndex);
+            desc.Types.emplace_back();
+            typeMemberFixups.emplace_back();
+            auto& storedType = desc.Types.back();
+            if (typeDesc.Name != nullptr) {
+                storedType.Name = typeDesc.Name;
+            }
+            storedType.Class = _MapShaderVariableClass(typeDesc.Class);
+            storedType.Type = _MapShaderVariableType(typeDesc.Type);
+            storedType.Rows = typeDesc.Rows;
+            storedType.Columns = typeDesc.Columns;
+            storedType.Elements = typeDesc.Elements;
+            storedType.Offset = typeDesc.Offset;
+            size_t pendingMemberListIndex = typeMemberFixups.size() - 1;
+            typeMemberFixups[pendingMemberListIndex].reserve(typeDesc.Members);
+            for (UINT memberIdx = 0; memberIdx < typeDesc.Members; memberIdx++) {
+                auto* memberType = typeRefl->GetMemberTypeByIndex(memberIdx);
+                size_t memberTypeIndex = getOrCreateTypeIndex(memberType);
+                string memberName;
+                if (auto* name = typeRefl->GetMemberTypeName(memberIdx); name != nullptr) {
+                    memberName = name;
+                }
+                if (memberTypeIndex != invalidTypeIndex) {
+                    typeMemberFixups[pendingMemberListIndex].push_back(TypeMemberFix{
+                        .Name = std::move(memberName),
+                        .TypeIndex = memberTypeIndex,
+                    });
+                }
+            }
+            return newIndex;
+        };
+        desc.ConstantBuffers.reserve(shaderDesc.ConstantBuffers);
         for (UINT i = 0; i < shaderDesc.ConstantBuffers; i++) {
-            ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByIndex(i);
-            D3D12_SHADER_BUFFER_DESC bufDesc;
-            cb->GetDesc(&bufDesc);
-            auto&& cbt = result.CBuffers.emplace_back(DxilReflection::CBuffer{});
-            cbt.Name = bufDesc.Name;
-            cbt.Size = bufDesc.Size;
-            cbt.Vars.reserve(bufDesc.Variables);
-            for (UINT j = 0; j < bufDesc.Variables; j++) {
-                ID3D12ShaderReflectionVariable* v = cb->GetVariableByIndex(j);
-                D3D12_SHADER_VARIABLE_DESC varDesc;
-                v->GetDesc(&varDesc);
-                auto&& vart = cbt.Vars.emplace_back(DxilReflection::Variable{});
-                vart.Name = varDesc.Name;
-                vart.Start = varDesc.StartOffset;
-                vart.Size = varDesc.Size;
+            auto* cb = sr->GetConstantBufferByIndex(i);
+            if (cb == nullptr) {
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetConstantBufferByIndex", i);
+                continue;
+            }
+            D3D12_SHADER_BUFFER_DESC cbDesc{};
+            if (HRESULT hr = cb->GetDesc(&cbDesc);
+                FAILED(hr)) {
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionConstantBuffer", "GetDesc", hr);
+                continue;
+            }
+            HlslShaderBufferDesc bufferDesc{};
+            if (cbDesc.Name != nullptr) {
+                bufferDesc.Name = cbDesc.Name;
+            }
+            bufferDesc.Type = _MapCBufferType(static_cast<D3D_CBUFFER_TYPE>(cbDesc.Type));
+            bufferDesc.Size = cbDesc.Size;
+            bufferDesc.Flags = cbDesc.uFlags;
+            desc.ConstantBuffers.emplace_back(std::move(bufferDesc));
+            cbufferVariableIndices.emplace_back();
+            auto& bufferVariableIndices = cbufferVariableIndices.back();
+            bufferVariableIndices.reserve(cbDesc.Variables);
+            for (UINT j = 0; j < cbDesc.Variables; j++) {
+                auto* var = cb->GetVariableByIndex(j);
+                if (var == nullptr) {
+                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionConstantBuffer", "GetVariableByIndex", j);
+                    continue;
+                }
+                D3D12_SHADER_VARIABLE_DESC varDesc{};
+                if (HRESULT hr = var->GetDesc(&varDesc);
+                    FAILED(hr)) {
+                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionVariable", "GetDesc", hr);
+                    continue;
+                }
+                HlslShaderVariableDesc hlslVar{};
+                if (varDesc.Name != nullptr) {
+                    hlslVar.Name = varDesc.Name;
+                }
+                hlslVar.StartOffset = varDesc.StartOffset;
+                hlslVar.Size = varDesc.Size;
+                hlslVar.uFlags = varDesc.uFlags;
+                hlslVar.StartTexture = varDesc.StartTexture;
+                hlslVar.TextureSize = varDesc.TextureSize;
+                hlslVar.StartSampler = varDesc.StartSampler;
+                hlslVar.SamplerSize = varDesc.SamplerSize;
+                size_t variableIndex = desc.Variables.size();
+                desc.Variables.emplace_back(std::move(hlslVar));
+                bufferVariableIndices.emplace_back(variableIndex);
+                auto* typeRefl = var->GetType();
+                size_t typeIndex = getOrCreateTypeIndex(typeRefl);
+                if (typeIndex != invalidTypeIndex) {
+                    pendingVariableTypes.push_back({variableIndex, typeIndex});
+                }
             }
         }
-        result.Binds.reserve(shaderDesc.BoundResources);
+        desc.BoundResources.reserve(shaderDesc.BoundResources);
         for (UINT i = 0; i < shaderDesc.BoundResources; i++) {
-            D3D12_SHADER_INPUT_BIND_DESC bindDesc;
+            D3D12_SHADER_INPUT_BIND_DESC bindDesc{};
             if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
                 FAILED(hr)) {
                 RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetResourceBindingDesc", hr);
-                return std::nullopt;
+                continue;
             }
-            auto&& br = result.Binds.emplace_back(DxilReflection::BindResource{});
-            br.Name = bindDesc.Name;
-            br.Type = ([](D3D_SHADER_INPUT_TYPE type, D3D_SRV_DIMENSION dim) noexcept -> ShaderResourceType {
-                if (type == D3D_SHADER_INPUT_TYPE::D3D_SIT_UAV_RWTYPED && dim == D3D_SRV_DIMENSION_BUFFER) {
-                    return ShaderResourceType::RWBuffer;
-                }
-                if (type == D3D_SHADER_INPUT_TYPE::D3D_SIT_TEXTURE && dim == D3D_SRV_DIMENSION_BUFFER) {
-                    return ShaderResourceType::Buffer;
-                }
-                switch (type) {
-                    case D3D_SIT_CBUFFER: return ShaderResourceType::CBuffer;
-                    case D3D_SIT_TBUFFER: return ShaderResourceType::Buffer;
-                    case D3D_SIT_TEXTURE: return ShaderResourceType::Texture;
-                    case D3D_SIT_SAMPLER: return ShaderResourceType::Sampler;
-                    case D3D_SIT_UAV_RWTYPED: return ShaderResourceType::RWTexture;
-                    case D3D_SIT_STRUCTURED: return ShaderResourceType::Buffer;
-                    case D3D_SIT_UAV_RWSTRUCTURED: return ShaderResourceType::RWBuffer;
-                    case D3D_SIT_BYTEADDRESS: return ShaderResourceType::Buffer;
-                    case D3D_SIT_UAV_RWBYTEADDRESS: return ShaderResourceType::RWBuffer;
-                    case D3D_SIT_UAV_APPEND_STRUCTURED: return ShaderResourceType::RWBuffer;
-                    case D3D_SIT_UAV_CONSUME_STRUCTURED: return ShaderResourceType::RWBuffer;
-                    case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: return ShaderResourceType::RWBuffer;
-                    case D3D_SIT_RTACCELERATIONSTRUCTURE: return ShaderResourceType::RayTracing;
-                    case D3D_SIT_UAV_FEEDBACKTEXTURE: return ShaderResourceType::RWTexture;
-                }
-                Unreachable();
-            })(bindDesc.Type, bindDesc.Dimension);
-            br.Dim = ([](D3D_SRV_DIMENSION dim) noexcept -> TextureViewDimension {
-                switch (dim) {
-                    case D3D_SRV_DIMENSION_UNKNOWN: return TextureViewDimension::UNKNOWN;
-                    case D3D_SRV_DIMENSION_BUFFER: return TextureViewDimension::UNKNOWN;
-                    case D3D_SRV_DIMENSION_TEXTURE1D: return TextureViewDimension::Dim1D;
-                    case D3D_SRV_DIMENSION_TEXTURE1DARRAY: return TextureViewDimension::Dim1DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE2D: return TextureViewDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURE2DARRAY: return TextureViewDimension::Dim2DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE2DMS: return TextureViewDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURE2DMSARRAY: return TextureViewDimension::Dim2DArray;
-                    case D3D_SRV_DIMENSION_TEXTURE3D: return TextureViewDimension::Dim2D;
-                    case D3D_SRV_DIMENSION_TEXTURECUBE: return TextureViewDimension::Cube;
-                    case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return TextureViewDimension::CubeArray;
-                    case D3D_SRV_DIMENSION_BUFFEREX: return TextureViewDimension::UNKNOWN;
-                }
-                Unreachable();
-            })(bindDesc.Dimension);
-            br.Space = bindDesc.Space;
-            br.BindPoint = bindDesc.BindPoint;
-            br.BindCount = bindDesc.BindCount;
+            HlslInputBindDesc bind{};
+            if (bindDesc.Name != nullptr) {
+                bind.Name = bindDesc.Name;
+            }
+            bind.Type = _MapInputType(bindDesc.Type);
+            bind.BindPoint = bindDesc.BindPoint;
+            bind.BindCount = bindDesc.BindCount;
+            bind.Flags = bindDesc.uFlags;
+            bind.ReturnType = _MapReturnType(bindDesc.ReturnType);
+            bind.Dimension = _MapSRVDimension(bindDesc.Dimension);
+            bind.NumSamples = bindDesc.NumSamples;
+            bind.Space = bindDesc.Space;
+            desc.BoundResources.emplace_back(std::move(bind));
         }
-        if (stage == ShaderStage::Vertex) {
-            result.VertexInputs.reserve(shaderDesc.InputParameters);
-            for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
-                D3D12_SIGNATURE_PARAMETER_DESC spDesc;
-                if (HRESULT hr = sr->GetInputParameterDesc(i, &spDesc);
-                    FAILED(hr)) {
-                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetInputParameterDesc", hr);
-                    return std::nullopt;
-                }
-                auto&& vi = result.VertexInputs.emplace_back(DxilReflection::VertexInput{});
-                vi.Semantic = spDesc.SemanticName;
-                vi.SemanticIndex = spDesc.SemanticIndex;
-                uint32_t comps = static_cast<uint32_t>(std::log2(spDesc.Mask));
-                vi.Format = ([](D3D_REGISTER_COMPONENT_TYPE type, uint32_t coms) noexcept -> VertexFormat {
-                    switch (type) {
-                        case D3D_REGISTER_COMPONENT_UNKNOWN: return VertexFormat::UNKNOWN;
-                        case D3D_REGISTER_COMPONENT_UINT32:
-                            switch (coms) {
-                                case 0: return VertexFormat::UINT32;
-                                case 1: return VertexFormat::UINT32X2;
-                                case 2: return VertexFormat::UINT32X3;
-                                case 3: return VertexFormat::UINT32X4;
-                                default: return VertexFormat::UNKNOWN;
-                            }
-                        case D3D_REGISTER_COMPONENT_SINT32:
-                            switch (coms) {
-                                case 0: return VertexFormat::SINT32;
-                                case 1: return VertexFormat::SINT32X2;
-                                case 2: return VertexFormat::SINT32X3;
-                                case 3: return VertexFormat::SINT32X4;
-                                default: return VertexFormat::UNKNOWN;
-                            }
-                        case D3D_REGISTER_COMPONENT_FLOAT32:
-                            switch (coms) {
-                                case 0: return VertexFormat::FLOAT32;
-                                case 1: return VertexFormat::FLOAT32X2;
-                                case 2: return VertexFormat::FLOAT32X3;
-                                case 3: return VertexFormat::FLOAT32X4;
-                                default: return VertexFormat::UNKNOWN;
-                            }
-                        default: return VertexFormat::UNKNOWN;
-                    }
-                })(spDesc.ComponentType, comps);
+        desc.InputParameters.reserve(shaderDesc.InputParameters);
+        for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
+            D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
+            if (HRESULT hr = sr->GetInputParameterDesc(i, &paramDesc);
+                FAILED(hr)) {
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetInputParameterDesc", hr);
+                continue;
+            }
+            HlslSignatureParameterDesc param{};
+            if (paramDesc.SemanticName != nullptr) {
+                param.SemanticName = paramDesc.SemanticName;
+            }
+            param.SemanticIndex = paramDesc.SemanticIndex;
+            param.Register = paramDesc.Register;
+            param.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
+            param.ComponentType = _MapComponentType(paramDesc.ComponentType);
+            param.Stream = paramDesc.Stream;
+            desc.InputParameters.emplace_back(std::move(param));
+        }
+        desc.OutputParameters.reserve(shaderDesc.OutputParameters);
+        for (UINT i = 0; i < shaderDesc.OutputParameters; i++) {
+            D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
+            if (HRESULT hr = sr->GetOutputParameterDesc(i, &paramDesc);
+                FAILED(hr)) {
+                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetOutputParameterDesc", hr);
+                continue;
+            }
+            HlslSignatureParameterDesc param{};
+            if (paramDesc.SemanticName != nullptr) {
+                param.SemanticName = paramDesc.SemanticName;
+            }
+            param.SemanticIndex = paramDesc.SemanticIndex;
+            param.Register = paramDesc.Register;
+            param.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
+            param.ComponentType = _MapComponentType(paramDesc.ComponentType);
+            param.Stream = paramDesc.Stream;
+            desc.OutputParameters.emplace_back(std::move(param));
+        }
+        for (auto& fix : pendingVariableTypes) {
+            if (fix.variableIndex < desc.Variables.size() && fix.typeIndex < desc.Types.size()) {
+                desc.Variables[fix.variableIndex].Type = &desc.Types[fix.typeIndex];
             }
         }
-        if (stage == ShaderStage::Compute) {
-            UINT x, y, z;
-            sr->GetThreadGroupSize(&x, &y, &z);
-            result.GroupSize = {x, y, z};
+        for (size_t i = 0; i < cbufferVariableIndices.size(); i++) {
+            auto& bufferDesc = desc.ConstantBuffers[i];
+            auto& indices = cbufferVariableIndices[i];
+            bufferDesc.Variables.reserve(indices.size());
+            for (auto varIndex : indices) {
+                if (varIndex < desc.Variables.size()) {
+                    bufferDesc.Variables.emplace_back(&desc.Variables[varIndex]);
+                }
+            }
+            std::sort(bufferDesc.Variables.begin(), bufferDesc.Variables.end(), [](const auto* a, const auto* b) noexcept {
+                return a->StartOffset < b->StartOffset;
+            });
         }
-        return result;
+        for (size_t i = 0; i < desc.Types.size(); i++) {
+            auto& members = desc.Types[i].Members;
+            auto& fixups = typeMemberFixups[i];
+            members.reserve(fixups.size());
+            for (auto& fix : fixups) {
+                if (fix.TypeIndex < desc.Types.size()) {
+                    HlslShaderTypeMember member{};
+                    member.Name = fix.Name;
+                    member.Type = &desc.Types[fix.TypeIndex];
+                    members.emplace_back(std::move(member));
+                }
+            }
+            std::sort(members.begin(), members.end(), [](const auto& a, const auto& b) noexcept {
+                return a.Type->Offset < b.Type->Offset;
+            });
+        }
+        return desc;
     }
 
 public:
@@ -608,8 +870,8 @@ std::optional<DxcOutput> Dxc::Compile(
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
-std::optional<DxilReflection> Dxc::GetDxilReflection(ShaderStage stage, std::span<const byte> refl) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->GetDxilReflection(stage, refl);
+std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(stage, refl);
 }
 
 }  // namespace radray::render

@@ -265,4 +265,79 @@ Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 #endif
 }
 
+std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept {
+    vector<const HlslInputBindDesc*> mergedBindings;
+    for (const auto& stagedDesc : descs) {
+        if (stagedDesc.Desc == nullptr) {
+            continue;
+        }
+        for (const auto& bind : stagedDesc.Desc->BoundResources) {
+            bool alreadyMerged = false;
+            for (const auto* merged : mergedBindings) {
+                if (merged->BindPoint == bind.BindPoint && merged->Space == bind.Space && merged->BindCount == bind.BindCount) {
+                    alreadyMerged = true;
+                    break;
+                }
+            }
+            if (!alreadyMerged) {
+                mergedBindings.emplace_back(&bind);
+            }
+        }
+    }
+    // 检查绑定点是否存在重叠区域
+    for (size_t i = 0; i < mergedBindings.size(); i++) {
+        const auto* lhs = mergedBindings[i];
+        const uint32_t lhsStart = lhs->BindPoint;
+        const uint32_t lhsEnd = lhsStart + lhs->BindCount;
+        for (size_t j = i + 1; j < mergedBindings.size(); j++) {
+            const auto* rhs = mergedBindings[j];
+            if (lhs->Space != rhs->Space) {
+                continue;
+            }
+            const uint32_t rhsStart = rhs->BindPoint;
+            const uint32_t rhsEnd = rhsStart + rhs->BindCount;
+            const bool overlaps = (lhsStart < rhsEnd) && (rhsStart < lhsEnd);
+            if (overlaps) {
+                RADRAY_ERR_LOG("{} space:{} {}-{} overlaps {}-{}", Errors::DXC, lhs->Space, lhs->BindPoint, lhsEnd, rhs->BindPoint, rhsEnd);
+                return std::nullopt;
+            }
+        }
+    }
+
+    vector<const HlslShaderBufferDesc*> mergedCbuffers;
+    for (auto bind : mergedBindings) {
+        // TODO:
+    }
+
+    // vector<const HlslShaderBufferDesc*> mergedCbuffers;
+    // for (const auto& stagedDesc : descs) {
+    //     if (stagedDesc.Desc == nullptr) {
+    //         continue;
+    //     }
+    //     for (const auto& cb : stagedDesc.Desc->ConstantBuffers) {
+    //         bool alreadyMerged = false;
+    //         for (const auto* merged : mergedCbuffers) {
+    //             if ((*merged) == cb) {
+    //                 alreadyMerged = true;
+    //                 break;
+    //             }
+    //         }
+    //         if (!alreadyMerged) {
+    //             mergedCbuffers.emplace_back(&cb);
+    //         }
+    //     }
+    // }
+    // if (!mergedCbuffers.empty()) {
+    //     for (size_t i = 0; i < mergedCbuffers.size(); i++) {
+    //         const auto* iCB = mergedCbuffers[i];
+    //         for (size_t j = 0; j < mergedCbuffers.size(); j++) {
+    //             if (i == j) continue;
+    //             const auto* jCB = mergedCbuffers[j];
+
+    //         }
+    //     }
+    // }
+    return std::nullopt;
+}
+
 }  // namespace radray::render

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <radray/vertex_data.h>
+
 #include <radray/render/common.h>
+#include <radray/render/dxc.h>
 
 namespace radray::render {
 
@@ -45,5 +47,11 @@ IndexFormat MapIndexType(uint32_t size) noexcept;
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
+class StagedHlslShaderDesc {
+public:
+    const HlslShaderDesc* Desc;
+    ShaderStage Stage;
+};
+std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
 }  // namespace radray::render
