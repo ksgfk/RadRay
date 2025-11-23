@@ -265,33 +265,44 @@ Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 #endif
 }
 
+struct BindDescWithCBuffer {
+    const HlslInputBindDesc* bind;
+    const HlslShaderBufferDesc* cbuffer;
+};
+
 std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept {
-    vector<const HlslInputBindDesc*> mergedBindings;
+    vector<BindDescWithCBuffer> mergedBindings;
     for (const auto& stagedDesc : descs) {
         if (stagedDesc.Desc == nullptr) {
             continue;
         }
         for (const auto& bind : stagedDesc.Desc->BoundResources) {
             bool alreadyMerged = false;
-            for (const auto* merged : mergedBindings) {
-                if (merged->BindPoint == bind.BindPoint && merged->Space == bind.Space && merged->BindCount == bind.BindCount) {
+            for (const auto& t : mergedBindings) {
+                auto merged = t.bind;
+                if (merged->Type == bind.Type &&
+                    merged->BindPoint == bind.BindPoint &&
+                    merged->Space == bind.Space &&
+                    merged->BindCount == bind.BindCount) {
                     alreadyMerged = true;
                     break;
                 }
             }
             if (!alreadyMerged) {
-                mergedBindings.emplace_back(&bind);
+                mergedBindings.emplace_back(BindDescWithCBuffer{&bind, nullptr});
             }
         }
     }
     // 检查绑定点是否存在重叠区域
     for (size_t i = 0; i < mergedBindings.size(); i++) {
-        const auto* lhs = mergedBindings[i];
+        const auto& lhsBind = mergedBindings[i];
+        auto lhs = lhsBind.bind;
         const uint32_t lhsStart = lhs->BindPoint;
         const uint32_t lhsEnd = lhsStart + lhs->BindCount;
         for (size_t j = i + 1; j < mergedBindings.size(); j++) {
-            const auto* rhs = mergedBindings[j];
-            if (lhs->Space != rhs->Space) {
+            const auto& rhsBind = mergedBindings[j];
+            auto rhs = rhsBind.bind;
+            if (lhs->Space != rhs->Space || lhs->Type != rhs->Type) {
                 continue;
             }
             const uint32_t rhsStart = rhs->BindPoint;
@@ -303,40 +314,35 @@ std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::sp
             }
         }
     }
-
-    vector<const HlslShaderBufferDesc*> mergedCbuffers;
-    for (auto bind : mergedBindings) {
-        // TODO:
+    for (auto& i : mergedBindings) {
+        auto bind = i.bind;
+        if (bind->Type != HlslShaderInputType::CBUFFER) {
+            continue;
+        }
+        const HlslShaderBufferDesc* matchedDesc = nullptr;
+        for (const auto& stagedDesc : descs) {
+            if (stagedDesc.Desc == nullptr) {
+                continue;
+            }
+            for (const auto& cb : stagedDesc.Desc->ConstantBuffers) {
+                if (cb.Type != HlslCBufferType::CBUFFER || cb.Name != bind->Name) {
+                    continue;
+                }
+                if (matchedDesc == nullptr) {
+                    matchedDesc = &cb;
+                } else if ((*matchedDesc) != cb) {
+                    RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer mismatch between stages", cb.Name);
+                    return std::nullopt;
+                }
+            }
+        }
+        if (matchedDesc == nullptr) {
+            RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer reflection missing", bind->Name);
+            return std::nullopt;
+        }
+        i.cbuffer = matchedDesc;
     }
 
-    // vector<const HlslShaderBufferDesc*> mergedCbuffers;
-    // for (const auto& stagedDesc : descs) {
-    //     if (stagedDesc.Desc == nullptr) {
-    //         continue;
-    //     }
-    //     for (const auto& cb : stagedDesc.Desc->ConstantBuffers) {
-    //         bool alreadyMerged = false;
-    //         for (const auto* merged : mergedCbuffers) {
-    //             if ((*merged) == cb) {
-    //                 alreadyMerged = true;
-    //                 break;
-    //             }
-    //         }
-    //         if (!alreadyMerged) {
-    //             mergedCbuffers.emplace_back(&cb);
-    //         }
-    //     }
-    // }
-    // if (!mergedCbuffers.empty()) {
-    //     for (size_t i = 0; i < mergedCbuffers.size(); i++) {
-    //         const auto* iCB = mergedCbuffers[i];
-    //         for (size_t j = 0; j < mergedCbuffers.size(); j++) {
-    //             if (i == j) continue;
-    //             const auto* jCB = mergedCbuffers[j];
-
-    //         }
-    //     }
-    // }
     return std::nullopt;
 }
 

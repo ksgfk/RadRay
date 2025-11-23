@@ -49,8 +49,8 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
 Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
 class StagedHlslShaderDesc {
 public:
-    const HlslShaderDesc* Desc;
-    ShaderStage Stage;
+    const HlslShaderDesc* Desc{nullptr};
+    ShaderStage Stage{ShaderStage::UNKNOWN};
 };
 std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
