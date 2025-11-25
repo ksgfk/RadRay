@@ -84,6 +84,8 @@ public:
     RootDescriptor GetRootDescriptor(uint32_t slot) const noexcept;
     DescriptorTable GetDescriptorTable(uint32_t slot) const noexcept;
 
+    UINT GetDescriptorTableCount() const noexcept;
+
     friend void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescContainer& rhs) noexcept;
 
 private:
@@ -97,6 +99,28 @@ private:
     vector<D3D12_ROOT_PARAMETER1> _params1;
     vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplerDescs;
     vector<D3D12_STATIC_SAMPLER_DESC1> _staticSamplerDescs1;
+};
+
+class RootDescriptorTable1Container {
+public:
+    RootDescriptorTable1Container() noexcept = default;
+    explicit RootDescriptorTable1Container(const D3D12_ROOT_DESCRIPTOR_TABLE1& table) noexcept;
+    RootDescriptorTable1Container(const RootDescriptorTable1Container& other) noexcept;
+    RootDescriptorTable1Container(RootDescriptorTable1Container&& other) noexcept;
+    RootDescriptorTable1Container& operator=(const RootDescriptorTable1Container& other) noexcept;
+    RootDescriptorTable1Container& operator=(RootDescriptorTable1Container&& other) noexcept;
+    ~RootDescriptorTable1Container() noexcept = default;
+
+    const D3D12_ROOT_DESCRIPTOR_TABLE1* Get() const noexcept { return &_table; }
+    const vector<D3D12_DESCRIPTOR_RANGE1>& GetRanges() const noexcept { return _ranges; }
+
+    friend void swap(RootDescriptorTable1Container& lhs, RootDescriptorTable1Container& rhs) noexcept;
+
+private:
+    void Refresh() noexcept;
+
+    D3D12_ROOT_DESCRIPTOR_TABLE1 _table{};
+    vector<D3D12_DESCRIPTOR_RANGE1> _ranges;
 };
 
 std::optional<Win32Event> MakeWin32Event() noexcept;

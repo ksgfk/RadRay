@@ -341,8 +341,7 @@ enum class RenderObjectTag : uint32_t {
     BufferView = ResourceView | (ResourceView << 1),
     TextureView = ResourceView | (ResourceView << 2),
     DescriptorSet = ResourceView << 3,
-    DescriptorSetLayout = DescriptorSet << 1,
-    Sampler = DescriptorSetLayout << 1,
+    Sampler = DescriptorSet << 1,
 
     VkInstance = Sampler << 1
 };
@@ -407,7 +406,6 @@ class RootSignature;
 class PipelineState;
 class GraphicsPipelineState;
 class DescriptorSet;
-class DescriptorSetLayout;
 class Sampler;
 class InstanceVulkan;
 
@@ -604,7 +602,7 @@ struct RootSignatureConstant {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-struct RootSignatureBinding {
+struct RootSignatureRootDescriptor {
     uint32_t Slot{0};
     uint32_t Space{0};
     ResourceBindType Type{ResourceBindType::UNKNOWN};
@@ -620,13 +618,13 @@ struct RootSignatureSetElement {
     std::span<SamplerDescriptor> StaticSamplers{};
 };
 
-struct RootSignatureBindingSet {
+struct RootSignatureDescriptorSet {
     std::span<RootSignatureSetElement> Elements{};
 };
 
 struct RootSignatureDescriptor {
-    std::span<RootSignatureBinding> RootBindings{};
-    std::span<DescriptorSetLayout*> BindingSets{};
+    std::span<RootSignatureRootDescriptor> RootDescriptors{};
+    std::span<RootSignatureDescriptorSet> DescriptorSets{};
     std::optional<RootSignatureConstant> Constant{};
 };
 
@@ -772,9 +770,7 @@ public:
 
     virtual Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept = 0;
-
-    virtual Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept = 0;
+    virtual Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
     virtual Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 };
@@ -943,13 +939,6 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
 
     virtual void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept = 0;
-};
-
-class DescriptorSetLayout : public RenderBase {
-public:
-    virtual ~DescriptorSetLayout() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSetLayout; }
 };
 
 class Sampler : public RenderBase {

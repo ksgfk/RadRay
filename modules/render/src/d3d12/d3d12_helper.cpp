@@ -94,7 +94,9 @@ VersionedRootSignatureDescContainer::VersionedRootSignatureDescContainer(
         }
     }
 
-    if (_ranges.size() > 0) {
+    const bool hasRanges = !_ranges.empty();
+    const bool hasRanges1 = !_ranges1.empty();
+    if (hasRanges && !hasRanges1) {
         _ranges1.reserve(_ranges.size());
         for (const auto& i : _ranges) {
             D3D12_DESCRIPTOR_RANGE1& r1 = _ranges1.emplace_back();
@@ -105,8 +107,7 @@ VersionedRootSignatureDescContainer::VersionedRootSignatureDescContainer(
             r1.OffsetInDescriptorsFromTableStart = i.OffsetInDescriptorsFromTableStart;
             r1.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
         }
-    }
-    if (_ranges1.size() > 0) {
+    } else if (hasRanges1 && !hasRanges) {
         _ranges.reserve(_ranges1.size());
         for (const auto& i : _ranges1) {
             D3D12_DESCRIPTOR_RANGE& r = _ranges.emplace_back();
@@ -175,6 +176,52 @@ void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescCo
     rhs.RefreshRanges();
 }
 
+RootDescriptorTable1Container::RootDescriptorTable1Container(const D3D12_ROOT_DESCRIPTOR_TABLE1& table) noexcept
+    : _table(table) {
+    if (_table.NumDescriptorRanges > 0 && _table.pDescriptorRanges) {
+        _ranges.assign(_table.pDescriptorRanges, _table.pDescriptorRanges + _table.NumDescriptorRanges);
+    }
+    Refresh();
+}
+
+RootDescriptorTable1Container::RootDescriptorTable1Container(const RootDescriptorTable1Container& other) noexcept
+    : _table(other._table),
+      _ranges(other._ranges) {
+    Refresh();
+}
+
+RootDescriptorTable1Container::RootDescriptorTable1Container(RootDescriptorTable1Container&& other) noexcept
+    : _table(other._table),
+      _ranges(std::move(other._ranges)) {
+    Refresh();
+    other.Refresh();
+}
+
+RootDescriptorTable1Container& RootDescriptorTable1Container::operator=(const RootDescriptorTable1Container& other) noexcept {
+    RootDescriptorTable1Container tmp{other};
+    swap(*this, tmp);
+    return *this;
+}
+
+RootDescriptorTable1Container& RootDescriptorTable1Container::operator=(RootDescriptorTable1Container&& other) noexcept {
+    RootDescriptorTable1Container tmp{std::move(other)};
+    swap(*this, tmp);
+    return *this;
+}
+
+void swap(RootDescriptorTable1Container& lhs, RootDescriptorTable1Container& rhs) noexcept {
+    using std::swap;
+    swap(lhs._table, rhs._table);
+    swap(lhs._ranges, rhs._ranges);
+    lhs.Refresh();
+    rhs.Refresh();
+}
+
+void RootDescriptorTable1Container::Refresh() noexcept {
+    _table.NumDescriptorRanges = static_cast<UINT>(_ranges.size());
+    _table.pDescriptorRanges = _ranges.empty() ? nullptr : _ranges.data();
+}
+
 template <class T>
 static auto _GetRootConstImpl(const T* params, UINT count) noexcept {
     for (UINT i = 0; i < count; i++) {
@@ -184,6 +231,17 @@ static auto _GetRootConstImpl(const T* params, UINT count) noexcept {
         }
     }
     return VersionedRootSignatureDescContainer::RootConstant{{}, std::numeric_limits<UINT>::max()};
+}
+
+template <class T>
+static UINT _CountDescriptorTablesImpl(const T* params, UINT count) noexcept {
+    UINT result = 0;
+    for (UINT i = 0; i < count; i++) {
+        if (params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            ++result;
+        }
+    }
+    return result;
 }
 
 VersionedRootSignatureDescContainer::RootConstant VersionedRootSignatureDescContainer::GetRootConstant() const noexcept {
@@ -266,6 +324,18 @@ VersionedRootSignatureDescContainer::DescriptorTable VersionedRootSignatureDescC
         case D3D_ROOT_SIGNATURE_VERSION_1: return _GetDescriptorTableImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, slot, _ranges, _ranges1);
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return _GetDescriptorTableImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, slot, _ranges, _ranges1);
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return _GetDescriptorTableImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, slot, _ranges, _ranges1);
+    }
+    Unreachable();
+}
+
+UINT VersionedRootSignatureDescContainer::GetDescriptorTableCount() const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1:
+            return _CountDescriptorTablesImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1:
+            return _CountDescriptorTablesImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2:
+            return _CountDescriptorTablesImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters);
     }
     Unreachable();
 }

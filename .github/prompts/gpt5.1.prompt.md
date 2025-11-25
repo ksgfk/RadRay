@@ -1,5 +1,5 @@
 ---
-mode: agent
+agent: agent
 ---
 # GPT5八荣八耻
 - 以瞎猜接口为耻，以认真查询为荣。

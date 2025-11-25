@@ -250,9 +250,7 @@ public:
 
     Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
-
-    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
+    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
     Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
@@ -573,16 +571,6 @@ public:
     D3D12_PRIMITIVE_TOPOLOGY _topo;
 };
 
-class SimulateDescriptorSetLayoutD3D12 final : public DescriptorSetLayout {
-public:
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-public:
-    vector<RootSignatureSetElementContainer> _elems;
-};
-
 class GpuDescriptorHeapViews final : public DescriptorSet {
 public:
     GpuDescriptorHeapViews(
@@ -601,7 +589,7 @@ public:
     DeviceD3D12* _device;
     GpuDescriptorHeapViewRAII _resHeapView;
     GpuDescriptorHeapViewRAII _samplerHeapView;
-    vector<RootSignatureSetElementContainer> _elems;
+    RootDescriptorTable1Container _table;
     vector<uint32_t> _elemToHeapOffset;
 };
 
@@ -633,7 +621,6 @@ inline auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<Root
 inline auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 inline auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
 inline auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
-inline auto CastD3D12Object(DescriptorSetLayout* v) noexcept { return static_cast<SimulateDescriptorSetLayoutD3D12*>(v); }
 inline auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 }  // namespace radray::render::d3d12

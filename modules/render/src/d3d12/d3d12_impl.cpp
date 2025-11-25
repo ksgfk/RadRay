@@ -947,7 +947,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         allStages |= rootConst.Stages;
     }
     // size_t rootDescStart = rootParmas.size();
-    for (const RootSignatureBinding& rootDesc : desc.RootBindings) {
+    for (const auto& rootDesc : desc.RootDescriptors) {
         D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
         switch (rootDesc.Type) {
             case ResourceBindType::CBuffer: {
@@ -989,10 +989,8 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     // 我们约定, hlsl 中定义的单个资源独占一个 range
     // 资源数组占一个 range
-    for (auto i : desc.BindingSets) {
-        auto descSet = CastD3D12Object(i);
-        for (const RootSignatureSetElementContainer& c : descSet->_elems) {
-            const RootSignatureSetElement& e = c._elem;
+    for (auto i : desc.DescriptorSets) {
+        for (const auto& e : i.Elements) {
             switch (e.Type) {
                 case ResourceBindType::CBuffer:
                 case ResourceBindType::Buffer:
@@ -1022,10 +1020,8 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     size_t offset = 0;
     vector<RootSignatureSetElement> bindDescs{};
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
-    for (auto i : desc.BindingSets) {
-        auto descSet = CastD3D12Object(i);
-        for (const RootSignatureSetElementContainer& c : descSet->_elems) {
-            const RootSignatureSetElement& e = c._elem;
+    for (auto i : desc.DescriptorSets) {
+        for (const auto& e : i.Elements) {
             switch (e.Type) {
                 case ResourceBindType::Sampler: {
                     if (e.StaticSamplers.empty()) {
@@ -1328,35 +1324,33 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     return make_shared<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
 }
 
-Nullable<shared_ptr<DescriptorSetLayout>> DeviceD3D12::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
-    auto result = make_shared<SimulateDescriptorSetLayoutD3D12>();
-    result->_elems = RootSignatureSetElementContainer::FromView(desc.Elements);
-    return result;
-}
-
-Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
-    auto layout = CastD3D12Object(layout_);
+Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
+    auto rootSig = CastD3D12Object(rootSig_);
+    const auto& desc = rootSig->_desc;
+    auto&& data = desc.GetDescriptorTable(index);
+    if (data.index == std::numeric_limits<UINT>::max()) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::ArgumentOutOfRange, "index");
+        return nullptr;
+    }
+    const auto& table = data.data;
     UINT resCount = 0, samplerCount = 0;
     vector<uint32_t> offset;
-    offset.reserve(layout->_elems.size());
-    for (const RootSignatureSetElementContainer& c : layout->_elems) {
-        const RootSignatureSetElement& e = c._elem;
-        switch (e.Type) {
-            case ResourceBindType::CBuffer:
-            case ResourceBindType::Buffer:
-            case ResourceBindType::Texture:
-            case ResourceBindType::RWBuffer:
-            case ResourceBindType::RWTexture:
+    offset.reserve(table.NumDescriptorRanges);
+    for (UINT i = 0; i < table.NumDescriptorRanges; i++) {
+        const auto& range = table.pDescriptorRanges[i];
+        switch (range.RangeType) {
+            case D3D12_DESCRIPTOR_RANGE_TYPE_CBV:
+            case D3D12_DESCRIPTOR_RANGE_TYPE_SRV:
+            case D3D12_DESCRIPTOR_RANGE_TYPE_UAV:
                 offset.push_back(resCount);
-                resCount += e.Count;
+                resCount += range.NumDescriptors;
                 break;
-            case ResourceBindType::Sampler:
-                if (e.StaticSamplers.empty()) {
-                    offset.push_back(samplerCount);
-                    samplerCount += e.Count;
-                }
+            case D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER:
+                offset.push_back(samplerCount);
+                samplerCount += range.NumDescriptors;
                 break;
-            case ResourceBindType::UNKNOWN: break;
+            default:
+                break;
         }
     }
     GpuDescriptorHeapViewRAII resHeapView{};
@@ -1378,7 +1372,7 @@ Nullable<shared_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorS
         samplerHeapView = {gpuSamplerHeapAllocationOpt.value(), _gpuSamplerHeap.get()};
     }
     auto result = make_shared<GpuDescriptorHeapViews>(this, std::move(resHeapView), std::move(samplerHeapView));
-    result->_elems = layout->_elems;
+    result->_table = RootDescriptorTable1Container{table};
     result->_elemToHeapOffset = std::move(offset);
     return result;
 }
@@ -2060,12 +2054,6 @@ void GraphicsPsoD3D12::Destroy() noexcept {
     _pso = nullptr;
 }
 
-bool SimulateDescriptorSetLayoutD3D12::IsValid() const noexcept {
-    return true;
-}
-
-void SimulateDescriptorSetLayoutD3D12::Destroy() noexcept {}
-
 GpuDescriptorHeapViews::GpuDescriptorHeapViews(
     DeviceD3D12* device,
     GpuDescriptorHeapViewRAII resHeapView,
@@ -2084,12 +2072,13 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
 }
 
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
-    if (slot >= _elems.size()) {
+    const auto* table = _table.Get();
+    if (slot >= table->NumDescriptorRanges) {
         RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "slot");
         return;
     }
-    const auto& e = _elems[slot];
-    if (index >= e._elem.Count) {
+    const auto& e = table->pDescriptorRanges[slot];
+    if (index >= e.NumDescriptors) {
         RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "index");
         return;
     }
