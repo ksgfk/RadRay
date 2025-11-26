@@ -623,8 +623,8 @@ struct RootSignatureDescriptorSet {
 };
 
 struct RootSignatureDescriptor {
-    std::span<RootSignatureRootDescriptor> RootDescriptors{};
-    std::span<RootSignatureDescriptorSet> DescriptorSets{};
+    std::span<const RootSignatureRootDescriptor> RootDescriptors{};
+    std::span<const RootSignatureDescriptorSet> DescriptorSets{};
     std::optional<RootSignatureConstant> Constant{};
 };
 

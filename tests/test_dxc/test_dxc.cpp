@@ -83,4 +83,5 @@ TEST(DXC, BasicReflection) {
         {&vsDesc, ShaderStage::Vertex},
         {&psDesc, ShaderStage::Pixel}};
     auto rootSig = GenerateRSDescFromHlslShaderDescs(stagedDescs);
+    ASSERT_TRUE(rootSig.has_value());
 }

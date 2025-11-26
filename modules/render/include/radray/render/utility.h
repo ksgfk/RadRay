@@ -34,6 +34,42 @@ struct SemanticMapping {
     VertexFormat Format;
 };
 
+class RootSignatureDescriptorContainer {
+public:
+    RootSignatureDescriptorContainer() noexcept = default;
+    explicit RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept;
+    RootSignatureDescriptorContainer(const RootSignatureDescriptorContainer&) noexcept;
+    RootSignatureDescriptorContainer(RootSignatureDescriptorContainer&&) noexcept;
+    RootSignatureDescriptorContainer& operator=(const RootSignatureDescriptorContainer&) noexcept;
+    RootSignatureDescriptorContainer& operator=(RootSignatureDescriptorContainer&&) noexcept;
+    ~RootSignatureDescriptorContainer() noexcept = default;
+
+    RootSignatureDescriptor Get() const noexcept;
+
+    friend void swap(RootSignatureDescriptorContainer& lhs, RootSignatureDescriptorContainer& rhs) noexcept;
+
+private:
+    void Refresh() noexcept;
+
+    struct DescriptorSetRange {
+        size_t Offset{0};
+        size_t Count{0};
+    };
+
+    struct SamplerRange {
+        size_t Offset{0};
+        size_t Count{0};
+    };
+
+    vector<RootSignatureRootDescriptor> _rootDescriptors{};
+    vector<RootSignatureSetElement> _descriptorSetElements{};
+    vector<DescriptorSetRange> _descriptorSetRanges{};
+    vector<RootSignatureDescriptorSet> _descriptorSets{};
+    vector<SamplerDescriptor> _staticSamplers{};
+    vector<SamplerRange> _staticSamplerRanges{};
+    std::optional<RootSignatureConstant> _constant{};
+};
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSize(IndexFormat format) noexcept;
@@ -52,6 +88,6 @@ public:
     const HlslShaderDesc* Desc{nullptr};
     ShaderStage Stage{ShaderStage::UNKNOWN};
 };
-std::optional<RootSignatureDescriptor> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
+std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
 }  // namespace radray::render
