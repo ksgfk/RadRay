@@ -240,19 +240,17 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
     rsSampler.Count = 1;
     rsSampler.Stages = ShaderStage::Pixel;
     rsSampler.StaticSamplers = std::span(&sampler, 1);
-    RootSignatureBindingSet rsSet;
-    rsSet.Elements = rsElems;
-    auto layout = device->CreateDescriptorSetLayout(rsSet).Unwrap();
 
     RootSignatureConstant rsConst{};
     rsConst.Slot = 0;
     rsConst.Space = 0;
     rsConst.Size = 64;
     rsConst.Stages = ShaderStage::Vertex;
-    DescriptorSetLayout* layouts = layout.get();
     RootSignatureDescriptor rsDesc{};
     rsDesc.Constant = rsConst;
-    rsDesc.BindingSets = std::span(&layouts, 1);
+    RootSignatureDescriptorSet descSet{};
+    descSet.Elements = rsElems;
+    rsDesc.DescriptorSets = std::span{&descSet, 1};
     auto rs = device->CreateRootSignature(rsDesc).Unwrap();
 
     VertexElement vertexElems[3];
@@ -314,7 +312,6 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
 
     auto result = make_unique<ImGuiDrawContext>();
     result->_device = device;
-    result->_rsLayout = layout;
     result->_rs = rs;
     result->_pso = pso;
     result->_desc = desc;
@@ -593,7 +590,7 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
                     DescriptorSet* descSetRaw = nullptr;
                     auto it = _descSetCache.find(texView);
                     if (it == _descSetCache.end()) {
-                        shared_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rsLayout.get()).Unwrap();
+                        shared_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rs.get(), 0).Unwrap();
                         descSet->SetResource(0, 0, texView);
                         descSetRaw = descSet.get();
                         _descSetCache.emplace(texView, std::move(descSet));

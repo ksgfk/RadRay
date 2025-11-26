@@ -130,7 +130,6 @@ public:
     };
 
     render::Device* _device;
-    shared_ptr<render::DescriptorSetLayout> _rsLayout;
     shared_ptr<render::RootSignature> _rs;
     shared_ptr<render::GraphicsPipelineState> _pso;
     vector<Frame> _frames;

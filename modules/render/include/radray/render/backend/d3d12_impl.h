@@ -26,7 +26,6 @@ class TextureD3D12;
 class TextureViewD3D12;
 class RootSigD3D12;
 class GraphicsPsoD3D12;
-class SimulateDescriptorSetLayoutD3D12;
 class GpuDescriptorHeapViews;
 class SamplerD3D12;
 

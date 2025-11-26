@@ -121,26 +121,21 @@ public:
             MeshResource sphereModel{};
             sphereMesh.ToSimpleMeshResource(&sphereModel);
 
+            vector<RootSignatureSetElement> cbLayoutElems;
             if (backend == RenderBackend::Vulkan) {
-                RootSignatureSetElement cbLayoutElems[] = {
-                    {0, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}},
-                    {1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}}};
-                RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
-                _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+                cbLayoutElems.push_back({0, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}});
+                cbLayoutElems.push_back({1, 0, ResourceBindType::CBuffer, 1, ShaderStage::Graphics, {}});
             } else if (backend == RenderBackend::D3D12) {
-                RootSignatureSetElement cbLayoutElems[] = {
-                    {1, 0, ResourceBindType::CBuffer, 2, ShaderStage::Graphics, {}}};
-                RootSignatureBindingSet cbLayoutDesc{cbLayoutElems};
-                _cbLayout = _device->CreateDescriptorSetLayout(cbLayoutDesc).Unwrap();
+                cbLayoutElems.push_back({1, 0, ResourceBindType::CBuffer, 2, ShaderStage::Graphics, {}});
             }
+            RootSignatureDescriptorSet cbLayoutDesc{cbLayoutElems};
             RootSignatureConstant rscDesc{};
             rscDesc.Slot = 0;
             rscDesc.Space = 0;
             rscDesc.Size = 64 * 3;
             rscDesc.Stages = ShaderStage::Vertex | ShaderStage::Pixel;
-            DescriptorSetLayout* layouts[] = {_cbLayout.get()};
             RootSignatureDescriptor rsDesc{};
-            rsDesc.BindingSets = layouts;
+            rsDesc.DescriptorSets = std::span{&cbLayoutDesc, 1};
             rsDesc.Constant = rscDesc;
             _rs = _device->CreateRootSignature(rsDesc).Unwrap();
             const auto& prim = sphereModel.Primitives[0];
@@ -247,7 +242,7 @@ public:
         _cbMappedPtr = _cbuffer->Map(0, cbDesc.Size);
         _descSets.reserve(_frameCount);
         for (size_t i = 0; i < _frameCount; i++) {
-            auto set = _device->CreateDescriptorSet(_cbLayout.get()).Unwrap();
+            auto set = _device->CreateDescriptorSet(_rs.get(), 0).Unwrap();
             _descSets.emplace_back(std::move(set));
         }
         _cbCamViews.reserve(_frameCount);
@@ -467,7 +462,6 @@ public:
         _meshes.clear();
         _depthTexView.reset();
         _depthTex.reset();
-        _cbLayout.reset();
         _descSets.clear();
         _cbCamViews.clear();
         _cbMatViews.clear();
@@ -594,7 +588,6 @@ private:
     shared_ptr<Dxc> _dxc;
     shared_ptr<RootSignature> _rs;
     shared_ptr<GraphicsPipelineState> _pso;
-    shared_ptr<DescriptorSetLayout> _cbLayout;
 
     shared_ptr<Texture> _depthTex;
     shared_ptr<TextureView> _depthTexView;

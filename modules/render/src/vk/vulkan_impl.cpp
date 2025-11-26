@@ -7,18 +7,6 @@
 
 namespace radray::render::vulkan {
 
-static auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
-static auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-static auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
-static auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
-static auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
-static auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
-static auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
-static auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
-static auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
-static auto CastVkObject(DescriptorSetLayout* p) noexcept { return static_cast<DescriptorSetLayoutVulkan*>(p); }
-static auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
-
 static Nullable<InstanceVulkanImpl*> g_vkInstance = nullptr;
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
@@ -557,40 +545,12 @@ Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
 }
 
 Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
-    if (!desc.RootBindings.empty()) {
+    if (!desc.RootDescriptors.empty()) {
         // vk 要模拟 dx D3D12_ROOT_PARAMETER_TYPE_CBV/SRV/UAV 的 root binding 有亿点麻烦, 也没那么简单, 先不做了 (欸嘿
         RADRAY_ERR_LOG("{} {}", Errors::VK, "RS RootBindings not support");
         return nullptr;
     }
     vector<VkDescriptorSetLayoutBinding> bindings;
-    // unique_ptr<DescriptorSetLayoutVulkan> rootSetLayout;
-    // if (!desc.RootBindings.empty()) {
-    //     for (const auto& i : desc.RootBindings) {
-    //         auto& binding = bindings.emplace_back();
-    //         binding.binding = i.Slot;
-    //         binding.descriptorType = MapType(i.Type);
-    //         binding.descriptorCount = 1;
-    //         binding.stageFlags = MapType(i.Stages);
-    //         binding.pImmutableSamplers = nullptr;
-    //     }
-    //     VkDescriptorSetLayoutCreateInfo dslci{};
-    //     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    //     dslci.pNext = nullptr;
-    //     dslci.flags = 0;
-    //     dslci.bindingCount = static_cast<uint32_t>(bindings.size());
-    //     dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
-    //     auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
-    //     if (!descSetLayoutVk.HasValue()) {
-    //         return nullptr;
-    //     }
-    //     auto descSetLayoutV = descSetLayoutVk.Release();
-    //     descSetLayoutV->_rootBindings = {desc.RootBindings.begin(), desc.RootBindings.end()};
-    //     rootSetLayout = std::move(descSetLayoutV);
-    // }
-    // unique_ptr<DescriptorSetVulkan> rootSet;
-    // if (rootSetLayout != nullptr) {
-    //     rootSet = _poolAlloc->Allocate(rootSetLayout->_layout);
-    // }
     VkPushConstantRange pushConstant{};
     VkPushConstantRange* pushConstantPtr = nullptr;
     if (desc.Constant.has_value()) {
@@ -599,16 +559,16 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         pushConstant.size = desc.Constant->Size;
         pushConstantPtr = &pushConstant;
     }
+    vector<unique_ptr<DescriptorSetLayoutVulkan>> layouts;
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
-    vkDescSetLayouts.reserve(desc.BindingSets.size());
-    // uint32_t rootSetStart = static_cast<uint32_t>(vkDescSetLayouts.size());
-    // if (rootSetLayout != nullptr) {
-    //     vkDescSetLayouts.emplace_back(rootSetLayout->_layout);
-    // }
-    // uint32_t descSetsStart = static_cast<uint32_t>(vkDescSetLayouts.size());
-    for (auto i : desc.BindingSets) {
-        auto layout = CastVkObject(i);
-        vkDescSetLayouts.emplace_back(layout->_layout);
+    vkDescSetLayouts.reserve(desc.DescriptorSets.size());
+    for (auto i : desc.DescriptorSets) {
+        auto layout = this->CreateDescriptorSetLayout(i);
+        if (!layout) {
+            return nullptr;
+        }
+        const auto& t = layouts.emplace_back(layout.Release());
+        vkDescSetLayouts.emplace_back(t->_layout);
     }
     VkPipelineLayoutCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -625,16 +585,12 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         return nullptr;
     }
     auto result = make_shared<PipelineLayoutVulkan>(this, pipelineLayout);
-    // result->_rootSetLayout = std::move(rootSetLayout);
-    // result->_rootSet = std::move(rootSet);
+    result->_descSetLayouts = std::move(layouts);
     if (pushConstantPtr == nullptr) {
         result->_pushConst = std::nullopt;
     } else {
         result->_pushConst = *pushConstantPtr;
     }
-    result->_descSetCount = static_cast<uint32_t>(desc.BindingSets.size());
-    // result->_rootSetStart = rootSetStart;
-    // result->_setsStart = descSetsStart;
     return result;
 }
 
@@ -916,9 +872,14 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     return result;
 }
 
-Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept {
+Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
     vector<shared_ptr<SamplerVulkan>> staticSamplers;
+    size_t staticSamplerCount = 0;
+    for (const auto& j : desc.Elements) {
+        staticSamplerCount += j.StaticSamplers.size();
+    }
+    staticSamplers.reserve(staticSamplerCount);
     vector<vector<VkSampler>> tmpSS;
     for (const auto& j : desc.Elements) {
         auto& binding = bindings.emplace_back();
@@ -961,13 +922,17 @@ Nullable<shared_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayou
     }
     auto result = descSetLayoutVk.Release();
     result->_bindingElements = RootSignatureSetElementContainer::FromView(desc.Elements);
-    staticSamplers.shrink_to_fit();
     result->_immutableSamplers = std::move(staticSamplers);
-    return shared_ptr{std::move(result)};
+    return result;
 }
 
-Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
-    auto layout = CastVkObject(layout_);
+Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
+    auto rootSig = CastVkObject(rootSig_);
+    if (index >= rootSig->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, Errors::ArgumentOutOfRange, "index");
+        return nullptr;
+    }
+    const auto& layout = rootSig->_descSetLayouts[index];
     auto descSet = _poolAlloc->Allocate(layout->_layout);
     auto result = std::make_shared<DescriptorSetVulkanWrapper>(this, std::move(descSet));
     result->_bindingElements = layout->_bindingElements;
@@ -2315,8 +2280,8 @@ void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSe
         RADRAY_ERR_LOG("{} {}", Errors::VK, "unbound pipeline layout");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetCount) {
-        RADRAY_ERR_LOG("{} BindDescriptorSet slot {} exceeds VkPipelineLayout descriptor set count {}", Errors::VK, slot, _boundPipeLayout->_descSetCount);
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("{} BindDescriptorSet slot {} exceeds VkPipelineLayout descriptor set count {}", Errors::VK, slot, _boundPipeLayout->_descSetLayouts.size());
         return;
     }
     auto descSet = CastVkObject(set);

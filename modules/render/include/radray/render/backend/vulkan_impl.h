@@ -134,9 +134,7 @@ public:
 
     Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const RootSignatureBindingSet& desc) noexcept override;
-
-    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept override;
+    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
     Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
@@ -154,6 +152,8 @@ public:
     Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
 
     Nullable<unique_ptr<DescriptorPoolVulkan>> CreateDescriptorPool() noexcept;
+
+    Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -616,13 +616,15 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
-class DescriptorSetLayoutVulkan final : public DescriptorSetLayout {
+class DescriptorSetLayoutVulkan final : public RenderBase {
 public:
     DescriptorSetLayoutVulkan(
         DeviceVulkan* device,
         VkDescriptorSetLayout layout) noexcept;
 
     ~DescriptorSetLayoutVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -633,7 +635,6 @@ public:
 
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
-    vector<RootSignatureBinding> _rootBindings;
     vector<RootSignatureSetElementContainer> _bindingElements;
     vector<shared_ptr<SamplerVulkan>> _immutableSamplers;
 };
@@ -655,12 +656,8 @@ public:
 
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
-    // unique_ptr<DescriptorSetLayoutVulkan> _rootSetLayout;
-    // unique_ptr<DescriptorSetVulkan> _rootSet;
+    vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
     std::optional<VkPushConstantRange> _pushConst;
-    uint32_t _descSetCount{0};
-    // uint32_t _rootSetStart{0};
-    // uint32_t _setsStart{0};
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
@@ -806,5 +803,16 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc);
 
 void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept;
+
+inline auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
+inline auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
+inline auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
+inline auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
+inline auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
+inline auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+inline auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+inline auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+inline auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+inline auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
 
 }  // namespace radray::render::vulkan
