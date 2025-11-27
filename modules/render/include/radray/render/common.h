@@ -455,7 +455,7 @@ struct VulkanCommandQueueDescriptor {
 class VulkanDeviceDescriptor {
 public:
     std::optional<uint32_t> PhysicalDeviceIndex{};
-    std::span<VulkanCommandQueueDescriptor> Queues{};
+    std::span<const VulkanCommandQueueDescriptor> Queues{};
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
@@ -488,11 +488,11 @@ struct SamplerDescriptor {
 };
 
 struct CommandQueueSubmitDescriptor {
-    std::span<CommandBuffer*> CmdBuffers{};
-    std::span<Fence*> WaitFences{};
-    std::span<uint64_t> WaitFenceValues{};
-    std::span<Fence*> SignalFences{};
-    std::span<uint64_t> SignalFenceValues{};
+    std::span<CommandBuffer* const> CmdBuffers{};
+    std::span<Fence* const> WaitFences{};
+    std::span<const uint64_t> WaitFenceValues{};
+    std::span<Fence* const> SignalFences{};
+    std::span<const uint64_t> SignalFenceValues{};
 };
 
 struct BarrierBufferDescriptor {
@@ -543,7 +543,7 @@ struct DepthStencilAttachment {
 };
 
 struct RenderPassDescriptor {
-    std::span<ColorAttachment> ColorAttachments{};
+    std::span<const ColorAttachment> ColorAttachments{};
     std::optional<DepthStencilAttachment> DepthStencilAttachment{};
     std::string_view Name{};
 };
@@ -615,11 +615,11 @@ struct RootSignatureSetElement {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::span<SamplerDescriptor> StaticSamplers{};
+    std::span<const SamplerDescriptor> StaticSamplers{};
 };
 
 struct RootSignatureDescriptorSet {
-    std::span<RootSignatureSetElement> Elements{};
+    std::span<const RootSignatureSetElement> Elements{};
 };
 
 struct RootSignatureDescriptor {
@@ -639,7 +639,7 @@ struct VertexElement {
 struct VertexBufferLayout {
     uint64_t ArrayStride{0};
     VertexStepMode StepMode{};
-    std::span<VertexElement> Elements{};
+    std::span<const VertexElement> Elements{};
 };
 
 struct PrimitiveState {
@@ -712,11 +712,11 @@ struct GraphicsPipelineStateDescriptor {
     RootSignature* RootSig{nullptr};
     std::optional<ShaderEntry> VS{};
     std::optional<ShaderEntry> PS{};
-    std::span<VertexBufferLayout> VertexLayouts{};
+    std::span<const VertexBufferLayout> VertexLayouts{};
     PrimitiveState Primitive{};
     std::optional<DepthStencilState> DepthStencil{};
     MultiSampleState MultiSample{};
-    std::span<ColorTargetState> ColorTargets{};
+    std::span<const ColorTargetState> ColorTargets{};
 };
 
 struct VertexBufferView {
@@ -796,7 +796,7 @@ public:
 
     virtual void End() noexcept = 0;
 
-    virtual void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept = 0;
+    virtual void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept = 0;
 
     virtual Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 
@@ -817,7 +817,7 @@ public:
 
     virtual void SetScissor(Rect rect) noexcept = 0;
 
-    virtual void BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept = 0;
+    virtual void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept = 0;
 
     virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
 

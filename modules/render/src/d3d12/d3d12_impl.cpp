@@ -558,12 +558,7 @@ Nullable<shared_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
         desc.Size = paddedSize;
         resDesc.Width = paddedSize;
     }
-    D3D12_RESOURCE_STATES rawInitState;
-    switch (desc.Memory) {
-        case MemoryType::Device: rawInitState = D3D12_RESOURCE_STATE_COMMON; break;
-        case MemoryType::Upload: rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ; break;
-        case MemoryType::ReadBack: rawInitState = D3D12_RESOURCE_STATE_COPY_DEST; break;
-    }
+    D3D12_RESOURCE_STATES rawInitState = MapMemoryTypeToResourceState(desc.Memory);
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(desc.Memory);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
@@ -630,7 +625,7 @@ Nullable<shared_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
     if (desc.Usage == BufferUse::CBuffer) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
         cbvDesc.BufferLocation = buf->_gpuAddr + desc.Range.Offset;
-        cbvDesc.SizeInBytes = desc.Range.Size;
+        cbvDesc.SizeInBytes = (UINT)desc.Range.Size;
         heapView.GetHeap()->Create(cbvDesc, heapView.GetStart());
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
     } else if (desc.Usage == BufferUse::Resource) {
@@ -1058,7 +1053,7 @@ Nullable<shared_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                             ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
                             ssDesc.MinLOD = ss.LodMin;
                             ssDesc.MaxLOD = ss.LodMax;
-                            ssDesc.ShaderRegister = e.Slot + t;
+                            ssDesc.ShaderRegister = e.Slot + (UINT)t;
                             ssDesc.RegisterSpace = e.Space;
                             ssDesc.ShaderVisibility = MapShaderStages(e.Stages);
                         }
@@ -1537,7 +1532,7 @@ void CmdListD3D12::End() noexcept {
     _cmdList->Close();
 }
 
-void CmdListD3D12::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
+void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
     vector<D3D12_RESOURCE_BARRIER> rawBarriers;
     rawBarriers.reserve(buffers.size() + textures.size());
     for (const BarrierBufferDescriptor& bb : buffers) {
@@ -1726,7 +1721,7 @@ void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
     _cmdList->_cmdList->RSSetScissorRects(1, &rect);
 }
 
-void CmdRenderPassD3D12::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
+void CmdRenderPassD3D12::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
     if (_boundPso == nullptr) {
         _boundVbvs.clear();
         _boundVbvs.insert(_boundVbvs.end(), vbv.begin(), vbv.end());
@@ -1739,7 +1734,7 @@ void CmdRenderPassD3D12::BindVertexBuffer(std::span<VertexBufferView> vbv) noexc
             D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
             auto buf = CastD3D12Object(i.Target);
             raw.BufferLocation = buf->_gpuAddr + i.Offset;
-            raw.SizeInBytes = (UINT)buf->_desc.Size - i.Offset;
+            raw.SizeInBytes = (UINT)(buf->_desc.Size - i.Offset);
             raw.StrideInBytes = (UINT)strides[index];
         }
         _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());

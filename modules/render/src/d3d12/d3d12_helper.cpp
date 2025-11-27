@@ -1009,6 +1009,15 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
     Unreachable();
 }
 
+D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept {
+    switch (v) {
+        case MemoryType::Device: return D3D12_RESOURCE_STATE_COMMON;
+        case MemoryType::Upload: return D3D12_RESOURCE_STATE_GENERIC_READ;
+        case MemoryType::ReadBack: return D3D12_RESOURCE_STATE_COPY_DEST;
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

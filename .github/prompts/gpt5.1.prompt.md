@@ -10,3 +10,6 @@ agent: agent
 - 以破坏架构为耻，以遵循规范为荣。
 - 以假装理解为耻，以诚实无知为荣。
 - 以盲目修改为耻，以谨慎重构为荣。
+
+# STL容器
+- 常用容器，例如`std::vector`、`std::string`等在`modules/core/include/common.h`中alias了名字，不要使用std::前缀

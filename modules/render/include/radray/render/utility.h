@@ -27,13 +27,6 @@ public:
     vector<SamplerDescriptor> _staticSamplers;
 };
 
-struct SemanticMapping {
-    std::string_view Semantic;
-    uint32_t SemanticIndex;
-    uint32_t Location;
-    VertexFormat Format;
-};
-
 class RootSignatureDescriptorContainer {
 public:
     RootSignatureDescriptorContainer() noexcept = default;
@@ -44,30 +37,17 @@ public:
     RootSignatureDescriptorContainer& operator=(RootSignatureDescriptorContainer&&) noexcept;
     ~RootSignatureDescriptorContainer() noexcept = default;
 
-    RootSignatureDescriptor Get() const noexcept;
+    const RootSignatureDescriptor& Get() const noexcept;
 
     friend void swap(RootSignatureDescriptorContainer& lhs, RootSignatureDescriptorContainer& rhs) noexcept;
 
 private:
     void Refresh() noexcept;
 
-    struct DescriptorSetRange {
-        size_t Offset{0};
-        size_t Count{0};
-    };
-
-    struct SamplerRange {
-        size_t Offset{0};
-        size_t Count{0};
-    };
-
-    vector<RootSignatureRootDescriptor> _rootDescriptors{};
-    vector<RootSignatureSetElement> _descriptorSetElements{};
-    vector<DescriptorSetRange> _descriptorSetRanges{};
-    vector<RootSignatureDescriptorSet> _descriptorSets{};
-    vector<SamplerDescriptor> _staticSamplers{};
-    vector<SamplerRange> _staticSamplerRanges{};
-    std::optional<RootSignatureConstant> _constant{};
+    vector<RootSignatureRootDescriptor> _rootDescriptors;
+    vector<RootSignatureSetElement> _elements;
+    vector<RootSignatureDescriptorSet> _descriptorSets;
+    RootSignatureDescriptor _desc;
 };
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
@@ -80,6 +60,12 @@ MultiSampleState DefaultMultiSampleState() noexcept;
 ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept;
 BlendState DefaultBlendState() noexcept;
 IndexFormat MapIndexType(uint32_t size) noexcept;
+struct SemanticMapping {
+    std::string_view Semantic;
+    uint32_t SemanticIndex;
+    uint32_t Location;
+    VertexFormat Format;
+};
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;

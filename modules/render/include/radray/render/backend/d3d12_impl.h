@@ -334,7 +334,7 @@ public:
 
     void End() noexcept override;
 
-    void ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept override;
+    void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept override;
 
     Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
@@ -364,7 +364,7 @@ public:
 
     void SetScissor(Rect rect) noexcept override;
 
-    void BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept override;
+    void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept override;
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 

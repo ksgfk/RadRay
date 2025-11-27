@@ -697,7 +697,7 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         const auto& ds = desc.DepthStencil.value();
         if (ds.DepthBias.Constant != 0.0f || ds.DepthBias.SlopScale != 0.0f) {
             rasterInfo.depthBiasEnable = VK_TRUE;
-            rasterInfo.depthBiasConstantFactor = ds.DepthBias.Constant;
+            rasterInfo.depthBiasConstantFactor = (float)ds.DepthBias.Constant;
             rasterInfo.depthBiasClamp = ds.DepthBias.Clamp;
             rasterInfo.depthBiasSlopeFactor = ds.DepthBias.SlopScale;
         }
@@ -953,7 +953,7 @@ Nullable<shared_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
     createInfo.mipLodBias = 0;
     if (desc.AnisotropyClamp > 1.0f) {
         createInfo.anisotropyEnable = VK_TRUE;
-        createInfo.maxAnisotropy = desc.AnisotropyClamp;
+        createInfo.maxAnisotropy = (float)desc.AnisotropyClamp;
     } else {
         createInfo.anisotropyEnable = VK_FALSE;
         createInfo.maxAnisotropy = 1.0f;
@@ -1623,7 +1623,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
         detail.UploadTextureAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
         detail.UploadTextureRowAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
-        detail.MapAlignment = deviceR->_properties.limits.nonCoherentAtomSize;
+        detail.MapAlignment = (uint32_t)deviceR->_properties.limits.nonCoherentAtomSize;
     }
 
     RADRAY_INFO_LOG("========== Feature ==========");
@@ -1875,7 +1875,7 @@ void CommandBufferVulkan::End() noexcept {
     }
 }
 
-void CommandBufferVulkan::ResourceBarrier(std::span<BarrierBufferDescriptor> buffers, std::span<BarrierTextureDescriptor> textures) noexcept {
+void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
     VkPipelineStageFlags srcStageMask = 0;
     VkPipelineStageFlags dstStageMask = 0;
     vector<VkBufferMemoryBarrier> bufferBarriers;
@@ -2171,7 +2171,7 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
     _device->_ftb.vkCmdSetScissor(_cmdBuffer->_cmdBuffer, 0, 1, &s);
 }
 
-void SimulateCommandEncoderVulkan::BindVertexBuffer(std::span<VertexBufferView> vbv) noexcept {
+void SimulateCommandEncoderVulkan::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
     vector<VkBuffer> buffers;
     vector<VkDeviceSize> offsets;
     for (const auto& view : vbv) {

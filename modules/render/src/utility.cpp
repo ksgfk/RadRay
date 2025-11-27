@@ -1,6 +1,7 @@
 #include <radray/render/utility.h>
 
 #include <algorithm>
+#include <limits>
 
 #include <radray/errors.h>
 
@@ -65,82 +66,62 @@ vector<RootSignatureSetElementContainer> RootSignatureSetElementContainer::FromV
     return result;
 }
 
-RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept {
-    _rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
-    _constant = desc.Constant;
+static void _CopyRootSignatureDescriptor(
+    const RootSignatureDescriptor& src,
+    vector<RootSignatureRootDescriptor>& rootDescriptors,
+    vector<RootSignatureSetElement>& elements,
+    vector<RootSignatureDescriptorSet>& descriptorSets,
+    RootSignatureDescriptor& dst) noexcept {
+    rootDescriptors.assign(src.RootDescriptors.begin(), src.RootDescriptors.end());
 
-    const size_t setCount = desc.DescriptorSets.size();
     size_t totalElements = 0;
-    size_t totalSamplers = 0;
-    for (const auto& set : desc.DescriptorSets) {
+    for (const auto& set : src.DescriptorSets) {
         totalElements += set.Elements.size();
-        for (const auto& elem : set.Elements) {
-            totalSamplers += elem.StaticSamplers.size();
-        }
     }
 
-    _descriptorSetElements.clear();
-    _descriptorSetElements.reserve(totalElements);
-    _descriptorSetRanges.clear();
-    _descriptorSetRanges.reserve(setCount);
-    _descriptorSets.clear();
-    _descriptorSets.resize(setCount);
+    elements.clear();
+    elements.reserve(totalElements);
+    descriptorSets.clear();
+    descriptorSets.reserve(src.DescriptorSets.size());
 
-    _staticSamplers.clear();
-    _staticSamplers.reserve(totalSamplers);
-    _staticSamplerRanges.clear();
-    _staticSamplerRanges.reserve(totalElements);
-
-    for (const auto& set : desc.DescriptorSets) {
-        DescriptorSetRange range{};
-        range.Offset = _descriptorSetElements.size();
-        for (const auto& elem : set.Elements) {
-            SamplerRange samplerRange{};
-            if (!elem.StaticSamplers.empty()) {
-                samplerRange.Offset = _staticSamplers.size();
-                samplerRange.Count = elem.StaticSamplers.size();
-                _staticSamplers.insert(_staticSamplers.end(), elem.StaticSamplers.begin(), elem.StaticSamplers.end());
-            }
-            _staticSamplerRanges.push_back(samplerRange);
-            RootSignatureSetElement stored = elem;
-            stored.StaticSamplers = {};
-            _descriptorSetElements.push_back(stored);
+    for (const auto& set : src.DescriptorSets) {
+        const size_t start = elements.size();
+        elements.insert(elements.end(), set.Elements.begin(), set.Elements.end());
+        const size_t count = elements.size() - start;
+        RootSignatureDescriptorSet copiedSet{};
+        if (count > 0) {
+            copiedSet.Elements = std::span<const RootSignatureSetElement>{elements.data() + start, count};
+        } else {
+            copiedSet.Elements = std::span<const RootSignatureSetElement>{};
         }
-        range.Count = _descriptorSetElements.size() - range.Offset;
-        _descriptorSetRanges.push_back(range);
+        descriptorSets.push_back(copiedSet);
     }
 
+    dst.Constant = src.Constant;
+}
+
+RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept {
+    _CopyRootSignatureDescriptor(desc, _rootDescriptors, _elements, _descriptorSets, _desc);
     Refresh();
 }
 
-RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptorContainer& other) noexcept
-    : _rootDescriptors(other._rootDescriptors),
-      _descriptorSetElements(other._descriptorSetElements),
-      _descriptorSetRanges(other._descriptorSetRanges),
-      _descriptorSets(other._descriptorSets),
-      _staticSamplers(other._staticSamplers),
-      _staticSamplerRanges(other._staticSamplerRanges),
-      _constant(other._constant) {
+RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptorContainer& other) noexcept {
+    _CopyRootSignatureDescriptor(other._desc, _rootDescriptors, _elements, _descriptorSets, _desc);
     Refresh();
 }
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(RootSignatureDescriptorContainer&& other) noexcept
     : _rootDescriptors(std::move(other._rootDescriptors)),
-      _descriptorSetElements(std::move(other._descriptorSetElements)),
-      _descriptorSetRanges(std::move(other._descriptorSetRanges)),
+      _elements(std::move(other._elements)),
       _descriptorSets(std::move(other._descriptorSets)),
-      _staticSamplers(std::move(other._staticSamplers)),
-      _staticSamplerRanges(std::move(other._staticSamplerRanges)),
-      _constant(std::move(other._constant)) {
+      _desc(other._desc) {
     Refresh();
+    other._desc.Constant.reset();
+    other.Refresh();
 }
 
-RootSignatureDescriptor RootSignatureDescriptorContainer::Get() const noexcept {
-    RootSignatureDescriptor desc{};
-    desc.RootDescriptors = std::span<const RootSignatureRootDescriptor>{_rootDescriptors};
-    desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{_descriptorSets};
-    desc.Constant = _constant;
-    return desc;
+const RootSignatureDescriptor& RootSignatureDescriptorContainer::Get() const noexcept {
+    return _desc;
 }
 
 RootSignatureDescriptorContainer& RootSignatureDescriptorContainer::operator=(const RootSignatureDescriptorContainer& other) noexcept {
@@ -156,37 +137,31 @@ RootSignatureDescriptorContainer& RootSignatureDescriptorContainer::operator=(Ro
 }
 
 void RootSignatureDescriptorContainer::Refresh() noexcept {
-    for (size_t i = 0; i < _descriptorSetElements.size(); i++) {
-        const SamplerRange range = i < _staticSamplerRanges.size() ? _staticSamplerRanges[i] : SamplerRange{};
-        if (range.Count == 0) {
-            _descriptorSetElements[i].StaticSamplers = std::span<SamplerDescriptor>{};
-        } else {
-            _descriptorSetElements[i].StaticSamplers = std::span<SamplerDescriptor>{_staticSamplers.data() + range.Offset, range.Count};
+    size_t offset = 0;
+    for (auto& set : _descriptorSets) {
+        const size_t count = set.Elements.size();
+        if (count == 0) {
+            set.Elements = std::span<const RootSignatureSetElement>{};
+            continue;
         }
-    }
-
-    if (_descriptorSets.size() != _descriptorSetRanges.size()) {
-        _descriptorSets.resize(_descriptorSetRanges.size());
-    }
-    for (size_t i = 0; i < _descriptorSetRanges.size(); i++) {
-        const DescriptorSetRange range = _descriptorSetRanges[i];
-        if (range.Count == 0) {
-            _descriptorSets[i].Elements = std::span<RootSignatureSetElement>{};
-        } else {
-            _descriptorSets[i].Elements = std::span<RootSignatureSetElement>{_descriptorSetElements.data() + range.Offset, range.Count};
+        if (offset + count > _elements.size()) {
+            set.Elements = std::span<const RootSignatureSetElement>{};
+            offset = _elements.size();
+            continue;
         }
+        set.Elements = std::span<const RootSignatureSetElement>{_elements.data() + offset, count};
+        offset += count;
     }
+    _desc.RootDescriptors = std::span<const RootSignatureRootDescriptor>{_rootDescriptors};
+    _desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{_descriptorSets};
 }
 
 void swap(RootSignatureDescriptorContainer& lhs, RootSignatureDescriptorContainer& rhs) noexcept {
     using std::swap;
     swap(lhs._rootDescriptors, rhs._rootDescriptors);
-    swap(lhs._descriptorSetElements, rhs._descriptorSetElements);
-    swap(lhs._descriptorSetRanges, rhs._descriptorSetRanges);
+    swap(lhs._elements, rhs._elements);
     swap(lhs._descriptorSets, rhs._descriptorSets);
-    swap(lhs._staticSamplers, rhs._staticSamplers);
-    swap(lhs._staticSamplerRanges, rhs._staticSamplerRanges);
-    swap(lhs._constant, rhs._constant);
+    swap(lhs._desc, rhs._desc);
     lhs.Refresh();
     rhs.Refresh();
 }
@@ -427,7 +402,8 @@ static std::optional<ResourceBindType> _MapResourceBindType(const HlslInputBindD
         case HlslShaderInputType::STRUCTURED:
         case HlslShaderInputType::BYTEADDRESS:
             return ResourceBindType::Buffer;
-        case HlslShaderInputType::TEXTURE: return ResourceBindType::Texture;
+        case HlslShaderInputType::TEXTURE:
+            return _IsBufferDimension(bind.Dimension) ? ResourceBindType::Buffer : ResourceBindType::Texture;
         case HlslShaderInputType::SAMPLER: return ResourceBindType::Sampler;
         case HlslShaderInputType::UAV_RWTYPED:
             return _IsBufferDimension(bind.Dimension) ? ResourceBindType::RWBuffer : ResourceBindType::RWTexture;
@@ -488,27 +464,216 @@ static uint32_t _BindTypePriority(ResourceBindType type) noexcept {
     }
 }
 
-struct BindDescWithCBuffer {
-    const HlslInputBindDesc* bind;
-    const HlslShaderBufferDesc* cbuffer;
-    ShaderStages stages{ShaderStage::UNKNOWN};
+static bool _IsSameShaderTypeLayout(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept;
+
+static bool _IsSameShaderVariableLayout(const HlslShaderVariableDesc& lhs, const HlslShaderVariableDesc& rhs) noexcept {
+    if (lhs.StartOffset != rhs.StartOffset ||
+        lhs.Size != rhs.Size ||
+        lhs.StartTexture != rhs.StartTexture ||
+        lhs.TextureSize != rhs.TextureSize ||
+        lhs.StartSampler != rhs.StartSampler ||
+        lhs.SamplerSize != rhs.SamplerSize) {
+        return false;
+    }
+    if (!lhs.Type || !rhs.Type) {
+        return lhs.Type == rhs.Type;
+    }
+    return _IsSameShaderTypeLayout(*lhs.Type, *rhs.Type);
+}
+
+static bool _IsSameShaderTypeLayout(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept {
+    if (lhs.Class != rhs.Class ||
+        lhs.Type != rhs.Type ||
+        lhs.Rows != rhs.Rows ||
+        lhs.Columns != rhs.Columns ||
+        lhs.Elements != rhs.Elements ||
+        lhs.Offset != rhs.Offset ||
+        lhs.Members.size() != rhs.Members.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.Members.size(); ++i) {
+        const auto& lm = lhs.Members[i];
+        const auto& rm = rhs.Members[i];
+        if (!lm.Type || !rm.Type) {
+            if (lm.Type != rm.Type) {
+                return false;
+            }
+            continue;
+        }
+        if (!_IsSameShaderTypeLayout(*lm.Type, *rm.Type)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool _IsSameShaderBufferLayout(const HlslShaderBufferDesc* lhs, const HlslShaderBufferDesc* rhs) noexcept {
+    if (lhs == rhs) {
+        return true;
+    }
+    if (!lhs || !rhs) {
+        return lhs == rhs;
+    }
+    if (lhs->Size != rhs->Size || lhs->Type != rhs->Type || lhs->Variables.size() != rhs->Variables.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs->Variables.size(); ++i) {
+        if (!lhs->Variables[i] || !rhs->Variables[i]) {
+            if (lhs->Variables[i] != rhs->Variables[i]) {
+                return false;
+            }
+            continue;
+        }
+        if (!_IsSameShaderVariableLayout(*lhs->Variables[i], *rhs->Variables[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool _HasSameBindingLayout(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    return lhs.Type == rhs.Type &&
+           lhs.BindCount == rhs.BindCount &&
+           lhs.Flags == rhs.Flags &&
+           lhs.ReturnType == rhs.ReturnType &&
+           lhs.Dimension == rhs.Dimension &&
+           lhs.NumSamples == rhs.NumSamples;
+}
+
+struct CombinedBinding {
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    uint32_t Slot{0};
+    uint32_t Space{0};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    const HlslShaderBufferDesc* CBuffer{nullptr};
+    HlslInputBindDesc Layout{};
+    string Name;
 };
+
+enum class Placement {
+    Table,
+    RootDescriptor,
+    RootConstant,
+};
+
+struct RangeSpec {
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    uint32_t Space{0};
+    uint32_t Slot{0};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
+
+struct DescriptorTableBuildResult {
+    vector<RootSignatureSetElement> Elements;
+    vector<RootSignatureDescriptorSet> Sets;
+};
+
+static std::optional<DescriptorTableBuildResult> _BuildDescriptorSets(
+    const vector<CombinedBinding>& bindings,
+    const vector<Placement>& placements) noexcept {
+    DescriptorTableBuildResult result{};
+    vector<std::pair<size_t, size_t>> setRanges;
+    map<uint32_t, vector<size_t>> perSpace;
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        if (placements[i] != Placement::Table) {
+            continue;
+        }
+        perSpace[bindings[i].Space].push_back(i);
+    }
+
+    for (auto& [space, indices] : perSpace) {
+        auto& idxs = indices;
+        std::sort(
+            idxs.begin(),
+            idxs.end(),
+            [&](size_t lhs, size_t rhs) {
+                const auto& l = bindings[lhs];
+                const auto& r = bindings[rhs];
+                uint32_t lp = _BindTypePriority(l.Type);
+                uint32_t rp = _BindTypePriority(r.Type);
+                if (lp != rp) {
+                    return lp < rp;
+                }
+                if (l.Slot != r.Slot) {
+                    return l.Slot < r.Slot;
+                }
+                return l.Name < r.Name;
+            });
+
+        vector<RangeSpec> ranges;
+        RangeSpec current{};
+        bool hasCurrent = false;
+        auto flush = [&]() {
+            if (hasCurrent) {
+                ranges.push_back(current);
+                hasCurrent = false;
+            }
+        };
+
+        for (size_t idx : idxs) {
+            const auto& binding = bindings[idx];
+            if (!hasCurrent) {
+                current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
+                hasCurrent = true;
+                continue;
+            }
+            if (binding.Type == current.Type) {
+                uint64_t expected = static_cast<uint64_t>(current.Slot) + current.Count;
+                if (binding.Slot < expected) {
+                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "overlap in resource registers");
+                    return std::nullopt;
+                }
+                if (binding.Slot == expected) {
+                    if (binding.Count > std::numeric_limits<uint32_t>::max() - current.Count) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "descriptor range overflow");
+                        return std::nullopt;
+                    }
+                    current.Count += binding.Count;
+                    current.Stages |= binding.Stages;
+                    continue;
+                }
+            }
+            flush();
+            current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
+            hasCurrent = true;
+        }
+        flush();
+
+        size_t start = result.Elements.size();
+        for (const auto& range : ranges) {
+            RootSignatureSetElement elem{};
+            elem.Slot = range.Slot;
+            elem.Space = range.Space;
+            elem.Type = range.Type;
+            elem.Count = range.Count;
+            elem.Stages = _EnsureNonEmptyStages(range.Stages);
+            elem.StaticSamplers = std::span<const SamplerDescriptor>{};
+            result.Elements.push_back(elem);
+        }
+
+        size_t count = result.Elements.size() - start;
+        RootSignatureDescriptorSet set{};
+        result.Sets.push_back(set);
+        setRanges.emplace_back(start, count);
+    }
+
+    for (size_t i = 0; i < result.Sets.size(); ++i) {
+        auto [start, count] = setRanges[i];
+        result.Sets[i].Elements = std::span<const RootSignatureSetElement>{
+            result.Elements.data() + start,
+            count};
+    }
+
+    return result;
+}
 
 std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept {
     if (descs.empty()) {
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "descs");
         return std::nullopt;
     }
-
-    struct CombinedBinding {
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t Slot{0};
-        uint32_t Space{0};
-        uint32_t Count{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-        const HlslShaderBufferDesc* CBuffer{nullptr};
-        std::string Name;
-    };
 
     size_t totalBindings = 0;
     for (const auto& staged : descs) {
@@ -553,20 +718,33 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
                 combined.Space = bind.Space;
                 combined.Count = bind.BindCount;
                 combined.Stages = stageMask;
+                combined.Layout = bind;
                 combined.Name = bind.Name;
                 if (type == ResourceBindType::CBuffer) {
                     combined.CBuffer = _FindCBufferByName(*staged.Desc, bind.Name);
+                    if (!combined.CBuffer) {
+                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
+                        return std::nullopt;
+                    }
                 }
                 bindings.emplace_back(std::move(combined));
             } else {
-                if (it->Count != bind.BindCount) {
-                    RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched bind count", bind.Name);
+                if (!_HasSameBindingLayout(it->Layout, bind)) {
+                    RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched resource layout", bind.Name);
                     return std::nullopt;
                 }
-                it->Stages |= stageMask;
-                if (type == ResourceBindType::CBuffer && it->CBuffer == nullptr) {
-                    it->CBuffer = _FindCBufferByName(*staged.Desc, bind.Name);
+                if (type == ResourceBindType::CBuffer) {
+                    const auto* rhsCBuffer = _FindCBufferByName(*staged.Desc, bind.Name);
+                    if (!rhsCBuffer) {
+                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
+                        return std::nullopt;
+                    }
+                    if (!_IsSameShaderBufferLayout(it->CBuffer, rhsCBuffer)) {
+                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched cbuffer layout", bind.Name);
+                        return std::nullopt;
+                    }
                 }
+                it->Stages |= stageMask;
             }
         }
     }
@@ -576,54 +754,57 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         return RootSignatureDescriptorContainer{desc};
     }
 
-    enum class Placement { Table,
-                           RootDescriptor,
-                           RootConstant };
+    constexpr uint32_t kMaxRootDwords = 64;
     vector<Placement> placements(bindings.size(), Placement::Table);
 
-    constexpr uint32_t kPreferredRootConstBytes = 64;
-    constexpr uint32_t kMaxRootConstBytes = 256;
-
-    auto pickRootConstant = [&](uint32_t limit) -> std::optional<size_t> {
-        std::optional<size_t> bestIndex;
-        uint32_t bestSize = std::numeric_limits<uint32_t>::max();
+    auto pickRootConstant = [&]() -> std::optional<size_t> {
+        std::optional<size_t> best;
         for (size_t i = 0; i < bindings.size(); ++i) {
             const auto& binding = bindings[i];
             if (binding.Type != ResourceBindType::CBuffer || binding.Count != 1 || binding.CBuffer == nullptr) {
                 continue;
             }
-            if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0) {
+            if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0 || binding.CBuffer->Size > kMaxRootDwords * 4) {
                 continue;
             }
-            if (binding.CBuffer->Size > limit) {
+            if (!best.has_value()) {
+                best = i;
                 continue;
             }
-            if (!bestIndex.has_value() || binding.CBuffer->Size < bestSize) {
-                bestIndex = i;
-                bestSize = binding.CBuffer->Size;
+            const auto& currentBest = bindings[best.value()];
+            if (binding.Space < currentBest.Space ||
+                (binding.Space == currentBest.Space && binding.Slot < currentBest.Slot)) {
+                best = i;
             }
         }
-        return bestIndex;
+        return best;
     };
 
-    std::optional<size_t> rootConstIndex = pickRootConstant(kPreferredRootConstBytes);
-    if (!rootConstIndex.has_value()) {
-        rootConstIndex = pickRootConstant(kMaxRootConstBytes);
-    }
-
     std::optional<RootSignatureConstant> rootConstant;
-    uint32_t rootConstCost = 0;
-    if (rootConstIndex.has_value()) {
+    uint32_t rootConstDwords = 0;
+    if (auto rootConstIndex = pickRootConstant(); rootConstIndex.has_value()) {
         const auto& binding = bindings[rootConstIndex.value()];
         RootSignatureConstant constant{};
         constant.Slot = binding.Slot;
         constant.Space = binding.Space;
         constant.Size = binding.CBuffer->Size;
         constant.Stages = _EnsureNonEmptyStages(binding.Stages);
-        rootConstCost = constant.Size / 4;
+        rootConstDwords = constant.Size / 4;
         placements[rootConstIndex.value()] = Placement::RootConstant;
         rootConstant = constant;
     }
+
+    auto isRootDescriptorCandidate = [&](const CombinedBinding& binding) noexcept {
+        if (binding.Count != 1) {
+            return false;
+        }
+        switch (binding.Type) {
+            case ResourceBindType::CBuffer: return binding.CBuffer != nullptr;
+            case ResourceBindType::Buffer:
+            case ResourceBindType::RWBuffer: return true;
+            default: return false;
+        }
+    };
 
     vector<size_t> rootDescCandidates;
     rootDescCandidates.reserve(bindings.size());
@@ -631,18 +812,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         if (placements[i] != Placement::Table) {
             continue;
         }
-        const auto& binding = bindings[i];
-        if (binding.Count != 1) {
-            continue;
-        }
-        bool eligible = false;
-        switch (binding.Type) {
-            case ResourceBindType::CBuffer: eligible = binding.CBuffer != nullptr; break;
-            case ResourceBindType::Buffer:
-            case ResourceBindType::RWBuffer: eligible = true; break;
-            default: break;
-        }
-        if (eligible) {
+        if (isRootDescriptorCandidate(bindings[i])) {
             rootDescCandidates.push_back(i);
         }
     }
@@ -673,120 +843,39 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         });
 
     vector<size_t> selectedRootDescs;
-    constexpr uint32_t kMaxRootDwords = 64;
-    uint32_t rootDescCount = 0;
+    selectedRootDescs.reserve(rootDescCandidates.size());
     for (size_t idx : rootDescCandidates) {
-        if (rootConstCost + (rootDescCount + 1) * 2 > kMaxRootDwords) {
-            break;
-        }
         placements[idx] = Placement::RootDescriptor;
         selectedRootDescs.push_back(idx);
-        rootDescCount++;
     }
 
-    struct RangeSpec {
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t Space{0};
-        uint32_t Slot{0};
-        uint32_t Count{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
+    auto buildTables = [&](DescriptorTableBuildResult& out) -> bool {
+        auto tables = _BuildDescriptorSets(bindings, placements);
+        if (!tables.has_value()) {
+            return false;
+        }
+        out = std::move(tables.value());
+        return true;
     };
 
-    auto buildRanges = [&](const vector<Placement>& layout) -> std::optional<vector<RangeSpec>> {
-        struct SortKey {
-            ResourceBindType Type;
-            uint32_t Space;
-            uint32_t Slot;
-            size_t Index;
-        };
-        vector<SortKey> keys;
-        keys.reserve(bindings.size());
-        for (size_t i = 0; i < bindings.size(); ++i) {
-            if (layout[i] != Placement::Table) {
-                continue;
-            }
-            keys.push_back({bindings[i].Type, bindings[i].Space, bindings[i].Slot, i});
-        }
-        if (keys.empty()) {
-            return vector<RangeSpec>{};
-        }
-        std::sort(
-            keys.begin(),
-            keys.end(),
-            [&](const SortKey& lhs, const SortKey& rhs) {
-                if (lhs.Space != rhs.Space) {
-                    return lhs.Space < rhs.Space;
-                }
-                uint32_t lp = _BindTypePriority(lhs.Type);
-                uint32_t rp = _BindTypePriority(rhs.Type);
-                if (lp != rp) {
-                    return lp < rp;
-                }
-                return lhs.Slot < rhs.Slot;
-            });
-
-        vector<RangeSpec> ranges;
-        ranges.reserve(keys.size());
-        RangeSpec current{};
-        bool hasCurrent = false;
-        auto flush = [&]() {
-            if (hasCurrent) {
-                ranges.push_back(current);
-                hasCurrent = false;
-            }
-        };
-
-        for (const auto& key : keys) {
-            const auto& binding = bindings[key.Index];
-            if (!hasCurrent) {
-                current = {binding.Type, binding.Space, binding.Slot, binding.Count, binding.Stages};
-                hasCurrent = true;
-                continue;
-            }
-            if (binding.Type == current.Type && binding.Space == current.Space) {
-                uint64_t expected = static_cast<uint64_t>(current.Slot) + current.Count;
-                if (binding.Slot < expected) {
-                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "overlap in resource registers");
-                    return std::nullopt;
-                }
-                if (binding.Slot == expected) {
-                    if (binding.Count > std::numeric_limits<uint32_t>::max() - current.Count) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "descriptor range overflow");
-                        return std::nullopt;
-                    }
-                    current.Count += binding.Count;
-                    current.Stages |= binding.Stages;
-                    continue;
-                }
-            }
-            flush();
-            current = {binding.Type, binding.Space, binding.Slot, binding.Count, binding.Stages};
-            hasCurrent = true;
-        }
-        flush();
-        return ranges;
-    };
-
-    auto rangesOpt = buildRanges(placements);
-    if (!rangesOpt.has_value()) {
+    DescriptorTableBuildResult tableResult{};
+    if (!buildTables(tableResult)) {
         return std::nullopt;
     }
-    auto ranges = std::move(rangesOpt.value());
-    uint32_t rootDescCost = rootDescCount * 2;
-    uint32_t totalCost = rootConstCost + rootDescCost + static_cast<uint32_t>(ranges.size());
 
+    auto calcTotalCost = [&](uint32_t rootDescCount, uint32_t tableCount) noexcept {
+        return rootConstDwords + rootDescCount * 2u + tableCount;
+    };
+
+    uint32_t totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
     while (totalCost > kMaxRootDwords && !selectedRootDescs.empty()) {
         size_t idx = selectedRootDescs.back();
         selectedRootDescs.pop_back();
         placements[idx] = Placement::Table;
-        rootDescCount--;
-        rootDescCost = rootDescCount * 2;
-        auto rebuilt = buildRanges(placements);
-        if (!rebuilt.has_value()) {
+        if (!buildTables(tableResult)) {
             return std::nullopt;
         }
-        ranges = std::move(rebuilt.value());
-        totalCost = rootConstCost + rootDescCost + static_cast<uint32_t>(ranges.size());
+        totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
     }
 
     if (totalCost > kMaxRootDwords) {
@@ -794,7 +883,6 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         return std::nullopt;
     }
 
-    vector<RootSignatureRootDescriptor> rootDescriptors;
     if (!selectedRootDescs.empty()) {
         std::sort(
             selectedRootDescs.begin(),
@@ -810,41 +898,28 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
                 if (l.Space != r.Space) {
                     return l.Space < r.Space;
                 }
-                return l.Slot < r.Slot;
+                if (l.Slot != r.Slot) {
+                    return l.Slot < r.Slot;
+                }
+                return l.Name < r.Name;
             });
-        rootDescriptors.reserve(selectedRootDescs.size());
-        for (size_t idx : selectedRootDescs) {
-            const auto& binding = bindings[idx];
-            RootSignatureRootDescriptor rd{};
-            rd.Slot = binding.Slot;
-            rd.Space = binding.Space;
-            rd.Type = binding.Type;
-            rd.Stages = _EnsureNonEmptyStages(binding.Stages);
-            rootDescriptors.push_back(rd);
-        }
     }
 
-    vector<RootSignatureSetElement> setElements;
-    setElements.reserve(ranges.size());
-    vector<RootSignatureDescriptorSet> descriptorSets;
-    descriptorSets.reserve(ranges.size());
-    for (const auto& range : ranges) {
-        RootSignatureSetElement elem{};
-        elem.Slot = range.Slot;
-        elem.Space = range.Space;
-        elem.Type = range.Type;
-        elem.Count = range.Count;
-        elem.Stages = _EnsureNonEmptyStages(range.Stages);
-        elem.StaticSamplers = std::span<SamplerDescriptor>{};
-        setElements.push_back(elem);
-        RootSignatureDescriptorSet set{};
-        set.Elements = std::span<RootSignatureSetElement>{&setElements.back(), 1};
-        descriptorSets.push_back(set);
+    vector<RootSignatureRootDescriptor> rootDescriptors;
+    rootDescriptors.reserve(selectedRootDescs.size());
+    for (size_t idx : selectedRootDescs) {
+        const auto& binding = bindings[idx];
+        RootSignatureRootDescriptor rd{};
+        rd.Slot = binding.Slot;
+        rd.Space = binding.Space;
+        rd.Type = binding.Type;
+        rd.Stages = _EnsureNonEmptyStages(binding.Stages);
+        rootDescriptors.push_back(rd);
     }
 
     RootSignatureDescriptor desc{};
     desc.RootDescriptors = std::span<const RootSignatureRootDescriptor>{rootDescriptors};
-    desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{descriptorSets};
+    desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{tableResult.Sets};
     if (rootConstant.has_value()) {
         desc.Constant = rootConstant;
     }
