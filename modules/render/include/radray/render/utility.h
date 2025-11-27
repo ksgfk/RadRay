@@ -7,8 +7,16 @@
 
 namespace radray::render {
 
+class ResourceBindingTable : public RenderBase {
+public:
+    ~ResourceBindingTable() noexcept override = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTags{RenderObjectTag::UNKNOWN}; }
+};
+
 class RootSignatureSetElementContainer {
 public:
+    RootSignatureSetElementContainer() noexcept = default;
     explicit RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept;
     RootSignatureSetElementContainer(const RootSignatureSetElementContainer&) noexcept;
     RootSignatureSetElementContainer(RootSignatureSetElementContainer&&) noexcept;
@@ -23,7 +31,7 @@ public:
 public:
     void Refresh() noexcept;
 
-    RootSignatureSetElement _elem;
+    RootSignatureSetElement _elem{};
     vector<SamplerDescriptor> _staticSamplers;
 };
 
@@ -47,7 +55,7 @@ private:
     vector<RootSignatureRootDescriptor> _rootDescriptors;
     vector<RootSignatureSetElement> _elements;
     vector<RootSignatureDescriptorSet> _descriptorSets;
-    RootSignatureDescriptor _desc;
+    RootSignatureDescriptor _desc{};
 };
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
@@ -61,16 +69,15 @@ ColorTargetState DefaultColorTargetState(TextureFormat format) noexcept;
 BlendState DefaultBlendState() noexcept;
 IndexFormat MapIndexType(uint32_t size) noexcept;
 struct SemanticMapping {
-    std::string_view Semantic;
-    uint32_t SemanticIndex;
-    uint32_t Location;
-    VertexFormat Format;
+    std::string_view Semantic{};
+    uint32_t SemanticIndex{0};
+    uint32_t Location{0};
+    VertexFormat Format{VertexFormat::UNKNOWN};
 };
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
-Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
-class StagedHlslShaderDesc {
-public:
+Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
+struct StagedHlslShaderDesc {
     const HlslShaderDesc* Desc{nullptr};
     ShaderStage Stage{ShaderStage::UNKNOWN};
 };

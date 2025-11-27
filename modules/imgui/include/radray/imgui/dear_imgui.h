@@ -59,20 +59,22 @@ public:
 
 class ImGuiDrawTexture {
 public:
-    ImGuiDrawTexture(shared_ptr<render::Texture> tex, shared_ptr<render::TextureView> srv) noexcept;
-    ImGuiDrawTexture(const ImGuiDrawTexture&) = default;
-    ImGuiDrawTexture& operator=(const ImGuiDrawTexture&) = default;
-    ImGuiDrawTexture(ImGuiDrawTexture&&) = default;
-    ImGuiDrawTexture& operator=(ImGuiDrawTexture&&) = default;
+    ImGuiDrawTexture(unique_ptr<render::Texture> tex, unique_ptr<render::TextureView> srv) noexcept;
     ~ImGuiDrawTexture() noexcept;
 
 public:
-    shared_ptr<render::Texture> _tex;
-    shared_ptr<render::TextureView> _srv;
+    unique_ptr<render::Texture> _tex;
+    unique_ptr<render::TextureView> _srv;
 };
 
 class ImGuiDrawContext {
 public:
+    ImGuiDrawContext() = default;
+    ImGuiDrawContext(const ImGuiDrawContext&) = delete;
+    ImGuiDrawContext(ImGuiDrawContext&&) = delete;
+    ImGuiDrawContext& operator=(const ImGuiDrawContext&) = delete;
+    ImGuiDrawContext& operator=(ImGuiDrawContext&&) = delete;
+
     void ExtractDrawData(int frame, ImDrawData* drawData);
     void ExtractTexture(int frame, ImTextureData* tex);
 
@@ -117,12 +119,12 @@ public:
     class Frame {
     public:
         size_t _usableDescSetIndex{0};
-        vector<shared_ptr<render::Buffer>> _tempUploadBuffers;
+        vector<unique_ptr<render::Buffer>> _tempUploadBuffers;
         vector<UploadTexturePayload> _needCopyTexs;
         vector<render::Texture*> _waitDestroyTexs;
 
-        shared_ptr<render::Buffer> _vb;
-        shared_ptr<render::Buffer> _ib;
+        unique_ptr<render::Buffer> _vb;
+        unique_ptr<render::Buffer> _ib;
         int32_t _vbSize{0};
         int32_t _ibSize{0};
 
@@ -130,11 +132,11 @@ public:
     };
 
     render::Device* _device;
-    shared_ptr<render::RootSignature> _rs;
-    shared_ptr<render::GraphicsPipelineState> _pso;
+    unique_ptr<render::RootSignature> _rs;
+    unique_ptr<render::GraphicsPipelineState> _pso;
     vector<Frame> _frames;
     unordered_map<render::Texture*, unique_ptr<ImGuiDrawTexture>> _texs;
-    unordered_map<render::TextureView*, shared_ptr<render::DescriptorSet>> _descSetCache;
+    unordered_map<render::TextureView*, unique_ptr<render::DescriptorSet>> _descSetCache;
 
     ImGuiDrawDescriptor _desc;
 };
@@ -167,7 +169,7 @@ class ImGuiApplication {
 public:
     class Frame {
     public:
-        Frame(size_t index, shared_ptr<render::CommandBuffer> cmdBuffer) noexcept;
+        Frame(size_t index, unique_ptr<render::CommandBuffer> cmdBuffer) noexcept;
         ~Frame() noexcept = default;
         Frame(const Frame&) = delete;
         Frame& operator=(const Frame&) = delete;
@@ -176,7 +178,7 @@ public:
 
         size_t _frameIndex;
         uint64_t _completeFrame{std::numeric_limits<uint64_t>::max()};
-        shared_ptr<render::CommandBuffer> _cmdBuffer{};
+        unique_ptr<render::CommandBuffer> _cmdBuffer{};
         render::Texture* _rt{};
         render::TextureView* _rtView{};
         uint32_t _rtIndex;
@@ -234,7 +236,7 @@ protected:
     unique_ptr<render::InstanceVulkan> _vkIns;
     shared_ptr<render::Device> _device;
     render::CommandQueue* _cmdQueue;
-    shared_ptr<render::SwapChain> _swapchain;
+    unique_ptr<render::SwapChain> _swapchain;
     unique_ptr<ImGuiDrawContext> _imguiDrawContext;
     unique_ptr<std::thread> _renderThread;
     unique_ptr<BoundedChannel<size_t>> _freeFrame;
@@ -243,7 +245,7 @@ protected:
     vector<unique_ptr<Frame>> _frames;
     uint64_t _currRenderFrame;
 
-    vector<shared_ptr<render::TextureView>> _rtViews;
+    vector<unique_ptr<render::TextureView>> _rtViews;
     sigslot::scoped_connection _resizingConn;
     sigslot::scoped_connection _resizedConn;
     Eigen::Vector2i _renderRtSize;

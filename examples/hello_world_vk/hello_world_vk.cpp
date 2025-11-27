@@ -39,26 +39,26 @@ float4 PSMain(V2P v2p) : SV_Target {
 )";
 
 struct FrameData {
-    shared_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
+    unique_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
 };
 
 unique_ptr<NativeWindow> window;
 unique_ptr<InstanceVulkan> vkInstance;
 shared_ptr<vulkan::DeviceVulkan> device;
 vulkan::QueueVulkan* cmdQueue = nullptr;
-shared_ptr<vulkan::SwapChainVulkan> swapchain;
+unique_ptr<vulkan::SwapChainVulkan> swapchain;
 vector<FrameData> frames;
-unordered_map<Texture*, shared_ptr<vulkan::ImageViewVulkan>> rtViews;
+unordered_map<Texture*, unique_ptr<vulkan::ImageViewVulkan>> rtViews;
 uint32_t currentFrameIndex = 0;
 ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
 int clearIndex = 0;
 Stopwatch sw;
 uint64_t last;
-shared_ptr<vulkan::BufferVulkan> vertBuf;
-shared_ptr<vulkan::BufferVulkan> idxBuf;
+unique_ptr<vulkan::BufferVulkan> vertBuf;
+unique_ptr<vulkan::BufferVulkan> idxBuf;
 shared_ptr<Dxc> dxc;
-shared_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
-shared_ptr<vulkan::GraphicsPipelineVulkan> pso;
+unique_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
+unique_ptr<vulkan::GraphicsPipelineVulkan> pso;
 Eigen::Vector2i winSize{WIN_WIDTH, WIN_HEIGHT};
 sigslot::connection resizedConn;
 sigslot::connection resizingConn;
@@ -106,11 +106,11 @@ void Init() {
     swapchainDesc.BackBufferCount = RT_COUNT;
     swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
     swapchainDesc.EnableSync = false;
-    swapchain = std::static_pointer_cast<vulkan::SwapChainVulkan>(device->CreateSwapChain(swapchainDesc).Unwrap());
+    swapchain = StaticCastUniquePtr<vulkan::SwapChainVulkan>(device->CreateSwapChain(swapchainDesc).Unwrap());
     frames.reserve(swapchain->_frames.size());
     for (size_t i = 0; i < swapchain->_frames.size(); ++i) {
         auto& f = frames.emplace_back();
-        f.cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
+        f.cmdBuffer = StaticCastUniquePtr<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     }
     currentFrameIndex = 0;
     sw.Reset();
@@ -122,11 +122,13 @@ void Init() {
     const size_t vertexSize = sizeof(pos);
     const size_t indexSize = sizeof(i);
     auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
     auto idxUpload = device->CreateBuffer({indexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
-    vertBuf = std::static_pointer_cast<vulkan::BufferVulkan>(vert);
-    idxBuf = std::static_pointer_cast<vulkan::BufferVulkan>(idx);
+    {
+        auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
+        auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
+        vertBuf = StaticCastUniquePtr<vulkan::BufferVulkan>(std::move(vert));
+        idxBuf = StaticCastUniquePtr<vulkan::BufferVulkan>(std::move(idx));
+    }
     {
         void* vertMap = vertUpload->Map(0, vertexSize);
         std::memcpy(vertMap, pos, vertexSize);
@@ -138,20 +140,20 @@ void Init() {
         idxUpload->Unmap(0, indexSize);
     }
 
-    auto cmdBuffer = std::static_pointer_cast<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
+    auto cmdBuffer = StaticCastUniquePtr<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     cmdBuffer->Begin();
     {
         BarrierBufferDescriptor barriers[] = {
-            {vert.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
-            {idx.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
+            {vertBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
+            {idxBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
         cmdBuffer->ResourceBarrier(barriers, {});
     }
-    cmdBuffer->CopyBufferToBuffer(vert.get(), 0, vertUpload.get(), 0, vertexSize);
-    cmdBuffer->CopyBufferToBuffer(idx.get(), 0, idxUpload.get(), 0, indexSize);
+    cmdBuffer->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
+    cmdBuffer->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
     {
         BarrierBufferDescriptor barriers[] = {
-            {vert.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
-            {idx.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+            {vertBuf.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
+            {idxBuf.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
         cmdBuffer->ResourceBarrier(barriers, {});
     }
     cmdBuffer->End();
@@ -174,7 +176,7 @@ void Init() {
         auto ps = device->CreateShader(psDesc).Unwrap();
 
         RootSignatureDescriptor rootSigDesc{};
-        pipelineLayout = std::static_pointer_cast<vulkan::PipelineLayoutVulkan>(device->CreateRootSignature(rootSigDesc).Unwrap());
+        pipelineLayout = StaticCastUniquePtr<vulkan::PipelineLayoutVulkan>(device->CreateRootSignature(rootSigDesc).Unwrap());
 
         VertexElement ve[] = {
             {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
@@ -193,7 +195,7 @@ void Init() {
         psoDesc.DepthStencil = std::nullopt;
         psoDesc.MultiSample = DefaultMultiSampleState();
         psoDesc.ColorTargets = cts;
-        pso = std::static_pointer_cast<vulkan::GraphicsPipelineVulkan>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
+        pso = StaticCastUniquePtr<vulkan::GraphicsPipelineVulkan>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
     }
 }
 
@@ -266,7 +268,7 @@ void Update() {
                 cmdQueue->Wait();
                 rtViews.clear();
                 swapchain->Destroy();
-                swapchain = std::static_pointer_cast<vulkan::SwapChainVulkan>(
+                swapchain = StaticCastUniquePtr<vulkan::SwapChainVulkan>(
                     device->CreateSwapChain(
                               {cmdQueue,
                                window->GetNativeHandler().Handle,
@@ -291,7 +293,7 @@ void Update() {
         return;
     }
     auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
-    shared_ptr<vulkan::ImageViewVulkan> rtView = nullptr;
+    vulkan::ImageViewVulkan* rtView = nullptr;
     {
         auto it = rtViews.find(rt);
         if (it == rtViews.end()) {
@@ -303,9 +305,9 @@ void Update() {
             rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
             rtViewDesc.Range.BaseArrayLayer = 0;
             rtViewDesc.Range.ArrayLayerCount = SubresourceRange::All;
-            it = rtViews.emplace(rt, std::static_pointer_cast<vulkan::ImageViewVulkan>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
+            it = rtViews.emplace(rt, StaticCastUniquePtr<vulkan::ImageViewVulkan>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
         }
-        rtView = it->second;
+        rtView = it->second.get();
     }
     frameData.cmdBuffer->Begin();
     {
@@ -313,7 +315,7 @@ void Update() {
         frameData.cmdBuffer->ResourceBarrier({}, texDesc);
     }
     {
-        ColorAttachment rpColorAttch[] = {{rtView.get(), LoadAction::Clear, StoreAction::Store, clear}};
+        ColorAttachment rpColorAttch[] = {{rtView, LoadAction::Clear, StoreAction::Store, clear}};
         RenderPassDescriptor rpDesc{};
         rpDesc.ColorAttachments = rpColorAttch;
         rpDesc.DepthStencilAttachment = std::nullopt;

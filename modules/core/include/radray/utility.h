@@ -9,6 +9,7 @@
 #include <iterator>
 #include <concepts>
 #include <functional>
+#include <memory>
 
 #include <sigslot/signal.hpp>
 
@@ -21,6 +22,12 @@
     } while (0)
 
 namespace radray {
+
+template <class To, class From>
+requires std::is_same_v<typename std::unique_ptr<From>::deleter_type, std::default_delete<From>>
+[[nodiscard]] constexpr std::unique_ptr<To> StaticCastUniquePtr(std::unique_ptr<From>&& from) noexcept {
+    return std::unique_ptr<To>(static_cast<To*>(from.release()));
+}
 
 template <typename Call>
 class ScopeGuard {

@@ -229,34 +229,36 @@ public:
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
-    Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
+    Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
 
-    Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
+    Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
-    Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     D3D12_RESOURCE_DESC MapTextureDesc(const TextureDescriptor& desc) noexcept;
+
+    Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
@@ -280,7 +282,7 @@ public:
         DeviceD3D12* device,
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
-        shared_ptr<FenceD3D12> fence) noexcept;
+        unique_ptr<FenceD3D12> fence) noexcept;
     ~CmdQueueD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -294,7 +296,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;
-    shared_ptr<FenceD3D12> _fence;
+    unique_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 

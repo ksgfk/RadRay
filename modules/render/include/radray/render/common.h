@@ -750,29 +750,29 @@ public:
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
+    virtual Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
+    virtual Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
 
-    virtual Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
+    virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
-    virtual Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {

@@ -322,7 +322,7 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
     return result;
 }
 
-Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
+Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
 #ifdef RADRAY_ENABLE_D3D12
     if (device_->GetBackend() != RenderBackend::D3D12) {
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "device");
@@ -359,7 +359,7 @@ Nullable<shared_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, "unknown version", desc->Version);
         return nullptr;
     }
-    auto result = make_shared<d3d12::RootSigD3D12>(device, std::move(rootSig));
+    auto result = make_unique<d3d12::RootSigD3D12>(device, std::move(rootSig));
     result->_desc = d3d12::VersionedRootSignatureDescContainer{*desc};
     return result;
 #else

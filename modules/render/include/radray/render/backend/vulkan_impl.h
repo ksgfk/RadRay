@@ -114,35 +114,34 @@ public:
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<shared_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
-    Nullable<shared_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
+    Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
 
-    Nullable<shared_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
-    Nullable<shared_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
+    Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
-    Nullable<shared_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
     Nullable<unique_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
-
     Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
@@ -154,6 +153,11 @@ public:
     Nullable<unique_ptr<DescriptorPoolVulkan>> CreateDescriptorPool() noexcept;
 
     Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept;
+
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept;
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept;
+
+    Nullable<unique_ptr<CommandBufferVulkan>> CreateCommandBufferVulkan(QueueVulkan* queue) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -477,7 +481,7 @@ public:
         shared_ptr<FenceVulkan> fence;
         shared_ptr<SemaphoreVulkan> imageAvailableSemaphore;
         shared_ptr<SemaphoreVulkan> renderFinishedSemaphore;
-        shared_ptr<CommandBufferVulkan> internalCmdBuffer;
+        unique_ptr<CommandBufferVulkan> internalCmdBuffer;
     };
 
     DeviceVulkan* _device;
@@ -560,7 +564,7 @@ public:
     DeviceVulkan* _device;
     BufferVulkan* _buffer;
     BufferRange _range;
-    shared_ptr<BufferViewVulkan> _texelView;
+    unique_ptr<BufferViewVulkan> _texelView;
 };
 
 class ImageVulkan final : public Texture {
@@ -636,7 +640,7 @@ public:
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
     vector<RootSignatureSetElementContainer> _bindingElements;
-    vector<shared_ptr<SamplerVulkan>> _immutableSamplers;
+    vector<unique_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
 class PipelineLayoutVulkan final : public RootSignature {

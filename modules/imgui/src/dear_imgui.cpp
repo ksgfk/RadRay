@@ -186,8 +186,8 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
 
     auto device = desc.Device;
     RenderBackend backendType = device->GetBackend();
-    shared_ptr<Shader> shaderVS;
-    shared_ptr<Shader> shaderPS;
+    unique_ptr<Shader> shaderVS;
+    unique_ptr<Shader> shaderPS;
     if (backendType == RenderBackend::D3D12) {
         ShaderDescriptor descVS{};
         descVS.Source = GetImGuiShaderDXIL_VS();
@@ -312,8 +312,8 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
 
     auto result = make_unique<ImGuiDrawContext>();
     result->_device = device;
-    result->_rs = rs;
-    result->_pso = pso;
+    result->_rs = std::move(rs);
+    result->_pso = std::move(pso);
     result->_desc = desc;
     result->_frames.reserve(desc.FrameCount);
     for (int i = 0; i < desc.FrameCount; i++) {
@@ -323,8 +323,8 @@ Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDes
 }
 
 ImGuiDrawTexture::ImGuiDrawTexture(
-    shared_ptr<render::Texture> tex,
-    shared_ptr<render::TextureView> srv) noexcept
+    unique_ptr<render::Texture> tex,
+    unique_ptr<render::TextureView> srv) noexcept
     : _tex(std::move(tex)),
       _srv(std::move(srv)) {}
 
@@ -434,7 +434,7 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
         texDesc.Format = TextureFormat::RGBA8_UNORM;
         texDesc.Usage = TextureUse::Resource | TextureUse::CopyDestination;
         texDesc.Name = texName;
-        shared_ptr<Texture> texObj = _device->CreateTexture(texDesc).Unwrap();
+        unique_ptr<Texture> texObj = _device->CreateTexture(texDesc).Unwrap();
 
         TextureViewDescriptor viewDesc{};
         viewDesc.Target = texObj.get();
@@ -442,7 +442,7 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
         viewDesc.Format = TextureFormat::RGBA8_UNORM;
         viewDesc.Range = SubresourceRange::AllSub();
         viewDesc.Usage = TextureUse::Resource;
-        shared_ptr<TextureView> srv = _device->CreateTextureView(viewDesc).Unwrap();
+        unique_ptr<TextureView> srv = _device->CreateTextureView(viewDesc).Unwrap();
 
         auto texId = std::bit_cast<ImU64>(srv.get());
         tex->SetTexID(texId);
@@ -468,14 +468,14 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
         uploadDesc.Memory = MemoryType::Upload;
         uploadDesc.Usage = BufferUse::CopySource;
         uploadDesc.Name = uploadName;
-        shared_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
+        unique_ptr<Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
         {
             void* dst = uploadBuffer->Map(0, upload_size);
             std::memcpy(dst, tex->GetPixels(), upload_size);
             uploadBuffer->Unmap(0, upload_size);
         }
-        frame._tempUploadBuffers.emplace_back(uploadBuffer);
         frame._needCopyTexs.emplace_back(UploadTexturePayload{texObjPtr, uploadBuffer.get(), tex->Status == ImTextureStatus_WantCreate});
+        frame._tempUploadBuffers.emplace_back(std::move(uploadBuffer));
         tex->SetStatus(ImTextureStatus_OK);
     }
     if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= _desc.FrameCount) {
@@ -590,7 +590,7 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
                     DescriptorSet* descSetRaw = nullptr;
                     auto it = _descSetCache.find(texView);
                     if (it == _descSetCache.end()) {
-                        shared_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rs.get(), 0).Unwrap();
+                        unique_ptr<DescriptorSet> descSet = _device->CreateDescriptorSet(_rs.get(), 0).Unwrap();
                         descSet->SetResource(0, 0, texView);
                         descSetRaw = descSet.get();
                         _descSetCache.emplace(texView, std::move(descSet));
@@ -689,7 +689,7 @@ void ImGuiDrawContext::DrawData::Clear() noexcept {
     CmdLists.clear();
 }
 
-ImGuiApplication::Frame::Frame(size_t index, shared_ptr<render::CommandBuffer> cmdBuffer) noexcept
+ImGuiApplication::Frame::Frame(size_t index, unique_ptr<render::CommandBuffer> cmdBuffer) noexcept
     : _frameIndex(index),
       _cmdBuffer(std::move(cmdBuffer)) {}
 
@@ -1036,7 +1036,7 @@ render::TextureView* ImGuiApplication::SafeGetRTView(uint32_t rtIndex, render::T
         rtViewDesc.Range = render::SubresourceRange::AllSub();
         rtViewDesc.Usage = render::TextureUse::RenderTarget;
         auto rtView = _device->CreateTextureView(rtViewDesc).Unwrap();
-        _rtViews[rtIndex] = rtView;
+        _rtViews[rtIndex] = std::move(rtView);
     }
     return _rtViews[rtIndex].get();
 }

@@ -109,44 +109,16 @@ Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t s
     return _queues[static_cast<std::underlying_type_t<QueueType>>(type)][slot].get();
 }
 
-Nullable<shared_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
+Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
     auto queue = CastVkObject(queue_);
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.pNext = nullptr;
-    poolInfo.flags = 0;
-    poolInfo.queueFamilyIndex = queue->_family.Family;
-    VkCommandPool pool{VK_NULL_HANDLE};
-    if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateCommandPool", vr);
-        return nullptr;
-    }
-    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
-    VkCommandBufferAllocateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    bufferInfo.pNext = nullptr;
-    bufferInfo.commandPool = cmdPool->_cmdPool;
-    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    bufferInfo.commandBufferCount = 1;
-    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
-    if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAllocateCommandBuffers", vr);
-        return nullptr;
-    }
-    return make_shared<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
+    return CreateCommandBufferVulkan(queue);
 }
 
-Nullable<shared_ptr<Fence>> DeviceVulkan::CreateFence(uint64_t initValue) noexcept {
-    auto fence = this->CreateTimelineSemaphore(initValue);
-    if (!fence.HasValue()) {
-        return nullptr;
-    }
-    return shared_ptr{fence.Release()};
+Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence(uint64_t initValue) noexcept {
+    return this->CreateTimelineSemaphore(initValue);
 }
 
-Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
+Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
     SwapChainDescriptor desc = desc_;
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
@@ -290,7 +262,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSwapchainKHR", vr);
         return nullptr;
     }
-    auto result = make_shared<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain);
+    auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain);
     vector<VkImage> swapchainImages;
     if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, _ftb.vkGetSwapchainImagesKHR, _device, swapchain);
         vr != VK_SUCCESS) {
@@ -322,7 +294,7 @@ Nullable<shared_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     return result;
 }
 
-Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
+Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.pNext = nullptr;
@@ -380,16 +352,16 @@ Nullable<shared_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
         return nullptr;
     }
     this->SetObjectName(desc.Name, vkBuf);
-    auto result = make_shared<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
+    auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
     result->_mdesc = desc;
     result->_name = desc.Name;
     result->_mdesc.Name = result->_name;
     return result;
 }
 
-Nullable<shared_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
+Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
     auto buf = CastVkObject(desc.Target);
-    shared_ptr<BufferViewVulkan> texelView;
+    unique_ptr<BufferViewVulkan> texelView;
     if (buf->_mdesc.Usage.HasFlag(BufferUse::Resource) || buf->_mdesc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
         VkBufferViewCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
@@ -405,12 +377,12 @@ Nullable<shared_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
         }
         texelView = bv.Release();
     }
-    auto result = make_shared<SimulateBufferViewVulkan>(this, buf, desc.Range);
+    auto result = make_unique<SimulateBufferViewVulkan>(this, buf, desc.Range);
     result->_texelView = std::move(texelView);
     return result;
 }
 
-Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
+Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -479,12 +451,12 @@ Nullable<shared_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
         return nullptr;
     }
     this->SetObjectName(desc.Name, vkImg);
-    auto result = make_shared<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
+    auto result = make_unique<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
     result->SetExtData(desc);
     return result;
 }
 
-Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     auto image = CastVkObject(desc.Target);
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -510,13 +482,13 @@ Nullable<shared_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateImageView", vr);
         return nullptr;
     }
-    auto result = make_shared<ImageViewVulkan>(this, image, imageView);
+    auto result = make_unique<ImageViewVulkan>(this, image, imageView);
     result->_mdesc = desc;
     result->_rawFormat = createInfo.format;
     return result;
 }
 
-Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
+Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
     if (desc.Category != ShaderBlobCategory::SPIRV) {
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "only supported SPIR-V", desc.Category);
@@ -541,10 +513,10 @@ Nullable<shared_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateShaderModule", vr);
         return nullptr;
     }
-    return make_shared<ShaderModuleVulkan>(this, shaderModule);
+    return make_unique<ShaderModuleVulkan>(this, shaderModule);
 }
 
-Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
+Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
     if (!desc.RootDescriptors.empty()) {
         // vk 要模拟 dx D3D12_ROOT_PARAMETER_TYPE_CBV/SRV/UAV 的 root binding 有亿点麻烦, 也没那么简单, 先不做了 (欸嘿
         RADRAY_ERR_LOG("{} {}", Errors::VK, "RS RootBindings not support");
@@ -584,7 +556,7 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreatePipelineLayout", vr);
         return nullptr;
     }
-    auto result = make_shared<PipelineLayoutVulkan>(this, pipelineLayout);
+    auto result = make_unique<PipelineLayoutVulkan>(this, pipelineLayout);
     result->_descSetLayouts = std::move(layouts);
     if (pushConstantPtr == nullptr) {
         result->_pushConst = std::nullopt;
@@ -594,7 +566,7 @@ Nullable<shared_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     return result;
 }
 
-Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
     vector<VkPipelineShaderStageCreateInfo> shaderStages;
     {
         struct ShaderWithStage {
@@ -867,14 +839,14 @@ Nullable<shared_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateGraphicsPipelines", vr);
         return nullptr;
     }
-    auto result = make_shared<GraphicsPipelineVulkan>(this, pipeline);
+    auto result = make_unique<GraphicsPipelineVulkan>(this, pipeline);
     result->_renderPass = std::move(renderPass);
     return result;
 }
 
 Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept {
     vector<VkDescriptorSetLayoutBinding> bindings;
-    vector<shared_ptr<SamplerVulkan>> staticSamplers;
+    vector<unique_ptr<SamplerVulkan>> staticSamplers;
     size_t staticSamplerCount = 0;
     for (const auto& j : desc.Elements) {
         staticSamplerCount += j.StaticSamplers.size();
@@ -898,11 +870,11 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
             sss.reserve(j.StaticSamplers.size());
             for (size_t t = 0; t < j.StaticSamplers.size(); t++) {
                 const SamplerDescriptor& ss = j.StaticSamplers[t];
-                auto samplerOpt = this->CreateSampler(ss);
+                auto samplerOpt = this->CreateSamplerVulkan(ss);
                 if (!samplerOpt.HasValue()) {
                     return nullptr;
                 }
-                auto sampler = std::static_pointer_cast<SamplerVulkan>(samplerOpt.Release());
+                auto sampler = samplerOpt.Release();
                 sss.emplace_back(sampler->_sampler);
                 staticSamplers.emplace_back(std::move(sampler));
             }
@@ -926,7 +898,79 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     return result;
 }
 
-Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept {
+    VkSamplerCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.magFilter = MapTypeFilter(desc.MagFilter);
+    createInfo.minFilter = MapTypeFilter(desc.MigFilter);
+    createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
+    createInfo.addressModeU = MapType(desc.AddressS);
+    createInfo.addressModeV = MapType(desc.AddressT);
+    createInfo.addressModeW = MapType(desc.AddressR);
+    createInfo.mipLodBias = 0;
+    if (desc.AnisotropyClamp > 1.0f) {
+        createInfo.anisotropyEnable = VK_TRUE;
+        createInfo.maxAnisotropy = (float)desc.AnisotropyClamp;
+    } else {
+        createInfo.anisotropyEnable = VK_FALSE;
+        createInfo.maxAnisotropy = 1.0f;
+    }
+    createInfo.compareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
+    createInfo.compareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
+    createInfo.minLod = desc.LodMin;
+    createInfo.maxLod = desc.LodMax;
+    createInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    createInfo.unnormalizedCoordinates = VK_FALSE;
+    auto samplerOpt = this->CreateSamplerVulkan(createInfo);
+    if (!samplerOpt.HasValue()) {
+        return nullptr;
+    }
+    auto sampler = samplerOpt.Release();
+    sampler->_mdesc = desc;
+    return sampler;
+}
+
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept {
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateSampler(_device, &desc, this->GetAllocationCallbacks(), &sampler);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSampler", vr);
+        return nullptr;
+    }
+    return make_unique<SamplerVulkan>(this, sampler);
+}
+
+Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulkan(QueueVulkan* queue) noexcept {
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.pNext = nullptr;
+    poolInfo.flags = 0;
+    poolInfo.queueFamilyIndex = queue->_family.Family;
+    VkCommandPool pool{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateCommandPool", vr);
+        return nullptr;
+    }
+    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
+    VkCommandBufferAllocateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    bufferInfo.pNext = nullptr;
+    bufferInfo.commandPool = cmdPool->_cmdPool;
+    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    bufferInfo.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAllocateCommandBuffers", vr);
+        return nullptr;
+    }
+    return make_unique<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
+}
+
+Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastVkObject(rootSig_);
     if (index >= rootSig->_descSetLayouts.size()) {
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, Errors::ArgumentOutOfRange, "index");
@@ -934,12 +978,12 @@ Nullable<shared_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignat
     }
     const auto& layout = rootSig->_descSetLayouts[index];
     auto descSet = _poolAlloc->Allocate(layout->_layout);
-    auto result = std::make_shared<DescriptorSetVulkanWrapper>(this, std::move(descSet));
+    auto result = std::make_unique<DescriptorSetVulkanWrapper>(this, std::move(descSet));
     result->_bindingElements = layout->_bindingElements;
     return result;
 }
 
-Nullable<shared_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
+Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
     VkSamplerCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -970,7 +1014,7 @@ Nullable<shared_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSampler", vr);
         return nullptr;
     }
-    auto result = make_shared<SamplerVulkan>(this, sampler);
+    auto result = make_unique<SamplerVulkan>(this, sampler);
     result->_mdesc = desc;
     return result;
 }
@@ -2532,7 +2576,7 @@ void SwapChainVulkan::Present() noexcept {
     // 在提交前需要将当前 back buffer 转换到 PRESENT 状态
     if (_queue->_swapchainSync.fence != nullptr) {
         if (imageFrame.internalCmdBuffer == nullptr) {
-            imageFrame.internalCmdBuffer = std::static_pointer_cast<CommandBufferVulkan>(_device->CreateCommandBuffer(_queue).Unwrap());
+            imageFrame.internalCmdBuffer = _device->CreateCommandBufferVulkan(_queue).Unwrap();
         }
         auto cmdBuffer = imageFrame.internalCmdBuffer.get();
         cmdBuffer->Begin();
