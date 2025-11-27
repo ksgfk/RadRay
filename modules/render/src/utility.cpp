@@ -368,25 +368,6 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 #endif
 }
 
-static ShaderStages _NormalizeStageMask(ShaderStage stage) noexcept {
-    switch (stage) {
-        case ShaderStage::UNKNOWN: {
-            ShaderStages mask{};
-            mask |= ShaderStage::Vertex;
-            mask |= ShaderStage::Pixel;
-            mask |= ShaderStage::Compute;
-            return mask;
-        }
-        case ShaderStage::Graphics: {
-            ShaderStages mask{};
-            mask |= ShaderStage::Vertex;
-            mask |= ShaderStage::Pixel;
-            return mask;
-        }
-        default: return ShaderStages{stage};
-    }
-}
-
 static bool _IsBufferDimension(HlslSRVDimension dim) noexcept {
     switch (dim) {
         case HlslSRVDimension::BUFFER:
@@ -417,17 +398,6 @@ static std::optional<ResourceBindType> _MapResourceBindType(const HlslInputBindD
         case HlslShaderInputType::UAV_FEEDBACKTEXTURE: return ResourceBindType::RWTexture;
         default: return std::nullopt;
     }
-}
-
-static ShaderStages _EnsureNonEmptyStages(ShaderStages stages) noexcept {
-    if (static_cast<bool>(stages)) {
-        return stages;
-    }
-    ShaderStages mask{};
-    mask |= ShaderStage::Vertex;
-    mask |= ShaderStage::Pixel;
-    mask |= ShaderStage::Compute;
-    return mask;
 }
 
 static const HlslShaderBufferDesc* _FindCBufferByName(const HlslShaderDesc& desc, std::string_view name) noexcept {
@@ -540,7 +510,7 @@ static bool _HasSameBindingLayout(const HlslInputBindDesc& lhs, const HlslInputB
            lhs.NumSamples == rhs.NumSamples;
 }
 
-struct CombinedBinding {
+struct HlslRSCombinedBinding {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Slot{0};
     uint32_t Space{0};
@@ -551,13 +521,79 @@ struct CombinedBinding {
     string Name;
 };
 
-enum class Placement {
+static bool _AddOrMergeHlslBinding(
+    vector<HlslRSCombinedBinding>& bindings,
+    const HlslShaderDesc& shaderDesc,
+    const HlslInputBindDesc& bind,
+    ShaderStages stageMask) noexcept {
+    if (bind.BindCount == 0 || bind.BindCount == std::numeric_limits<uint32_t>::max()) {
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported bind count", bind.Name);
+        return false;
+    }
+
+    auto typeOpt = _MapResourceBindType(bind);
+    if (!typeOpt.has_value()) {
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported resource", bind.Name);
+        return false;
+    }
+
+    ResourceBindType type = typeOpt.value();
+    if (type == ResourceBindType::UNKNOWN) {
+        return true;
+    }
+
+    auto it = std::find_if(bindings.begin(), bindings.end(), [&](const HlslRSCombinedBinding& existing) {
+        return existing.Type == type && existing.Space == bind.Space && existing.Slot == bind.BindPoint;
+    });
+
+    if (it == bindings.end()) {
+        HlslRSCombinedBinding combined{};
+        combined.Type = type;
+        combined.Slot = bind.BindPoint;
+        combined.Space = bind.Space;
+        combined.Count = bind.BindCount;
+        combined.Stages = stageMask;
+        combined.Layout = bind;
+        combined.Name = bind.Name;
+        if (type == ResourceBindType::CBuffer) {
+            combined.CBuffer = _FindCBufferByName(shaderDesc, bind.Name);
+            if (!combined.CBuffer) {
+                RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
+                return false;
+            }
+        }
+        bindings.emplace_back(std::move(combined));
+        return true;
+    }
+
+    if (!_HasSameBindingLayout(it->Layout, bind)) {
+        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched resource layout", bind.Name);
+        return false;
+    }
+
+    if (type == ResourceBindType::CBuffer) {
+        const auto* rhsCBuffer = _FindCBufferByName(shaderDesc, bind.Name);
+        if (!rhsCBuffer) {
+            RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
+            return false;
+        }
+        if (!_IsSameShaderBufferLayout(it->CBuffer, rhsCBuffer)) {
+            RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched cbuffer layout", bind.Name);
+            return false;
+        }
+    }
+
+    it->Stages |= stageMask;
+    return true;
+}
+
+enum class HlslRSPlacement {
     Table,
     RootDescriptor,
     RootConstant,
 };
 
-struct RangeSpec {
+struct HlslRSRangeSpec {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Space{0};
     uint32_t Slot{0};
@@ -565,19 +601,19 @@ struct RangeSpec {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-struct DescriptorTableBuildResult {
+struct HlslRSDescriptorTableBuildResult {
     vector<RootSignatureSetElement> Elements;
     vector<RootSignatureDescriptorSet> Sets;
 };
 
-static std::optional<DescriptorTableBuildResult> _BuildDescriptorSets(
-    const vector<CombinedBinding>& bindings,
-    const vector<Placement>& placements) noexcept {
-    DescriptorTableBuildResult result{};
+static std::optional<HlslRSDescriptorTableBuildResult> _BuildHlslDescriptorSets(
+    const vector<HlslRSCombinedBinding>& bindings,
+    const vector<HlslRSPlacement>& placements) noexcept {
+    HlslRSDescriptorTableBuildResult result{};
     vector<std::pair<size_t, size_t>> setRanges;
     map<uint32_t, vector<size_t>> perSpace;
     for (size_t i = 0; i < bindings.size(); ++i) {
-        if (placements[i] != Placement::Table) {
+        if (placements[i] != HlslRSPlacement::Table) {
             continue;
         }
         perSpace[bindings[i].Space].push_back(i);
@@ -585,25 +621,22 @@ static std::optional<DescriptorTableBuildResult> _BuildDescriptorSets(
 
     for (auto& [space, indices] : perSpace) {
         auto& idxs = indices;
-        std::sort(
-            idxs.begin(),
-            idxs.end(),
-            [&](size_t lhs, size_t rhs) {
-                const auto& l = bindings[lhs];
-                const auto& r = bindings[rhs];
-                uint32_t lp = _BindTypePriority(l.Type);
-                uint32_t rp = _BindTypePriority(r.Type);
-                if (lp != rp) {
-                    return lp < rp;
-                }
-                if (l.Slot != r.Slot) {
-                    return l.Slot < r.Slot;
-                }
-                return l.Name < r.Name;
-            });
+        std::sort(idxs.begin(), idxs.end(), [&](size_t lhs, size_t rhs) {
+            const auto& l = bindings[lhs];
+            const auto& r = bindings[rhs];
+            uint32_t lp = _BindTypePriority(l.Type);
+            uint32_t rp = _BindTypePriority(r.Type);
+            if (lp != rp) {
+                return lp < rp;
+            }
+            if (l.Slot != r.Slot) {
+                return l.Slot < r.Slot;
+            }
+            return l.Name < r.Name;
+        });
 
-        vector<RangeSpec> ranges;
-        RangeSpec current{};
+        vector<HlslRSRangeSpec> ranges;
+        HlslRSRangeSpec current{};
         bool hasCurrent = false;
         auto flush = [&]() {
             if (hasCurrent) {
@@ -648,7 +681,7 @@ static std::optional<DescriptorTableBuildResult> _BuildDescriptorSets(
             elem.Space = range.Space;
             elem.Type = range.Type;
             elem.Count = range.Count;
-            elem.Stages = _EnsureNonEmptyStages(range.Stages);
+            elem.Stages = range.Stages;
             elem.StaticSamplers = std::span<const SamplerDescriptor>{};
             result.Elements.push_back(elem);
         }
@@ -682,7 +715,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         }
     }
 
-    vector<CombinedBinding> bindings;
+    vector<HlslRSCombinedBinding> bindings;
     bindings.reserve(totalBindings);
 
     for (const auto& staged : descs) {
@@ -690,61 +723,14 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
             RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "shader desc");
             return std::nullopt;
         }
-        ShaderStages stageMask = _NormalizeStageMask(staged.Stage);
+        if (staged.Stage == ShaderStage::UNKNOWN) {
+            RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "shader stage");
+            return std::nullopt;
+        }
+        ShaderStages stageMask = staged.Stage;
         for (const auto& bind : staged.Desc->BoundResources) {
-            if (bind.BindCount == 0 || bind.BindCount == std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported bind count", bind.Name);
+            if (!_AddOrMergeHlslBinding(bindings, *staged.Desc, bind, stageMask)) {
                 return std::nullopt;
-            }
-            auto typeOpt = _MapResourceBindType(bind);
-            if (!typeOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported resource", bind.Name);
-                return std::nullopt;
-            }
-            ResourceBindType type = typeOpt.value();
-            if (type == ResourceBindType::UNKNOWN) {
-                continue;
-            }
-            auto it = std::find_if(
-                bindings.begin(),
-                bindings.end(),
-                [&](const CombinedBinding& existing) {
-                    return existing.Type == type && existing.Space == bind.Space && existing.Slot == bind.BindPoint;
-                });
-            if (it == bindings.end()) {
-                CombinedBinding combined{};
-                combined.Type = type;
-                combined.Slot = bind.BindPoint;
-                combined.Space = bind.Space;
-                combined.Count = bind.BindCount;
-                combined.Stages = stageMask;
-                combined.Layout = bind;
-                combined.Name = bind.Name;
-                if (type == ResourceBindType::CBuffer) {
-                    combined.CBuffer = _FindCBufferByName(*staged.Desc, bind.Name);
-                    if (!combined.CBuffer) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
-                        return std::nullopt;
-                    }
-                }
-                bindings.emplace_back(std::move(combined));
-            } else {
-                if (!_HasSameBindingLayout(it->Layout, bind)) {
-                    RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched resource layout", bind.Name);
-                    return std::nullopt;
-                }
-                if (type == ResourceBindType::CBuffer) {
-                    const auto* rhsCBuffer = _FindCBufferByName(*staged.Desc, bind.Name);
-                    if (!rhsCBuffer) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
-                        return std::nullopt;
-                    }
-                    if (!_IsSameShaderBufferLayout(it->CBuffer, rhsCBuffer)) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched cbuffer layout", bind.Name);
-                        return std::nullopt;
-                    }
-                }
-                it->Stages |= stageMask;
             }
         }
     }
@@ -754,8 +740,8 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         return RootSignatureDescriptorContainer{desc};
     }
 
-    constexpr uint32_t kMaxRootDwords = 64;
-    vector<Placement> placements(bindings.size(), Placement::Table);
+    constexpr uint32_t maxRootDWORD = 64;
+    vector<HlslRSPlacement> placements(bindings.size(), HlslRSPlacement::Table);
 
     auto pickRootConstant = [&]() -> std::optional<size_t> {
         std::optional<size_t> best;
@@ -764,7 +750,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
             if (binding.Type != ResourceBindType::CBuffer || binding.Count != 1 || binding.CBuffer == nullptr) {
                 continue;
             }
-            if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0 || binding.CBuffer->Size > kMaxRootDwords * 4) {
+            if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0 || binding.CBuffer->Size > maxRootDWORD * 4) {
                 continue;
             }
             if (!best.has_value()) {
@@ -772,8 +758,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
                 continue;
             }
             const auto& currentBest = bindings[best.value()];
-            if (binding.Space < currentBest.Space ||
-                (binding.Space == currentBest.Space && binding.Slot < currentBest.Slot)) {
+            if (binding.Space < currentBest.Space || (binding.Space == currentBest.Space && binding.Slot < currentBest.Slot)) {
                 best = i;
             }
         }
@@ -781,6 +766,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
     };
 
     std::optional<RootSignatureConstant> rootConstant;
+    std::optional<size_t> rootConstantBindingIndex;
     uint32_t rootConstDwords = 0;
     if (auto rootConstIndex = pickRootConstant(); rootConstIndex.has_value()) {
         const auto& binding = bindings[rootConstIndex.value()];
@@ -788,13 +774,14 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         constant.Slot = binding.Slot;
         constant.Space = binding.Space;
         constant.Size = binding.CBuffer->Size;
-        constant.Stages = _EnsureNonEmptyStages(binding.Stages);
+        constant.Stages = binding.Stages;
         rootConstDwords = constant.Size / 4;
-        placements[rootConstIndex.value()] = Placement::RootConstant;
+        placements[rootConstIndex.value()] = HlslRSPlacement::RootConstant;
         rootConstant = constant;
+        rootConstantBindingIndex = rootConstIndex;
     }
 
-    auto isRootDescriptorCandidate = [&](const CombinedBinding& binding) noexcept {
+    auto isRootDescriptorCandidate = [&](const HlslRSCombinedBinding& binding) noexcept {
         if (binding.Count != 1) {
             return false;
         }
@@ -809,7 +796,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
     vector<size_t> rootDescCandidates;
     rootDescCandidates.reserve(bindings.size());
     for (size_t i = 0; i < bindings.size(); ++i) {
-        if (placements[i] != Placement::Table) {
+        if (placements[i] != HlslRSPlacement::Table) {
             continue;
         }
         if (isRootDescriptorCandidate(bindings[i])) {
@@ -817,40 +804,37 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         }
     }
 
-    std::sort(
-        rootDescCandidates.begin(),
-        rootDescCandidates.end(),
-        [&](size_t lhs, size_t rhs) {
-            const auto& l = bindings[lhs];
-            const auto& r = bindings[rhs];
-            uint32_t lp = _BindTypePriority(l.Type);
-            uint32_t rp = _BindTypePriority(r.Type);
-            if (lp != rp) {
-                return lp < rp;
-            }
-            uint32_t ls = _StageUsageScore(l.Stages);
-            uint32_t rs = _StageUsageScore(r.Stages);
-            if (ls != rs) {
-                return ls > rs;
-            }
-            if (l.Space != r.Space) {
-                return l.Space < r.Space;
-            }
-            if (l.Slot != r.Slot) {
-                return l.Slot < r.Slot;
-            }
-            return l.Name < r.Name;
-        });
+    std::sort(rootDescCandidates.begin(), rootDescCandidates.end(), [&](size_t lhs, size_t rhs) {
+        const auto& l = bindings[lhs];
+        const auto& r = bindings[rhs];
+        uint32_t lp = _BindTypePriority(l.Type);
+        uint32_t rp = _BindTypePriority(r.Type);
+        if (lp != rp) {
+            return lp < rp;
+        }
+        uint32_t ls = _StageUsageScore(l.Stages);
+        uint32_t rs = _StageUsageScore(r.Stages);
+        if (ls != rs) {
+            return ls > rs;
+        }
+        if (l.Space != r.Space) {
+            return l.Space < r.Space;
+        }
+        if (l.Slot != r.Slot) {
+            return l.Slot < r.Slot;
+        }
+        return l.Name < r.Name;
+    });
 
     vector<size_t> selectedRootDescs;
     selectedRootDescs.reserve(rootDescCandidates.size());
     for (size_t idx : rootDescCandidates) {
-        placements[idx] = Placement::RootDescriptor;
+        placements[idx] = HlslRSPlacement::RootDescriptor;
         selectedRootDescs.push_back(idx);
     }
 
-    auto buildTables = [&](DescriptorTableBuildResult& out) -> bool {
-        auto tables = _BuildDescriptorSets(bindings, placements);
+    auto buildTables = [&](HlslRSDescriptorTableBuildResult& out) -> bool {
+        auto tables = _BuildHlslDescriptorSets(bindings, placements);
         if (!tables.has_value()) {
             return false;
         }
@@ -858,7 +842,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         return true;
     };
 
-    DescriptorTableBuildResult tableResult{};
+    HlslRSDescriptorTableBuildResult tableResult{};
     if (!buildTables(tableResult)) {
         return std::nullopt;
     }
@@ -868,41 +852,59 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
     };
 
     uint32_t totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
-    while (totalCost > kMaxRootDwords && !selectedRootDescs.empty()) {
-        size_t idx = selectedRootDescs.back();
-        selectedRootDescs.pop_back();
-        placements[idx] = Placement::Table;
+    auto reduceRootDescriptorUsage = [&]() -> bool {
+        while (totalCost > maxRootDWORD && !selectedRootDescs.empty()) {
+            size_t idx = selectedRootDescs.back();
+            selectedRootDescs.pop_back();
+            placements[idx] = HlslRSPlacement::Table;
+            if (!buildTables(tableResult)) {
+                return false;
+            }
+            totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
+        }
+        return true;
+    };
+
+    if (!reduceRootDescriptorUsage()) {
+        return std::nullopt;
+    }
+
+    if (totalCost > maxRootDWORD && rootConstant.has_value() && rootConstantBindingIndex.has_value()) {
+        placements[rootConstantBindingIndex.value()] = HlslRSPlacement::Table;
+        rootConstant.reset();
+        rootConstantBindingIndex.reset();
+        rootConstDwords = 0;
         if (!buildTables(tableResult)) {
             return std::nullopt;
         }
         totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
+        if (!reduceRootDescriptorUsage()) {
+            return std::nullopt;
+        }
     }
 
-    if (totalCost > kMaxRootDwords) {
+    if (totalCost > maxRootDWORD) {
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root signature exceeds limit");
         return std::nullopt;
     }
 
     if (!selectedRootDescs.empty()) {
-        std::sort(
-            selectedRootDescs.begin(),
-            selectedRootDescs.end(),
-            [&](size_t lhs, size_t rhs) {
-                const auto& l = bindings[lhs];
-                const auto& r = bindings[rhs];
-                uint32_t lp = _BindTypePriority(l.Type);
-                uint32_t rp = _BindTypePriority(r.Type);
-                if (lp != rp) {
-                    return lp < rp;
-                }
-                if (l.Space != r.Space) {
-                    return l.Space < r.Space;
-                }
-                if (l.Slot != r.Slot) {
-                    return l.Slot < r.Slot;
-                }
-                return l.Name < r.Name;
-            });
+        std::sort(selectedRootDescs.begin(), selectedRootDescs.end(), [&](size_t lhs, size_t rhs) {
+            const auto& l = bindings[lhs];
+            const auto& r = bindings[rhs];
+            uint32_t lp = _BindTypePriority(l.Type);
+            uint32_t rp = _BindTypePriority(r.Type);
+            if (lp != rp) {
+                return lp < rp;
+            }
+            if (l.Space != r.Space) {
+                return l.Space < r.Space;
+            }
+            if (l.Slot != r.Slot) {
+                return l.Slot < r.Slot;
+            }
+            return l.Name < r.Name;
+        });
     }
 
     vector<RootSignatureRootDescriptor> rootDescriptors;
@@ -913,7 +915,7 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
         rd.Slot = binding.Slot;
         rd.Space = binding.Space;
         rd.Type = binding.Type;
-        rd.Stages = _EnsureNonEmptyStages(binding.Stages);
+        rd.Stages = binding.Stages;
         rootDescriptors.push_back(rd);
     }
 
@@ -925,6 +927,76 @@ std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDesc
     }
 
     return RootSignatureDescriptorContainer{desc};
+}
+
+#ifdef RADRAY_ENABLE_D3D12
+class ResourceBindingTableD3D12 final : public ResourceBindingTable {
+public:
+    ResourceBindingTableD3D12() noexcept = default;
+    ~ResourceBindingTableD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override { return true; }
+
+    void Destroy() noexcept override {}
+};
+#endif
+
+Nullable<unique_ptr<ResourceBindingTable>> CreateResourceBindingTable(
+    Device* device,
+    RootSignature* rs_,
+    const BuildResourceBindingTableExtraData& extraData) noexcept {
+    if (device->GetBackend() == RenderBackend::D3D12) {
+#ifdef RADRAY_ENABLE_D3D12
+        std::span<const StagedHlslShaderDesc> hlslDescs{};
+        if (std::holds_alternative<HlslResourceBindingTableExtraData>(extraData)) {
+            hlslDescs = std::get<HlslResourceBindingTableExtraData>(extraData).StagedDescs;
+        }
+
+        vector<HlslRSCombinedBinding> bindings;
+        for (const auto& staged : hlslDescs) {
+            if (staged.Desc == nullptr) {
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "shader desc");
+                continue;
+            }
+            if (staged.Stage == ShaderStage::UNKNOWN) {
+                RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "shader stage");
+                continue;
+            }
+            ShaderStages stageMask = staged.Stage;
+            for (const auto& bind : staged.Desc->BoundResources) {
+                if (!_AddOrMergeHlslBinding(bindings, *staged.Desc, bind, stageMask)) {
+                    return nullptr;
+                }
+            }
+        }
+
+        size_t cbSize = 0;
+        auto rs = d3d12::CastD3D12Object(rs_);
+        const auto& desc = rs->_desc;
+        if (desc.GetRootConstantCount() > 0) {
+            const auto& rootConstant = desc.GetRootConstant();
+            cbSize += rootConstant.data.Num32BitValues * sizeof(uint32_t);
+        }
+        UINT rootDescCount = desc.GetRootDescriptorCount();
+        if (rootDescCount > 0) {
+            for (UINT i = 0; i < rootDescCount; ++i) {
+                const auto& rootDesc = desc.GetRootDescriptor(i);
+                auto it = std::find_if(bindings.begin(), bindings.end(), [&](const HlslRSCombinedBinding& b) {
+                    return b.Space == rootDesc.data.RegisterSpace && b.Slot == rootDesc.data.ShaderRegister;
+                });
+                if (it == bindings.end()) {
+                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing binding data for root descriptor");
+                    return nullptr;
+                } else {
+                }
+            }
+        }
+#else
+        RADRAY_ERR_LOG("{} {}", Errors::D3D12, "disabled");
+        return nullptr;
+#endif
+    }
+    return nullptr;
 }
 
 }  // namespace radray::render

@@ -808,15 +808,15 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
 
 void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept;
 
-inline auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
-inline auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-inline auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
-inline auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
-inline auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
-inline auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
-inline auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
-inline auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
-inline auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
-inline auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
+constexpr auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
+constexpr auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
+constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
+constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
+constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
+constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
 
 }  // namespace radray::render::vulkan

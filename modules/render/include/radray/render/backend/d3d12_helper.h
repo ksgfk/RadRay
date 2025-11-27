@@ -85,6 +85,8 @@ public:
     DescriptorTable GetDescriptorTable(uint32_t slot) const noexcept;
 
     UINT GetDescriptorTableCount() const noexcept;
+    UINT GetRootDescriptorCount() const noexcept;
+    UINT GetRootConstantCount() const noexcept;
 
     friend void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescContainer& rhs) noexcept;
 

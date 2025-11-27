@@ -7,12 +7,23 @@
 
 namespace radray::render {
 
+struct StagedHlslShaderDesc {
+    const HlslShaderDesc* Desc{nullptr};
+    ShaderStage Stage{ShaderStage::UNKNOWN};
+};
+
+class HlslResourceBindingTableExtraData {
+public:
+    std::span<const StagedHlslShaderDesc> StagedDescs{};
+};
+using BuildResourceBindingTableExtraData = std::variant<HlslResourceBindingTableExtraData>;
 class ResourceBindingTable : public RenderBase {
 public:
     ~ResourceBindingTable() noexcept override = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTags{RenderObjectTag::UNKNOWN}; }
 };
+Nullable<unique_ptr<ResourceBindingTable>> CreateResourceBindingTable(Device* device, RootSignature* rs, const BuildResourceBindingTableExtraData& extraData) noexcept;
 
 class RootSignatureSetElementContainer {
 public:
@@ -77,10 +88,6 @@ struct SemanticMapping {
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
-struct StagedHlslShaderDesc {
-    const HlslShaderDesc* Desc{nullptr};
-    ShaderStage Stage{ShaderStage::UNKNOWN};
-};
 std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
 }  // namespace radray::render

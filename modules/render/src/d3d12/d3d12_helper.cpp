@@ -233,12 +233,13 @@ static auto _GetRootConstImpl(const T* params, UINT count) noexcept {
     return VersionedRootSignatureDescContainer::RootConstant{{}, std::numeric_limits<UINT>::max()};
 }
 
-template <class T>
-static UINT _CountDescriptorTablesImpl(const T* params, UINT count) noexcept {
+template <class T, class... TTypes>
+static UINT _CountTypeImpl(const T* params, UINT count, TTypes&&... types) noexcept {
+    static_assert(sizeof...(types) > 0, "expected at least one parameter type");
     UINT result = 0;
     for (UINT i = 0; i < count; i++) {
-        if (params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
-            ++result;
+        if (((params[i].ParameterType == types) || ...)) {
+            result++;
         }
     }
     return result;
@@ -331,11 +332,35 @@ VersionedRootSignatureDescContainer::DescriptorTable VersionedRootSignatureDescC
 UINT VersionedRootSignatureDescContainer::GetDescriptorTableCount() const noexcept {
     switch (_desc.Version) {
         case D3D_ROOT_SIGNATURE_VERSION_1:
-            return _CountDescriptorTablesImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters);
+            return _CountTypeImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE);
         case D3D_ROOT_SIGNATURE_VERSION_1_1:
-            return _CountDescriptorTablesImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters);
+            return _CountTypeImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE);
         case D3D_ROOT_SIGNATURE_VERSION_1_2:
-            return _CountDescriptorTablesImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters);
+            return _CountTypeImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE);
+    }
+    Unreachable();
+}
+
+UINT VersionedRootSignatureDescContainer::GetRootDescriptorCount() const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1:
+            return _CountTypeImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1:
+            return _CountTypeImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2:
+            return _CountTypeImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV);
+    }
+    Unreachable();
+}
+
+UINT VersionedRootSignatureDescContainer::GetRootConstantCount() const noexcept {
+    switch (_desc.Version) {
+        case D3D_ROOT_SIGNATURE_VERSION_1:
+            return _CountTypeImpl(_desc.Desc_1_0.pParameters, _desc.Desc_1_0.NumParameters, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+        case D3D_ROOT_SIGNATURE_VERSION_1_1:
+            return _CountTypeImpl(_desc.Desc_1_1.pParameters, _desc.Desc_1_1.NumParameters, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+        case D3D_ROOT_SIGNATURE_VERSION_1_2:
+            return _CountTypeImpl(_desc.Desc_1_2.pParameters, _desc.Desc_1_2.NumParameters, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
     }
     Unreachable();
 }
