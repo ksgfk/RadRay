@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <utility>
+
 #include <radray/vertex_data.h>
 
 #include <radray/render/common.h>
@@ -10,6 +13,41 @@ namespace radray::render {
 struct StagedHlslShaderDesc {
     const HlslShaderDesc* Desc{nullptr};
     ShaderStage Stage{ShaderStage::UNKNOWN};
+};
+
+class ShaderCBufferType;
+
+class ShaderCBufferVariable {
+public:
+private:
+    string _name;
+    const ShaderCBufferType* _type{nullptr};
+    size_t _offset{0};
+};
+
+class ShaderCBufferType {
+public:
+private:
+    string _name;
+    vector<const ShaderCBufferVariable*> _members;
+    size_t _size{0};
+};
+
+class ShaderCBufferLayout {
+public:
+private:
+    string _name;
+    const ShaderCBufferType* _root{nullptr};
+    size_t _size{0};
+};
+
+class ShaderCBufferStorage {
+public:
+private:
+    vector<ShaderCBufferLayout> _layout;
+    vector<ShaderCBufferType> _types;
+    vector<ShaderCBufferVariable> _variables;
+    vector<byte> _buffer;
 };
 
 class HlslResourceBindingTableExtraData {

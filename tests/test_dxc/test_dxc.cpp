@@ -44,6 +44,10 @@ struct PS_INPUT
 ConstantBuffer<PreObjectData> _Obj : register(b0);
 ConstantBuffer<PreCameraData> _Camera : register(b1);
 ConstantBuffer<GlobalData> _Global : register(b2);
+cbuffer TestCBuffer : register(b3)
+{
+    float4 _SomeValue;
+};
 
 Texture2D _AlbedoTex : register(t0);
 SamplerState _AlbedoSampler : register(s0);
@@ -65,7 +69,7 @@ float4 PSMain(PS_INPUT psIn) : SV_Target
     float3 albedo = _AlbedoTex.Sample(_AlbedoSampler, psIn.uv).xyz;
     float3 mr = _MetallicRoughnessTex.Sample(_MetallicRoughnessSampler, psIn.uv).xyz;
     float3 t = albedo * mr * ((float3)1.0 / _Global.lightDirW.xyz) + ((float3)1.0 / + _Camera.posW);
-    return float4(t, 1.0f);
+    return float4(t, 1.0f) + _SomeValue;
 }
 )";
 

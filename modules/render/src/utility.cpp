@@ -970,12 +970,10 @@ Nullable<unique_ptr<ResourceBindingTable>> CreateResourceBindingTable(
             }
         }
 
-        size_t cbSize = 0;
         auto rs = d3d12::CastD3D12Object(rs_);
         const auto& desc = rs->_desc;
         if (desc.GetRootConstantCount() > 0) {
             const auto& rootConstant = desc.GetRootConstant();
-            cbSize += rootConstant.data.Num32BitValues * sizeof(uint32_t);
         }
         UINT rootDescCount = desc.GetRootDescriptorCount();
         if (rootDescCount > 0) {
@@ -990,6 +988,9 @@ Nullable<unique_ptr<ResourceBindingTable>> CreateResourceBindingTable(
                 } else {
                 }
             }
+        }
+        UINT descTableCount = desc.GetDescriptorTableCount();
+        for (UINT i = 0; i < descTableCount; i++) {
         }
 #else
         RADRAY_ERR_LOG("{} {}", Errors::D3D12, "disabled");
