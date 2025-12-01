@@ -271,11 +271,13 @@ public:
     HlslShaderInputType Type{HlslShaderInputType::UNKNOWN};
     uint32_t BindPoint{0};
     uint32_t BindCount{0};
-    uint32_t Flags{0};
     HlslResourceReturnType ReturnType{HlslResourceReturnType::UNKNOWN};
     HlslSRVDimension Dimension{HlslSRVDimension::UNKNOWN};
     uint32_t NumSamples{0};
     uint32_t Space{0};
+    uint32_t Flags{0};
+
+    ResourceBindType MapResourceBindType() const noexcept;
 };
 
 class HlslSignatureParameterDesc {
@@ -301,6 +303,9 @@ public:
     uint32_t Flags{0};
     HlslFeatureLevel MinFeatureLevel{HlslFeatureLevel::UNKNOWN};
     uint32_t GroupSizeX{0}, GroupSizeY{0}, GroupSizeZ{0};
+    ShaderStage Stage{ShaderStage::UNKNOWN};
+
+    Nullable<const HlslShaderBufferDesc*> FindCBufferByName(std::string_view name) const noexcept;
 };
 
 bool operator==(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept;
@@ -309,6 +314,10 @@ bool operator==(const HlslShaderVariableDesc& lhs, const HlslShaderVariableDesc&
 bool operator!=(const HlslShaderVariableDesc& lhs, const HlslShaderVariableDesc& rhs) noexcept;
 bool operator==(const HlslShaderBufferDesc& lhs, const HlslShaderBufferDesc& rhs) noexcept;
 bool operator!=(const HlslShaderBufferDesc& lhs, const HlslShaderBufferDesc& rhs) noexcept;
+bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
+bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
+
+bool IsBufferDimension(HlslSRVDimension dim) noexcept;
 
 }  // namespace radray::render
 

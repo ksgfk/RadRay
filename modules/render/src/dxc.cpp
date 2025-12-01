@@ -2,6 +2,35 @@
 
 namespace radray::render {
 
+ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
+    switch (Type) {
+        case HlslShaderInputType::CBUFFER: return ResourceBindType::CBuffer;
+        case HlslShaderInputType::TBUFFER:
+        case HlslShaderInputType::STRUCTURED:
+        case HlslShaderInputType::BYTEADDRESS: return ResourceBindType::Buffer;
+        case HlslShaderInputType::TEXTURE: return IsBufferDimension(Dimension) ? ResourceBindType::Buffer : ResourceBindType::Texture;
+        case HlslShaderInputType::SAMPLER: return ResourceBindType::Sampler;
+        case HlslShaderInputType::UAV_RWTYPED: return IsBufferDimension(Dimension) ? ResourceBindType::RWBuffer : ResourceBindType::RWTexture;
+        case HlslShaderInputType::UAV_RWSTRUCTURED:
+        case HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
+        case HlslShaderInputType::UAV_APPEND_STRUCTURED:
+        case HlslShaderInputType::UAV_CONSUME_STRUCTURED:
+        case HlslShaderInputType::UAV_RWBYTEADDRESS: return ResourceBindType::RWBuffer;
+        case HlslShaderInputType::RTACCELERATIONSTRUCTURE: return ResourceBindType::Buffer;
+        case HlslShaderInputType::UAV_FEEDBACKTEXTURE: return ResourceBindType::RWTexture;
+        case HlslShaderInputType::UNKNOWN: return ResourceBindType::UNKNOWN;
+    }
+    Unreachable();
+}
+
+Nullable<const HlslShaderBufferDesc*> HlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
+    auto it = std::find_if(ConstantBuffers.begin(), ConstantBuffers.end(), [&](const HlslShaderBufferDesc& cb) {
+        return std::string_view{cb.Name} == name;
+    });
+    auto result = it == ConstantBuffers.end() ? nullptr : &(*it);
+    return result;
+}
+
 bool operator==(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
     if (lhs.Name != rhs.Name ||
         lhs.Class != rhs.Class ||
@@ -60,6 +89,29 @@ bool operator==(const radray::render::HlslShaderBufferDesc& lhs, const radray::r
 
 bool operator!=(const radray::render::HlslShaderBufferDesc& lhs, const radray::render::HlslShaderBufferDesc& rhs) noexcept {
     return !(operator==(lhs, rhs));
+}
+
+bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    return lhs.Name == rhs.Name &&
+           lhs.Type == rhs.Type &&
+           lhs.BindPoint == rhs.BindPoint &&
+           lhs.BindCount == rhs.BindCount &&
+           lhs.ReturnType == rhs.ReturnType &&
+           lhs.Dimension == rhs.Dimension &&
+           lhs.NumSamples == rhs.NumSamples &&
+           lhs.Space == rhs.Space;
+}
+
+bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    return !(operator==(lhs, rhs));
+}
+
+bool IsBufferDimension(HlslSRVDimension dim) noexcept {
+    switch (dim) {
+        case HlslSRVDimension::BUFFER:
+        case HlslSRVDimension::BUFFEREX: return true;
+        default: return false;
+    }
 }
 
 }  // namespace radray::render
@@ -522,6 +574,16 @@ public:
             return std::nullopt;
         }
         HlslShaderDesc desc{};
+        const auto d3dStage = static_cast<D3D12_SHADER_VERSION_TYPE>(D3D12_SHVER_GET_TYPE(shaderDesc.Version));
+        switch (d3dStage) {
+            case D3D12_SHVER_PIXEL_SHADER: desc.Stage = ShaderStage::Pixel; break;
+            case D3D12_SHVER_VERTEX_SHADER: desc.Stage = ShaderStage::Vertex; break;
+            case D3D12_SHVER_COMPUTE_SHADER: desc.Stage = ShaderStage::Compute; break;
+            default: {
+                RADRAY_ERR_LOG("{} {}", Errors::DXC, "unsupported shader stage");
+                return std::nullopt;
+            }
+        }
         if (shaderDesc.Creator != nullptr) {
             desc.Creator = shaderDesc.Creator;
         }

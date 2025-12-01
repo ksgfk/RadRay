@@ -2,6 +2,7 @@
 
 #include <radray/render/dxc.h>
 #include <radray/render/utility.h>
+#include <radray/render/root_signature_helper.h>
 
 const char* SHADER_CODE = R"(
 struct PreObjectData
@@ -83,9 +84,7 @@ TEST(DXC, BasicReflection) {
     auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl).value();
     auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps.Refl).value();
 
-    StagedHlslShaderDesc stagedDescs[] = {
-        {&vsDesc, ShaderStage::Vertex},
-        {&psDesc, ShaderStage::Pixel}};
-    auto rootSig = CreateRootSignatureDescriptor(stagedDescs);
+    const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
+    auto rootSig = CreateRootSignatureDescriptor(descs);
     ASSERT_TRUE(rootSig.has_value());
 }

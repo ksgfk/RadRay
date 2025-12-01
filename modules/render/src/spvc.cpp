@@ -88,18 +88,18 @@ static const SpirvTypeDesc* _GetOrCreateType(SpirvReflectionContext& ctx, uint32
     }
 
     const auto& type = ctx.compiler.get_type(typeId);
-    ctx.desc.types.emplace_back();
-    auto* typeDesc = &ctx.desc.types.back();
+    ctx.desc.Types.emplace_back();
+    auto* typeDesc = &ctx.desc.Types.back();
     ctx.typeCache.emplace(typeId, typeDesc);
 
-    typeDesc->base = _MapBaseType(type.basetype);
-    typeDesc->bitWidth = type.width;
-    typeDesc->vectorSize = type.vecsize;
-    typeDesc->columnCount = type.columns;
-    typeDesc->arraySize = _ExtractArraySize(type);
+    typeDesc->Base = _MapBaseType(type.basetype);
+    typeDesc->BitWidth = type.width;
+    typeDesc->VectorSize = type.vecsize;
+    typeDesc->ColumnCount = type.columns;
+    typeDesc->ArraySize = _ExtractArraySize(type);
 
     if (type.basetype == spirv_cross::SPIRType::BaseType::Struct) {
-        typeDesc->structInfo = _GetOrCreateStruct(ctx, typeId);
+        typeDesc->StructInfo = _GetOrCreateStruct(ctx, typeId);
     }
 
     return typeDesc;
@@ -126,27 +126,27 @@ static const SpirvStructDesc* _GetOrCreateStruct(SpirvReflectionContext& ctx, ui
     }
 
     const auto& type = ctx.compiler.get_type(typeId);
-    ctx.desc.structs.emplace_back();
-    auto* structDesc = &ctx.desc.structs.back();
+    ctx.desc.Structs.emplace_back();
+    auto* structDesc = &ctx.desc.Structs.back();
     ctx.structCache.emplace(typeId, structDesc);
 
-    structDesc->name = ctx.compiler.get_name(typeId);
-    if (structDesc->name.empty()) {
-        structDesc->name = format("struct_{}", typeId);
+    structDesc->Name = ctx.compiler.get_name(typeId);
+    if (structDesc->Name.empty()) {
+        structDesc->Name = format("struct_{}", typeId);
     }
-    structDesc->size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_size(type));
-    structDesc->members.clear();
-    structDesc->members.reserve(type.member_types.size());
+    structDesc->Size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_size(type));
+    structDesc->Members.clear();
+    structDesc->Members.reserve(type.member_types.size());
     for (uint32_t idx = 0; idx < type.member_types.size(); ++idx) {
         SpirvStructMemberDesc member{};
-        member.name = ctx.compiler.get_member_name(typeId, idx);
-        if (member.name.empty()) {
-            member.name = format("member_{}", idx);
+        member.Name = ctx.compiler.get_member_name(typeId, idx);
+        if (member.Name.empty()) {
+            member.Name = format("member_{}", idx);
         }
-        member.offset = ctx.compiler.type_struct_member_offset(type, idx);
-        member.size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_member_size(type, idx));
-        member.type = _GetOrCreateType(ctx, type.member_types[idx]);
-        structDesc->members.push_back(std::move(member));
+        member.Offset = ctx.compiler.type_struct_member_offset(type, idx);
+        member.Size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_member_size(type, idx));
+        member.Type = _GetOrCreateType(ctx, type.member_types[idx]);
+        structDesc->Members.push_back(std::move(member));
     }
 
     return structDesc;
@@ -157,12 +157,12 @@ static SpirvResourceBindingDesc _BuildResourceBinding(
     const spirv_cross::Resource& resource,
     SpirvResourceKind kind) {
     SpirvResourceBindingDesc binding{};
-    binding.name = _ResolveName(ctx.compiler, resource.id);
-    binding.kind = kind;
-    binding.binding = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationBinding).value_or(0);
-    binding.descriptorSet = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationDescriptorSet).value_or(0);
-    binding.arraySize = _ExtractArraySize(ctx.compiler.get_type(resource.type_id));
-    binding.valueType = _GetOrCreateType(ctx, resource.base_type_id);
+    binding.Name = _ResolveName(ctx.compiler, resource.id);
+    binding.Kind = kind;
+    binding.Binding = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationBinding).value_or(0);
+    binding.DescriptorSet = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationDescriptorSet).value_or(0);
+    binding.ArraySize = _ExtractArraySize(ctx.compiler.get_type(resource.type_id));
+    binding.ValueType = _GetOrCreateType(ctx, resource.base_type_id);
     return binding;
 }
 
@@ -213,28 +213,28 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::string_view entryPointName, Sha
         collectFromList(resources.storage_images);
         collectFromList(resources.separate_images);
         collectFromList(resources.separate_samplers);
-        desc.types.reserve(typeIds.size());
-        desc.structs.reserve(structTypeIds.size());
+        desc.Types.reserve(typeIds.size());
+        desc.Structs.reserve(structTypeIds.size());
         SpirvReflectionContext ctx{compiler, desc};
-        desc.stageInput.reserve(resources.stage_inputs.size());
+        desc.StageInput.reserve(resources.stage_inputs.size());
         for (const auto& input : resources.stage_inputs) {
             SpirvParameterDesc param{};
-            param.name = _ResolveName(compiler, input.id);
-            param.location = _TryGetDecoration(compiler, input.id, spv::DecorationLocation).value_or(0);
-            param.type = _GetOrCreateType(ctx, input.base_type_id);
-            desc.stageInput.push_back(std::move(param));
+            param.Name = _ResolveName(compiler, input.id);
+            param.Location = _TryGetDecoration(compiler, input.id, spv::DecorationLocation).value_or(0);
+            param.Type = _GetOrCreateType(ctx, input.base_type_id);
+            desc.StageInput.push_back(std::move(param));
         }
-        desc.stageOutput.reserve(resources.stage_outputs.size());
+        desc.StageOutput.reserve(resources.stage_outputs.size());
         for (const auto& output : resources.stage_outputs) {
             SpirvParameterDesc param{};
-            param.name = _ResolveName(compiler, output.id);
-            param.location = _TryGetDecoration(compiler, output.id, spv::DecorationLocation).value_or(0);
-            param.type = _GetOrCreateType(ctx, output.base_type_id);
-            desc.stageOutput.push_back(std::move(param));
+            param.Name = _ResolveName(compiler, output.id);
+            param.Location = _TryGetDecoration(compiler, output.id, spv::DecorationLocation).value_or(0);
+            param.Type = _GetOrCreateType(ctx, output.base_type_id);
+            desc.StageOutput.push_back(std::move(param));
         }
         const auto appendResources = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, SpirvResourceKind kind) {
             for (const auto& res : list) {
-                desc.resources.push_back(_BuildResourceBinding(ctx, res, kind));
+                desc.Resources.push_back(_BuildResourceBinding(ctx, res, kind));
             }
         };
         appendResources(resources.uniform_buffers, SpirvResourceKind::UniformBuffer);
@@ -247,7 +247,7 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::string_view entryPointName, Sha
         static_assert(sizeof(SpirvWorkgroupSize) == sizeof(entryPoint.workgroup_size), "Size mismatch between SpirvWorkgroupSize and entryPoint.workgroup_size");
         static_assert(std::is_trivially_copyable_v<SpirvWorkgroupSize>, "SpirvWorkgroupSize must be trivially copyable");
         static_assert(std::is_trivially_copyable_v<spirv_cross::SPIREntryPoint::WorkgroupSize>, "spirv_cross::SPIREntryPoint::WorkgroupSize must be trivially copyable");
-        std::memcpy(&desc.workgroupSize, &entryPoint.workgroup_size, sizeof(SpirvWorkgroupSize));
+        std::memcpy(&desc.WorkgroupSize, &entryPoint.workgroup_size, sizeof(SpirvWorkgroupSize));
     } catch (const spirv_cross::CompilerError& e) {
         RADRAY_ERR_LOG("{} {}: {}", Errors::SPIRV_CROSS, "Compiler Error", e.what());
         return std::nullopt;

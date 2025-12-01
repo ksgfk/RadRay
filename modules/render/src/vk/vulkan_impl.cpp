@@ -895,6 +895,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     auto result = descSetLayoutVk.Release();
     result->_bindings = std::move(bindings);
     result->_immutableSamplers = std::move(staticSamplers);
+    result->_immutableSamplerView = std::move(tmpSS);
     return result;
 }
 
