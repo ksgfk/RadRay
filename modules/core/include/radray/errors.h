@@ -19,6 +19,7 @@ enum class Errors {
     LIBPNG,
     RADRAYIMGUI,
     DXC,
+    SPIRV_CROSS,
     WIN,
 };
 

@@ -4,64 +4,24 @@
 
 namespace radray::render {
 
-class MslReflection {
-public:
-    class VertexInput {
-    public:
-        string Name;
-        uint32_t Location;
-        VertexFormat Format;
-        string Semantic;
-        uint32_t SemanticIndex;
-    };
-
-    vector<VertexInput> VertexInputs;
+struct SpirvWorkgroupSize {
+    uint32_t x = 0, y = 0, z = 0;
+    uint32_t id_x = 0, id_y = 0, id_z = 0;
+    uint32_t constant = 0;
 };
 
-class SpirvReflection {};
+class SpirvShaderDesc {
+public:
+    SpirvWorkgroupSize workgroupSize;
+};
 
-};  // namespace radray::render
+}  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
 
 namespace radray::render {
 
-enum class MslVersion {
-    MSL11,
-    MSL12,
-    MSL20,
-    MSL21,
-    MSL22,
-    MSL23,
-    MSL24,
-    MSL30,
-    MSL31,
-    MSL32,
-};
-
-enum class MslPlatform {
-    Macos,
-    Ios
-};
-
-class SpvcEntryPoint {
-public:
-    string Name;
-    ShaderStage Stage;
-};
-
-class SpvcMslOutput {
-public:
-    string Msl;
-    vector<SpvcEntryPoint> EntryPoints;
-};
-
-std::pair<uint32_t, uint32_t> GetMslVersionNumber(MslVersion ver) noexcept;
-
-std::optional<SpvcMslOutput> SpirvToMsl(
-    std::span<byte> spirv,
-    MslVersion ver,
-    MslPlatform plat);
+std::optional<SpirvShaderDesc> ReflectSpirv(std::string_view entryPointName, ShaderStage stage, std::span<const byte> data);
 
 }  // namespace radray::render
 

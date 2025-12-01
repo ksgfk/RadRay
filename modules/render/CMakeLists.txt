@@ -20,11 +20,16 @@ target_link_libraries(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Guids>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:D3D12MemoryAllocator>)
 target_link_libraries(radrayrender PRIVATE
-    $<$<BOOL:${RADRAY_ENABLE_DXC}>:dxc::dxcompiler>)
+    $<$<BOOL:${RADRAY_ENABLE_DXC}>:dxc::dxcompiler>
+    $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:spirv-cross-core>
+    $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:spirv-cross-glsl>
+    $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:spirv-cross-msl>
+    $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:spirv-cross-util>)
 target_compile_definitions(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_DXC}>:RADRAY_ENABLE_DXC>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:RADRAY_ENABLE_VULKAN>
-    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>)
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>
+    $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:RADRAY_ENABLE_SPIRV_CROSS>)
 target_compile_options(radrayrender PRIVATE
     $<$<BOOL:MSVC>:/W4>)
 radray_optimize_flags_library(radrayrender)
