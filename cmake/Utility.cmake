@@ -158,9 +158,18 @@ function(radray_compile_flag_lto target)
     endif()
 endfunction()
 
+function(radray_compile_flag_cpp20 target)
+    if (MSVC)
+        target_compile_options(${target} PRIVATE /std:c++20)
+    else()
+        target_compile_options(${target} PRIVATE -std=c++20)
+    endif()
+endfunction()
+
 function(radray_optimize_flags_library target)
     radray_compile_flag_auto_simd(${target})
     radray_compile_flag_lto(${target})
+    radray_compile_flag_cpp20(${target})
 endfunction()
 
 function(radray_optimize_flags_binary target)
