@@ -639,7 +639,7 @@ public:
 
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
-    vector<RootSignatureSetElementContainer> _bindingElements;
+    vector<VkDescriptorSetLayoutBinding> _bindings;
     vector<unique_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
@@ -751,6 +751,7 @@ class DescriptorSetVulkanWrapper final : public DescriptorSet {
 public:
     DescriptorSetVulkanWrapper(
         DeviceVulkan* device,
+        DescriptorSetLayoutVulkan* layout,
         unique_ptr<DescriptorSetVulkan> set) noexcept;
     ~DescriptorSetVulkanWrapper() noexcept override = default;
 
@@ -762,8 +763,8 @@ public:
 
 public:
     DeviceVulkan* _device;
+    DescriptorSetLayoutVulkan* _layout;
     unique_ptr<DescriptorSetVulkan> _set;
-    vector<RootSignatureSetElementContainer> _bindingElements;
 };
 
 class DescPoolAllocator {

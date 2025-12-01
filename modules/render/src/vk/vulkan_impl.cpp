@@ -893,7 +893,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         return nullptr;
     }
     auto result = descSetLayoutVk.Release();
-    result->_bindingElements = RootSignatureSetElementContainer::FromView(desc.Elements);
+    result->_bindings = std::move(bindings);
     result->_immutableSamplers = std::move(staticSamplers);
     return result;
 }
@@ -978,9 +978,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignat
     }
     const auto& layout = rootSig->_descSetLayouts[index];
     auto descSet = _poolAlloc->Allocate(layout->_layout);
-    auto result = std::make_unique<DescriptorSetVulkanWrapper>(this, std::move(descSet));
-    result->_bindingElements = layout->_bindingElements;
-    return result;
+    return std::make_unique<DescriptorSetVulkanWrapper>(this, layout.get(), std::move(descSet));
 }
 
 Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
@@ -2989,8 +2987,10 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
 
 DescriptorSetVulkanWrapper::DescriptorSetVulkanWrapper(
     DeviceVulkan* device,
+    DescriptorSetLayoutVulkan* layout,
     unique_ptr<DescriptorSetVulkan> set) noexcept
     : _device(device),
+      _layout(layout),
       _set(std::move(set)) {}
 
 bool DescriptorSetVulkanWrapper::IsValid() const noexcept {
@@ -3002,12 +3002,12 @@ void DescriptorSetVulkanWrapper::Destroy() noexcept {
 }
 
 void DescriptorSetVulkanWrapper::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
-    if (slot >= _bindingElements.size()) {
+    if (slot >= _layout->_bindings.size()) {
         RADRAY_ERR_LOG("{} {} '{}'", Errors::VK, Errors::ArgumentOutOfRange, "slot");
         return;
     }
-    const auto& e = _bindingElements[slot];
-    if (index >= e._elem.Count) {
+    const auto& e = _layout->_bindings[slot];
+    if (index >= e.descriptorCount) {
         RADRAY_ERR_LOG("{} {} '{}'", Errors::VK, Errors::ArgumentOutOfRange, "index");
         return;
     }
@@ -3016,10 +3016,10 @@ void DescriptorSetVulkanWrapper::SetResource(uint32_t slot, uint32_t index, Reso
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;
     writeDesc.dstSet = _set->_set;
-    writeDesc.dstBinding = e._elem.Slot;
+    writeDesc.dstBinding = e.binding;
     writeDesc.dstArrayElement = index;
     writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = MapType(e._elem.Type);
+    writeDesc.descriptorType = e.descriptorType;
     writeDesc.pBufferInfo = nullptr;
     writeDesc.pImageInfo = nullptr;
     writeDesc.pTexelBufferView = nullptr;

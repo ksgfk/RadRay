@@ -15,57 +15,6 @@
 
 namespace radray::render {
 
-RootSignatureSetElementContainer::RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept
-    : _elem(elem),
-      _staticSamplers(elem.StaticSamplers.begin(), elem.StaticSamplers.end()) {
-    Refresh();
-}
-
-RootSignatureSetElementContainer::RootSignatureSetElementContainer(const RootSignatureSetElementContainer& other) noexcept
-    : _elem(other._elem),
-      _staticSamplers(other._staticSamplers) {
-    Refresh();
-}
-
-RootSignatureSetElementContainer::RootSignatureSetElementContainer(RootSignatureSetElementContainer&& other) noexcept
-    : _elem(other._elem),
-      _staticSamplers(std::move(other._staticSamplers)) {
-    Refresh();
-}
-
-RootSignatureSetElementContainer& RootSignatureSetElementContainer::operator=(const RootSignatureSetElementContainer& other) noexcept {
-    RootSignatureSetElementContainer temp{other};
-    swap(*this, temp);
-    return *this;
-}
-
-RootSignatureSetElementContainer& RootSignatureSetElementContainer::operator=(RootSignatureSetElementContainer&& other) noexcept {
-    RootSignatureSetElementContainer temp{std::move(other)};
-    swap(*this, temp);
-    return *this;
-}
-
-void swap(RootSignatureSetElementContainer& lhs, RootSignatureSetElementContainer& rhs) noexcept {
-    using std::swap;
-    swap(lhs._elem, rhs._elem);
-    swap(lhs._staticSamplers, rhs._staticSamplers);
-    lhs.Refresh();
-    rhs.Refresh();
-}
-
-void RootSignatureSetElementContainer::Refresh() noexcept {
-    _elem.StaticSamplers = std::span{_staticSamplers};
-}
-
-vector<RootSignatureSetElementContainer> RootSignatureSetElementContainer::FromView(std::span<const RootSignatureSetElement> elems) noexcept {
-    vector<RootSignatureSetElementContainer> result;
-    result.reserve(elems.size());
-    for (const auto& i : elems) {
-        result.emplace_back(i);
-    }
-    return result;
-}
-
 static void _CopyRootSignatureDescriptor(
     const RootSignatureDescriptor& src,
     vector<RootSignatureRootDescriptor>& rootDescriptors,
@@ -702,7 +651,7 @@ static std::optional<HlslRSDescriptorTableBuildResult> _BuildHlslDescriptorSets(
     return result;
 }
 
-std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept {
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const StagedHlslShaderDesc> descs) noexcept {
     if (descs.empty()) {
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "descs");
         return std::nullopt;

@@ -63,27 +63,7 @@ public:
 };
 Nullable<unique_ptr<ResourceBindingTable>> CreateResourceBindingTable(Device* device, RootSignature* rs, const BuildResourceBindingTableExtraData& extraData) noexcept;
 
-class RootSignatureSetElementContainer {
-public:
-    RootSignatureSetElementContainer() noexcept = default;
-    explicit RootSignatureSetElementContainer(const RootSignatureSetElement& elem) noexcept;
-    RootSignatureSetElementContainer(const RootSignatureSetElementContainer&) noexcept;
-    RootSignatureSetElementContainer(RootSignatureSetElementContainer&&) noexcept;
-    RootSignatureSetElementContainer& operator=(const RootSignatureSetElementContainer&) noexcept;
-    RootSignatureSetElementContainer& operator=(RootSignatureSetElementContainer&&) noexcept;
-    ~RootSignatureSetElementContainer() noexcept = default;
-
-    static vector<RootSignatureSetElementContainer> FromView(std::span<const RootSignatureSetElement> elems) noexcept;
-
-    friend void swap(RootSignatureSetElementContainer& lhs, RootSignatureSetElementContainer& rhs) noexcept;
-
-public:
-    void Refresh() noexcept;
-
-    RootSignatureSetElement _elem{};
-    vector<SamplerDescriptor> _staticSamplers;
-};
-
+Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
 class RootSignatureDescriptorContainer {
 public:
     RootSignatureDescriptorContainer() noexcept = default;
@@ -106,6 +86,7 @@ private:
     vector<RootSignatureDescriptorSet> _descriptorSets;
     RootSignatureDescriptor _desc{};
 };
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSize(VertexFormat format) noexcept;
@@ -124,8 +105,5 @@ struct SemanticMapping {
     VertexFormat Format{VertexFormat::UNKNOWN};
 };
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
-
-Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
-std::optional<RootSignatureDescriptorContainer> GenerateRSDescFromHlslShaderDescs(std::span<const StagedHlslShaderDesc> descs) noexcept;
 
 }  // namespace radray::render

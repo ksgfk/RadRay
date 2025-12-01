@@ -86,6 +86,6 @@ TEST(DXC, BasicReflection) {
     StagedHlslShaderDesc stagedDescs[] = {
         {&vsDesc, ShaderStage::Vertex},
         {&psDesc, ShaderStage::Pixel}};
-    auto rootSig = GenerateRSDescFromHlslShaderDescs(stagedDescs);
+    auto rootSig = CreateRootSignatureDescriptor(stagedDescs);
     ASSERT_TRUE(rootSig.has_value());
 }
