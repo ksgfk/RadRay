@@ -235,6 +235,8 @@ public:
     uint32_t Columns{0};
     uint32_t Elements{0};
     uint32_t Offset{0};
+
+    bool IsPrimitive() const noexcept;
 };
 
 class HlslShaderTypeMember {
@@ -303,7 +305,7 @@ public:
     uint32_t Flags{0};
     HlslFeatureLevel MinFeatureLevel{HlslFeatureLevel::UNKNOWN};
     uint32_t GroupSizeX{0}, GroupSizeY{0}, GroupSizeZ{0};
-    ShaderStage Stage{ShaderStage::UNKNOWN};
+    ShaderStages Stage{ShaderStage::UNKNOWN};
 
     Nullable<const HlslShaderBufferDesc*> FindCBufferByName(std::string_view name) const noexcept;
 };
@@ -318,6 +320,18 @@ bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noex
 bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
 
 bool IsBufferDimension(HlslSRVDimension dim) noexcept;
+
+class MergedHlslShaderDesc {
+public:
+    vector<HlslShaderBufferDesc> ConstantBuffers;
+    vector<HlslInputBindDesc> BoundResources;
+    vector<HlslShaderVariableDesc> Variables;
+    vector<HlslShaderTypeDesc> Types;
+    ShaderStages Stage{ShaderStage::UNKNOWN};
+
+    Nullable<const HlslShaderBufferDesc*> FindCBufferByName(std::string_view name) const noexcept;
+};
+MergedHlslShaderDesc MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept;
 
 }  // namespace radray::render
 

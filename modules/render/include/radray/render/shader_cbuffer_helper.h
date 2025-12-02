@@ -2,6 +2,7 @@
 
 #include <radray/render/common.h>
 #include <radray/render/utility.h>
+#include <radray/render/dxc.h>
 
 namespace radray::render {
 
@@ -39,5 +40,7 @@ private:
     vector<std::unique_ptr<ShaderCBufferVariable>> _variables;
     vector<byte> _buffer;
 };
+
+std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslShaderDesc*> descs) noexcept;
 
 };  // namespace radray::render

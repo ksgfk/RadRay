@@ -29,20 +29,7 @@ private:
     RootSignatureDescriptor _desc{};
 };
 
-struct HlslRSCombinedBinding {
-    std::string_view Name;
-    const HlslShaderBufferDesc* CBuffer{nullptr};
-    const HlslInputBindDesc* Layout{nullptr};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    uint32_t Slot{0};
-    uint32_t Space{0};
-    uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
-
-vector<HlslRSCombinedBinding> MergeHlslShaderBoundResources(std::span<const HlslShaderDesc*> descs) noexcept;
 
 std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const HlslShaderDesc*> descs) noexcept;
 

@@ -154,391 +154,333 @@ static uint32_t _BindTypePriority(ResourceBindType type) noexcept {
     }
 }
 
-vector<HlslRSCombinedBinding> MergeHlslShaderBoundResources(std::span<const HlslShaderDesc*> descs) noexcept {
-    size_t totalBindings = 0;
-    for (const auto& desc : descs) {
-        totalBindings += desc->BoundResources.size();
-    }
-    vector<HlslRSCombinedBinding> bindings;
-    bindings.reserve(totalBindings);
-    for (const auto& descPtr : descs) {
-        const auto& desc = *descPtr;
-        for (const auto& bind : desc.BoundResources) {
-            if (bind.BindCount == 0 || bind.BindCount == std::numeric_limits<uint32_t>::max()) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported bind count", bind.Name);
-                continue;
-            }
-            ResourceBindType type = bind.MapResourceBindType();
-            if (type == ResourceBindType::UNKNOWN) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported resource bind type", bind.Name);
-                continue;
-            }
-            auto it = std::find_if(bindings.begin(), bindings.end(), [&](const HlslRSCombinedBinding& existing) {
-                return existing.Type == type && existing.Space == bind.Space && existing.Slot == bind.BindPoint;
-            });
-            if (it == bindings.end()) {
-                HlslRSCombinedBinding combined{};
-                combined.Type = type;
-                combined.Slot = bind.BindPoint;
-                combined.Space = bind.Space;
-                combined.Count = bind.BindCount;
-                combined.Stages = desc.Stage;
-                combined.Layout = &bind;
-                combined.Name = bind.Name;
-                if (type == ResourceBindType::CBuffer) {
-                    combined.CBuffer = desc.FindCBufferByName(bind.Name).Release();
-                    if (!combined.CBuffer) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
-                        return {};
-                    }
-                }
-                bindings.emplace_back(std::move(combined));
-            } else {
-                if (*it->Layout != bind) {
-                    RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched resource layout", bind.Name);
-                    return {};
-                }
-                if (type == ResourceBindType::CBuffer) {
-                    const auto* rhsCBuffer = desc.FindCBufferByName(bind.Name).Release();
-                    if (!rhsCBuffer) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidArgument, "missing cbuffer desc", bind.Name);
-                        return {};
-                    }
-                    if (*(it->CBuffer) != *(rhsCBuffer)) {
-                        RADRAY_ERR_LOG("{} {} {} {}", Errors::D3D12, Errors::InvalidOperation, "mismatched cbuffer layout", bind.Name);
-                        return {};
-                    }
-                }
-            }
-            it->Stages |= desc.Stage;
-        }
-    }
-    return bindings;
-}
+// enum class HlslRSPlacement {
+//     Table,
+//     RootDescriptor,
+//     RootConstant,
+// };
 
-// static bool _AddOrMergeHlslBinding(
-//     vector<HlslRSCombinedBinding>& bindings,
-//     const HlslShaderDesc& shaderDesc,
-//     const HlslInputBindDesc& bind,
-//     ShaderStages stageMask) noexcept {
+// struct HlslRSRangeSpec {
+//     ResourceBindType Type{ResourceBindType::UNKNOWN};
+//     uint32_t Space{0};
+//     uint32_t Slot{0};
+//     uint32_t Count{0};
+//     ShaderStages Stages{ShaderStage::UNKNOWN};
+// };
 
+// struct HlslRSDescriptorTableBuildResult {
+//     vector<RootSignatureSetElement> Elements;
+//     vector<RootSignatureDescriptorSet> Sets;
+// };
+
+// static std::optional<HlslRSDescriptorTableBuildResult> _BuildHlslDescriptorSets(
+//     const vector<HlslRSCombinedBinding>& bindings,
+//     const vector<HlslRSPlacement>& placements) noexcept {
+//     HlslRSDescriptorTableBuildResult result{};
+//     vector<std::pair<size_t, size_t>> setRanges;
+//     map<uint32_t, vector<size_t>> perSpace;
+//     for (size_t i = 0; i < bindings.size(); ++i) {
+//         if (placements[i] != HlslRSPlacement::Table) {
+//             continue;
+//         }
+//         perSpace[bindings[i].Space].push_back(i);
+//     }
+
+//     for (auto& [space, indices] : perSpace) {
+//         auto& idxs = indices;
+//         std::sort(idxs.begin(), idxs.end(), [&](size_t lhs, size_t rhs) {
+//             const auto& l = bindings[lhs];
+//             const auto& r = bindings[rhs];
+//             uint32_t lp = _BindTypePriority(l.Type);
+//             uint32_t rp = _BindTypePriority(r.Type);
+//             if (lp != rp) {
+//                 return lp < rp;
+//             }
+//             if (l.Slot != r.Slot) {
+//                 return l.Slot < r.Slot;
+//             }
+//             return l.Name < r.Name;
+//         });
+
+//         vector<HlslRSRangeSpec> ranges;
+//         HlslRSRangeSpec current{};
+//         bool hasCurrent = false;
+//         auto flush = [&]() {
+//             if (hasCurrent) {
+//                 ranges.push_back(current);
+//                 hasCurrent = false;
+//             }
+//         };
+
+//         for (size_t idx : idxs) {
+//             const auto& binding = bindings[idx];
+//             if (!hasCurrent) {
+//                 current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
+//                 hasCurrent = true;
+//                 continue;
+//             }
+//             if (binding.Type == current.Type) {
+//                 uint64_t expected = static_cast<uint64_t>(current.Slot) + current.Count;
+//                 if (binding.Slot < expected) {
+//                     RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "overlap in resource registers");
+//                     return std::nullopt;
+//                 }
+//                 if (binding.Slot == expected) {
+//                     if (binding.Count > std::numeric_limits<uint32_t>::max() - current.Count) {
+//                         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "descriptor range overflow");
+//                         return std::nullopt;
+//                     }
+//                     current.Count += binding.Count;
+//                     current.Stages |= binding.Stages;
+//                     continue;
+//                 }
+//             }
+//             flush();
+//             current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
+//             hasCurrent = true;
+//         }
+//         flush();
+
+//         size_t start = result.Elements.size();
+//         for (const auto& range : ranges) {
+//             RootSignatureSetElement elem{};
+//             elem.Slot = range.Slot;
+//             elem.Space = range.Space;
+//             elem.Type = range.Type;
+//             elem.Count = range.Count;
+//             elem.Stages = range.Stages;
+//             elem.StaticSamplers = std::span<const SamplerDescriptor>{};
+//             result.Elements.push_back(elem);
+//         }
+
+//         size_t count = result.Elements.size() - start;
+//         RootSignatureDescriptorSet set{};
+//         result.Sets.push_back(set);
+//         setRanges.emplace_back(start, count);
+//     }
+
+//     for (size_t i = 0; i < result.Sets.size(); ++i) {
+//         auto [start, count] = setRanges[i];
+//         result.Sets[i].Elements = std::span<const RootSignatureSetElement>{
+//             result.Elements.data() + start,
+//             count};
+//     }
+
+//     return result;
 // }
 
-enum class HlslRSPlacement {
-    Table,
-    RootDescriptor,
-    RootConstant,
-};
-
-struct HlslRSRangeSpec {
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    uint32_t Space{0};
-    uint32_t Slot{0};
-    uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-struct HlslRSDescriptorTableBuildResult {
-    vector<RootSignatureSetElement> Elements;
-    vector<RootSignatureDescriptorSet> Sets;
-};
-
-static std::optional<HlslRSDescriptorTableBuildResult> _BuildHlslDescriptorSets(
-    const vector<HlslRSCombinedBinding>& bindings,
-    const vector<HlslRSPlacement>& placements) noexcept {
-    HlslRSDescriptorTableBuildResult result{};
-    vector<std::pair<size_t, size_t>> setRanges;
-    map<uint32_t, vector<size_t>> perSpace;
-    for (size_t i = 0; i < bindings.size(); ++i) {
-        if (placements[i] != HlslRSPlacement::Table) {
-            continue;
-        }
-        perSpace[bindings[i].Space].push_back(i);
-    }
-
-    for (auto& [space, indices] : perSpace) {
-        auto& idxs = indices;
-        std::sort(idxs.begin(), idxs.end(), [&](size_t lhs, size_t rhs) {
-            const auto& l = bindings[lhs];
-            const auto& r = bindings[rhs];
-            uint32_t lp = _BindTypePriority(l.Type);
-            uint32_t rp = _BindTypePriority(r.Type);
-            if (lp != rp) {
-                return lp < rp;
-            }
-            if (l.Slot != r.Slot) {
-                return l.Slot < r.Slot;
-            }
-            return l.Name < r.Name;
-        });
-
-        vector<HlslRSRangeSpec> ranges;
-        HlslRSRangeSpec current{};
-        bool hasCurrent = false;
-        auto flush = [&]() {
-            if (hasCurrent) {
-                ranges.push_back(current);
-                hasCurrent = false;
-            }
-        };
-
-        for (size_t idx : idxs) {
-            const auto& binding = bindings[idx];
-            if (!hasCurrent) {
-                current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
-                hasCurrent = true;
-                continue;
-            }
-            if (binding.Type == current.Type) {
-                uint64_t expected = static_cast<uint64_t>(current.Slot) + current.Count;
-                if (binding.Slot < expected) {
-                    RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "overlap in resource registers");
-                    return std::nullopt;
-                }
-                if (binding.Slot == expected) {
-                    if (binding.Count > std::numeric_limits<uint32_t>::max() - current.Count) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "descriptor range overflow");
-                        return std::nullopt;
-                    }
-                    current.Count += binding.Count;
-                    current.Stages |= binding.Stages;
-                    continue;
-                }
-            }
-            flush();
-            current = {binding.Type, space, binding.Slot, binding.Count, binding.Stages};
-            hasCurrent = true;
-        }
-        flush();
-
-        size_t start = result.Elements.size();
-        for (const auto& range : ranges) {
-            RootSignatureSetElement elem{};
-            elem.Slot = range.Slot;
-            elem.Space = range.Space;
-            elem.Type = range.Type;
-            elem.Count = range.Count;
-            elem.Stages = range.Stages;
-            elem.StaticSamplers = std::span<const SamplerDescriptor>{};
-            result.Elements.push_back(elem);
-        }
-
-        size_t count = result.Elements.size() - start;
-        RootSignatureDescriptorSet set{};
-        result.Sets.push_back(set);
-        setRanges.emplace_back(start, count);
-    }
-
-    for (size_t i = 0; i < result.Sets.size(); ++i) {
-        auto [start, count] = setRanges[i];
-        result.Sets[i].Elements = std::span<const RootSignatureSetElement>{
-            result.Elements.data() + start,
-            count};
-    }
-
-    return result;
-}
-
 std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const HlslShaderDesc*> descs) noexcept {
-    if (descs.empty()) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "descs");
-        return std::nullopt;
-    }
+    // if (descs.empty()) {
+    //     RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidArgument, "descs");
+    //     return std::nullopt;
+    // }
 
-    vector<HlslRSCombinedBinding> bindings = MergeHlslShaderBoundResources(descs);
+    constexpr uint32_t maxRootDWORD = 64;
+    enum class HlslRSPlacement {
+        Table,
+        RootDescriptor,
+        RootConstant,
+    };
 
-    if (bindings.empty()) {
+    MergedHlslShaderDesc desc = MergeHlslShaderDesc(descs);
+    if (desc.BoundResources.empty()) {
         RootSignatureDescriptor desc{};
         return RootSignatureDescriptorContainer{desc};
     }
-
-    constexpr uint32_t maxRootDWORD = 64;
-    vector<HlslRSPlacement> placements(bindings.size(), HlslRSPlacement::Table);
-
-    auto pickRootConstant = [&]() -> std::optional<size_t> {
-        std::optional<size_t> best;
-        for (size_t i = 0; i < bindings.size(); ++i) {
-            const auto& binding = bindings[i];
-            if (binding.Type != ResourceBindType::CBuffer || binding.Count != 1 || binding.CBuffer == nullptr) {
-                continue;
-            }
-            if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0 || binding.CBuffer->Size > maxRootDWORD * 4) {
-                continue;
-            }
-            if (!best.has_value()) {
-                best = i;
-                continue;
-            }
-            const auto& currentBest = bindings[best.value()];
-            if (binding.Space < currentBest.Space || (binding.Space == currentBest.Space && binding.Slot < currentBest.Slot)) {
-                best = i;
-            }
-        }
-        return best;
-    };
-
+    vector<HlslRSPlacement> placements{desc.BoundResources.size(), HlslRSPlacement::Table};
     std::optional<RootSignatureConstant> rootConstant;
-    std::optional<size_t> rootConstantBindingIndex;
-    uint32_t rootConstDwords = 0;
-    if (auto rootConstIndex = pickRootConstant(); rootConstIndex.has_value()) {
-        const auto& binding = bindings[rootConstIndex.value()];
-        RootSignatureConstant constant{};
-        constant.Slot = binding.Slot;
-        constant.Space = binding.Space;
-        constant.Size = binding.CBuffer->Size;
-        constant.Stages = binding.Stages;
-        rootConstDwords = constant.Size / 4;
-        placements[rootConstIndex.value()] = HlslRSPlacement::RootConstant;
-        rootConstant = constant;
-        rootConstantBindingIndex = rootConstIndex;
-    }
+    for (size_t i = 0; i < desc.BoundResources.size(); i++) {
+        const auto& binding = desc.BoundResources[i];
+        if (binding.Type == HlslShaderInputType::CBUFFER) {
 
-    auto isRootDescriptorCandidate = [&](const HlslRSCombinedBinding& binding) noexcept {
-        if (binding.Count != 1) {
-            return false;
-        }
-        switch (binding.Type) {
-            case ResourceBindType::CBuffer: return binding.CBuffer != nullptr;
-            case ResourceBindType::Buffer:
-            case ResourceBindType::RWBuffer: return true;
-            default: return false;
-        }
-    };
-
-    vector<size_t> rootDescCandidates;
-    rootDescCandidates.reserve(bindings.size());
-    for (size_t i = 0; i < bindings.size(); ++i) {
-        if (placements[i] != HlslRSPlacement::Table) {
-            continue;
-        }
-        if (isRootDescriptorCandidate(bindings[i])) {
-            rootDescCandidates.push_back(i);
         }
     }
 
-    std::sort(rootDescCandidates.begin(), rootDescCandidates.end(), [&](size_t lhs, size_t rhs) {
-        const auto& l = bindings[lhs];
-        const auto& r = bindings[rhs];
-        uint32_t lp = _BindTypePriority(l.Type);
-        uint32_t rp = _BindTypePriority(r.Type);
-        if (lp != rp) {
-            return lp < rp;
-        }
-        uint32_t ls = _StageUsageScore(l.Stages);
-        uint32_t rs = _StageUsageScore(r.Stages);
-        if (ls != rs) {
-            return ls > rs;
-        }
-        if (l.Space != r.Space) {
-            return l.Space < r.Space;
-        }
-        if (l.Slot != r.Slot) {
-            return l.Slot < r.Slot;
-        }
-        return l.Name < r.Name;
-    });
+    // auto pickRootConstant = [&]() -> std::optional<size_t> {
+    //     std::optional<size_t> best;
+    //     for (size_t i = 0; i < bindings.size(); ++i) {
+    //         const auto& binding = bindings[i];
+    //         auto type = binding.MapResourceBindType();
+    //         if (type != ResourceBindType::CBuffer || binding.Count != 1 || binding.Type == nullptr) {
+    //             continue;
+    //         }
+    //         if (binding.CBuffer->Size == 0 || binding.CBuffer->Size % 4 != 0 || binding > maxRootDWORD * 4) {
+    //             continue;
+    //         }
+    //         if (!best.has_value()) {
+    //             best = i;
+    //             continue;
+    //         }
+    //         const auto& currentBest = bindings[best.value()];
+    //         if (binding.Space < currentBest.Space || (binding.Space == currentBest.Space && binding.Slot < currentBest.Slot)) {
+    //             best = i;
+    //         }
+    //     }
+    //     return best;
+    // };
 
-    vector<size_t> selectedRootDescs;
-    selectedRootDescs.reserve(rootDescCandidates.size());
-    for (size_t idx : rootDescCandidates) {
-        placements[idx] = HlslRSPlacement::RootDescriptor;
-        selectedRootDescs.push_back(idx);
-    }
+    // std::optional<RootSignatureConstant> rootConstant;
+    // std::optional<size_t> rootConstantBindingIndex;
+    // uint32_t rootConstDwords = 0;
+    // if (auto rootConstIndex = pickRootConstant(); rootConstIndex.has_value()) {
+    //     const auto& binding = bindings[rootConstIndex.value()];
+    //     RootSignatureConstant constant{};
+    //     constant.Slot = binding.BindPoint;
+    //     constant.Space = binding.Space;
+    //     constant.Size = binding.CBuffer->Size;
+    //     constant.Stages = binding.Stages;
+    //     rootConstDwords = constant.Size / 4;
+    //     placements[rootConstIndex.value()] = HlslRSPlacement::RootConstant;
+    //     rootConstant = constant;
+    //     rootConstantBindingIndex = rootConstIndex;
+    // }
 
-    auto buildTables = [&](HlslRSDescriptorTableBuildResult& out) -> bool {
-        auto tables = _BuildHlslDescriptorSets(bindings, placements);
-        if (!tables.has_value()) {
-            return false;
-        }
-        out = std::move(tables.value());
-        return true;
-    };
+    // auto isRootDescriptorCandidate = [&](const HlslRSCombinedBinding& binding) noexcept {
+    //     if (binding.Count != 1) {
+    //         return false;
+    //     }
+    //     switch (binding.Type) {
+    //         case ResourceBindType::CBuffer: return binding.CBuffer != nullptr;
+    //         case ResourceBindType::Buffer:
+    //         case ResourceBindType::RWBuffer: return true;
+    //         default: return false;
+    //     }
+    // };
 
-    HlslRSDescriptorTableBuildResult tableResult{};
-    if (!buildTables(tableResult)) {
-        return std::nullopt;
-    }
+    // vector<size_t> rootDescCandidates;
+    // rootDescCandidates.reserve(bindings.size());
+    // for (size_t i = 0; i < bindings.size(); ++i) {
+    //     if (placements[i] != HlslRSPlacement::Table) {
+    //         continue;
+    //     }
+    //     if (isRootDescriptorCandidate(bindings[i])) {
+    //         rootDescCandidates.push_back(i);
+    //     }
+    // }
 
-    auto calcTotalCost = [&](uint32_t rootDescCount, uint32_t tableCount) noexcept {
-        return rootConstDwords + rootDescCount * 2u + tableCount;
-    };
+    // std::sort(rootDescCandidates.begin(), rootDescCandidates.end(), [&](size_t lhs, size_t rhs) {
+    //     const auto& l = bindings[lhs];
+    //     const auto& r = bindings[rhs];
+    //     uint32_t lp = _BindTypePriority(l.Type);
+    //     uint32_t rp = _BindTypePriority(r.Type);
+    //     if (lp != rp) {
+    //         return lp < rp;
+    //     }
+    //     uint32_t ls = _StageUsageScore(l.Stages);
+    //     uint32_t rs = _StageUsageScore(r.Stages);
+    //     if (ls != rs) {
+    //         return ls > rs;
+    //     }
+    //     if (l.Space != r.Space) {
+    //         return l.Space < r.Space;
+    //     }
+    //     if (l.Slot != r.Slot) {
+    //         return l.Slot < r.Slot;
+    //     }
+    //     return l.Name < r.Name;
+    // });
 
-    uint32_t totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
-    auto reduceRootDescriptorUsage = [&]() -> bool {
-        while (totalCost > maxRootDWORD && !selectedRootDescs.empty()) {
-            size_t idx = selectedRootDescs.back();
-            selectedRootDescs.pop_back();
-            placements[idx] = HlslRSPlacement::Table;
-            if (!buildTables(tableResult)) {
-                return false;
-            }
-            totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
-        }
-        return true;
-    };
+    // vector<size_t> selectedRootDescs;
+    // selectedRootDescs.reserve(rootDescCandidates.size());
+    // for (size_t idx : rootDescCandidates) {
+    //     placements[idx] = HlslRSPlacement::RootDescriptor;
+    //     selectedRootDescs.push_back(idx);
+    // }
 
-    if (!reduceRootDescriptorUsage()) {
-        return std::nullopt;
-    }
+    // auto buildTables = [&](HlslRSDescriptorTableBuildResult& out) -> bool {
+    //     auto tables = _BuildHlslDescriptorSets(bindings, placements);
+    //     if (!tables.has_value()) {
+    //         return false;
+    //     }
+    //     out = std::move(tables.value());
+    //     return true;
+    // };
 
-    if (totalCost > maxRootDWORD && rootConstant.has_value() && rootConstantBindingIndex.has_value()) {
-        placements[rootConstantBindingIndex.value()] = HlslRSPlacement::Table;
-        rootConstant.reset();
-        rootConstantBindingIndex.reset();
-        rootConstDwords = 0;
-        if (!buildTables(tableResult)) {
-            return std::nullopt;
-        }
-        totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
-        if (!reduceRootDescriptorUsage()) {
-            return std::nullopt;
-        }
-    }
+    // HlslRSDescriptorTableBuildResult tableResult{};
+    // if (!buildTables(tableResult)) {
+    //     return std::nullopt;
+    // }
 
-    if (totalCost > maxRootDWORD) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root signature exceeds limit");
-        return std::nullopt;
-    }
+    // auto calcTotalCost = [&](uint32_t rootDescCount, uint32_t tableCount) noexcept {
+    //     return rootConstDwords + rootDescCount * 2u + tableCount;
+    // };
 
-    if (!selectedRootDescs.empty()) {
-        std::sort(selectedRootDescs.begin(), selectedRootDescs.end(), [&](size_t lhs, size_t rhs) {
-            const auto& l = bindings[lhs];
-            const auto& r = bindings[rhs];
-            uint32_t lp = _BindTypePriority(l.Type);
-            uint32_t rp = _BindTypePriority(r.Type);
-            if (lp != rp) {
-                return lp < rp;
-            }
-            if (l.Space != r.Space) {
-                return l.Space < r.Space;
-            }
-            if (l.Slot != r.Slot) {
-                return l.Slot < r.Slot;
-            }
-            return l.Name < r.Name;
-        });
-    }
+    // uint32_t totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
+    // auto reduceRootDescriptorUsage = [&]() -> bool {
+    //     while (totalCost > maxRootDWORD && !selectedRootDescs.empty()) {
+    //         size_t idx = selectedRootDescs.back();
+    //         selectedRootDescs.pop_back();
+    //         placements[idx] = HlslRSPlacement::Table;
+    //         if (!buildTables(tableResult)) {
+    //             return false;
+    //         }
+    //         totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
+    //     }
+    //     return true;
+    // };
 
-    vector<RootSignatureRootDescriptor> rootDescriptors;
-    rootDescriptors.reserve(selectedRootDescs.size());
-    for (size_t idx : selectedRootDescs) {
-        const auto& binding = bindings[idx];
-        RootSignatureRootDescriptor rd{};
-        rd.Slot = binding.Slot;
-        rd.Space = binding.Space;
-        rd.Type = binding.Type;
-        rd.Stages = binding.Stages;
-        rootDescriptors.push_back(rd);
-    }
+    // if (!reduceRootDescriptorUsage()) {
+    //     return std::nullopt;
+    // }
 
-    RootSignatureDescriptor desc{};
-    desc.RootDescriptors = std::span<const RootSignatureRootDescriptor>{rootDescriptors};
-    desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{tableResult.Sets};
-    if (rootConstant.has_value()) {
-        desc.Constant = rootConstant;
-    }
+    // if (totalCost > maxRootDWORD && rootConstant.has_value() && rootConstantBindingIndex.has_value()) {
+    //     placements[rootConstantBindingIndex.value()] = HlslRSPlacement::Table;
+    //     rootConstant.reset();
+    //     rootConstantBindingIndex.reset();
+    //     rootConstDwords = 0;
+    //     if (!buildTables(tableResult)) {
+    //         return std::nullopt;
+    //     }
+    //     totalCost = calcTotalCost(static_cast<uint32_t>(selectedRootDescs.size()), static_cast<uint32_t>(tableResult.Sets.size()));
+    //     if (!reduceRootDescriptorUsage()) {
+    //         return std::nullopt;
+    //     }
+    // }
 
-    return RootSignatureDescriptorContainer{desc};
+    // if (totalCost > maxRootDWORD) {
+    //     RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root signature exceeds limit");
+    //     return std::nullopt;
+    // }
+
+    // if (!selectedRootDescs.empty()) {
+    //     std::sort(selectedRootDescs.begin(), selectedRootDescs.end(), [&](size_t lhs, size_t rhs) {
+    //         const auto& l = bindings[lhs];
+    //         const auto& r = bindings[rhs];
+    //         uint32_t lp = _BindTypePriority(l.Type);
+    //         uint32_t rp = _BindTypePriority(r.Type);
+    //         if (lp != rp) {
+    //             return lp < rp;
+    //         }
+    //         if (l.Space != r.Space) {
+    //             return l.Space < r.Space;
+    //         }
+    //         if (l.Slot != r.Slot) {
+    //             return l.Slot < r.Slot;
+    //         }
+    //         return l.Name < r.Name;
+    //     });
+    // }
+
+    // vector<RootSignatureRootDescriptor> rootDescriptors;
+    // rootDescriptors.reserve(selectedRootDescs.size());
+    // for (size_t idx : selectedRootDescs) {
+    //     const auto& binding = bindings[idx];
+    //     RootSignatureRootDescriptor rd{};
+    //     rd.Slot = binding.Slot;
+    //     rd.Space = binding.Space;
+    //     rd.Type = binding.Type;
+    //     rd.Stages = binding.Stages;
+    //     rootDescriptors.push_back(rd);
+    // }
+
+    // RootSignatureDescriptor desc{};
+    // desc.RootDescriptors = std::span<const RootSignatureRootDescriptor>{rootDescriptors};
+    // desc.DescriptorSets = std::span<const RootSignatureDescriptorSet>{tableResult.Sets};
+    // if (rootConstant.has_value()) {
+    //     desc.Constant = rootConstant;
+    // }
+
+    // return RootSignatureDescriptorContainer{desc};
 }
 
 }  // namespace radray::render

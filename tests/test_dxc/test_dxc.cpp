@@ -3,6 +3,7 @@
 #include <radray/render/dxc.h>
 #include <radray/render/utility.h>
 #include <radray/render/root_signature_helper.h>
+#include <radray/render/shader_cbuffer_helper.h>
 
 const char* SHADER_CODE = R"(
 struct PreObjectData
@@ -20,10 +21,15 @@ struct PreCameraData
     float3 posW;
 };
 
-struct GlobalData
+struct DirLight
 {
     float4 lightDirW;
     float4 lightColor;
+};
+
+struct GlobalData
+{
+    DirLight dirLight;
     float time;
 };
 
@@ -69,7 +75,7 @@ float4 PSMain(PS_INPUT psIn) : SV_Target
 {
     float3 albedo = _AlbedoTex.Sample(_AlbedoSampler, psIn.uv).xyz;
     float3 mr = _MetallicRoughnessTex.Sample(_MetallicRoughnessSampler, psIn.uv).xyz;
-    float3 t = albedo * mr * ((float3)1.0 / _Global.lightDirW.xyz) + ((float3)1.0 / + _Camera.posW);
+    float3 t = albedo * mr * ((float3)1.0 / _Global.dirLight.lightDirW.xyz) + ((float3)1.0 / + _Camera.posW);
     return float4(t, 1.0f) + _SomeValue;
 }
 )";
@@ -87,4 +93,6 @@ TEST(DXC, BasicReflection) {
     const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
     auto rootSig = CreateRootSignatureDescriptor(descs);
     ASSERT_TRUE(rootSig.has_value());
+
+    CreateCBufferStorage(descs);
 }

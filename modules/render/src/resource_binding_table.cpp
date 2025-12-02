@@ -1,4 +1,4 @@
-#include <radray/render/ext/resource_binding_table.h>
+#include <radray/render/resource_binding_table.h>
 
 #include <radray/errors.h>
 
