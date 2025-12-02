@@ -30,12 +30,15 @@ ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
     Unreachable();
 }
 
-Nullable<const HlslShaderBufferDesc*> HlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
-    auto it = std::find_if(ConstantBuffers.begin(), ConstantBuffers.end(), [&](const HlslShaderBufferDesc& cb) {
+static std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> _FindCBufferByName(std::span<const HlslShaderBufferDesc> data, std::string_view name) noexcept {
+    auto it = std::find_if(data.begin(), data.end(), [&](const HlslShaderBufferDesc& cb) {
         return cb.Name == name;
     });
-    auto result = it == ConstantBuffers.end() ? nullptr : &(*it);
-    return result;
+    return it == data.end() ? std::nullopt : std::make_optional(std::cref(*it));
+}
+
+std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> HlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
+    return _FindCBufferByName(ConstantBuffers, name);
 }
 
 bool operator==(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
@@ -121,20 +124,14 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     }
 }
 
-Nullable<const HlslShaderBufferDesc*> MergedHlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
-    auto it = std::find_if(ConstantBuffers.begin(), ConstantBuffers.end(), [&](const HlslShaderBufferDesc& cb) {
-        return cb.Name == name;
-    });
-    auto result = it == ConstantBuffers.end() ? nullptr : &(*it);
-    return result;
+std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> MergedHlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
+    return _FindCBufferByName(ConstantBuffers, name);
 }
 
 MergedHlslShaderDesc MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
     MergedHlslShaderDesc result{};
     for (auto descPtr : descs) {
-        if (descPtr == nullptr) {
-            continue;
-        }
+        result.Stages |= descPtr->Stage;
         for (const auto& cb : descPtr->ConstantBuffers) {
             auto it = std::find_if(result.ConstantBuffers.begin(), result.ConstantBuffers.end(), [&](const HlslShaderBufferDesc& existing) {
                 return existing == cb;
@@ -144,91 +141,79 @@ MergedHlslShaderDesc MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs)
             }
         }
         for (const auto& br : descPtr->BoundResources) {
-            auto it = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindDesc& existing) {
+            auto it = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindWithStageDesc& existing) {
                 return existing == br;
             });
             if (it == result.BoundResources.end()) {
-                result.BoundResources.emplace_back(br);
+                HlslInputBindWithStageDesc newBr{br};
+                newBr.Stages = descPtr->Stage;
+                result.BoundResources.emplace_back(newBr);
+            } else {
+                it->Stages |= descPtr->Stage;
             }
         }
     }
-    struct VariableCopyEntry {
-        const HlslShaderVariableDesc* Source{nullptr};
-        size_t Index{0};
-    };
-    vector<VariableCopyEntry> variableCopies;
-    auto findVariableCopy = [&](const HlslShaderVariableDesc* original) noexcept -> VariableCopyEntry* {
-        auto it = std::find_if(variableCopies.begin(), variableCopies.end(), [&](const VariableCopyEntry& entry) {
-            return entry.Source == original;
-        });
-        return it == variableCopies.end() ? nullptr : &(*it);
-    };
-    struct TypeCopyEntry {
-        const HlslShaderTypeDesc* Source{nullptr};
-        size_t Index{0};
-    };
-    vector<TypeCopyEntry> typeCopies;
-    auto findTypeCopy = [&](const HlslShaderTypeDesc* original) noexcept -> TypeCopyEntry* {
-        auto it = std::find_if(typeCopies.begin(), typeCopies.end(), [&](const TypeCopyEntry& entry) {
-            return entry.Source == original;
-        });
-        return it == typeCopies.end() ? nullptr : &(*it);
-    };
-    std::function<const HlslShaderTypeDesc*(const HlslShaderTypeDesc*)> copyTypeTree = [&](const HlslShaderTypeDesc* original) noexcept -> const HlslShaderTypeDesc* {
-        if (original == nullptr) {
-            return nullptr;
-        }
-        if (auto* existing = findTypeCopy(original); existing != nullptr) {
-            return &result.Types[existing->Index];
-        }
-        size_t newIndex = result.Types.size();
-        result.Types.emplace_back(*original);
-        typeCopies.push_back(TypeCopyEntry{original, newIndex});
-        auto& stored = result.Types.back();
-        for (auto& member : stored.Members) {
-            member.Type = copyTypeTree(member.Type);
-        }
-        return &stored;
-    };
-    auto copyVariableTree = [&](const HlslShaderVariableDesc* original) noexcept -> const HlslShaderVariableDesc* {
-        if (original == nullptr) {
-            return nullptr;
-        }
-        if (auto* existing = findVariableCopy(original); existing != nullptr) {
-            return &result.Variables[existing->Index];
-        }
-        size_t newIndex = result.Variables.size();
-        result.Variables.emplace_back(*original);
-        variableCopies.push_back(VariableCopyEntry{original, newIndex});
-        auto& stored = result.Variables.back();
-        stored.Type = copyTypeTree(stored.Type);
-        return &stored;
-    };
 
-    for (auto& cb : result.ConstantBuffers) {
-        for (auto*& varPtr : cb.Variables) {
-            varPtr = copyVariableTree(varPtr);
-        }
-        std::sort(cb.Variables.begin(), cb.Variables.end(), [](const auto* lhs, const auto* rhs) noexcept {
-            if (lhs == nullptr || rhs == nullptr) {
-                return rhs != nullptr;
-            }
-            if (lhs->StartOffset == rhs->StartOffset) {
-                return lhs < rhs;
-            }
-            return lhs->StartOffset < rhs->StartOffset;
-        });
+    size_t varCount = 0;
+    for (const auto& cbuffer : result.ConstantBuffers) {
+        varCount += cbuffer.Variables.size();
     }
+    result.Variables.resize(varCount);
+    size_t varBase = 0;
+    for (auto& cbuffer : result.ConstantBuffers) {
+        for (size_t i = 0; i < cbuffer.Variables.size(); i++) {
+            auto dstIndex = varBase + i;
+            auto cbVar = cbuffer.Variables[i];
+            result.Variables[dstIndex] = *cbVar;
+            cbuffer.Variables[i] = &result.Variables[dstIndex];
+        }
+        varBase += cbuffer.Variables.size();
+    }
+
+    unordered_map<const HlslShaderTypeDesc*, size_t> typeIndexCache;
+    vector<const HlslShaderTypeDesc*> orderedTypes;
+    std::function<void(const HlslShaderTypeDesc*)> visitType;
+    visitType = [&](const HlslShaderTypeDesc* type) {
+        auto [it, inserted] = typeIndexCache.emplace(type, orderedTypes.size());
+        if (!inserted) {
+            return;
+        }
+        orderedTypes.push_back(type);
+        for (const auto& member : type->Members) {
+            visitType(member.Type);
+        }
+    };
+    for (auto& cbuffer : result.ConstantBuffers) {
+        for (const auto* var : cbuffer.Variables) {
+            visitType(var->Type);
+        }
+    }
+    result.Types.resize(orderedTypes.size());
+    for (size_t i = 0; i < orderedTypes.size(); i++) {
+        result.Types[i] = *orderedTypes[i];
+    }
+    for (size_t i = 0; i < result.Types.size(); i++) {
+        auto& typeDesc = result.Types[i];
+        for (auto& member : typeDesc.Members) {
+            const auto* srcMemberType = member.Type;
+            auto it = typeIndexCache.find(srcMemberType);
+            RADRAY_ASSERT(it != typeIndexCache.end());
+            member.Type = &result.Types[it->second];
+        }
+    }
+    for (auto& var : result.Variables) {
+        const auto* srcType = var.Type;
+        auto it = typeIndexCache.find(srcType);
+        RADRAY_ASSERT(it != typeIndexCache.end());
+        var.Type = &result.Types[it->second];
+    }
+
     return result;
 }
 
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_DXC
-
-#include <functional>
-#include <limits>
-#include <optional>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #ifndef NOMINMAX

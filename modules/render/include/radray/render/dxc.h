@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 
 #include <radray/render/common.h>
 
@@ -305,9 +306,9 @@ public:
     uint32_t Flags{0};
     HlslFeatureLevel MinFeatureLevel{HlslFeatureLevel::UNKNOWN};
     uint32_t GroupSizeX{0}, GroupSizeY{0}, GroupSizeZ{0};
-    ShaderStages Stage{ShaderStage::UNKNOWN};
+    ShaderStage Stage{ShaderStage::UNKNOWN};
 
-    Nullable<const HlslShaderBufferDesc*> FindCBufferByName(std::string_view name) const noexcept;
+    std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> FindCBufferByName(std::string_view name) const noexcept;
 };
 
 bool operator==(const HlslShaderTypeDesc& lhs, const HlslShaderTypeDesc& rhs) noexcept;
@@ -321,15 +322,19 @@ bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noex
 
 bool IsBufferDimension(HlslSRVDimension dim) noexcept;
 
+class HlslInputBindWithStageDesc : public HlslInputBindDesc {
+public:
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
 class MergedHlslShaderDesc {
 public:
     vector<HlslShaderBufferDesc> ConstantBuffers;
-    vector<HlslInputBindDesc> BoundResources;
+    vector<HlslInputBindWithStageDesc> BoundResources;
     vector<HlslShaderVariableDesc> Variables;
     vector<HlslShaderTypeDesc> Types;
-    ShaderStages Stage{ShaderStage::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 
-    Nullable<const HlslShaderBufferDesc*> FindCBufferByName(std::string_view name) const noexcept;
+    std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> FindCBufferByName(std::string_view name) const noexcept;
 };
 MergedHlslShaderDesc MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept;
 

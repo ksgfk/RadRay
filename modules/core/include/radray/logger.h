@@ -198,12 +198,7 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 #define RADRAY_ERR_LOG_CSTYLE(fmt, ...) ::radray::LogErrorSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 #define RADRAY_ABORT_CSTYLE(fmt, ...) ::radray::LogAbortSPrintfLoc(::std::source_location::current(), fmt __VA_OPT__(, ) __VA_ARGS__)
 
-#define RADRAY_ASSERT(x)                              \
-    do {                                              \
-        if (!(x)) [[unlikely]] {                      \
-            RADRAY_ABORT("Assertion failed: {}", #x); \
-        }                                             \
-    } while (0)
+#define RADRAY_ASSERT(x) assert(x)
 
 #define RADRAY_THROW(type, fmt, ...)                                    \
     do {                                                                \
