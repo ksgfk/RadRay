@@ -6,6 +6,12 @@
 #include <radray/render/shader_cbuffer_helper.h>
 
 const char* SHADER_CODE = R"(
+struct DirLight
+{
+    float4 lightDirW;
+    float4 lightColor;
+};
+
 struct PreObjectData
 {
     float4x4 model;
@@ -18,13 +24,8 @@ struct PreCameraData
     float4x4 view;
     float4x4 proj;
     float4x4 viewProj;
+    DirLight temp;
     float3 posW;
-};
-
-struct DirLight
-{
-    float4 lightDirW;
-    float4 lightColor;
 };
 
 struct GlobalData
