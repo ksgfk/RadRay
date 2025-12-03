@@ -9,6 +9,28 @@ bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
            Class == HlslShaderVariableClass::MATRIX_COLUMNS;
 }
 
+size_t HlslShaderTypeDesc::GetSizeInBytes() const noexcept {
+    switch (Type) {
+        case HlslShaderVariableType::INT16:
+        case HlslShaderVariableType::UINT16:
+        case HlslShaderVariableType::FLOAT16:
+            return 2 * Columns * Rows;
+        case HlslShaderVariableType::UINT8:
+            return 1 * Columns * Rows;
+        case HlslShaderVariableType::DOUBLE:
+        case HlslShaderVariableType::INT64:
+        case HlslShaderVariableType::UINT64:
+            return 8 * Columns * Rows;
+        case HlslShaderVariableType::BOOL:
+        case HlslShaderVariableType::INT:
+        case HlslShaderVariableType::FLOAT:
+        case HlslShaderVariableType::UINT:
+            return 4 * Columns * Rows;
+        default:
+            return 0;
+    }
+}
+
 ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
     switch (Type) {
         case HlslShaderInputType::CBUFFER: return ResourceBindType::CBuffer;

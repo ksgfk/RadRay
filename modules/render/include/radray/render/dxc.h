@@ -238,6 +238,7 @@ public:
     uint32_t Offset{0};
 
     bool IsPrimitive() const noexcept;
+    size_t GetSizeInBytes() const noexcept;
 };
 
 class HlslShaderTypeMember {

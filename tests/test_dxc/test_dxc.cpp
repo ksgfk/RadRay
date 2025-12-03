@@ -94,5 +94,6 @@ TEST(DXC, BasicReflection) {
     auto rootSig = CreateRootSignatureDescriptor(descs);
     ASSERT_TRUE(rootSig.has_value());
 
-    CreateCBufferStorage(descs);
+    auto storage = CreateCBufferStorage(descs);
+    ASSERT_TRUE(storage.has_value());
 }
