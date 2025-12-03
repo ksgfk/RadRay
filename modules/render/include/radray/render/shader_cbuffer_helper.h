@@ -17,6 +17,9 @@ class ShaderCBufferStorage;
 
 class ShaderCBufferVariable {
 public:
+    ShaderCBufferVariable() = default;
+    ShaderCBufferVariable(string name, const ShaderCBufferType* type) : _name(std::move(name)), _type(type) {}
+
     std::string_view GetName() const noexcept { return _name; }
     const ShaderCBufferType* GetType() const noexcept { return _type; }
 
@@ -29,6 +32,9 @@ private:
 
 class ShaderCBufferMember {
 public:
+    ShaderCBufferMember() = default;
+    ShaderCBufferMember(const ShaderCBufferVariable* variable, size_t offset) : _variable(variable), _offset(offset) {}
+
     const ShaderCBufferVariable* GetVariable() const noexcept { return _variable; }
     size_t GetOffset() const noexcept { return _offset; }
 

@@ -98,13 +98,28 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     if (!IsValid()) {
         return std::nullopt;
     }
+    struct VariableSig {
+        std::string_view Name;
+        size_t TypeIndex;
+        auto operator<=>(const VariableSig&) const = default;
+    };
     vector<size_t> remapping(_types.size());
     map<Type, size_t> uniqueTypes;
+    map<VariableSig, size_t> uniqueVariables;
+    vector<VariableSig> variableList;
+    auto ensureVariable = [&](std::string_view name, size_t typeIndex) {
+        VariableSig sig{name, typeIndex};
+        if (uniqueVariables.find(sig) == uniqueVariables.end()) {
+            uniqueVariables.emplace(sig, variableList.size());
+            variableList.push_back(sig);
+        }
+    };
     for (size_t i = _types.size(); i-- > 0;) {
         const auto& type = _types[i];
         Type sig = type;
         for (auto& member : sig.Members) {
             member.TypeIndex = remapping[member.TypeIndex];
+            ensureVariable(member.Name, member.TypeIndex);
         }
         if (auto it = uniqueTypes.find(sig); it != uniqueTypes.end()) {
             remapping[i] = it->second;
@@ -113,39 +128,35 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
             uniqueTypes.emplace(std::move(sig), i);
         }
     }
-    ShaderCBufferStorage storage;
-    vector<size_t> oldToNewIndex(_types.size(), Invalid);
-    size_t totalVariables = 0;
-    for (const auto& [sig, index] : uniqueTypes) {
-        totalVariables += sig.Members.size();
+    for (size_t rootIndex : _roots) {
+        ensureVariable(_types[rootIndex].Name, remapping[rootIndex]);
     }
-    totalVariables += _roots.size();
+    ShaderCBufferStorage storage;
     storage._types.resize(uniqueTypes.size());
-    storage._variables.reserve(totalVariables);
+    storage._variables.resize(variableList.size());
     vector<ShaderCBufferType*> typeMap(_types.size(), nullptr);
     size_t typeCounter = 0;
     for (size_t i = 0; i < _types.size(); i++) {
         if (remapping[i] == i) {
-            oldToNewIndex[i] = typeCounter;
             typeMap[i] = &storage._types[typeCounter++];
             typeMap[i]->_name = _types[i].Name;
             typeMap[i]->_size = _types[i].SizeInBytes;
         }
     }
+    vector<ShaderCBufferVariable*> varPtrs(variableList.size());
+    for (size_t i = 0; i < variableList.size(); ++i) {
+        const auto& sig = variableList[i];
+        storage._variables[i] = ShaderCBufferVariable(string(sig.Name), typeMap[sig.TypeIndex]);
+        varPtrs[i] = &storage._variables[i];
+    }
     for (size_t i = 0; i < _types.size(); i++) {
         if (remapping[i] == i) {
             auto* type = typeMap[i];
-            const auto& oldType = _types[i];
-            type->_members.reserve(oldType.Members.size());
-            for (const auto& member : oldType.Members) {
-                storage._variables.emplace_back();
-                auto* var = &storage._variables.back();
-                var->_name = member.Name;
-                size_t childRep = remapping[member.TypeIndex];
-                var->_type = typeMap[childRep];
-                auto& newMember = type->_members.emplace_back();
-                newMember._offset = member.Offset;
-                newMember._variable = var;
+            type->_members.reserve(_types[i].Members.size());
+            for (const auto& member : _types[i].Members) {
+                VariableSig sig{member.Name, remapping[member.TypeIndex]};
+                size_t varIndex = uniqueVariables.at(sig);
+                type->_members.emplace_back(varPtrs[varIndex], member.Offset);
             }
         }
     }
@@ -153,18 +164,13 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     size_t currentOffset = 0;
     for (size_t rootIndex : _roots) {
         size_t repIndex = remapping[rootIndex];
-        auto* type = typeMap[repIndex];
         if (_align > 0) {
             currentOffset = Align(currentOffset, _align);
         }
-        storage._variables.emplace_back();
-        auto* var = &storage._variables.back();
-        var->_name = type->_name;
-        var->_type = type;
-        auto& binding = storage._bindings.emplace_back();
-        binding._variable = var;
-        binding._offset = currentOffset;
-        currentOffset += type->_size;
+        VariableSig sig{_types[rootIndex].Name, repIndex};
+        size_t varIndex = uniqueVariables.at(sig);
+        storage._bindings.emplace_back(varPtrs[varIndex], currentOffset);
+        currentOffset += typeMap[repIndex]->_size;
     }
     storage._buffer.resize(currentOffset, (byte)0);
     return storage;
@@ -186,7 +192,7 @@ static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view 
             continue;
         }
         size_t currentTypeSize = item.ForceSize.has_value() ? *item.ForceSize : item.Type->GetSizeInBytes();
-        auto typeIndex = builder.AddType(item.Name, currentTypeSize);
+        auto typeIndex = builder.AddType(item.Type->Name, currentTypeSize);
         builder.AddMemberForType(item.FromTypeIndex, typeIndex, item.Name, item.Type->Offset);
         const auto& members = item.Type->Members;
         for (size_t i = members.size(); i-- > 0;) {
@@ -219,12 +225,23 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslSha
             return std::nullopt;
         }
         const auto& cbufferData = cbufferDataOpt.value().get();
-        auto rootTypeIndex = builder.AddType(cbufferData.Name, cbufferData.Size);
-        builder.AddRootType(rootTypeIndex);
         for (const auto& cbVar : cbufferData.Variables) {
             auto cbType = cbVar->Type;
-            size_t varSize = cbVar->Size;
-            _BuildType(builder, cbVar->Name, cbType, varSize, rootTypeIndex);
+            size_t currentTypeSize = cbVar->Size;
+            const auto& members = cbType->Members;
+            auto rootTypeIndex = builder.AddType(cbVar->Name, cbVar->Size);
+            builder.AddRootType(rootTypeIndex);
+            for (size_t i = 0; i < members.size(); ++i) {
+                const auto& member = members[i];
+                size_t memberSize = member.Type->GetSizeInBytes();
+                if (!member.Type->IsPrimitive() && memberSize == 0) {
+                    size_t nextOffset = (i + 1 < members.size()) ? members[i + 1].Type->Offset : currentTypeSize;
+                    if (nextOffset > member.Type->Offset) {
+                        memberSize = nextOffset - member.Type->Offset;
+                    }
+                }
+                _BuildType(builder, member.Name, member.Type, memberSize, rootTypeIndex);
+            }
         }
     }
     return builder.Build();
