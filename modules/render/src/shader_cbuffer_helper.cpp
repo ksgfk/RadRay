@@ -9,11 +9,11 @@
 
 namespace radray::render {
 
-ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) const noexcept {
+ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
     if (!IsValid()) return {};
     for (const auto& member : _type->GetMembers()) {
         if (member.GetVariable()->GetName() == name) {
-            return ShaderCBufferView(_storage, member.GetVariable()->GetType(), _offset + member.GetOffset());
+            return ShaderCBufferView{_storage, member.GetVariable()->GetType(), _offset + member.GetOffset(), member.GetId()};
         }
     }
     return {};
@@ -22,17 +22,20 @@ ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) const noexcep
 ShaderCBufferView ShaderCBufferStorage::GetVar(std::string_view name) noexcept {
     for (const auto& binding : _bindings) {
         if (binding.GetVariable()->GetName() == name) {
-            return ShaderCBufferView(this, binding.GetVariable()->GetType(), binding.GetOffset());
+            return ShaderCBufferView{this, binding.GetVariable()->GetType(), binding.GetOffset(), binding.GetId()};
         }
     }
     return {};
 }
 
+ShaderCBufferView ShaderCBufferStorage::GetVar(size_t id) noexcept {
+    RADRAY_ASSERT(id <= _idMap.size());
+    auto mem = _idMap[id];
+    return ShaderCBufferView{this, mem->GetVariable()->GetType(), mem->GetGlobalOffset(), mem->GetId()};
+}
+
 void ShaderCBufferStorage::WriteData(size_t offset, const void* data, size_t size) noexcept {
-    if (offset + size > _buffer.size()) {
-        RADRAY_ERR_LOG("ShaderCBufferStorage::WriteData: offset {} + size {} exceeds buffer size {}", offset, size, _buffer.size());
-        return;
-    }
+    RADRAY_ASSERT(offset + size <= _buffer.size());
     std::memcpy(_buffer.data() + offset, data, size);
 }
 
@@ -53,8 +56,8 @@ void ShaderCBufferStorage::Builder::AddMemberForType(size_t targetType, size_t m
     member.TypeIndex = memberType;
 }
 
-void ShaderCBufferStorage::Builder::AddRootType(size_t typeIndex) noexcept {
-    _roots.push_back(typeIndex);
+void ShaderCBufferStorage::Builder::AddRoot(std::string_view name, size_t typeIndex) noexcept {
+    _roots.emplace_back(string{name}, typeIndex);
 }
 
 void ShaderCBufferStorage::Builder::SetAlignment(size_t align) noexcept {
@@ -68,8 +71,8 @@ bool ShaderCBufferStorage::Builder::IsValid() const noexcept {
     }
     stack<size_t> s;
     vector<int32_t> visited(_types.size(), 0);
-    for (size_t i : _roots) {
-        s.push(i);
+    for (const auto& root : _roots) {
+        s.push(root.TypeIndex);
     }
     while (!s.empty()) {
         size_t typeIndex = s.top();
@@ -98,17 +101,17 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     if (!IsValid()) {
         return std::nullopt;
     }
-    struct VariableSig {
+    struct VariableView {
         std::string_view Name;
         size_t TypeIndex;
-        auto operator<=>(const VariableSig&) const = default;
+        auto operator<=>(const VariableView&) const = default;
     };
     vector<size_t> remapping(_types.size());
     map<Type, size_t> uniqueTypes;
-    map<VariableSig, size_t> uniqueVariables;
-    vector<VariableSig> variableList;
+    map<VariableView, size_t> uniqueVariables;
+    vector<VariableView> variableList;
     auto ensureVariable = [&](std::string_view name, size_t typeIndex) {
-        VariableSig sig{name, typeIndex};
+        VariableView sig{name, typeIndex};
         if (uniqueVariables.find(sig) == uniqueVariables.end()) {
             uniqueVariables.emplace(sig, variableList.size());
             variableList.push_back(sig);
@@ -128,8 +131,8 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
             uniqueTypes.emplace(std::move(sig), i);
         }
     }
-    for (size_t rootIndex : _roots) {
-        ensureVariable(_types[rootIndex].Name, remapping[rootIndex]);
+    for (const auto& root : _roots) {
+        ensureVariable(root.Name, remapping[root.TypeIndex]);
     }
     ShaderCBufferStorage storage;
     storage._types.resize(uniqueTypes.size());
@@ -154,7 +157,7 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
             auto* type = typeMap[i];
             type->_members.reserve(_types[i].Members.size());
             for (const auto& member : _types[i].Members) {
-                VariableSig sig{member.Name, remapping[member.TypeIndex]};
+                VariableView sig{member.Name, remapping[member.TypeIndex]};
                 size_t varIndex = uniqueVariables.at(sig);
                 type->_members.emplace_back(varPtrs[varIndex], member.Offset);
             }
@@ -162,18 +165,41 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     }
     storage._bindings.reserve(_roots.size());
     size_t currentOffset = 0;
-    for (size_t rootIndex : _roots) {
-        size_t repIndex = remapping[rootIndex];
+    for (const auto& root : _roots) {
+        size_t repIndex = remapping[root.TypeIndex];
         if (_align > 0) {
             currentOffset = Align(currentOffset, _align);
         }
-        VariableSig sig{_types[rootIndex].Name, repIndex};
+        VariableView sig{root.Name, repIndex};
         size_t varIndex = uniqueVariables.at(sig);
         storage._bindings.emplace_back(varPtrs[varIndex], currentOffset);
         currentOffset += typeMap[repIndex]->_size;
     }
     storage._buffer.resize(currentOffset, (byte)0);
+    BuildMember(storage);
     return storage;
+}
+
+void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) noexcept {
+    struct BuildMemberItem {
+        ShaderCBufferMember* Member;
+        size_t GlobalOffset;
+    };
+    stack<BuildMemberItem> s;
+    for (auto& binding : storage._bindings) {
+        s.push({&binding, binding._offset});
+    }
+    while (!s.empty()) {
+        auto v = s.top();
+        s.pop();
+        v.Member->_id = storage._idMap.size();
+        storage._idMap.push_back(v.Member);
+        v.Member->_globalOffset = v.GlobalOffset;
+        for (auto& member : v.Member->_variable->_type->_members) {
+            s.push({&member, v.GlobalOffset + member._offset});
+        }
+    }
+    storage._idMap.shrink_to_fit();
 }
 
 static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view name, const HlslShaderTypeDesc* type, size_t typeSize, size_t fromTypeIndex) noexcept {
@@ -229,8 +255,8 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslSha
             auto cbType = cbVar->Type;
             size_t currentTypeSize = cbVar->Size;
             const auto& members = cbType->Members;
-            auto rootTypeIndex = builder.AddType(cbVar->Name, cbVar->Size);
-            builder.AddRootType(rootTypeIndex);
+            auto rootTypeIndex = builder.AddType(cbType->Name, cbVar->Size);
+            builder.AddRoot(cbVar->Name, rootTypeIndex);
             for (size_t i = 0; i < members.size(); ++i) {
                 const auto& member = members[i];
                 size_t memberSize = member.Type->GetSizeInBytes();

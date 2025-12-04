@@ -12,11 +12,10 @@ struct DirLight
     float4 lightColor;
 };
 
-struct PreObjectData
+struct GlobalData
 {
-    float4x4 model;
-    float4x4 mvp;
-    float4x4 modelInv;
+    DirLight dirLight;
+    float time;
 };
 
 struct PreCameraData
@@ -26,12 +25,6 @@ struct PreCameraData
     float4x4 viewProj;
     DirLight temp;
     float3 posW;
-};
-
-struct GlobalData
-{
-    DirLight dirLight;
-    float time;
 };
 
 struct VS_INPUT
@@ -47,6 +40,13 @@ struct PS_INPUT
     float3 posW : POSITION;
     float3 norW : NORMAL0;
     float2 uv  : TEXCOORD0;
+};
+
+struct PreObjectData
+{
+    float4x4 model;
+    float4x4 mvp;
+    float4x4 modelInv;
 };
 
 ConstantBuffer<PreObjectData> _Obj : register(b0);
@@ -97,4 +97,84 @@ TEST(DXC, BasicReflection) {
 
     auto storage = CreateCBufferStorage(descs);
     ASSERT_TRUE(storage.has_value());
+
+    Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
+    auto id = storage->GetVar("_Obj").GetVar("model").GetId();
+    storage->GetVar(id).SetValue(model);
+
+    auto dst = storage->GetData().subspan(storage->GetVar(id).GetOffset(), storage->GetVar(id).GetType()->GetSizeInBytes());
+    ASSERT_TRUE(std::memcmp(dst.data(), model.data(), sizeof(Eigen::Matrix4f)) == 0);
+}
+
+TEST(DXC, CBufferStorageTests) {
+    auto dxc = CreateDxc();
+    auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
+    auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true).value();
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl).value();
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps.Refl).value();
+
+    const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
+    auto storageOpt = CreateCBufferStorage(descs);
+    ASSERT_TRUE(storageOpt.has_value());
+    auto& storage = *storageOpt;
+
+    // 1. Test Global Variable (Struct)
+    {
+        auto globalVar = storage.GetVar("_Global");
+        ASSERT_TRUE(globalVar.IsValid());
+        
+        auto dirLightVar = globalVar.GetVar("dirLight");
+        ASSERT_TRUE(dirLightVar.IsValid());
+
+        auto lightDirWVar = dirLightVar.GetVar("lightDirW");
+        ASSERT_TRUE(lightDirWVar.IsValid());
+
+        Eigen::Vector4f lightDir(1.0f, 0.5f, 0.2f, 1.0f);
+        lightDirWVar.SetValue(lightDir);
+
+        auto offset = lightDirWVar.GetOffset();
+        // Verify data in buffer
+        auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector4f));
+        ASSERT_EQ(std::memcmp(data.data(), lightDir.data(), sizeof(Eigen::Vector4f)), 0);
+    }
+
+    // 2. Test Camera Data (float3)
+    {
+        auto cameraVar = storage.GetVar("_Camera");
+        ASSERT_TRUE(cameraVar.IsValid());
+
+        auto posWVar = cameraVar.GetVar("posW");
+        ASSERT_TRUE(posWVar.IsValid());
+
+        Eigen::Vector3f pos(10.0f, 20.0f, 30.0f);
+        posWVar.SetValue(pos);
+
+        auto offset = posWVar.GetOffset();
+        auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector3f));
+        ASSERT_EQ(std::memcmp(data.data(), pos.data(), sizeof(Eigen::Vector3f)), 0);
+    }
+
+    // 3. Test Scalar (float)
+    {
+        auto globalVar = storage.GetVar("_Global");
+        auto timeVar = globalVar.GetVar("time");
+        ASSERT_TRUE(timeVar.IsValid());
+
+        float time = 123.456f;
+        timeVar.SetValue(time);
+
+        auto offset = timeVar.GetOffset();
+        auto data = storage.GetData().subspan(offset, sizeof(float));
+        ASSERT_EQ(*reinterpret_cast<const float*>(data.data()), time);
+    }
+
+    // 4. Test Invalid Access
+    {
+        auto invalidVar = storage.GetVar("_NonExistent");
+        ASSERT_FALSE(invalidVar.IsValid());
+        
+        auto globalVar = storage.GetVar("_Global");
+        auto invalidMember = globalVar.GetVar("nonExistentMember");
+        ASSERT_FALSE(invalidMember.IsValid());
+    }
 }

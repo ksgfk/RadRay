@@ -13,10 +13,29 @@
 namespace radray {
 
 template <class T>
-struct IsEigenVector : std::false_type {};
-
+struct IsEigenMatrix : std::false_type {};
 template <class Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
-struct IsEigenVector<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> : std::bool_constant<(Rows == 1 || Cols == 1)> {};
+struct IsEigenMatrix<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> : std::bool_constant<(Rows != Eigen::Dynamic && Cols != Eigen::Dynamic)> {};
+
+template <class T>
+struct IsEigenVector : std::false_type {};
+template <class Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
+struct IsEigenVector<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows, MaxCols>> : std::bool_constant<((Rows == 1 || Cols == 1) && Rows != Eigen::Dynamic && Cols != Eigen::Dynamic)> {};
+
+template <class T>
+struct IsEigenQuaternion : std::false_type {};
+template <class Scalar>
+struct IsEigenQuaternion<Eigen::Quaternion<Scalar>> : std::true_type {};
+
+template <class T>
+struct IsEigenTranslation : std::false_type {};
+template <class Scalar, int Dim>
+struct IsEigenTranslation<Eigen::Translation<Scalar, Dim>> : std::true_type {};
+
+template <class T>
+struct IsEigenDiagonalMatrix : std::false_type {};
+template <class Scalar, int Dim>
+struct IsEigenDiagonalMatrix<Eigen::DiagonalMatrix<Scalar, Dim>> : std::true_type {};
 
 struct Viewport {
     float X;
