@@ -1,16 +1,11 @@
 #include <radray/render/spvc.h>
 
-#ifdef RADRAY_ENABLE_SPIRV_CROSS
-
 #include <algorithm>
 #include <bit>
 #include <cstring>
 #include <limits>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
-
-#include <spirv_cross.hpp>
 
 #include <radray/errors.h>
 #include <radray/logger.h>
@@ -18,246 +13,450 @@
 
 namespace radray::render {
 
-static void _CollectTypeTree(
-    spirv_cross::Compiler& compiler,
-    uint32_t typeId,
-    unordered_set<uint32_t>& typeIds,
-    unordered_set<uint32_t>& structIds) {
-    if (typeId == 0) {
-        return;
-    }
-    if (!typeIds.insert(typeId).second) {
-        return;
-    }
+}
 
-    const auto& type = compiler.get_type(typeId);
-    if (type.basetype == spirv_cross::SPIRType::BaseType::Struct) {
-        structIds.insert(typeId);
-        for (uint32_t memberTypeId : type.member_types) {
-            _CollectTypeTree(compiler, memberTypeId, typeIds, structIds);
-        }
-    }
+#ifdef RADRAY_ENABLE_SPIRV_CROSS
 
-    if (type.pointer && type.parent_type != 0) {
-        _CollectTypeTree(compiler, type.parent_type, typeIds, structIds);
+#include <spirv_cross.hpp>
+
+namespace radray::render {
+
+namespace {
+
+// 辅助函数：获取基础类型的标量大小
+uint32_t GetScalarSize(SpirvBaseType baseType) {
+    switch (baseType) {
+        case SpirvBaseType::Bool:
+        case SpirvBaseType::Int8:
+        case SpirvBaseType::UInt8: return 1;
+        case SpirvBaseType::Int16:
+        case SpirvBaseType::UInt16:
+        case SpirvBaseType::Float16: return 2;
+        case SpirvBaseType::Int32:
+        case SpirvBaseType::UInt32:
+        case SpirvBaseType::Float32: return 4;
+        case SpirvBaseType::Int64:
+        case SpirvBaseType::UInt64:
+        case SpirvBaseType::Float64: return 8;
+        default: return 0;
     }
 }
 
-struct SpirvReflectionContext {
-    spirv_cross::Compiler& compiler;
-    SpirvShaderDesc& desc;
-    unordered_map<uint32_t, SpirvTypeDesc*> typeCache{};
-    unordered_map<uint32_t, SpirvStructDesc*> structCache{};
-};
-
-static SpirvBaseType _MapBaseType(spirv_cross::SPIRType::BaseType type) noexcept {
-    switch (type) {
-        case spirv_cross::SPIRType::BaseType::Boolean: return SpirvBaseType::Bool;
-        case spirv_cross::SPIRType::BaseType::Int: return SpirvBaseType::Int;
-        case spirv_cross::SPIRType::BaseType::UInt: return SpirvBaseType::UInt;
-        case spirv_cross::SPIRType::BaseType::Float: return SpirvBaseType::Float;
-        case spirv_cross::SPIRType::BaseType::Double: return SpirvBaseType::Double;
-        case spirv_cross::SPIRType::BaseType::Struct: return SpirvBaseType::Struct;
-        case spirv_cross::SPIRType::BaseType::Image: return SpirvBaseType::Image;
-        case spirv_cross::SPIRType::BaseType::SampledImage: return SpirvBaseType::SampledImage;
-        case spirv_cross::SPIRType::BaseType::Sampler: return SpirvBaseType::Sampler;
-        case spirv_cross::SPIRType::BaseType::AccelerationStructure: return SpirvBaseType::AccelerationStructure;
+// 辅助函数：将SPIR-V类型转换为我们的基础类型
+SpirvBaseType GetBaseTypeFromSpirv(const spirv_cross::SPIRType& type) {
+    switch (type.basetype) {
+        case spirv_cross::SPIRType::Void: return SpirvBaseType::Void;
+        case spirv_cross::SPIRType::Boolean: return SpirvBaseType::Bool;
+        case spirv_cross::SPIRType::SByte: return SpirvBaseType::Int8;
+        case spirv_cross::SPIRType::UByte: return SpirvBaseType::UInt8;
+        case spirv_cross::SPIRType::Short: return SpirvBaseType::Int16;
+        case spirv_cross::SPIRType::UShort: return SpirvBaseType::UInt16;
+        case spirv_cross::SPIRType::Int: return SpirvBaseType::Int32;
+        case spirv_cross::SPIRType::UInt: return SpirvBaseType::UInt32;
+        case spirv_cross::SPIRType::Int64: return SpirvBaseType::Int64;
+        case spirv_cross::SPIRType::UInt64: return SpirvBaseType::UInt64;
+        case spirv_cross::SPIRType::Half: return SpirvBaseType::Float16;
+        case spirv_cross::SPIRType::Float: return SpirvBaseType::Float32;
+        case spirv_cross::SPIRType::Double: return SpirvBaseType::Float64;
+        case spirv_cross::SPIRType::Struct: return SpirvBaseType::Struct;
+        case spirv_cross::SPIRType::Image: return SpirvBaseType::Image;
+        case spirv_cross::SPIRType::SampledImage: return SpirvBaseType::SampledImage;
+        case spirv_cross::SPIRType::Sampler: return SpirvBaseType::Sampler;
+        case spirv_cross::SPIRType::AccelerationStructure: return SpirvBaseType::AccelerationStructure;
         default: return SpirvBaseType::UNKNOWN;
     }
 }
 
-static uint32_t _ExtractArraySize(const spirv_cross::SPIRType& type) noexcept {
-    if (type.array.empty()) {
-        return 1;
+// 辅助函数：从类型推断顶点格式
+VertexFormat InferVertexFormat(const spirv_cross::SPIRType& type) {
+    uint32_t vecsize = type.vecsize;
+    uint32_t columns = type.columns;
+
+    if (columns != 1) return VertexFormat::UNKNOWN;
+
+    switch (type.basetype) {
+        case spirv_cross::SPIRType::Float:
+            if (vecsize == 1) return VertexFormat::FLOAT32;
+            if (vecsize == 2) return VertexFormat::FLOAT32X2;
+            if (vecsize == 3) return VertexFormat::FLOAT32X3;
+            if (vecsize == 4) return VertexFormat::FLOAT32X4;
+            break;
+        case spirv_cross::SPIRType::Int:
+            if (vecsize == 1) return VertexFormat::SINT32;
+            if (vecsize == 2) return VertexFormat::SINT32X2;
+            if (vecsize == 3) return VertexFormat::SINT32X3;
+            if (vecsize == 4) return VertexFormat::SINT32X4;
+            break;
+        case spirv_cross::SPIRType::UInt:
+            if (vecsize == 1) return VertexFormat::UINT32;
+            if (vecsize == 2) return VertexFormat::UINT32X2;
+            if (vecsize == 3) return VertexFormat::UINT32X3;
+            if (vecsize == 4) return VertexFormat::UINT32X4;
+            break;
+        case spirv_cross::SPIRType::Half:
+            if (vecsize == 2) return VertexFormat::FLOAT16X2;
+            if (vecsize == 4) return VertexFormat::FLOAT16X4;
+            break;
+        default:
+            break;
     }
-    uint64_t result = 1;
-    for (size_t i = 0; i < type.array.size(); ++i) {
-        if (!type.array_size_literal[i] || type.array[i] == 0) {
-            return 0;
-        }
-        result *= static_cast<uint64_t>(type.array[i]);
-    }
-    return static_cast<uint32_t>(result);
+
+    return VertexFormat::UNKNOWN;
 }
 
-static const SpirvStructDesc* _GetOrCreateStruct(SpirvReflectionContext& ctx, uint32_t typeId);
+// 辅助函数：获取图像维度
+SpirvImageDim GetImageDim(spv::Dim dim) {
+    switch (dim) {
+        case spv::Dim1D: return SpirvImageDim::Dim1D;
+        case spv::Dim2D: return SpirvImageDim::Dim2D;
+        case spv::Dim3D: return SpirvImageDim::Dim3D;
+        case spv::DimCube: return SpirvImageDim::Cube;
+        case spv::DimBuffer: return SpirvImageDim::Buffer;
+        default: return SpirvImageDim::UNKNOWN;
+    }
+}
 
-static const SpirvTypeDesc* _GetOrCreateType(SpirvReflectionContext& ctx, uint32_t typeId) {
-    if (auto it = ctx.typeCache.find(typeId); it != ctx.typeCache.end()) {
+// 前向声明
+uint32_t ReflectType(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::SPIRType& type,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache);
+
+// 递归反射类型信息
+uint32_t ReflectType(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::SPIRType& type,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache) {
+    auto it = typeCache.find(type.self);
+    if (it != typeCache.end()) {
         return it->second;
     }
 
-    const auto& type = ctx.compiler.get_type(typeId);
-    ctx.desc.Types.emplace_back();
-    auto* typeDesc = &ctx.desc.Types.back();
-    ctx.typeCache.emplace(typeId, typeDesc);
+    // 关键修复：先占位，确保索引固定，避免递归导致索引错位
+    uint32_t typeIndex = static_cast<uint32_t>(desc.Types.size());
+    typeCache[type.self] = typeIndex;
+    desc.Types.emplace_back();
 
-    typeDesc->Base = _MapBaseType(type.basetype);
-    typeDesc->BitWidth = type.width;
-    typeDesc->VectorSize = type.vecsize;
-    typeDesc->ColumnCount = type.columns;
-    typeDesc->ArraySize = _ExtractArraySize(type);
+    SpirvTypeInfo typeInfo{};
 
-    if (type.basetype == spirv_cross::SPIRType::BaseType::Struct) {
-        typeDesc->StructInfo = _GetOrCreateStruct(ctx, typeId);
+    std::string typeName = compiler.get_name(type.self);
+    if (typeName.empty()) {
+        typeName = compiler.get_fallback_name(type.self);
+    }
+    typeInfo.Name = string(typeName);
+
+    typeInfo.BaseType = GetBaseTypeFromSpirv(type);
+    typeInfo.VectorSize = type.vecsize;
+    typeInfo.Columns = type.columns;
+
+    if (!type.array.empty()) {
+        typeInfo.ArraySize = type.array[0];
+        typeInfo.ArrayStride = compiler.get_decoration(type.self, spv::DecorationArrayStride);
     }
 
-    return typeDesc;
-}
-
-static string _ResolveName(const spirv_cross::Compiler& compiler, uint32_t id) {
-    auto name = compiler.get_name(id);
-    if (!name.empty()) {
-        return string{name};
-    }
-    return string{compiler.get_fallback_name(id)};
-}
-
-static std::optional<uint32_t> _TryGetDecoration(const spirv_cross::Compiler& compiler, uint32_t id, spv::Decoration deco) {
-    if (compiler.has_decoration(id, deco)) {
-        return compiler.get_decoration(id, deco);
-    }
-    return std::nullopt;
-}
-
-static const SpirvStructDesc* _GetOrCreateStruct(SpirvReflectionContext& ctx, uint32_t typeId) {
-    if (auto it = ctx.structCache.find(typeId); it != ctx.structCache.end()) {
-        return it->second;
-    }
-
-    const auto& type = ctx.compiler.get_type(typeId);
-    ctx.desc.Structs.emplace_back();
-    auto* structDesc = &ctx.desc.Structs.back();
-    ctx.structCache.emplace(typeId, structDesc);
-
-    structDesc->Name = ctx.compiler.get_name(typeId);
-    if (structDesc->Name.empty()) {
-        structDesc->Name = format("struct_{}", typeId);
-    }
-    structDesc->Size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_size(type));
-    structDesc->Members.clear();
-    structDesc->Members.reserve(type.member_types.size());
-    for (uint32_t idx = 0; idx < type.member_types.size(); ++idx) {
-        SpirvStructMemberDesc member{};
-        member.Name = ctx.compiler.get_member_name(typeId, idx);
-        if (member.Name.empty()) {
-            member.Name = format("member_{}", idx);
+    if (type.columns > 1) {
+        typeInfo.MatrixStride = compiler.get_decoration(type.self, spv::DecorationMatrixStride);
+        if (compiler.has_decoration(type.self, spv::DecorationRowMajor)) {
+            typeInfo.RowMajor = true;
         }
-        member.Offset = ctx.compiler.type_struct_member_offset(type, idx);
-        member.Size = static_cast<uint32_t>(ctx.compiler.get_declared_struct_member_size(type, idx));
-        member.Type = _GetOrCreateType(ctx, type.member_types[idx]);
-        structDesc->Members.push_back(std::move(member));
     }
 
-    return structDesc;
+    // 计算类型大小
+    if (type.basetype == spirv_cross::SPIRType::Struct) {
+        try {
+            typeInfo.Size = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
+        } catch (...) {
+            typeInfo.Size = 0;
+        }
+    } else {
+        uint32_t scalarSize = GetScalarSize(typeInfo.BaseType);
+        typeInfo.Size = scalarSize * type.vecsize * type.columns;
+        
+        // 累乘数组维度
+        for (auto dim : type.array) {
+            if (dim == 0) {
+                typeInfo.Size = 0; // 动态数组大小未知
+                break;
+            }
+            typeInfo.Size *= dim;
+        }
+    }
+
+    if (type.basetype == spirv_cross::SPIRType::Struct) {
+        size_t memberCount = type.member_types.size();
+        typeInfo.Members.reserve(memberCount);
+
+        for (size_t i = 0; i < memberCount; ++i) {
+            SpirvTypeMember member{};
+
+            std::string memberName = compiler.get_member_name(type.self, static_cast<uint32_t>(i));
+            if (memberName.empty()) {
+                member.Name = string("member_") + string(std::to_string(i));
+            } else {
+                member.Name = string(memberName);
+            }
+
+            try {
+                member.Offset = compiler.type_struct_member_offset(type, static_cast<uint32_t>(i));
+            } catch (...) {
+                member.Offset = 0;
+            }
+
+            const auto& memberType = compiler.get_type(type.member_types[i]);
+            member.TypeIndex = ReflectType(compiler, memberType, desc, typeCache);
+
+            try {
+                member.Size = static_cast<uint32_t>(compiler.get_declared_struct_member_size(type, static_cast<uint32_t>(i)));
+            } catch (...) {
+                // 如果无法获取成员大小（无布局），尝试使用类型本身的大小
+                if (member.TypeIndex < desc.Types.size()) {
+                    member.Size = desc.Types[member.TypeIndex].Size;
+                } else {
+                    member.Size = 0;
+                }
+            }
+
+            typeInfo.Members.push_back(std::move(member));
+        }
+    }
+
+    desc.Types[typeIndex] = std::move(typeInfo);
+    return typeIndex;
 }
 
-static SpirvResourceBindingDesc _BuildResourceBinding(
-    SpirvReflectionContext& ctx,
-    const spirv_cross::Resource& resource,
-    SpirvResourceKind kind) {
-    SpirvResourceBindingDesc binding{};
-    binding.Name = _ResolveName(ctx.compiler, resource.id);
+// 处理单个资源
+void ProcessResource(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::Resource& res,
+    SpirvResourceKind kind,
+    ShaderStage stage,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache) {
+    SpirvResourceBinding binding{};
+    // 优先获取变量名（ID对应的名称），spirv-cross的res.name可能会回退到类型名
+    binding.Name = compiler.get_name(res.id);
+    if (binding.Name.empty()) {
+        binding.Name = string(res.name);
+    }
     binding.Kind = kind;
-    binding.Binding = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationBinding).value_or(0);
-    binding.DescriptorSet = _TryGetDecoration(ctx.compiler, resource.id, spv::DecorationDescriptorSet).value_or(0);
-    binding.ArraySize = _ExtractArraySize(ctx.compiler.get_type(resource.type_id));
-    binding.ValueType = _GetOrCreateType(ctx, resource.base_type_id);
-    return binding;
+    binding.Stages = stage;
+
+    binding.Set = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+    binding.Binding = compiler.get_decoration(res.id, spv::DecorationBinding);
+
+    const auto& type = compiler.get_type(res.type_id);
+    binding.TypeIndex = ReflectType(compiler, type, desc, typeCache);
+
+    if (!type.array.empty()) {
+        binding.ArraySize = type.array[0];
+    }
+
+    if (type.basetype == spirv_cross::SPIRType::Image ||
+        type.basetype == spirv_cross::SPIRType::SampledImage) {
+        SpirvImageInfo imgInfo{};
+        imgInfo.Dim = GetImageDim(type.image.dim);
+        imgInfo.Arrayed = type.image.arrayed;
+        imgInfo.Multisampled = type.image.ms;
+        imgInfo.Depth = type.image.depth;
+
+        const auto& sampledType = compiler.get_type(type.image.type);
+        imgInfo.SampledType = ReflectType(compiler, sampledType, desc, typeCache);
+
+        binding.ImageInfo = imgInfo;
+    }
+
+    if (kind == SpirvResourceKind::StorageBuffer || kind == SpirvResourceKind::StorageImage) {
+        auto access = compiler.get_decoration(res.id, spv::DecorationNonReadable);
+        binding.WriteOnly = (access != 0);
+        access = compiler.get_decoration(res.id, spv::DecorationNonWritable);
+        binding.ReadOnly = (access != 0);
+    }
+
+    desc.ResourceBindings.push_back(std::move(binding));
 }
 
-static spv::ExecutionModel _MapType(ShaderStage stage) noexcept {
-    switch (stage) {
-        case ShaderStage::UNKNOWN: return spv::ExecutionModel::ExecutionModelMax;
-        case ShaderStage::Vertex: return spv::ExecutionModel::ExecutionModelVertex;
-        case ShaderStage::Pixel: return spv::ExecutionModel::ExecutionModelFragment;
-        case ShaderStage::Compute: return spv::ExecutionModel::ExecutionModelGLCompute;
-        case ShaderStage::Graphics: return spv::ExecutionModel::ExecutionModelMax;
+// 反射资源绑定
+void ReflectResourceBindings(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::ShaderResources& resources,
+    ShaderStage stage,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache) {
+    for (const auto& ubo : resources.uniform_buffers) {
+        ProcessResource(compiler, ubo, SpirvResourceKind::UniformBuffer, stage, desc, typeCache);
     }
-    Unreachable();
+
+    for (const auto& ssbo : resources.storage_buffers) {
+        ProcessResource(compiler, ssbo, SpirvResourceKind::StorageBuffer, stage, desc, typeCache);
+    }
+
+    for (const auto& img : resources.sampled_images) {
+        ProcessResource(compiler, img, SpirvResourceKind::SampledImage, stage, desc, typeCache);
+    }
+
+    for (const auto& img : resources.storage_images) {
+        ProcessResource(compiler, img, SpirvResourceKind::StorageImage, stage, desc, typeCache);
+    }
+
+    for (const auto& img : resources.separate_images) {
+        ProcessResource(compiler, img, SpirvResourceKind::SeparateImage, stage, desc, typeCache);
+    }
+
+    for (const auto& smp : resources.separate_samplers) {
+        ProcessResource(compiler, smp, SpirvResourceKind::SeparateSampler, stage, desc, typeCache);
+    }
+
+    for (const auto& as : resources.acceleration_structures) {
+        ProcessResource(compiler, as, SpirvResourceKind::AccelerationStructure, stage, desc, typeCache);
+    }
 }
 
-std::optional<SpirvShaderDesc> ReflectSpirv(std::string_view entryPointName, ShaderStage stage, std::span<const byte> data) {
-    if (data.size() % 4 != 0) {
-        RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "Invalid SPIR-V data size");
-        return std::nullopt;
+// 反射顶点输入
+void ReflectVertexInputs(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::ShaderResources& resources,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache) {
+    for (const auto& input : resources.stage_inputs) {
+        SpirvVertexInput vertexInput{};
+        vertexInput.Name = string(input.name);
+        vertexInput.Location = compiler.get_decoration(input.id, spv::DecorationLocation);
+
+        const auto& type = compiler.get_type(input.type_id);
+        vertexInput.TypeIndex = ReflectType(compiler, type, desc, typeCache);
+        vertexInput.Format = InferVertexFormat(type);
+
+        desc.VertexInputs.push_back(std::move(vertexInput));
     }
-    if (stage == ShaderStage::UNKNOWN) {
-        RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "Shader stage cannot be UNKNOWN");
-        return std::nullopt;
+
+    std::sort(desc.VertexInputs.begin(), desc.VertexInputs.end(),
+              [](const SpirvVertexInput& a, const SpirvVertexInput& b) {
+                  return a.Location < b.Location;
+              });
+}
+
+// 反射Push Constants
+void ReflectPushConstants(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::ShaderResources& resources,
+    ShaderStage stage,
+    SpirvShaderDesc& desc,
+    unordered_map<uint32_t, uint32_t>& typeCache) {
+    for (const auto& pc : resources.push_constant_buffers) {
+        SpirvPushConstantRange range{};
+        range.Name = string(pc.name);
+        range.Stages = stage;
+
+        const auto& type = compiler.get_type(pc.type_id);
+        range.TypeIndex = ReflectType(compiler, type, desc, typeCache);
+        range.Size = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
+        range.Offset = 0;
+
+        desc.PushConstants.push_back(std::move(range));
     }
+}
+
+// 反射Compute Shader信息
+void ReflectComputeInfo(
+    const spirv_cross::Compiler& compiler,
+    SpirvShaderDesc& desc) {
+    SpirvComputeInfo computeInfo{};
+    auto workGroupSize = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0);
+
+    if (workGroupSize != 0) {
+        computeInfo.LocalSizeX = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0);
+        computeInfo.LocalSizeY = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1);
+        computeInfo.LocalSizeZ = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2);
+
+        desc.ComputeInfo = computeInfo;
+    }
+}
+
+// 合并多个着色器阶段的资源信息
+void MergeResourceBindings(SpirvShaderDesc& desc) {
+    for (size_t i = 0; i < desc.ResourceBindings.size(); ++i) {
+        for (size_t j = i + 1; j < desc.ResourceBindings.size();) {
+            if (desc.ResourceBindings[i].Set == desc.ResourceBindings[j].Set &&
+                desc.ResourceBindings[i].Binding == desc.ResourceBindings[j].Binding &&
+                desc.ResourceBindings[i].Name == desc.ResourceBindings[j].Name) {
+                desc.ResourceBindings[i].Stages =
+                    static_cast<ShaderStage>(
+                        static_cast<uint32_t>(desc.ResourceBindings[i].Stages) |
+                        static_cast<uint32_t>(desc.ResourceBindings[j].Stages));
+
+                desc.ResourceBindings.erase(desc.ResourceBindings.begin() + j);
+            } else {
+                ++j;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < desc.PushConstants.size(); ++i) {
+        for (size_t j = i + 1; j < desc.PushConstants.size();) {
+            if (desc.PushConstants[i].Name == desc.PushConstants[j].Name) {
+                desc.PushConstants[i].Stages =
+                    static_cast<ShaderStage>(
+                        static_cast<uint32_t>(desc.PushConstants[i].Stages) |
+                        static_cast<uint32_t>(desc.PushConstants[j].Stages));
+                desc.PushConstants.erase(desc.PushConstants.begin() + j);
+            } else {
+                ++j;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes) {
     SpirvShaderDesc desc;
-    try {
-        spirv_cross::Compiler compiler{std::bit_cast<const uint32_t*>(data.data()), data.size() / sizeof(uint32_t)};
-        std::string epStr{entryPointName};
-        spv::ExecutionModel exeModel = _MapType(stage);
-        const auto& entryPoint = compiler.get_entry_point(epStr, exeModel);
-        auto resources = compiler.get_shader_resources();
-        unordered_set<uint32_t> typeIds{};
-        unordered_set<uint32_t> structTypeIds{};
-        const auto collectFromList = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list) {
-            for (const auto& res : list) {
-                _CollectTypeTree(compiler, res.base_type_id, typeIds, structTypeIds);
+    unordered_map<uint32_t, uint32_t> typeCache;
+
+    for (auto&& bytecode : bytecodes) {
+        if (bytecode.Data.size() % 4 != 0) {
+            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "Invalid SPIR-V data size");
+            return std::nullopt;
+        }
+
+        try {
+            spirv_cross::Compiler compiler{
+                std::bit_cast<const uint32_t*>(bytecode.Data.data()),
+                bytecode.Data.size() / sizeof(uint32_t)};
+
+            spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+
+            desc.UsedStages = static_cast<ShaderStage>(
+                static_cast<uint32_t>(desc.UsedStages) |
+                static_cast<uint32_t>(bytecode.Stage));
+
+            if (bytecode.Stage == ShaderStage::Vertex) {
+                ReflectVertexInputs(compiler, resources, desc, typeCache);
             }
-        };
-        for (const auto& input : resources.stage_inputs) {
-            _CollectTypeTree(compiler, input.base_type_id, typeIds, structTypeIds);
-        }
-        for (const auto& output : resources.stage_outputs) {
-            _CollectTypeTree(compiler, output.base_type_id, typeIds, structTypeIds);
-        }
-        collectFromList(resources.uniform_buffers);
-        collectFromList(resources.push_constant_buffers);
-        collectFromList(resources.storage_buffers);
-        collectFromList(resources.sampled_images);
-        collectFromList(resources.storage_images);
-        collectFromList(resources.separate_images);
-        collectFromList(resources.separate_samplers);
-        desc.Types.reserve(typeIds.size());
-        desc.Structs.reserve(structTypeIds.size());
-        SpirvReflectionContext ctx{compiler, desc};
-        desc.StageInput.reserve(resources.stage_inputs.size());
-        for (const auto& input : resources.stage_inputs) {
-            SpirvParameterDesc param{};
-            param.Name = _ResolveName(compiler, input.id);
-            param.Location = _TryGetDecoration(compiler, input.id, spv::DecorationLocation).value_or(0);
-            param.Type = _GetOrCreateType(ctx, input.base_type_id);
-            desc.StageInput.push_back(std::move(param));
-        }
-        desc.StageOutput.reserve(resources.stage_outputs.size());
-        for (const auto& output : resources.stage_outputs) {
-            SpirvParameterDesc param{};
-            param.Name = _ResolveName(compiler, output.id);
-            param.Location = _TryGetDecoration(compiler, output.id, spv::DecorationLocation).value_or(0);
-            param.Type = _GetOrCreateType(ctx, output.base_type_id);
-            desc.StageOutput.push_back(std::move(param));
-        }
-        const auto appendResources = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, SpirvResourceKind kind) {
-            for (const auto& res : list) {
-                desc.Resources.push_back(_BuildResourceBinding(ctx, res, kind));
+
+            ReflectResourceBindings(compiler, resources, bytecode.Stage, desc, typeCache);
+
+            ReflectPushConstants(compiler, resources, bytecode.Stage, desc, typeCache);
+
+            if (bytecode.Stage == ShaderStage::Compute) {
+                ReflectComputeInfo(compiler, desc);
             }
-        };
-        appendResources(resources.uniform_buffers, SpirvResourceKind::UniformBuffer);
-        appendResources(resources.push_constant_buffers, SpirvResourceKind::PushConstant);
-        appendResources(resources.storage_buffers, SpirvResourceKind::StorageBuffer);
-        appendResources(resources.sampled_images, SpirvResourceKind::SampledImage);
-        appendResources(resources.storage_images, SpirvResourceKind::StorageImage);
-        appendResources(resources.separate_images, SpirvResourceKind::SeparateImage);
-        appendResources(resources.separate_samplers, SpirvResourceKind::SeparateSampler);
-        static_assert(sizeof(SpirvWorkgroupSize) == sizeof(entryPoint.workgroup_size), "Size mismatch between SpirvWorkgroupSize and entryPoint.workgroup_size");
-        static_assert(std::is_trivially_copyable_v<SpirvWorkgroupSize>, "SpirvWorkgroupSize must be trivially copyable");
-        static_assert(std::is_trivially_copyable_v<spirv_cross::SPIREntryPoint::WorkgroupSize>, "spirv_cross::SPIREntryPoint::WorkgroupSize must be trivially copyable");
-        std::memcpy(&desc.WorkgroupSize, &entryPoint.workgroup_size, sizeof(SpirvWorkgroupSize));
-    } catch (const spirv_cross::CompilerError& e) {
-        RADRAY_ERR_LOG("{} {}: {}", Errors::SPIRV_CROSS, "Compiler Error", e.what());
-        return std::nullopt;
-    } catch (const std::exception& e) {
-        RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, e.what());
-        return std::nullopt;
-    } catch (...) {
-        RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "unknown error");
-        return std::nullopt;
+
+        } catch (const spirv_cross::CompilerError& e) {
+            RADRAY_ERR_LOG("{} {}: {}", Errors::SPIRV_CROSS, "Compiler Error", e.what());
+            return std::nullopt;
+        } catch (const std::exception& e) {
+            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, e.what());
+            return std::nullopt;
+        } catch (...) {
+            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "unknown error");
+            return std::nullopt;
+        }
     }
+
+    MergeResourceBindings(desc);
+
     return desc;
 }
 

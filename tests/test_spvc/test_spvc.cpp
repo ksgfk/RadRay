@@ -87,8 +87,9 @@ TEST(SPVC, BasicReflection) {
     auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, true).value();
     auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, {}, {}, true).value();
 
-    auto vsDesc = ReflectSpirv("VSMain", ShaderStage::Vertex, vs.Data);
-    ASSERT_TRUE(vsDesc.has_value());
-    auto psDesc = ReflectSpirv("PSMain", ShaderStage::Pixel, ps.Data);
-    ASSERT_TRUE(psDesc.has_value());
+    SpirvBytecodeView bytecodes[] = {
+        {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex},
+        {.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
+    auto desc = ReflectSpirv(bytecodes);
+    ASSERT_TRUE(desc.has_value());
 }
