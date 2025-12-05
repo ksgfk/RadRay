@@ -13,7 +13,14 @@
 
 namespace radray::render {
 
+const SpirvTypeInfo* SpirvShaderDesc::GetType(uint32_t index) const {
+    if (index < Types.size()) {
+        return &Types[index];
+    }
+    return nullptr;
 }
+
+}  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
 
@@ -173,11 +180,11 @@ uint32_t ReflectType(
     } else {
         uint32_t scalarSize = GetScalarSize(typeInfo.BaseType);
         typeInfo.Size = scalarSize * type.vecsize * type.columns;
-        
+
         // 累乘数组维度
         for (auto dim : type.array) {
             if (dim == 0) {
-                typeInfo.Size = 0; // 动态数组大小未知
+                typeInfo.Size = 0;  // 动态数组大小未知
                 break;
             }
             typeInfo.Size *= dim;

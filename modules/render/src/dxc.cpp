@@ -791,7 +791,7 @@ public:
             if (cbDesc.Name != nullptr) {
                 bufferDesc.Name = cbDesc.Name;
             }
-            bufferDesc.Type = _MapCBufferType(static_cast<D3D_CBUFFER_TYPE>(cbDesc.Type));
+            bufferDesc.Type = _MapCBufferType(cbDesc.Type);
             bufferDesc.Size = cbDesc.Size;
             bufferDesc.Flags = cbDesc.uFlags;
             desc.ConstantBuffers.emplace_back(std::move(bufferDesc));

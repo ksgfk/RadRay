@@ -99,7 +99,7 @@ TEST(DXC, BasicReflection) {
     ASSERT_TRUE(storage.has_value());
 
     Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
-    auto id = storage->GetVar("_Obj").GetVar("model").GetId();
+    auto id = storage->GetVar("_Obj").GetVar("_Obj").GetVar("model").GetId();
     storage->GetVar(id).SetValue(model);
 
     auto dst = storage->GetData().subspan(storage->GetVar(id).GetOffset(), storage->GetVar(id).GetType()->GetSizeInBytes());
@@ -120,9 +120,9 @@ TEST(DXC, CBufferStorageTests) {
 
     // 1. Test Global Variable (Struct)
     {
-        auto globalVar = storage.GetVar("_Global");
+        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
         ASSERT_TRUE(globalVar.IsValid());
-        
+
         auto dirLightVar = globalVar.GetVar("dirLight");
         ASSERT_TRUE(dirLightVar.IsValid());
 
@@ -140,7 +140,7 @@ TEST(DXC, CBufferStorageTests) {
 
     // 2. Test Camera Data (float3)
     {
-        auto cameraVar = storage.GetVar("_Camera");
+        auto cameraVar = storage.GetVar("_Camera").GetVar("_Camera");
         ASSERT_TRUE(cameraVar.IsValid());
 
         auto posWVar = cameraVar.GetVar("posW");
@@ -156,7 +156,7 @@ TEST(DXC, CBufferStorageTests) {
 
     // 3. Test Scalar (float)
     {
-        auto globalVar = storage.GetVar("_Global");
+        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
         auto timeVar = globalVar.GetVar("time");
         ASSERT_TRUE(timeVar.IsValid());
 
@@ -172,9 +172,76 @@ TEST(DXC, CBufferStorageTests) {
     {
         auto invalidVar = storage.GetVar("_NonExistent");
         ASSERT_FALSE(invalidVar.IsValid());
-        
-        auto globalVar = storage.GetVar("_Global");
+
+        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
         auto invalidMember = globalVar.GetVar("nonExistentMember");
         ASSERT_FALSE(invalidMember.IsValid());
+    }
+
+    // 5. Test cbuffer namespace
+    {
+        auto testCBuffer = storage.GetVar("TestCBuffer");
+        ASSERT_TRUE(testCBuffer.IsValid());
+
+        auto someValueVar = testCBuffer.GetVar("_SomeValue");
+        ASSERT_TRUE(someValueVar.IsValid());
+
+        Eigen::Vector4f val(1.0f, 2.0f, 3.0f, 4.0f);
+        someValueVar.SetValue(val);
+
+        auto offset = someValueVar.GetOffset();
+        auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector4f));
+        ASSERT_EQ(std::memcmp(data.data(), val.data(), sizeof(Eigen::Vector4f)), 0);
+    }
+}
+
+TEST(DXC, NamingCollision) {
+    const char* COLLISION_SHADER = R"(
+struct SameName {
+    float4 SameName;
+};
+
+ConstantBuffer<SameName> _Root : register(b0);
+
+cbuffer _Inner : register(b1) {
+    SameName _Inner;
+};
+
+float4 VSMain() : SV_Position {
+    return _Root.SameName + _Inner.SameName;
+}
+)";
+
+    auto dxc = CreateDxc();
+    auto vs = dxc->Compile(COLLISION_SHADER, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl).value();
+
+    const HlslShaderDesc* descs[] = {&vsDesc};
+    auto storageOpt = CreateCBufferStorage(descs);
+    ASSERT_TRUE(storageOpt.has_value());
+    auto& storage = *storageOpt;
+
+    // 1. Test Struct with member of same name
+    {
+        auto rootVar = storage.GetVar("_Root");
+        ASSERT_TRUE(rootVar.IsValid());
+
+        auto memberVar = rootVar.GetVar("_Root").GetVar("SameName");
+        ASSERT_TRUE(memberVar.IsValid());
+
+        // Verify type size (float4 = 16 bytes)
+        ASSERT_EQ(memberVar.GetType()->GetSizeInBytes(), 16);
+    }
+
+    // 2. Test usage in cbuffer
+    {
+        auto cbVar = storage.GetVar("_Inner");
+        ASSERT_TRUE(cbVar.IsValid());
+
+        auto innerVar = cbVar.GetVar("_Inner");
+        ASSERT_TRUE(innerVar.IsValid());
+
+        auto memberVar = innerVar.GetVar("SameName");
+        ASSERT_TRUE(memberVar.IsValid());
     }
 }

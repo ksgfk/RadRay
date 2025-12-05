@@ -141,8 +141,8 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(st
 
     MergedHlslShaderDesc desc = MergeHlslShaderDesc(descs);
     if (desc.BoundResources.empty()) {
-        RootSignatureDescriptor desc{};
-        return RootSignatureDescriptorContainer{desc};
+        RootSignatureDescriptor empty{};
+        return RootSignatureDescriptorContainer{empty};
     }
     vector<HlslRSPlacement> placements{desc.BoundResources.size(), HlslRSPlacement::Table};
     auto cmpResource = [&](size_t lhs, size_t rhs) noexcept {

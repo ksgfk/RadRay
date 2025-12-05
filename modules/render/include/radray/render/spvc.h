@@ -131,6 +131,9 @@ struct SpirvPushConstantRange {
 // 完整的着色器描述
 class SpirvShaderDesc {
 public:
+    // 辅助方法：根据索引获取类型
+    const SpirvTypeInfo* GetType(uint32_t index) const;
+
     // 类型表（所有类型信息的集中存储）
     vector<SpirvTypeInfo> Types;
 
@@ -148,14 +151,6 @@ public:
 
     // 使用的着色器阶段
     ShaderStage UsedStages{ShaderStage::UNKNOWN};
-
-    // 辅助方法：根据索引获取类型
-    const SpirvTypeInfo* GetType(uint32_t index) const {
-        if (index < Types.size()) {
-            return &Types[index];
-        }
-        return nullptr;
-    }
 };
 
 }  // namespace radray::render

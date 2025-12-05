@@ -202,15 +202,16 @@ void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) n
     storage._idMap.shrink_to_fit();
 }
 
-static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view name, const HlslShaderTypeDesc* type, size_t typeSize, size_t fromTypeIndex) noexcept {
+static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view name, const HlslShaderTypeDesc* type, size_t typeSize, size_t fromTypeIndex, std::optional<size_t> forceOffset = std::nullopt) noexcept {
     struct BuildItem {
         std::string_view Name;
         const HlslShaderTypeDesc* Type;
         size_t FromTypeIndex;
         std::optional<size_t> ForceSize;
+        std::optional<size_t> ForceOffset;
     };
     stack<BuildItem> s;
-    s.push({name, type, fromTypeIndex, typeSize});
+    s.push({name, type, fromTypeIndex, typeSize, forceOffset});
     while (!s.empty()) {
         auto item = s.top();
         s.pop();
@@ -218,8 +219,9 @@ static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view 
             continue;
         }
         size_t currentTypeSize = item.ForceSize.has_value() ? *item.ForceSize : item.Type->GetSizeInBytes();
+        size_t currentOffset = item.ForceOffset.has_value() ? *item.ForceOffset : item.Type->Offset;
         auto typeIndex = builder.AddType(item.Type->Name, currentTypeSize);
-        builder.AddMemberForType(item.FromTypeIndex, typeIndex, item.Name, item.Type->Offset);
+        builder.AddMemberForType(item.FromTypeIndex, typeIndex, item.Name, currentOffset);
         const auto& members = item.Type->Members;
         for (size_t i = members.size(); i-- > 0;) {
             const auto& member = members[i];
@@ -230,7 +232,7 @@ static void _BuildType(ShaderCBufferStorage::Builder& builder, std::string_view 
                     memberSizeOpt = nextOffset - member.Type->Offset;
                 }
             }
-            s.push({member.Name, member.Type, typeIndex, memberSizeOpt});
+            s.push({member.Name, member.Type, typeIndex, memberSizeOpt, std::nullopt});
         }
     }
 }
@@ -251,23 +253,10 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslSha
             return std::nullopt;
         }
         const auto& cbufferData = cbufferDataOpt.value().get();
+        auto rootTypeIndex = builder.AddType(cbufferData.Name, cbufferData.Size);
+        builder.AddRoot(cbufferData.Name, rootTypeIndex);
         for (const auto& cbVar : cbufferData.Variables) {
-            auto cbType = cbVar->Type;
-            size_t currentTypeSize = cbVar->Size;
-            const auto& members = cbType->Members;
-            auto rootTypeIndex = builder.AddType(cbType->Name, cbVar->Size);
-            builder.AddRoot(cbVar->Name, rootTypeIndex);
-            for (size_t i = 0; i < members.size(); ++i) {
-                const auto& member = members[i];
-                size_t memberSize = member.Type->GetSizeInBytes();
-                if (!member.Type->IsPrimitive() && memberSize == 0) {
-                    size_t nextOffset = (i + 1 < members.size()) ? members[i + 1].Type->Offset : currentTypeSize;
-                    if (nextOffset > member.Type->Offset) {
-                        memberSize = nextOffset - member.Type->Offset;
-                    }
-                }
-                _BuildType(builder, member.Name, member.Type, memberSize, rootTypeIndex);
-            }
+            _BuildType(builder, cbVar->Name, cbVar->Type, cbVar->Size, rootTypeIndex, cbVar->StartOffset);
         }
     }
     return builder.Build();
