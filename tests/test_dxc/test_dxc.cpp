@@ -99,7 +99,7 @@ TEST(DXC, BasicReflection) {
     ASSERT_TRUE(storage.has_value());
 
     Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
-    auto id = storage->GetVar("_Obj").GetVar("_Obj").GetVar("model").GetId();
+    auto id = storage->GetVar("_Obj").GetVar("model").GetId();
     storage->GetVar(id).SetValue(model);
 
     auto dst = storage->GetData().subspan(storage->GetVar(id).GetOffset(), storage->GetVar(id).GetType()->GetSizeInBytes());
@@ -120,7 +120,7 @@ TEST(DXC, CBufferStorageTests) {
 
     // 1. Test Global Variable (Struct)
     {
-        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
+        auto globalVar = storage.GetVar("_Global");
         ASSERT_TRUE(globalVar.IsValid());
 
         auto dirLightVar = globalVar.GetVar("dirLight");
@@ -140,7 +140,7 @@ TEST(DXC, CBufferStorageTests) {
 
     // 2. Test Camera Data (float3)
     {
-        auto cameraVar = storage.GetVar("_Camera").GetVar("_Camera");
+        auto cameraVar = storage.GetVar("_Camera");
         ASSERT_TRUE(cameraVar.IsValid());
 
         auto posWVar = cameraVar.GetVar("posW");
@@ -156,7 +156,7 @@ TEST(DXC, CBufferStorageTests) {
 
     // 3. Test Scalar (float)
     {
-        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
+        auto globalVar = storage.GetVar("_Global");
         auto timeVar = globalVar.GetVar("time");
         ASSERT_TRUE(timeVar.IsValid());
 
@@ -173,17 +173,14 @@ TEST(DXC, CBufferStorageTests) {
         auto invalidVar = storage.GetVar("_NonExistent");
         ASSERT_FALSE(invalidVar.IsValid());
 
-        auto globalVar = storage.GetVar("_Global").GetVar("_Global");
+        auto globalVar = storage.GetVar("_Global");
         auto invalidMember = globalVar.GetVar("nonExistentMember");
         ASSERT_FALSE(invalidMember.IsValid());
     }
 
     // 5. Test cbuffer namespace
     {
-        auto testCBuffer = storage.GetVar("TestCBuffer");
-        ASSERT_TRUE(testCBuffer.IsValid());
-
-        auto someValueVar = testCBuffer.GetVar("_SomeValue");
+        auto someValueVar = storage.GetVar("_SomeValue");
         ASSERT_TRUE(someValueVar.IsValid());
 
         Eigen::Vector4f val(1.0f, 2.0f, 3.0f, 4.0f);
@@ -226,7 +223,7 @@ float4 VSMain() : SV_Position {
         auto rootVar = storage.GetVar("_Root");
         ASSERT_TRUE(rootVar.IsValid());
 
-        auto memberVar = rootVar.GetVar("_Root").GetVar("SameName");
+        auto memberVar = rootVar.GetVar("SameName");
         ASSERT_TRUE(memberVar.IsValid());
 
         // Verify type size (float4 = 16 bytes)
@@ -235,13 +232,10 @@ float4 VSMain() : SV_Position {
 
     // 2. Test usage in cbuffer
     {
-        auto cbVar = storage.GetVar("_Inner");
-        ASSERT_TRUE(cbVar.IsValid());
-
-        auto innerVar = cbVar.GetVar("_Inner");
-        ASSERT_TRUE(innerVar.IsValid());
-
-        auto memberVar = innerVar.GetVar("SameName");
+        auto memberVar = storage.GetVar("_Inner");
         ASSERT_TRUE(memberVar.IsValid());
+
+        auto sameNameVar = memberVar.GetVar("SameName");
+        ASSERT_TRUE(sameNameVar.IsValid());
     }
 }

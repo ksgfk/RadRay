@@ -6,10 +6,11 @@
 #include <optional>
 #include <type_traits>
 
+#include <radray/logger.h>
 #include <radray/render/common.h>
 #include <radray/render/utility.h>
 #include <radray/render/dxc.h>
-#include <radray/logger.h>
+#include <radray/render/spvc.h>
 
 namespace radray::render {
 
@@ -86,10 +87,17 @@ public:
             string Name;
             size_t TypeIndex{Invalid};
         };
+        struct Export {
+            string Name;
+            size_t RootIndex{Invalid};
+            size_t RelativeOffset{0};
+            size_t TypeIndex{Invalid};
+        };
 
         size_t AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept;
-        void AddRoot(std::string_view name, size_t typeIndex) noexcept;
+        size_t AddRoot(std::string_view name, size_t typeIndex) noexcept;
+        void AddExport(std::string_view name, size_t rootIndex, size_t relativeOffset, size_t typeIndex) noexcept;
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
@@ -100,6 +108,7 @@ public:
 
         vector<Type> _types;
         vector<Root> _roots;
+        vector<Export> _exports;
         size_t _align{256};
     };
 
@@ -173,5 +182,7 @@ private:
 };
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslShaderDesc*> descs) noexcept;
+
+std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 
 };  // namespace radray::render
