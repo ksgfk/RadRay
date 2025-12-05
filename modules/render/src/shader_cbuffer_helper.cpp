@@ -25,6 +25,11 @@ ShaderCBufferView ShaderCBufferStorage::GetVar(std::string_view name) noexcept {
             return ShaderCBufferView{this, binding.GetVariable()->GetType(), binding.GetOffset(), binding.GetId()};
         }
     }
+    for (const auto& member : _exportedMembers) {
+        if (member.GetVariable()->GetName() == name) {
+            return ShaderCBufferView{this, member.GetVariable()->GetType(), member.GetOffset(), member.GetId()};
+        }
+    }
     return {};
 }
 
@@ -172,7 +177,8 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
             }
         }
     }
-    storage._bindings.reserve(_roots.size() + _exports.size());
+    storage._bindings.reserve(_roots.size());
+    storage._exportedMembers.reserve(_exports.size());
     size_t currentOffset = 0;
     vector<size_t> rootOffsets(_roots.size());
     for (size_t i = 0; i < _roots.size(); ++i) {
@@ -187,12 +193,13 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
         storage._bindings.emplace_back(varPtrs[varIndex], currentOffset);
         currentOffset += typeMap[repIndex]->_size;
     }
+    currentOffset = Align(currentOffset, _align);
     for (const auto& exportVar : _exports) {
         size_t repIndex = remapping[exportVar.TypeIndex];
         VariableView sig{exportVar.Name, repIndex};
         size_t varIndex = uniqueVariables.at(sig);
         size_t offset = rootOffsets[exportVar.RootIndex] + exportVar.RelativeOffset;
-        storage._bindings.emplace_back(varPtrs[varIndex], offset);
+        storage._exportedMembers.emplace_back(varPtrs[varIndex], offset);
     }
     storage._buffer.resize(currentOffset, (byte)0);
     BuildMember(storage);
@@ -207,6 +214,9 @@ void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) n
     stack<BuildMemberItem> s;
     for (auto& binding : storage._bindings) {
         s.push({&binding, binding._offset});
+    }
+    for (auto& member : storage._exportedMembers) {
+        s.push({&member, member._offset});
     }
     while (!s.empty()) {
         auto v = s.top();
@@ -231,9 +241,7 @@ static size_t _BuildType(ShaderCBufferStorage::Builder& builder, std::string_vie
     };
     stack<BuildItem> s;
     s.push({name, type, fromTypeIndex, typeSize, forceOffset});
-    
     size_t rootTypeIndex = ShaderCBufferStorage::Builder::Invalid;
-
     while (!s.empty()) {
         auto item = s.top();
         s.pop();
@@ -243,11 +251,9 @@ static size_t _BuildType(ShaderCBufferStorage::Builder& builder, std::string_vie
         size_t currentTypeSize = item.ForceSize.has_value() ? *item.ForceSize : item.Type->GetSizeInBytes();
         size_t currentOffset = item.ForceOffset.has_value() ? *item.ForceOffset : item.Type->Offset;
         auto typeIndex = builder.AddType(item.Type->Name, currentTypeSize);
-        
         if (rootTypeIndex == ShaderCBufferStorage::Builder::Invalid) {
             rootTypeIndex = typeIndex;
         }
-
         builder.AddMemberForType(item.FromTypeIndex, typeIndex, item.Name, currentOffset);
         const auto& members = item.Type->Members;
         for (size_t i = members.size(); i-- > 0;) {
@@ -281,18 +287,11 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslSha
             return std::nullopt;
         }
         const auto& cbufferData = cbufferDataOpt.value().get();
-
-        // Heuristic: If the cbuffer has exactly one variable and its name matches the buffer name,
-        // it is likely a ConstantBuffer<T> _Obj.
-        // In this case, we want to bind the root "_Obj" directly to the type T.
         bool isConstantBufferT = (cbufferData.Variables.size() == 1 && cbufferData.Variables[0]->Name == cbufferData.Name);
-
         if (isConstantBufferT) {
             const auto* var = cbufferData.Variables[0];
-            
             size_t rootTypeIndex = builder.AddType(var->Type->Name, cbufferData.Size);
             builder.AddRoot(cbufferData.Name, rootTypeIndex);
-            
             const auto& members = var->Type->Members;
             for (size_t i = members.size(); i-- > 0;) {
                 const auto& member = members[i];
@@ -303,20 +302,13 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslSha
                         memberSizeOpt = nextOffset - member.Type->Offset;
                     }
                 }
-                // Use _BuildType for members
                 _BuildType(builder, member.Name, member.Type, memberSizeOpt.value_or(member.Type->GetSizeInBytes()), rootTypeIndex, std::nullopt);
             }
         } else {
-            // Standard cbuffer.
-            // Root is the struct containing variables.
             auto rootTypeIndex = builder.AddType(cbufferData.Name, cbufferData.Size);
             auto rootIndex = builder.AddRoot(cbufferData.Name, rootTypeIndex);
-            
             for (const auto& cbVar : cbufferData.Variables) {
-                // Build the variable as a member of the root type
                 size_t varTypeIndex = _BuildType(builder, cbVar->Name, cbVar->Type, cbVar->Size, rootTypeIndex, cbVar->StartOffset);
-                
-                // Also export it so it can be accessed directly
                 builder.AddExport(cbVar->Name, rootIndex, cbVar->StartOffset, varTypeIndex);
             }
         }
@@ -333,24 +325,17 @@ static size_t _BuildTypeSpirv(ShaderCBufferStorage::Builder& builder, const Spir
     };
     stack<BuildItem> s;
     s.push({name, spirvTypeIndex, fromTypeIndex, offset});
-
     size_t rootTypeIndex = ShaderCBufferStorage::Builder::Invalid;
-
     while (!s.empty()) {
         auto item = s.top();
         s.pop();
-
         const auto* typeInfo = desc.GetType(item.SpirvTypeIndex);
         if (!typeInfo) continue;
-
         auto typeIndex = builder.AddType(typeInfo->Name, typeInfo->Size);
-        
         if (rootTypeIndex == ShaderCBufferStorage::Builder::Invalid) {
             rootTypeIndex = typeIndex;
         }
-
         builder.AddMemberForType(item.FromTypeIndex, typeIndex, item.Name, item.Offset);
-
         if (typeInfo->BaseType == SpirvBaseType::Struct) {
             for (size_t i = typeInfo->Members.size(); i-- > 0;) {
                 const auto& member = typeInfo->Members[i];
@@ -360,6 +345,7 @@ static size_t _BuildTypeSpirv(ShaderCBufferStorage::Builder& builder, const Spir
     }
     return rootTypeIndex;
 }
+
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
     if (desc.ResourceBindings.empty() && desc.PushConstants.empty()) {
         return std::nullopt;
@@ -369,70 +355,25 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& 
         if (binding.Kind != SpirvResourceKind::UniformBuffer) {
             continue;
         }
-
         const auto* typeInfo = desc.GetType(binding.TypeIndex);
         if (!typeInfo) {
             RADRAY_ERR_LOG("{} {}", "CreateCBufferStorage", "cannot find cbuffer type");
             return std::nullopt;
         }
-
         bool isWrapped = (typeInfo->Members.size() == 1 && typeInfo->Members[0].Name == binding.Name);
-        
         if (isWrapped) {
-             // Unwrap.
-             // The Block typeInfo should have 1 member.
-             const auto& innerMember = typeInfo->Members[0];
-             const auto* innerType = desc.GetType(innerMember.TypeIndex);
-             
-             auto rootTypeIndex = builder.AddType(innerType->Name, innerType->Size);
-             builder.AddRoot(binding.Name, rootTypeIndex);
-             
-             // Build members of T into rootTypeIndex
-             if (innerType->BaseType == SpirvBaseType::Struct) {
-                 for (const auto& m : innerType->Members) {
-                     _BuildTypeSpirv(builder, desc, m.Name, m.TypeIndex, rootTypeIndex, m.Offset);
-                 }
-             }
-        } else {
-             // Standard cbuffer.
-             auto rootTypeIndex = builder.AddType(binding.Name, typeInfo->Size);
-             auto rootIndex = builder.AddRoot(binding.Name, rootTypeIndex);
-             
-             if (typeInfo->BaseType == SpirvBaseType::Struct) {
-                for (const auto& member : typeInfo->Members) {
-                    size_t varTypeIndex = _BuildTypeSpirv(builder, desc, member.Name, member.TypeIndex, rootTypeIndex, member.Offset);
-                    builder.AddExport(member.Name, rootIndex, member.Offset, varTypeIndex);
+            const auto& innerMember = typeInfo->Members[0];
+            const auto* innerType = desc.GetType(innerMember.TypeIndex);
+            auto rootTypeIndex = builder.AddType(innerType->Name, innerType->Size);
+            builder.AddRoot(binding.Name, rootTypeIndex);
+            if (innerType->BaseType == SpirvBaseType::Struct) {
+                for (const auto& m : innerType->Members) {
+                    _BuildTypeSpirv(builder, desc, m.Name, m.TypeIndex, rootTypeIndex, m.Offset);
                 }
             }
-        }
-    }
-
-    for (const auto& pc : desc.PushConstants) {
-        const auto* typeInfo = desc.GetType(pc.TypeIndex);
-        if (!typeInfo) {
-            RADRAY_ERR_LOG("{} {}", "CreateCBufferStorage", "cannot find push constant type");
-            return std::nullopt;
-        }
-
-        bool isWrapped = (typeInfo->Members.size() == 1 && typeInfo->Members[0].Name == pc.Name);
-
-        if (isWrapped) {
-             // Unwrap.
-             const auto& innerMember = typeInfo->Members[0];
-             const auto* innerType = desc.GetType(innerMember.TypeIndex);
-             
-             auto rootTypeIndex = builder.AddType(innerType->Name, innerType->Size);
-             builder.AddRoot(pc.Name, rootTypeIndex);
-             
-             if (innerType->BaseType == SpirvBaseType::Struct) {
-                 for (const auto& m : innerType->Members) {
-                     _BuildTypeSpirv(builder, desc, m.Name, m.TypeIndex, rootTypeIndex, m.Offset);
-                 }
-             }
         } else {
-            auto rootTypeIndex = builder.AddType(pc.Name, typeInfo->Size);
-            auto rootIndex = builder.AddRoot(pc.Name, rootTypeIndex);
-            
+            auto rootTypeIndex = builder.AddType(binding.Name, typeInfo->Size);
+            auto rootIndex = builder.AddRoot(binding.Name, rootTypeIndex);
             if (typeInfo->BaseType == SpirvBaseType::Struct) {
                 for (const auto& member : typeInfo->Members) {
                     size_t varTypeIndex = _BuildTypeSpirv(builder, desc, member.Name, member.TypeIndex, rootTypeIndex, member.Offset);
@@ -441,7 +382,34 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& 
             }
         }
     }
-
+    for (const auto& pc : desc.PushConstants) {
+        const auto* typeInfo = desc.GetType(pc.TypeIndex);
+        if (!typeInfo) {
+            RADRAY_ERR_LOG("{} {}", "CreateCBufferStorage", "cannot find push constant type");
+            return std::nullopt;
+        }
+        bool isWrapped = (typeInfo->Members.size() == 1 && typeInfo->Members[0].Name == pc.Name);
+        if (isWrapped) {
+            const auto& innerMember = typeInfo->Members[0];
+            const auto* innerType = desc.GetType(innerMember.TypeIndex);
+            auto rootTypeIndex = builder.AddType(innerType->Name, innerType->Size);
+            builder.AddRoot(pc.Name, rootTypeIndex);
+            if (innerType->BaseType == SpirvBaseType::Struct) {
+                for (const auto& m : innerType->Members) {
+                    _BuildTypeSpirv(builder, desc, m.Name, m.TypeIndex, rootTypeIndex, m.Offset);
+                }
+            }
+        } else {
+            auto rootTypeIndex = builder.AddType(pc.Name, typeInfo->Size);
+            auto rootIndex = builder.AddRoot(pc.Name, rootTypeIndex);
+            if (typeInfo->BaseType == SpirvBaseType::Struct) {
+                for (const auto& member : typeInfo->Members) {
+                    size_t varTypeIndex = _BuildTypeSpirv(builder, desc, member.Name, member.TypeIndex, rootTypeIndex, member.Offset);
+                    builder.AddExport(member.Name, rootIndex, member.Offset, varTypeIndex);
+                }
+            }
+        }
+    }
     return builder.Build();
 }
 

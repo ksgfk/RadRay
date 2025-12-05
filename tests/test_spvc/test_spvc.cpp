@@ -246,3 +246,66 @@ float4 VSMain() : SV_Position {
         ASSERT_TRUE(sameNameVar.IsValid());
     }
 }
+
+TEST(SPVC, NamingCollision2) {
+    const char* COLLISION_SHADER = R"(
+struct SameName {
+    float4 SameName;
+};
+
+struct SameName2 {
+    float4 _Inner;
+};
+
+[[vk::binding(0)]] ConstantBuffer<SameName> _Root : register(b0);
+
+[[vk::binding(1)]] cbuffer _Inner : register(b1) {
+    SameName _Inner;
+};
+
+[[vk::binding(2)]] ConstantBuffer<SameName2> _Test : register(b2);
+
+float4 VSMain() : SV_Position {
+    return _Root.SameName + _Inner.SameName + _Test._Inner;
+}
+)";
+
+    auto dxc = CreateDxc();
+    auto vs = dxc->Compile(COLLISION_SHADER, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, true).value();
+    
+    SpirvBytecodeView bytecodes[] = {
+        {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
+    auto desc = ReflectSpirv(bytecodes);
+    ASSERT_TRUE(desc.has_value());
+
+    auto storageOpt = CreateCBufferStorage(*desc);
+    ASSERT_TRUE(storageOpt.has_value());
+    auto& storage = *storageOpt;
+
+    // 1. Test Struct with member of same name
+    {
+        auto rootVar = storage.GetVar("_Root");
+        ASSERT_TRUE(rootVar.IsValid());
+
+        auto memberVar = rootVar.GetVar("SameName");
+        ASSERT_TRUE(memberVar.IsValid());
+
+        // Verify type size (float4 = 16 bytes)
+        ASSERT_EQ(memberVar.GetType()->GetSizeInBytes(), 16);
+    }
+
+    // 2. Test usage in cbuffer
+    {
+        auto memberVar = storage.GetVar("_Inner");
+        ASSERT_TRUE(memberVar.IsValid());
+
+        auto sameNameVar = memberVar.GetVar("SameName");
+        ASSERT_TRUE(sameNameVar.IsValid());
+    }
+
+    {
+        auto a = storage.GetVar("_Inner");
+        auto b = storage.GetVar("_Test").GetVar("_Inner");
+        ASSERT_NE(a.GetId(), b.GetId());
+    }
+}

@@ -121,6 +121,7 @@ private:
     vector<ShaderCBufferType> _types;
     vector<ShaderCBufferVariable> _variables;
     vector<ShaderCBufferMember> _bindings;
+    vector<ShaderCBufferMember> _exportedMembers;
     vector<byte> _buffer;
     vector<const ShaderCBufferMember*> _idMap;
 
