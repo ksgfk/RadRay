@@ -11,5 +11,6 @@ imgui.ini
 build_debug/
 build_release/
 .idea/
+SDKs/
 
 cmake_test_discovery**

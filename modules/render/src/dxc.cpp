@@ -2,6 +2,45 @@
 
 namespace radray::render {
 
+DxcOutputReflectionRadray DeserializeDxcOutputReflectionRadray(std::span<const byte> data) noexcept {
+    const byte* ptr = data.data();
+    const byte* end = ptr + data.size();
+    auto readU32 = [&]() -> uint32_t {
+        if (ptr + sizeof(uint32_t) > end) return 0;
+        uint32_t v;
+        std::memcpy(&v, ptr, sizeof(uint32_t));
+        ptr += sizeof(uint32_t);
+        return v;
+    };
+    auto readU8 = [&]() -> uint8_t {
+        if (ptr + sizeof(uint8_t) > end) return 0;
+        uint8_t v;
+        std::memcpy(&v, ptr, sizeof(uint8_t));
+        ptr += sizeof(uint8_t);
+        return v;
+    };
+    DxcOutputReflectionRadray result;
+    uint32_t count = readU32();
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t nameLen = readU32();
+        string name;
+        if (ptr + nameLen <= end) {
+            name.assign(reinterpret_cast<const char*>(ptr), nameLen);
+            ptr += nameLen;
+        }
+        uint32_t bindPoint = readU32();
+        uint32_t space = readU32();
+        uint8_t isViewInHlsl = readU8();
+        DxcOutputReflectionRadrayCBufferExt cbExt{};
+        cbExt.Name = std::move(name);
+        cbExt.BindPoint = bindPoint;
+        cbExt.Space = space;
+        cbExt.IsViewInHlsl = isViewInHlsl != 0;
+        result.CBuffers.push_back(std::move(cbExt));
+    }
+    return result;
+}
+
 bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
     return Class == HlslShaderVariableClass::SCALAR ||
            Class == HlslShaderVariableClass::VECTOR ||
@@ -664,10 +703,15 @@ public:
         if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
             reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
         }
+        std::span<const byte> radrayReflData{};
+        if (compileResult->HasOutput(DXC_OUT_REFLECTION_RADRAY)) {
+            radrayReflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION_RADRAY);
+        }
         auto argsData = ParseArgs(args);
         return DxcOutput{
             .Data = {resultData.begin(), resultData.end()},
             .Refl = {reflData.begin(), reflData.end()},
+            .RadRayRefl = DeserializeDxcOutputReflectionRadray(radrayReflData),
             .Category = argsData.category};
     }
 

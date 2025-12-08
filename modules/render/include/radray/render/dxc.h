@@ -205,10 +205,26 @@ enum class HlslShaderVariableType {
     UINT64,
 };
 
+class DxcOutputReflectionRadrayCBufferExt {
+public:
+    string Name;
+    uint32_t BindPoint;
+    uint32_t Space;
+    bool IsViewInHlsl{false};
+};
+
+class DxcOutputReflectionRadray {
+public:
+    vector<DxcOutputReflectionRadrayCBufferExt> CBuffers;
+};
+
+DxcOutputReflectionRadray DeserializeDxcOutputReflectionRadray(std::span<const byte> data) noexcept;
+
 class DxcOutput {
 public:
     vector<byte> Data;
     vector<byte> Refl;
+    DxcOutputReflectionRadray RadRayRefl;
     ShaderBlobCategory Category;
 };
 
