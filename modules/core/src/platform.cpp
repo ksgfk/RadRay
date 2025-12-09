@@ -99,7 +99,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 }
 
 DynamicLibrary::~DynamicLibrary() noexcept {
-    if (_handle != nullptr) {
+    if (_handle != nullptr && _unload) {
         ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
         _handle = nullptr;
     }
@@ -109,9 +109,13 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
     if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", _Win32LastErrMessage());
+        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, _Win32LastErrMessage(), name_);
     }
     return std::bit_cast<void*>(symbol);
+}
+
+void DynamicLibrary::DontUnload() noexcept {
+    _unload = false;
 }
 
 string FormatLastErrorMessageWin32() noexcept {

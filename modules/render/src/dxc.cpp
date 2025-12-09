@@ -20,7 +20,7 @@ std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::spa
         return v;
     };
     uint32_t magic = readU32();
-    constexpr uint32_t Magic = 0x52524558; // RREX
+    constexpr uint32_t Magic = 0x52524558;  // RREX
     if (magic != Magic) {
         return std::nullopt;
     }
@@ -303,11 +303,12 @@ using Microsoft::WRL::ComPtr;
 // TODO:
 #endif
 
-#include <dxcapi.h>
+#include <dxc/dxcapi.h>
 
 #include <radray/errors.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
+#include <radray/platform.h>
 
 namespace radray::render {
 
@@ -995,23 +996,30 @@ public:
 };
 
 Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
+    DynamicLibrary dxcDll{"dxcompiler"};
+    dxcDll.DontUnload();
+    DynamicLibrary dxilDll{"dxil"};
+    dxilDll.DontUnload();
+    auto DxcCreateInstance2F = dxcDll.GetFunction<DxcCreateInstance2Proc>("DxcCreateInstance2");
+    auto DxcCreateInstanceF = dxcDll.GetFunction<DxcCreateInstanceProc>("DxcCreateInstance");
+
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
-    if (HRESULT hr = DxcCreateInstance2(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
+    if (HRESULT hr = DxcCreateInstance2F(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
         RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance2", hr);
         return nullptr;
     }
 #else
-    if (HRESULT hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
+    if (HRESULT hr = DxcCreateInstanceF(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
         RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
         return nullptr;
     }
 #endif
     ComPtr<IDxcUtils> utils;
-    if (HRESULT hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
+    if (HRESULT hr = DxcCreateInstanceF(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
         FAILED(hr)) {
         RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
         return nullptr;

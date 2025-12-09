@@ -51,12 +51,15 @@ public:
 
     constexpr bool IsValid() const noexcept { return _handle != nullptr; }
 
+    void DontUnload() noexcept;
+
     friend constexpr void swap(DynamicLibrary& l, DynamicLibrary& r) noexcept {
         std::swap(l._handle, r._handle);
     }
 
 private:
     void* _handle{nullptr};
+    bool _unload{true};
 };
 
 #if defined(RADRAY_PLATFORM_WINDOWS)
