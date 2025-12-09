@@ -2,7 +2,7 @@
 
 namespace radray::render {
 
-DxcOutputReflectionRadray DeserializeDxcOutputReflectionRadray(std::span<const byte> data) noexcept {
+std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::span<const byte> data) noexcept {
     const byte* ptr = data.data();
     const byte* end = ptr + data.size();
     auto readU32 = [&]() -> uint32_t {
@@ -19,7 +19,13 @@ DxcOutputReflectionRadray DeserializeDxcOutputReflectionRadray(std::span<const b
         ptr += sizeof(uint8_t);
         return v;
     };
-    DxcOutputReflectionRadray result;
+    uint32_t magic = readU32();
+    constexpr uint32_t Magic = 0x52524558; // RREX
+    if (magic != Magic) {
+        return std::nullopt;
+    }
+    DxcReflectionRadrayExt result;
+    result.TargetType = readU8();
     uint32_t count = readU32();
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t nameLen = readU32();
@@ -31,12 +37,11 @@ DxcOutputReflectionRadray DeserializeDxcOutputReflectionRadray(std::span<const b
         uint32_t bindPoint = readU32();
         uint32_t space = readU32();
         uint8_t isViewInHlsl = readU8();
-        DxcOutputReflectionRadrayCBufferExt cbExt{};
+        DxcReflectionRadrayExtCBuffer& cbExt = result.CBuffers.emplace_back();
         cbExt.Name = std::move(name);
         cbExt.BindPoint = bindPoint;
         cbExt.Space = space;
         cbExt.IsViewInHlsl = isViewInHlsl != 0;
-        result.CBuffers.push_back(std::move(cbExt));
     }
     return result;
 }
@@ -706,13 +711,21 @@ public:
         std::span<const byte> radrayReflData{};
         if (compileResult->HasOutput(DXC_OUT_REFLECTION_RADRAY)) {
             radrayReflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION_RADRAY);
+        } else {
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, "no radray ext reflection data");
+            return std::nullopt;
+        }
+        auto reflExtOpt = DeserializeDxcReflectionRadrayExt(radrayReflData);
+        if (!reflExtOpt.has_value()) {
+            RADRAY_ERR_LOG("{} {}", Errors::DXC, "no radray ext reflection data");
+            return std::nullopt;
         }
         auto argsData = ParseArgs(args);
         return DxcOutput{
-            .Data = {resultData.begin(), resultData.end()},
-            .Refl = {reflData.begin(), reflData.end()},
-            .RadRayRefl = DeserializeDxcOutputReflectionRadray(radrayReflData),
-            .Category = argsData.category};
+            {resultData.begin(), resultData.end()},
+            {reflData.begin(), reflData.end()},
+            std::move(reflExtOpt.value()),
+            argsData.category};
     }
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept {
