@@ -121,7 +121,7 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 #endif
 }
 
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const HlslShaderDesc*> descs) noexcept {
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const MergedHlslShaderDesc& desc) noexcept {
     constexpr uint32_t maxRootDWORD = 64;
     constexpr uint32_t maxRootBYTE = maxRootDWORD * 4;
 
@@ -131,7 +131,6 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(st
         RootConstant,
     };
 
-    MergedHlslShaderDesc desc = MergeHlslShaderDesc(descs);
     if (desc.BoundResources.empty()) {
         RootSignatureDescriptor empty{};
         return RootSignatureDescriptorContainer{empty};

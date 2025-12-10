@@ -31,6 +31,6 @@ private:
 
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
 
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(std::span<const HlslShaderDesc*> descs) noexcept;
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const MergedHlslShaderDesc& desc) noexcept;
 
 }  // namespace radray::render

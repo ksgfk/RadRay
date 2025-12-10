@@ -86,18 +86,12 @@ public:
         struct Root {
             string Name;
             size_t TypeIndex{Invalid};
-        };
-        struct Export {
-            string Name;
-            size_t RootIndex{Invalid};
-            size_t RelativeOffset{0};
-            size_t TypeIndex{Invalid};
+            size_t Offset{Invalid};
         };
 
         size_t AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept;
-        size_t AddRoot(std::string_view name, size_t typeIndex) noexcept;
-        void AddExport(std::string_view name, size_t rootIndex, size_t relativeOffset, size_t typeIndex) noexcept;
+        size_t AddRoot(std::string_view name, size_t typeIndex, size_t offset = Invalid) noexcept;
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
@@ -108,7 +102,6 @@ public:
 
         vector<Type> _types;
         vector<Root> _roots;
-        vector<Export> _exports;
         size_t _align{256};
     };
 
@@ -121,7 +114,6 @@ private:
     vector<ShaderCBufferType> _types;
     vector<ShaderCBufferVariable> _variables;
     vector<ShaderCBufferMember> _bindings;
-    vector<ShaderCBufferMember> _exportedMembers;
     vector<byte> _buffer;
     vector<const ShaderCBufferMember*> _idMap;
 
@@ -182,7 +174,7 @@ private:
     size_t _id{0};
 };
 
-std::optional<ShaderCBufferStorage> CreateCBufferStorage(std::span<const HlslShaderDesc*> descs) noexcept;
+std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept;
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 

@@ -1,5 +1,7 @@
 #include <radray/render/dxc.h>
 
+#include <radray/errors.h>
+
 namespace radray::render {
 
 std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::span<const byte> data) noexcept {
@@ -107,81 +109,6 @@ std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> HlslShaderDesc
     return _FindCBufferByName(ConstantBuffers, name);
 }
 
-bool operator==(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
-    if (lhs.Name != rhs.Name ||
-        lhs.Class != rhs.Class ||
-        lhs.Type != rhs.Type ||
-        lhs.Rows != rhs.Rows ||
-        lhs.Columns != rhs.Columns ||
-        lhs.Elements != rhs.Elements ||
-        lhs.Offset != rhs.Offset ||
-        lhs.Members.size() != rhs.Members.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < lhs.Members.size(); i++) {
-        const auto& lm = lhs.Members[i];
-        const auto& rm = rhs.Members[i];
-        if ((*lm.Type) != (*rm.Type)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool operator!=(const radray::render::HlslShaderTypeDesc& lhs, const radray::render::HlslShaderTypeDesc& rhs) noexcept {
-    return !(operator==(lhs, rhs));
-}
-
-bool operator==(const radray::render::HlslShaderVariableDesc& lhs, const radray::render::HlslShaderVariableDesc& rhs) noexcept {
-    if (lhs.Name != rhs.Name ||
-        lhs.StartOffset != rhs.StartOffset ||
-        lhs.Size != rhs.Size ||
-        lhs.StartTexture != rhs.StartTexture ||
-        lhs.TextureSize != rhs.TextureSize ||
-        lhs.StartSampler != rhs.StartSampler ||
-        lhs.SamplerSize != rhs.SamplerSize) {
-        return false;
-    }
-    return (*lhs.Type) == (*rhs.Type);
-}
-
-bool operator!=(const radray::render::HlslShaderVariableDesc& lhs, const radray::render::HlslShaderVariableDesc& rhs) noexcept {
-    return !(operator==(lhs, rhs));
-}
-
-bool operator==(const radray::render::HlslShaderBufferDesc& lhs, const radray::render::HlslShaderBufferDesc& rhs) noexcept {
-    if (lhs.Name != rhs.Name || lhs.Size != rhs.Size || lhs.Type != rhs.Type || lhs.Variables.size() != rhs.Variables.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < lhs.Variables.size(); i++) {
-        const auto& lv = lhs.Variables[i];
-        const auto& rv = rhs.Variables[i];
-        if ((*lv) != (*rv)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool operator!=(const radray::render::HlslShaderBufferDesc& lhs, const radray::render::HlslShaderBufferDesc& rhs) noexcept {
-    return !(operator==(lhs, rhs));
-}
-
-bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
-    return lhs.Name == rhs.Name &&
-           lhs.Type == rhs.Type &&
-           lhs.BindPoint == rhs.BindPoint &&
-           lhs.BindCount == rhs.BindCount &&
-           lhs.ReturnType == rhs.ReturnType &&
-           lhs.Dimension == rhs.Dimension &&
-           lhs.NumSamples == rhs.NumSamples &&
-           lhs.Space == rhs.Space;
-}
-
-bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
-    return !(operator==(lhs, rhs));
-}
-
 bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     switch (dim) {
         case HlslSRVDimension::BUFFER:
@@ -190,90 +117,165 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     }
 }
 
+bool HlslInputBindDesc::operator==(const HlslInputBindDesc& other) const noexcept {
+    return Name == other.Name &&
+           Type == other.Type &&
+           BindPoint == other.BindPoint &&
+           BindCount == other.BindCount &&
+           ReturnType == other.ReturnType &&
+           Dimension == other.Dimension &&
+           NumSamples == other.NumSamples &&
+           Space == other.Space;
+}
+
+bool HlslInputBindDesc::operator!=(const HlslInputBindDesc& other) const noexcept {
+    return !(*this == other);
+}
+
+bool HlslShaderBufferDesc::operator==(const HlslShaderBufferDesc& other) const noexcept {
+    return Name == other.Name &&
+           Type == other.Type &&
+           Size == other.Size &&
+           IsViewInHlsl == other.IsViewInHlsl;
+}
+
+bool HlslShaderBufferDesc::operator!=(const HlslShaderBufferDesc& other) const noexcept {
+    return !(*this == other);
+}
+
 std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> MergedHlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
     return _FindCBufferByName(ConstantBuffers, name);
 }
 
-MergedHlslShaderDesc MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
-    MergedHlslShaderDesc result{};
-    for (auto descPtr : descs) {
-        result.Stages |= descPtr->Stage;
-        for (const auto& cb : descPtr->ConstantBuffers) {
-            auto it = std::find_if(result.ConstantBuffers.begin(), result.ConstantBuffers.end(), [&](const HlslShaderBufferDesc& existing) {
-                return existing == cb;
-            });
-            if (it == result.ConstantBuffers.end()) {
-                result.ConstantBuffers.emplace_back(cb);
-            }
+static bool _IsTypeEqual(
+    size_t typeIdx1, const vector<HlslShaderTypeDesc>& types1,
+    size_t typeIdx2, const vector<HlslShaderTypeDesc>& types2) noexcept {
+    if (typeIdx1 == typeIdx2 && &types1 == &types2) return true;
+    if (typeIdx1 >= types1.size() || typeIdx2 >= types2.size()) return false;
+
+    const auto& t1 = types1[typeIdx1];
+    const auto& t2 = types2[typeIdx2];
+
+    if (t1.Class != t2.Class || t1.Type != t2.Type ||
+        t1.Rows != t2.Rows || t1.Columns != t2.Columns ||
+        t1.Elements != t2.Elements || t1.Offset != t2.Offset ||
+        t1.Members.size() != t2.Members.size()) {
+        return false;
+    }
+
+    if (t1.Name != t2.Name) return false;
+
+    for (size_t i = 0; i < t1.Members.size(); ++i) {
+        if (t1.Members[i].Name != t2.Members[i].Name) return false;
+        if (!_IsTypeEqual(t1.Members[i].Type, types1, t2.Members[i].Type, types2)) return false;
+    }
+    return true;
+}
+
+static bool _IsCBufferDeepEqual(
+    const HlslShaderBufferDesc& cb1, const HlslShaderDesc& ctx1,
+    const HlslShaderBufferDesc& cb2, const MergedHlslShaderDesc& ctx2) noexcept {
+    if (cb1 != cb2) return false;
+    if (cb1.Variables.size() != cb2.Variables.size()) return false;
+
+    for (size_t i = 0; i < cb1.Variables.size(); ++i) {
+        const auto& v1 = ctx1.Variables[cb1.Variables[i]];
+        const auto& v2 = ctx2.Variables[cb2.Variables[i]];
+
+        if (v1.Name != v2.Name || v1.StartOffset != v2.StartOffset ||
+            v1.Size != v2.Size || v1.uFlags != v2.uFlags ||
+            v1.StartTexture != v2.StartTexture || v1.TextureSize != v2.TextureSize ||
+            v1.StartSampler != v2.StartSampler || v1.SamplerSize != v2.SamplerSize) {
+            return false;
         }
-        for (const auto& br : descPtr->BoundResources) {
+
+        if (!_IsTypeEqual(v1.Type, ctx1.Types, v2.Type, ctx2.Types)) return false;
+    }
+    return true;
+}
+
+static size_t _CopyType(
+    size_t srcTypeIdx, const vector<HlslShaderTypeDesc>& srcTypes,
+    vector<HlslShaderTypeDesc>& dstTypes,
+    unordered_map<size_t, size_t>& typeMap) {
+    if (srcTypeIdx >= srcTypes.size()) return HlslShaderInvalidIndex;
+    if (auto it = typeMap.find(srcTypeIdx); it != typeMap.end()) return it->second;
+
+    const auto& srcType = srcTypes[srcTypeIdx];
+    size_t newIdx = dstTypes.size();
+    dstTypes.emplace_back(srcType);
+    typeMap[srcTypeIdx] = newIdx;
+
+    size_t memberCount = srcTypes[srcTypeIdx].Members.size();
+    for (size_t i = 0; i < memberCount; ++i) {
+        size_t srcMemberTypeIdx = srcTypes[srcTypeIdx].Members[i].Type;
+        size_t dstMemberTypeIdx = _CopyType(srcMemberTypeIdx, srcTypes, dstTypes, typeMap);
+        dstTypes[newIdx].Members[i].Type = dstMemberTypeIdx;
+    }
+    return newIdx;
+}
+
+static void _CopyCBuffer(
+    const HlslShaderBufferDesc& srcCb, const HlslShaderDesc& srcCtx,
+    MergedHlslShaderDesc& dstCtx) {
+    auto& dstCb = dstCtx.ConstantBuffers.emplace_back(srcCb);
+    dstCb.Variables.clear();
+
+    unordered_map<size_t, size_t> typeMap;
+    for (size_t varIdx : srcCb.Variables) {
+        const auto& srcVar = srcCtx.Variables[varIdx];
+        auto& dstVar = dstCtx.Variables.emplace_back(srcVar);
+        dstVar.Type = _CopyType(srcVar.Type, srcCtx.Types, dstCtx.Types, typeMap);
+        dstCb.Variables.push_back(dstCtx.Variables.size() - 1);
+    }
+}
+
+std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
+    MergedHlslShaderDesc result;
+    for (const auto* descPtr : descs) {
+        const auto& desc = *descPtr;
+        result.Stages |= desc.Stage;
+
+        for (const auto& res : desc.BoundResources) {
             auto it = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindWithStageDesc& existing) {
-                return existing == br;
+                return existing.BindPoint == res.BindPoint && existing.Space == res.Space && existing.Type == res.Type;
             });
-            if (it == result.BoundResources.end()) {
-                HlslInputBindWithStageDesc newBr{br};
-                newBr.Stages = descPtr->Stage;
-                result.BoundResources.emplace_back(newBr);
+
+            if (it != result.BoundResources.end()) {
+                if (!(res == *it)) {
+                    RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "resource mismatch during merge", res.Name);
+                    return std::nullopt;
+                }
+                it->Stages |= desc.Stage;
+
+                if (res.Type == HlslShaderInputType::CBUFFER) {
+                    auto cbDescOpt = desc.FindCBufferByName(res.Name);
+                    auto resCbDescOpt = result.FindCBufferByName(it->Name);
+
+                    if (cbDescOpt && resCbDescOpt) {
+                        if (!_IsCBufferDeepEqual(cbDescOpt.value(), desc, resCbDescOpt.value(), result)) {
+                            RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer mismatch during merge", res.Name);
+                            return std::nullopt;
+                        }
+                    } else if (cbDescOpt || resCbDescOpt) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer definition missing in one shader", res.Name);
+                        return std::nullopt;
+                    }
+                }
             } else {
-                it->Stages |= descPtr->Stage;
+                auto& newRes = result.BoundResources.emplace_back();
+                static_cast<HlslInputBindDesc&>(newRes) = res;
+                newRes.Stages = desc.Stage;
+
+                if (res.Type == HlslShaderInputType::CBUFFER) {
+                    auto cbDescOpt = desc.FindCBufferByName(res.Name);
+                    if (cbDescOpt) {
+                        _CopyCBuffer(cbDescOpt.value(), desc, result);
+                    }
+                }
             }
         }
     }
-
-    size_t varCount = 0;
-    for (const auto& cbuffer : result.ConstantBuffers) {
-        varCount += cbuffer.Variables.size();
-    }
-    result.Variables.resize(varCount);
-    size_t varBase = 0;
-    for (auto& cbuffer : result.ConstantBuffers) {
-        for (size_t i = 0; i < cbuffer.Variables.size(); i++) {
-            auto dstIndex = varBase + i;
-            auto cbVar = cbuffer.Variables[i];
-            result.Variables[dstIndex] = *cbVar;
-            cbuffer.Variables[i] = &result.Variables[dstIndex];
-        }
-        varBase += cbuffer.Variables.size();
-    }
-
-    unordered_map<const HlslShaderTypeDesc*, size_t> typeIndexCache;
-    vector<const HlslShaderTypeDesc*> orderedTypes;
-    std::function<void(const HlslShaderTypeDesc*)> visitType;
-    visitType = [&](const HlslShaderTypeDesc* type) {
-        auto [it, inserted] = typeIndexCache.emplace(type, orderedTypes.size());
-        if (!inserted) {
-            return;
-        }
-        orderedTypes.push_back(type);
-        for (const auto& member : type->Members) {
-            visitType(member.Type);
-        }
-    };
-    for (auto& cbuffer : result.ConstantBuffers) {
-        for (const auto* var : cbuffer.Variables) {
-            visitType(var->Type);
-        }
-    }
-    result.Types.resize(orderedTypes.size());
-    for (size_t i = 0; i < orderedTypes.size(); i++) {
-        result.Types[i] = *orderedTypes[i];
-    }
-    for (size_t i = 0; i < result.Types.size(); i++) {
-        auto& typeDesc = result.Types[i];
-        for (auto& member : typeDesc.Members) {
-            const auto* srcMemberType = member.Type;
-            auto it = typeIndexCache.find(srcMemberType);
-            RADRAY_ASSERT(it != typeIndexCache.end());
-            member.Type = &result.Types[it->second];
-        }
-    }
-    for (auto& var : result.Variables) {
-        const auto* srcType = var.Type;
-        auto it = typeIndexCache.find(srcType);
-        RADRAY_ASSERT(it != typeIndexCache.end());
-        var.Type = &result.Types[it->second];
-    }
-
     return result;
 }
 
@@ -305,7 +307,6 @@ using Microsoft::WRL::ComPtr;
 
 #include <dxc/dxcapi.h>
 
-#include <radray/errors.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/platform.h>
@@ -729,7 +730,10 @@ public:
             argsData.category};
     }
 
-    std::optional<HlslShaderDesc> GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept {
+    std::optional<HlslShaderDesc> GetShaderDescFromOutput(
+        ShaderStage stage,
+        std::span<const byte> refl,
+        const DxcReflectionRadrayExt& ext) noexcept {
         if (refl.empty()) {
             return std::nullopt;
         }
@@ -746,244 +750,139 @@ public:
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetDesc", hr);
             return std::nullopt;
         }
-        HlslShaderDesc desc{};
-        const auto d3dStage = static_cast<D3D12_SHADER_VERSION_TYPE>(D3D12_SHVER_GET_TYPE(shaderDesc.Version));
-        switch (d3dStage) {
-            case D3D12_SHVER_PIXEL_SHADER: desc.Stage = ShaderStage::Pixel; break;
-            case D3D12_SHVER_VERTEX_SHADER: desc.Stage = ShaderStage::Vertex; break;
-            case D3D12_SHVER_COMPUTE_SHADER: desc.Stage = ShaderStage::Compute; break;
-            default: {
-                RADRAY_ERR_LOG("{} {}", Errors::DXC, "unsupported shader stage");
-                return std::nullopt;
-            }
-        }
-        if (shaderDesc.Creator != nullptr) {
-            desc.Creator = shaderDesc.Creator;
-        }
-        desc.Version = shaderDesc.Version;
-        desc.Flags = shaderDesc.Flags;
-        D3D_FEATURE_LEVEL featureLevel{};
+
+        HlslShaderDesc result{};
+        result.Creator = shaderDesc.Creator;
+        result.Version = shaderDesc.Version;
+        result.Flags = shaderDesc.Flags;
+        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
         if (SUCCEEDED(sr->GetMinFeatureLevel(&featureLevel))) {
-            desc.MinFeatureLevel = _MapFeatureLevel(featureLevel);
+            result.MinFeatureLevel = _MapFeatureLevel(featureLevel);
         }
-        if (stage == ShaderStage::Compute) {
-            UINT groupX{}, groupY{}, groupZ{};
-            sr->GetThreadGroupSize(&groupX, &groupY, &groupZ);
-            desc.GroupSizeX = groupX;
-            desc.GroupSizeY = groupY;
-            desc.GroupSizeZ = groupZ;
-        }
-        constexpr size_t invalidTypeIndex = std::numeric_limits<size_t>::max();
-        unordered_map<ID3D12ShaderReflectionType*, size_t> typeIndexCache;
-        struct TypeMemberFix {
-            string Name;
-            size_t TypeIndex;
-        };
-        vector<vector<TypeMemberFix>> typeMemberFixups;
-        struct VariableTypeFix {
-            size_t variableIndex;
-            size_t typeIndex;
-        };
-        vector<VariableTypeFix> pendingVariableTypes;
-        vector<vector<size_t>> cbufferVariableIndices;
-        cbufferVariableIndices.reserve(shaderDesc.ConstantBuffers);
-        std::function<size_t(ID3D12ShaderReflectionType*)> getOrCreateTypeIndex = [&](ID3D12ShaderReflectionType* typeRefl) -> size_t {
-            if (typeRefl == nullptr) {
-                return invalidTypeIndex;
-            }
-            if (auto it = typeIndexCache.find(typeRefl); it != typeIndexCache.end()) {
-                return it->second;
+        result.Stage = stage;
+        sr->GetThreadGroupSize(&result.GroupSizeX, &result.GroupSizeY, &result.GroupSizeZ);
+
+        std::vector<ID3D12ShaderReflectionType*> typeCache;
+        std::function<size_t(ID3D12ShaderReflectionType*)> getTypeIndex =
+            [&](ID3D12ShaderReflectionType* type) -> size_t {
+            if (!type) return HlslShaderInvalidIndex;
+            for (size_t i = 0; i < typeCache.size(); i++) {
+                if (typeCache[i]->IsEqual(type) == S_OK) {
+                    return i;
+                }
             }
             D3D12_SHADER_TYPE_DESC typeDesc{};
-            if (HRESULT hr = typeRefl->GetDesc(&typeDesc);
-                FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionType", "GetDesc", hr);
-                return invalidTypeIndex;
+            if (FAILED(type->GetDesc(&typeDesc))) return HlslShaderInvalidIndex;
+            HlslShaderTypeDesc desc{};
+            desc.Name = typeDesc.Name;
+            desc.Class = _MapShaderVariableClass(typeDesc.Class);
+            desc.Type = _MapShaderVariableType(typeDesc.Type);
+            desc.Rows = typeDesc.Rows;
+            desc.Columns = typeDesc.Columns;
+            desc.Elements = typeDesc.Elements;
+            desc.Offset = typeDesc.Offset;
+            for (UINT i = 0; i < typeDesc.Members; i++) {
+                ID3D12ShaderReflectionType* memberType = type->GetMemberTypeByIndex(i);
+                LPCSTR memberName = type->GetMemberTypeName(i);
+                size_t memberTypeIdx = getTypeIndex(memberType);
+                auto& member = desc.Members.emplace_back();
+                member.Name = memberName;
+                member.Type = memberTypeIdx;
             }
-            size_t newIndex = desc.Types.size();
-            typeIndexCache.emplace(typeRefl, newIndex);
-            desc.Types.emplace_back();
-            typeMemberFixups.emplace_back();
-            auto& storedType = desc.Types.back();
-            if (typeDesc.Name != nullptr) {
-                storedType.Name = typeDesc.Name;
-            }
-            storedType.Class = _MapShaderVariableClass(typeDesc.Class);
-            storedType.Type = _MapShaderVariableType(typeDesc.Type);
-            storedType.Rows = typeDesc.Rows;
-            storedType.Columns = typeDesc.Columns;
-            storedType.Elements = typeDesc.Elements;
-            storedType.Offset = typeDesc.Offset;
-            size_t pendingMemberListIndex = typeMemberFixups.size() - 1;
-            typeMemberFixups[pendingMemberListIndex].reserve(typeDesc.Members);
-            for (UINT memberIdx = 0; memberIdx < typeDesc.Members; memberIdx++) {
-                auto* memberType = typeRefl->GetMemberTypeByIndex(memberIdx);
-                size_t memberTypeIndex = getOrCreateTypeIndex(memberType);
-                string memberName;
-                if (auto* name = typeRefl->GetMemberTypeName(memberIdx); name != nullptr) {
-                    memberName = name;
-                }
-                if (memberTypeIndex != invalidTypeIndex) {
-                    typeMemberFixups[pendingMemberListIndex].push_back(TypeMemberFix{
-                        .Name = std::move(memberName),
-                        .TypeIndex = memberTypeIndex,
-                    });
-                }
-            }
-            return newIndex;
+            result.Types.push_back(std::move(desc));
+            typeCache.push_back(type);
+            return result.Types.size() - 1;
         };
-        desc.ConstantBuffers.reserve(shaderDesc.ConstantBuffers);
+
         for (UINT i = 0; i < shaderDesc.ConstantBuffers; i++) {
-            auto* cb = sr->GetConstantBufferByIndex(i);
-            if (cb == nullptr) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetConstantBufferByIndex", i);
-                continue;
-            }
+            ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByIndex(i);
             D3D12_SHADER_BUFFER_DESC cbDesc{};
-            if (HRESULT hr = cb->GetDesc(&cbDesc);
-                FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionConstantBuffer", "GetDesc", hr);
-                continue;
-            }
-            HlslShaderBufferDesc bufferDesc{};
-            if (cbDesc.Name != nullptr) {
-                bufferDesc.Name = cbDesc.Name;
-            }
-            bufferDesc.Type = _MapCBufferType(cbDesc.Type);
-            bufferDesc.Size = cbDesc.Size;
-            bufferDesc.Flags = cbDesc.uFlags;
-            desc.ConstantBuffers.emplace_back(std::move(bufferDesc));
-            cbufferVariableIndices.emplace_back();
-            auto& bufferVariableIndices = cbufferVariableIndices.back();
-            bufferVariableIndices.reserve(cbDesc.Variables);
-            for (UINT j = 0; j < cbDesc.Variables; j++) {
-                auto* var = cb->GetVariableByIndex(j);
-                if (var == nullptr) {
-                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionConstantBuffer", "GetVariableByIndex", j);
-                    continue;
-                }
+            if (FAILED(cb->GetDesc(&cbDesc))) continue;
+            auto& bufDesc = result.ConstantBuffers.emplace_back();
+            bufDesc.Name = cbDesc.Name;
+            bufDesc.Type = _MapCBufferType(cbDesc.Type);
+            bufDesc.Size = cbDesc.Size;
+            bufDesc.Flags = cbDesc.uFlags;
+
+            for (UINT v = 0; v < cbDesc.Variables; v++) {
+                ID3D12ShaderReflectionVariable* var = cb->GetVariableByIndex(v);
                 D3D12_SHADER_VARIABLE_DESC varDesc{};
-                if (HRESULT hr = var->GetDesc(&varDesc);
-                    FAILED(hr)) {
-                    RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflectionVariable", "GetDesc", hr);
-                    continue;
-                }
-                HlslShaderVariableDesc hlslVar{};
-                if (varDesc.Name != nullptr) {
-                    hlslVar.Name = varDesc.Name;
-                }
-                hlslVar.StartOffset = varDesc.StartOffset;
-                hlslVar.Size = varDesc.Size;
-                hlslVar.uFlags = varDesc.uFlags;
-                hlslVar.StartTexture = varDesc.StartTexture;
-                hlslVar.TextureSize = varDesc.TextureSize;
-                hlslVar.StartSampler = varDesc.StartSampler;
-                hlslVar.SamplerSize = varDesc.SamplerSize;
-                size_t variableIndex = desc.Variables.size();
-                desc.Variables.emplace_back(std::move(hlslVar));
-                bufferVariableIndices.emplace_back(variableIndex);
-                auto* typeRefl = var->GetType();
-                size_t typeIndex = getOrCreateTypeIndex(typeRefl);
-                if (typeIndex != invalidTypeIndex) {
-                    pendingVariableTypes.push_back({variableIndex, typeIndex});
-                }
+                if (FAILED(var->GetDesc(&varDesc))) continue;
+                auto& vDesc = result.Variables.emplace_back();
+                vDesc.Name = varDesc.Name;
+                vDesc.StartOffset = varDesc.StartOffset;
+                vDesc.Size = varDesc.Size;
+                vDesc.uFlags = varDesc.uFlags;
+                vDesc.StartTexture = varDesc.StartTexture;
+                vDesc.TextureSize = varDesc.TextureSize;
+                vDesc.StartSampler = varDesc.StartSampler;
+                vDesc.SamplerSize = varDesc.SamplerSize;
+                vDesc.Type = getTypeIndex(var->GetType());
+                bufDesc.Variables.push_back(result.Variables.size() - 1);
             }
         }
-        desc.BoundResources.reserve(shaderDesc.BoundResources);
+
         for (UINT i = 0; i < shaderDesc.BoundResources; i++) {
             D3D12_SHADER_INPUT_BIND_DESC bindDesc{};
-            if (HRESULT hr = sr->GetResourceBindingDesc(i, &bindDesc);
-                FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetResourceBindingDesc", hr);
+            if (FAILED(sr->GetResourceBindingDesc(i, &bindDesc))) continue;
+            auto& ibDesc = result.BoundResources.emplace_back();
+            ibDesc.Name = bindDesc.Name;
+            ibDesc.Type = _MapInputType(bindDesc.Type);
+            ibDesc.BindPoint = bindDesc.BindPoint;
+            ibDesc.BindCount = bindDesc.BindCount;
+            ibDesc.Flags = bindDesc.uFlags;
+            ibDesc.ReturnType = _MapReturnType(bindDesc.ReturnType);
+            ibDesc.Dimension = _MapSRVDimension(bindDesc.Dimension);
+            ibDesc.NumSamples = bindDesc.NumSamples;
+            ibDesc.Space = bindDesc.Space;
+        }
+
+        for (auto& cb : result.ConstantBuffers) {
+            if (cb.Type != HlslCBufferType::CBUFFER) {
                 continue;
             }
-            HlslInputBindDesc bind{};
-            if (bindDesc.Name != nullptr) {
-                bind.Name = bindDesc.Name;
+            auto bindIt = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindDesc& bind) {
+                return bind.Name == cb.Name;
+            });
+            if (bindIt == result.BoundResources.end()) {
+                RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "failed to find bound resource for cbuffer", cb.Name);
+                return std::nullopt;
             }
-            bind.Type = _MapInputType(bindDesc.Type);
-            bind.BindPoint = bindDesc.BindPoint;
-            bind.BindCount = bindDesc.BindCount;
-            bind.Flags = bindDesc.uFlags;
-            bind.ReturnType = _MapReturnType(bindDesc.ReturnType);
-            bind.Dimension = _MapSRVDimension(bindDesc.Dimension);
-            bind.NumSamples = bindDesc.NumSamples;
-            bind.Space = bindDesc.Space;
-            desc.BoundResources.emplace_back(std::move(bind));
+            auto extIt = std::find_if(ext.CBuffers.begin(), ext.CBuffers.end(), [&](const DxcReflectionRadrayExtCBuffer& extCb) {
+                return extCb.BindPoint == bindIt->BindPoint && extCb.Space == bindIt->Space;
+            });
+            if (extIt == ext.CBuffers.end()) {
+                RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "no radray ext reflection data for cbuffer", cb.Name);
+                return std::nullopt;
+            }
+            cb.IsViewInHlsl = extIt->IsViewInHlsl;
         }
-        desc.InputParameters.reserve(shaderDesc.InputParameters);
+
         for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
             D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
-            if (HRESULT hr = sr->GetInputParameterDesc(i, &paramDesc);
-                FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetInputParameterDesc", hr);
-                continue;
-            }
-            HlslSignatureParameterDesc param{};
-            if (paramDesc.SemanticName != nullptr) {
-                param.SemanticName = paramDesc.SemanticName;
-            }
-            param.SemanticIndex = paramDesc.SemanticIndex;
-            param.Register = paramDesc.Register;
-            param.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
-            param.ComponentType = _MapComponentType(paramDesc.ComponentType);
-            param.Stream = paramDesc.Stream;
-            desc.InputParameters.emplace_back(std::move(param));
+            if (FAILED(sr->GetInputParameterDesc(i, &paramDesc))) continue;
+            auto& spDesc = result.InputParameters.emplace_back();
+            spDesc.SemanticName = paramDesc.SemanticName;
+            spDesc.SemanticIndex = paramDesc.SemanticIndex;
+            spDesc.Register = paramDesc.Register;
+            spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
+            spDesc.ComponentType = _MapComponentType(paramDesc.ComponentType);
+            spDesc.Stream = paramDesc.Stream;
         }
-        desc.OutputParameters.reserve(shaderDesc.OutputParameters);
+
         for (UINT i = 0; i < shaderDesc.OutputParameters; i++) {
             D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
-            if (HRESULT hr = sr->GetOutputParameterDesc(i, &paramDesc);
-                FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetOutputParameterDesc", hr);
-                continue;
-            }
-            HlslSignatureParameterDesc param{};
-            if (paramDesc.SemanticName != nullptr) {
-                param.SemanticName = paramDesc.SemanticName;
-            }
-            param.SemanticIndex = paramDesc.SemanticIndex;
-            param.Register = paramDesc.Register;
-            param.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
-            param.ComponentType = _MapComponentType(paramDesc.ComponentType);
-            param.Stream = paramDesc.Stream;
-            desc.OutputParameters.emplace_back(std::move(param));
+            if (FAILED(sr->GetOutputParameterDesc(i, &paramDesc))) continue;
+            auto& spDesc = result.OutputParameters.emplace_back();
+            spDesc.SemanticName = paramDesc.SemanticName;
+            spDesc.SemanticIndex = paramDesc.SemanticIndex;
+            spDesc.Register = paramDesc.Register;
+            spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
+            spDesc.ComponentType = _MapComponentType(paramDesc.ComponentType);
+            spDesc.Stream = paramDesc.Stream;
         }
-        for (auto& fix : pendingVariableTypes) {
-            if (fix.variableIndex < desc.Variables.size() && fix.typeIndex < desc.Types.size()) {
-                desc.Variables[fix.variableIndex].Type = &desc.Types[fix.typeIndex];
-            }
-        }
-        for (size_t i = 0; i < cbufferVariableIndices.size(); i++) {
-            auto& bufferDesc = desc.ConstantBuffers[i];
-            auto& indices = cbufferVariableIndices[i];
-            bufferDesc.Variables.reserve(indices.size());
-            for (auto varIndex : indices) {
-                if (varIndex < desc.Variables.size()) {
-                    bufferDesc.Variables.emplace_back(&desc.Variables[varIndex]);
-                }
-            }
-            std::sort(bufferDesc.Variables.begin(), bufferDesc.Variables.end(), [](const auto* a, const auto* b) noexcept {
-                return a->StartOffset < b->StartOffset;
-            });
-        }
-        for (size_t i = 0; i < desc.Types.size(); i++) {
-            auto& members = desc.Types[i].Members;
-            auto& fixups = typeMemberFixups[i];
-            members.reserve(fixups.size());
-            for (auto& fix : fixups) {
-                if (fix.TypeIndex < desc.Types.size()) {
-                    HlslShaderTypeMember member{};
-                    member.Name = fix.Name;
-                    member.Type = &desc.Types[fix.TypeIndex];
-                    members.emplace_back(std::move(member));
-                }
-            }
-            std::sort(members.begin(), members.end(), [](const auto& a, const auto& b) noexcept {
-                return a.Type->Offset < b.Type->Offset;
-            });
-        }
-        return desc;
+
+        return result;
     }
 
 public:
@@ -1114,8 +1013,11 @@ std::optional<DxcOutput> Dxc::Compile(
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
-std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(ShaderStage stage, std::span<const byte> refl) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(stage, refl);
+std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(
+    ShaderStage stage,
+    std::span<const byte> refl,
+    const DxcReflectionRadrayExt& ext) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(stage, refl, ext);
 }
 
 }  // namespace radray::render
