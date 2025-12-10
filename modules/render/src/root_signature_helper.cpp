@@ -96,16 +96,8 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
         RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12Device", "CreateRootSignature", hr);
         return nullptr;
     }
-    DynamicLibrary d3d12Dll{"d3d12"};
-    if (!d3d12Dll.IsValid()) {
-        return nullptr;
-    }
-    auto D3D12CreateVersionedRootSignatureDeserializer_F = d3d12Dll.GetFunction<PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER>("D3D12CreateVersionedRootSignatureDeserializer");
-    if (!D3D12CreateVersionedRootSignatureDeserializer_F) {
-        return nullptr;
-    }
     d3d12::ComPtr<ID3D12VersionedRootSignatureDeserializer> deserializer;
-    if (HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer_F(data.data(), data.size(), IID_PPV_ARGS(&deserializer));
+    if (HRESULT hr = ::D3D12CreateVersionedRootSignatureDeserializer(data.data(), data.size(), IID_PPV_ARGS(&deserializer));
         FAILED(hr)) {
         RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "D3D12CreateVersionedRootSignatureDeserializer", d3d12::GetErrorName(hr), hr);
         return nullptr;

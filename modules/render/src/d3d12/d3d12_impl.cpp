@@ -9,8 +9,6 @@
 
 namespace radray::render::d3d12 {
 
-static Nullable<EnvironmentD3D12Impl*> g_envD3D12;
-
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
@@ -2112,59 +2110,6 @@ bool SamplerD3D12::IsValid() const noexcept {
 
 void SamplerD3D12::Destroy() noexcept {
     _samplerView.Destroy();
-}
-
-EnvironmentD3D12Impl::EnvironmentD3D12Impl(DynamicLibrary dxgi, DynamicLibrary d3d12) noexcept
-    : _dxgi(std::move(dxgi)),
-      _d3d12(std::move(d3d12)) {}
-
-bool EnvironmentD3D12Impl::IsValid() const noexcept {
-    return _d3d12.IsValid() && _dxgi.IsValid();
-}
-
-void EnvironmentD3D12Impl::Destroy() noexcept {
-    _d3d12.Destroy();
-    _dxgi.Destroy();
-}
-
-void EnvironmentD3D12Impl::LoadSymbols() noexcept {
-    auto load = [](DynamicLibrary& lib, auto& func, const char* name) {
-        using FuncType = std::remove_reference_t<decltype(func)>;
-        func = lib.GetFunction<FuncType>(name);
-        if (!func) {
-            RADRAY_ABORT("{} {} {}", Errors::D3D12, "DynamicLibrary", "failed to load symbol");
-        }
-    };
-    load(_dxgi, CreateDXGIFactory2, "CreateDXGIFactory2");
-    load(_d3d12, D3D12GetDebugInterface, "D3D12GetDebugInterface");
-    load(_d3d12, D3D12CreateDevice, "D3D12CreateDevice");
-    load(_d3d12, D3D12SerializeRootSignature, "D3D12SerializeRootSignature");
-    load(_d3d12, D3D12SerializeVersionedRootSignature, "D3D12SerializeVersionedRootSignature");
-    load(_d3d12, D3D12CreateVersionedRootSignatureDeserializer, "D3D12CreateVersionedRootSignatureDeserializer");
-}
-
-Nullable<unique_ptr<EnvironmentD3D12Impl>> CreateD3D12EnvironmentImpl() noexcept {
-    unique_ptr<EnvironmentD3D12Impl> env;
-    {
-        DynamicLibrary dxgiLib{"dxgi"};
-        if (!dxgiLib.IsValid()) {
-            return nullptr;
-        }
-        DynamicLibrary d3d12Lib{"d3d12"};
-        if (!d3d12Lib.IsValid()) {
-            return nullptr;
-        }
-        env = make_unique<EnvironmentD3D12Impl>(std::move(dxgiLib), std::move(d3d12Lib));
-    }
-    env->LoadSymbols();
-    g_envD3D12 = env.get();
-    return env;
-}
-
-void DestroyD3D12Environment(unique_ptr<EnvironmentD3D12> env) noexcept {
-    RADRAY_ASSERT(g_envD3D12.Get() == env.get());
-    g_envD3D12 = nullptr;
-    env.reset();
 }
 
 }  // namespace radray::render::d3d12

@@ -960,19 +960,7 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
 };
 
-class EnvironmentD3D12 : public RenderBase {
-public:
-    EnvironmentD3D12() noexcept = default;
-    virtual ~EnvironmentD3D12() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
-};
-
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
-
-Nullable<unique_ptr<EnvironmentD3D12>> CreateD3D12Environment() noexcept;
-
-void DestroyD3D12Environment(unique_ptr<EnvironmentD3D12> env) noexcept;
 
 Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDescriptor& desc);
 

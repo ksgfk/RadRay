@@ -571,25 +571,25 @@ public:
         std::string_view ErrMsg;
     };
 
-#ifdef RADRAY_ENABLE_MIMALLOC
     DxcImpl(
+        DynamicLibrary dxcLib,
+        DynamicLibrary dxilLib,
+#ifdef RADRAY_ENABLE_MIMALLOC
         ComPtr<MiMallocAdapter> mi,
+#endif
         ComPtr<IDxcCompiler3> dxc,
         ComPtr<IDxcUtils> utils,
         ComPtr<IDxcIncludeHandler> inc) noexcept
-        : _mi(std::move(mi)),
+        : _dxcLib(std::move(dxcLib)),
+          _dxilLib(std::move(dxilLib)),
+#ifdef RADRAY_ENABLE_MIMALLOC
+          _mi(std::move(mi)),
+#endif
           _dxc(std::move(dxc)),
           _utils(std::move(utils)),
-          _inc(std::move(inc)) {}
-#else
-    DxcImpl(
-        ComPtr<IDxcCompiler3> dxc,
-        ComPtr<IDxcUtils> utils,
-        ComPtr<IDxcIncludeHandler> inc) noexcept
-        : _dxc(std::move(dxc)),
-          _utils(std::move(utils)),
-          _inc(std::move(inc)) {}
-#endif
+          _inc(std::move(inc)) {
+    }
+
     ~DxcImpl() noexcept override = default;
 
     ArgsData ParseArgs(std::span<std::string_view> args) noexcept {
@@ -987,6 +987,8 @@ public:
     }
 
 public:
+    DynamicLibrary _dxcLib{};
+    DynamicLibrary _dxilLib{};
 #ifdef RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> _mi;
 #endif
@@ -1029,6 +1031,8 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
         return nullptr;
     }
     auto implPtr = make_unique<DxcImpl>(
+        std::move(dxcDll),
+        std::move(dxilDll),
 #ifdef RADRAY_ENABLE_MIMALLOC
         std::move(mi),
 #endif

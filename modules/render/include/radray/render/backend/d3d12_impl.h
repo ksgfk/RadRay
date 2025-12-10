@@ -611,35 +611,7 @@ public:
     CpuDescriptorHeapViewRAII _samplerView;
 };
 
-using PFN_CreateDXGIFactory2 = HRESULT(WINAPI*)(UINT Flags, REFIID riid, _COM_Outptr_ void** ppFactory);
-
-class EnvironmentD3D12Impl : public EnvironmentD3D12 {
-public:
-    EnvironmentD3D12Impl(DynamicLibrary dxgi, DynamicLibrary d3d12) noexcept;
-    EnvironmentD3D12Impl() noexcept = default;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void LoadSymbols() noexcept;
-
-public:
-    DynamicLibrary _dxgi;
-    DynamicLibrary _d3d12;
-    PFN_CreateDXGIFactory2 CreateDXGIFactory2;
-    PFN_D3D12_GET_DEBUG_INTERFACE D3D12GetDebugInterface;
-    PFN_D3D12_CREATE_DEVICE D3D12CreateDevice;
-    PFN_D3D12_SERIALIZE_ROOT_SIGNATURE D3D12SerializeRootSignature;
-    PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE D3D12SerializeVersionedRootSignature;
-    PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER D3D12CreateVersionedRootSignatureDeserializer;
-};
-
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
-
-Nullable<unique_ptr<EnvironmentD3D12Impl>> CreateD3D12EnvironmentImpl() noexcept;
-
-void DestroyD3D12Environment(unique_ptr<EnvironmentD3D12> env) noexcept;
 
 constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
