@@ -1374,6 +1374,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
 }
 
 void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept {
+    RADRAY_ASSERT(g_vkInstance.Get() == instance.get());
     g_vkInstance = nullptr;
     instance.reset();
     volkFinalize();

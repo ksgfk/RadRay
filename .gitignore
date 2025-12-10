@@ -12,5 +12,6 @@ build_debug/
 build_release/
 .idea/
 SDKs/
+third_party/
 
 cmake_test_discovery**

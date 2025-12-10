@@ -46,7 +46,7 @@ option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADRAY_ENABLE_ZLIB AND RADRAY_ENABLE_LIBPNG" OFF)
 
-# ====== Load SDK manifest ======
+# ======== Load manifest ========
 if (WIN32)
     set(RADRAY_SDKVAR_PLATFORM "windows")
 elseif (APPLE)
@@ -56,15 +56,15 @@ elseif (UNIX)
 else()
     set(RADRAY_SDKVAR_PLATFORM "unknown")
 endif()
-if (NOT EXISTS "${CMAKE_SOURCE_DIR}/sdk_manifest.json")
-    message(FATAL_ERROR "SDK manifest file not found: ${CMAKE_SOURCE_DIR}/sdk_manifest.json")
+if (NOT EXISTS "${CMAKE_SOURCE_DIR}/project_manifest.json")
+    message(FATAL_ERROR "manifest file not found: ${CMAKE_SOURCE_DIR}/project_manifest.json")
 endif()
-file(READ "${CMAKE_SOURCE_DIR}/sdk_manifest.json" RADRAY_MANIFEST_CONTENT)
-string(JSON RADRAY_MANIFEST_ARTIFACTS GET "${RADRAY_MANIFEST_CONTENT}" artifacts)
-string(JSON RADRAY_MANIFEST_ARTIFACTS_LENGTH LENGTH "${RADRAY_MANIFEST_CONTENT}" artifacts)
+file(READ "${CMAKE_SOURCE_DIR}/project_manifest.json" RADRAY_MANIFEST_CONTENT)
+string(JSON RADRAY_MANIFEST_ARTIFACTS GET "${RADRAY_MANIFEST_CONTENT}" Artifacts)
+string(JSON RADRAY_MANIFEST_ARTIFACTS_LENGTH LENGTH "${RADRAY_MANIFEST_CONTENT}" Artifacts)
 math(EXPR RADRAY_MANIFEST_ARTIFACTS_LAST "${RADRAY_MANIFEST_ARTIFACTS_LENGTH} - 1")
 foreach(_INDEX RANGE ${RADRAY_MANIFEST_ARTIFACTS_LAST})
-    string(JSON _ARTIFACT GET "${RADRAY_MANIFEST_CONTENT}" artifacts ${_INDEX})
+    string(JSON _ARTIFACT GET "${RADRAY_MANIFEST_CONTENT}" Artifacts ${_INDEX})
     string(JSON _NAME GET "${_ARTIFACT}" Name)
     string(JSON _PLATFORM GET "${_ARTIFACT}" Platform)
     string(FIND "${_PLATFORM}" "${RADRAY_SDKVAR_PLATFORM}" _PLATFORM_MATCH)
@@ -79,83 +79,54 @@ foreach(_INDEX RANGE ${RADRAY_MANIFEST_ARTIFACTS_LAST})
 endforeach()
 # ===============================
 
+set(RADRAY_THIRDPARTY_ROOT "${CMAKE_SOURCE_DIR}/third_party")
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 include(FetchContent)
+
 set(FETCHCONTENT_UPDATES_DISCONNECTED OFF CACHE BOOL "" FORCE)
 set(FMT_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 12.1.0
-    OVERRIDE_FIND_PACKAGE)
-FetchContent_MakeAvailable(fmt)
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/fmt)
 radray_optimize_flags_library(fmt)
 radray_set_build_path(fmt)
+
 set(SPDLOG_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
 set(SPDLOG_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
 set(SPDLOG_NO_THREAD_ID ON CACHE BOOL "" FORCE)
 set(SPDLOG_DISABLE_DEFAULT_LOGGER ON CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.16.0)
-FetchContent_MakeAvailable(spdlog)
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/spdlog)
 radray_optimize_flags_library(spdlog)
 radray_set_build_path(spdlog)
+
 set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    eigen
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG 5.0)
-FetchContent_MakeAvailable(eigen)
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/eigen)
+
 set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
 set(DISPATCH ON CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    xxHash
-    GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
-    GIT_TAG v0.8.3
-    SOURCE_SUBDIR cmake_unofficial)
-FetchContent_MakeAvailable(xxHash)
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/xxHash/build/cmake)
 radray_optimize_flags_library(xxhash)
 radray_set_build_path(xxhash)
-FetchContent_Declare(
-    sigslot
-    GIT_REPOSITORY https://github.com/palacaze/sigslot
-    GIT_TAG v1.2.3)
-FetchContent_MakeAvailable(sigslot)
-if (RADRAY_BUILD_WINDOW)
-    # set(GLFW_STANDALONE OFF CACHE BOOL "" FORCE)
-    # set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    # set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    # set(GLFW_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
-    # FetchContent_Declare(
-    #     glfw
-    #     GIT_REPOSITORY https://github.com/glfw/glfw.git
-    #     GIT_TAG 3.4)
-    # FetchContent_MakeAvailable(glfw)
-    # radray_set_build_path(glfw)
-endif()
+
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
+
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(MI_XMALLOC ON CACHE BOOL "" FORCE)
     set(MI_OPT_ARCH ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        mimalloc
-        GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
-        GIT_TAG v2.2.4)
-    FetchContent_MakeAvailable(mimalloc)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/mimalloc)
     radray_optimize_flags_library(mimalloc-static)
     radray_set_build_path(mimalloc-static)
 endif()
+
 if (RADRAY_ENABLE_DXC)
     if (NOT DEFINED RADRAY_SDK_dxc OR NOT DEFINED RADRAY_SDK_dxc_VERSION)
-        message(FATAL_ERROR "Failed to load dxc info from sdk_manifest.json")
+        message(FATAL_ERROR "Failed to load dxc info from sdk_project_manifest.json")
     endif()
     set(_DXC_ROOT "${CMAKE_SOURCE_DIR}/SDKs/dxc/v${RADRAY_SDK_dxc_VERSION}/extracted")
     set(_DXC_INCLUDE_DIR "${_DXC_ROOT}/include")
@@ -171,38 +142,43 @@ if (RADRAY_ENABLE_DXC)
     endif()
     set(RADRAY_DXC_RUNTIME_DLLS "${RADRAY_DXC_RUNTIME_DLLS}" CACHE INTERNAL "DXC runtime binaries")
 endif()
+
 if (RADRAY_ENABLE_ZLIB)
     set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
     set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
     set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        zlib
-        GIT_REPOSITORY https://github.com/madler/zlib.git
-        GIT_TAG v1.3.1
-        OVERRIDE_FIND_PACKAGE
-        GIT_REMOTE_UPDATE_STRATEGY REBASE_CHECKOUT
-        PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH_FILE="${CMAKE_SOURCE_DIR}/cmake/no-zlib-shared.patch" -P "${CMAKE_SOURCE_DIR}/cmake/apply_patch.cmake")
-    FetchContent_MakeAvailable(zlib)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/zlib)
     radray_optimize_flags_library(zlibstatic)
     radray_set_build_path(zlibstatic)
     if (TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
         add_library(ZLIB::ZLIB ALIAS zlibstatic)
     endif()
+    set(ZLIB_FOUND TRUE CACHE BOOL "ZLIB found" FORCE)
+    set(ZLIB_INCLUDE_DIR "${RADRAY_THIRDPARTY_ROOT}/zlib" CACHE PATH "ZLIB include dir" FORCE)
+    set(ZLIB_LIBRARY zlibstatic CACHE FILEPATH "ZLIB library" FORCE)
+    set(ZLIB_LIBRARIES zlibstatic CACHE FILEPATH "ZLIB libraries" FORCE)
 endif()
+
 if (RADRAY_ENABLE_LIBPNG)
     set(PNG_TESTS OFF CACHE BOOL "" FORCE)
     set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
     set(PNG_SHARED OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        libpng
-        GIT_REPOSITORY https://github.com/pnggroup/libpng.git
-        GIT_TAG v1.6.50
-        OVERRIDE_FIND_PACKAGE)
-    FetchContent_MakeAvailable(libpng)
+    set(ZLIB_ROOT "${RADRAY_THIRDPARTY_ROOT}/zlib" CACHE PATH "ZLIB root" FORCE)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/libpng)
     radray_optimize_flags_library(png_static)
     radray_set_build_path(png_static)
+    if (TARGET png_static AND NOT TARGET PNG::PNG)
+        add_library(PNG::PNG ALIAS png_static)
+    endif()
+    set(PNG_FOUND TRUE CACHE BOOL "PNG found" FORCE)
+    set(PNG_INCLUDE_DIR "${RADRAY_THIRDPARTY_ROOT}/libpng" "${CMAKE_BINARY_DIR}/third_party/libpng" CACHE PATH "PNG include dir" FORCE)
+    set(PNG_INCLUDE_DIRS "${PNG_INCLUDE_DIR}" CACHE PATH "PNG include dirs" FORCE)
+    set(PNG_LIBRARY png_static CACHE FILEPATH "PNG library" FORCE)
+    set(PNG_LIBRARIES png_static CACHE FILEPATH "PNG libraries" FORCE)
+    set(PNG_PNG_INCLUDE_DIR "${PNG_INCLUDE_DIR}" CACHE PATH "PNG include dir" FORCE)
 endif()
+
 if (RADRAY_ENABLE_FREETYPE)
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
@@ -210,51 +186,29 @@ if (RADRAY_ENABLE_FREETYPE)
     set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
     set(FT_REQUIRE_ZLIB ON CACHE BOOL "" FORCE)
     set(FT_REQUIRE_PNG ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        freetype
-        GIT_REPOSITORY https://github.com/freetype/freetype.git
-        GIT_TAG VER-2-14-1)
-    FetchContent_MakeAvailable(freetype)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/freetype)
     radray_optimize_flags_library(freetype)
     radray_set_build_path(freetype)
 endif()
+
 if (RADRAY_ENABLE_VULKAN)
     set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        Vulkan-Headers
-        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
-        GIT_TAG v1.4.321)
-    FetchContent_MakeAvailable(Vulkan-Headers)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/Vulkan-Headers)
     if (DEFINED vulkan-headers_SOURCE_DIR)
         set(VULKAN_HEADERS_INSTALL_DIR "${vulkan-headers_SOURCE_DIR}" CACHE PATH "" FORCE)
     endif()
     set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)
     set(VOLK_HEADERS_ONLY ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        volk
-        GIT_REPOSITORY https://github.com/zeux/volk.git
-        GIT_TAG 1.4.304)
-    FetchContent_MakeAvailable(volk)
-    FetchContent_Declare(
-        VulkanMemoryAllocator
-        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG v3.3.0)
-    FetchContent_MakeAvailable(VulkanMemoryAllocator)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/volk)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/VulkanMemoryAllocator)
 endif()
+
 if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
     set(DXHEADERS_BUILD_TEST OFF CACHE BOOL "" FORCE)
     set(DXHEADERS_INSTALL OFF CACHE BOOL "" FORCE)
     set(DXHEADERS_BUILD_GOOGLE_TEST OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        DirectX-Headers
-        GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
-        GIT_TAG v1.618.2)
-    FetchContent_MakeAvailable(DirectX-Headers)
-    FetchContent_Declare(
-        D3D12MemoryAllocator
-        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
-        GIT_TAG v3.0.1)
-    FetchContent_MakeAvailable(D3D12MemoryAllocator)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/DirectX-Headers)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/D3D12MemoryAllocator)
     target_compile_options(D3D12MemoryAllocator PRIVATE 
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-variable>
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-switch>
@@ -263,6 +217,7 @@ if (RADRAY_ENABLE_DXC OR RADRAY_ENABLE_D3D12)
     radray_optimize_flags_library(D3D12MemoryAllocator)
     radray_set_build_path(D3D12MemoryAllocator)
 endif()
+
 if (RADRAY_ENABLE_SPVCROSS)
     set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
@@ -270,11 +225,7 @@ if (RADRAY_ENABLE_SPVCROSS)
     set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        SPIRV-Cross
-        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
-        GIT_TAG vulkan-sdk-1.4.321.0)
-    FetchContent_MakeAvailable(SPIRV-Cross)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/SPIRV-Cross)
     radray_optimize_flags_library(spirv-cross-core)
     radray_set_build_path(spirv-cross-core)
     radray_optimize_flags_library(spirv-cross-glsl)
@@ -284,15 +235,12 @@ if (RADRAY_ENABLE_SPVCROSS)
     radray_optimize_flags_library(spirv-cross-util)
     radray_set_build_path(spirv-cross-util)
 endif()
+
 if (RADRAY_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.17.0)
-    FetchContent_MakeAvailable(googletest)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/googletest)
     radray_optimize_flags_library(gtest_main)
     radray_set_build_path(gtest_main)
     if (RADRAY_BUILD_BENCHMARKS)
@@ -302,11 +250,7 @@ if (RADRAY_BUILD_TESTS)
         set(BENCHMARK_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
         set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
         set(BENCHMARK_USE_BUNDLED_GTEST OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(
-            googlebenchmark
-            GIT_REPOSITORY https://github.com/google/benchmark.git
-            GIT_TAG v1.9.4)
-        FetchContent_MakeAvailable(googlebenchmark)
+        add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/googlebenchmark)
         radray_optimize_flags_library(benchmark)
         radray_set_build_path(benchmark)
     endif()

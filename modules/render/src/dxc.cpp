@@ -997,9 +997,7 @@ public:
 
 Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
     DynamicLibrary dxcDll{"dxcompiler"};
-    dxcDll.DontUnload();
     DynamicLibrary dxilDll{"dxil"};
-    dxilDll.DontUnload();
     auto DxcCreateInstance2F = dxcDll.GetFunction<DxcCreateInstance2Proc>("DxcCreateInstance2");
     auto DxcCreateInstanceF = dxcDll.GetFunction<DxcCreateInstanceProc>("DxcCreateInstance");
 

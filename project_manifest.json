@@ -1,0 +1,118 @@
+{
+    "Artifacts": [
+        {
+            "Name": "dxc",
+            "Version": "1.8.2505.1",
+            "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-windows-x64.zip",
+            "Hash": "4ce002b83542a734712e957e13a01386a1ba4b4aaf15d25130b780f5731b91d9",
+            "EnforceHash": true,
+            "Platform": [
+                "windows"
+            ]
+        }
+    ],
+    "ThirdParties": [
+        {
+            "Name": "fmt",
+            "Type": "git",
+            "Git": "https://github.com/fmtlib/fmt.git",
+            "Tag": "12.1.0"
+        },
+        {
+            "Name": "spdlog",
+            "Type": "git",
+            "Git": "https://github.com/gabime/spdlog.git",
+            "Tag": "v1.16.0"
+        },
+        {
+            "Name": "eigen",
+            "Type": "git",
+            "Git": "https://gitlab.com/libeigen/eigen.git",
+            "Branch": "5.0"
+        },
+        {
+            "Name": "xxHash",
+            "Type": "git",
+            "Git": "https://github.com/Cyan4973/xxHash.git"
+        },
+        {
+            "Name": "sigslot",
+            "Type": "git",
+            "Git": "https://github.com/palacaze/sigslot.git",
+            "Tag": "v1.2.3"
+        },
+        {
+            "Name": "mimalloc",
+            "Type": "git",
+            "Git": "https://github.com/microsoft/mimalloc.git",
+            "Tag": "v2.2.4"
+        },
+        {
+            "Name": "zlib",
+            "Type": "git",
+            "Git": "https://github.com/madler/zlib.git",
+            "Tag": "v1.3.1",
+            "Patch": "cmake/no-zlib-shared.patch"
+        },
+        {
+            "Name": "libpng",
+            "Type": "git",
+            "Git": "https://github.com/pnggroup/libpng.git",
+            "Tag": "v1.6.50"
+        },
+        {
+            "Name": "freetype",
+            "Type": "git",
+            "Git": "https://github.com/freetype/freetype.git",
+            "Tag": "VER-2-14-1"
+        },
+        {
+            "Name": "Vulkan-Headers",
+            "Type": "git",
+            "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+            "Tag": "v1.4.321"
+        },
+        {
+            "Name": "volk",
+            "Type": "git",
+            "Git": "https://github.com/zeux/volk.git",
+            "Tag": "vulkan-sdk-1.4.321.0"
+        },
+        {
+            "Name": "VulkanMemoryAllocator",
+            "Type": "git",
+            "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git",
+            "Tag": "v3.3.0"
+        },
+        {
+            "Name": "SPIRV-Cross",
+            "Type": "git",
+            "Git": "https://github.com/KhronosGroup/SPIRV-Cross.git",
+            "Tag": "vulkan-sdk-1.4.321.0"
+        },
+        {
+            "Name": "DirectX-Headers",
+            "Type": "git",
+            "Git": "https://github.com/microsoft/DirectX-Headers.git",
+            "Tag": "v1.618.2"
+        },
+        {
+            "Name": "D3D12MemoryAllocator",
+            "Type": "git",
+            "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
+            "Tag": "v3.0.1"
+        },
+        {
+            "Name": "googletest",
+            "Type": "git",
+            "Git": "https://github.com/google/googletest.git",
+            "Tag": "v1.17.0"
+        },
+        {
+            "Name": "googlebenchmark",
+            "Type": "git",
+            "Git": "https://github.com/google/benchmark.git",
+            "Tag": "v1.9.4"
+        }
+    ]
+}

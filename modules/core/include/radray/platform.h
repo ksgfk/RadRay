@@ -49,9 +49,9 @@ public:
         return std::bit_cast<T>(GetSymbol(name));
     }
 
-    constexpr bool IsValid() const noexcept { return _handle != nullptr; }
+    bool IsValid() const noexcept;
 
-    void DontUnload() noexcept;
+    void Destroy() noexcept;
 
     friend constexpr void swap(DynamicLibrary& l, DynamicLibrary& r) noexcept {
         std::swap(l._handle, r._handle);
@@ -59,7 +59,6 @@ public:
 
 private:
     void* _handle{nullptr};
-    bool _unload{true};
 };
 
 #if defined(RADRAY_PLATFORM_WINDOWS)

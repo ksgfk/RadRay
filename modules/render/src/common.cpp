@@ -48,6 +48,24 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
         desc);
 }
 
+Nullable<unique_ptr<EnvironmentD3D12>> CreateD3D12Environment() noexcept {
+#ifdef RADRAY_ENABLE_D3D12
+    return d3d12::CreateD3D12EnvironmentImpl();
+#else
+    RADRAY_ERR_LOG("{} {}", Errors::D3D12, "disable");
+    return nullptr;
+#endif
+}
+
+void DestroyD3D12Environment(unique_ptr<EnvironmentD3D12> env) noexcept {
+#ifdef RADRAY_ENABLE_D3D12
+    return d3d12::DestroyD3D12Environment(std::move(env));
+#else
+    RADRAY_UNUSED(env);
+    RADRAY_ERR_LOG("{} {}", Errors::D3D12, "disable");
+#endif
+}
+
 Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDescriptor& desc) {
 #ifdef RADRAY_ENABLE_VULKAN
     return vulkan::CreateVulkanInstanceImpl(desc);

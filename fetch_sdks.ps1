@@ -122,10 +122,10 @@ function Fetch-SDK-Artifact {
 }
 
 # ==========================================
-# 读取 Manifest 并调用
+# 读取 Manifest 的 Artifacts 并处理
 # ==========================================
 
-$ManifestPath = Join-Path $PSScriptRoot "sdk_manifest.json"
+$ManifestPath = Join-Path $PSScriptRoot "project_manifest.json"
 
 if (-not (Test-Path $ManifestPath)) {
     Write-Error "未找到配置文件: $ManifestPath"
@@ -140,11 +140,11 @@ catch {
     exit 1
 }
 
-if ($Manifest.artifacts) {
+if ($Manifest.Artifacts) {
     $CurrentPlatform = if ($IsWindows) { "windows" } elseif ($IsLinux) { "linux" } elseif ($IsMacOS) { "macos" } else { "unknown" }
     $ProcessedNames = @{}
 
-    foreach ($Artifact in $Manifest.artifacts) {
+    foreach ($Artifact in $Manifest.Artifacts) {
         $ArtifactInfo = @{}
         $Artifact.PSObject.Properties | ForEach-Object {
             $ArtifactInfo[$_.Name] = $_.Value
@@ -163,7 +163,7 @@ if ($Manifest.artifacts) {
 
         # 检查 Name 是否重复
         if ($ProcessedNames.ContainsKey($Name)) {
-            Write-Error "配置错误: 发现重复的 SDK 名称 '$Name' 适用于当前平台 ($CurrentPlatform)。请检查 sdk_manifest.json。"
+            Write-Error "配置错误: 发现重复的 SDK 名称 '$Name' 适用于当前平台 ($CurrentPlatform)。请检查 sdk_project_manifest.json。"
             exit 1
         }
         $ProcessedNames[$Name] = $true

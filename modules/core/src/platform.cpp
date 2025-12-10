@@ -31,6 +31,10 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
     return *this;
 }
 
+bool DynamicLibrary::IsValid() const noexcept {
+    return _handle != nullptr;
+}
+
 }  // namespace radray
 
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -99,10 +103,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 }
 
 DynamicLibrary::~DynamicLibrary() noexcept {
-    if (_handle != nullptr && _unload) {
-        ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
-        _handle = nullptr;
-    }
+    Destroy();
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
@@ -114,12 +115,15 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     return std::bit_cast<void*>(symbol);
 }
 
-void DynamicLibrary::DontUnload() noexcept {
-    _unload = false;
-}
-
 string FormatLastErrorMessageWin32() noexcept {
     return _Win32LastErrMessage();
+}
+
+void DynamicLibrary::Destroy() noexcept {
+    if (_handle != nullptr) {
+        ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
+        _handle = nullptr;
+    }
 }
 
 }  // namespace radray
@@ -179,10 +183,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 }
 
 DynamicLibrary::~DynamicLibrary() noexcept {
-    if (_handle != nullptr) [[unlikely]] {
-        dlclose(_handle);
-        _handle = nullptr;
-    }
+    Destroy();
 }
 
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
@@ -192,6 +193,13 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
         RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", dlerror());
     }
     return symbol;
+}
+
+void DynamicLibrary::Destroy() noexcept {
+    if (_handle != nullptr) {
+        dlclose(_handle);
+        _handle = nullptr;
+    }
 }
 
 }  // namespace radray
