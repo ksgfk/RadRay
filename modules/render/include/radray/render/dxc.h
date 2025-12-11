@@ -287,9 +287,6 @@ public:
     uint32_t Size{0};
     uint32_t Flags{0};
     bool IsViewInHlsl{false};
-
-    bool operator==(const HlslShaderBufferDesc& other) const noexcept;
-    bool operator!=(const HlslShaderBufferDesc& other) const noexcept;
 };
 
 class HlslInputBindDesc {
@@ -303,10 +300,10 @@ public:
     uint32_t NumSamples{0};
     uint32_t Space{0};
     uint32_t Flags{0};
+
     ResourceBindType MapResourceBindType() const noexcept;
 
-    bool operator==(const HlslInputBindDesc& other) const noexcept;
-    bool operator!=(const HlslInputBindDesc& other) const noexcept;
+    friend bool operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept = default;
 };
 
 class HlslSignatureParameterDesc {
@@ -318,6 +315,38 @@ public:
     HlslRegisterComponentType ComponentType{HlslRegisterComponentType::UNKNOWN};
     uint32_t Stream{0};
 };
+
+template <class T>
+concept IsHlslDescCBufferPartLike = requires(T t) {
+    { t.ConstantBuffers } -> std::convertible_to<std::span<const HlslShaderBufferDesc>>;
+    { t.Variables } -> std::convertible_to<std::span<const HlslShaderVariableDesc>>;
+    { t.Types } -> std::convertible_to<std::span<const HlslShaderTypeDesc>>;
+};
+struct HlslDescCBufferPartLike {
+    const std::span<const HlslShaderBufferDesc> ConstantBuffers;
+    const std::span<const HlslShaderVariableDesc> Variables;
+    const std::span<const HlslShaderTypeDesc> Types;
+};
+template <class T, class U>
+requires IsHlslDescCBufferPartLike<T> && IsHlslDescCBufferPartLike<U>
+bool IsHlslShaderBufferEqual(const T& l, const HlslShaderBufferDesc& lcb, const U& r, const HlslShaderBufferDesc& rcb) noexcept {
+    HlslDescCBufferPartLike lPart{l.ConstantBuffers, l.Variables, l.Types};
+    HlslDescCBufferPartLike rPart{r.ConstantBuffers, r.Variables, r.Types};
+    return IsHlslShaderBufferEqualImpl(lPart, lcb, rPart, rcb);
+}
+template <class T, class U>
+requires IsHlslDescCBufferPartLike<T> && IsHlslDescCBufferPartLike<U>
+bool IsHlslTypeEqual(const T& l, size_t lType, const U& r, size_t rType) noexcept {
+    HlslDescCBufferPartLike lPart{l.ConstantBuffers, l.Variables, l.Types};
+    HlslDescCBufferPartLike rPart{r.ConstantBuffers, r.Variables, r.Types};
+    return IsHlslTypeEqualImpl(lPart, lType, rPart, rType);
+}
+bool IsHlslShaderBufferEqualImpl(
+    const HlslDescCBufferPartLike& l, const HlslShaderBufferDesc& lcb,
+    const HlslDescCBufferPartLike& r, const HlslShaderBufferDesc& rcb) noexcept;
+bool IsHlslTypeEqualImpl(
+    const HlslDescCBufferPartLike& l, size_t lType,
+    const HlslDescCBufferPartLike& r, size_t rType) noexcept;
 
 class HlslShaderDesc {
 public:

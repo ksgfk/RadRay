@@ -109,6 +109,57 @@ std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> HlslShaderDesc
     return _FindCBufferByName(ConstantBuffers, name);
 }
 
+bool IsHlslShaderBufferEqualImpl(
+    const HlslDescCBufferPartLike& l, const HlslShaderBufferDesc& lcb,
+    const HlslDescCBufferPartLike& r, const HlslShaderBufferDesc& rcb) noexcept {
+    if (lcb.Name != rcb.Name ||
+        lcb.Type != rcb.Type ||
+        lcb.Size != rcb.Size ||
+        lcb.Flags != rcb.Flags ||
+        lcb.Variables.size() != rcb.Variables.size()) {
+        return false;
+    }
+    size_t len = lcb.Variables.size();
+    for (size_t i = 0; i < len; i++) {
+        if (!IsHlslTypeEqualImpl(l, lcb.Variables[i], r, rcb.Variables[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsHlslTypeEqualImpl(
+    const HlslDescCBufferPartLike& l, size_t lType,
+    const HlslDescCBufferPartLike& r, size_t rType) noexcept {
+    struct TypeCompareCtx {
+        size_t lTypeIdx, rTypeIdx;
+    };
+    stack<TypeCompareCtx> s;
+    s.push({lType, rType});
+    while (!s.empty()) {
+        auto [lTypeIdx, rTypeIdx] = s.top();
+        s.pop();
+        RADRAY_ASSERT(lTypeIdx < l.Types.size());
+        RADRAY_ASSERT(rTypeIdx < r.Types.size());
+        const auto& lTypeDesc = l.Types[lTypeIdx];
+        const auto& rTypeDesc = r.Types[rTypeIdx];
+        if (lTypeDesc.Name != rTypeDesc.Name ||
+            lTypeDesc.Class != rTypeDesc.Class ||
+            lTypeDesc.Type != rTypeDesc.Type ||
+            lTypeDesc.Rows != rTypeDesc.Rows ||
+            lTypeDesc.Columns != rTypeDesc.Columns ||
+            lTypeDesc.Elements != rTypeDesc.Elements ||
+            lTypeDesc.Members.size() != rTypeDesc.Members.size()) {
+            return false;
+        }
+        size_t memberCount = lTypeDesc.Members.size();
+        for (size_t i = 0; i < memberCount; i++) {
+            s.push({lTypeDesc.Members[i].Type, rTypeDesc.Members[i].Type});
+        }
+    }
+    return true;
+}
+
 bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     switch (dim) {
         case HlslSRVDimension::BUFFER:
@@ -117,166 +168,97 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     }
 }
 
-bool HlslInputBindDesc::operator==(const HlslInputBindDesc& other) const noexcept {
-    return Name == other.Name &&
-           Type == other.Type &&
-           BindPoint == other.BindPoint &&
-           BindCount == other.BindCount &&
-           ReturnType == other.ReturnType &&
-           Dimension == other.Dimension &&
-           NumSamples == other.NumSamples &&
-           Space == other.Space;
-}
-
-bool HlslInputBindDesc::operator!=(const HlslInputBindDesc& other) const noexcept {
-    return !(*this == other);
-}
-
-bool HlslShaderBufferDesc::operator==(const HlslShaderBufferDesc& other) const noexcept {
-    return Name == other.Name &&
-           Type == other.Type &&
-           Size == other.Size &&
-           IsViewInHlsl == other.IsViewInHlsl;
-}
-
-bool HlslShaderBufferDesc::operator!=(const HlslShaderBufferDesc& other) const noexcept {
-    return !(*this == other);
-}
-
 std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> MergedHlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
     return _FindCBufferByName(ConstantBuffers, name);
 }
 
-static bool _IsTypeEqual(
-    size_t typeIdx1, const vector<HlslShaderTypeDesc>& types1,
-    size_t typeIdx2, const vector<HlslShaderTypeDesc>& types2) noexcept {
-    if (typeIdx1 == typeIdx2 && &types1 == &types2) return true;
-    if (typeIdx1 >= types1.size() || typeIdx2 >= types2.size()) return false;
-
-    const auto& t1 = types1[typeIdx1];
-    const auto& t2 = types2[typeIdx2];
-
-    if (t1.Class != t2.Class || t1.Type != t2.Type ||
-        t1.Rows != t2.Rows || t1.Columns != t2.Columns ||
-        t1.Elements != t2.Elements || t1.Offset != t2.Offset ||
-        t1.Members.size() != t2.Members.size()) {
-        return false;
-    }
-
-    if (t1.Name != t2.Name) return false;
-
-    for (size_t i = 0; i < t1.Members.size(); ++i) {
-        if (t1.Members[i].Name != t2.Members[i].Name) return false;
-        if (!_IsTypeEqual(t1.Members[i].Type, types1, t2.Members[i].Type, types2)) return false;
-    }
-    return true;
-}
-
-static bool _IsCBufferDeepEqual(
-    const HlslShaderBufferDesc& cb1, const HlslShaderDesc& ctx1,
-    const HlslShaderBufferDesc& cb2, const MergedHlslShaderDesc& ctx2) noexcept {
-    if (cb1 != cb2) return false;
-    if (cb1.Variables.size() != cb2.Variables.size()) return false;
-
-    for (size_t i = 0; i < cb1.Variables.size(); ++i) {
-        const auto& v1 = ctx1.Variables[cb1.Variables[i]];
-        const auto& v2 = ctx2.Variables[cb2.Variables[i]];
-
-        if (v1.Name != v2.Name || v1.StartOffset != v2.StartOffset ||
-            v1.Size != v2.Size || v1.uFlags != v2.uFlags ||
-            v1.StartTexture != v2.StartTexture || v1.TextureSize != v2.TextureSize ||
-            v1.StartSampler != v2.StartSampler || v1.SamplerSize != v2.SamplerSize) {
-            return false;
-        }
-
-        if (!_IsTypeEqual(v1.Type, ctx1.Types, v2.Type, ctx2.Types)) return false;
-    }
-    return true;
-}
-
-static size_t _CopyType(
-    size_t srcTypeIdx, const vector<HlslShaderTypeDesc>& srcTypes,
-    vector<HlslShaderTypeDesc>& dstTypes,
-    unordered_map<size_t, size_t>& typeMap) {
-    if (srcTypeIdx >= srcTypes.size()) return HlslShaderInvalidIndex;
-    if (auto it = typeMap.find(srcTypeIdx); it != typeMap.end()) return it->second;
-
-    const auto& srcType = srcTypes[srcTypeIdx];
-    size_t newIdx = dstTypes.size();
-    dstTypes.emplace_back(srcType);
-    typeMap[srcTypeIdx] = newIdx;
-
-    size_t memberCount = srcTypes[srcTypeIdx].Members.size();
-    for (size_t i = 0; i < memberCount; ++i) {
-        size_t srcMemberTypeIdx = srcTypes[srcTypeIdx].Members[i].Type;
-        size_t dstMemberTypeIdx = _CopyType(srcMemberTypeIdx, srcTypes, dstTypes, typeMap);
-        dstTypes[newIdx].Members[i].Type = dstMemberTypeIdx;
-    }
-    return newIdx;
-}
-
-static void _CopyCBuffer(
-    const HlslShaderBufferDesc& srcCb, const HlslShaderDesc& srcCtx,
-    MergedHlslShaderDesc& dstCtx) {
-    auto& dstCb = dstCtx.ConstantBuffers.emplace_back(srcCb);
-    dstCb.Variables.clear();
-
-    unordered_map<size_t, size_t> typeMap;
-    for (size_t varIdx : srcCb.Variables) {
-        const auto& srcVar = srcCtx.Variables[varIdx];
-        auto& dstVar = dstCtx.Variables.emplace_back(srcVar);
-        dstVar.Type = _CopyType(srcVar.Type, srcCtx.Types, dstCtx.Types, typeMap);
-        dstCb.Variables.push_back(dstCtx.Variables.size() - 1);
-    }
-}
-
 std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
-    MergedHlslShaderDesc result;
-    for (const auto* descPtr : descs) {
-        const auto& desc = *descPtr;
-        result.Stages |= desc.Stage;
-
-        for (const auto& res : desc.BoundResources) {
-            auto it = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindWithStageDesc& existing) {
-                return existing.BindPoint == res.BindPoint && existing.Space == res.Space && existing.Type == res.Type;
+    MergedHlslShaderDesc dstDesc{};
+    auto createImcompleteType = [&](const HlslShaderDesc& srcDesc, size_t srcTypeIdx) {
+        const auto& srcType = srcDesc.Types[srcTypeIdx];
+        size_t dstTypeIdx = dstDesc.Types.size();
+        dstDesc.Types.emplace_back(srcType);
+        return dstTypeIdx;
+    };
+    auto createType = [&](const HlslShaderDesc& srcDesc, size_t srcTypeIdx_) {
+        auto rootTypeIdx = createImcompleteType(srcDesc, srcTypeIdx_);
+        struct TypeCreateCtx {
+            size_t srcTypeIdx, dstTypeIdx, member;
+        };
+        stack<TypeCreateCtx> s;
+        RADRAY_ASSERT(srcTypeIdx_ < srcDesc.Types.size());
+        for (size_t i = 0; i < srcDesc.Types[srcTypeIdx_].Members.size(); i++) {
+            s.push({srcTypeIdx_, rootTypeIdx, i});
+        }
+        while (!s.empty()) {
+            auto [srcTypeIdx, dstTypeIdx, member] = s.top();
+            s.pop();
+            RADRAY_ASSERT(srcTypeIdx < srcDesc.Types.size());
+            const auto& srcType = srcDesc.Types[srcTypeIdx];
+            const auto& srcMember = srcType.Members[member];
+            auto& dstType = dstDesc.Types[dstTypeIdx];
+            auto& dstMember = dstType.Members[member];
+            dstMember.Type = createImcompleteType(srcDesc, srcMember.Type);
+            for (size_t i = 0; i < srcDesc.Types[srcMember.Type].Members.size(); i++) {
+                s.push({srcMember.Type, dstMember.Type, i});
+            }
+        }
+        return rootTypeIdx;
+    };
+    for (const auto descPtr : descs) {
+        const auto& srcDesc = *descPtr;
+        dstDesc.Stages |= srcDesc.Stage;
+        for (const auto& srcRes : srcDesc.BoundResources) {
+            auto it = std::find_if(dstDesc.BoundResources.begin(), dstDesc.BoundResources.end(), [&](const HlslInputBindWithStageDesc& i) {
+                return i.BindPoint == srcRes.BindPoint && i.Space == srcRes.Space && i.Type == srcRes.Type;
             });
-
-            if (it != result.BoundResources.end()) {
-                if (!(res == *it)) {
-                    RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "resource mismatch during merge", res.Name);
-                    return std::nullopt;
-                }
-                it->Stages |= desc.Stage;
-
-                if (res.Type == HlslShaderInputType::CBUFFER) {
-                    auto cbDescOpt = desc.FindCBufferByName(res.Name);
-                    auto resCbDescOpt = result.FindCBufferByName(it->Name);
-
-                    if (cbDescOpt && resCbDescOpt) {
-                        if (!_IsCBufferDeepEqual(cbDescOpt.value(), desc, resCbDescOpt.value(), result)) {
-                            RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer mismatch during merge", res.Name);
-                            return std::nullopt;
-                        }
-                    } else if (cbDescOpt || resCbDescOpt) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer definition missing in one shader", res.Name);
+            if (it == dstDesc.BoundResources.end()) {
+                auto& dstRes = dstDesc.BoundResources.emplace_back(srcRes);
+                dstRes.Stages = srcDesc.Stage;
+                if (srcRes.Type == HlslShaderInputType::CBUFFER) {
+                    auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
+                    if (!cbDescOpt) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find cbuffer data during merge", srcRes.Name);
                         return std::nullopt;
+                    }
+                    const auto& srcCb = cbDescOpt.value().get();
+                    auto& dstCb = dstDesc.ConstantBuffers.emplace_back(srcCb);
+                    dstCb.Variables.clear();
+                    for (size_t srcVarIdx : srcCb.Variables) {
+                        RADRAY_ASSERT(srcVarIdx < srcDesc.Variables.size());
+                        const auto& srcVar = srcDesc.Variables[srcVarIdx];
+                        auto dstVarIdx = dstDesc.Variables.size();
+                        auto& dstVar = dstDesc.Variables.emplace_back(srcVar);
+                        dstCb.Variables.push_back(dstVarIdx);
+                        dstVar.Type = createType(srcDesc, srcVar.Type);
                     }
                 }
             } else {
-                auto& newRes = result.BoundResources.emplace_back();
-                static_cast<HlslInputBindDesc&>(newRes) = res;
-                newRes.Stages = desc.Stage;
-
-                if (res.Type == HlslShaderInputType::CBUFFER) {
-                    auto cbDescOpt = desc.FindCBufferByName(res.Name);
-                    if (cbDescOpt) {
-                        _CopyCBuffer(cbDescOpt.value(), desc, result);
+                if (srcRes != *it) {
+                    RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "resource mismatch during merge", srcRes.Name);
+                    return std::nullopt;
+                }
+                it->Stages |= srcDesc.Stage;
+                if (srcRes.Type == HlslShaderInputType::CBUFFER) {
+                    auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
+                    if (!cbDescOpt.has_value()) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find cbuffer data during merge", srcRes.Name);
+                        return std::nullopt;
+                    }
+                    auto resCbDescOpt = dstDesc.FindCBufferByName(it->Name);
+                    if (!resCbDescOpt.has_value()) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find merged cbuffer data during merge", srcRes.Name);
+                        return std::nullopt;
+                    }
+                    if (!IsHlslShaderBufferEqual(srcDesc, cbDescOpt.value().get(), dstDesc, resCbDescOpt.value().get())) {
+                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer mismatch during merge", srcRes.Name);
+                        return std::nullopt;
                     }
                 }
             }
         }
     }
-    return result;
+    return dstDesc;
 }
 
 }  // namespace radray::render

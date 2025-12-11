@@ -216,7 +216,56 @@ void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) n
 }
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept {
-    return std::nullopt;
+    ShaderCBufferStorage::Builder builder{};
+    auto createType = [&](size_t parent, size_t bdType, size_t size) {
+        struct TypeCreateCtx {
+            size_t par, bd, s;
+        };
+        stack<TypeCreateCtx> s;
+        s.push({parent, bdType, size});
+        while (!s.empty()) {
+            auto ctx = s.top();
+            s.pop();
+            const auto& type = desc.Types[ctx.par];
+            for (size_t i = 0; i < type.Members.size(); i++) {
+                const auto& member = type.Members[i];
+                const auto& memberType = desc.Types[member.Type];
+                size_t sizeInBytes = 0;
+                if (memberType.IsPrimitive()) {
+                    sizeInBytes = memberType.GetSizeInBytes();
+                } else {
+                    auto rOffset = i == type.Members.size() - 1 ? ctx.s : desc.Types[type.Members[i + 1].Type].Offset;
+                    sizeInBytes = rOffset - memberType.Offset;
+                }
+                auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
+                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, memberType.Offset);
+                s.push({member.Type, childBdIdx, sizeInBytes});
+            }
+        }
+    };
+    for (const auto& res : desc.BoundResources) {
+        if (res.Type != HlslShaderInputType::CBUFFER) {
+            continue;
+        }
+        auto cbOpt = desc.FindCBufferByName(res.Name);
+        if (!cbOpt.has_value()) {
+            RADRAY_ERR_LOG("{} {}", "cannot find cbuffer", res.Name);
+            return std::nullopt;
+        }
+        const auto& cb = cbOpt.value().get();
+        for (size_t i = 0; i < cb.Variables.size(); i++) {
+            size_t varIdx = cb.Variables[i];
+            RADRAY_ASSERT(varIdx < desc.Variables.size());
+            const auto& var = desc.Variables[varIdx];
+            RADRAY_ASSERT(var.Type < desc.Types.size());
+            const auto& type = desc.Types[var.Type];
+            size_t sizeInBytes = cb.IsViewInHlsl ? cb.Size : var.Size;
+            size_t bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
+            builder.AddRoot(var.Name, bdTypeIdx, var.StartOffset);
+            createType(var.Type, bdTypeIdx, sizeInBytes);
+        }
+    }
+    return builder.Build();
 }
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
