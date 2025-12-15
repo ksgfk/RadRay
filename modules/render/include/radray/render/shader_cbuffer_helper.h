@@ -86,12 +86,12 @@ public:
         struct Root {
             string Name;
             size_t TypeIndex{Invalid};
-            size_t Offset{Invalid};
+            size_t GlobalOffset{Invalid};
         };
 
         size_t AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept;
-        size_t AddRoot(std::string_view name, size_t typeIndex, size_t offset = Invalid) noexcept;
+        size_t AddRoot(std::string_view name, size_t typeIndex, size_t globalOffset = Invalid) noexcept;
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
@@ -102,13 +102,15 @@ public:
 
         vector<Type> _types;
         vector<Root> _roots;
-        size_t _align{256};
+        size_t _align{0};
     };
 
     ShaderCBufferView GetVar(std::string_view name) noexcept;
     ShaderCBufferView GetVar(size_t id) noexcept;
-    void WriteData(size_t offset, const void* data, size_t size) noexcept;
+    void WriteData(size_t offset, std::span<const byte> data) noexcept;
     std::span<const byte> GetData() const noexcept { return _buffer; }
+    std::span<const byte> GetSpan(size_t offset, size_t size) const noexcept;
+    std::span<const byte> GetSpan(size_t id) const noexcept;
 
 private:
     vector<ShaderCBufferType> _types;
@@ -144,6 +146,8 @@ public:
     template <class T>
     void SetValue(const T& value) noexcept {
         if constexpr (std::is_trivially_copyable_v<T>) {
+            constexpr size_t typeSize = sizeof(T);
+            RADRAY_ASSERT(typeSize <= _type->GetSizeInBytes());
             auto dst = _storage->_buffer.data();
             auto src = reinterpret_cast<const void*>(&value);
             std::memcpy(dst + _offset, src, sizeof(T));
@@ -151,9 +155,12 @@ public:
             auto dst = _storage->_buffer.data();
             auto src = value.derived().data();
             constexpr size_t byteSize = T::SizeAtCompileTime * sizeof(typename T::Scalar);
+            RADRAY_ASSERT(byteSize <= _type->GetSizeInBytes());
             std::memcpy(dst + _offset, src, byteSize);
         } else if constexpr (IsEigenQuaternion<T>::value) {
             float data[4] = {value.x(), value.y(), value.z(), value.w()};
+            constexpr size_t typeSize = sizeof(data);
+            RADRAY_ASSERT(typeSize <= _type->GetSizeInBytes());
             auto dst = _storage->_buffer.data();
             std::memcpy(dst + _offset, data, sizeof(data));
         } else if constexpr (IsEigenTranslation<T>::value) {

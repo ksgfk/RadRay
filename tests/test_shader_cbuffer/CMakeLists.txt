@@ -1,0 +1,5 @@
+add_executable(test_shader_cbuffer test_shader_cbuffer.cpp)
+target_link_libraries(test_shader_cbuffer radraycore radrayrender GTest::gtest_main)
+gtest_discover_tests(test_shader_cbuffer)
+radray_optimize_flags_binary(test_shader_cbuffer)
+radray_set_build_path(test_shader_cbuffer)

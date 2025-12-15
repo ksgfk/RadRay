@@ -8,3 +8,5 @@ add_subdirectory(test_img_rw)
 add_subdirectory(test_native_window)
 add_subdirectory(test_dxc)
 add_subdirectory(test_spvc)
+add_subdirectory(test_shader_cbuffer)
+

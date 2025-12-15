@@ -35,9 +35,21 @@ ShaderCBufferView ShaderCBufferStorage::GetVar(size_t id) noexcept {
     return ShaderCBufferView{this, mem->GetVariable()->GetType(), mem->GetGlobalOffset(), mem->GetId()};
 }
 
-void ShaderCBufferStorage::WriteData(size_t offset, const void* data, size_t size) noexcept {
-    RADRAY_ASSERT(offset + size <= _buffer.size());
-    std::memcpy(_buffer.data() + offset, data, size);
+void ShaderCBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
+    RADRAY_ASSERT(offset + data.size() <= _buffer.size());
+    std::memcpy(_buffer.data() + offset, data.data(), data.size());
+}
+
+std::span<const byte> ShaderCBufferStorage::GetSpan(size_t offset, size_t size) const noexcept {
+    return GetData().subspan(offset, size);
+}
+
+std::span<const byte> ShaderCBufferStorage::GetSpan(size_t id) const noexcept {
+    RADRAY_ASSERT(id <= _idMap.size());
+    auto mem = _idMap[id];
+    auto v = mem->GetVariable();
+    auto t = v->GetType();
+    return GetData().subspan(mem->GetGlobalOffset(), t->GetSizeInBytes());
 }
 
 size_t ShaderCBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {
@@ -73,7 +85,7 @@ bool ShaderCBufferStorage::Builder::IsValid() const noexcept {
         return false;
     }
     stack<size_t> s;
-    vector<int32_t> visited(_types.size(), 0);
+    vector<int8_t> visited(_types.size(), 0);
     for (const auto& root : _roots) {
         s.push(root.TypeIndex);
     }
@@ -172,8 +184,8 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     for (size_t i = 0; i < _roots.size(); ++i) {
         const auto& root = _roots[i];
         size_t repIndex = remapping[root.TypeIndex];
-        if (root.Offset != Invalid) {
-            currentOffset = root.Offset;
+        if (root.GlobalOffset != Invalid) {
+            currentOffset = root.GlobalOffset;
         } else if (_align > 0) {
             currentOffset = Align(currentOffset, _align);
         }
@@ -181,9 +193,7 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
         VariableView sig{root.Name, repIndex};
         size_t varIndex = uniqueVariables.at(sig);
         storage._bindings.emplace_back(varPtrs[varIndex], currentOffset);
-        if (root.Offset == Invalid) {
-            currentOffset += typeMap[repIndex]->_size;
-        }
+        currentOffset += typeMap[repIndex]->_size;
     }
     if (_align > 0) {
         currentOffset = Align(currentOffset, _align);
@@ -217,6 +227,7 @@ void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) n
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept {
     ShaderCBufferStorage::Builder builder{};
+    builder.SetAlignment(0);
     auto createType = [&](size_t parent, size_t bdType, size_t size) {
         struct TypeCreateCtx {
             size_t par, bd, s;
@@ -261,7 +272,7 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderD
             const auto& type = desc.Types[var.Type];
             size_t sizeInBytes = cb.IsViewInHlsl ? cb.Size : var.Size;
             size_t bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
-            builder.AddRoot(var.Name, bdTypeIdx, var.StartOffset);
+            builder.AddRoot(var.Name, bdTypeIdx);
             createType(var.Type, bdTypeIdx, sizeInBytes);
         }
     }
@@ -269,7 +280,57 @@ std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderD
 }
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
-    return std::nullopt;
+    ShaderCBufferStorage::Builder builder{};
+    builder.SetAlignment(0);
+    auto createType = [&](size_t parent, size_t bdType, size_t size) {
+        struct TypeCreateCtx {
+            size_t par, bd, s;
+        };
+        stack<TypeCreateCtx> s;
+        s.push({parent, bdType, size});
+        while (!s.empty()) {
+            auto ctx = s.top();
+            s.pop();
+            const auto& type = desc.Types[ctx.par];
+            for (size_t i = 0; i < type.Members.size(); i++) {
+                const auto& member = type.Members[i];
+                const auto& memberType = desc.Types[member.TypeIndex];
+                size_t sizeInBytes = memberType.Size;
+                auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
+                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                s.push({member.TypeIndex, childBdIdx, sizeInBytes});
+            }
+        }
+    };
+
+    for (const auto& res : desc.PushConstants) {
+        RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
+        auto type = desc.Types[res.TypeIndex];
+        size_t bdTypeIdx = builder.AddType(type.Name, type.Size);
+        builder.AddRoot(res.Name, bdTypeIdx);
+        createType(res.TypeIndex, bdTypeIdx, type.Size);
+    }
+    for (const auto& res : desc.ResourceBindings) {
+        if (res.Kind != SpirvResourceKind::UniformBuffer) {
+            continue;
+        }
+        RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
+        auto type = desc.Types[res.TypeIndex];
+        if (res.IsViewInHlsl) {
+            size_t bdTypeIdx = builder.AddType(type.Name, type.Size);
+            builder.AddRoot(res.Name, bdTypeIdx);
+            createType(res.TypeIndex, bdTypeIdx, type.Size);
+        } else {
+            for (auto member : type.Members) {
+                RADRAY_ASSERT(member.TypeIndex < desc.Types.size());
+                auto memberType = desc.Types[member.TypeIndex];
+                size_t bdTypeIdx = builder.AddType(memberType.Name, memberType.Size);
+                builder.AddRoot(member.Name, bdTypeIdx);
+                createType(member.TypeIndex, bdTypeIdx, memberType.Size);
+            }
+        }
+    }
+    return builder.Build();
 }
 
 }  // namespace radray::render

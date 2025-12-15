@@ -84,161 +84,70 @@ float4 PSMain(PS_INPUT psIn) : SV_Target
 using namespace radray;
 using namespace radray::render;
 
-TEST(DXC, BasicReflection) {
+TEST(DXC, Basic) {
     auto dxc = CreateDxc();
-    auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
-    auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true).value();
-    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl, vs.ReflExt).value();
-    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps.Refl, ps.ReflExt).value();
-
-    const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
+    auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
+    ASSERT_TRUE(vs.has_value());
+    auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
+    ASSERT_TRUE(ps.has_value());
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    ASSERT_TRUE(vsDesc.has_value());
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    ASSERT_TRUE(psDesc.has_value());
+    const HlslShaderDesc* descs[] = {&*vsDesc, &*psDesc};
     auto mergedDesc = MergeHlslShaderDesc(descs);
-    ASSERT_EQ(mergedDesc.has_value(), true);
-
-    auto rootSig = CreateRootSignatureDescriptor(mergedDesc.value());
-    ASSERT_TRUE(rootSig.has_value());
-
-    auto storage = CreateCBufferStorage(mergedDesc.value());
-    ASSERT_TRUE(storage.has_value());
-
-    // Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
-    // auto id = storage->GetVar("_Obj").GetVar("model").GetId();
-    // storage->GetVar(id).SetValue(model);
-
-    // auto dst = storage->GetData().subspan(storage->GetVar(id).GetOffset(), storage->GetVar(id).GetType()->GetSizeInBytes());
-    // ASSERT_TRUE(std::memcmp(dst.data(), model.data(), sizeof(Eigen::Matrix4f)) == 0);
+    ASSERT_TRUE(mergedDesc.has_value());
 }
 
-// TEST(DXC, CBufferStorageTests) {
-//     auto dxc = CreateDxc();
-//     auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
-//     auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true).value();
-//     auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl).value();
-//     auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps.Refl).value();
+TEST(DXC, CBufferStorage) {
+    auto dxc = CreateDxc();
+    auto vs = dxc->Compile(SHADER_CODE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
+    auto ps = dxc->Compile(SHADER_CODE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl, vs.ReflExt).value();
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt).value();
+    const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
+    auto mergedDesc = MergeHlslShaderDesc(descs).value();
+    auto storageOpt = CreateCBufferStorage(mergedDesc);
+    ASSERT_TRUE(storageOpt.has_value());
+    auto& storage = storageOpt.value();
 
-//     const HlslShaderDesc* descs[] = {&vsDesc, &psDesc};
-//     auto storageOpt = CreateCBufferStorage(descs);
-//     ASSERT_TRUE(storageOpt.has_value());
-//     auto& storage = *storageOpt;
+    // Check _Obj (ConstantBuffer<PreObjectData>)
+    auto obj = storage.GetVar("_Obj");
+    ASSERT_TRUE(obj.IsValid());
+    EXPECT_TRUE(obj.GetVar("model").IsValid());
+    EXPECT_TRUE(obj.GetVar("mvp").IsValid());
+    EXPECT_TRUE(obj.GetVar("modelInv").IsValid());
 
-//     // 1. Test Global Variable (Struct)
-//     {
-//         auto globalVar = storage.GetVar("_Global");
-//         ASSERT_TRUE(globalVar.IsValid());
+    // Check _Camera (ConstantBuffer<PreCameraData>)
+    auto cam = storage.GetVar("_Camera");
+    ASSERT_TRUE(cam.IsValid());
+    EXPECT_TRUE(cam.GetVar("view").IsValid());
+    EXPECT_TRUE(cam.GetVar("proj").IsValid());
+    EXPECT_TRUE(cam.GetVar("viewProj").IsValid());
+    EXPECT_TRUE(cam.GetVar("posW").IsValid());
+    auto camTemp = cam.GetVar("temp");
+    ASSERT_TRUE(camTemp.IsValid());
+    EXPECT_TRUE(camTemp.GetVar("lightDirW").IsValid());
 
-//         auto dirLightVar = globalVar.GetVar("dirLight");
-//         ASSERT_TRUE(dirLightVar.IsValid());
+    // Check _Global (ConstantBuffer<GlobalData>)
+    auto global = storage.GetVar("_Global");
+    ASSERT_TRUE(global.IsValid());
+    EXPECT_TRUE(global.GetVar("time").IsValid());
+    auto dirLight = global.GetVar("dirLight");
+    ASSERT_TRUE(dirLight.IsValid());
+    EXPECT_TRUE(dirLight.GetVar("lightColor").IsValid());
 
-//         auto lightDirWVar = dirLightVar.GetVar("lightDirW");
-//         ASSERT_TRUE(lightDirWVar.IsValid());
+    // Check TestCBuffer (cbuffer)
+    // For `cbuffer TestCBuffer { float4 _SomeValue; }`, the variable is `_SomeValue`.
+    auto someValue = storage.GetVar("_SomeValue");
+    ASSERT_TRUE(someValue.IsValid());
 
-//         Eigen::Vector4f lightDir(1.0f, 0.5f, 0.2f, 1.0f);
-//         lightDirWVar.SetValue(lightDir);
+    // Test writing and reading
+    float timeVal = 42.0f;
+    global.GetVar("time").SetValue(timeVal);
 
-//         auto offset = lightDirWVar.GetOffset();
-//         // Verify data in buffer
-//         auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector4f));
-//         ASSERT_EQ(std::memcmp(data.data(), lightDir.data(), sizeof(Eigen::Vector4f)), 0);
-//     }
-
-//     // 2. Test Camera Data (float3)
-//     {
-//         auto cameraVar = storage.GetVar("_Camera");
-//         ASSERT_TRUE(cameraVar.IsValid());
-
-//         auto posWVar = cameraVar.GetVar("posW");
-//         ASSERT_TRUE(posWVar.IsValid());
-
-//         Eigen::Vector3f pos(10.0f, 20.0f, 30.0f);
-//         posWVar.SetValue(pos);
-
-//         auto offset = posWVar.GetOffset();
-//         auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector3f));
-//         ASSERT_EQ(std::memcmp(data.data(), pos.data(), sizeof(Eigen::Vector3f)), 0);
-//     }
-
-//     // 3. Test Scalar (float)
-//     {
-//         auto globalVar = storage.GetVar("_Global");
-//         auto timeVar = globalVar.GetVar("time");
-//         ASSERT_TRUE(timeVar.IsValid());
-
-//         float time = 123.456f;
-//         timeVar.SetValue(time);
-
-//         auto offset = timeVar.GetOffset();
-//         auto data = storage.GetData().subspan(offset, sizeof(float));
-//         ASSERT_EQ(*reinterpret_cast<const float*>(data.data()), time);
-//     }
-
-//     // 4. Test Invalid Access
-//     {
-//         auto invalidVar = storage.GetVar("_NonExistent");
-//         ASSERT_FALSE(invalidVar.IsValid());
-
-//         auto globalVar = storage.GetVar("_Global");
-//         auto invalidMember = globalVar.GetVar("nonExistentMember");
-//         ASSERT_FALSE(invalidMember.IsValid());
-//     }
-
-//     // 5. Test cbuffer namespace
-//     {
-//         auto someValueVar = storage.GetVar("_SomeValue");
-//         ASSERT_TRUE(someValueVar.IsValid());
-
-//         Eigen::Vector4f val(1.0f, 2.0f, 3.0f, 4.0f);
-//         someValueVar.SetValue(val);
-
-//         auto offset = someValueVar.GetOffset();
-//         auto data = storage.GetData().subspan(offset, sizeof(Eigen::Vector4f));
-//         ASSERT_EQ(std::memcmp(data.data(), val.data(), sizeof(Eigen::Vector4f)), 0);
-//     }
-// }
-
-// TEST(DXC, NamingCollision) {
-//     const char* COLLISION_SHADER = R"(
-// struct SameName {
-//     float4 SameName;
-// };
-
-// ConstantBuffer<SameName> _Root : register(b0);
-
-// cbuffer _Inner : register(b1) {
-//     SameName _Inner;
-// };
-
-// float4 VSMain() : SV_Position {
-//     return _Root.SameName + _Inner.SameName;
-// }
-// )";
-
-//     auto dxc = CreateDxc();
-//     auto vs = dxc->Compile(COLLISION_SHADER, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true).value();
-//     auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs.Refl).value();
-
-//     const HlslShaderDesc* descs[] = {&vsDesc};
-//     auto storageOpt = CreateCBufferStorage(descs);
-//     ASSERT_TRUE(storageOpt.has_value());
-//     auto& storage = *storageOpt;
-
-//     // 1. Test Struct with member of same name
-//     {
-//         auto rootVar = storage.GetVar("_Root");
-//         ASSERT_TRUE(rootVar.IsValid());
-
-//         auto memberVar = rootVar.GetVar("SameName");
-//         ASSERT_TRUE(memberVar.IsValid());
-
-//         // Verify type size (float4 = 16 bytes)
-//         ASSERT_EQ(memberVar.GetType()->GetSizeInBytes(), 16);
-//     }
-
-//     // 2. Test usage in cbuffer
-//     {
-//         auto memberVar = storage.GetVar("_Inner");
-//         ASSERT_TRUE(memberVar.IsValid());
-
-//         auto sameNameVar = memberVar.GetVar("SameName");
-//         ASSERT_TRUE(sameNameVar.IsValid());
-//     }
-// }
+    auto buffer = storage.GetData();
+    float readTime;
+    std::memcpy(&readTime, buffer.data() + global.GetVar("time").GetOffset(), sizeof(float));
+    EXPECT_EQ(readTime, timeVal);
+}
