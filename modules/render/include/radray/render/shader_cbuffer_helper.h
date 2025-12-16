@@ -8,11 +8,12 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/utility.h>
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
 
 namespace radray::render {
+
+static constexpr size_t ShaderCBufferStorageInvalidId = std::numeric_limits<size_t>::max();
 
 class ShaderCBufferType;
 class ShaderCBufferStorage;
@@ -29,6 +30,8 @@ public:
 private:
     string _name;
     ShaderCBufferType* _type{nullptr};
+    size_t _id{ShaderCBufferStorageInvalidId};
+    size_t _typeId{ShaderCBufferStorageInvalidId};
 
     friend class ShaderCBufferStorage;
 };
@@ -45,8 +48,9 @@ public:
 
 private:
     ShaderCBufferVariable* _variable;
-    size_t _offset;
+    size_t _varId{ShaderCBufferStorageInvalidId};
     uint64_t _id{0};
+    size_t _offset;
     size_t _globalOffset{0};
 
     friend class ShaderCBufferStorage;
@@ -61,6 +65,7 @@ public:
 private:
     string _name;
     vector<ShaderCBufferMember> _members;
+    size_t _id{ShaderCBufferStorageInvalidId};
     size_t _size{0};
 
     friend class ShaderCBufferStorage;
@@ -68,9 +73,11 @@ private:
 
 class ShaderCBufferStorage {
 public:
+    static constexpr size_t InvalidId = ShaderCBufferStorageInvalidId;
+
     class Builder {
     public:
-        static constexpr size_t Invalid = std::numeric_limits<size_t>::max();
+        static constexpr size_t Invalid = InvalidId;
         struct Member {
             string Name;
             size_t Offset{0};

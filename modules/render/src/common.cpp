@@ -18,6 +18,23 @@
 
 namespace radray::render {
 
+bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
+    return lhs.AddressS == rhs.AddressS &&
+           lhs.AddressT == rhs.AddressT &&
+           lhs.AddressR == rhs.AddressR &&
+           lhs.MigFilter == rhs.MigFilter &&
+           lhs.MagFilter == rhs.MagFilter &&
+           lhs.MipmapFilter == rhs.MipmapFilter &&
+           lhs.LodMin == rhs.LodMin &&
+           lhs.LodMax == rhs.LodMax &&
+           lhs.Compare == rhs.Compare &&
+           lhs.AnisotropyClamp == rhs.AnisotropyClamp;
+}
+
+bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
     return std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {
@@ -67,21 +84,68 @@ void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept {
 #endif
 }
 
-bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
-    return lhs.AddressS == rhs.AddressS &&
-           lhs.AddressT == rhs.AddressT &&
-           lhs.AddressR == rhs.AddressR &&
-           lhs.MigFilter == rhs.MigFilter &&
-           lhs.MagFilter == rhs.MagFilter &&
-           lhs.MipmapFilter == rhs.MipmapFilter &&
-           lhs.LodMin == rhs.LodMin &&
-           lhs.LodMax == rhs.LodMax &&
-           lhs.Compare == rhs.Compare &&
-           lhs.AnisotropyClamp == rhs.AnisotropyClamp;
+bool IsDepthStencilFormat(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::S8:
+        case TextureFormat::D16_UNORM:
+        case TextureFormat::D32_FLOAT:
+        case TextureFormat::D24_UNORM_S8_UINT:
+        case TextureFormat::D32_FLOAT_S8_UINT: return true;
+        default: return false;
+    }
 }
 
-bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
-    return !(lhs == rhs);
+uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
+    switch (format) {
+        case VertexFormat::UINT8X2:
+        case VertexFormat::SINT8X2:
+        case VertexFormat::UNORM8X2:
+        case VertexFormat::SNORM8X2: return 2;
+        case VertexFormat::UINT8X4:
+        case VertexFormat::SINT8X4:
+        case VertexFormat::UNORM8X4:
+        case VertexFormat::SNORM8X4:
+        case VertexFormat::UINT16X2:
+        case VertexFormat::SINT16X2:
+        case VertexFormat::UNORM16X2:
+        case VertexFormat::SNORM16X2:
+        case VertexFormat::FLOAT16X2:
+        case VertexFormat::UINT32:
+        case VertexFormat::SINT32:
+        case VertexFormat::FLOAT32: return 4;
+        case VertexFormat::UINT16X4:
+        case VertexFormat::SINT16X4:
+        case VertexFormat::UNORM16X4:
+        case VertexFormat::SNORM16X4:
+        case VertexFormat::FLOAT16X4:
+        case VertexFormat::UINT32X2:
+        case VertexFormat::SINT32X2:
+        case VertexFormat::FLOAT32X2: return 8;
+        case VertexFormat::UINT32X3:
+        case VertexFormat::SINT32X3:
+        case VertexFormat::FLOAT32X3: return 12;
+        case VertexFormat::UINT32X4:
+        case VertexFormat::SINT32X4:
+        case VertexFormat::FLOAT32X4: return 16;
+        case VertexFormat::UNKNOWN: return 0;
+    }
+    Unreachable();
+}
+
+uint32_t GetIndexFormatSize(IndexFormat format) noexcept {
+    switch (format) {
+        case IndexFormat::UINT16: return 2;
+        case IndexFormat::UINT32: return 4;
+    }
+    Unreachable();
+}
+
+IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept {
+    switch (size) {
+        case 2: return IndexFormat::UINT16;
+        case 4: return IndexFormat::UINT32;
+        default: return IndexFormat::UINT32;
+    }
 }
 
 std::string_view format_as(RenderBackend v) noexcept {

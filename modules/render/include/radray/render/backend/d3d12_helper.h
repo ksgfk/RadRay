@@ -8,7 +8,6 @@
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/render/common.h>
-#include <radray/render/utility.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -146,7 +145,7 @@ struct MapPrimitiveTopologyResult {
     D3D12_PRIMITIVE_TOPOLOGY_TYPE type;
     D3D12_PRIMITIVE_TOPOLOGY topology;
 };
-std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept;
+MapPrimitiveTopologyResult MapType(PrimitiveTopology v) noexcept;
 D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept;
 DXGI_FORMAT MapType(VertexFormat v) noexcept;
 std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept;

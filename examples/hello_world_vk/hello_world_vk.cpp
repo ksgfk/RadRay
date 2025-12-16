@@ -185,15 +185,15 @@ void Init() {
              VertexStepMode::Vertex,
              ve}};
         ColorTargetState cts[] = {
-            DefaultColorTargetState(TextureFormat::RGBA8_UNORM)};
+            ColorTargetState::Default(TextureFormat::RGBA8_UNORM)};
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = pipelineLayout.get();
         psoDesc.VS = {vs.get(), "VSMain"};
         psoDesc.PS = {ps.get(), "PSMain"};
         psoDesc.VertexLayouts = vl;
-        psoDesc.Primitive = DefaultPrimitiveState();
+        psoDesc.Primitive = PrimitiveState::Default();
         psoDesc.DepthStencil = std::nullopt;
-        psoDesc.MultiSample = DefaultMultiSampleState();
+        psoDesc.MultiSample = MultiSampleState::Default();
         psoDesc.ColorTargets = cts;
         pso = StaticCastUniquePtr<vulkan::GraphicsPipelineVulkan>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
     }

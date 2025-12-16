@@ -6,8 +6,8 @@
 #include <radray/vertex_data.h>
 #include <radray/camera_control.h>
 #include <radray/render/common.h>
+#include <radray/render/render_utility.h>
 #include <radray/render/dxc.h>
-#include <radray/render/utility.h>
 #include <radray/imgui/dear_imgui.h>
 
 const char* RADRAY_APP_NAME = "hello_pbr";
@@ -159,15 +159,15 @@ public:
             vertLayout.ArrayStride = stride;
             vertLayout.StepMode = VertexStepMode::Vertex;
             vertLayout.Elements = vertElems;
-            ColorTargetState rtState = DefaultColorTargetState(TextureFormat::RGBA8_UNORM);
+            ColorTargetState rtState = ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
             GraphicsPipelineStateDescriptor psoDesc{};
             psoDesc.RootSig = _rs.get();
             psoDesc.VS = {vsShader.get(), "VSMain"};
             psoDesc.PS = {psShader.get(), "PSMain"};
             psoDesc.VertexLayouts = std::span{&vertLayout, 1};
-            psoDesc.Primitive = DefaultPrimitiveState();
-            psoDesc.DepthStencil = DefaultDepthStencilState();
-            psoDesc.MultiSample = DefaultMultiSampleState();
+            psoDesc.Primitive = PrimitiveState::Default();
+            psoDesc.DepthStencil = DepthStencilState::Default();
+            psoDesc.MultiSample = MultiSampleState::Default();
             psoDesc.ColorTargets = std::span{&rtState, 1};
             _pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
 
@@ -222,7 +222,7 @@ public:
             copyQueue->Submit(submitDesc);
             copyQueue->Wait();
 
-            uint32_t indexStride = GetIndexFormatSize(MapIndexType(sphereModel.Primitives[0].IndexBuffer.Stride));
+            uint32_t indexStride = sphereModel.Primitives[0].IndexBuffer.Stride;
             _meshes.emplace_back(HelloMesh{
                 std::move(vert),
                 std::move(index),

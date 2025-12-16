@@ -69,31 +69,6 @@ constexpr auto ArrayLength(const T& arr) noexcept {
     return ArrayTrait<T>::length;
 }
 
-template <typename Iter>
-concept IsIterator = requires(Iter ite, size_t n) {
-    { *ite };
-    { !std::is_integral_v<Iter> };
-    { std::distance(ite, ite) } -> std::same_as<typename std::iterator_traits<Iter>::difference_type>;
-    { std::advance(ite, n) };
-};
-
-template <typename T>
-struct FunctionTraits;
-template <typename Ret, typename... Args>
-struct FunctionTraits<Ret(Args...)> {
-    using ReturnType = Ret;
-    using ArgsTuple = std::tuple<Args...>;
-    static constexpr std::size_t ArgsCount = sizeof...(Args);
-};
-template <typename Ret, typename... Args>
-struct FunctionTraits<Ret (*)(Args...)> : FunctionTraits<Ret(Args...)> {};
-template <typename Ret, typename... Args>
-struct FunctionTraits<std::function<Ret(Args...)>> : FunctionTraits<Ret(Args...)> {};
-template <typename ClassType, typename Ret, typename... Args>
-struct FunctionTraits<Ret (ClassType::*)(Args...)> : FunctionTraits<Ret(Args...)> {};
-template <typename ClassType, typename Ret, typename... Args>
-struct FunctionTraits<Ret (ClassType::*)(Args...) const> : FunctionTraits<Ret(Args...)> {};
-
 // Resolves to the more efficient of `const T` or `const T&`, in the context of returning a const-qualified value
 // of type T.
 //

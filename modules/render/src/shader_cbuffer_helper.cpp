@@ -1,12 +1,11 @@
 #include <radray/render/shader_cbuffer_helper.h>
 
-#include <radray/basic_math.h>
-
 #include <algorithm>
 #include <bit>
 #include <utility>
 #include <cstring>
-#include <unordered_map>
+
+#include <radray/basic_math.h>
 
 namespace radray::render {
 

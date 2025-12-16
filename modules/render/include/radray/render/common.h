@@ -650,6 +650,17 @@ struct PrimitiveState {
     std::optional<IndexFormat> StripIndexFormat{};
     bool UnclippedDepth{false};
     bool Conservative{false};
+
+    constexpr static PrimitiveState Default() noexcept {
+        return {
+            PrimitiveTopology::TriangleList,
+            FrontFace::CW,
+            CullMode::Back,
+            PolygonMode::Fill,
+            std::nullopt,
+            true,
+            false};
+    }
 };
 
 struct StencilFaceState {
@@ -664,6 +675,26 @@ struct StencilState {
     StencilFaceState Back{};
     uint32_t ReadMask{0};
     uint32_t WriteMask{0};
+
+    constexpr static uint32_t DefaultMask = 0xFF;
+
+    constexpr static StencilState Default() noexcept {
+        return {
+            {
+                CompareFunction::Always,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+            },
+            {
+                CompareFunction::Always,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+                StencilOperation::Keep,
+            },
+            DefaultMask,
+            DefaultMask};
+    }
 };
 
 struct DepthBiasState {
@@ -678,12 +709,32 @@ struct DepthStencilState {
     DepthBiasState DepthBias{};
     std::optional<StencilState> Stencil{};
     bool DepthWriteEnable{false};
+
+    constexpr static DepthStencilState Default() noexcept {
+        return {
+            TextureFormat::D32_FLOAT,
+            CompareFunction::Less,
+            {
+                0,
+                0.0f,
+                0.0f,
+            },
+            std::nullopt,
+            true};
+    }
 };
 
 struct MultiSampleState {
     uint32_t Count{0};
     uint64_t Mask{0};
     bool AlphaToCoverageEnable{false};
+
+    static MultiSampleState Default() noexcept {
+        return {
+            1,
+            0xFFFFFFFF,
+            false};
+    }
 };
 
 struct BlendComponent {
@@ -695,12 +746,29 @@ struct BlendComponent {
 struct BlendState {
     BlendComponent Color{};
     BlendComponent Alpha{};
+
+    static BlendState Default() noexcept {
+        return {
+            {BlendFactor::One,
+             BlendFactor::Zero,
+             BlendOperation::Add},
+            {BlendFactor::One,
+             BlendFactor::Zero,
+             BlendOperation::Add}};
+    }
 };
 
 struct ColorTargetState {
     TextureFormat Format{TextureFormat::UNKNOWN};
     std::optional<BlendState> Blend{};
     ColorWrites WriteMask{};
+
+    static ColorTargetState Default(TextureFormat format) noexcept {
+        return {
+            format,
+            std::nullopt,
+            ColorWrite::All};
+    }
 };
 
 struct ShaderEntry {
@@ -965,6 +1033,13 @@ Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
 Nullable<unique_ptr<InstanceVulkan>> CreateVulkanInstance(const VulkanInstanceDescriptor& desc);
 
 void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept;
+
+// --------------------------- Utility Functions ---------------------------
+bool IsDepthStencilFormat(TextureFormat format) noexcept;
+uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
+IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
+// -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;

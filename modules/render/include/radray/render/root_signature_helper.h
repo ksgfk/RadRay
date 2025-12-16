@@ -1,7 +1,6 @@
 #pragma once
 
 #include <radray/render/common.h>
-#include <radray/render/utility.h>
 #include <radray/render/dxc.h>
 
 namespace radray::render {

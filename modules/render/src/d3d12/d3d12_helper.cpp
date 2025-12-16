@@ -753,7 +753,7 @@ D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
     return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
 }
 
-std::pair<D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY> MapType(PrimitiveTopology v) noexcept {
+MapPrimitiveTopologyResult MapType(PrimitiveTopology v) noexcept {
     switch (v) {
         case PrimitiveTopology::PointList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT, D3D_PRIMITIVE_TOPOLOGY_POINTLIST};
         case PrimitiveTopology::LineList: return {D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE, D3D_PRIMITIVE_TOPOLOGY_LINELIST};
