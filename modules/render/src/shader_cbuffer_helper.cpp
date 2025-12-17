@@ -9,69 +9,42 @@
 
 namespace radray::render {
 
-ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
-    if (!IsValid()) return {};
-    for (const auto& member : _type->GetMembers()) {
-        if (member.GetVariable()->GetName() == name) {
-            return ShaderCBufferView{_storage, member.GetVariable()->GetType(), _offset + member.GetOffset(), member.GetId()};
-        }
-    }
-    return {};
-}
+namespace {
 
-ShaderCBufferView ShaderCBufferStorage::GetVar(std::string_view name) noexcept {
-    for (const auto& binding : _bindings) {
-        if (binding.GetVariable()->GetName() == name) {
-            return ShaderCBufferView{this, binding.GetVariable()->GetType(), binding.GetOffset(), binding.GetId()};
-        }
-    }
-    return {};
-}
+constexpr size_t kInvalid = ShaderCBufferStorageInvalidId;
 
-ShaderCBufferView ShaderCBufferStorage::GetVar(size_t id) noexcept {
-    RADRAY_ASSERT(id <= _idMap.size());
-    auto mem = _idMap[id];
-    return ShaderCBufferView{this, mem->GetVariable()->GetType(), mem->GetGlobalOffset(), mem->GetId()};
-}
-
-void ShaderCBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
-    RADRAY_ASSERT(offset + data.size() <= _buffer.size());
-    std::memcpy(_buffer.data() + offset, data.data(), data.size());
-}
-
-std::span<const byte> ShaderCBufferStorage::GetSpan(size_t offset, size_t size) const noexcept {
-    return GetData().subspan(offset, size);
-}
-
-std::span<const byte> ShaderCBufferStorage::GetSpan(size_t id) const noexcept {
-    RADRAY_ASSERT(id <= _idMap.size());
-    auto mem = _idMap[id];
-    auto v = mem->GetVariable();
-    auto t = v->GetType();
-    return GetData().subspan(mem->GetGlobalOffset(), t->GetSizeInBytes());
-}
+}  // namespace
 
 size_t ShaderCBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {
-    size_t index = _types.size();
-    auto& type = _types.emplace_back();
-    type.Name = string{name};
-    type.SizeInBytes = size;
-    return index;
+    Type t{};
+    t.Name = string{name};
+    t.SizeInBytes = size;
+    _types.push_back(std::move(t));
+    return _types.size() - 1;
 }
 
 void ShaderCBufferStorage::Builder::AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept {
-    RADRAY_ASSERT(targetType < _types.size());
-    auto& type = _types[targetType];
-    auto& member = type.Members.emplace_back();
-    member.Name = string{name};
-    member.Offset = offset;
-    member.TypeIndex = memberType;
+    if (targetType >= _types.size() || memberType >= _types.size()) {
+        RADRAY_ERR_LOG("ShaderCBufferStorage::Builder::AddMemberForType invalid index target={} member={}", targetType, memberType);
+        return;
+    }
+    Member m{};
+    m.Name = string{name};
+    m.Offset = offset;
+    m.TypeIndex = memberType;
+    _types[targetType].Members.push_back(std::move(m));
 }
 
-size_t ShaderCBufferStorage::Builder::AddRoot(std::string_view name, size_t typeIndex, size_t offset) noexcept {
-    size_t index = _roots.size();
-    _roots.emplace_back(string{name}, typeIndex, offset);
-    return index;
+size_t ShaderCBufferStorage::Builder::AddRoot(std::string_view name, size_t typeIndex) noexcept {
+    if (typeIndex >= _types.size()) {
+        RADRAY_ERR_LOG("ShaderCBufferStorage::Builder::AddRoot invalid typeIndex={}", typeIndex);
+        return Invalid;
+    }
+    Root r{};
+    r.Name = string{name};
+    r.TypeIndex = typeIndex;
+    _roots.push_back(std::move(r));
+    return _roots.size() - 1;
 }
 
 void ShaderCBufferStorage::Builder::SetAlignment(size_t align) noexcept {
@@ -79,149 +52,338 @@ void ShaderCBufferStorage::Builder::SetAlignment(size_t align) noexcept {
 }
 
 bool ShaderCBufferStorage::Builder::IsValid() const noexcept {
-    if (_align > 0 && !std::has_single_bit(_align)) {
-        RADRAY_ERR_LOG("{}: {}", "alignment must be power of two", _align);
+    if (_align != 0 && (_align & (_align - 1)) != 0) {
         return false;
     }
-    stack<size_t> s;
-    vector<int8_t> visited(_types.size(), 0);
-    for (const auto& root : _roots) {
-        s.push(root.TypeIndex);
-    }
-    while (!s.empty()) {
-        size_t typeIndex = s.top();
-        s.pop();
-        if (typeIndex >= _types.size()) {
-            RADRAY_ERR_LOG("{}: {}", "invalid type index", typeIndex);
-            return false;
-        }
-        if (visited[typeIndex]) {
-            continue;
-        }
-        visited[typeIndex] = true;
-        const auto& type = _types[typeIndex];
-        for (const auto& member : type.Members) {
-            if (member.Offset + _types[member.TypeIndex].SizeInBytes > type.SizeInBytes) {
-                RADRAY_ERR_LOG("{}: {}", "member exceeds type size", member.Name);
+    for (size_t ti = 0; ti < _types.size(); ++ti) {
+        const auto& t = _types[ti];
+        for (const auto& m : t.Members) {
+            if (m.TypeIndex >= _types.size()) {
                 return false;
             }
-            s.push(member.TypeIndex);
+            const auto& mt = _types[m.TypeIndex];
+            if (m.Offset > t.SizeInBytes) {
+                return false;
+            }
+            if (mt.SizeInBytes > t.SizeInBytes) {
+                return false;
+            }
+            if (m.Offset + mt.SizeInBytes > t.SizeInBytes) {
+                return false;
+            }
+        }
+    }
+    for (const auto& r : _roots) {
+        if (r.TypeIndex >= _types.size()) {
+            return false;
         }
     }
     return true;
+}
+
+void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) noexcept {
+    storage._globalIndex.clear();
+    storage._globalIndex.reserve(256);
+    struct StackItem {
+        size_t TypeId;
+        size_t GlobalOffset;
+        size_t MemberIndexInType;
+    };
+    stack<StackItem> s;
+    for (const auto& root : storage._rootVarIds) {
+        s.push({root._typeId, root._offset, kInvalid});
+    }
+    while (!s.empty()) {
+        auto item = s.top();
+        s.pop();
+        ShaderCBufferStorage::GlobalVarIndexer idx{};
+        idx.TypeId = item.TypeId;
+        idx.MemberIndexInType = item.MemberIndexInType;
+        idx.GlobalOffset = item.GlobalOffset;
+        storage._globalIndex.push_back(idx);
+        const auto& type = storage._types[item.TypeId];
+        for (size_t mi = 0; mi < type._members.size(); ++mi) {
+            const auto& mem = type._members[mi];
+            s.push({mem._typeId, item.GlobalOffset + mem._offset, mi});
+        }
+    }
+    storage._globalIndex.shrink_to_fit();
 }
 
 std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexcept {
     if (!IsValid()) {
         return std::nullopt;
     }
-    struct VariableView {
+    ShaderCBufferStorage storage{};
+    // Phase 1: build the full builder type graph (canonicalized member order)
+    struct CanonMemberBuilder {
         std::string_view Name;
+        size_t Offset;
         size_t TypeIndex;
-        auto operator<=>(const VariableView&) const = default;
     };
-    vector<size_t> remapping(_types.size());
-    map<Type, size_t> uniqueTypes;
-    map<VariableView, size_t> uniqueVariables;
-    vector<VariableView> variableList;
-    auto ensureVariable = [&](std::string_view name, size_t typeIndex) {
-        VariableView sig{name, typeIndex};
-        if (uniqueVariables.find(sig) == uniqueVariables.end()) {
-            uniqueVariables.emplace(sig, variableList.size());
-            variableList.push_back(sig);
+    vector<vector<CanonMemberBuilder>> canonMembers;
+    canonMembers.resize(_types.size());
+    for (size_t ti = 0; ti < _types.size(); ++ti) {
+        const auto& t = _types[ti];
+        auto& out = canonMembers[ti];
+        out.reserve(t.Members.size());
+        for (const auto& m : t.Members) {
+            out.push_back({m.Name, m.Offset, m.TypeIndex});
+        }
+        std::sort(out.begin(), out.end(), [](const CanonMemberBuilder& a, const CanonMemberBuilder& b) {
+            if (a.Offset != b.Offset) {
+                return a.Offset < b.Offset;
+            }
+            if (a.Name != b.Name) {
+                return a.Name < b.Name;
+            }
+            return a.TypeIndex < b.TypeIndex;
+        });
+    }
+    // Phase 2: merge graph nodes via recursive structural equality (no string signatures, no hash map)
+    // 0 = unknown, 1 = in-progress, 2 = equal, 3 = not-equal
+    const size_t nTypes = _types.size();
+    vector<uint8_t> eqMemo;
+    eqMemo.resize(nTypes * nTypes, 0);
+    auto eqCell = [&](size_t a, size_t b) -> uint8_t& {
+        return eqMemo[a * nTypes + b];
+    };
+    auto equalBuilderTypes = [&](auto&& self, size_t a, size_t b) -> bool {
+        if (a == b) {
+            return true;
+        }
+        if (a >= _types.size() || b >= _types.size()) {
+            return false;
+        }
+        // normalize key so (a,b) and (b,a) share memo
+        const size_t x = std::min(a, b);
+        const size_t y = std::max(a, b);
+        uint8_t& state = eqCell(x, y);
+        if (state == 2) {
+            return true;
+        }
+        if (state == 3) {
+            return false;
+        }
+        if (state == 1) {
+            // in-progress: break recursion loops conservatively
+            return true;
+        }
+        state = 1;
+        const auto& ta = _types[a];
+        const auto& tb = _types[b];
+        if (ta.Name != tb.Name || ta.SizeInBytes != tb.SizeInBytes) {
+            state = 3;
+            return false;
+        }
+        const auto& ma = canonMembers[a];
+        const auto& mb = canonMembers[b];
+        if (ma.size() != mb.size()) {
+            state = 3;
+            return false;
+        }
+        for (size_t i = 0; i < ma.size(); ++i) {
+            if (ma[i].Offset != mb[i].Offset || ma[i].Name != mb[i].Name) {
+                state = 3;
+                return false;
+            }
+            if (!self(self, ma[i].TypeIndex, mb[i].TypeIndex)) {
+                state = 3;
+                return false;
+            }
+        }
+        state = 2;
+        return true;
+    };
+    // union-find over builder type indices
+    vector<size_t> parent(_types.size());
+    vector<uint32_t> rank(_types.size(), 0);
+    for (size_t i = 0; i < parent.size(); ++i) {
+        parent[i] = i;
+    }
+    auto ufFind = [&](auto&& self, size_t x) -> size_t {
+        if (parent[x] == x) {
+            return x;
+        }
+        parent[x] = self(self, parent[x]);
+        return parent[x];
+    };
+    auto ufUnion = [&](size_t a, size_t b) {
+        a = ufFind(ufFind, a);
+        b = ufFind(ufFind, b);
+        if (a == b) {
+            return;
+        }
+        if (rank[a] < rank[b]) {
+            std::swap(a, b);
+        }
+        parent[b] = a;
+        if (rank[a] == rank[b]) {
+            rank[a]++;
         }
     };
-    for (size_t i = _types.size(); i-- > 0;) {
-        const auto& type = _types[i];
-        Type sig = type;
-        for (auto& member : sig.Members) {
-            member.TypeIndex = remapping[member.TypeIndex];
-            ensureVariable(member.Name, member.TypeIndex);
-        }
-        if (auto it = uniqueTypes.find(sig); it != uniqueTypes.end()) {
-            remapping[i] = it->second;
-        } else {
-            remapping[i] = i;
-            uniqueTypes.emplace(std::move(sig), i);
-        }
-    }
-    for (const auto& root : _roots) {
-        ensureVariable(root.Name, remapping[root.TypeIndex]);
-    }
-    ShaderCBufferStorage storage;
-    storage._types.resize(uniqueTypes.size());
-    storage._variables.resize(variableList.size());
-    vector<ShaderCBufferType*> typeMap(_types.size(), nullptr);
-    size_t typeCounter = 0;
-    for (size_t i = 0; i < _types.size(); i++) {
-        if (remapping[i] == i) {
-            typeMap[i] = &storage._types[typeCounter++];
-            typeMap[i]->_name = _types[i].Name;
-            typeMap[i]->_size = _types[i].SizeInBytes;
-        }
-    }
-    vector<ShaderCBufferVariable*> varPtrs(variableList.size());
-    for (size_t i = 0; i < variableList.size(); ++i) {
-        const auto& sig = variableList[i];
-        storage._variables[i] = ShaderCBufferVariable(string(sig.Name), typeMap[sig.TypeIndex]);
-        varPtrs[i] = &storage._variables[i];
-    }
-    for (size_t i = 0; i < _types.size(); i++) {
-        if (remapping[i] == i) {
-            auto* type = typeMap[i];
-            type->_members.reserve(_types[i].Members.size());
-            for (const auto& member : _types[i].Members) {
-                VariableView sig{member.Name, remapping[member.TypeIndex]};
-                size_t varIndex = uniqueVariables.at(sig);
-                type->_members.emplace_back(varPtrs[varIndex], member.Offset);
+    for (size_t i = 0; i < _types.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (ufFind(ufFind, i) == ufFind(ufFind, j)) {
+                continue;
+            }
+            if (equalBuilderTypes(equalBuilderTypes, i, j)) {
+                ufUnion(i, j);
             }
         }
     }
-    storage._bindings.reserve(_roots.size());
-    size_t currentOffset = 0;
-    vector<size_t> rootOffsets(_roots.size());
-    for (size_t i = 0; i < _roots.size(); ++i) {
-        const auto& root = _roots[i];
-        size_t repIndex = remapping[root.TypeIndex];
-        if (root.GlobalOffset != Invalid) {
-            currentOffset = root.GlobalOffset;
-        } else if (_align > 0) {
-            currentOffset = Align(currentOffset, _align);
+    // map union representative -> new deduped type id
+    vector<size_t> repToNewId(_types.size(), kInvalid);
+    vector<size_t> builderToNewId(_types.size(), kInvalid);
+    vector<size_t> newIdToRepBuilder;
+    newIdToRepBuilder.reserve(_types.size());
+    for (size_t i = 0; i < _types.size(); ++i) {
+        size_t rep = ufFind(ufFind, i);
+        if (repToNewId[rep] == kInvalid) {
+            repToNewId[rep] = newIdToRepBuilder.size();
+            newIdToRepBuilder.push_back(rep);
         }
-        rootOffsets[i] = currentOffset;
-        VariableView sig{root.Name, repIndex};
-        size_t varIndex = uniqueVariables.at(sig);
-        storage._bindings.emplace_back(varPtrs[varIndex], currentOffset);
-        currentOffset += typeMap[repIndex]->_size;
+        builderToNewId[i] = repToNewId[rep];
     }
-    if (_align > 0) {
-        currentOffset = Align(currentOffset, _align);
+    storage._types.clear();
+    storage._types.reserve(newIdToRepBuilder.size());
+    for (size_t newId = 0; newId < newIdToRepBuilder.size(); ++newId) {
+        size_t repBuilder = newIdToRepBuilder[newId];
+        const auto& t = _types[repBuilder];
+
+        storage._types.emplace_back(t.Name, newId);
+        auto& newType = storage._types.back();
+        newType._size = t.SizeInBytes;
+
+        const auto& members = canonMembers[repBuilder];
+        newType._members.reserve(members.size());
+        for (const auto& m : members) {
+            ShaderCBufferVariable v{string{m.Name}, builderToNewId[m.TypeIndex]};
+            v._offset = m.Offset;
+            newType._members.push_back(std::move(v));
+        }
     }
-    storage._buffer.resize(currentOffset, (byte)0);
+    // Roots and buffer layout
+    size_t totalSize = 0;
+    storage._rootVarIds.reserve(_roots.size());
+    for (const auto& r : _roots) {
+        if (r.TypeIndex >= _types.size()) {
+            return std::nullopt;
+        }
+        const size_t typeId = builderToNewId[r.TypeIndex];
+        if (_align != 0) {
+            totalSize = static_cast<size_t>(radray::Align(static_cast<uint64_t>(totalSize), static_cast<uint64_t>(_align)));
+        }
+        ShaderCBufferVariable rootVar{r.Name, typeId};
+        rootVar._offset = totalSize;
+        storage._rootVarIds.push_back(std::move(rootVar));
+        totalSize += storage._types[typeId]._size;
+    }
+    if (_align != 0) {
+        totalSize = static_cast<size_t>(radray::Align(static_cast<uint64_t>(totalSize), static_cast<uint64_t>(_align)));
+    }
+    storage._buffer.resize(totalSize);
     BuildMember(storage);
     return storage;
 }
 
-void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) noexcept {
-    struct BuildMemberItem {
-        ShaderCBufferMember* Member;
-        size_t GlobalOffset;
-    };
-    stack<BuildMemberItem> s;
-    for (auto& binding : storage._bindings) {
-        s.push({&binding, binding._offset});
-    }
-    while (!s.empty()) {
-        auto v = s.top();
-        s.pop();
-        v.Member->_id = storage._idMap.size();
-        storage._idMap.push_back(v.Member);
-        v.Member->_globalOffset = v.GlobalOffset;
-        for (auto& member : v.Member->_variable->_type->_members) {
-            s.push({&member, v.GlobalOffset + member._offset});
+ShaderCBufferView ShaderCBufferStorage::GetVar(std::string_view name) noexcept {
+    for (const auto& root : _rootVarIds) {
+        if (root._name == name) {
+            for (size_t i = 0; i < _globalIndex.size(); ++i) {
+                const auto& gi = _globalIndex[i];
+                if (gi.MemberIndexInType == kInvalid && gi.TypeId == root._typeId && gi.GlobalOffset == root._offset) {
+                    return ShaderCBufferView{this, i};
+                }
+            }
+            return ShaderCBufferView{};
         }
     }
-    storage._idMap.shrink_to_fit();
+    return ShaderCBufferView{};
+}
+
+void ShaderCBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
+    if (data.empty()) {
+        return;
+    }
+    if (offset > _buffer.size() || data.size() > _buffer.size() || offset + data.size() > _buffer.size()) {
+        RADRAY_ERR_LOG("ShaderCBufferStorage::WriteData out of range offset={} size={} buffer={}", offset, data.size(), _buffer.size());
+        return;
+    }
+    std::memcpy(_buffer.data() + offset, data.data(), data.size());
+}
+
+std::span<const byte> ShaderCBufferStorage::GetSpan(size_t offset, size_t size) const noexcept {
+    if (offset > _buffer.size() || size > _buffer.size() || offset + size > _buffer.size()) {
+        return {};
+    }
+    return std::span<const byte>{_buffer.data() + offset, size};
+}
+
+std::span<const byte> ShaderCBufferStorage::GetSpan(size_t memberId) const noexcept {
+    if (memberId >= _globalIndex.size()) {
+        return {};
+    }
+    const auto& gi = _globalIndex[memberId];
+    if (gi.TypeId >= _types.size()) {
+        return {};
+    }
+    return GetSpan(gi.GlobalOffset, _types[gi.TypeId]._size);
+}
+
+ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
+    if (!IsValid()) {
+        return {};
+    }
+    auto* type = GetType();
+    if (type == nullptr) {
+        return {};
+    }
+
+    const size_t baseOffset = GetOffset();
+    for (size_t mi = 0; mi < type->_members.size(); ++mi) {
+        const auto& mem = type->_members[mi];
+        if (mem._name == name) {
+            const size_t childOffset = baseOffset + mem._offset;
+            for (size_t i = 0; i < _storage->_globalIndex.size(); ++i) {
+                const auto& gi = _storage->_globalIndex[i];
+                if (gi.TypeId == mem._typeId && gi.GlobalOffset == childOffset) {
+                    return ShaderCBufferView{_storage, i};
+                }
+            }
+            return {};
+        }
+    }
+    return {};
+}
+
+size_t ShaderCBufferView::GetOffset() const noexcept {
+    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
+        return 0;
+    }
+    return _storage->_globalIndex[_memberId].GlobalOffset;
+}
+
+ShaderCBufferType* ShaderCBufferView::GetType() noexcept {
+    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
+        return nullptr;
+    }
+    const auto typeId = _storage->_globalIndex[_memberId].TypeId;
+    if (typeId >= _storage->_types.size()) {
+        return nullptr;
+    }
+    return &_storage->_types[typeId];
+}
+
+const ShaderCBufferType* ShaderCBufferView::GetType() const noexcept {
+    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
+        return nullptr;
+    }
+    const auto typeId = _storage->_globalIndex[_memberId].TypeId;
+    if (typeId >= _storage->_types.size()) {
+        return nullptr;
+    }
+    return &_storage->_types[typeId];
 }
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept {

@@ -15,6 +15,7 @@ namespace radray::render {
 
 static constexpr size_t ShaderCBufferStorageInvalidId = std::numeric_limits<size_t>::max();
 
+class ShaderCBufferVariable;
 class ShaderCBufferType;
 class ShaderCBufferStorage;
 class ShaderCBufferView;
@@ -22,53 +23,34 @@ class ShaderCBufferView;
 class ShaderCBufferVariable {
 public:
     ShaderCBufferVariable() = default;
-    ShaderCBufferVariable(string name, ShaderCBufferType* type) : _name(std::move(name)), _type(type) {}
-
-    std::string_view GetName() const noexcept { return _name; }
-    const ShaderCBufferType* GetType() const noexcept { return _type; }
+    ShaderCBufferVariable(string name, size_t typeId) : _name(std::move(name)), _typeId(typeId) {}
 
 private:
     string _name;
-    ShaderCBufferType* _type{nullptr};
-    size_t _id{ShaderCBufferStorageInvalidId};
     size_t _typeId{ShaderCBufferStorageInvalidId};
-
-    friend class ShaderCBufferStorage;
-};
-
-class ShaderCBufferMember {
-public:
-    ShaderCBufferMember() = default;
-    ShaderCBufferMember(ShaderCBufferVariable* variable, size_t offset) : _variable(variable), _offset(offset) {}
-
-    const ShaderCBufferVariable* GetVariable() const noexcept { return _variable; }
-    size_t GetOffset() const noexcept { return _offset; }
-    uint64_t GetId() const noexcept { return _id; }
-    size_t GetGlobalOffset() const noexcept { return _globalOffset; }
-
-private:
-    ShaderCBufferVariable* _variable;
-    size_t _varId{ShaderCBufferStorageInvalidId};
-    uint64_t _id{0};
     size_t _offset;
-    size_t _globalOffset{0};
 
     friend class ShaderCBufferStorage;
+    friend class ShaderCBufferView;
 };
 
 class ShaderCBufferType {
 public:
+    ShaderCBufferType() = default;
+    ShaderCBufferType(std::string_view name, size_t id) : _name(string{name}), _id(id) {}
+
     std::string_view GetName() const noexcept { return _name; }
-    std::span<const ShaderCBufferMember> GetMembers() const noexcept { return _members; }
+    size_t GetId() const noexcept { return _id; }
     size_t GetSizeInBytes() const noexcept { return _size; }
 
 private:
     string _name;
-    vector<ShaderCBufferMember> _members;
     size_t _id{ShaderCBufferStorageInvalidId};
+    vector<ShaderCBufferVariable> _members;
     size_t _size{0};
 
     friend class ShaderCBufferStorage;
+    friend class ShaderCBufferView;
 };
 
 class ShaderCBufferStorage {
@@ -93,12 +75,11 @@ public:
         struct Root {
             string Name;
             size_t TypeIndex{Invalid};
-            size_t GlobalOffset{Invalid};
         };
 
         size_t AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept;
-        size_t AddRoot(std::string_view name, size_t typeIndex, size_t globalOffset = Invalid) noexcept;
+        size_t AddRoot(std::string_view name, size_t typeIndex) noexcept;
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
@@ -113,18 +94,22 @@ public:
     };
 
     ShaderCBufferView GetVar(std::string_view name) noexcept;
-    ShaderCBufferView GetVar(size_t id) noexcept;
     void WriteData(size_t offset, std::span<const byte> data) noexcept;
     std::span<const byte> GetData() const noexcept { return _buffer; }
     std::span<const byte> GetSpan(size_t offset, size_t size) const noexcept;
-    std::span<const byte> GetSpan(size_t id) const noexcept;
+    std::span<const byte> GetSpan(size_t memberId) const noexcept;
 
 private:
+    struct GlobalVarIndexer {
+        size_t TypeId;
+        size_t MemberIndexInType;
+        size_t GlobalOffset;
+    };
+
     vector<ShaderCBufferType> _types;
-    vector<ShaderCBufferVariable> _variables;
-    vector<ShaderCBufferMember> _bindings;
+    vector<ShaderCBufferVariable> _rootVarIds;
+    vector<GlobalVarIndexer> _globalIndex;
     vector<byte> _buffer;
-    vector<const ShaderCBufferMember*> _idMap;
 
     friend class ShaderCBufferView;
 };
@@ -132,60 +117,37 @@ private:
 class ShaderCBufferView {
 public:
     ShaderCBufferView() = default;
-    ShaderCBufferView(
-        ShaderCBufferStorage* storage,
-        const ShaderCBufferType* type,
-        size_t offset,
-        size_t id) noexcept
-        : _storage(storage),
-          _type(type),
-          _offset(offset),
-          _id(id) {}
+    ShaderCBufferView(ShaderCBufferStorage* storage, size_t memberId) noexcept : _storage(storage), _memberId(memberId) {}
 
-    bool IsValid() const noexcept { return _storage != nullptr && _type != nullptr; }
+    bool IsValid() const noexcept { return _storage != nullptr && _memberId != ShaderCBufferStorageInvalidId; }
     operator bool() const noexcept { return IsValid(); }
 
     ShaderCBufferView GetVar(std::string_view name) noexcept;
-    size_t GetId() const noexcept { return _id; }
-    size_t GetOffset() const noexcept { return _offset; }
-    const ShaderCBufferType* GetType() const noexcept { return _type; }
+
+    size_t GetId() const noexcept { return _memberId; }
+    size_t GetOffset() const noexcept;
+    ShaderCBufferType* GetType() noexcept;
+    const ShaderCBufferType* GetType() const noexcept;
 
     template <class T>
     void SetValue(const T& value) noexcept {
+        if (!IsValid()) {
+            return;
+        }
         if constexpr (std::is_trivially_copyable_v<T>) {
-            constexpr size_t typeSize = sizeof(T);
-            RADRAY_ASSERT(typeSize <= _type->GetSizeInBytes());
-            auto dst = _storage->_buffer.data();
-            auto src = reinterpret_cast<const void*>(&value);
-            std::memcpy(dst + _offset, src, sizeof(T));
-        } else if constexpr (IsEigenMatrix<T>::value) {
-            auto dst = _storage->_buffer.data();
-            auto src = value.derived().data();
-            constexpr size_t byteSize = T::SizeAtCompileTime * sizeof(typename T::Scalar);
-            RADRAY_ASSERT(byteSize <= _type->GetSizeInBytes());
-            std::memcpy(dst + _offset, src, byteSize);
-        } else if constexpr (IsEigenQuaternion<T>::value) {
-            float data[4] = {value.x(), value.y(), value.z(), value.w()};
-            constexpr size_t typeSize = sizeof(data);
-            RADRAY_ASSERT(typeSize <= _type->GetSizeInBytes());
-            auto dst = _storage->_buffer.data();
-            std::memcpy(dst + _offset, data, sizeof(data));
-        } else if constexpr (IsEigenTranslation<T>::value) {
-            const auto& vec = value.vector();
-            SetValue(vec);
-        } else if constexpr (IsEigenDiagonalMatrix<T>::value) {
-            const auto& vec = value.diagonal();
-            SetValue(vec);
+            _storage->WriteData(GetOffset(), std::as_bytes(std::span{&value, 1}));
+        } else if constexpr (radray::IsEigenMatrix<T>::value || radray::IsEigenVector<T>::value) {
+            using Scalar = typename T::Scalar;
+            constexpr size_t Count = size_t(T::RowsAtCompileTime) * size_t(T::ColsAtCompileTime);
+            _storage->WriteData(GetOffset(), std::as_bytes(std::span<const Scalar, Count>{value.data(), Count}));
         } else {
-            static_assert(false, "unsupported type");
+            static_assert(std::is_trivially_copyable_v<T>, "ShaderCBufferView::SetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
         }
     }
 
 private:
     ShaderCBufferStorage* _storage{nullptr};
-    const ShaderCBufferType* _type{nullptr};
-    size_t _offset{0};
-    size_t _id{0};
+    size_t _memberId{ShaderCBufferStorageInvalidId};
 };
 
 std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept;

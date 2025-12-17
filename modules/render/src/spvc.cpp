@@ -405,13 +405,13 @@ static void _MergeResourceBindings(SpirvShaderDesc& desc) {
 
 std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes, std::span<const DxcReflectionRadrayExt*> extInfos) {
     SpirvShaderDesc desc;
-    unordered_map<uint32_t, uint32_t> typeCache;
     for (size_t i = 0; i < bytecodes.size(); i++) {
         const auto& bytecode = bytecodes[i];
         if (bytecode.Data.size() % 4 != 0) {
             RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "Invalid SPIR-V data size");
             return std::nullopt;
         }
+        unordered_map<uint32_t, uint32_t> typeCache;
         try {
             spirv_cross::Compiler compiler{
                 std::bit_cast<const uint32_t*>(bytecode.Data.data()),
