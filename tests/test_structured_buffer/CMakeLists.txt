@@ -1,0 +1,5 @@
+add_executable(test_structured_buffer test_structured_buffer.cpp)
+target_link_libraries(test_structured_buffer radraycore GTest::gtest_main)
+gtest_discover_tests(test_structured_buffer)
+radray_optimize_flags_binary(test_structured_buffer)
+radray_set_build_path(test_structured_buffer)

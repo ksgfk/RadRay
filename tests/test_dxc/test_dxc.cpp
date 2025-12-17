@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <radray/render/render_utility.h>
 #include <radray/render/dxc.h>
 #include <radray/render/root_signature_helper.h>
-#include <radray/render/shader_cbuffer_helper.h>
 
 const char* SHADER_CODE = R"(
 struct DirLight

@@ -2,7 +2,7 @@
 
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
-#include <radray/render/shader_cbuffer_helper.h>
+#include <radray/render/render_utility.h>
 
 const char* SHADER_CODE = R"(
 struct DirLight

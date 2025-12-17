@@ -1,67 +1,57 @@
-#include <radray/render/shader_cbuffer_helper.h>
+#include <radray/structured_buffer.h>
 
-#include <algorithm>
-#include <bit>
-#include <utility>
-#include <cstring>
+namespace radray {
 
-#include <radray/basic_math.h>
-
-namespace radray::render {
-
-namespace {
-
-constexpr size_t kInvalid = ShaderCBufferStorageInvalidId;
-
-}  // namespace
-
-size_t ShaderCBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {
+StructuredBufferId StructuredBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {
     Type t{};
     t.Name = string{name};
     t.SizeInBytes = size;
     _types.push_back(std::move(t));
-    return _types.size() - 1;
+    return StructuredBufferId{_types.size() - 1};
 }
 
-void ShaderCBufferStorage::Builder::AddMemberForType(size_t targetType, size_t memberType, std::string_view name, size_t offset) noexcept {
-    if (targetType >= _types.size() || memberType >= _types.size()) {
-        RADRAY_ERR_LOG("ShaderCBufferStorage::Builder::AddMemberForType invalid index target={} member={}", targetType, memberType);
+void StructuredBufferStorage::Builder::AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset) noexcept {
+    const size_t targetTypeIndex = static_cast<size_t>(targetType);
+    const size_t memberTypeIndex = static_cast<size_t>(memberType);
+    if (targetTypeIndex >= _types.size() || memberTypeIndex >= _types.size()) {
+        RADRAY_ERR_LOG("StructuredBufferStorage::Builder::AddMemberForType invalid index target={} member={}", targetTypeIndex, memberTypeIndex);
         return;
     }
     Member m{};
     m.Name = string{name};
     m.Offset = offset;
     m.TypeIndex = memberType;
-    _types[targetType].Members.push_back(std::move(m));
+    _types[targetTypeIndex].Members.push_back(std::move(m));
 }
 
-size_t ShaderCBufferStorage::Builder::AddRoot(std::string_view name, size_t typeIndex) noexcept {
-    if (typeIndex >= _types.size()) {
-        RADRAY_ERR_LOG("ShaderCBufferStorage::Builder::AddRoot invalid typeIndex={}", typeIndex);
+StructuredBufferId StructuredBufferStorage::Builder::AddRoot(std::string_view name, StructuredBufferId typeIndex) noexcept {
+    const size_t typeIndexValue = static_cast<size_t>(typeIndex);
+    if (typeIndexValue >= _types.size()) {
+        RADRAY_ERR_LOG("StructuredBufferStorage::Builder::AddRoot invalid typeIndex={}", typeIndexValue);
         return Invalid;
     }
     Root r{};
     r.Name = string{name};
     r.TypeIndex = typeIndex;
     _roots.push_back(std::move(r));
-    return _roots.size() - 1;
+    return StructuredBufferId{_roots.size() - 1};
 }
 
-void ShaderCBufferStorage::Builder::SetAlignment(size_t align) noexcept {
+void StructuredBufferStorage::Builder::SetAlignment(size_t align) noexcept {
     _align = align;
 }
 
-bool ShaderCBufferStorage::Builder::IsValid() const noexcept {
+bool StructuredBufferStorage::Builder::IsValid() const noexcept {
     if (_align != 0 && (_align & (_align - 1)) != 0) {
         return false;
     }
     for (size_t ti = 0; ti < _types.size(); ++ti) {
         const auto& t = _types[ti];
         for (const auto& m : t.Members) {
-            if (m.TypeIndex >= _types.size()) {
+            if (static_cast<size_t>(m.TypeIndex) >= _types.size()) {
                 return false;
             }
-            const auto& mt = _types[m.TypeIndex];
+            const auto& mt = _types[static_cast<size_t>(m.TypeIndex)];
             if (m.Offset > t.SizeInBytes) {
                 return false;
             }
@@ -74,29 +64,29 @@ bool ShaderCBufferStorage::Builder::IsValid() const noexcept {
         }
     }
     for (const auto& r : _roots) {
-        if (r.TypeIndex >= _types.size()) {
+        if (static_cast<size_t>(r.TypeIndex) >= _types.size()) {
             return false;
         }
     }
     return true;
 }
 
-void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) noexcept {
+void StructuredBufferStorage::Builder::BuildMember(StructuredBufferStorage& storage) noexcept {
     storage._globalIndex.clear();
     storage._globalIndex.reserve(256);
     struct StackItem {
-        size_t TypeId;
+        StructuredBufferId TypeId;
         size_t GlobalOffset;
         size_t MemberIndexInType;
     };
     stack<StackItem> s;
     for (const auto& root : storage._rootVarIds) {
-        s.push({root._typeId, root._offset, kInvalid});
+        s.push({root._typeId, root._offset, StructuredBufferId::Invalid});
     }
     while (!s.empty()) {
         auto item = s.top();
         s.pop();
-        ShaderCBufferStorage::GlobalVarIndexer idx{};
+        StructuredBufferStorage::GlobalVarIndexer idx{};
         idx.TypeId = item.TypeId;
         idx.MemberIndexInType = item.MemberIndexInType;
         idx.GlobalOffset = item.GlobalOffset;
@@ -110,16 +100,16 @@ void ShaderCBufferStorage::Builder::BuildMember(ShaderCBufferStorage& storage) n
     storage._globalIndex.shrink_to_fit();
 }
 
-std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexcept {
+std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build() noexcept {
     if (!IsValid()) {
         return std::nullopt;
     }
-    ShaderCBufferStorage storage{};
+    StructuredBufferStorage storage{};
     // Phase 1: build the full builder type graph (canonicalized member order)
     struct CanonMemberBuilder {
         std::string_view Name;
         size_t Offset;
-        size_t TypeIndex;
+        StructuredBufferId TypeIndex;
     };
     vector<vector<CanonMemberBuilder>> canonMembers;
     canonMembers.resize(_types.size());
@@ -233,17 +223,17 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
         }
     }
     // map union representative -> new deduped type id
-    vector<size_t> repToNewId(_types.size(), kInvalid);
-    vector<size_t> builderToNewId(_types.size(), kInvalid);
+    vector<size_t> repToNewId(_types.size(), StructuredBufferId::Invalid);
+    vector<StructuredBufferId> builderToNewId(_types.size(), StructuredBufferId{StructuredBufferId::Invalid});
     vector<size_t> newIdToRepBuilder;
     newIdToRepBuilder.reserve(_types.size());
     for (size_t i = 0; i < _types.size(); ++i) {
         size_t rep = ufFind(ufFind, i);
-        if (repToNewId[rep] == kInvalid) {
+        if (repToNewId[rep] == StructuredBufferId::Invalid) {
             repToNewId[rep] = newIdToRepBuilder.size();
             newIdToRepBuilder.push_back(rep);
         }
-        builderToNewId[i] = repToNewId[rep];
+        builderToNewId[i] = StructuredBufferId{repToNewId[rep]};
     }
     storage._types.clear();
     storage._types.reserve(newIdToRepBuilder.size());
@@ -251,14 +241,14 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
         size_t repBuilder = newIdToRepBuilder[newId];
         const auto& t = _types[repBuilder];
 
-        storage._types.emplace_back(t.Name, newId);
+        storage._types.emplace_back(t.Name, StructuredBufferId{newId});
         auto& newType = storage._types.back();
         newType._size = t.SizeInBytes;
 
         const auto& members = canonMembers[repBuilder];
         newType._members.reserve(members.size());
         for (const auto& m : members) {
-            ShaderCBufferVariable v{string{m.Name}, builderToNewId[m.TypeIndex]};
+            StructuredBufferVariable v{string{m.Name}, builderToNewId[m.TypeIndex]};
             v._offset = m.Offset;
             newType._members.push_back(std::move(v));
         }
@@ -267,14 +257,14 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     size_t totalSize = 0;
     storage._rootVarIds.reserve(_roots.size());
     for (const auto& r : _roots) {
-        if (r.TypeIndex >= _types.size()) {
+        if (static_cast<size_t>(r.TypeIndex) >= _types.size()) {
             return std::nullopt;
         }
-        const size_t typeId = builderToNewId[r.TypeIndex];
+        const StructuredBufferId typeId = builderToNewId[r.TypeIndex];
         if (_align != 0) {
             totalSize = static_cast<size_t>(radray::Align(static_cast<uint64_t>(totalSize), static_cast<uint64_t>(_align)));
         }
-        ShaderCBufferVariable rootVar{r.Name, typeId};
+        StructuredBufferVariable rootVar{r.Name, typeId};
         rootVar._offset = totalSize;
         storage._rootVarIds.push_back(std::move(rootVar));
         totalSize += storage._types[typeId]._size;
@@ -287,55 +277,56 @@ std::optional<ShaderCBufferStorage> ShaderCBufferStorage::Builder::Build() noexc
     return storage;
 }
 
-ShaderCBufferView ShaderCBufferStorage::GetVar(std::string_view name) noexcept {
+StructuredBufferView StructuredBufferStorage::GetVar(std::string_view name) noexcept {
     for (const auto& root : _rootVarIds) {
         if (root._name == name) {
             for (size_t i = 0; i < _globalIndex.size(); ++i) {
                 const auto& gi = _globalIndex[i];
-                if (gi.MemberIndexInType == kInvalid && gi.TypeId == root._typeId && gi.GlobalOffset == root._offset) {
-                    return ShaderCBufferView{this, i};
+                if (gi.MemberIndexInType == StructuredBufferId::Invalid && gi.TypeId == root._typeId && gi.GlobalOffset == root._offset) {
+                    return StructuredBufferView{this, StructuredBufferId{i}};
                 }
             }
-            return ShaderCBufferView{};
+            return StructuredBufferView{};
         }
     }
-    return ShaderCBufferView{};
+    return StructuredBufferView{};
 }
 
-void ShaderCBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
+void StructuredBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
     if (data.empty()) {
         return;
     }
     if (offset > _buffer.size() || data.size() > _buffer.size() || offset + data.size() > _buffer.size()) {
-        RADRAY_ERR_LOG("ShaderCBufferStorage::WriteData out of range offset={} size={} buffer={}", offset, data.size(), _buffer.size());
+        RADRAY_ERR_LOG("StructuredBufferStorage::WriteData out of range offset={} size={} buffer={}", offset, data.size(), _buffer.size());
         return;
     }
     std::memcpy(_buffer.data() + offset, data.data(), data.size());
 }
 
-std::span<const byte> ShaderCBufferStorage::GetSpan(size_t offset, size_t size) const noexcept {
+std::span<const byte> StructuredBufferStorage::GetSpan(size_t offset, size_t size) const noexcept {
     if (offset > _buffer.size() || size > _buffer.size() || offset + size > _buffer.size()) {
         return {};
     }
     return std::span<const byte>{_buffer.data() + offset, size};
 }
 
-std::span<const byte> ShaderCBufferStorage::GetSpan(size_t memberId) const noexcept {
-    if (memberId >= _globalIndex.size()) {
+std::span<const byte> StructuredBufferStorage::GetSpan(StructuredBufferId memberId) const noexcept {
+    const size_t memberIdValue = static_cast<size_t>(memberId);
+    if (memberIdValue >= _globalIndex.size()) {
         return {};
     }
-    const auto& gi = _globalIndex[memberId];
-    if (gi.TypeId >= _types.size()) {
+    const auto& gi = _globalIndex[memberIdValue];
+    if (static_cast<size_t>(gi.TypeId) >= _types.size()) {
         return {};
     }
     return GetSpan(gi.GlobalOffset, _types[gi.TypeId]._size);
 }
 
-ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
+StructuredBufferView StructuredBufferView::GetVar(std::string_view name) noexcept {
     if (!IsValid()) {
         return {};
     }
-    auto* type = GetType();
+    auto type = GetType();
     if (type == nullptr) {
         return {};
     }
@@ -348,7 +339,7 @@ ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
             for (size_t i = 0; i < _storage->_globalIndex.size(); ++i) {
                 const auto& gi = _storage->_globalIndex[i];
                 if (gi.TypeId == mem._typeId && gi.GlobalOffset == childOffset) {
-                    return ShaderCBufferView{_storage, i};
+                    return StructuredBufferView{_storage, StructuredBufferId{i}};
                 }
             }
             return {};
@@ -357,141 +348,36 @@ ShaderCBufferView ShaderCBufferView::GetVar(std::string_view name) noexcept {
     return {};
 }
 
-size_t ShaderCBufferView::GetOffset() const noexcept {
-    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
+size_t StructuredBufferView::GetOffset() const noexcept {
+    const size_t memberIdValue = static_cast<size_t>(_memberId);
+    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
         return 0;
     }
-    return _storage->_globalIndex[_memberId].GlobalOffset;
+    return _storage->_globalIndex[memberIdValue].GlobalOffset;
 }
 
-ShaderCBufferType* ShaderCBufferView::GetType() noexcept {
-    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
+Nullable<StructuredBufferType*> StructuredBufferView::GetType() noexcept {
+    const size_t memberIdValue = static_cast<size_t>(_memberId);
+    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
         return nullptr;
     }
-    const auto typeId = _storage->_globalIndex[_memberId].TypeId;
-    if (typeId >= _storage->_types.size()) {
-        return nullptr;
-    }
-    return &_storage->_types[typeId];
-}
-
-const ShaderCBufferType* ShaderCBufferView::GetType() const noexcept {
-    if (!IsValid() || _memberId >= _storage->_globalIndex.size()) {
-        return nullptr;
-    }
-    const auto typeId = _storage->_globalIndex[_memberId].TypeId;
-    if (typeId >= _storage->_types.size()) {
+    const auto typeId = _storage->_globalIndex[memberIdValue].TypeId;
+    if (static_cast<size_t>(typeId) >= _storage->_types.size()) {
         return nullptr;
     }
     return &_storage->_types[typeId];
 }
 
-std::optional<ShaderCBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept {
-    ShaderCBufferStorage::Builder builder{};
-    builder.SetAlignment(0);
-    auto createType = [&](size_t parent, size_t bdType, size_t size) {
-        struct TypeCreateCtx {
-            size_t par, bd, s;
-        };
-        stack<TypeCreateCtx> s;
-        s.push({parent, bdType, size});
-        while (!s.empty()) {
-            auto ctx = s.top();
-            s.pop();
-            const auto& type = desc.Types[ctx.par];
-            for (size_t i = 0; i < type.Members.size(); i++) {
-                const auto& member = type.Members[i];
-                const auto& memberType = desc.Types[member.Type];
-                size_t sizeInBytes = 0;
-                if (memberType.IsPrimitive()) {
-                    sizeInBytes = memberType.GetSizeInBytes();
-                } else {
-                    auto rOffset = i == type.Members.size() - 1 ? ctx.s : desc.Types[type.Members[i + 1].Type].Offset;
-                    sizeInBytes = rOffset - memberType.Offset;
-                }
-                auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
-                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, memberType.Offset);
-                s.push({member.Type, childBdIdx, sizeInBytes});
-            }
-        }
-    };
-    for (const auto& res : desc.BoundResources) {
-        if (res.Type != HlslShaderInputType::CBUFFER) {
-            continue;
-        }
-        auto cbOpt = desc.FindCBufferByName(res.Name);
-        if (!cbOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {}", "cannot find cbuffer", res.Name);
-            return std::nullopt;
-        }
-        const auto& cb = cbOpt.value().get();
-        for (size_t i = 0; i < cb.Variables.size(); i++) {
-            size_t varIdx = cb.Variables[i];
-            RADRAY_ASSERT(varIdx < desc.Variables.size());
-            const auto& var = desc.Variables[varIdx];
-            RADRAY_ASSERT(var.Type < desc.Types.size());
-            const auto& type = desc.Types[var.Type];
-            size_t sizeInBytes = cb.IsViewInHlsl ? cb.Size : var.Size;
-            size_t bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
-            builder.AddRoot(var.Name, bdTypeIdx);
-            createType(var.Type, bdTypeIdx, sizeInBytes);
-        }
+Nullable<const StructuredBufferType*> StructuredBufferView::GetType() const noexcept {
+    const size_t memberIdValue = static_cast<size_t>(_memberId);
+    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
+        return nullptr;
     }
-    return builder.Build();
+    const auto typeId = _storage->_globalIndex[memberIdValue].TypeId;
+    if (static_cast<size_t>(typeId) >= _storage->_types.size()) {
+        return nullptr;
+    }
+    return &_storage->_types[typeId];
 }
 
-std::optional<ShaderCBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
-    ShaderCBufferStorage::Builder builder{};
-    builder.SetAlignment(0);
-    auto createType = [&](size_t parent, size_t bdType, size_t size) {
-        struct TypeCreateCtx {
-            size_t par, bd, s;
-        };
-        stack<TypeCreateCtx> s;
-        s.push({parent, bdType, size});
-        while (!s.empty()) {
-            auto ctx = s.top();
-            s.pop();
-            const auto& type = desc.Types[ctx.par];
-            for (size_t i = 0; i < type.Members.size(); i++) {
-                const auto& member = type.Members[i];
-                const auto& memberType = desc.Types[member.TypeIndex];
-                size_t sizeInBytes = memberType.Size;
-                auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
-                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
-                s.push({member.TypeIndex, childBdIdx, sizeInBytes});
-            }
-        }
-    };
-
-    for (const auto& res : desc.PushConstants) {
-        RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
-        auto type = desc.Types[res.TypeIndex];
-        size_t bdTypeIdx = builder.AddType(type.Name, type.Size);
-        builder.AddRoot(res.Name, bdTypeIdx);
-        createType(res.TypeIndex, bdTypeIdx, type.Size);
-    }
-    for (const auto& res : desc.ResourceBindings) {
-        if (res.Kind != SpirvResourceKind::UniformBuffer) {
-            continue;
-        }
-        RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
-        auto type = desc.Types[res.TypeIndex];
-        if (res.IsViewInHlsl) {
-            size_t bdTypeIdx = builder.AddType(type.Name, type.Size);
-            builder.AddRoot(res.Name, bdTypeIdx);
-            createType(res.TypeIndex, bdTypeIdx, type.Size);
-        } else {
-            for (auto member : type.Members) {
-                RADRAY_ASSERT(member.TypeIndex < desc.Types.size());
-                auto memberType = desc.Types[member.TypeIndex];
-                size_t bdTypeIdx = builder.AddType(memberType.Name, memberType.Size);
-                builder.AddRoot(member.Name, bdTypeIdx);
-                createType(member.TypeIndex, bdTypeIdx, memberType.Size);
-            }
-        }
-    }
-    return builder.Build();
-}
-
-}  // namespace radray::render
+}  // namespace radray

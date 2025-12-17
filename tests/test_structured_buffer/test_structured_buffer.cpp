@@ -1,12 +1,11 @@
 #include <gtest/gtest.h>
-#include <radray/render/shader_cbuffer_helper.h>
+#include <radray/structured_buffer.h>
 #include <radray/basic_math.h>
 
 using namespace radray;
-using namespace radray::render;
 
-TEST(ShaderCBufferStorage, BasicBuilder) {
-    ShaderCBufferStorage::Builder builder;
+TEST(StructuredBufferStorage, BasicBuilder) {
+    StructuredBufferStorage::Builder builder;
     
     // Define a simple float3 type
     // Size = 12 bytes
@@ -44,8 +43,8 @@ TEST(ShaderCBufferStorage, BasicBuilder) {
     EXPECT_EQ(scaleView.GetOffset(), 12); // Relative to obj
 }
 
-TEST(ShaderCBufferStorage, DataReadWrite) {
-    ShaderCBufferStorage::Builder builder;
+TEST(StructuredBufferStorage, DataReadWrite) {
+    StructuredBufferStorage::Builder builder;
     size_t floatType = builder.AddType("float", 4);
     size_t vec4Type = builder.AddType("float4", 16);
     
@@ -87,8 +86,8 @@ TEST(ShaderCBufferStorage, DataReadWrite) {
     EXPECT_EQ(readColor[3], 1.0f);
 }
 
-TEST(ShaderCBufferStorage, Alignment) {
-    ShaderCBufferStorage::Builder builder;
+TEST(StructuredBufferStorage, Alignment) {
+    StructuredBufferStorage::Builder builder;
     builder.SetAlignment(256); // Common UBO alignment
     
     size_t floatType = builder.AddType("float", 4);
@@ -108,8 +107,8 @@ TEST(ShaderCBufferStorage, Alignment) {
     EXPECT_EQ(storage.GetData().size(), 512);
 }
 
-TEST(ShaderCBufferStorage, InvalidBuild) {
-    ShaderCBufferStorage::Builder builder;
+TEST(StructuredBufferStorage, InvalidBuild) {
+    StructuredBufferStorage::Builder builder;
     size_t floatType = builder.AddType("float", 4);
     size_t structType = builder.AddType("Struct", 4); // Too small
     
