@@ -591,7 +591,7 @@ public:
     DeviceD3D12* _device;
     GpuDescriptorHeapViewRAII _resHeapView;
     GpuDescriptorHeapViewRAII _samplerHeapView;
-    RootDescriptorTable1Container _table;
+    VersionedRootSignatureDescContainer::RootParameter _table;
     vector<uint32_t> _elemToHeapOffset;
 };
 

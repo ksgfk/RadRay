@@ -32,13 +32,16 @@ public:
     StructuredBufferVariable() = default;
     StructuredBufferVariable(string name, StructuredBufferId typeId) : _name(std::move(name)), _typeId(typeId) {}
 
+    std::string_view GetName() const noexcept { return _name; }
+    StructuredBufferId GetTypeId() const noexcept { return _typeId; }
+    size_t GetOffset() const noexcept { return _offset; }
+
 private:
     string _name;
     StructuredBufferId _typeId{StructuredBufferId::Invalid};
     size_t _offset{0};
 
     friend class StructuredBufferStorage;
-    friend class StructuredBufferView;
 };
 
 class StructuredBufferType {
@@ -49,6 +52,7 @@ public:
     std::string_view GetName() const noexcept { return _name; }
     StructuredBufferId GetId() const noexcept { return _id; }
     size_t GetSizeInBytes() const noexcept { return _size; }
+    std::span<const StructuredBufferVariable> GetMembers() const noexcept { return _members; }
 
 private:
     string _name;
@@ -57,7 +61,6 @@ private:
     size_t _size{0};
 
     friend class StructuredBufferStorage;
-    friend class StructuredBufferView;
 };
 
 class StructuredBufferStorage {

@@ -51,77 +51,100 @@ private:
 
 class VersionedRootSignatureDescContainer {
 public:
-    class RootConstant {
-    public:
-        D3D12_ROOT_CONSTANTS data;
-        UINT index;
+    struct DescriptorRange {
+        D3D12_DESCRIPTOR_RANGE_TYPE RangeType{};
+        UINT NumDescriptors{};
+        UINT BaseShaderRegister{};
+        UINT RegisterSpace{};
+        UINT OffsetInDescriptorsFromTableStart{};
+        D3D12_DESCRIPTOR_RANGE_FLAGS Flags{D3D12_DESCRIPTOR_RANGE_FLAG_NONE};
     };
 
-    class RootDescriptor {
-    public:
-        D3D12_ROOT_DESCRIPTOR1 data;
-        D3D12_ROOT_PARAMETER_TYPE type;
-        UINT index;
+    struct RootDescriptor {
+        UINT ShaderRegister{};
+        UINT RegisterSpace{};
+        D3D12_ROOT_DESCRIPTOR_FLAGS Flags{D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
     };
 
-    class DescriptorTable {
+    struct RootConstants {
+        UINT ShaderRegister{};
+        UINT RegisterSpace{};
+        UINT Num32BitValues{};
+    };
+
+    struct RootParameter {
+        D3D12_ROOT_PARAMETER_TYPE Type{};
+        D3D12_SHADER_VISIBILITY ShaderVisibility{D3D12_SHADER_VISIBILITY_ALL};
+        RootConstants Constants{};
+        RootDescriptor Descriptor{};
+        vector<DescriptorRange> Ranges;
+    };
+
+    struct StaticSampler {
+        D3D12_FILTER Filter{};
+        D3D12_TEXTURE_ADDRESS_MODE AddressU{};
+        D3D12_TEXTURE_ADDRESS_MODE AddressV{};
+        D3D12_TEXTURE_ADDRESS_MODE AddressW{};
+        FLOAT MipLODBias{};
+        UINT MaxAnisotropy{};
+        D3D12_COMPARISON_FUNC ComparisonFunc{};
+        D3D12_STATIC_BORDER_COLOR BorderColor{};
+        FLOAT MinLOD{};
+        FLOAT MaxLOD{};
+        UINT ShaderRegister{};
+        UINT RegisterSpace{};
+        D3D12_SHADER_VISIBILITY ShaderVisibility{D3D12_SHADER_VISIBILITY_ALL};
+        D3D12_SAMPLER_FLAGS Flags{D3D12_SAMPLER_FLAG_NONE};
+    };
+
+    struct RootParamRef {
+        size_t Index;
+        const RootParameter& Param;
+    };
+
+    class View {
     public:
-        D3D12_ROOT_DESCRIPTOR_TABLE1 data;
-        UINT index;
+        const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Get() const noexcept { return &_desc; }
+
+    private:
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
+        vector<D3D12_ROOT_PARAMETER> _params0;
+        vector<D3D12_DESCRIPTOR_RANGE> _ranges0;
+        vector<D3D12_STATIC_SAMPLER_DESC> _samplers0;
+        vector<D3D12_ROOT_PARAMETER1> _params1;
+        vector<D3D12_DESCRIPTOR_RANGE1> _ranges1;
+        vector<D3D12_STATIC_SAMPLER_DESC1> _samplers1;
+
+        friend class VersionedRootSignatureDescContainer;
     };
 
     VersionedRootSignatureDescContainer() noexcept = default;
     explicit VersionedRootSignatureDescContainer(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& desc) noexcept;
-    VersionedRootSignatureDescContainer(const VersionedRootSignatureDescContainer& other) noexcept;
-    VersionedRootSignatureDescContainer(VersionedRootSignatureDescContainer&& other) noexcept;
-    VersionedRootSignatureDescContainer& operator=(const VersionedRootSignatureDescContainer& other) noexcept;
-    VersionedRootSignatureDescContainer& operator=(VersionedRootSignatureDescContainer&& other) noexcept;
-    ~VersionedRootSignatureDescContainer() noexcept = default;
 
-    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Get() const noexcept { return &_desc; }
-    RootConstant GetRootConstant() const noexcept;
-    RootDescriptor GetRootDescriptor(uint32_t slot) const noexcept;
-    DescriptorTable GetDescriptorTable(uint32_t slot) const noexcept;
+    View MakeView(D3D_ROOT_SIGNATURE_VERSION version) const noexcept;
+    View MakeView() const noexcept { return MakeView(_sourceVersion); }
 
-    UINT GetDescriptorTableCount() const noexcept;
-    UINT GetRootDescriptorCount() const noexcept;
-    UINT GetRootConstantCount() const noexcept;
+    D3D_ROOT_SIGNATURE_VERSION GetSourceVersion() const noexcept { return _sourceVersion; }
+    D3D12_ROOT_SIGNATURE_FLAGS GetFlags() const noexcept { return _flags; }
+    std::span<const RootParameter> GetParameters() const noexcept { return _parameters; }
+    std::span<const StaticSampler> GetStaticSamplers() const noexcept { return _staticSamplers; }
 
-    friend void swap(VersionedRootSignatureDescContainer& lhs, VersionedRootSignatureDescContainer& rhs) noexcept;
-
-private:
-    void RefreshDesc() noexcept;
-    void RefreshRanges() noexcept;
-
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
-    vector<D3D12_DESCRIPTOR_RANGE> _ranges;
-    vector<D3D12_DESCRIPTOR_RANGE1> _ranges1;
-    vector<D3D12_ROOT_PARAMETER> _params;
-    vector<D3D12_ROOT_PARAMETER1> _params1;
-    vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplerDescs;
-    vector<D3D12_STATIC_SAMPLER_DESC1> _staticSamplerDescs1;
-};
-
-class RootDescriptorTable1Container {
-public:
-    RootDescriptorTable1Container() noexcept = default;
-    explicit RootDescriptorTable1Container(const D3D12_ROOT_DESCRIPTOR_TABLE1& table) noexcept;
-    RootDescriptorTable1Container(const RootDescriptorTable1Container& other) noexcept;
-    RootDescriptorTable1Container(RootDescriptorTable1Container&& other) noexcept;
-    RootDescriptorTable1Container& operator=(const RootDescriptorTable1Container& other) noexcept;
-    RootDescriptorTable1Container& operator=(RootDescriptorTable1Container&& other) noexcept;
-    ~RootDescriptorTable1Container() noexcept = default;
-
-    const D3D12_ROOT_DESCRIPTOR_TABLE1* Get() const noexcept { return &_table; }
-    const vector<D3D12_DESCRIPTOR_RANGE1>& GetRanges() const noexcept { return _ranges; }
-
-    friend void swap(RootDescriptorTable1Container& lhs, RootDescriptorTable1Container& rhs) noexcept;
+    RootParamRef GetTable(size_t index) const noexcept;
+    size_t GetTableCount() const noexcept { return _tableOffsets.size(); }
+    RootParamRef GetRootConstant(size_t index) const noexcept;
+    size_t GetRootConstantCount() const noexcept { return _rootConstantsOffsets.size(); }
+    RootParamRef GetRootDescriptor(size_t index) const noexcept;
+    size_t GetRootDescriptorCount() const noexcept { return _rootDescriptorsOffsets.size(); }
 
 private:
-    void Refresh() noexcept;
+    D3D_ROOT_SIGNATURE_VERSION _sourceVersion{D3D_ROOT_SIGNATURE_VERSION_1};
+    D3D12_ROOT_SIGNATURE_FLAGS _flags{D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    vector<RootParameter> _parameters;
+    vector<StaticSampler> _staticSamplers;
 
-    D3D12_ROOT_DESCRIPTOR_TABLE1 _table{};
-    vector<D3D12_DESCRIPTOR_RANGE1> _ranges;
+    vector<size_t> _tableOffsets;
+    vector<size_t> _rootConstantsOffsets;
+    vector<size_t> _rootDescriptorsOffsets;
 };
 
 std::optional<Win32Event> MakeWin32Event() noexcept;

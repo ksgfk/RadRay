@@ -1314,17 +1314,13 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastD3D12Object(rootSig_);
     const auto& desc = rootSig->_desc;
-    auto&& data = desc.GetDescriptorTable(index);
-    if (data.index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::ArgumentOutOfRange, "index");
-        return nullptr;
-    }
-    const auto& table = data.data;
+    auto&& data = desc.GetTable(index);
+    const auto& table = data.Param;
     UINT resCount = 0, samplerCount = 0;
     vector<uint32_t> offset;
-    offset.reserve(table.NumDescriptorRanges);
-    for (UINT i = 0; i < table.NumDescriptorRanges; i++) {
-        const auto& range = table.pDescriptorRanges[i];
+    offset.reserve(table.Ranges.size());
+    for (UINT i = 0; i < table.Ranges.size(); i++) {
+        const auto& range = table.Ranges[i];
         switch (range.RangeType) {
             case D3D12_DESCRIPTOR_RANGE_TYPE_CBV:
             case D3D12_DESCRIPTOR_RANGE_TYPE_SRV:
@@ -1359,7 +1355,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignatu
         samplerHeapView = {gpuSamplerHeapAllocationOpt.value(), _gpuSamplerHeap.get()};
     }
     auto result = make_unique<GpuDescriptorHeapViews>(this, std::move(resHeapView), std::move(samplerHeapView));
-    result->_table = RootDescriptorTable1Container{table};
+    result->_table = table;
     result->_elemToHeapOffset = std::move(offset);
     return result;
 }
@@ -1781,17 +1777,14 @@ void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept 
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
-    auto [rootConstData, index] = _boundRootSig->_desc.GetRootConstant();
-    if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root signature has no root constant");
-        return;
-    }
-    size_t rcSize = rootConstData.Num32BitValues * 4;
+    RADRAY_ASSERT(_boundRootSig->_desc.GetRootConstantCount() > 0);
+    auto dataRef = _boundRootSig->_desc.GetRootConstant(0);
+    size_t rcSize = dataRef.Param.Constants.Num32BitValues * 4;
     if (length > rcSize) {
         RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "length");
         return;
     }
-    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(index, static_cast<UINT>(length / 4), data, 0);
+    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(dataRef.Index, static_cast<UINT>(length / 4), data, 0);
 }
 
 void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
@@ -1799,34 +1792,31 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
-    auto [rootDescData, type, index] = _boundRootSig->_desc.GetRootDescriptor(slot);
-    if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "slot");
-        return;
-    }
+    RADRAY_ASSERT(slot < _boundRootSig->_desc.GetRootDescriptorCount());
+    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(slot);
     auto tag = view->GetTag();
     if (tag == RenderObjectTag::BufferView) {
         BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
         D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferView->_buffer->_gpuAddr + bufferView->_desc.Range.Offset;
         auto usage = bufferView->_desc.Usage;
         if (usage.HasFlag(BufferUse::Resource)) {
-            if (type != D3D12_ROOT_PARAMETER_TYPE_SRV) {
+            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_SRV) {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootShaderResourceView(index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootShaderResourceView(dataRef.Index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::CBuffer)) {
-            if (type != D3D12_ROOT_PARAMETER_TYPE_CBV) {
+            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_CBV) {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootConstantBufferView(index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootConstantBufferView(dataRef.Index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::UnorderedAccess)) {
-            if (type != D3D12_ROOT_PARAMETER_TYPE_UAV) {
+            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_UAV) {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(dataRef.Index, gpuAddr);
         } else {
             RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported buffer view usage");
         }
@@ -1842,17 +1832,14 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) no
         RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unbound root signature");
         return;
     }
-    auto [tableData, index] = _boundRootSig->_desc.GetDescriptorTable(slot);
-    if (index == std::numeric_limits<UINT>::max()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "slot");
-        return;
-    }
+    RADRAY_ASSERT(slot < _boundRootSig->_desc.GetTableCount());
+    auto dataRef = _boundRootSig->_desc.GetTable(slot);
     auto descHeapView = CastD3D12Object(set);
     if (descHeapView->_resHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(index, descHeapView->_resHeapView.HandleGpu());
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(dataRef.Index, descHeapView->_resHeapView.HandleGpu());
     }
     if (descHeapView->_samplerHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(index, descHeapView->_samplerHeapView.HandleGpu());
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
     }
 }
 
@@ -2075,16 +2062,9 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
 }
 
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
-    const auto* table = _table.Get();
-    if (slot >= table->NumDescriptorRanges) {
-        RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "slot");
-        return;
-    }
-    const auto& e = table->pDescriptorRanges[slot];
-    if (index >= e.NumDescriptors) {
-        RADRAY_ERR_LOG("{} {} '{}", Errors::D3D12, Errors::ArgumentOutOfRange, "index");
-        return;
-    }
+    RADRAY_ASSERT(slot < _table.Ranges.size());
+    const auto& e = _table.Ranges[slot];
+    RADRAY_ASSERT(index < e.NumDescriptors);
     auto tag = view->GetTag();
     auto offset = _elemToHeapOffset[slot] + index;
     if (tag.HasFlag(RenderObjectTag::BufferView)) {

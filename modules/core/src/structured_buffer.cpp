@@ -138,7 +138,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
     auto eqCell = [&](size_t a, size_t b) -> uint8_t& {
         return eqMemo[a * nTypes + b];
     };
-    auto equalBuilderTypes = [&](auto&& self, size_t a, size_t b) -> bool {
+    const std::function<bool(size_t, size_t)> equalBuilderTypes = [&](size_t a, size_t b) -> bool {
         if (a == b) {
             return true;
         }
@@ -177,7 +177,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
                 state = 3;
                 return false;
             }
-            if (!self(self, ma[i].TypeIndex, mb[i].TypeIndex)) {
+            if (!equalBuilderTypes(ma[i].TypeIndex, mb[i].TypeIndex)) {
                 state = 3;
                 return false;
             }
@@ -191,16 +191,16 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
     for (size_t i = 0; i < parent.size(); ++i) {
         parent[i] = i;
     }
-    auto ufFind = [&](auto&& self, size_t x) -> size_t {
-        if (parent[x] == x) {
-            return x;
+    const std::function<size_t(size_t)> ufFind = [&](size_t x) -> size_t {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
         }
-        parent[x] = self(self, parent[x]);
-        return parent[x];
+        return x;
     };
     auto ufUnion = [&](size_t a, size_t b) {
-        a = ufFind(ufFind, a);
-        b = ufFind(ufFind, b);
+        a = ufFind(a);
+        b = ufFind(b);
         if (a == b) {
             return;
         }
@@ -214,10 +214,10 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
     };
     for (size_t i = 0; i < _types.size(); ++i) {
         for (size_t j = 0; j < i; ++j) {
-            if (ufFind(ufFind, i) == ufFind(ufFind, j)) {
+            if (ufFind(i) == ufFind(j)) {
                 continue;
             }
-            if (equalBuilderTypes(equalBuilderTypes, i, j)) {
+            if (equalBuilderTypes(i, j)) {
                 ufUnion(i, j);
             }
         }
@@ -228,7 +228,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
     vector<size_t> newIdToRepBuilder;
     newIdToRepBuilder.reserve(_types.size());
     for (size_t i = 0; i < _types.size(); ++i) {
-        size_t rep = ufFind(ufFind, i);
+        size_t rep = ufFind(i);
         if (repToNewId[rep] == StructuredBufferId::Invalid) {
             repToNewId[rep] = newIdToRepBuilder.size();
             newIdToRepBuilder.push_back(rep);
@@ -330,15 +330,13 @@ StructuredBufferView StructuredBufferView::GetVar(std::string_view name) noexcep
     if (type == nullptr) {
         return {};
     }
-
     const size_t baseOffset = GetOffset();
-    for (size_t mi = 0; mi < type->_members.size(); ++mi) {
-        const auto& mem = type->_members[mi];
-        if (mem._name == name) {
-            const size_t childOffset = baseOffset + mem._offset;
+    for (const auto& mem : type->GetMembers()) {
+        if (mem.GetName() == name) {
+            const size_t childOffset = baseOffset + mem.GetOffset();
             for (size_t i = 0; i < _storage->_globalIndex.size(); ++i) {
                 const auto& gi = _storage->_globalIndex[i];
-                if (gi.TypeId == mem._typeId && gi.GlobalOffset == childOffset) {
+                if (gi.TypeId == mem.GetTypeId() && gi.GlobalOffset == childOffset) {
                     return StructuredBufferView{_storage, StructuredBufferId{i}};
                 }
             }

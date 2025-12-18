@@ -20,8 +20,62 @@ struct SemanticMapping {
 };
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
+// --------------------------------------- CBuffer Utility ---------------------------------------
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const MergedHlslShaderDesc& desc) noexcept;
-
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
+// -----------------------------------------------------------------------------------------------
+
+// ----------------------------------- Root Signature Utility ------------------------------------
+class RootSignatureDescriptorContainer {
+public:
+    struct SetElementData {
+        uint32_t Slot{0};
+        uint32_t Space{0};
+        ResourceBindType Type{ResourceBindType::UNKNOWN};
+        uint32_t Count{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+        uint32_t StaticSamplerOffset{0};
+        uint32_t StaticSamplerCount{0};
+    };
+
+    struct DescriptorSetRange {
+        size_t ElementOffset{0};
+        size_t ElementCount{0};
+    };
+
+    class View {
+    public:
+        const RootSignatureDescriptor& Get() const noexcept { return _desc; }
+
+    private:
+        RootSignatureDescriptor _desc{};
+        vector<RootSignatureRootDescriptor> _rootDescriptors;
+        vector<RootSignatureSetElement> _elements;
+        vector<SamplerDescriptor> _staticSamplers;
+        vector<RootSignatureDescriptorSet> _descriptorSets;
+
+        friend class RootSignatureDescriptorContainer;
+    };
+
+    RootSignatureDescriptorContainer() noexcept = default;
+    explicit RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept;
+
+    View MakeView() const noexcept;
+
+    std::span<const RootSignatureRootDescriptor> GetRootDescriptors() const noexcept { return _rootDescriptors; }
+    std::span<const SetElementData> GetElements() const noexcept { return _elements; }
+    std::span<const DescriptorSetRange> GetDescriptorSets() const noexcept { return _descriptorSets; }
+    const std::optional<RootSignatureConstant>& GetConstant() const noexcept { return _constant; }
+
+private:
+    vector<RootSignatureRootDescriptor> _rootDescriptors;
+    vector<SetElementData> _elements;
+    vector<SamplerDescriptor> _staticSamplers;
+    vector<DescriptorSetRange> _descriptorSets;
+    std::optional<RootSignatureConstant> _constant;
+};
+Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const MergedHlslShaderDesc& desc) noexcept;
+// -----------------------------------------------------------------------------------------------
 
 }  // namespace radray::render
