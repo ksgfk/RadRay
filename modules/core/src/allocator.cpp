@@ -9,6 +9,10 @@
 
 namespace radray {
 
+static constexpr size_t LeftChild(size_t index) noexcept { return index * 2 + 1; }
+// static constexpr size_t RightChild(size_t index) noexcept { return index * 2 + 2; }
+static constexpr size_t Parent(size_t index) noexcept { return (index - 1) / 2; }
+
 BuddyAllocator::BuddyAllocator(size_t capacity) noexcept : _capacity(capacity) {
     _virtualCapacity = capacity > 0 ? std::bit_ceil(capacity) : size_t{1};
     const size_t treeSize = _virtualCapacity * 2 - 1;

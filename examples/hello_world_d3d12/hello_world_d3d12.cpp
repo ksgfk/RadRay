@@ -173,7 +173,7 @@ void Init() {
 }
 
 void Update() {
-    uint64_t now = sw.RunningMilliseconds();
+    uint64_t now = static_cast<uint64_t>(sw.ElapsedMilliseconds());
     auto delta = now - last;
     last = now;
 

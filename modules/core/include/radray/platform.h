@@ -61,8 +61,6 @@ private:
     void* _handle{nullptr};
 };
 
-#if defined(RADRAY_PLATFORM_WINDOWS)
 string FormatLastErrorMessageWin32() noexcept;
-#endif
 
 }  // namespace radray

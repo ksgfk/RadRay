@@ -33,7 +33,7 @@ std::optional<Win32Event> MakeWin32Event() noexcept {
     HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
         DWORD err = ::GetLastError();
-        RADRAY_ERR_LOG("{} {} {}", Errors::WIN, "CreateEvent", err);
+        RADRAY_ERR_LOG("{} {} {}", Errors::WINDOWS, "CreateEvent", err);
         return std::nullopt;
     }
     Win32Event result{};

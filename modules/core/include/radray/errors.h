@@ -20,7 +20,7 @@ enum class Errors {
     RADRAYIMGUI,
     DXC,
     SPIRV_CROSS,
-    WIN,
+    WINDOWS,
 };
 
 std::string_view format_as(Errors v) noexcept;

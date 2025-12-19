@@ -2,6 +2,7 @@
 
 #include <bit>
 #include <limits>
+#include <list>
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
@@ -39,9 +40,6 @@ private:
     vector<uint8_t> _allocated;
 
     void UpdateAncestors(size_t index) noexcept;
-    static constexpr size_t LeftChild(size_t index) noexcept { return index * 2 + 1; }
-    static constexpr size_t RightChild(size_t index) noexcept { return index * 2 + 2; }
-    static constexpr size_t Parent(size_t index) noexcept { return (index - 1) / 2; }
 };
 
 static_assert(is_allocator<BuddyAllocator, size_t>, "BuddyAllocator is not an allocator");
@@ -69,9 +67,10 @@ public:
         const size_t needBucket = BucketForNeed(size);
         EnsureBucketCount(needBucket + 1);
         for (size_t bucket = needBucket; bucket < _bucketHeads.size(); ++bucket) {
-            Page* page = _bucketHeads[bucket];
-            while (page != nullptr) {
-                Page* next = page->_next;
+            auto& bucketList = _bucketHeads[bucket];
+            for (auto it = bucketList.begin(); it != bucketList.end(); ) {
+                Page* page = *it;
+                ++it;
                 if (page->_freeBytes >= size) {
                     std::optional<size_t> start = page->_allocator.Allocate(size);
                     if (start.has_value()) {
@@ -81,7 +80,6 @@ public:
                         return BlockAllocation<THeap>{page->_heap.get(), start.value(), size};
                     }
                 }
-                page = next;
             }
         }
         Page* page = CreatePage(size);
@@ -119,19 +117,16 @@ private:
             unique_ptr<THeap> heap,
             TSubAlloc&& allocator,
             size_t capacity) noexcept
-            : _capacity(capacity),
-              _freeBytes(capacity),
+            : _freeBytes(capacity),
               _heap(std::move(heap)),
               _allocator(std::move(std::forward<TSubAlloc>(allocator))) {}
 
-        size_t _capacity = 0;
         size_t _freeBytes = 0;
         size_t _liveAllocs = 0;
 
         size_t _ownerIndex = 0;
-        size_t _bucket = npos;
-        Page* _prev = nullptr;
-        Page* _next = nullptr;
+        size_t _bucketIndex = npos;
+        list<Page*>::iterator _bucketIter{};
 
         unique_ptr<THeap> _heap;
         TSubAlloc _allocator;
@@ -155,51 +150,42 @@ private:
         if (_bucketHeads.size() >= count) {
             return;
         }
-        _bucketHeads.resize(count, nullptr);
+        _bucketHeads.resize(count);
     }
 
-    void ListRemove(Page* page) noexcept {
-        if (page->_bucket == npos) {
+    void RemoveFromBucket(Page* page) noexcept {
+        if (page->_bucketIndex == npos) {
             return;
         }
-        Page*& head = _bucketHeads[page->_bucket];
-        if (page->_prev != nullptr) {
-            page->_prev->_next = page->_next;
-        } else {
-            RADRAY_ASSERT(head == page);
-            head = page->_next;
-        }
-        if (page->_next != nullptr) {
-            page->_next->_prev = page->_prev;
-        }
-        page->_prev = nullptr;
-        page->_next = nullptr;
-        page->_bucket = npos;
+        _bucketHeads[page->_bucketIndex].erase(page->_bucketIter);
+        page->_bucketIndex = npos;
     }
 
-    void ListInsert(Page* page, size_t bucket) noexcept {
+    void MoveToBucketFront(Page* page, size_t bucket) noexcept {
         EnsureBucketCount(bucket + 1);
-        Page*& head = _bucketHeads[bucket];
-        page->_bucket = bucket;
-        page->_prev = nullptr;
-        page->_next = head;
-        if (head != nullptr) {
-            head->_prev = page;
+        auto& dst = _bucketHeads[bucket];
+        if (page->_bucketIndex == npos) {
+            dst.push_front(page);
+            page->_bucketIter = dst.begin();
+            page->_bucketIndex = bucket;
+            return;
         }
-        head = page;
+        auto& src = _bucketHeads[page->_bucketIndex];
+        dst.splice(dst.begin(), src, page->_bucketIter);
+        page->_bucketIndex = bucket;
+        page->_bucketIter = dst.begin();
     }
 
     void UpdatePageBucket(Page* page) noexcept {
         if (page->_freeBytes == 0) {
-            ListRemove(page);
+            RemoveFromBucket(page);
             return;
         }
         const size_t newBucket = BucketForFree(page->_freeBytes);
-        if (page->_bucket != npos && page->_bucket == newBucket) {
+        if (page->_bucketIndex == newBucket) {
             return;
         }
-        ListRemove(page);
-        ListInsert(page, newBucket);
+        MoveToBucketFront(page, newBucket);
     }
 
     Page* CreatePage(size_t requestSize) noexcept {
@@ -217,7 +203,7 @@ private:
     }
 
     void ReleasePage(Page* page) noexcept {
-        ListRemove(page);
+        RemoveFromBucket(page);
         _heapToPage.erase(page->_heap.get());
         const size_t idx = page->_ownerIndex;
         RADRAY_ASSERT(idx < _pages.size());
@@ -229,8 +215,8 @@ private:
     }
 
     vector<unique_ptr<Page>> _pages;
-    std::unordered_map<THeap*, Page*> _heapToPage;
-    vector<Page*> _bucketHeads;
+    unordered_map<THeap*, Page*> _heapToPage;
+    vector<list<Page*>> _bucketHeads;
     size_t _basicPageSize;
 };
 

@@ -115,10 +115,6 @@ void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     return std::bit_cast<void*>(symbol);
 }
 
-string FormatLastErrorMessageWin32() noexcept {
-    return _Win32LastErrMessage();
-}
-
 void DynamicLibrary::Destroy() noexcept {
     if (_handle != nullptr) {
         ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
@@ -205,3 +201,16 @@ void DynamicLibrary::Destroy() noexcept {
 }  // namespace radray
 
 #endif
+
+namespace radray {
+
+string FormatLastErrorMessageWin32() noexcept {
+#ifdef RADRAY_PLATFORM_WINDOWS
+    return _Win32LastErrMessage();
+#else
+    RADRAY_ERR_LOG("{}", Errors::UnsupportedPlatform);
+    return "";
+#endif
+}
+
+}  // namespace radray

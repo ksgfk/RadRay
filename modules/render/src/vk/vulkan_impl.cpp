@@ -129,7 +129,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 instanceAddr,
                 &hInstance) == 0) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::WIN, "GetModuleHandleExW", GetLastError());
+            RADRAY_ERR_LOG("{} {} {}", Errors::WINDOWS, "GetModuleHandleExW", GetLastError());
             return nullptr;
         }
         HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);

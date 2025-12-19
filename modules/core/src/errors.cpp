@@ -21,7 +21,7 @@ std::string_view format_as(Errors v) noexcept {
         case Errors::RADRAYIMGUI: return "radrayimgui";
         case Errors::DXC: return "dxc";
         case Errors::SPIRV_CROSS: return "spirv-cross";
-        case Errors::WIN: return "WINDOWS API";
+        case Errors::WINDOWS: return "WINDOWS";
     }
     Unreachable();
 }

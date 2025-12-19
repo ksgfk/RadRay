@@ -887,9 +887,7 @@ void ImGuiApplication::RunMultiThreadRender() {
 }
 
 void ImGuiApplication::RunSingleThreadRender() {
-    Stopwatch sw{};
-    sw.Start();
-
+    Stopwatch sw = Stopwatch::StartNew();
     while (true) {
         this->MainUpdate();
         if (_needClose) {
@@ -908,8 +906,8 @@ void ImGuiApplication::RunSingleThreadRender() {
             rt = _swapchain->GetCurrentBackBuffer().Release();
         } else {
             sw.Stop();
-            _renderTime = sw.ElapsedNanoseconds() / 1'000'000.0;
-            sw.Start();
+            _renderTime = sw.Elapsed().count() / 1'000'000.0;
+            sw.Restart();
             radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
             if (!rtOpt.HasValue()) {
                 continue;
@@ -949,9 +947,7 @@ void ImGuiApplication::RunSingleThreadRender() {
 }
 
 void ImGuiApplication::MainUpdate() {
-    Stopwatch sw{};
-    sw.Start();
-
+    Stopwatch sw = Stopwatch::StartNew();
     _imguiContext->SetCurrent();
     _window->DispatchEvents();
     if (_window->ShouldClose()) {
@@ -975,13 +971,13 @@ void ImGuiApplication::MainUpdate() {
     }
 
     sw.Stop();
-    _logicTime = sw.ElapsedNanoseconds() / 1'000'000.0;
+    _logicTime = sw.Elapsed().count() / 1'000'000.0;
+    sw.Restart();
 }
 
 void ImGuiApplication::RenderUpdateMultiThread() {
     ::radray::SetWin32DpiAwarenessImGui();
-    Stopwatch sw{};
-    sw.Start();
+    Stopwatch sw = Stopwatch::StartNew();
     while (true) {
         this->ExecuteBeforeAcquire();
         if (_isResizingRender) {
@@ -993,8 +989,8 @@ void ImGuiApplication::RenderUpdateMultiThread() {
             continue;
         }
         sw.Stop();
-        _renderTime = sw.ElapsedNanoseconds() / 1'000'000.0;
-        sw.Start();
+        _renderTime = sw.Elapsed().count() / 1'000'000.0;
+        sw.Restart();
         radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
         if (_needClose) {
             return;

@@ -15,6 +15,8 @@
 #include <unordered_set>
 #include <memory>
 #include <string>
+#include <list>
+#include <forward_list>
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 #ifdef __clang__
@@ -76,6 +78,12 @@ using multimap = std::multimap<K, V, Cmp, allocator<std::pair<const K, V>>>;
 
 template <class T, class Cmp = std::less<T>>
 using multiset = std::multiset<T, Cmp, allocator<T>>;
+
+template <class T>
+using list = std::list<T, allocator<T>>;
+
+template <class T>
+using forward_list = std::forward_list<T, allocator<T>>;
 
 using std::unique_ptr;
 using std::shared_ptr;
