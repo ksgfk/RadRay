@@ -845,29 +845,25 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
 }
 
 Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept {
-    vector<VkDescriptorSetLayoutBinding> bindings;
-    vector<unique_ptr<SamplerVulkan>> staticSamplers;
-    size_t staticSamplerCount = 0;
+    struct BindingCtx {
+        VkDescriptorSetLayoutBinding binding;
+        vector<unique_ptr<SamplerVulkan>> staticSamplers;
+        vector<VkSampler> tmpSS;
+    };
+    vector<BindingCtx> ctxs;
     for (const auto& j : desc.Elements) {
-        staticSamplerCount += j.StaticSamplers.size();
-    }
-    staticSamplers.reserve(staticSamplerCount);
-    vector<vector<VkSampler>> tmpSS;
-    for (const auto& j : desc.Elements) {
-        auto& binding = bindings.emplace_back();
-        binding.binding = j.Slot;
-        binding.descriptorType = MapType(j.Type);
-        binding.descriptorCount = j.Count;
-        binding.stageFlags = MapType(j.Stages);
-        if (j.StaticSamplers.empty()) {
-            binding.pImmutableSamplers = nullptr;
-        } else {
+        auto& ctx = ctxs.emplace_back();
+        ctx.binding.binding = j.Slot;
+        ctx.binding.descriptorType = MapType(j.Type);
+        ctx.binding.descriptorCount = j.Count;
+        ctx.binding.stageFlags = MapType(j.Stages);
+        if (!j.StaticSamplers.empty()) {
             if (j.StaticSamplers.size() != j.Count) {
                 RADRAY_ERR_LOG("{} {} {} {}", Errors::VK, "static sampler count mismatch", j.StaticSamplers.size(), j.Count);
                 return nullptr;
             }
-            vector<VkSampler> sss;
-            sss.reserve(j.StaticSamplers.size());
+            ctx.staticSamplers.reserve(j.StaticSamplers.size());
+            ctx.tmpSS.reserve(j.StaticSamplers.size());
             for (size_t t = 0; t < j.StaticSamplers.size(); t++) {
                 const SamplerDescriptor& ss = j.StaticSamplers[t];
                 auto samplerOpt = this->CreateSamplerVulkan(ss);
@@ -875,12 +871,21 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
                     return nullptr;
                 }
                 auto sampler = samplerOpt.Release();
-                sss.emplace_back(sampler->_sampler);
-                staticSamplers.emplace_back(std::move(sampler));
+                ctx.tmpSS.emplace_back(sampler->_sampler);
+                ctx.staticSamplers.emplace_back(std::move(sampler));
             }
-            const auto& tsss = tmpSS.emplace_back(std::move(sss));
-            binding.pImmutableSamplers = tsss.data();
         }
+    }
+    vector<VkDescriptorSetLayoutBinding> bindings;
+    bindings.reserve(ctxs.size());
+    for (const auto& i : ctxs) {
+        auto b = i.binding;
+        if (i.tmpSS.empty()) {
+            b.pImmutableSamplers = nullptr;
+        } else {
+            b.pImmutableSamplers = i.tmpSS.data();
+        }
+        bindings.emplace_back(b);
     }
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -888,14 +893,17 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     dslci.flags = 0;
     dslci.bindingCount = static_cast<uint32_t>(bindings.size());
     dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
-    auto descSetLayoutVk = this->CreateDescriptorSetLayout(dslci);
-    if (!descSetLayoutVk.HasValue()) {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &dslci, this->GetAllocationCallbacks(), &layout);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateDescriptorSetLayout", vr);
         return nullptr;
     }
-    auto result = descSetLayoutVk.Release();
-    result->_bindings = std::move(bindings);
-    result->_immutableSamplers = std::move(staticSamplers);
-    result->_immutableSamplerView = std::move(tmpSS);
+    auto result = make_unique<DescriptorSetLayoutVulkan>(this, layout);
+    result->_bindings.reserve(ctxs.size());
+    for (auto& ctx : ctxs) {
+        result->_bindings.emplace_back(ctx.binding, std::move(ctx.staticSamplers));
+    }
     return result;
 }
 
@@ -1078,16 +1086,6 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
         return nullptr;
     }
     return make_unique<BufferViewVulkan>(this, bufferView);
-}
-
-Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept {
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &info, this->GetAllocationCallbacks(), &layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateDescriptorSetLayout", vr);
-        return nullptr;
-    }
-    return make_unique<DescriptorSetLayoutVulkan>(this, layout);
 }
 
 Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept {
@@ -2834,6 +2832,15 @@ void ImageViewVulkan::DestroyImpl() noexcept {
         _imageView = VK_NULL_HANDLE;
     }
 }
+
+DescriptorSetLayoutBindingVulkanContainer::DescriptorSetLayoutBindingVulkanContainer(
+    const VkDescriptorSetLayoutBinding& binding,
+    vector<unique_ptr<SamplerVulkan>> immutableSamplers) noexcept
+    : binding(binding.binding),
+      descriptorType(binding.descriptorType),
+      descriptorCount(binding.descriptorCount),
+      stageFlags(binding.stageFlags),
+      immutableSamplers(std::move(immutableSamplers)) {}
 
 DescriptorSetLayoutVulkan::DescriptorSetLayoutVulkan(
     DeviceVulkan* device,

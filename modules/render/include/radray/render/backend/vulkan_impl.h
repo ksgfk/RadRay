@@ -146,8 +146,6 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const VkDescriptorSetLayoutCreateInfo& info) noexcept;
-
     Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
 
     Nullable<unique_ptr<DescriptorPoolVulkan>> CreateDescriptorPool() noexcept;
@@ -620,6 +618,18 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
+class DescriptorSetLayoutBindingVulkanContainer {
+public:
+    DescriptorSetLayoutBindingVulkanContainer() = default;
+    DescriptorSetLayoutBindingVulkanContainer(const VkDescriptorSetLayoutBinding& binding, vector<unique_ptr<SamplerVulkan>> immutableSamplers) noexcept;
+
+    uint32_t binding;
+    VkDescriptorType descriptorType;
+    uint32_t descriptorCount;
+    VkShaderStageFlags stageFlags;
+    vector<unique_ptr<SamplerVulkan>> immutableSamplers;
+};
+
 class DescriptorSetLayoutVulkan final : public RenderBase {
 public:
     DescriptorSetLayoutVulkan(
@@ -639,9 +649,7 @@ public:
 
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
-    vector<VkDescriptorSetLayoutBinding> _bindings;
-    vector<unique_ptr<SamplerVulkan>> _immutableSamplers;
-    vector<vector<VkSampler>> _immutableSamplerView;
+    vector<DescriptorSetLayoutBindingVulkanContainer> _bindings;
 };
 
 class PipelineLayoutVulkan final : public RootSignature {
