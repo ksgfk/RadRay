@@ -19,7 +19,7 @@ struct StructuredBufferId {
 
     constexpr operator size_t() const noexcept { return Value; }
 
-    auto operator<=>(const StructuredBufferId&) const = default;
+    friend auto operator<=>(const StructuredBufferId&, const StructuredBufferId&) = default;
 };
 
 class StructuredBufferVariable;

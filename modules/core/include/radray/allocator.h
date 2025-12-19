@@ -1,8 +1,12 @@
 #pragma once
 
+#include <bit>
+#include <limits>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 
+#include <radray/enum_flags.h>
 #include <radray/types.h>
 #include <radray/utility.h>
 #include <radray/logger.h>
@@ -53,11 +57,8 @@ template <class TSubAlloc, class THeap, class TDerived>
 requires is_allocator<TSubAlloc, size_t>
 class BlockAllocator {
 public:
-    BlockAllocator(
-        size_t basicSize,
-        size_t destroyThreshold) noexcept
-        : _basicSize(basicSize),
-          _destroyThreshold(destroyThreshold) {}
+    explicit BlockAllocator(size_t basicPageSize) noexcept
+        : _basicPageSize(basicPageSize) {}
 
     virtual ~BlockAllocator() noexcept = default;
 
@@ -65,99 +66,172 @@ public:
         if (size == 0) {
             return std::nullopt;
         }
-        for (auto iter = _sizeQuery.lower_bound(size); iter != _sizeQuery.end(); iter++) {
-            BlockAllocator::Block* block = iter->second;
-            std::optional<size_t> start = block->_allocator.Allocate(size);
-            if (start.has_value()) {
-                _sizeQuery.erase(iter);
-                block->_freeSize -= size;
-                CheckBlockState(block);
-                return std::make_optional(BlockAllocation<THeap>{block->_heap.get(), start.value(), size});
+        const size_t needBucket = BucketForNeed(size);
+        EnsureBucketCount(needBucket + 1);
+        for (size_t bucket = needBucket; bucket < _bucketHeads.size(); ++bucket) {
+            Page* page = _bucketHeads[bucket];
+            while (page != nullptr) {
+                Page* next = page->_next;
+                if (page->_freeBytes >= size) {
+                    std::optional<size_t> start = page->_allocator.Allocate(size);
+                    if (start.has_value()) {
+                        page->_freeBytes -= size;
+                        page->_liveAllocs += 1;
+                        UpdatePageBucket(page);
+                        return BlockAllocation<THeap>{page->_heap.get(), start.value(), size};
+                    }
+                }
+                page = next;
             }
         }
-        {
-            size_t needSize = std::max(size, _basicSize);
-            unique_ptr<BlockAllocator::Block> newBlock = make_unique<BlockAllocator::Block>(
-                static_cast<TDerived*>(this)->CreateHeap(needSize),
-                static_cast<TDerived*>(this)->CreateSubAllocator(needSize),
-                needSize);
-            BlockAllocator::Block* blockPtr = newBlock.get();
-            auto [newIter, isInsert] = _blocks.emplace(blockPtr->_heap.get(), std::move(newBlock));
-            RADRAY_ASSERT(isInsert);
-            size_t newStart = blockPtr->_allocator.Allocate(size).value();
-            blockPtr->_freeSize -= size;
-            CheckBlockState(blockPtr);
-            return std::make_optional(BlockAllocation<THeap>{blockPtr->_heap.get(), newStart, size});
-        }
+        Page* page = CreatePage(size);
+        std::optional<size_t> start = page->_allocator.Allocate(size);
+        RADRAY_ASSERT(start.has_value());
+        page->_freeBytes -= size;
+        page->_liveAllocs += 1;
+        UpdatePageBucket(page);
+        return BlockAllocation<THeap>{page->_heap.get(), start.value(), size};
     }
 
     void Destroy(BlockAllocation<THeap> allocation) noexcept {
-        auto iter = _blocks.find(allocation.Heap);
-        RADRAY_ASSERT(iter != _blocks.end());
-        BlockAllocator::Block* block = iter->second.get();
-        block->_allocator.Destroy(allocation.Start);
-        auto [qBegin, qEnd] = _sizeQuery.equal_range(block->_freeSize);
-        for (auto it = qBegin; it != qEnd; it++) {
-            if (it->second == block) {
-                _sizeQuery.erase(it);
-                break;
-            }
+        RADRAY_ASSERT(allocation.Heap != nullptr);
+        auto it = _heapToPage.find(allocation.Heap);
+        RADRAY_ASSERT(it != _heapToPage.end());
+
+        Page* page = it->second;
+        page->_allocator.Destroy(allocation.Start);
+        page->_freeBytes += allocation.Length;
+        RADRAY_ASSERT(page->_liveAllocs > 0);
+        page->_liveAllocs -= 1;
+
+        if (page->_liveAllocs == 0) {
+            ReleasePage(page);
+            return;
         }
-        block->_freeSize += allocation.Length;
-        CheckBlockState(block);
+        UpdatePageBucket(page);
     }
 
 private:
-    class Block {
-    public:
-        Block(
+    static constexpr size_t npos = static_cast<size_t>(-1);
+
+    struct Page {
+        explicit Page(
             unique_ptr<THeap> heap,
             TSubAlloc&& allocator,
-            size_t heapSize) noexcept
-            : _freeSize(heapSize),
-              _initSize(heapSize),
+            size_t capacity) noexcept
+            : _capacity(capacity),
+              _freeBytes(capacity),
               _heap(std::move(heap)),
               _allocator(std::move(std::forward<TSubAlloc>(allocator))) {}
 
-        size_t _freeSize;
-        size_t _initSize;
+        size_t _capacity = 0;
+        size_t _freeBytes = 0;
+        size_t _liveAllocs = 0;
+
+        size_t _ownerIndex = 0;
+        size_t _bucket = npos;
+        Page* _prev = nullptr;
+        Page* _next = nullptr;
+
         unique_ptr<THeap> _heap;
         TSubAlloc _allocator;
     };
 
-    void CheckBlockState(BlockAllocator::Block* block) noexcept {
-        bool isBlockDestroyed = false;
-        if (block->_freeSize == block->_initSize) {
-            _unused.emplace(block);
-            while (_unused.size() > _destroyThreshold) {
-                auto selectIter = _unused.begin();
-                BlockAllocator::Block* selectBlock = *selectIter;
-                if (selectBlock == block) {
-                    isBlockDestroyed = true;
-                }
-                _unused.erase(selectIter);
-                auto [qBegin, qEnd] = _sizeQuery.equal_range(selectBlock->_freeSize);
-                for (auto it = qBegin; it != qEnd; it++) {
-                    if (it->second == selectBlock) {
-                        _sizeQuery.erase(it);
-                        break;
-                    }
-                }
-                _blocks.erase(selectBlock->_heap.get());
-            }
-        } else {
-            _unused.erase(block);
+    static constexpr size_t BucketForFree(size_t freeBytes) noexcept {
+        if (freeBytes == 0) {
+            return 0;
         }
-        if (block->_freeSize > 0 && !isBlockDestroyed) {
-            _sizeQuery.emplace(block->_freeSize, block);
-        }
+        return std::bit_width(freeBytes) - 1;
     }
 
-    unordered_map<THeap*, unique_ptr<BlockAllocator::Block>> _blocks;
-    multimap<size_t, BlockAllocator::Block*> _sizeQuery;
-    unordered_set<BlockAllocator::Block*> _unused;
-    size_t _basicSize;
-    size_t _destroyThreshold;
+    static constexpr size_t BucketForNeed(size_t needBytes) noexcept {
+        if (needBytes <= 1) {
+            return 0;
+        }
+        return std::bit_width(needBytes - 1);
+    }
+
+    void EnsureBucketCount(size_t count) noexcept {
+        if (_bucketHeads.size() >= count) {
+            return;
+        }
+        _bucketHeads.resize(count, nullptr);
+    }
+
+    void ListRemove(Page* page) noexcept {
+        if (page->_bucket == npos) {
+            return;
+        }
+        Page*& head = _bucketHeads[page->_bucket];
+        if (page->_prev != nullptr) {
+            page->_prev->_next = page->_next;
+        } else {
+            RADRAY_ASSERT(head == page);
+            head = page->_next;
+        }
+        if (page->_next != nullptr) {
+            page->_next->_prev = page->_prev;
+        }
+        page->_prev = nullptr;
+        page->_next = nullptr;
+        page->_bucket = npos;
+    }
+
+    void ListInsert(Page* page, size_t bucket) noexcept {
+        EnsureBucketCount(bucket + 1);
+        Page*& head = _bucketHeads[bucket];
+        page->_bucket = bucket;
+        page->_prev = nullptr;
+        page->_next = head;
+        if (head != nullptr) {
+            head->_prev = page;
+        }
+        head = page;
+    }
+
+    void UpdatePageBucket(Page* page) noexcept {
+        if (page->_freeBytes == 0) {
+            ListRemove(page);
+            return;
+        }
+        const size_t newBucket = BucketForFree(page->_freeBytes);
+        if (page->_bucket != npos && page->_bucket == newBucket) {
+            return;
+        }
+        ListRemove(page);
+        ListInsert(page, newBucket);
+    }
+
+    Page* CreatePage(size_t requestSize) noexcept {
+        const size_t capacity = std::max(requestSize, _basicPageSize);
+        unique_ptr<Page> page = make_unique<Page>(
+            static_cast<TDerived*>(this)->CreateHeap(capacity),
+            static_cast<TDerived*>(this)->CreateSubAllocator(capacity),
+            capacity);
+        Page* pagePtr = page.get();
+        pagePtr->_ownerIndex = _pages.size();
+        _pages.emplace_back(std::move(page));
+        _heapToPage.emplace(pagePtr->_heap.get(), pagePtr);
+        UpdatePageBucket(pagePtr);
+        return pagePtr;
+    }
+
+    void ReleasePage(Page* page) noexcept {
+        ListRemove(page);
+        _heapToPage.erase(page->_heap.get());
+        const size_t idx = page->_ownerIndex;
+        RADRAY_ASSERT(idx < _pages.size());
+        if (idx != _pages.size() - 1) {
+            std::swap(_pages[idx], _pages.back());
+            _pages[idx]->_ownerIndex = idx;
+        }
+        _pages.pop_back();
+    }
+
+    vector<unique_ptr<Page>> _pages;
+    std::unordered_map<THeap*, Page*> _heapToPage;
+    vector<Page*> _bucketHeads;
+    size_t _basicPageSize;
 };
 
 class FreeListAllocator {
@@ -174,20 +248,27 @@ private:
         Used
     };
 
-    class LinkNode {
-    public:
-        LinkNode(size_t start, size_t length) noexcept;
+    static constexpr uint32_t npos = std::numeric_limits<uint32_t>::max();
 
-        size_t _start;
-        size_t _length;
-        FreeListAllocator::LinkNode* _prev;
-        FreeListAllocator::LinkNode* _next;
-        NodeState _state;
+    struct Node {
+        size_t start = 0;
+        size_t length = 0;
+        uint32_t prev = npos;
+        uint32_t next = npos;
+        NodeState state = NodeState::Free;
     };
 
-    unordered_map<size_t, unique_ptr<FreeListAllocator::LinkNode>> _nodes;
-    multimap<size_t, FreeListAllocator::LinkNode*> _sizeQuery;
+    uint32_t NewNode(size_t start, size_t length, NodeState state) noexcept;
+    void DeleteNode(uint32_t idx) noexcept;
+    void AddFree(uint32_t idx) noexcept;
+    void RemoveFree(uint32_t idx) noexcept;
+
     size_t _capacity;
+    vector<Node> _nodes;
+    vector<uint32_t> _nodeFreePool;
+    vector<uint32_t> _freeNodes;
+    vector<int32_t> _startToNode;
+    uint32_t _head = npos;
 };
 
 static_assert(is_allocator<FreeListAllocator, size_t>, "FreeListAllocator is not an allocator");

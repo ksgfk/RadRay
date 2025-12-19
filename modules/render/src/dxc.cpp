@@ -98,6 +98,27 @@ ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
     Unreachable();
 }
 
+auto operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    if (auto cmp = lhs.Name <=> rhs.Name; cmp != 0) return cmp;
+    if (auto cmp = lhs.Type <=> rhs.Type; cmp != 0) return cmp;
+    if (auto cmp = lhs.BindPoint <=> rhs.BindPoint; cmp != 0) return cmp;
+    if (auto cmp = lhs.BindCount <=> rhs.BindCount; cmp != 0) return cmp;
+    if (auto cmp = lhs.ReturnType <=> rhs.ReturnType; cmp != 0) return cmp;
+    if (auto cmp = lhs.Dimension <=> rhs.Dimension; cmp != 0) return cmp;
+    if (auto cmp = lhs.NumSamples <=> rhs.NumSamples; cmp != 0) return cmp;
+    if (auto cmp = lhs.Space <=> rhs.Space; cmp != 0) return cmp;
+    if (auto cmp = lhs.Flags <=> rhs.Flags; cmp != 0) return cmp;
+    return std::strong_ordering::equal;
+}
+
+bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    return (lhs <=> rhs) == 0;
+}
+
+bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
+    return !(lhs == rhs);
+}
+
 static std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> _FindCBufferByName(std::span<const HlslShaderBufferDesc> data, std::string_view name) noexcept {
     auto it = std::find_if(data.begin(), data.end(), [&](const HlslShaderBufferDesc& cb) {
         return cb.Name == name;
@@ -109,9 +130,9 @@ std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> HlslShaderDesc
     return _FindCBufferByName(ConstantBuffers, name);
 }
 
-bool IsHlslShaderBufferEqualImpl(
-    const HlslDescCBufferPartLike& l, const HlslShaderBufferDesc& lcb,
-    const HlslDescCBufferPartLike& r, const HlslShaderBufferDesc& rcb) noexcept {
+bool IsHlslShaderBufferEqual(
+    const HlslShaderDesc& l, const HlslShaderBufferDesc& lcb,
+    const HlslShaderDesc& r, const HlslShaderBufferDesc& rcb) noexcept {
     if (lcb.Name != rcb.Name ||
         lcb.Type != rcb.Type ||
         lcb.Size != rcb.Size ||
@@ -121,16 +142,16 @@ bool IsHlslShaderBufferEqualImpl(
     }
     size_t len = lcb.Variables.size();
     for (size_t i = 0; i < len; i++) {
-        if (!IsHlslTypeEqualImpl(l, lcb.Variables[i], r, rcb.Variables[i])) {
+        if (!IsHlslTypeEqual(l, lcb.Variables[i], r, rcb.Variables[i])) {
             return false;
         }
     }
     return true;
 }
 
-bool IsHlslTypeEqualImpl(
-    const HlslDescCBufferPartLike& l, size_t lType,
-    const HlslDescCBufferPartLike& r, size_t rType) noexcept {
+bool IsHlslTypeEqual(
+    const HlslShaderDesc& l, size_t lType,
+    const HlslShaderDesc& r, size_t rType) noexcept {
     struct TypeCompareCtx {
         size_t lTypeIdx, rTypeIdx;
     };
@@ -168,12 +189,8 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept {
     }
 }
 
-std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> MergedHlslShaderDesc::FindCBufferByName(std::string_view name) const noexcept {
-    return _FindCBufferByName(ConstantBuffers, name);
-}
-
-std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
-    MergedHlslShaderDesc dstDesc{};
+std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept {
+    HlslShaderDesc dstDesc{};
     auto createImcompleteType = [&](const HlslShaderDesc& srcDesc, size_t srcTypeIdx) {
         const auto& srcType = srcDesc.Types[srcTypeIdx];
         size_t dstTypeIdx = dstDesc.Types.size();
@@ -207,14 +224,14 @@ std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShad
     };
     for (const auto descPtr : descs) {
         const auto& srcDesc = *descPtr;
-        dstDesc.Stages |= srcDesc.Stage;
+        dstDesc.Stages |= srcDesc.Stages;
         for (const auto& srcRes : srcDesc.BoundResources) {
-            auto it = std::find_if(dstDesc.BoundResources.begin(), dstDesc.BoundResources.end(), [&](const HlslInputBindWithStageDesc& i) {
+            auto it = std::find_if(dstDesc.BoundResources.begin(), dstDesc.BoundResources.end(), [&](const HlslInputBindDesc& i) {
                 return i.BindPoint == srcRes.BindPoint && i.Space == srcRes.Space && i.Type == srcRes.Type;
             });
             if (it == dstDesc.BoundResources.end()) {
                 auto& dstRes = dstDesc.BoundResources.emplace_back(srcRes);
-                dstRes.Stages = srcDesc.Stage;
+                dstRes.Stages = srcDesc.Stages;
                 if (srcRes.Type == HlslShaderInputType::CBUFFER) {
                     auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
                     if (!cbDescOpt) {
@@ -238,7 +255,7 @@ std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShad
                     RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "resource mismatch during merge", srcRes.Name);
                     return std::nullopt;
                 }
-                it->Stages |= srcDesc.Stage;
+                it->Stages |= srcDesc.Stages;
                 if (srcRes.Type == HlslShaderInputType::CBUFFER) {
                     auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
                     if (!cbDescOpt.has_value()) {
@@ -255,6 +272,14 @@ std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShad
                         return std::nullopt;
                     }
                 }
+            }
+        }
+    }
+    if (descs.size() > 0) {
+        dstDesc.MinFeatureLevel = descs[0]->MinFeatureLevel;
+        for (size_t i = 1; i < descs.size(); i++) {
+            if (dstDesc.MinFeatureLevel > descs[i]->MinFeatureLevel) {
+                dstDesc.MinFeatureLevel = descs[i]->MinFeatureLevel;
             }
         }
     }
@@ -741,20 +766,20 @@ public:
         if (SUCCEEDED(sr->GetMinFeatureLevel(&featureLevel))) {
             result.MinFeatureLevel = _MapFeatureLevel(featureLevel);
         }
-        result.Stage = stage;
+        result.Stages = stage;
         sr->GetThreadGroupSize(&result.GroupSizeX, &result.GroupSizeY, &result.GroupSizeZ);
 
         std::vector<ID3D12ShaderReflectionType*> typeCache;
         std::function<size_t(ID3D12ShaderReflectionType*)> getTypeIndex =
             [&](ID3D12ShaderReflectionType* type) -> size_t {
-            if (!type) return HlslShaderInvalidIndex;
+            if (!type) return HlslShaderTypeId::Invalid;
             for (size_t i = 0; i < typeCache.size(); i++) {
                 if (typeCache[i]->IsEqual(type) == S_OK) {
                     return i;
                 }
             }
             D3D12_SHADER_TYPE_DESC typeDesc{};
-            if (FAILED(type->GetDesc(&typeDesc))) return HlslShaderInvalidIndex;
+            if (FAILED(type->GetDesc(&typeDesc))) return HlslShaderTypeId::Invalid;
             HlslShaderTypeDesc desc{};
             desc.Name = typeDesc.Name;
             desc.Class = _MapShaderVariableClass(typeDesc.Class);
@@ -817,6 +842,7 @@ public:
             ibDesc.Dimension = _MapSRVDimension(bindDesc.Dimension);
             ibDesc.NumSamples = bindDesc.NumSamples;
             ibDesc.Space = bindDesc.Space;
+            ibDesc.Stages = stage;
         }
 
         for (auto& cb : result.ConstantBuffers) {

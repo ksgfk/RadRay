@@ -125,9 +125,11 @@ static uint32_t _ReflectType(
     auto& desc = ctx.desc;
     auto& typeCache = ctx.typeCache;
 
-    auto it = typeCache.find(rootType.self);
-    if (it != typeCache.end()) {
-        return it->second;
+    {
+        auto it = typeCache.find(rootType.self);
+        if (it != typeCache.end()) {
+            return it->second;
+        }
     }
     struct Frame {
         const spirv_cross::SPIRType* type;

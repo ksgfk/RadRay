@@ -241,7 +241,18 @@ public:
     bool IsSpirv{};
 };
 
-constexpr size_t HlslShaderInvalidIndex = std::numeric_limits<size_t>::max();
+struct HlslShaderTypeId {
+    static constexpr size_t Invalid = std::numeric_limits<size_t>::max();
+
+    size_t Value{Invalid};
+
+    constexpr HlslShaderTypeId() noexcept = default;
+    constexpr HlslShaderTypeId(size_t value) noexcept : Value(value) {}
+
+    constexpr operator size_t() const noexcept { return Value; }
+
+    friend auto operator<=>(const HlslShaderTypeId&, const HlslShaderTypeId&) = default;
+};
 
 class HlslShaderTypeMember;
 
@@ -263,13 +274,13 @@ public:
 class HlslShaderTypeMember {
 public:
     string Name;
-    size_t Type{HlslShaderInvalidIndex};
+    HlslShaderTypeId Type{HlslShaderTypeId::Invalid};
 };
 
 class HlslShaderVariableDesc {
 public:
     string Name;
-    size_t Type{HlslShaderInvalidIndex};
+    HlslShaderTypeId Type{HlslShaderTypeId::Invalid};
     uint32_t StartOffset{0};
     uint32_t Size{0};
     uint32_t uFlags{0};
@@ -300,10 +311,13 @@ public:
     uint32_t NumSamples{0};
     uint32_t Space{0};
     uint32_t Flags{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 
     ResourceBindType MapResourceBindType() const noexcept;
 
-    friend bool operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept = default;
+    friend auto operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
+    friend bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
+    friend bool operator!=(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
 };
 
 class HlslSignatureParameterDesc {
@@ -315,38 +329,6 @@ public:
     HlslRegisterComponentType ComponentType{HlslRegisterComponentType::UNKNOWN};
     uint32_t Stream{0};
 };
-
-template <class T>
-concept IsHlslDescCBufferPartLike = requires(T t) {
-    { t.ConstantBuffers } -> std::convertible_to<std::span<const HlslShaderBufferDesc>>;
-    { t.Variables } -> std::convertible_to<std::span<const HlslShaderVariableDesc>>;
-    { t.Types } -> std::convertible_to<std::span<const HlslShaderTypeDesc>>;
-};
-struct HlslDescCBufferPartLike {
-    const std::span<const HlslShaderBufferDesc> ConstantBuffers;
-    const std::span<const HlslShaderVariableDesc> Variables;
-    const std::span<const HlslShaderTypeDesc> Types;
-};
-template <class T, class U>
-requires IsHlslDescCBufferPartLike<T> && IsHlslDescCBufferPartLike<U>
-bool IsHlslShaderBufferEqual(const T& l, const HlslShaderBufferDesc& lcb, const U& r, const HlslShaderBufferDesc& rcb) noexcept {
-    HlslDescCBufferPartLike lPart{l.ConstantBuffers, l.Variables, l.Types};
-    HlslDescCBufferPartLike rPart{r.ConstantBuffers, r.Variables, r.Types};
-    return IsHlslShaderBufferEqualImpl(lPart, lcb, rPart, rcb);
-}
-template <class T, class U>
-requires IsHlslDescCBufferPartLike<T> && IsHlslDescCBufferPartLike<U>
-bool IsHlslTypeEqual(const T& l, size_t lType, const U& r, size_t rType) noexcept {
-    HlslDescCBufferPartLike lPart{l.ConstantBuffers, l.Variables, l.Types};
-    HlslDescCBufferPartLike rPart{r.ConstantBuffers, r.Variables, r.Types};
-    return IsHlslTypeEqualImpl(lPart, lType, rPart, rType);
-}
-bool IsHlslShaderBufferEqualImpl(
-    const HlslDescCBufferPartLike& l, const HlslShaderBufferDesc& lcb,
-    const HlslDescCBufferPartLike& r, const HlslShaderBufferDesc& rcb) noexcept;
-bool IsHlslTypeEqualImpl(
-    const HlslDescCBufferPartLike& l, size_t lType,
-    const HlslDescCBufferPartLike& r, size_t rType) noexcept;
 
 class HlslShaderDesc {
 public:
@@ -361,30 +343,17 @@ public:
     uint32_t Flags{0};
     HlslFeatureLevel MinFeatureLevel{HlslFeatureLevel::UNKNOWN};
     uint32_t GroupSizeX{0}, GroupSizeY{0}, GroupSizeZ{0};
-    ShaderStage Stage{ShaderStage::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 
     std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> FindCBufferByName(std::string_view name) const noexcept;
 };
+
+bool IsHlslShaderBufferEqual(const HlslShaderDesc& l, const HlslShaderBufferDesc& lcb, const HlslShaderDesc& r, const HlslShaderBufferDesc& rcb) noexcept;
+bool IsHlslTypeEqual(const HlslShaderDesc& l, size_t lType, const HlslShaderDesc& r, size_t rType) noexcept;
 
 bool IsBufferDimension(HlslSRVDimension dim) noexcept;
 
-class HlslInputBindWithStageDesc : public HlslInputBindDesc {
-public:
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-class MergedHlslShaderDesc {
-public:
-    vector<HlslShaderBufferDesc> ConstantBuffers;
-    vector<HlslInputBindWithStageDesc> BoundResources;
-    vector<HlslShaderVariableDesc> Variables;
-    vector<HlslShaderTypeDesc> Types;
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-
-    std::optional<std::reference_wrapper<const HlslShaderBufferDesc>> FindCBufferByName(std::string_view name) const noexcept;
-};
-
-std::optional<MergedHlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept;
+std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept;
 
 }  // namespace radray::render
 

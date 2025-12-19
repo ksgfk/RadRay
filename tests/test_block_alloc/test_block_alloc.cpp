@@ -37,9 +37,8 @@ class TestAllocator : public BlockAllocator<BuddyAllocator, Heap, TestAllocator>
 public:
     TestAllocator(
         int* counter,
-        size_t basicSize,
-        size_t destroyThreshold) noexcept
-        : BlockAllocator(basicSize, destroyThreshold),
+                size_t basicSize) noexcept
+                : BlockAllocator(basicSize),
           Counter(counter) {}
 
     ~TestAllocator() noexcept override = default;
@@ -53,139 +52,99 @@ public:
     int* Counter;
 };
 
-TEST(Core_Allocator_BlockAllocator, Basic) {
+class HeapInternal2 {
+public:
+    HeapInternal2(int* counter, size_t size) noexcept : Size(size), Counter(counter) { (*Counter)++; }
+    ~HeapInternal2() noexcept { (*Counter)--; }
+
+    HeapInternal2(const HeapInternal2&) = delete;
+    HeapInternal2& operator=(const HeapInternal2&) = delete;
+
+    size_t Size;
+    int* Counter;
+};
+
+class Heap2 {
+public:
+    Heap2(int* counter, size_t size) noexcept : Size(size), Internal{make_unique<HeapInternal2>(counter, size)} {}
+
+    size_t Size;
+    unique_ptr<HeapInternal2> Internal;
+};
+
+class TestPagedAllocator : public BlockAllocator<BuddyAllocator, Heap2, TestPagedAllocator> {
+public:
+    TestPagedAllocator(int* counter, size_t basicPageSize) noexcept
+        : BlockAllocator(basicPageSize), Counter(counter) {}
+
+    ~TestPagedAllocator() noexcept override = default;
+
+    unique_ptr<Heap2> CreateHeap(size_t size) noexcept {
+        return make_unique<Heap2>(Counter, size);
+    }
+
+    BuddyAllocator CreateSubAllocator(size_t size) noexcept { return BuddyAllocator{size}; }
+
+    int* Counter;
+};
+
+TEST(Core_Allocator_BlockAllocator, ReleasesEmptyPage) {
     unique_ptr<int> counter = make_unique<int>(0);
 
-    TestAllocator alloc{counter.get(), 2, 0};
-    auto a = alloc.Allocate(1);
-    ASSERT_TRUE(a.has_value());
-    ASSERT_EQ(a.value().Length, 1);
-    ASSERT_EQ(a.value().Start, 0);
-
-    ASSERT_EQ(*counter, 1);
-
-    auto b = alloc.Allocate(1);
-    ASSERT_TRUE(b.has_value());
-    ASSERT_EQ(b.value().Length, 1);
-    ASSERT_EQ(b.value().Start, 1);
-
-    ASSERT_EQ(a.value().Heap, b.value().Heap);
-
-    ASSERT_EQ(*counter, 1);
-
-    auto c = alloc.Allocate(1);
-    ASSERT_TRUE(c.has_value());
-    ASSERT_EQ(c.value().Length, 1);
-    ASSERT_EQ(c.value().Start, 0);
-
-    ASSERT_NE(a.value().Heap, c.value().Heap);
-
-    ASSERT_EQ(*counter, 2);
-
-    auto d = alloc.Allocate(2);
-    ASSERT_TRUE(d.has_value());
-    ASSERT_EQ(d.value().Length, 2);
-    ASSERT_EQ(d.value().Start, 0);
-
-    ASSERT_EQ(*counter, 3);
-
-    alloc.Destroy(c.value());
-
-    ASSERT_EQ(*counter, 2);
-
-    alloc.Destroy(d.value());
-
-    ASSERT_EQ(*counter, 1);
-}
-
-TEST(Core_Allocator_BlockAllocator, AllocateAndDestroyMultiple) {
-    unique_ptr<int> counter = make_unique<int>(0);
-
-    TestAllocator alloc{counter.get(), 4, 1};
+    TestPagedAllocator alloc{counter.get(), 4};
 
     auto a = alloc.Allocate(2);
     ASSERT_TRUE(a.has_value());
-    ASSERT_EQ(a.value().Length, 2);
-    ASSERT_EQ(a.value().Start, 0);
-
     ASSERT_EQ(*counter, 1);
 
     auto b = alloc.Allocate(2);
     ASSERT_TRUE(b.has_value());
-    ASSERT_EQ(b.value().Length, 2);
-    ASSERT_EQ(b.value().Start, 2);
-
-    ASSERT_EQ(a.value().Heap, b.value().Heap);
-
+    ASSERT_EQ(a->Heap, b->Heap);
     ASSERT_EQ(*counter, 1);
 
-    auto c = alloc.Allocate(4);
-    ASSERT_TRUE(c.has_value());
-    ASSERT_EQ(c.value().Length, 4);
-    ASSERT_EQ(c.value().Start, 0);
-
-    ASSERT_NE(a.value().Heap, c.value().Heap);
-
-    ASSERT_EQ(*counter, 2);
-
     alloc.Destroy(a.value());
-    ASSERT_EQ(*counter, 2);
+    ASSERT_EQ(*counter, 1);
 
     alloc.Destroy(b.value());
+    ASSERT_EQ(*counter, 0);
+}
+
+TEST(Core_Allocator_BlockAllocator, KeepsNonEmptyPagesAlive) {
+    unique_ptr<int> counter = make_unique<int>(0);
+
+    TestPagedAllocator alloc{counter.get(), 2};
+
+    auto a = alloc.Allocate(1);
+    auto b = alloc.Allocate(1);
+    auto c = alloc.Allocate(1);
+
+    ASSERT_TRUE(a.has_value());
+    ASSERT_TRUE(b.has_value());
+    ASSERT_TRUE(c.has_value());
+
     ASSERT_EQ(*counter, 2);
+    ASSERT_EQ(a->Heap, b->Heap);
+    ASSERT_NE(a->Heap, c->Heap);
 
     alloc.Destroy(c.value());
     ASSERT_EQ(*counter, 1);
+
+    alloc.Destroy(a.value());
+    ASSERT_EQ(*counter, 1);
+
+    alloc.Destroy(b.value());
+    ASSERT_EQ(*counter, 0);
 }
 
-TEST(Core_Allocator_BlockAllocator, AllocateExceedingCapacity) {
+TEST(Core_Allocator_BlockAllocator, AllocateExceedingBasicPageSize) {
     unique_ptr<int> counter = make_unique<int>(0);
 
-    TestAllocator alloc{counter.get(), 4, 1};
+    TestPagedAllocator alloc{counter.get(), 4};
 
     auto a = alloc.Allocate(5);
     ASSERT_TRUE(a.has_value());
-
-    ASSERT_EQ(*counter, 1);
-}
-
-TEST(Core_Allocator_BlockAllocator, DestroyInvalidAllocation) {
-    unique_ptr<int> counter = make_unique<int>(0);
-
-    TestAllocator alloc{counter.get(), 4, 1};
-
-    auto a = alloc.Allocate(2);
-    ASSERT_TRUE(a.has_value());
-    ASSERT_EQ(*counter, 1);
-
-    BlockAllocation<Heap> invalidAllocation{nullptr, 0, 2};
-    ASSERT_DEATH(alloc.Destroy(invalidAllocation), ".*");
-
     ASSERT_EQ(*counter, 1);
 
     alloc.Destroy(a.value());
-    ASSERT_EQ(*counter, 1);
-}
-
-TEST(Core_Allocator_BlockAllocator, ReuseFreedBlocks) {
-    unique_ptr<int> counter = make_unique<int>(0);
-
-    TestAllocator alloc{counter.get(), 4, 1};
-
-    auto a = alloc.Allocate(2);
-    ASSERT_TRUE(a.has_value());
-    ASSERT_EQ(a.value().Length, 2);
-    ASSERT_EQ(a.value().Start, 0);
-
-    ASSERT_EQ(*counter, 1);
-
-    alloc.Destroy(a.value());
-    ASSERT_EQ(*counter, 1);
-
-    auto b = alloc.Allocate(2);
-    ASSERT_TRUE(b.has_value());
-    ASSERT_EQ(b.value().Length, 2);
-    ASSERT_EQ(b.value().Start, 0);
-
-    ASSERT_EQ(*counter, 1);
+    ASSERT_EQ(*counter, 0);
 }

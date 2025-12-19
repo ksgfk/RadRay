@@ -102,7 +102,7 @@ CpuDescriptorAllocatorImpl::CpuDescriptorAllocatorImpl(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_TYPE type,
     UINT basicSize) noexcept
-    : BlockAllocator(basicSize, 1),
+    : BlockAllocator(basicSize),
       _device(device),
       _type(type) {}
 

@@ -134,102 +134,154 @@ void BuddyAllocator::UpdateAncestors(size_t index) noexcept {
 FreeListAllocator::FreeListAllocator(
     size_t capacity) noexcept
     : _capacity(capacity) {
-    auto iter = _nodes.emplace(0, make_unique<FreeListAllocator::LinkNode>(0, _capacity));
-    _sizeQuery.emplace(_capacity, iter.first->second.get());
+    _nodes.reserve(64);
+    _nodeFreePool.reserve(64);
+    _freeNodes.reserve(64);
+    _startToNode.assign(_capacity > 0 ? _capacity : 1, -1);
+    _head = NewNode(0, _capacity, FreeListAllocator::NodeState::Free);
+    _startToNode[0] = static_cast<int32_t>(_head);
+    AddFree(_head);
 }
 
 std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
     if (size == 0 || size > _capacity) {
         return std::nullopt;
     }
-    auto iter = _sizeQuery.lower_bound(size);
-    if (iter == _sizeQuery.end()) {
+    uint32_t best = FreeListAllocator::npos;
+    size_t bestLen = std::numeric_limits<size_t>::max();
+    for (uint32_t idx : _freeNodes) {
+        const auto& n = _nodes[idx];
+        if (n.length < size) {
+            continue;
+        }
+        if (n.length < bestLen) {
+            best = idx;
+            bestLen = n.length;
+        }
+    }
+    if (best == FreeListAllocator::npos) {
         return std::nullopt;
     }
-    FreeListAllocator::LinkNode* node = iter->second;
-    if (node->_length == size) {
-        _sizeQuery.erase(iter);
-        node->_state = FreeListAllocator::NodeState::Used;
-        return std::make_optional(node->_start);
-    } else {
-        RADRAY_ASSERT(node->_length > size);
-        size_t newStart = node->_start + size;
-        size_t newLength = node->_length - size;
-        auto [newIter, isInsert] = _nodes.emplace(
-            newStart,
-            make_unique<FreeListAllocator::LinkNode>(newStart, newLength));
-        RADRAY_ASSERT(isInsert);
-        FreeListAllocator::LinkNode* newNode = newIter->second.get();
-        node->_state = FreeListAllocator::NodeState::Used;
-        node->_length = size;
-        newNode->_state = FreeListAllocator::NodeState::Free;
-        newNode->_prev = node;
-        newNode->_next = node->_next;
-        node->_next = newNode;
-        if (newNode->_next != nullptr) {
-            newNode->_next->_prev = newNode;
-        }
-        _sizeQuery.erase(iter);
-        _sizeQuery.emplace(newNode->_length, newNode);
-        return std::make_optional(node->_start);
+    Node& node = _nodes[best];
+    RADRAY_ASSERT(node.state == FreeListAllocator::NodeState::Free);
+    RemoveFree(best);
+    const size_t allocStart = node.start;
+    if (node.length == size) {
+        node.state = FreeListAllocator::NodeState::Used;
+        return std::make_optional(allocStart);
     }
+    RADRAY_ASSERT(node.length > size);
+    const size_t remainStart = node.start + size;
+    const size_t remainLen = node.length - size;
+    uint32_t remainIdx = NewNode(remainStart, remainLen, FreeListAllocator::NodeState::Free);
+    _startToNode[remainStart] = static_cast<int32_t>(remainIdx);
+    remainIdx = static_cast<uint32_t>(remainIdx);
+    _nodes[remainIdx].prev = best;
+    _nodes[remainIdx].next = node.next;
+    if (node.next != FreeListAllocator::npos) {
+        _nodes[node.next].prev = remainIdx;
+    }
+    node.next = remainIdx;
+    node.length = size;
+    node.state = FreeListAllocator::NodeState::Used;
+    AddFree(remainIdx);
+    return std::make_optional(allocStart);
 }
 
 void FreeListAllocator::Destroy(size_t offset) noexcept {
-    auto iter = _nodes.find(offset);
-    if (iter == _nodes.end()) {
+    if (offset >= _capacity) {
         RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
         return;
     }
-    FreeListAllocator::LinkNode* node = iter->second.get();
-    if (node->_state == FreeListAllocator::NodeState::Free) {
+    int32_t idxSigned = _startToNode[offset];
+    if (idxSigned < 0) {
         RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
         return;
     }
-    node->_state = FreeListAllocator::NodeState::Free;
-    FreeListAllocator::LinkNode* startFreePtr = node;
-    while (startFreePtr->_prev != nullptr && startFreePtr->_prev->_state == FreeListAllocator::NodeState::Free) {
-        startFreePtr = startFreePtr->_prev;
-    }
-    FreeListAllocator::LinkNode* endFreePtr = node;
-    while (endFreePtr->_next != nullptr && endFreePtr->_next->_state == FreeListAllocator::NodeState::Free) {
-        endFreePtr = endFreePtr->_next;
-    }
-    if (startFreePtr == endFreePtr) {
-        _sizeQuery.emplace(node->_length, node);
+    uint32_t idx = static_cast<uint32_t>(idxSigned);
+    Node& node = _nodes[idx];
+    if (node.state == FreeListAllocator::NodeState::Free) {
+        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
         return;
     }
-    FreeListAllocator::LinkNode* endFreeNext = endFreePtr->_next;
-    size_t newSize = 0;
-    for (FreeListAllocator::LinkNode* i = startFreePtr; i != endFreeNext;) {
-        newSize += i->_length;
-        for (auto j = _sizeQuery.begin(); j != _sizeQuery.end(); j++) {
-            if (j->second == i) {
-                _sizeQuery.erase(j);
-                break;
-            }
+    node.state = FreeListAllocator::NodeState::Free;
+    uint32_t base = idx;
+    size_t mergedStart = node.start;
+    size_t mergedLen = node.length;
+    if (node.prev != FreeListAllocator::npos && _nodes[node.prev].state == FreeListAllocator::NodeState::Free) {
+        uint32_t p = node.prev;
+        RemoveFree(p);
+        base = p;
+        mergedStart = _nodes[p].start;
+        mergedLen += _nodes[p].length;
+        _nodes[base].next = node.next;
+        if (node.next != FreeListAllocator::npos) {
+            _nodes[node.next].prev = base;
         }
-        if (i == startFreePtr) {
-            i = i->_next;
-        } else {
-            auto key = i->_start;
-            i = i->_next;
-            _nodes.erase(key);
+        _startToNode[node.start] = -1;
+        DeleteNode(idx);
+    } else {
+        RemoveFree(idx);
+    }
+    while (_nodes[base].next != FreeListAllocator::npos && _nodes[_nodes[base].next].state == FreeListAllocator::NodeState::Free) {
+        uint32_t n = _nodes[base].next;
+        RemoveFree(n);
+        mergedLen += _nodes[n].length;
+        _nodes[base].next = _nodes[n].next;
+        if (_nodes[n].next != FreeListAllocator::npos) {
+            _nodes[_nodes[n].next].prev = base;
         }
+        _startToNode[_nodes[n].start] = -1;
+        DeleteNode(n);
     }
-    startFreePtr->_length = newSize;
-    startFreePtr->_next = endFreeNext;
-    if (endFreeNext != nullptr) {
-        endFreeNext->_prev = startFreePtr;
-    }
-    _sizeQuery.emplace(startFreePtr->_length, startFreePtr);
+    _nodes[base].start = mergedStart;
+    _nodes[base].length = mergedLen;
+    _nodes[base].state = FreeListAllocator::NodeState::Free;
+    _startToNode[mergedStart] = static_cast<int32_t>(base);
+    AddFree(base);
 }
 
-FreeListAllocator::LinkNode::LinkNode(size_t start, size_t length) noexcept
-    : _start(start),
-      _length(length),
-      _prev(nullptr),
-      _next(nullptr),
-      _state(FreeListAllocator::NodeState::Free) {}
+uint32_t FreeListAllocator::NewNode(size_t start, size_t length, NodeState state) noexcept {
+    uint32_t idx;
+    if (!_nodeFreePool.empty()) {
+        idx = _nodeFreePool.back();
+        _nodeFreePool.pop_back();
+        _nodes[idx] = Node{};
+    } else {
+        idx = static_cast<uint32_t>(_nodes.size());
+        _nodes.emplace_back();
+    }
+    Node& n = _nodes[idx];
+    n.start = start;
+    n.length = length;
+    n.state = state;
+    n.prev = npos;
+    n.next = npos;
+    return idx;
+}
+
+void FreeListAllocator::DeleteNode(uint32_t idx) noexcept {
+    _nodeFreePool.emplace_back(idx);
+}
+
+void FreeListAllocator::AddFree(uint32_t idx) noexcept {
+    for (uint32_t existing : _freeNodes) {
+        if (existing == idx) {
+            return;
+        }
+    }
+    _freeNodes.emplace_back(idx);
+}
+
+void FreeListAllocator::RemoveFree(uint32_t idx) noexcept {
+    for (size_t pos = 0; pos < _freeNodes.size(); ++pos) {
+        if (_freeNodes[pos] != idx) {
+            continue;
+        }
+        _freeNodes[pos] = _freeNodes.back();
+        _freeNodes.pop_back();
+        return;
+    }
+}
 
 }  // namespace radray
