@@ -133,11 +133,19 @@ std::optional<DescriptorHeapView> CpuDescriptorAllocator::Allocate(UINT count) n
     return std::make_optional(DescriptorHeapView{
         v.Heap,
         static_cast<UINT>(v.Start),
-        static_cast<UINT>(v.Length)});
+        static_cast<UINT>(v.Length),
+        v.OwnerPage,
+        radray::FreeListAllocator::Allocation::Invalid()});
 }
 
 void CpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
-    _impl.Destroy({view.Heap, view.Start, view.Length});
+    _impl.Destroy({
+        view.Heap,
+        static_cast<size_t>(view.Start),
+        static_cast<size_t>(view.Length),
+        static_cast<size_t>(view.Start),
+        view.OwnerPage,
+        static_cast<radray::BlockAllocatorOwnerBase*>(&_impl)});
 }
 
 GpuDescriptorAllocator::GpuDescriptorAllocator(
@@ -163,12 +171,14 @@ std::optional<DescriptorHeapView> GpuDescriptorAllocator::Allocate(UINT count) n
     auto v = allocation.value();
     return std::make_optional(DescriptorHeapView{
         _heap.get(),
-        static_cast<UINT>(v),
-        count});
+        static_cast<UINT>(v.Start),
+        count,
+        nullptr,
+        v});
 }
 
 void GpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
-    _allocator.Destroy(view.Start);
+    _allocator.Destroy(view.FreeListAllocation);
 }
 
 DeviceD3D12::DeviceD3D12(
@@ -331,9 +341,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     {
         DeviceDetail& detail = result->_detail;
         detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-        detail.UploadTextureAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
-        detail.UploadTextureRowAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
-        detail.MapAlignment = 1;
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -1784,7 +1791,7 @@ void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept 
         RADRAY_ERR_LOG("{} {} '{}'", Errors::D3D12, Errors::InvalidOperation, "length");
         return;
     }
-    _cmdList->_cmdList->SetGraphicsRoot32BitConstants(dataRef.Index, static_cast<UINT>(length / 4), data, 0);
+    _cmdList->_cmdList->SetGraphicsRoot32BitConstants((UINT)dataRef.Index, static_cast<UINT>(length / 4), data, 0);
 }
 
 void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
@@ -1804,19 +1811,19 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootShaderResourceView(dataRef.Index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::CBuffer)) {
             if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_CBV) {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootConstantBufferView(dataRef.Index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
         } else if (usage.HasFlag(BufferUse::UnorderedAccess)) {
             if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_UAV) {
                 RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "root parameter type mismatch");
                 return;
             }
-            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView(dataRef.Index, gpuAddr);
+            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
         } else {
             RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "unsupported buffer view usage");
         }
@@ -1836,10 +1843,10 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) no
     auto dataRef = _boundRootSig->_desc.GetTable(slot);
     auto descHeapView = CastD3D12Object(set);
     if (descHeapView->_resHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
     }
     if (descHeapView->_samplerHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable(dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
     }
 }
 

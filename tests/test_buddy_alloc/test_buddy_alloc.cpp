@@ -166,3 +166,26 @@ TEST(Core_Allocator_Buddy, AllocateAndDeallocateNonPowerOfTwo) {
     ASSERT_TRUE(alloc4.has_value());
     EXPECT_EQ(alloc4.value(), 2);
 }
+
+#if GTEST_HAS_DEATH_TEST
+#if !defined(NDEBUG)
+
+TEST(Core_Allocator_Buddy_Death, DestroyInvalidOffsetAsserts) {
+    BuddyAllocator allocator(8);
+    ASSERT_DEATH({
+        allocator.Destroy(999);
+    }, ".*");
+}
+
+TEST(Core_Allocator_Buddy_Death, DoubleFreeAsserts) {
+    BuddyAllocator allocator(8);
+    auto a = allocator.Allocate(1);
+    ASSERT_TRUE(a.has_value());
+    allocator.Destroy(a.value());
+    ASSERT_DEATH({
+        allocator.Destroy(a.value());
+    }, ".*");
+}
+
+#endif  // !defined(NDEBUG)
+#endif  // GTEST_HAS_DEATH_TEST

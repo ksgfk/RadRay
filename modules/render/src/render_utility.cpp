@@ -2,7 +2,10 @@
 
 #include <radray/errors.h>
 
+#include <radray/basic_math.h>
+
 #include <cstring>
+#include <bit>
 
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
@@ -151,12 +154,82 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     return builder.Build();
 }
 
+class SimpleTempCbufferAllocatorHeap {
+public:
+    SimpleTempCbufferAllocatorHeap() noexcept = default;
+    SimpleTempCbufferAllocatorHeap(const SimpleTempCbufferAllocatorHeap&) = delete;
+    SimpleTempCbufferAllocatorHeap& operator=(const SimpleTempCbufferAllocatorHeap&) = delete;
+    SimpleTempCbufferAllocatorHeap(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
+    SimpleTempCbufferAllocatorHeap& operator=(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
+    ~SimpleTempCbufferAllocatorHeap() noexcept {
+        if (BufferObj) {
+            BufferObj->Unmap(0, Capacity);
+            BufferObj->Destroy();
+            BufferObj.reset();
+            Mapped = nullptr;
+            Capacity = 0;
+        }
+    }
+
+public:
+    SimpleTempCbufferAllocator* Owner{nullptr};
+    unique_ptr<Buffer> BufferObj;
+    void* Mapped{nullptr};
+    uint64_t Capacity{0};
+};
+
+class SimpleTempCbufferAllocator::AllocImpl final : public BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl> {
+public:
+    using Base = BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl>;
+
+    AllocImpl(SimpleTempCbufferAllocator* owner, size_t basicPageSize) noexcept
+        : Base(basicPageSize),
+          _owner(owner) {}
+
+    ~AllocImpl() noexcept override = default;
+
+    unique_ptr<SimpleTempCbufferAllocatorHeap> CreateHeap(size_t capacity) noexcept {
+        BufferDescriptor desc{};
+        desc.Size = capacity;
+        desc.Memory = MemoryType::Upload;
+        desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite;
+        desc.Hints = ResourceHint::None;
+        auto cbOpt = _owner->_device->CreateBuffer(desc);
+        if (!cbOpt.HasValue()) {
+            RADRAY_ABORT("allocation failed: cannot create upload buffer");
+        }
+        auto cb = cbOpt.Release();
+        auto mapped = cb->Map(0, desc.Size);
+        if (!mapped) {
+            RADRAY_ABORT("allocation failed: cannot map upload buffer");
+        }
+        auto heap = make_unique<SimpleTempCbufferAllocatorHeap>();
+        heap->Owner = _owner;
+        heap->BufferObj = std::move(cb);
+        heap->Mapped = mapped;
+        heap->Capacity = capacity;
+        return heap;
+    }
+
+    StackAllocator CreateSubAllocator(size_t capacity) noexcept {
+        return StackAllocator(capacity);
+    }
+
+    void Reset() noexcept {
+        Base::Reset();
+    }
+
+private:
+    SimpleTempCbufferAllocator* _owner{nullptr};
+};
+
 SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device) noexcept
     : SimpleTempCbufferAllocator(device, {}) {}
 
 SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept
     : _device(device),
       _desc(desc) {
+    RADRAY_ASSERT(_device != nullptr);
     auto detail = device->GetDetail();
     uint32_t align = detail.CBufferAlignment;
     if (align == 0) {
@@ -169,45 +242,29 @@ SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device, const Des
     if (_desc.PageSize < static_cast<uint64_t>(_cbAlign)) {
         _desc.PageSize = static_cast<uint64_t>(_cbAlign);
     }
+
+    _alloc = make_unique<AllocImpl>(this, static_cast<size_t>(_desc.PageSize));
 }
 
 SimpleTempCbufferAllocator::~SimpleTempCbufferAllocator() noexcept {
-    this->Shutdown();
+    this->Destroy();
 }
 
-void SimpleTempCbufferAllocator::Shutdown() noexcept {
-    this->DestroyViews(_currViews);
-    this->DestroyPages(_currPages);
-    this->DestroyPages(_freePages);
-
-    _currPage = nullptr;
+void SimpleTempCbufferAllocator::Destroy() noexcept {
+    _alloc.reset();
     _device = nullptr;
     _cbAlign = 256u;
     _desc = {};
 }
 
-void SimpleTempCbufferAllocator::Reset() noexcept {
-    if (!_device) {
-        return;
-    }
-
-    this->DestroyViews(_currViews);
-    for (auto& p : _currPages) {
-        if (p) {
-            p->Offset = 0;
-        }
-        _freePages.emplace_back(std::move(p));
-    }
-    _currPages.clear();
-    _currPage = nullptr;
+bool SimpleTempCbufferAllocator::IsValid() const noexcept {
+    return _device != nullptr && _alloc != nullptr;
 }
 
-uint64_t SimpleTempCbufferAllocator::AlignUp(uint64_t v, uint64_t align) const noexcept {
-    if (align == 0) {
-        return v;
-    }
-    uint64_t r = v % align;
-    return r == 0 ? v : (v + (align - r));
+void SimpleTempCbufferAllocator::Reset() noexcept {
+    RADRAY_ASSERT(_device != nullptr);
+    RADRAY_ASSERT(_alloc != nullptr);
+    _alloc->Reset();
 }
 
 uint64_t SimpleTempCbufferAllocator::GetAllocAlignment(uint32_t alignment) const noexcept {
@@ -215,124 +272,28 @@ uint64_t SimpleTempCbufferAllocator::GetAllocAlignment(uint32_t alignment) const
     if (a < static_cast<uint64_t>(_cbAlign)) {
         a = static_cast<uint64_t>(_cbAlign);
     }
-    return a;
-}
-
-SimpleTempCbufferAllocator::Page* SimpleTempCbufferAllocator::GetOrCreatePage(uint64_t minCapacity) noexcept {
-    if (!_device) {
-        return nullptr;
-    }
-    uint64_t wantCap = _desc.PageSize;
-    if (wantCap < minCapacity) {
-        wantCap = this->AlignUp(minCapacity, static_cast<uint64_t>(_cbAlign));
-    }
-
-    auto takeFree = [&]() -> unique_ptr<Page> {
-        for (size_t i = 0; i < _freePages.size(); i++) {
-            if (_freePages[i] && _freePages[i]->Capacity >= wantCap) {
-                auto p = std::move(_freePages[i]);
-                _freePages.erase(_freePages.begin() + i);
-                return p;
-            }
-        }
-        return nullptr;
-    };
-
-    unique_ptr<Page> page = takeFree();
-    if (!page) {
-        BufferDescriptor bd{};
-        bd.Size = wantCap;
-        bd.Memory = MemoryType::Upload;
-        bd.Usage = BufferUse::CBuffer | BufferUse::MapWrite;
-        bd.Hints = ResourceHint::None;
-
-        // Keep the name storage alive for the duration of CreateBuffer call.
-        string name;
-        name.reserve(_desc.NamePrefix.size() + 32);
-        name.append(_desc.NamePrefix.data(), _desc.NamePrefix.size());
-        name += "_Page";
-        bd.Name = name;
-
-        auto bufOpt = _device->CreateBuffer(bd);
-        if (!bufOpt) {
-            RADRAY_ERR_LOG("{} {}", "SimpleTempCbufferAllocator", "CreateBuffer failed");
-            return nullptr;
-        }
-
-        page = make_unique<Page>();
-        page->BufferObj = bufOpt.Unwrap();
-        page->Capacity = wantCap;
-        page->Offset = 0;
-        // Map with size=0 for write-only on D3D12 (range {0,0}). Vulkan ignores size.
-        page->Mapped = page->BufferObj->Map(0, 0);
-        if (!page->Mapped) {
-            RADRAY_ERR_LOG("{} {}", "SimpleTempCbufferAllocator", "Map failed");
-            page->BufferObj->Destroy();
-            page->BufferObj.reset();
-            return nullptr;
-        }
-    } else {
-        page->Offset = 0;
-    }
-
-    _currPages.emplace_back(std::move(page));
-    _currPage = _currPages.back().get();
-    return _currPage;
+    return std::bit_ceil(a);
 }
 
 std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateInternal(uint64_t size, uint32_t alignment) noexcept {
-    if (!_device) {
-        return std::nullopt;
-    }
+    RADRAY_ASSERT(_device != nullptr);
+    RADRAY_ASSERT(_alloc != nullptr);
     if (size == 0) {
         return std::nullopt;
     }
-
     const uint64_t a = this->GetAllocAlignment(alignment);
-    const uint64_t alignedSize = this->AlignUp(size, a);
-
-    if (!_currPage) {
-        _currPage = this->GetOrCreatePage(alignedSize);
-        if (!_currPage) {
-            return std::nullopt;
-        }
-    }
-
-    uint64_t off = this->AlignUp(_currPage->Offset, a);
-    if (off + alignedSize > _currPage->Capacity) {
-        _currPage = this->GetOrCreatePage(alignedSize);
-        if (!_currPage) {
-            return std::nullopt;
-        }
-        off = this->AlignUp(_currPage->Offset, a);
-        if (off + alignedSize > _currPage->Capacity) {
-            // Should not happen.
-            return std::nullopt;
-        }
-    }
-
-    BufferViewDescriptor bvd{};
-    bvd.Target = _currPage->BufferObj.get();
-    bvd.Range = {off, alignedSize};
-    bvd.Stride = 0;
-    bvd.Format = TextureFormat::UNKNOWN;
-    bvd.Usage = BufferUse::CBuffer;
-
-    auto viewOpt = _device->CreateBufferView(bvd);
-    if (!viewOpt) {
-        RADRAY_ERR_LOG("{} {}", "SimpleTempCbufferAllocator", "CreateBufferView failed");
+    const uint64_t alignedSize = radray::Align(size, a);
+    const uint64_t requestSize = alignedSize + (a - 1);
+    auto allocOpt = _alloc->Allocate(static_cast<size_t>(requestSize));
+    if (!allocOpt.has_value()) {
         return std::nullopt;
     }
-
-    auto view = viewOpt.Unwrap();
-    BufferView* viewPtr = view.get();
-    _currViews.emplace_back(std::move(view));
-
-    void* cpuPtr = static_cast<byte*>(_currPage->Mapped) + off;
-    _currPage->Offset = off + alignedSize;
-
+    auto blockAlloc = allocOpt.value();
+    auto heap = blockAlloc.Heap;
+    const uint64_t off = radray::Align(static_cast<uint64_t>(blockAlloc.Start), a);
+    void* cpuPtr = static_cast<byte*>(heap->Mapped) + off;
     TempCbufferAllocation out{};
-    out.View = viewPtr;
+    out.BufferObj = heap->BufferObj.get();
     out.CpuPtr = cpuPtr;
     out.Size = size;
     out.OffsetInPage = off;
@@ -352,33 +313,6 @@ std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateAndWrit
         std::memcpy(allocOpt->CpuPtr, data.data(), data.size());
     }
     return allocOpt;
-}
-
-void SimpleTempCbufferAllocator::DestroyViews(vector<unique_ptr<BufferView>>& views) noexcept {
-    for (auto& v : views) {
-        if (v) {
-            v->Destroy();
-            v.reset();
-        }
-    }
-    views.clear();
-}
-
-void SimpleTempCbufferAllocator::DestroyPages(vector<unique_ptr<Page>>& pages) noexcept {
-    for (auto& p : pages) {
-        if (!p) {
-            continue;
-        }
-        if (p->BufferObj) {
-            // Best-effort unmap; offset/size are ignored by Vulkan and acceptable on D3D12.
-            p->BufferObj->Unmap(0, 0);
-            p->BufferObj->Destroy();
-            p->BufferObj.reset();
-        }
-        p->Mapped = nullptr;
-        p.reset();
-    }
-    pages.clear();
 }
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept

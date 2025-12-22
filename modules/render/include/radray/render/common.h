@@ -801,9 +801,6 @@ struct IndexBufferView {
 
 struct DeviceDetail {
     uint32_t CBufferAlignment{0};
-    uint32_t UploadTextureAlignment{0};
-    uint32_t UploadTextureRowAlignment{0};
-    uint32_t MapAlignment{0};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {

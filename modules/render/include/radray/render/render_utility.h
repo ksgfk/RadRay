@@ -3,6 +3,7 @@
 #include <span>
 #include <string_view>
 
+#include <radray/allocator.h>
 #include <radray/vertex_data.h>
 #include <radray/structured_buffer.h>
 
@@ -25,7 +26,7 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 
 struct TempCbufferAllocation {
-    BufferView* View{nullptr};
+    Buffer* BufferObj{nullptr};
     void* CpuPtr{nullptr};
     uint64_t Size{0};
     uint64_t OffsetInPage{0};
@@ -36,10 +37,9 @@ public:
     struct Descriptor {
         uint64_t PageSize{256u * 1024u};
         uint32_t MinAlignment{256u};
-        std::string_view NamePrefix{"TempCBuffer"};
+        std::string_view NamePrefix{};
     };
 
-    SimpleTempCbufferAllocator() noexcept = default;
     explicit SimpleTempCbufferAllocator(Device* device) noexcept;
     SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept;
 
@@ -50,52 +50,28 @@ public:
 
     ~SimpleTempCbufferAllocator() noexcept;
 
-    void Shutdown() noexcept;
-    // Recycle all allocations made so far (views are destroyed; pages are kept and reused).
+    void Destroy() noexcept;
+    bool IsValid() const noexcept;
+
     void Reset() noexcept;
 
     Device* GetDevice() const noexcept { return _device; }
     uint32_t GetCBufferAlignment() const noexcept { return _cbAlign; }
 
-    // Allocate a temporary constant-buffer slice. Returned View/CpuPtr stay valid until the frame is retired.
     std::optional<TempCbufferAllocation> Allocate(uint64_t size, uint32_t alignment = 0) noexcept;
 
-    // Allocate + copy data into the mapped upload page.
     std::optional<TempCbufferAllocation> AllocateAndWrite(std::span<const byte> data, uint32_t alignment = 0) noexcept;
 
-    template <class T>
-    std::optional<TempCbufferAllocation> AllocateAndWrite(const T& value, uint32_t alignment = 0) noexcept {
-        return AllocateAndWrite(std::span{reinterpret_cast<const byte*>(&value), sizeof(T)}, alignment);
-    }
-
 private:
-    struct Page {
-        unique_ptr<Buffer> BufferObj;
-        void* Mapped{nullptr};
-        uint64_t Capacity{0};
-        uint64_t Offset{0};
-    };
+    class AllocImpl;
 
-    uint64_t AlignUp(uint64_t v, uint64_t align) const noexcept;
     uint64_t GetAllocAlignment(uint32_t alignment) const noexcept;
     std::optional<TempCbufferAllocation> AllocateInternal(uint64_t size, uint32_t alignment) noexcept;
-    Page* GetOrCreatePage(uint64_t minCapacity) noexcept;
 
-    void DestroyViews(vector<unique_ptr<BufferView>>& views) noexcept;
-    void DestroyPages(vector<unique_ptr<Page>>& pages) noexcept;
-
-private:
     Device* _device{nullptr};
+    unique_ptr<AllocImpl> _alloc;
     Descriptor _desc{};
     uint32_t _cbAlign{256u};
-
-    // Current-frame working set
-    vector<unique_ptr<Page>> _currPages;
-    vector<unique_ptr<BufferView>> _currViews;
-    Page* _currPage{nullptr};
-
-    // Reusable pages
-    vector<unique_ptr<Page>> _freePages;
 };
 
 // -----------------------------------------------------------------------------------------------

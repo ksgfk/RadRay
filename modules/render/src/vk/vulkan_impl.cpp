@@ -1663,9 +1663,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     {
         DeviceDetail& detail = deviceR->_detail;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
-        detail.UploadTextureAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
-        detail.UploadTextureRowAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
-        detail.MapAlignment = (uint32_t)deviceR->_properties.limits.nonCoherentAtomSize;
     }
 
     RADRAY_INFO_LOG("========== Feature ==========");

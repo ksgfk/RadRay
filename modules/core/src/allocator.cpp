@@ -15,6 +15,10 @@ static constexpr size_t Parent(size_t index) noexcept { return (index - 1) / 2; 
 
 BuddyAllocator::BuddyAllocator(size_t capacity) noexcept : _capacity(capacity) {
     _virtualCapacity = capacity > 0 ? std::bit_ceil(capacity) : size_t{1};
+    RADRAY_ASSERT(_capacity != 0);
+    RADRAY_ASSERT(_virtualCapacity != 0);
+    RADRAY_ASSERT(std::has_single_bit(_virtualCapacity));
+    RADRAY_ASSERT(_capacity <= _virtualCapacity);
     const size_t treeSize = _virtualCapacity * 2 - 1;
 
     _longest.assign(treeSize, 0);
@@ -50,20 +54,16 @@ std::optional<size_t> BuddyAllocator::Allocate(size_t size_) noexcept {
     if (_capacity == 0) {
         return std::nullopt;
     }
-
     const size_t request = size_ == 0 ? size_t{1} : size_;
     if (request > _capacity) {
         return std::nullopt;
     }
-
     const size_t targetSize = std::min(std::bit_ceil(request), _virtualCapacity);
     size_t index = 0;
     size_t nodeSize = _nodeSize[index];
-
     if (_longest[index] < request) {
         return std::nullopt;
     }
-
     while (nodeSize > targetSize) {
         const size_t left = LeftChild(index);
         const size_t right = left + 1;
@@ -76,37 +76,27 @@ std::optional<size_t> BuddyAllocator::Allocate(size_t size_) noexcept {
         }
         nodeSize = _nodeSize[index];
     }
-
     if (_longest[index] < request || _actualCapacity[index] < request) {
         return std::nullopt;
     }
-
     _allocated[index] = 1;
     _longest[index] = 0;
     const size_t offset = _nodeOffset[index];
-
     UpdateAncestors(index);
-
     return offset;
 }
 
 void BuddyAllocator::Destroy(size_t offset) noexcept {
-    if (_capacity == 0 || offset >= _capacity) {
-        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
-        return;
-    }
-
+    RADRAY_ASSERT(offset < _capacity);
     size_t index = 0;
     while (true) {
         if (_allocated[index] && _nodeOffset[index] == offset) {
             break;
         }
-
         if (_nodeSize[index] == 1) {
-            RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
+            RADRAY_ASSERT(false);
             return;
         }
-
         const size_t left = LeftChild(index);
         const size_t right = left + 1;
         if (offset < _nodeOffset[right]) {
@@ -115,7 +105,6 @@ void BuddyAllocator::Destroy(size_t offset) noexcept {
             index = right;
         }
     }
-
     RADRAY_ASSERT(_allocated[index] != 0);
     _allocated[index] = 0;
     _longest[index] = _actualCapacity[index];
@@ -141,13 +130,11 @@ FreeListAllocator::FreeListAllocator(
     _nodes.reserve(64);
     _nodeFreePool.reserve(64);
     _freeNodes.reserve(64);
-    _startToNode.assign(_capacity > 0 ? _capacity : 1, -1);
     _head = NewNode(0, _capacity, FreeListAllocator::NodeState::Free);
-    _startToNode[0] = static_cast<int32_t>(_head);
     AddFree(_head);
 }
 
-std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
+std::optional<FreeListAllocator::Allocation> FreeListAllocator::Allocate(size_t size) noexcept {
     if (size == 0 || size > _capacity) {
         return std::nullopt;
     }
@@ -172,13 +159,16 @@ std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
     const size_t allocStart = node.start;
     if (node.length == size) {
         node.state = FreeListAllocator::NodeState::Used;
-        return std::make_optional(allocStart);
+        return std::make_optional(FreeListAllocator::Allocation{
+            allocStart,
+            size,
+            best,
+            node.generation});
     }
     RADRAY_ASSERT(node.length > size);
     const size_t remainStart = node.start + size;
     const size_t remainLen = node.length - size;
     uint32_t remainIdx = NewNode(remainStart, remainLen, FreeListAllocator::NodeState::Free);
-    _startToNode[remainStart] = static_cast<int32_t>(remainIdx);
     remainIdx = static_cast<uint32_t>(remainIdx);
     _nodes[remainIdx].prev = best;
     _nodes[remainIdx].next = node.next;
@@ -189,25 +179,23 @@ std::optional<size_t> FreeListAllocator::Allocate(size_t size) noexcept {
     node.length = size;
     node.state = FreeListAllocator::NodeState::Used;
     AddFree(remainIdx);
-    return std::make_optional(allocStart);
+    return std::make_optional(FreeListAllocator::Allocation{
+        allocStart,
+        size,
+        best,
+        node.generation});
 }
 
-void FreeListAllocator::Destroy(size_t offset) noexcept {
-    if (offset >= _capacity) {
-        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
-        return;
-    }
-    int32_t idxSigned = _startToNode[offset];
-    if (idxSigned < 0) {
-        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
-        return;
-    }
-    uint32_t idx = static_cast<uint32_t>(idxSigned);
+void FreeListAllocator::Destroy(Allocation allocation) noexcept {
+    RADRAY_ASSERT(allocation.Length != 0);
+    RADRAY_ASSERT(allocation.Start < _capacity);
+    RADRAY_ASSERT(allocation.Node < _nodes.size());
+    uint32_t idx = allocation.Node;
     Node& node = _nodes[idx];
-    if (node.state == FreeListAllocator::NodeState::Free) {
-        RADRAY_ABORT("{} '{}'", Errors::InvalidOperation, "offset");
-        return;
-    }
+    RADRAY_ASSERT(node.generation == allocation.Generation);
+    RADRAY_ASSERT(node.start == allocation.Start);
+    RADRAY_ASSERT(node.length == allocation.Length);
+    RADRAY_ASSERT(node.state == FreeListAllocator::NodeState::Used);
     node.state = FreeListAllocator::NodeState::Free;
     uint32_t base = idx;
     size_t mergedStart = node.start;
@@ -222,10 +210,7 @@ void FreeListAllocator::Destroy(size_t offset) noexcept {
         if (node.next != FreeListAllocator::npos) {
             _nodes[node.next].prev = base;
         }
-        _startToNode[node.start] = -1;
         DeleteNode(idx);
-    } else {
-        RemoveFree(idx);
     }
     while (_nodes[base].next != FreeListAllocator::npos && _nodes[_nodes[base].next].state == FreeListAllocator::NodeState::Free) {
         uint32_t n = _nodes[base].next;
@@ -235,13 +220,11 @@ void FreeListAllocator::Destroy(size_t offset) noexcept {
         if (_nodes[n].next != FreeListAllocator::npos) {
             _nodes[_nodes[n].next].prev = base;
         }
-        _startToNode[_nodes[n].start] = -1;
         DeleteNode(n);
     }
     _nodes[base].start = mergedStart;
     _nodes[base].length = mergedLen;
     _nodes[base].state = FreeListAllocator::NodeState::Free;
-    _startToNode[mergedStart] = static_cast<int32_t>(base);
     AddFree(base);
 }
 
@@ -250,7 +233,6 @@ uint32_t FreeListAllocator::NewNode(size_t start, size_t length, NodeState state
     if (!_nodeFreePool.empty()) {
         idx = _nodeFreePool.back();
         _nodeFreePool.pop_back();
-        _nodes[idx] = Node{};
     } else {
         idx = static_cast<uint32_t>(_nodes.size());
         _nodes.emplace_back();
@@ -261,31 +243,63 @@ uint32_t FreeListAllocator::NewNode(size_t start, size_t length, NodeState state
     n.state = state;
     n.prev = npos;
     n.next = npos;
+    n.freePos = npos;
     return idx;
 }
 
 void FreeListAllocator::DeleteNode(uint32_t idx) noexcept {
+    if (_nodes[idx].freePos != npos) {
+        RemoveFree(idx);
+    }
+    _nodes[idx].generation += 1;
+    _nodes[idx].start = 0;
+    _nodes[idx].length = 0;
+    _nodes[idx].prev = npos;
+    _nodes[idx].next = npos;
+    _nodes[idx].freePos = npos;
+    _nodes[idx].state = FreeListAllocator::NodeState::Free;
     _nodeFreePool.emplace_back(idx);
 }
 
 void FreeListAllocator::AddFree(uint32_t idx) noexcept {
-    for (uint32_t existing : _freeNodes) {
-        if (existing == idx) {
-            return;
-        }
+    Node& n = _nodes[idx];
+    if (n.freePos != npos) {
+        return;
     }
+    n.freePos = static_cast<uint32_t>(_freeNodes.size());
     _freeNodes.emplace_back(idx);
 }
 
 void FreeListAllocator::RemoveFree(uint32_t idx) noexcept {
-    for (size_t pos = 0; pos < _freeNodes.size(); ++pos) {
-        if (_freeNodes[pos] != idx) {
-            continue;
-        }
-        _freeNodes[pos] = _freeNodes.back();
-        _freeNodes.pop_back();
+    Node& n = _nodes[idx];
+    if (n.freePos == npos) {
         return;
     }
+    const uint32_t pos = n.freePos;
+    RADRAY_ASSERT(pos < _freeNodes.size());
+    const uint32_t backIdx = _freeNodes.back();
+    _freeNodes[pos] = backIdx;
+    _freeNodes.pop_back();
+    if (backIdx != idx) {
+        _nodes[backIdx].freePos = pos;
+    }
+    n.freePos = npos;
+}
+
+StackAllocator::StackAllocator(size_t capacity) noexcept
+    : _capacity(capacity),
+      _offset(0) {}
+
+std::optional<size_t> StackAllocator::Allocate(size_t size) noexcept {
+    if (size == 0 || size > _capacity) {
+        return std::nullopt;
+    }
+    if (_offset + size > _capacity) {
+        return std::nullopt;
+    }
+    const size_t start = _offset;
+    _offset += size;
+    return start;
 }
 
 }  // namespace radray

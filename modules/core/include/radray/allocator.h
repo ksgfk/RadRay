@@ -5,7 +5,6 @@
 #include <list>
 #include <optional>
 #include <type_traits>
-#include <unordered_map>
 
 #include <radray/enum_flags.h>
 #include <radray/types.h>
@@ -20,8 +19,15 @@ concept is_allocator = requires(TAllocator alloc, size_t size, TAllocation alloc
     { alloc.Destroy(allocation) } -> std::same_as<void>;
 };
 
+template <class TAllocator>
+concept is_resetable_allocator = requires(TAllocator alloc) {
+    { alloc.Reset() } -> std::same_as<void>;
+};
+
 class BuddyAllocator {
 public:
+    using Allocation = size_t;
+
     explicit BuddyAllocator(size_t capacity) noexcept;
 
     ~BuddyAllocator() noexcept = default;
@@ -44,23 +50,33 @@ private:
 
 static_assert(is_allocator<BuddyAllocator, size_t>, "BuddyAllocator is not an allocator");
 
-template <class THeap>
+struct BlockAllocatorOwnerBase {};
+
+struct BlockAllocatorPageBase {};
+
+template <class THeap, class TSubAllocation>
 struct BlockAllocation {
     THeap* Heap;
+    BlockAllocatorPageBase* OwnerPage;
+    BlockAllocatorOwnerBase* OwnerAllocator;
     size_t Start;
     size_t Length;
+    TSubAllocation SubAllocation;
 };
 
 template <class TSubAlloc, class THeap, class TDerived>
-requires is_allocator<TSubAlloc, size_t>
-class BlockAllocator {
+requires is_allocator<TSubAlloc, typename TSubAlloc::Allocation>
+class BlockAllocator : public BlockAllocatorOwnerBase {
 public:
+    using SubAllocation = typename TSubAlloc::Allocation;
+    using Allocation = BlockAllocation<THeap, SubAllocation>;
+
     explicit BlockAllocator(size_t basicPageSize) noexcept
         : _basicPageSize(basicPageSize) {}
 
     virtual ~BlockAllocator() noexcept = default;
 
-    std::optional<BlockAllocation<THeap>> Allocate(size_t size) noexcept {
+    std::optional<Allocation> Allocate(size_t size) noexcept {
         if (size == 0) {
             return std::nullopt;
         }
@@ -68,40 +84,41 @@ public:
         EnsureBucketCount(needBucket + 1);
         for (size_t bucket = needBucket; bucket < _bucketHeads.size(); ++bucket) {
             auto& bucketList = _bucketHeads[bucket];
-            for (auto it = bucketList.begin(); it != bucketList.end(); ) {
+            for (auto it = bucketList.begin(); it != bucketList.end();) {
                 Page* page = *it;
                 ++it;
                 if (page->_freeBytes >= size) {
-                    std::optional<size_t> start = page->_allocator.Allocate(size);
-                    if (start.has_value()) {
+                    std::optional<SubAllocation> subAlloc = page->_allocator.Allocate(size);
+                    if (subAlloc.has_value()) {
                         page->_freeBytes -= size;
                         page->_liveAllocs += 1;
                         UpdatePageBucket(page);
-                        return BlockAllocation<THeap>{page->_heap.get(), start.value(), size};
+                        const size_t start = StartOf(subAlloc.value());
+                        return Allocation{page->_heap.get(), page, this, start, size, subAlloc.value()};
                     }
                 }
             }
         }
         Page* page = CreatePage(size);
-        std::optional<size_t> start = page->_allocator.Allocate(size);
-        RADRAY_ASSERT(start.has_value());
+        std::optional<SubAllocation> subAlloc = page->_allocator.Allocate(size);
+        RADRAY_ASSERT(subAlloc.has_value());
         page->_freeBytes -= size;
         page->_liveAllocs += 1;
         UpdatePageBucket(page);
-        return BlockAllocation<THeap>{page->_heap.get(), start.value(), size};
+        const size_t start = StartOf(subAlloc.value());
+        return Allocation{page->_heap.get(), page, this, start, size, subAlloc.value()};
     }
 
-    void Destroy(BlockAllocation<THeap> allocation) noexcept {
+    void Destroy(Allocation allocation) noexcept {
         RADRAY_ASSERT(allocation.Heap != nullptr);
-        auto it = _heapToPage.find(allocation.Heap);
-        RADRAY_ASSERT(it != _heapToPage.end());
-
-        Page* page = it->second;
-        page->_allocator.Destroy(allocation.Start);
+        RADRAY_ASSERT(allocation.OwnerAllocator == static_cast<BlockAllocatorOwnerBase*>(this));
+        RADRAY_ASSERT(allocation.OwnerPage != nullptr);
+        Page* page = static_cast<Page*>(allocation.OwnerPage);
+        RADRAY_ASSERT(page->_heap.get() == allocation.Heap);
+        page->_allocator.Destroy(allocation.SubAllocation);
         page->_freeBytes += allocation.Length;
         RADRAY_ASSERT(page->_liveAllocs > 0);
         page->_liveAllocs -= 1;
-
         if (page->_liveAllocs == 0) {
             ReleasePage(page);
             return;
@@ -109,19 +126,51 @@ public:
         UpdatePageBucket(page);
     }
 
+    void Reset() noexcept {
+        _bucketHeads.clear();
+        for (auto& up : _pages) {
+            Page* page = up.get();
+            RADRAY_ASSERT(page);
+            if constexpr (is_resetable_allocator<TSubAlloc>) {
+                page->_allocator.Reset();
+            } else {
+                page->_allocator = static_cast<TDerived*>(this)->CreateSubAllocator(page->_capacity);
+            }
+            page->_freeBytes = page->_capacity;
+            page->_liveAllocs = 0;
+
+            const size_t bucket = BucketForFree(page->_freeBytes);
+            EnsureBucketCount(bucket + 1);
+            auto& dst = _bucketHeads[bucket];
+            dst.push_front(page);
+            page->_bucketIter = dst.begin();
+            page->_bucketIndex = bucket;
+        }
+    }
+
 private:
+    static constexpr size_t StartOf(const SubAllocation& alloc) noexcept {
+        if constexpr (std::is_same_v<SubAllocation, size_t>) {
+            return alloc;
+        } else {
+            return alloc.Start;
+        }
+    }
+
     static constexpr size_t npos = static_cast<size_t>(-1);
 
-    struct Page {
+    struct Page : public BlockAllocatorPageBase {
         explicit Page(
             unique_ptr<THeap> heap,
             TSubAlloc&& allocator,
             size_t capacity) noexcept
             : _freeBytes(capacity),
+              _capacity(capacity),
               _heap(std::move(heap)),
               _allocator(std::move(std::forward<TSubAlloc>(allocator))) {}
 
         size_t _freeBytes = 0;
+        size_t _capacity = 0;
         size_t _liveAllocs = 0;
 
         size_t _ownerIndex = 0;
@@ -197,14 +246,12 @@ private:
         Page* pagePtr = page.get();
         pagePtr->_ownerIndex = _pages.size();
         _pages.emplace_back(std::move(page));
-        _heapToPage.emplace(pagePtr->_heap.get(), pagePtr);
         UpdatePageBucket(pagePtr);
         return pagePtr;
     }
 
     void ReleasePage(Page* page) noexcept {
         RemoveFromBucket(page);
-        _heapToPage.erase(page->_heap.get());
         const size_t idx = page->_ownerIndex;
         RADRAY_ASSERT(idx < _pages.size());
         if (idx != _pages.size() - 1) {
@@ -215,18 +262,26 @@ private:
     }
 
     vector<unique_ptr<Page>> _pages;
-    unordered_map<THeap*, Page*> _heapToPage;
     vector<list<Page*>> _bucketHeads;
     size_t _basicPageSize;
 };
 
 class FreeListAllocator {
 public:
+    struct Allocation {
+        size_t Start = 0;
+        size_t Length = 0;
+        uint32_t Node = 0;
+        uint32_t Generation = 0;
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+    };
+
     explicit FreeListAllocator(size_t capacity) noexcept;
 
-    std::optional<size_t> Allocate(size_t size) noexcept;
+    std::optional<Allocation> Allocate(size_t size) noexcept;
 
-    void Destroy(size_t offset) noexcept;
+    void Destroy(Allocation allocation) noexcept;
 
 private:
     enum class NodeState {
@@ -241,6 +296,8 @@ private:
         size_t length = 0;
         uint32_t prev = npos;
         uint32_t next = npos;
+        uint32_t freePos = npos;
+        uint32_t generation = 0;
         NodeState state = NodeState::Free;
     };
 
@@ -253,10 +310,28 @@ private:
     vector<Node> _nodes;
     vector<uint32_t> _nodeFreePool;
     vector<uint32_t> _freeNodes;
-    vector<int32_t> _startToNode;
     uint32_t _head = npos;
 };
 
-static_assert(is_allocator<FreeListAllocator, size_t>, "FreeListAllocator is not an allocator");
+static_assert(is_allocator<FreeListAllocator, FreeListAllocator::Allocation>, "FreeListAllocator is not an allocator");
+
+class StackAllocator {
+public:
+    using Allocation = size_t;
+
+    explicit StackAllocator(size_t capacity) noexcept;
+
+    std::optional<size_t> Allocate(size_t size) noexcept;
+
+    void Destroy(size_t) noexcept {}
+
+    void Reset() noexcept { _offset = 0; }
+
+private:
+    size_t _capacity = 0;
+    size_t _offset = 0;
+};
+
+static_assert(is_allocator<StackAllocator, size_t>, "StackAllocator is not an allocator");
 
 }  // namespace radray

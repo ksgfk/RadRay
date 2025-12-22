@@ -464,7 +464,7 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
 
         string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
         BufferDescriptor uploadDesc{};
-        uploadDesc.Size = Align(upload_size, _device->GetDetail().UploadTextureAlignment);
+        uploadDesc.Size = upload_size;
         uploadDesc.Memory = MemoryType::Upload;
         uploadDesc.Usage = BufferUse::CopySource;
         uploadDesc.Name = uploadName;

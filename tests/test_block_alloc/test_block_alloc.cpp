@@ -241,7 +241,7 @@ TEST(Core_Allocator_BlockAllocator, ManySmallAllocationsSpillToNewPage_FreeList)
 
     TestFreeListPagedAllocator alloc{counter.get(), 8};
 
-    radray::vector<BlockAllocation<Heap2>> allocs;
+    radray::vector<TestFreeListPagedAllocator::Allocation> allocs;
     allocs.reserve(9);
 
     for (int i = 0; i < 8; ++i) {
@@ -286,7 +286,7 @@ TEST(Core_Allocator_BlockAllocator_Death, DestroyNullHeapAsserts) {
     unique_ptr<int> counter = make_unique<int>(0);
     TestPagedAllocator alloc{counter.get(), 4};
 
-    BlockAllocation<Heap2> bogus{nullptr, 0, 1};
+    TestPagedAllocator::Allocation bogus{nullptr, 0, 1, 0, nullptr, nullptr};
     ASSERT_DEATH({
         alloc.Destroy(bogus);
     }, ".*");
@@ -307,8 +307,6 @@ TEST(Core_Allocator_BlockAllocator_Death, DestroyForeignHeapAsserts) {
 
     // 清理 allocA，避免泄漏（这一行不应该走到，但写上更清晰）。
 }
-#endif  // !defined(NDEBUG)
-
 TEST(Core_Allocator_BlockAllocator_Death, DoubleFreeAborts_Buddy) {
     unique_ptr<int> counter = make_unique<int>(0);
     TestPagedAllocator alloc{counter.get(), 8};
@@ -349,7 +347,8 @@ TEST(Core_Allocator_BlockAllocator_Death, InvalidOffsetAborts_Buddy) {
     ASSERT_TRUE(live.has_value());
 
     // 伪造一个 start 越界的 allocation，但 heap 指针是真实存在的。
-    BlockAllocation<Heap2> bogus{live->Heap, live->Heap->Size + 1, 1};
+    const size_t bogusStart = live->Heap->Size + 1;
+    TestPagedAllocator::Allocation bogus{live->Heap, bogusStart, 1, bogusStart, live->OwnerPage, live->OwnerAllocator};
     ASSERT_DEATH({
         alloc.Destroy(bogus);
     }, ".*");
@@ -362,10 +361,14 @@ TEST(Core_Allocator_BlockAllocator_Death, InvalidOffsetAborts_FreeList) {
     auto live = alloc.Allocate(1);
     ASSERT_TRUE(live.has_value());
 
-    BlockAllocation<Heap2> bogus{live->Heap, live->Heap->Size + 123, 1};
+    auto sub = live->SubAllocation;
+    sub.Start = live->Heap->Size + 123;
+    TestFreeListPagedAllocator::Allocation bogus{live->Heap, sub.Start, 1, sub, live->OwnerPage, live->OwnerAllocator};
     ASSERT_DEATH({
         alloc.Destroy(bogus);
     }, ".*");
 }
+
+#endif  // !defined(NDEBUG)
 
 #endif  // GTEST_HAS_DEATH_TEST

@@ -76,7 +76,12 @@ struct DescriptorHeapView {
     UINT Start;
     UINT Length;
 
-    static constexpr DescriptorHeapView Invalid() noexcept { return {nullptr, 0, 0}; }
+    radray::BlockAllocatorPageBase* OwnerPage;
+    radray::FreeListAllocator::Allocation FreeListAllocation;
+
+    static constexpr DescriptorHeapView Invalid() noexcept {
+        return {nullptr, 0, 0, nullptr, radray::FreeListAllocator::Allocation::Invalid()};
+    }
 
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept;
 
