@@ -72,15 +72,12 @@ private:
 };
 
 struct DescriptorHeapView {
-    DescriptorHeap* Heap;
-    UINT Start;
-    UINT Length;
-
-    radray::BlockAllocatorPageBase* OwnerPage;
-    radray::FreeListAllocator::Allocation FreeListAllocation;
+    DescriptorHeap* Heap{nullptr};
+    UINT Start{0};
+    UINT Length{0};
 
     static constexpr DescriptorHeapView Invalid() noexcept {
-        return {nullptr, 0, 0, nullptr, radray::FreeListAllocator::Allocation::Invalid()};
+        return {nullptr, 0, 0};
     }
 
     D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept;
@@ -90,116 +87,166 @@ struct DescriptorHeapView {
     bool IsValid() const noexcept;
 };
 
-template <class TAllocator>
-requires is_allocator<TAllocator, DescriptorHeapView>
+template <class T>
+concept is_desc_heap_view_like = requires(T v) {
+    { v.Heap } -> std::convertible_to<DescriptorHeap*>;
+    { v.Start } -> std::convertible_to<UINT>;
+    { v.Length } -> std::convertible_to<UINT>;
+    { T::Invalid() } -> std::same_as<T>;
+};
+
+template <class TAllocator, class TAllocation>
+requires is_allocator<TAllocator, TAllocation> && is_desc_heap_view_like<TAllocation>
 class DescriptorHeapViewRAII {
 public:
     DescriptorHeapViewRAII() noexcept
-        : _heapView(DescriptorHeapView::Invalid()),
-          _allocator(nullptr) {}
-    DescriptorHeapViewRAII(
-        DescriptorHeapView heapView,
-        TAllocator* allocator) noexcept
-        : _heapView(heapView),
-          _allocator(allocator) {}
+        : _allocator(nullptr),
+          _allocation(TAllocation::Invalid()) {}
+
+    DescriptorHeapViewRAII(TAllocator* allocator, const TAllocation& allocation) noexcept
+        : _allocator(allocator),
+          _allocation(allocation) {}
+
     DescriptorHeapViewRAII(const DescriptorHeapViewRAII&) = delete;
     DescriptorHeapViewRAII(DescriptorHeapViewRAII&& other) noexcept
-        : _heapView(other._heapView),
-          _allocator(other._allocator) {
-        other._heapView = DescriptorHeapView::Invalid();
+        : _allocator(other._allocator),
+          _allocation(other._allocation) {
+        other._allocation = TAllocation::Invalid();
         other._allocator = nullptr;
     }
+
     DescriptorHeapViewRAII& operator=(const DescriptorHeapViewRAII&) = delete;
     DescriptorHeapViewRAII& operator=(DescriptorHeapViewRAII&& other) noexcept {
         DescriptorHeapViewRAII tmp{std::move(other)};
         swap(*this, tmp);
         return *this;
     }
-    ~DescriptorHeapViewRAII() noexcept { Destroy(); }
+
+    ~DescriptorHeapViewRAII() noexcept { this->Destroy(); }
 
     bool IsValid() const noexcept {
-        return _heapView.IsValid() && _allocator != nullptr;
+        return _allocator != nullptr;
     }
 
     void Destroy() noexcept {
         if (IsValid()) {
-            _allocator->Destroy(_heapView);
-            _heapView = DescriptorHeapView::Invalid();
+            _allocator->Destroy(_allocation);
+            _allocation = TAllocation::Invalid();
             _allocator = nullptr;
         }
     }
 
-    D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept { return _heapView.HandleGpu(); }
+    D3D12_GPU_DESCRIPTOR_HANDLE HandleGpu() const noexcept {
+        DescriptorHeapView view{_allocation.Heap, _allocation.Start, _allocation.Length};
+        return view.HandleGpu();
+    }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu() const noexcept { return _heapView.HandleCpu(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE HandleCpu() const noexcept {
+        DescriptorHeapView view{_allocation.Heap, _allocation.Start, _allocation.Length};
+        return view.HandleCpu();
+    }
 
-    UINT GetStart() const noexcept { return _heapView.Start; }
+    UINT GetStart() const noexcept { return _allocation.Start; }
 
-    UINT GetLength() const noexcept { return _heapView.Length; }
+    UINT GetLength() const noexcept { return _allocation.Length; }
 
-    DescriptorHeap* GetHeap() const noexcept { return _heapView.Heap; }
+    DescriptorHeap* GetHeap() const noexcept { return _allocation.Heap; }
 
-    template <class T>
-    void CopyTo(UINT start, UINT count, DescriptorHeapViewRAII<T>& dst, UINT dstStart) noexcept {
+    template <class T, class U>
+    void CopyTo(UINT start, UINT count, DescriptorHeapViewRAII<T, U>& dst, UINT dstStart) noexcept {
         this->GetHeap()->CopyTo(this->GetStart() + start, count, dst.GetHeap(), dst.GetStart() + dstStart);
     }
 
     friend constexpr void swap(DescriptorHeapViewRAII& lhs, DescriptorHeapViewRAII& rhs) noexcept {
         using std::swap;
-        swap(lhs._heapView, rhs._heapView);
         swap(lhs._allocator, rhs._allocator);
+        swap(lhs._allocation, rhs._allocation);
     }
 
 private:
-    DescriptorHeapView _heapView;
     TAllocator* _allocator;
-};
-
-class CpuDescriptorAllocatorImpl final : public BlockAllocator<BuddyAllocator, DescriptorHeap, CpuDescriptorAllocatorImpl> {
-public:
-    CpuDescriptorAllocatorImpl(
-        ID3D12Device* device,
-        D3D12_DESCRIPTOR_HEAP_TYPE type,
-        UINT basicSize) noexcept;
-
-    ~CpuDescriptorAllocatorImpl() noexcept override = default;
-
-    unique_ptr<DescriptorHeap> CreateHeap(size_t size) noexcept;
-
-    BuddyAllocator CreateSubAllocator(size_t size) noexcept;
-
-private:
-    ID3D12Device* _device;
-    D3D12_DESCRIPTOR_HEAP_TYPE _type;
+    TAllocation _allocation;
 };
 
 class CpuDescriptorAllocator {
 public:
+    class Page {
+    public:
+        unique_ptr<DescriptorHeap> Heap;
+        BuddyAllocator Allocator;
+        size_t Capacity = 0;
+        size_t Used = 0;
+
+        Page(unique_ptr<DescriptorHeap> heap, size_t capacity) noexcept;
+        Page(const Page&) = delete;
+        Page(Page&&) noexcept = delete;
+        ~Page() noexcept = default;
+    };
+
+    struct Allocation {
+        DescriptorHeap* Heap{nullptr};
+        UINT Start{0};
+        UINT Length{0};
+
+        Page* PagePtr = nullptr;
+        size_t Offset = 0;
+        size_t NodeIndex = 0;
+        size_t BlockSize = 0;
+
+        static constexpr Allocation Invalid() noexcept {
+            return {nullptr, 0, 0, nullptr, 0, 0, 0};
+        }
+    };
+
+    static_assert(is_desc_heap_view_like<Allocation>, "CpuDescriptorAllocator::Allocation is not a desc heap view like");
+
     CpuDescriptorAllocator(
         ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
-        UINT basicSize) noexcept;
+        UINT basicSize,
+        UINT keepFreePages) noexcept;
 
-    std::optional<DescriptorHeapView> Allocate(UINT count) noexcept;
+    std::optional<Allocation> Allocate(UINT count) noexcept;
 
-    void Destroy(DescriptorHeapView view) noexcept;
+    void Destroy(Allocation allocation) noexcept;
 
 private:
-    CpuDescriptorAllocatorImpl _impl;
+    void TryReleaseFreePages() noexcept;
+
+    ID3D12Device* _device = nullptr;
+    vector<unique_ptr<Page>> _pages;
+    size_t _hint = 0;
+    D3D12_DESCRIPTOR_HEAP_TYPE _type{};
+    UINT _basicSize = 0;
+    UINT _freePageKeepCount = 1;
 };
 
-static_assert(is_allocator<CpuDescriptorAllocator, DescriptorHeapView>, "CpuDescriptorAllocator is not an allocator");
+static_assert(is_allocator<CpuDescriptorAllocator, CpuDescriptorAllocator::Allocation>, "CpuDescriptorAllocator is not an allocator");
 
 class GpuDescriptorAllocator {
 public:
+    struct Allocation {
+        DescriptorHeap* Heap{nullptr};
+        UINT Start{0};
+        UINT Length{0};
+
+        FreeListAllocator::Allocation ParentAllocation;
+
+        static constexpr Allocation Invalid() noexcept {
+            return {nullptr, 0, 0, FreeListAllocator::Allocation::Invalid()};
+        }
+    };
+
+    static_assert(is_desc_heap_view_like<Allocation>, "GpuDescriptorAllocator::Allocation is not a desc heap view like");
+
     GpuDescriptorAllocator(
         ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         UINT size) noexcept;
 
-    std::optional<DescriptorHeapView> Allocate(UINT count) noexcept;
+    std::optional<GpuDescriptorAllocator::Allocation> Allocate(UINT count) noexcept;
 
-    void Destroy(DescriptorHeapView view) noexcept;
+    void Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept;
 
     ID3D12DescriptorHeap* GetNative() const noexcept { return _heap->Get(); }
     DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
@@ -210,10 +257,10 @@ private:
     FreeListAllocator _allocator;
 };
 
-static_assert(is_allocator<GpuDescriptorAllocator, DescriptorHeapView>, "GpuDescriptorAllocator is not an allocator");
+static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>, "GpuDescriptorAllocator is not an allocator");
 
-using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator>;
-using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator>;
+using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator, CpuDescriptorAllocator::Allocation>;
+using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>;
 
 class DeviceD3D12 final : public Device {
 public:

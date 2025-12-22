@@ -154,166 +154,166 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     return builder.Build();
 }
 
-class SimpleTempCbufferAllocatorHeap {
-public:
-    SimpleTempCbufferAllocatorHeap() noexcept = default;
-    SimpleTempCbufferAllocatorHeap(const SimpleTempCbufferAllocatorHeap&) = delete;
-    SimpleTempCbufferAllocatorHeap& operator=(const SimpleTempCbufferAllocatorHeap&) = delete;
-    SimpleTempCbufferAllocatorHeap(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
-    SimpleTempCbufferAllocatorHeap& operator=(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
-    ~SimpleTempCbufferAllocatorHeap() noexcept {
-        if (BufferObj) {
-            BufferObj->Unmap(0, Capacity);
-            BufferObj->Destroy();
-            BufferObj.reset();
-            Mapped = nullptr;
-            Capacity = 0;
-        }
-    }
+// class SimpleTempCbufferAllocatorHeap {
+// public:
+//     SimpleTempCbufferAllocatorHeap() noexcept = default;
+//     SimpleTempCbufferAllocatorHeap(const SimpleTempCbufferAllocatorHeap&) = delete;
+//     SimpleTempCbufferAllocatorHeap& operator=(const SimpleTempCbufferAllocatorHeap&) = delete;
+//     SimpleTempCbufferAllocatorHeap(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
+//     SimpleTempCbufferAllocatorHeap& operator=(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
+//     ~SimpleTempCbufferAllocatorHeap() noexcept {
+//         if (BufferObj) {
+//             BufferObj->Unmap(0, Capacity);
+//             BufferObj->Destroy();
+//             BufferObj.reset();
+//             Mapped = nullptr;
+//             Capacity = 0;
+//         }
+//     }
 
-public:
-    SimpleTempCbufferAllocator* Owner{nullptr};
-    unique_ptr<Buffer> BufferObj;
-    void* Mapped{nullptr};
-    uint64_t Capacity{0};
-};
+// public:
+//     SimpleTempCbufferAllocator* Owner{nullptr};
+//     unique_ptr<Buffer> BufferObj;
+//     void* Mapped{nullptr};
+//     uint64_t Capacity{0};
+// };
 
-class SimpleTempCbufferAllocator::AllocImpl final : public BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl> {
-public:
-    using Base = BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl>;
+// class SimpleTempCbufferAllocator::AllocImpl final : public BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl> {
+// public:
+//     using Base = BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl>;
 
-    AllocImpl(SimpleTempCbufferAllocator* owner, size_t basicPageSize) noexcept
-        : Base(basicPageSize),
-          _owner(owner) {}
+//     AllocImpl(SimpleTempCbufferAllocator* owner, size_t basicPageSize) noexcept
+//         : Base(basicPageSize),
+//           _owner(owner) {}
 
-    ~AllocImpl() noexcept override = default;
+//     ~AllocImpl() noexcept override = default;
 
-    unique_ptr<SimpleTempCbufferAllocatorHeap> CreateHeap(size_t capacity) noexcept {
-        BufferDescriptor desc{};
-        desc.Size = capacity;
-        desc.Memory = MemoryType::Upload;
-        desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite;
-        desc.Hints = ResourceHint::None;
-        auto cbOpt = _owner->_device->CreateBuffer(desc);
-        if (!cbOpt.HasValue()) {
-            RADRAY_ABORT("allocation failed: cannot create upload buffer");
-        }
-        auto cb = cbOpt.Release();
-        auto mapped = cb->Map(0, desc.Size);
-        if (!mapped) {
-            RADRAY_ABORT("allocation failed: cannot map upload buffer");
-        }
-        auto heap = make_unique<SimpleTempCbufferAllocatorHeap>();
-        heap->Owner = _owner;
-        heap->BufferObj = std::move(cb);
-        heap->Mapped = mapped;
-        heap->Capacity = capacity;
-        return heap;
-    }
+//     unique_ptr<SimpleTempCbufferAllocatorHeap> CreateHeap(size_t capacity) noexcept {
+//         BufferDescriptor desc{};
+//         desc.Size = capacity;
+//         desc.Memory = MemoryType::Upload;
+//         desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite;
+//         desc.Hints = ResourceHint::None;
+//         auto cbOpt = _owner->_device->CreateBuffer(desc);
+//         if (!cbOpt.HasValue()) {
+//             RADRAY_ABORT("allocation failed: cannot create upload buffer");
+//         }
+//         auto cb = cbOpt.Release();
+//         auto mapped = cb->Map(0, desc.Size);
+//         if (!mapped) {
+//             RADRAY_ABORT("allocation failed: cannot map upload buffer");
+//         }
+//         auto heap = make_unique<SimpleTempCbufferAllocatorHeap>();
+//         heap->Owner = _owner;
+//         heap->BufferObj = std::move(cb);
+//         heap->Mapped = mapped;
+//         heap->Capacity = capacity;
+//         return heap;
+//     }
 
-    StackAllocator CreateSubAllocator(size_t capacity) noexcept {
-        return StackAllocator(capacity);
-    }
+//     StackAllocator CreateSubAllocator(size_t capacity) noexcept {
+//         return StackAllocator(capacity);
+//     }
 
-    void Reset() noexcept {
-        Base::Reset();
-    }
+//     void Reset() noexcept {
+//         Base::Reset();
+//     }
 
-private:
-    SimpleTempCbufferAllocator* _owner{nullptr};
-};
+// private:
+//     SimpleTempCbufferAllocator* _owner{nullptr};
+// };
 
-SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device) noexcept
-    : SimpleTempCbufferAllocator(device, {}) {}
+// SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device) noexcept
+//     : SimpleTempCbufferAllocator(device, {}) {}
 
-SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept
-    : _device(device),
-      _desc(desc) {
-    RADRAY_ASSERT(_device != nullptr);
-    auto detail = device->GetDetail();
-    uint32_t align = detail.CBufferAlignment;
-    if (align == 0) {
-        align = 256u;
-    }
-    if (_desc.MinAlignment > align) {
-        align = _desc.MinAlignment;
-    }
-    _cbAlign = align;
-    if (_desc.PageSize < static_cast<uint64_t>(_cbAlign)) {
-        _desc.PageSize = static_cast<uint64_t>(_cbAlign);
-    }
+// SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept
+//     : _device(device),
+//       _desc(desc) {
+//     RADRAY_ASSERT(_device != nullptr);
+//     auto detail = device->GetDetail();
+//     uint32_t align = detail.CBufferAlignment;
+//     if (align == 0) {
+//         align = 256u;
+//     }
+//     if (_desc.MinAlignment > align) {
+//         align = _desc.MinAlignment;
+//     }
+//     _cbAlign = align;
+//     if (_desc.PageSize < static_cast<uint64_t>(_cbAlign)) {
+//         _desc.PageSize = static_cast<uint64_t>(_cbAlign);
+//     }
 
-    _alloc = make_unique<AllocImpl>(this, static_cast<size_t>(_desc.PageSize));
-}
+//     _alloc = make_unique<AllocImpl>(this, static_cast<size_t>(_desc.PageSize));
+// }
 
-SimpleTempCbufferAllocator::~SimpleTempCbufferAllocator() noexcept {
-    this->Destroy();
-}
+// SimpleTempCbufferAllocator::~SimpleTempCbufferAllocator() noexcept {
+//     this->Destroy();
+// }
 
-void SimpleTempCbufferAllocator::Destroy() noexcept {
-    _alloc.reset();
-    _device = nullptr;
-    _cbAlign = 256u;
-    _desc = {};
-}
+// void SimpleTempCbufferAllocator::Destroy() noexcept {
+//     _alloc.reset();
+//     _device = nullptr;
+//     _cbAlign = 256u;
+//     _desc = {};
+// }
 
-bool SimpleTempCbufferAllocator::IsValid() const noexcept {
-    return _device != nullptr && _alloc != nullptr;
-}
+// bool SimpleTempCbufferAllocator::IsValid() const noexcept {
+//     return _device != nullptr && _alloc != nullptr;
+// }
 
-void SimpleTempCbufferAllocator::Reset() noexcept {
-    RADRAY_ASSERT(_device != nullptr);
-    RADRAY_ASSERT(_alloc != nullptr);
-    _alloc->Reset();
-}
+// void SimpleTempCbufferAllocator::Reset() noexcept {
+//     RADRAY_ASSERT(_device != nullptr);
+//     RADRAY_ASSERT(_alloc != nullptr);
+//     _alloc->Reset();
+// }
 
-uint64_t SimpleTempCbufferAllocator::GetAllocAlignment(uint32_t alignment) const noexcept {
-    uint64_t a = alignment == 0 ? static_cast<uint64_t>(_cbAlign) : static_cast<uint64_t>(alignment);
-    if (a < static_cast<uint64_t>(_cbAlign)) {
-        a = static_cast<uint64_t>(_cbAlign);
-    }
-    return std::bit_ceil(a);
-}
+// uint64_t SimpleTempCbufferAllocator::GetAllocAlignment(uint32_t alignment) const noexcept {
+//     uint64_t a = alignment == 0 ? static_cast<uint64_t>(_cbAlign) : static_cast<uint64_t>(alignment);
+//     if (a < static_cast<uint64_t>(_cbAlign)) {
+//         a = static_cast<uint64_t>(_cbAlign);
+//     }
+//     return std::bit_ceil(a);
+// }
 
-std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateInternal(uint64_t size, uint32_t alignment) noexcept {
-    RADRAY_ASSERT(_device != nullptr);
-    RADRAY_ASSERT(_alloc != nullptr);
-    if (size == 0) {
-        return std::nullopt;
-    }
-    const uint64_t a = this->GetAllocAlignment(alignment);
-    const uint64_t alignedSize = radray::Align(size, a);
-    const uint64_t requestSize = alignedSize + (a - 1);
-    auto allocOpt = _alloc->Allocate(static_cast<size_t>(requestSize));
-    if (!allocOpt.has_value()) {
-        return std::nullopt;
-    }
-    auto blockAlloc = allocOpt.value();
-    auto heap = blockAlloc.Heap;
-    const uint64_t off = radray::Align(static_cast<uint64_t>(blockAlloc.Start), a);
-    void* cpuPtr = static_cast<byte*>(heap->Mapped) + off;
-    TempCbufferAllocation out{};
-    out.BufferObj = heap->BufferObj.get();
-    out.CpuPtr = cpuPtr;
-    out.Size = size;
-    out.OffsetInPage = off;
-    return out;
-}
+// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateInternal(uint64_t size, uint32_t alignment) noexcept {
+//     RADRAY_ASSERT(_device != nullptr);
+//     RADRAY_ASSERT(_alloc != nullptr);
+//     if (size == 0) {
+//         return std::nullopt;
+//     }
+//     const uint64_t a = this->GetAllocAlignment(alignment);
+//     const uint64_t alignedSize = radray::Align(size, a);
+//     const uint64_t requestSize = alignedSize + (a - 1);
+//     auto allocOpt = _alloc->Allocate(static_cast<size_t>(requestSize));
+//     if (!allocOpt.has_value()) {
+//         return std::nullopt;
+//     }
+//     auto blockAlloc = allocOpt.value();
+//     auto heap = blockAlloc.Heap;
+//     const uint64_t off = radray::Align(static_cast<uint64_t>(blockAlloc.Start), a);
+//     void* cpuPtr = static_cast<byte*>(heap->Mapped) + off;
+//     TempCbufferAllocation out{};
+//     out.BufferObj = heap->BufferObj.get();
+//     out.CpuPtr = cpuPtr;
+//     out.Size = size;
+//     out.OffsetInPage = off;
+//     return out;
+// }
 
-std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::Allocate(uint64_t size, uint32_t alignment) noexcept {
-    return this->AllocateInternal(size, alignment);
-}
+// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::Allocate(uint64_t size, uint32_t alignment) noexcept {
+//     return this->AllocateInternal(size, alignment);
+// }
 
-std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateAndWrite(std::span<const byte> data, uint32_t alignment) noexcept {
-    auto allocOpt = this->AllocateInternal(data.size(), alignment);
-    if (!allocOpt.has_value()) {
-        return std::nullopt;
-    }
-    if (!data.empty()) {
-        std::memcpy(allocOpt->CpuPtr, data.data(), data.size());
-    }
-    return allocOpt;
-}
+// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateAndWrite(std::span<const byte> data, uint32_t alignment) noexcept {
+//     auto allocOpt = this->AllocateInternal(data.size(), alignment);
+//     if (!allocOpt.has_value()) {
+//         return std::nullopt;
+//     }
+//     if (!data.empty()) {
+//         std::memcpy(allocOpt->CpuPtr, data.data(), data.size());
+//     }
+//     return allocOpt;
+// }
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept
     : _constant(desc.Constant) {

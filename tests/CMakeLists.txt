@@ -1,4 +1,3 @@
-add_subdirectory(test_block_alloc)
 add_subdirectory(test_buddy_alloc)
 add_subdirectory(test_byte_to_dword)
 add_subdirectory(test_free_list_alloc)
@@ -9,4 +8,3 @@ add_subdirectory(test_native_window)
 add_subdirectory(test_dxc)
 add_subdirectory(test_spvc)
 add_subdirectory(test_structured_buffer)
-

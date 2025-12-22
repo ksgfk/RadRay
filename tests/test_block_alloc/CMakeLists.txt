@@ -1,5 +1,0 @@
-add_executable(test_block_alloc test_block_alloc.cpp)
-target_link_libraries(test_block_alloc radraycore GTest::gtest_main)
-gtest_discover_tests(test_block_alloc)
-radray_optimize_flags_binary(test_block_alloc)
-radray_set_build_path(test_block_alloc)

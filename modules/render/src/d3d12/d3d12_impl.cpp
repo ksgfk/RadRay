@@ -98,54 +98,135 @@ bool DescriptorHeapView::IsValid() const noexcept {
     return Heap != nullptr;
 }
 
-CpuDescriptorAllocatorImpl::CpuDescriptorAllocatorImpl(
-    ID3D12Device* device,
-    D3D12_DESCRIPTOR_HEAP_TYPE type,
-    UINT basicSize) noexcept
-    : BlockAllocator(basicSize),
-      _device(device),
-      _type(type) {}
-
-unique_ptr<DescriptorHeap> CpuDescriptorAllocatorImpl::CreateHeap(size_t size) noexcept {
-    return make_unique<DescriptorHeap>(
-        _device,
-        D3D12_DESCRIPTOR_HEAP_DESC{
-            _type,
-            static_cast<UINT>(size),
-            D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
-            0});
-}
-
-BuddyAllocator CpuDescriptorAllocatorImpl::CreateSubAllocator(size_t size) noexcept { return BuddyAllocator{size}; }
-
 CpuDescriptorAllocator::CpuDescriptorAllocator(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_TYPE type,
-    UINT basicSize) noexcept
-    : _impl(device, type, basicSize) {}
+    UINT basicSize,
+    UINT keepFreePages) noexcept
+    : _device(device),
+      _type(type),
+      _basicSize(basicSize),
+      _freePageKeepCount(keepFreePages) {}
 
-std::optional<DescriptorHeapView> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
-    auto allocation = _impl.Allocate(count);
-    if (!allocation.has_value()) {
+CpuDescriptorAllocator::Page::Page(unique_ptr<DescriptorHeap> heap, size_t capacity) noexcept
+    : Heap(std::move(heap)),
+      Allocator(capacity),
+      Capacity(capacity) {}
+
+std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    if (count == 0) {
         return std::nullopt;
     }
-    auto v = allocation.value();
-    return std::make_optional(DescriptorHeapView{
-        v.Heap,
-        static_cast<UINT>(v.Start),
-        static_cast<UINT>(v.Length),
-        v.OwnerPage,
-        radray::FreeListAllocator::Allocation::Invalid()});
+    const size_t request = static_cast<size_t>(count);
+    const size_t blockSize = std::bit_ceil(request);
+    if (!_pages.empty()) {
+        const size_t n = _pages.size();
+        const size_t start = (_hint < n) ? _hint : 0;
+        for (size_t step = 0; step < n; step++) {
+            const size_t pageIndex = (start + step) % n;
+            Page& page = *_pages[pageIndex];
+            if (page.Capacity - page.Used < request) {
+                continue;
+            }
+            auto allocOpt = page.Allocator.Allocate(request);
+            if (!allocOpt.has_value()) {
+                continue;
+            }
+            const auto a = allocOpt.value();
+            page.Used += blockSize;
+            _hint = pageIndex;
+            return std::make_optional(Allocation{
+                .Heap = page.Heap.get(),
+                .Start = static_cast<UINT>(a.Offset),
+                .Length = count,
+                .PagePtr = _pages[pageIndex].get(),
+                .Offset = a.Offset,
+                .NodeIndex = a.NodeIndex,
+                .BlockSize = blockSize,
+            });
+        }
+    }
+    const size_t desired = std::max<size_t>(static_cast<size_t>(_basicSize), request);
+    const size_t pageCapacity = std::bit_ceil(desired);
+    if (pageCapacity > static_cast<size_t>(std::numeric_limits<UINT>::max())) {
+        return std::nullopt;
+    }
+    auto heap = make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            _type,
+            static_cast<UINT>(pageCapacity),
+            D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            0});
+    auto newPage = make_unique<Page>(std::move(heap), pageCapacity);
+    Page* newPagePtr = newPage.get();
+    _pages.emplace_back(std::move(newPage));
+    const size_t pageIndex = _pages.size() - 1;
+    _hint = pageIndex;
+    Page& page = *_pages.back();
+    auto allocOpt = page.Allocator.Allocate(request);
+    if (!allocOpt.has_value()) {
+        _pages.pop_back();
+        return std::nullopt;
+    }
+    const auto a = allocOpt.value();
+    page.Used += blockSize;
+    return std::make_optional(Allocation{
+        .Heap = page.Heap.get(),
+        .Start = static_cast<UINT>(a.Offset),
+        .Length = count,
+        .PagePtr = newPagePtr,
+        .Offset = a.Offset,
+        .NodeIndex = a.NodeIndex,
+        .BlockSize = blockSize,
+    });
 }
 
-void CpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
-    _impl.Destroy({
-        view.Heap,
-        static_cast<size_t>(view.Start),
-        static_cast<size_t>(view.Length),
-        static_cast<size_t>(view.Start),
-        view.OwnerPage,
-        static_cast<radray::BlockAllocatorOwnerBase*>(&_impl)});
+void CpuDescriptorAllocator::Destroy(CpuDescriptorAllocator::Allocation view) noexcept {
+    if (view.PagePtr == nullptr) {
+        return;
+    }
+    auto* page = view.PagePtr;
+    RADRAY_ASSERT(page->Heap.get() == view.Heap);
+    page->Allocator.Destroy(BuddyAllocator::Allocation{view.Offset, view.NodeIndex});
+    page->Used -= view.BlockSize;
+    if (page->Used == 0) {
+        TryReleaseFreePages();
+    }
+}
+
+void CpuDescriptorAllocator::TryReleaseFreePages() noexcept {
+    if (_freePageKeepCount == std::numeric_limits<uint32_t>::max()) {
+        return;
+    }
+    size_t freeCount = 0;
+    for (const auto& page : _pages) {
+        freeCount += (page->Used == 0) ? 1 : 0;
+    }
+    while (freeCount > static_cast<size_t>(_freePageKeepCount) && !_pages.empty()) {
+        size_t victim = _pages.size();
+        for (size_t i = _pages.size(); i-- > 0;) {
+            if (_pages[i]->Used == 0) {
+                victim = i;
+                break;
+            }
+        }
+        if (victim == _pages.size()) {
+            return;
+        }
+        const size_t last = _pages.size() - 1;
+        if (victim != last) {
+            std::swap(_pages[victim], _pages[last]);
+            if (_hint == last) {
+                _hint = victim;
+            }
+        }
+        _pages.pop_back();
+        if (_hint >= _pages.size()) {
+            _hint = 0;
+        }
+        --freeCount;
+    }
 }
 
 GpuDescriptorAllocator::GpuDescriptorAllocator(
@@ -163,22 +244,17 @@ GpuDescriptorAllocator::GpuDescriptorAllocator(
             0});
 }
 
-std::optional<DescriptorHeapView> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
-    auto allocation = _allocator.Allocate(count);
+std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    const auto allocation = _allocator.Allocate(count);
     if (!allocation.has_value()) {
         return std::nullopt;
     }
-    auto v = allocation.value();
-    return std::make_optional(DescriptorHeapView{
-        _heap.get(),
-        static_cast<UINT>(v.Start),
-        count,
-        nullptr,
-        v});
+    const auto& v = allocation.value();
+    return std::make_optional(GpuDescriptorAllocator::Allocation{_heap.get(), static_cast<UINT>(v.Start), count, v});
 }
 
-void GpuDescriptorAllocator::Destroy(DescriptorHeapView view) noexcept {
-    _allocator.Destroy(view.FreeListAllocation);
+void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept {
+    _allocator.Destroy(allocation.ParentAllocation);
 }
 
 DeviceD3D12::DeviceD3D12(
@@ -190,10 +266,10 @@ DeviceD3D12::DeviceD3D12(
       _dxgiFactory(std::move(dxgiFactory)),
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)) {
-    _cpuResAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 512);
-    _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128);
-    _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128);
-    _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 64);
+    _cpuResAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 512, 1);
+    _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128, 1);
+    _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128, 1);
+    _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 64, 1);
     _gpuResHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
     _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 8);
     _features.Init(_device.Get());
@@ -614,7 +690,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
-        heapView = {heapViewOpt.value(), heap};
+        heapView = {heap, heapViewOpt.value()};
     }
     DXGI_FORMAT dxgiFormat;
     if (desc.Usage == BufferUse::CBuffer) {
@@ -714,7 +790,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
-            heapView = {heapViewOpt.value(), heap};
+            heapView = {heap, heapViewOpt.value()};
         }
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = MapShaderResourceType(desc.Format);
@@ -778,7 +854,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
-            heapView = {heapViewOpt.value(), heap};
+            heapView = {heap, heapViewOpt.value()};
         }
         D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
         rtvDesc.Format = MapType(desc.Format);
@@ -824,7 +900,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
-            heapView = {heapViewOpt.value(), heap};
+            heapView = {heap, heapViewOpt.value()};
         }
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = MapType(desc.Format);
@@ -863,7 +939,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
                 return nullptr;
             }
-            heapView = {heapViewOpt.value(), heap};
+            heapView = {heap, heapViewOpt.value()};
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = MapShaderResourceType(desc.Format);
@@ -1350,7 +1426,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignatu
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "GpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
-        resHeapView = {gpuResHeapAllocationOpt.value(), _gpuResHeap.get()};
+        resHeapView = {_gpuResHeap.get(), gpuResHeapAllocationOpt.value()};
     }
     GpuDescriptorHeapViewRAII samplerHeapView{};
     if (samplerCount > 0) {
@@ -1359,7 +1435,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignatu
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "GpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
-        samplerHeapView = {gpuSamplerHeapAllocationOpt.value(), _gpuSamplerHeap.get()};
+        samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
     }
     auto result = make_unique<GpuDescriptorHeapViews>(this, std::move(resHeapView), std::move(samplerHeapView));
     result->_table = table;
@@ -1390,7 +1466,7 @@ Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
             RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "CpuDescriptorAllocator", "Allocate", Errors::OutOfMemory);
             return nullptr;
         }
-        heapView = {opt.value(), alloc};
+        heapView = {alloc, opt.value()};
     }
     heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
     return make_unique<SamplerD3D12>(this, std::move(heapView));

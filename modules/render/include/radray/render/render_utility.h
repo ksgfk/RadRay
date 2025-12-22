@@ -25,54 +25,54 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept;
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 
-struct TempCbufferAllocation {
-    Buffer* BufferObj{nullptr};
-    void* CpuPtr{nullptr};
-    uint64_t Size{0};
-    uint64_t OffsetInPage{0};
-};
+// struct TempCbufferAllocation {
+//     Buffer* BufferObj{nullptr};
+//     void* CpuPtr{nullptr};
+//     uint64_t Size{0};
+//     uint64_t OffsetInPage{0};
+// };
 
-class SimpleTempCbufferAllocator {
-public:
-    struct Descriptor {
-        uint64_t PageSize{256u * 1024u};
-        uint32_t MinAlignment{256u};
-        std::string_view NamePrefix{};
-    };
+// class SimpleTempCbufferAllocator {
+// public:
+//     struct Descriptor {
+//         uint64_t PageSize{256u * 1024u};
+//         uint32_t MinAlignment{256u};
+//         std::string_view NamePrefix{};
+//     };
 
-    explicit SimpleTempCbufferAllocator(Device* device) noexcept;
-    SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept;
+//     explicit SimpleTempCbufferAllocator(Device* device) noexcept;
+//     SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept;
 
-    SimpleTempCbufferAllocator(const SimpleTempCbufferAllocator&) = delete;
-    SimpleTempCbufferAllocator(SimpleTempCbufferAllocator&&) = delete;
-    SimpleTempCbufferAllocator& operator=(const SimpleTempCbufferAllocator&) = delete;
-    SimpleTempCbufferAllocator& operator=(SimpleTempCbufferAllocator&&) = delete;
+//     SimpleTempCbufferAllocator(const SimpleTempCbufferAllocator&) = delete;
+//     SimpleTempCbufferAllocator(SimpleTempCbufferAllocator&&) = delete;
+//     SimpleTempCbufferAllocator& operator=(const SimpleTempCbufferAllocator&) = delete;
+//     SimpleTempCbufferAllocator& operator=(SimpleTempCbufferAllocator&&) = delete;
 
-    ~SimpleTempCbufferAllocator() noexcept;
+//     ~SimpleTempCbufferAllocator() noexcept;
 
-    void Destroy() noexcept;
-    bool IsValid() const noexcept;
+//     void Destroy() noexcept;
+//     bool IsValid() const noexcept;
 
-    void Reset() noexcept;
+//     void Reset() noexcept;
 
-    Device* GetDevice() const noexcept { return _device; }
-    uint32_t GetCBufferAlignment() const noexcept { return _cbAlign; }
+//     Device* GetDevice() const noexcept { return _device; }
+//     uint32_t GetCBufferAlignment() const noexcept { return _cbAlign; }
 
-    std::optional<TempCbufferAllocation> Allocate(uint64_t size, uint32_t alignment = 0) noexcept;
+//     std::optional<TempCbufferAllocation> Allocate(uint64_t size, uint32_t alignment = 0) noexcept;
 
-    std::optional<TempCbufferAllocation> AllocateAndWrite(std::span<const byte> data, uint32_t alignment = 0) noexcept;
+//     std::optional<TempCbufferAllocation> AllocateAndWrite(std::span<const byte> data, uint32_t alignment = 0) noexcept;
 
-private:
-    class AllocImpl;
+// private:
+//     class AllocImpl;
 
-    uint64_t GetAllocAlignment(uint32_t alignment) const noexcept;
-    std::optional<TempCbufferAllocation> AllocateInternal(uint64_t size, uint32_t alignment) noexcept;
+//     uint64_t GetAllocAlignment(uint32_t alignment) const noexcept;
+//     std::optional<TempCbufferAllocation> AllocateInternal(uint64_t size, uint32_t alignment) noexcept;
 
-    Device* _device{nullptr};
-    unique_ptr<AllocImpl> _alloc;
-    Descriptor _desc{};
-    uint32_t _cbAlign{256u};
-};
+//     Device* _device{nullptr};
+//     unique_ptr<AllocImpl> _alloc;
+//     Descriptor _desc{};
+//     uint32_t _cbAlign{256u};
+// };
 
 // -----------------------------------------------------------------------------------------------
 
