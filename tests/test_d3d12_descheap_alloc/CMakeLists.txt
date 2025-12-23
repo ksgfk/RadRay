@@ -1,0 +1,7 @@
+if (RADRAY_ENABLE_D3D12)
+    add_executable(test_d3d12_descheap_alloc test_d3d12_descheap_alloc.cpp)
+    target_link_libraries(test_d3d12_descheap_alloc radraycore radrayrender GTest::gtest_main)
+    gtest_discover_tests(test_d3d12_descheap_alloc)
+    radray_optimize_flags_binary(test_d3d12_descheap_alloc)
+    radray_set_build_path(test_d3d12_descheap_alloc)
+endif()

@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_VULKAN
+
 #include <span>
 #include <algorithm>
 
@@ -268,3 +270,5 @@ template <class CharT>
 struct fmt::formatter<VkFormat, CharT> : RadrayVkTypeFormat<VkFormat, CharT> {};
 template <class CharT>
 struct fmt::formatter<VkPresentModeKHR, CharT> : RadrayVkTypeFormat<VkPresentModeKHR, CharT> {};
+
+#endif

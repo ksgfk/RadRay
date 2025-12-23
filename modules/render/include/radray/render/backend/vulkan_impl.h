@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_VULKAN
+
 #include <array>
 
 #include <radray/render/backend/vulkan_helper.h>
@@ -31,10 +33,8 @@ class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
 class GraphicsPipelineVulkan;
 class ShaderModuleVulkan;
-class DescriptorPoolVulkan;
 class DescriptorSetVulkan;
-class DescPoolAllocator;
-class DescriptorSetVulkanWrapper;
+class DescriptorSetAllocatorVulkan;
 class SamplerVulkan;
 
 struct QueueIndexInFamily {
@@ -148,8 +148,6 @@ public:
 
     Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<DescriptorPoolVulkan>> CreateDescriptorPool() noexcept;
-
     Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept;
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept;
@@ -172,7 +170,7 @@ public:
     VkDevice _device;
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
-    std::unique_ptr<DescPoolAllocator> _poolAlloc;
+    std::unique_ptr<DescriptorSetAllocatorVulkan> _descSetAlloc;
     DeviceFuncTable _ftb;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
@@ -716,10 +714,13 @@ class DescriptorPoolVulkan final : public RenderBase {
 public:
     DescriptorPoolVulkan(
         DeviceVulkan* device,
-        VkDescriptorPool pool) noexcept;
+        DescriptorSetAllocatorVulkan* alloc,
+        VkDescriptorPool pool,
+        uint32_t capacity) noexcept;
+
     ~DescriptorPoolVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -729,40 +730,59 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+    DescriptorSetAllocatorVulkan* _alloc;
     VkDescriptorPool _pool;
-    vector<VkDescriptorPoolSize> _sizes;
-    uint32_t _maxSets{0};
+    uint32_t _capacity;
+    uint32_t _liveCount{0};
 };
 
-class DescriptorSetVulkan final : public RenderBase {
+class DescriptorSetAllocatorVulkan {
+public:
+    struct Allocation {
+        DescriptorPoolVulkan* Pool;
+        VkDescriptorSet Set;
+
+        static constexpr Allocation Invalid() noexcept {
+            return Allocation{nullptr, VK_NULL_HANDLE};
+        }
+
+        constexpr bool IsValid() const noexcept {
+            return Pool != nullptr && Set != VK_NULL_HANDLE;
+        }
+    };
+
+    DescriptorSetAllocatorVulkan(DeviceVulkan* device, uint32_t keepFreePages) noexcept;
+    ~DescriptorSetAllocatorVulkan() noexcept;
+
+    DescriptorSetAllocatorVulkan(const DescriptorSetAllocatorVulkan&) = delete;
+    DescriptorSetAllocatorVulkan(DescriptorSetAllocatorVulkan&&) = delete;
+    DescriptorSetAllocatorVulkan& operator=(const DescriptorSetAllocatorVulkan&) = delete;
+    DescriptorSetAllocatorVulkan& operator=(DescriptorSetAllocatorVulkan&&) = delete;
+
+    std::optional<Allocation> Allocate(DescriptorSetLayoutVulkan* layout) noexcept;
+
+    void Destroy(Allocation allocation) noexcept;
+
+private:
+    DescriptorPoolVulkan* NewPage() noexcept;
+
+    void TryReleaseFreePages() noexcept;
+
+    DeviceVulkan* _device;
+    vector<unique_ptr<DescriptorPoolVulkan>> _pages;
+    size_t _hintPage{0};
+    uint32_t _keepFreePages;
+};
+
+class DescriptorSetVulkan final : public DescriptorSet {
 public:
     DescriptorSetVulkan(
         DeviceVulkan* device,
-        DescriptorPoolVulkan* pool,
-        VkDescriptorSet set) noexcept;
-    ~DescriptorSetVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    DescriptorPoolVulkan* _pool;
-    VkDescriptorSet _set;
-};
-
-class DescriptorSetVulkanWrapper final : public DescriptorSet {
-public:
-    DescriptorSetVulkanWrapper(
-        DeviceVulkan* device,
         DescriptorSetLayoutVulkan* layout,
-        unique_ptr<DescriptorSetVulkan> set) noexcept;
-    ~DescriptorSetVulkanWrapper() noexcept override = default;
+        DescriptorSetAllocatorVulkan* allocator,
+        DescriptorSetAllocatorVulkan::Allocation allocation) noexcept;
+
+    ~DescriptorSetVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -771,26 +791,12 @@ public:
     void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept override;
 
 public:
+    void DestroyImpl() noexcept;
+
     DeviceVulkan* _device;
     DescriptorSetLayoutVulkan* _layout;
-    unique_ptr<DescriptorSetVulkan> _set;
-};
-
-class DescPoolAllocator {
-public:
-    explicit DescPoolAllocator(DeviceVulkan* device);
-
-    vector<unique_ptr<DescriptorSetVulkan>> Allocate(std::span<VkDescriptorSetLayout> layouts);
-
-    unique_ptr<DescriptorSetVulkan> Allocate(VkDescriptorSetLayout layout);
-
-private:
-    DescriptorPoolVulkan* NewPoolToBack();
-
-    DescriptorPoolVulkan* GetMaybeEmptyPool();
-
-    DeviceVulkan* _device;
-    vector<unique_ptr<DescriptorPoolVulkan>> _pools;
+    DescriptorSetAllocatorVulkan* _allocator;
+    DescriptorSetAllocatorVulkan::Allocation _allocation;
 };
 
 class SamplerVulkan final : public Sampler {
@@ -827,6 +833,8 @@ constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageV
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
-constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkanWrapper*>(p); }
+constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkan*>(p); }
 
 }  // namespace radray::render::vulkan
+
+#endif
