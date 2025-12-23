@@ -674,9 +674,10 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     }
     SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
     auto result = make_unique<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
-    result->_desc = desc;
     result->_name = desc.Name;
-    result->_desc.Name = result->_name;
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
     return result;
 }
 
@@ -1821,7 +1822,7 @@ void CmdRenderPassD3D12::BindVertexBuffer(std::span<const VertexBufferView> vbv)
             D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
             auto buf = CastD3D12Object(i.Target);
             raw.BufferLocation = buf->_gpuAddr + i.Offset;
-            raw.SizeInBytes = (UINT)(buf->_desc.Size - i.Offset);
+            raw.SizeInBytes = (UINT)(buf->_rawDesc.Width - i.Offset);
             raw.StrideInBytes = (UINT)strides[index];
         }
         _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());
@@ -1832,7 +1833,7 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
     auto buf = CastD3D12Object(ibv.Target);
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = buf->_gpuAddr + ibv.Offset;
-    view.SizeInBytes = (UINT)buf->_desc.Size - ibv.Offset;
+    view.SizeInBytes = (UINT)buf->_rawDesc.Width - ibv.Offset;
     view.Format = ibv.Stride == 1 ? DXGI_FORMAT_R8_UINT : ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT
                                                                           : DXGI_FORMAT_R32_UINT;
     _cmdList->_cmdList->IASetIndexBuffer(&view);
@@ -2029,6 +2030,15 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
 void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
     D3D12_RANGE range{offset, offset + size};
     _buf->Unmap(0, &range);
+}
+
+BufferDescriptor BufferD3D12::GetDesc() const noexcept {
+    return BufferDescriptor{
+        _rawDesc.Width,
+        _memory,
+        _usage,
+        _hints,
+        _name};
 }
 
 BufferViewD3D12::BufferViewD3D12(

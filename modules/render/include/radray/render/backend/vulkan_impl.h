@@ -508,6 +508,8 @@ public:
 
     void Unmap(uint64_t offset, uint64_t size) noexcept override;
 
+    BufferDescriptor GetDesc() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -515,8 +517,10 @@ public:
     VkBuffer _buffer;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
-    BufferDescriptor _mdesc;
     string _name;
+    MemoryType _memory{};
+    BufferUses _usage{BufferUse::UNKNOWN};
+    ResourceHints _hints{};
 };
 
 class BufferViewVulkan final : public RenderBase {

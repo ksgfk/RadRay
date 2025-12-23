@@ -336,6 +336,9 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Usage.HasFlag(BufferUse::MapWrite)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
+    if (desc.Usage.HasFlag(BufferUse::MapRead)) {
+        vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    }
     vmaInfo.usage = MapType(desc.Memory);
     vmaInfo.requiredFlags = 0;
     vmaInfo.preferredFlags = 0;
@@ -353,16 +356,17 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     }
     this->SetObjectName(desc.Name, vkBuf);
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
-    result->_mdesc = desc;
     result->_name = desc.Name;
-    result->_mdesc.Name = result->_name;
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
     return result;
 }
 
 Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
     auto buf = CastVkObject(desc.Target);
     unique_ptr<BufferViewVulkan> texelView;
-    if (buf->_mdesc.Usage.HasFlag(BufferUse::Resource) || buf->_mdesc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+    if (buf->_usage.HasFlag(BufferUse::Resource) || buf->_usage.HasFlag(BufferUse::UnorderedAccess)) {
         VkBufferViewCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
         info.pNext = nullptr;
@@ -1904,7 +1908,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         }
         bufBarrier.buffer = buf->_buffer;
         bufBarrier.offset = 0;
-        bufBarrier.size = buf->_mdesc.Size;
+        bufBarrier.size = buf->_allocInfo.size;
 
         auto srcStage = BufferUseToPipelineStageFlags(i.Before);
         auto dstStage = BufferUseToPipelineStageFlags(i.After);
@@ -2663,10 +2667,18 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
 void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
-    if (!_allocInfo.pMappedData && !_mdesc.Usage.HasFlag(BufferUse::MapWrite)) {
-        vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, size);
+    if (!_allocInfo.pMappedData) {
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
     }
+}
+
+BufferDescriptor BufferVulkan::GetDesc() const noexcept {
+    return BufferDescriptor{
+        _allocInfo.size,
+        _memory,
+        _usage,
+        _hints,
+        _name};
 }
 
 BufferViewVulkan::BufferViewVulkan(

@@ -270,7 +270,7 @@ void Update() {
         rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
         rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
         VertexBufferView vbv[] = {
-            {vertBuf.get(), 0, vertBuf->_desc.Size}};
+            {vertBuf.get(), 0, vertBuf->_rawDesc.Width}};
         rp->BindVertexBuffer(vbv);
         rp->BindIndexBuffer({idxBuf.get(), 0, 2});
         rp->DrawIndexed(3, 1, 0, 0, 0);

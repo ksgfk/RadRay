@@ -25,55 +25,67 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept;
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 
-// struct TempCbufferAllocation {
-//     Buffer* BufferObj{nullptr};
-//     void* CpuPtr{nullptr};
-//     uint64_t Size{0};
-//     uint64_t OffsetInPage{0};
-// };
+class SimpleCBufferArena {
+public:
+    struct Descriptor {
+        uint64_t BasicSize{256 * 256};
+        uint64_t Alignment{256};
+        uint64_t MaxResetSize{std::numeric_limits<uint64_t>::max()};
+        string NamePrefix{};
+    };
 
-// class SimpleTempCbufferAllocator {
-// public:
-//     struct Descriptor {
-//         uint64_t PageSize{256u * 1024u};
-//         uint32_t MinAlignment{256u};
-//         std::string_view NamePrefix{};
-//     };
+    struct Allocation {
+        Buffer* Target{nullptr};
+        void* Mapped{nullptr};
+        uint64_t Offset{0};
+        uint64_t Size{0};
 
-//     explicit SimpleTempCbufferAllocator(Device* device) noexcept;
-//     SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept;
+        static constexpr Allocation Invalid() noexcept {
+            return Allocation{};
+        }
+    };
 
-//     SimpleTempCbufferAllocator(const SimpleTempCbufferAllocator&) = delete;
-//     SimpleTempCbufferAllocator(SimpleTempCbufferAllocator&&) = delete;
-//     SimpleTempCbufferAllocator& operator=(const SimpleTempCbufferAllocator&) = delete;
-//     SimpleTempCbufferAllocator& operator=(SimpleTempCbufferAllocator&&) = delete;
+    class Block {
+    public:
+        explicit Block(unique_ptr<Buffer> buf) noexcept;
+        Block(const Block&) = delete;
+        Block& operator=(const Block&) = delete;
+        ~Block() noexcept;
 
-//     ~SimpleTempCbufferAllocator() noexcept;
+    public:
+        unique_ptr<Buffer> _buf;
+        void* _mapped{nullptr};
+        uint64_t _used{0};
+    };
 
-//     void Destroy() noexcept;
-//     bool IsValid() const noexcept;
+    SimpleCBufferArena(Device* device, const Descriptor& desc) noexcept;
+    explicit SimpleCBufferArena(Device* device) noexcept;
+    SimpleCBufferArena(const SimpleCBufferArena&) = delete;
+    SimpleCBufferArena& operator=(const SimpleCBufferArena&) = delete;
+    SimpleCBufferArena(SimpleCBufferArena&& other) noexcept;
+    SimpleCBufferArena& operator=(SimpleCBufferArena&& other) noexcept;
+    ~SimpleCBufferArena() noexcept;
 
-//     void Reset() noexcept;
+    bool IsValid() const noexcept;
 
-//     Device* GetDevice() const noexcept { return _device; }
-//     uint32_t GetCBufferAlignment() const noexcept { return _cbAlign; }
+    void Destroy() noexcept;
 
-//     std::optional<TempCbufferAllocation> Allocate(uint64_t size, uint32_t alignment = 0) noexcept;
+    Allocation Allocate(uint64_t size) noexcept;
 
-//     std::optional<TempCbufferAllocation> AllocateAndWrite(std::span<const byte> data, uint32_t alignment = 0) noexcept;
+    void Reset() noexcept;
 
-// private:
-//     class AllocImpl;
+    void Clear() noexcept;
 
-//     uint64_t GetAllocAlignment(uint32_t alignment) const noexcept;
-//     std::optional<TempCbufferAllocation> AllocateInternal(uint64_t size, uint32_t alignment) noexcept;
+    friend void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept;
 
-//     Device* _device{nullptr};
-//     unique_ptr<AllocImpl> _alloc;
-//     Descriptor _desc{};
-//     uint32_t _cbAlign{256u};
-// };
+public:
+    Nullable<Block*> GetOrCreateBlock(uint64_t size) noexcept;
 
+    Device* _device;
+    vector<unique_ptr<Block>> _blocks;
+    Descriptor _desc;
+    uint64_t _minBlockSize{};
+};
 // -----------------------------------------------------------------------------------------------
 
 // ----------------------------------- Root Signature Utility ------------------------------------

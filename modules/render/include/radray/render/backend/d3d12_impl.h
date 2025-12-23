@@ -499,14 +499,18 @@ public:
 
     void Unmap(uint64_t offset, uint64_t size) noexcept override;
 
+    BufferDescriptor GetDesc() const noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _buf;
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _rawDesc;
     D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
-    BufferDescriptor _desc;
     string _name;
+    MemoryType _memory{};
+    BufferUses _usage{BufferUse::UNKNOWN};
+    ResourceHints _hints{};
 };
 
 class BufferViewD3D12 final : public BufferView {

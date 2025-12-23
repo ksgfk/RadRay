@@ -154,166 +154,134 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     return builder.Build();
 }
 
-// class SimpleTempCbufferAllocatorHeap {
-// public:
-//     SimpleTempCbufferAllocatorHeap() noexcept = default;
-//     SimpleTempCbufferAllocatorHeap(const SimpleTempCbufferAllocatorHeap&) = delete;
-//     SimpleTempCbufferAllocatorHeap& operator=(const SimpleTempCbufferAllocatorHeap&) = delete;
-//     SimpleTempCbufferAllocatorHeap(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
-//     SimpleTempCbufferAllocatorHeap& operator=(SimpleTempCbufferAllocatorHeap&&) noexcept = delete;
-//     ~SimpleTempCbufferAllocatorHeap() noexcept {
-//         if (BufferObj) {
-//             BufferObj->Unmap(0, Capacity);
-//             BufferObj->Destroy();
-//             BufferObj.reset();
-//             Mapped = nullptr;
-//             Capacity = 0;
-//         }
-//     }
+SimpleCBufferArena::Block::Block(unique_ptr<Buffer> buf) noexcept
+    : _buf(std::move(buf)) {
+    _mapped = _buf->Map(0, _buf->GetDesc().Size);
+    RADRAY_ASSERT(_mapped != nullptr);
+}
 
-// public:
-//     SimpleTempCbufferAllocator* Owner{nullptr};
-//     unique_ptr<Buffer> BufferObj;
-//     void* Mapped{nullptr};
-//     uint64_t Capacity{0};
-// };
+SimpleCBufferArena::Block::~Block() noexcept {
+    if (_buf && _mapped) {
+        _buf->Unmap(0, _buf->GetDesc().Size);
+        _mapped = nullptr;
+    }
+}
 
-// class SimpleTempCbufferAllocator::AllocImpl final : public BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl> {
-// public:
-//     using Base = BlockAllocator<StackAllocator, SimpleTempCbufferAllocatorHeap, SimpleTempCbufferAllocator::AllocImpl>;
+SimpleCBufferArena::SimpleCBufferArena(Device* device, const Descriptor& desc) noexcept
+    : _device(device),
+      _desc(desc) {
+    if (_desc.Alignment == 0 || (_desc.Alignment & (_desc.Alignment - 1)) != 0) {
+        RADRAY_ABORT("SimpleCBufferArena invalid Alignment: {} (must be power-of-two and non-zero)", _desc.Alignment);
+    }
+}
 
-//     AllocImpl(SimpleTempCbufferAllocator* owner, size_t basicPageSize) noexcept
-//         : Base(basicPageSize),
-//           _owner(owner) {}
+SimpleCBufferArena::SimpleCBufferArena(Device* device) noexcept
+    : SimpleCBufferArena(device, Descriptor{256 * 256, 256, 1024 * 1024, "cb_arena"}) {}
 
-//     ~AllocImpl() noexcept override = default;
+SimpleCBufferArena::SimpleCBufferArena(SimpleCBufferArena&& other) noexcept
+    : _device(other._device),
+      _blocks(std::move(other._blocks)),
+      _desc(std::move(other._desc)),
+      _minBlockSize(other._minBlockSize) {
+    other._device = nullptr;
+    other._minBlockSize = 0;
+}
 
-//     unique_ptr<SimpleTempCbufferAllocatorHeap> CreateHeap(size_t capacity) noexcept {
-//         BufferDescriptor desc{};
-//         desc.Size = capacity;
-//         desc.Memory = MemoryType::Upload;
-//         desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite;
-//         desc.Hints = ResourceHint::None;
-//         auto cbOpt = _owner->_device->CreateBuffer(desc);
-//         if (!cbOpt.HasValue()) {
-//             RADRAY_ABORT("allocation failed: cannot create upload buffer");
-//         }
-//         auto cb = cbOpt.Release();
-//         auto mapped = cb->Map(0, desc.Size);
-//         if (!mapped) {
-//             RADRAY_ABORT("allocation failed: cannot map upload buffer");
-//         }
-//         auto heap = make_unique<SimpleTempCbufferAllocatorHeap>();
-//         heap->Owner = _owner;
-//         heap->BufferObj = std::move(cb);
-//         heap->Mapped = mapped;
-//         heap->Capacity = capacity;
-//         return heap;
-//     }
+SimpleCBufferArena& SimpleCBufferArena::operator=(SimpleCBufferArena&& other) noexcept {
+    SimpleCBufferArena tmp{std::move(other)};
+    swap(*this, tmp);
+    return *this;
+}
 
-//     StackAllocator CreateSubAllocator(size_t capacity) noexcept {
-//         return StackAllocator(capacity);
-//     }
+SimpleCBufferArena::~SimpleCBufferArena() noexcept {
+    this->Destroy();
+}
 
-//     void Reset() noexcept {
-//         Base::Reset();
-//     }
+bool SimpleCBufferArena::IsValid() const noexcept {
+    return _device != nullptr;
+}
 
-// private:
-//     SimpleTempCbufferAllocator* _owner{nullptr};
-// };
+void SimpleCBufferArena::Destroy() noexcept {
+    _blocks.clear();
+    _device = nullptr;
+}
 
-// SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device) noexcept
-//     : SimpleTempCbufferAllocator(device, {}) {}
+SimpleCBufferArena::Allocation SimpleCBufferArena::Allocate(uint64_t size) noexcept {
+    if (size == 0) {
+        return Allocation::Invalid();
+    }
+    auto blockOpt = this->GetOrCreateBlock(size);
+    if (!blockOpt.HasValue()) {
+        RADRAY_ABORT("allocation failed: cannot create cbuffer block");
+    }
+    auto block = blockOpt.Release();
+    uint64_t offsetStart = Align(block->_used, _desc.Alignment);
+    block->_used = offsetStart + size;
+    Allocation alloc{};
+    alloc.Target = block->_buf.get();
+    alloc.Mapped = static_cast<byte*>(block->_mapped) + offsetStart;
+    alloc.Offset = offsetStart;
+    alloc.Size = size;
+    return alloc;
+}
 
-// SimpleTempCbufferAllocator::SimpleTempCbufferAllocator(Device* device, const Descriptor& desc) noexcept
-//     : _device(device),
-//       _desc(desc) {
-//     RADRAY_ASSERT(_device != nullptr);
-//     auto detail = device->GetDetail();
-//     uint32_t align = detail.CBufferAlignment;
-//     if (align == 0) {
-//         align = 256u;
-//     }
-//     if (_desc.MinAlignment > align) {
-//         align = _desc.MinAlignment;
-//     }
-//     _cbAlign = align;
-//     if (_desc.PageSize < static_cast<uint64_t>(_cbAlign)) {
-//         _desc.PageSize = static_cast<uint64_t>(_cbAlign);
-//     }
+Nullable<SimpleCBufferArena::Block*> SimpleCBufferArena::GetOrCreateBlock(uint64_t size) noexcept {
+    if (!_blocks.empty()) {
+        auto last = _blocks[_blocks.size() - 1].get();
+        auto desc = last->_buf->GetDesc();
+        auto offsetStart = Align(last->_used, _desc.Alignment);
+        if (offsetStart < desc.Size) {
+            auto remain = desc.Size - offsetStart;
+            if (remain >= size) {
+                return last;
+            }
+        }
+    }
+    string name = radray::format("{}_{}", _desc.NamePrefix, _blocks.size());
+    BufferDescriptor desc{};
+    desc.Size = Align(std::max(_minBlockSize, std::max(size, _desc.BasicSize)), _desc.Alignment);
+    desc.Memory = MemoryType::Upload;
+    desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite | BufferUse::CopySource;
+    desc.Hints = ResourceHint::None;
+    desc.Name = name;
+    SimpleCBufferArena::Block* result = nullptr;
+    {
+        auto bufOpt = _device->CreateBuffer(desc);
+        if (!bufOpt.HasValue()) {
+            return nullptr;
+        }
+        result = _blocks.emplace_back(make_unique<SimpleCBufferArena::Block>(bufOpt.Release())).get();
+    }
+    return result;
+}
 
-//     _alloc = make_unique<AllocImpl>(this, static_cast<size_t>(_desc.PageSize));
-// }
+void SimpleCBufferArena::Reset() noexcept {
+    if (_blocks.empty()) {
+        return;
+    } else if (_blocks.size() == 1) {
+        _blocks[0]->_used = 0;
+    } else {
+        _minBlockSize = 0;
+        for (const auto& i : _blocks) {
+            _minBlockSize += i->_buf->GetDesc().Size;
+        }
+        _minBlockSize = std::min(_minBlockSize, _desc.MaxResetSize);
+        _blocks.clear();
+    }
+}
 
-// SimpleTempCbufferAllocator::~SimpleTempCbufferAllocator() noexcept {
-//     this->Destroy();
-// }
+void SimpleCBufferArena::Clear() noexcept {
+    _blocks.clear();
+    _minBlockSize = 0;
+}
 
-// void SimpleTempCbufferAllocator::Destroy() noexcept {
-//     _alloc.reset();
-//     _device = nullptr;
-//     _cbAlign = 256u;
-//     _desc = {};
-// }
-
-// bool SimpleTempCbufferAllocator::IsValid() const noexcept {
-//     return _device != nullptr && _alloc != nullptr;
-// }
-
-// void SimpleTempCbufferAllocator::Reset() noexcept {
-//     RADRAY_ASSERT(_device != nullptr);
-//     RADRAY_ASSERT(_alloc != nullptr);
-//     _alloc->Reset();
-// }
-
-// uint64_t SimpleTempCbufferAllocator::GetAllocAlignment(uint32_t alignment) const noexcept {
-//     uint64_t a = alignment == 0 ? static_cast<uint64_t>(_cbAlign) : static_cast<uint64_t>(alignment);
-//     if (a < static_cast<uint64_t>(_cbAlign)) {
-//         a = static_cast<uint64_t>(_cbAlign);
-//     }
-//     return std::bit_ceil(a);
-// }
-
-// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateInternal(uint64_t size, uint32_t alignment) noexcept {
-//     RADRAY_ASSERT(_device != nullptr);
-//     RADRAY_ASSERT(_alloc != nullptr);
-//     if (size == 0) {
-//         return std::nullopt;
-//     }
-//     const uint64_t a = this->GetAllocAlignment(alignment);
-//     const uint64_t alignedSize = radray::Align(size, a);
-//     const uint64_t requestSize = alignedSize + (a - 1);
-//     auto allocOpt = _alloc->Allocate(static_cast<size_t>(requestSize));
-//     if (!allocOpt.has_value()) {
-//         return std::nullopt;
-//     }
-//     auto blockAlloc = allocOpt.value();
-//     auto heap = blockAlloc.Heap;
-//     const uint64_t off = radray::Align(static_cast<uint64_t>(blockAlloc.Start), a);
-//     void* cpuPtr = static_cast<byte*>(heap->Mapped) + off;
-//     TempCbufferAllocation out{};
-//     out.BufferObj = heap->BufferObj.get();
-//     out.CpuPtr = cpuPtr;
-//     out.Size = size;
-//     out.OffsetInPage = off;
-//     return out;
-// }
-
-// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::Allocate(uint64_t size, uint32_t alignment) noexcept {
-//     return this->AllocateInternal(size, alignment);
-// }
-
-// std::optional<TempCbufferAllocation> SimpleTempCbufferAllocator::AllocateAndWrite(std::span<const byte> data, uint32_t alignment) noexcept {
-//     auto allocOpt = this->AllocateInternal(data.size(), alignment);
-//     if (!allocOpt.has_value()) {
-//         return std::nullopt;
-//     }
-//     if (!data.empty()) {
-//         std::memcpy(allocOpt->CpuPtr, data.data(), data.size());
-//     }
-//     return allocOpt;
-// }
+void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept {
+    using std::swap;
+    swap(a._device, b._device);
+    swap(a._blocks, b._blocks);
+    swap(a._desc, b._desc);
+    swap(a._minBlockSize, b._minBlockSize);
+}
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept
     : _constant(desc.Constant) {

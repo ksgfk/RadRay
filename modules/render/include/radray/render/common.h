@@ -948,6 +948,8 @@ public:
     virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
 
     virtual void Unmap(uint64_t offset, uint64_t size) noexcept = 0;
+
+    virtual BufferDescriptor GetDesc() const noexcept = 0;
 };
 
 class BufferView : public ResourceView {
