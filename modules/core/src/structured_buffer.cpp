@@ -24,6 +24,21 @@ void StructuredBufferStorage::Builder::AddMemberForType(StructuredBufferId targe
     _types[targetTypeIndex].Members.push_back(std::move(m));
 }
 
+void StructuredBufferStorage::Builder::AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset, size_t arraySize) noexcept {
+    const size_t targetTypeIndex = static_cast<size_t>(targetType);
+    const size_t memberTypeIndex = static_cast<size_t>(memberType);
+    if (targetTypeIndex >= _types.size() || memberTypeIndex >= _types.size()) {
+        RADRAY_ERR_LOG("StructuredBufferStorage::Builder::AddMemberForType invalid index target={} member={}", targetTypeIndex, memberTypeIndex);
+        return;
+    }
+    Member m{};
+    m.Name = string{name};
+    m.Offset = offset;
+    m.TypeIndex = memberType;
+    m.ArraySize = arraySize;
+    _types[targetTypeIndex].Members.push_back(std::move(m));
+}
+
 StructuredBufferId StructuredBufferStorage::Builder::AddRoot(std::string_view name, StructuredBufferId typeIndex) noexcept {
     const size_t typeIndexValue = static_cast<size_t>(typeIndex);
     if (typeIndexValue >= _types.size()) {
@@ -73,35 +88,49 @@ bool StructuredBufferStorage::Builder::IsValid() const noexcept {
 
 void StructuredBufferStorage::Builder::BuildMember(StructuredBufferStorage& storage) noexcept {
     storage._globalIndex.clear();
-    storage._globalIndex.reserve(256);
     struct StackItem {
         StructuredBufferId TypeId;
         size_t GlobalOffset;
+        StructuredBufferId ParentTypeId;
         size_t MemberIndexInType;
     };
     stack<StackItem> s;
     for (const auto& root : storage._rootVarIds) {
-        s.push({root._typeId, root._offset, StructuredBufferId::Invalid});
+        s.push({root._typeId, root._offset, StructuredBufferId::Invalid, StructuredBufferId::Invalid});
     }
     while (!s.empty()) {
         auto item = s.top();
         s.pop();
         StructuredBufferStorage::GlobalVarIndexer idx{};
-        idx.TypeId = item.TypeId;
         idx.MemberIndexInType = item.MemberIndexInType;
         idx.GlobalOffset = item.GlobalOffset;
+        idx.ParentTypeId = item.ParentTypeId;
         storage._globalIndex.push_back(idx);
         const auto& type = storage._types[item.TypeId];
         for (size_t mi = 0; mi < type._members.size(); ++mi) {
             const auto& mem = type._members[mi];
-            s.push({mem._typeId, item.GlobalOffset + mem._offset, mi});
+            s.push({mem._typeId, item.GlobalOffset + mem._offset, item.TypeId, mi});
         }
     }
     storage._globalIndex.shrink_to_fit();
+    for (size_t i = 0; i < storage._rootVarIds.size(); i++) {
+        storage._rootVarIds[i]._globalId = i;
+        storage._globalIndex[i].MemberIndexInType = i;
+    }
+    for (size_t i = 0; i < storage._globalIndex.size(); i++) {
+        const auto& indexer = storage._globalIndex[i];
+        if (indexer.ParentTypeId == StructuredBufferId::Invalid) {
+            continue;
+        }
+        auto& parentType = storage._types[indexer.ParentTypeId];
+        auto& memberInType = parentType._members[indexer.MemberIndexInType];
+        memberInType._globalId = i;
+    }
 }
 
 std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build() noexcept {
     if (!IsValid()) {
+        RADRAY_ERR_LOG("invalid StructuredBufferStorage::Builder state");
         return std::nullopt;
     }
     StructuredBufferStorage storage{};
@@ -110,6 +139,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
         std::string_view Name;
         size_t Offset;
         StructuredBufferId TypeIndex;
+        size_t ArraySize{0};
     };
     vector<vector<CanonMemberBuilder>> canonMembers;
     canonMembers.resize(_types.size());
@@ -118,7 +148,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
         auto& out = canonMembers[ti];
         out.reserve(t.Members.size());
         for (const auto& m : t.Members) {
-            out.push_back({m.Name, m.Offset, m.TypeIndex});
+            out.push_back({m.Name, m.Offset, m.TypeIndex, m.ArraySize});
         }
         std::sort(out.begin(), out.end(), [](const CanonMemberBuilder& a, const CanonMemberBuilder& b) {
             if (a.Offset != b.Offset) {
@@ -250,6 +280,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
         for (const auto& m : members) {
             StructuredBufferVariable v{string{m.Name}, builderToNewId[m.TypeIndex]};
             v._offset = m.Offset;
+            v._arraySize = m.ArraySize;
             newType._members.push_back(std::move(v));
         }
     }
@@ -280,13 +311,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
 StructuredBufferView StructuredBufferStorage::GetVar(std::string_view name) noexcept {
     for (const auto& root : _rootVarIds) {
         if (root._name == name) {
-            for (size_t i = 0; i < _globalIndex.size(); ++i) {
-                const auto& gi = _globalIndex[i];
-                if (gi.MemberIndexInType == StructuredBufferId::Invalid && gi.TypeId == root._typeId && gi.GlobalOffset == root._offset) {
-                    return StructuredBufferView{this, StructuredBufferId{i}};
-                }
-            }
-            return StructuredBufferView{};
+            return StructuredBufferView{this, root._globalId};
         }
     }
     return StructuredBufferView{};
@@ -310,72 +335,53 @@ std::span<const byte> StructuredBufferStorage::GetSpan(size_t offset, size_t siz
     return std::span<const byte>{_buffer.data() + offset, size};
 }
 
-std::span<const byte> StructuredBufferStorage::GetSpan(StructuredBufferId memberId) const noexcept {
-    const size_t memberIdValue = static_cast<size_t>(memberId);
-    if (memberIdValue >= _globalIndex.size()) {
-        return {};
+std::span<const byte> StructuredBufferStorage::GetSpan(StructuredBufferId globalId) const noexcept {
+    RADRAY_ASSERT(globalId.Value < _globalIndex.size());
+    const auto& indexer = _globalIndex[globalId];
+    if (indexer.ParentTypeId == StructuredBufferId::Invalid) {
+        const auto& rootVar = _rootVarIds[globalId];
+        const auto& type = _types[rootVar.GetTypeId()];
+        return GetSpan(rootVar._offset, type._size);
+    } else {
+        const auto& parentType = _types[indexer.ParentTypeId];
+        const auto& memberInType = parentType._members[indexer.MemberIndexInType];
+        const auto& type = _types[memberInType.GetTypeId()];
+        return GetSpan(indexer.GlobalOffset, type._size);
     }
-    const auto& gi = _globalIndex[memberIdValue];
-    if (static_cast<size_t>(gi.TypeId) >= _types.size()) {
-        return {};
-    }
-    return GetSpan(gi.GlobalOffset, _types[gi.TypeId]._size);
 }
 
 StructuredBufferView StructuredBufferView::GetVar(std::string_view name) noexcept {
-    if (!IsValid()) {
-        return {};
-    }
-    auto type = GetType();
-    if (type == nullptr) {
-        return {};
-    }
-    const size_t baseOffset = GetOffset();
-    for (const auto& mem : type->GetMembers()) {
+    RADRAY_ASSERT(this->IsValid());
+    const auto& type = GetType();
+    for (const auto& mem : type.GetMembers()) {
         if (mem.GetName() == name) {
-            const size_t childOffset = baseOffset + mem.GetOffset();
-            for (size_t i = 0; i < _storage->_globalIndex.size(); ++i) {
-                const auto& gi = _storage->_globalIndex[i];
-                if (gi.TypeId == mem.GetTypeId() && gi.GlobalOffset == childOffset) {
-                    return StructuredBufferView{_storage, StructuredBufferId{i}};
-                }
-            }
-            return {};
+            return StructuredBufferView{_storage, mem.GetGlobalId()};
         }
     }
     return {};
 }
 
 size_t StructuredBufferView::GetOffset() const noexcept {
-    const size_t memberIdValue = static_cast<size_t>(_memberId);
-    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
-        return 0;
-    }
-    return _storage->_globalIndex[memberIdValue].GlobalOffset;
+    RADRAY_ASSERT(this->IsValid());
+    return _storage->_globalIndex[_globalId].GlobalOffset;
 }
 
-Nullable<StructuredBufferType*> StructuredBufferView::GetType() noexcept {
-    const size_t memberIdValue = static_cast<size_t>(_memberId);
-    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
-        return nullptr;
+const StructuredBufferType& StructuredBufferView::GetType() const noexcept {
+    RADRAY_ASSERT(this->IsValid());
+    const auto& indexer = _storage->_globalIndex[_globalId];
+    if (indexer.ParentTypeId == StructuredBufferId::Invalid) {
+        return _storage->_types[_storage->_rootVarIds[_globalId].GetTypeId()];
+    } else {
+        const auto& parentType = _storage->_types[indexer.ParentTypeId];
+        const auto& memberInType = parentType.GetMembers()[indexer.MemberIndexInType];
+        return _storage->_types[memberInType.GetTypeId().Value];
     }
-    const auto typeId = _storage->_globalIndex[memberIdValue].TypeId;
-    if (static_cast<size_t>(typeId) >= _storage->_types.size()) {
-        return nullptr;
-    }
-    return &_storage->_types[typeId];
 }
 
-Nullable<const StructuredBufferType*> StructuredBufferView::GetType() const noexcept {
-    const size_t memberIdValue = static_cast<size_t>(_memberId);
-    if (!IsValid() || memberIdValue >= _storage->_globalIndex.size()) {
-        return nullptr;
-    }
-    const auto typeId = _storage->_globalIndex[memberIdValue].TypeId;
-    if (static_cast<size_t>(typeId) >= _storage->_types.size()) {
-        return nullptr;
-    }
-    return &_storage->_types[typeId];
+const StructuredBufferVariable& StructuredBufferView::GetSelf() const noexcept {
+    const auto& indexer = _storage->_globalIndex[_globalId];
+    const auto& parentType = _storage->_types[indexer.ParentTypeId];
+    return parentType.GetMembers()[indexer.MemberIndexInType];
 }
 
 }  // namespace radray

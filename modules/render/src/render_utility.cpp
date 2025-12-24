@@ -68,7 +68,11 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
                     sizeInBytes = rOffset - memberType.Offset;
                 }
                 auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
-                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, memberType.Offset);
+                if (memberType.Elements == 0) {
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, memberType.Offset);
+                } else {
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, memberType.Offset, memberType.Elements);
+                }
                 s.push({member.Type, childBdIdx, sizeInBytes});
             }
         }
@@ -281,6 +285,10 @@ void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept {
     swap(a._blocks, b._blocks);
     swap(a._desc, b._desc);
     swap(a._minBlockSize, b._minBlockSize);
+}
+
+SimpleCBufferUploader::SimpleCBufferUploader(const HlslShaderDesc& desc) noexcept {
+    _storage = CreateCBufferStorage(desc).value();
 }
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept

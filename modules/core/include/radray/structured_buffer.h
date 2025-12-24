@@ -20,6 +20,10 @@ struct StructuredBufferId {
     constexpr operator size_t() const noexcept { return Value; }
 
     friend auto operator<=>(const StructuredBufferId&, const StructuredBufferId&) = default;
+    friend constexpr bool operator==(const StructuredBufferId& lhs, size_t rhs) noexcept { return lhs.Value == rhs; }
+    friend constexpr bool operator!=(const StructuredBufferId& lhs, size_t rhs) noexcept { return lhs.Value != rhs; }
+    friend constexpr bool operator==(size_t lhs, const StructuredBufferId& rhs) noexcept { return lhs == rhs.Value; }
+    friend constexpr bool operator!=(size_t lhs, const StructuredBufferId& rhs) noexcept { return lhs != rhs.Value; }
 };
 
 class StructuredBufferVariable;
@@ -35,11 +39,15 @@ public:
     std::string_view GetName() const noexcept { return _name; }
     StructuredBufferId GetTypeId() const noexcept { return _typeId; }
     size_t GetOffset() const noexcept { return _offset; }
+    size_t GetArraySize() const noexcept { return _arraySize; }
+    StructuredBufferId GetGlobalId() const noexcept { return _globalId; }
 
 private:
     string _name;
     StructuredBufferId _typeId{StructuredBufferId::Invalid};
     size_t _offset{0};
+    size_t _arraySize{0};
+    StructuredBufferId _globalId{StructuredBufferId::Invalid};
 
     friend class StructuredBufferStorage;
 };
@@ -74,6 +82,7 @@ public:
             string Name;
             size_t Offset{0};
             StructuredBufferId TypeIndex{Invalid};
+            size_t ArraySize{0};
             auto operator<=>(const Member&) const = default;
         };
         struct Type {
@@ -89,6 +98,7 @@ public:
 
         StructuredBufferId AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset) noexcept;
+        void AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset, size_t arraySize) noexcept;
         StructuredBufferId AddRoot(std::string_view name, StructuredBufferId typeIndex) noexcept;
         void SetAlignment(size_t align) noexcept;
 
@@ -107,11 +117,11 @@ public:
     void WriteData(size_t offset, std::span<const byte> data) noexcept;
     std::span<const byte> GetData() const noexcept { return _buffer; }
     std::span<const byte> GetSpan(size_t offset, size_t size) const noexcept;
-    std::span<const byte> GetSpan(StructuredBufferId memberId) const noexcept;
+    std::span<const byte> GetSpan(StructuredBufferId globalId) const noexcept;
 
 private:
     struct GlobalVarIndexer {
-        StructuredBufferId TypeId;
+        StructuredBufferId ParentTypeId;
         size_t MemberIndexInType;
         size_t GlobalOffset;
     };
@@ -127,17 +137,17 @@ private:
 class StructuredBufferView {
 public:
     StructuredBufferView() = default;
-    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId memberId) noexcept : _storage(storage), _memberId(memberId) {}
+    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId) noexcept : _storage(storage), _globalId(globalId) {}
 
-    bool IsValid() const noexcept { return _storage != nullptr && _memberId.Value != StructuredBufferId::Invalid; }
+    bool IsValid() const noexcept { return _storage != nullptr; }
     operator bool() const noexcept { return IsValid(); }
 
     StructuredBufferView GetVar(std::string_view name) noexcept;
 
-    StructuredBufferId GetId() const noexcept { return _memberId; }
+    StructuredBufferId GetId() const noexcept { return _globalId; }
     size_t GetOffset() const noexcept;
-    Nullable<StructuredBufferType*> GetType() noexcept;
-    Nullable<const StructuredBufferType*> GetType() const noexcept;
+    const StructuredBufferType& GetType() const noexcept;
+    const StructuredBufferVariable& GetSelf() const noexcept;
 
     template <class T>
     void SetValue(const T& value) noexcept {
@@ -157,7 +167,7 @@ public:
 
 private:
     StructuredBufferStorage* _storage{nullptr};
-    StructuredBufferId _memberId{StructuredBufferId::Invalid};
+    StructuredBufferId _globalId{StructuredBufferId::Invalid};
 };
 
 }  // namespace radray

@@ -28,18 +28,18 @@ TEST(StructuredBufferStorage, BasicBuilder) {
     // Verify root variable
     auto objView = storage.GetVar("obj");
     ASSERT_TRUE(objView.IsValid());
-    EXPECT_EQ(objView.GetType()->GetName(), "Transform");
-    EXPECT_EQ(objView.GetType()->GetSizeInBytes(), 24);
+    EXPECT_EQ(objView.GetType().GetName(), "Transform");
+    EXPECT_EQ(objView.GetType().GetSizeInBytes(), 24);
     
     // Verify members
     auto posView = objView.GetVar("pos");
     ASSERT_TRUE(posView.IsValid());
-    EXPECT_EQ(posView.GetType()->GetName(), "float3");
+    EXPECT_EQ(posView.GetType().GetName(), "float3");
     EXPECT_EQ(posView.GetOffset(), 0); // Relative to obj
     
     auto scaleView = objView.GetVar("scale");
     ASSERT_TRUE(scaleView.IsValid());
-    EXPECT_EQ(scaleView.GetType()->GetName(), "float3");
+    EXPECT_EQ(scaleView.GetType().GetName(), "float3");
     EXPECT_EQ(scaleView.GetOffset(), 12); // Relative to obj
 }
 

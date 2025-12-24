@@ -149,3 +149,73 @@ TEST(DXC, CBufferStorage) {
     std::memcpy(&readTime, buffer.data() + global.GetVar("time").GetOffset(), sizeof(float));
     EXPECT_EQ(readTime, timeVal);
 }
+
+const char* SRC2 = R"(
+struct PointLight
+{
+    float3 posW;
+    float radius;
+    float3 lightColor;
+    float intensity;
+};
+
+struct DirectionalLight
+{
+    float3 lightDirW;
+    float _pad1;
+    float3 lightColor;
+    float _pad2;
+};
+
+struct Lights
+{
+    DirectionalLight dl;
+    PointLight pl[4];
+};
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+    float3 posW : POSITION;
+    float3 norW : NORMAL0;
+    float2 uv : TEXCOORD0;
+};
+
+ConstantBuffer<Lights> _Lights : register(b0);
+
+float4 PSMain(PS_INPUT psIn) : SV_Target
+{
+    float3 color = float3(0, 0, 0);
+    float3 n = normalize(psIn.norW);
+    float3 l_dir = normalize(-_Lights.dl.lightDirW);
+    float n_dot_l = max(dot(n, l_dir), 0.0f);
+    color += _Lights.dl.lightColor * n_dot_l;
+    [unroll]
+    for (int i = 0; i < 4; ++i) {
+        float3 l_vec = _Lights.pl[i].posW - psIn.posW;
+        float dist = length(l_vec);
+        float3 l = l_vec / max(dist, 1e-4f);
+        float att = saturate(1.0f - dist / _Lights.pl[i].radius);
+        float n_dot_l_pl = max(dot(n, l), 0.0f);
+        color += _Lights.pl[i].lightColor * _Lights.pl[i].intensity * n_dot_l_pl * att;
+    }
+    return float4(color, 1.0f);
+}
+)";
+
+TEST(DXC, CBufferArrayBasic) {
+    auto dxc = CreateDxc();
+    auto ps = dxc->Compile(SRC2, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
+    ASSERT_TRUE(ps.has_value());
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    ASSERT_TRUE(psDesc.has_value());
+    auto storage = CreateCBufferStorage(psDesc.value());
+    ASSERT_TRUE(storage.has_value());
+
+    auto lightsVar = storage->GetVar("_Lights");
+    ASSERT_TRUE(lightsVar.IsValid());
+    auto plArrayVar = lightsVar.GetVar("pl");
+    ASSERT_TRUE(plArrayVar.IsValid());
+    const auto& plArrayVarSelf = plArrayVar.GetSelf();
+    EXPECT_EQ(plArrayVarSelf.GetArraySize(), 4);
+}

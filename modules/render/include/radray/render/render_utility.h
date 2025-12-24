@@ -2,6 +2,7 @@
 
 #include <span>
 #include <string_view>
+#include <stdexcept>
 
 #include <radray/allocator.h>
 #include <radray/vertex_data.h>
@@ -22,6 +23,15 @@ struct SemanticMapping {
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 // --------------------------------------- CBuffer Utility ---------------------------------------
+struct CBufferStorageRange {
+    string Name;
+    vector<StructuredBufferId> Roots;
+    uint32_t BindPoint;
+    uint32_t Space;
+    size_t GlobalOffset;
+    size_t SizeInBytes;
+};
+
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept;
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 
@@ -85,6 +95,14 @@ public:
     vector<unique_ptr<Block>> _blocks;
     Descriptor _desc;
     uint64_t _minBlockSize{};
+};
+
+class SimpleCBufferUploader {
+public:
+    explicit SimpleCBufferUploader(const HlslShaderDesc& desc) noexcept;
+
+public:
+    StructuredBufferStorage _storage;
 };
 // -----------------------------------------------------------------------------------------------
 
