@@ -10,9 +10,10 @@
 namespace radray {
 
 struct StructuredBufferId {
-    static constexpr size_t Invalid = std::numeric_limits<size_t>::max();
+    constexpr static size_t InvalidValue = std::numeric_limits<size_t>::max();
+    constexpr static StructuredBufferId Invalid() { return StructuredBufferId{InvalidValue}; }
 
-    size_t Value{Invalid};
+    size_t Value{InvalidValue};
 
     constexpr StructuredBufferId() noexcept = default;
     constexpr StructuredBufferId(size_t value) noexcept : Value(value) {}
@@ -20,10 +21,6 @@ struct StructuredBufferId {
     constexpr operator size_t() const noexcept { return Value; }
 
     friend auto operator<=>(const StructuredBufferId&, const StructuredBufferId&) = default;
-    friend constexpr bool operator==(const StructuredBufferId& lhs, size_t rhs) noexcept { return lhs.Value == rhs; }
-    friend constexpr bool operator!=(const StructuredBufferId& lhs, size_t rhs) noexcept { return lhs.Value != rhs; }
-    friend constexpr bool operator==(size_t lhs, const StructuredBufferId& rhs) noexcept { return lhs == rhs.Value; }
-    friend constexpr bool operator!=(size_t lhs, const StructuredBufferId& rhs) noexcept { return lhs != rhs.Value; }
 };
 
 class StructuredBufferVariable;
@@ -44,10 +41,10 @@ public:
 
 private:
     string _name;
-    StructuredBufferId _typeId{StructuredBufferId::Invalid};
+    StructuredBufferId _typeId{StructuredBufferId::Invalid()};
     size_t _offset{0};
     size_t _arraySize{0};
-    StructuredBufferId _globalId{StructuredBufferId::Invalid};
+    StructuredBufferId _globalId{StructuredBufferId::Invalid()};
 
     friend class StructuredBufferStorage;
 };
@@ -64,7 +61,7 @@ public:
 
 private:
     string _name;
-    StructuredBufferId _id{StructuredBufferId::Invalid};
+    StructuredBufferId _id{StructuredBufferId::Invalid()};
     vector<StructuredBufferVariable> _members;
     size_t _size{0};
 
@@ -73,7 +70,7 @@ private:
 
 class StructuredBufferStorage {
 public:
-    static constexpr StructuredBufferId InvalidId{StructuredBufferId::Invalid};
+    static constexpr StructuredBufferId InvalidId{StructuredBufferId::Invalid()};
 
     class Builder {
     public:
@@ -94,12 +91,14 @@ public:
         struct Root {
             string Name;
             StructuredBufferId TypeIndex{Invalid};
+            size_t ArraySize{0};
         };
 
         StructuredBufferId AddType(std::string_view name, size_t size) noexcept;
         void AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset) noexcept;
         void AddMemberForType(StructuredBufferId targetType, StructuredBufferId memberType, std::string_view name, size_t offset, size_t arraySize) noexcept;
         StructuredBufferId AddRoot(std::string_view name, StructuredBufferId typeIndex) noexcept;
+        StructuredBufferId AddRoot(std::string_view name, StructuredBufferId typeIndex, size_t arraySize) noexcept;
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
@@ -116,8 +115,9 @@ public:
     StructuredBufferView GetVar(std::string_view name) noexcept;
     void WriteData(size_t offset, std::span<const byte> data) noexcept;
     std::span<const byte> GetData() const noexcept { return _buffer; }
-    std::span<const byte> GetSpan(size_t offset, size_t size) const noexcept;
+    std::span<const byte> GetGlobalSpan(size_t offset, size_t size) const noexcept;
     std::span<const byte> GetSpan(StructuredBufferId globalId) const noexcept;
+    std::span<const byte> GetSpan(StructuredBufferId globalId, size_t arrayIndex) const noexcept;
 
 private:
     struct GlobalVarIndexer {
@@ -137,29 +137,32 @@ private:
 class StructuredBufferView {
 public:
     StructuredBufferView() = default;
-    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId) noexcept : _storage(storage), _globalId(globalId) {}
+    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId) noexcept;
+    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId, size_t arrayIndex) noexcept;
 
     bool IsValid() const noexcept { return _storage != nullptr; }
     operator bool() const noexcept { return IsValid(); }
 
     StructuredBufferView GetVar(std::string_view name) noexcept;
+    StructuredBufferView GetArrayElement(size_t index) noexcept;
 
     StructuredBufferId GetId() const noexcept { return _globalId; }
-    size_t GetOffset() const noexcept;
+    size_t GetArrayIndex() const noexcept { return _arrayIndex; }
+    size_t GetGlobalOffset() const noexcept;
     const StructuredBufferType& GetType() const noexcept;
     const StructuredBufferVariable& GetSelf() const noexcept;
 
     template <class T>
     void SetValue(const T& value) noexcept {
-        if (!IsValid()) {
+        if (!this->IsValid()) {
             return;
         }
         if constexpr (std::is_trivially_copyable_v<T>) {
-            _storage->WriteData(GetOffset(), std::as_bytes(std::span{&value, 1}));
+            _storage->WriteData(this->GetGlobalOffset(), std::as_bytes(std::span{&value, 1}));
         } else if constexpr (radray::IsEigenMatrix<T>::value || radray::IsEigenVector<T>::value) {
             using Scalar = typename T::Scalar;
             constexpr size_t Count = size_t(T::RowsAtCompileTime) * size_t(T::ColsAtCompileTime);
-            _storage->WriteData(GetOffset(), std::as_bytes(std::span<const Scalar, Count>{value.data(), Count}));
+            _storage->WriteData(this->GetGlobalOffset(), std::as_bytes(std::span<const Scalar, Count>{value.data(), Count}));
         } else {
             static_assert(std::is_trivially_copyable_v<T>, "StructuredBufferView::SetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
         }
@@ -167,7 +170,8 @@ public:
 
 private:
     StructuredBufferStorage* _storage{nullptr};
-    StructuredBufferId _globalId{StructuredBufferId::Invalid};
+    StructuredBufferId _globalId{StructuredBufferId::Invalid()};
+    size_t _arrayIndex{0};
 };
 
 }  // namespace radray

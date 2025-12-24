@@ -146,7 +146,7 @@ TEST(DXC, CBufferStorage) {
 
     auto buffer = storage.GetData();
     float readTime;
-    std::memcpy(&readTime, buffer.data() + global.GetVar("time").GetOffset(), sizeof(float));
+    std::memcpy(&readTime, buffer.data() + global.GetVar("time").GetGlobalOffset(), sizeof(float));
     EXPECT_EQ(readTime, timeVal);
 }
 
@@ -157,6 +157,7 @@ struct PointLight
     float radius;
     float3 lightColor;
     float intensity;
+    float2 _test;
 };
 
 struct DirectionalLight
@@ -218,4 +219,151 @@ TEST(DXC, CBufferArrayBasic) {
     ASSERT_TRUE(plArrayVar.IsValid());
     const auto& plArrayVarSelf = plArrayVar.GetSelf();
     EXPECT_EQ(plArrayVarSelf.GetArraySize(), 4);
+}
+
+const char* SRC3 = R"(
+struct PointLight
+{
+    float3 posW;
+    float radius;
+    float3 lightColor;
+    float intensity;
+    float2 _test;
+};
+
+struct DirectionalLight
+{
+    float3 lightDirW;
+    float _pad1;
+    float3 lightColor;
+    float _pad2;
+};
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+    float3 posW : POSITION;
+    float3 norW : NORMAL0;
+    float2 uv : TEXCOORD0;
+};
+
+ConstantBuffer<DirectionalLight> _DirectionalLight : register(b0);
+ConstantBuffer<PointLight> _PointLights[4] : register(b1);
+
+float4 PSMain(PS_INPUT psIn) : SV_Target
+{
+    float3 color = float3(0, 0, 0);
+    float3 n = normalize(psIn.norW);
+    float3 l_dir = normalize(-_DirectionalLight.lightDirW);
+    float n_dot_l = max(dot(n, l_dir), 0.0f);
+    color += _DirectionalLight.lightColor * n_dot_l;
+    [unroll]
+    for (int i = 0; i < 4; i++) {
+        float3 l_vec = _PointLights[i].posW - psIn.posW;
+        float dist = length(l_vec);
+        float3 l = l_vec / max(dist, 1e-4f);
+        float att = saturate(1.0f - dist / _PointLights[i].radius);
+        float n_dot_l_pl = max(dot(n, l), 0.0f);
+        color += _PointLights[i].lightColor * _PointLights[i].intensity * n_dot_l_pl * att;
+    }
+    return float4(color, 1.0f);
+}
+)";
+TEST(DXC, CBufferArrayBindArray) {
+    auto dxc = CreateDxc();
+    auto ps = dxc->Compile(SRC3, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
+    ASSERT_TRUE(ps.has_value());
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    ASSERT_TRUE(psDesc.has_value());
+    auto storage = CreateCBufferStorage(psDesc.value());
+    ASSERT_TRUE(storage.has_value());
+
+    auto plArrayVar = storage->GetVar("_PointLights");
+    ASSERT_TRUE(plArrayVar.IsValid());
+    const auto& plArrayVarSelf = plArrayVar.GetSelf();
+    EXPECT_EQ(plArrayVarSelf.GetArraySize(), 4);
+
+    auto plArrayVarElement = plArrayVar.GetArrayElement(2);
+    ASSERT_TRUE(plArrayVarElement.IsValid());
+    // sizeof(DirectionalLight) == 32
+    // sizeof(PointLight) == 48
+    // _PointLights[2] offset == 32 + 48 * 2 == 128
+    EXPECT_EQ(plArrayVarElement.GetGlobalOffset(), 128);
+    // all 32 + 48 * 4 = 224 bytes
+    EXPECT_EQ(storage->GetData().size(), 224);
+}
+
+const char* SRC4 = R"(
+struct PointLight
+{
+    float3 posW;
+    float radius;
+    float3 lightColor;
+    float intensity;
+    float2 _test;
+};
+
+struct DirectionalLight
+{
+    float3 lightDirW;
+    float _pad1;
+    float3 lightColor;
+    float _pad2;
+};
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+    float3 posW : POSITION;
+    float3 norW : NORMAL0;
+    float2 uv : TEXCOORD0;
+};
+
+ConstantBuffer<DirectionalLight> _DirectionalLight : register(b0);
+cbuffer PointLightsCB : register(b3)
+{
+    PointLight _PointLights[4];
+};
+
+float4 PSMain(PS_INPUT psIn) : SV_Target
+{
+    float3 color = float3(0, 0, 0);
+    float3 n = normalize(psIn.norW);
+    float3 l_dir = normalize(-_DirectionalLight.lightDirW);
+    float n_dot_l = max(dot(n, l_dir), 0.0f);
+    color += _DirectionalLight.lightColor * n_dot_l;
+    [unroll]
+    for (int i = 0; i < 4; i++) {
+        float3 l_vec = _PointLights[i].posW - psIn.posW;
+        float dist = length(l_vec);
+        float3 l = l_vec / max(dist, 1e-4f);
+        float att = saturate(1.0f - dist / _PointLights[i].radius);
+        float n_dot_l_pl = max(dot(n, l), 0.0f);
+        color += _PointLights[i].lightColor * _PointLights[i].intensity * n_dot_l_pl * att;
+    }
+    return float4(color, 1.0f);
+}
+)";
+TEST(DXC, CBufferArrayBindArrayNotView) {
+    auto dxc = CreateDxc();
+    auto ps = dxc->Compile(SRC4, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
+    ASSERT_TRUE(ps.has_value());
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    ASSERT_TRUE(psDesc.has_value());
+    auto storage = CreateCBufferStorage(psDesc.value());
+    ASSERT_TRUE(storage.has_value());
+
+    auto plArrayVar = storage->GetVar("_PointLights");
+    ASSERT_TRUE(plArrayVar.IsValid());
+    const auto& plArrayVarSelf = plArrayVar.GetSelf();
+    EXPECT_EQ(plArrayVarSelf.GetArraySize(), 4);
+
+    auto plArrayVarElement = plArrayVar.GetArrayElement(2);
+    ASSERT_TRUE(plArrayVarElement.IsValid());
+    // sizeof(DirectionalLight) == 32
+    // sizeof(PointLight) == 48
+    // _PointLights[2] offset == 32 + 48 * 2 == 128
+    EXPECT_EQ(plArrayVarElement.GetGlobalOffset(), 128);
+    // all 32 + 48 * 4 = 224 bytes
+    EXPECT_EQ(storage->GetData().size(), 224);
 }

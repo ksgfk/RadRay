@@ -35,12 +35,12 @@ TEST(StructuredBufferStorage, BasicBuilder) {
     auto posView = objView.GetVar("pos");
     ASSERT_TRUE(posView.IsValid());
     EXPECT_EQ(posView.GetType().GetName(), "float3");
-    EXPECT_EQ(posView.GetOffset(), 0); // Relative to obj
+    EXPECT_EQ(posView.GetGlobalOffset(), 0); // Relative to obj
     
     auto scaleView = objView.GetVar("scale");
     ASSERT_TRUE(scaleView.IsValid());
     EXPECT_EQ(scaleView.GetType().GetName(), "float3");
-    EXPECT_EQ(scaleView.GetOffset(), 12); // Relative to obj
+    EXPECT_EQ(scaleView.GetGlobalOffset(), 12); // Relative to obj
 }
 
 TEST(StructuredBufferStorage, DataReadWrite) {
@@ -70,7 +70,7 @@ TEST(StructuredBufferStorage, DataReadWrite) {
     // Also verify raw buffer access
     auto buffer = storage.GetData();
     float readTime;
-    std::memcpy(&readTime, buffer.data() + storage.GetVar("time").GetOffset(), sizeof(float));
+    std::memcpy(&readTime, buffer.data() + storage.GetVar("time").GetGlobalOffset(), sizeof(float));
     EXPECT_EQ(readTime, timeVal);
     
     // Write Eigen vector
@@ -79,7 +79,7 @@ TEST(StructuredBufferStorage, DataReadWrite) {
     
     // Read back
     float readColor[4];
-    std::memcpy(readColor, buffer.data() + storage.GetVar("color").GetOffset(), sizeof(float) * 4);
+    std::memcpy(readColor, buffer.data() + storage.GetVar("color").GetGlobalOffset(), sizeof(float) * 4);
     EXPECT_EQ(readColor[0], 1.0f);
     EXPECT_EQ(readColor[1], 0.5f);
     EXPECT_EQ(readColor[2], 0.2f);
@@ -102,8 +102,8 @@ TEST(StructuredBufferStorage, Alignment) {
     auto var1 = storage.GetVar("var1");
     auto var2 = storage.GetVar("var2");
     
-    EXPECT_EQ(var1.GetOffset(), 0);
-    EXPECT_EQ(var2.GetOffset(), 256);
+    EXPECT_EQ(var1.GetGlobalOffset(), 0);
+    EXPECT_EQ(var2.GetGlobalOffset(), 256);
     EXPECT_EQ(storage.GetData().size(), 512);
 }
 

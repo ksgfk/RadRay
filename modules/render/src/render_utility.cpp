@@ -66,6 +66,9 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
                 } else {
                     auto rOffset = i == type.Members.size() - 1 ? ctx.s : desc.Types[type.Members[i + 1].Type].Offset;
                     sizeInBytes = rOffset - memberType.Offset;
+                    if (memberType.Elements > 0) {
+                        sizeInBytes /= memberType.Elements;
+                    }
                 }
                 auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
                 if (memberType.Elements == 0) {
@@ -87,16 +90,45 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
             return std::nullopt;
         }
         const auto& cb = cbOpt.value().get();
-        for (size_t i = 0; i < cb.Variables.size(); i++) {
-            size_t varIdx = cb.Variables[i];
+        if (cb.IsViewInHlsl) {
+            RADRAY_ASSERT(cb.Variables.size() == 1);
+            size_t varIdx = cb.Variables[0];
             RADRAY_ASSERT(varIdx < desc.Variables.size());
             const auto& var = desc.Variables[varIdx];
             RADRAY_ASSERT(var.Type.Value < desc.Types.size());
             const auto& type = desc.Types[var.Type];
-            size_t sizeInBytes = cb.IsViewInHlsl ? cb.Size : var.Size;
+            size_t sizeInBytes = cb.Size;
             StructuredBufferId bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
-            builder.AddRoot(var.Name, bdTypeIdx);
+            if (res.BindCount > 1) {
+                builder.AddRoot(var.Name, bdTypeIdx, res.BindCount);
+            } else {
+                builder.AddRoot(var.Name, bdTypeIdx);
+            }
             createType(var.Type, bdTypeIdx, sizeInBytes);
+        } else {
+            for (size_t i = 0; i < cb.Variables.size(); i++) {
+                size_t varIdx = cb.Variables[i];
+                RADRAY_ASSERT(varIdx < desc.Variables.size());
+                const auto& var = desc.Variables[varIdx];
+                RADRAY_ASSERT(var.Type.Value < desc.Types.size());
+                const auto& type = desc.Types[var.Type];
+                size_t sizeInBytes = 0;
+                if (i == cb.Variables.size() - 1) {
+                    sizeInBytes = cb.Size - var.StartOffset;
+                } else {
+                    sizeInBytes = desc.Variables[cb.Variables[i + 1]].StartOffset - var.StartOffset;
+                }
+                if (type.Elements > 0) {
+                    sizeInBytes /= type.Elements;
+                }
+                StructuredBufferId bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
+                if (type.Elements == 0) {
+                    builder.AddRoot(var.Name, bdTypeIdx);
+                } else {
+                    builder.AddRoot(var.Name, bdTypeIdx, type.Elements);
+                }
+                createType(var.Type, bdTypeIdx, sizeInBytes);
+            }
         }
     }
     return builder.Build();
