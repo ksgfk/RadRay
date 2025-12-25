@@ -288,7 +288,19 @@ static void _ProcessResource(
                 binding.IsViewInHlsl = it->IsViewInHlsl;
             }
         }
-        binding.UniformBufferSize = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
+        const auto* typePtr = &type;
+        while (!typePtr->array.empty()) {
+            typePtr = &compiler.get_type(typePtr->parent_type);
+        }
+        binding.UniformBufferSize = static_cast<uint32_t>(compiler.get_declared_struct_size(*typePtr));
+        if (binding.ArraySize > 0) {
+            uint32_t arrayStride = compiler.get_decoration(type.self, spv::DecorationArrayStride);
+            if (arrayStride > 0) {
+                binding.UniformBufferSize = arrayStride * binding.ArraySize;
+            } else {
+                throw spirv_cross::CompilerError{"Struct member does not have ArrayStride set."};
+            }
+        }
     }
     desc.ResourceBindings.push_back(std::move(binding));
 }

@@ -189,12 +189,25 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
             }
             createType(res.TypeIndex, bdTypeIdx, sizeInBytes);
         } else {
-            for (auto member : type.Members) {
-                RADRAY_ASSERT(member.TypeIndex < desc.Types.size());
-                auto memberType = desc.Types[member.TypeIndex];
-                StructuredBufferId bdTypeIdx = builder.AddType(memberType.Name, memberType.Size);
-                builder.AddRoot(member.Name, bdTypeIdx);
-                createType(member.TypeIndex, bdTypeIdx, memberType.Size);
+            for (size_t i = 0; i < type.Members.size(); i++) {
+                const auto& member = type.Members[i];
+                const auto& memberType = desc.Types[member.TypeIndex];
+                size_t sizeInBytes;
+                if (i == type.Members.size() - 1) {
+                    sizeInBytes = res.UniformBufferSize - member.Offset;
+                } else {
+                    sizeInBytes = type.Members[i + 1].Offset - member.Offset;
+                }
+                if (memberType.ArraySize > 0) {
+                    sizeInBytes /= memberType.ArraySize;
+                }
+                StructuredBufferId bdTypeIdx = builder.AddType(memberType.Name, sizeInBytes);
+                if (memberType.ArraySize == 0) {
+                    builder.AddRoot(member.Name, bdTypeIdx);
+                } else {
+                    builder.AddRoot(member.Name, bdTypeIdx, memberType.ArraySize);
+                }
+                createType(member.TypeIndex, bdTypeIdx, sizeInBytes);
             }
         }
     }
