@@ -93,9 +93,7 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
         if (cb.IsViewInHlsl) {
             RADRAY_ASSERT(cb.Variables.size() == 1);
             size_t varIdx = cb.Variables[0];
-            RADRAY_ASSERT(varIdx < desc.Variables.size());
             const auto& var = desc.Variables[varIdx];
-            RADRAY_ASSERT(var.Type.Value < desc.Types.size());
             const auto& type = desc.Types[var.Type];
             size_t sizeInBytes = cb.Size;
             StructuredBufferId bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
@@ -108,9 +106,7 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
         } else {
             for (size_t i = 0; i < cb.Variables.size(); i++) {
                 size_t varIdx = cb.Variables[i];
-                RADRAY_ASSERT(varIdx < desc.Variables.size());
                 const auto& var = desc.Variables[varIdx];
-                RADRAY_ASSERT(var.Type.Value < desc.Types.size());
                 const auto& type = desc.Types[var.Type];
                 size_t sizeInBytes = 0;
                 if (i == cb.Variables.size() - 1) {
@@ -152,9 +148,16 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
             for (size_t i = 0; i < type.Members.size(); i++) {
                 const auto& member = type.Members[i];
                 const auto& memberType = desc.Types[member.TypeIndex];
-                size_t sizeInBytes = memberType.Size;
+                size_t sizeInBytes = member.Size;
+                if (memberType.ArraySize > 0) {
+                    sizeInBytes /= memberType.ArraySize;
+                }
                 auto childBdIdx = builder.AddType(memberType.Name, sizeInBytes);
-                builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                if (memberType.ArraySize == 0) {
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                } else {
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset, memberType.ArraySize);
+                }
                 s.push({member.TypeIndex, childBdIdx, sizeInBytes});
             }
         }
@@ -163,9 +166,9 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     for (const auto& res : desc.PushConstants) {
         RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
         auto type = desc.Types[res.TypeIndex];
-        StructuredBufferId bdTypeIdx = builder.AddType(type.Name, type.Size);
+        StructuredBufferId bdTypeIdx = builder.AddType(type.Name, res.Size);
         builder.AddRoot(res.Name, bdTypeIdx);
-        createType(res.TypeIndex, bdTypeIdx, type.Size);
+        createType(res.TypeIndex, bdTypeIdx, res.Size);
     }
     for (const auto& res : desc.ResourceBindings) {
         if (res.Kind != SpirvResourceKind::UniformBuffer) {
@@ -174,9 +177,17 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
         RADRAY_ASSERT(res.TypeIndex < desc.Types.size());
         auto type = desc.Types[res.TypeIndex];
         if (res.IsViewInHlsl) {
-            StructuredBufferId bdTypeIdx = builder.AddType(type.Name, type.Size);
-            builder.AddRoot(res.Name, bdTypeIdx);
-            createType(res.TypeIndex, bdTypeIdx, type.Size);
+            size_t sizeInBytes = res.UniformBufferSize;
+            if (res.ArraySize > 0) {
+                sizeInBytes /= res.ArraySize;
+            }
+            StructuredBufferId bdTypeIdx = builder.AddType(type.Name, sizeInBytes);
+            if (res.ArraySize == 0) {
+                builder.AddRoot(res.Name, bdTypeIdx);
+            } else {
+                builder.AddRoot(res.Name, bdTypeIdx, res.ArraySize);
+            }
+            createType(res.TypeIndex, bdTypeIdx, sizeInBytes);
         } else {
             for (auto member : type.Members) {
                 RADRAY_ASSERT(member.TypeIndex < desc.Types.size());

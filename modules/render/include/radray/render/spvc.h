@@ -103,6 +103,7 @@ struct SpirvResourceBinding {
     ShaderStage Stages{ShaderStage::UNKNOWN};
 
     std::optional<SpirvImageInfo> ImageInfo;
+    uint32_t UniformBufferSize{0};
     bool ReadOnly{true};
     bool WriteOnly{false};
     bool IsViewInHlsl{false};

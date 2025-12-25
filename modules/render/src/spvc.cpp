@@ -288,6 +288,7 @@ static void _ProcessResource(
                 binding.IsViewInHlsl = it->IsViewInHlsl;
             }
         }
+        binding.UniformBufferSize = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
     }
     desc.ResourceBindings.push_back(std::move(binding));
 }
