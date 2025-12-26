@@ -58,7 +58,7 @@
             "Name": "libpng",
             "Type": "git",
             "Git": "https://github.com/pnggroup/libpng.git",
-            "Tag": "v1.6.50"
+            "Tag": "v1.6.53"
         },
         {
             "Name": "freetype",
@@ -101,6 +101,12 @@
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
             "Tag": "v3.0.1"
+        },
+        {
+            "Name": "imgui",
+            "Type": "git",
+            "Git": "https://github.com/ocornut/imgui.git",
+            "Tag": "v1.92.5"
         },
         {
             "Name": "googletest",
