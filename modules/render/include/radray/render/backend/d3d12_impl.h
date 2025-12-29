@@ -284,7 +284,9 @@ public:
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
-    Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
+    Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
+
+    Nullable<unique_ptr<Semaphore>> CreateSemaphoreGraphics() noexcept override;
 
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
@@ -353,23 +355,53 @@ public:
     D3D12_COMMAND_LIST_TYPE _type;
 };
 
-class FenceD3D12 final : public Fence {
+class FenceD3D12 final : public RenderBase {
 public:
     FenceD3D12(
         ComPtr<ID3D12Fence> fence,
         Win32Event event) noexcept;
     ~FenceD3D12() noexcept override = default;
 
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
-    uint64_t GetCompletedValue() const noexcept override;
+    uint64_t GetCompletedValue() const noexcept;
 
 public:
     ComPtr<ID3D12Fence> _fence;
     uint64_t _fenceValue{0};
     Win32Event _event{};
+};
+
+class FenceD3D12Proxy final : public Fence {
+public:
+    explicit FenceD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept;
+    ~FenceD3D12Proxy() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    uint64_t GetCompletedValue() const noexcept;
+
+public:
+    unique_ptr<FenceD3D12> _proxy;
+};
+
+class SemaphoreD3D12Proxy final : public Semaphore {
+public:
+    explicit SemaphoreD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept;
+    ~SemaphoreD3D12Proxy() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    unique_ptr<FenceD3D12> _proxy;
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -458,7 +490,11 @@ public:
 
     Nullable<Texture*> AcquireNext() noexcept override;
 
+    Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
+
     void Present() noexcept override;
+
+    void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -673,7 +709,8 @@ constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3
 constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
 constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
+constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12Proxy*>(v)->_proxy.get(); }
+constexpr auto CastD3D12Object(Semaphore* v) noexcept { return static_cast<SemaphoreD3D12Proxy*>(v)->_proxy.get(); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }

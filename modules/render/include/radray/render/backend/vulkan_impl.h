@@ -116,7 +116,9 @@ public:
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
 
-    Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept override;
+    Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
+
+    Nullable<unique_ptr<Semaphore>> CreateSemaphoreGraphics() noexcept override;
 
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
@@ -142,6 +144,7 @@ public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
     Nullable<unique_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+
     Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
@@ -151,6 +154,7 @@ public:
     Nullable<unique_ptr<DescriptorSetLayoutVulkan>> CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept;
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept;
+
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept;
 
     Nullable<unique_ptr<CommandBufferVulkan>> CreateCommandBufferVulkan(QueueVulkan* queue) noexcept;
@@ -358,15 +362,13 @@ public:
     VkFramebuffer _framebuffer;
 };
 
-class FenceVulkan final : public RenderBase {
+class FenceVulkan final : public Fence {
 public:
     FenceVulkan(
         DeviceVulkan* device,
         VkFence fence) noexcept;
 
     ~FenceVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -379,15 +381,13 @@ public:
     VkFence _fence;
 };
 
-class SemaphoreVulkan final : public RenderBase {
+class SemaphoreVulkan final : public Semaphore {
 public:
     SemaphoreVulkan(
         DeviceVulkan* device,
         VkSemaphore semaphore) noexcept;
 
     ~SemaphoreVulkan() noexcept;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
@@ -400,7 +400,7 @@ public:
     VkSemaphore _semaphore;
 };
 
-class TimelineSemaphoreVulkan final : public Fence {
+class TimelineSemaphoreVulkan final : public RenderBase {
 public:
     TimelineSemaphoreVulkan(
         DeviceVulkan* device,
@@ -408,11 +408,13 @@ public:
 
     ~TimelineSemaphoreVulkan() noexcept;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
-    uint64_t GetCompletedValue() const noexcept override;
+    uint64_t GetCompletedValue() const noexcept;
 
 public:
     void DestroyImpl() noexcept;
@@ -458,7 +460,11 @@ public:
 
     Nullable<Texture*> AcquireNext() noexcept override;
 
+    Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
+
     void Present() noexcept override;
+
+    void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -830,7 +836,9 @@ void DestroyVulkanInstanceImpl(unique_ptr<InstanceVulkan> instance) noexcept;
 
 constexpr auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
 constexpr auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
-constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<TimelineSemaphoreVulkan*>(p); }
+constexpr auto CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
+constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
+constexpr auto CastVkObject(Semaphore* p) noexcept { return static_cast<SemaphoreVulkan*>(p); }
 constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }

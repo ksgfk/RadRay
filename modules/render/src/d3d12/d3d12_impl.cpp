@@ -527,8 +527,20 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
     }
 }
 
-Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence(uint64_t initValue) noexcept {
-    return this->CreateFenceD3D12(initValue);
+Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+    auto fOpt = this->CreateFenceD3D12(0);
+    if (!fOpt.HasValue()) {
+        return nullptr;
+    }
+    return make_unique<FenceD3D12Proxy>(fOpt.Release());
+}
+
+Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreGraphics() noexcept {
+    auto fOpt = this->CreateFenceD3D12(0);
+    if (!fOpt.HasValue()) {
+        return nullptr;
+    }
+    return make_unique<SemaphoreD3D12Proxy>(fOpt.Release());
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
@@ -1582,6 +1594,46 @@ uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     return _fence->GetCompletedValue();
 }
 
+FenceD3D12Proxy::FenceD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept : _proxy(std::move(proxy)) {}
+
+FenceD3D12Proxy::~FenceD3D12Proxy() noexcept {
+    if (_proxy) {
+        _proxy->Destroy();
+        _proxy = nullptr;
+    }
+}
+
+bool FenceD3D12Proxy::IsValid() const noexcept { return _proxy != nullptr && _proxy->IsValid(); }
+
+void FenceD3D12Proxy::Destroy() noexcept {
+    if (_proxy) {
+        _proxy->Destroy();
+        _proxy = nullptr;
+    }
+}
+
+uint64_t FenceD3D12Proxy::GetCompletedValue() const noexcept {
+    return _proxy->GetCompletedValue();
+}
+
+SemaphoreD3D12Proxy::SemaphoreD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept : _proxy(std::move(proxy)) {}
+
+SemaphoreD3D12Proxy::~SemaphoreD3D12Proxy() noexcept {
+    if (_proxy) {
+        _proxy->Destroy();
+        _proxy = nullptr;
+    }
+}
+
+bool SemaphoreD3D12Proxy::IsValid() const noexcept { return _proxy != nullptr && _proxy->IsValid(); }
+
+void SemaphoreD3D12Proxy::Destroy() noexcept {
+    if (_proxy) {
+        _proxy->Destroy();
+        _proxy = nullptr;
+    }
+}
+
 CmdListD3D12::CmdListD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandAllocator> cmdAlloc,
@@ -1965,6 +2017,14 @@ Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
     return frame.image.get();
 }
 
+Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
+    RADRAY_UNUSED(signalSemaphore);
+    RADRAY_UNUSED(signalFence);
+    auto curr = _swapchain->GetCurrentBackBufferIndex();
+    auto& frame = _frames[curr];
+    return frame.image.get();
+}
+
 void SwapChainD3D12::Present() noexcept {
     UINT curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
@@ -1978,6 +2038,16 @@ void SwapChainD3D12::Present() noexcept {
     auto queue = CastD3D12Object(_desc.PresentQueue);
     queue->_queue->Signal(_fence.Get(), _fenceValue);
     _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
+}
+
+void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
+    RADRAY_UNUSED(waitSemaphores);
+    UINT syncInterval = _desc.EnableSync ? 1 : 0;
+    UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+        FAILED(hr)) {
+        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
+    }
 }
 
 Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {

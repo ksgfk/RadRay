@@ -329,7 +329,8 @@ enum class RenderObjectTag : uint32_t {
     CmdBuffer = CmdQueue << 1,
     CmdEncoder = CmdBuffer << 1,
     Fence = CmdEncoder << 1,
-    Shader = Fence << 1,
+    Semaphore = Fence << 1,
+    Shader = Semaphore << 1,
     RootSignature = Shader << 1,
     PipelineState = RootSignature << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
@@ -408,15 +409,16 @@ class GraphicsPipelineState;
 class DescriptorSet;
 class Sampler;
 class InstanceVulkan;
+class Semaphore;
 
 class RenderBase {
 public:
     RenderBase() noexcept = default;
     virtual ~RenderBase() noexcept = default;
     RenderBase(const RenderBase&) = delete;
-    RenderBase(RenderBase&&) = default;
+    RenderBase(RenderBase&&) = delete;
     RenderBase& operator=(const RenderBase&) = delete;
-    RenderBase& operator=(RenderBase&&) = default;
+    RenderBase& operator=(RenderBase&&) = delete;
 
     virtual RenderObjectTags GetTag() const noexcept = 0;
 
@@ -817,7 +819,9 @@ public:
 
     virtual Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
 
-    virtual Nullable<unique_ptr<Fence>> CreateFence(uint64_t initValue) noexcept = 0;
+    virtual Nullable<unique_ptr<Fence>> CreateFence() noexcept = 0;
+
+    virtual Nullable<unique_ptr<Semaphore>> CreateSemaphoreGraphics() noexcept = 0;  // a.k.a. CreateSemaphore. make windows.h happy :)
 
     virtual Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 
@@ -906,8 +910,6 @@ public:
     virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
-
-    virtual uint64_t GetCompletedValue() const noexcept = 0;
 };
 
 class SwapChain : public RenderBase {
@@ -918,7 +920,11 @@ public:
 
     virtual Nullable<Texture*> AcquireNext() noexcept = 0;
 
+    virtual Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept = 0;
+
     virtual void Present() noexcept = 0;
+
+    virtual void Present(std::span<Semaphore*> waitSemaphores) noexcept = 0;
 
     virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
 
@@ -1025,6 +1031,13 @@ public:
     virtual ~InstanceVulkan() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
+};
+
+class Semaphore : public RenderBase {
+public:
+    virtual ~Semaphore() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Semaphore; }
 };
 
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);
