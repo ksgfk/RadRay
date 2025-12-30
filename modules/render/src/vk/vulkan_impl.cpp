@@ -290,9 +290,6 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
             ResourceHint::None,
             name};
         f.image->SetExtData(texDesc);
-        f.fence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT).Unwrap();
-        f.imageAvailableSemaphore = this->CreateLegacySemaphore(0).Unwrap();
-        f.renderFinishedSemaphore = this->CreateLegacySemaphore(0).Unwrap();
     }
     result->_desc = desc;
     return result;
@@ -1053,6 +1050,7 @@ Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateF
         return nullptr;
     }
     auto v = make_unique<FenceVulkan>(this, fence);
+    v->_submitted = !((flags & VK_FENCE_CREATE_SIGNALED_BIT) == VK_FENCE_CREATE_SIGNALED_BIT);
     return v;
 }
 
@@ -1067,7 +1065,9 @@ Nullable<unique_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSema
         RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSemaphore", vr);
         return nullptr;
     }
-    return make_unique<SemaphoreVulkan>(this, semaphore);
+    auto v = make_unique<SemaphoreVulkan>(this, semaphore);
+    v->_signaled = false;
+    return v;
 }
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
@@ -1715,79 +1715,58 @@ void QueueVulkan::Destroy() noexcept {
 }
 
 void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    // TODO: rewrite
+    vector<VkSemaphore> waitSemaphores;
+    waitSemaphores.reserve(desc.WaitSemaphores.size());
+    vector<VkPipelineStageFlags> waitStages;
+    waitStages.resize(desc.WaitSemaphores.size(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    for (auto i : desc.WaitSemaphores) {
+        auto semaphore = CastVkObject(i);
+        if (semaphore->_signaled) {
+            waitSemaphores.emplace_back(semaphore->_semaphore);
+            semaphore->_signaled = false;
+        }
+    }
+    vector<VkCommandBuffer> cmdBufs;
+    cmdBufs.reserve(desc.CmdBuffers.size());
+    for (auto i : desc.CmdBuffers) {
+        auto cmdBuffer = CastVkObject(i);
+        cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
+    }
+    vector<VkSemaphore> signalSemaphores;
+    signalSemaphores.reserve(desc.SignalSemaphores.size());
+    for (auto i : desc.SignalSemaphores) {
+        auto semaphore = CastVkObject(i);
+        if (!semaphore->_signaled) {
+            signalSemaphores.emplace_back(semaphore->_semaphore);
+            semaphore->_signaled = true;
+        }
+    }
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = nullptr;
+    submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+    submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
+    submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
+    submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
+    submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
+    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
+    submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
 
-    // vector<VkCommandBuffer> cmdBufs;
-    // cmdBufs.reserve(desc.CmdBuffers.size());
-    // for (auto i : desc.CmdBuffers) {
-    //     auto cmdBuffer = CastVkObject(i);
-    //     cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
-    // }
-    // vector<VkSemaphore> waitSemaphores;
-    // vector<uint64_t> waitValues;
-    // vector<VkPipelineStageFlags> waitStages;
-    // size_t waitCount = desc.WaitFences.size();
-    // size_t waitCapacity = desc.WaitFences.size() + (_swapchainSync.imageAvailableSemaphore ? 1 : 0);
-    // waitSemaphores.reserve(waitCapacity);
-    // waitValues.reserve(waitCapacity);
-    // waitStages.reserve(waitCapacity);
-    // if (_swapchainSync.imageAvailableSemaphore) {
-    //     waitSemaphores.emplace_back(_swapchainSync.imageAvailableSemaphore->_semaphore);
-    //     waitValues.emplace_back(0);
-    //     waitStages.emplace_back(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
-    //     _swapchainSync.imageAvailableSemaphore = nullptr;
-    // }
-    // for (size_t i = 0; i < waitCount; i++) {
-    //     auto timelineSemaphore = CastVkObject(desc.WaitFences[i]);
-    //     auto fenceValue = desc.WaitFenceValues[i];
-    //     waitSemaphores.emplace_back(timelineSemaphore->_semaphore);
-    //     waitValues.emplace_back(fenceValue);
-    //     waitStages.emplace_back(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-    // }
-    // vector<VkSemaphore> signalSemaphores;
-    // vector<uint64_t> signalValues;
-    // size_t signalCount = desc.SignalFences.size();
-    // size_t signalCapacity = desc.SignalFences.size() + (_swapchainSync.renderFinishedSemaphore ? 1 : 0);
-    // signalSemaphores.reserve(signalCapacity);
-    // signalValues.reserve(signalCapacity);
-    // if (_swapchainSync.renderFinishedSemaphore) {
-    //     signalSemaphores.emplace_back(_swapchainSync.renderFinishedSemaphore->_semaphore);
-    //     signalValues.emplace_back(0);
-    //     _swapchainSync.renderFinishedSemaphore = nullptr;
-    // }
-    // for (size_t i = 0; i < signalCount; i++) {
-    //     auto timelineSemaphore = CastVkObject(desc.SignalFences[i]);
-    //     auto fenceValue = desc.SignalFenceValues[i];
-    //     signalSemaphores.emplace_back(timelineSemaphore->_semaphore);
-    //     signalValues.emplace_back(fenceValue);
-    // }
-    // VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
-    // timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    // timelineSubmitInfo.pNext = nullptr;
-    // timelineSubmitInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size());
-    // timelineSubmitInfo.pWaitSemaphoreValues = waitValues.empty() ? nullptr : waitValues.data();
-    // timelineSubmitInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalValues.size());
-    // timelineSubmitInfo.pSignalSemaphoreValues = signalValues.empty() ? nullptr : signalValues.data();
-    // VkSubmitInfo submitInfo{};
-    // submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    // submitInfo.pNext = &timelineSubmitInfo;
-    // submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
-    // submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
-    // submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
-    // submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
-    // submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
-    // submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
-    // submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
-    // VkFence signalFence = VK_NULL_HANDLE;
-    // if (_swapchainSync.fence) {
-    //     signalFence = _swapchainSync.fence->_fence;
-    //     _swapchainSync.fence = nullptr;
-    // }
-    // if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
-    //     vr != VK_SUCCESS) {
-    //     RADRAY_ABORT("{} {} {}", Errors::VK, "vkQueueSubmit", vr);
-    //     return;
-    // }
+    VkFence signalFence = VK_NULL_HANDLE;
+    if (desc.SignalFence.HasValue()) {
+        auto fence = CastVkObject(desc.SignalFence.Get());
+        signalFence = fence->_fence;
+    }
+
+    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("{} {} {}", Errors::VK, "vkQueueSubmit", vr);
+    }
+
+    if (desc.SignalFence.HasValue()) {
+        auto fence = CastVkObject(desc.SignalFence.Get());
+        fence->_submitted = true;
+    }
 }
 
 void QueueVulkan::Wait() noexcept {
@@ -1795,7 +1774,6 @@ void QueueVulkan::Wait() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("{} {} {}", Errors::VK, "vkQueueWaitIdle", vr);
     }
-    _swapchainSync = {};
 }
 
 void QueueVulkan::DestroyImpl() noexcept {
@@ -2231,60 +2209,6 @@ void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceVie
     RADRAY_UNUSED(slot);
     RADRAY_UNUSED(view);
     RADRAY_ERR_LOG("{} {}", Errors::VK, "RS RootBindings not support");
-
-    // if (!_boundPipeLayout) {
-    //     RADRAY_ERR_LOG("vk BindRootDescriptor without pipelinelayout");
-    //     return;
-    // }
-    // if (!_boundPipeLayout->_rootSetLayout || !_boundPipeLayout->_rootSet) {
-    //     RADRAY_ERR_LOG("vk BindRootDescriptor but pipelinelayout has no root descriptor");
-    //     return;
-    // }
-    // DescriptorSetLayoutVulkan* rootSetLayout = _boundPipeLayout->_rootSetLayout.get();
-    // DescriptorSetVulkan* rootSet = _boundPipeLayout->_rootSet.get();
-    // if (slot >= rootSetLayout->_rootBindings.size()) {
-    //     RADRAY_ERR_LOG("vk BindRootDescriptor slot {} exceeds pipelinelayout root descriptor count {}", slot, rootSetLayout->_rootBindings.size());
-    //     return;
-    // }
-    // _device->_ftb.vkCmdBindDescriptorSets(
-    //     _cmdBuffer->_cmdBuffer,
-    //     VK_PIPELINE_BIND_POINT_GRAPHICS,
-    //     _boundPipeLayout->_layout,
-    //     _boundPipeLayout->_rootSetStart,
-    //     1,
-    //     &rootSet->_set,
-    //     0, nullptr);
-    // const auto& rb = rootSetLayout->_rootBindings[slot];
-    // VkWriteDescriptorSet writeDesc{};
-    // writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    // writeDesc.pNext = nullptr;
-    // writeDesc.dstSet = rootSet->_set;
-    // writeDesc.dstBinding = rb.Slot;
-    // writeDesc.dstArrayElement = 0;
-    // writeDesc.descriptorCount = 1;
-    // writeDesc.descriptorType = MapType(rb.Type);
-    // auto tag = view->GetTag();
-    // VkDescriptorBufferInfo bufInfo{};
-    // if (tag == RenderObjectTag::BufferView) {
-    //     auto bv = static_cast<SimulateBufferViewVulkan*>(view);
-    //     bufInfo.buffer = bv->_buffer->_buffer;
-    //     bufInfo.offset = bv->_range.Offset;
-    //     bufInfo.range = bv->_range.Size;
-    //     writeDesc.pBufferInfo = &bufInfo;
-    // } else if (tag == RenderObjectTag::TextureView) {
-    //     // TODO: support image view as root descriptor
-    //     RADRAY_ERR_LOG("vk cannot bind texture as root descriptor");
-    //     return;
-    // } else {
-    //     RADRAY_ERR_LOG("vk cannot BindRootDescriptor, unsupported tag {}", static_cast<RenderObjectTag>(tag.value()));
-    //     return;
-    // }
-    // _device->_ftb.vkUpdateDescriptorSets(
-    //     _device->_device,
-    //     1,
-    //     &writeDesc,
-    //     0,
-    //     nullptr);
 }
 
 void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
@@ -2381,6 +2305,17 @@ bool FenceVulkan::IsValid() const noexcept {
 
 void FenceVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void FenceVulkan::Wait() noexcept {
+    if (_submitted) {
+        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("{} {} {}", Errors::VK, "vkWaitForFences", vr);
+        }
+        _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
+        _submitted = false;
+    }
 }
 
 void FenceVulkan::DestroyImpl() noexcept {
@@ -2508,122 +2443,52 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
-    // 等待渲染中的帧资源完成
-    Frame& inflightFrame = _frames[_currentFrameIndex];
-    _device->_ftb.vkWaitForFences(_device->_device, 1, &inflightFrame.fence->_fence, VK_TRUE, UINT64_MAX);
-    _device->_ftb.vkResetFences(_device->_device, 1, &inflightFrame.fence->_fence);
-    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
-    // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
-    if (auto vr = _device->_ftb.vkAcquireNextImageKHR(
-            _device->_device,
-            _swapchain,
-            UINT64_MAX,
-            inflightFrame.imageAvailableSemaphore->_semaphore,  // signal 帧资源可用
-            VK_NULL_HANDLE,
-            &_currentTextureIndex);
-        vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
-        if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
-            RADRAY_WARN_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
-        } else {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
-        }
-        return nullptr;
-    }
-    Frame& imageFrame = _frames[_currentTextureIndex];
-    _queue->_swapchainSync.fence = inflightFrame.fence;
-    _queue->_swapchainSync.imageAvailableSemaphore = inflightFrame.imageAvailableSemaphore;  // 让 queue 等待帧资源的 rt 可用
-    _queue->_swapchainSync.renderFinishedSemaphore = imageFrame.renderFinishedSemaphore;     // 让 queue signal rt 渲染完成
-    return imageFrame.image.get();
-}
-
 Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
-    auto semaphore = signalSemaphore.HasValue() ? CastVkObject(signalSemaphore.Get())->_semaphore : nullptr;
-    auto fence = signalFence.HasValue() ? CastVkObject(signalFence.Get())->_fence : nullptr;
-
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    if (signalSemaphore.HasValue()) {
+        auto sem = CastVkObject(signalSemaphore.Get());
+        semaphore = sem->_semaphore;
+    }
+    VkFence fence = VK_NULL_HANDLE;
+    if (signalFence.HasValue()) {
+        auto f = CastVkObject(signalFence.Get());
+        fence = f->_fence;
+    }
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
-    // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
-    if (auto vr = _device->_ftb.vkAcquireNextImageKHR(
-            _device->_device,
-            _swapchain,
-            UINT64_MAX,
-            semaphore,
-            fence,
-            &_currentTextureIndex);
-        vr != VK_SUCCESS && vr != VK_SUBOPTIMAL_KHR) {
-        if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
-            RADRAY_WARN_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
-        } else {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
+    auto vr = _device->_ftb.vkAcquireNextImageKHR(
+        _device->_device,
+        _swapchain,
+        UINT64_MAX,
+        semaphore,
+        fence,
+        &_currentTextureIndex);
+    if (vr == VK_SUCCESS) {
+        if (signalFence.HasValue()) {
+            auto fenceObj = CastVkObject(signalFence.Get());
+            fenceObj->_submitted = true;
         }
+        if (signalSemaphore.HasValue()) {
+            auto semObj = CastVkObject(signalSemaphore.Get());
+            semObj->_signaled = true;
+        }
+        Frame& imageFrame = _frames[_currentTextureIndex];
+        return imageFrame.image.get();
+    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
+        if (signalFence.HasValue()) {
+            auto fenceObj = CastVkObject(signalFence.Get());
+            _device->_ftb.vkResetFences(_device->_device, 1, &fenceObj->_fence);
+            fenceObj->_submitted = false;
+        }
+        if (signalSemaphore.HasValue()) {
+            auto semObj = CastVkObject(signalSemaphore.Get());
+            semObj->_signaled = false;
+        }
+        RADRAY_WARN_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
+        return nullptr;
+    } else {
+        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
         return nullptr;
     }
-    Frame& imageFrame = _frames[_currentTextureIndex];
-    return imageFrame.image.get();
-}
-
-void SwapChainVulkan::Present() noexcept {
-    Frame& imageFrame = _frames[_currentTextureIndex];
-
-    // 如果直到 present, queue 还没有提交过命令
-    // 在提交前需要将当前 back buffer 转换到 PRESENT 状态
-    if (_queue->_swapchainSync.fence != nullptr) {
-        if (imageFrame.internalCmdBuffer == nullptr) {
-            imageFrame.internalCmdBuffer = _device->CreateCommandBufferVulkan(_queue).Unwrap();
-        }
-        auto cmdBuffer = imageFrame.internalCmdBuffer.get();
-        cmdBuffer->Begin();
-        VkImageMemoryBarrier imgBarrier{};
-        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        imgBarrier.pNext = nullptr;
-        imgBarrier.srcAccessMask = 0;
-        imgBarrier.dstAccessMask = 0;
-        imgBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imgBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imgBarrier.image = imageFrame.image->_image;
-        imgBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imgBarrier.subresourceRange.baseMipLevel = 0;
-        imgBarrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-        imgBarrier.subresourceRange.baseArrayLayer = 0;
-        imgBarrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-        _device->_ftb.vkCmdPipelineBarrier(
-            cmdBuffer->_cmdBuffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0,
-            0, nullptr,
-            0, nullptr,
-            1, &imgBarrier);
-        cmdBuffer->End();
-        VkPipelineStageFlags waitStage{VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT};
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.pNext = nullptr;
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &_queue->_swapchainSync.imageAvailableSemaphore->_semaphore;
-        submitInfo.pWaitDstStageMask = &waitStage;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &cmdBuffer->_cmdBuffer;
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &_queue->_swapchainSync.renderFinishedSemaphore->_semaphore;         // signal cmd finish
-        _device->_ftb.vkQueueSubmit(_queue->_queue, 1, &submitInfo, _queue->_swapchainSync.fence->_fence);  // signal host that cmd finish
-        _queue->_swapchainSync.fence = nullptr;
-        _queue->_swapchainSync.imageAvailableSemaphore = nullptr;
-        _queue->_swapchainSync.renderFinishedSemaphore = nullptr;
-    }
-    VkPresentInfoKHR presentInfo{};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.pNext = nullptr;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &imageFrame.renderFinishedSemaphore->_semaphore;  // 等待之前acquire的rt的渲染完成
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &_swapchain;
-    presentInfo.pImageIndices = &_currentTextureIndex;
-    presentInfo.pResults = nullptr;
-    _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
-    _currentFrameIndex = (_currentFrameIndex + 1) % _frames.size();
 }
 
 void SwapChainVulkan::Present(std::span<Semaphore*> waitSemaphores) noexcept {
@@ -2631,7 +2496,10 @@ void SwapChainVulkan::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     waitSems.reserve(waitSemaphores.size());
     for (auto sem : waitSemaphores) {
         auto semaphore = CastVkObject(sem);
-        waitSems.emplace_back(semaphore->_semaphore);
+        if (semaphore->_signaled) {
+            waitSems.emplace_back(semaphore->_semaphore);
+            semaphore->_signaled = false;
+        }
     }
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

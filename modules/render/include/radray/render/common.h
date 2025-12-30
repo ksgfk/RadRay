@@ -490,11 +490,10 @@ struct SamplerDescriptor {
 };
 
 struct CommandQueueSubmitDescriptor {
-    std::span<CommandBuffer* const> CmdBuffers{};
-    std::span<Fence* const> WaitFences{};
-    std::span<const uint64_t> WaitFenceValues{};
-    std::span<Fence* const> SignalFences{};
-    std::span<const uint64_t> SignalFenceValues{};
+    std::span<CommandBuffer*> CmdBuffers{};
+    Nullable<Fence*> SignalFence{nullptr};
+    std::span<Semaphore*> WaitSemaphores{};
+    std::span<Semaphore*> SignalSemaphores{};
 };
 
 struct BarrierBufferDescriptor {
@@ -910,6 +909,8 @@ public:
     virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+
+    virtual void Wait() noexcept = 0;
 };
 
 class SwapChain : public RenderBase {
@@ -918,11 +919,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture*> AcquireNext() noexcept = 0;
-
     virtual Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept = 0;
-
-    virtual void Present() noexcept = 0;
 
     virtual void Present(std::span<Semaphore*> waitSemaphores) noexcept = 0;
 

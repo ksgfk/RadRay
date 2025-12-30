@@ -208,11 +208,6 @@ public:
     VkQueue _queue;
     QueueIndexInFamily _family;
     QueueType _type;
-    struct {
-        shared_ptr<FenceVulkan> fence;
-        shared_ptr<SemaphoreVulkan> imageAvailableSemaphore;
-        shared_ptr<SemaphoreVulkan> renderFinishedSemaphore;
-    } _swapchainSync;
 };
 
 class CommandPoolVulkan final : public RenderBase {
@@ -374,11 +369,14 @@ public:
 
     void Destroy() noexcept override;
 
+    void Wait() noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkFence _fence;
+    bool _submitted{false};
 };
 
 class SemaphoreVulkan final : public Semaphore {
@@ -398,6 +396,7 @@ public:
 
     DeviceVulkan* _device;
     VkSemaphore _semaphore;
+    bool _signaled{false};
 };
 
 class TimelineSemaphoreVulkan final : public RenderBase {
@@ -458,11 +457,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext() noexcept override;
-
     Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
-
-    void Present() noexcept override;
 
     void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
 
@@ -480,10 +475,6 @@ public:
     class Frame {
     public:
         unique_ptr<ImageVulkan> image;
-        shared_ptr<FenceVulkan> fence;
-        shared_ptr<SemaphoreVulkan> imageAvailableSemaphore;
-        shared_ptr<SemaphoreVulkan> renderFinishedSemaphore;
-        unique_ptr<CommandBufferVulkan> internalCmdBuffer;
     };
 
     DeviceVulkan* _device;
@@ -492,7 +483,6 @@ public:
     VkSwapchainKHR _swapchain;
     vector<Frame> _frames;
     uint32_t _currentTextureIndex{0};
-    uint32_t _currentFrameIndex{0};
     SwapChainDescriptor _desc;
 };
 

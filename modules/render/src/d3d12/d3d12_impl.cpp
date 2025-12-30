@@ -1523,7 +1523,7 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
         return nullptr;
     }
     auto result = make_unique<FenceD3D12>(std::move(fence), std::move(e.value()));
-    result->_fenceValue = initValue;
+    result->_fenceValue = initValue + 1;
     return result;
 }
 
@@ -1547,32 +1547,32 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    for (size_t i = 0; i < desc.WaitFences.size(); i++) {
-        auto f = CastD3D12Object(desc.WaitFences[i]);
-        _queue->Wait(f->_fence.Get(), desc.WaitFenceValues[i]);
+    for (size_t i = 0; i < desc.WaitSemaphores.size(); i++) {
+        auto f = CastD3D12Object(desc.WaitSemaphores[i]);
+        _queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
     }
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
     for (auto& i : desc.CmdBuffers) {
         auto cmdList = CastD3D12Object(i);
-        submits.push_back(cmdList->_cmdList.Get());
+        submits.emplace_back(cmdList->_cmdList.Get());
     }
     if (!submits.empty()) {
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
     }
-    for (size_t i = 0; i < desc.SignalFences.size(); i++) {
-        auto f = CastD3D12Object(desc.SignalFences[i]);
-        _queue->Signal(f->_fence.Get(), desc.SignalFenceValues[i]);
+    if (desc.SignalFence.HasValue()) {
+        auto f = CastD3D12Object(desc.SignalFence.Get());
+        _queue->Signal(f->_fence.Get(), f->_fenceValue++);
     }
-    _fence->_fenceValue++;
-    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue);
+    for (size_t i = 0; i < desc.SignalSemaphores.size(); i++) {
+        auto f = CastD3D12Object(desc.SignalSemaphores[i]);
+        _queue->Signal(f->_fence.Get(), f->_fenceValue++);
+    }
 }
 
 void CmdQueueD3D12::Wait() noexcept {
-    _fence->_fenceValue++;
-    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue);
-    _fence->_fence->SetEventOnCompletion(_fence->_fenceValue, _fence->_event.Get());
-    ::WaitForSingleObject(_fence->_event.Get(), INFINITE);
+    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue++);
+    _fence->Wait();
 }
 
 FenceD3D12::FenceD3D12(
@@ -1588,6 +1588,15 @@ bool FenceD3D12::IsValid() const noexcept {
 void FenceD3D12::Destroy() noexcept {
     _fence = nullptr;
     _event.Destroy();
+}
+
+void FenceD3D12::Wait() noexcept {
+    UINT64 completedValue = _fence->GetCompletedValue();
+    uint64_t signaledValue = _fenceValue - 1;
+    if (completedValue < signaledValue) {
+        _fence->SetEventOnCompletion(signaledValue, _event.Get());
+        ::WaitForSingleObject(_event.Get(), INFINITE);
+    }
 }
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
@@ -1610,6 +1619,10 @@ void FenceD3D12Proxy::Destroy() noexcept {
         _proxy->Destroy();
         _proxy = nullptr;
     }
+}
+
+void FenceD3D12Proxy::Wait() noexcept {
+    _proxy->Wait();
 }
 
 uint64_t FenceD3D12Proxy::GetCompletedValue() const noexcept {
@@ -2009,35 +2022,12 @@ void SwapChainD3D12::Destroy() noexcept {
     _swapchain = nullptr;
 }
 
-Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
-    auto curr = _swapchain->GetCurrentBackBufferIndex();
-    auto& frame = _frames[curr];
-    ::WaitForSingleObject(frame.event.Get(), INFINITE);
-    ::ResetEvent(frame.event.Get());
-    return frame.image.get();
-}
-
 Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
     RADRAY_UNUSED(signalSemaphore);
     RADRAY_UNUSED(signalFence);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
     return frame.image.get();
-}
-
-void SwapChainD3D12::Present() noexcept {
-    UINT curr = _swapchain->GetCurrentBackBufferIndex();
-    auto& frame = _frames[curr];
-    UINT syncInterval = _desc.EnableSync ? 1 : 0;
-    UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-    if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
-        FAILED(hr)) {
-        RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
-    }
-    _fenceValue++;
-    auto queue = CastD3D12Object(_desc.PresentQueue);
-    queue->_queue->Signal(_fence.Get(), _fenceValue);
-    _fence->SetEventOnCompletion(_fenceValue, frame.event.Get());
 }
 
 void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
