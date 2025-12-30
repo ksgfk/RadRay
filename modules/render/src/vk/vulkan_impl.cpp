@@ -291,7 +291,6 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
             name};
         f.image->SetExtData(texDesc);
     }
-    result->_desc = desc;
     return result;
 }
 
@@ -357,6 +356,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     }
     this->SetObjectName(desc.Name, vkBuf);
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
+    result->_reqSize = bufInfo.size;
     result->_name = desc.Name;
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
@@ -1892,7 +1892,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         }
         bufBarrier.buffer = buf->_buffer;
         bufBarrier.offset = 0;
-        bufBarrier.size = buf->_allocInfo.size;
+        bufBarrier.size = buf->_reqSize;
 
         auto srcStage = BufferUseToPipelineStageFlags(i.Before);
         auto dstStage = BufferUseToPipelineStageFlags(i.After);
@@ -2526,10 +2526,6 @@ uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
-}
-
-SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
-    return _desc;
 }
 
 BufferVulkan::BufferVulkan(

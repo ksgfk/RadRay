@@ -502,21 +502,16 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
-    SwapChainDescriptor GetDesc() const noexcept override;
-
 public:
     class Frame {
     public:
         unique_ptr<TextureD3D12> image;
-        Win32Event event;
     };
 
     DeviceD3D12* _device;
     ComPtr<IDXGISwapChain3> _swapchain;
-    ComPtr<ID3D12Fence> _fence;
-    uint64_t _fenceValue;
     vector<Frame> _frames;
-    SwapChainDescriptor _desc;
+    bool _enableSync{false};
 };
 
 class BufferD3D12 final : public Buffer {

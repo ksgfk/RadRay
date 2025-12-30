@@ -467,8 +467,6 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
-    SwapChainDescriptor GetDesc() const noexcept override;
-
 public:
     void DestroyImpl() noexcept;
 
@@ -483,7 +481,6 @@ public:
     VkSwapchainKHR _swapchain;
     vector<Frame> _frames;
     uint32_t _currentTextureIndex{0};
-    SwapChainDescriptor _desc;
 };
 
 class BufferVulkan final : public Buffer {
@@ -513,6 +510,7 @@ public:
     VkBuffer _buffer;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
+    VkDeviceSize _reqSize;
     string _name;
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};

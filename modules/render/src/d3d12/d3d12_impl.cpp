@@ -590,12 +590,6 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     }
     auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
     result->_frames.reserve(scDesc.BufferCount);
-    if (HRESULT hr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(result->_fence.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    result->_fenceValue = 0;
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
         auto& frame = result->_frames.emplace_back();
         ComPtr<ID3D12Resource> rt;
@@ -605,8 +599,6 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
             return nullptr;
         }
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
-        frame.event = MakeWin32Event().value();
-        ::SetEvent(frame.event.Get());
     }
     return result;
 }
@@ -2006,7 +1998,7 @@ SwapChainD3D12::SwapChainD3D12(
     const SwapChainDescriptor& desc) noexcept
     : _device(device),
       _swapchain(std::move(swapchain)),
-      _desc(desc) {}
+      _enableSync(desc.EnableSync) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
@@ -2032,8 +2024,8 @@ Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaph
 
 void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     RADRAY_UNUSED(waitSemaphores);
-    UINT syncInterval = _desc.EnableSync ? 1 : 0;
-    UINT presentFlags = (!_desc.EnableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    UINT syncInterval = _enableSync ? 1 : 0;
+    UINT presentFlags = (!_enableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
         FAILED(hr)) {
         RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
@@ -2051,10 +2043,6 @@ uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
-}
-
-SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
-    return _desc;
 }
 
 BufferD3D12::BufferD3D12(
