@@ -115,10 +115,10 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT);
+    return this->CreateLegacyFence(0);
 }
 
-Nullable<unique_ptr<Semaphore>> DeviceVulkan::CreateSemaphoreGraphics() noexcept {
+Nullable<unique_ptr<Semaphore>> DeviceVulkan::CreateSemaphoreDevice() noexcept {
     return this->CreateLegacySemaphore(0);
 }
 
@@ -1050,7 +1050,7 @@ Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateF
         return nullptr;
     }
     auto v = make_unique<FenceVulkan>(this, fence);
-    v->_submitted = !((flags & VK_FENCE_CREATE_SIGNALED_BIT) == VK_FENCE_CREATE_SIGNALED_BIT);
+    v->_submitted = false;
     return v;
 }
 
@@ -1718,7 +1718,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkSemaphore> waitSemaphores;
     waitSemaphores.reserve(desc.WaitSemaphores.size());
     vector<VkPipelineStageFlags> waitStages;
-    waitStages.resize(desc.WaitSemaphores.size(), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    waitStages.resize(desc.WaitSemaphores.size(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
     for (auto i : desc.WaitSemaphores) {
         auto semaphore = CastVkObject(i);
         if (semaphore->_signaled) {

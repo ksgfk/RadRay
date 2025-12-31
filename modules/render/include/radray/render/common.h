@@ -820,7 +820,7 @@ public:
 
     virtual Nullable<unique_ptr<Fence>> CreateFence() noexcept = 0;
 
-    virtual Nullable<unique_ptr<Semaphore>> CreateSemaphoreGraphics() noexcept = 0;  // a.k.a. CreateSemaphore. make windows.h happy :)
+    virtual Nullable<unique_ptr<Semaphore>> CreateSemaphoreDevice() noexcept = 0;  // a.k.a. CreateSemaphore. make windows.h happy :)
 
     virtual Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 

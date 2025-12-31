@@ -43,6 +43,8 @@ class Frame {
 public:
     unique_ptr<vulkan::CommandBufferVulkan> cmdBuffer;
     unique_ptr<vulkan::FenceVulkan> execFence;
+    unique_ptr<vulkan::SemaphoreVulkan> imageAvailable;
+    uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
 };
 
 shared_ptr<Dxc> dxc;
@@ -54,10 +56,13 @@ vulkan::QueueVulkan* cmdQueue;
 unique_ptr<vulkan::SwapChainVulkan> swapchain;
 vector<Frame> frames;
 vector<unique_ptr<vulkan::ImageViewVulkan>> rtViews;
+vector<unique_ptr<vulkan::SemaphoreVulkan>> backBufRenderFinished;
 unique_ptr<vulkan::PipelineLayoutVulkan> pipelineLayout;
 unique_ptr<vulkan::GraphicsPipelineVulkan> pso;
 unique_ptr<vulkan::BufferVulkan> vertBuf;
 unique_ptr<vulkan::BufferVulkan> idxBuf;
+
+ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
 
 void Init() {
     dxc = CreateDxc().Unwrap();
@@ -111,6 +116,12 @@ void Init() {
         auto& f = frames.emplace_back();
         f.cmdBuffer = StaticCastUniquePtr<vulkan::CommandBufferVulkan>(device->CreateCommandBuffer(cmdQueue).Unwrap());
         f.execFence = StaticCastUniquePtr<vulkan::FenceVulkan>(device->CreateFence().Unwrap());
+        f.imageAvailable = StaticCastUniquePtr<vulkan::SemaphoreVulkan>(device->CreateSemaphoreDevice().Unwrap());
+    }
+    // create a render-finished semaphore per swapchain image to avoid semaphore reuse
+    backBufRenderFinished.reserve(swapchain->_frames.size());
+    for (size_t i = 0; i < swapchain->_frames.size(); ++i) {
+        backBufRenderFinished.emplace_back(StaticCastUniquePtr<vulkan::SemaphoreVulkan>(device->CreateSemaphoreDevice().Unwrap()));
     }
     {
         auto hlslStr = SHADER_SRC;
@@ -190,19 +201,102 @@ void Init() {
 }
 
 void Update() {
+    uint32_t currentFrame = 0;
+    vector<vulkan::FenceVulkan*> imageInFlight;
+    imageInFlight.resize(swapchain->_frames.size(), nullptr);
     while (true) {
         window->DispatchEvents();
         if (window->ShouldClose()) {
             break;
         }
+
+        Frame& frame = frames[currentFrame];
+        frame.execFence->Wait();
+        frame.backBufferIndex = std::numeric_limits<uint32_t>::max();
+
+        Semaphore* imageAvailSem = frame.imageAvailable.get();
+        auto acq = swapchain->AcquireNext(imageAvailSem, nullptr);
+        if (!acq.HasValue()) {
+            continue;
+        }
+
+        uint32_t backBufferIndex = swapchain->GetCurrentBackBufferIndex();
+        if (imageInFlight[backBufferIndex] != nullptr) {
+            imageInFlight[backBufferIndex]->Wait();
+            imageInFlight[backBufferIndex] = nullptr;
+        }
+        frame.backBufferIndex = backBufferIndex;
+
+        CommandBuffer* cmdBuffer = frame.cmdBuffer.get();
+        auto rt = acq.Get();
+        vulkan::ImageViewVulkan* rtView = nullptr;
+        if (rtViews[backBufferIndex] == nullptr) {
+            TextureViewDescriptor rtViewDesc{};
+            rtViewDesc.Target = rt;
+            rtViewDesc.Dim = TextureViewDimension::Dim2D;
+            rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+            rtViewDesc.Range.BaseMipLevel = 0;
+            rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
+            rtViewDesc.Range.BaseArrayLayer = 0;
+            rtViewDesc.Range.ArrayLayerCount = SubresourceRange::All;
+            rtViews[backBufferIndex] = StaticCastUniquePtr<vulkan::ImageViewVulkan>(device->CreateTextureView(rtViewDesc).Unwrap());
+        }
+        rtView = rtViews[backBufferIndex].get();
+
+        cmdBuffer->Begin();
+        {
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier({}, texDesc);
+        }
+        {
+            ColorAttachment rpColorAttch[] = {{rtView, LoadAction::Clear, StoreAction::Store, clear}};
+            RenderPassDescriptor rpDesc{};
+            rpDesc.ColorAttachments = rpColorAttch;
+            rpDesc.DepthStencilAttachment = std::nullopt;
+            auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            rp->BindRootSignature(pipelineLayout.get());
+            rp->BindGraphicsPipelineState(pso.get());
+            rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
+            rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
+            VertexBufferView vbv[] = {{vertBuf.get(), 0, vertBuf->_allocInfo.size}};
+            rp->BindVertexBuffer(vbv);
+            rp->BindIndexBuffer({idxBuf.get(), 0, 2});
+            rp->DrawIndexed(3, 1, 0, 0, 0);
+            cmdBuffer->EndRenderPass(std::move(rp));
+        }
+        {
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier({}, texDesc);
+        }
+        cmdBuffer->End();
+
+        Semaphore* waitSems[] = {imageAvailSem};
+        Semaphore* signalSems[] = {backBufRenderFinished[backBufferIndex].get()};
+        CommandBuffer* submitCmdBuffer[] = {cmdBuffer};
+        CommandQueueSubmitDescriptor submitDesc{};
+        submitDesc.CmdBuffers = submitCmdBuffer;
+        submitDesc.WaitSemaphores = waitSems;
+        submitDesc.SignalSemaphores = signalSems;
+        submitDesc.SignalFence = frame.execFence.get();
+        cmdQueue->Submit(submitDesc);
+
+        swapchain->Present(signalSems);
+        imageInFlight[backBufferIndex] = frame.execFence.get();
+
+        currentFrame = (currentFrame + 1) % frames.size();
     }
 }
 
 void End() {
+    for (auto& i : frames) {
+        i.execFence->Wait();
+    }
+    cmdQueue->Wait();
     idxBuf.reset();
     vertBuf.reset();
     pso.reset();
     pipelineLayout.reset();
+    backBufRenderFinished.clear();
     frames.clear();
     rtViews.clear();
     swapchain.reset();

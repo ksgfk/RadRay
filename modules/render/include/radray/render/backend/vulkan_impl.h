@@ -118,7 +118,7 @@ public:
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
 
-    Nullable<unique_ptr<Semaphore>> CreateSemaphoreGraphics() noexcept override;
+    Nullable<unique_ptr<Semaphore>> CreateSemaphoreDevice() noexcept override;
 
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 

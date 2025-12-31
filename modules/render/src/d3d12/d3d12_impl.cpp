@@ -535,7 +535,7 @@ Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     return make_unique<FenceD3D12Proxy>(fOpt.Release());
 }
 
-Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreGraphics() noexcept {
+Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreDevice() noexcept {
     auto fOpt = this->CreateFenceD3D12(0);
     if (!fOpt.HasValue()) {
         return nullptr;
