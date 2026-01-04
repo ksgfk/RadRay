@@ -510,6 +510,7 @@ public:
 
     DeviceD3D12* _device;
     ComPtr<IDXGISwapChain3> _swapchain;
+    HANDLE _frameLatencyEvent{nullptr};
     vector<Frame> _frames;
     bool _enableSync{false};
 };

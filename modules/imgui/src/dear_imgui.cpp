@@ -1,3 +1,5 @@
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include <radray/imgui/dear_imgui.h>
 
 #include <cstdlib>
@@ -8,7 +10,8 @@
 #include <radray/basic_math.h>
 #include <radray/stopwatch.h>
 
-#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/render/backend/vulkan_impl.h>
+#include <radray/render/backend/d3d12_impl.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #ifndef NOMINMAX
@@ -24,6 +27,8 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);
 #endif
+
+using namespace radray::render;
 
 namespace radray {
 
@@ -182,8 +187,6 @@ Nullable<std::function<Win32WNDPROC>> GetImGuiWin32WNDPROCEx(ImGuiContext* conte
 }
 
 Nullable<unique_ptr<ImGuiDrawContext>> CreateImGuiDrawContext(const ImGuiDrawDescriptor& desc) noexcept {
-    using namespace ::radray::render;
-
     auto device = desc.Device;
     RenderBackend backendType = device->GetBackend();
     unique_ptr<Shader> shaderVS;
@@ -334,8 +337,6 @@ ImGuiDrawTexture::~ImGuiDrawTexture() noexcept {
 }
 
 void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
-    using namespace ::radray::render;
-
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
@@ -357,7 +358,7 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         desc.Memory = MemoryType::Upload;
         desc.Usage = BufferUse::Vertex | BufferUse::CopySource;
         desc.Hints = ResourceHint::Dedicated;
-        string vbName = ::radray::format("imgui_vb_{}", frameIndex);
+        string vbName = format("imgui_vb_{}", frameIndex);
         desc.Name = vbName;
         frame._vb = _device->CreateBuffer(desc).Unwrap();
         frame._vbSize = vertCount;
@@ -369,7 +370,7 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         desc.Memory = MemoryType::Upload;
         desc.Usage = BufferUse::Index | BufferUse::CopySource;
         desc.Hints = ResourceHint::Dedicated;
-        string ibName = ::radray::format("imgui_ib_{}", frameIndex);
+        string ibName = format("imgui_ib_{}", frameIndex);
         desc.Name = ibName;
         frame._ib = _device->CreateBuffer(desc).Unwrap();
         frame._ibSize = idxCount;
@@ -416,8 +417,6 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
 }
 
 void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
-    using namespace ::radray::render;
-
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     if (tex->Status == ImTextureStatus_WantCreate) {
@@ -488,8 +487,6 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
 }
 
 void ImGuiDrawContext::BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuffer) {
-    using namespace ::radray::render;
-
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     frame._usableDescSetIndex = 0;
@@ -532,8 +529,6 @@ void ImGuiDrawContext::BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuff
 }
 
 void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
-    using namespace ::radray::render;
-
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
     const ImGuiDrawContext::DrawData* drawData = &frame._drawData;
 
@@ -617,8 +612,6 @@ void ImGuiDrawContext::Draw(int frameIndex, render::CommandEncoder* encoder) {
 }
 
 void ImGuiDrawContext::AfterDraw(int frameIndex) {
-    using namespace ::radray::render;
-
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
 
     for (Texture* texToDestroy : frame._waitDestroyTexs) {
@@ -638,8 +631,6 @@ void ImGuiDrawContext::AfterDraw(int frameIndex) {
 }
 
 void ImGuiDrawContext::SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
-    using namespace ::radray::render;
-
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
     const ImGuiDrawContext::DrawData* drawData = &frame._drawData;
 
@@ -673,7 +664,7 @@ void ImGuiDrawContext::SetupRenderState(int frameIndex, render::CommandEncoder* 
     float R = drawData->DisplayPos.x + drawData->DisplaySize.x;
     float T = drawData->DisplayPos.y;
     float B = drawData->DisplayPos.y + drawData->DisplaySize.y;
-    Eigen::Matrix4f proj = ::radray::OrthoLH(L, R, B, T, 0.0f, 1.0f);
+    Eigen::Matrix4f proj = OrthoLH(L, R, B, T, 0.0f, 1.0f);
     encoder->PushConstant(proj.data(), sizeof(proj));
 }
 
@@ -703,8 +694,8 @@ void ImGuiApplication::Destroy() noexcept {
     _cmdQueue->Wait();
     this->OnDestroy();
     _cmdQueue = nullptr;
-    ::radray::TerminateRendererImGui(_imguiContext->Get());
-    ::radray::TerminatePlatformImGui(_imguiContext->Get());
+    TerminateRendererImGui(_imguiContext->Get());
+    TerminatePlatformImGui(_imguiContext->Get());
     _imguiDrawContext.reset();
     _frames.clear();
     _rtViews.clear();
@@ -715,6 +706,23 @@ void ImGuiApplication::Destroy() noexcept {
     _win32ImguiProc.reset();
     _imguiContext.reset();
 }
+
+class ImGuiAppRenderContextVulkan : public ImGuiApplication::RenderContext {
+public:
+    using Base = ImGuiApplication::RenderContext;
+
+    ImGuiAppRenderContextVulkan(ImGuiApplication& app) noexcept
+        : Base(app) {}
+
+    ~ImGuiAppRenderContextVulkan() noexcept override {
+    }
+
+public:
+    unique_ptr<render::InstanceVulkan> _vkIns;
+    shared_ptr<render::vulkan::DeviceVulkan> _device;
+    render::vulkan::QueueVulkan* _cmdQueue;
+    unique_ptr<render::vulkan::SwapChainVulkan> _swapchain;
+};
 
 void ImGuiApplication::NewSwapChain() {
     _swapchain.reset();
@@ -730,47 +738,48 @@ void ImGuiApplication::NewSwapChain() {
 }
 
 void ImGuiApplication::RecreateSwapChain() {
-    _cmdQueue->Wait();
-    _isRenderAcquiredRt = false;
-    _rtViews.clear();
-    _currRenderFrame = 0;
-    while (_freeFrame->Size() > 0) {
-        size_t _;
-        _freeFrame->TryRead(_);
-    }
-    while (_waitFrame->Size() > 0) {
-        size_t _;
-        _waitFrame->TryRead(_);
-    }
-    for (auto& frame : _frames) {
-        frame->_rt = nullptr;
-        frame->_rtView = nullptr;
-        frame->_completeFrame = std::numeric_limits<uint64_t>::max();
-    }
-    this->NewSwapChain();
-    _rtViews.resize(_swapchain->GetBackBufferCount());
-    for (size_t i = 0; i < _frames.size(); i++) {
-        _freeFrame->TryWrite(i);
-    }
+    // _cmdQueue->Wait();
+    // _isRenderAcquiredRt = false;
+    // _rtViews.clear();
+    // _currRenderFrame = 0;
+    // while (_freeFrame->Size() > 0) {
+    //     size_t _;
+    //     _freeFrame->TryRead(_);
+    // }
+    // while (_waitFrame->Size() > 0) {
+    //     size_t _;
+    //     _waitFrame->TryRead(_);
+    // }
+    // for (auto& frame : _frames) {
+    //     frame->_rt = nullptr;
+    //     frame->_rtView = nullptr;
+    //     frame->_completeFrame = std::numeric_limits<uint64_t>::max();
+    // }
+    // this->NewSwapChain();
+    // _rtViews.resize(_swapchain->GetBackBufferCount());
+    // for (size_t i = 0; i < _frames.size(); i++) {
+    //     _freeFrame->TryWrite(i);
+    // }
 }
 
 void ImGuiApplication::Run() {
     this->OnStart();
-    if (_multithreadRender) {
-        this->RunMultiThreadRender();
-    } else {
-        this->RunSingleThreadRender();
-    }
+    // if (_multithreadRender) {
+    //     this->RunMultiThreadRender();
+    // } else {
+    //     this->RunSingleThreadRender();
+    // }
 }
 
 void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
+    _backBufferCount = desc_.BackBufferCount;
     _frameCount = desc_.FrameCount;
     _rtFormat = desc_.RTFormat;
     _enableVSync = desc_.EnableVSync;
     _isWaitFrame = desc_.IsWaitFrame;
     _multithreadRender = desc_.IsRenderMultiThread;
-    _freeFrame = make_unique<BoundedChannel<size_t>>(desc_.FrameCount);
-    _waitFrame = make_unique<BoundedChannel<size_t>>(desc_.FrameCount);
+    // _freeFrame = make_unique<BoundedChannel<size_t>>(desc_.FrameCount);
+    // _waitFrame = make_unique<BoundedChannel<size_t>>(desc_.FrameCount);
 
     ImGuiApplicationDescriptor appDesc = desc_;
     if (!appDesc.IsRenderMultiThread) {
@@ -782,10 +791,10 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
 
     _imguiContext = radray::make_unique<radray::ImGuiContextRAII>();
 
-    PlatformId platform = ::radray::GetPlatform();
+    PlatformId platform = GetPlatform();
     if (platform == PlatformId::Windows) {
-        _win32ImguiProc = make_shared<std::function<::radray::Win32WNDPROC>>(::radray::GetImGuiWin32WNDPROCEx(_imguiContext->Get()).Release());
-        weak_ptr<std::function<::radray::Win32WNDPROC>> weakImguiProc = _win32ImguiProc;
+        _win32ImguiProc = make_shared<std::function<Win32WNDPROC>>(GetImGuiWin32WNDPROCEx(_imguiContext->Get()).Release());
+        weak_ptr<std::function<Win32WNDPROC>> weakImguiProc = _win32ImguiProc;
         Win32WindowCreateDescriptor desc{};
         desc.Title = appDesc.AppName;
         desc.Width = appDesc.WindowSize.x();
@@ -796,14 +805,14 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         desc.StartMaximized = false;
         desc.Fullscreen = appDesc.IsFullscreen;
         desc.ExtraWndProcs = std::span{&weakImguiProc, 1};
-        auto windowOpt = ::radray::CreateNativeWindow(desc);
+        auto windowOpt = CreateNativeWindow(desc);
         _window = windowOpt.Release();
         ImGuiPlatformInitDescriptor imguiDesc{};
         imguiDesc.Platform = PlatformId::Windows;
         imguiDesc.Window = _window.get();
         imguiDesc.Context = _imguiContext->Get();
-        ::radray::InitPlatformImGui(imguiDesc);
-        ::radray::InitRendererImGui(imguiDesc.Context);
+        InitPlatformImGui(imguiDesc);
+        InitRendererImGui(imguiDesc.Context);
     }
     if (!_window) {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create window");
@@ -827,6 +836,7 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
         insDesc.EngineName = "RadRay";
         insDesc.EngineVersion = 1;
         insDesc.IsEnableDebugLayer = appDesc.EnableValidation;
+        insDesc.IsEnableGpuBasedValid = appDesc.EnableValidation;
         _vkIns = CreateVulkanInstance(insDesc).Unwrap();
         render::VulkanCommandQueueDescriptor queueDesc[] = {
             {render::QueueType::Direct, 1}};
@@ -847,106 +857,113 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
     _cmdQueue = _device->GetCommandQueue(render::QueueType::Direct, 0).Release();
     _renderRtSize = appDesc.WindowSize;
     this->NewSwapChain();
-    _frames.reserve(_swapchain->GetBackBufferCount());
-    for (size_t i = 0; i < _swapchain->GetBackBufferCount(); ++i) {
+    _frames.reserve(appDesc.FrameCount);
+    for (size_t i = 0; i < appDesc.FrameCount; ++i) {
         auto cmdBufferOpt = _device->CreateCommandBuffer(_cmdQueue);
         if (!cmdBufferOpt.HasValue()) {
             throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "failed create cmdBuffer");
         }
         _frames.emplace_back(make_unique<ImGuiApplication::Frame>(i, cmdBufferOpt.Release()));
     }
+    _currFrameIndex = 0;
     _rtViews.resize(_swapchain->GetBackBufferCount());
-    _currRenderFrame = 0;
     {
         ImGuiDrawDescriptor imguiDrawDesc{};
         imguiDrawDesc.Device = _device.get();
         imguiDrawDesc.RTFormat = appDesc.RTFormat;
         imguiDrawDesc.FrameCount = static_cast<int>(_frames.size());
-        auto ctxOpt = ::radray::CreateImGuiDrawContext(imguiDrawDesc);
+        auto ctxOpt = CreateImGuiDrawContext(imguiDrawDesc);
         if (!ctxOpt.HasValue()) {
             throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "failed create ImGuiDrawContext");
         }
         _imguiDrawContext = ctxOpt.Release();
     }
-    for (size_t i = 0; i < _frames.size(); i++) {
-        _freeFrame->TryWrite(i);
-    }
 }
 
-void ImGuiApplication::RunMultiThreadRender() {
-    _renderThread = radray::make_unique<std::thread>(&ImGuiApplication::RenderUpdateMultiThread, this);
-    while (true) {
-        this->MainUpdate();
-        if (_needClose) {
-            break;
-        }
+class SingleThreadContext : public ImGuiApplication::RunningContext {
+public:
+    using Base = ImGuiApplication::RunningContext;
+    using Base::RunningContext;
+    ~SingleThreadContext() noexcept = default;
+
+    void Run() override {
     }
-    _freeFrame->Complete();
-    _waitFrame->Complete();
-    _renderThread->join();
-}
+};
 
-void ImGuiApplication::RunSingleThreadRender() {
-    Stopwatch sw = Stopwatch::StartNew();
-    while (true) {
-        this->MainUpdate();
-        if (_needClose) {
-            break;
-        }
+// void ImGuiApplication::RunMultiThreadRender() {
+//     _renderThread = radray::make_unique<std::thread>(&ImGuiApplication::RenderUpdateMultiThread, this);
+//     while (true) {
+//         this->MainUpdate();
+//         if (_needClose) {
+//             break;
+//         }
+//     }
+//     _freeFrame->Complete();
+//     _waitFrame->Complete();
+//     _renderThread->join();
+// }
 
-        this->ExecuteBeforeAcquire();
-        if (_isResizingRender) {
-            continue;
-        }
-        if (_renderRtSize.x() <= 0 || _renderRtSize.y() <= 0) {
-            continue;
-        }
-        radray::render::Texture* rt = nullptr;
-        if (_isRenderAcquiredRt) {
-            rt = _swapchain->GetCurrentBackBuffer().Release();
-        } else {
-            sw.Stop();
-            _renderTime = sw.Elapsed().count() / 1'000'000.0;
-            sw.Restart();
-            radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
-            if (!rtOpt.HasValue()) {
-                continue;
-            }
-            rt = rtOpt.Get();
-            _isRenderAcquiredRt = true;
-        }
-        if (_needClose) {
-            break;
-        }
-        {
-            size_t completeFrameIndex = _currRenderFrame % _frames.size();
-            if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
-                _imguiDrawContext->AfterDraw((int)completeFrameIndex);
-                _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
-                if (!_freeFrame->WaitWrite(completeFrameIndex)) {
-                    break;
-                }
-            }
-        }
-        size_t frameIndex = std::numeric_limits<size_t>::max();
-        if (!_waitFrame->TryRead(frameIndex)) {
-            continue;
-        }
-        _isRenderAcquiredRt = false;
-        ImGuiApplication::Frame* frame = _frames[frameIndex].get();
-        frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
-        frame->_completeFrame = _currRenderFrame + _frames.size();
-        frame->_rt = rt;
-        frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
-        this->OnRender(frame);
-        _swapchain->Present();
-        _currRenderFrame++;
+// void ImGuiApplication::RunSingleThreadRender() {
+//     Stopwatch sw = Stopwatch::StartNew();
+//     while (true) {
+//         this->MainUpdate();
+//         if (_needClose) {
+//             break;
+//         }
 
-        sw.Stop();
-    }
-}
+//         this->ExecuteBeforeAcquire();
+//         if (_isResizingRender) {
+//             continue;
+//         }
+//         if (_renderRtSize.x() <= 0 || _renderRtSize.y() <= 0) {
+//             continue;
+//         }
+//         radray::render::Texture* rt = nullptr;
+//         if (_isRenderAcquiredRt) {
+//             rt = _swapchain->GetCurrentBackBuffer().Release();
+//         } else {
+//             sw.Stop();
+//             _renderTime = sw.Elapsed().count() / 1'000'000.0;
+//             sw.Restart();
+//             radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
+//             if (!rtOpt.HasValue()) {
+//                 continue;
+//             }
+//             rt = rtOpt.Get();
+//             _isRenderAcquiredRt = true;
+//         }
+//         if (_needClose) {
+//             break;
+//         }
+//         {
+//             size_t completeFrameIndex = _currRenderFrame % _frames.size();
+//             if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
+//                 _imguiDrawContext->AfterDraw((int)completeFrameIndex);
+//                 _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
+//                 if (!_freeFrame->WaitWrite(completeFrameIndex)) {
+//                     break;
+//                 }
+//             }
+//         }
+//         size_t frameIndex = std::numeric_limits<size_t>::max();
+//         if (!_waitFrame->TryRead(frameIndex)) {
+//             continue;
+//         }
+//         _isRenderAcquiredRt = false;
+//         ImGuiApplication::Frame* frame = _frames[frameIndex].get();
+//         frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
+//         frame->_completeFrame = _currRenderFrame + _frames.size();
+//         frame->_rt = rt;
+//         frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
+//         this->OnRender(frame);
+//         _swapchain->Present();
+//         _currRenderFrame++;
 
-void ImGuiApplication::MainUpdate() {
+//         sw.Stop();
+//     }
+// }
+
+void ImGuiApplication::Update() {
     Stopwatch sw = Stopwatch::StartNew();
     _imguiContext->SetCurrent();
     _window->DispatchEvents();
@@ -967,7 +984,7 @@ void ImGuiApplication::MainUpdate() {
         ImGuiApplication::Frame* frame = frameOpt.Get();
         ImDrawData* drawData = ImGui::GetDrawData();
         _imguiDrawContext->ExtractDrawData((int)frame->_frameIndex, drawData);
-        _waitFrame->WaitWrite(frame->_frameIndex);
+        // _waitFrame->WaitWrite(frame->_frameIndex);
     }
 
     sw.Stop();
@@ -975,53 +992,53 @@ void ImGuiApplication::MainUpdate() {
     sw.Restart();
 }
 
-void ImGuiApplication::RenderUpdateMultiThread() {
-    ::radray::SetWin32DpiAwarenessImGui();
-    Stopwatch sw = Stopwatch::StartNew();
-    while (true) {
-        this->ExecuteBeforeAcquire();
-        if (_isResizingRender) {
-            std::this_thread::yield();
-            continue;
-        }
-        if (_renderRtSize.x() <= 0 || _renderRtSize.y() <= 0) {
-            std::this_thread::yield();
-            continue;
-        }
-        sw.Stop();
-        _renderTime = sw.Elapsed().count() / 1'000'000.0;
-        sw.Restart();
-        radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
-        if (_needClose) {
-            return;
-        }
-        if (!rtOpt.HasValue()) {
-            continue;
-        }
-        {
-            size_t completeFrameIndex = _currRenderFrame % _frames.size();
-            if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
-                _imguiDrawContext->AfterDraw((int)completeFrameIndex);
-                _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
-                if (!_freeFrame->WaitWrite(completeFrameIndex)) {
-                    return;
-                }
-            }
-        }
-        size_t frameIndex = std::numeric_limits<size_t>::max();
-        if (!_waitFrame->WaitRead(frameIndex)) {
-            return;
-        }
-        ImGuiApplication::Frame* frame = _frames[frameIndex].get();
-        frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
-        frame->_completeFrame = _currRenderFrame + _frames.size();
-        frame->_rt = rtOpt.Get();
-        frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
-        this->OnRender(frame);
-        _swapchain->Present();
-        _currRenderFrame++;
-    }
-}
+// void ImGuiApplication::RenderUpdateMultiThread() {
+//     SetWin32DpiAwarenessImGui();
+//     Stopwatch sw = Stopwatch::StartNew();
+//     while (true) {
+//         this->ExecuteBeforeAcquire();
+//         if (_isResizingRender) {
+//             std::this_thread::yield();
+//             continue;
+//         }
+//         if (_renderRtSize.x() <= 0 || _renderRtSize.y() <= 0) {
+//             std::this_thread::yield();
+//             continue;
+//         }
+//         sw.Stop();
+//         _renderTime = sw.Elapsed().count() / 1'000'000.0;
+//         sw.Restart();
+//         radray::Nullable<radray::render::Texture*> rtOpt = _swapchain->AcquireNext();
+//         if (_needClose) {
+//             return;
+//         }
+//         if (!rtOpt.HasValue()) {
+//             continue;
+//         }
+//         {
+//             size_t completeFrameIndex = _currRenderFrame % _frames.size();
+//             if (_frames[completeFrameIndex]->_completeFrame == _currRenderFrame) {
+//                 _imguiDrawContext->AfterDraw((int)completeFrameIndex);
+//                 _frames[completeFrameIndex]->_completeFrame = std::numeric_limits<uint64_t>::max();
+//                 if (!_freeFrame->WaitWrite(completeFrameIndex)) {
+//                     return;
+//                 }
+//             }
+//         }
+//         size_t frameIndex = std::numeric_limits<size_t>::max();
+//         if (!_waitFrame->WaitRead(frameIndex)) {
+//             return;
+//         }
+//         ImGuiApplication::Frame* frame = _frames[frameIndex].get();
+//         frame->_rtIndex = _swapchain->GetCurrentBackBufferIndex();
+//         frame->_completeFrame = _currRenderFrame + _frames.size();
+//         frame->_rt = rtOpt.Get();
+//         frame->_rtView = this->SafeGetRTView(frame->_rtIndex, frame->_rt);
+//         this->OnRender(frame);
+//         _swapchain->Present();
+//         _currRenderFrame++;
+//     }
+// }
 
 render::TextureView* ImGuiApplication::SafeGetRTView(uint32_t rtIndex, render::Texture* rt) {
     if (_rtViews[rtIndex] == nullptr) {
@@ -1038,21 +1055,22 @@ render::TextureView* ImGuiApplication::SafeGetRTView(uint32_t rtIndex, render::T
 }
 
 Nullable<ImGuiApplication::Frame*> ImGuiApplication::GetAvailableFrame() {
-    if (_isWaitFrame) {
-        size_t frameIndex;
-        if (_freeFrame->WaitRead(frameIndex)) {
-            return _frames[frameIndex].get();
-        } else {
-            return nullptr;
-        }
-    } else {
-        size_t frameIndex;
-        if (_freeFrame->TryRead(frameIndex)) {
-            return _frames[frameIndex].get();
-        } else {
-            return nullptr;
-        }
-    }
+    // if (_isWaitFrame) {
+    //     size_t frameIndex;
+    //     if (_freeFrame->WaitRead(frameIndex)) {
+    //         return _frames[frameIndex].get();
+    //     } else {
+    //         return nullptr;
+    //     }
+    // } else {
+    //     size_t frameIndex;
+    //     if (_freeFrame->TryRead(frameIndex)) {
+    //         return _frames[frameIndex].get();
+    //     } else {
+    //         return nullptr;
+    //     }
+    // }
+    return nullptr;
 }
 
 void ImGuiApplication::ExecuteBeforeAcquire() {

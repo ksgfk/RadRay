@@ -147,6 +147,7 @@ struct ImGuiApplicationDescriptor {
     bool Resizeable;
     bool IsFullscreen;
     render::RenderBackend Backend;
+    uint32_t BackBufferCount;
     uint32_t FrameCount;
     render::TextureFormat RTFormat;
     bool EnableValidation;
@@ -177,11 +178,30 @@ public:
         Frame& operator=(Frame&&) noexcept = delete;
 
         size_t _frameIndex;
-        uint64_t _completeFrame{std::numeric_limits<uint64_t>::max()};
         unique_ptr<render::CommandBuffer> _cmdBuffer{};
         render::Texture* _rt{};
         render::TextureView* _rtView{};
         uint32_t _rtIndex;
+    };
+
+    class RunningContext {
+    public:
+        RunningContext(ImGuiApplication& app) : _app(app) {}
+        virtual ~RunningContext() noexcept = default;
+
+        virtual void Run() = 0;
+
+    public:
+        ImGuiApplication& _app;
+    };
+
+    class RenderContext {
+    public:
+        RenderContext(ImGuiApplication& app) : _app(app) {}
+        virtual ~RenderContext() noexcept = default;
+
+    public:
+        ImGuiApplication& _app;
     };
 
     ImGuiApplication() noexcept;
@@ -200,19 +220,17 @@ protected:
     void RecreateSwapChain();
 
     void Init(const ImGuiApplicationDescriptor& desc);
-    // TODO: use strategy pattern
-    virtual void MainUpdate();
-    virtual void RenderUpdateMultiThread();
-    void RunMultiThreadRender();
-    void RunSingleThreadRender();
 
-    virtual void OnResizing(int width, int height);
-    virtual void OnResized(int width, int height);
+    virtual void Update();
+
     virtual void OnStart();
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual void OnRender(ImGuiApplication::Frame* frame);
     virtual void OnDestroy() noexcept;
+
+    virtual void OnResizing(int width, int height);
+    virtual void OnResized(int width, int height);
 
     render::TextureView* SafeGetRTView(uint32_t rtIndex, render::Texture* rt);
     Nullable<ImGuiApplication::Frame*> GetAvailableFrame();
@@ -224,6 +242,7 @@ protected:
     void ExecuteBeforeAcquire();
 
 protected:
+    uint32_t _backBufferCount;
     uint32_t _frameCount;
     render::TextureFormat _rtFormat;
     bool _enableVSync;
@@ -237,13 +256,15 @@ protected:
     shared_ptr<render::Device> _device;
     render::CommandQueue* _cmdQueue;
     unique_ptr<render::SwapChain> _swapchain;
+    unique_ptr<RenderContext> _renderContext;
     unique_ptr<ImGuiDrawContext> _imguiDrawContext;
-    unique_ptr<std::thread> _renderThread;
-    unique_ptr<BoundedChannel<size_t>> _freeFrame;
-    unique_ptr<BoundedChannel<size_t>> _waitFrame;
-    radray::UnboundedChannel<std::function<void(void)>> _beforeAcquire;
+    // unique_ptr<std::thread> _renderThread;
+    // unique_ptr<BoundedChannel<size_t>> _freeFrame;
+    // unique_ptr<BoundedChannel<size_t>> _waitFrame;
+    UnboundedChannel<std::function<void(void)>> _beforeAcquire;
     vector<unique_ptr<Frame>> _frames;
-    uint64_t _currRenderFrame;
+    uint64_t _currFrameIndex;
+    unique_ptr<RunningContext> _runningContext;
 
     vector<unique_ptr<render::TextureView>> _rtViews;
     sigslot::scoped_connection _resizingConn;
@@ -255,6 +276,8 @@ protected:
 
     double _logicTime{0};
     std::atomic<double> _renderTime{0};
+
+    friend class SingleThreadContext;
 };
 
 bool InitImGui();

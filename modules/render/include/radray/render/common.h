@@ -469,6 +469,7 @@ public:
     uint32_t Width{0};
     uint32_t Height{0};
     uint32_t BackBufferCount{0};
+    uint32_t FlightFrameCount{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
     bool EnableSync{false};
 };

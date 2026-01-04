@@ -14,10 +14,10 @@ using namespace radray::render;
 
 constexpr int WIN_WIDTH = 1280;
 constexpr int WIN_HEIGHT = 720;
-constexpr int RT_COUNT = 3;
+constexpr int BACK_BUFFER_COUNT = 3;
+constexpr int INFLIGHT_FRAME_COUNT = 2;
 const char* RADRAY_APPNAME = "hello_world_d3d12";
-const char* SHADER_SRC = R"(
-const static float3 g_Color[3] = {
+const char* SHADER_SRC = R"(const static float3 g_Color[3] = {
     float3(1, 0, 0),
     float3(0, 1, 0),
     float3(0, 0, 1)};
@@ -38,34 +38,59 @@ float4 PSMain(V2P v2p) : SV_Target {
     return float4(v2p.color, 1);
 })";
 
-struct FrameData {
+class Frame {
+public:
     unique_ptr<d3d12::CmdListD3D12> cmdBuffer;
+    unique_ptr<d3d12::FenceD3D12Proxy> execFence;
+    uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
 };
 
+shared_ptr<Dxc> dxc;
+Eigen::Vector2i winSize;
 unique_ptr<NativeWindow> window;
 shared_ptr<d3d12::DeviceD3D12> device;
 d3d12::CmdQueueD3D12* cmdQueue;
 unique_ptr<d3d12::SwapChainD3D12> swapchain;
-vector<FrameData> frames;
-unordered_map<Texture*, unique_ptr<d3d12::TextureViewD3D12>> rtViews;
-uint32_t currentFrameIndex = 0;
-ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
-int clearIndex = 0;
-Stopwatch sw;
-uint64_t last;
-unique_ptr<d3d12::BufferD3D12> vertBuf;
-unique_ptr<d3d12::BufferD3D12> idxBuf;
-shared_ptr<Dxc> dxc;
+vector<Frame> frames;
+vector<unique_ptr<d3d12::TextureViewD3D12>> rtViews;
 unique_ptr<d3d12::RootSigD3D12> rootSig;
 unique_ptr<d3d12::GraphicsPsoD3D12> pso;
-Eigen::Vector2i winSize{WIN_WIDTH, WIN_HEIGHT};
+unique_ptr<d3d12::BufferD3D12> vertBuf;
+unique_ptr<d3d12::BufferD3D12> idxBuf;
 sigslot::connection resizedConn;
-sigslot::connection resizingConn;
-std::mutex mtx;
-std::optional<Eigen::Vector2i> resizeVal;
-bool isResizing = false;
+
+void CreateSwapChain() {
+    SwapChainDescriptor swapchainDesc{};
+    swapchainDesc.PresentQueue = cmdQueue;
+    swapchainDesc.NativeHandler = window->GetNativeHandler().Handle;
+    swapchainDesc.Width = (uint32_t)winSize.x();
+    swapchainDesc.Height = (uint32_t)winSize.y();
+    swapchainDesc.BackBufferCount = BACK_BUFFER_COUNT;
+    swapchainDesc.FlightFrameCount = INFLIGHT_FRAME_COUNT;
+    swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
+    swapchainDesc.EnableSync = false;
+    swapchain = StaticCastUniquePtr<d3d12::SwapChainD3D12>(device->CreateSwapChain(swapchainDesc).Unwrap());
+}
+
+void OnResized(int width, int height) {
+    winSize = {width, height};
+    if (swapchain && width > 0 && height > 0) {
+        for (auto& i : frames) {
+            i.execFence->Wait();
+        }
+        cmdQueue->Wait();
+        for (auto& i : rtViews) {
+            i.reset();
+        }
+        swapchain.reset();
+        CreateSwapChain();
+    }
+}
 
 void Init() {
+    dxc = CreateDxc().Unwrap();
+    winSize = {WIN_WIDTH, WIN_HEIGHT};
+#ifdef RADRAY_PLATFORM_WINDOWS
     Win32WindowCreateDescriptor windowDesc{
         RADRAY_APPNAME,
         winSize.x(),
@@ -77,67 +102,30 @@ void Init() {
         false,
         {}};
     window = CreateNativeWindow(windowDesc).Unwrap();
-    device = std::static_pointer_cast<d3d12::DeviceD3D12>(CreateDevice(D3D12DeviceDescriptor{std::nullopt, true, false}).Unwrap());
+#endif
+    if (!window) {
+        throw std::runtime_error("Failed to create native window");
+    }
+    D3D12DeviceDescriptor deviceDesc{};
+    deviceDesc.IsEnableDebugLayer = true;
+    deviceDesc.IsEnableGpuBasedValid = true;
+    device = std::static_pointer_cast<d3d12::DeviceD3D12>(CreateDevice(deviceDesc).Unwrap());
     cmdQueue = static_cast<d3d12::CmdQueueD3D12*>(device->GetCommandQueue(QueueType::Direct, 0).Unwrap());
-    swapchain = StaticCastUniquePtr<d3d12::SwapChainD3D12>(device->CreateSwapChain({cmdQueue, window->GetNativeHandler().Handle, (uint32_t)winSize.x(), (uint32_t)winSize.y(), RT_COUNT, TextureFormat::RGBA8_UNORM, false}).Unwrap());
-    frames.reserve(swapchain->_frames.size());
-    for (size_t i = 0; i < swapchain->_frames.size(); ++i) {
+    CreateSwapChain();
+    rtViews.reserve(BACK_BUFFER_COUNT);
+    for (size_t i = 0; i < BACK_BUFFER_COUNT; i++) {
+        rtViews.emplace_back();
+    }
+    frames.reserve(INFLIGHT_FRAME_COUNT);
+    for (size_t i = 0; i < INFLIGHT_FRAME_COUNT; i++) {
         auto& f = frames.emplace_back();
         f.cmdBuffer = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
-    }
-    currentFrameIndex = 0;
-    sw.Reset();
-    sw.Start();
-    last = 0;
-
-    float pos[] = {0, 0.5f, 0, -0.5f, -0.366f, 0, 0.5f, -0.366f, 0};
-    uint16_t i[] = {0, 1, 2};
-    const size_t vertexSize = sizeof(pos);
-    const size_t indexSize = sizeof(i);
-    auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    auto idxUpload = device->CreateBuffer({indexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
-    {
-        auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
-        auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
-        vertBuf = StaticCastUniquePtr<d3d12::BufferD3D12>(std::move(vert));
-        idxBuf = StaticCastUniquePtr<d3d12::BufferD3D12>(std::move(idx));
+        f.execFence = StaticCastUniquePtr<d3d12::FenceD3D12Proxy>(device->CreateFence().Unwrap());
     }
     {
-        void* vertMap = vertUpload->Map(0, vertexSize);
-        std::memcpy(vertMap, pos, vertexSize);
-        vertUpload->Unmap(0, vertexSize);
-    }
-    {
-        void* idxMap = idxUpload->Map(0, indexSize);
-        std::memcpy(idxMap, i, indexSize);
-        idxUpload->Unmap(0, indexSize);
-    }
-
-    auto cmdBuffer = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
-    cmdBuffer->Begin();
-    {
-        BarrierBufferDescriptor barriers[] = {
-            {vertBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
-            {idxBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
-        cmdBuffer->ResourceBarrier(barriers, {});
-    }
-    cmdBuffer->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
-    cmdBuffer->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
-    {
-        BarrierBufferDescriptor barriers[] = {
-            {vertBuf.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
-            {idxBuf.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
-        cmdBuffer->ResourceBarrier(barriers, {});
-    }
-    cmdBuffer->End();
-    CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
-    cmdQueue->Submit({submitCmdBuffers, {}, {}, {}, {}});
-    cmdQueue->Wait();
-
-    dxc = CreateDxc().Unwrap();
-    {
-        auto vsSpv = dxc->Compile(SHADER_SRC, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false, {}, {}, false).value();
-        auto psSpv = dxc->Compile(SHADER_SRC, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false, {}, {}, false).value();
+        auto hlslStr = SHADER_SRC;
+        auto vsSpv = dxc->Compile(hlslStr, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, false).value();
+        auto psSpv = dxc->Compile(hlslStr, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, false).value();
         ShaderDescriptor vsDesc{};
         vsDesc.Source = vsSpv.Data;
         vsDesc.Category = vsSpv.Category;
@@ -152,191 +140,168 @@ void Init() {
 
         VertexElement ve[] = {
             {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
-        VertexBufferLayout vl[] = {
-            {12,
-             VertexStepMode::Vertex,
-             ve}};
-        ColorTargetState cts[] = {
-            ColorTargetState::Default(TextureFormat::RGBA8_UNORM)};
+        VertexBufferLayout vl{12, VertexStepMode::Vertex, ve};
+        ColorTargetState cts = ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = rootSig.get();
         psoDesc.VS = {vs.get(), "VSMain"};
         psoDesc.PS = {ps.get(), "PSMain"};
-        psoDesc.VertexLayouts = vl;
+        psoDesc.VertexLayouts = std::span{&vl, 1};
         psoDesc.Primitive = PrimitiveState::Default();
-        psoDesc.Primitive.FaceClockwise = FrontFace::CCW;
         psoDesc.DepthStencil = std::nullopt;
         psoDesc.MultiSample = MultiSampleState::Default();
-        psoDesc.ColorTargets = cts;
+        psoDesc.ColorTargets = std::span{&cts, 1};
         pso = StaticCastUniquePtr<d3d12::GraphicsPsoD3D12>(device->CreateGraphicsPipelineState(psoDesc).Unwrap());
     }
+    {
+        float pos[] = {0, 0.5f, 0, -0.5f, -0.366f, 0, 0.5f, -0.366f, 0};
+        uint16_t i[] = {0, 2, 1};
+        const size_t vertexSize = sizeof(pos);
+        const size_t indexSize = sizeof(i);
+        auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+        auto idxUpload = device->CreateBuffer({indexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
+        {
+            auto vert = device->CreateBuffer({vertexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Vertex, ResourceHint::None, {}}).Unwrap();
+            auto idx = device->CreateBuffer({indexSize, MemoryType::Device, BufferUse::CopyDestination | BufferUse::Index, ResourceHint::None, {}}).Unwrap();
+            vertBuf = StaticCastUniquePtr<d3d12::BufferD3D12>(std::move(vert));
+            idxBuf = StaticCastUniquePtr<d3d12::BufferD3D12>(std::move(idx));
+        }
+        {
+            void* vertMap = vertUpload->Map(0, vertexSize);
+            std::memcpy(vertMap, pos, vertexSize);
+            vertUpload->Unmap(0, vertexSize);
+        }
+        {
+            void* idxMap = idxUpload->Map(0, indexSize);
+            std::memcpy(idxMap, i, indexSize);
+            idxUpload->Unmap(0, indexSize);
+        }
+        auto cmdBuffer = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
+        cmdBuffer->Begin();
+        {
+            BarrierBufferDescriptor barriers[] = {
+                {vertBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
+                {idxBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
+            cmdBuffer->ResourceBarrier(barriers, {});
+        }
+        cmdBuffer->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
+        cmdBuffer->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
+        {
+            BarrierBufferDescriptor barriers[] = {
+                {vertBuf.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
+                {idxBuf.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+            cmdBuffer->ResourceBarrier(barriers, {});
+        }
+        cmdBuffer->End();
+        CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
+        cmdQueue->Submit({submitCmdBuffers, {}, {}, {}});
+        cmdQueue->Wait();
+    }
+    resizedConn = window->EventResized().connect(OnResized);
 }
 
 void Update() {
-    uint64_t now = static_cast<uint64_t>(sw.ElapsedMilliseconds());
-    auto delta = now - last;
-    last = now;
+    uint32_t currentFrame = 0;
+    ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
+    Stopwatch sw = Stopwatch::StartNew();
+    int64_t time = 0;
+    while (true) {
+        time = sw.ElapsedMilliseconds() / 2;
+        window->DispatchEvents();
+        float timeMinus = time / 1000.0f;
+        int colorElement = static_cast<int>(timeMinus) % 3;
+        float t = timeMinus - std::floor(timeMinus);
+        float colorValue = t < 0.5 ? Lerp(0.0f, 1.0f, t * 2) : Lerp(1.0f, 0.0f, (t - 0.5f) * 2);
+        Eigen::Vector3f color{0.0f, 0.0f, 0.0f};
+        color[colorElement] = colorValue;
+        clear = {color.x(), color.y(), color.z(), 1.0f};
+        if (window->ShouldClose()) {
+            break;
+        }
+        if (winSize.x() == 0 || winSize.y() == 0) {
+            continue;
+        }
 
-    float* v = nullptr;
-    if (clearIndex >= 0 && clearIndex < 2) {
-        v = &clear.R;
-    } else if (clearIndex >= 2 && clearIndex < 4) {
-        v = &clear.G;
-    } else if (clearIndex >= 4 && clearIndex < 6) {
-        v = &clear.B;
-    }
-    if (clearIndex % 2 == 0) {
-        *v += delta / 1000.0f;
-        if (*v >= 1.0f) {
-            *v = 1.0f;
-            clearIndex++;
-        }
-    } else {
-        *v -= delta / 1000.0f;
-        if (*v <= 0.0f) {
-            *v = 0.0f;
-            clearIndex++;
-            if (clearIndex >= 5) clearIndex = 0;
-        }
-    }
-
-    bool mresize = false;
-    std::optional<Eigen::Vector2i> mr;
-    {
-        std::lock_guard<std::mutex> lock{mtx};
-        if (isResizing || resizeVal.has_value()) {
-            mresize = true;
-        }
-        mr = resizeVal;
-        resizeVal = std::nullopt;
-    }
-    if (mresize) {
-        if (mr.has_value()) {
-            Eigen::Vector2i sz = mr.value();
-            if (sz.x() == 0 || sz.y() == 0) {
-                return;
-            }
-            cmdQueue->Wait();
-            rtViews.clear();
-            swapchain->Destroy();
-            swapchain = StaticCastUniquePtr<d3d12::SwapChainD3D12>(
-                device->CreateSwapChain(
-                          {cmdQueue,
-                           window->GetNativeHandler().Handle,
-                           (uint32_t)sz.x(),
-                           (uint32_t)sz.y(),
-                           RT_COUNT,
-                           TextureFormat::RGBA8_UNORM,
-                           false})
-                    .Unwrap());
-            winSize = sz;
-        }
-        return;
-    }
-
-    auto& frameData = frames[currentFrameIndex];
-    swapchain->AcquireNext();
-    auto rt = swapchain->GetCurrentBackBuffer().Unwrap();
-    d3d12::TextureViewD3D12* rtView = nullptr;
-    {
-        auto it = rtViews.find(rt);
-        if (it == rtViews.end()) {
+        Frame& frame = frames[currentFrame];
+        frame.execFence->Wait();
+        auto rt = swapchain->AcquireNext({}, nullptr).Unwrap();
+        uint32_t backBufferIndex = swapchain->GetCurrentBackBufferIndex();
+        CommandBuffer* cmdBuffer = frame.cmdBuffer.get();
+        d3d12::TextureViewD3D12* rtView = nullptr;
+        if (rtViews[backBufferIndex] == nullptr) {
             TextureViewDescriptor rtViewDesc{};
             rtViewDesc.Target = rt;
             rtViewDesc.Dim = TextureViewDimension::Dim2D;
             rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+            rtViewDesc.Usage = TextureUse::RenderTarget;
             rtViewDesc.Range.BaseMipLevel = 0;
             rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
             rtViewDesc.Range.BaseArrayLayer = 0;
             rtViewDesc.Range.ArrayLayerCount = SubresourceRange::All;
-            rtViewDesc.Usage = TextureUse::RenderTarget;
-            it = rtViews.emplace(rt, StaticCastUniquePtr<d3d12::TextureViewD3D12>(device->CreateTextureView(rtViewDesc).Unwrap())).first;
+            rtViews[backBufferIndex] = StaticCastUniquePtr<d3d12::TextureViewD3D12>(device->CreateTextureView(rtViewDesc).Unwrap());
         }
-        rtView = it->second.get();
+        rtView = rtViews[backBufferIndex].get();
+
+        cmdBuffer->Begin();
+        {
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier({}, texDesc);
+        }
+        {
+            ColorAttachment rpColorAttch[] = {{rtView, LoadAction::Clear, StoreAction::Store, clear}};
+            RenderPassDescriptor rpDesc{};
+            rpDesc.ColorAttachments = rpColorAttch;
+            rpDesc.DepthStencilAttachment = std::nullopt;
+            auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            rp->BindRootSignature(rootSig.get());
+            rp->BindGraphicsPipelineState(pso.get());
+            rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
+            rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
+            VertexBufferView vbv[] = {{vertBuf.get(), 0, vertBuf->_alloc->GetSize()}};
+            rp->BindVertexBuffer(vbv);
+            rp->BindIndexBuffer({idxBuf.get(), 0, 2});
+            rp->DrawIndexed(3, 1, 0, 0, 0);
+            cmdBuffer->EndRenderPass(std::move(rp));
+        }
+        {
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier({}, texDesc);
+        }
+        cmdBuffer->End();
+
+        CommandQueueSubmitDescriptor submitDesc{};
+        submitDesc.CmdBuffers = std::span{&cmdBuffer, 1};
+        submitDesc.SignalFence = frame.execFence.get();
+        cmdQueue->Submit(submitDesc);
+
+        swapchain->Present({});
+
+        currentFrame = (currentFrame + 1) % frames.size();
     }
-    frameData.cmdBuffer->Begin();
-    {
-        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, false, {}}};
-        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
-    }
-    {
-        ColorAttachment rpColorAttch[] = {{rtView, LoadAction::Clear, StoreAction::Store, clear}};
-        RenderPassDescriptor rpDesc{};
-        rpDesc.ColorAttachments = rpColorAttch;
-        rpDesc.DepthStencilAttachment = std::nullopt;
-        auto rp = frameData.cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
-        rp->BindRootSignature(rootSig.get());
-        rp->BindGraphicsPipelineState(pso.get());
-        rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
-        rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
-        VertexBufferView vbv[] = {
-            {vertBuf.get(), 0, vertBuf->_rawDesc.Width}};
-        rp->BindVertexBuffer(vbv);
-        rp->BindIndexBuffer({idxBuf.get(), 0, 2});
-        rp->DrawIndexed(3, 1, 0, 0, 0);
-        frameData.cmdBuffer->EndRenderPass(std::move(rp));
-    }
-    {
-        BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, false, {}}};
-        frameData.cmdBuffer->ResourceBarrier({}, texDesc);
-    }
-    frameData.cmdBuffer->End();
-    CommandBuffer* submitCmdBuffer[] = {frameData.cmdBuffer.get()};
-    CommandQueueSubmitDescriptor submitDesc{};
-    submitDesc.CmdBuffers = submitCmdBuffer;
-    cmdQueue->Submit(submitDesc);
-    swapchain->Present();
-    currentFrameIndex = (currentFrameIndex + 1) % frames.size();
 }
 
 void End() {
+    resizedConn.disconnect();
+    for (auto& i : frames) {
+        i.execFence->Wait();
+    }
     cmdQueue->Wait();
-
+    idxBuf.reset();
+    vertBuf.reset();
     pso.reset();
     rootSig.reset();
-
-    vertBuf.reset();
-    idxBuf.reset();
-
-    rtViews.clear();
     frames.clear();
-    swapchain = nullptr;
+    rtViews.clear();
+    swapchain.reset();
     cmdQueue = nullptr;
     device.reset();
-    resizedConn.disconnect();
-    resizingConn.disconnect();
     window.reset();
+    dxc.reset();
 }
 
 int main() {
     Init();
-    resizedConn = window->EventResized().connect([](int width, int height) {
-        std::lock_guard<std::mutex> lock{mtx};
-        isResizing = false;
-        resizeVal = Eigen::Vector2i(width, height);
-    });
-    resizingConn = window->EventResizing().connect([](int width, int height) {
-        std::lock_guard<std::mutex> lock{mtx};
-        isResizing = true;
-        resizeVal = Eigen::Vector2i(width, height);
-    });
-    std::thread renderThread{[]() {
-        while (true) {
-            Update();
-            if (window->ShouldClose()) {
-                break;
-            }
-            std::this_thread::yield();
-        }
-    }};
-    while (true) {
-        window->DispatchEvents();
-        if (window->ShouldClose()) {
-            break;
-        }
-        std::this_thread::yield();
-    }
-    renderThread.join();
+    Update();
     End();
     return 0;
 }

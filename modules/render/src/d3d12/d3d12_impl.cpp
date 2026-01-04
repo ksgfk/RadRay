@@ -570,6 +570,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     scDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
     scDesc.Flags = 0;
     scDesc.Flags |= _isAllowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    scDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     auto queue = CastD3D12Object(desc.PresentQueue);
     HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
     ComPtr<IDXGISwapChain1> temp;
@@ -588,8 +589,14 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain1", "QueryInterface", GetErrorName(hr), hr);
         return nullptr;
     }
+    if (HRESULT hr = swapchain->SetMaximumFrameLatency(desc.FlightFrameCount);
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain3", "SetMaximumFrameLatency", GetErrorName(hr), hr);
+        return nullptr;
+    }
     auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
     result->_frames.reserve(scDesc.BufferCount);
+    result->_frameLatencyEvent = swapchain->GetFrameLatencyWaitableObject();
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
         auto& frame = result->_frames.emplace_back();
         ComPtr<ID3D12Resource> rt;
@@ -2017,6 +2024,7 @@ void SwapChainD3D12::Destroy() noexcept {
 Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
     RADRAY_UNUSED(signalSemaphore);
     RADRAY_UNUSED(signalFence);
+    ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
     auto& frame = _frames[curr];
     return frame.image.get();
