@@ -17,7 +17,9 @@ class CpuDescriptorAllocator;
 class GpuDescriptorAllocator;
 class DeviceD3D12;
 class CmdQueueD3D12;
+class FenceD3D12Impl;
 class FenceD3D12;
+class SemaphoreD3D12;
 class CmdListD3D12;
 class CmdRenderPassD3D12;
 class SwapChainD3D12;
@@ -337,7 +339,7 @@ public:
         DeviceD3D12* device,
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
-        unique_ptr<FenceD3D12> fence) noexcept;
+        unique_ptr<FenceD3D12Impl> fence) noexcept;
     ~CmdQueueD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -351,22 +353,20 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;
-    unique_ptr<FenceD3D12> _fence;
+    unique_ptr<FenceD3D12Impl> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 
-class FenceD3D12 final : public RenderBase {
+class FenceD3D12Impl {
 public:
-    FenceD3D12(
+    FenceD3D12Impl(
         ComPtr<ID3D12Fence> fence,
         Win32Event event) noexcept;
-    ~FenceD3D12() noexcept override = default;
+    virtual ~FenceD3D12Impl() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+    bool IsValid() const noexcept;
 
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
+    void Destroy() noexcept;
 
     void Wait() noexcept;
 
@@ -378,10 +378,14 @@ public:
     Win32Event _event{};
 };
 
-class FenceD3D12Proxy final : public Fence {
+class FenceD3D12 final : public Fence, public FenceD3D12Impl {
 public:
-    explicit FenceD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept;
-    ~FenceD3D12Proxy() noexcept override;
+    using Impl = FenceD3D12Impl;
+
+    FenceD3D12(
+        ComPtr<ID3D12Fence> fence,
+        Win32Event event) noexcept;
+    ~FenceD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -390,22 +394,20 @@ public:
     void Wait() noexcept override;
 
     uint64_t GetCompletedValue() const noexcept;
-
-public:
-    unique_ptr<FenceD3D12> _proxy;
 };
 
-class SemaphoreD3D12Proxy final : public Semaphore {
+class SemaphoreD3D12 final : public Semaphore, public FenceD3D12Impl {
 public:
-    explicit SemaphoreD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept;
-    ~SemaphoreD3D12Proxy() noexcept override;
+    using Impl = FenceD3D12Impl;
+
+    SemaphoreD3D12(
+        ComPtr<ID3D12Fence> fence,
+        Win32Event event) noexcept;
+    ~SemaphoreD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
-
-public:
-    unique_ptr<FenceD3D12> _proxy;
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -701,18 +703,18 @@ public:
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
-inline auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3D12*>(v); }
-inline auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
-inline auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
-inline auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-inline auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12Proxy*>(v)->_proxy.get(); }
-inline auto CastD3D12Object(Semaphore* v) noexcept { return static_cast<SemaphoreD3D12Proxy*>(v)->_proxy.get(); }
-inline auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
-inline auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
-inline auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
-inline auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
-inline auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
-inline auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
+constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3D12*>(v); }
+constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
+constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
+constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
+constexpr auto CastD3D12Object(Semaphore* v) noexcept { return static_cast<SemaphoreD3D12*>(v); }
+constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
+constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
+constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 }  // namespace radray::render::d3d12
 

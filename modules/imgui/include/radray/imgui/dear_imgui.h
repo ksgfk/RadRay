@@ -168,26 +168,10 @@ public:
 
 class ImGuiApplication {
 public:
-    class Frame {
+    class RunningStrategy {
     public:
-        Frame(size_t index, unique_ptr<render::CommandBuffer> cmdBuffer) noexcept;
-        ~Frame() noexcept = default;
-        Frame(const Frame&) = delete;
-        Frame& operator=(const Frame&) = delete;
-        Frame(Frame&&) noexcept = delete;
-        Frame& operator=(Frame&&) noexcept = delete;
-
-        size_t _frameIndex;
-        unique_ptr<render::CommandBuffer> _cmdBuffer{};
-        render::Texture* _rt{};
-        render::TextureView* _rtView{};
-        uint32_t _rtIndex;
-    };
-
-    class RunningContext {
-    public:
-        RunningContext(ImGuiApplication& app) : _app(app) {}
-        virtual ~RunningContext() noexcept = default;
+        RunningStrategy(ImGuiApplication& app) : _app(app) {}
+        virtual ~RunningStrategy() noexcept = default;
 
         virtual void Run() = 0;
 
@@ -195,14 +179,26 @@ public:
         ImGuiApplication& _app;
     };
 
+    class SingleThreadStrategy;
+
     class RenderContext {
     public:
         RenderContext(ImGuiApplication& app) : _app(app) {}
         virtual ~RenderContext() noexcept = default;
 
+        virtual render::Device* GetDevice() const noexcept = 0;
+        virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
+        virtual uint32_t GetCurrentFrameIndex() const noexcept = 0;
+        virtual render::Texture* GetBackBuffer(uint32_t index) const noexcept = 0;
+        virtual render::TextureView* GetBackBufferDefaultRTV(uint32_t index) noexcept = 0;
+
+        virtual void Render() = 0;
+
     public:
         ImGuiApplication& _app;
     };
+
+    class RenderContextVulkan;
 
     ImGuiApplication() noexcept;
     virtual ~ImGuiApplication() noexcept;
@@ -216,9 +212,6 @@ public:
     void Destroy() noexcept;
 
 protected:
-    void NewSwapChain();
-    void RecreateSwapChain();
-
     void Init(const ImGuiApplicationDescriptor& desc);
 
     virtual void Update();
@@ -226,25 +219,17 @@ protected:
     virtual void OnStart();
     virtual void OnUpdate();
     virtual void OnImGui();
-    virtual void OnRender(ImGuiApplication::Frame* frame);
+    virtual std::span<render::CommandBuffer*> OnRender();
     virtual void OnDestroy() noexcept;
 
     virtual void OnResizing(int width, int height);
     virtual void OnResized(int width, int height);
 
-    render::TextureView* SafeGetRTView(uint32_t rtIndex, render::Texture* rt);
-    Nullable<ImGuiApplication::Frame*> GetAvailableFrame();
-
-    template <class F>
-    void ExecuteOnRenderThreadBeforeAcquire(F&& func) {
-        _beforeAcquire.WaitWrite(std::forward<F>(func));
-    }
-    void ExecuteBeforeAcquire();
-
 protected:
     uint32_t _backBufferCount;
     uint32_t _frameCount;
     render::TextureFormat _rtFormat;
+    Eigen::Vector2i _rtSize;
     bool _enableVSync;
     bool _isWaitFrame;
     bool _multithreadRender;
@@ -252,32 +237,16 @@ protected:
     unique_ptr<ImGuiContextRAII> _imguiContext;
     shared_ptr<std::function<Win32WNDPROC>> _win32ImguiProc;
     unique_ptr<NativeWindow> _window;
-    unique_ptr<render::InstanceVulkan> _vkIns;
-    shared_ptr<render::Device> _device;
-    render::CommandQueue* _cmdQueue;
-    unique_ptr<render::SwapChain> _swapchain;
     unique_ptr<RenderContext> _renderContext;
     unique_ptr<ImGuiDrawContext> _imguiDrawContext;
-    // unique_ptr<std::thread> _renderThread;
-    // unique_ptr<BoundedChannel<size_t>> _freeFrame;
-    // unique_ptr<BoundedChannel<size_t>> _waitFrame;
-    UnboundedChannel<std::function<void(void)>> _beforeAcquire;
-    vector<unique_ptr<Frame>> _frames;
-    uint64_t _currFrameIndex;
-    unique_ptr<RunningContext> _runningContext;
+    unique_ptr<RunningStrategy> _runningStrategy;
 
-    vector<unique_ptr<render::TextureView>> _rtViews;
     sigslot::scoped_connection _resizingConn;
     sigslot::scoped_connection _resizedConn;
-    Eigen::Vector2i _renderRtSize;
+
     bool _isResizingRender{false};
     bool _isRenderAcquiredRt{false};
     std::atomic_bool _needClose{false};
-
-    double _logicTime{0};
-    std::atomic<double> _renderTime{0};
-
-    friend class SingleThreadContext;
 };
 
 bool InitImGui();

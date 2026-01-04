@@ -41,7 +41,7 @@ float4 PSMain(V2P v2p) : SV_Target {
 class Frame {
 public:
     unique_ptr<d3d12::CmdListD3D12> cmdBuffer;
-    unique_ptr<d3d12::FenceD3D12Proxy> execFence;
+    unique_ptr<d3d12::FenceD3D12> execFence;
     uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
 };
 
@@ -120,7 +120,7 @@ void Init() {
     for (size_t i = 0; i < INFLIGHT_FRAME_COUNT; i++) {
         auto& f = frames.emplace_back();
         f.cmdBuffer = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
-        f.execFence = StaticCastUniquePtr<d3d12::FenceD3D12Proxy>(device->CreateFence().Unwrap());
+        f.execFence = StaticCastUniquePtr<d3d12::FenceD3D12>(device->CreateFence().Unwrap());
     }
     {
         auto hlslStr = SHADER_SRC;

@@ -480,8 +480,8 @@ Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t sl
     }
     unique_ptr<CmdQueueD3D12>& q = queues[slot];
     if (q == nullptr) {
-        Nullable<unique_ptr<FenceD3D12>> fence = CreateFenceD3D12(0);
-        if (fence == nullptr) {
+        auto fenceOpt = CreateFenceD3D12(0);
+        if (fenceOpt == nullptr) {
             return nullptr;
         }
         ComPtr<ID3D12CommandQueue> queue;
@@ -489,7 +489,7 @@ Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t sl
         desc.Type = MapType(type);
         if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
             SUCCEEDED(hr)) {
-            unique_ptr<FenceD3D12> f = fence.Release();
+            auto f = fenceOpt.Release();
             auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
             string debugName = radray::format("Queue-{}-{}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
@@ -528,19 +528,24 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
 }
 
 Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
-    auto fOpt = this->CreateFenceD3D12(0);
-    if (!fOpt.HasValue()) {
-        return nullptr;
-    }
-    return make_unique<FenceD3D12Proxy>(fOpt.Release());
+    return this->CreateFenceD3D12(0);
 }
 
 Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreDevice() noexcept {
-    auto fOpt = this->CreateFenceD3D12(0);
-    if (!fOpt.HasValue()) {
+    const uint64_t initValue = 0;
+    ComPtr<ID3D12Fence> fence;
+    if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("{} {}::{} {} {}", Errors::D3D12, "ID3D12Device", "CreateFence", GetErrorName(hr), hr);
         return nullptr;
     }
-    return make_unique<SemaphoreD3D12Proxy>(fOpt.Release());
+    std::optional<Win32Event> e = MakeWin32Event();
+    if (!e.has_value()) {
+        return nullptr;
+    }
+    auto result = make_unique<SemaphoreD3D12>(std::move(fence), std::move(e.value()));
+    result->_fenceValue = initValue + 1;
+    return result;
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
@@ -1530,7 +1535,7 @@ CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
     D3D12_COMMAND_LIST_TYPE type,
-    unique_ptr<FenceD3D12> fence) noexcept
+    unique_ptr<FenceD3D12Impl> fence) noexcept
     : _device(device),
       _queue(std::move(queue)),
       _fence(std::move(fence)),
@@ -1574,22 +1579,22 @@ void CmdQueueD3D12::Wait() noexcept {
     _fence->Wait();
 }
 
-FenceD3D12::FenceD3D12(
+FenceD3D12Impl::FenceD3D12Impl(
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept
     : _fence(std::move(fence)),
       _event(std::move(event)) {}
 
-bool FenceD3D12::IsValid() const noexcept {
+bool FenceD3D12Impl::IsValid() const noexcept {
     return _fence != nullptr;
 }
 
-void FenceD3D12::Destroy() noexcept {
+void FenceD3D12Impl::Destroy() noexcept {
     _fence = nullptr;
     _event.Destroy();
 }
 
-void FenceD3D12::Wait() noexcept {
+void FenceD3D12Impl::Wait() noexcept {
     UINT64 completedValue = _fence->GetCompletedValue();
     uint64_t signaledValue = _fenceValue - 1;
     if (completedValue < signaledValue) {
@@ -1598,52 +1603,46 @@ void FenceD3D12::Wait() noexcept {
     }
 }
 
-uint64_t FenceD3D12::GetCompletedValue() const noexcept {
+uint64_t FenceD3D12Impl::GetCompletedValue() const noexcept {
     return _fence->GetCompletedValue();
 }
 
-FenceD3D12Proxy::FenceD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept : _proxy(std::move(proxy)) {}
+FenceD3D12::FenceD3D12(
+    ComPtr<ID3D12Fence> fence,
+    Win32Event event) noexcept
+    : FenceD3D12Impl(std::move(fence), std::move(event)) {}
 
-FenceD3D12Proxy::~FenceD3D12Proxy() noexcept {
-    if (_proxy) {
-        _proxy->Destroy();
-        _proxy = nullptr;
-    }
+FenceD3D12::~FenceD3D12() noexcept = default;
+
+bool FenceD3D12::IsValid() const noexcept {
+    return Impl::IsValid();
 }
 
-bool FenceD3D12Proxy::IsValid() const noexcept { return _proxy != nullptr && _proxy->IsValid(); }
-
-void FenceD3D12Proxy::Destroy() noexcept {
-    if (_proxy) {
-        _proxy->Destroy();
-        _proxy = nullptr;
-    }
+void FenceD3D12::Destroy() noexcept {
+    Impl::Destroy();
 }
 
-void FenceD3D12Proxy::Wait() noexcept {
-    _proxy->Wait();
+void FenceD3D12::Wait() noexcept {
+    Impl::Wait();
 }
 
-uint64_t FenceD3D12Proxy::GetCompletedValue() const noexcept {
-    return _proxy->GetCompletedValue();
+uint64_t FenceD3D12::GetCompletedValue() const noexcept {
+    return Impl::GetCompletedValue();
 }
 
-SemaphoreD3D12Proxy::SemaphoreD3D12Proxy(unique_ptr<FenceD3D12> proxy) noexcept : _proxy(std::move(proxy)) {}
+SemaphoreD3D12::SemaphoreD3D12(
+    ComPtr<ID3D12Fence> fence,
+    Win32Event event) noexcept
+    : FenceD3D12Impl(std::move(fence), std::move(event)) {}
 
-SemaphoreD3D12Proxy::~SemaphoreD3D12Proxy() noexcept {
-    if (_proxy) {
-        _proxy->Destroy();
-        _proxy = nullptr;
-    }
+SemaphoreD3D12::~SemaphoreD3D12() noexcept = default;
+
+bool SemaphoreD3D12::IsValid() const noexcept {
+    return Impl::IsValid();
 }
 
-bool SemaphoreD3D12Proxy::IsValid() const noexcept { return _proxy != nullptr && _proxy->IsValid(); }
-
-void SemaphoreD3D12Proxy::Destroy() noexcept {
-    if (_proxy) {
-        _proxy->Destroy();
-        _proxy = nullptr;
-    }
+void SemaphoreD3D12::Destroy() noexcept {
+    Impl::Destroy();
 }
 
 CmdListD3D12::CmdListD3D12(
