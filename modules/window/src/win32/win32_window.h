@@ -73,7 +73,7 @@ public:
     std::atomic<RECT> _windowedRect{};
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
-    vector<weak_ptr<std::function<Win32WNDPROC>>> _extraWndProcs;
+    vector<std::function<Win32MsgProc>> _extraWndProcs;
     bool _isFullscreen{false};
     bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};

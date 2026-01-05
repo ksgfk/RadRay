@@ -7,11 +7,6 @@
 
 #include <radray/types.h>
 
-#ifndef _WINDEF_
-struct HWND__;
-using HWND = struct HWND__*;
-#endif
-
 namespace radray {
 
 enum class PlatformId {
@@ -28,8 +23,6 @@ void Free(void* ptr) noexcept;
 [[nodiscard]] void* AlignedAlloc(size_t alignment, size_t size) noexcept;
 
 void AlignedFree(void* ptr) noexcept;
-
-PlatformId GetPlatform() noexcept;
 
 class DynamicLibrary {
 public:

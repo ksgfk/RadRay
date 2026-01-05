@@ -21,11 +21,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
         auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
         if (window) {
             for (auto& proc : window->_extraWndProcs) {
-                if (proc.expired()) {
-                    continue;
-                }
-                auto procPtr = proc.lock();
-                LRESULT r = (*procPtr)(hWnd, uMsg, wParam, lParam);
+                LRESULT r = proc(hWnd, uMsg, wParam, lParam);
                 if (r) {
                     return r;
                 }

@@ -52,8 +52,6 @@ bool DynamicLibrary::IsValid() const noexcept {
 
 namespace radray {
 
-PlatformId GetPlatform() noexcept { return PlatformId::Windows; }
-
 static auto _Win32LastErrMessage() {
     void* buffer = nullptr;
     auto errCode = ::GetLastError();
@@ -132,11 +130,6 @@ void DynamicLibrary::Destroy() noexcept {
 #include <string>
 
 namespace radray {
-
-PlatformId GetPlatform() noexcept {
-    // TODO:
-    return PlatformId::UNKNOWN;
-}
 
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
 #ifdef RADRAY_ENABLE_MIMALLOC

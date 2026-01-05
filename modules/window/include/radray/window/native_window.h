@@ -7,7 +7,6 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/utility.h>
-#include <radray/platform.h>
 #include <radray/window/input.h>
 
 namespace radray {
@@ -17,12 +16,12 @@ enum class WindowHandlerTag {
     HWND
 };
 
-using Win32WNDPROC = int64_t(HWND hwnd, uint32_t uMsg, uint64_t wParam, int64_t lParam);
-
 struct WindowNativeHandler {
     WindowHandlerTag Type{WindowHandlerTag::UNKNOWN};
     void* Handle{nullptr};
 };
+
+using Win32MsgProc = int64_t(void* hwnd, uint32_t msg, uint64_t wparam, int64_t lparam);
 
 struct Win32WindowCreateDescriptor {
     std::string_view Title{};
@@ -33,7 +32,7 @@ struct Win32WindowCreateDescriptor {
     bool Resizable{false};
     bool StartMaximized{false};
     bool Fullscreen{false};
-    std::span<std::weak_ptr<std::function<Win32WNDPROC>>> ExtraWndProcs{};
+    std::span<std::function<Win32MsgProc>> ExtraWndProcs{};
 };
 
 using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor>;
