@@ -123,6 +123,9 @@ public:
         vector<UploadTexturePayload> _needCopyTexs;
         vector<render::Texture*> _waitDestroyTexs;
 
+        vector<unique_ptr<render::Buffer>> _garbageBuffers;
+        vector<unique_ptr<ImGuiDrawTexture>> _garbageTextures;
+
         unique_ptr<render::Buffer> _vb;
         unique_ptr<render::Buffer> _ib;
         int32_t _vbSize{0};
@@ -191,6 +194,7 @@ public:
         virtual uint32_t GetCurrentFrameIndex() const noexcept = 0;
         virtual render::Texture* GetBackBuffer(uint32_t index) const noexcept = 0;
         virtual render::TextureView* GetBackBufferDefaultRTV(uint32_t index) noexcept = 0;
+        virtual void Wait() noexcept = 0;
 
         virtual void Render() = 0;
 
@@ -219,7 +223,7 @@ protected:
     virtual void OnStart();
     virtual void OnUpdate();
     virtual void OnImGui();
-    virtual std::span<render::CommandBuffer*> OnRender();
+    virtual vector<render::CommandBuffer*> OnRender();
     virtual void OnDestroy() noexcept;
 
     virtual void OnResizing(int width, int height);

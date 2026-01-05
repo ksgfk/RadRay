@@ -54,6 +54,7 @@ public:
             false,
             backend,
             3,
+            2,
             radray::render::TextureFormat::RGBA8_UNORM,
 #ifdef RADRAY_IS_DEBUG
             true,
@@ -64,6 +65,17 @@ public:
             waitFrame,
             multiThread};
         this->Init(desc);
+
+        auto device = _renderContext->GetDevice();
+        _cmdBuffers.reserve(desc.FrameCount);
+        for (uint32_t i = 0; i < desc.FrameCount; i++) {
+            auto q = device->GetCommandQueue(radray::render::QueueType::Direct, 0).Unwrap();
+            _cmdBuffers.emplace_back(device->CreateCommandBuffer(q).Unwrap());
+        }
+    }
+
+    void OnDestroy() noexcept override {
+        _cmdBuffers.clear();
     }
 
     void OnImGui() override {
@@ -86,17 +98,17 @@ public:
             window_flags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
-                ImGui::Text("Logic  Time: (%09.4f ms)", _logicTime);
-                ImGui::Text("Render Time: (%09.4f ms)", _renderTime.load());
-                ImGui::Separator();
+                //     ImGui::Text("Logic  Time: (%09.4f ms)", _logicTime);
+                //     ImGui::Text("Render Time: (%09.4f ms)", _renderTime.load());
+                //     ImGui::Separator();
                 if (ImGui::Checkbox("VSync", &_enableVSync)) {
-                    this->ExecuteOnRenderThreadBeforeAcquire([this]() {
-                        this->RecreateSwapChain();
-                    });
+                    //         this->ExecuteOnRenderThreadBeforeAcquire([this]() {
+                    //             this->RecreateSwapChain();
+                    //         });
                 }
-                if (_multithreadRender) {
-                    ImGui::Checkbox("Wait Frame", &_isWaitFrame);
-                }
+                //     if (_multithreadRender) {
+                //         ImGui::Checkbox("Wait Frame", &_isWaitFrame);
+                //     }
             }
             ImGui::End();
         }
@@ -104,67 +116,71 @@ public:
 
     void OnUpdate() override {}
 
-    void OnRender(radray::ImGuiApplication::Frame* currFrame) override {
-        currFrame->_cmdBuffer->Begin();
-        _imguiDrawContext->BeforeDraw((int)currFrame->_frameIndex, currFrame->_cmdBuffer.get());
+    radray::vector<radray::render::CommandBuffer*> OnRender() override {
+        auto currFrameIndex = _renderContext->GetCurrentFrameIndex();
+        auto currBackBufferIndex = _renderContext->GetCurrentBackBufferIndex();
+        auto cmdBuffer = _cmdBuffers[currFrameIndex].get();
+        auto rt = _renderContext->GetBackBuffer(currBackBufferIndex);
+        auto rtView = _renderContext->GetBackBufferDefaultRTV(currBackBufferIndex);
+
+        cmdBuffer->Begin();
+        _imguiDrawContext->BeforeDraw((int)currFrameIndex, cmdBuffer);
         {
             radray::render::BarrierTextureDescriptor barrier{};
-            barrier.Target = currFrame->_rt;
+            barrier.Target = rt;
             barrier.Before = radray::render::TextureUse::Uninitialized;
             barrier.After = radray::render::TextureUse::RenderTarget;
             barrier.IsFromOrToOtherQueue = false;
             barrier.IsSubresourceBarrier = false;
-            currFrame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
         radray::unique_ptr<radray::render::CommandEncoder> pass;
         {
             radray::render::RenderPassDescriptor rpDesc{};
             radray::render::ColorAttachment rtAttach{};
-            rtAttach.Target = currFrame->_rtView;
+            rtAttach.Target = rtView;
             rtAttach.Load = radray::render::LoadAction::Clear;
             rtAttach.Store = radray::render::StoreAction::Store;
             rtAttach.ClearValue = radray::render::ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-            pass = currFrame->_cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+            pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         }
-        _imguiDrawContext->Draw((int)currFrame->_frameIndex, pass.get());
-        currFrame->_cmdBuffer->EndRenderPass(std::move(pass));
+        _imguiDrawContext->Draw((int)currFrameIndex, pass.get());
+        cmdBuffer->EndRenderPass(std::move(pass));
         {
             radray::render::BarrierTextureDescriptor barrier{};
-            barrier.Target = currFrame->_rt;
+            barrier.Target = rt;
             barrier.Before = radray::render::TextureUse::RenderTarget;
             barrier.After = radray::render::TextureUse::Present;
             barrier.IsFromOrToOtherQueue = false;
             barrier.IsSubresourceBarrier = false;
-            currFrame->_cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
-        currFrame->_cmdBuffer->End();
-        {
-            radray::render::CommandQueueSubmitDescriptor submitDesc{};
-            auto cmdBuffer = currFrame->_cmdBuffer.get();
-            submitDesc.CmdBuffers = std::span{&cmdBuffer, 1};
-            _cmdQueue->Submit(submitDesc);
-        }
+        cmdBuffer->End();
+        _imguiDrawContext->AfterDraw((int)currFrameIndex);
+        return {cmdBuffer};
     }
 
     void OnResizing(int width, int height) override {
-        ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-            this->_renderRtSize = Eigen::Vector2i{width, height};
-            this->_isResizingRender = true;
-        });
+        // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
+        //     this->_renderRtSize = Eigen::Vector2i{width, height};
+        //     this->_isResizingRender = true;
+        // });
     }
 
     void OnResized(int width, int height) override {
-        ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-            this->_renderRtSize = Eigen::Vector2i(width, height);
-            this->_isResizingRender = false;
-            if (width > 0 && height > 0) {
-                this->RecreateSwapChain();
-            }
-        });
+        // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
+        //     this->_renderRtSize = Eigen::Vector2i(width, height);
+        //     this->_isResizingRender = false;
+        //     if (width > 0 && height > 0) {
+        //         this->RecreateSwapChain();
+        //     }
+        // });
     }
 
 private:
+    radray::vector<radray::unique_ptr<radray::render::CommandBuffer>> _cmdBuffers;
+
     radray::render::RenderBackend backend;
     bool vsync, waitFrame, multiThread;
     bool _showDemo{true};
@@ -194,7 +210,7 @@ int main(int argc, char** argv) {
     }
     radray::InitImGui();
     {
-        HelloImguiApp app{backend, false, false, isMultiThread};
+        HelloImguiApp app{backend, true, false, isMultiThread};
         app.Run();
         app.Destroy();
     }

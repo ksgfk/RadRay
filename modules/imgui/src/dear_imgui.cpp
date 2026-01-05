@@ -352,6 +352,9 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         }
     }
     if (frame._vb == nullptr || frame._vbSize < drawData->TotalVtxCount) {
+        if (frame._vb) {
+            frame._garbageBuffers.emplace_back(std::move(frame._vb));
+        }
         int vertCount = drawData->TotalVtxCount + 5000;
         BufferDescriptor desc{};
         desc.Size = vertCount * sizeof(ImDrawVert);
@@ -364,6 +367,9 @@ void ImGuiDrawContext::ExtractDrawData(int frameIndex, ImDrawData* drawData) {
         frame._vbSize = vertCount;
     }
     if (frame._ib == nullptr || frame._ibSize < drawData->TotalIdxCount) {
+        if (frame._ib) {
+            frame._garbageBuffers.emplace_back(std::move(frame._ib));
+        }
         int idxCount = drawData->TotalIdxCount + 10000;
         BufferDescriptor desc{};
         desc.Size = idxCount * sizeof(ImDrawIdx);
@@ -488,6 +494,9 @@ void ImGuiDrawContext::ExtractTexture(int frameIndex, ImTextureData* tex) {
 
 void ImGuiDrawContext::BeforeDraw(int frameIndex, render::CommandBuffer* cmdBuffer) {
     ImGuiDrawContext::Frame& frame = _frames[frameIndex];
+
+    frame._garbageBuffers.clear();
+    frame._garbageTextures.clear();
 
     frame._usableDescSetIndex = 0;
 
@@ -622,11 +631,16 @@ void ImGuiDrawContext::AfterDraw(int frameIndex) {
             if (itSet != _descSetCache.end()) {
                 _descSetCache.erase(itSet);
             }
+            frame._garbageTextures.emplace_back(std::move(it->second));
             _texs.erase(it);
         }
     }
     frame._waitDestroyTexs.clear();
     frame._needCopyTexs.clear();
+
+    for (auto& buf : frame._tempUploadBuffers) {
+        frame._garbageBuffers.emplace_back(std::move(buf));
+    }
     frame._tempUploadBuffers.clear();
 }
 
@@ -714,18 +728,15 @@ public:
     }
 
     ~RenderContextVulkan() noexcept override {
-        for (auto& fence : _inFlightFences) {
-            fence->Wait();
-        }
-        _cmdQueue->Wait();
         _rts.clear();
         _rtViews.clear();
         _imageAvailableSemaphores.clear();
         _renderFinishSemaphores.clear();
+        _inFlightFences.clear();
         _swapchain.reset();
         _cmdQueue = nullptr;
         _device.reset();
-        _vkIns.reset();
+        render::DestroyVulkanInstance(std::move(_vkIns));
     }
 
     render::Device* GetDevice() const noexcept override { return _device.get(); }
@@ -748,6 +759,12 @@ public:
         }
         return _rtViews[index].get();
     }
+    void Wait() noexcept override {
+        for (auto& fence : _inFlightFences) {
+            fence->Wait();
+        }
+        _cmdQueue->Wait();
+    }
 
     void Render() override {
         if (_app._rtSize.x() <= 0 || _app._rtSize.y() <= 0) {
@@ -761,6 +778,7 @@ public:
             return;
         }
         _currentBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+        _rts[_currentBackBufferIndex] = static_cast<vulkan::ImageVulkan*>(rtOpt.Release());
         auto submitCmdBufs = _app.OnRender();
         Semaphore* renderFinishSemaphore = _renderFinishSemaphores[_currentBackBufferIndex].get();
         render::CommandQueueSubmitDescriptor submitDesc{};
@@ -851,6 +869,7 @@ void ImGuiApplication::Run() {
 void ImGuiApplication::Destroy() noexcept {
     _resizingConn.disconnect();
     _resizedConn.disconnect();
+    _renderContext->Wait();
     this->OnDestroy();
     TerminateRendererImGui(_imguiContext->Get());
     TerminatePlatformImGui(_imguiContext->Get());
@@ -916,6 +935,9 @@ void ImGuiApplication::Init(const ImGuiApplicationDescriptor& desc_) {
     } else {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, Errors::UnsupportedPlatform);
     }
+    if (!_renderContext) {
+        throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create RenderContext");
+    }
     {
         ImGuiDrawDescriptor imguiDrawDesc{};
         imguiDrawDesc.Device = _renderContext->GetDevice();
@@ -970,7 +992,7 @@ void ImGuiApplication::OnUpdate() {}
 
 void ImGuiApplication::OnImGui() {}
 
-std::span<render::CommandBuffer*> ImGuiApplication::OnRender() { return {}; }
+vector<render::CommandBuffer*> ImGuiApplication::OnRender() { return {}; }
 
 void ImGuiApplication::OnDestroy() noexcept {}
 
