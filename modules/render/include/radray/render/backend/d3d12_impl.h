@@ -453,6 +453,8 @@ public:
 
     void Destroy() noexcept override;
 
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
     void SetViewport(Viewport vp) noexcept override;
 
     void SetScissor(Rect rect) noexcept override;

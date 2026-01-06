@@ -2136,6 +2136,10 @@ void SimulateCommandEncoderVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+CommandBuffer* SimulateCommandEncoderVulkan::GetCommandBuffer() const noexcept {
+    return _cmdBuffer;
+}
+
 void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _framebuffer.reset();
     _pass.reset();

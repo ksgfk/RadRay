@@ -1852,6 +1852,10 @@ void CmdRenderPassD3D12::Destroy() noexcept {
     _cmdList = nullptr;
 }
 
+CommandBuffer* CmdRenderPassD3D12::GetCommandBuffer() const noexcept {
+    return _cmdList;
+}
+
 void CmdRenderPassD3D12::SetViewport(Viewport viewport) noexcept {
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = viewport.X;

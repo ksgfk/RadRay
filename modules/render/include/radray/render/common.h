@@ -882,6 +882,8 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdEncoder; }
 
+    virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
+
     virtual void SetViewport(Viewport vp) noexcept = 0;
 
     virtual void SetScissor(Rect rect) noexcept = 0;
