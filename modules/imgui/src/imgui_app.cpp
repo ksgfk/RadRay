@@ -496,6 +496,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     _enableFrameDropping = config.EnableFrameDropping;
     // window
 #ifdef RADRAY_PLATFORM_WINDOWS
+    ImGui_ImplWin32_EnableDpiAwareness();
     std::function<Win32MsgProc> imguiProc = [this](void* hwnd_, uint32_t msg_, uint64_t wparam_, int64_t lparam_) -> int64_t {
         if (!_imgui) {
             return 0;
@@ -520,10 +521,8 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create window");
     }
     // imgui
+    IMGUI_CHECKVERSION();
     ImGui::SetAllocatorFunctions(_ImguiAllocBridge, _ImguiFreeBridge, nullptr);
-#ifdef RADRAY_PLATFORM_WINDOWS
-    ImGui_ImplWin32_EnableDpiAwareness();
-#endif
     _imgui = make_unique<ImGuiContextRAII>();
     _imgui->SetCurrent();
     ImGuiIO& io = ImGui::GetIO();
@@ -535,13 +534,12 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
         }
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::StyleColorsDark();
-        ImGuiStyle& style = ImGui::GetStyle();
         float mainScale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+        ImGuiStyle& style = ImGui::GetStyle();
         style.ScaleAllSizes(mainScale);
         style.FontScaleDpi = mainScale;
         ImGui_ImplWin32_Init(wnh.Handle);
         io.Fonts->AddFontDefault();
-        IMGUI_CHECKVERSION();
     }
 #endif
     // render
