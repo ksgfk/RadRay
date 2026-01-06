@@ -1,13 +1,3 @@
-#include <thread>
-#include <mutex>
-#include <atomic>
-#include <condition_variable>
-#include <stdexcept>
-#include <deque>
-#include <array>
-#include <limits>
-#include <algorithm>
-
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/platform.h>
@@ -15,7 +5,7 @@
 #include <radray/stopwatch.h>
 #include <radray/window/native_window.h>
 #include <radray/render/common.h>
-#include <radray/imgui/dear_imgui.h>
+#include <radray/imgui/imgui_app.h>
 
 const char* RADRAY_APP_NAME = "Hello Dear ImGui";
 
@@ -41,36 +31,14 @@ private:
 
 class HelloImguiApp : public radray::ImGuiApplication {
 public:
-    explicit HelloImguiApp(radray::render::RenderBackend backend, bool vsync, bool waitFrame, bool multiThread)
-        : radray::ImGuiApplication(), backend(backend), vsync(vsync), waitFrame(waitFrame), multiThread(multiThread) {}
+    HelloImguiApp() = default;
     ~HelloImguiApp() noexcept override = default;
 
-    void OnStart() override {
-        auto name = radray::format("{} - {} {}", radray::string{RADRAY_APP_NAME}, backend, multiThread ? "MultiThread" : "");
-        radray::ImGuiApplicationDescriptor desc{
-            name,
-            {1280, 720},
-            true,
-            false,
-            backend,
-            3,
-            2,
-            radray::render::TextureFormat::RGBA8_UNORM,
-#ifdef RADRAY_IS_DEBUG
-            true,
-#else
-            false,
-#endif
-            vsync,
-            waitFrame,
-            multiThread};
-        this->Init(desc);
-
-        auto device = _renderContext->GetDevice();
-        _cmdBuffers.reserve(desc.FrameCount);
-        for (uint32_t i = 0; i < desc.FrameCount; i++) {
-            auto q = device->GetCommandQueue(radray::render::QueueType::Direct, 0).Unwrap();
-            _cmdBuffers.emplace_back(device->CreateCommandBuffer(q).Unwrap());
+    void OnStart(const radray::ImGuiAppConfig& config) override {
+        this->Init(config);
+        _cmdBuffers.reserve(_inFlightFrameCount);
+        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+            _cmdBuffers.emplace_back(_device->CreateCommandBuffer(_cmdQueue).Unwrap());
         }
     }
 
@@ -116,15 +84,14 @@ public:
 
     void OnUpdate() override {}
 
-    radray::vector<radray::render::CommandBuffer*> OnRender() override {
-        auto currFrameIndex = _renderContext->GetCurrentFrameIndex();
-        auto currBackBufferIndex = _renderContext->GetCurrentBackBufferIndex();
-        auto cmdBuffer = _cmdBuffers[currFrameIndex].get();
-        auto rt = _renderContext->GetBackBuffer(currBackBufferIndex);
-        auto rtView = _renderContext->GetBackBufferDefaultRTV(currBackBufferIndex);
+    radray::vector<radray::render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
+        auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+        auto cmdBuffer = _cmdBuffers[frameIndex].get();
+        auto rt = _backBuffers[currBackBufferIndex];
+        auto rtView = this->GetDefaultRTV(currBackBufferIndex);
 
         cmdBuffer->Begin();
-        _imguiDrawContext->BeforeDraw((int)currFrameIndex, cmdBuffer);
+        _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
         {
             radray::render::BarrierTextureDescriptor barrier{};
             barrier.Target = rt;
@@ -145,7 +112,7 @@ public:
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
             pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         }
-        _imguiDrawContext->Draw((int)currFrameIndex, pass.get());
+        _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
             radray::render::BarrierTextureDescriptor barrier{};
@@ -157,37 +124,35 @@ public:
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
         cmdBuffer->End();
-        _imguiDrawContext->AfterDraw((int)currFrameIndex);
         return {cmdBuffer};
     }
 
-    void OnResizing(int width, int height) override {
-        // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-        //     this->_renderRtSize = Eigen::Vector2i{width, height};
-        //     this->_isResizingRender = true;
-        // });
-    }
+    // void OnResizing(int width, int height) override {
+    // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
+    //     this->_renderRtSize = Eigen::Vector2i{width, height};
+    //     this->_isResizingRender = true;
+    // });
+    // }
 
-    void OnResized(int width, int height) override {
-        // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-        //     this->_renderRtSize = Eigen::Vector2i(width, height);
-        //     this->_isResizingRender = false;
-        //     if (width > 0 && height > 0) {
-        //         this->RecreateSwapChain();
-        //     }
-        // });
-    }
+    // void OnResized(int width, int height) override {
+    // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
+    //     this->_renderRtSize = Eigen::Vector2i(width, height);
+    //     this->_isResizingRender = false;
+    //     if (width > 0 && height > 0) {
+    //         this->RecreateSwapChain();
+    //     }
+    // });
+    // }
 
 private:
     radray::vector<radray::unique_ptr<radray::render::CommandBuffer>> _cmdBuffers;
-
-    radray::render::RenderBackend backend;
-    bool vsync, waitFrame, multiThread;
     bool _showDemo{true};
     bool _showMonitor{true};
 };
 
-int main(int argc, char** argv) {
+radray::unique_ptr<HelloImguiApp> app;
+
+void Init(int argc, char** argv) {
     radray::render::RenderBackend backend{radray::render::RenderBackend::Vulkan};
     bool isMultiThread = true;
     if (argc > 1) {
@@ -198,8 +163,7 @@ int main(int argc, char** argv) {
         } else if (backendStr == "d3d12") {
             backend = radray::render::RenderBackend::D3D12;
         } else {
-            fmt::print("Unsupported backend: {}, using default Vulkan backend.\n", backendStr);
-            return -1;
+            RADRAY_WARN_LOG("Unsupported backend: {}, using default Vulkan backend.", backendStr);
         }
     }
     if (argc > 2) {
@@ -208,11 +172,35 @@ int main(int argc, char** argv) {
             isMultiThread = false;
         }
     }
-    radray::InitImGui();
-    {
-        HelloImguiApp app{backend, true, false, isMultiThread};
-        app.Run();
-        app.Destroy();
+
+    app = radray::make_unique<HelloImguiApp>();
+    auto name = radray::format("{} - {} {}", radray::string{RADRAY_APP_NAME}, backend, isMultiThread ? "MultiThread" : "");
+    radray::ImGuiAppConfig config{
+        RADRAY_APP_NAME,
+        name,
+        1280,
+        720,
+        backend,
+        std::nullopt,
+        3,
+        2,
+        radray::render::TextureFormat::RGBA8_UNORM,
+        true,
+        isMultiThread,
+        false,
+        true};
+    app->Setup(config);
+}
+
+int main(int argc, char** argv) {
+    try {
+        Init(argc, argv);
+        app->Run();
+        app->Destroy();
+    } catch (std::exception& e) {
+        RADRAY_ERR_LOG("Fatal error: {}", e.what());
+    } catch (...) {
+        RADRAY_ERR_LOG("Fatal unknown error.");
     }
     radray::FlushLog();
     return 0;

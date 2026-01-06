@@ -699,7 +699,7 @@ public:
             if (!compileResultOpt.HasValue()) {
                 return std::nullopt;
             }
-            compileResult = compileResultOpt.Unwrap();
+            compileResult = compileResultOpt.Release();
         }
         auto [status, errMsg] = GetCompileState(compileResult.Get());
         if (!errMsg.empty()) {

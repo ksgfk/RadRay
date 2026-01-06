@@ -322,6 +322,12 @@ enum class ResourceBindType {
     RWTexture
 };
 
+enum class FenceStatus {
+    Complete,
+    Incomplete,
+    NotSubmitted
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -912,6 +918,8 @@ public:
     virtual ~Fence() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+
+    virtual FenceStatus GetStatus() const noexcept = 0;
 
     virtual void Wait() noexcept = 0;
 };

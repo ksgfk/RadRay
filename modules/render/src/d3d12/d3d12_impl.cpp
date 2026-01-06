@@ -1622,6 +1622,12 @@ void FenceD3D12::Destroy() noexcept {
     Impl::Destroy();
 }
 
+FenceStatus FenceD3D12::GetStatus() const noexcept {
+    UINT64 completedValue = _fence->GetCompletedValue();
+    uint64_t signaledValue = _fenceValue - 1;
+    return completedValue < signaledValue ? FenceStatus::Incomplete : FenceStatus::Complete;
+}
+
 void FenceD3D12::Wait() noexcept {
     Impl::Wait();
 }

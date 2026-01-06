@@ -117,8 +117,9 @@ public:
     ~ImGuiRenderer() noexcept;
 
     void ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData);
-    void Render(uint32_t frameIndex, render::CommandEncoder* encoder);
-    void OnFrameComplete(uint32_t frameIndex);
+    void OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer);
+    void OnRender(uint32_t frameIndex, render::CommandEncoder* encoder);
+    void OnRenderComplete(uint32_t frameIndex);
     void SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
 
 public:
@@ -156,26 +157,30 @@ public:
     ImGuiApplication& operator=(const ImGuiApplication&) = delete;
     ImGuiApplication& operator=(ImGuiApplication&&) = delete;
 
-    void Run(const ImGuiAppConfig& config);
+    void Setup(const ImGuiAppConfig& config);
+    void Run();
     void Destroy();
 
 protected:
-    virtual void OnStart();
+    virtual void OnStart(const ImGuiAppConfig& config);
     virtual void OnDestroy();
     virtual void OnUpdate();
     virtual void OnImGui();
+    virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
 
+    void Init(const ImGuiAppConfig& config);
     void RecreateSwapChain();
+    render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
 
 private:
-    void MainLoop();
-    void RenderLoop();
+    void LoopSingleThreaded();
 
 protected:
+    // imgui
     unique_ptr<ImGuiContextRAII> _imgui;
-
+    // window
     unique_ptr<NativeWindow> _window;
-
+    // render objects
     unique_ptr<render::InstanceVulkan> _vkIns;
     shared_ptr<render::Device> _device;
     render::CommandQueue* _cmdQueue{nullptr};
@@ -185,20 +190,24 @@ protected:
     vector<unique_ptr<render::Semaphore>> _imageAvailableSemaphores;
     vector<render::Texture*> _backBuffers;
     vector<unique_ptr<render::TextureView>> _defaultRTVs;
-    unique_ptr<ImGuiRenderer> _renderer;
-
+    unique_ptr<ImGuiRenderer> _imguiRenderer;
+    // multi-threading
     unique_ptr<std::thread> _renderThread;
     unique_ptr<BoundedChannel<uint32_t>> _freeFrames;
     unique_ptr<BoundedChannel<uint32_t>> _inflightFrames;
-
+    // global configs
     uint32_t _rtWidth{0};
     uint32_t _rtHeight{0};
     uint32_t _backBufferCount{0};
     uint32_t _inFlightFrameCount{0};
     render::TextureFormat _rtFormat{render::TextureFormat::UNKNOWN};
     bool _enableVSync{false};
-
+    bool _enableMultiThreading{false};
+    bool _enableFrameDropping{false};
+    // state
     std::atomic_bool _needClose{false};
+    uint64_t _frameCount{0};
+    vector<uint8_t> _frameState;  // true: frame is submitted but not yet completed, false: frame is completed
 };
 
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

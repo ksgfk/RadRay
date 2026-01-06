@@ -2311,6 +2311,15 @@ void FenceVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+FenceStatus FenceVulkan::GetStatus() const noexcept {
+    if (_submitted) {
+        VkResult vr = _device->_ftb.vkGetFenceStatus(_device->_device, _fence);
+        return vr == VK_SUCCESS ? FenceStatus::Complete : FenceStatus::Incomplete;
+    } else {
+        return FenceStatus::NotSubmitted;
+    }
+}
+
 void FenceVulkan::Wait() noexcept {
     if (_submitted) {
         if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);

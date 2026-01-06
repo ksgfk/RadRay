@@ -4,11 +4,17 @@
 #include <utility>
 #include <type_traits>
 #include <source_location>
+#include <stdexcept>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
 
 namespace radray {
+
+class NullableAccessException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 template <class T>
 requires std::is_convertible_v<decltype(std::declval<T>() != nullptr), bool> && std::is_constructible_v<T, std::nullptr_t>
@@ -48,16 +54,16 @@ public:
 
     constexpr explicit operator bool() const noexcept { return HasValue(); }
 
-    constexpr T Unwrap(std::source_location location = std::source_location::current()) & noexcept {
+    constexpr T Unwrap(std::source_location location = std::source_location::current()) & {
         if (!HasValue()) [[unlikely]] {
-            LogAbort(location, "access null");
+            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
         }
         return _value;
     }
 
-    constexpr T Unwrap(std::source_location location = std::source_location::current()) && noexcept {
+    constexpr T Unwrap(std::source_location location = std::source_location::current()) && {
         if (!HasValue()) [[unlikely]] {
-            LogAbort(location, "access null");
+            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
         }
         return std::move(_value);
     }
@@ -103,9 +109,9 @@ public:
 
     constexpr explicit operator bool() const noexcept { return static_cast<bool>(_value); }
 
-    constexpr std::unique_ptr<T, TDeleter> Unwrap(std::source_location location = std::source_location::current()) noexcept {
+    constexpr std::unique_ptr<T, TDeleter> Unwrap(std::source_location location = std::source_location::current()) {
         if (!HasValue()) [[unlikely]] {
-            LogAbort(location, "access null");
+            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
         }
         return std::move(_value);
     }
@@ -157,9 +163,9 @@ public:
 
     constexpr explicit operator bool() const noexcept { return static_cast<bool>(_value); }
 
-    constexpr std::shared_ptr<T> Unwrap(std::source_location location = std::source_location::current()) noexcept {
+    constexpr std::shared_ptr<T> Unwrap(std::source_location location = std::source_location::current()) {
         if (!HasValue()) [[unlikely]] {
-            LogAbort(location, "access null");
+            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
         }
         return std::move(_value);
     }

@@ -371,6 +371,8 @@ public:
 
     void Destroy() noexcept override;
 
+    FenceStatus GetStatus() const noexcept override;
+
     void Wait() noexcept override;
 
 public:

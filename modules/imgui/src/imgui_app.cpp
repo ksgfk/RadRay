@@ -144,6 +144,13 @@ ImGuiRenderer::ImGuiRenderer(
     }
 }
 
+ImGuiRenderer::~ImGuiRenderer() noexcept {
+    _frames.clear();
+    _aliveTexs.clear();
+    _pso.reset();
+    _rootSig.reset();
+}
+
 void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
@@ -194,7 +201,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                     render::BufferDescriptor uploadDesc{
                         static_cast<uint64_t>(uploadSize),
                         render::MemoryType::Upload,
-                        render::BufferUse::CopySource,
+                        render::BufferUse::CopySource | render::BufferUse::MapWrite,
                         {},
                         uploadName};
                     unique_ptr<render::Buffer> uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
@@ -228,7 +235,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
         render::BufferDescriptor desc{
             vertCount * sizeof(ImDrawVert),
             render::MemoryType::Upload,
-            render::BufferUse::Vertex | render::BufferUse::CopySource,
+            render::BufferUse::Vertex | render::BufferUse::MapWrite,
             {},
             vbName};
         frame._vb = _device->CreateBuffer(desc).Unwrap();
@@ -244,7 +251,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
         render::BufferDescriptor desc{
             idxCount * sizeof(ImDrawIdx),
             render::MemoryType::Upload,
-            render::BufferUse::Index | render::BufferUse::CopySource,
+            render::BufferUse::Index | render::BufferUse::MapWrite,
             {},
             ibName};
         frame._ib = _device->CreateBuffer(desc).Unwrap();
@@ -287,13 +294,12 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
     }
 }
 
-void ImGuiRenderer::Render(uint32_t frameIndex, render::CommandEncoder* encoder) {
+void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer) {
     auto& frame = *_frames[frameIndex].get();
     const auto drawData = &frame._drawData;
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
         return;
     }
-    auto cmdBuffer = encoder->GetCommandBuffer();
     if (frame._uploadTexReqs.size() > 0) {
         vector<render::BarrierTextureDescriptor> barriers;
         barriers.reserve(frame._uploadTexReqs.size());
@@ -321,6 +327,14 @@ void ImGuiRenderer::Render(uint32_t frameIndex, render::CommandEncoder* encoder)
         }
         cmdBuffer->ResourceBarrier({}, barriers);
         frame._uploadTexReqs.clear();
+    }
+}
+
+void ImGuiRenderer::OnRender(uint32_t frameIndex, render::CommandEncoder* encoder) {
+    auto& frame = *_frames[frameIndex].get();
+    const auto drawData = &frame._drawData;
+    if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
+        return;
     }
     int fbWidth = (int)(drawData->DisplaySize.x * drawData->FramebufferScale.x);
     int fbHeight = (int)(drawData->DisplaySize.y * drawData->FramebufferScale.y);
@@ -382,7 +396,7 @@ void ImGuiRenderer::Render(uint32_t frameIndex, render::CommandEncoder* encoder)
     encoder->SetScissor({0, 0, (uint32_t)fbWidth, (uint32_t)fbHeight});
 }
 
-void ImGuiRenderer::OnFrameComplete(uint32_t frameIndex) {
+void ImGuiRenderer::OnRenderComplete(uint32_t frameIndex) {
     auto& frame = *_frames[frameIndex].get();
     frame._tempBufs.clear();
     frame._tempTexSets.clear();
@@ -420,18 +434,66 @@ void ImGuiRenderer::SetupRenderState(int frameIndex, render::CommandEncoder* enc
     encoder->PushConstant(proj.data(), sizeof(proj));
 }
 
-void ImGuiApplication::Run(const ImGuiAppConfig& config_) {
-    auto config = config_;
-    if (config.EnableFrameDropping && !config.EnableMultiThreading) {
-        config.EnableFrameDropping = false;
-        RADRAY_WARN_LOG("{}: Frame dropping requires multi-threading. Disabling frame dropping.", Errors::RADRAYIMGUI);
+void ImGuiApplication::Setup(const ImGuiAppConfig& config) {
+    this->OnStart(config);
+}
+
+void ImGuiApplication::Run() {
+    if (_enableMultiThreading) {
+    } else {
+        this->LoopSingleThreaded();
     }
+}
+
+void ImGuiApplication::Destroy() {
+    if (_cmdQueue) _cmdQueue->Wait();
+
+    this->OnDestroy();
+
+    // render
+    if (_imgui) {
+        _imgui->SetCurrent();
+        ImGuiIO& io = ImGui::GetIO();
+        io.BackendRendererName = nullptr;
+        io.BackendRendererUserData = nullptr;
+        io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    }
+    _imguiRenderer.reset();
+    _defaultRTVs.clear();
+    _backBuffers.clear();
+    _imageAvailableSemaphores.clear();
+    _renderFinishSemaphores.clear();
+    _inFlightFences.clear();
+    _swapchain.reset();
+    _cmdQueue = nullptr;
+    _device.reset();
+    if (_vkIns) render::DestroyVulkanInstance(std::move(_vkIns));
+    // imgui
+    if (_imgui) {
+        _imgui->SetCurrent();
+#ifdef RADRAY_PLATFORM_WINDOWS
+        ImGui_ImplWin32_Shutdown();
+#endif
+    }
+    _imgui.reset();
+    // window
+    _window.reset();
+}
+
+void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
+    auto config = config_;
+    // if (config.EnableFrameDropping && !config.EnableMultiThreading) {
+    //     config.EnableFrameDropping = false;
+    //     RADRAY_WARN_LOG("{}: Frame dropping requires multi-threading. Disabling frame dropping.", Errors::RADRAYIMGUI);
+    // }
     _rtWidth = config.Width;
     _rtHeight = config.Height;
     _backBufferCount = config.BackBufferCount;
     _inFlightFrameCount = config.InFlightFrameCount;
     _rtFormat = config.RTFormat;
     _enableVSync = config.EnableVSync;
+    _enableMultiThreading = config.EnableMultiThreading;
+    _enableFrameDropping = config.EnableFrameDropping;
     // window
 #ifdef RADRAY_PLATFORM_WINDOWS
     std::function<Win32MsgProc> imguiProc = [this](void* hwnd_, uint32_t msg_, uint64_t wparam_, int64_t lparam_) -> int64_t {
@@ -510,39 +572,12 @@ void ImGuiApplication::Run(const ImGuiAppConfig& config_) {
     if (!_device) {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create device");
     }
-    _renderer = make_unique<ImGuiRenderer>(_device.get(), _rtFormat, _inFlightFrameCount);
+    _imguiRenderer = make_unique<ImGuiRenderer>(_device.get(), _rtFormat, _inFlightFrameCount);
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
-    io.BackendRendererUserData = _renderer.get();
-    io.BackendRendererName = "radray_imgui_renderer_impl";
+    io.BackendRendererUserData = _imguiRenderer.get();
+    io.BackendRendererName = "radray_imgui_imguiRenderer_impl";
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
-}
-
-void ImGuiApplication::Destroy() {
-    _cmdQueue->Wait();
-
-    _imgui->SetCurrent();
-    ImGuiIO& io = ImGui::GetIO();
-
-    this->OnDestroy();
-    // render
-    io.BackendRendererName = nullptr;
-    io.BackendRendererUserData = nullptr;
-    io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
-    _renderer.reset();
-    _defaultRTVs.clear();
-    _backBuffers.clear();
-    _imageAvailableSemaphores.clear();
-    _renderFinishSemaphores.clear();
-    _inFlightFences.clear();
-    _swapchain.reset();
-    _cmdQueue = nullptr;
-    _device.reset();
-    // imgui
-    ImGui_ImplWin32_Shutdown();
-    _imgui.reset();
-    // window
-    _window.reset();
 }
 
 void ImGuiApplication::RecreateSwapChain() {
@@ -577,9 +612,33 @@ void ImGuiApplication::RecreateSwapChain() {
     for (auto& rt : _backBuffers) {
         rt = nullptr;
     }
+    _frameState.resize(_inFlightFrameCount);
+    for (auto& state : _frameState) {
+        state = false;
+    }
+    _frameCount = 0;
+    if (_imguiRenderer) {
+        for (size_t i = 0; i < _inFlightFrameCount; i++) {
+            _imguiRenderer->OnRenderComplete(i);
+        }
+    }
 }
 
-void ImGuiApplication::MainLoop() {
+render::TextureView* ImGuiApplication::GetDefaultRTV(uint32_t backBufferIndex) {
+    if (_defaultRTVs[backBufferIndex] == nullptr) {
+        render::Texture* backBuffer = _backBuffers[backBufferIndex];
+        render::TextureViewDescriptor rtvDesc{
+            backBuffer,
+            render::TextureViewDimension::Dim2D,
+            _rtFormat,
+            render::SubresourceRange::AllSub(),
+            render::TextureUse::RenderTarget};
+        _defaultRTVs[backBufferIndex] = _device->CreateTextureView(rtvDesc).Unwrap();
+    }
+    return _defaultRTVs[backBufferIndex].get();
+}
+
+void ImGuiApplication::LoopSingleThreaded() {
     while (true) {
         _window->DispatchEvents();
         _needClose = _window->ShouldClose();
@@ -587,17 +646,65 @@ void ImGuiApplication::MainLoop() {
             break;
         }
         this->OnUpdate();
+        _imgui->SetCurrent();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
         this->OnImGui();
         ImGui::Render();
+
+        const uint32_t frameIndex = static_cast<uint32_t>(_frameCount % _inFlightFrameCount);
+        {
+            render::Fence* fence = _inFlightFences[frameIndex].get();
+            if (_enableFrameDropping) {
+                auto status = fence->GetStatus();
+                if (status != render::FenceStatus::Complete) {
+                    continue;
+                }
+            } else {
+                fence->Wait();
+            }
+        }
+        if (_frameState[frameIndex]) {
+            _imguiRenderer->OnRenderComplete(frameIndex);
+            _frameState[frameIndex] = false;
+        }
+        _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
+        {
+            render::Semaphore* imageAvailableSemaphore = nullptr;
+            if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+                imageAvailableSemaphore = _imageAvailableSemaphores[frameIndex].get();
+            }
+            auto rtOpt = _swapchain->AcquireNext(imageAvailableSemaphore, nullptr);
+            if (!rtOpt.HasValue()) {
+                continue;
+            }
+            uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+            _backBuffers[backBufferIndex] = rtOpt.Release();
+        }
+        auto submitCmdBufs = this->OnRender(frameIndex);
+        {
+            render::Semaphore* renderFinishSemaphore = nullptr;
+            render::Semaphore* imageAvailableSemaphore = nullptr;
+            if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+                uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+                renderFinishSemaphore = _renderFinishSemaphores[backBufferIndex].get();
+                imageAvailableSemaphore = _imageAvailableSemaphores[frameIndex].get();
+            }
+            render::Fence* fence = _inFlightFences[frameIndex].get();
+            render::CommandQueueSubmitDescriptor submitDesc{
+                submitCmdBufs,
+                fence,
+                imageAvailableSemaphore ? std::span{&imageAvailableSemaphore, 1} : std::span<render::Semaphore*>{},
+                renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{}};
+            _cmdQueue->Submit(submitDesc);
+            _swapchain->Present(renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{});
+            _frameState[frameIndex] = true;
+            _frameCount++;
+        }
     }
 }
 
-void ImGuiApplication::RenderLoop() {
-}
-
-void ImGuiApplication::OnStart() {}
+void ImGuiApplication::OnStart(const ImGuiAppConfig& config) { RADRAY_UNUSED(config); }
 
 void ImGuiApplication::OnDestroy() {}
 
