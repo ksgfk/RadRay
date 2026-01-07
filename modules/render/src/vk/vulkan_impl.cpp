@@ -221,12 +221,11 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     {
         const VkPresentModeKHR vsyncOffModes[] = {
             VK_PRESENT_MODE_IMMEDIATE_KHR,
-            VK_PRESENT_MODE_MAILBOX_KHR,
             VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+            VK_PRESENT_MODE_MAILBOX_KHR,
             VK_PRESENT_MODE_FIFO_KHR};
         const VkPresentModeKHR vsyncOnModes[] = {
-            VK_PRESENT_MODE_MAILBOX_KHR,
-            VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+            // VK_PRESENT_MODE_MAILBOX_KHR,
             VK_PRESENT_MODE_FIFO_KHR};
         std::span<const VkPresentModeKHR> lookupPresentModes;
         if (desc.EnableSync) {

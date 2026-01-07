@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <span>
 #include <thread>
+#include <mutex>
 
 #include <imgui.h>
 
@@ -167,20 +168,38 @@ protected:
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
+    virtual void OnResizing(int width, int height);
+    virtual void OnResized(int width, int height);
 
     void Init(const ImGuiAppConfig& config);
     void RecreateSwapChain();
     render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
+    void RequestRecreateSwapChain(std::function<void()> setValueFunc);
 
 private:
     void LoopSingleThreaded();
     void LoopMultiThreaded();
 
 protected:
+    class RenderFrameState {
+    public:
+        constexpr static RenderFrameState Invalid() noexcept {
+            return RenderFrameState{std::numeric_limits<uint32_t>::max(), false};
+        }
+        constexpr bool IsValid() const noexcept {
+            return InFlightFrameIndex != std::numeric_limits<uint32_t>::max();
+        }
+
+        uint32_t InFlightFrameIndex{std::numeric_limits<uint32_t>::max()};
+        bool IsSubmitted{false};
+    };
+
     // imgui
     unique_ptr<ImGuiContextRAII> _imgui;
     // window
     unique_ptr<NativeWindow> _window;
+    sigslot::scoped_connection _resizingConn;
+    sigslot::scoped_connection _resizedConn;
     // render objects
     unique_ptr<render::InstanceVulkan> _vkIns;
     shared_ptr<render::Device> _device;
@@ -193,12 +212,13 @@ protected:
     vector<unique_ptr<render::TextureView>> _defaultRTVs;
     unique_ptr<ImGuiRenderer> _imguiRenderer;
     // multi-threading
+    mutable std::mutex _shareMutex;
     unique_ptr<std::thread> _renderThread;
     unique_ptr<BoundedChannel<uint32_t>> _freeFrames;
     unique_ptr<BoundedChannel<uint32_t>> _submitFrames;
     // global configs
-    uint32_t _rtWidth{0};
-    uint32_t _rtHeight{0};
+    int32_t _rtWidth{0};
+    int32_t _rtHeight{0};
     uint32_t _backBufferCount{0};
     uint32_t _inFlightFrameCount{0};
     render::TextureFormat _rtFormat{render::TextureFormat::UNKNOWN};
@@ -208,11 +228,12 @@ protected:
     // state
     std::atomic_bool _needClose{false};
     uint64_t _frameCount{0};
-    vector<uint8_t> _frameState;  // true: frame is submitted but not yet completed, false: frame is completed
+    vector<RenderFrameState> _renderFrameStates;
     double _time{0};
     double _deltaTime{0};
     std::atomic<double> _gpuTime{0};
     std::atomic<double> _gpuDeltaTime{0};
+    bool _needRecreate{false};
 };
 
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

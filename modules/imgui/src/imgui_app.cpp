@@ -188,7 +188,6 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                     descSet->SetResource(0, 0, srv.get());
                     const auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiTexture>(std::move(texObj), std::move(srv), std::move(descSet)));
                     tex->SetTexID(std::bit_cast<ImU64>(ptr->_srv.get()));
-                    auto t = _aliveTexs.begin();
                     tex->BackendUserData = ptr.get();
                 }
                 if (tex->Status == ImTextureStatus_WantCreate || tex->Status == ImTextureStatus_WantUpdates) {
@@ -399,6 +398,7 @@ void ImGuiRenderer::OnRender(uint32_t frameIndex, render::CommandEncoder* encode
 
 void ImGuiRenderer::OnRenderComplete(uint32_t frameIndex) {
     auto& frame = *_frames[frameIndex].get();
+    frame._uploadTexReqs.clear();
     frame._tempBufs.clear();
     frame._tempTexSets.clear();
     frame._waitForFreeTexs.clear();
@@ -449,6 +449,8 @@ void ImGuiApplication::Run() {
 
 void ImGuiApplication::Destroy() noexcept {
     if (_cmdQueue) _cmdQueue->Wait();
+    _resizingConn.disconnect();
+    _resizedConn.disconnect();
 
     this->OnDestroy();
 
@@ -484,8 +486,8 @@ void ImGuiApplication::Destroy() noexcept {
 
 void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     auto config = config_;
-    _rtWidth = config.Width;
-    _rtHeight = config.Height;
+    _rtWidth = (int32_t)config.Width;
+    _rtHeight = (int32_t)config.Height;
     _backBufferCount = config.BackBufferCount;
     _inFlightFrameCount = config.InFlightFrameCount;
     _rtFormat = config.RTFormat;
@@ -518,6 +520,8 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     if (!_window) {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create window");
     }
+    _resizedConn = _window->EventResized().connect(&ImGuiApplication::OnResized, this);
+    _resizingConn = _window->EventResizing().connect(&ImGuiApplication::OnResizing, this);
     // imgui
     IMGUI_CHECKVERSION();
     ImGui::SetAllocatorFunctions(_ImguiAllocBridge, _ImguiFreeBridge, nullptr);
@@ -575,7 +579,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     this->RecreateSwapChain();
     _inFlightFences.resize(_inFlightFrameCount);
     for (auto& fence : _inFlightFences) {
-        fence = StaticCastUniquePtr<render::vulkan::FenceVulkan>(_device->CreateFence().Unwrap());
+        fence = _device->CreateFence().Unwrap();
     }
     _imguiRenderer = make_unique<ImGuiRenderer>(_device.get(), _rtFormat, _inFlightFrameCount);
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
@@ -586,6 +590,13 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
 }
 
 void ImGuiApplication::RecreateSwapChain() {
+    std::unique_lock<std::mutex> lock;
+    if (_renderThread != nullptr) {
+        lock = std::unique_lock<std::mutex>{_shareMutex};
+    }
+    if (_rtWidth <= 0 || _rtHeight <= 0) {
+        return;
+    }
     if (_swapchain) {
         _cmdQueue->Wait();
         _swapchain.reset();
@@ -593,8 +604,8 @@ void ImGuiApplication::RecreateSwapChain() {
     render::SwapChainDescriptor swapchainDesc{
         _cmdQueue,
         _window->GetNativeHandler().Handle,
-        _rtWidth,
-        _rtHeight,
+        (uint32_t)_rtWidth,
+        (uint32_t)_rtHeight,
         _backBufferCount,
         _inFlightFrameCount,
         _rtFormat,
@@ -603,11 +614,11 @@ void ImGuiApplication::RecreateSwapChain() {
     if (_device->GetBackend() == render::RenderBackend::Vulkan) {
         _renderFinishSemaphores.resize(_backBufferCount);
         for (auto& semaphore : _renderFinishSemaphores) {
-            semaphore = StaticCastUniquePtr<render::vulkan::SemaphoreVulkan>(_device->CreateSemaphoreDevice().Unwrap());
+            semaphore = _device->CreateSemaphoreDevice().Unwrap();
         }
         _imageAvailableSemaphores.resize(_inFlightFrameCount);
         for (auto& semaphore : _imageAvailableSemaphores) {
-            semaphore = StaticCastUniquePtr<render::vulkan::SemaphoreVulkan>(_device->CreateSemaphoreDevice().Unwrap());
+            semaphore = _device->CreateSemaphoreDevice().Unwrap();
         }
     }
     _defaultRTVs.resize(_backBufferCount);
@@ -617,16 +628,6 @@ void ImGuiApplication::RecreateSwapChain() {
     _backBuffers.resize(_backBufferCount);
     for (auto& rt : _backBuffers) {
         rt = nullptr;
-    }
-    _frameState.resize(_inFlightFrameCount);
-    for (auto& state : _frameState) {
-        state = false;
-    }
-    _frameCount = 0;
-    if (_imguiRenderer) {
-        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _imguiRenderer->OnRenderComplete(i);
-        }
     }
 }
 
@@ -644,7 +645,20 @@ render::TextureView* ImGuiApplication::GetDefaultRTV(uint32_t backBufferIndex) {
     return _defaultRTVs[backBufferIndex].get();
 }
 
+void ImGuiApplication::RequestRecreateSwapChain(std::function<void()> setValueFunc) {
+    if (_renderThread != nullptr) {
+        std::unique_lock<std::mutex> lock{_shareMutex};
+        setValueFunc();
+        _needRecreate = true;
+    } else {
+        setValueFunc();
+        _needRecreate = true;
+    }
+}
+
 void ImGuiApplication::LoopSingleThreaded() {
+    _frameCount = 0;
+    _renderFrameStates.resize(_inFlightFrameCount, RenderFrameState::Invalid());
     while (true) {
         _window->DispatchEvents();
         _needClose = _window->ShouldClose();
@@ -653,12 +667,15 @@ void ImGuiApplication::LoopSingleThreaded() {
         }
         this->OnUpdate();
         _imgui->SetCurrent();
+#ifdef RADRAY_PLATFORM_WINDOWS
         ImGui_ImplWin32_NewFrame();
+#endif
         ImGui::NewFrame();
         this->OnImGui();
         ImGui::Render();
 
         const uint32_t frameIndex = static_cast<uint32_t>(_frameCount % _inFlightFrameCount);
+        auto& state = _renderFrameStates[frameIndex];
         {
             render::Fence* fence = _inFlightFences[frameIndex].get();
             if (_enableFrameDropping) {
@@ -671,9 +688,20 @@ void ImGuiApplication::LoopSingleThreaded() {
                 fence->Wait();
             }
         }
-        if (_frameState[frameIndex]) {
+        if (state.IsSubmitted) {
             _imguiRenderer->OnRenderComplete(frameIndex);
-            _frameState[frameIndex] = false;
+            state.IsSubmitted = false;
+        }
+        if (_rtWidth <= 0 || _rtHeight <= 0) {
+            continue;
+        }
+        if (_needRecreate) {
+            this->RecreateSwapChain();
+            for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+                _renderFrameStates[i] = RenderFrameState::Invalid();
+                _imguiRenderer->OnRenderComplete(i);
+            }
+            _needRecreate = false;
         }
         _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
         {
@@ -705,7 +733,8 @@ void ImGuiApplication::LoopSingleThreaded() {
                 renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{}};
             _cmdQueue->Submit(submitDesc);
             _swapchain->Present(renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{});
-            _frameState[frameIndex] = true;
+            state.InFlightFrameIndex = frameIndex;
+            state.IsSubmitted = true;
             _frameCount++;
         }
     }
@@ -717,35 +746,61 @@ void ImGuiApplication::LoopMultiThreaded() {
     for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
         _freeFrames->TryWrite(i);
     }
-
+    _frameCount = 0;
+    _renderFrameStates.resize(_inFlightFrameCount, RenderFrameState::Invalid());
     _renderThread = make_unique<std::thread>([this]() {
-        _frameCount = 0;
-        vector<uint32_t> slotIdx;
-        slotIdx.resize(_inFlightFrameCount, std::numeric_limits<uint32_t>::max());
+#ifdef RADRAY_PLATFORM_WINDOWS
+        ImGui_ImplWin32_EnableDpiAwareness();
+#endif
         Stopwatch sw = Stopwatch::StartNew();
         while (true) {
             if (_needClose) {
                 break;
             }
             const uint32_t processIndex = static_cast<uint32_t>(_frameCount % _inFlightFrameCount);
-            if (_frameState[processIndex]) {
+            auto& state = _renderFrameStates[processIndex];
+            if (state.IsSubmitted) {
                 render::Fence* fence = _inFlightFences[processIndex].get();
                 fence->Wait();
-                _imguiRenderer->OnRenderComplete(slotIdx[processIndex]);
-                _frameState[processIndex] = false;
-                _freeFrames->WaitWrite(slotIdx[processIndex]);
-                slotIdx[processIndex] = std::numeric_limits<uint32_t>::max();
+                _imguiRenderer->OnRenderComplete(state.InFlightFrameIndex);
+                _freeFrames->WaitWrite(state.InFlightFrameIndex);
+                state = RenderFrameState::Invalid();
 
                 double last = _gpuTime;
                 _gpuTime = sw.Elapsed().count() * 0.000001;
                 _gpuDeltaTime = _gpuTime - last;
             }
-            if (slotIdx[processIndex] == std::numeric_limits<uint32_t>::max()) {
-                uint32_t reqIndex;
-                if (!_submitFrames->WaitRead(reqIndex)) {
+            if (!state.IsValid()) {
+                uint32_t req;
+                if (!_submitFrames->WaitRead(req)) {
                     break;
                 }
-                slotIdx[processIndex] = reqIndex;
+                state.InFlightFrameIndex = req;
+            }
+            {
+                int32_t rtWidth, rtHeight;
+                bool needResize;
+                {
+                    std::unique_lock<std::mutex> lock{_shareMutex};
+                    rtWidth = _rtWidth;
+                    rtHeight = _rtHeight;
+                    needResize = _needRecreate;
+                    _needRecreate = false;
+                }
+                if (rtWidth > 0 && rtHeight > 0) {
+                    if (needResize) {
+                        this->RecreateSwapChain();
+                        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+                            _imguiRenderer->OnRenderComplete(i);
+                            _freeFrames->WaitWrite(_renderFrameStates[i].InFlightFrameIndex);
+                            _renderFrameStates[i] = RenderFrameState::Invalid();
+                        }
+                        continue;
+                    }
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                    continue;
+                }
             }
             {
                 render::Semaphore* imageAvailableSemaphore = nullptr;
@@ -754,12 +809,18 @@ void ImGuiApplication::LoopMultiThreaded() {
                 }
                 auto rtOpt = _swapchain->AcquireNext(imageAvailableSemaphore, nullptr);
                 if (!rtOpt.HasValue()) {
+                    auto [w, h] = _window->GetSize();
+                    this->RequestRecreateSwapChain([this, w, h]() {
+                        _rtWidth = w;
+                        _rtHeight = h;
+                    });
+                    std::this_thread::yield();
                     continue;
                 }
                 uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
                 _backBuffers[backBufferIndex] = rtOpt.Release();
             }
-            auto submitCmdBufs = this->OnRender(slotIdx[processIndex]);
+            auto submitCmdBufs = this->OnRender(state.InFlightFrameIndex);
             {
                 render::Semaphore* renderFinishSemaphore = nullptr;
                 render::Semaphore* imageAvailableSemaphore = nullptr;
@@ -776,7 +837,7 @@ void ImGuiApplication::LoopMultiThreaded() {
                     renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{}};
                 _cmdQueue->Submit(submitDesc);
                 _swapchain->Present(renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{});
-                _frameState[processIndex] = true;
+                state.IsSubmitted = true;
                 _frameCount++;
             }
         }
@@ -795,7 +856,9 @@ void ImGuiApplication::LoopMultiThreaded() {
             }
             this->OnUpdate();
             _imgui->SetCurrent();
+#ifdef RADRAY_PLATFORM_WINDOWS
             ImGui_ImplWin32_NewFrame();
+#endif
             ImGui::NewFrame();
             this->OnImGui();
             ImGui::Render();
@@ -819,12 +882,28 @@ void ImGuiApplication::LoopMultiThreaded() {
     _renderThread->join();
 }
 
-void ImGuiApplication::OnStart(const ImGuiAppConfig& config) { RADRAY_UNUSED(config); }
+void ImGuiApplication::OnStart(const ImGuiAppConfig& config) {
+    RADRAY_UNUSED(config);
+}
 
 void ImGuiApplication::OnDestroy() noexcept {}
 
 void ImGuiApplication::OnUpdate() {}
 
 void ImGuiApplication::OnImGui() {}
+
+void ImGuiApplication::OnResizing(int width, int height) {
+    this->RequestRecreateSwapChain([this, width, height]() {
+        _rtWidth = width;
+        _rtHeight = height;
+    });
+}
+
+void ImGuiApplication::OnResized(int width, int height) {
+    this->RequestRecreateSwapChain([this, width, height]() {
+        _rtWidth = width;
+        _rtHeight = height;
+    });
+}
 
 }  // namespace radray

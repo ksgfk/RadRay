@@ -63,10 +63,11 @@ public:
                 ImGui::Text("Delta  Time: (%09.4f ms)", _deltaTime);
                 ImGui::Text("Render Time: (%09.4f ms)", _gpuDeltaTime.load());
                 ImGui::Separator();
-                if (ImGui::Checkbox("VSync", &_enableVSync)) {
-                    //         this->ExecuteOnRenderThreadBeforeAcquire([this]() {
-                    //             this->RecreateSwapChain();
-                    //         });
+                bool vsync = _enableVSync;
+                if (ImGui::Checkbox("VSync", &vsync)) {
+                    this->RequestRecreateSwapChain([this, vsync]() {
+                        _enableVSync = vsync;
+                    });
                 }
                 //     if (_multithreadRender) {
                 //         ImGui::Checkbox("Wait Frame", &_isWaitFrame);
@@ -121,23 +122,6 @@ public:
         return {cmdBuffer};
     }
 
-    // void OnResizing(int width, int height) override {
-    // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-    //     this->_renderRtSize = Eigen::Vector2i{width, height};
-    //     this->_isResizingRender = true;
-    // });
-    // }
-
-    // void OnResized(int width, int height) override {
-    // ExecuteOnRenderThreadBeforeAcquire([this, width, height]() {
-    //     this->_renderRtSize = Eigen::Vector2i(width, height);
-    //     this->_isResizingRender = false;
-    //     if (width > 0 && height > 0) {
-    //         this->RecreateSwapChain();
-    //     }
-    // });
-    // }
-
 private:
     radray::vector<radray::unique_ptr<radray::render::CommandBuffer>> _cmdBuffers;
     bool _showDemo{true};
@@ -179,7 +163,7 @@ void Init(int argc, char** argv) {
         3,
         2,
         radray::render::TextureFormat::RGBA8_UNORM,
-        true,
+        false,
         isMultiThread,
         true,
         true};
