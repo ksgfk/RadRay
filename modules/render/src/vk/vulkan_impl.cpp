@@ -222,12 +222,12 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         const VkPresentModeKHR vsyncOffModes[] = {
             VK_PRESENT_MODE_IMMEDIATE_KHR,
             VK_PRESENT_MODE_MAILBOX_KHR,
+            VK_PRESENT_MODE_FIFO_RELAXED_KHR,
             VK_PRESENT_MODE_FIFO_KHR};
         const VkPresentModeKHR vsyncOnModes[] = {
+            VK_PRESENT_MODE_MAILBOX_KHR,
             VK_PRESENT_MODE_FIFO_RELAXED_KHR,
-            VK_PRESENT_MODE_FIFO_KHR,
-            VK_PRESENT_MODE_IMMEDIATE_KHR,
-            VK_PRESENT_MODE_MAILBOX_KHR};
+            VK_PRESENT_MODE_FIFO_KHR};
         std::span<const VkPresentModeKHR> lookupPresentModes;
         if (desc.EnableSync) {
             lookupPresentModes = vsyncOnModes;
@@ -2329,6 +2329,11 @@ void FenceVulkan::Wait() noexcept {
         _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
         _submitted = false;
     }
+}
+
+void FenceVulkan::Reset() noexcept {
+    _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
+    _submitted = false;
 }
 
 void FenceVulkan::DestroyImpl() noexcept {

@@ -36,7 +36,7 @@ static std::string_view TrimEnd(std::string_view str) noexcept {
     if (str.empty()) {
         return str;
     }
-    size_t end = str.size() - 1;
+    int64_t end = (int64_t)str.size() - 1;
     for (; end >= 0; end--) {
         auto v = str[end];
         if (v < -1 || !std::isspace(str[end])) {

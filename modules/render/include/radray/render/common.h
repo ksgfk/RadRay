@@ -922,6 +922,8 @@ public:
     virtual FenceStatus GetStatus() const noexcept = 0;
 
     virtual void Wait() noexcept = 0;
+
+    virtual void Reset() noexcept = 0;
 };
 
 class SwapChain : public RenderBase {
@@ -1068,5 +1070,6 @@ std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureViewDimension v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
+std::string_view format_as(FenceStatus v) noexcept;
 
 }  // namespace radray::render

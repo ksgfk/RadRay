@@ -9,12 +9,6 @@
 
 const char* RADRAY_APP_NAME = "Hello Dear ImGui";
 
-class HelloImguiException;
-class HelloImguiFrame;
-class HelloImguiApp;
-
-radray::vector<radray::unique_ptr<HelloImguiApp>> g_apps;
-
 class HelloImguiException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -66,9 +60,9 @@ public:
             window_flags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
-                //     ImGui::Text("Logic  Time: (%09.4f ms)", _logicTime);
-                //     ImGui::Text("Render Time: (%09.4f ms)", _renderTime.load());
-                //     ImGui::Separator();
+                ImGui::Text("Delta  Time: (%09.4f ms)", _deltaTime);
+                ImGui::Text("Render Time: (%09.4f ms)", _gpuDeltaTime.load());
+                ImGui::Separator();
                 if (ImGui::Checkbox("VSync", &_enableVSync)) {
                     //         this->ExecuteOnRenderThreadBeforeAcquire([this]() {
                     //             this->RecreateSwapChain();
@@ -187,7 +181,7 @@ void Init(int argc, char** argv) {
         radray::render::TextureFormat::RGBA8_UNORM,
         true,
         isMultiThread,
-        false,
+        true,
         true};
     app->Setup(config);
 }
@@ -196,12 +190,12 @@ int main(int argc, char** argv) {
     try {
         Init(argc, argv);
         app->Run();
-        app->Destroy();
     } catch (std::exception& e) {
         RADRAY_ERR_LOG("Fatal error: {}", e.what());
     } catch (...) {
         RADRAY_ERR_LOG("Fatal unknown error.");
     }
+    app->Destroy();
     radray::FlushLog();
     return 0;
 }

@@ -159,11 +159,11 @@ public:
 
     void Setup(const ImGuiAppConfig& config);
     void Run();
-    void Destroy();
+    void Destroy() noexcept;
 
 protected:
     virtual void OnStart(const ImGuiAppConfig& config);
-    virtual void OnDestroy();
+    virtual void OnDestroy() noexcept;
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
@@ -174,6 +174,7 @@ protected:
 
 private:
     void LoopSingleThreaded();
+    void LoopMultiThreaded();
 
 protected:
     // imgui
@@ -194,7 +195,7 @@ protected:
     // multi-threading
     unique_ptr<std::thread> _renderThread;
     unique_ptr<BoundedChannel<uint32_t>> _freeFrames;
-    unique_ptr<BoundedChannel<uint32_t>> _inflightFrames;
+    unique_ptr<BoundedChannel<uint32_t>> _submitFrames;
     // global configs
     uint32_t _rtWidth{0};
     uint32_t _rtHeight{0};
@@ -208,6 +209,10 @@ protected:
     std::atomic_bool _needClose{false};
     uint64_t _frameCount{0};
     vector<uint8_t> _frameState;  // true: frame is submitted but not yet completed, false: frame is completed
+    double _time{0};
+    double _deltaTime{0};
+    std::atomic<double> _gpuTime{0};
+    std::atomic<double> _gpuDeltaTime{0};
 };
 
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

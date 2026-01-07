@@ -1632,6 +1632,8 @@ void FenceD3D12::Wait() noexcept {
     Impl::Wait();
 }
 
+void FenceD3D12::Reset() noexcept {}
+
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     return Impl::GetCompletedValue();
 }

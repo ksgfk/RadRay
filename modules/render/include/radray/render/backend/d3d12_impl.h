@@ -395,6 +395,8 @@ public:
 
     void Wait() noexcept override;
 
+    void Reset() noexcept override;
+
     uint64_t GetCompletedValue() const noexcept;
 };
 

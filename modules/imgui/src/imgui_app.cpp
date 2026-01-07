@@ -1,6 +1,7 @@
 #include <radray/imgui/imgui_app.h>
 
 #include <radray/errors.h>
+#include <radray/stopwatch.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <imgui_impl_win32.h>
@@ -440,12 +441,13 @@ void ImGuiApplication::Setup(const ImGuiAppConfig& config) {
 
 void ImGuiApplication::Run() {
     if (_enableMultiThreading) {
+        this->LoopMultiThreaded();
     } else {
         this->LoopSingleThreaded();
     }
 }
 
-void ImGuiApplication::Destroy() {
+void ImGuiApplication::Destroy() noexcept {
     if (_cmdQueue) _cmdQueue->Wait();
 
     this->OnDestroy();
@@ -482,10 +484,6 @@ void ImGuiApplication::Destroy() {
 
 void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     auto config = config_;
-    // if (config.EnableFrameDropping && !config.EnableMultiThreading) {
-    //     config.EnableFrameDropping = false;
-    //     RADRAY_WARN_LOG("{}: Frame dropping requires multi-threading. Disabling frame dropping.", Errors::RADRAYIMGUI);
-    // }
     _rtWidth = config.Width;
     _rtHeight = config.Height;
     _backBufferCount = config.BackBufferCount;
@@ -544,13 +542,13 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
 #endif
     // render
     if (config.Backend == render::RenderBackend::Vulkan) {
-        render::VulkanInstanceDescriptor insDesc{};
-        insDesc.AppName = config.AppName;
-        insDesc.AppVersion = 1;
-        insDesc.EngineName = "RadRay";
-        insDesc.EngineVersion = 1;
-        insDesc.IsEnableDebugLayer = config.EnableValidation;
-        insDesc.IsEnableGpuBasedValid = config.EnableValidation;
+        render::VulkanInstanceDescriptor insDesc{
+            config.AppName,
+            1,
+            "RadRay",
+            1,
+            config.EnableValidation,
+            config.EnableValidation};
         _vkIns = CreateVulkanInstance(insDesc).Unwrap();
         render::VulkanCommandQueueDescriptor queueDesc = {render::QueueType::Direct, 1};
         render::VulkanDeviceDescriptor devDesc{};
@@ -560,15 +558,24 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
             devDesc.Queues = std::span{&queueDesc, 1};
         }
         _device = CreateDevice(devDesc).Unwrap();
-        _cmdQueue = _device->GetCommandQueue(render::QueueType::Direct, 0).Unwrap();
-        this->RecreateSwapChain();
-        _inFlightFences.resize(_inFlightFrameCount);
-        for (auto& fence : _inFlightFences) {
-            fence = StaticCastUniquePtr<render::vulkan::FenceVulkan>(_device->CreateFence().Unwrap());
+    } else if (config.Backend == render::RenderBackend::D3D12) {
+        render::D3D12DeviceDescriptor devDesc{
+            std::nullopt,
+            config.EnableValidation,
+            config.EnableValidation};
+        if (config.DeviceDesc.has_value()) {
+            devDesc = std::get<render::D3D12DeviceDescriptor>(config.DeviceDesc.value());
         }
+        _device = CreateDevice(devDesc).Unwrap();
     }
     if (!_device) {
         throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create device");
+    }
+    _cmdQueue = _device->GetCommandQueue(render::QueueType::Direct, 0).Unwrap();
+    this->RecreateSwapChain();
+    _inFlightFences.resize(_inFlightFrameCount);
+    for (auto& fence : _inFlightFences) {
+        fence = StaticCastUniquePtr<render::vulkan::FenceVulkan>(_device->CreateFence().Unwrap());
     }
     _imguiRenderer = make_unique<ImGuiRenderer>(_device.get(), _rtFormat, _inFlightFrameCount);
     IM_ASSERT(io.BackendRendererUserData == nullptr && "Already initialized a renderer backend!");
@@ -583,14 +590,15 @@ void ImGuiApplication::RecreateSwapChain() {
         _cmdQueue->Wait();
         _swapchain.reset();
     }
-    render::SwapChainDescriptor swapchainDesc{};
-    swapchainDesc.PresentQueue = _cmdQueue;
-    swapchainDesc.NativeHandler = _window->GetNativeHandler().Handle;
-    swapchainDesc.Width = _rtWidth;
-    swapchainDesc.Height = _rtHeight;
-    swapchainDesc.BackBufferCount = _backBufferCount;
-    swapchainDesc.Format = _rtFormat;
-    swapchainDesc.EnableSync = _enableVSync;
+    render::SwapChainDescriptor swapchainDesc{
+        _cmdQueue,
+        _window->GetNativeHandler().Handle,
+        _rtWidth,
+        _rtHeight,
+        _backBufferCount,
+        _inFlightFrameCount,
+        _rtFormat,
+        _enableVSync};
     _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     if (_device->GetBackend() == render::RenderBackend::Vulkan) {
         _renderFinishSemaphores.resize(_backBufferCount);
@@ -616,7 +624,7 @@ void ImGuiApplication::RecreateSwapChain() {
     }
     _frameCount = 0;
     if (_imguiRenderer) {
-        for (size_t i = 0; i < _inFlightFrameCount; i++) {
+        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
             _imguiRenderer->OnRenderComplete(i);
         }
     }
@@ -655,9 +663,10 @@ void ImGuiApplication::LoopSingleThreaded() {
             render::Fence* fence = _inFlightFences[frameIndex].get();
             if (_enableFrameDropping) {
                 auto status = fence->GetStatus();
-                if (status != render::FenceStatus::Complete) {
+                if (status == render::FenceStatus::Incomplete) {
                     continue;
                 }
+                fence->Reset();
             } else {
                 fence->Wait();
             }
@@ -702,9 +711,117 @@ void ImGuiApplication::LoopSingleThreaded() {
     }
 }
 
+void ImGuiApplication::LoopMultiThreaded() {
+    _freeFrames = make_unique<BoundedChannel<uint32_t>>(_inFlightFrameCount);
+    _submitFrames = make_unique<BoundedChannel<uint32_t>>(_inFlightFrameCount);
+    for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+        _freeFrames->TryWrite(i);
+    }
+
+    _renderThread = make_unique<std::thread>([this]() {
+        _frameCount = 0;
+        vector<uint32_t> slotIdx;
+        slotIdx.resize(_inFlightFrameCount, std::numeric_limits<uint32_t>::max());
+        Stopwatch sw = Stopwatch::StartNew();
+        while (true) {
+            if (_needClose) {
+                break;
+            }
+            const uint32_t processIndex = static_cast<uint32_t>(_frameCount % _inFlightFrameCount);
+            if (_frameState[processIndex]) {
+                render::Fence* fence = _inFlightFences[processIndex].get();
+                fence->Wait();
+                _imguiRenderer->OnRenderComplete(slotIdx[processIndex]);
+                _frameState[processIndex] = false;
+                _freeFrames->WaitWrite(slotIdx[processIndex]);
+                slotIdx[processIndex] = std::numeric_limits<uint32_t>::max();
+
+                double last = _gpuTime;
+                _gpuTime = sw.Elapsed().count() * 0.000001;
+                _gpuDeltaTime = _gpuTime - last;
+            }
+            if (slotIdx[processIndex] == std::numeric_limits<uint32_t>::max()) {
+                uint32_t reqIndex;
+                if (!_submitFrames->WaitRead(reqIndex)) {
+                    break;
+                }
+                slotIdx[processIndex] = reqIndex;
+            }
+            {
+                render::Semaphore* imageAvailableSemaphore = nullptr;
+                if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+                    imageAvailableSemaphore = _imageAvailableSemaphores[processIndex].get();
+                }
+                auto rtOpt = _swapchain->AcquireNext(imageAvailableSemaphore, nullptr);
+                if (!rtOpt.HasValue()) {
+                    continue;
+                }
+                uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+                _backBuffers[backBufferIndex] = rtOpt.Release();
+            }
+            auto submitCmdBufs = this->OnRender(slotIdx[processIndex]);
+            {
+                render::Semaphore* renderFinishSemaphore = nullptr;
+                render::Semaphore* imageAvailableSemaphore = nullptr;
+                if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+                    uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+                    renderFinishSemaphore = _renderFinishSemaphores[backBufferIndex].get();
+                    imageAvailableSemaphore = _imageAvailableSemaphores[processIndex].get();
+                }
+                render::Fence* fence = _inFlightFences[processIndex].get();
+                render::CommandQueueSubmitDescriptor submitDesc{
+                    submitCmdBufs,
+                    fence,
+                    imageAvailableSemaphore ? std::span{&imageAvailableSemaphore, 1} : std::span<render::Semaphore*>{},
+                    renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{}};
+                _cmdQueue->Submit(submitDesc);
+                _swapchain->Present(renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{});
+                _frameState[processIndex] = true;
+                _frameCount++;
+            }
+        }
+    });
+    {
+        Stopwatch sw = Stopwatch::StartNew();
+        while (true) {
+            auto last = _time;
+            _time = sw.Elapsed().count() * 0.000001;
+            _deltaTime = _time - last;
+
+            _window->DispatchEvents();
+            _needClose = _window->ShouldClose();
+            if (_needClose) {
+                break;
+            }
+            this->OnUpdate();
+            _imgui->SetCurrent();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+            this->OnImGui();
+            ImGui::Render();
+
+            uint32_t frameIndex;
+            bool isConsumed = false;
+            if (_enableFrameDropping) {
+                isConsumed = _freeFrames->TryRead(frameIndex);
+            } else {
+                isConsumed = _freeFrames->WaitRead(frameIndex);
+            }
+            if (!isConsumed) {
+                continue;
+            }
+            _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
+            _submitFrames->WaitWrite(frameIndex);
+        }
+    }
+    _submitFrames->Complete();
+    _freeFrames->Complete();
+    _renderThread->join();
+}
+
 void ImGuiApplication::OnStart(const ImGuiAppConfig& config) { RADRAY_UNUSED(config); }
 
-void ImGuiApplication::OnDestroy() {}
+void ImGuiApplication::OnDestroy() noexcept {}
 
 void ImGuiApplication::OnUpdate() {}
 

@@ -375,6 +375,8 @@ public:
 
     void Wait() noexcept override;
 
+    void Reset() noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
