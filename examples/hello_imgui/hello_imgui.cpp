@@ -60,24 +60,38 @@ public:
             window_flags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
-                ImGui::Text("Delta  Time: (%09.4f ms)", _deltaTime);
-                ImGui::Text("Render Time: (%09.4f ms)", _gpuDeltaTime.load());
+                ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
+                ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
                 ImGui::Separator();
                 bool vsync = _enableVSync;
                 if (ImGui::Checkbox("VSync", &vsync)) {
-                    this->RequestRecreateSwapChain([this, vsync]() {
-                        _enableVSync = vsync;
-                    });
+                    this->RequestRecreateSwapChain([this, vsync]() { _enableVSync = vsync; });
                 }
-                //     if (_multithreadRender) {
-                //         ImGui::Checkbox("Wait Frame", &_isWaitFrame);
-                //     }
+                ImGui::Checkbox("Frame Drop", &_enableFrameDropping);
+                if (ImGui::Checkbox("Multi Thread", &_enableMultiThreading)) {
+                    this->RequestReloadLoop();
+                }
             }
             ImGui::End();
         }
     }
 
-    void OnUpdate() override {}
+    void OnUpdate() override {
+        _cpuAccum++;
+        auto now = _nowCpuTimePoint;
+        auto last = _cpuLastPoint;
+        auto delta = now - last;
+        if (delta >= 125) {
+            _cpuAvgTime = delta / _cpuAccum;
+            _cpuFps = _cpuAccum / (delta * 0.001);
+            _cpuLastPoint = now;
+            _cpuAccum = 0;
+
+            auto lastGpuTime = _lastGpuTime.load();
+            _gpuAvgTime = lastGpuTime;
+            _gpuFps = 1 / (lastGpuTime * 0.001);
+        }
+    }
 
     radray::vector<radray::render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
         auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
@@ -123,6 +137,10 @@ public:
     }
 
 private:
+    uint64_t _cpuAccum{0};
+    double _cpuLastPoint{0}, _cpuAvgTime{0}, _cpuFps{0};
+    double _gpuAvgTime{0}, _gpuFps{0};
+
     radray::vector<radray::unique_ptr<radray::render::CommandBuffer>> _cmdBuffers;
     bool _showDemo{true};
     bool _showMonitor{true};
@@ -131,23 +149,36 @@ private:
 radray::unique_ptr<HelloImguiApp> app;
 
 void Init(int argc, char** argv) {
+    radray::vector<radray::string> args;
+    for (int i = 0; i < argc; i++) {
+        args.emplace_back(argv[i]);
+    }
     radray::render::RenderBackend backend{radray::render::RenderBackend::Vulkan};
-    bool isMultiThread = true;
-    if (argc > 1) {
-        radray::string backendStr = argv[1];
-        std::transform(backendStr.begin(), backendStr.end(), backendStr.begin(), [](char c) { return std::tolower(c); });
-        if (backendStr == "vulkan") {
-            backend = radray::render::RenderBackend::Vulkan;
-        } else if (backendStr == "d3d12") {
-            backend = radray::render::RenderBackend::D3D12;
-        } else {
-            RADRAY_WARN_LOG("Unsupported backend: {}, using default Vulkan backend.", backendStr);
+    bool isMultiThread = false, enableValid = false;
+    {
+        auto bIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--backend"; });
+        if (bIt != args.end() && (bIt + 1) != args.end()) {
+            radray::string backendStr = *(bIt + 1);
+            std::transform(backendStr.begin(), backendStr.end(), backendStr.begin(), [](char c) { return std::tolower(c); });
+            if (backendStr == "vulkan") {
+                backend = radray::render::RenderBackend::Vulkan;
+            } else if (backendStr == "d3d12") {
+                backend = radray::render::RenderBackend::D3D12;
+            } else {
+                RADRAY_WARN_LOG("Unsupported backend: {}, using default Vulkan backend.", backendStr);
+            }
         }
     }
-    if (argc > 2) {
-        radray::string mtStr = argv[2];
-        if (mtStr == "-st") {
-            isMultiThread = false;
+    {
+        auto mtIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--multithread"; });
+        if (mtIt != args.end()) {
+            isMultiThread = true;
+        }
+    }
+    {
+        auto validIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--valid-layer"; });
+        if (validIt != args.end()) {
+            enableValid = true;
         }
     }
 
@@ -165,8 +196,8 @@ void Init(int argc, char** argv) {
         radray::render::TextureFormat::RGBA8_UNORM,
         false,
         isMultiThread,
-        true,
-        true};
+        false,
+        enableValid};
     app->Setup(config);
 }
 

@@ -10,6 +10,7 @@
 #include <imgui.h>
 
 #include <radray/channel.h>
+#include <radray/stopwatch.h>
 #include <radray/render/common.h>
 #include <radray/window/native_window.h>
 
@@ -168,6 +169,8 @@ protected:
     virtual void OnUpdate();
     virtual void OnImGui();
     virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
+    virtual void OnRenderComplete(uint32_t frameIndex);
+
     virtual void OnResizing(int width, int height);
     virtual void OnResized(int width, int height);
 
@@ -175,6 +178,7 @@ protected:
     void RecreateSwapChain();
     render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
     void RequestRecreateSwapChain(std::function<void()> setValueFunc);
+    void RequestReloadLoop();
 
 private:
     void LoopSingleThreaded();
@@ -229,11 +233,11 @@ protected:
     std::atomic_bool _needClose{false};
     uint64_t _frameCount{0};
     vector<RenderFrameState> _renderFrameStates;
-    double _time{0};
-    double _deltaTime{0};
-    std::atomic<double> _gpuTime{0};
-    std::atomic<double> _gpuDeltaTime{0};
+    Stopwatch _sw;
+    double _nowCpuTimePoint{0};
+    std::atomic<double> _lastGpuTime{0};
     bool _needRecreate{false};
+    bool _needReLoop{false};
 };
 
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

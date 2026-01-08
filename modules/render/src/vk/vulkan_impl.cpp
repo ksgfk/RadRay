@@ -1269,7 +1269,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     if (isValidFeatureExtEnable) {
         validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
         validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
-        if (desc.IsEnableGpuBasedValid) {
+        if (desc.IsEnableGpuBasedValid) { // vk 1.4.321.0 开这两个校验层内存会持续增长 :) :) :)
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
         }

@@ -1,7 +1,6 @@
 #include <radray/imgui/imgui_app.h>
 
 #include <radray/errors.h>
-#include <radray/stopwatch.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <imgui_impl_win32.h>
@@ -440,10 +439,17 @@ void ImGuiApplication::Setup(const ImGuiAppConfig& config) {
 }
 
 void ImGuiApplication::Run() {
-    if (_enableMultiThreading) {
-        this->LoopMultiThreaded();
-    } else {
-        this->LoopSingleThreaded();
+    _sw = Stopwatch::StartNew();
+    while (true) {
+        if (_enableMultiThreading) {
+            this->LoopMultiThreaded();
+        } else {
+            this->LoopSingleThreaded();
+        }
+        if (_needClose) {
+            break;
+        }
+        _needReLoop = false;
     }
 }
 
@@ -552,7 +558,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
             "RadRay",
             1,
             config.EnableValidation,
-            config.EnableValidation};
+            false};
         _vkIns = CreateVulkanInstance(insDesc).Unwrap();
         render::VulkanCommandQueueDescriptor queueDesc = {render::QueueType::Direct, 1};
         render::VulkanDeviceDescriptor devDesc{};
@@ -656,10 +662,27 @@ void ImGuiApplication::RequestRecreateSwapChain(std::function<void()> setValueFu
     }
 }
 
+void ImGuiApplication::RequestReloadLoop() {
+    if (_renderThread != nullptr) {
+        std::unique_lock<std::mutex> lock{_shareMutex};
+        _needReLoop = true;
+    } else {
+        _needReLoop = true;
+    }
+}
+
 void ImGuiApplication::LoopSingleThreaded() {
     _frameCount = 0;
-    _renderFrameStates.resize(_inFlightFrameCount, RenderFrameState::Invalid());
+    _renderFrameStates.resize(_inFlightFrameCount);
+    for (auto& i : _renderFrameStates) {
+        i = RenderFrameState::Invalid();
+    }
+    Stopwatch gpuSw = Stopwatch::StartNew();
+    double lastGpuTimePoint = 0.0;
     while (true) {
+        if (_needReLoop) {
+            break;
+        }
         _window->DispatchEvents();
         _needClose = _window->ShouldClose();
         if (_needClose) {
@@ -673,6 +696,7 @@ void ImGuiApplication::LoopSingleThreaded() {
         ImGui::NewFrame();
         this->OnImGui();
         ImGui::Render();
+        _nowCpuTimePoint = _sw.Elapsed().count() * 0.000001;
 
         const uint32_t frameIndex = static_cast<uint32_t>(_frameCount % _inFlightFrameCount);
         auto& state = _renderFrameStates[frameIndex];
@@ -689,8 +713,12 @@ void ImGuiApplication::LoopSingleThreaded() {
             }
         }
         if (state.IsSubmitted) {
-            _imguiRenderer->OnRenderComplete(frameIndex);
-            state.IsSubmitted = false;
+            this->OnRenderComplete(state.InFlightFrameIndex);
+            state = RenderFrameState::Invalid();
+
+            auto now = gpuSw.Elapsed().count() * 0.000001;
+            _lastGpuTime = now - lastGpuTimePoint;
+            lastGpuTimePoint = now;
         }
         if (_rtWidth <= 0 || _rtHeight <= 0) {
             continue;
@@ -698,11 +726,15 @@ void ImGuiApplication::LoopSingleThreaded() {
         if (_needRecreate) {
             this->RecreateSwapChain();
             for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-                _renderFrameStates[i] = RenderFrameState::Invalid();
-                _imguiRenderer->OnRenderComplete(i);
+                if (_renderFrameStates[i].IsValid()) {
+                    this->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
+                    _renderFrameStates[i] = RenderFrameState::Invalid();
+                }
+                _inFlightFences[i]->Reset();
             }
             _needRecreate = false;
         }
+        state.InFlightFrameIndex = frameIndex;
         _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
         {
             render::Semaphore* imageAvailableSemaphore = nullptr;
@@ -716,7 +748,7 @@ void ImGuiApplication::LoopSingleThreaded() {
             uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
             _backBuffers[backBufferIndex] = rtOpt.Release();
         }
-        auto submitCmdBufs = this->OnRender(frameIndex);
+        auto submitCmdBufs = this->OnRender(state.InFlightFrameIndex);
         {
             render::Semaphore* renderFinishSemaphore = nullptr;
             render::Semaphore* imageAvailableSemaphore = nullptr;
@@ -733,10 +765,19 @@ void ImGuiApplication::LoopSingleThreaded() {
                 renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{}};
             _cmdQueue->Submit(submitDesc);
             _swapchain->Present(renderFinishSemaphore ? std::span{&renderFinishSemaphore, 1} : std::span<render::Semaphore*>{});
-            state.InFlightFrameIndex = frameIndex;
             state.IsSubmitted = true;
             _frameCount++;
         }
+    }
+    _cmdQueue->Wait();
+    for (auto& i : _renderFrameStates) {
+        if (i.IsSubmitted) {
+            _imguiRenderer->OnRenderComplete(i.InFlightFrameIndex);
+        }
+        i = RenderFrameState::Invalid();
+    }
+    for (auto& i : _inFlightFences) {
+        i->Reset();
     }
 }
 
@@ -747,13 +788,20 @@ void ImGuiApplication::LoopMultiThreaded() {
         _freeFrames->TryWrite(i);
     }
     _frameCount = 0;
-    _renderFrameStates.resize(_inFlightFrameCount, RenderFrameState::Invalid());
+    _renderFrameStates.resize(_inFlightFrameCount);
+    for (auto& i : _renderFrameStates) {
+        i = RenderFrameState::Invalid();
+    }
     _renderThread = make_unique<std::thread>([this]() {
 #ifdef RADRAY_PLATFORM_WINDOWS
         ImGui_ImplWin32_EnableDpiAwareness();
 #endif
-        Stopwatch sw = Stopwatch::StartNew();
+        Stopwatch gpuSw = Stopwatch::StartNew();
+        double lastGpuTimePoint = 0.0;
         while (true) {
+            if (_needReLoop) {
+                break;
+            }
             if (_needClose) {
                 break;
             }
@@ -766,9 +814,9 @@ void ImGuiApplication::LoopMultiThreaded() {
                 _freeFrames->WaitWrite(state.InFlightFrameIndex);
                 state = RenderFrameState::Invalid();
 
-                double last = _gpuTime;
-                _gpuTime = sw.Elapsed().count() * 0.000001;
-                _gpuDeltaTime = _gpuTime - last;
+                auto now = gpuSw.Elapsed().count() * 0.000001;
+                _lastGpuTime = now - lastGpuTimePoint;
+                lastGpuTimePoint = now;
             }
             if (!state.IsValid()) {
                 uint32_t req;
@@ -791,9 +839,12 @@ void ImGuiApplication::LoopMultiThreaded() {
                     if (needResize) {
                         this->RecreateSwapChain();
                         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-                            _imguiRenderer->OnRenderComplete(i);
-                            _freeFrames->WaitWrite(_renderFrameStates[i].InFlightFrameIndex);
-                            _renderFrameStates[i] = RenderFrameState::Invalid();
+                            if (_renderFrameStates[i].IsValid()) {
+                                _imguiRenderer->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
+                                _freeFrames->WaitWrite(_renderFrameStates[i].InFlightFrameIndex);
+                                _renderFrameStates[i] = RenderFrameState::Invalid();
+                            }
+                            _inFlightFences[i]->Reset();
                         }
                         continue;
                     }
@@ -841,14 +892,13 @@ void ImGuiApplication::LoopMultiThreaded() {
                 _frameCount++;
             }
         }
+        _freeFrames->Complete();
     });
     {
-        Stopwatch sw = Stopwatch::StartNew();
         while (true) {
-            auto last = _time;
-            _time = sw.Elapsed().count() * 0.000001;
-            _deltaTime = _time - last;
-
+            if (_needReLoop) {
+                break;
+            }
             _window->DispatchEvents();
             _needClose = _window->ShouldClose();
             if (_needClose) {
@@ -875,11 +925,25 @@ void ImGuiApplication::LoopMultiThreaded() {
             }
             _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
             _submitFrames->WaitWrite(frameIndex);
+            _nowCpuTimePoint = _sw.Elapsed().count() * 0.000001;
         }
     }
     _submitFrames->Complete();
-    _freeFrames->Complete();
     _renderThread->join();
+    _submitFrames.reset();
+    _freeFrames.reset();
+    _renderThread.reset();
+
+    _cmdQueue->Wait();
+    for (auto& i : _renderFrameStates) {
+        if (i.IsSubmitted) {
+            _imguiRenderer->OnRenderComplete(i.InFlightFrameIndex);
+        }
+        i = RenderFrameState::Invalid();
+    }
+    for (auto& i : _inFlightFences) {
+        i->Reset();
+    }
 }
 
 void ImGuiApplication::OnStart(const ImGuiAppConfig& config) {
@@ -891,6 +955,10 @@ void ImGuiApplication::OnDestroy() noexcept {}
 void ImGuiApplication::OnUpdate() {}
 
 void ImGuiApplication::OnImGui() {}
+
+void ImGuiApplication::OnRenderComplete(uint32_t frameIndex) {
+    _imguiRenderer->OnRenderComplete(frameIndex);
+}
 
 void ImGuiApplication::OnResizing(int width, int height) {
     this->RequestRecreateSwapChain([this, width, height]() {
