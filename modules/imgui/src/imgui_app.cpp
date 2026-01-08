@@ -497,6 +497,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     _backBufferCount = config.BackBufferCount;
     _inFlightFrameCount = config.InFlightFrameCount;
     _rtFormat = config.RTFormat;
+    _enableValidation = config.EnableValidation;
     _enableVSync = config.EnableVSync;
     _enableMultiThreading = config.EnableMultiThreading;
     _enableFrameDropping = config.EnableFrameDropping;

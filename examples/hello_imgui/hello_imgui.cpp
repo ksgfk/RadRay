@@ -60,6 +60,7 @@ public:
             window_flags |= ImGuiWindowFlags_NoMove;
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
+                ImGui::Text("Backend: %s (validate layer %s)", radray::render::format_as(_device->GetBackend()).data(), _enableValidation ? "On" : "Off");
                 ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
                 ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
                 ImGui::Separator();
@@ -183,7 +184,7 @@ void Init(int argc, char** argv) {
     }
 
     app = radray::make_unique<HelloImguiApp>();
-    auto name = radray::format("{} - {} {}", radray::string{RADRAY_APP_NAME}, backend, isMultiThread ? "MultiThread" : "");
+    auto name = radray::string{RADRAY_APP_NAME};
     radray::ImGuiAppConfig config{
         RADRAY_APP_NAME,
         name,

@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include <imgui.h>
+#include <imgui_stdlib.h>
 
 #include <radray/channel.h>
 #include <radray/stopwatch.h>
@@ -226,16 +227,17 @@ protected:
     uint32_t _backBufferCount{0};
     uint32_t _inFlightFrameCount{0};
     render::TextureFormat _rtFormat{render::TextureFormat::UNKNOWN};
+    bool _enableValidation{false};
     bool _enableVSync{false};
     bool _enableMultiThreading{false};
     bool _enableFrameDropping{false};
     // state
-    std::atomic_bool _needClose{false};
     uint64_t _frameCount{0};
     vector<RenderFrameState> _renderFrameStates;
     Stopwatch _sw;
     double _nowCpuTimePoint{0};
     std::atomic<double> _lastGpuTime{0};
+    std::atomic_bool _needClose{false};
     bool _needRecreate{false};
     bool _needReLoop{false};
 };
