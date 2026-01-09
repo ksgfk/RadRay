@@ -2016,7 +2016,7 @@ SwapChainD3D12::SwapChainD3D12(
     const SwapChainDescriptor& desc) noexcept
     : _device(device),
       _swapchain(std::move(swapchain)),
-      _enableSync(desc.EnableSync) {}
+      _mode(desc.PresentMode) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
@@ -2043,10 +2043,33 @@ Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaph
 
 void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     RADRAY_UNUSED(waitSemaphores);
-    UINT syncInterval = _enableSync ? 1 : 0;
-    UINT presentFlags = (!_enableSync && _device->_isAllowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    UINT syncInterval = 0;
+    UINT presentFlags = 0;
+    switch (_mode) {
+        case PresentMode::FIFO: {
+            syncInterval = 1;
+            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+            break;
+        }
+        case PresentMode::Mailbox: {
+            syncInterval = 0;
+            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+            break;
+        }
+        case PresentMode::Immediate: {
+            syncInterval = 0;
+            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+            if (_device->_isAllowTearing) {
+                presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
+            }
+            break;
+        }
+    }
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
         FAILED(hr)) {
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            return;
+        }
         RADRAY_ABORT("{} {}::{} {} {}", Errors::D3D12, "IDXGISwapChain", "Present", GetErrorName(hr), hr);
     }
 }

@@ -340,4 +340,13 @@ std::string_view format_as(FenceStatus v) noexcept {
     Unreachable();
 }
 
+std::string_view format_as(PresentMode v) noexcept {
+    switch (v) {
+        case PresentMode::FIFO: return "FIFO";
+        case PresentMode::Mailbox: return "Mailbox";
+        case PresentMode::Immediate: return "Immediate";
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render

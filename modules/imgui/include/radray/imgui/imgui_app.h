@@ -144,7 +144,7 @@ struct ImGuiAppConfig {
     uint32_t BackBufferCount{3};
     uint32_t InFlightFrameCount{2};
     render::TextureFormat RTFormat{render::TextureFormat::RGBA8_UNORM};
-    bool EnableVSync{true};
+    render::PresentMode PresentMode{render::PresentMode::FIFO};
     bool EnableMultiThreading{true};
     bool EnableFrameDropping{false};
     bool EnableValidation{true};
@@ -179,7 +179,6 @@ protected:
     void RecreateSwapChain();
     render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
     void RequestRecreateSwapChain(std::function<void()> setValueFunc);
-    void RequestReloadLoop();
 
 private:
     void LoopSingleThreaded();
@@ -227,8 +226,8 @@ protected:
     uint32_t _backBufferCount{0};
     uint32_t _inFlightFrameCount{0};
     render::TextureFormat _rtFormat{render::TextureFormat::UNKNOWN};
+    render::PresentMode _presentMode{render::PresentMode::FIFO};
     bool _enableValidation{false};
-    bool _enableVSync{false};
     bool _enableMultiThreading{false};
     bool _enableFrameDropping{false};
     // state
@@ -239,7 +238,7 @@ protected:
     std::atomic<double> _lastGpuTime{0};
     std::atomic_bool _needClose{false};
     bool _needRecreate{false};
-    bool _needReLoop{false};
+    std::atomic_bool _needReLoop{false};
 };
 
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;

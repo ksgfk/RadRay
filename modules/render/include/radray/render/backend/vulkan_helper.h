@@ -244,6 +244,7 @@ VkIndexType MapIndexType(uint32_t v) noexcept;
 VkFilter MapTypeFilter(FilterMode v) noexcept;
 VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept;
 VkSamplerAddressMode MapType(AddressMode v) noexcept;
+VkPresentModeKHR MapType(PresentMode v) noexcept;
 
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
 std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;

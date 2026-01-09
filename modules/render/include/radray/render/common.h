@@ -328,6 +328,12 @@ enum class FenceStatus {
     NotSubmitted
 };
 
+enum class PresentMode {
+    FIFO,
+    Mailbox,
+    Immediate
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -477,7 +483,7 @@ public:
     uint32_t BackBufferCount{0};
     uint32_t FlightFrameCount{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
-    bool EnableSync{false};
+    PresentMode PresentMode{PresentMode::FIFO};
 };
 
 struct SamplerDescriptor {
@@ -737,7 +743,7 @@ struct MultiSampleState {
     uint64_t Mask{0};
     bool AlphaToCoverageEnable{false};
 
-    static MultiSampleState Default() noexcept {
+    constexpr static MultiSampleState Default() noexcept {
         return {
             1,
             0xFFFFFFFF,
@@ -755,7 +761,7 @@ struct BlendState {
     BlendComponent Color{};
     BlendComponent Alpha{};
 
-    static BlendState Default() noexcept {
+    constexpr static BlendState Default() noexcept {
         return {
             {BlendFactor::One,
              BlendFactor::Zero,
@@ -771,7 +777,7 @@ struct ColorTargetState {
     std::optional<BlendState> Blend{};
     ColorWrites WriteMask{};
 
-    static ColorTargetState Default(TextureFormat format) noexcept {
+    constexpr static ColorTargetState Default(TextureFormat format) noexcept {
         return {
             format,
             std::nullopt,
@@ -1071,5 +1077,6 @@ std::string_view format_as(TextureViewDimension v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;
+std::string_view format_as(PresentMode v) noexcept;
 
 }  // namespace radray::render

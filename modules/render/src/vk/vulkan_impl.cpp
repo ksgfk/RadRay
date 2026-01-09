@@ -219,20 +219,14 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     }
     VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     {
-        const VkPresentModeKHR vsyncOffModes[] = {
-            VK_PRESENT_MODE_IMMEDIATE_KHR,
-            VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+        const VkPresentModeKHR tryList[] = {
             VK_PRESENT_MODE_MAILBOX_KHR,
+            VK_PRESENT_MODE_FIFO_RELAXED_KHR,
             VK_PRESENT_MODE_FIFO_KHR};
-        const VkPresentModeKHR vsyncOnModes[] = {
-            // VK_PRESENT_MODE_MAILBOX_KHR,
-            VK_PRESENT_MODE_FIFO_KHR};
-        std::span<const VkPresentModeKHR> lookupPresentModes;
-        if (desc.EnableSync) {
-            lookupPresentModes = vsyncOnModes;
-        } else {
-            lookupPresentModes = vsyncOffModes;
-        }
+        vector<VkPresentModeKHR> lookupPresentModes;
+        lookupPresentModes.reserve(16);
+        lookupPresentModes.push_back(MapType(desc.PresentMode));
+        lookupPresentModes.insert(lookupPresentModes.end(), std::begin(tryList), std::end(tryList));
         for (const auto& i : lookupPresentModes) {
             if (std::ranges::find(supportedPresentModes, i) != supportedPresentModes.end()) {
                 needPresentMode = i;
@@ -1269,7 +1263,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     if (isValidFeatureExtEnable) {
         validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
         validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
-        if (desc.IsEnableGpuBasedValid) { // vk 1.4.321.0 开这两个校验层内存会持续增长 :) :) :)
+        if (desc.IsEnableGpuBasedValid) {  // vk 1.4.321.0 开这两个校验层内存会持续增长 :) :) :)
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
         }

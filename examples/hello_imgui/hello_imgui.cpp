@@ -64,13 +64,28 @@ public:
                 ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
                 ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
                 ImGui::Separator();
-                bool vsync = _enableVSync;
-                if (ImGui::Checkbox("VSync", &vsync)) {
-                    this->RequestRecreateSwapChain([this, vsync]() { _enableVSync = vsync; });
+
+                auto nowModeName = radray::render::format_as(_presentMode);
+                const radray::render::PresentMode modes[] = {
+                    radray::render::PresentMode::FIFO,
+                    radray::render::PresentMode::Mailbox,
+                    radray::render::PresentMode::Immediate};
+                if (ImGui::BeginCombo("Present Mode", nowModeName.data())) {
+                    for (const auto i : modes) {
+                        const bool isSelected = i == _presentMode;
+                        if (ImGui::Selectable(radray::render::format_as(i).data(), isSelected)) {
+                            this->RequestRecreateSwapChain([this, i]() { _presentMode = i; });
+                        }
+                        if (isSelected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
                 }
+
                 ImGui::Checkbox("Frame Drop", &_enableFrameDropping);
                 if (ImGui::Checkbox("Multi Thread", &_enableMultiThreading)) {
-                    this->RequestReloadLoop();
+                    _needReLoop = true;
                 }
             }
             ImGui::End();
@@ -195,7 +210,7 @@ void Init(int argc, char** argv) {
         3,
         2,
         radray::render::TextureFormat::RGBA8_UNORM,
-        false,
+        radray::render::PresentMode::Mailbox,
         isMultiThread,
         false,
         enableValid};

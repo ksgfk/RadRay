@@ -498,7 +498,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     _inFlightFrameCount = config.InFlightFrameCount;
     _rtFormat = config.RTFormat;
     _enableValidation = config.EnableValidation;
-    _enableVSync = config.EnableVSync;
+    _presentMode = config.PresentMode;
     _enableMultiThreading = config.EnableMultiThreading;
     _enableFrameDropping = config.EnableFrameDropping;
     // window
@@ -616,7 +616,7 @@ void ImGuiApplication::RecreateSwapChain() {
         _backBufferCount,
         _inFlightFrameCount,
         _rtFormat,
-        _enableVSync};
+        _presentMode};
     _swapchain = _device->CreateSwapChain(swapchainDesc).Unwrap();
     if (_device->GetBackend() == render::RenderBackend::Vulkan) {
         _renderFinishSemaphores.resize(_backBufferCount);
@@ -660,15 +660,6 @@ void ImGuiApplication::RequestRecreateSwapChain(std::function<void()> setValueFu
     } else {
         setValueFunc();
         _needRecreate = true;
-    }
-}
-
-void ImGuiApplication::RequestReloadLoop() {
-    if (_renderThread != nullptr) {
-        std::unique_lock<std::mutex> lock{_shareMutex};
-        _needReLoop = true;
-    } else {
-        _needReLoop = true;
     }
 }
 

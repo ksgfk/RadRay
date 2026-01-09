@@ -68,7 +68,7 @@ void CreateSwapChain() {
     swapchainDesc.BackBufferCount = BACK_BUFFER_COUNT;
     swapchainDesc.FlightFrameCount = INFLIGHT_FRAME_COUNT;
     swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
-    swapchainDesc.EnableSync = false;
+    swapchainDesc.PresentMode = render::PresentMode::Mailbox;
     swapchain = StaticCastUniquePtr<d3d12::SwapChainD3D12>(device->CreateSwapChain(swapchainDesc).Unwrap());
 }
 

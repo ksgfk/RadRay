@@ -520,7 +520,7 @@ public:
     ComPtr<IDXGISwapChain3> _swapchain;
     HANDLE _frameLatencyEvent{nullptr};
     vector<Frame> _frames;
-    bool _enableSync{false};
+    PresentMode _mode;
 };
 
 class BufferD3D12 final : public Buffer {

@@ -616,6 +616,15 @@ VkSamplerAddressMode MapType(AddressMode v) noexcept {
     Unreachable();
 }
 
+VkPresentModeKHR MapType(PresentMode v) noexcept {
+    switch (v) {
+        case PresentMode::FIFO: return VK_PRESENT_MODE_FIFO_KHR;
+        case PresentMode::Mailbox: return VK_PRESENT_MODE_MAILBOX_KHR;
+        case PresentMode::Immediate: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    Unreachable();
+}
+
 std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
     if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
         return "General";
