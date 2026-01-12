@@ -173,6 +173,22 @@ public:
         double _gpuLastPoint{0};
     };
 
+    class SimpleMonitorIMGUI {
+    public:
+        explicit SimpleMonitorIMGUI(ImGuiApplication& app) noexcept;
+
+        void SetData(double cpuAvgTime, double cpuFps, double gpuAvgTime, double gpuFps);
+        void SetData(const SimpleFPSCounter& counter);
+        void OnImGui();
+
+    public:
+        ImGuiApplication& _app;
+        double _cpuAvgTime{0}, _cpuFps{0}, _gpuAvgTime{0}, _gpuFps{0};
+        bool _showMonitor{true};
+    };
+
+    static ImGuiAppConfig ParseArgsSimple(int argc, char** argv) noexcept;
+
     ImGuiApplication() = default;
     virtual ~ImGuiApplication() noexcept = default;
 

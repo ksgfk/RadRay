@@ -22,7 +22,7 @@
             "Name": "spdlog",
             "Type": "git",
             "Git": "https://github.com/gabime/spdlog.git",
-            "Tag": "v1.16.0"
+            "Tag": "v1.17.0"
         },
         {
             "Name": "eigen",
@@ -45,7 +45,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v2.2.4"
+            "Tag": "v2.2.6"
         },
         {
             "Name": "zlib",

@@ -996,4 +996,112 @@ double ImGuiApplication::SimpleFPSCounter::GetGPUFPS() const noexcept {
     return _gpuFps.load();
 }
 
+ImGuiApplication::SimpleMonitorIMGUI::SimpleMonitorIMGUI(ImGuiApplication& app) noexcept
+    : _app(app) {}
+
+void ImGuiApplication::SimpleMonitorIMGUI::SetData(double cpuAvgTime, double cpuFps, double gpuAvgTime, double gpuFps) {
+    _cpuAvgTime = cpuAvgTime;
+    _cpuFps = cpuFps;
+    _gpuAvgTime = gpuAvgTime;
+    _gpuFps = gpuFps;
+}
+
+void ImGuiApplication::SimpleMonitorIMGUI::SetData(const SimpleFPSCounter& counter) {
+    this->SetData(counter.GetCPUAverageTime(), counter.GetCPUFPS(), counter.GetGPUAverageTime(), counter.GetGPUFPS());
+}
+
+void ImGuiApplication::SimpleMonitorIMGUI::OnImGui() {
+    ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    int location = 0;
+    const float PAD = 10.0f;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 workPos = viewport->WorkPos;
+    ImVec2 workSize = viewport->WorkSize;
+    ImVec2 windowPos, windowPosPivot;
+    windowPos.x = (location & 1) ? (workPos.x + workSize.x - PAD) : (workPos.x + PAD);
+    windowPos.y = (location & 2) ? (workPos.y + workSize.y - PAD) : (workPos.y + PAD);
+    windowPosPivot.x = (location & 1) ? 1.0f : 0.0f;
+    windowPosPivot.y = (location & 2) ? 1.0f : 0.0f;
+    ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, windowPosPivot);
+    windowFlags |= ImGuiWindowFlags_NoMove;
+    ImGui::SetNextWindowBgAlpha(0.35f);
+    if (ImGui::Begin("RadrayMonitor", &_showMonitor, windowFlags)) {
+        ImGui::Text("Backend: %s (validate layer %s)", radray::render::format_as(_app._device->GetBackend()).data(), _app._enableValidation ? "On" : "Off");
+        ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
+        ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
+        ImGui::Separator();
+        auto nowModeName = radray::render::format_as(_app._presentMode);
+        const radray::render::PresentMode modes[] = {
+            radray::render::PresentMode::FIFO,
+            radray::render::PresentMode::Mailbox,
+            radray::render::PresentMode::Immediate};
+        if (ImGui::BeginCombo("Present Mode", nowModeName.data())) {
+            for (const auto i : modes) {
+                const bool isSelected = i == _app._presentMode;
+                if (ImGui::Selectable(radray::render::format_as(i).data(), isSelected)) {
+                    _app.RequestRecreateSwapChain([this, i]() { _app._presentMode = i; });
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Checkbox("Frame Drop", &_app._enableFrameDropping);
+        if (ImGui::Checkbox("Multi Thread", &_app._enableMultiThreading)) {
+            _app._needReLoop = true;
+        }
+    }
+    ImGui::End();
+}
+
+ImGuiAppConfig ImGuiApplication::ParseArgsSimple(int argc, char** argv) noexcept {
+    radray::vector<radray::string> args;
+    for (int i = 0; i < argc; i++) {
+        args.emplace_back(argv[i]);
+    }
+    radray::render::RenderBackend backend{radray::render::RenderBackend::Vulkan};
+    bool isMultiThread = false, enableValid = false;
+    {
+        auto bIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--backend"; });
+        if (bIt != args.end() && (bIt + 1) != args.end()) {
+            radray::string backendStr = *(bIt + 1);
+            std::transform(backendStr.begin(), backendStr.end(), backendStr.begin(), [](char c) { return std::tolower(c); });
+            if (backendStr == "vulkan") {
+                backend = radray::render::RenderBackend::Vulkan;
+            } else if (backendStr == "d3d12") {
+                backend = radray::render::RenderBackend::D3D12;
+            } else {
+                RADRAY_WARN_LOG("Unsupported backend: {}, using default Vulkan backend.", backendStr);
+            }
+        }
+    }
+    {
+        auto mtIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--multithread"; });
+        if (mtIt != args.end()) {
+            isMultiThread = true;
+        }
+    }
+    {
+        auto validIt = std::find_if(args.begin(), args.end(), [](const radray::string& arg) { return arg == "--valid-layer"; });
+        if (validIt != args.end()) {
+            enableValid = true;
+        }
+    }
+    return {
+        "",
+        "",
+        1280,
+        720,
+        backend,
+        std::nullopt,
+        3,
+        2,
+        radray::render::TextureFormat::RGBA8_UNORM,
+        radray::render::PresentMode::Mailbox,
+        isMultiThread,
+        false,
+        enableValid};
+}
+
 }  // namespace radray
