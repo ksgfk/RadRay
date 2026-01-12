@@ -669,8 +669,6 @@ void ImGuiApplication::LoopSingleThreaded() {
     for (auto& i : _renderFrameStates) {
         i = RenderFrameState::Invalid();
     }
-    Stopwatch gpuSw = Stopwatch::StartNew();
-    double lastGpuTimePoint = 0.0;
     while (true) {
         if (_needReLoop) {
             break;
@@ -708,9 +706,7 @@ void ImGuiApplication::LoopSingleThreaded() {
             this->OnRenderComplete(state.InFlightFrameIndex);
             state = RenderFrameState::Invalid();
 
-            auto now = gpuSw.Elapsed().count() * 0.000001;
-            _lastGpuTime = now - lastGpuTimePoint;
-            lastGpuTimePoint = now;
+            _nowGpuTimePoint = _sw.Elapsed().count() * 0.000001;
         }
         if (_rtWidth <= 0 || _rtHeight <= 0) {
             continue;
@@ -788,8 +784,6 @@ void ImGuiApplication::LoopMultiThreaded() {
 #ifdef RADRAY_PLATFORM_WINDOWS
         ImGui_ImplWin32_EnableDpiAwareness();
 #endif
-        Stopwatch gpuSw = Stopwatch::StartNew();
-        double lastGpuTimePoint = 0.0;
         while (true) {
             if (_needReLoop) {
                 break;
@@ -806,9 +800,7 @@ void ImGuiApplication::LoopMultiThreaded() {
                 _freeFrames->WaitWrite(state.InFlightFrameIndex);
                 state = RenderFrameState::Invalid();
 
-                auto now = gpuSw.Elapsed().count() * 0.000001;
-                _lastGpuTime = now - lastGpuTimePoint;
-                lastGpuTimePoint = now;
+                _nowGpuTimePoint = _sw.Elapsed().count() * 0.000001;
             }
             if (!state.IsValid()) {
                 uint32_t req;
@@ -964,6 +956,44 @@ void ImGuiApplication::OnResized(int width, int height) {
         _rtWidth = width;
         _rtHeight = height;
     });
+}
+
+ImGuiApplication::SimpleFPSCounter::SimpleFPSCounter(const ImGuiApplication& app, double rate) noexcept
+    : _app(app),
+      _rate(rate) {}
+
+void ImGuiApplication::SimpleFPSCounter::OnUpdate() {
+    _cpuAccum++;
+    auto now = _app._nowCpuTimePoint;
+    auto last = _cpuLastPoint;
+    auto delta = now - last;
+    if (delta >= _rate) {
+        _cpuAvgTime = delta / _cpuAccum;
+        _cpuFps = _cpuAccum / (delta * 0.001);
+        _cpuLastPoint = now;
+        _cpuAccum = 0;
+    }
+}
+
+void ImGuiApplication::SimpleFPSCounter::OnRender() {
+    _gpuAccum++;
+    double now = _app._nowGpuTimePoint;
+    auto last = _gpuLastPoint;
+    auto delta = now - last;
+    if (delta >= _rate) {
+        _gpuAvgTime = delta / _gpuAccum;
+        _gpuFps = _gpuAccum / (delta * 0.001);
+        _gpuLastPoint = now;
+        _gpuAccum = 0;
+    }
+}
+
+double ImGuiApplication::SimpleFPSCounter::GetGPUAverageTime() const noexcept {
+    return _gpuAvgTime.load();
+}
+
+double ImGuiApplication::SimpleFPSCounter::GetGPUFPS() const noexcept {
+    return _gpuFps.load();
 }
 
 }  // namespace radray

@@ -152,6 +152,27 @@ struct ImGuiAppConfig {
 
 class ImGuiApplication {
 public:
+    class SimpleFPSCounter {
+    public:
+        SimpleFPSCounter(const ImGuiApplication& app, double rate) noexcept;
+
+        void OnUpdate();
+        void OnRender();
+
+        double GetCPUAverageTime() const noexcept { return _cpuAvgTime; }
+        double GetCPUFPS() const noexcept { return _cpuFps; }
+        double GetGPUAverageTime() const noexcept;
+        double GetGPUFPS() const noexcept;
+
+    public:
+        const ImGuiApplication& _app;
+        double _rate;
+        uint64_t _cpuAccum{0}, _gpuAccum{0};
+        double _cpuLastPoint{0}, _cpuAvgTime{0}, _cpuFps{0};
+        std::atomic<double> _gpuAvgTime{0}, _gpuFps{0};
+        double _gpuLastPoint{0};
+    };
+
     ImGuiApplication() = default;
     virtual ~ImGuiApplication() noexcept = default;
 
@@ -235,7 +256,7 @@ protected:
     vector<RenderFrameState> _renderFrameStates;
     Stopwatch _sw;
     double _nowCpuTimePoint{0};
-    std::atomic<double> _lastGpuTime{0};
+    std::atomic<double> _nowGpuTimePoint{0};
     std::atomic_bool _needClose{false};
     bool _needRecreate{false};
     std::atomic_bool _needReLoop{false};

@@ -18,15 +18,13 @@ public:
 
     bool IsRunning() const noexcept;
     int64_t ElapsedMilliseconds() const noexcept;
-    int64_t ElapsedTicks() const noexcept;
     std::chrono::nanoseconds Elapsed() const noexcept;
 
 private:
-    int64_t ElapsedTicksInternal(int64_t timestampNow) const noexcept;
+    using Clock = std::chrono::steady_clock;
 
-    int64_t _elapsedTicks{0};
-    int64_t _startTimestamp{0};
-    int64_t _frequency{0};
+    std::chrono::nanoseconds _elapsed{0};
+    Clock::time_point _startTimestamp{};
     bool _isRunning{false};
 };
 

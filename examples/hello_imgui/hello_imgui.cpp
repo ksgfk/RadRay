@@ -61,8 +61,8 @@ public:
             ImGui::SetNextWindowBgAlpha(0.35f);
             if (ImGui::Begin("RadrayMonitor", &_showMonitor, window_flags)) {
                 ImGui::Text("Backend: %s (validate layer %s)", radray::render::format_as(_device->GetBackend()).data(), _enableValidation ? "On" : "Off");
-                ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
-                ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
+                ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _fps.GetCPUAverageTime(), _fps.GetCPUFPS());
+                ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _fps.GetGPUAverageTime(), _fps.GetGPUFPS());
                 ImGui::Separator();
 
                 auto nowModeName = radray::render::format_as(_presentMode);
@@ -93,23 +93,12 @@ public:
     }
 
     void OnUpdate() override {
-        _cpuAccum++;
-        auto now = _nowCpuTimePoint;
-        auto last = _cpuLastPoint;
-        auto delta = now - last;
-        if (delta >= 125) {
-            _cpuAvgTime = delta / _cpuAccum;
-            _cpuFps = _cpuAccum / (delta * 0.001);
-            _cpuLastPoint = now;
-            _cpuAccum = 0;
-
-            auto lastGpuTime = _lastGpuTime.load();
-            _gpuAvgTime = lastGpuTime;
-            _gpuFps = 1 / (lastGpuTime * 0.001);
-        }
+        _fps.OnUpdate();
     }
 
     radray::vector<radray::render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
+        _fps.OnRender();
+
         auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
         auto cmdBuffer = _cmdBuffers[frameIndex].get();
         auto rt = _backBuffers[currBackBufferIndex];
@@ -153,11 +142,8 @@ public:
     }
 
 private:
-    uint64_t _cpuAccum{0};
-    double _cpuLastPoint{0}, _cpuAvgTime{0}, _cpuFps{0};
-    double _gpuAvgTime{0}, _gpuFps{0};
-
     radray::vector<radray::unique_ptr<radray::render::CommandBuffer>> _cmdBuffers;
+    SimpleFPSCounter _fps{*this, 125};
     bool _showDemo{true};
     bool _showMonitor{true};
 };
