@@ -159,4 +159,8 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const HlslShaderDesc& desc) noexcept;
 // -----------------------------------------------------------------------------------------------
 
+// -------------------------------------- Upload Utility -----------------------------------------
+
+// -----------------------------------------------------------------------------------------------
+
 }  // namespace radray::render

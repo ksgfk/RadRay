@@ -113,6 +113,8 @@ radray_set_build_path(xxhash)
 
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/cppcoro)
+
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -241,6 +243,8 @@ if (RADRAY_BUILD_TESTS)
     set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/googletest)
+    radray_optimize_flags_library(gtest)
+    radray_set_build_path(gtest)
     radray_optimize_flags_library(gtest_main)
     radray_set_build_path(gtest_main)
     if (RADRAY_BUILD_BENCHMARKS)

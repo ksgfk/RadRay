@@ -1,0 +1,29 @@
+From d05c96c94c6e3529c8edbfb3707a523a0a1070eb Mon Sep 17 00:00:00 2001
+From: ksgfk <1537100607@qq.com>
+Date: Thu, 15 Jan 2026 22:18:54 +0800
+Subject: [PATCH] no test
+
+---
+ CMakeLists.txt | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3ce73ea..7fb14fc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,10 +13,12 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+ 
+ add_subdirectory(lib)
+ 
++if(CPPCORO_BUILD_TESTING)
+ enable_testing()
+ if(BUILD_TESTING)
+     add_subdirectory(test)
+ endif()
++endif()
+ 
+ export(EXPORT cppcoroTargets
+   FILE "${PROJECT_BINARY_DIR}/cppcoro/cppcoroTargets.cmake"
+-- 
+2.52.0.windows.1
+
