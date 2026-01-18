@@ -13,8 +13,6 @@
 
 #include <sigslot/signal.hpp>
 
-#include <cppcoro/task.hpp>
-
 #include <radray/types.h>
 #include <radray/logger.h>
 

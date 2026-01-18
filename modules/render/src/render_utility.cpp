@@ -343,10 +343,6 @@ void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept {
     swap(a._minBlockSize, b._minBlockSize);
 }
 
-SimpleCBufferUploader::SimpleCBufferUploader(const HlslShaderDesc& desc) noexcept {
-    _storage = CreateCBufferStorage(desc).value();
-}
-
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept
     : _constant(desc.Constant) {
     _rootDescriptors.clear();
