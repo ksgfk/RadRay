@@ -39,13 +39,22 @@ struct PS_INPUT
 };
 
 VK_PUSH_CONSTANT ConstantBuffer<PreObjectData> _Obj : register(b0);
-VK_BINDING(0, 0) ConstantBuffer<MaterialData> _Mat : register(b1);
-VK_BINDING(1, 0) ConstantBuffer<PreCameraData> _Camera : register(b2);
+VK_BINDING(0, 0) ConstantBuffer<PreCameraData> _Camera : register(b1);
 
 PS_INPUT VSMain(VS_INPUT vsIn)
 {
+    PS_INPUT psIn;
+    psIn.pos = mul(_Obj.mvp, float4(vsIn.pos, 1.0));
+    float4 posW = mul(_Obj.model, float4(vsIn.pos, 1.0));
+    psIn.posW = posW.xyz / posW.w;
+    float4x4 normalMat = transpose(_Obj.modelInv);
+    psIn.norW = mul((float3x3)normalMat, vsIn.nor);
+    psIn.uv = vsIn.uv;
+    return psIn;
 }
 
 float4 PSMain(PS_INPUT psIn) : SV_Target
 {
+    float3 n = normalize(psIn.norW);
+    return float4(n*0.5 + 0.5, 1.0);
 }

@@ -8,6 +8,8 @@
 
 namespace radray::render {
 
+using cppcoro::async_manual_reset_event;
+
 class GpuResourceException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -22,43 +24,50 @@ class GpuUploader {
 public:
     GpuUploader(Device* device, CommandQueue* queue) noexcept;
 
+    ~GpuUploader() noexcept;
+
+    void Destroy() noexcept;
+
     task<RenderMesh> UploadMeshAsync(const MeshResource& resource);
 
-    void Submit();
-
-    void Schedule();
+    void Submit(Scheduler& scheduler);
 
 private:
+    // struct UploadRequest {
+    //     Buffer* Src{nullptr};
+    //     Buffer* Dst{nullptr};
+    //     uint64_t SrcOffset{0};
+    //     uint64_t DstOffset{0};
+    //     uint64_t Size{0};
+    // };
+
+    // struct UploadBatch {
+    //     vector<UploadRequest> Requests;
+    //     async_manual_reset_event Event;
+    //     vector<unique_ptr<Buffer>> StagingBuffers;
+    // };
+
     struct BufferSpan {
         Buffer* Buffer{nullptr};
         void* CpuAddress{nullptr};
-        size_t Offset{0};
-        size_t Size{0};
+        uint64_t Offset{0};
+        uint64_t Size{0};
     };
-    struct Page {
-        unique_ptr<Buffer> Handle;
-        void* MappedPtr{nullptr};
-        size_t CurrentOffset{0};
-        size_t Size{0};
-    };
-    struct Request {
-        BufferSpan Src;
-        BufferSpan Dst;
+
+    class UploadBatch {
+    public:
+        vector<unique_ptr<Buffer>> _tempBuffers;
     };
 
     BufferSpan AllocateUploadBuffer(uint64_t size, uint64_t alignment);
 
-    Page RequestPage(uint64_t reqSize);
-
-    task<> RequestCopyAsync(std::span<Request> req);
-
     Device* _device{nullptr};
     CommandQueue* _queue{nullptr};
 
-    const uint64_t _defaultPageSize{4 * 1024 * 1024};
-    std::optional<Page> _activePage;
-    vector<Page> _usedPages;
-    vector<Page> _freePages;
+    // std::shared_ptr<UploadBatch> _currentBatch;
+
+    vector<unique_ptr<CommandBuffer>> _cmdPool;
+    vector<unique_ptr<Fence>> _fencePool;
 };
 
 }  // namespace radray::render

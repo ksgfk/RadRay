@@ -3,6 +3,8 @@
 #include <radray/vertex_data.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
+#include <radray/render/gpu_resource.h>
+#include <radray/render/render_utility.h>
 
 using namespace radray;
 
@@ -13,10 +15,122 @@ public:
     HelloPBRApp() = default;
     ~HelloPBRApp() noexcept override = default;
 
-    void OnStart(const ImGuiAppConfig& config) override {
-        this->Init(config);
-
+    task<> LoadAsync() {
         auto backend = _device->GetBackend();
+        TriangleMesh sphereMesh{};
+        sphereMesh.InitAsUVSphere(0.5f, 32);
+        MeshResource sphereModel{};
+        sphereMesh.ToSimpleMeshResource(&sphereModel);
+        // _renderMesh = co_await _gpuUploader->UploadMeshAsync(sphereModel);
+
+        unique_ptr<render::Shader> vsShader, psShader;
+        {
+            string hlsl;
+            {
+                auto hlslOpt = ReadText(std::filesystem::path("assets") / "hello_pbr" / "pbr.hlsl");
+                if (!hlslOpt.has_value()) {
+                    throw ImGuiApplicationException("Failed to read shader file pbr.hlsl");
+                }
+                hlsl = std::move(hlslOpt.value());
+            }
+            vector<std::string_view> defines;
+            if (backend == render::RenderBackend::Vulkan) {
+                defines.emplace_back("VULKAN");
+            } else if (backend == render::RenderBackend::D3D12) {
+                defines.emplace_back("D3D12");
+            }
+            vector<std::string_view> includes;
+            render::DxcOutput vsBin;
+            {
+                auto vs = _dxc->Compile(hlsl, "VSMain", render::ShaderStage::Vertex, render::HlslShaderModel::SM60, false, defines, includes, backend == render::RenderBackend::Vulkan);
+                if (!vs.has_value()) {
+                    throw ImGuiApplicationException("Failed to compile vertex shader");
+                }
+                vsBin = std::move(vs.value());
+            }
+            render::DxcOutput psBin;
+            {
+                auto ps = _dxc->Compile(hlsl, "PSMain", render::ShaderStage::Pixel, render::HlslShaderModel::SM60, false, defines, includes, backend == render::RenderBackend::Vulkan);
+                if (!ps.has_value()) {
+                    throw ImGuiApplicationException("Failed to compile pixel shader");
+                }
+                psBin = std::move(ps.value());
+            }
+            render::ShaderDescriptor vsDesc{vsBin.Data, vsBin.Category};
+            vsShader = _device->CreateShader(vsDesc).Unwrap();
+            render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
+            psShader = _device->CreateShader(psDesc).Unwrap();
+
+            auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
+            auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
+            const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
+            auto mergedDesc = MergeHlslShaderDesc(descs).value();
+            _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
+        }
+
+        vector<render::RootSignatureSetElement> cbLayoutElems;
+        if (backend == render::RenderBackend::Vulkan) {
+            cbLayoutElems.push_back({0, 0, render::ResourceBindType::CBuffer, 1, render::ShaderStage::Graphics, {}});
+        } else if (backend == render::RenderBackend::D3D12) {
+            cbLayoutElems.push_back({1, 0, render::ResourceBindType::CBuffer, 2, render::ShaderStage::Graphics, {}});
+        }
+        render::RootSignatureDescriptorSet cbLayoutDesc{cbLayoutElems};
+        render::RootSignatureConstant rscDesc{
+            0,
+            0,
+            64 * 3,
+            render::ShaderStage::Vertex | render::ShaderStage::Pixel};
+        render::RootSignatureDescriptor rsDesc{};
+        rsDesc.DescriptorSets = std::span{&cbLayoutDesc, 1};
+        rsDesc.Constant = rscDesc;
+        _rs = _device->CreateRootSignature(rsDesc).Unwrap();
+        const auto& prim = sphereModel.Primitives[0];
+        vector<render::VertexElement> vertElems;
+        {
+            render::SemanticMapping mapping[] = {
+                {VertexSemantics::POSITION, 0, 0, render::VertexFormat::FLOAT32X3},
+                {VertexSemantics::NORMAL, 0, 1, render::VertexFormat::FLOAT32X3},
+                {VertexSemantics::TEXCOORD, 0, 2, render::VertexFormat::FLOAT32X2}};
+            auto mves = render::MapVertexElements(prim.VertexBuffers, mapping);
+            if (!mves.has_value()) {
+                throw ImGuiApplicationException("failed to map vertex elements");
+            }
+            vertElems = std::move(mves.value());
+        }
+        uint32_t stride = 0;
+        for (const auto& vb : prim.VertexBuffers) {
+            stride += GetVertexDataSizeInBytes(vb.Type, vb.ComponentCount);
+        }
+        render::VertexBufferLayout vertLayout{};
+        vertLayout.ArrayStride = stride;
+        vertLayout.StepMode = render::VertexStepMode::Vertex;
+        vertLayout.Elements = vertElems;
+        render::ColorTargetState rtState = render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM);
+        render::GraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = _rs.get();
+        psoDesc.VS = {vsShader.get(), "VSMain"};
+        psoDesc.PS = {psShader.get(), "PSMain"};
+        psoDesc.VertexLayouts = std::span{&vertLayout, 1};
+        psoDesc.Primitive = render::PrimitiveState::Default();
+        psoDesc.DepthStencil = render::DepthStencilState::Default();
+        psoDesc.MultiSample = render::MultiSampleState::Default();
+        psoDesc.ColorTargets = std::span{&rtState, 1};
+        _pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
+
+        _ready = true;
+    }
+
+    void OnStart(const ImGuiAppConfig& config_) override {
+        auto config = config_;
+        if (config.Backend == render::RenderBackend::Vulkan) {
+            render::VulkanCommandQueueDescriptor queueDesc[] = {
+                {render::QueueType::Direct, 1},
+                {render::QueueType::Copy, 1}};
+            render::VulkanDeviceDescriptor devDesc{};
+            devDesc.Queues = queueDesc;
+            config.DeviceDesc = devDesc;
+        }
+        this->Init(config);
 
         _dxc = render::CreateDxc().Unwrap();
         _cmdBuffers.reserve(_inFlightFrameCount);
@@ -24,54 +138,15 @@ public:
             _cmdBuffers.emplace_back(_device->CreateCommandBuffer(_cmdQueue).Unwrap());
         }
 
-        // unique_ptr<render::Shader> vsShader, psShader;
-        // {
-        //     string hlsl;
-        //     {
-        //         auto hlslOpt = ReadText(std::filesystem::path("assets") / RADRAY_APP_NAME / "pbr.hlsl");
-        //         if (!hlslOpt.has_value()) {
-        //             throw ImGuiApplicationException("Failed to read shader file pbr.hlsl");
-        //         }
-        //         hlsl = std::move(hlslOpt.value());
-        //     }
-        //     vector<std::string_view> defines;
-        //     if (backend == render::RenderBackend::Vulkan) {
-        //         defines.emplace_back("VULKAN");
-        //     } else if (backend == render::RenderBackend::D3D12) {
-        //         defines.emplace_back("D3D12");
-        //     }
-        //     vector<std::string_view> includes;
-        //     render::DxcOutput vsBin;
-        //     {
-        //         auto vs = _dxc->Compile(hlsl, "VSMain", render::ShaderStage::Vertex, render::HlslShaderModel::SM60, false, defines, includes, backend == render::RenderBackend::Vulkan);
-        //         if (!vs.has_value()) {
-        //             throw ImGuiApplicationException("Failed to compile vertex shader");
-        //         }
-        //         vsBin = std::move(vs.value());
-        //     }
-        //     render::DxcOutput psBin;
-        //     {
-        //         auto ps = _dxc->Compile(hlsl, "PSMain", render::ShaderStage::Pixel, render::HlslShaderModel::SM60, false, defines, includes, backend == render::RenderBackend::Vulkan);
-        //         if (!ps.has_value()) {
-        //             throw ImGuiApplicationException("Failed to compile pixel shader");
-        //         }
-        //         psBin = std::move(ps.value());
-        //     }
-        //     render::ShaderDescriptor vsDesc{vsBin.Data, vsBin.Category};
-        //     vsShader = _device->CreateShader(vsDesc).Unwrap();
-        //     render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
-        //     psShader = _device->CreateShader(psDesc).Unwrap();
-        // }
-
-        TriangleMesh sphereMesh{};
-        sphereMesh.InitAsUVSphere(0.5f, 32);
-        MeshResource sphereModel{};
-        sphereMesh.ToSimpleMeshResource(&sphereModel);
+        // auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
     }
 
     void OnDestroy() noexcept override {
         _dxc.reset();
         _cmdBuffers.clear();
+
+        _pso.reset();
+        _rs.reset();
     }
 
     void OnImGui() override {
@@ -113,6 +188,8 @@ public:
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
             pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         }
+        if (_ready) {
+        }
         _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
@@ -131,6 +208,13 @@ public:
 private:
     shared_ptr<render::Dxc> _dxc;
     vector<unique_ptr<render::CommandBuffer>> _cmdBuffers;
+
+    unique_ptr<render::RootSignature> _rs;
+    unique_ptr<render::GraphicsPipelineState> _pso;
+    render::RenderMesh _renderMesh;
+    StructuredBufferStorage _cbStorage;
+    bool _ready{false};
+
     SimpleFPSCounter _fps{*this, 125};
     SimpleMonitorIMGUI _monitor{*this};
 };
