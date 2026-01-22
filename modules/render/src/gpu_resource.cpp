@@ -69,6 +69,7 @@ task<RenderMesh> GpuUploader::UploadMeshAsync(const MeshResource& resource) {
     // RenderMesh mesh;
     // mesh._buffers = std::move(dsts);
     // co_return mesh;
+    return {};
 }
 
 // void GpuUploader::Submit(Scheduler& scheduler) {
@@ -176,6 +177,7 @@ GpuUploader::BufferSpan GpuUploader::AllocateUploadBuffer(uint64_t size, uint64_
         ResourceHint::None};
     auto uploadBuffer = _device->CreateBuffer(uploadDesc).Unwrap();
     void* mapped = uploadBuffer->Map(0, uploadDesc.Size);
+    return {};
 }
 
 }  // namespace radray::render

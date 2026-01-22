@@ -2,6 +2,8 @@
 
 #include <exception>
 #include <functional>
+#include <utility>
+#include <vector>
 
 #include <radray/types.h>
 #include <radray/logger.h>
@@ -11,6 +13,7 @@
 #include <cppcoro/shared_task.hpp>
 #include <cppcoro/when_all.hpp>
 #include <cppcoro/async_manual_reset_event.hpp>
+#include <cppcoro/is_awaitable.hpp>
 
 namespace radray {
 
@@ -23,47 +26,44 @@ using cppcoro::task;
 using cppcoro::shared_task;
 using cppcoro::when_all;
 using cppcoro::async_manual_reset_event;
+using cppcoro::is_awaitable;
+using cppcoro::is_awaitable_v;
 
-class Scheduler {
+class TickScheduler {
 public:
-    Scheduler() = default;
-    Scheduler(const Scheduler&) = delete;
-    Scheduler& operator=(const Scheduler&) = delete;
-    virtual ~Scheduler() noexcept;
+    class schedule_operation;
 
-    template <typename Awaitable>
-    void Schedule(Awaitable t) {
-        auto session = WrapTask(std::move(t));
-        _tasks.emplace_back(session.handle);
-    }
+    TickScheduler() = default;
+    TickScheduler(const TickScheduler&) = delete;
+    TickScheduler& operator=(const TickScheduler&) = delete;
+    TickScheduler(TickScheduler&&) = delete;
+    TickScheduler& operator=(TickScheduler&&) = delete;
+
+    [[nodiscard]] schedule_operation schedule() noexcept;
 
     void Tick();
 
-protected:
-    struct TaskSession {
-        struct promise_type {
-            std::exception_ptr _exception;
+private:
+    friend class schedule_operation;
 
-            TaskSession get_return_object() { return TaskSession{coroutine_handle<promise_type>::from_promise(*this)}; }
-            suspend_never initial_suspend() { return {}; }
-            suspend_always final_suspend() noexcept { return {}; }
-            void return_void() {}
-            void unhandled_exception() {
-                _exception = std::current_exception();
-            }
-        };
+    void EnqueueNext(cppcoro::coroutine_handle<> handle) noexcept;
 
-        coroutine_handle<promise_type> handle;
-    };
+    vector<cppcoro::coroutine_handle<>> _ready;
+    vector<cppcoro::coroutine_handle<>> _next;
+};
 
-    template <typename Awaitable>
-    TaskSession WrapTask(Awaitable t) {
-        co_await t;
+class TickScheduler::schedule_operation {
+public:
+    explicit schedule_operation(TickScheduler& service) noexcept : m_service(service) {}
+
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(cppcoro::coroutine_handle<> awaiter) noexcept {
+        m_service.EnqueueNext(awaiter);
     }
+    void await_resume() const noexcept {}
 
-    virtual void OnException(std::exception_ptr e);
-
-    list<coroutine_handle<TaskSession::promise_type>> _tasks;
+private:
+    TickScheduler& m_service;
 };
 
 }  // namespace radray
