@@ -455,8 +455,18 @@ void ImGuiApplication::Run() {
 
 void ImGuiApplication::Destroy() noexcept {
     _needClose = true;
-    if (_renderThread) {
-        _renderThread->join();
+    if (_submitFrames) {
+        _submitFrames->Complete();
+    }
+    if (_freeFrames) {
+        _freeFrames->Complete();
+    }
+    if (_renderThread && _renderThread->joinable()) {
+        try {
+            _renderThread->join();
+        } catch (...) {
+            RADRAY_ERR_LOG("{} {}", Errors::RADRAYIMGUI, "fail join render thread");
+        }
     }
 
     if (_cmdQueue) _cmdQueue->Wait();
