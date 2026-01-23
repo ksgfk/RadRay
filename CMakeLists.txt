@@ -114,6 +114,7 @@ radray_set_build_path(xxhash)
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/cppcoro)
+target_compile_definitions(cppcoro PUBLIC CPPCORO_COMPILER_SUPPORTS_SYMMETRIC_TRANSFER=1)
 
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)

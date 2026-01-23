@@ -29,41 +29,14 @@ using cppcoro::async_manual_reset_event;
 using cppcoro::is_awaitable;
 using cppcoro::is_awaitable_v;
 
-class TickScheduler {
-public:
-    class schedule_operation;
-
-    TickScheduler() = default;
-    TickScheduler(const TickScheduler&) = delete;
-    TickScheduler& operator=(const TickScheduler&) = delete;
-    TickScheduler(TickScheduler&&) = delete;
-    TickScheduler& operator=(TickScheduler&&) = delete;
-
-    [[nodiscard]] schedule_operation schedule() noexcept;
-
-    void Tick();
-
-private:
-    friend class schedule_operation;
-
-    void EnqueueNext(cppcoro::coroutine_handle<> handle) noexcept;
-
-    vector<cppcoro::coroutine_handle<>> _ready;
-    vector<cppcoro::coroutine_handle<>> _next;
-};
-
-class TickScheduler::schedule_operation {
-public:
-    explicit schedule_operation(TickScheduler& service) noexcept : m_service(service) {}
-
-    bool await_ready() const noexcept { return false; }
-    void await_suspend(cppcoro::coroutine_handle<> awaiter) noexcept {
-        m_service.EnqueueNext(awaiter);
-    }
-    void await_resume() const noexcept {}
-
-private:
-    TickScheduler& m_service;
+struct FireAndForgetTask {
+    struct promise_type {
+        FireAndForgetTask get_return_object() { return {}; }
+        suspend_never initial_suspend() { return {}; }
+        suspend_never final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { throw; }
+    };
 };
 
 }  // namespace radray

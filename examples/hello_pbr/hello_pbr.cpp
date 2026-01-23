@@ -15,13 +15,13 @@ public:
     HelloPBRApp() = default;
     ~HelloPBRApp() noexcept override = default;
 
-    task<> LoadAsync() {
+    FireAndForgetTask LoadAsync() {
         auto backend = _device->GetBackend();
         TriangleMesh sphereMesh{};
         sphereMesh.InitAsUVSphere(0.5f, 32);
         MeshResource sphereModel{};
         sphereMesh.ToSimpleMeshResource(&sphereModel);
-        // _renderMesh = co_await _gpuUploader->UploadMeshAsync(sphereModel);
+        _renderMesh = co_await _gpuUploader->UploadMeshAsync(sphereModel);
 
         unique_ptr<render::Shader> vsShader, psShader;
         {
@@ -118,6 +118,8 @@ public:
         _pso = _device->CreateGraphicsPipelineState(psoDesc).Unwrap();
 
         _ready = true;
+
+        RADRAY_INFO_LOG("upload done");
     }
 
     void OnStart(const ImGuiAppConfig& config_) override {
@@ -138,15 +140,21 @@ public:
             _cmdBuffers.emplace_back(_device->CreateCommandBuffer(_cmdQueue).Unwrap());
         }
 
-        // auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
+        auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
+        _gpuUploader = std::make_unique<render::GpuUploader>(_device.get(), copyQueue);
+
+        LoadAsync();
     }
 
     void OnDestroy() noexcept override {
+        _gpuUploader.reset();
+
         _dxc.reset();
         _cmdBuffers.clear();
 
         _pso.reset();
         _rs.reset();
+        _renderMesh = {};
     }
 
     void OnImGui() override {
@@ -156,6 +164,9 @@ public:
     void OnUpdate() override {
         _fps.OnUpdate();
         _monitor.SetData(_fps);
+
+        _gpuUploader->Submit();
+        _gpuUploader->Tick();
     }
 
     vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
@@ -213,6 +224,7 @@ private:
     unique_ptr<render::GraphicsPipelineState> _pso;
     render::RenderMesh _renderMesh;
     StructuredBufferStorage _cbStorage;
+    unique_ptr<render::GpuUploader> _gpuUploader = nullptr;
     bool _ready{false};
 
     SimpleFPSCounter _fps{*this, 125};

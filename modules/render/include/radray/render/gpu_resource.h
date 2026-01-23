@@ -8,8 +8,6 @@
 
 namespace radray::render {
 
-using cppcoro::async_manual_reset_event;
-
 class GpuResourceException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -30,22 +28,12 @@ public:
 
     task<RenderMesh> UploadMeshAsync(const MeshResource& resource);
 
-    void Submit(Scheduler& scheduler);
+    void Submit();
+
+    void Tick();
 
 private:
-    // struct UploadRequest {
-    //     Buffer* Src{nullptr};
-    //     Buffer* Dst{nullptr};
-    //     uint64_t SrcOffset{0};
-    //     uint64_t DstOffset{0};
-    //     uint64_t Size{0};
-    // };
-
-    // struct UploadBatch {
-    //     vector<UploadRequest> Requests;
-    //     async_manual_reset_event Event;
-    //     vector<unique_ptr<Buffer>> StagingBuffers;
-    // };
+    class BatchAwaiter;
 
     struct BufferSpan {
         Buffer* Buffer{nullptr};
@@ -54,20 +42,37 @@ private:
         uint64_t Size{0};
     };
 
+    struct UploadRequest {
+        Buffer* Src{nullptr};
+        uint64_t SrcOffset{0};
+        Buffer* Dst{nullptr};
+        uint64_t DstOffset{0};
+        uint64_t Size{0};
+    };
+
+    struct PendingTask {
+        coroutine_handle<> Handle;
+        vector<unique_ptr<Buffer>> RetainedBuffers;
+    };
+
     class UploadBatch {
     public:
-        vector<unique_ptr<Buffer>> _tempBuffers;
+        unique_ptr<CommandBuffer> _cmdBuffer;
+        unique_ptr<Fence> _fence;
+        vector<unique_ptr<Buffer>> _tmpBuffers;
+        vector<UploadRequest> _requests;
+        vector<std::shared_ptr<PendingTask>> _awaiters;
     };
+
+    UploadBatch* GetOrCreateCurrentBatch();
 
     BufferSpan AllocateUploadBuffer(uint64_t size, uint64_t alignment);
 
     Device* _device{nullptr};
     CommandQueue* _queue{nullptr};
 
-    // std::shared_ptr<UploadBatch> _currentBatch;
-
-    vector<unique_ptr<CommandBuffer>> _cmdPool;
-    vector<unique_ptr<Fence>> _fencePool;
+    unique_ptr<UploadBatch> _currBatch{nullptr};
+    vector<unique_ptr<UploadBatch>> _pendings;
 };
 
 }  // namespace radray::render

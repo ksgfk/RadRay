@@ -454,6 +454,11 @@ void ImGuiApplication::Run() {
 }
 
 void ImGuiApplication::Destroy() noexcept {
+    _needClose = true;
+    if (_renderThread) {
+        _renderThread->join();
+    }
+
     if (_cmdQueue) _cmdQueue->Wait();
     _resizingConn.disconnect();
     _resizedConn.disconnect();
