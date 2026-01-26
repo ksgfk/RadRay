@@ -294,6 +294,7 @@ static void _ProcessResource(
         }
         binding.UniformBufferSize = static_cast<uint32_t>(compiler.get_declared_struct_size(*typePtr));
         if (binding.ArraySize > 0) {
+            // ConstantBuffer<T> _v[4] : register(b0); 这种情况, 如果spv里没带 stride 推不出正确大小, 以后再想想有没有办法
             uint32_t arrayStride = compiler.get_decoration(type.self, spv::DecorationArrayStride);
             if (arrayStride > 0) {
                 binding.UniformBufferSize = arrayStride * binding.ArraySize;

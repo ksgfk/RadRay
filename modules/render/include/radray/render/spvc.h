@@ -55,7 +55,6 @@ struct SpirvBytecodeView {
     std::span<const byte> Data;
     std::string_view EntryPointName;
     ShaderStage Stage{ShaderStage::UNKNOWN};
-    std::span<const byte> RadrayExt;
 };
 
 struct SpirvTypeMember {

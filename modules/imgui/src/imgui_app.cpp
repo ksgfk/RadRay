@@ -678,6 +678,10 @@ void ImGuiApplication::RequestRecreateSwapChain(std::function<void()> setValueFu
     }
 }
 
+Eigen::Vector2i ImGuiApplication::GetRTSize() const noexcept {
+    return Eigen::Vector2i{_rtWidth, _rtHeight};
+}
+
 void ImGuiApplication::LoopSingleThreaded() {
     _frameCount = 0;
     _renderFrameStates.resize(_inFlightFrameCount);
@@ -738,7 +742,7 @@ void ImGuiApplication::LoopSingleThreaded() {
             _needRecreate = false;
         }
         state.InFlightFrameIndex = frameIndex;
-        _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
+        this->OnExtractDrawData(frameIndex);
         {
             render::Semaphore* imageAvailableSemaphore = nullptr;
             if (_device->GetBackend() == render::RenderBackend::Vulkan) {
@@ -922,8 +926,10 @@ void ImGuiApplication::LoopMultiThreaded() {
             if (!isConsumed) {
                 continue;
             }
-            _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
-            _submitFrames->WaitWrite(frameIndex);
+            this->OnExtractDrawData(frameIndex);
+            if (!_submitFrames->WaitWrite(frameIndex)) {
+                break;
+            }
             _nowCpuTimePoint = _sw.Elapsed().count() * 0.000001;
         }
     }
@@ -954,6 +960,10 @@ void ImGuiApplication::OnDestroy() noexcept {}
 void ImGuiApplication::OnUpdate() {}
 
 void ImGuiApplication::OnImGui() {}
+
+void ImGuiApplication::OnExtractDrawData(uint32_t frameIndex) {
+    _imguiRenderer->ExtractDrawData(frameIndex, ImGui::GetDrawData());
+}
 
 void ImGuiApplication::OnRenderComplete(uint32_t frameIndex) {
     _imguiRenderer->OnRenderComplete(frameIndex);

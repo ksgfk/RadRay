@@ -1,6 +1,7 @@
 #include <radray/logger.h>
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
+#include <radray/camera_control.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
 #include <radray/render/gpu_resource.h>
@@ -9,6 +10,34 @@
 using namespace radray;
 
 const char* RADRAY_APP_NAME = "PBR Example";
+
+class DrawData {
+public:
+    render::RootSignature* _rs;
+    render::PipelineState* _pso;
+    render::VertexBufferView _vbv;
+    render::IndexBufferView _ibv;
+};
+
+class Frame {
+public:
+    Frame(render::Device* device, render::CommandQueue* queue)
+        : _cbArena(device, {256 * 256, device->GetDetail().CBufferAlignment}) {
+        _cmdBuffer = device->CreateCommandBuffer(queue).Unwrap();
+    }
+    Frame(const Frame&) = delete;
+    Frame& operator=(const Frame&) = delete;
+    Frame(Frame&&) = delete;
+    Frame& operator=(Frame&&) = delete;
+    ~Frame() noexcept {
+        _cbArena.Destroy();
+        _cmdBuffer.reset();
+    }
+
+    unique_ptr<render::CommandBuffer> _cmdBuffer;
+    render::CBufferArena _cbArena;
+    vector<DrawData> _drawDatas;
+};
 
 class HelloPBRApp : public ImGuiApplication {
 public:
@@ -61,29 +90,27 @@ public:
             render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
             psShader = _device->CreateShader(psDesc).Unwrap();
 
-            auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
-            auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
-            const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
-            auto mergedDesc = MergeHlslShaderDesc(descs).value();
-            _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
+            if (backend == render::RenderBackend::D3D12) {
+                auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
+                auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
+                const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
+                auto mergedDesc = MergeHlslShaderDesc(descs).value();
+                _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
+                auto rsDesc = render::CreateRootSignatureDescriptor(mergedDesc).value();
+                _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
+            } else if (backend == render::RenderBackend::Vulkan) {
+                render::SpirvBytecodeView spvs[] = {
+                    {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
+                    {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
+                const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
+                auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
+                _cbStorage = render::CreateCBufferStorage(spirvDesc).value();
+                auto rsDesc = render::CreateRootSignatureDescriptor(spirvDesc).value();
+                _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
+            } else {
+                throw ImGuiApplicationException("Unsupported render backend for shader reflection");
+            }
         }
-
-        vector<render::RootSignatureSetElement> cbLayoutElems;
-        if (backend == render::RenderBackend::Vulkan) {
-            cbLayoutElems.push_back({0, 0, render::ResourceBindType::CBuffer, 1, render::ShaderStage::Graphics, {}});
-        } else if (backend == render::RenderBackend::D3D12) {
-            cbLayoutElems.push_back({1, 0, render::ResourceBindType::CBuffer, 2, render::ShaderStage::Graphics, {}});
-        }
-        render::RootSignatureDescriptorSet cbLayoutDesc{cbLayoutElems};
-        render::RootSignatureConstant rscDesc{
-            0,
-            0,
-            64 * 3,
-            render::ShaderStage::Vertex | render::ShaderStage::Pixel};
-        render::RootSignatureDescriptor rsDesc{};
-        rsDesc.DescriptorSets = std::span{&cbLayoutDesc, 1};
-        rsDesc.Constant = rscDesc;
-        _rs = _device->CreateRootSignature(rsDesc).Unwrap();
         const auto& prim = sphereModel.Primitives[0];
         vector<render::VertexElement> vertElems;
         {
@@ -135,9 +162,9 @@ public:
         this->Init(config);
 
         _dxc = render::CreateDxc().Unwrap();
-        _cmdBuffers.reserve(_inFlightFrameCount);
+        _frames.reserve(_inFlightFrameCount);
         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _cmdBuffers.emplace_back(_device->CreateCommandBuffer(_cmdQueue).Unwrap());
+            _frames.emplace_back(make_unique<Frame>(_device.get(), _cmdQueue));
         }
 
         auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
@@ -150,11 +177,12 @@ public:
         _gpuUploader.reset();
 
         _dxc.reset();
-        _cmdBuffers.clear();
 
         _pso.reset();
         _rs.reset();
         _renderMesh = {};
+
+        _frames.clear();
     }
 
     void OnImGui() override {
@@ -169,11 +197,38 @@ public:
         _gpuUploader->Tick();
     }
 
+    void OnExtractDrawData(uint32_t frameIndex) override {
+        ImGuiApplication::OnExtractDrawData(frameIndex);
+
+        auto& frame = _frames[frameIndex];
+        auto& cbArena = frame->_cbArena;
+        if (_ready) {
+            Eigen::Vector2i rtSize = this->GetRTSize();
+            Eigen::Matrix4f view = LookAt(_camRot, _camPos);
+            Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)rtSize.x() / rtSize.y(), _camNear, _camFar);
+            Eigen::Matrix4f model = (Eigen::Translation3f{_modelPos} * _modelRot.toRotationMatrix() * Eigen::AlignedScaling3f{_modelScale}).matrix();
+            Eigen::Matrix4f modelInv = model.inverse();
+            Eigen::Matrix4f vp = proj * view;
+            Eigen::Matrix4f mvp = vp * model;
+            _cbStorage.GetVar("_Obj").GetVar("model").SetValue(model);
+            _cbStorage.GetVar("_Obj").GetVar("mvp").SetValue(mvp);
+            _cbStorage.GetVar("_Obj").GetVar("modelInv").SetValue(modelInv);
+            auto allocation = cbArena.Allocate(_cbStorage.GetData().size());
+            std::memcpy(allocation.Mapped, _cbStorage.GetData().data(), _cbStorage.GetData().size());
+            auto& drawData = frame->_drawDatas.emplace_back();
+            drawData._rs = _rs.get();
+            drawData._pso = _pso.get();
+        }
+    }
+
     vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
+        auto& frame = _frames[frameIndex];
+        auto cmdBuffer = frame->_cmdBuffer.get();
+        auto& cbArena = frame->_cbArena;
+
         _fps.OnRender();
 
         auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
-        auto cmdBuffer = _cmdBuffers[frameIndex].get();
         auto rt = _backBuffers[currBackBufferIndex];
         auto rtView = this->GetDefaultRTV(currBackBufferIndex);
 
@@ -199,8 +254,22 @@ public:
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
             pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         }
-        if (_ready) {
-        }
+        // for(auto& drawData : frame->_drawDatas) {
+        //     pass->BindRootSignature(drawData._rs);
+        //     pass->BindGraphicsPipelineState(drawData._pso);
+        //     render::VertexBufferView vbv{
+        //         _renderMesh.GetVertexBuffer().get(),
+        //         0,
+        //         _renderMesh.GetVertexStride()};
+        //     pass->BindVertexBuffer(std::span{&vbv, 1});
+        //     render::IndexBufferView ibv{
+        //         _renderMesh.GetIndexBuffer().get(),
+        //         0,
+        //         _renderMesh.GetIndexFormat()};
+        //     pass->BindIndexBuffer(ibv);
+        //     pass->BindDescriptorSet(0, cbArena.CreateDescriptorSet(drawData._rs, 0).Unwrap());
+        //     pass->DrawIndexed(_renderMesh.GetIndexCount(), 1, 0, 0, 0);
+        // }
         _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
@@ -216,15 +285,33 @@ public:
         return {cmdBuffer};
     }
 
+    void OnRenderComplete(uint32_t frameIndex) override {
+        ImGuiApplication::OnRenderComplete(frameIndex);
+
+        auto& frame = _frames[frameIndex];
+        frame->_drawDatas.clear();
+        frame->_cbArena.Reset();
+    }
+
 private:
     shared_ptr<render::Dxc> _dxc;
-    vector<unique_ptr<render::CommandBuffer>> _cmdBuffers;
+    vector<unique_ptr<Frame>> _frames;
+
+    Eigen::Vector3f _camPos{0.0f, 0.0f, -3.0f};
+    Eigen::Quaternionf _camRot{Eigen::Quaternionf::Identity()};
+    float _camFovY{45.0f};
+    float _camNear{0.1f};
+    float _camFar{100.0f};
+    CameraControl _cc;
 
     unique_ptr<render::RootSignature> _rs;
     unique_ptr<render::GraphicsPipelineState> _pso;
     render::RenderMesh _renderMesh;
     StructuredBufferStorage _cbStorage;
     unique_ptr<render::GpuUploader> _gpuUploader = nullptr;
+    Eigen::Vector3f _modelPos{0.0f, 0.0f, 0.0f};
+    Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
+    Eigen::Quaternionf _modelRot{Eigen::Quaternionf::Identity()};
     bool _ready{false};
 
     SimpleFPSCounter _fps{*this, 125};

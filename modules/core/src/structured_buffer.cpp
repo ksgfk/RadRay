@@ -334,6 +334,15 @@ StructuredBufferView StructuredBufferStorage::GetVar(std::string_view name) noex
     return StructuredBufferView{};
 }
 
+StructuredBufferReadOnlyView StructuredBufferStorage::GetVar(std::string_view name) const noexcept {
+    for (const auto& root : _rootVarIds) {
+        if (root._name == name) {
+            return StructuredBufferReadOnlyView{this, root._globalId};
+        }
+    }
+    return StructuredBufferReadOnlyView{};
+}
+
 void StructuredBufferStorage::WriteData(size_t offset, std::span<const byte> data) noexcept {
     if (data.empty()) {
         return;
@@ -376,69 +385,7 @@ std::span<const byte> StructuredBufferStorage::GetSpan(StructuredBufferId global
     return this->GetGlobalSpan(offset, type._size);
 }
 
-StructuredBufferView::StructuredBufferView(
-    StructuredBufferStorage* storage,
-    StructuredBufferId globalId) noexcept
-    : StructuredBufferView(storage, globalId, 0) {}
-
-StructuredBufferView::StructuredBufferView(
-    StructuredBufferStorage* storage,
-    StructuredBufferId globalId,
-    size_t arrayIndex) noexcept
-    : _storage(storage),
-      _globalId(globalId),
-      _arrayIndex(arrayIndex) {}
-
-StructuredBufferView StructuredBufferView::GetVar(std::string_view name) noexcept {
-    RADRAY_ASSERT(this->IsValid());
-    const auto& type = this->GetType();
-    for (const auto& mem : type.GetMembers()) {
-        if (mem.GetName() == name) {
-            return StructuredBufferView{_storage, mem.GetGlobalId()};
-        }
-    }
-    return {};
-}
-
-StructuredBufferView StructuredBufferView::GetArrayElement(size_t index) noexcept {
-    RADRAY_ASSERT(this->IsValid());
-    const auto& var = this->GetSelf();
-    if (var.GetArraySize() == 0 || index >= var.GetArraySize()) {
-        return {};
-    }
-    return StructuredBufferView{_storage, var.GetGlobalId(), index};
-}
-
-size_t StructuredBufferView::GetGlobalOffset() const noexcept {
-    RADRAY_ASSERT(this->IsValid());
-    const auto& indexer = _storage->_globalIndex[_globalId];
-    if (_arrayIndex == 0) {
-        return indexer.GlobalOffset;
-    }
-    const auto& var = this->GetSelf();
-    if (var.GetArraySize() == 0) {
-        return indexer.GlobalOffset;
-    }
-    const auto& type = _storage->_types[var.GetTypeId()];
-    return indexer.GlobalOffset + _arrayIndex * type.GetSizeInBytes();
-}
-
-const StructuredBufferType& StructuredBufferView::GetType() const noexcept {
-    RADRAY_ASSERT(this->IsValid());
-    const auto& indexer = _storage->_globalIndex[_globalId];
-    const auto& var = (indexer.ParentTypeId == StructuredBufferId::Invalid())
-                          ? _storage->_rootVarIds[indexer.MemberIndexInType]
-                          : _storage->_types[indexer.ParentTypeId].GetMembers()[indexer.MemberIndexInType];
-    return _storage->_types[var.GetTypeId()];
-}
-
-const StructuredBufferVariable& StructuredBufferView::GetSelf() const noexcept {
-    RADRAY_ASSERT(this->IsValid());
-    const auto& indexer = _storage->_globalIndex[_globalId];
-    const auto& var = (indexer.ParentTypeId == StructuredBufferId::Invalid())
-                          ? _storage->_rootVarIds[indexer.MemberIndexInType]
-                          : _storage->_types[indexer.ParentTypeId].GetMembers()[indexer.MemberIndexInType];
-    return var;
-}
+template class BasicStructuredBufferView<StructuredBufferStorage>;
+template class BasicStructuredBufferView<const StructuredBufferStorage>;
 
 }  // namespace radray

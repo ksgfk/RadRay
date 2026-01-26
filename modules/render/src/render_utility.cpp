@@ -214,133 +214,18 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     return builder.Build();
 }
 
-SimpleCBufferArena::Block::Block(unique_ptr<Buffer> buf) noexcept
-    : _buf(std::move(buf)) {
-    _mapped = _buf->Map(0, _buf->GetDesc().Size);
-    RADRAY_ASSERT(_mapped != nullptr);
-}
-
-SimpleCBufferArena::Block::~Block() noexcept {
-    if (_buf && _mapped) {
-        _buf->Unmap(0, _buf->GetDesc().Size);
-        _mapped = nullptr;
+CBufferStorage::CBufferStorage(const HlslShaderDesc& hlslDesc, const RootSignatureDescriptor& rsDesc, const StructuredBufferStorage& storage) {
+    if (rsDesc.Constant) {
+        auto& c = rsDesc.Constant.value();
+        auto& cDesc = *std::find_if(hlslDesc.BoundResources.begin(), hlslDesc.BoundResources.end(), [&](const auto& cb) {
+            return cb.Type == HlslShaderInputType::CBUFFER && cb.BindPoint == c.Slot && cb.Space == c.Space;
+        });
+        _constantId = storage.GetVar(cDesc.Name).GetId();
     }
 }
 
-SimpleCBufferArena::SimpleCBufferArena(Device* device, const Descriptor& desc) noexcept
-    : _device(device),
-      _desc(desc) {
-    if (_desc.Alignment == 0 || (_desc.Alignment & (_desc.Alignment - 1)) != 0) {
-        RADRAY_ABORT("SimpleCBufferArena invalid Alignment: {} (must be power-of-two and non-zero)", _desc.Alignment);
-    }
-}
-
-SimpleCBufferArena::SimpleCBufferArena(Device* device) noexcept
-    : SimpleCBufferArena(device, Descriptor{256 * 256, 256, 1024 * 1024, "cb_arena"}) {}
-
-SimpleCBufferArena::SimpleCBufferArena(SimpleCBufferArena&& other) noexcept
-    : _device(other._device),
-      _blocks(std::move(other._blocks)),
-      _desc(std::move(other._desc)),
-      _minBlockSize(other._minBlockSize) {
-    other._device = nullptr;
-    other._minBlockSize = 0;
-}
-
-SimpleCBufferArena& SimpleCBufferArena::operator=(SimpleCBufferArena&& other) noexcept {
-    SimpleCBufferArena tmp{std::move(other)};
-    swap(*this, tmp);
-    return *this;
-}
-
-SimpleCBufferArena::~SimpleCBufferArena() noexcept {
-    this->Destroy();
-}
-
-bool SimpleCBufferArena::IsValid() const noexcept {
-    return _device != nullptr;
-}
-
-void SimpleCBufferArena::Destroy() noexcept {
-    _blocks.clear();
-    _device = nullptr;
-}
-
-SimpleCBufferArena::Allocation SimpleCBufferArena::Allocate(uint64_t size) noexcept {
-    if (size == 0) {
-        return Allocation::Invalid();
-    }
-    auto blockOpt = this->GetOrCreateBlock(size);
-    if (!blockOpt.HasValue()) {
-        RADRAY_ABORT("allocation failed: cannot create cbuffer block");
-    }
-    auto block = blockOpt.Release();
-    uint64_t offsetStart = Align(block->_used, _desc.Alignment);
-    block->_used = offsetStart + size;
-    Allocation alloc{};
-    alloc.Target = block->_buf.get();
-    alloc.Mapped = static_cast<byte*>(block->_mapped) + offsetStart;
-    alloc.Offset = offsetStart;
-    alloc.Size = size;
-    return alloc;
-}
-
-Nullable<SimpleCBufferArena::Block*> SimpleCBufferArena::GetOrCreateBlock(uint64_t size) noexcept {
-    if (!_blocks.empty()) {
-        auto last = _blocks[_blocks.size() - 1].get();
-        auto desc = last->_buf->GetDesc();
-        auto offsetStart = Align(last->_used, _desc.Alignment);
-        if (offsetStart < desc.Size) {
-            auto remain = desc.Size - offsetStart;
-            if (remain >= size) {
-                return last;
-            }
-        }
-    }
-    string name = radray::format("{}_{}", _desc.NamePrefix, _blocks.size());
-    BufferDescriptor desc{};
-    desc.Size = Align(std::max(_minBlockSize, std::max(size, _desc.BasicSize)), _desc.Alignment);
-    desc.Memory = MemoryType::Upload;
-    desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite | BufferUse::CopySource;
-    desc.Hints = ResourceHint::None;
-    desc.Name = name;
-    SimpleCBufferArena::Block* result = nullptr;
-    {
-        auto bufOpt = _device->CreateBuffer(desc);
-        if (!bufOpt.HasValue()) {
-            return nullptr;
-        }
-        result = _blocks.emplace_back(make_unique<SimpleCBufferArena::Block>(bufOpt.Release())).get();
-    }
-    return result;
-}
-
-void SimpleCBufferArena::Reset() noexcept {
-    if (_blocks.empty()) {
-        return;
-    } else if (_blocks.size() == 1) {
-        _blocks[0]->_used = 0;
-    } else {
-        _minBlockSize = 0;
-        for (const auto& i : _blocks) {
-            _minBlockSize += i->_buf->GetDesc().Size;
-        }
-        _minBlockSize = std::min(_minBlockSize, _desc.MaxResetSize);
-        _blocks.clear();
-    }
-}
-
-void SimpleCBufferArena::Clear() noexcept {
-    _blocks.clear();
-    _minBlockSize = 0;
-}
-
-void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept {
-    using std::swap;
-    swap(a._device, b._device);
-    swap(a._blocks, b._blocks);
-    swap(a._desc, b._desc);
-    swap(a._minBlockSize, b._minBlockSize);
+void CBufferStorage::Bind(CommandEncoder* encode, CBufferArena* arena) {
+    // TODO:
 }
 
 RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept
@@ -639,6 +524,77 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
     rsDesc.RootDescriptors = rootDescs;
     rsDesc.DescriptorSets = descriptorSets;
     rsDesc.Constant = rootConstant;
+    return RootSignatureDescriptorContainer{rsDesc};
+}
+
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const SpirvShaderDesc& desc) noexcept {
+    unordered_map<uint32_t, vector<RootSignatureSetElement>> sets;
+    for (const auto& binding : desc.ResourceBindings) {
+        auto& elements = sets[binding.Set];
+        RootSignatureSetElement& elem = elements.emplace_back();
+        elem.Slot = binding.Binding;
+        elem.Space = binding.Set;
+        elem.Count = binding.ArraySize == 0 ? 1 : binding.ArraySize;
+        elem.Stages = binding.Stages;
+        switch (binding.Kind) {
+            case SpirvResourceKind::UniformBuffer:
+                elem.Type = ResourceBindType::CBuffer;
+                break;
+            case SpirvResourceKind::StorageBuffer:
+                elem.Type = (binding.ReadOnly && !binding.WriteOnly) ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
+                break;
+            case SpirvResourceKind::SampledImage:
+            case SpirvResourceKind::SeparateImage:
+                elem.Type = ResourceBindType::Texture;
+                break;
+            case SpirvResourceKind::SeparateSampler:
+                elem.Type = ResourceBindType::Sampler;
+                break;
+            case SpirvResourceKind::StorageImage:
+                elem.Type = ResourceBindType::RWTexture;
+                break;
+            case SpirvResourceKind::AccelerationStructure:
+                elem.Type = ResourceBindType::Buffer;
+                break;
+            default:
+                elem.Type = ResourceBindType::UNKNOWN;
+                break;
+        }
+    }
+    vector<uint32_t> setIndices;
+    setIndices.reserve(sets.size());
+    for (const auto& [k, v] : sets) {
+        setIndices.emplace_back(k);
+    }
+    std::sort(setIndices.begin(), setIndices.end());
+    vector<RootSignatureDescriptorSet> descriptorSets;
+    descriptorSets.reserve(sets.size());
+    for (uint32_t setIdx : setIndices) {
+        auto& elements = sets[setIdx];
+        std::sort(elements.begin(), elements.end(), [](const RootSignatureSetElement& a, const RootSignatureSetElement& b) {
+            return a.Slot < b.Slot;
+        });
+        RootSignatureDescriptorSet& setDesc = descriptorSets.emplace_back();
+        setDesc.Elements = elements;
+    }
+    std::optional<RootSignatureConstant> constant;
+    if (!desc.PushConstants.empty()) {
+        uint32_t size = 0;
+        ShaderStages stages = ShaderStage::UNKNOWN;
+        for (const auto& pc : desc.PushConstants) {
+            size = std::max(size, pc.Offset + pc.Size);
+            stages |= pc.Stages;
+        }
+        if (size > 0) {
+            RootSignatureConstant c{};
+            c.Size = size;
+            c.Stages = stages;
+            constant = c;
+        }
+    }
+    RootSignatureDescriptor rsDesc{};
+    rsDesc.DescriptorSets = descriptorSets;
+    rsDesc.Constant = constant;
     return RootSignatureDescriptorContainer{rsDesc};
 }
 

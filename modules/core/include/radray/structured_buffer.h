@@ -6,6 +6,9 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/basic_math.h>
+#include <radray/logger.h>
+
+#include <type_traits>
 
 namespace radray {
 
@@ -26,7 +29,10 @@ struct StructuredBufferId {
 class StructuredBufferVariable;
 class StructuredBufferType;
 class StructuredBufferStorage;
-class StructuredBufferView;
+template <typename TStorage>
+class BasicStructuredBufferView;
+using StructuredBufferView = BasicStructuredBufferView<StructuredBufferStorage>;
+using StructuredBufferReadOnlyView = BasicStructuredBufferView<const StructuredBufferStorage>;
 
 class StructuredBufferVariable {
 public:
@@ -113,6 +119,7 @@ public:
     };
 
     StructuredBufferView GetVar(std::string_view name) noexcept;
+    StructuredBufferReadOnlyView GetVar(std::string_view name) const noexcept;
     void WriteData(size_t offset, std::span<const byte> data) noexcept;
     std::span<const byte> GetData() const noexcept { return _buffer; }
     std::span<const byte> GetGlobalSpan(size_t offset, size_t size) const noexcept;
@@ -131,29 +138,92 @@ private:
     vector<GlobalVarIndexer> _globalIndex;
     vector<byte> _buffer;
 
-    friend class StructuredBufferView;
+    template <typename T>
+    friend class BasicStructuredBufferView;
 };
 
-class StructuredBufferView {
+template <typename TStorage>
+class BasicStructuredBufferView {
 public:
-    StructuredBufferView() = default;
-    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId) noexcept;
-    StructuredBufferView(StructuredBufferStorage* storage, StructuredBufferId globalId, size_t arrayIndex) noexcept;
+    using ViewType = BasicStructuredBufferView<TStorage>;
+    using ConstView = BasicStructuredBufferView<const std::remove_const_t<TStorage>>;
+
+    BasicStructuredBufferView() = default;
+    BasicStructuredBufferView(TStorage* storage, StructuredBufferId globalId, size_t arrayIndex = 0) noexcept
+        : _storage(storage), _globalId(globalId), _arrayIndex(arrayIndex) {}
+
+    operator ConstView() const noexcept
+    requires(!std::is_const_v<TStorage>)
+    {
+        return ConstView(_storage, _globalId, _arrayIndex);
+    }
 
     bool IsValid() const noexcept { return _storage != nullptr; }
     operator bool() const noexcept { return IsValid(); }
 
-    StructuredBufferView GetVar(std::string_view name) noexcept;
-    StructuredBufferView GetArrayElement(size_t index) noexcept;
+    ViewType GetVar(std::string_view name) const noexcept {
+        RADRAY_ASSERT(this->IsValid());
+        const auto& type = this->GetType();
+        for (const auto& mem : type.GetMembers()) {
+            if (mem.GetName() == name) {
+                return ViewType{_storage, mem.GetGlobalId()};
+            }
+        }
+        return ViewType{};
+    }
+
+    ViewType GetArrayElement(size_t index) const noexcept {
+        RADRAY_ASSERT(this->IsValid());
+        const auto& var = this->GetSelf();
+        if (var.GetArraySize() == 0 || index >= var.GetArraySize()) {
+            return ViewType{};
+        }
+        return ViewType{_storage, var.GetGlobalId(), index};
+    }
 
     StructuredBufferId GetId() const noexcept { return _globalId; }
     size_t GetArrayIndex() const noexcept { return _arrayIndex; }
-    size_t GetGlobalOffset() const noexcept;
-    const StructuredBufferType& GetType() const noexcept;
-    const StructuredBufferVariable& GetSelf() const noexcept;
+
+    size_t GetGlobalOffset() const noexcept {
+        RADRAY_ASSERT(this->IsValid());
+        const auto& indexer = _storage->_globalIndex[_globalId];
+        if (_arrayIndex == 0) {
+            return indexer.GlobalOffset;
+        }
+        const auto& var = this->GetSelf();
+        if (var.GetArraySize() == 0) {
+            return indexer.GlobalOffset;
+        }
+        const auto& type = _storage->_types[var.GetTypeId()];
+        return indexer.GlobalOffset + _arrayIndex * type.GetSizeInBytes();
+    }
+
+    const StructuredBufferType& GetType() const noexcept {
+        RADRAY_ASSERT(this->IsValid());
+        const auto& indexer = _storage->_globalIndex[_globalId];
+        const auto& var = (indexer.ParentTypeId == StructuredBufferId::Invalid())
+                              ? _storage->_rootVarIds[indexer.MemberIndexInType]
+                              : _storage->_types[indexer.ParentTypeId].GetMembers()[indexer.MemberIndexInType];
+        return _storage->_types[var.GetTypeId()];
+    }
+
+    const StructuredBufferVariable& GetSelf() const noexcept {
+        RADRAY_ASSERT(this->IsValid());
+        const auto& indexer = _storage->_globalIndex[_globalId];
+        const auto& var = (indexer.ParentTypeId == StructuredBufferId::Invalid())
+                              ? _storage->_rootVarIds[indexer.MemberIndexInType]
+                              : _storage->_types[indexer.ParentTypeId].GetMembers()[indexer.MemberIndexInType];
+        return var;
+    }
+
+    ConstView AsReadOnly() const noexcept {
+        return ConstView{_storage, _globalId, _arrayIndex};
+    }
 
     template <class T>
-    void SetValue(const T& value) noexcept {
+    void SetValue(const T& value) noexcept
+    requires(!std::is_const_v<TStorage>)
+    {
         if (!this->IsValid()) {
             return;
         }
@@ -164,14 +234,17 @@ public:
             constexpr size_t Count = size_t(T::RowsAtCompileTime) * size_t(T::ColsAtCompileTime);
             _storage->WriteData(this->GetGlobalOffset(), std::as_bytes(std::span<const Scalar, Count>{value.data(), Count}));
         } else {
-            static_assert(std::is_trivially_copyable_v<T>, "StructuredBufferView::SetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
+            static_assert(std::is_trivially_copyable_v<T>, "BasicStructuredBufferView::SetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
         }
     }
 
 private:
-    StructuredBufferStorage* _storage{nullptr};
+    TStorage* _storage{nullptr};
     StructuredBufferId _globalId{StructuredBufferId::Invalid()};
     size_t _arrayIndex{0};
 };
+
+extern template class BasicStructuredBufferView<StructuredBufferStorage>;
+extern template class BasicStructuredBufferView<const StructuredBufferStorage>;
 
 }  // namespace radray

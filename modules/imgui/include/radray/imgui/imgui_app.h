@@ -206,6 +206,7 @@ protected:
     virtual void OnDestroy() noexcept;
     virtual void OnUpdate();
     virtual void OnImGui();
+    virtual void OnExtractDrawData(uint32_t frameIndex);
     virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
     virtual void OnRenderComplete(uint32_t frameIndex);
 
@@ -216,6 +217,8 @@ protected:
     void RecreateSwapChain();
     render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
     void RequestRecreateSwapChain(std::function<void()> setValueFunc);
+
+    Eigen::Vector2i GetRTSize() const noexcept;
 
 private:
     void LoopSingleThreaded();

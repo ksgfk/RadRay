@@ -11,6 +11,7 @@
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
+#include <radray/render/gpu_resource.h>
 
 namespace radray::render {
 
@@ -23,80 +24,19 @@ struct SemanticMapping {
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 // --------------------------------------- CBuffer Utility ---------------------------------------
-struct CBufferStorageRange {
-    string Name;
-    vector<StructuredBufferId> Roots;
-    uint32_t BindPoint;
-    uint32_t Space;
-    size_t GlobalOffset;
-    size_t SizeInBytes;
+class CBufferStorage {
+public:
+    CBufferStorage() noexcept = default;
+    CBufferStorage(const HlslShaderDesc& hlslDesc, const RootSignatureDescriptor& rsDesc, const StructuredBufferStorage& storage);
+
+    void Bind(CommandEncoder* encode, CBufferArena* arena);
+
+private:
+    StructuredBufferId _constantId{StructuredBufferId::Invalid()};
 };
 
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept;
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
-
-class SimpleCBufferArena {
-public:
-    struct Descriptor {
-        uint64_t BasicSize{256 * 256};
-        uint64_t Alignment{256};
-        uint64_t MaxResetSize{std::numeric_limits<uint64_t>::max()};
-        string NamePrefix{};
-    };
-
-    struct Allocation {
-        Buffer* Target{nullptr};
-        void* Mapped{nullptr};
-        uint64_t Offset{0};
-        uint64_t Size{0};
-
-        static constexpr Allocation Invalid() noexcept {
-            return Allocation{};
-        }
-    };
-
-    class Block {
-    public:
-        explicit Block(unique_ptr<Buffer> buf) noexcept;
-        Block(const Block&) = delete;
-        Block& operator=(const Block&) = delete;
-        ~Block() noexcept;
-
-    public:
-        unique_ptr<Buffer> _buf;
-        void* _mapped{nullptr};
-        uint64_t _used{0};
-    };
-
-    SimpleCBufferArena(Device* device, const Descriptor& desc) noexcept;
-    explicit SimpleCBufferArena(Device* device) noexcept;
-    SimpleCBufferArena(const SimpleCBufferArena&) = delete;
-    SimpleCBufferArena& operator=(const SimpleCBufferArena&) = delete;
-    SimpleCBufferArena(SimpleCBufferArena&& other) noexcept;
-    SimpleCBufferArena& operator=(SimpleCBufferArena&& other) noexcept;
-    ~SimpleCBufferArena() noexcept;
-
-    bool IsValid() const noexcept;
-
-    void Destroy() noexcept;
-
-    Allocation Allocate(uint64_t size) noexcept;
-
-    void Reset() noexcept;
-
-    void Clear() noexcept;
-
-    friend void swap(SimpleCBufferArena& a, SimpleCBufferArena& b) noexcept;
-
-public:
-    Nullable<Block*> GetOrCreateBlock(uint64_t size) noexcept;
-
-    Device* _device;
-    vector<unique_ptr<Block>> _blocks;
-    Descriptor _desc;
-    uint64_t _minBlockSize{};
-};
-
 // -----------------------------------------------------------------------------------------------
 
 // ----------------------------------- Root Signature Utility ------------------------------------
@@ -150,6 +90,7 @@ private:
 };
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
 std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const HlslShaderDesc& desc) noexcept;
+std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const SpirvShaderDesc& desc) noexcept;
 // -----------------------------------------------------------------------------------------------
 
 }  // namespace radray::render
