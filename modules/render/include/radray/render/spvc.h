@@ -106,6 +106,8 @@ struct SpirvResourceBinding {
     bool ReadOnly{true};
     bool WriteOnly{false};
     bool IsViewInHlsl{false};
+
+    ResourceBindType MapResourceBindType() const noexcept;
 };
 
 struct SpirvComputeInfo {

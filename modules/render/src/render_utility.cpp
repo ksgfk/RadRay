@@ -214,104 +214,33 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
     return builder.Build();
 }
 
-CBufferStorage::CBufferStorage(const HlslShaderDesc& hlslDesc, const RootSignatureDescriptor& rsDesc, const StructuredBufferStorage& storage) {
-    if (rsDesc.Constant) {
-        auto& c = rsDesc.Constant.value();
-        auto& cDesc = *std::find_if(hlslDesc.BoundResources.begin(), hlslDesc.BoundResources.end(), [&](const auto& cb) {
-            return cb.Type == HlslShaderInputType::CBUFFER && cb.BindPoint == c.Slot && cb.Space == c.Space;
-        });
-        _constantId = storage.GetVar(cDesc.Name).GetId();
+RootSignatureDetail::RootSignatureDetail(const HlslShaderDesc& desc) noexcept {
+    auto ins = CreateRootSignatureDetail(desc);
+    if (ins.has_value()) {
+        *this = std::move(ins.value());
     }
 }
 
-void CBufferStorage::Bind(CommandEncoder* encode, CBufferArena* arena) {
+RootSignatureDetail::RootSignatureDetail(const SpirvShaderDesc& desc) noexcept {
     // TODO:
 }
 
-RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept
-    : _constant(desc.Constant) {
-    _rootDescriptors.clear();
-    _rootDescriptors.reserve(desc.RootDescriptors.size());
-    for (const auto& rd : desc.RootDescriptors) {
-        _rootDescriptors.emplace_back(rd);
-    }
-    size_t totalElements = 0;
-    size_t totalSamplers = 0;
-    for (const auto& set : desc.DescriptorSets) {
-        totalElements += set.Elements.size();
-        for (const auto& elem : set.Elements) {
-            totalSamplers += elem.StaticSamplers.size();
-        }
-    }
-    _elements.clear();
-    _elements.reserve(totalElements);
-    _staticSamplers.clear();
-    _staticSamplers.reserve(totalSamplers);
-    _descriptorSets.clear();
-    _descriptorSets.reserve(desc.DescriptorSets.size());
-    for (const auto& set : desc.DescriptorSets) {
-        auto& setData = _descriptorSets.emplace_back();
-        setData.ElementOffset = _elements.size();
-        setData.ElementCount = set.Elements.size();
-        for (const auto& elem : set.Elements) {
-            auto& out = _elements.emplace_back();
-            out.Slot = elem.Slot;
-            out.Space = elem.Space;
-            out.Type = elem.Type;
-            out.Count = elem.Count;
-            out.Stages = elem.Stages;
-            out.StaticSamplerOffset = static_cast<uint32_t>(_staticSamplers.size());
-            out.StaticSamplerCount = static_cast<uint32_t>(elem.StaticSamplers.size());
-            for (const auto& s : elem.StaticSamplers) {
-                _staticSamplers.emplace_back(s);
-            }
-        }
-    }
+RootSignatureDetail::RootSignatureDetail(
+    vector<DescSet> descSets,
+    vector<RootDesc> rootDescs,
+    std::optional<PushConst> pushConst) noexcept
+    : _descSets(std::move(descSets)),
+      _rootDescs(std::move(rootDescs)),
+      _pushConst(std::move(pushConst)) {}
+
+RootSignatureDetail::View RootSignatureDetail::MakeView() const noexcept {
+    // TODO:
+    return View{};
 }
 
-RootSignatureDescriptorContainer::View RootSignatureDescriptorContainer::MakeView() const noexcept {
-    View view{};
-    view._rootDescriptors.clear();
-    view._rootDescriptors.reserve(_rootDescriptors.size());
-    for (const auto& rd : _rootDescriptors) {
-        view._rootDescriptors.emplace_back(rd);
-    }
-    view._staticSamplers.clear();
-    view._staticSamplers.reserve(_staticSamplers.size());
-    for (const auto& s : _staticSamplers) {
-        view._staticSamplers.emplace_back(s);
-    }
-    view._elements.clear();
-    view._elements.reserve(_elements.size());
-    for (const auto& e : _elements) {
-        auto& out = view._elements.emplace_back();
-        out.Slot = e.Slot;
-        out.Space = e.Space;
-        out.Type = e.Type;
-        out.Count = e.Count;
-        out.Stages = e.Stages;
-        if (e.StaticSamplerCount == 0) {
-            out.StaticSamplers = {};
-        } else {
-            RADRAY_ASSERT(static_cast<size_t>(e.StaticSamplerOffset) + static_cast<size_t>(e.StaticSamplerCount) <= view._staticSamplers.size());
-            out.StaticSamplers = std::span{view._staticSamplers.data() + e.StaticSamplerOffset, e.StaticSamplerCount};
-        }
-    }
-    view._descriptorSets.clear();
-    view._descriptorSets.reserve(_descriptorSets.size());
-    for (const auto& s : _descriptorSets) {
-        auto& out = view._descriptorSets.emplace_back();
-        if (s.ElementCount == 0) {
-            out.Elements = {};
-        } else {
-            RADRAY_ASSERT(s.ElementOffset + s.ElementCount <= view._elements.size());
-            out.Elements = std::span{view._elements.data() + s.ElementOffset, s.ElementCount};
-        }
-    }
-    view._desc.RootDescriptors = std::span{view._rootDescriptors};
-    view._desc.DescriptorSets = std::span{view._descriptorSets};
-    view._desc.Constant = _constant;
-    return view;
+RootSignatureBinder RootSignatureDetail::MakeBinder() const noexcept {
+    // TODO:
+    return {};
 }
 
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
@@ -352,7 +281,7 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 #endif
 }
 
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const HlslShaderDesc& desc) noexcept {
+std::optional<RootSignatureDetail> CreateRootSignatureDetail(const HlslShaderDesc& desc) noexcept {
     constexpr uint32_t maxRootDWORD = 64;
     constexpr uint32_t maxRootBYTE = maxRootDWORD * 4;
 
@@ -363,8 +292,7 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
     };
 
     if (desc.BoundResources.empty()) {
-        RootSignatureDescriptor empty{};
-        return RootSignatureDescriptorContainer{empty};
+        return RootSignatureDetail{};
     }
     vector<HlslRSPlacement> placements{desc.BoundResources.size(), HlslRSPlacement::Table};
     auto cmpResource = [&](size_t lhs, size_t rhs) noexcept {
@@ -397,22 +325,21 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
         for (size_t i : samplerIndices) {
             samplerSpace[desc.BoundResources[i].Space].push_back(i);
         }
-        vector<vector<RootSignatureSetElement>> descriptors;
+        vector<vector<RootSignatureDetail::DescSetElem>> descriptors;
         auto buildDescriptors = [&](const decltype(resourceSpace)& splits) noexcept {
             for (auto [space, indices] : splits) {
-                auto& elements = descriptors.emplace_back(vector<RootSignatureSetElement>{});
+                auto& elements = descriptors.emplace_back();
                 elements.reserve(indices.size());
                 std::sort(indices.begin(), indices.end(), cmpResource);
                 for (size_t i : indices) {
                     const auto& binding = desc.BoundResources[i];
-                    RootSignatureSetElement elem{};
-                    elem.Slot = binding.BindPoint;
-                    elem.Space = binding.Space;
-                    elem.Type = binding.MapResourceBindType();
-                    elem.Count = binding.BindCount;
-                    elem.Stages = binding.Stages;
-                    elem.StaticSamplers = {};
-                    elements.push_back(elem);
+                    elements.emplace_back(RootSignatureDetail::DescSetElem{
+                        {binding.Name,
+                         binding.BindPoint,
+                         binding.BindCount,
+                         binding.Space,
+                         binding.Stages},
+                        binding.MapResourceBindType()});
                 }
             }
         };
@@ -421,7 +348,7 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
         return descriptors;
     };
 
-    std::optional<RootSignatureConstant> rootConstant;
+    std::optional<RootSignatureDetail::PushConst> rootConstant;
     size_t bestRootConstIndex = std::numeric_limits<size_t>::max();
     for (size_t i = 0; i < desc.BoundResources.size(); i++) {
         const auto& binding = desc.BoundResources[i];
@@ -451,12 +378,13 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
         auto cbufferDataOpt = desc.FindCBufferByName(binding.Name);
         RADRAY_ASSERT(cbufferDataOpt.has_value());
         const auto& cbufferData = cbufferDataOpt.value().get();
-        RootSignatureConstant constant{};
-        constant.Slot = binding.BindPoint;
-        constant.Space = binding.Space;
-        constant.Size = cbufferData.Size;
-        constant.Stages = desc.Stages;
-        rootConstant = constant;
+        rootConstant = RootSignatureDetail::PushConst{
+            {binding.Name,
+             binding.BindPoint,
+             binding.BindCount,
+             binding.Space,
+             binding.Stages},
+            cbufferData.Size};
         placements[bestRootConstIndex] = HlslRSPlacement::RootConstant;
     }
     vector<size_t> asRootDesc;
@@ -476,7 +404,7 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
             placements[i] = HlslRSPlacement::RootDescriptor;
         }
     }
-    vector<vector<RootSignatureSetElement>> tables;
+    vector<vector<RootSignatureDetail::DescSetElem>> tables;
     while (true) {
         std::sort(asRootDesc.begin(), asRootDesc.end(), cmpResource);
         tables = buildTable();
@@ -504,98 +432,28 @@ std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(co
         RADRAY_ERR_LOG("{} {}", "CreateRootSignatureDescriptor", "cannot fit into root signature limits");
         return std::nullopt;
     }
-    vector<RootSignatureRootDescriptor> rootDescs;
+    vector<RootSignatureDetail::RootDesc> rootDescs;
     for (size_t i : asRootDesc) {
         const auto& binding = desc.BoundResources[i];
-        RootSignatureRootDescriptor rootDesc{};
-        rootDesc.Slot = binding.BindPoint;
-        rootDesc.Space = binding.Space;
-        rootDesc.Type = binding.MapResourceBindType();
-        rootDesc.Stages = binding.Stages;
-        rootDescs.push_back(rootDesc);
+        rootDescs.emplace_back(RootSignatureDetail::RootDesc{
+            {binding.Name,
+             binding.BindPoint,
+             binding.BindCount,
+             binding.Space,
+             binding.Stages},
+            binding.MapResourceBindType()});
     }
-    vector<RootSignatureDescriptorSet> descriptorSets;
-    for (const auto& table : tables) {
-        RootSignatureDescriptorSet set{};
-        set.Elements = std::span{table};
-        descriptorSets.push_back(set);
+    vector<RootSignatureDetail::DescSet> tablesOut;
+    tablesOut.reserve(tables.size());
+    for (auto& table : tables) {
+        RootSignatureDetail::DescSet set{};
+        set.Elems = std::move(table);
+        tablesOut.emplace_back(std::move(set));
     }
-    RootSignatureDescriptor rsDesc{};
-    rsDesc.RootDescriptors = rootDescs;
-    rsDesc.DescriptorSets = descriptorSets;
-    rsDesc.Constant = rootConstant;
-    return RootSignatureDescriptorContainer{rsDesc};
-}
-
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const SpirvShaderDesc& desc) noexcept {
-    unordered_map<uint32_t, vector<RootSignatureSetElement>> sets;
-    for (const auto& binding : desc.ResourceBindings) {
-        auto& elements = sets[binding.Set];
-        RootSignatureSetElement& elem = elements.emplace_back();
-        elem.Slot = binding.Binding;
-        elem.Space = binding.Set;
-        elem.Count = binding.ArraySize == 0 ? 1 : binding.ArraySize;
-        elem.Stages = binding.Stages;
-        switch (binding.Kind) {
-            case SpirvResourceKind::UniformBuffer:
-                elem.Type = ResourceBindType::CBuffer;
-                break;
-            case SpirvResourceKind::StorageBuffer:
-                elem.Type = (binding.ReadOnly && !binding.WriteOnly) ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
-                break;
-            case SpirvResourceKind::SampledImage:
-            case SpirvResourceKind::SeparateImage:
-                elem.Type = ResourceBindType::Texture;
-                break;
-            case SpirvResourceKind::SeparateSampler:
-                elem.Type = ResourceBindType::Sampler;
-                break;
-            case SpirvResourceKind::StorageImage:
-                elem.Type = ResourceBindType::RWTexture;
-                break;
-            case SpirvResourceKind::AccelerationStructure:
-                elem.Type = ResourceBindType::Buffer;
-                break;
-            default:
-                elem.Type = ResourceBindType::UNKNOWN;
-                break;
-        }
-    }
-    vector<uint32_t> setIndices;
-    setIndices.reserve(sets.size());
-    for (const auto& [k, v] : sets) {
-        setIndices.emplace_back(k);
-    }
-    std::sort(setIndices.begin(), setIndices.end());
-    vector<RootSignatureDescriptorSet> descriptorSets;
-    descriptorSets.reserve(sets.size());
-    for (uint32_t setIdx : setIndices) {
-        auto& elements = sets[setIdx];
-        std::sort(elements.begin(), elements.end(), [](const RootSignatureSetElement& a, const RootSignatureSetElement& b) {
-            return a.Slot < b.Slot;
-        });
-        RootSignatureDescriptorSet& setDesc = descriptorSets.emplace_back();
-        setDesc.Elements = elements;
-    }
-    std::optional<RootSignatureConstant> constant;
-    if (!desc.PushConstants.empty()) {
-        uint32_t size = 0;
-        ShaderStages stages = ShaderStage::UNKNOWN;
-        for (const auto& pc : desc.PushConstants) {
-            size = std::max(size, pc.Offset + pc.Size);
-            stages |= pc.Stages;
-        }
-        if (size > 0) {
-            RootSignatureConstant c{};
-            c.Size = size;
-            c.Stages = stages;
-            constant = c;
-        }
-    }
-    RootSignatureDescriptor rsDesc{};
-    rsDesc.DescriptorSets = descriptorSets;
-    rsDesc.Constant = constant;
-    return RootSignatureDescriptorContainer{rsDesc};
+    return RootSignatureDetail{
+        std::move(tablesOut),
+        std::move(rootDescs),
+        std::move(rootConstant)};
 }
 
 }  // namespace radray::render

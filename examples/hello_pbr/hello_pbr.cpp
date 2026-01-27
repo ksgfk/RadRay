@@ -90,26 +90,26 @@ public:
             render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
             psShader = _device->CreateShader(psDesc).Unwrap();
 
-            if (backend == render::RenderBackend::D3D12) {
-                auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
-                auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
-                const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
-                auto mergedDesc = MergeHlslShaderDesc(descs).value();
-                _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
-                auto rsDesc = render::CreateRootSignatureDescriptor(mergedDesc).value();
-                _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
-            } else if (backend == render::RenderBackend::Vulkan) {
-                render::SpirvBytecodeView spvs[] = {
-                    {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
-                    {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
-                const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
-                auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
-                _cbStorage = render::CreateCBufferStorage(spirvDesc).value();
-                auto rsDesc = render::CreateRootSignatureDescriptor(spirvDesc).value();
-                _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
-            } else {
-                throw ImGuiApplicationException("Unsupported render backend for shader reflection");
-            }
+            // if (backend == render::RenderBackend::D3D12) {
+            //     auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
+            //     auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
+            //     const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
+            //     auto mergedDesc = MergeHlslShaderDesc(descs).value();
+            //     _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
+            //     auto rsDesc = render::CreateRootSignatureDescriptor(mergedDesc).value();
+            //     _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
+            // } else if (backend == render::RenderBackend::Vulkan) {
+            //     render::SpirvBytecodeView spvs[] = {
+            //         {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
+            //         {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
+            //     const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
+            //     auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
+            //     _cbStorage = render::CreateCBufferStorage(spirvDesc).value();
+            //     auto rsDesc = render::CreateRootSignatureDescriptor(spirvDesc).value();
+            //     _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
+            // } else {
+            //     throw ImGuiApplicationException("Unsupported render backend for shader reflection");
+            // }
         }
         const auto& prim = sphereModel.Primitives[0];
         vector<render::VertexElement> vertElems;

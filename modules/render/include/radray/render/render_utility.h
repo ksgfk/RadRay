@@ -24,37 +24,37 @@ struct SemanticMapping {
 std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBufferEntry> layouts, std::span<const SemanticMapping> semantics) noexcept;
 
 // --------------------------------------- CBuffer Utility ---------------------------------------
-class CBufferStorage {
-public:
-    CBufferStorage() noexcept = default;
-    CBufferStorage(const HlslShaderDesc& hlslDesc, const RootSignatureDescriptor& rsDesc, const StructuredBufferStorage& storage);
-
-    void Bind(CommandEncoder* encode, CBufferArena* arena);
-
-private:
-    StructuredBufferId _constantId{StructuredBufferId::Invalid()};
-};
-
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept;
 std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept;
 // -----------------------------------------------------------------------------------------------
 
 // ----------------------------------- Root Signature Utility ------------------------------------
-class RootSignatureDescriptorContainer {
+class RootSignatureBinder;
+
+class RootSignatureDetail {
 public:
-    struct SetElementData {
-        uint32_t Slot{0};
-        uint32_t Space{0};
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t Count{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-        uint32_t StaticSamplerOffset{0};
-        uint32_t StaticSamplerCount{0};
+    struct BindData {
+        string Name;
+        uint32_t BindPoint;
+        uint32_t BindCount;
+        uint32_t Space;
+        ShaderStages Stages;
     };
 
-    struct DescriptorSetRange {
-        size_t ElementOffset{0};
-        size_t ElementCount{0};
+    struct PushConst : BindData {
+        uint32_t Size;
+    };
+
+    struct RootDesc : BindData {
+        ResourceBindType Type;
+    };
+
+    struct DescSetElem : BindData {
+        ResourceBindType Type;
+    };
+
+    struct DescSet {
+        vector<DescSetElem> Elems;
     };
 
     class View {
@@ -68,29 +68,39 @@ public:
         vector<SamplerDescriptor> _staticSamplers;
         vector<RootSignatureDescriptorSet> _descriptorSets;
 
-        friend class RootSignatureDescriptorContainer;
+        friend class RootSignatureDetail;
     };
 
-    RootSignatureDescriptorContainer() noexcept = default;
-    explicit RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept;
+    RootSignatureDetail() noexcept = default;
+    explicit RootSignatureDetail(const HlslShaderDesc& desc) noexcept;
+    explicit RootSignatureDetail(const SpirvShaderDesc& desc) noexcept;
+    RootSignatureDetail(
+        vector<DescSet> descSets,
+        vector<RootDesc> rootDescs,
+        std::optional<PushConst> pushConst) noexcept;
 
     View MakeView() const noexcept;
+    RootSignatureBinder MakeBinder() const noexcept;
 
-    std::span<const RootSignatureRootDescriptor> GetRootDescriptors() const noexcept { return _rootDescriptors; }
-    std::span<const SetElementData> GetElements() const noexcept { return _elements; }
-    std::span<const DescriptorSetRange> GetDescriptorSets() const noexcept { return _descriptorSets; }
-    const std::optional<RootSignatureConstant>& GetConstant() const noexcept { return _constant; }
+    const std::optional<PushConst>& GetPushConstant() const noexcept { return _pushConst; }
+    std::span<const RootDesc> GetRootDescs() const noexcept { return _rootDescs; }
+    std::span<const DescSet> GetDescSets() const noexcept { return _descSets; }
 
 private:
-    vector<RootSignatureRootDescriptor> _rootDescriptors;
-    vector<SetElementData> _elements;
-    vector<SamplerDescriptor> _staticSamplers;
-    vector<DescriptorSetRange> _descriptorSets;
-    std::optional<RootSignatureConstant> _constant;
+    vector<DescSet> _descSets;
+    vector<RootDesc> _rootDescs;
+    std::optional<PushConst> _pushConst;
 };
+
+class RootSignatureBinder {
+public:
+private:
+    friend class RootSignatureDetail;
+};
+
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device, std::span<const byte> data) noexcept;
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const HlslShaderDesc& desc) noexcept;
-std::optional<RootSignatureDescriptorContainer> CreateRootSignatureDescriptor(const SpirvShaderDesc& desc) noexcept;
+
+std::optional<RootSignatureDetail> CreateRootSignatureDetail(const HlslShaderDesc& desc) noexcept;
 // -----------------------------------------------------------------------------------------------
 
 }  // namespace radray::render

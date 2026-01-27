@@ -13,6 +13,26 @@
 
 namespace radray::render {
 
+ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
+    switch (Kind) {
+        case SpirvResourceKind::UniformBuffer:
+            return ResourceBindType::CBuffer;
+        case SpirvResourceKind::StorageBuffer:
+            return (ReadOnly && !WriteOnly) ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
+        case SpirvResourceKind::SampledImage:
+        case SpirvResourceKind::SeparateImage:
+            return ResourceBindType::Texture;
+        case SpirvResourceKind::SeparateSampler:
+            return ResourceBindType::Sampler;
+        case SpirvResourceKind::StorageImage:
+            return ResourceBindType::RWTexture;
+        case SpirvResourceKind::AccelerationStructure:
+            return ResourceBindType::Buffer;
+        default:
+            return ResourceBindType::UNKNOWN;
+    }
+}
+
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
