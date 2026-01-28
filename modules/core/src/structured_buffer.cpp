@@ -106,7 +106,7 @@ bool StructuredBufferStorage::Builder::IsValid() const noexcept {
     return true;
 }
 
-void StructuredBufferStorage::Builder::BuildMember(StructuredBufferStorage& storage) noexcept {
+void StructuredBufferStorage::Builder::BuildMember(StructuredBufferStorage& storage) const noexcept {
     storage._globalIndex.clear();
     struct StackItem {
         size_t GlobalOffset;
@@ -140,7 +140,7 @@ void StructuredBufferStorage::Builder::BuildMember(StructuredBufferStorage& stor
     storage._globalIndex.shrink_to_fit();
 }
 
-std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build() noexcept {
+std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build() const noexcept {
     if (!IsValid()) {
         RADRAY_ERR_LOG("invalid StructuredBufferStorage::Builder state");
         return std::nullopt;

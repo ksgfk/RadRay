@@ -108,10 +108,10 @@ public:
         void SetAlignment(size_t align) noexcept;
 
         bool IsValid() const noexcept;
-        std::optional<StructuredBufferStorage> Build() noexcept;
+        std::optional<StructuredBufferStorage> Build() const noexcept;
 
     private:
-        void BuildMember(StructuredBufferStorage& storage) noexcept;
+        void BuildMember(StructuredBufferStorage& storage) const noexcept;
 
         vector<Type> _types;
         vector<Root> _roots;

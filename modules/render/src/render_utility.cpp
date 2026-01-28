@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <bit>
+#include <algorithm>
 
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
@@ -42,7 +43,7 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
     return result;
 }
 
-std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept {
+std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const HlslShaderDesc& desc) noexcept {
     StructuredBufferStorage::Builder builder{};
     builder.SetAlignment(0);
     auto createType = [&](size_t parent, StructuredBufferId bdType, size_t size) {
@@ -127,10 +128,10 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc
             }
         }
     }
-    return builder.Build();
+    return builder;
 }
 
-std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
+std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const SpirvShaderDesc& desc) noexcept {
     StructuredBufferStorage::Builder builder{};
     builder.SetAlignment(0);
     auto createType = [&](size_t parent, StructuredBufferId bdType, size_t size) {
@@ -211,7 +212,23 @@ std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDes
             }
         }
     }
-    return builder.Build();
+    return builder;
+}
+
+std::optional<StructuredBufferStorage> CreateCBufferStorage(const HlslShaderDesc& desc) noexcept {
+    auto builderOpt = CreateCBufferStorageBuilder(desc);
+    if (!builderOpt.has_value()) {
+        return std::nullopt;
+    }
+    return builderOpt->Build();
+}
+
+std::optional<StructuredBufferStorage> CreateCBufferStorage(const SpirvShaderDesc& desc) noexcept {
+    auto builderOpt = CreateCBufferStorageBuilder(desc);
+    if (!builderOpt.has_value()) {
+        return std::nullopt;
+    }
+    return builderOpt->Build();
 }
 
 RootSignatureDetail::RootSignatureDetail(const HlslShaderDesc& desc) noexcept {
@@ -228,19 +245,367 @@ RootSignatureDetail::RootSignatureDetail(const SpirvShaderDesc& desc) noexcept {
 RootSignatureDetail::RootSignatureDetail(
     vector<DescSet> descSets,
     vector<RootDesc> rootDescs,
-    std::optional<PushConst> pushConst) noexcept
+    std::optional<PushConst> pushConst,
+    StructuredBufferStorage::Builder builder) noexcept
     : _descSets(std::move(descSets)),
       _rootDescs(std::move(rootDescs)),
-      _pushConst(std::move(pushConst)) {}
+      _pushConst(std::move(pushConst)),
+      _cbStorageBuilder(std::move(builder)) {
+    this->BuildBindingIndex();
+}
 
-RootSignatureDetail::View RootSignatureDetail::MakeView() const noexcept {
-    // TODO:
-    return View{};
+void RootSignatureDetail::BuildBindingIndex() noexcept {
+    _bindings.clear();
+    _nameToBindingId.clear();
+    uint32_t nextId = 0;
+
+    auto addEntry = [&](BindingEntry entry) {
+        entry.Id = nextId++;
+        if (!entry.Name.empty()) {
+            if (_nameToBindingId.find(entry.Name) == _nameToBindingId.end()) {
+                _nameToBindingId.emplace(entry.Name, entry.Id);
+            }
+        }
+        _bindings.emplace_back(std::move(entry));
+    };
+
+    if (_pushConst.has_value()) {
+        const auto& pc = _pushConst.value();
+        addEntry(BindingEntry{
+            0,
+            pc.Name,
+            BindingKind::PushConst,
+            ResourceBindType::CBuffer,
+            1,
+            0,
+            0,
+            0,
+            pc.Size});
+    }
+
+    for (size_t i = 0; i < _rootDescs.size(); i++) {
+        const auto& rd = _rootDescs[i];
+        addEntry(BindingEntry{
+            0,
+            rd.Name,
+            BindingKind::RootDescriptor,
+            rd.Type,
+            rd.BindCount,
+            0,
+            0,
+            static_cast<uint32_t>(i),
+            0});
+    }
+
+    for (size_t si = 0; si < _descSets.size(); si++) {
+        const auto& set = _descSets[si];
+        for (size_t ei = 0; ei < set.Elems.size(); ei++) {
+            const auto& e = set.Elems[ei];
+            addEntry(BindingEntry{
+                0,
+                e.Name,
+                BindingKind::DescriptorSet,
+                e.Type,
+                e.BindCount,
+                static_cast<uint32_t>(si),
+                static_cast<uint32_t>(ei),
+                0,
+                0});
+        }
+    }
+}
+
+const RootSignatureDetail::BindingEntry* RootSignatureDetail::GetBinding(uint32_t id) const noexcept {
+    if (id >= _bindings.size()) {
+        return nullptr;
+    }
+    return &_bindings[id];
+}
+
+std::optional<uint32_t> RootSignatureDetail::GetBindingId(std::string_view name) const noexcept {
+    auto it = _nameToBindingId.find(string{name});
+    if (it == _nameToBindingId.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+RootSignatureDescriptorContainer RootSignatureDetail::ToDescriptor() const noexcept {
+    RootSignatureDescriptorContainer container{};
+    container._rootDescriptors.reserve(_rootDescs.size());
+    for (const auto& rd : _rootDescs) {
+        container._rootDescriptors.push_back(RootSignatureRootDescriptor{
+            rd.BindPoint,
+            rd.Space,
+            rd.Type,
+            rd.Stages});
+    }
+
+    size_t totalElems = 0;
+    for (const auto& set : _descSets) {
+        totalElems += set.Elems.size();
+    }
+    container._elements.reserve(totalElems);
+    container._descriptorSets.reserve(_descSets.size());
+
+    for (const auto& set : _descSets) {
+        size_t elemStart = container._elements.size();
+        for (const auto& e : set.Elems) {
+            RootSignatureSetElement elem{};
+            elem.Slot = e.BindPoint;
+            elem.Space = e.Space;
+            elem.Type = e.Type;
+            elem.Count = e.BindCount;
+            elem.Stages = e.Stages;
+            elem.StaticSamplers = {};
+            container._elements.push_back(elem);
+        }
+        size_t elemCount = container._elements.size() - elemStart;
+        RootSignatureDescriptorSet setDesc{};
+        setDesc.Elements = std::span<const RootSignatureSetElement>{
+            container._elements.data() + elemStart,
+            elemCount};
+        container._descriptorSets.push_back(setDesc);
+    }
+
+    container._desc.RootDescriptors = container._rootDescriptors;
+    container._desc.DescriptorSets = container._descriptorSets;
+    if (_pushConst.has_value()) {
+        const auto& pc = _pushConst.value();
+        container._desc.Constant = RootSignatureConstant{
+            pc.BindPoint,
+            pc.Space,
+            pc.Size,
+            pc.Stages};
+    } else {
+        container._desc.Constant = std::nullopt;
+    }
+    return container;
 }
 
 RootSignatureBinder RootSignatureDetail::MakeBinder() const noexcept {
-    // TODO:
-    return {};
+    RootSignatureBinder binder{};
+    auto storageOpt = _cbStorageBuilder.Build();
+    if (!storageOpt.has_value()) {
+        return binder;
+    }
+    binder._cbStorage = std::move(storageOpt.value());
+
+    binder._bindings.reserve(_bindings.size());
+    binder._nameToBindingId = _nameToBindingId;
+    for (const auto& b : _bindings) {
+        RootSignatureBinder::BindingLocator loc{};
+        loc.Kind = b.Kind;
+        loc.Type = b.Type;
+        loc.BindCount = b.BindCount;
+        loc.SetIndex = b.SetIndex;
+        loc.ElementIndex = b.ElementIndex;
+        loc.RootIndex = b.RootIndex;
+        loc.PushConstSize = b.PushConstSize;
+        if (b.Type == ResourceBindType::CBuffer || b.Kind == BindingKind::PushConst) {
+            auto var = binder._cbStorage.GetVar(b.Name);
+            loc.CBufferId = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
+        }
+        binder._bindings.emplace_back(loc);
+    }
+
+    if (_pushConst.has_value()) {
+        const auto& pc = _pushConst.value();
+        auto var = binder._cbStorage.GetVar(pc.Name);
+        binder._cbPushConst = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
+        binder._pushConstSize = pc.Size;
+    }
+
+    binder._cbRootDescs.reserve(_rootDescs.size());
+    binder._rootDescViews.assign(_rootDescs.size(), nullptr);
+    for (const auto& rd : _rootDescs) {
+        if (rd.Type == ResourceBindType::CBuffer) {
+            auto var = binder._cbStorage.GetVar(rd.Name);
+            binder._cbRootDescs.push_back(var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId);
+        } else {
+            binder._cbRootDescs.push_back(StructuredBufferStorage::InvalidId);
+        }
+    }
+
+    binder._descSets.resize(_descSets.size());
+    for (size_t si = 0; si < _descSets.size(); si++) {
+        const auto& set = _descSets[si];
+        auto& record = binder._descSets[si];
+        record.Set = nullptr;
+        record.Bindings.reserve(set.Elems.size());
+        for (const auto& e : set.Elems) {
+            RootSignatureBinder::DescSetBinding binding{};
+            binding.Slot = e.BindPoint;
+            binding.Count = e.BindCount;
+            binding.Type = e.Type;
+            binding.Views.assign(e.BindCount, nullptr);
+            if (e.Type == ResourceBindType::CBuffer) {
+                auto var = binder._cbStorage.GetVar(e.Name);
+                binding.CBufferId = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
+            }
+            record.Bindings.emplace_back(std::move(binding));
+        }
+    }
+    return binder;
+}
+
+std::optional<uint32_t> RootSignatureBinder::GetBindingId(std::string_view name) const noexcept {
+    auto it = _nameToBindingId.find(string{name});
+    if (it == _nameToBindingId.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+bool RootSignatureBinder::SetResource(uint32_t id, ResourceView* view, uint32_t arrayIndex) noexcept {
+    if (id >= _bindings.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "id");
+        return false;
+    }
+    const auto& binding = _bindings[id];
+    if (binding.Kind == RootSignatureDetail::BindingKind::PushConst) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "push constant");
+        return false;
+    }
+    if (binding.Type == ResourceBindType::Sampler) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "sampler");
+        return false;
+    }
+    if (arrayIndex >= binding.BindCount) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "arrayIndex");
+        return false;
+    }
+    if (binding.Kind == RootSignatureDetail::BindingKind::RootDescriptor) {
+        if (binding.RootIndex >= _rootDescViews.size()) {
+            RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "rootIndex");
+            return false;
+        }
+        _rootDescViews[binding.RootIndex] = view;
+        return true;
+    }
+    if (binding.Kind == RootSignatureDetail::BindingKind::DescriptorSet) {
+        if (binding.SetIndex >= _descSets.size()) {
+            RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "setIndex");
+            return false;
+        }
+        auto& record = _descSets[binding.SetIndex];
+        if (binding.ElementIndex >= record.Bindings.size()) {
+            RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "elementIndex");
+            return false;
+        }
+        auto& elem = record.Bindings[binding.ElementIndex];
+        if (arrayIndex >= elem.Views.size()) {
+            RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "arrayIndex");
+            return false;
+        }
+        elem.Views[arrayIndex] = view;
+        return true;
+    }
+    return false;
+}
+
+bool RootSignatureBinder::SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
+    auto idOpt = this->GetBindingId(name);
+    if (!idOpt.has_value()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "name");
+        return false;
+    }
+    return this->SetResource(idOpt.value(), view, arrayIndex);
+}
+
+StructuredBufferView RootSignatureBinder::GetCBuffer(uint32_t id) noexcept {
+    if (id >= _bindings.size()) {
+        return {};
+    }
+    const auto& binding = _bindings[id];
+    if (binding.CBufferId == StructuredBufferStorage::InvalidId) {
+        return {};
+    }
+    return StructuredBufferView{&_cbStorage, binding.CBufferId};
+}
+
+StructuredBufferReadOnlyView RootSignatureBinder::GetCBuffer(uint32_t id) const noexcept {
+    if (id >= _bindings.size()) {
+        return {};
+    }
+    const auto& binding = _bindings[id];
+    if (binding.CBufferId == StructuredBufferStorage::InvalidId) {
+        return {};
+    }
+    return StructuredBufferReadOnlyView{&_cbStorage, binding.CBufferId};
+}
+
+void RootSignatureBinder::SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+    if (slot >= _rootDescViews.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "slot");
+        return;
+    }
+    _rootDescViews[slot] = view;
+}
+
+void RootSignatureBinder::SetDescriptorSet(uint32_t setIndex, DescriptorSet* set) noexcept {
+    if (setIndex >= _descSets.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "setIndex");
+        return;
+    }
+    _descSets[setIndex].Set = set;
+}
+
+void RootSignatureBinder::SetDescriptorSetResource(uint32_t setIndex, uint32_t elementIndex, uint32_t arrayIndex, ResourceView* view) noexcept {
+    if (setIndex >= _descSets.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "setIndex");
+        return;
+    }
+    auto& record = _descSets[setIndex];
+    if (elementIndex >= record.Bindings.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "elementIndex");
+        return;
+    }
+    auto& binding = record.Bindings[elementIndex];
+    if (arrayIndex >= binding.Views.size()) {
+        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "arrayIndex");
+        return;
+    }
+    binding.Views[arrayIndex] = view;
+}
+
+void RootSignatureBinder::Bind(CommandEncoder* encoder) const noexcept {
+    if (!encoder) {
+        return;
+    }
+    if (_cbPushConst != StructuredBufferStorage::InvalidId && _pushConstSize > 0) {
+        auto span = _cbStorage.GetSpan(_cbPushConst);
+        size_t size = std::min(span.size(), static_cast<size_t>(_pushConstSize));
+        if (size > 0) {
+            encoder->PushConstant(span.data(), size);
+        }
+    }
+
+    for (size_t i = 0; i < _rootDescViews.size(); i++) {
+        if (_rootDescViews[i]) {
+            encoder->BindRootDescriptor(static_cast<uint32_t>(i), _rootDescViews[i]);
+        }
+    }
+
+    for (size_t si = 0; si < _descSets.size(); si++) {
+        const auto& record = _descSets[si];
+        if (!record.Set) {
+            continue;
+        }
+        for (size_t ei = 0; ei < record.Bindings.size(); ei++) {
+            const auto& binding = record.Bindings[ei];
+            if (binding.Type == ResourceBindType::Sampler) {
+                continue;
+            }
+            for (size_t ai = 0; ai < binding.Views.size(); ai++) {
+                auto* view = binding.Views[ai];
+                if (view) {
+                    record.Set->SetResource(static_cast<uint32_t>(ei), static_cast<uint32_t>(ai), view);
+                }
+            }
+        }
+        encoder->BindDescriptorSet(static_cast<uint32_t>(si), record.Set);
+    }
 }
 
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
@@ -450,10 +815,15 @@ std::optional<RootSignatureDetail> CreateRootSignatureDetail(const HlslShaderDes
         set.Elems = std::move(table);
         tablesOut.emplace_back(std::move(set));
     }
+    auto builderOpt = CreateCBufferStorageBuilder(desc);
+    if (!builderOpt.has_value()) {
+        return std::nullopt;
+    }
     return RootSignatureDetail{
         std::move(tablesOut),
         std::move(rootDescs),
-        std::move(rootConstant)};
+        std::move(rootConstant),
+        std::move(builderOpt.value())};
 }
 
 }  // namespace radray::render
