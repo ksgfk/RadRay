@@ -5,6 +5,7 @@
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
 #include <radray/render/gpu_resource.h>
+#include <radray/render/bind_bridge.h>
 #include <radray/render/render_utility.h>
 
 using namespace radray;

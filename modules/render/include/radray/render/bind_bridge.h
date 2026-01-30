@@ -4,10 +4,27 @@
 #include <string_view>
 #include <unordered_map>
 #include <variant>
+#include <stdexcept>
 
-#include <radray/render/render_utility.h>
+#include <radray/structured_buffer.h>
+#include <radray/render/common.h>
+#include <radray/render/dxc.h>
+#include <radray/render/spvc.h>
+#include <radray/render/gpu_resource.h>
 
 namespace radray::render {
+
+class RootSignatureDescriptorContainer {
+public:
+    const RootSignatureDescriptor& Get() const noexcept { return _desc; }
+
+public:
+    RootSignatureDescriptor _desc{};
+    vector<RootSignatureRootDescriptor> _rootDescriptors;
+    vector<RootSignatureSetElement> _elements;
+    vector<SamplerDescriptor> _staticSamplers;
+    vector<RootSignatureDescriptorSet> _descriptorSets;
+};
 
 struct BindBridgeStaticSampler {
     string Name;
@@ -16,15 +33,28 @@ struct BindBridgeStaticSampler {
 
 class BindBridgeLayout {
 public:
-    enum class BindingKind {
-        PushConst,
-        RootDescriptor,
-        DescriptorSet
-    };
-    struct BindingEntry {
-        uint32_t Id{0};
+    struct PushConstEntry {
         string Name;
-        BindingKind Kind{BindingKind::DescriptorSet};
+        uint32_t Id{0};
+        uint32_t BindPoint{0};
+        uint32_t Space{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+        uint32_t Size{0};
+    };
+
+    struct RootDescriptorEntry {
+        string Name;
+        uint32_t Id{0};
+        ResourceBindType Type{ResourceBindType::UNKNOWN};
+        uint32_t BindPoint{0};
+        uint32_t Space{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+        uint32_t RootIndex{0};
+    };
+
+    struct DescriptorSetEntry {
+        string Name;
+        uint32_t Id{0};
         ResourceBindType Type{ResourceBindType::UNKNOWN};
         uint32_t BindCount{0};
         uint32_t BindPoint{0};
@@ -32,10 +62,10 @@ public:
         ShaderStages Stages{ShaderStage::UNKNOWN};
         uint32_t SetIndex{0};
         uint32_t ElementIndex{0};
-        uint32_t RootIndex{0};
-        uint32_t PushConstSize{0};
         vector<SamplerDescriptor> StaticSamplers;
     };
+
+    using BindingEntry = std::variant<PushConstEntry, RootDescriptorEntry, DescriptorSetEntry>;
 
     BindBridgeLayout() noexcept = default;
     explicit BindBridgeLayout(const HlslShaderDesc& desc, std::span<const BindBridgeStaticSampler> staticSamplers = {}) noexcept;
@@ -45,17 +75,25 @@ public:
     std::span<const BindingEntry> GetBindings() const noexcept { return _bindings; }
     std::optional<uint32_t> GetBindingId(std::string_view name) const noexcept;
 
+    static std::optional<vector<BindingEntry>> BuildFromHlsl(const HlslShaderDesc& desc) noexcept;
+    static std::optional<vector<BindingEntry>> BuildFromSpirv(const SpirvShaderDesc& desc) noexcept;
+    static std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const HlslShaderDesc& desc) noexcept;
+    static std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const SpirvShaderDesc& desc) noexcept;
+
 private:
     friend class BindBridge;
 
-    bool BuildFromHlsl(const HlslShaderDesc& desc) noexcept;
-    bool BuildFromSpirv(const SpirvShaderDesc& desc) noexcept;
     void BuildBindingIndex() noexcept;
     void ApplyStaticSamplers(std::span<const BindBridgeStaticSampler> staticSamplers) noexcept;
 
-    StructuredBufferStorage::Builder _cbStorageBuilder;
     vector<BindingEntry> _bindings;
     unordered_map<string, uint32_t> _nameToBindingId;
+    StructuredBufferStorage::Builder _cbStorageBuilder;
+};
+
+class BindBridgeException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
 class BindBridge {
@@ -71,7 +109,7 @@ public:
     StructuredBufferView GetCBuffer(uint32_t id) noexcept;
     StructuredBufferReadOnlyView GetCBuffer(uint32_t id) const noexcept;
 
-    bool Upload(Device& device, CBufferArena& arena) noexcept;
+    bool Upload(Device* device, CBufferArena& arena) noexcept;
 
     void Bind(CommandEncoder* encoder) const noexcept;
 
@@ -84,7 +122,6 @@ private:
     struct RootDescriptorBinding {
         uint32_t RootIndex{0};
         ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t BindCount{0};
         StructuredBufferId CBufferId{StructuredBufferStorage::InvalidId};
     };
 
@@ -107,12 +144,11 @@ private:
     };
 
     struct DescSetRecord {
-        DescriptorSet* Set{nullptr};
         vector<DescSetBinding> Bindings{};
+        unique_ptr<DescriptorSet> OwnedSet{};
     };
 
     void SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept;
-    void SetDescriptorSet(uint32_t setIndex, DescriptorSet* set) noexcept;
     void SetDescriptorSetResource(uint32_t setIndex, uint32_t elementIndex, uint32_t arrayIndex, ResourceView* view) noexcept;
 
     vector<ResourceView*> _rootDescViews;
@@ -120,7 +156,6 @@ private:
     StructuredBufferStorage _cbStorage;
     vector<BindingLocator> _bindings;
     unordered_map<string, uint32_t> _nameToBindingId;
-    vector<unique_ptr<DescriptorSet>> _ownedDescriptorSets{};
     vector<unique_ptr<BufferView>> _ownedCBufferViews{};
 };
 
