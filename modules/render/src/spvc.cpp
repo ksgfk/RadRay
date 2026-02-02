@@ -3,13 +3,9 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
-#include <limits>
-#include <type_traits>
 #include <utility>
 
-#include <radray/errors.h>
 #include <radray/logger.h>
-#include <radray/utility.h>
 
 namespace radray::render {
 
@@ -444,7 +440,7 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> b
     for (size_t i = 0; i < bytecodes.size(); i++) {
         const auto& bytecode = bytecodes[i];
         if (bytecode.Data.size() % 4 != 0) {
-            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "Invalid SPIR-V data size");
+            RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
             return std::nullopt;
         }
         unordered_map<uint32_t, uint32_t> typeCache;
@@ -468,13 +464,13 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> b
                 _ReflectComputeInfo(ctx);
             }
         } catch (const spirv_cross::CompilerError& e) {
-            RADRAY_ERR_LOG("{} {}: {}", Errors::SPIRV_CROSS, "Compiler Error", e.what());
+            RADRAY_ERR_LOG("SPIRV-Cross Compiler Error: {}", e.what());
             return std::nullopt;
         } catch (const std::exception& e) {
-            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, e.what());
+            RADRAY_ERR_LOG("SPIRV-Cross error: {}", e.what());
             return std::nullopt;
         } catch (...) {
-            RADRAY_ERR_LOG("{} {}", Errors::SPIRV_CROSS, "unknown error");
+            RADRAY_ERR_LOG("SPIRV-Cross error: {}", "unknown error");
             return std::nullopt;
         }
     }

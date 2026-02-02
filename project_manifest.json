@@ -45,7 +45,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v2.2.6"
+            "Tag": "v2.2.7"
         },
         {
             "Name": "zlib",
@@ -124,7 +124,7 @@
             "Name": "googlebenchmark",
             "Type": "git",
             "Git": "https://github.com/google/benchmark.git",
-            "Tag": "v1.9.4"
+            "Tag": "v1.9.5"
         }
     ]
 }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <array>
-#include <functional>
+#include <type_traits>
 
 #include <radray/render/common.h>
 

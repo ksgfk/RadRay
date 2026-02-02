@@ -3,9 +3,7 @@
 #include <algorithm>
 #include <bit>
 
-#include <radray/errors.h>
-#include <radray/basic_math.h>
-#include <radray/utility.h>
+#include <radray/logger.h>
 
 namespace radray {
 

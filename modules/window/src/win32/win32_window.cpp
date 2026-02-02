@@ -1,8 +1,7 @@
 #include "win32_window.h"
 
-#include <radray/errors.h>
 #include <radray/platform.h>
-#include <radray/utility.h>
+#include <radray/text_encoding.h>
 
 // make windows happy :)
 #ifdef DELETE
@@ -203,7 +202,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
                 moduleAddr,
                 &hInstance) == 0) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("{} {} {} {}", Errors::WINDOWS, "GetModuleHandleEx", fmtErr, ::GetLastError());
+            RADRAY_ERR_LOG("GetModuleHandleEx failed: {}", fmtErr);
             return nullptr;
         }
     }
@@ -223,7 +222,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         ATOM clazz = ::RegisterClassEx(&wce);
         if (!clazz) {
             auto fmtErr = FormatLastErrorMessageWin32();
-            RADRAY_ERR_LOG("{} {} {} {}", Errors::WINDOWS, "RegisterClassEx", fmtErr, ::GetLastError());
+            RADRAY_ERR_LOG("RegisterClassEx failed: {}", fmtErr);
             return nullptr;
         }
         g_wndClass = std::make_unique<WndClassRAII>(clazz, wce.hInstance, RADRAY_WIN32_WNDCLASS_NAME);
@@ -253,7 +252,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         h = rc.bottom - rc.top;
     }
 
-    wstring title = ToWideChar(desc.Title).value();
+    wstring title = text_encoding::ToWideChar(desc.Title).value();
     HWND hwnd = ::CreateWindowEx(
         exStyle,
         g_wndClass->GetName().data(),
@@ -267,7 +266,7 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
         win.get());
     if (!hwnd) {
         auto fmtErr = FormatLastErrorMessageWin32();
-        RADRAY_ERR_LOG("{} {} {} {}", Errors::WINDOWS, "CreateWindowEx", fmtErr, ::GetLastError());
+        RADRAY_ERR_LOG("CreateWindowEx failed: {}", fmtErr);
         return nullptr;
     }
     win->_hwnd = hwnd;
@@ -341,7 +340,7 @@ void Win32Window::SetSize(int width, int height) noexcept {
     if (!_hwnd) return;
     if (width <= 0 || height <= 0) return;
     if (_isFullscreen) {
-        RADRAY_ERR_LOG("{} {} ", Errors::WINDOWS, "cannot set size when in fullscreen mode");
+        RADRAY_ERR_LOG("cannot set size when in fullscreen mode");
         return;
     }
     RECT rc{0, 0, width, height};

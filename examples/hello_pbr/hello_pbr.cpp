@@ -2,6 +2,7 @@
 #include <radray/triangle_mesh.h>
 #include <radray/vertex_data.h>
 #include <radray/camera_control.h>
+#include <radray/file.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
 #include <radray/render/gpu_resource.h>
@@ -57,7 +58,7 @@ public:
         {
             string hlsl;
             {
-                auto hlslOpt = ReadText(std::filesystem::path("assets") / "hello_pbr" / "pbr.hlsl");
+                auto hlslOpt = file::ReadText(std::filesystem::path("assets") / "hello_pbr" / "pbr.hlsl");
                 if (!hlslOpt.has_value()) {
                     throw ImGuiApplicationException("Failed to read shader file pbr.hlsl");
                 }
@@ -127,7 +128,7 @@ public:
         }
         uint32_t stride = 0;
         for (const auto& vb : prim.VertexBuffers) {
-            stride += GetVertexDataSizeInBytes(vb.Type, vb.ComponentCount);
+            stride += vertex_utility::GetVertexDataSizeInBytes(vb.Type, vb.ComponentCount);
         }
         render::VertexBufferLayout vertLayout{};
         vertLayout.ArrayStride = stride;

@@ -18,6 +18,11 @@ struct is_flags : public std::false_type {};
 template <typename T>
 concept is_enum_flags = ::std::is_enum_v<T> && ::radray::is_flags<T>::value;
 
+template <typename T>
+concept enum_has_adl_format_as = requires(T value) {
+    { format_as(value) };
+};
+
 template <class T>
 requires is_enum_flags<T>
 class EnumFlags {
@@ -95,70 +100,60 @@ public:
         return *this;
     }
 
+    string FormatByName()
+    requires enum_has_adl_format_as<T>
+    {
+        using underlying_t = std::underlying_type_t<T>;
+        using unsigned_t = std::make_unsigned_t<underlying_t>;
+        fmt_memory_buffer buffer;
+        fmt::format_to(std::back_inserter(buffer), "[");
+        auto remaining = static_cast<unsigned_t>(this->value());
+        bool first = true;
+        while (remaining != 0) {
+            auto bit = remaining & (~remaining + 1);
+            remaining &= ~bit;
+            if (!first) {
+                fmt::format_to(std::back_inserter(buffer), " | ");
+            }
+            fmt::format_to(std::back_inserter(buffer), "{}", static_cast<T>(bit));
+            first = false;
+        }
+        fmt::format_to(std::back_inserter(buffer), "]");
+        return string{buffer.data(), buffer.size()};
+    }
+
+    string FormatAsBits() {
+        using underlying_t = std::underlying_type_t<T>;
+        using unsigned_t = std::make_unsigned_t<underlying_t>;
+        constexpr auto bit_count = std::numeric_limits<unsigned_t>::digits;
+        string result;
+        result.reserve(bit_count + 2);
+        result.append("0b");
+        auto value = static_cast<unsigned_t>(this->value());
+        for (size_t index = 0; index < bit_count; ++index) {
+            const bool set = (value >> (bit_count - 1 - index)) & 0x1u;
+            result.push_back(set ? '1' : '0');
+        }
+        return result;
+    }
+
 private:
     T _value;
 };
-
-namespace detail {
-
-template <typename T>
-concept enum_has_adl_format_as = requires(T value) {
-    { format_as(value) };
-};
-
-template <class T>
-requires enum_has_adl_format_as<T> && is_enum_flags<T>
-string format_flags_with_names(EnumFlags<T> flags) {
-    using underlying_t = std::underlying_type_t<T>;
-    using unsigned_t = std::make_unsigned_t<underlying_t>;
-    fmt_memory_buffer buffer;
-    fmt::format_to(std::back_inserter(buffer), "[");
-    auto remaining = static_cast<unsigned_t>(flags.value());
-    bool first = true;
-    while (remaining != 0) {
-        auto bit = remaining & (~remaining + 1);
-        remaining &= ~bit;
-        if (!first) {
-            fmt::format_to(std::back_inserter(buffer), " | ");
-        }
-        fmt::format_to(std::back_inserter(buffer), "{}", static_cast<T>(bit));
-        first = false;
-    }
-    fmt::format_to(std::back_inserter(buffer), "]");
-    return string{buffer.data(), buffer.size()};
-}
-
-template <class T>
-requires is_enum_flags<T>
-string format_flags_as_bits(EnumFlags<T> flags) {
-    using underlying_t = std::underlying_type_t<T>;
-    using unsigned_t = std::make_unsigned_t<underlying_t>;
-    constexpr auto bit_count = std::numeric_limits<unsigned_t>::digits;
-    string result;
-    result.reserve(bit_count + 2);
-    result.append("0b");
-    auto value = static_cast<unsigned_t>(flags.value());
-    for (size_t index = 0; index < bit_count; ++index) {
-        const bool set = (value >> (bit_count - 1 - index)) & 0x1u;
-        result.push_back(set ? '1' : '0');
-    }
-    return result;
-}
-
-}  // namespace detail
 
 template <class T>
 requires is_enum_flags<T>
 string format_as(EnumFlags<T> flags) {
     using unsigned_t = std::make_unsigned_t<std::underlying_type_t<T>>;
     const auto value = static_cast<unsigned_t>(flags.value());
-    if constexpr (detail::enum_has_adl_format_as<T>) {
+    if constexpr (enum_has_adl_format_as<T>) {
         if (value == 0) {
             return "[]";
         }
-        return detail::format_flags_with_names(flags);
+        return flags.FormatByName();
+    } else {
+        return flags.FormatAsBits();
     }
-    return detail::format_flags_as_bits(flags);
 }
 
 }  // namespace radray

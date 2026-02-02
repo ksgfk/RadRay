@@ -1,6 +1,6 @@
 #include <radray/render/gpu_resource.h>
 
-#include <radray/utility.h>
+#include <radray/scope_guard.h>
 
 namespace radray::render {
 

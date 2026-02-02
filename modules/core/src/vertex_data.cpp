@@ -1,7 +1,7 @@
+#include <radray/vertex_data.h>
+
 #include <cstring>
 #include <memory>
-
-#include <radray/vertex_data.h>
 
 namespace radray {
 

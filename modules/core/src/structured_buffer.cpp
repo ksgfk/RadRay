@@ -1,7 +1,5 @@
 #include <radray/structured_buffer.h>
 
-#include <limits>
-
 namespace radray {
 
 StructuredBufferId StructuredBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {

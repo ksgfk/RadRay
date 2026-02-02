@@ -3,7 +3,6 @@
 #ifdef RADRAY_ENABLE_VULKAN
 
 #include <span>
-#include <algorithm>
 
 #include <radray/platform.h>
 #include <radray/types.h>

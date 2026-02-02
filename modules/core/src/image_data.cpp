@@ -11,9 +11,10 @@
 #include <png.h>
 #endif
 
-#include <radray/errors.h>
+#include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/platform.h>
+#include <radray/scope_guard.h>
 
 namespace radray {
 
@@ -34,29 +35,16 @@ ImageData::ImageData(ImageData&& other) noexcept
 
 ImageData& ImageData::operator=(const ImageData& other) noexcept {
     if (this != &other) {
-        const size_t size = other.GetSize();
-        Width = other.Width;
-        Height = other.Height;
-        Format = other.Format;
-        if (size > 0 && other.Data) {
-            Data = make_unique<byte[]>(size);
-            std::memcpy(Data.get(), other.Data.get(), size);
-        } else {
-            Data.reset();
-        }
+        ImageData tmp{other};
+        swap(*this, tmp);
     }
     return *this;
 }
 
 ImageData& ImageData::operator=(ImageData&& other) noexcept {
     if (this != &other) {
-        Data = std::move(other.Data);
-        Width = other.Width;
-        Height = other.Height;
-        Format = other.Format;
-        other.Width = 0;
-        other.Height = 0;
-        other.Format = ImageFormat::R8_BYTE;
+        ImageData tmp{std::move(other)};
+        swap(*this, tmp);
     }
     return *this;
 }
@@ -65,17 +53,11 @@ size_t ImageData::GetSize() const noexcept {
     if (Width == 0 || Height == 0) {
         return 0;
     }
-    const size_t bs = GetImageFormatSize(Format);
-    const size_t width_sz = static_cast<size_t>(Width);
-    const size_t height_sz = static_cast<size_t>(Height);
-    if (height_sz != 0 && width_sz > std::numeric_limits<size_t>::max() / height_sz) {
-        RADRAY_ABORT("{}: {}", Errors::InvalidArgument, "image dimensions overflow");
-    }
-    const size_t pixel_count = width_sz * height_sz;
-    if (bs != 0 && pixel_count > std::numeric_limits<size_t>::max() / bs) {
-        RADRAY_ABORT("{}: {}", Errors::InvalidArgument, "image size overflow");
-    }
-    return pixel_count * bs;
+    const size_t bs = this->FormatSize(Format);
+    const size_t width = static_cast<size_t>(Width);
+    const size_t height = static_cast<size_t>(Height);
+    const size_t pixelCount = width * height;
+    return pixelCount * bs;
 }
 
 std::span<const byte> ImageData::GetSpan() const noexcept {
@@ -87,16 +69,11 @@ std::span<const byte> ImageData::GetSpan() const noexcept {
 }
 
 ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
-    if (Format != ImageFormat::RGB8_BYTE) {
-        RADRAY_ABORT("{} '{}' {}", Errors::InvalidOperation, "Format", Format);
-    }
     if (Width == 0 || Height == 0) {
         return ImageData{};
     }
-    if (!Data) {
-        RADRAY_ERR_LOG("{}: {}", Errors::InvalidOperation, "image buffer is null");
-        return ImageData{};
-    }
+    RADRAY_ASSERT(Format == ImageFormat::RGB8_BYTE);
+    RADRAY_ASSERT(Data);
 
     ImageData dstImg;
     dstImg.Width = Width;
@@ -105,12 +82,12 @@ ImageData ImageData::RGB8ToRGBA8(uint8_t alpha_) const noexcept {
     dstImg.Data = make_unique<byte[]>(dstImg.GetSize());
 
     const size_t row = static_cast<size_t>(Width);
-    const size_t src_stride = row * 3;
-    const size_t dst_stride = row * 4;
+    const size_t srcStride = row * 3;
+    const size_t dstStride = row * 4;
     byte a_ = static_cast<byte>(alpha_);
     const byte* src_ = Data.get();
     byte* dst_ = dstImg.Data.get();
-    for (size_t j = 0; j < Height; j++, src_ += src_stride, dst_ += dst_stride) {
+    for (size_t j = 0; j < Height; j++, src_ += srcStride, dst_ += dstStride) {
         const byte* src = src_;
         byte* dst = dst_;
         for (size_t i = 0; i < row; i++, src += 3, dst += 4) {
@@ -125,19 +102,27 @@ void ImageData::FlipY() noexcept {
     if (!Data || Width == 0 || Height < 2) {
         return;
     }
-    const size_t row_bytes = GetImageFormatSize(Format) * static_cast<size_t>(Width);
-    if (row_bytes == 0) {
+    const size_t rowBytes = this->FormatSize(Format) * static_cast<size_t>(Width);
+    if (rowBytes == 0) {
         return;
     }
-    byte* data_ptr = Data.get();
+    byte* dataPtr = Data.get();
     for (size_t y = 0; y < Height / 2; ++y) {
-        byte* row_top = data_ptr + y * row_bytes;
-        byte* row_bottom = data_ptr + (Height - 1 - y) * row_bytes;
-        std::swap_ranges(row_top, row_top + row_bytes, row_bottom);
+        byte* rowTop = dataPtr + y * rowBytes;
+        byte* rowBottom = dataPtr + (Height - 1 - y) * rowBytes;
+        std::swap_ranges(rowTop, rowTop + rowBytes, rowBottom);
     }
 }
 
-size_t GetImageFormatSize(ImageFormat format) noexcept {
+void swap(ImageData& a, ImageData& b) noexcept {
+    using std::swap;
+    swap(a.Data, b.Data);
+    swap(a.Width, b.Width);
+    swap(a.Height, b.Height);
+    swap(a.Format, b.Format);
+}
+
+size_t ImageData::FormatSize(ImageFormat format) noexcept {
     switch (format) {
         case ImageFormat::R8_BYTE: return 1;
         case ImageFormat::R16_USHORT: return 2;
@@ -168,12 +153,12 @@ public:
 };
 static void radray_libpng_user_error_fn(png_structp png_ptr, png_const_charp msg) {
     RADRAY_UNUSED(png_ptr);
-    RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, msg);
+    RADRAY_ERR_LOG("libpng error msg: {}", msg);
     throw LibpngException(msg);
 }
 static void radray_libpng_user_warn_fn(png_structp png_ptr, png_const_charp msg) {
     RADRAY_UNUSED(png_ptr);
-    RADRAY_WARN_LOG("{}: {}", Errors::LIBPNG, msg);
+    RADRAY_WARN_LOG("libpng warning msg: {}", msg);
 }
 static void* radray_libpng_malloc_fn(png_structp png_ptr, png_size_t size) {
     RADRAY_UNUSED(png_ptr);
@@ -199,7 +184,7 @@ static size_t _SafeMulSize(size_t a, size_t b) {
 }
 
 static constexpr size_t PNG_SIG_SIZE = 8;
-bool IsPNG(std::istream& stream) {
+bool ImageData::IsPNG(std::istream& stream) {
     if (!stream.good()) {
         return false;
     }
@@ -221,9 +206,9 @@ bool IsPNG(std::istream& stream) {
     stream.clear(original_state);
     return is_png;
 }
-std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings) {
+std::optional<ImageData> ImageData::LoadPNG(std::istream& stream, PNGLoadSettings settings) {
     if (!stream.good()) {
-        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, "stream not good");
+        RADRAY_ERR_LOG("stream is not good");
         return std::nullopt;
     }
     png_structp png_ptr = nullptr;
@@ -360,12 +345,24 @@ std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings)
         RADRAY_ASSERT(image_byte_size == imgData.GetSize());
         return std::make_optional(std::move(imgData));
     } catch (LibpngException& e) {
-        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, e.what());
+        RADRAY_ERR_LOG("LibpngException: {}", e.what());
         return std::nullopt;
     } catch (...) {
-        RADRAY_ERR_LOG("{}: {}", Errors::LIBPNG, "unknown error");
+        RADRAY_ERR_LOG("LibpngException: {}", "unknown error");
         return std::nullopt;
     }
+}
+#else
+bool ImageData::IsPNG(std::istream& stream) {
+    RADRAY_UNUSED(stream);
+    RADRAY_ERR_LOG("libpng support is not enabled");
+    return false;
+}
+std::optional<ImageData> ImageData::LoadPNG(std::istream& stream, PNGLoadSettings settings) {
+    RADRAY_UNUSED(stream);
+    RADRAY_UNUSED(settings);
+    RADRAY_ERR_LOG("libpng support is not enabled");
+    return std::nullopt;
 }
 #endif
 

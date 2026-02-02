@@ -1,7 +1,7 @@
 #include <radray/render/backend/d3d12_helper.h>
 
-#include <radray/errors.h>
 #include <radray/utility.h>
+#include <radray/text_encoding.h>
 
 namespace radray::render::d3d12 {
 
@@ -30,10 +30,10 @@ void Win32Event::Destroy() noexcept {
 }
 
 std::optional<Win32Event> MakeWin32Event() noexcept {
-    HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    HANDLE event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
         DWORD err = ::GetLastError();
-        RADRAY_ERR_LOG("{} {} {}", Errors::WINDOWS, "CreateEvent", err);
+        RADRAY_ERR_LOG("CreateEvent failed: {}", err);
         return std::nullopt;
     }
     Win32Event result{};
@@ -554,7 +554,7 @@ void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation*
         }
         obj->SetName(L"");
     } else {
-        std::optional<wstring> wco = ToWideChar(str);
+        std::optional<wstring> wco = text_encoding::ToWideChar(str);
         if (wco.has_value()) {
             const wchar_t* debugName = wco.value().c_str();
             if (alloc) {

@@ -3,8 +3,6 @@
 #include <bit>
 #include <cstring>
 
-#include <radray/errors.h>
-
 namespace radray::render::vulkan {
 
 static Nullable<InstanceVulkanImpl*> g_vkInstance = nullptr;
@@ -16,15 +14,15 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     void* pUserData) noexcept {
     RADRAY_UNUSED(pUserData);
     if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        RADRAY_ERR_LOG("{} Validation Layer\n{}: {}: {}", Errors::VK, pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        RADRAY_ERR_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        RADRAY_WARN_LOG("{} Validation Layer\n{}: {}: {}", Errors::VK, pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        RADRAY_WARN_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-        RADRAY_INFO_LOG("{} Validation Layer\n{}: {}: {}", Errors::VK, pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        RADRAY_INFO_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-        LogDebug("{} Validation Layer\n{}: {}: {}", Errors::VK, pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        LogDebug("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     } else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
-        RADRAY_INFO_LOG("{} Validation Layer\n{}: {}: {}", Errors::VK, pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+        RADRAY_INFO_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
     }
     return VK_FALSE;
 }
@@ -127,13 +125,13 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     {
-        LPCSTR instanceAddr = std::bit_cast<LPCSTR>(&DestroyVulkanInstanceImpl);
+        LPCWSTR instanceAddr = std::bit_cast<LPCWSTR>(&DestroyVulkanInstanceImpl);
         HMODULE hInstance;
-        if (GetModuleHandleEx(
+        if (::GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 instanceAddr,
                 &hInstance) == 0) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::WINDOWS, "GetModuleHandleExW", GetLastError());
+            RADRAY_ERR_LOG("GetModuleHandleExW failed: {}", GetLastError());
             return nullptr;
         }
         HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
@@ -146,7 +144,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         VkSurfaceKHR vkSurface;
         if (auto vr = vkCreateWin32SurfaceKHR(_instance->_instance, &win32SurfaceInfo, this->GetAllocationCallbacks(), &vkSurface);
             vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateWin32SurfaceKHR", vr);
+            RADRAY_ERR_LOG("vkCreateWin32SurfaceKHR failed: {}", vr);
             return nullptr;
         }
         surface = make_unique<SurfaceVulkan>(this, vkSurface);
@@ -155,20 +153,20 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
 #error "unsupported platform for Vulkan surface creation"
 #endif
     if (surface == nullptr) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "create VkSurfaceKHR failed");
+        RADRAY_ERR_LOG("vk cannot create VkSurfaceKHR");
         return nullptr;
     }
     auto presentQueue = CastVkObject(desc.PresentQueue);
     VkSurfaceCapabilitiesKHR surfaceProperties;
     if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, surface->_surface, &surfaceProperties);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", vr);
+        RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
         return nullptr;
     }
     if (desc.BackBufferCount < surfaceProperties.minImageCount || desc.BackBufferCount > surfaceProperties.maxImageCount) {
         auto newValue = radray::Clamp(desc.BackBufferCount, surfaceProperties.minImageCount, surfaceProperties.maxImageCount);
         RADRAY_WARN_LOG(
-            "{} back buffer count {} not in range [{}, {}]. auto clamp to {}", Errors::VK,
+            "vk back buffer count {} not in range [{}, {}]. auto clamp to {}",
             desc.BackBufferCount,
             surfaceProperties.minImageCount,
             surfaceProperties.maxImageCount,
@@ -202,19 +200,19 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     vector<VkSurfaceFormatKHR> supportedFormats;
     if (auto vr = EnumerateVectorFromVkFunc(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, this->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkGetPhysicalDeviceSurfaceFormatsKHR", vr);
+        RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
         return nullptr;
     }
     auto needFormatIter = std::ranges::find_if(supportedFormats, [rawFormat](VkSurfaceFormatKHR i) { return i.format == rawFormat; });
     if (needFormatIter == supportedFormats.end()) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vk surface format not supported", rawFormat);
+        RADRAY_ERR_LOG("vk surface format not supported", rawFormat);
         return nullptr;
     }
     const VkSurfaceFormatKHR& needFormat = *needFormatIter;
     vector<VkPresentModeKHR> supportedPresentModes;
     if (auto vr = EnumerateVectorFromVkFunc(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, this->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkGetPhysicalDeviceSurfacePresentModesKHR", vr);
+        RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
         return nullptr;
     }
     VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -256,14 +254,14 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     VkSwapchainKHR swapchain{};
     if (auto vr = _ftb.vkCreateSwapchainKHR(_device, &swapchianCreateInfo, this->GetAllocationCallbacks(), &swapchain);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSwapchainKHR", vr);
+        RADRAY_ERR_LOG("vkCreateSwapchainKHR failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain);
     vector<VkImage> swapchainImages;
     if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, _ftb.vkGetSwapchainImagesKHR, _device, swapchain);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkGetSwapchainImagesKHR", vr);
+        RADRAY_ERR_LOG("vkGetSwapchainImagesKHR failed: {}", vr);
         return nullptr;
     }
     result->_frames.reserve(swapchainImages.size());
@@ -344,7 +342,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     VmaAllocationInfo vmaAllocInfo{};
     if (auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &vmaInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vmaCreateBuffer", vr);
+        RADRAY_ERR_LOG("vmaCreateBuffer failed: {}", vr);
         return nullptr;
     }
     this->SetObjectName(desc.Name, vkBuf);
@@ -445,7 +443,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     VmaAllocationInfo vmaAllocInfo{};
     if (auto vr = vmaCreateImage(_vma->_vma, &imgInfo, &vmaInfo, &vkImg, &vmaAlloc, &vmaAllocInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vmaCreateImage", vr);
+        RADRAY_ERR_LOG("vmaCreateImage failed: {}", vr);
         return nullptr;
     }
     this->SetObjectName(desc.Name, vkImg);
@@ -477,7 +475,7 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     VkImageView imageView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateImageView", vr);
+        RADRAY_ERR_LOG("vkCreateImageView failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<ImageViewVulkan>(this, image, imageView);
@@ -489,12 +487,11 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
     if (desc.Category != ShaderBlobCategory::SPIRV) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "only supported SPIR-V", desc.Category);
+        RADRAY_ERR_LOG("vk only supported SPIR-V shader blobs");
         return nullptr;
     }
     if (desc.Source.size() % 4 != 0) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "SPIR-V code byte size must be a multiple of 4", desc.Source.size());
-
+        RADRAY_ERR_LOG("vk SPIR-V code byte size must be a multiple of 4: {}", desc.Source.size());
         return nullptr;
     }
     size_t realSize = desc.Source.size();
@@ -508,7 +505,7 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateShaderModule(_device, &createInfo, this->GetAllocationCallbacks(), &shaderModule);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateShaderModule", vr);
+        RADRAY_ERR_LOG("vkCreateShaderModule failed: {}", vr);
         return nullptr;
     }
     return make_unique<ShaderModuleVulkan>(this, shaderModule);
@@ -517,7 +514,7 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
 Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
     if (!desc.RootDescriptors.empty()) {
         // vk 要模拟 dx D3D12_ROOT_PARAMETER_TYPE_CBV/SRV/UAV 的 root binding 有亿点麻烦, 也没那么简单, 先不做了 (欸嘿
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "RS RootBindings not support");
+        RADRAY_ERR_LOG("vk unsupported root descriptors in root signature");
         return nullptr;
     }
     vector<VkDescriptorSetLayoutBinding> bindings;
@@ -551,7 +548,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreatePipelineLayout(_device, &createInfo, this->GetAllocationCallbacks(), &pipelineLayout);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreatePipelineLayout", vr);
+        RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<PipelineLayoutVulkan>(this, pipelineLayout);
@@ -834,7 +831,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateGraphicsPipelines", vr);
+        RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<GraphicsPipelineVulkan>(this, pipeline);
@@ -857,7 +854,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         ctx.binding.stageFlags = MapType(j.Stages);
         if (!j.StaticSamplers.empty()) {
             if (j.StaticSamplers.size() != j.Count) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::VK, "static sampler count mismatch", j.StaticSamplers.size(), j.Count);
+                RADRAY_ERR_LOG("static sampler count mismatch", j.StaticSamplers.size(), j.Count);
                 return nullptr;
             }
             ctx.staticSamplers.reserve(j.StaticSamplers.size());
@@ -894,7 +891,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &dslci, this->GetAllocationCallbacks(), &layout);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateDescriptorSetLayout", vr);
+        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<DescriptorSetLayoutVulkan>(this, layout);
@@ -943,7 +940,7 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const VkSa
     VkSampler sampler = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSampler(_device, &desc, this->GetAllocationCallbacks(), &sampler);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSampler", vr);
+        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
     return make_unique<SamplerVulkan>(this, sampler);
@@ -958,7 +955,7 @@ Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulka
     VkCommandPool pool{VK_NULL_HANDLE};
     if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateCommandPool", vr);
+        RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
         return nullptr;
     }
     auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
@@ -971,7 +968,7 @@ Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulka
     VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
     if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAllocateCommandBuffers", vr);
+        RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
         return nullptr;
     }
     return make_unique<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
@@ -980,14 +977,10 @@ Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulka
 Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastVkObject(rootSig_);
     if (index >= rootSig->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, Errors::ArgumentOutOfRange, "index");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "index", rootSig->_descSetLayouts.size(), index);
         return nullptr;
     }
     const auto& layout = rootSig->_descSetLayouts[index];
-    if (!_descSetAlloc) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "descriptor set allocator not initialized");
-        return nullptr;
-    }
     auto allocOpt = _descSetAlloc->Allocate(layout.get());
     if (!allocOpt.has_value()) {
         return nullptr;
@@ -1023,7 +1016,7 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
     VkSampler sampler = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSampler(_device, &createInfo, this->GetAllocationCallbacks(), &sampler);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSampler", vr);
+        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<SamplerVulkan>(this, sampler);
@@ -1039,7 +1032,7 @@ Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateF
     VkFence fence = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateFence(_device, &fenceInfo, this->GetAllocationCallbacks(), &fence);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateFence", vr);
+        RADRAY_ERR_LOG("vkCreateFence failed: {}", vr);
         return nullptr;
     }
     auto v = make_unique<FenceVulkan>(this, fence);
@@ -1055,7 +1048,7 @@ Nullable<unique_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSema
     VkSemaphore semaphore = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSemaphore(_device, &info, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSemaphore", vr);
+        RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
         return nullptr;
     }
     auto v = make_unique<SemaphoreVulkan>(this, semaphore);
@@ -1065,7 +1058,7 @@ Nullable<unique_ptr<SemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSema
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
     if (!_extFeatures.feature12.timelineSemaphore) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "timeline semaphore not supported");
+        RADRAY_ERR_LOG("vk feature timeline semaphore not supported");
         return nullptr;
     }
     VkSemaphoreTypeCreateInfo timelineCreateInfo{};
@@ -1080,7 +1073,7 @@ Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaph
     VkSemaphore semaphore = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSemaphore(_device, &createInfo, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateSemaphore", vr);
+        RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
         return nullptr;
     }
     return make_unique<TimelineSemaphoreVulkan>(this, semaphore);
@@ -1090,7 +1083,7 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
     VkBufferView bufferView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateBufferView(_device, &info, this->GetAllocationCallbacks(), &bufferView);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateBufferView", vr);
+        RADRAY_ERR_LOG("vkCreateBufferView failed: {}", vr);
         return nullptr;
     }
     return make_unique<BufferViewVulkan>(this, bufferView);
@@ -1100,7 +1093,7 @@ Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRe
     VkRenderPass pass;
     if (auto vr = _ftb.vkCreateRenderPass(_device, &info, this->GetAllocationCallbacks(), &pass);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateRenderPass", vr);
+        RADRAY_ERR_LOG("vkCreateRenderPass failed: {}", vr);
         return nullptr;
     }
     return make_unique<RenderPassVulkan>(this, pass);
@@ -1150,34 +1143,34 @@ void DeviceVulkan::DestroyImpl() noexcept {
 
 Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc) {
     if (g_vkInstance.HasValue()) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "has active VkInstance");
+        RADRAY_ERR_LOG("vk has actived VkInstance");
         return nullptr;
     }
     if (volkInitialize() != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "volkInitialize", "failed");
+        RADRAY_ERR_LOG("volkInitialize failed");
         return nullptr;
     }
     uint32_t version = 0;
     if (vkEnumerateInstanceVersion(&version) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkEnumerateInstanceVersion", "failed");
+        RADRAY_ERR_LOG("vkEnumerateInstanceVersion failed");
         return nullptr;
     }
-    RADRAY_INFO_LOG("{} instance version: {}.{}.{}", Errors::VK, VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
+    RADRAY_INFO_LOG("vk instance version: {}.{}.{}", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
     vector<VkExtensionProperties> extProps;
     if (EnumerateVectorFromVkFunc(extProps, vkEnumerateInstanceExtensionProperties, nullptr) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkEnumerateInstanceExtensionProperties", "failed");
+        RADRAY_ERR_LOG("vkEnumerateInstanceExtensionProperties failed");
         return nullptr;
     }
     vector<VkLayerProperties> layerProps;
     if (EnumerateVectorFromVkFunc(layerProps, vkEnumerateInstanceLayerProperties) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkEnumerateInstanceLayerProperties", "failed");
+        RADRAY_ERR_LOG("vkEnumerateInstanceLayerProperties failed");
         return nullptr;
     }
     for (auto& i : extProps) {
-        RADRAY_DEBUG_LOG("{} instance extension: {} version: {}", Errors::VK, i.extensionName, i.specVersion);
+        RADRAY_DEBUG_LOG("vk instance extension: {} version: {}", i.extensionName, i.specVersion);
     }
     for (auto& i : layerProps) {
-        RADRAY_DEBUG_LOG("{} instance layer: {} version: {}", Errors::VK, i.layerName, i.specVersion);
+        RADRAY_DEBUG_LOG("vk instance layer: {} version: {}", i.layerName, i.specVersion);
     }
 
     unordered_set<string> needExts;
@@ -1198,7 +1191,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
         if (IsValidateExtensions(requireExts, extProps)) {
             needExts.emplace(requireExt);
         } else {
-            RADRAY_WARN_LOG("{} {} {}", Errors::VK, "unsupported ext", requireExt);
+            RADRAY_WARN_LOG("vk unsupported ext: {}", requireExt);
         }
         const auto validName = "VK_LAYER_KHRONOS_validation";
         const char* requireLayer[] = {validName};
@@ -1206,20 +1199,20 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
             needLayers.emplace(validName);
             isValidFeatureExtEnable = true;
         } else {
-            RADRAY_WARN_LOG("{} {} {}", Errors::VK, "unsupported layer", validName);
+            RADRAY_WARN_LOG("vk unsupported layer: {}", validName);
         }
     }
     for (const auto& i : needLayers) {
         const char* require[] = {i.c_str()};
         if (!IsValidateLayers(require, layerProps)) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "unsupported layer", i);
+            RADRAY_ERR_LOG("vk unsupported layer: {}", i);
             return nullptr;
         }
     }
     for (const auto& i : needExts) {
         const char* require[] = {i.c_str()};
         if (!IsValidateExtensions(require, extProps)) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "unsupported ext", i);
+            RADRAY_ERR_LOG("vk unsupported ext: {}", i);
             return nullptr;
         }
     }
@@ -1314,15 +1307,19 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
         VK_API_VERSION_1_1,
         VK_API_VERSION_1_0};
     VkInstance instance = VK_NULL_HANDLE;
+    VkResult lastResult = VK_ERROR_UNKNOWN;
     for (uint32_t apiVersion : apiVersionsToTry) {
         appInfo.apiVersion = apiVersion;
         if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
             vr == VK_SUCCESS) {
             break;
+        } else {
+            lastResult = vr;
+            RADRAY_WARN_LOG("vkCreateInstance with api version {}.{}.{} failed: {}", VK_VERSION_MAJOR(apiVersion), VK_VERSION_MINOR(apiVersion), VK_VERSION_PATCH(apiVersion), vr);
         }
     }
     if (instance == VK_NULL_HANDLE) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateInstance", "failed");
+        RADRAY_ERR_LOG("vkCreateInstance failed: {}", lastResult);
         return nullptr;
     }
     volkLoadInstanceOnly(instance);
@@ -1351,17 +1348,17 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     };
 
     if (!g_vkInstance.HasValue()) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "not init");
+        RADRAY_ERR_LOG("vk env not init");
         return nullptr;
     }
     VkInstance instance = g_vkInstance->_instance;
     vector<VkPhysicalDevice> physicalDevices;
     if (EnumerateVectorFromVkFunc(physicalDevices, vkEnumeratePhysicalDevices, instance) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkEnumeratePhysicalDevices", "failed");
+        RADRAY_ERR_LOG("vkEnumeratePhysicalDevices failed");
         return nullptr;
     }
     if (physicalDevices.size() == 0) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "no physical device found");
+        RADRAY_ERR_LOG("vk no physical device found");
         return nullptr;
     }
     vector<PhyDeviceInfo> physicalDeviceProps{};
@@ -1372,14 +1369,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         VkPhysicalDeviceMemoryProperties memory;
         vkGetPhysicalDeviceMemoryProperties(phyDevice, &memory);
         uint64_t total = GetPhysicalDeviceMemoryAllSize(memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-        RADRAY_INFO_LOG("{} find device: {}, memory: {}MB", Errors::VK, deviceProps.deviceName, total / (1024 * 1024));
+        RADRAY_INFO_LOG("vk find physical device: {}, heap memory: {}MB", deviceProps.deviceName, total / (1024 * 1024));
         physicalDeviceProps.emplace_back(PhyDeviceInfo{phyDevice, deviceProps, memory, i});
     }
     size_t selectPhysicalDeviceIndex = std::numeric_limits<size_t>::max();
     if (desc.PhysicalDeviceIndex.has_value()) {
         uint32_t index = desc.PhysicalDeviceIndex.value();
         if (index >= physicalDevices.size()) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "PhysicalDeviceIndex out of range", index);
+            RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "PhysicalDeviceIndex", physicalDevices.size(), index);
             return nullptr;
         }
         selectPhysicalDeviceIndex = index;
@@ -1413,7 +1410,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     const auto& selectPhyDevice = physicalDeviceProps[selectPhysicalDeviceIndex];
-    RADRAY_INFO_LOG("{} select device: {}", Errors::VK, selectPhyDevice.properties.deviceName);
+    RADRAY_INFO_LOG("vk select physical device: {}", selectPhyDevice.properties.deviceName);
 
     struct QueueRequest {
         QueueType rawType;
@@ -1434,7 +1431,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         vector<VkQueueFamilyProperties> queueFamilyProps;
         EnumerateVectorFromVkFunc(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
         if (queueFamilyProps.empty()) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkGetPhysicalDeviceQueueFamilyProperties", "no queue family found");
+            RADRAY_ERR_LOG("vk no queue family found");
             return nullptr;
         }
         vector<QueueFamilyUsage> families;
@@ -1449,7 +1446,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 r.requiredCount = i.Count;
             } else {
                 r.requiredCount = 0;
-                RADRAY_WARN_LOG("{} {} {}", Errors::VK, "unsupported queue type", FormatVkQueueFlags(r.requiredFlag));
+                RADRAY_WARN_LOG("vk unsupported queue type: {}", FormatVkQueueFlags(r.requiredFlag));
             }
         }
         for (auto& req : queueRequests) {
@@ -1463,7 +1460,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         }
         for (const auto& i : queueRequests) {
             if (i.queueIndices.size() < i.requiredCount) {
-                RADRAY_ERR_LOG("{} {} {}", Errors::VK, "not enough queue family for type", FormatVkQueueFlags(i.requiredFlag));
+                RADRAY_ERR_LOG("vk not enough queue family for type: {}", FormatVkQueueFlags(i.requiredFlag));
                 return nullptr;
             }
         }
@@ -1497,7 +1494,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     vector<VkExtensionProperties> deviceExtsAvailable;
     if (auto vr = EnumerateVectorFromVkFunc(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkEnumerateDeviceExtensionProperties", vr);
+        RADRAY_ERR_LOG("vkEnumerateDeviceExtensionProperties failed: {}", vr);
         return nullptr;
     }
     VkPhysicalDeviceProperties2 deviceProperties2{};
@@ -1514,7 +1511,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     for (const auto& ext : needExts) {
         const char* exts[] = {ext.c_str()};
         if (!IsValidateExtensions(exts, deviceExtsAvailable)) {
-            RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vk device extension not supported", ext);
+            RADRAY_ERR_LOG("vk device extension not supported: {}", ext);
             return nullptr;
         }
     }
@@ -1568,7 +1565,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     VkDevice device = VK_NULL_HANDLE;
     if (VkResult vr = vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_vkInstance->GetAllocationCallbacks(), &device);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateDevice", vr);
+        RADRAY_ERR_LOG("vkCreateDevice failed: {}", vr);
         return nullptr;
     }
     auto deviceR = make_shared<DeviceVulkan>(
@@ -1593,13 +1590,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 #endif
     if (auto vr = vmaImportVulkanFunctionsFromVolk(&vmaCreateInfo, &vmaFunctions);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vmaImportVulkanFunctionsFromVolk", vr);
+        RADRAY_ERR_LOG("vmaImportVulkanFunctionsFromVolk failed: {}", vr);
         return nullptr;
     }
     VmaAllocator vma;
     if (auto vr = vmaCreateAllocator(&vmaCreateInfo, &vma);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vmaCreateAllocator", vr);
+        RADRAY_ERR_LOG("vmaCreateAllocator failed: {}", vr);
         return nullptr;
     }
     deviceR->_vma = make_unique<VMA>(vma);
@@ -1608,7 +1605,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             VkQueue queuePtr = VK_NULL_HANDLE;
             deviceR->_ftb.vkGetDeviceQueue(deviceR->_device, j.Family, j.IndexInFamily, &queuePtr);
             if (queuePtr == VK_NULL_HANDLE) {
-                RADRAY_ERR_LOG("{} {} {} {}", Errors::VK, "vkGetDeviceQueue", j.Family, j.IndexInFamily);
+                RADRAY_ERR_LOG("vkGetDeviceQueue failed: {} {}", j.Family, j.IndexInFamily);
                 return nullptr;
             }
             auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j, i.rawType);
@@ -1753,7 +1750,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 
     if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkQueueSubmit", vr);
+        RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
 
     if (desc.SignalFence.HasValue()) {
@@ -1765,7 +1762,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 void QueueVulkan::Wait() noexcept {
     if (auto vr = _device->_ftb.vkQueueWaitIdle(_queue);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkQueueWaitIdle", vr);
+        RADRAY_ABORT("vkQueueWaitIdle failed: {}", vr);
     }
 }
 
@@ -1796,7 +1793,7 @@ void CommandPoolVulkan::Destroy() noexcept {
 void CommandPoolVulkan::Reset() const noexcept {
     if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkResetCommandPool", vr);
+        RADRAY_ABORT("vkResetCommandPool failed: {}", vr);
     }
 }
 
@@ -1847,14 +1844,14 @@ void CommandBufferVulkan::Begin() noexcept {
     beginInfo.pInheritanceInfo = nullptr;
     if (auto vr = _device->_ftb.vkBeginCommandBuffer(_cmdBuffer, &beginInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkBeginCommandBuffer", vr);
+        RADRAY_ABORT("vkBeginCommandBuffer failed: {}", vr);
     }
 }
 
 void CommandBufferVulkan::End() noexcept {
     if (auto vr = _device->_ftb.vkEndCommandBuffer(_cmdBuffer);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkEndCommandBuffer", vr);
+        RADRAY_ABORT("vkEndCommandBuffer failed: {}", vr);
     }
 }
 
@@ -1972,14 +1969,14 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
             width = imageView->_image->_mdesc.Width;
         } else {
             if (width != imageView->_image->_mdesc.Width) {
-                RADRAY_ERR_LOG("{} render pass color attachment width mismatch, expected: {}, got: {}", Errors::VK, width, imageView->_image->_mdesc.Width);
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
                 return nullptr;
             }
         }
         if (height == std::numeric_limits<uint32_t>::max()) {
             height = imageView->_image->_mdesc.Height;
         } else if (height != imageView->_image->_mdesc.Height) {
-            RADRAY_ERR_LOG("{} vk render pass color attachment height mismatch, expected: {}, got: {}", Errors::VK, height, imageView->_image->_mdesc.Height);
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
             return nullptr;
         }
     }
@@ -2007,14 +2004,14 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
             width = imageView->_image->_mdesc.Width;
         } else {
             if (width != imageView->_image->_mdesc.Width) {
-                RADRAY_ERR_LOG("{} render pass color attachment width mismatch, expected: {}, got: {}", Errors::VK, width, imageView->_image->_mdesc.Width);
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
                 return nullptr;
             }
         }
         if (height == std::numeric_limits<uint32_t>::max()) {
             height = imageView->_image->_mdesc.Height;
         } else if (height != imageView->_image->_mdesc.Height) {
-            RADRAY_ERR_LOG("{} render pass color attachment height mismatch, expected: {}, got: {}", Errors::VK, height, imageView->_image->_mdesc.Height);
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
             return nullptr;
         }
     }
@@ -2058,7 +2055,7 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     VkFramebuffer framebuffer;
     if (auto vr = _device->_ftb.vkCreateFramebuffer(_device->_device, &fbInfo, _device->GetAllocationCallbacks(), &framebuffer);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateFramebuffer", vr);
+        RADRAY_ERR_LOG("vkCreateFramebuffer failed: {}", vr);
         return nullptr;
     }
     auto fbR = make_unique<FrameBufferVulkan>(_device, framebuffer);
@@ -2187,16 +2184,16 @@ void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineSta
 
 void SimulateCommandEncoderVulkan::PushConstant(const void* data, size_t length) noexcept {
     if (!_boundPipeLayout) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "unbound pipeline layout");
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::PushConstant");
         return;
     }
     if (!_boundPipeLayout->_pushConst.has_value()) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "VkPipelineLayout has no push constant");
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
         return;
     }
     const auto& pc = _boundPipeLayout->_pushConst.value();
     if (length > pc.size) {
-        RADRAY_ERR_LOG("{} push constant length {} exceeds VkPipelineLayout push constant size {}", Errors::VK, length, pc.size);
+        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
         return;
     }
     _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
@@ -2205,16 +2202,16 @@ void SimulateCommandEncoderVulkan::PushConstant(const void* data, size_t length)
 void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
     RADRAY_UNUSED(slot);
     RADRAY_UNUSED(view);
-    RADRAY_ERR_LOG("{} {}", Errors::VK, "RS RootBindings not support");
+    RADRAY_ERR_LOG("unsupported CommandEncoder::BindRootDescriptor in vk");
 }
 
 void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     if (!_boundPipeLayout) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "unbound pipeline layout");
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
         return;
     }
     if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("{} BindDescriptorSet slot {} exceeds VkPipelineLayout descriptor set count {}", Errors::VK, slot, _boundPipeLayout->_descSetLayouts.size());
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
         return;
     }
     auto descSet = CastVkObject(set);
@@ -2317,7 +2314,7 @@ void FenceVulkan::Wait() noexcept {
     if (_submitted) {
         if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);
             vr != VK_SUCCESS) {
-            RADRAY_ABORT("{} {} {}", Errors::VK, "vkWaitForFences", vr);
+            RADRAY_ABORT("vkWaitForFences failed: {}", vr);
         }
         _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
         _submitted = false;
@@ -2390,7 +2387,7 @@ uint64_t TimelineSemaphoreVulkan::GetCompletedValue() const noexcept {
     uint64_t result;
     if (auto vr = _device->_ftb.vkGetSemaphoreCounterValue(_device->_device, _semaphore, &result);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkGetSemaphoreCounterValue", vr);
+        RADRAY_ABORT("vkGetSemaphoreCounterValue failed: {}", vr);
     }
     return result;
 }
@@ -2494,10 +2491,10 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Semaphore*> signalSemap
             auto semObj = CastVkObject(signalSemaphore.Get());
             semObj->_signaled = false;
         }
-        RADRAY_WARN_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
+        RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return nullptr;
     } else {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAcquireNextImageKHR", vr);
+        RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return nullptr;
     }
 }
@@ -2582,7 +2579,7 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
     } else {
         if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
             vr != VK_SUCCESS) {
-            RADRAY_ABORT("{} {} {}", Errors::VK, "vmaMapMemory", vr);
+            RADRAY_ABORT("vmaMapMemory failed: {}", vr);
         }
         mappedData = static_cast<byte*>(mappedData) + offset;
     }
@@ -2899,16 +2896,16 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
 
 void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
     if (!_layout || !_allocation.IsValid()) {
-        RADRAY_ERR_LOG("{} {}", Errors::VK, "invalid descriptor set");
+        RADRAY_ERR_LOG("vk invalid descriptor set");
         return;
     }
     if (slot >= _layout->_bindings.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::VK, Errors::ArgumentOutOfRange, "slot");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _layout->_bindings.size(), slot);
         return;
     }
     const auto& e = _layout->_bindings[slot];
     if (index >= e.descriptorCount) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::VK, Errors::ArgumentOutOfRange, "index");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "index", e.descriptorCount, index);
         return;
     }
     auto tag = view->GetTag();
@@ -2941,7 +2938,7 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
         imgInfo.imageLayout = TextureUseToLayout(tv->_mdesc.Usage);
         writeDesc.pImageInfo = &imgInfo;
     } else {
-        RADRAY_ERR_LOG("{} unsupported resource view", Errors::VK);
+        RADRAY_ERR_LOG("vk unsupported resource view: {}", tag);
         return;
     }
     _device->_ftb.vkUpdateDescriptorSets(
@@ -2985,7 +2982,7 @@ std::optional<DescriptorSetAllocatorVulkan::Allocation> DescriptorSetAllocatorVu
         if (vr == VK_ERROR_OUT_OF_POOL_MEMORY || vr == VK_ERROR_FRAGMENTED_POOL) {
             return VK_NULL_HANDLE;
         }
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAllocateDescriptorSets", vr);
+        RADRAY_ERR_LOG("vkAllocateDescriptorSets failed: {}", vr);
         return VK_NULL_HANDLE;
     };
     const size_t start = _hintPage < _pages.size() ? _hintPage : 0;
@@ -3010,7 +3007,7 @@ std::optional<DescriptorSetAllocatorVulkan::Allocation> DescriptorSetAllocatorVu
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (auto vr = _device->_ftb.vkAllocateDescriptorSets(_device->_device, &allocInfo, &set);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkAllocateDescriptorSets", vr);
+        RADRAY_ERR_LOG("vkAllocateDescriptorSets failed: {}", vr);
         return std::nullopt;
     }
     newPage->_liveCount += 1;
@@ -3023,7 +3020,7 @@ void DescriptorSetAllocatorVulkan::Destroy(Allocation allocation) noexcept {
     RADRAY_ASSERT(allocation.Set != VK_NULL_HANDLE);
     if (auto vr = _device->_ftb.vkFreeDescriptorSets(_device->_device, allocation.Pool->_pool, 1, &allocation.Set);
         vr != VK_SUCCESS) {
-        RADRAY_ABORT("{} {} {}", Errors::VK, "vkFreeDescriptorSets", vr);
+        RADRAY_ABORT("vkFreeDescriptorSets failed: {}", vr);
         return;
     }
     allocation.Pool->_liveCount -= 1;
@@ -3064,7 +3061,7 @@ DescriptorPoolVulkan* DescriptorSetAllocatorVulkan::NewPage() noexcept {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     if (auto vr = _device->_ftb.vkCreateDescriptorPool(_device->_device, &info, _device->GetAllocationCallbacks(), &pool);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::VK, "vkCreateDescriptorPool", vr);
+        RADRAY_ERR_LOG("vkCreateDescriptorPool failed: {}", vr);
         return nullptr;
     }
     auto page = make_unique<DescriptorPoolVulkan>(_device, this, pool, info.maxSets);

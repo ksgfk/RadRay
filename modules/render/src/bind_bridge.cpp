@@ -5,7 +5,6 @@
 #include <limits>
 #include <type_traits>
 
-#include <radray/errors.h>
 #include <radray/basic_math.h>
 
 namespace radray::render {
@@ -215,7 +214,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         if (binding.Type == HlslShaderInputType::CBUFFER && binding.BindCount == 1) {
             auto cbufferDataOpt = desc.FindCBufferByName(binding.Name);
             if (!cbufferDataOpt.has_value()) {
-                RADRAY_ERR_LOG("{} {}", "BindBridgeLayout", "cannot find cbuffer data");
+                RADRAY_ERR_LOG("cannot find cbuffer data: {}", binding.Name);
                 return std::nullopt;
             }
             const auto& cbufferData = cbufferDataOpt.value().get();
@@ -288,7 +287,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
             asRootDesc.pop_back();
             continue;
         }
-        RADRAY_ERR_LOG("{} {}", "BindBridgeLayout", "cannot fit into root signature limits");
+        RADRAY_ERR_LOG("cannot fit into root signature limits");
         return std::nullopt;
     }
     vector<BindingEntry> bindings;
@@ -352,7 +351,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
             pc.Stages,
             pc.Size});
         if (desc.PushConstants.size() > 1) {
-            RADRAY_ERR_LOG("{} {} {}", "BindBridgeLayout", "multiple push constants detected, only the first is used", desc.PushConstants.size());
+            RADRAY_ERR_LOG("multiple push constants detected, only the first is used: {}", desc.PushConstants.size());
         }
     }
     unordered_map<uint32_t, vector<const SpirvResourceBinding*>> perSet;
@@ -442,7 +441,7 @@ std::optional<StructuredBufferStorage::Builder> BindBridgeLayout::CreateCBufferS
         }
         auto cbOpt = desc.FindCBufferByName(res.Name);
         if (!cbOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {}", "cannot find cbuffer", res.Name);
+            RADRAY_ERR_LOG("cannot find cbuffer: {}", res.Name);
             return std::nullopt;
         }
         const auto& cb = cbOpt.value().get();
@@ -619,7 +618,7 @@ void BindBridgeLayout::ApplyStaticSamplers(std::span<const BindBridgeStaticSampl
                         }
                         matched = true;
                         if (ss.Samplers.size() != e.BindCount) {
-                            RADRAY_ERR_LOG("{} {} {} {}", "BindBridgeLayout", "static sampler count mismatch", e.Name, e.BindCount);
+                            RADRAY_ERR_LOG("static sampler count mismatch: {} {}", e.Name, e.BindCount);
                             return;
                         }
                         e.StaticSamplers = ss.Samplers;
@@ -628,7 +627,7 @@ void BindBridgeLayout::ApplyStaticSamplers(std::span<const BindBridgeStaticSampl
                 b);
         }
         if (!matched) {
-            RADRAY_ERR_LOG("{} {} {}", "BindBridgeLayout", "static sampler name not found", ss.Name);
+            RADRAY_ERR_LOG("static sampler name not found: {}", ss.Name);
         }
     }
 }
@@ -750,7 +749,7 @@ std::optional<uint32_t> BindBridge::GetBindingId(std::string_view name) const no
 
 bool BindBridge::SetResource(uint32_t id, ResourceView* view, uint32_t arrayIndex) noexcept {
     if (id >= _bindings.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "id");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "id", _bindings.size(), id);
         return false;
     }
     const auto& binding = _bindings[id];
@@ -758,22 +757,22 @@ bool BindBridge::SetResource(uint32_t id, ResourceView* view, uint32_t arrayInde
         [this, view, arrayIndex](const auto& b) noexcept -> bool {
             using T = std::decay_t<decltype(b)>;
             if constexpr (std::is_same_v<T, PushConstBinding>) {
-                RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "push constant");
+                RADRAY_ERR_LOG("cannot SetResource on push constant");
                 return false;
             } else if constexpr (std::is_same_v<T, RootDescriptorBinding>) {
                 if (b.Type == ResourceBindType::Sampler) {
-                    RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "sampler");
+                    RADRAY_ERR_LOG("cannot SetResource on sampler");
                     return false;
                 }
                 this->SetRootDescriptor(b.RootIndex, view);
                 return true;
             } else {
                 if (b.Type == ResourceBindType::Sampler) {
-                    RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "sampler");
+                    RADRAY_ERR_LOG("cannot SetResource on sampler");
                     return false;
                 }
                 if (arrayIndex >= b.BindCount) {
-                    RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "arrayIndex");
+                    RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", b.BindCount, arrayIndex);
                     return false;
                 }
                 this->SetDescriptorSetResource(b.SetIndex, b.ElementIndex, arrayIndex, view);
@@ -786,7 +785,7 @@ bool BindBridge::SetResource(uint32_t id, ResourceView* view, uint32_t arrayInde
 bool BindBridge::SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
     auto idOpt = this->GetBindingId(name);
     if (!idOpt.has_value()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::InvalidArgument, "name");
+        RADRAY_ERR_LOG("cannot find name: {}", name);
         return false;
     }
     return this->SetResource(idOpt.value(), view, arrayIndex);
@@ -827,7 +826,7 @@ StructuredBufferReadOnlyView BindBridge::GetCBuffer(uint32_t id) const noexcept 
 
 void BindBridge::SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
     if (slot >= _rootDescViews.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "slot");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _rootDescViews.size(), slot);
         return;
     }
     _rootDescViews[slot] = view;
@@ -835,17 +834,17 @@ void BindBridge::SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
 
 void BindBridge::SetDescriptorSetResource(uint32_t setIndex, uint32_t elementIndex, uint32_t arrayIndex, ResourceView* view) noexcept {
     if (setIndex >= _descSets.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "setIndex");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "setIndex", _descSets.size(), setIndex);
         return;
     }
     auto& record = _descSets[setIndex];
     if (elementIndex >= record.Bindings.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "elementIndex");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "elementIndex", record.Bindings.size(), elementIndex);
         return;
     }
     auto& binding = record.Bindings[elementIndex];
     if (arrayIndex >= binding.Views.size()) {
-        RADRAY_ERR_LOG("{} {} '{}'", Errors::InvalidOperation, Errors::ArgumentOutOfRange, "arrayIndex");
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding.Views.size(), arrayIndex);
         return;
     }
     binding.Views[arrayIndex] = view;
@@ -959,7 +958,7 @@ bool BindBridge::Upload(Device* device, CBufferArena& arena) noexcept {
             size_t uploadSize = Align(span.size(), alignment);
             auto alloc = arena.Allocate(uploadSize);
             if (!alloc.Target || !alloc.Mapped) {
-                RADRAY_ERR_LOG("{} {}", "BindBridge", "CBufferArena allocation failed");
+                RADRAY_ERR_LOG("CBufferArena allocation failed");
                 return false;
             }
             if (!span.empty()) {
@@ -976,7 +975,7 @@ bool BindBridge::Upload(Device* device, CBufferArena& arena) noexcept {
             viewDesc.Usage = BufferUse::CBuffer;
             auto bvOpt = device->CreateBufferView(viewDesc);
             if (!bvOpt.HasValue()) {
-                RADRAY_ERR_LOG("{} {}", "BindBridge", "CreateBufferView failed");
+                RADRAY_ERR_LOG("Device::CreateBufferView failed");
                 return false;
             }
             auto bv = bvOpt.Release();

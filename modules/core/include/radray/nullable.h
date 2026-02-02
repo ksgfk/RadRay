@@ -7,7 +7,7 @@
 #include <stdexcept>
 
 #include <radray/logger.h>
-#include <radray/utility.h>
+#include <radray/trait.h>
 
 namespace radray {
 

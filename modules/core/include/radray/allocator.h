@@ -2,14 +2,10 @@
 
 #include <bit>
 #include <limits>
-#include <list>
 #include <optional>
 #include <type_traits>
 
-#include <radray/enum_flags.h>
 #include <radray/types.h>
-#include <radray/utility.h>
-#include <radray/logger.h>
 
 namespace radray {
 

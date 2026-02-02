@@ -1,12 +1,6 @@
 #pragma once
 
-#include <exception>
-#include <functional>
-#include <utility>
-#include <vector>
-
-#include <radray/types.h>
-#include <radray/logger.h>
+#include <coroutine>
 
 #include <cppcoro/coroutine.hpp>
 #include <cppcoro/task.hpp>

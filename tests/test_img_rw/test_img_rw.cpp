@@ -18,7 +18,7 @@ TEST(PNG, SimpleLoad) {
     auto filename = GetAssetsPath() / "1735141462310.png";
     std::ifstream file{filename, std::ios::binary};
     ASSERT_TRUE(file.is_open());
-    auto result = radray::LoadPNG(file);
+    auto result = radray::ImageData::LoadPNG(file);
     ASSERT_TRUE(result.has_value());
     radray::ImageData img = std::move(result.value());
     ASSERT_EQ(img.Width, 2560);
@@ -29,7 +29,7 @@ TEST(PNG, ToRGBA8) {
     auto filename = GetAssetsPath() / "1735141462310.png";
     std::ifstream file{filename, std::ios::binary};
     ASSERT_TRUE(file.is_open());
-    auto result = radray::LoadPNG(file);
+    auto result = radray::ImageData::LoadPNG(file);
     ASSERT_TRUE(result.has_value());
     radray::ImageData img = std::move(result.value());
     ASSERT_EQ(img.Width, 2560);

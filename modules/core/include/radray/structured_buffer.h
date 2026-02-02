@@ -4,7 +4,6 @@
 #include <span>
 
 #include <radray/types.h>
-#include <radray/nullable.h>
 #include <radray/basic_math.h>
 #include <radray/logger.h>
 

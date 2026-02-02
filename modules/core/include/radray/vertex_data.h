@@ -1,12 +1,10 @@
 #pragma once
 
-#include <optional>
 #include <span>
 #include <string_view>
 #include <memory>
 
 #include <radray/types.h>
-#include <radray/logger.h>
 #include <radray/basic_math.h>
 
 namespace radray {
@@ -82,10 +80,7 @@ public:
     string Name;
 };
 
-template <class TValueType, class Enable = void>
-struct VertexAttributeTraits {
-    static_assert(false, "Unsupported vertex attribute container type");
-};
+namespace vertex_utility {
 
 template <class Scalar>
 consteval VertexDataType DeduceVertexDataType() {
@@ -104,11 +99,18 @@ consteval VertexDataType DeduceVertexDataType() {
     }
 }
 
+}  // namespace vertex_utility
+
+template <class TValueType, class Enable = void>
+struct VertexAttributeTraits {
+    static_assert(false, "Unsupported vertex attribute container type");
+};
+
 template <class TValueType>
 struct VertexAttributeTraits<TValueType, std::enable_if_t<std::is_arithmetic_v<TValueType>>> {
     using ScalarType = std::remove_cvref_t<TValueType>;
     static constexpr uint16_t ComponentCount = 1;
-    static constexpr VertexDataType Type = DeduceVertexDataType<TValueType>();
+    static constexpr VertexDataType Type = vertex_utility::DeduceVertexDataType<TValueType>();
 };
 
 template <class Scalar, int Rows, int Cols, int Options, int MaxRows, int MaxCols>
@@ -119,8 +121,10 @@ struct VertexAttributeTraits<Eigen::Matrix<Scalar, Rows, Cols, Options, MaxRows,
     static_assert(MatrixT::SizeAtCompileTime != Eigen::Dynamic, "Dynamic-sized Eigen vectors are not supported");
     using ScalarType = Scalar;
     static constexpr uint16_t ComponentCount = static_cast<uint16_t>(MatrixT::SizeAtCompileTime);
-    static constexpr VertexDataType Type = DeduceVertexDataType<Scalar>();
+    static constexpr VertexDataType Type = vertex_utility::DeduceVertexDataType<Scalar>();
 };
+
+namespace vertex_utility {
 
 constexpr uint32_t GetVertexDataSizeInBytes(VertexDataType type, uint16_t componentCount) noexcept {
     switch (type) {
@@ -134,5 +138,7 @@ constexpr uint32_t GetVertexDataSizeInBytes(VertexDataType type, uint16_t compon
             return 0;
     }
 }
+
+}  // namespace vertex_utility
 
 }  // namespace radray

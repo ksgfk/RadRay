@@ -1,11 +1,5 @@
 #include <radray/render/render_utility.h>
 
-#include <cstring>
-#include <bit>
-#include <algorithm>
-
-#include <radray/errors.h>
-#include <radray/basic_math.h>
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
 #endif
@@ -22,7 +16,7 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
         uint32_t wantSize = GetVertexFormatSizeInBytes(want.Format);
         const VertexBufferEntry* found = nullptr;
         for (const auto& l : layouts) {
-            uint32_t preSize = GetVertexDataSizeInBytes(l.Type, l.ComponentCount);
+            uint32_t preSize = vertex_utility::GetVertexDataSizeInBytes(l.Type, l.ComponentCount);
             if (l.Semantic == want.Semantic && l.SemanticIndex == want.SemanticIndex && preSize == wantSize) {
                 found = &l;
                 break;
@@ -44,37 +38,37 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
 Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device_, std::span<const byte> data) noexcept {
 #ifdef RADRAY_ENABLE_D3D12
     if (device_->GetBackend() != RenderBackend::D3D12) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, Errors::InvalidOperation, "device");
+        RADRAY_ERR_LOG("only d3d12 backend supports serialized root signature");
         return nullptr;
     }
     auto device = d3d12::CastD3D12Object(device_);
     d3d12::ComPtr<ID3D12RootSignature> rootSig;
     if (HRESULT hr = device->_device->CreateRootSignature(0, data.data(), data.size(), IID_PPV_ARGS(&rootSig));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12Device", "CreateRootSignature", hr);
+        RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {}", hr);
         return nullptr;
     }
     d3d12::ComPtr<ID3D12VersionedRootSignatureDeserializer> deserializer;
     if (HRESULT hr = ::D3D12CreateVersionedRootSignatureDeserializer(data.data(), data.size(), IID_PPV_ARGS(&deserializer));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "D3D12CreateVersionedRootSignatureDeserializer", d3d12::GetErrorName(hr), hr);
+        RADRAY_ERR_LOG("D3D12CreateVersionedRootSignatureDeserializer failed: {}", hr);
         return nullptr;
     }
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* desc;
     if (HRESULT hr = deserializer->GetRootSignatureDescAtVersion(D3D_ROOT_SIGNATURE_VERSION_1_1, &desc);
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", Errors::D3D12, "ID3D12VersionedRootSignatureDeserializer", "GetRootSignatureDescAtVersion", hr);
+        RADRAY_ERR_LOG("ID3D12VersionedRootSignatureDeserializer::GetRootSignatureDescAtVersion failed: {}", hr);
         return nullptr;
     }
     if (desc->Version != D3D_ROOT_SIGNATURE_VERSION_1_1) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::D3D12, "unknown version", desc->Version);
+        RADRAY_ERR_LOG("unknown root signature version: {}", desc->Version);
         return nullptr;
     }
     auto result = make_unique<d3d12::RootSigD3D12>(device, std::move(rootSig));
     result->_desc = d3d12::VersionedRootSignatureDescContainer{*desc};
     return result;
 #else
-    RADRAY_ERR_LOG("only d3d12 backend supports serialized root signature");
+    RADRAY_ERR_LOG("d3d12 backend is not enabled, cannot create serialized root signature");
     return nullptr;
 #endif
 }

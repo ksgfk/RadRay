@@ -6,7 +6,6 @@
 #include <istream>
 
 #include <radray/types.h>
-#include <radray/logger.h>
 
 namespace radray {
 
@@ -32,7 +31,11 @@ enum class ImageFormat {
     RGB16_USHORT  // 6
 };
 
-size_t GetImageFormatSize(ImageFormat format) noexcept;
+class PNGLoadSettings {
+public:
+    std::optional<uint32_t> AddAlphaIfRGB;
+    bool IsFlipY{false};
+};
 
 class ImageData {
 public:
@@ -49,21 +52,17 @@ public:
     ImageData RGB8ToRGBA8(uint8_t alpha) const noexcept;
     void FlipY() noexcept;
 
+    friend void swap(ImageData& a, ImageData& b) noexcept;
+
+    static size_t FormatSize(ImageFormat format) noexcept;
+    static bool IsPNG(std::istream& stream);
+    static std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
+
     unique_ptr<byte[]> Data{};
     uint32_t Width{0};
     uint32_t Height{0};
     ImageFormat Format{ImageFormat::R8_BYTE};
 };
-
-#ifdef RADRAY_ENABLE_PNG
-class PNGLoadSettings {
-public:
-    std::optional<uint32_t> AddAlphaIfRGB;
-    bool IsFlipY{false};
-};
-bool IsPNG(std::istream& stream);
-std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
-#endif
 
 std::string_view format_as(ImageFormat val) noexcept;
 

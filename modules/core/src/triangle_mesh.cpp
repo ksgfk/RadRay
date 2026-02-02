@@ -1,13 +1,9 @@
 #include <radray/triangle_mesh.h>
 
-#include <new>
-#include <numbers>
-#include <limits>
 #include <type_traits>
 #include <utility>
 #include <cstring>
 
-#include <radray/errors.h>
 #include <radray/vertex_data.h>
 
 namespace radray {

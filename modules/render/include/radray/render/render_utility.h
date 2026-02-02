@@ -1,7 +1,6 @@
 #pragma once
 
 #include <radray/vertex_data.h>
-
 #include <radray/render/common.h>
 
 namespace radray::render {

@@ -1,7 +1,7 @@
 #include <radray/platform.h>
 
-#include <radray/errors.h>
 #include <radray/logger.h>
+#include <radray/text_encoding.h>
 
 namespace radray {
 
@@ -44,6 +44,9 @@ bool DynamicLibrary::IsValid() const noexcept {
 #endif
 #ifndef _WINDOWS
 #define _WINDOWS
+#endif
+#ifndef UNICODE
+#define UNICODE
 #endif
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
@@ -93,11 +96,15 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     } else {
         name = string{name_} + ".dll";
     }
-    HMODULE m = ::LoadLibraryA(name.c_str());
-    if (m == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", _Win32LastErrMessage());
+    auto nameW = text_encoding::ToWideChar(name);
+    if (nameW.has_value()) {
+        HMODULE m = ::LoadLibraryW(nameW->c_str());
+        if (m == nullptr) {
+            RADRAY_ERR_LOG("LoadLibraryW failed: {}", _Win32LastErrMessage());
+        } else {
+            _handle = m;
+        }
     }
-    _handle = m;
 }
 
 DynamicLibrary::~DynamicLibrary() noexcept {
@@ -107,8 +114,8 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
-    if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, _Win32LastErrMessage(), name_);
+    if (symbol == nullptr) {
+        RADRAY_ERR_LOG("GetProcAddress failed: {}", _Win32LastErrMessage());
     }
     return std::bit_cast<void*>(symbol);
 }
@@ -166,7 +173,7 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 #endif
     auto h = dlopen(name.c_str(), RTLD_LAZY);
     if (h == nullptr) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", dlerror());
+        RADRAY_ERR_LOG("dlopen failed: {}", dlerror());
     }
     _handle = h;
 }
@@ -178,8 +185,8 @@ DynamicLibrary::~DynamicLibrary() noexcept {
 void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
     string name{name_};
     auto symbol = dlsym(_handle, name.c_str());
-    if (symbol == nullptr) [[unlikely]] {
-        RADRAY_ERR_LOG("{} {} {}", Errors::InvalidOperation, "name", dlerror());
+    if (symbol == nullptr) {
+        RADRAY_ERR_LOG("dlsym failed: {}", dlerror());
     }
     return symbol;
 }
@@ -201,7 +208,7 @@ string FormatLastErrorMessageWin32() noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
     return _Win32LastErrMessage();
 #else
-    RADRAY_ERR_LOG("{}", Errors::UnsupportedPlatform);
+    RADRAY_ERR_LOG("unsupported platform");
     return "";
 #endif
 }

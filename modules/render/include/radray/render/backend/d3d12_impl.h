@@ -2,8 +2,6 @@
 
 #ifdef RADRAY_ENABLE_D3D12
 
-#include <utility>
-
 #include <radray/allocator.h>
 #include <radray/platform.h>
 

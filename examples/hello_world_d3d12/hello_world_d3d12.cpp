@@ -3,7 +3,6 @@
 
 #include <radray/logger.h>
 #include <radray/stopwatch.h>
-#include <radray/utility.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
 #include <radray/window/native_window.h>

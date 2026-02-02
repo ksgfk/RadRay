@@ -1,11 +1,20 @@
 #include <radray/imgui/imgui_app.h>
 
-#include <radray/errors.h>
-
 #ifdef RADRAY_PLATFORM_WINDOWS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WINDOWS
+#define _WINDOWS
+#endif
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#include <windows.h>
 #include <imgui_impl_win32.h>
-#include <radray/render/backend/d3d12_impl.h>
-#include <radray/render/backend/vulkan_impl.h>
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);
 #endif
@@ -84,7 +93,7 @@ ImGuiRenderer::ImGuiRenderer(
         render::ShaderDescriptor descPS{GetImGuiShaderSPIRV_PS(), render::ShaderBlobCategory::SPIRV};
         shaderPS = device->CreateShader(descPS).Unwrap();
     } else {
-        throw ImGuiApplicationException("{} {} {}", Errors::RADRAYIMGUI, Errors::UnsupportedPlatform, backendType);
+        throw ImGuiApplicationException("unsupported backend {}", backendType);
     }
     render::SamplerDescriptor sampler{
         render::AddressMode::ClampToEdge,
@@ -465,7 +474,7 @@ void ImGuiApplication::Destroy() noexcept {
         try {
             _renderThread->join();
         } catch (...) {
-            RADRAY_ERR_LOG("{} {}", Errors::RADRAYIMGUI, "fail join render thread");
+            RADRAY_ERR_LOG("join render thread failed");
         }
     }
 
@@ -540,7 +549,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     _window = CreateNativeWindow(desc).Unwrap();
 #endif
     if (!_window) {
-        throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create window");
+        throw ImGuiApplicationException("create window failed");
     }
     _resizedConn = _window->EventResized().connect(&ImGuiApplication::OnResized, this);
     _resizingConn = _window->EventResizing().connect(&ImGuiApplication::OnResizing, this);
@@ -554,7 +563,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     {
         WindowNativeHandler wnh = _window->GetNativeHandler();
         if (wnh.Type != WindowHandlerTag::HWND) {
-            throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "unknown window handler type");
+            throw ImGuiApplicationException("unknown window handler type");
         }
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::StyleColorsDark();
@@ -595,7 +604,7 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
         _device = CreateDevice(devDesc).Unwrap();
     }
     if (!_device) {
-        throw ImGuiApplicationException("{}: {}", Errors::RADRAYIMGUI, "fail create device");
+        throw ImGuiApplicationException("create device failed");
     }
     _cmdQueue = _device->GetCommandQueue(render::QueueType::Direct, 0).Unwrap();
     this->RecreateSwapChain();
@@ -1097,7 +1106,7 @@ ImGuiAppConfig ImGuiApplication::ParseArgsSimple(int argc, char** argv) noexcept
             } else if (backendStr == "d3d12") {
                 backend = radray::render::RenderBackend::D3D12;
             } else {
-                RADRAY_WARN_LOG("Unsupported backend: {}, using default Vulkan backend.", backendStr);
+                RADRAY_WARN_LOG("unsupported backend: {}, using default Vulkan backend.", backendStr);
             }
         }
     }

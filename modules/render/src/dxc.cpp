@@ -1,6 +1,9 @@
 #include <radray/render/dxc.h>
 
-#include <radray/errors.h>
+#include <utility>
+
+#include <radray/utility.h>
+#include <radray/text_encoding.h>
 
 namespace radray::render {
 
@@ -235,7 +238,7 @@ std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc
                 if (srcRes.Type == HlslShaderInputType::CBUFFER) {
                     auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
                     if (!cbDescOpt) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find cbuffer data during merge", srcRes.Name);
+                        RADRAY_ERR_LOG("cannot find cbuffer data during merge: {}", srcRes.Name);
                         return std::nullopt;
                     }
                     const auto& srcCb = cbDescOpt.value().get();
@@ -252,23 +255,23 @@ std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc
                 }
             } else {
                 if (srcRes != *it) {
-                    RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "resource mismatch during merge", srcRes.Name);
+                    RADRAY_ERR_LOG("resource mismatch during merge: {}", srcRes.Name);
                     return std::nullopt;
                 }
                 it->Stages |= srcDesc.Stages;
                 if (srcRes.Type == HlslShaderInputType::CBUFFER) {
                     auto cbDescOpt = srcDesc.FindCBufferByName(srcRes.Name);
                     if (!cbDescOpt.has_value()) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find cbuffer data during merge", srcRes.Name);
+                        RADRAY_ERR_LOG("cannot find cbuffer data during merge: {}", srcRes.Name);
                         return std::nullopt;
                     }
                     auto resCbDescOpt = dstDesc.FindCBufferByName(it->Name);
                     if (!resCbDescOpt.has_value()) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cannot find merged cbuffer data during merge", srcRes.Name);
+                        RADRAY_ERR_LOG("cannot find merged cbuffer data during merge: {}", srcRes.Name);
                         return std::nullopt;
                     }
                     if (!IsHlslShaderBufferEqual(srcDesc, cbDescOpt.value().get(), dstDesc, resCbDescOpt.value().get())) {
-                        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "cbuffer mismatch during merge", srcRes.Name);
+                        RADRAY_ERR_LOG("cbuffer mismatch during merge: {}", srcRes.Name);
                         return std::nullopt;
                     }
                 }
@@ -296,6 +299,9 @@ std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc
 #endif
 #ifndef _WINDOWS
 #define _WINDOWS
+#endif
+#ifndef UNICODE
+#define UNICODE
 #endif
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
@@ -563,7 +569,7 @@ private:
 };
 #endif
 
-class DxcImpl : public Dxc::Impl, public Noncopyable {
+class DxcImpl : public Dxc::Impl {
 public:
     class ArgsData {
     public:
@@ -597,7 +603,10 @@ public:
           _utils(std::move(utils)),
           _inc(std::move(inc)) {
     }
-
+    DxcImpl(const DxcImpl&) = delete;
+    DxcImpl& operator=(const DxcImpl&) = delete;
+    DxcImpl(DxcImpl&&) = delete;
+    DxcImpl& operator=(DxcImpl&&) = delete;
     ~DxcImpl() noexcept override = default;
 
     ArgsData ParseArgs(std::span<std::string_view> args) noexcept {
@@ -621,9 +630,9 @@ public:
         vector<wstring> wargs;
         wargs.reserve(args.size());
         for (auto i : args) {
-            auto w = ToWideChar(i);
+            auto w = text_encoding::ToWideChar(i);
             if (!w.has_value()) {
-                RADRAY_ERR_LOG("{} {}", Errors::DXC, i);
+                RADRAY_ERR_LOG("arg convert error: {}", i);
                 return Nullable<ComPtr<IDxcResult>>{nullptr};
             }
             wargs.emplace_back(std::move(w.value()));
@@ -642,7 +651,7 @@ public:
                 _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
+            RADRAY_ERR_LOG("IDxcCompiler3::Compile failed: {}", hr);
             return Nullable<ComPtr<IDxcResult>>{nullptr};
         }
         return Nullable<ComPtr<IDxcResult>>{std::move(compileResult)};
@@ -652,7 +661,7 @@ public:
         CompileStateData result{};
         if (HRESULT hr = compileResult->GetStatus(&result.Status);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
+            RADRAY_ERR_LOG("IDxcResult::GetStatus failed: {}", hr);
             result.Status = hr;
             return result;
         }
@@ -660,7 +669,7 @@ public:
         if (compileResult->HasOutput(DXC_OUT_ERRORS)) {
             if (HRESULT hr = compileResult->GetErrorBuffer(&errBuffer);
                 FAILED(hr)) {
-                RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
+                RADRAY_ERR_LOG("IDxcResult::GetErrorBuffer failed: {}", hr);
                 errBuffer = nullptr;
             }
         }
@@ -674,7 +683,7 @@ public:
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetResult(&blob);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
+            RADRAY_ERR_LOG("IDxcResult::GetResult failed: {}", hr);
             return {};
         }
         auto blobStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
@@ -685,7 +694,7 @@ public:
         ComPtr<IDxcBlob> blob;
         if (HRESULT hr = compileResult->GetOutput(kind, IID_PPV_ARGS(&blob), nullptr);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, hr);
+            RADRAY_ERR_LOG("IDxcResult::GetOutput failed: {}", hr);
             return {};
         }
         auto reflStart = std::bit_cast<byte const*>(blob->GetBufferPointer());
@@ -703,7 +712,7 @@ public:
         }
         auto [status, errMsg] = GetCompileState(compileResult.Get());
         if (!errMsg.empty()) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, "compile message");
+            RADRAY_ERR_LOG("dxc compile message");
             RADRAY_ERR_LOG("{}", errMsg);
         }
         if (FAILED(status)) {
@@ -721,12 +730,12 @@ public:
         if (compileResult->HasOutput(DXC_OUT_REFLECTION_RADRAY)) {
             radrayReflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION_RADRAY);
         } else {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, "no radray ext reflection data");
+            RADRAY_ERR_LOG("dxc no radray ext reflection data");
             return std::nullopt;
         }
         auto reflExtOpt = DeserializeDxcReflectionRadrayExt(radrayReflData);
         if (!reflExtOpt.has_value()) {
-            RADRAY_ERR_LOG("{} {}", Errors::DXC, "no radray ext reflection data");
+            RADRAY_ERR_LOG("dxc no radray ext reflection data");
             return std::nullopt;
         }
         auto argsData = ParseArgs(args);
@@ -748,13 +757,13 @@ public:
         ComPtr<ID3D12ShaderReflection> sr;
         if (HRESULT hr = _utils->CreateReflection(&buf, IID_PPV_ARGS(&sr));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "IDxcUtils", "CreateReflection", hr);
+            RADRAY_ERR_LOG("IDxcUtils::CreateReflection failed: {}", hr);
             return std::nullopt;
         }
         D3D12_SHADER_DESC shaderDesc{};
         if (HRESULT hr = sr->GetDesc(&shaderDesc);
             FAILED(hr)) {
-            RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "ID3D12ShaderReflection", "GetDesc", hr);
+            RADRAY_ERR_LOG("ID3D12ShaderReflection::GetDesc failed: {}", hr);
             return std::nullopt;
         }
 
@@ -853,14 +862,14 @@ public:
                 return bind.Name == cb.Name;
             });
             if (bindIt == result.BoundResources.end()) {
-                RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "failed to find bound resource for cbuffer", cb.Name);
+                RADRAY_ERR_LOG("dxc failed to find bound resource for cbuffer: {}", cb.Name);
                 return std::nullopt;
             }
             auto extIt = std::find_if(ext.CBuffers.begin(), ext.CBuffers.end(), [&](const DxcReflectionRadrayExtCBuffer& extCb) {
                 return extCb.BindPoint == bindIt->BindPoint && extCb.Space == bindIt->Space;
             });
             if (extIt == ext.CBuffers.end()) {
-                RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "no radray ext reflection data for cbuffer", cb.Name);
+                RADRAY_ERR_LOG("dxc no radray ext reflection data for cbuffer: {}", cb.Name);
                 return std::nullopt;
             }
             cb.IsViewInHlsl = extIt->IsViewInHlsl;
@@ -906,35 +915,46 @@ public:
 
 Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
     DynamicLibrary dxcDll{"dxcompiler"};
+    if (!dxcDll.IsValid()) {
+        return nullptr;
+    }
     DynamicLibrary dxilDll{"dxil"};
+    if (!dxilDll.IsValid()) {
+        return nullptr;
+    }
     auto DxcCreateInstance2F = dxcDll.GetFunction<DxcCreateInstance2Proc>("DxcCreateInstance2");
+    if (!DxcCreateInstance2F) {
+        return nullptr;
+    }
     auto DxcCreateInstanceF = dxcDll.GetFunction<DxcCreateInstanceProc>("DxcCreateInstance");
-
+    if (!DxcCreateInstanceF) {
+        return nullptr;
+    }
     ComPtr<IDxcCompiler3> dxc;
 #if RADRAY_ENABLE_MIMALLOC
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
     if (HRESULT hr = DxcCreateInstance2F(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance2", hr);
+        RADRAY_ERR_LOG("DxcCreateInstance2 failed: {}", hr);
         return nullptr;
     }
 #else
     if (HRESULT hr = DxcCreateInstanceF(CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
+        RADRAY_ERR_LOG("DxcCreateInstance failed: {}", hr);
         return nullptr;
     }
 #endif
     ComPtr<IDxcUtils> utils;
     if (HRESULT hr = DxcCreateInstanceF(CLSID_DxcUtils, IID_PPV_ARGS(&utils));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {} {}", Errors::DXC, "DxcCreateInstance", hr);
+        RADRAY_ERR_LOG("DxcCreateInstance failed: {}", hr);
         return nullptr;
     }
     ComPtr<IDxcIncludeHandler> incHandler;
     if (HRESULT hr = utils->CreateDefaultIncludeHandler(&incHandler);
         FAILED(hr)) {
-        RADRAY_ERR_LOG("{} {}::{} {}", Errors::DXC, "IDxcUtils", "CreateDefaultIncludeHandler", hr);
+        RADRAY_ERR_LOG("DxcUtils::CreateDefaultIncludeHandler failed: {}", hr);
         return nullptr;
     }
     auto implPtr = make_unique<DxcImpl>(
