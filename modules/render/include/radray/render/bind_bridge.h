@@ -98,6 +98,11 @@ public:
 class BindBridge {
 public:
     BindBridge(Device* device, RootSignature* rootSig, const BindBridgeLayout& layout);
+    BindBridge(const BindBridge&) = delete;
+    BindBridge& operator=(const BindBridge&) = delete;
+    BindBridge(BindBridge&&) noexcept = default;
+    BindBridge& operator=(BindBridge&&) noexcept = default;
+    ~BindBridge() noexcept = default;
 
     std::optional<uint32_t> GetBindingId(std::string_view name) const noexcept;
     bool SetResource(uint32_t id, ResourceView* view, uint32_t arrayIndex = 0) noexcept;
@@ -108,9 +113,11 @@ public:
     StructuredBufferView GetCBuffer(uint32_t id) noexcept;
     StructuredBufferReadOnlyView GetCBuffer(uint32_t id) const noexcept;
 
-    bool Upload(Device* device, CBufferArena& arena) noexcept;
+    void Bind(CommandEncoder* encoder) const;
 
-    void Bind(CommandEncoder* encoder) const noexcept;
+    bool Upload(Device* device, CBufferArena& arena);
+
+    void Clear();
 
 private:
     struct PushConstBinding {
@@ -147,15 +154,21 @@ private:
         unique_ptr<DescriptorSet> OwnedSet{};
     };
 
-    void SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept;
+    struct RootDescriptorView {
+        Buffer* Buffer{nullptr};
+        uint64_t Offset{0};
+        uint64_t Size{0};
+    };
+
+    void SetRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept;
     void SetDescriptorSetResource(uint32_t setIndex, uint32_t elementIndex, uint32_t arrayIndex, ResourceView* view) noexcept;
 
-    vector<ResourceView*> _rootDescViews;
+    vector<RootDescriptorView> _rootDescViews;
     vector<DescSetRecord> _descSets;
     StructuredBufferStorage _cbStorage;
     vector<BindingLocator> _bindings;
+    vector<unique_ptr<BufferView>> _ownedCBufferViews;
     unordered_map<string, uint32_t> _nameToBindingId;
-    vector<unique_ptr<BufferView>> _ownedCBufferViews{};
 };
 
 }  // namespace radray::render

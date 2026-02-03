@@ -689,7 +689,7 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
             },
             b);
     }
-    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, nullptr);
+    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
 
     unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
     uint32_t maxSetIndex = 0;
@@ -760,12 +760,8 @@ bool BindBridge::SetResource(uint32_t id, ResourceView* view, uint32_t arrayInde
                 RADRAY_ERR_LOG("cannot SetResource on push constant");
                 return false;
             } else if constexpr (std::is_same_v<T, RootDescriptorBinding>) {
-                if (b.Type == ResourceBindType::Sampler) {
-                    RADRAY_ERR_LOG("cannot SetResource on sampler");
-                    return false;
-                }
-                this->SetRootDescriptor(b.RootIndex, view);
-                return true;
+                RADRAY_ERR_LOG("cannot SetResource on root descriptor");
+                return false;
             } else {
                 if (b.Type == ResourceBindType::Sampler) {
                     RADRAY_ERR_LOG("cannot SetResource on sampler");
@@ -824,12 +820,12 @@ StructuredBufferReadOnlyView BindBridge::GetCBuffer(uint32_t id) const noexcept 
     return StructuredBufferReadOnlyView{&_cbStorage, cbId};
 }
 
-void BindBridge::SetRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+void BindBridge::SetRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
     if (slot >= _rootDescViews.size()) {
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _rootDescViews.size(), slot);
         return;
     }
-    _rootDescViews[slot] = view;
+    _rootDescViews[slot] = RootDescriptorView{buffer, offset, size};
 }
 
 void BindBridge::SetDescriptorSetResource(uint32_t setIndex, uint32_t elementIndex, uint32_t arrayIndex, ResourceView* view) noexcept {
@@ -850,7 +846,7 @@ void BindBridge::SetDescriptorSetResource(uint32_t setIndex, uint32_t elementInd
     binding.Views[arrayIndex] = view;
 }
 
-void BindBridge::Bind(CommandEncoder* encoder) const noexcept {
+void BindBridge::Bind(CommandEncoder* encoder) const {
     if (!encoder) {
         return;
     }
@@ -878,10 +874,12 @@ void BindBridge::Bind(CommandEncoder* encoder) const noexcept {
         }
     }
 
-    for (size_t i = 0; i < _rootDescViews.size(); i++) {
-        if (_rootDescViews[i]) {
-            encoder->BindRootDescriptor(static_cast<uint32_t>(i), _rootDescViews[i]);
+    for (size_t i = 0; i < _rootDescViews.size(); ++i) {
+        const auto& rootView = _rootDescViews[i];
+        if (rootView.Buffer == nullptr) {
+            continue;
         }
+        encoder->BindRootDescriptor(static_cast<uint32_t>(i), rootView.Buffer, rootView.Offset, rootView.Size);
     }
 
     for (size_t si = 0; si < _descSets.size(); si++) {
@@ -906,9 +904,8 @@ void BindBridge::Bind(CommandEncoder* encoder) const noexcept {
     }
 }
 
-bool BindBridge::Upload(Device* device, CBufferArena& arena) noexcept {
+bool BindBridge::Upload(Device* device, CBufferArena& arena) {
     auto& storage = _cbStorage;
-
     _ownedCBufferViews.clear();
     uint32_t alignment = device->GetDetail().CBufferAlignment;
     if (alignment == 0) {
@@ -916,74 +913,75 @@ bool BindBridge::Upload(Device* device, CBufferArena& arena) noexcept {
     }
     for (uint32_t id = 0; id < _bindings.size(); ++id) {
         const auto& binding = _bindings[id];
-        struct UploadInfo {
-            bool Valid{false};
-            ResourceBindType Type{ResourceBindType::UNKNOWN};
-            uint32_t BindCount{0};
-        };
-        UploadInfo info = std::visit(
-            [](const auto& b) noexcept -> UploadInfo {
-                using T = std::decay_t<decltype(b)>;
-                if constexpr (std::is_same_v<T, RootDescriptorBinding>) {
-                    return UploadInfo{true, b.Type, 1};
-                } else if constexpr (std::is_same_v<T, DescriptorSetBindingInfo>) {
-                    return UploadInfo{true, b.Type, b.BindCount};
-                } else {
-                    return UploadInfo{};
-                }
-            },
-            binding);
-        if (!info.Valid || info.Type != ResourceBindType::CBuffer) {
-            continue;
-        }
-        uint32_t bindCount = info.BindCount;
-        if (bindCount == 0) {
-            bindCount = 1;
-        }
-        auto rootView = this->GetCBuffer(id);
-        if (!rootView) {
-            continue;
-        }
-        for (uint32_t arrayIndex = 0; arrayIndex < bindCount; ++arrayIndex) {
-            StructuredBufferView view = rootView;
-            if (rootView.GetSelf().GetArraySize() > 0) {
-                view = rootView.GetArrayElement(arrayIndex);
-            } else if (arrayIndex > 0) {
+        if (std::holds_alternative<RootDescriptorBinding>(binding)) {
+            const auto& b = std::get<RootDescriptorBinding>(binding);
+            if (b.Type != ResourceBindType::CBuffer) {
                 continue;
             }
-            if (!view) {
+            auto rootView = this->GetCBuffer(id);
+            if (!rootView) {
                 continue;
             }
-            auto span = storage.GetSpan(view.GetId(), view.GetArrayIndex());
+            auto span = storage.GetSpan(rootView.GetId(), rootView.GetArrayIndex());
+            if (span.empty()) {
+                continue;
+            }
             size_t uploadSize = Align(span.size(), alignment);
             auto alloc = arena.Allocate(uploadSize);
-            if (!alloc.Target || !alloc.Mapped) {
-                RADRAY_ERR_LOG("CBufferArena allocation failed");
-                return false;
+            std::memcpy(alloc.Mapped, span.data(), span.size());
+            this->SetRootDescriptor(b.RootIndex, alloc.Target, alloc.Offset, uploadSize);
+        } else if (std::holds_alternative<DescriptorSetBindingInfo>(binding)) {
+            const auto& b = std::get<DescriptorSetBindingInfo>(binding);
+            if (b.Type != ResourceBindType::CBuffer) {
+                continue;
             }
-            if (!span.empty()) {
+            uint32_t bindCount = b.BindCount;
+            auto rootView = this->GetCBuffer(id);
+            if (!rootView) {
+                continue;
+            }
+            for (uint32_t arrayIndex = 0; arrayIndex < bindCount; ++arrayIndex) {
+                StructuredBufferView view = rootView;
+                if (rootView.GetSelf().GetArraySize() > 0) {
+                    view = rootView.GetArrayElement(arrayIndex);
+                } else if (arrayIndex > 0) {
+                    continue;
+                }
+                auto span = storage.GetSpan(view.GetId(), view.GetArrayIndex());
+                if (span.empty()) {
+                    continue;
+                }
+                size_t uploadSize = Align(span.size(), alignment);
+                auto alloc = arena.Allocate(uploadSize);
                 std::memcpy(alloc.Mapped, span.data(), span.size());
+                BufferViewDescriptor viewDesc{
+                    alloc.Target,
+                    BufferRange{alloc.Offset, uploadSize},
+                    0,
+                    TextureFormat::UNKNOWN,
+                    BufferUse::CBuffer};
+                auto bvOpt = device->CreateBufferView(viewDesc);
+                if (!bvOpt.HasValue()) {
+                    RADRAY_ERR_LOG("Device::CreateBufferView failed");
+                    return false;
+                }
+                auto bv = bvOpt.Release();
+                _ownedCBufferViews.emplace_back(std::move(bv));
+                this->SetResource(id, _ownedCBufferViews.back().get(), arrayIndex);
             }
-            if (uploadSize > span.size()) {
-                std::memset(static_cast<byte*>(alloc.Mapped) + span.size(), 0, uploadSize - span.size());
-            }
-            BufferViewDescriptor viewDesc{};
-            viewDesc.Target = alloc.Target;
-            viewDesc.Range = BufferRange{alloc.Offset, uploadSize};
-            viewDesc.Stride = 0;
-            viewDesc.Format = TextureFormat::UNKNOWN;
-            viewDesc.Usage = BufferUse::CBuffer;
-            auto bvOpt = device->CreateBufferView(viewDesc);
-            if (!bvOpt.HasValue()) {
-                RADRAY_ERR_LOG("Device::CreateBufferView failed");
-                return false;
-            }
-            auto bv = bvOpt.Release();
-            _ownedCBufferViews.emplace_back(std::move(bv));
-            this->SetResource(id, _ownedCBufferViews.back().get(), arrayIndex);
         }
     }
     return true;
+}
+
+void BindBridge::Clear() {
+    _rootDescViews.clear();
+    for (auto& record : _descSets) {
+        for (auto& binding : record.Bindings) {
+            std::fill(binding.Views.begin(), binding.Views.end(), nullptr);
+        }
+    }
+    _ownedCBufferViews.clear();
 }
 
 }  // namespace radray::render

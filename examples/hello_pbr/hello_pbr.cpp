@@ -13,12 +13,12 @@ using namespace radray;
 
 const char* RADRAY_APP_NAME = "PBR Example";
 
-class DrawData {
+class DrawMeshData {
 public:
     render::RootSignature* _rs;
-    render::PipelineState* _pso;
-    render::VertexBufferView _vbv;
-    render::IndexBufferView _ibv;
+    render::GraphicsPipelineState* _pso;
+    render::BindBridge* _bind;
+    render::RenderMesh* _mesh;
 };
 
 class Frame {
@@ -37,8 +37,11 @@ public:
     }
 
     unique_ptr<render::CommandBuffer> _cmdBuffer;
+    unique_ptr<render::Texture> _depthStencil;
+    unique_ptr<render::TextureView> _dsv;
+    render::TextureUse _dsvUsage;
     render::CBufferArena _cbArena;
-    vector<DrawData> _drawDatas;
+    vector<DrawMeshData> _drawDatas;
 };
 
 class HelloPBRApp : public ImGuiApplication {
@@ -46,13 +49,216 @@ public:
     HelloPBRApp() = default;
     ~HelloPBRApp() noexcept override = default;
 
+    void OnStart(const ImGuiAppConfig& config_) override {
+        auto config = config_;
+        if (config.Backend == render::RenderBackend::Vulkan) {
+            render::VulkanCommandQueueDescriptor queueDesc[] = {
+                {render::QueueType::Direct, 1},
+                {render::QueueType::Copy, 1}};
+            render::VulkanDeviceDescriptor devDesc{};
+            devDesc.Queues = queueDesc;
+            config.DeviceDesc = devDesc;
+        }
+        this->Init(config);
+
+        _dxc = render::CreateDxc().Unwrap();
+        _frames.reserve(_inFlightFrameCount);
+        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+            _frames.emplace_back(make_unique<Frame>(_device.get(), _cmdQueue));
+        }
+        this->OnRecreateSwapChain();
+
+        auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
+        _gpuUploader = std::make_unique<render::GpuUploader>(_device.get(), copyQueue);
+
+        LoadAsync();
+    }
+
+    void OnDestroy() noexcept override {
+        _gpuUploader.reset();
+
+        _dxc.reset();
+
+        _binds.clear();
+        _renderMesh.reset();
+        _pso.reset();
+        _rs.reset();
+
+        _frames.clear();
+    }
+
+    void OnImGui() override {
+        _monitor.OnImGui();
+    }
+
+    void OnUpdate() override {
+        _fps.OnUpdate();
+        _monitor.SetData(_fps);
+
+        _gpuUploader->Submit();
+        _gpuUploader->Tick();
+    }
+
+    void OnExtractDrawData(uint32_t frameIndex) override {
+        ImGuiApplication::OnExtractDrawData(frameIndex);
+
+        auto& frame = _frames[frameIndex];
+        auto& cbArena = frame->_cbArena;
+        if (_ready) {
+            Eigen::Vector2i rtSize = this->GetRTSize();
+            Eigen::Matrix4f view = LookAt(_camRot, _camPos);
+            Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)rtSize.x() / rtSize.y(), _camNear, _camFar);
+            Eigen::Matrix4f model = (Eigen::Translation3f{_modelPos} * _modelRot.toRotationMatrix() * Eigen::AlignedScaling3f{_modelScale}).matrix();
+            Eigen::Matrix4f modelInv = model.inverse();
+            Eigen::Matrix4f vp = proj * view;
+            Eigen::Matrix4f mvp = vp * model;
+            auto bind = _binds[frameIndex].get();
+            bind->GetCBuffer("_Obj").GetVar("model").SetValue(model);
+            bind->GetCBuffer("_Obj").GetVar("mvp").SetValue(mvp);
+            bind->GetCBuffer("_Obj").GetVar("modelInv").SetValue(modelInv);
+            bind->Upload(_device.get(), cbArena);
+            auto& drawData = frame->_drawDatas.emplace_back();
+            drawData._rs = _rs.get();
+            drawData._pso = _pso.get();
+            drawData._bind = bind;
+            drawData._mesh = _renderMesh.get();
+        }
+    }
+
+    vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
+        auto& frame = _frames[frameIndex];
+        auto cmdBuffer = frame->_cmdBuffer.get();
+        // auto& cbArena = frame->_cbArena;
+
+        _fps.OnRender();
+
+        auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
+        auto rt = _backBuffers[currBackBufferIndex];
+        auto rtView = this->GetDefaultRTV(currBackBufferIndex);
+
+        cmdBuffer->Begin();
+        _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
+        {
+            render::BarrierTextureDescriptor barriers[] = {
+                {rt,
+                 render::TextureUse::Uninitialized,
+                 render::TextureUse::RenderTarget},
+                {frame->_depthStencil.get(),
+                 frame->_dsvUsage,
+                 render::TextureUse::DepthStencilWrite}};
+            cmdBuffer->ResourceBarrier({}, barriers);
+            frame->_dsvUsage = render::TextureUse::DepthStencilWrite;
+        }
+        unique_ptr<render::CommandEncoder> pass;
+        {
+            render::RenderPassDescriptor rpDesc{};
+            render::ColorAttachment rtAttach{
+                rtView,
+                render::LoadAction::Clear,
+                render::StoreAction::Store,
+                render::ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f}};
+            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+            render::DepthStencilAttachment dsAttach{
+                frame->_dsv.get(),
+                render::LoadAction::Clear,
+                render::StoreAction::Discard,
+                render::LoadAction::DontCare,
+                render::StoreAction::Discard,
+                {1.0f, 0}};
+            rpDesc.DepthStencilAttachment = dsAttach;
+            pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        }
+        Eigen::Vector2i rtSize = this->GetRTSize();
+        Viewport viewport{0.0f, 0.0f, (float)rtSize.x(), (float)rtSize.y(), 0.0f, 1.0f};
+        if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+            viewport.Y = (float)rtSize.y();
+            viewport.Height = -(float)rtSize.y();
+        }
+        pass->SetViewport(viewport);
+        pass->SetScissor({0, 0, (uint32_t)rtSize.x(), (uint32_t)rtSize.y()});
+        for (auto& drawData : frame->_drawDatas) {
+            pass->BindRootSignature(drawData._rs);
+            pass->BindGraphicsPipelineState(drawData._pso);
+            drawData._bind->Bind(pass.get());
+            for (const auto& meshDraw : drawData._mesh->_drawDatas) {
+                auto vbv = meshDraw.Vbv;
+                pass->BindVertexBuffer(std::span{&vbv, 1});
+                auto ibv = meshDraw.Ibv;
+                pass->BindIndexBuffer(ibv);
+                uint64_t ibSize = ibv.Target->GetDesc().Size;
+                uint64_t offset = ibv.Offset;
+                uint64_t count = (ibSize > offset) ? ((ibSize - offset) / ibv.Stride) : 0;
+                pass->DrawIndexed(static_cast<uint32_t>(count), 1, 0, 0, 0);
+            }
+        }
+        cmdBuffer->EndRenderPass(std::move(pass));
+        {
+            render::RenderPassDescriptor rpDesc{};
+            render::ColorAttachment rtAttach{
+                rtView,
+                render::LoadAction::Load,
+                render::StoreAction::Store,
+                render::ColorClearValue{}};
+            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
+            pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
+        }
+        _imguiRenderer->OnRender(frameIndex, pass.get());
+        cmdBuffer->EndRenderPass(std::move(pass));
+        {
+            render::BarrierTextureDescriptor barrier{
+                rt,
+                render::TextureUse::RenderTarget,
+                render::TextureUse::Present};
+            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+        }
+        cmdBuffer->End();
+        return {cmdBuffer};
+    }
+
+    void OnRenderComplete(uint32_t frameIndex) override {
+        ImGuiApplication::OnRenderComplete(frameIndex);
+
+        auto& frame = _frames[frameIndex];
+        frame->_drawDatas.clear();
+        frame->_cbArena.Reset();
+    }
+
+    void OnRecreateSwapChain() override {
+        for (size_t i = 0; i < _frames.size(); i++) {
+            auto frame = _frames[i].get();
+            frame->_depthStencil.reset();
+            frame->_dsv.reset();
+            string dsName = format("DepthStencil_{}", i);
+            render::TextureDescriptor dsDesc{
+                render::TextureDimension::Dim2D,
+                (uint32_t)_rtWidth,
+                (uint32_t)_rtHeight,
+                1,
+                1,
+                1,
+                render::TextureFormat::D32_FLOAT,
+                render::TextureUse::DepthStencilWrite,
+                render::ResourceHint::None,
+                dsName};
+            frame->_depthStencil = _device->CreateTexture(dsDesc).Unwrap();
+            render::TextureViewDescriptor dsvDesc{
+                frame->_depthStencil.get(),
+                render::TextureViewDimension::Dim2D,
+                dsDesc.Format,
+                render::SubresourceRange::AllSub(),
+                render::TextureUse::DepthStencilWrite};
+            frame->_dsv = _device->CreateTextureView(dsvDesc).Unwrap();
+            frame->_dsvUsage = render::TextureUse::Uninitialized;
+        }
+    }
+
     FireAndForgetTask LoadAsync() {
         auto backend = _device->GetBackend();
         TriangleMesh sphereMesh{};
         sphereMesh.InitAsUVSphere(0.5f, 32);
         MeshResource sphereModel{};
         sphereMesh.ToSimpleMeshResource(&sphereModel);
-        _renderMesh = co_await _gpuUploader->UploadMeshAsync(sphereModel);
+        _renderMesh = std::make_unique<render::RenderMesh>(co_await _gpuUploader->UploadMeshAsync(sphereModel));
 
         unique_ptr<render::Shader> vsShader, psShader;
         {
@@ -92,26 +298,29 @@ public:
             render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
             psShader = _device->CreateShader(psDesc).Unwrap();
 
-            // if (backend == render::RenderBackend::D3D12) {
-            //     auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
-            //     auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
-            //     const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
-            //     auto mergedDesc = MergeHlslShaderDesc(descs).value();
-            //     _cbStorage = render::CreateCBufferStorage(mergedDesc).value();
-            //     auto rsDesc = render::CreateRootSignatureDescriptor(mergedDesc).value();
-            //     _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
-            // } else if (backend == render::RenderBackend::Vulkan) {
-            //     render::SpirvBytecodeView spvs[] = {
-            //         {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
-            //         {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
-            //     const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
-            //     auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
-            //     _cbStorage = render::CreateCBufferStorage(spirvDesc).value();
-            //     auto rsDesc = render::CreateRootSignatureDescriptor(spirvDesc).value();
-            //     _rs = _device->CreateRootSignature(rsDesc.MakeView().Get()).Unwrap();
-            // } else {
-            //     throw ImGuiApplicationException("Unsupported render backend for shader reflection");
-            // }
+            render::BindBridgeLayout bindLayout;
+            if (backend == render::RenderBackend::D3D12) {
+                auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
+                auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
+                const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
+                auto mergedDesc = render::MergeHlslShaderDesc(descs).value();
+                bindLayout = render::BindBridgeLayout{mergedDesc};
+            } else if (backend == render::RenderBackend::Vulkan) {
+                render::SpirvBytecodeView spvs[] = {
+                    {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
+                    {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
+                const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
+                auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
+                bindLayout = render::BindBridgeLayout{spirvDesc};
+            } else {
+                throw ImGuiApplicationException("unsupported render backend for shader reflection");
+            }
+            auto rsDesc = bindLayout.GetDescriptor();
+            _rs = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
+            _binds.reserve(_inFlightFrameCount);
+            for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
+                _binds.emplace_back(std::make_unique<render::BindBridge>(_device.get(), _rs.get(), bindLayout));
+            }
         }
         const auto& prim = sphereModel.Primitives[0];
         vector<render::VertexElement> vertElems;
@@ -151,166 +360,22 @@ public:
         RADRAY_INFO_LOG("upload done");
     }
 
-    void OnStart(const ImGuiAppConfig& config_) override {
-        auto config = config_;
-        if (config.Backend == render::RenderBackend::Vulkan) {
-            render::VulkanCommandQueueDescriptor queueDesc[] = {
-                {render::QueueType::Direct, 1},
-                {render::QueueType::Copy, 1}};
-            render::VulkanDeviceDescriptor devDesc{};
-            devDesc.Queues = queueDesc;
-            config.DeviceDesc = devDesc;
-        }
-        this->Init(config);
-
-        _dxc = render::CreateDxc().Unwrap();
-        _frames.reserve(_inFlightFrameCount);
-        for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _frames.emplace_back(make_unique<Frame>(_device.get(), _cmdQueue));
-        }
-
-        auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
-        _gpuUploader = std::make_unique<render::GpuUploader>(_device.get(), copyQueue);
-
-        LoadAsync();
-    }
-
-    void OnDestroy() noexcept override {
-        _gpuUploader.reset();
-
-        _dxc.reset();
-
-        _pso.reset();
-        _rs.reset();
-        _renderMesh = {};
-
-        _frames.clear();
-    }
-
-    void OnImGui() override {
-        _monitor.OnImGui();
-    }
-
-    void OnUpdate() override {
-        _fps.OnUpdate();
-        _monitor.SetData(_fps);
-
-        _gpuUploader->Submit();
-        _gpuUploader->Tick();
-    }
-
-    void OnExtractDrawData(uint32_t frameIndex) override {
-        ImGuiApplication::OnExtractDrawData(frameIndex);
-
-        auto& frame = _frames[frameIndex];
-        auto& cbArena = frame->_cbArena;
-        if (_ready) {
-            Eigen::Vector2i rtSize = this->GetRTSize();
-            Eigen::Matrix4f view = LookAt(_camRot, _camPos);
-            Eigen::Matrix4f proj = PerspectiveLH(Radian(_camFovY), (float)rtSize.x() / rtSize.y(), _camNear, _camFar);
-            Eigen::Matrix4f model = (Eigen::Translation3f{_modelPos} * _modelRot.toRotationMatrix() * Eigen::AlignedScaling3f{_modelScale}).matrix();
-            Eigen::Matrix4f modelInv = model.inverse();
-            Eigen::Matrix4f vp = proj * view;
-            Eigen::Matrix4f mvp = vp * model;
-            _cbStorage.GetVar("_Obj").GetVar("model").SetValue(model);
-            _cbStorage.GetVar("_Obj").GetVar("mvp").SetValue(mvp);
-            _cbStorage.GetVar("_Obj").GetVar("modelInv").SetValue(modelInv);
-            auto allocation = cbArena.Allocate(_cbStorage.GetData().size());
-            std::memcpy(allocation.Mapped, _cbStorage.GetData().data(), _cbStorage.GetData().size());
-            auto& drawData = frame->_drawDatas.emplace_back();
-            drawData._rs = _rs.get();
-            drawData._pso = _pso.get();
-        }
-    }
-
-    vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) override {
-        auto& frame = _frames[frameIndex];
-        auto cmdBuffer = frame->_cmdBuffer.get();
-        auto& cbArena = frame->_cbArena;
-
-        _fps.OnRender();
-
-        auto currBackBufferIndex = _swapchain->GetCurrentBackBufferIndex();
-        auto rt = _backBuffers[currBackBufferIndex];
-        auto rtView = this->GetDefaultRTV(currBackBufferIndex);
-
-        cmdBuffer->Begin();
-        _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
-        {
-            render::BarrierTextureDescriptor barrier{};
-            barrier.Target = rt;
-            barrier.Before = render::TextureUse::Uninitialized;
-            barrier.After = render::TextureUse::RenderTarget;
-            barrier.IsFromOrToOtherQueue = false;
-            barrier.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-        }
-        unique_ptr<render::CommandEncoder> pass;
-        {
-            render::RenderPassDescriptor rpDesc{};
-            render::ColorAttachment rtAttach{};
-            rtAttach.Target = rtView;
-            rtAttach.Load = render::LoadAction::Clear;
-            rtAttach.Store = render::StoreAction::Store;
-            rtAttach.ClearValue = render::ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
-            rpDesc.ColorAttachments = std::span(&rtAttach, 1);
-            pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
-        }
-        // for(auto& drawData : frame->_drawDatas) {
-        //     pass->BindRootSignature(drawData._rs);
-        //     pass->BindGraphicsPipelineState(drawData._pso);
-        //     render::VertexBufferView vbv{
-        //         _renderMesh.GetVertexBuffer().get(),
-        //         0,
-        //         _renderMesh.GetVertexStride()};
-        //     pass->BindVertexBuffer(std::span{&vbv, 1});
-        //     render::IndexBufferView ibv{
-        //         _renderMesh.GetIndexBuffer().get(),
-        //         0,
-        //         _renderMesh.GetIndexFormat()};
-        //     pass->BindIndexBuffer(ibv);
-        //     pass->BindDescriptorSet(0, cbArena.CreateDescriptorSet(drawData._rs, 0).Unwrap());
-        //     pass->DrawIndexed(_renderMesh.GetIndexCount(), 1, 0, 0, 0);
-        // }
-        _imguiRenderer->OnRender(frameIndex, pass.get());
-        cmdBuffer->EndRenderPass(std::move(pass));
-        {
-            render::BarrierTextureDescriptor barrier{};
-            barrier.Target = rt;
-            barrier.Before = render::TextureUse::RenderTarget;
-            barrier.After = render::TextureUse::Present;
-            barrier.IsFromOrToOtherQueue = false;
-            barrier.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-        }
-        cmdBuffer->End();
-        return {cmdBuffer};
-    }
-
-    void OnRenderComplete(uint32_t frameIndex) override {
-        ImGuiApplication::OnRenderComplete(frameIndex);
-
-        auto& frame = _frames[frameIndex];
-        frame->_drawDatas.clear();
-        frame->_cbArena.Reset();
-    }
-
 private:
     shared_ptr<render::Dxc> _dxc;
     vector<unique_ptr<Frame>> _frames;
-
+    unique_ptr<render::GpuUploader> _gpuUploader = nullptr;
+    // camera
     Eigen::Vector3f _camPos{0.0f, 0.0f, -3.0f};
     Eigen::Quaternionf _camRot{Eigen::Quaternionf::Identity()};
     float _camFovY{45.0f};
     float _camNear{0.1f};
     float _camFar{100.0f};
     CameraControl _cc;
-
+    // mesh
     unique_ptr<render::RootSignature> _rs;
     unique_ptr<render::GraphicsPipelineState> _pso;
-    render::RenderMesh _renderMesh;
-    StructuredBufferStorage _cbStorage;
-    unique_ptr<render::GpuUploader> _gpuUploader = nullptr;
+    unique_ptr<render::RenderMesh> _renderMesh;
+    vector<unique_ptr<render::BindBridge>> _binds;
     Eigen::Vector3f _modelPos{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
     Eigen::Quaternionf _modelRot{Eigen::Quaternionf::Identity()};

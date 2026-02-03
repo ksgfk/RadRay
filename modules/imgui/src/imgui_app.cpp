@@ -741,6 +741,7 @@ void ImGuiApplication::LoopSingleThreaded() {
         }
         if (_needRecreate) {
             this->RecreateSwapChain();
+            this->OnRecreateSwapChain();
             for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
                 if (_renderFrameStates[i].IsValid()) {
                     this->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
@@ -850,6 +851,7 @@ void ImGuiApplication::LoopMultiThreaded() {
                 if (rtWidth > 0 && rtHeight > 0) {
                     if (needResize) {
                         this->RecreateSwapChain();
+                        this->OnRecreateSwapChain();
                         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
                             if (_renderFrameStates[i].IsValid()) {
                                 _imguiRenderer->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
@@ -977,6 +979,8 @@ void ImGuiApplication::OnExtractDrawData(uint32_t frameIndex) {
 void ImGuiApplication::OnRenderComplete(uint32_t frameIndex) {
     _imguiRenderer->OnRenderComplete(frameIndex);
 }
+
+void ImGuiApplication::OnRecreateSwapChain() {}
 
 void ImGuiApplication::OnResizing(int width, int height) {
     this->RequestRecreateSwapChain([this, width, height]() {

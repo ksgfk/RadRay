@@ -471,7 +471,7 @@ public:
 
     void PushConstant(const void* data, size_t length) noexcept override;
 
-    void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept override;
+    void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept override;
 
     void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
 

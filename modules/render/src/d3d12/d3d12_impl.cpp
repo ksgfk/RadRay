@@ -908,7 +908,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
         dxgiFormat = rtvDesc.Format;
-    } else if (desc.Usage.HasFlag(TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) {
+    } else if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
         {
             auto heap = _cpuDsvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -1945,7 +1945,7 @@ void CmdRenderPassD3D12::PushConstant(const void* data, size_t length) noexcept 
     _cmdList->_cmdList->SetGraphicsRoot32BitConstants((UINT)dataRef.Index, static_cast<UINT>(length / 4), data, 0);
 }
 
-void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
     if (_boundRootSig == nullptr) {
         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindRootDescriptor");
         return;
@@ -1954,37 +1954,24 @@ void CmdRenderPassD3D12::BindRootDescriptor(uint32_t slot, ResourceView* view) n
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundRootSig->_desc.GetRootDescriptorCount(), slot);
         return;
     }
+    RADRAY_ASSERT(buffer != nullptr);
     auto dataRef = _boundRootSig->_desc.GetRootDescriptor(slot);
-    auto tag = view->GetTag();
-    if (tag == RenderObjectTag::BufferView) {
-        BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
-        D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = bufferView->_buffer->_gpuAddr + bufferView->_desc.Range.Offset;
-        auto usage = bufferView->_desc.Usage;
-        if (usage.HasFlag(BufferUse::Resource)) {
-            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_SRV) {
-                RADRAY_ERR_LOG("root parameter type mismatch expected: {}, actual: {}", D3D12_ROOT_PARAMETER_TYPE_SRV, dataRef.Param.Type);
-                return;
-            }
+    auto buf = CastD3D12Object(buffer);
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+    RADRAY_UNUSED(size);
+    switch (dataRef.Param.Type) {
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
             _cmdList->_cmdList->SetGraphicsRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
-        } else if (usage.HasFlag(BufferUse::CBuffer)) {
-            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_CBV) {
-                RADRAY_ERR_LOG("root parameter type mismatch expected: {}, actual: {}", D3D12_ROOT_PARAMETER_TYPE_CBV, dataRef.Param.Type);
-                return;
-            }
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
             _cmdList->_cmdList->SetGraphicsRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
-        } else if (usage.HasFlag(BufferUse::UnorderedAccess)) {
-            if (dataRef.Param.Type != D3D12_ROOT_PARAMETER_TYPE_UAV) {
-                RADRAY_ERR_LOG("root parameter type mismatch expected: {}, actual: {}", D3D12_ROOT_PARAMETER_TYPE_UAV, dataRef.Param.Type);
-                return;
-            }
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
             _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
-        } else {
-            RADRAY_ERR_LOG("d3d12 unsupported buffer view usage", usage);
-        }
-    } else if (tag == RenderObjectTag::TextureView) {
-        RADRAY_ERR_LOG("d3d12 cannot bind texture as root descriptor");
-    } else {
-        RADRAY_ERR_LOG("d3d12 unsupported RenderObjectTag", tag);
+            break;
+        default:
+            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+            break;
     }
 }
 

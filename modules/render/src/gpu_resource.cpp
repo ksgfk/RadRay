@@ -90,6 +90,31 @@ task<RenderMesh> GpuUploader::UploadMeshAsync(const MeshResource& resource) {
     co_await BatchAwaiter(batch, taskState);
     RenderMesh mesh;
     mesh._buffers = std::move(taskState->RetainedBuffers);
+    mesh._drawDatas.reserve(resource.Primitives.size());
+    for (const auto& primitive : resource.Primitives) {
+        RenderMesh::DrawData drawData{};
+        if (!primitive.VertexBuffers.empty()) {
+            const auto& vbEntry = primitive.VertexBuffers.front();
+            if (vbEntry.BufferIndex < mesh._buffers.size()) {
+                Buffer* vb = mesh._buffers[vbEntry.BufferIndex].get();
+                uint64_t vbSize = vb->GetDesc().Size;
+                uint64_t viewSize = vbSize;
+                if (primitive.VertexCount > 0 && vbEntry.Stride > 0) {
+                    uint64_t required = static_cast<uint64_t>(primitive.VertexCount) * vbEntry.Stride;
+                    if (required > 0) {
+                        viewSize = std::min(vbSize, required);
+                    }
+                }
+                drawData.Vbv = {vb, 0, viewSize};
+            }
+        }
+        const auto& ibEntry = primitive.IndexBuffer;
+        if (ibEntry.BufferIndex < mesh._buffers.size()) {
+            Buffer* ib = mesh._buffers[ibEntry.BufferIndex].get();
+            drawData.Ibv = {ib, ibEntry.Offset, ibEntry.Stride};
+        }
+        mesh._drawDatas.emplace_back(drawData);
+    }
     co_return mesh;
 }
 

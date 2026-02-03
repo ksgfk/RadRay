@@ -209,6 +209,7 @@ protected:
     virtual void OnExtractDrawData(uint32_t frameIndex);
     virtual vector<render::CommandBuffer*> OnRender(uint32_t frameIndex) = 0;
     virtual void OnRenderComplete(uint32_t frameIndex);
+    virtual void OnRecreateSwapChain();
 
     virtual void OnResizing(int width, int height);
     virtual void OnResized(int width, int height);

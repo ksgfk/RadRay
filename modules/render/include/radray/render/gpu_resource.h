@@ -15,7 +15,13 @@ public:
 
 class RenderMesh {
 public:
+    struct DrawData {
+        VertexBufferView Vbv;
+        IndexBufferView Ibv;
+    };
+
     vector<unique_ptr<Buffer>> _buffers;
+    vector<DrawData> _drawDatas;
 };
 
 class GpuUploader {

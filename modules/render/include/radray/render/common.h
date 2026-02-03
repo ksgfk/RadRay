@@ -910,7 +910,7 @@ public:
 
     virtual void PushConstant(const void* data, size_t length) noexcept = 0;
 
-    virtual void BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept = 0;
+    virtual void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept = 0;
 
     virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept = 0;
 

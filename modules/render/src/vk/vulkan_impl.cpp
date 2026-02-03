@@ -2199,9 +2199,11 @@ void SimulateCommandEncoderVulkan::PushConstant(const void* data, size_t length)
     _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
 }
 
-void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, ResourceView* view) noexcept {
+void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
     RADRAY_UNUSED(slot);
-    RADRAY_UNUSED(view);
+    RADRAY_UNUSED(buffer);
+    RADRAY_UNUSED(offset);
+    RADRAY_UNUSED(size);
     RADRAY_ERR_LOG("unsupported CommandEncoder::BindRootDescriptor in vk");
 }
 
