@@ -1,12 +1,6 @@
-#ifdef VULKAN
-#define VK_LOCATION(l)   [[vk::location(l)]]
-#define VK_BINDING(b, s) [[vk::binding(b, s)]]
-#define VK_PUSH_CONSTANT [[vk::push_constant]]
-#else
-#define VK_LOCATION(l)
-#define VK_BINDING(b, s)
-#define VK_PUSH_CONSTANT
-#endif
+#include <common.hlsli>
+#include <bsdf.hlsli>
+#include <light.hlsli>
 
 struct PreObjectData
 {
@@ -56,5 +50,29 @@ PS_INPUT VSMain(VS_INPUT vsIn)
 float4 PSMain(PS_INPUT psIn) : SV_Target
 {
     float3 n = normalize(psIn.norW);
-    return float4(n*0.5 + 0.5, 1.0);
+    Frame3 frame = make_frame(n);
+
+    float3 wo_w = normalize(_Camera.posW - psIn.posW);
+
+    PointLightParams light;
+    light.position = float3(3.0, 7.0, 0.5);
+    light.intensity = (float3)25;
+
+    float3 Li = eval_point_light(light, psIn.posW);
+    float3 wi_w = normalize(light.position - psIn.posW);
+
+    float3 wi = to_local(frame, wi_w);
+    float3 wo = to_local(frame, wo_w);
+
+    ConductorParams cp;
+    cp.eta = float3(0.2, 0.92, 1.1);
+    cp.k = float3(3.9, 2.5, 2.4);
+    cp.roughness = 0.25;
+
+    float3 brdf = conductor_brdf(wi, wo, cp);
+    float3 color = brdf * Li;
+
+    float3 srgb = linear_to_srgb(color);
+
+    return float4(srgb, 1.0);
 }

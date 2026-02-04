@@ -64,7 +64,11 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             if (window) {
                 int width = LOWORD(lParam);
                 int height = HIWORD(lParam);
-                if (!window->_inSizeMove) {  // 最大最小化
+                const auto sizeType = static_cast<UINT>(wParam);
+                if (!window->_inSizeMove || sizeType == SIZE_MINIMIZED || sizeType == SIZE_MAXIMIZED || sizeType == SIZE_RESTORED) {  // 最大最小化/恢复
+                    if (sizeType == SIZE_MINIMIZED) {
+                        window->_inSizeMove = false;
+                    }
                     window->_eventResized(width, height);
                 }
             }

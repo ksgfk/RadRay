@@ -789,7 +789,7 @@ void ImGuiApplication::LoopSingleThreaded() {
     _cmdQueue->Wait();
     for (auto& i : _renderFrameStates) {
         if (i.IsSubmitted) {
-            _imguiRenderer->OnRenderComplete(i.InFlightFrameIndex);
+            this->OnRenderComplete(i.InFlightFrameIndex);
         }
         i = RenderFrameState::Invalid();
     }
@@ -825,7 +825,7 @@ void ImGuiApplication::LoopMultiThreaded() {
             if (state.IsSubmitted) {
                 render::Fence* fence = _inFlightFences[processIndex].get();
                 fence->Wait();
-                _imguiRenderer->OnRenderComplete(state.InFlightFrameIndex);
+                this->OnRenderComplete(state.InFlightFrameIndex);
                 _freeFrames->WaitWrite(state.InFlightFrameIndex);
                 state = RenderFrameState::Invalid();
 
@@ -854,7 +854,7 @@ void ImGuiApplication::LoopMultiThreaded() {
                         this->OnRecreateSwapChain();
                         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
                             if (_renderFrameStates[i].IsValid()) {
-                                _imguiRenderer->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
+                                this->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
                                 _freeFrames->WaitWrite(_renderFrameStates[i].InFlightFrameIndex);
                                 _renderFrameStates[i] = RenderFrameState::Invalid();
                             }
@@ -863,6 +863,10 @@ void ImGuiApplication::LoopMultiThreaded() {
                         continue;
                     }
                 } else {
+                    if (state.IsValid()) {
+                        _freeFrames->WaitWrite(state.InFlightFrameIndex);
+                        state = RenderFrameState::Invalid();
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(16));
                     continue;
                 }
@@ -879,6 +883,10 @@ void ImGuiApplication::LoopMultiThreaded() {
                         _rtWidth = w;
                         _rtHeight = h;
                     });
+                    if (state.IsValid()) {
+                        _freeFrames->WaitWrite(state.InFlightFrameIndex);
+                        state = RenderFrameState::Invalid();
+                    }
                     std::this_thread::yield();
                     continue;
                 }
@@ -927,19 +935,21 @@ void ImGuiApplication::LoopMultiThreaded() {
             this->OnImGui();
             ImGui::Render();
 
-            uint32_t frameIndex;
-            bool isConsumed = false;
-            if (_enableFrameDropping) {
-                isConsumed = _freeFrames->TryRead(frameIndex);
-            } else {
-                isConsumed = _freeFrames->WaitRead(frameIndex);
-            }
-            if (!isConsumed) {
-                continue;
-            }
-            this->OnExtractDrawData(frameIndex);
-            if (!_submitFrames->WaitWrite(frameIndex)) {
-                break;
+            if (_rtWidth > 0 && _rtHeight > 0) {
+                uint32_t frameIndex;
+                bool isConsumed = false;
+                if (_enableFrameDropping) {
+                    isConsumed = _freeFrames->TryRead(frameIndex);
+                } else {
+                    isConsumed = _freeFrames->WaitRead(frameIndex);
+                }
+                if (!isConsumed) {
+                    continue;
+                }
+                this->OnExtractDrawData(frameIndex);
+                if (!_submitFrames->WaitWrite(frameIndex)) {
+                    break;
+                }
             }
             _nowCpuTimePoint = _sw.Elapsed().count() * 0.000001;
         }
@@ -953,7 +963,7 @@ void ImGuiApplication::LoopMultiThreaded() {
     _cmdQueue->Wait();
     for (auto& i : _renderFrameStates) {
         if (i.IsSubmitted) {
-            _imguiRenderer->OnRenderComplete(i.InFlightFrameIndex);
+            this->OnRenderComplete(i.InFlightFrameIndex);
         }
         i = RenderFrameState::Invalid();
     }

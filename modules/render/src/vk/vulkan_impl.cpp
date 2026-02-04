@@ -2483,7 +2483,7 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Semaphore*> signalSemap
         }
         Frame& imageFrame = _frames[_currentTextureIndex];
         return imageFrame.image.get();
-    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
+    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
         if (signalFence.HasValue()) {
             auto fenceObj = CastVkObject(signalFence.Get());
             _device->_ftb.vkResetFences(_device->_device, 1, &fenceObj->_fence);
