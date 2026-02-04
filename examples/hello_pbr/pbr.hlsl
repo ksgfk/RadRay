@@ -1,6 +1,6 @@
-#include <common.hlsli>
-#include <bsdf.hlsli>
-#include <light.hlsli>
+#include <common.hlsl>
+#include <bsdf.hlsl>
+#include <light.hlsl>
 
 struct PreObjectData
 {

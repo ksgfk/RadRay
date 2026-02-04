@@ -1,7 +1,7 @@
 #ifndef BSDF_HLSLI
 #define BSDF_HLSLI
 
-#include "common.hlsli"
+#include "common.hlsl"
 
 float fresnel_dielectric(float cos_theta_i, float eta,
                          out float cos_theta_t, out float eta_it, out float eta_ti)
