@@ -109,10 +109,9 @@
             "Tag": "v1.92.5"
         },
         {
-            "Name": "cppcoro",
+            "Name": "stdexec",
             "Type": "git",
-            "Git": "https://github.com/andreasbuhr/cppcoro.git",
-            "Patch": "cmake/no-cppcoro-test.patch"
+            "Git": "https://github.com/NVIDIA/stdexec.git"
         },
         {
             "Name": "googletest",

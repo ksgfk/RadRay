@@ -1,35 +1,33 @@
 #pragma once
 
-#include <coroutine>
+#include <deque>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <utility>
 
-#include <cppcoro/coroutine.hpp>
-#include <cppcoro/task.hpp>
-#include <cppcoro/shared_task.hpp>
-#include <cppcoro/when_all.hpp>
-#include <cppcoro/async_manual_reset_event.hpp>
-#include <cppcoro/is_awaitable.hpp>
+#include <stdexec/coroutine.hpp>
+#include <stdexec/execution.hpp>
+#include <exec/task.hpp>
+
+#include <radray/types.h>
 
 namespace radray {
 
-using cppcoro::coroutine_handle;
-using cppcoro::suspend_always;
-using cppcoro::noop_coroutine;
-using cppcoro::suspend_never;
-
-using cppcoro::task;
-using cppcoro::shared_task;
-using cppcoro::when_all;
-using cppcoro::async_manual_reset_event;
-using cppcoro::is_awaitable;
-using cppcoro::is_awaitable_v;
+using std::coroutine_handle;
+using exec::task;
 
 struct FireAndForgetTask {
-    struct promise_type {
+    struct promise_type : STDEXEC::with_awaitable_senders<promise_type> {
         FireAndForgetTask get_return_object() { return {}; }
-        suspend_never initial_suspend() { return {}; }
-        suspend_never final_suspend() noexcept { return {}; }
+        std::suspend_never initial_suspend() { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
         void unhandled_exception() { throw; }
+
+        auto get_env() const noexcept {
+            return STDEXEC::prop{STDEXEC::get_scheduler, STDEXEC::inline_scheduler{}};
+        }
     };
 };
 
