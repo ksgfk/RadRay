@@ -334,6 +334,13 @@ enum class PresentMode {
     Immediate
 };
 
+enum class BindlessSlotType {
+    Multiple,
+    BufferOnly,
+    Texture2DOnly,
+    Texture3DOnly
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -355,8 +362,9 @@ enum class RenderObjectTag : uint32_t {
     TextureView = ResourceView | (ResourceView << 2),
     DescriptorSet = ResourceView << 3,
     Sampler = DescriptorSet << 1,
+    BindlessArray = Sampler << 1,
 
-    VkInstance = Sampler << 1
+    VkInstance = BindlessArray << 1,
 };
 
 }  // namespace radray::render
@@ -420,6 +428,7 @@ class PipelineState;
 class GraphicsPipelineState;
 class DescriptorSet;
 class Sampler;
+class BindlessArray;
 class InstanceVulkan;
 class Semaphore;
 
@@ -591,9 +600,20 @@ struct BufferDescriptor {
     std::string_view Name{};
 };
 
+struct BindlessArrayDescriptor {
+    uint32_t Size{0};
+    BindlessSlotType SlotType{BindlessSlotType::Multiple};
+    std::string_view Name{};
+};
+
 struct BufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
+};
+
+struct BindlessTextureBinding {
+    TextureView* Target{nullptr};
+    Sampler* SamplerPtr{nullptr};
 };
 
 struct BufferViewDescriptor {
@@ -815,6 +835,7 @@ struct IndexBufferView {
 
 struct DeviceDetail {
     uint32_t CBufferAlignment{0};
+    bool IsBindlessArraySupported{false};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -854,6 +875,8 @@ public:
     virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept = 0;
 };
 
 class CommandQueue : public RenderBase {
@@ -1033,6 +1056,21 @@ public:
     virtual ~Sampler() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
+};
+
+class BindlessArray : public RenderBase {
+public:
+    virtual ~BindlessArray() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindlessArray; }
+
+    virtual void SetBuffer(uint32_t slot, BufferView* bufView) noexcept = 0;
+
+    virtual void SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept = 0;
+
+    virtual void Remove(uint32_t slot) noexcept = 0;
+
+    virtual void Clear() noexcept = 0;
 };
 
 class InstanceVulkan : public RenderBase {

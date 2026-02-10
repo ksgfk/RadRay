@@ -413,10 +413,9 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
-    {
-        DeviceDetail& detail = result->_detail;
-        detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-    }
+    DeviceDetail& detail = result->_detail;
+    detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    detail.IsBindlessArraySupported = false;
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
@@ -454,8 +453,14 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     if (SUCCEEDED(fs.GetStatus())) {
         RADRAY_INFO_LOG("Feature Level: {}", fs.MaxSupportedFeatureLevel());
         RADRAY_INFO_LOG("Shader Model: {}", fs.HighestShaderModel());
+        RADRAY_INFO_LOG("Resource Binding Tier: {}", fs.ResourceBindingTier());
+        RADRAY_INFO_LOG("Resource Heap Tier: {}", fs.ResourceHeapTier());
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
         RADRAY_INFO_LOG("UMA: {}", static_cast<bool>(fs.UMA()));
+        detail.IsBindlessArraySupported =
+            fs.ResourceBindingTier() >= D3D12_RESOURCE_BINDING_TIER_3 &&
+            fs.HighestShaderModel() >= D3D_SHADER_MODEL_6_0;
+        RADRAY_INFO_LOG("Bindless Array: {}", detail.IsBindlessArraySupported);
     } else {
         RADRAY_WARN_LOG("CD3DX12FeatureSupport::GetStatus failed");
     }
@@ -1484,6 +1489,41 @@ Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
     return make_unique<SamplerD3D12>(this, std::move(heapView));
 }
 
+Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
+    if (!this->GetDetail().IsBindlessArraySupported) {
+        RADRAY_ERR_LOG("d3d12 bindless array is not supported by this device");
+        return nullptr;
+    }
+    if (desc.Size == 0) {
+        RADRAY_ERR_LOG("d3d12 bindless array size must be greater than 0");
+        return nullptr;
+    }
+    GpuDescriptorHeapViewRAII resHeapView{};
+    {
+        auto gpuResHeapAllocationOpt = _gpuResHeap->Allocate(desc.Size);
+        if (!gpuResHeapAllocationOpt.has_value()) {
+            RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate bindless resource descriptors");
+            return nullptr;
+        }
+        resHeapView = {_gpuResHeap.get(), gpuResHeapAllocationOpt.value()};
+    }
+    GpuDescriptorHeapViewRAII samplerHeapView{};
+    if (desc.SlotType != BindlessSlotType::BufferOnly) {
+        auto gpuSamplerHeapAllocationOpt = _gpuSamplerHeap->Allocate(desc.Size);
+        if (!gpuSamplerHeapAllocationOpt.has_value()) {
+            RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate bindless sampler descriptors");
+            return nullptr;
+        }
+        samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
+    }
+
+    return make_unique<BindlessArrayD3D12>(
+        this,
+        desc,
+        std::move(resHeapView),
+        std::move(samplerHeapView));
+}
+
 D3D12_RESOURCE_DESC DeviceD3D12::MapTextureDesc(const TextureDescriptor& desc) noexcept {
     DXGI_FORMAT rawFormat = MapType(desc.Format);
     D3D12_RESOURCE_DESC resDesc{};
@@ -2261,6 +2301,102 @@ bool SamplerD3D12::IsValid() const noexcept {
 
 void SamplerD3D12::Destroy() noexcept {
     _samplerView.Destroy();
+}
+
+BindlessArrayD3D12::BindlessArrayD3D12(
+    DeviceD3D12* device,
+    const BindlessArrayDescriptor& desc,
+    GpuDescriptorHeapViewRAII resHeap,
+    GpuDescriptorHeapViewRAII samplerHeap) noexcept
+    : _device(device),
+      _resHeap(std::move(resHeap)),
+      _samplerHeap(std::move(samplerHeap)),
+      _size(desc.Size),
+      _slotType(desc.SlotType),
+      _slotKinds(desc.Size, SlotKind::None),
+      _name(desc.Name) {}
+
+bool BindlessArrayD3D12::IsValid() const noexcept {
+    return _device != nullptr && (_resHeap.IsValid() || _samplerHeap.IsValid());
+}
+
+void BindlessArrayD3D12::Destroy() noexcept {
+    _resHeap.Destroy();
+    _samplerHeap.Destroy();
+    _device = nullptr;
+}
+
+void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
+    if (_slotType == BindlessSlotType::Texture2DOnly || _slotType == BindlessSlotType::Texture3DOnly) {
+        RADRAY_ERR_LOG("d3d12 bindless array does not support buffer slots");
+        return;
+    }
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
+        return;
+    }
+    if (bufView == nullptr) {
+        Remove(slot);
+        return;
+    }
+    auto bufferView = CastD3D12Object(bufView);
+    bufferView->_heapView.CopyTo(0, 1, _resHeap, slot);
+    _slotKinds[slot] = SlotKind::Buffer;
+}
+
+void BindlessArrayD3D12::SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept {
+}
+
+void BindlessArrayD3D12::Remove(uint32_t slot) noexcept {
+}
+
+void BindlessArrayD3D12::Clear() noexcept {
+}
+
+void BindlessArrayD3D12::WriteNullBuffer(uint32_t slot) noexcept {
+    if (!_resHeap.IsValid()) {
+        return;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Buffer.FirstElement = 0;
+    srvDesc.Buffer.NumElements = 1;
+    srvDesc.Buffer.StructureByteStride = 0;
+    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
+    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
+}
+
+void BindlessArrayD3D12::WriteNullTexture2D(uint32_t slot) noexcept {
+    if (!_resHeap.IsValid()) {
+        return;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
+    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
+}
+
+void BindlessArrayD3D12::WriteNullTexture3D(uint32_t slot) noexcept {
+    if (!_resHeap.IsValid()) {
+        return;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture3D.MipLevels = 1;
+    srvDesc.Texture3D.MostDetailedMip = 0;
+    srvDesc.Texture3D.ResourceMinLODClamp = 0.0f;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
+    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
 }
 
 }  // namespace radray::render::d3d12

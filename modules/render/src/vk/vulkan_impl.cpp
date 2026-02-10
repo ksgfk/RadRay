@@ -1024,6 +1024,12 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
     return result;
 }
 
+Nullable<unique_ptr<BindlessArray>> DeviceVulkan::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("vk bindless array is not implemented");
+    return nullptr;
+}
+
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1624,8 +1630,16 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     {
         DeviceDetail& detail = deviceR->_detail;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
+        const auto& f12 = deviceR->_extFeatures.feature12;
+        detail.IsBindlessArraySupported =
+            selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
+            f12.runtimeDescriptorArray &&
+            f12.descriptorBindingPartiallyBound &&
+            f12.descriptorBindingVariableDescriptorCount &&
+            f12.shaderSampledImageArrayNonUniformIndexing &&
+            f12.shaderStorageImageArrayNonUniformIndexing &&
+            f12.shaderStorageBufferArrayNonUniformIndexing;
     }
-
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         auto apiVersion = selectPhyDevice.properties.apiVersion;
@@ -1659,25 +1673,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         }
         RADRAY_INFO_LOG("Driver Version: {}", verStr);
     }
-    {
-        RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
-    }
-    {
-        RADRAY_INFO_LOG("Queue:");
-        for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
-            const auto& queues = deviceR->_queues[i];
-            QueueType type = static_cast<QueueType>(i);
-            if (queues.size() > 0) {
-                RADRAY_INFO_LOG("\t{}: {}", type, queues.size());
-            }
+    RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
+    RADRAY_INFO_LOG("Queue:");
+    for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
+        const auto& queues = deviceR->_queues[i];
+        QueueType type = static_cast<QueueType>(i);
+        if (queues.size() > 0) {
+            RADRAY_INFO_LOG("\t{}: {}", type, queues.size());
         }
     }
-    {
-        RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
-    }
-    {
-        RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
-    }
+    RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
+    RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
+    RADRAY_INFO_LOG("Bindless Array: {}", deviceR->_detail.IsBindlessArraySupported);
     RADRAY_INFO_LOG("=============================");
     return deviceR;
 }

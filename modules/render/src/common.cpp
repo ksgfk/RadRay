@@ -326,6 +326,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
         case RenderObjectTag::Semaphore: return "Semaphore";
+        case RenderObjectTag::BindlessArray: return "BindlessArray";
     }
     Unreachable();
 }

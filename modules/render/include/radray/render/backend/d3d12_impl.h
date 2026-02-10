@@ -308,6 +308,8 @@ public:
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -705,6 +707,48 @@ public:
     CpuDescriptorHeapViewRAII _samplerView;
 };
 
+class BindlessArrayD3D12 final : public BindlessArray {
+public:
+    BindlessArrayD3D12(
+        DeviceD3D12* device,
+        const BindlessArrayDescriptor& desc,
+        GpuDescriptorHeapViewRAII resHeap,
+        GpuDescriptorHeapViewRAII samplerHeap) noexcept;
+    ~BindlessArrayD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
+
+    void SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept override;
+
+    void Remove(uint32_t slot) noexcept override;
+
+    void Clear() noexcept override;
+
+private:
+    enum class SlotKind : uint8_t {
+        None,
+        Buffer,
+        Texture2D,
+        Texture3D
+    };
+
+    void WriteNullBuffer(uint32_t slot) noexcept;
+    void WriteNullTexture2D(uint32_t slot) noexcept;
+    void WriteNullTexture3D(uint32_t slot) noexcept;
+
+    DeviceD3D12* _device;
+    GpuDescriptorHeapViewRAII _resHeap;
+    GpuDescriptorHeapViewRAII _samplerHeap;
+    uint32_t _size;
+    BindlessSlotType _slotType{BindlessSlotType::Multiple};
+    vector<SlotKind> _slotKinds{};
+    string _name;
+};
+
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3D12*>(v); }
@@ -716,7 +760,9 @@ constexpr auto CastD3D12Object(Semaphore* v) noexcept { return static_cast<Semap
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
+constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<SamplerD3D12*>(v); }
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
+constexpr auto CastD3D12Object(BufferView* v) noexcept { return static_cast<BufferViewD3D12*>(v); }
 constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
