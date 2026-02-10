@@ -101,6 +101,10 @@ ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
     Unreachable();
 }
 
+bool HlslInputBindDesc::IsUnboundArray() const noexcept {
+    return BindCount == 0;
+}
+
 auto operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept {
     if (auto cmp = lhs.Name <=> rhs.Name; cmp != 0) return cmp;
     if (auto cmp = lhs.Type <=> rhs.Type; cmp != 0) return cmp;
@@ -145,7 +149,22 @@ bool IsHlslShaderBufferEqual(
     }
     size_t len = lcb.Variables.size();
     for (size_t i = 0; i < len; i++) {
-        if (!IsHlslTypeEqual(l, lcb.Variables[i], r, rcb.Variables[i])) {
+        if (lcb.Variables[i] >= l.Variables.size() || rcb.Variables[i] >= r.Variables.size()) {
+            return false;
+        }
+        const auto& lVar = l.Variables[lcb.Variables[i]];
+        const auto& rVar = r.Variables[rcb.Variables[i]];
+        if (lVar.Name != rVar.Name ||
+            lVar.StartOffset != rVar.StartOffset ||
+            lVar.Size != rVar.Size ||
+            lVar.uFlags != rVar.uFlags ||
+            lVar.StartTexture != rVar.StartTexture ||
+            lVar.TextureSize != rVar.TextureSize ||
+            lVar.StartSampler != rVar.StartSampler ||
+            lVar.SamplerSize != rVar.SamplerSize) {
+            return false;
+        }
+        if (!IsHlslTypeEqual(l, lVar.Type, r, rVar.Type)) {
             return false;
         }
     }
@@ -977,6 +996,30 @@ std::optional<DxcOutput> Dxc::Compile(std::string_view code, std::span<std::stri
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
 }
 
+static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
+    auto fmtStage = [](ShaderStage stage) -> std::string_view {
+        switch (stage) {
+            case ShaderStage::Vertex: return "vs";
+            case ShaderStage::Pixel: return "ps";
+            case ShaderStage::Compute: return "cs";
+            default: return "??";
+        }
+    };
+    auto fmtSm = [](HlslShaderModel sm) -> std::string_view {
+        switch (sm) {
+            case HlslShaderModel::SM60: return "6_0";
+            case HlslShaderModel::SM61: return "6_1";
+            case HlslShaderModel::SM62: return "6_2";
+            case HlslShaderModel::SM63: return "6_3";
+            case HlslShaderModel::SM64: return "6_4";
+            case HlslShaderModel::SM65: return "6_5";
+            case HlslShaderModel::SM66: return "6_6";
+            default: return "??";
+        }
+    };
+    return format("{}_{}", fmtStage(stage), fmtSm(sm));
+}
+
 std::optional<DxcOutput> Dxc::Compile(
     std::string_view code,
     std::string_view entryPoint,
@@ -986,27 +1029,7 @@ std::optional<DxcOutput> Dxc::Compile(
     std::span<std::string_view> defines,
     std::span<std::string_view> includes,
     bool isSpirv) noexcept {
-    string smStr = ([stage, sm]() noexcept {
-        using oss = std::basic_ostringstream<char, std::char_traits<char>, allocator<char>>;
-        oss s{};
-        switch (stage) {
-            case ShaderStage::Vertex: s << "vs_"; break;
-            case ShaderStage::Pixel: s << "ps_"; break;
-            case ShaderStage::Compute: s << "cs_"; break;
-            default: s << "??_"; break;
-        }
-        switch (sm) {
-            case HlslShaderModel::SM60: s << "6_0"; break;
-            case HlslShaderModel::SM61: s << "6_1"; break;
-            case HlslShaderModel::SM62: s << "6_2"; break;
-            case HlslShaderModel::SM63: s << "6_3"; break;
-            case HlslShaderModel::SM64: s << "6_4"; break;
-            case HlslShaderModel::SM65: s << "6_5"; break;
-            case HlslShaderModel::SM66: s << "6_6"; break;
-        }
-        string result = s.str();
-        return result;
-    })();
+    string smStr = _FormatStageAndSm(stage, sm);
     vector<std::string_view> args{};
     if (isSpirv) {
         args.emplace_back("-spirv");
@@ -1039,6 +1062,44 @@ std::optional<DxcOutput> Dxc::Compile(
         args.emplace_back(i);
     }
     return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
+}
+
+std::optional<DxcOutput> Dxc::Compile(const DxcCompileParams& params) noexcept {
+    string smStr = _FormatStageAndSm(params.Stage, params.SM);
+    vector<std::string_view> args{};
+    if (params.IsSpirv) {
+        args.emplace_back("-spirv");
+    }
+    if (!params.EnableUnbounded) {
+        args.emplace_back("-all_resources_bound");
+    }
+    {
+        args.emplace_back("-HV");
+        args.emplace_back("2021");
+    }
+    if (params.IsOptimize) {
+        args.emplace_back("-O3");
+    } else {
+        args.emplace_back("-Od");
+        args.emplace_back("-Zi");
+    }
+    {
+        args.emplace_back("-T");
+        args.emplace_back(smStr);
+    }
+    {
+        args.emplace_back("-E");
+        args.emplace_back(params.EntryPoint);
+    }
+    for (auto&& i : params.Includes) {
+        args.emplace_back("-I");
+        args.emplace_back(i);
+    }
+    for (auto&& i : params.Defines) {
+        args.emplace_back("-D");
+        args.emplace_back(i);
+    }
+    return static_cast<DxcImpl*>(_impl.get())->Compile(params.Code, args);
 }
 
 std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(

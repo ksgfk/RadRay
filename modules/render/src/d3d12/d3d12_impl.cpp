@@ -1114,8 +1114,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                             D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
                             e.Count,
                             e.Slot,
-                            e.Space,
-                            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+                            e.Space);
                         D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                         CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                             rp,
@@ -1157,8 +1156,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
                         e.Count,
                         e.Slot,
-                        e.Space,
-                        D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
@@ -1176,8 +1174,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
                         e.Count,
                         e.Slot,
-                        e.Space,
-                        D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
@@ -1196,8 +1193,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
                         e.Count,
                         e.Slot,
-                        e.Space,
-                        D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+                        e.Space);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,

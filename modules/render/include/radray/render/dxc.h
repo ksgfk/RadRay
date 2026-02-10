@@ -239,6 +239,7 @@ public:
     std::span<std::string_view> Includes{};
     bool IsOptimize{};
     bool IsSpirv{};
+    bool EnableUnbounded{};
 };
 
 struct HlslShaderTypeId {
@@ -314,6 +315,7 @@ public:
     ShaderStages Stages{ShaderStage::UNKNOWN};
 
     ResourceBindType MapResourceBindType() const noexcept;
+    bool IsUnboundArray() const noexcept;
 
     friend auto operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
     friend bool operator==(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept;
@@ -388,6 +390,8 @@ public:
         std::span<std::string_view> defines = {},
         std::span<std::string_view> includes = {},
         bool isSpirv = false) noexcept;
+
+    std::optional<DxcOutput> Compile(const DxcCompileParams& params) noexcept;
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(
         ShaderStage stage,

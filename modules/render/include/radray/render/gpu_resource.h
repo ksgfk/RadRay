@@ -24,6 +24,7 @@ public:
     vector<DrawData> _drawDatas;
 };
 
+// TOOD: 没啥用, 之后改一下，写的什么一坨东西
 class GpuUploader {
 public:
     GpuUploader(Device* device, CommandQueue* queue) noexcept;
