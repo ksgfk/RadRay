@@ -1,5 +1,6 @@
 #include <radray/render/backend/vulkan_impl.h>
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
 
@@ -946,6 +947,64 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const VkSa
     return make_unique<SamplerVulkan>(this, sampler);
 }
 
+Nullable<unique_ptr<BindlessDescriptorSetVulkan>> DeviceVulkan::CreateBindlessDescriptorSetVulkan(
+    VkDescriptorType type,
+    uint32_t capacity) noexcept {
+    if (capacity == 0) {
+        RADRAY_ERR_LOG("vk bindless descriptor set capacity must be greater than 0");
+        return nullptr;
+    }
+    auto bdls = make_unique<BindlessDescriptorSetVulkan>(this, type, capacity);
+    VkDescriptorPoolSize poolSize{type, capacity};
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.pNext = nullptr;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    if (auto vr = _ftb.vkCreateDescriptorPool(_device, &poolInfo, this->GetAllocationCallbacks(), &bdls->_pool);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDescriptorPool failed: {}", vr);
+        return nullptr;
+    }
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = type;
+    binding.descriptorCount = capacity;
+    binding.stageFlags = VK_SHADER_STAGE_ALL;
+    binding.pImmutableSamplers = nullptr;
+    VkDescriptorBindingFlags bindFlags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+    flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsInfo.pNext = nullptr;
+    flagsInfo.bindingCount = 1;
+    flagsInfo.pBindingFlags = &bindFlags;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.pNext = &flagsInfo;
+    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &binding;
+    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &layoutInfo, this->GetAllocationCallbacks(), &bdls->_layout);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
+        return nullptr;
+    }
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.pNext = nullptr;
+    allocInfo.descriptorPool = bdls->_pool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &bdls->_layout;
+    if (auto vr = _ftb.vkAllocateDescriptorSets(_device, &allocInfo, &bdls->_set);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkAllocateDescriptorSets failed: {}", vr);
+        return nullptr;
+    }
+    return bdls;
+}
+
 Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulkan(QueueVulkan* queue) noexcept {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1025,9 +1084,57 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
 }
 
 Nullable<unique_ptr<BindlessArray>> DeviceVulkan::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("vk bindless array is not implemented");
-    return nullptr;
+    if (!this->GetDetail().IsBindlessArraySupported) {
+        RADRAY_ERR_LOG("vk bindless array is not supported by this device");
+        return nullptr;
+    }
+    if (desc.Size == 0) {
+        RADRAY_ERR_LOG("vk bindless array size must be greater than 0");
+        return nullptr;
+    }
+    auto result = make_unique<BindlessArrayVulkan>(this, desc);
+    // TODO:
+    // auto tryAlloc = [&](BindlessDescAllocator* alloc, BindlessDescAllocator::Allocation& outAlloc, const char* err) -> bool {
+    //     if (!alloc) {
+    //         RADRAY_ERR_LOG("vk bindless allocator is not initialized: {}", err);
+    //         return false;
+    //     }
+    //     auto opt = alloc->Allocate(desc.Size);
+    //     if (!opt.has_value()) {
+    //         RADRAY_ERR_LOG("BindlessDescAllocator::Allocate failed: {}", err);
+    //         return false;
+    //     }
+    //     outAlloc = opt.value();
+    //     return true;
+    // };
+    // if (desc.SlotType == BindlessSlotType::BufferOnly || desc.SlotType == BindlessSlotType::Multiple) {
+    //     if (!tryAlloc(_bdlsBuffer.get(), result->_bufferAlloc, "cannot allocate bindless buffer descriptors")) {
+    //         return nullptr;
+    //     }
+    //     result->_bufferAllocOwner = _bdlsBuffer.get();
+    // }
+    // if (desc.SlotType == BindlessSlotType::Texture2DOnly || desc.SlotType == BindlessSlotType::Multiple) {
+    //     if (!tryAlloc(_bdlsTex2d.get(), result->_tex2dAlloc, "cannot allocate bindless texture2d descriptors")) {
+    //         if (result->_bufferAllocOwner && result->_bufferAlloc.IsValid()) {
+    //             result->_bufferAllocOwner->Destroy(result->_bufferAlloc);
+    //         }
+    //         return nullptr;
+    //     }
+    //     result->_tex2dAllocOwner = _bdlsTex2d.get();
+    // }
+    // if (desc.SlotType == BindlessSlotType::Texture3DOnly || desc.SlotType == BindlessSlotType::Multiple) {
+    //     if (!tryAlloc(_bdlsTex3d.get(), result->_tex3dAlloc, "cannot allocate bindless texture3d descriptors")) {
+    //         if (result->_bufferAllocOwner && result->_bufferAlloc.IsValid()) {
+    //             result->_bufferAllocOwner->Destroy(result->_bufferAlloc);
+    //         }
+    //         if (result->_tex2dAllocOwner && result->_tex2dAlloc.IsValid()) {
+    //             result->_tex2dAllocOwner->Destroy(result->_tex2dAlloc);
+    //         }
+    //         return nullptr;
+    //     }
+    //     result->_tex3dAllocOwner = _bdlsTex3d.get();
+    // }
+    return result;
 }
 
 Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -1134,6 +1241,9 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 }
 
 void DeviceVulkan::DestroyImpl() noexcept {
+    _bdlsBuffer.reset();
+    _bdlsTex2d.reset();
+    _bdlsTex3d.reset();
     _descSetAlloc.reset();
     _vma.reset();
     for (auto&& i : _queues) {
@@ -1633,12 +1743,25 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         const auto& f12 = deviceR->_extFeatures.feature12;
         detail.IsBindlessArraySupported =
             selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
-            f12.runtimeDescriptorArray &&
-            f12.descriptorBindingPartiallyBound &&
-            f12.descriptorBindingVariableDescriptorCount &&
-            f12.shaderSampledImageArrayNonUniformIndexing &&
-            f12.shaderStorageImageArrayNonUniformIndexing &&
-            f12.shaderStorageBufferArrayNonUniformIndexing;
+            f12.descriptorBindingUniformBufferUpdateAfterBind &&
+            f12.descriptorBindingSampledImageUpdateAfterBind;
+    }
+    if (deviceR->_detail.IsBindlessArraySupported) {
+        auto bdlsBufferOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 262144);
+        if (!bdlsBufferOpt) {
+            return nullptr;
+        }
+        deviceR->_bdlsBuffer = make_unique<BindlessDescAllocator>(bdlsBufferOpt.Release());
+        auto bdlsTex2dOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 262144);
+        if (!bdlsTex2dOpt) {
+            return nullptr;
+        }
+        deviceR->_bdlsTex2d = make_unique<BindlessDescAllocator>(bdlsTex2dOpt.Release());
+        auto bdlsTex3dOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 262144);
+        if (!bdlsTex3dOpt) {
+            return nullptr;
+        }
+        deviceR->_bdlsTex3d = make_unique<BindlessDescAllocator>(bdlsTex3dOpt.Release());
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -2770,6 +2893,58 @@ void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
     }
 }
 
+BindlessDescriptorSetVulkan::BindlessDescriptorSetVulkan(
+    DeviceVulkan* device,
+    VkDescriptorType type,
+    uint32_t capacity) noexcept
+    : _device(device),
+      _type(type),
+      _capacity(capacity) {}
+
+BindlessDescriptorSetVulkan::~BindlessDescriptorSetVulkan() noexcept {
+    DestroyImpl();
+}
+
+bool BindlessDescriptorSetVulkan::IsValid() const noexcept {
+    return _device != nullptr && _pool != VK_NULL_HANDLE && _layout != VK_NULL_HANDLE && _set != VK_NULL_HANDLE;
+}
+
+void BindlessDescriptorSetVulkan::Destroy() noexcept {
+    DestroyImpl();
+}
+
+void BindlessDescriptorSetVulkan::DestroyImpl() noexcept {
+    _set = VK_NULL_HANDLE;
+    if (_pool != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyDescriptorPool(_device->_device, _pool, _device->GetAllocationCallbacks());
+        _pool = VK_NULL_HANDLE;
+    }
+    if (_layout != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+        _layout = VK_NULL_HANDLE;
+    }
+}
+
+BindlessDescAllocator::BindlessDescAllocator(
+    unique_ptr<BindlessDescriptorSetVulkan> bdls) noexcept
+    : _bdls(std::move(bdls)),
+      _allocator(_bdls->_capacity) {}
+
+std::optional<BindlessDescAllocator::Allocation> BindlessDescAllocator::Allocate(uint32_t count) noexcept {
+    auto alloc = _allocator.Allocate(static_cast<size_t>(count));
+    if (!alloc.has_value()) {
+        return std::nullopt;
+    }
+    return std::make_optional(Allocation{alloc.value()});
+}
+
+void BindlessDescAllocator::Destroy(Allocation allocation) noexcept {
+    if (!allocation.IsValid()) {
+        return;
+    }
+    _allocator.Destroy(allocation.Range);
+}
+
 PipelineLayoutVulkan::PipelineLayoutVulkan(
     DeviceVulkan* device,
     VkPipelineLayout layout) noexcept
@@ -2960,8 +3135,10 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
 
 DescriptorSetAllocatorVulkan::DescriptorSetAllocatorVulkan(
     DeviceVulkan* device,
-    uint32_t keepFreePages) noexcept
+    uint32_t keepFreePages,
+    std::optional<vector<VkDescriptorPoolSize>> specPoolSize) noexcept
     : _device(device),
+      _specPoolSize(std::move(specPoolSize)),
       _keepFreePages(keepFreePages) {}
 
 DescriptorSetAllocatorVulkan::~DescriptorSetAllocatorVulkan() noexcept = default;
@@ -3039,26 +3216,30 @@ void DescriptorSetAllocatorVulkan::Destroy(Allocation allocation) noexcept {
 }
 
 DescriptorPoolVulkan* DescriptorSetAllocatorVulkan::NewPage() noexcept {
-    vector<VkDescriptorPoolSize> poolSizes{};
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8192});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 2048});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8192});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024});
-    poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024});
     VkDescriptorPoolInlineUniformBlockCreateInfo inlineInfo{};
     VkDescriptorPoolInlineUniformBlockCreateInfo* pInlineInfo = nullptr;
-    if (_device->_extFeatures.feature13.inlineUniformBlock) {
-        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, 1024});
-        pInlineInfo = &inlineInfo;
-        inlineInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO;
-        inlineInfo.pNext = nullptr;
-        inlineInfo.maxInlineUniformBlockBindings = 1024;
+    vector<VkDescriptorPoolSize> poolSizes{};
+    if (_specPoolSize.has_value()) {
+        poolSizes = _specPoolSize.value();
+    } else {
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 8192});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 2048});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8192});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024});
+        if (_device->_extFeatures.feature13.inlineUniformBlock) {
+            poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, 1024});
+            pInlineInfo = &inlineInfo;
+            inlineInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_INLINE_UNIFORM_BLOCK_CREATE_INFO;
+            inlineInfo.pNext = nullptr;
+            inlineInfo.maxInlineUniformBlockBindings = 1024;
+        }
     }
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -3134,6 +3315,127 @@ void SamplerVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroySampler(_device->_device, _sampler, _device->GetAllocationCallbacks());
         _sampler = VK_NULL_HANDLE;
     }
+}
+
+BindlessArrayVulkan::BindlessArrayVulkan(
+    DeviceVulkan* device,
+    const BindlessArrayDescriptor& desc) noexcept
+    : _device(device),
+      _size(desc.Size),
+      _slotType(desc.SlotType),
+      _name(desc.Name) {}
+
+BindlessArrayVulkan::~BindlessArrayVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool BindlessArrayVulkan::IsValid() const noexcept {
+    return _device != nullptr && (_bufferAlloc.IsValid() || _tex2dAlloc.IsValid() || _tex3dAlloc.IsValid());
+}
+
+void BindlessArrayVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void BindlessArrayVulkan::DestroyImpl() noexcept {
+}
+
+void BindlessArrayVulkan::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
+    if (_slotType != BindlessSlotType::BufferOnly && _slotType != BindlessSlotType::Multiple) {
+        RADRAY_ERR_LOG("vk bindless array does not support buffer slots");
+        return;
+    }
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
+        return;
+    }
+    if (!bufView) {
+        RADRAY_ERR_LOG("vk bindless array buffer view is null");
+        return;
+    }
+    auto view = static_cast<SimulateBufferViewVulkan*>(bufView);
+    VkDescriptorBufferInfo bufInfo{};
+    bufInfo.buffer = view->_buffer->_buffer;
+    bufInfo.offset = view->_range.Offset;
+    bufInfo.range = view->_range.Size;
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = _bufferAlloc.Set;
+    writeDesc.dstBinding = 0;
+    writeDesc.dstArrayElement = static_cast<uint32_t>(_bufferAlloc.Range.Start + slot);
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = _bufferAlloc.Type;
+    writeDesc.pBufferInfo = &bufInfo;
+    writeDesc.pImageInfo = nullptr;
+    writeDesc.pTexelBufferView = nullptr;
+    _device->_ftb.vkUpdateDescriptorSets(
+        _device->_device,
+        1,
+        &writeDesc,
+        0,
+        nullptr);
+}
+
+void BindlessArrayVulkan::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
+    RADRAY_UNUSED(sampler);
+    if (_slotType == BindlessSlotType::BufferOnly) {
+        RADRAY_ERR_LOG("vk bindless array does not support texture slots");
+        return;
+    }
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
+        return;
+    }
+    if (!texView) {
+        RADRAY_ERR_LOG("vk bindless array texture view is null");
+        return;
+    }
+    auto view = CastVkObject(texView);
+    auto dim = view->_mdesc.Dim;
+    if (dim != TextureViewDimension::Dim2D && dim != TextureViewDimension::Dim3D) {
+        RADRAY_ERR_LOG("vk bindless array only support texture 2D/3D");
+        return;
+    }
+    BindlessDescAllocator::Allocation* alloc = nullptr;
+    if (dim == TextureViewDimension::Dim2D) {
+        if (_slotType == BindlessSlotType::Texture3DOnly) {
+            RADRAY_ERR_LOG("vk bindless array does not support texture slots");
+            return;
+        }
+        alloc = &_tex2dAlloc;
+    } else {
+        if (_slotType == BindlessSlotType::Texture2DOnly) {
+            RADRAY_ERR_LOG("vk bindless array does not support texture slots");
+            return;
+        }
+        alloc = &_tex3dAlloc;
+    }
+    if (!alloc->IsValid()) {
+        RADRAY_ERR_LOG("vk bindless array texture allocator is invalid");
+        return;
+    }
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler = VK_NULL_HANDLE;
+    imgInfo.imageView = view->_imageView;
+    imgInfo.imageLayout = TextureUseToLayout(view->_mdesc.Usage);
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = alloc->Set;
+    writeDesc.dstBinding = 0;
+    writeDesc.dstArrayElement = static_cast<uint32_t>(alloc->Range.Start + slot);
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = alloc->Type;
+    writeDesc.pBufferInfo = nullptr;
+    writeDesc.pImageInfo = &imgInfo;
+    writeDesc.pTexelBufferView = nullptr;
+    _device->_ftb.vkUpdateDescriptorSets(
+        _device->_device,
+        1,
+        &writeDesc,
+        0,
+        nullptr);
 }
 
 }  // namespace radray::render::vulkan

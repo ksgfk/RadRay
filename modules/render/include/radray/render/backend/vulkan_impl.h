@@ -4,6 +4,7 @@
 
 #include <array>
 
+#include <radray/allocator.h>
 #include <radray/render/backend/vulkan_helper.h>
 
 namespace radray::render::vulkan {
@@ -35,7 +36,10 @@ class GraphicsPipelineVulkan;
 class ShaderModuleVulkan;
 class DescriptorSetVulkan;
 class DescriptorSetAllocatorVulkan;
+class BindlessDescriptorSetVulkan;
+class BindlessDescAllocator;
 class SamplerVulkan;
+class BindlessArrayVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -159,6 +163,8 @@ public:
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept;
 
+    Nullable<unique_ptr<BindlessDescriptorSetVulkan>> CreateBindlessDescriptorSetVulkan(VkDescriptorType type, uint32_t capacity) noexcept;
+
     Nullable<unique_ptr<CommandBufferVulkan>> CreateCommandBufferVulkan(QueueVulkan* queue) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
@@ -177,6 +183,9 @@ public:
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     std::unique_ptr<DescriptorSetAllocatorVulkan> _descSetAlloc;
+    std::unique_ptr<BindlessDescAllocator> _bdlsBuffer;
+    std::unique_ptr<BindlessDescAllocator> _bdlsTex2d;
+    std::unique_ptr<BindlessDescAllocator> _bdlsTex3d;
     DeviceFuncTable _ftb;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
@@ -656,6 +665,56 @@ public:
     vector<DescriptorSetLayoutBindingVulkanContainer> _bindings;
 };
 
+class BindlessDescriptorSetVulkan final : public RenderBase {
+public:
+    BindlessDescriptorSetVulkan(
+        DeviceVulkan* device,
+        VkDescriptorType type,
+        uint32_t capacity) noexcept;
+    ~BindlessDescriptorSetVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkDescriptorPool _pool{VK_NULL_HANDLE};
+    VkDescriptorSetLayout _layout{VK_NULL_HANDLE};
+    VkDescriptorSet _set{VK_NULL_HANDLE};
+    VkDescriptorType _type{};
+    uint32_t _capacity{};
+};
+
+class BindlessDescAllocator {
+public:
+    struct Allocation {
+        FreeListAllocator::Allocation Range{};
+        VkDescriptorSet Set{VK_NULL_HANDLE};
+        VkDescriptorType Type{};
+
+        static constexpr Allocation Invalid() noexcept { return Allocation{FreeListAllocator::Allocation::Invalid()}; }
+
+        constexpr bool IsValid() const noexcept { return Range.Length != 0; }
+    };
+
+    explicit BindlessDescAllocator(unique_ptr<BindlessDescriptorSetVulkan> bdls) noexcept;
+
+    std::optional<Allocation> Allocate(uint32_t count) noexcept;
+
+    void Destroy(Allocation allocation) noexcept;
+
+private:
+    unique_ptr<BindlessDescriptorSetVulkan> _bdls;
+    FreeListAllocator _allocator;
+};
+
+static_assert(is_allocator<BindlessDescAllocator, BindlessDescAllocator::Allocation>, "BindlessDescAllocator does not satisfy the allocator concept");
+
 class PipelineLayoutVulkan final : public RootSignature {
 public:
     PipelineLayoutVulkan(
@@ -757,7 +816,7 @@ public:
         }
     };
 
-    DescriptorSetAllocatorVulkan(DeviceVulkan* device, uint32_t keepFreePages) noexcept;
+    DescriptorSetAllocatorVulkan(DeviceVulkan* device, uint32_t keepFreePages, std::optional<vector<VkDescriptorPoolSize>> specPoolSize = std::nullopt) noexcept;
     ~DescriptorSetAllocatorVulkan() noexcept;
 
     DescriptorSetAllocatorVulkan(const DescriptorSetAllocatorVulkan&) = delete;
@@ -777,6 +836,7 @@ private:
     DeviceVulkan* _device;
     vector<unique_ptr<DescriptorPoolVulkan>> _pages;
     size_t _hintPage{0};
+    std::optional<vector<VkDescriptorPoolSize>> _specPoolSize;
     uint32_t _keepFreePages;
 };
 
@@ -824,6 +884,34 @@ public:
     SamplerDescriptor _mdesc;
 };
 
+class BindlessArrayVulkan final : public BindlessArray {
+public:
+    BindlessArrayVulkan(
+        DeviceVulkan* device,
+        const BindlessArrayDescriptor& desc) noexcept;
+
+    ~BindlessArrayVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
+
+    void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    BindlessDescAllocator::Allocation _bufferAlloc{};
+    BindlessDescAllocator::Allocation _tex2dAlloc{};
+    BindlessDescAllocator::Allocation _tex3dAlloc{};
+    uint32_t _size;
+    BindlessSlotType _slotType;
+    string _name;
+};
+
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
 
 Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc);
@@ -838,6 +926,7 @@ constexpr auto CastVkObject(Semaphore* p) noexcept { return static_cast<Semaphor
 constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }

@@ -722,11 +722,7 @@ public:
 
     void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
 
-    void SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept override;
-
-    void Remove(uint32_t slot) noexcept override;
-
-    void Clear() noexcept override;
+    void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept override;
 
 private:
     enum class SlotKind : uint8_t {
@@ -736,16 +732,12 @@ private:
         Texture3D
     };
 
-    void WriteNullBuffer(uint32_t slot) noexcept;
-    void WriteNullTexture2D(uint32_t slot) noexcept;
-    void WriteNullTexture3D(uint32_t slot) noexcept;
-
     DeviceD3D12* _device;
     GpuDescriptorHeapViewRAII _resHeap;
     GpuDescriptorHeapViewRAII _samplerHeap;
+    vector<SlotKind> _slotKinds{};
     uint32_t _size;
     BindlessSlotType _slotType{BindlessSlotType::Multiple};
-    vector<SlotKind> _slotKinds{};
     string _name;
 };
 

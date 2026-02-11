@@ -611,11 +611,6 @@ struct BufferRange {
     uint64_t Size{0};
 };
 
-struct BindlessTextureBinding {
-    TextureView* Target{nullptr};
-    Sampler* SamplerPtr{nullptr};
-};
-
 struct BufferViewDescriptor {
     Buffer* Target{nullptr};
     BufferRange Range{};
@@ -1066,11 +1061,7 @@ public:
 
     virtual void SetBuffer(uint32_t slot, BufferView* bufView) noexcept = 0;
 
-    virtual void SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept = 0;
-
-    virtual void Remove(uint32_t slot) noexcept = 0;
-
-    virtual void Clear() noexcept = 0;
+    virtual void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept = 0;
 };
 
 class InstanceVulkan : public RenderBase {

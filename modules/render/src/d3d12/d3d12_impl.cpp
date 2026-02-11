@@ -1516,7 +1516,6 @@ Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const Bindl
         }
         samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
     }
-
     return make_unique<BindlessArrayD3D12>(
         this,
         desc,
@@ -2311,9 +2310,9 @@ BindlessArrayD3D12::BindlessArrayD3D12(
     : _device(device),
       _resHeap(std::move(resHeap)),
       _samplerHeap(std::move(samplerHeap)),
+      _slotKinds(desc.Size, SlotKind::None),
       _size(desc.Size),
       _slotType(desc.SlotType),
-      _slotKinds(desc.Size, SlotKind::None),
       _name(desc.Name) {}
 
 bool BindlessArrayD3D12::IsValid() const noexcept {
@@ -2327,7 +2326,7 @@ void BindlessArrayD3D12::Destroy() noexcept {
 }
 
 void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
-    if (_slotType == BindlessSlotType::Texture2DOnly || _slotType == BindlessSlotType::Texture3DOnly) {
+    if (_slotType != BindlessSlotType::BufferOnly && _slotType != BindlessSlotType::Multiple) {
         RADRAY_ERR_LOG("d3d12 bindless array does not support buffer slots");
         return;
     }
@@ -2335,68 +2334,32 @@ void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept 
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
-    if (bufView == nullptr) {
-        Remove(slot);
-        return;
-    }
     auto bufferView = CastD3D12Object(bufView);
     bufferView->_heapView.CopyTo(0, 1, _resHeap, slot);
     _slotKinds[slot] = SlotKind::Buffer;
 }
 
-void BindlessArrayD3D12::SetTexture(uint32_t slot, const BindlessTextureBinding& binding) noexcept {
-}
-
-void BindlessArrayD3D12::Remove(uint32_t slot) noexcept {
-}
-
-void BindlessArrayD3D12::Clear() noexcept {
-}
-
-void BindlessArrayD3D12::WriteNullBuffer(uint32_t slot) noexcept {
-    if (!_resHeap.IsValid()) {
+void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
+    auto textureView = CastD3D12Object(texView);
+    auto dim = textureView->_desc.Dim;
+    if (dim != TextureViewDimension::Dim2D && dim != TextureViewDimension::Dim3D) {
+        RADRAY_ERR_LOG("d3d12 bindless array only support texture 2D/3D");
         return;
     }
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Buffer.FirstElement = 0;
-    srvDesc.Buffer.NumElements = 1;
-    srvDesc.Buffer.StructureByteStride = 0;
-    srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
-    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
-}
-
-void BindlessArrayD3D12::WriteNullTexture2D(uint32_t slot) noexcept {
-    if (!_resHeap.IsValid()) {
+    if (_slotType == BindlessSlotType::BufferOnly ||
+        (_slotType == BindlessSlotType::Texture2DOnly && dim != TextureViewDimension::Dim2D) ||
+        (_slotType == BindlessSlotType::Texture3DOnly && dim != TextureViewDimension::Dim3D)) {
+        RADRAY_ERR_LOG("d3d12 bindless array does not support texture slots");
         return;
     }
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels = 1;
-    srvDesc.Texture2D.MostDetailedMip = 0;
-    srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
-    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
-}
-
-void BindlessArrayD3D12::WriteNullTexture3D(uint32_t slot) noexcept {
-    if (!_resHeap.IsValid()) {
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture3D.MipLevels = 1;
-    srvDesc.Texture3D.MostDetailedMip = 0;
-    srvDesc.Texture3D.ResourceMinLODClamp = 0.0f;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = _resHeap.GetHeap()->HandleCpu(_resHeap.GetStart() + slot);
-    _device->_device->CreateShaderResourceView(nullptr, &srvDesc, cpuHandle);
+    textureView->_heapView.CopyTo(0, 1, _resHeap, slot);
+    auto sam = CastD3D12Object(sampler);
+    sam->_samplerView.CopyTo(0, 1, _samplerHeap, slot);
+    _slotKinds[slot] = dim == TextureViewDimension::Dim2D ? SlotKind::Texture2D : SlotKind::Texture3D;
 }
 
 }  // namespace radray::render::d3d12
