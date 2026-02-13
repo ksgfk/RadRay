@@ -744,7 +744,25 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     }
 
     for (uint32_t i = 0; i < _descSets.size(); ++i) {
-        if (!rootSig->NeedsDescriptorSet(i)) {
+        auto it = setBindings.find(i);
+        if (it == setBindings.end()) {
+            continue;
+        }
+        bool isBindless = false;
+        bool allStaticSamplers = true;
+        for (const auto* e : it->second) {
+            if (e->BindCount == 0) {
+                isBindless = true;
+            }
+            if (e->Type != ResourceBindType::Sampler || e->StaticSamplers.empty()) {
+                allStaticSamplers = false;
+            }
+        }
+        if (isBindless) {
+            continue;
+        }
+        // D3D12 static samplers are embedded in root signature, no descriptor table created
+        if (allStaticSamplers && device->GetBackend() == RenderBackend::D3D12) {
             continue;
         }
         auto setOpt = device->CreateDescriptorSet(rootSig, i);

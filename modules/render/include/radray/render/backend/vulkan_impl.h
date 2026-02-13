@@ -731,9 +731,7 @@ public:
 
     void Destroy() noexcept override;
 
-    bool IsBindlessSet(uint32_t index) const noexcept override;
-
-    bool NeedsDescriptorSet(uint32_t index) const noexcept override;
+    bool IsBindlessSet(uint32_t index) const noexcept;
 
 public:
     void DestroyImpl() noexcept;

@@ -3027,10 +3027,6 @@ bool PipelineLayoutVulkan::IsBindlessSet(uint32_t index) const noexcept {
     return index < _isBindlessSet.size() && _isBindlessSet[index];
 }
 
-bool PipelineLayoutVulkan::NeedsDescriptorSet(uint32_t index) const noexcept {
-    return index < _isBindlessSet.size() && !_isBindlessSet[index];
-}
-
 GraphicsPipelineVulkan::GraphicsPipelineVulkan(
     DeviceVulkan* device,
     VkPipeline pipeline) noexcept
