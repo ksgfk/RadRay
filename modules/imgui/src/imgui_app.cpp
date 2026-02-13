@@ -107,17 +107,21 @@ ImGuiRenderer::ImGuiRenderer(
         render::CompareFunction::Always,
         0};
     render::RootSignatureSetElement rsElems[] = {
-        {0, 0, render::ResourceBindType::Texture, 1, render::ShaderStage::Pixel},
-        {0, 0, render::ResourceBindType::Sampler, 1, render::ShaderStage::Pixel, std::span(&sampler, 1)}};
-    if (backendType == render::RenderBackend::D3D12) {
-        rsElems[1].Slot = 0;
-    } else if (backendType == render::RenderBackend::Vulkan) {
-        rsElems[1].Slot = 1;
+        {0, 0, render::ResourceBindType::Texture, 1, render::ShaderStage::Pixel}};
+    render::RootSignatureStaticSampler staticSampler{};
+    staticSampler.Slot = 0;
+    staticSampler.Space = 0;
+    staticSampler.SetIndex = 0;
+    staticSampler.Stages = render::ShaderStage::Pixel;
+    staticSampler.Desc = sampler;
+    if (backendType == render::RenderBackend::Vulkan) {
+        staticSampler.Slot = 1;
     }
     render::RootSignatureDescriptorSet descSet{rsElems};
     render::RootSignatureDescriptor rsDesc{
         {},
         std::span{&descSet, 1},
+        std::span{&staticSampler, 1},
         render::RootSignatureConstant{0, 0, 64, render::ShaderStage::Vertex}};
     _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
     render::VertexElement vertexElems[] = {

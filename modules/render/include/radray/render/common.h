@@ -644,16 +644,24 @@ struct RootSignatureSetElement {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::span<const SamplerDescriptor> StaticSamplers{};
 };
 
 struct RootSignatureDescriptorSet {
     std::span<const RootSignatureSetElement> Elements{};
 };
 
+struct RootSignatureStaticSampler {
+    uint32_t Slot{0};
+    uint32_t Space{0};
+    uint32_t SetIndex{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    SamplerDescriptor Desc{};
+};
+
 struct RootSignatureDescriptor {
     std::span<const RootSignatureRootDescriptor> RootDescriptors{};
     std::span<const RootSignatureDescriptorSet> DescriptorSets{};
+    std::span<const RootSignatureStaticSampler> StaticSamplers{};
     std::optional<RootSignatureConstant> Constant{};
 };
 

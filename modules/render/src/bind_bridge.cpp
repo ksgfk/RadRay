@@ -78,9 +78,12 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
     size_t totalElements = 0;
     size_t totalStaticSamplers = 0;
     for (auto setIndex : setOrder) {
-        totalElements += sets[setIndex].size();
         for (const auto* e : sets[setIndex]) {
-            totalStaticSamplers += e->StaticSamplers.size();
+            if (e->IsStaticSampler) {
+                totalStaticSamplers += e->BindCount;
+            } else {
+                totalElements++;
+            }
         }
     }
     container._elements.reserve(totalElements);
@@ -91,23 +94,34 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
         std::sort(elems.begin(), elems.end(), [](const DescriptorSetEntry* a, const DescriptorSetEntry* b) {
             return a->ElementIndex < b->ElementIndex;
         });
+        // Collect static samplers for this set
+        for (const auto* e : elems) {
+            if (e->IsStaticSampler) {
+                for (uint32_t t = 0; t < e->BindCount; t++) {
+                    RootSignatureStaticSampler ss{};
+                    ss.Slot = e->BindPoint + t;
+                    ss.Space = e->Space;
+                    ss.SetIndex = setIndex;
+                    ss.Stages = e->Stages;
+                    if (t < e->StaticSamplerDescs.size()) {
+                        ss.Desc = e->StaticSamplerDescs[t];
+                    }
+                    container._staticSamplers.push_back(ss);
+                }
+            }
+        }
+        // Build non-static-sampler elements
         size_t elemStart = container._elements.size();
         for (const auto* e : elems) {
+            if (e->IsStaticSampler) {
+                continue;
+            }
             RootSignatureSetElement elem{};
             elem.Slot = e->BindPoint;
             elem.Space = e->Space;
             elem.Type = e->Type;
             elem.Count = e->BindCount;
             elem.Stages = e->Stages;
-            if (!e->StaticSamplers.empty()) {
-                const size_t start = container._staticSamplers.size();
-                container._staticSamplers.insert(container._staticSamplers.end(), e->StaticSamplers.begin(), e->StaticSamplers.end());
-                elem.StaticSamplers = std::span<const SamplerDescriptor>{
-                    container._staticSamplers.data() + start,
-                    e->StaticSamplers.size()};
-            } else {
-                elem.StaticSamplers = {};
-            }
             container._elements.push_back(elem);
         }
         size_t elemCount = container._elements.size() - elemStart;
@@ -120,6 +134,7 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
 
     container._desc.RootDescriptors = container._rootDescriptors;
     container._desc.DescriptorSets = container._descriptorSets;
+    container._desc.StaticSamplers = container._staticSamplers;
     bool hasPushConst = false;
     for (const auto& b : _bindings) {
         bool found = std::visit(
@@ -339,6 +354,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 binding.Stages,
                 setIndex,
                 elemIndex++,
+                false,
                 {}});
         }
         setIndex++;
@@ -404,6 +420,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 b->Stages,
                 setOrderIndex,
                 elemIndex++,
+                false,
                 {}});
         }
         setOrderIndex++;
@@ -608,7 +625,7 @@ void BindBridgeLayout::ApplyStaticSamplers(std::span<const BindBridgeStaticSampl
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, DescriptorSetEntry>) {
                     if (e.Type == ResourceBindType::Sampler) {
-                        e.StaticSamplers.clear();
+                        e.IsStaticSampler = false;
                     }
                 }
             },
@@ -635,7 +652,8 @@ void BindBridgeLayout::ApplyStaticSamplers(std::span<const BindBridgeStaticSampl
                             RADRAY_ERR_LOG("static sampler count mismatch: {} {}", e.Name, e.BindCount);
                             return;
                         }
-                        e.StaticSamplers = ss.Samplers;
+                        e.IsStaticSampler = true;
+                        e.StaticSamplerDescs = ss.Samplers;
                     }
                 },
                 b);
@@ -749,25 +767,18 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
             continue;
         }
         bool isBindless = false;
-        bool allStaticSamplers = true;
         for (const auto* e : it->second) {
             if (e->BindCount == 0) {
                 isBindless = true;
-            }
-            if (e->Type != ResourceBindType::Sampler || e->StaticSamplers.empty()) {
-                allStaticSamplers = false;
             }
         }
         if (isBindless) {
             continue;
         }
-        // D3D12 static samplers are embedded in root signature, no descriptor table created
-        if (allStaticSamplers && device->GetBackend() == RenderBackend::D3D12) {
-            continue;
-        }
         auto setOpt = device->CreateDescriptorSet(rootSig, i);
         if (!setOpt.HasValue()) {
-            throw BindBridgeException("CreateDescriptorSet failed");
+            // No descriptor set for this set index (e.g., D3D12 static-sampler-only set has no table)
+            continue;
         }
         auto set = setOpt.Release();
         _descSets[i].OwnedSet = std::move(set);

@@ -645,13 +645,17 @@ public:
 
     void Destroy() noexcept override;
 
-    bool IsBindlessSet(uint32_t index) const noexcept;
+    bool IsBindlessSet(uint32_t setIndex) const noexcept;
+
+    std::optional<VersionedRootSignatureDescContainer::RootParamRef>
+    GetTableBySetIndex(uint32_t setIndex) const noexcept;
 
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
     VersionedRootSignatureDescContainer _desc;
-    vector<uint8_t> _isBindlessTable;
+    vector<uint8_t> _isBindlessSet;
+    unordered_map<uint32_t, size_t> _setIndexToTableIndex;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {

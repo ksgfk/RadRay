@@ -21,7 +21,7 @@ public:
     RootSignatureDescriptor _desc{};
     vector<RootSignatureRootDescriptor> _rootDescriptors;
     vector<RootSignatureSetElement> _elements;
-    vector<SamplerDescriptor> _staticSamplers;
+    vector<RootSignatureStaticSampler> _staticSamplers;
     vector<RootSignatureDescriptorSet> _descriptorSets;
 };
 
@@ -61,7 +61,8 @@ public:
         ShaderStages Stages{ShaderStage::UNKNOWN};
         uint32_t SetIndex{0};
         uint32_t ElementIndex{0};
-        vector<SamplerDescriptor> StaticSamplers;
+        bool IsStaticSampler{false};
+        vector<SamplerDescriptor> StaticSamplerDescs;
     };
 
     using BindingEntry = std::variant<PushConstEntry, RootDescriptorEntry, DescriptorSetEntry>;

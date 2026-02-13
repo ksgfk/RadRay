@@ -532,7 +532,8 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     vector<uint8_t> isBindlessSet;
     vkDescSetLayouts.reserve(desc.DescriptorSets.size());
     isBindlessSet.reserve(desc.DescriptorSets.size());
-    for (auto i : desc.DescriptorSets) {
+    for (uint32_t setIdx = 0; setIdx < desc.DescriptorSets.size(); setIdx++) {
+        const auto& i = desc.DescriptorSets[setIdx];
         bool isBindless = false;
         VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
         for (const auto& elem : i.Elements) {
@@ -540,6 +541,13 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
                 isBindless = true;
                 bindlessType = MapType(elem.Type);
                 break;
+            }
+        }
+        // Collect static samplers for this set
+        vector<RootSignatureStaticSampler> setStaticSamplers;
+        for (const auto& ss : desc.StaticSamplers) {
+            if (ss.SetIndex == setIdx) {
+                setStaticSamplers.push_back(ss);
             }
         }
         if (isBindless) {
@@ -557,7 +565,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
             layouts.emplace_back(nullptr);
             isBindlessSet.push_back(true);
         } else {
-            auto layout = this->CreateDescriptorSetLayout(i);
+            auto layout = this->CreateDescriptorSetLayout(i, setStaticSamplers);
             if (!layout) {
                 return nullptr;
             }
@@ -869,37 +877,35 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     return result;
 }
 
-Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc) noexcept {
+Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc, std::span<const RootSignatureStaticSampler> staticSamplers) noexcept {
     struct BindingCtx {
         VkDescriptorSetLayoutBinding binding;
         vector<unique_ptr<SamplerVulkan>> staticSamplers;
         vector<VkSampler> tmpSS;
     };
     vector<BindingCtx> ctxs;
+    // Regular elements
     for (const auto& j : desc.Elements) {
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = j.Slot;
         ctx.binding.descriptorType = MapType(j.Type);
         ctx.binding.descriptorCount = j.Count;
         ctx.binding.stageFlags = MapType(j.Stages);
-        if (!j.StaticSamplers.empty()) {
-            if (j.StaticSamplers.size() != j.Count) {
-                RADRAY_ERR_LOG("static sampler count mismatch", j.StaticSamplers.size(), j.Count);
-                return nullptr;
-            }
-            ctx.staticSamplers.reserve(j.StaticSamplers.size());
-            ctx.tmpSS.reserve(j.StaticSamplers.size());
-            for (size_t t = 0; t < j.StaticSamplers.size(); t++) {
-                const SamplerDescriptor& ss = j.StaticSamplers[t];
-                auto samplerOpt = this->CreateSamplerVulkan(ss);
-                if (!samplerOpt.HasValue()) {
-                    return nullptr;
-                }
-                auto sampler = samplerOpt.Release();
-                ctx.tmpSS.emplace_back(sampler->_sampler);
-                ctx.staticSamplers.emplace_back(std::move(sampler));
-            }
+    }
+    // Static samplers (immutable samplers)
+    for (const auto& ss : staticSamplers) {
+        auto& ctx = ctxs.emplace_back();
+        ctx.binding.binding = ss.Slot;
+        ctx.binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        ctx.binding.descriptorCount = 1;
+        ctx.binding.stageFlags = MapType(ss.Stages);
+        auto samplerOpt = this->CreateSamplerVulkan(ss.Desc);
+        if (!samplerOpt.HasValue()) {
+            return nullptr;
         }
+        auto sampler = samplerOpt.Release();
+        ctx.tmpSS.emplace_back(sampler->_sampler);
+        ctx.staticSamplers.emplace_back(std::move(sampler));
     }
     vector<VkDescriptorSetLayoutBinding> bindings;
     bindings.reserve(ctxs.size());
