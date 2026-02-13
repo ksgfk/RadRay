@@ -24,66 +24,6 @@ public:
     vector<DrawData> _drawDatas;
 };
 
-// TOOD: 没啥用, 之后改一下，写的什么一坨东西
-class GpuUploader {
-public:
-    GpuUploader(Device* device, CommandQueue* queue) noexcept;
-    GpuUploader(const GpuUploader&) = delete;
-    GpuUploader& operator=(const GpuUploader&) = delete;
-    GpuUploader(GpuUploader&&) noexcept = delete;
-    GpuUploader& operator=(GpuUploader&&) noexcept = delete;
-    ~GpuUploader() noexcept;
-
-    void Destroy() noexcept;
-
-    task<RenderMesh> UploadMeshAsync(const MeshResource& resource);
-
-    void Submit();
-
-    void Tick();
-
-private:
-    class BatchAwaiter;
-
-    struct BufferSpan {
-        Buffer* Buffer{nullptr};
-        void* CpuAddress{nullptr};
-        uint64_t Offset{0};
-        uint64_t Size{0};
-    };
-
-    struct UploadRequest {
-        Buffer* Src{nullptr};
-        uint64_t SrcOffset{0};
-        Buffer* Dst{nullptr};
-        uint64_t DstOffset{0};
-        uint64_t Size{0};
-    };
-
-    struct PendingTask {
-        coroutine_handle<> Handle;
-        vector<unique_ptr<Buffer>> RetainedBuffers;
-    };
-
-    class UploadBatch {
-    public:
-        unique_ptr<CommandBuffer> _cmdBuffer;
-        unique_ptr<Fence> _fence;
-        vector<unique_ptr<Buffer>> _tmpBuffers;
-        vector<UploadRequest> _requests;
-        vector<std::shared_ptr<PendingTask>> _awaiters;
-    };
-
-    UploadBatch* GetOrCreateCurrentBatch();
-
-    BufferSpan AllocateUploadBuffer(uint64_t size, uint64_t alignment);
-
-    Device* _device{nullptr};
-    CommandQueue* _queue{nullptr};
-    unique_ptr<UploadBatch> _currBatch{nullptr};
-    vector<unique_ptr<UploadBatch>> _pendings;
-};
-
 class CBufferArena {
 public:
     struct Descriptor {

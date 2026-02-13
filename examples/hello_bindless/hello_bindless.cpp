@@ -228,11 +228,7 @@ private:
             }
             auto& img = imgOpt.value();
             size_t srcRowPitch = static_cast<size_t>(img.Width) * 4;
-            size_t dstRowPitch = srcRowPitch;
-            if (_device->GetBackend() == render::RenderBackend::D3D12) {
-                // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT = 256
-                dstRowPitch = (srcRowPitch + 255) & ~size_t(255);
-            }
+            size_t dstRowPitch = Align(srcRowPitch, (size_t)_device->GetDetail().TextureDataPitchAlignment);
             size_t uploadSize = dstRowPitch * img.Height;
             string texName = string("Tex_") + TEX_NAMES[i];
             render::TextureDescriptor texDesc{

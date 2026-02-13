@@ -1756,6 +1756,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     {
         DeviceDetail& detail = deviceR->_detail;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
+        detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
         const auto& f12 = deviceR->_extFeatures.feature12;
         detail.IsBindlessArraySupported =
             selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
@@ -3024,6 +3025,10 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
 
 bool PipelineLayoutVulkan::IsBindlessSet(uint32_t index) const noexcept {
     return index < _isBindlessSet.size() && _isBindlessSet[index];
+}
+
+bool PipelineLayoutVulkan::NeedsDescriptorSet(uint32_t index) const noexcept {
+    return index < _isBindlessSet.size() && !_isBindlessSet[index];
 }
 
 GraphicsPipelineVulkan::GraphicsPipelineVulkan(

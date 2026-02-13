@@ -415,6 +415,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
     DeviceDetail& detail = result->_detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
     detail.IsBindlessArraySupported = false;
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -1280,6 +1281,21 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     auto result = make_unique<RootSigD3D12>(this, std::move(rootSig));
     result->_desc = VersionedRootSignatureDescContainer{versionDesc};
     result->_isBindlessTable = std::move(isBindlessTable);
+    // Build per-set-index flag: does this set need a descriptor set on D3D12?
+    // False for bindless sets (use BindBindlessArray) and static-sampler-only sets (embedded in root sig).
+    result->_needsDescriptorSet.reserve(desc.DescriptorSets.size());
+    for (auto i : desc.DescriptorSets) {
+        bool hasBindless = false;
+        bool hasNonStaticSamplerEntry = false;
+        for (const auto& e : i.Elements) {
+            if (e.Count == 0) {
+                hasBindless = true;
+            } else if (e.Type != ResourceBindType::Sampler || e.StaticSamplers.empty()) {
+                hasNonStaticSamplerEntry = true;
+            }
+        }
+        result->_needsDescriptorSet.push_back(!hasBindless && hasNonStaticSamplerEntry);
+    }
     return result;
 }
 
@@ -2275,6 +2291,10 @@ void RootSigD3D12::Destroy() noexcept {
 
 bool RootSigD3D12::IsBindlessSet(uint32_t index) const noexcept {
     return index < _isBindlessTable.size() && _isBindlessTable[index];
+}
+
+bool RootSigD3D12::NeedsDescriptorSet(uint32_t index) const noexcept {
+    return index < _needsDescriptorSet.size() && _needsDescriptorSet[index];
 }
 
 GraphicsPsoD3D12::GraphicsPsoD3D12(

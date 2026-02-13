@@ -647,11 +647,14 @@ public:
 
     bool IsBindlessSet(uint32_t index) const noexcept override;
 
+    bool NeedsDescriptorSet(uint32_t index) const noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
     VersionedRootSignatureDescContainer _desc;
     vector<uint8_t> _isBindlessTable;
+    vector<uint8_t> _needsDescriptorSet;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {

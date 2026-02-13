@@ -830,6 +830,7 @@ struct IndexBufferView {
 
 struct DeviceDetail {
     uint32_t CBufferAlignment{0};
+    uint32_t TextureDataPitchAlignment{1};
     bool IsBindlessArraySupported{false};
 };
 
@@ -1027,6 +1028,8 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
 
     virtual bool IsBindlessSet(uint32_t index) const noexcept = 0;
+
+    virtual bool NeedsDescriptorSet(uint32_t index) const noexcept = 0;
 };
 
 class PipelineState : public RenderBase {

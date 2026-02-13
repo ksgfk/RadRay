@@ -733,6 +733,8 @@ public:
 
     bool IsBindlessSet(uint32_t index) const noexcept override;
 
+    bool NeedsDescriptorSet(uint32_t index) const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

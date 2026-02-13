@@ -744,21 +744,8 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     }
 
     for (uint32_t i = 0; i < _descSets.size(); ++i) {
-        if (rootSig->IsBindlessSet(i)) {
+        if (!rootSig->NeedsDescriptorSet(i)) {
             continue;
-        }
-        // Skip sets that only contain static samplers (no descriptor table created)
-        if (auto it = setBindings.find(i); it != setBindings.end()) {
-            bool allStaticSamplers = true;
-            for (const auto* e : it->second) {
-                if (e->Type != ResourceBindType::Sampler || e->StaticSamplers.empty()) {
-                    allStaticSamplers = false;
-                    break;
-                }
-            }
-            if (allStaticSamplers) {
-                continue;
-            }
         }
         auto setOpt = device->CreateDescriptorSet(rootSig, i);
         if (!setOpt.HasValue()) {

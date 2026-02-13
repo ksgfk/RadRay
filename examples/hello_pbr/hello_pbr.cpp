@@ -53,14 +53,6 @@ public:
 
     void OnStart(const ImGuiAppConfig& config_) override {
         auto config = config_;
-        if (config.Backend == render::RenderBackend::Vulkan) {
-            render::VulkanCommandQueueDescriptor queueDesc[] = {
-                {render::QueueType::Direct, 1},
-                {render::QueueType::Copy, 1}};
-            render::VulkanDeviceDescriptor devDesc{};
-            devDesc.Queues = queueDesc;
-            config.DeviceDesc = devDesc;
-        }
         this->Init(config);
 
         _cc.SetOrbitTarget(_modelPos);
@@ -76,20 +68,17 @@ public:
         }
         this->OnRecreateSwapChain();
 
-        auto copyQueue = _device->GetCommandQueue(render::QueueType::Copy).Unwrap();
-        _gpuUploader = std::make_unique<render::GpuUploader>(_device.get(), copyQueue);
-
-        LoadAsync();
+        Load();
     }
 
     void OnDestroy() noexcept override {
         _touchConn.disconnect();
         _wheelConn.disconnect();
-        _gpuUploader.reset();
 
         _dxc.reset();
 
         _binds.clear();
+        _meshUploadBuffers.clear();
         _renderMesh.reset();
         _pso.reset();
         _rs.reset();
@@ -104,9 +93,6 @@ public:
     void OnUpdate() override {
         _fps.OnUpdate();
         _monitor.SetData(_fps);
-
-        _gpuUploader->Submit();
-        _gpuUploader->Tick();
     }
 
     void OnExtractDrawData(uint32_t frameIndex) override {
@@ -152,6 +138,22 @@ public:
 
         cmdBuffer->Begin();
         _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
+        if (_needsMeshUpload) {
+            for (size_t i = 0; i < _meshUploadBuffers.size(); i++) {
+                auto* src = _meshUploadBuffers[i].get();
+                auto* dst = _renderMesh->_buffers[i].get();
+                cmdBuffer->CopyBufferToBuffer(dst, 0, src, 0, src->GetDesc().Size);
+            }
+            vector<render::BarrierBufferDescriptor> bufBarriers;
+            for (auto& buf : _renderMesh->_buffers) {
+                auto& b = bufBarriers.emplace_back();
+                b.Target = buf.get();
+                b.Before = render::BufferUse::CopyDestination;
+                b.After = render::BufferUse::Vertex | render::BufferUse::Index;
+            }
+            cmdBuffer->ResourceBarrier(bufBarriers, {});
+            _needsMeshUpload = false;
+        }
         {
             render::BarrierTextureDescriptor barriers[] = {
                 {rt,
@@ -232,6 +234,7 @@ public:
     void OnRenderComplete(uint32_t frameIndex) override {
         ImGuiApplication::OnRenderComplete(frameIndex);
 
+        _meshUploadBuffers.clear();
         auto& frame = _frames[frameIndex];
         frame->_drawDatas.clear();
         frame->_cbArena.Reset();
@@ -266,13 +269,62 @@ public:
         }
     }
 
-    FireAndForgetTask LoadAsync() {
+    void Load() {
         auto backend = _device->GetBackend();
         TriangleMesh sphereMesh{};
         sphereMesh.InitAsUVSphere(0.5f, 128);
         MeshResource sphereModel{};
         sphereMesh.ToSimpleMeshResource(&sphereModel);
-        _renderMesh = std::make_unique<render::RenderMesh>(co_await _gpuUploader->UploadMeshAsync(sphereModel));
+
+        _renderMesh = std::make_unique<render::RenderMesh>();
+        _renderMesh->_buffers.reserve(sphereModel.Bins.size());
+        _meshUploadBuffers.reserve(sphereModel.Bins.size());
+        for (const auto& bufData : sphereModel.Bins) {
+            auto data = bufData.GetData();
+            render::BufferDescriptor uploadDesc{
+                bufData.GetSize(),
+                render::MemoryType::Upload,
+                render::BufferUse::CopySource | render::BufferUse::MapWrite,
+                {},
+                {}};
+            auto uploadBuf = _device->CreateBuffer(uploadDesc).Unwrap();
+            void* dst = uploadBuf->Map(0, data.size());
+            std::memcpy(dst, data.data(), data.size());
+            _meshUploadBuffers.emplace_back(std::move(uploadBuf));
+            render::BufferDescriptor deviceDesc{
+                bufData.GetSize(),
+                render::MemoryType::Device,
+                render::BufferUse::CopyDestination | render::BufferUse::Vertex | render::BufferUse::Index,
+                {},
+                {}};
+            _renderMesh->_buffers.emplace_back(_device->CreateBuffer(deviceDesc).Unwrap());
+        }
+        _renderMesh->_drawDatas.reserve(sphereModel.Primitives.size());
+        for (const auto& primitive : sphereModel.Primitives) {
+            render::RenderMesh::DrawData drawData{};
+            if (!primitive.VertexBuffers.empty()) {
+                const auto& vbEntry = primitive.VertexBuffers.front();
+                if (vbEntry.BufferIndex < _renderMesh->_buffers.size()) {
+                    auto* vb = _renderMesh->_buffers[vbEntry.BufferIndex].get();
+                    uint64_t vbSize = vb->GetDesc().Size;
+                    uint64_t viewSize = vbSize;
+                    if (primitive.VertexCount > 0 && vbEntry.Stride > 0) {
+                        uint64_t required = static_cast<uint64_t>(primitive.VertexCount) * vbEntry.Stride;
+                        if (required > 0) {
+                            viewSize = std::min(vbSize, required);
+                        }
+                    }
+                    drawData.Vbv = {vb, 0, viewSize};
+                }
+            }
+            const auto& ibEntry = primitive.IndexBuffer;
+            if (ibEntry.BufferIndex < _renderMesh->_buffers.size()) {
+                auto* ib = _renderMesh->_buffers[ibEntry.BufferIndex].get();
+                drawData.Ibv = {ib, ibEntry.Offset, ibEntry.Stride};
+            }
+            _renderMesh->_drawDatas.emplace_back(drawData);
+        }
+        _needsMeshUpload = true;
 
         unique_ptr<render::Shader> vsShader, psShader;
         {
@@ -460,7 +512,6 @@ private:
 
     shared_ptr<render::Dxc> _dxc;
     vector<unique_ptr<HelloPBRFrame>> _frames;
-    unique_ptr<render::GpuUploader> _gpuUploader = nullptr;
     // camera
     Eigen::Vector3f _camPos{0.0f, 0.0f, -3.0f};
     Eigen::Quaternionf _camRot{Eigen::Quaternionf::Identity()};
@@ -474,6 +525,8 @@ private:
     unique_ptr<render::RootSignature> _rs;
     unique_ptr<render::GraphicsPipelineState> _pso;
     unique_ptr<render::RenderMesh> _renderMesh;
+    vector<unique_ptr<render::Buffer>> _meshUploadBuffers;
+    bool _needsMeshUpload{false};
     vector<unique_ptr<render::BindBridge>> _binds;
     Eigen::Vector3f _modelPos{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
