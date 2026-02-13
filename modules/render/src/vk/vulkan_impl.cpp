@@ -529,14 +529,42 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     }
     vector<unique_ptr<DescriptorSetLayoutVulkan>> layouts;
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
+    vector<uint8_t> isBindlessSet;
     vkDescSetLayouts.reserve(desc.DescriptorSets.size());
+    isBindlessSet.reserve(desc.DescriptorSets.size());
     for (auto i : desc.DescriptorSets) {
-        auto layout = this->CreateDescriptorSetLayout(i);
-        if (!layout) {
-            return nullptr;
+        bool isBindless = false;
+        VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        for (const auto& elem : i.Elements) {
+            if (elem.Count == 0) {
+                isBindless = true;
+                bindlessType = MapType(elem.Type);
+                break;
+            }
         }
-        const auto& t = layouts.emplace_back(layout.Release());
-        vkDescSetLayouts.emplace_back(t->_layout);
+        if (isBindless) {
+            VkDescriptorSetLayout globalLayout = VK_NULL_HANDLE;
+            if (bindlessType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+                globalLayout = _bdlsTex2d->GetLayout();
+            } else if (bindlessType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                globalLayout = _bdlsBuffer->GetLayout();
+            }
+            if (globalLayout == VK_NULL_HANDLE) {
+                RADRAY_ERR_LOG("vk failed to find global bindless layout for type {}", bindlessType);
+                return nullptr;
+            }
+            vkDescSetLayouts.emplace_back(globalLayout);
+            layouts.emplace_back(nullptr);
+            isBindlessSet.push_back(true);
+        } else {
+            auto layout = this->CreateDescriptorSetLayout(i);
+            if (!layout) {
+                return nullptr;
+            }
+            const auto& t = layouts.emplace_back(layout.Release());
+            vkDescSetLayouts.emplace_back(t->_layout);
+            isBindlessSet.push_back(false);
+        }
     }
     VkPipelineLayoutCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -554,6 +582,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     }
     auto result = make_unique<PipelineLayoutVulkan>(this, pipelineLayout);
     result->_descSetLayouts = std::move(layouts);
+    result->_isBindlessSet = std::move(isBindlessSet);
     if (pushConstantPtr == nullptr) {
         result->_pushConst = std::nullopt;
     } else {
@@ -1039,6 +1068,10 @@ Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignat
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "index", rootSig->_descSetLayouts.size(), index);
         return nullptr;
     }
+    if (rootSig->IsBindlessSet(index)) {
+        RADRAY_ERR_LOG("cannot create descriptor set for bindless set {}", index);
+        return nullptr;
+    }
     const auto& layout = rootSig->_descSetLayouts[index];
     auto allocOpt = _descSetAlloc->Allocate(layout.get());
     if (!allocOpt.has_value()) {
@@ -1093,47 +1126,30 @@ Nullable<unique_ptr<BindlessArray>> DeviceVulkan::CreateBindlessArray(const Bind
         return nullptr;
     }
     auto result = make_unique<BindlessArrayVulkan>(this, desc);
-    // TODO:
-    // auto tryAlloc = [&](BindlessDescAllocator* alloc, BindlessDescAllocator::Allocation& outAlloc, const char* err) -> bool {
-    //     if (!alloc) {
-    //         RADRAY_ERR_LOG("vk bindless allocator is not initialized: {}", err);
-    //         return false;
-    //     }
-    //     auto opt = alloc->Allocate(desc.Size);
-    //     if (!opt.has_value()) {
-    //         RADRAY_ERR_LOG("BindlessDescAllocator::Allocate failed: {}", err);
-    //         return false;
-    //     }
-    //     outAlloc = opt.value();
-    //     return true;
-    // };
-    // if (desc.SlotType == BindlessSlotType::BufferOnly || desc.SlotType == BindlessSlotType::Multiple) {
-    //     if (!tryAlloc(_bdlsBuffer.get(), result->_bufferAlloc, "cannot allocate bindless buffer descriptors")) {
-    //         return nullptr;
-    //     }
-    //     result->_bufferAllocOwner = _bdlsBuffer.get();
-    // }
-    // if (desc.SlotType == BindlessSlotType::Texture2DOnly || desc.SlotType == BindlessSlotType::Multiple) {
-    //     if (!tryAlloc(_bdlsTex2d.get(), result->_tex2dAlloc, "cannot allocate bindless texture2d descriptors")) {
-    //         if (result->_bufferAllocOwner && result->_bufferAlloc.IsValid()) {
-    //             result->_bufferAllocOwner->Destroy(result->_bufferAlloc);
-    //         }
-    //         return nullptr;
-    //     }
-    //     result->_tex2dAllocOwner = _bdlsTex2d.get();
-    // }
-    // if (desc.SlotType == BindlessSlotType::Texture3DOnly || desc.SlotType == BindlessSlotType::Multiple) {
-    //     if (!tryAlloc(_bdlsTex3d.get(), result->_tex3dAlloc, "cannot allocate bindless texture3d descriptors")) {
-    //         if (result->_bufferAllocOwner && result->_bufferAlloc.IsValid()) {
-    //             result->_bufferAllocOwner->Destroy(result->_bufferAlloc);
-    //         }
-    //         if (result->_tex2dAllocOwner && result->_tex2dAlloc.IsValid()) {
-    //             result->_tex2dAllocOwner->Destroy(result->_tex2dAlloc);
-    //         }
-    //         return nullptr;
-    //     }
-    //     result->_tex3dAllocOwner = _bdlsTex3d.get();
-    // }
+    if (desc.SlotType == BindlessSlotType::BufferOnly || desc.SlotType == BindlessSlotType::Multiple) {
+        auto allocOpt = _bdlsBuffer->Allocate(desc.Size);
+        if (!allocOpt.has_value()) {
+            RADRAY_ERR_LOG("vk bindless array failed to allocate buffer descriptors (size={})", desc.Size);
+            return nullptr;
+        }
+        result->_bufferAlloc = allocOpt.value();
+    }
+    if (desc.SlotType == BindlessSlotType::Texture2DOnly || desc.SlotType == BindlessSlotType::Multiple) {
+        auto allocOpt = _bdlsTex2d->Allocate(desc.Size);
+        if (!allocOpt.has_value()) {
+            RADRAY_ERR_LOG("vk bindless array failed to allocate tex2d descriptors (size={})", desc.Size);
+            return nullptr;
+        }
+        result->_tex2dAlloc = allocOpt.value();
+    }
+    if (desc.SlotType == BindlessSlotType::Texture3DOnly || desc.SlotType == BindlessSlotType::Multiple) {
+        auto allocOpt = _bdlsTex3d->Allocate(desc.Size);
+        if (!allocOpt.has_value()) {
+            RADRAY_ERR_LOG("vk bindless array failed to allocate tex3d descriptors (size={})", desc.Size);
+            return nullptr;
+        }
+        result->_tex3dAlloc = allocOpt.value();
+    }
     return result;
 }
 
@@ -2357,6 +2373,42 @@ void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSe
         0, nullptr);
 }
 
+void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+        return;
+    }
+    if (!_boundPipeLayout->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+        return;
+    }
+    auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (bdlsArray->_tex2dAlloc.IsValid()) {
+        set = bdlsArray->_tex2dAlloc.Set;
+    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
+        set = bdlsArray->_tex3dAlloc.Set;
+    } else if (bdlsArray->_bufferAlloc.IsValid()) {
+        set = bdlsArray->_bufferAlloc.Set;
+    }
+    if (set == VK_NULL_HANDLE) {
+        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        return;
+    }
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _boundPipeLayout->_layout,
+        slot,
+        1,
+        &set,
+        0, nullptr);
+}
+
 void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
     _device->_ftb.vkCmdDraw(_cmdBuffer->_cmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -2935,7 +2987,7 @@ std::optional<BindlessDescAllocator::Allocation> BindlessDescAllocator::Allocate
     if (!alloc.has_value()) {
         return std::nullopt;
     }
-    return std::make_optional(Allocation{alloc.value()});
+    return std::make_optional(Allocation{alloc.value(), _bdls->_set, _bdls->_type});
 }
 
 void BindlessDescAllocator::Destroy(Allocation allocation) noexcept {
@@ -2968,6 +3020,10 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
         _layout = VK_NULL_HANDLE;
     }
+}
+
+bool PipelineLayoutVulkan::IsBindlessSet(uint32_t index) const noexcept {
+    return index < _isBindlessSet.size() && _isBindlessSet[index];
 }
 
 GraphicsPipelineVulkan::GraphicsPipelineVulkan(
@@ -3338,6 +3394,21 @@ void BindlessArrayVulkan::Destroy() noexcept {
 }
 
 void BindlessArrayVulkan::DestroyImpl() noexcept {
+    if (_device == nullptr) {
+        return;
+    }
+    if (_bufferAlloc.IsValid()) {
+        _device->_bdlsBuffer->Destroy(_bufferAlloc);
+        _bufferAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
+    if (_tex2dAlloc.IsValid()) {
+        _device->_bdlsTex2d->Destroy(_tex2dAlloc);
+        _tex2dAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
+    if (_tex3dAlloc.IsValid()) {
+        _device->_bdlsTex3d->Destroy(_tex3dAlloc);
+        _tex3dAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
 }
 
 void BindlessArrayVulkan::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
@@ -3385,10 +3456,6 @@ void BindlessArrayVulkan::SetTexture(uint32_t slot, TextureView* texView, Sample
     }
     if (slot >= _size) {
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
-        return;
-    }
-    if (!texView) {
-        RADRAY_ERR_LOG("vk bindless array texture view is null");
         return;
     }
     auto view = CastVkObject(texView);

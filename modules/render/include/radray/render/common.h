@@ -932,6 +932,8 @@ public:
 
     virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept = 0;
 
+    virtual void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept = 0;
+
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
@@ -1023,6 +1025,8 @@ public:
     virtual ~RootSignature() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
+
+    virtual bool IsBindlessSet(uint32_t index) const noexcept = 0;
 };
 
 class PipelineState : public RenderBase {

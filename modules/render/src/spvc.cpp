@@ -274,6 +274,9 @@ static void _ProcessResource(
     binding.TypeIndex = _ReflectType(ctx, type);
     if (!type.array.empty()) {
         binding.ArraySize = type.array[0];
+        if (binding.ArraySize == 0) {
+            binding.IsUnboundedArray = true;
+        }
     }
     if (type.basetype == spirv_cross::SPIRType::Image ||
         type.basetype == spirv_cross::SPIRType::SampledImage) {

@@ -74,6 +74,17 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
             b);
     }
     std::sort(setOrder.begin(), setOrder.end());
+    // Pre-reserve to prevent reallocation that would invalidate spans
+    size_t totalElements = 0;
+    size_t totalStaticSamplers = 0;
+    for (auto setIndex : setOrder) {
+        totalElements += sets[setIndex].size();
+        for (const auto* e : sets[setIndex]) {
+            totalStaticSamplers += e->StaticSamplers.size();
+        }
+    }
+    container._elements.reserve(totalElements);
+    container._staticSamplers.reserve(totalStaticSamplers);
     container._descriptorSets.reserve(setOrder.size());
     for (auto setIndex : setOrder) {
         auto& elems = sets[setIndex];
@@ -380,6 +391,9 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 continue;
             }
             uint32_t count = b->ArraySize == 0 ? 1u : b->ArraySize;
+            if (b->IsUnboundedArray) {
+                count = 0;  // bindless
+            }
             bindingEntries.emplace_back(DescriptorSetEntry{
                 b->Name,
                 0,
@@ -730,6 +744,22 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     }
 
     for (uint32_t i = 0; i < _descSets.size(); ++i) {
+        if (rootSig->IsBindlessSet(i)) {
+            continue;
+        }
+        // Skip sets that only contain static samplers (no descriptor table created)
+        if (auto it = setBindings.find(i); it != setBindings.end()) {
+            bool allStaticSamplers = true;
+            for (const auto* e : it->second) {
+                if (e->Type != ResourceBindType::Sampler || e->StaticSamplers.empty()) {
+                    allStaticSamplers = false;
+                    break;
+                }
+            }
+            if (allStaticSamplers) {
+                continue;
+            }
+        }
         auto setOpt = device->CreateDescriptorSet(rootSig, i);
         if (!setOpt.HasValue()) {
             throw BindBridgeException("CreateDescriptorSet failed");

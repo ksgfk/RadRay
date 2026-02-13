@@ -4,7 +4,6 @@ struct PreObjectData
 {
     float4x4 mvp;
     uint texIndex;
-    uint sIndex;
 };
 
 struct VS_INPUT
@@ -20,8 +19,8 @@ struct PS_INPUT
 };
 
 VK_PUSH_CONSTANT ConstantBuffer<PreObjectData> _Obj : register(b0);
-Texture2D<float4> _Tex[] : register(t0);
-SamplerState _Sampler[] : register(s0);
+VK_BINDING(0, 0) Texture2D<float4> _Tex[] : register(t0);
+VK_BINDING(0, 1) SamplerState _Sampler : register(s0);
 
 PS_INPUT VSMain(VS_INPUT vsIn)
 {
@@ -33,6 +32,6 @@ PS_INPUT VSMain(VS_INPUT vsIn)
 
 float4 PSMain(PS_INPUT psIn) : SV_Target
 {
-    float4 color = _Tex[_Obj.texIndex].Sample(_Sampler[_Obj.sIndex], psIn.uv);
+    float4 color = _Tex[NonUniformResourceIndex(_Obj.texIndex)].Sample(_Sampler, psIn.uv);
     return float4(color.rgb, 1.0);
 }

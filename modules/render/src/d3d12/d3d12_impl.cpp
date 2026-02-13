@@ -1107,6 +1107,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     size_t offset = 0;
     vector<RootSignatureSetElement> bindDescs{};
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
+    vector<uint8_t> isBindlessTable{};
     for (auto i : desc.DescriptorSets) {
         for (const auto& e : i.Elements) {
             switch (e.Type) {
@@ -1127,6 +1128,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                             &range,
                             MapShaderStages(e.Stages));
                         bindDescs.emplace_back(e);
+                        isBindlessTable.push_back(false);
                     } else {
                         if (e.StaticSamplers.size() != e.Count) {
                             RADRAY_ERR_LOG("static sampler count mismatch: {} != {}", e.StaticSamplers.size(), e.Count);
@@ -1156,12 +1158,15 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 case ResourceBindType::Buffer: {
                     D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
                     offset++;
+                    bool isBindless = (e.Count == 0);
+                    UINT numDesc = isBindless ? UINT_MAX : e.Count;
                     CD3DX12_DESCRIPTOR_RANGE1::Init(
                         range,
                         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-                        e.Count,
+                        numDesc,
                         e.Slot,
-                        e.Space);
+                        e.Space,
+                        isBindless ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
@@ -1169,17 +1174,21 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         &range,
                         MapShaderStages(e.Stages));
                     bindDescs.emplace_back(e);
+                    isBindlessTable.push_back(isBindless);
                     break;
                 }
                 case ResourceBindType::CBuffer: {
                     D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
                     offset++;
+                    bool isBindless = (e.Count == 0);
+                    UINT numDesc = isBindless ? UINT_MAX : e.Count;
                     CD3DX12_DESCRIPTOR_RANGE1::Init(
                         range,
                         D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
-                        e.Count,
+                        numDesc,
                         e.Slot,
-                        e.Space);
+                        e.Space,
+                        isBindless ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
@@ -1187,18 +1196,22 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         &range,
                         MapShaderStages(e.Stages));
                     bindDescs.emplace_back(e);
+                    isBindlessTable.push_back(isBindless);
                     break;
                 }
                 case ResourceBindType::RWTexture:
                 case ResourceBindType::RWBuffer: {
                     D3D12_DESCRIPTOR_RANGE1& range = descRanges[offset];
                     offset++;
+                    bool isBindless = (e.Count == 0);
+                    UINT numDesc = isBindless ? UINT_MAX : e.Count;
                     CD3DX12_DESCRIPTOR_RANGE1::Init(
                         range,
                         D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-                        e.Count,
+                        numDesc,
                         e.Slot,
-                        e.Space);
+                        e.Space,
+                        isBindless ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
                     D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
                     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
                         rp,
@@ -1206,6 +1219,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                         &range,
                         MapShaderStages(e.Stages));
                     bindDescs.emplace_back(e);
+                    isBindlessTable.push_back(isBindless);
                     break;
                 }
                 case ResourceBindType::UNKNOWN: break;
@@ -1265,6 +1279,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     auto result = make_unique<RootSigD3D12>(this, std::move(rootSig));
     result->_desc = VersionedRootSignatureDescContainer{versionDesc};
+    result->_isBindlessTable = std::move(isBindlessTable);
     return result;
 }
 
@@ -1413,6 +1428,10 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastD3D12Object(rootSig_);
+    if (rootSig->IsBindlessSet(index)) {
+        RADRAY_ERR_LOG("cannot create descriptor set for bindless table {}", index);
+        return nullptr;
+    }
     const auto& desc = rootSig->_desc;
     auto&& data = desc.GetTable(index);
     const auto& table = data.Param;
@@ -2029,6 +2048,24 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) no
     }
 }
 
+void CmdRenderPassD3D12::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (slot >= _boundRootSig->_desc.GetTableCount()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundRootSig->_desc.GetTableCount(), slot);
+        return;
+    }
+    if (!_boundRootSig->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("table {} is not a bindless table", slot);
+        return;
+    }
+    auto bdls = static_cast<BindlessArrayD3D12*>(array);
+    auto dataRef = _boundRootSig->_desc.GetTable(slot);
+    _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)dataRef.Index, bdls->_resHeap.HandleGpu());
+}
+
 void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
     _cmdList->_cmdList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -2236,6 +2273,10 @@ void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
 }
 
+bool RootSigD3D12::IsBindlessSet(uint32_t index) const noexcept {
+    return index < _isBindlessTable.size() && _isBindlessTable[index];
+}
+
 GraphicsPsoD3D12::GraphicsPsoD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12PipelineState> pso,
@@ -2357,8 +2398,10 @@ void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler
         return;
     }
     textureView->_heapView.CopyTo(0, 1, _resHeap, slot);
-    auto sam = CastD3D12Object(sampler);
-    sam->_samplerView.CopyTo(0, 1, _samplerHeap, slot);
+    if (sampler != nullptr) {
+        auto sam = CastD3D12Object(sampler);
+        sam->_samplerView.CopyTo(0, 1, _samplerHeap, slot);
+    }
     _slotKinds[slot] = dim == TextureViewDimension::Dim2D ? SlotKind::Texture2D : SlotKind::Texture3D;
 }
 

@@ -251,6 +251,7 @@ std::string_view to_string(VkPhysicalDeviceType v) noexcept;
 std::string_view to_string(VkResult v) noexcept;
 std::string_view to_string(VkFormat v) noexcept;
 std::string_view to_string(VkPresentModeKHR v) noexcept;
+std::string_view to_string(VkDescriptorType v) noexcept;
 
 }  // namespace radray::render::vulkan
 
@@ -270,5 +271,7 @@ template <class CharT>
 struct fmt::formatter<VkFormat, CharT> : RadrayVkTypeFormat<VkFormat, CharT> {};
 template <class CharT>
 struct fmt::formatter<VkPresentModeKHR, CharT> : RadrayVkTypeFormat<VkPresentModeKHR, CharT> {};
+template <class CharT>
+struct fmt::formatter<VkDescriptorType, CharT> : RadrayVkTypeFormat<VkDescriptorType, CharT> {};
 
 #endif

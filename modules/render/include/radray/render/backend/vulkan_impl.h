@@ -314,6 +314,8 @@ public:
 
     void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
 
+    void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -708,6 +710,8 @@ public:
 
     void Destroy(Allocation allocation) noexcept;
 
+    VkDescriptorSetLayout GetLayout() const noexcept { return _bdls->_layout; }
+
 private:
     unique_ptr<BindlessDescriptorSetVulkan> _bdls;
     FreeListAllocator _allocator;
@@ -727,12 +731,15 @@ public:
 
     void Destroy() noexcept override;
 
+    bool IsBindlessSet(uint32_t index) const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
+    vector<uint8_t> _isBindlessSet;
     std::optional<VkPushConstantRange> _pushConst;
 };
 
