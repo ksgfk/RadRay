@@ -33,6 +33,7 @@ class ImageViewVulkan;
 class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
 class GraphicsPipelineVulkan;
+class ComputePipelineVulkan;
 class ShaderModuleVulkan;
 class DescriptorSetVulkan;
 class DescriptorSetAllocatorVulkan;
@@ -139,6 +140,8 @@ public:
     Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
@@ -264,9 +267,13 @@ public:
 
     void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept override;
 
-    Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
-    void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
+
+    Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
+
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
@@ -282,7 +289,7 @@ public:
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
 };
 
-class SimulateCommandEncoderVulkan final : public CommandEncoder {
+class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
 public:
     SimulateCommandEncoderVulkan(
         DeviceVulkan* device,
@@ -327,6 +334,44 @@ public:
     CommandBufferVulkan* _cmdBuffer;
     unique_ptr<RenderPassVulkan> _pass;
     unique_ptr<FrameBufferVulkan> _framebuffer;
+    PipelineLayoutVulkan* _boundPipeLayout{nullptr};
+};
+
+class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {
+public:
+    SimulateComputeEncoderVulkan(
+        DeviceVulkan* device,
+        CommandBufferVulkan* cmdBuffer) noexcept;
+
+    ~SimulateComputeEncoderVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept override;
+
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
+
+    void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept override;
+
+    void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
+
+    void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
+
+    void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    CommandBufferVulkan* _cmdBuffer;
     PipelineLayoutVulkan* _boundPipeLayout{nullptr};
 };
 
@@ -763,6 +808,25 @@ public:
     unique_ptr<RenderPassVulkan> _renderPass;
 };
 
+class ComputePipelineVulkan final : public ComputePipelineState {
+public:
+    ComputePipelineVulkan(
+        DeviceVulkan* device,
+        VkPipeline pipeline) noexcept;
+
+    ~ComputePipelineVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkPipeline _pipeline;
+};
+
 class ShaderModuleVulkan final : public Shader {
 public:
     ShaderModuleVulkan(
@@ -937,6 +1001,7 @@ constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVul
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
 constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkan*>(p); }
 
 }  // namespace radray::render::vulkan

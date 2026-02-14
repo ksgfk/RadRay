@@ -121,9 +121,9 @@ public:
 
     void ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData);
     void OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer);
-    void OnRender(uint32_t frameIndex, render::CommandEncoder* encoder);
+    void OnRender(uint32_t frameIndex, render::GraphicsCommandEncoder* encoder);
     void OnRenderComplete(uint32_t frameIndex);
-    void SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight);
+    void SetupRenderState(int frameIndex, render::GraphicsCommandEncoder* encoder, int fbWidth, int fbHeight);
 
 public:
     render::Device* _device;

@@ -165,7 +165,7 @@ public:
             cmdBuffer->ResourceBarrier({}, barriers);
             frame->_dsvUsage = render::TextureUse::DepthStencilWrite;
         }
-        unique_ptr<render::CommandEncoder> pass;
+        unique_ptr<render::GraphicsCommandEncoder> pass;
         {
             render::RenderPassDescriptor rpDesc{};
             render::ColorAttachment rtAttach{

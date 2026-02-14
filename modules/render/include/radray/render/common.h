@@ -353,7 +353,8 @@ enum class RenderObjectTag : uint32_t {
     RootSignature = Shader << 1,
     PipelineState = RootSignature << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
-    SwapChain = PipelineState << 2,
+    ComputePipelineState = PipelineState | (PipelineState << 2),
+    SwapChain = PipelineState << 3,
     Resource = SwapChain << 1,
     Buffer = Resource | (Resource << 1),
     Texture = Resource | (Resource << 2),
@@ -414,6 +415,8 @@ class Device;
 class CommandQueue;
 class CommandBuffer;
 class CommandEncoder;
+class GraphicsCommandEncoder;
+class ComputeCommandEncoder;
 class Fence;
 class SwapChain;
 class Resource;
@@ -426,6 +429,7 @@ class Shader;
 class RootSignature;
 class PipelineState;
 class GraphicsPipelineState;
+class ComputePipelineState;
 class DescriptorSet;
 class Sampler;
 class BindlessArray;
@@ -499,7 +503,7 @@ struct SamplerDescriptor {
     AddressMode AddressS{};
     AddressMode AddressT{};
     AddressMode AddressR{};
-    FilterMode MigFilter{};
+    FilterMode MinFilter{};
     FilterMode MagFilter{};
     FilterMode MipmapFilter{};
     float LodMin{0.0f};
@@ -824,6 +828,11 @@ struct GraphicsPipelineStateDescriptor {
     std::span<const ColorTargetState> ColorTargets{};
 };
 
+struct ComputePipelineStateDescriptor {
+    RootSignature* RootSig{nullptr};
+    ShaderEntry CS{};
+};
+
 struct VertexBufferView {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
@@ -876,6 +885,8 @@ public:
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
@@ -906,9 +917,13 @@ public:
 
     virtual void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept = 0;
 
-    virtual Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 
-    virtual void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept = 0;
+    virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
+
+    virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
+
+    virtual void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
@@ -923,17 +938,7 @@ public:
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
-    virtual void SetViewport(Viewport vp) noexcept = 0;
-
-    virtual void SetScissor(Rect rect) noexcept = 0;
-
-    virtual void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept = 0;
-
-    virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
-
     virtual void BindRootSignature(RootSignature* rootSig) noexcept = 0;
-
-    virtual void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
     virtual void PushConstant(const void* data, size_t length) noexcept = 0;
 
@@ -942,10 +947,36 @@ public:
     virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept = 0;
 
     virtual void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept = 0;
+};
+
+class GraphicsCommandEncoder : public CommandEncoder {
+public:
+    virtual ~GraphicsCommandEncoder() noexcept = default;
+
+    virtual void SetViewport(Viewport vp) noexcept = 0;
+
+    virtual void SetScissor(Rect rect) noexcept = 0;
+
+    virtual void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept = 0;
+
+    virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
+
+    virtual void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
+};
+
+class ComputeCommandEncoder : public CommandEncoder {
+public:
+    virtual ~ComputeCommandEncoder() noexcept = default;
+
+    virtual void BindComputePipelineState(ComputePipelineState* pso) noexcept = 0;
+
+    virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept = 0;
+
+    virtual void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept = 0;
 };
 
 class Fence : public RenderBase {
@@ -1046,6 +1077,13 @@ public:
     virtual ~GraphicsPipelineState() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsPipelineState; }
+};
+
+class ComputePipelineState : public PipelineState {
+public:
+    virtual ~ComputePipelineState() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputePipelineState; }
 };
 
 class DescriptorSet : public RenderBase {

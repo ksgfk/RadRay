@@ -671,6 +671,70 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     }
     _cbStorage = std::move(storageOpt.value());
 
+    uint32_t maxRootIndex = 0;
+    bool hasRoot = false;
+    for (const auto& b : layout._bindings) {
+        std::visit(
+            [&](const auto& e) {
+                using T = std::decay_t<decltype(e)>;
+                if constexpr (std::is_same_v<T, BindBridgeLayout::RootDescriptorEntry>) {
+                    hasRoot = true;
+                    maxRootIndex = std::max(maxRootIndex, e.RootIndex);
+                }
+            },
+            b);
+    }
+    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
+
+    // Build setBindings first (filtering out static samplers) so we can remap element indices
+    unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
+    uint32_t maxSetIndex = 0;
+    bool hasSet = false;
+    for (const auto& b : layout._bindings) {
+        std::visit(
+            [&](const auto& e) {
+                using T = std::decay_t<decltype(e)>;
+                if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
+                    if (e.IsStaticSampler) {
+                        return;
+                    }
+                    hasSet = true;
+                    maxSetIndex = std::max(maxSetIndex, e.SetIndex);
+                    setBindings[e.SetIndex].push_back(&e);
+                }
+            },
+            b);
+    }
+    _descSets.clear();
+    _descSets.resize(hasSet ? (maxSetIndex + 1) : 0);
+    // Build element index remap: (setIndex, oldElemIndex) -> newElemIndex
+    // This accounts for static samplers being filtered out of record.Bindings
+    unordered_map<uint64_t, uint32_t> elemIndexRemap;
+    for (auto& [setIndex, bindings] : setBindings) {
+        auto& record = _descSets[setIndex];
+        record.OwnedSet.reset();
+        std::sort(bindings.begin(), bindings.end(), [](const auto* a, const auto* b) {
+            return a->ElementIndex < b->ElementIndex;
+        });
+        record.Bindings.reserve(bindings.size());
+        for (uint32_t i = 0; i < bindings.size(); i++) {
+            const auto* e = bindings[i];
+            uint64_t key = (uint64_t(setIndex) << 32) | e->ElementIndex;
+            elemIndexRemap[key] = i;
+            DescSetBinding binding{};
+            binding.Slot = e->BindPoint;
+            binding.Count = e->BindCount;
+            binding.Type = e->Type;
+            binding.Views.assign(e->BindCount, nullptr);
+            if (e->Type == ResourceBindType::CBuffer) {
+                auto var = _cbStorage.GetVar(e->Name);
+                binding.CBufferId = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
+            }
+            record.Bindings.emplace_back(std::move(binding));
+        }
+    }
+
+    // Now build _bindings with remapped element indices
     _bindings.reserve(layout._bindings.size());
     _nameToBindingId = layout._nameToBindingId;
     for (const auto& b : layout._bindings) {
@@ -695,9 +759,12 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
                 } else {
                     DescriptorSetBindingInfo loc{};
                     loc.SetIndex = e.SetIndex;
-                    loc.ElementIndex = e.ElementIndex;
                     loc.Type = e.Type;
                     loc.BindCount = e.BindCount;
+                    // Remap element index to account for filtered-out static samplers
+                    uint64_t key = (uint64_t(e.SetIndex) << 32) | e.ElementIndex;
+                    auto remapIt = elemIndexRemap.find(key);
+                    loc.ElementIndex = (remapIt != elemIndexRemap.end()) ? remapIt->second : e.ElementIndex;
                     if (e.Type == ResourceBindType::CBuffer) {
                         auto var = _cbStorage.GetVar(e.Name);
                         loc.CBufferId = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
@@ -706,59 +773,6 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
                 }
             },
             b);
-    }
-
-    uint32_t maxRootIndex = 0;
-    bool hasRoot = false;
-    for (const auto& b : layout._bindings) {
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, BindBridgeLayout::RootDescriptorEntry>) {
-                    hasRoot = true;
-                    maxRootIndex = std::max(maxRootIndex, e.RootIndex);
-                }
-            },
-            b);
-    }
-    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
-
-    unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
-    uint32_t maxSetIndex = 0;
-    bool hasSet = false;
-    for (const auto& b : layout._bindings) {
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
-                    hasSet = true;
-                    maxSetIndex = std::max(maxSetIndex, e.SetIndex);
-                    setBindings[e.SetIndex].push_back(&e);
-                }
-            },
-            b);
-    }
-    _descSets.clear();
-    _descSets.resize(hasSet ? (maxSetIndex + 1) : 0);
-    for (auto& [setIndex, bindings] : setBindings) {
-        auto& record = _descSets[setIndex];
-        record.OwnedSet.reset();
-        std::sort(bindings.begin(), bindings.end(), [](const auto* a, const auto* b) {
-            return a->ElementIndex < b->ElementIndex;
-        });
-        record.Bindings.reserve(bindings.size());
-        for (const auto* e : bindings) {
-            DescSetBinding binding{};
-            binding.Slot = e->BindPoint;
-            binding.Count = e->BindCount;
-            binding.Type = e->Type;
-            binding.Views.assign(e->BindCount, nullptr);
-            if (e->Type == ResourceBindType::CBuffer) {
-                auto var = _cbStorage.GetVar(e->Name);
-                binding.CBufferId = var.IsValid() ? var.GetId() : StructuredBufferStorage::InvalidId;
-            }
-            record.Bindings.emplace_back(std::move(binding));
-        }
     }
 
     for (uint32_t i = 0; i < _descSets.size(); ++i) {

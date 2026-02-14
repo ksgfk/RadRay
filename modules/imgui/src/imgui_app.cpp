@@ -342,7 +342,7 @@ void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cm
     }
 }
 
-void ImGuiRenderer::OnRender(uint32_t frameIndex, render::CommandEncoder* encoder) {
+void ImGuiRenderer::OnRender(uint32_t frameIndex, render::GraphicsCommandEncoder* encoder) {
     auto& frame = *_frames[frameIndex].get();
     const auto drawData = &frame._drawData;
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
@@ -416,7 +416,7 @@ void ImGuiRenderer::OnRenderComplete(uint32_t frameIndex) {
     frame._waitForFreeTexs.clear();
 }
 
-void ImGuiRenderer::SetupRenderState(int frameIndex, render::CommandEncoder* encoder, int fbWidth, int fbHeight) {
+void ImGuiRenderer::SetupRenderState(int frameIndex, render::GraphicsCommandEncoder* encoder, int fbWidth, int fbHeight) {
     const auto& frame = *_frames[frameIndex].get();
     const auto drawData = &frame._drawData;
     encoder->BindRootSignature(_rootSig.get());

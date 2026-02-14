@@ -21,7 +21,7 @@ bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noex
     return lhs.AddressS == rhs.AddressS &&
            lhs.AddressT == rhs.AddressT &&
            lhs.AddressR == rhs.AddressR &&
-           lhs.MigFilter == rhs.MigFilter &&
+           lhs.MinFilter == rhs.MinFilter &&
            lhs.MagFilter == rhs.MagFilter &&
            lhs.MipmapFilter == rhs.MipmapFilter &&
            lhs.LodMin == rhs.LodMin &&
@@ -131,7 +131,7 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     Unreachable();
 }
 
-uint32_t GetIndexFormatSize(IndexFormat format) noexcept {
+uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept {
     switch (format) {
         case IndexFormat::UINT16: return 2;
         case IndexFormat::UINT32: return 4;
@@ -315,6 +315,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::RootSignature: return "RootSignature";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
+        case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
         case RenderObjectTag::SwapChain: return "SwapChain";
         case RenderObjectTag::Resource: return "Resource";
         case RenderObjectTag::Buffer: return "Buffer";

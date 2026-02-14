@@ -877,6 +877,28 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     return result;
 }
 
+Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    auto rs = CastVkObject(desc.RootSig);
+    auto cs = CastVkObject(desc.CS.Target);
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = cs->_shaderModule;
+    string entryPoint{desc.CS.EntryPoint};
+    stageInfo.pName = entryPoint.c_str();
+    VkComputePipelineCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    createInfo.stage = stageInfo;
+    createInfo.layout = rs->_layout;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateComputePipelines failed: {}", vr);
+        return nullptr;
+    }
+    return make_unique<ComputePipelineVulkan>(this, pipeline);
+}
+
 Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc, std::span<const RootSignatureStaticSampler> staticSamplers) noexcept {
     struct BindingCtx {
         VkDescriptorSetLayoutBinding binding;
@@ -944,7 +966,7 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const Samp
     createInfo.pNext = nullptr;
     createInfo.flags = 0;
     createInfo.magFilter = MapTypeFilter(desc.MagFilter);
-    createInfo.minFilter = MapTypeFilter(desc.MigFilter);
+    createInfo.minFilter = MapTypeFilter(desc.MinFilter);
     createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
     createInfo.addressModeU = MapType(desc.AddressS);
     createInfo.addressModeV = MapType(desc.AddressT);
@@ -1092,7 +1114,7 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
     createInfo.pNext = nullptr;
     createInfo.flags = 0;
     createInfo.magFilter = MapTypeFilter(desc.MagFilter);
-    createInfo.minFilter = MapTypeFilter(desc.MigFilter);
+    createInfo.minFilter = MapTypeFilter(desc.MinFilter);
     createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
     createInfo.addressModeU = MapType(desc.AddressS);
     createInfo.addressModeV = MapType(desc.AddressT);
@@ -2088,7 +2110,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
 }
 
-Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
     vector<VkAttachmentDescription> attachs;
     vector<VkAttachmentReference> colorRefs;
     vector<VkImageView> fbs;
@@ -2227,8 +2249,16 @@ Nullable<unique_ptr<CommandEncoder>> CommandBufferVulkan::BeginRenderPass(const 
     return encoder;
 }
 
-void CommandBufferVulkan::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
+    _endedEncoders.emplace_back(std::move(encoder));
+}
+
+Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferVulkan::BeginComputePass() noexcept {
+    return make_unique<SimulateComputeEncoderVulkan>(_device, this);
+}
+
+void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     _endedEncoders.emplace_back(std::move(encoder));
 }
 
@@ -2422,6 +2452,138 @@ void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceC
 
 void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
     _device->_ftb.vkCmdDrawIndexed(_cmdBuffer->_cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+// ======================== SimulateComputeEncoderVulkan ========================
+
+SimulateComputeEncoderVulkan::SimulateComputeEncoderVulkan(
+    DeviceVulkan* device,
+    CommandBufferVulkan* cmdBuffer) noexcept
+    : _device(device),
+      _cmdBuffer(cmdBuffer) {}
+
+SimulateComputeEncoderVulkan::~SimulateComputeEncoderVulkan() noexcept {
+    DestroyImpl();
+}
+
+bool SimulateComputeEncoderVulkan::IsValid() const noexcept {
+    return _device != nullptr;
+}
+
+void SimulateComputeEncoderVulkan::Destroy() noexcept {
+    DestroyImpl();
+}
+
+void SimulateComputeEncoderVulkan::DestroyImpl() noexcept {
+    _device = nullptr;
+    _cmdBuffer = nullptr;
+    _boundPipeLayout = nullptr;
+}
+
+CommandBuffer* SimulateComputeEncoderVulkan::GetCommandBuffer() const noexcept {
+    return _cmdBuffer;
+}
+
+void SimulateComputeEncoderVulkan::BindRootSignature(RootSignature* rootSig) noexcept {
+    auto layout = CastVkObject(rootSig);
+    _boundPipeLayout = layout;
+}
+
+void SimulateComputeEncoderVulkan::PushConstant(const void* data, size_t length) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::PushConstant");
+        return;
+    }
+    if (!_boundPipeLayout->_pushConst.has_value()) {
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
+        return;
+    }
+    const auto& pc = _boundPipeLayout->_pushConst.value();
+    if (length > pc.size) {
+        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
+        return;
+    }
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+}
+
+void SimulateComputeEncoderVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(buffer);
+    RADRAY_UNUSED(offset);
+    RADRAY_UNUSED(size);
+    RADRAY_ERR_LOG("unsupported ComputeCommandEncoder::BindRootDescriptor in vk");
+}
+
+void SimulateComputeEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+        return;
+    }
+    auto descSet = CastVkObject(set);
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        _boundPipeLayout->_layout,
+        slot,
+        1,
+        &descSet->_allocation.Set,
+        0, nullptr);
+}
+
+void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+        return;
+    }
+    if (!_boundPipeLayout->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+        return;
+    }
+    auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (bdlsArray->_tex2dAlloc.IsValid()) {
+        set = bdlsArray->_tex2dAlloc.Set;
+    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
+        set = bdlsArray->_tex3dAlloc.Set;
+    } else if (bdlsArray->_bufferAlloc.IsValid()) {
+        set = bdlsArray->_bufferAlloc.Set;
+    }
+    if (set == VK_NULL_HANDLE) {
+        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        return;
+    }
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        _boundPipeLayout->_layout,
+        slot,
+        1,
+        &set,
+        0, nullptr);
+}
+
+void SimulateComputeEncoderVulkan::BindComputePipelineState(ComputePipelineState* pso) noexcept {
+    auto p = CastVkObject(pso);
+    _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, p->_pipeline);
+}
+
+void SimulateComputeEncoderVulkan::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
+    _device->_ftb.vkCmdDispatch(_cmdBuffer->_cmdBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
+void SimulateComputeEncoderVulkan::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept {
+    RADRAY_UNUSED(x);
+    RADRAY_UNUSED(y);
+    RADRAY_UNUSED(z);
+    // Vulkan: thread group size is defined in shader (local_size), no-op here
 }
 
 RenderPassVulkan::RenderPassVulkan(
@@ -3052,6 +3214,31 @@ void GraphicsPipelineVulkan::Destroy() noexcept {
 }
 
 void GraphicsPipelineVulkan::DestroyImpl() noexcept {
+    if (_pipeline != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
+        _pipeline = VK_NULL_HANDLE;
+    }
+}
+
+ComputePipelineVulkan::ComputePipelineVulkan(
+    DeviceVulkan* device,
+    VkPipeline pipeline) noexcept
+    : _device(device),
+      _pipeline(pipeline) {}
+
+ComputePipelineVulkan::~ComputePipelineVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool ComputePipelineVulkan::IsValid() const noexcept {
+    return _pipeline != VK_NULL_HANDLE;
+}
+
+void ComputePipelineVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void ComputePipelineVulkan::DestroyImpl() noexcept {
     if (_pipeline != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;

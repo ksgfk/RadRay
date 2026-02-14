@@ -51,7 +51,7 @@ public:
             barrier.IsSubresourceBarrier = false;
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
-        radray::unique_ptr<radray::render::CommandEncoder> pass;
+        radray::unique_ptr<radray::render::GraphicsCommandEncoder> pass;
         {
             radray::render::RenderPassDescriptor rpDesc{};
             radray::render::ColorAttachment rtAttach{};

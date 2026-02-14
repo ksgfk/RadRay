@@ -1077,6 +1077,16 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     }
     // 每个 set 对应一个 root parameter (descriptor table), 多个 element 对应多个 range
     // static sampler 从 desc.StaticSamplers 中读取, 不创建 root parameter
+    // Pre-count total ranges to prevent descRanges reallocation (root params hold pointers into it)
+    size_t totalRanges = 0;
+    for (const auto& set : desc.DescriptorSets) {
+        for (const auto& e : set.Elements) {
+            if (e.Type != ResourceBindType::UNKNOWN) {
+                totalRanges++;
+            }
+        }
+    }
+    descRanges.reserve(totalRanges);
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     vector<uint8_t> isBindlessSet{};
     unordered_map<uint32_t, size_t> setIndexToTableIndex{};
@@ -1157,7 +1167,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     // Process static samplers from desc.StaticSamplers
     for (const auto& ss : desc.StaticSamplers) {
         D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
-        ssDesc.Filter = MapType(ss.Desc.MigFilter, ss.Desc.MagFilter, ss.Desc.MipmapFilter, ss.Desc.Compare.has_value(), ss.Desc.AnisotropyClamp);
+        ssDesc.Filter = MapType(ss.Desc.MinFilter, ss.Desc.MagFilter, ss.Desc.MipmapFilter, ss.Desc.Compare.has_value(), ss.Desc.AnisotropyClamp);
         ssDesc.AddressU = MapType(ss.Desc.AddressS);
         ssDesc.AddressV = MapType(ss.Desc.AddressT);
         ssDesc.AddressW = MapType(ss.Desc.AddressR);
@@ -1372,6 +1382,21 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     return make_unique<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
 }
 
+Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.RootSig)->_rootSig.Get();
+    rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
+    rawPsoDesc.NodeMask = 0;
+    rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    ComPtr<ID3D12PipelineState> pso;
+    if (HRESULT hr = _device->CreateComputePipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::CreateComputePipelineState failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<ComputePsoD3D12>(this, std::move(pso));
+}
+
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastD3D12Object(rootSig_);
     if (rootSig->IsBindlessSet(index)) {
@@ -1431,7 +1456,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignatu
 
 Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
     D3D12_SAMPLER_DESC rawDesc{};
-    rawDesc.Filter = MapType(desc.MigFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
+    rawDesc.Filter = MapType(desc.MinFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
     rawDesc.AddressU = MapType(desc.AddressS);
     rawDesc.AddressV = MapType(desc.AddressT);
     rawDesc.AddressW = MapType(desc.AddressR);
@@ -1760,7 +1785,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buff
     }
 }
 
-Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
@@ -1815,7 +1840,7 @@ Nullable<unique_ptr<CommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderP
     return make_unique<CmdRenderPassD3D12>(this);
 }
 
-void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
+void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
@@ -1823,6 +1848,14 @@ void CmdListD3D12::EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept {
         return;
     }
     cmdList4->EndRenderPass();
+    encoder->Destroy();
+}
+
+Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noexcept {
+    return make_unique<CmdComputePassD3D12>(this);
+}
+
+void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     encoder->Destroy();
 }
 
@@ -2024,6 +2057,129 @@ void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint
 
 void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
     _cmdList->_cmdList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+// ======================== CmdComputePassD3D12 ========================
+
+CmdComputePassD3D12::CmdComputePassD3D12(CmdListD3D12* cmdList) noexcept
+    : _cmdList(cmdList) {}
+
+bool CmdComputePassD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdComputePassD3D12::Destroy() noexcept {
+    _cmdList = nullptr;
+}
+
+CommandBuffer* CmdComputePassD3D12::GetCommandBuffer() const noexcept {
+    return _cmdList;
+}
+
+void CmdComputePassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
+    auto rs = CastD3D12Object(rootSig);
+    _cmdList->_cmdList->SetComputeRootSignature(rs->_rootSig.Get());
+    _boundRootSig = rs;
+}
+
+void CmdComputePassD3D12::PushConstant(const void* data, size_t length) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::PushConstant");
+        return;
+    }
+    RADRAY_ASSERT(_boundRootSig->_desc.GetRootConstantCount() > 0);
+    auto dataRef = _boundRootSig->_desc.GetRootConstant(0);
+    size_t rcSize = dataRef.Param.Constants.Num32BitValues * 4;
+    if (length > rcSize) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "length", rcSize, length);
+        return;
+    }
+    _cmdList->_cmdList->SetComputeRoot32BitConstants((UINT)dataRef.Index, static_cast<UINT>(length / 4), data, 0);
+}
+
+void CmdComputePassD3D12::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindRootDescriptor");
+        return;
+    }
+    if (slot >= _boundRootSig->_desc.GetRootDescriptorCount()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundRootSig->_desc.GetRootDescriptorCount(), slot);
+        return;
+    }
+    RADRAY_ASSERT(buffer != nullptr);
+    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(slot);
+    auto buf = CastD3D12Object(buffer);
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+    RADRAY_UNUSED(size);
+    switch (dataRef.Param.Type) {
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+            _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+            _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+            _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
+            break;
+        default:
+            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+            break;
+    }
+}
+
+void CmdComputePassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
+        return;
+    }
+    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+    if (!tableOpt.has_value()) {
+        RADRAY_ERR_LOG("no table for set index {}", slot);
+        return;
+    }
+    auto dataRef = tableOpt.value();
+    auto descHeapView = CastD3D12Object(set);
+    if (descHeapView->_resHeapView.IsValid()) {
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+    }
+    if (descHeapView->_samplerHeapView.IsValid()) {
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+    }
+}
+
+void CmdComputePassD3D12::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (!_boundRootSig->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+        return;
+    }
+    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+    if (!tableOpt.has_value()) {
+        RADRAY_ERR_LOG("no table for bindless set index {}", slot);
+        return;
+    }
+    auto bdls = static_cast<BindlessArrayD3D12*>(array);
+    auto dataRef = tableOpt.value();
+    _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, bdls->_resHeap.HandleGpu());
+}
+
+void CmdComputePassD3D12::BindComputePipelineState(ComputePipelineState* pso) noexcept {
+    auto ps = CastD3D12Object(pso);
+    _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
+}
+
+void CmdComputePassD3D12::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
+    _cmdList->_cmdList->Dispatch(groupCountX, groupCountY, groupCountZ);
+}
+
+void CmdComputePassD3D12::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept {
+    RADRAY_UNUSED(x);
+    RADRAY_UNUSED(y);
+    RADRAY_UNUSED(z);
+    // D3D12: thread group size is defined in shader (numthreads), no-op here
 }
 
 SwapChainD3D12::SwapChainD3D12(
@@ -2229,8 +2385,7 @@ bool RootSigD3D12::IsBindlessSet(uint32_t setIndex) const noexcept {
     return setIndex < _isBindlessSet.size() && _isBindlessSet[setIndex];
 }
 
-std::optional<VersionedRootSignatureDescContainer::RootParamRef>
-RootSigD3D12::GetTableBySetIndex(uint32_t setIndex) const noexcept {
+std::optional<VersionedRootSignatureDescContainer::RootParamRef> RootSigD3D12::GetTableBySetIndex(uint32_t setIndex) const noexcept {
     auto it = _setIndexToTableIndex.find(setIndex);
     if (it == _setIndexToTableIndex.end()) {
         return std::nullopt;
@@ -2253,6 +2408,20 @@ bool GraphicsPsoD3D12::IsValid() const noexcept {
 }
 
 void GraphicsPsoD3D12::Destroy() noexcept {
+    _pso = nullptr;
+}
+
+ComputePsoD3D12::ComputePsoD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12PipelineState> pso) noexcept
+    : _device(device),
+      _pso(std::move(pso)) {}
+
+bool ComputePsoD3D12::IsValid() const noexcept {
+    return _pso != nullptr;
+}
+
+void ComputePsoD3D12::Destroy() noexcept {
     _pso = nullptr;
 }
 

@@ -27,6 +27,7 @@ class TextureD3D12;
 class TextureViewD3D12;
 class RootSigD3D12;
 class GraphicsPsoD3D12;
+class ComputePsoD3D12;
 class GpuDescriptorHeapViews;
 class SamplerD3D12;
 
@@ -304,6 +305,8 @@ public:
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
@@ -433,9 +436,13 @@ public:
 
     void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept override;
 
-    Nullable<unique_ptr<CommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
-    void EndRenderPass(unique_ptr<CommandEncoder> encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
+
+    Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
+
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
@@ -448,7 +455,7 @@ public:
     D3D12_COMMAND_LIST_TYPE _type;
 };
 
-class CmdRenderPassD3D12 final : public CommandEncoder {
+class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
 public:
     explicit CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept;
     ~CmdRenderPassD3D12() noexcept override = default;
@@ -487,6 +494,38 @@ public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     vector<VertexBufferView> _boundVbvs;
+    RootSigD3D12* _boundRootSig{nullptr};
+};
+
+class CmdComputePassD3D12 final : public ComputeCommandEncoder {
+public:
+    explicit CmdComputePassD3D12(CmdListD3D12* cmdList) noexcept;
+    ~CmdComputePassD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept override;
+
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
+
+    void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept override;
+
+    void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
+
+    void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
+
+    void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept override;
+
+public:
+    CmdListD3D12* _cmdList;
     RootSigD3D12* _boundRootSig{nullptr};
 };
 
@@ -647,8 +686,7 @@ public:
 
     bool IsBindlessSet(uint32_t setIndex) const noexcept;
 
-    std::optional<VersionedRootSignatureDescContainer::RootParamRef>
-    GetTableBySetIndex(uint32_t setIndex) const noexcept;
+    std::optional<VersionedRootSignatureDescContainer::RootParamRef> GetTableBySetIndex(uint32_t setIndex) const noexcept;
 
 public:
     DeviceD3D12* _device;
@@ -676,6 +714,22 @@ public:
     ComPtr<ID3D12PipelineState> _pso;
     vector<uint64_t> _arrayStrides;
     D3D12_PRIMITIVE_TOPOLOGY _topo;
+};
+
+class ComputePsoD3D12 final : public ComputePipelineState {
+public:
+    ComputePsoD3D12(
+        DeviceD3D12* device,
+        ComPtr<ID3D12PipelineState> pso) noexcept;
+    ~ComputePsoD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    ComPtr<ID3D12PipelineState> _pso;
 };
 
 class GpuDescriptorHeapViews final : public DescriptorSet {
@@ -765,6 +819,7 @@ constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<Sampler
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
 constexpr auto CastD3D12Object(BufferView* v) noexcept { return static_cast<BufferViewD3D12*>(v); }
 constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
+constexpr auto CastD3D12Object(ComputePipelineState* v) noexcept { return static_cast<ComputePsoD3D12*>(v); }
 constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 }  // namespace radray::render::d3d12
