@@ -75,18 +75,35 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
     }
     std::sort(setOrder.begin(), setOrder.end());
     // Pre-reserve to prevent reallocation that would invalidate spans
+    // Also validate for illegal mixed sets (bindless + other descriptors in same set)
     size_t totalElements = 0;
+    size_t totalBindless = 0;
     size_t totalStaticSamplers = 0;
     for (auto setIndex : setOrder) {
+        bool hasBindless = false;
+        bool hasOtherDescriptors = false;
         for (const auto* e : sets[setIndex]) {
             if (e->IsStaticSampler) {
                 totalStaticSamplers += e->BindCount;
+                hasOtherDescriptors = true;
+            } else if (e->BindCount == 0) {
+                totalBindless++;
+                hasBindless = true;
             } else {
                 totalElements++;
+                hasOtherDescriptors = true;
             }
         }
+        if (hasBindless && hasOtherDescriptors) {
+            RADRAY_ERR_LOG("Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
+                          "Bindless arrays must be in their own descriptor set. "
+                          "This is not supported in HLSL and may cause validation errors.",
+                          setIndex);
+        }
     }
+
     container._elements.reserve(totalElements);
+    container._bindlessDescriptors.reserve(totalBindless);
     container._staticSamplers.reserve(totalStaticSamplers);
     container._descriptorSets.reserve(setOrder.size());
     for (auto setIndex : setOrder) {
@@ -110,25 +127,43 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
                 }
             }
         }
-        // Build non-static-sampler elements
+        // Build regular elements and bindless descriptors
         size_t elemStart = container._elements.size();
+        size_t bindlessStart = container._bindlessDescriptors.size();
         for (const auto* e : elems) {
             if (e->IsStaticSampler) {
                 continue;
             }
-            RootSignatureSetElement elem{};
-            elem.Slot = e->BindPoint;
-            elem.Space = e->Space;
-            elem.Type = e->Type;
-            elem.Count = e->BindCount;
-            elem.Stages = e->Stages;
-            container._elements.push_back(elem);
+            if (e->BindCount == 0) {
+                // Bindless descriptor
+                RootSignatureBindlessDescriptor bindless{};
+                bindless.Slot = e->BindPoint;
+                bindless.Space = e->Space;
+                bindless.SetIndex = setIndex;
+                bindless.Type = e->Type;
+                bindless.Stages = e->Stages;
+                bindless.Capacity = 262144;  // Default capacity
+                container._bindlessDescriptors.push_back(bindless);
+            } else {
+                // Regular element
+                RootSignatureSetElement elem{};
+                elem.Slot = e->BindPoint;
+                elem.Space = e->Space;
+                elem.Type = e->Type;
+                elem.Count = e->BindCount;
+                elem.Stages = e->Stages;
+                container._elements.push_back(elem);
+            }
         }
         size_t elemCount = container._elements.size() - elemStart;
+        size_t bindlessCount = container._bindlessDescriptors.size() - bindlessStart;
         RootSignatureDescriptorSet setDesc{};
         setDesc.Elements = std::span<const RootSignatureSetElement>{
             container._elements.data() + elemStart,
             elemCount};
+        setDesc.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
+            container._bindlessDescriptors.data() + bindlessStart,
+            bindlessCount};
         container._descriptorSets.push_back(setDesc);
     }
 
@@ -671,8 +706,15 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     }
     _cbStorage = std::move(storageOpt.value());
 
+    // Calculate the maximum indices and collect set information in a single pass
     uint32_t maxRootIndex = 0;
     bool hasRoot = false;
+    uint32_t maxSetIndex = 0;
+    bool hasSet = false;
+    unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
+    unordered_set<uint32_t> setsWithStaticSamplers;
+    unordered_set<uint32_t> setsWithBindless;
+
     for (const auto& b : layout._bindings) {
         std::visit(
             [&](const auto& e) {
@@ -680,34 +722,24 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
                 if constexpr (std::is_same_v<T, BindBridgeLayout::RootDescriptorEntry>) {
                     hasRoot = true;
                     maxRootIndex = std::max(maxRootIndex, e.RootIndex);
-                }
-            },
-            b);
-    }
-    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
-
-    // Build setBindings first (filtering out static samplers) so we can remap element indices
-    // But we still need to track which sets have static samplers for descriptor set creation
-    unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
-    unordered_set<uint32_t> setsWithStaticSamplers;
-    uint32_t maxSetIndex = 0;
-    bool hasSet = false;
-    for (const auto& b : layout._bindings) {
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
+                } else if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
                     hasSet = true;
                     maxSetIndex = std::max(maxSetIndex, e.SetIndex);
+
                     if (e.IsStaticSampler) {
                         setsWithStaticSamplers.insert(e.SetIndex);
-                        return;
+                    } else if (e.BindCount == 0) {
+                        setsWithBindless.insert(e.SetIndex);
+                    } else {
+                        setBindings[e.SetIndex].push_back(&e);
                     }
-                    setBindings[e.SetIndex].push_back(&e);
                 }
             },
             b);
     }
+
+    _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
+
     _descSets.clear();
     _descSets.resize(hasSet ? (maxSetIndex + 1) : 0);
     // Build element index remap: (setIndex, oldElemIndex) -> newElemIndex
@@ -781,28 +813,26 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     for (uint32_t i = 0; i < _descSets.size(); ++i) {
         auto it = setBindings.find(i);
         bool hasStaticSamplers = setsWithStaticSamplers.count(i) > 0;
-        bool isBindless = false;
-        if (it != setBindings.end()) {
-            for (const auto* e : it->second) {
-                if (e->BindCount == 0) {
-                    isBindless = true;
-                    break;
-                }
-            }
-        }
+        bool hasBindless = setsWithBindless.count(i) > 0;
+
         // Skip bindless sets (they are bound separately via BindBindlessArray)
-        if (isBindless) {
+        if (hasBindless && it == setBindings.end() && !hasStaticSamplers) {
+            // Pure bindless set with no regular bindings or static samplers
             continue;
         }
-        // For non-bindless sets, create descriptor set even if it only has static samplers
-        // (Vulkan requires descriptor sets to be bound even if they only contain immutable samplers)
-        // Skip if the set has no bindings and no static samplers
+
+        // Create descriptor set for:
+        // 1. Sets with regular bindings
+        // 2. Sets with static samplers (Vulkan requires these to be bound)
+        // 3. Mixed sets (bindless + regular bindings or static samplers)
         if (it == setBindings.end() && !hasStaticSamplers) {
+            // No bindings and no static samplers - skip
             continue;
         }
+
         auto setOpt = device->CreateDescriptorSet(rootSig, i);
         if (!setOpt.HasValue()) {
-            // No descriptor set for this set index (e.g., D3D12 static-sampler-only set has no table)
+            // Backend doesn't need a descriptor set for this (e.g., D3D12 static-sampler-only set)
             continue;
         }
         auto set = setOpt.Release();

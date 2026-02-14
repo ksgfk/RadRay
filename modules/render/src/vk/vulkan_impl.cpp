@@ -534,14 +534,11 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     isBindlessSet.reserve(desc.DescriptorSets.size());
     for (uint32_t setIdx = 0; setIdx < desc.DescriptorSets.size(); setIdx++) {
         const auto& i = desc.DescriptorSets[setIdx];
-        bool isBindless = false;
+        bool hasBindless = !i.BindlessDescriptors.empty();
+        bool hasRegularElements = !i.Elements.empty();
         VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-        for (const auto& elem : i.Elements) {
-            if (elem.Count == 0) {
-                isBindless = true;
-                bindlessType = MapType(elem.Type);
-                break;
-            }
+        if (hasBindless) {
+            bindlessType = MapType(i.BindlessDescriptors[0].Type);
         }
         // Collect static samplers for this set
         vector<RootSignatureStaticSampler> setStaticSamplers;
@@ -550,7 +547,18 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
                 setStaticSamplers.push_back(ss);
             }
         }
-        if (isBindless) {
+        bool hasStaticSamplers = !setStaticSamplers.empty();
+
+        // Validate: Check for illegal mixed sets (bindless + other descriptors in same set)
+        if (hasBindless && (hasRegularElements || hasStaticSamplers)) {
+            RADRAY_ERR_LOG("Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
+                          "Bindless arrays must be in their own descriptor set. "
+                          "This is not supported in HLSL and may cause validation errors.",
+                          setIdx);
+            return nullptr;
+        }
+
+        if (hasBindless && !hasRegularElements && !hasStaticSamplers) {
             VkDescriptorSetLayout globalLayout = VK_NULL_HANDLE;
             if (bindlessType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
                 globalLayout = _bdlsTex2d->GetLayout();
@@ -908,21 +916,23 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     };
     vector<BindingCtx> ctxs;
     bool hasBindless = false;
-    constexpr uint32_t BINDLESS_CAPACITY = 262144;
     // Regular elements
     for (const auto& j : desc.Elements) {
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = j.Slot;
         ctx.binding.descriptorType = MapType(j.Type);
-        if (j.Count == 0) {
-            // Bindless array
-            ctx.binding.descriptorCount = BINDLESS_CAPACITY;
-            ctx.isBindless = true;
-            hasBindless = true;
-        } else {
-            ctx.binding.descriptorCount = j.Count;
-        }
+        ctx.binding.descriptorCount = j.Count;
         ctx.binding.stageFlags = MapType(j.Stages);
+    }
+    // Bindless descriptors
+    for (const auto& bd : desc.BindlessDescriptors) {
+        auto& ctx = ctxs.emplace_back();
+        ctx.binding.binding = bd.Slot;
+        ctx.binding.descriptorType = MapType(bd.Type);
+        ctx.binding.descriptorCount = bd.Capacity;
+        ctx.binding.stageFlags = MapType(bd.Stages);
+        ctx.isBindless = true;
+        hasBindless = true;
     }
     // Static samplers (immutable samplers)
     for (const auto& ss : staticSamplers) {

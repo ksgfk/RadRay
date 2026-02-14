@@ -1085,6 +1085,11 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 totalRanges++;
             }
         }
+        for (const auto& bd : set.BindlessDescriptors) {
+            if (bd.Type != ResourceBindType::UNKNOWN) {
+                totalRanges++;
+            }
+        }
     }
     descRanges.reserve(totalRanges);
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
@@ -1093,26 +1098,19 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     isBindlessSet.resize(desc.DescriptorSets.size(), false);
     for (uint32_t setIdx = 0; setIdx < desc.DescriptorSets.size(); setIdx++) {
         const auto& set = desc.DescriptorSets[setIdx];
-        if (set.Elements.empty()) {
+        if (set.Elements.empty() && set.BindlessDescriptors.empty()) {
             continue;
         }
-        // Check if this set has a bindless element
-        bool isBindless = false;
-        for (const auto& e : set.Elements) {
-            if (e.Count == 0) {
-                isBindless = true;
-                break;
-            }
-        }
+        // Check if this set has bindless descriptors
+        bool isBindless = !set.BindlessDescriptors.empty();
         // Collect ranges for this set
         vector<D3D12_DESCRIPTOR_RANGE1> setRanges{};
         ShaderStages setStages = ShaderStage::UNKNOWN;
+        // Process regular elements
         for (const auto& e : set.Elements) {
             D3D12_DESCRIPTOR_RANGE1 range{};
-            UINT numDesc = (e.Count == 0) ? UINT_MAX : e.Count;
-            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = (e.Count == 0)
-                                                          ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE
-                                                          : D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+            UINT numDesc = e.Count;
+            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
             switch (e.Type) {
                 case ResourceBindType::CBuffer:
                     CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, numDesc, e.Slot, e.Space, rangeFlags);
@@ -1133,6 +1131,32 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             }
             setRanges.push_back(range);
             setStages |= e.Stages;
+        }
+        // Process bindless descriptors
+        for (const auto& bd : set.BindlessDescriptors) {
+            D3D12_DESCRIPTOR_RANGE1 range{};
+            UINT numDesc = UINT_MAX;  // Unbounded for bindless
+            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+            switch (bd.Type) {
+                case ResourceBindType::CBuffer:
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, numDesc, bd.Slot, bd.Space, rangeFlags);
+                    break;
+                case ResourceBindType::Texture:
+                case ResourceBindType::Buffer:
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, numDesc, bd.Slot, bd.Space, rangeFlags);
+                    break;
+                case ResourceBindType::RWTexture:
+                case ResourceBindType::RWBuffer:
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, numDesc, bd.Slot, bd.Space, rangeFlags);
+                    break;
+                case ResourceBindType::Sampler:
+                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, numDesc, bd.Slot, bd.Space, rangeFlags);
+                    break;
+                case ResourceBindType::UNKNOWN:
+                    continue;
+            }
+            setRanges.push_back(range);
+            setStages |= bd.Stages;
         }
         if (setRanges.empty()) {
             continue;
