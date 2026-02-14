@@ -904,14 +904,24 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         VkDescriptorSetLayoutBinding binding;
         vector<unique_ptr<SamplerVulkan>> staticSamplers;
         vector<VkSampler> tmpSS;
+        bool isBindless{false};
     };
     vector<BindingCtx> ctxs;
+    bool hasBindless = false;
+    constexpr uint32_t BINDLESS_CAPACITY = 262144;
     // Regular elements
     for (const auto& j : desc.Elements) {
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = j.Slot;
         ctx.binding.descriptorType = MapType(j.Type);
-        ctx.binding.descriptorCount = j.Count;
+        if (j.Count == 0) {
+            // Bindless array
+            ctx.binding.descriptorCount = BINDLESS_CAPACITY;
+            ctx.isBindless = true;
+            hasBindless = true;
+        } else {
+            ctx.binding.descriptorCount = j.Count;
+        }
         ctx.binding.stageFlags = MapType(j.Stages);
     }
     // Static samplers (immutable samplers)
@@ -930,7 +940,9 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         ctx.staticSamplers.emplace_back(std::move(sampler));
     }
     vector<VkDescriptorSetLayoutBinding> bindings;
+    vector<VkDescriptorBindingFlags> bindingFlags;
     bindings.reserve(ctxs.size());
+    bindingFlags.reserve(ctxs.size());
     for (const auto& i : ctxs) {
         auto b = i.binding;
         if (i.tmpSS.empty()) {
@@ -939,11 +951,27 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
             b.pImmutableSamplers = i.tmpSS.data();
         }
         bindings.emplace_back(b);
+        // Set UPDATE_AFTER_BIND flag for bindless bindings
+        VkDescriptorBindingFlags flags = 0;
+        if (i.isBindless) {
+            flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+        }
+        bindingFlags.emplace_back(flags);
     }
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslci.pNext = nullptr;
-    dslci.flags = 0;
+    if (hasBindless) {
+        flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsInfo.pNext = nullptr;
+        flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
+        flagsInfo.pBindingFlags = bindingFlags.data();
+        dslci.pNext = &flagsInfo;
+        dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    } else {
+        dslci.pNext = nullptr;
+        dslci.flags = 0;
+    }
     dslci.bindingCount = static_cast<uint32_t>(bindings.size());
     dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;

@@ -347,7 +347,9 @@ enum class RenderObjectTag : uint32_t {
     CmdQueue = Device << 1,
     CmdBuffer = CmdQueue << 1,
     CmdEncoder = CmdBuffer << 1,
-    Fence = CmdEncoder << 1,
+    GraphicsCmdEncoder = CmdEncoder | (CmdEncoder << 1),
+    ComputeCmdEncoder = CmdEncoder | (CmdEncoder << 2),
+    Fence = CmdEncoder << 3,
     Semaphore = Fence << 1,
     Shader = Semaphore << 1,
     RootSignature = Shader << 1,
@@ -364,7 +366,6 @@ enum class RenderObjectTag : uint32_t {
     DescriptorSet = ResourceView << 3,
     Sampler = DescriptorSet << 1,
     BindlessArray = Sampler << 1,
-
     VkInstance = BindlessArray << 1,
 };
 
@@ -934,7 +935,7 @@ class CommandEncoder : public RenderBase {
 public:
     virtual ~CommandEncoder() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdEncoder; }
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::CmdEncoder; }
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
@@ -952,6 +953,8 @@ public:
 class GraphicsCommandEncoder : public CommandEncoder {
 public:
     virtual ~GraphicsCommandEncoder() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsCmdEncoder; }
 
     virtual void SetViewport(Viewport vp) noexcept = 0;
 
@@ -971,6 +974,8 @@ public:
 class ComputeCommandEncoder : public CommandEncoder {
 public:
     virtual ~ComputeCommandEncoder() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputeCmdEncoder; }
 
     virtual void BindComputePipelineState(ComputePipelineState* pso) noexcept = 0;
 
@@ -1070,6 +1075,8 @@ public:
 class PipelineState : public RenderBase {
 public:
     virtual ~PipelineState() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::PipelineState; }
 };
 
 class GraphicsPipelineState : public PipelineState {

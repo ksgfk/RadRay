@@ -687,7 +687,9 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
     _rootDescViews.assign(hasRoot ? (maxRootIndex + 1) : 0, RootDescriptorView{});
 
     // Build setBindings first (filtering out static samplers) so we can remap element indices
+    // But we still need to track which sets have static samplers for descriptor set creation
     unordered_map<uint32_t, vector<const BindBridgeLayout::DescriptorSetEntry*>> setBindings;
+    unordered_set<uint32_t> setsWithStaticSamplers;
     uint32_t maxSetIndex = 0;
     bool hasSet = false;
     for (const auto& b : layout._bindings) {
@@ -695,11 +697,12 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
             [&](const auto& e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
-                    if (e.IsStaticSampler) {
-                        return;
-                    }
                     hasSet = true;
                     maxSetIndex = std::max(maxSetIndex, e.SetIndex);
+                    if (e.IsStaticSampler) {
+                        setsWithStaticSamplers.insert(e.SetIndex);
+                        return;
+                    }
                     setBindings[e.SetIndex].push_back(&e);
                 }
             },
@@ -777,16 +780,24 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
 
     for (uint32_t i = 0; i < _descSets.size(); ++i) {
         auto it = setBindings.find(i);
-        if (it == setBindings.end()) {
-            continue;
-        }
+        bool hasStaticSamplers = setsWithStaticSamplers.count(i) > 0;
         bool isBindless = false;
-        for (const auto* e : it->second) {
-            if (e->BindCount == 0) {
-                isBindless = true;
+        if (it != setBindings.end()) {
+            for (const auto* e : it->second) {
+                if (e->BindCount == 0) {
+                    isBindless = true;
+                    break;
+                }
             }
         }
+        // Skip bindless sets (they are bound separately via BindBindlessArray)
         if (isBindless) {
+            continue;
+        }
+        // For non-bindless sets, create descriptor set even if it only has static samplers
+        // (Vulkan requires descriptor sets to be bound even if they only contain immutable samplers)
+        // Skip if the set has no bindings and no static samplers
+        if (it == setBindings.end() && !hasStaticSamplers) {
             continue;
         }
         auto setOpt = device->CreateDescriptorSet(rootSig, i);

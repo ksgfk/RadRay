@@ -331,7 +331,7 @@ private:
         staticSampler.Samplers.push_back(render::SamplerDescriptor{
             render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
             render::AddressMode::ClampToEdge,
-            render::FilterMode::Linear, render::FilterMode::Linear, render::FilterMode::Linear,
+            render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest,
             0.0f, 0.0f, std::nullopt, 0});
         render::BindBridgeLayout bindLayout;
         if (backend == render::RenderBackend::D3D12) {

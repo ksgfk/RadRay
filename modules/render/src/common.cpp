@@ -310,6 +310,8 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::CmdQueue: return "CmdQueue";
         case RenderObjectTag::CmdBuffer: return "CmdBuffer";
         case RenderObjectTag::CmdEncoder: return "CmdEncoder";
+        case RenderObjectTag::GraphicsCmdEncoder: return "GraphicsCmdEncoder";
+        case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
         case RenderObjectTag::RootSignature: return "RootSignature";
