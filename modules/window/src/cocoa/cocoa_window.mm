@@ -134,10 +134,8 @@ static MouseButton MapCocoaNSButtonToMouseButton(NSInteger buttonNumber) noexcep
 
 }  // namespace radray
 
-// ---- ObjC classes ----
-
 @interface RadrayWindowDelegate : NSObject <NSWindowDelegate>
-@property (nonatomic, assign) radray::CocoaWindow* owner;
+@property(nonatomic, assign) radray::CocoaWindow* owner;
 @end
 
 @implementation RadrayWindowDelegate
@@ -176,7 +174,7 @@ static MouseButton MapCocoaNSButtonToMouseButton(NSInteger buttonNumber) noexcep
 @end
 
 @interface RadrayView : NSView
-@property (nonatomic, assign) radray::CocoaWindow* owner;
+@property(nonatomic, assign) radray::CocoaWindow* owner;
 @end
 
 @implementation RadrayView
@@ -190,8 +188,12 @@ static MouseButton MapCocoaNSButtonToMouseButton(NSInteger buttonNumber) noexcep
     return self;
 }
 
-- (BOOL)acceptsFirstResponder { return YES; }
-- (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+- (BOOL)acceptsFirstMouse:(NSEvent*)event {
+    return YES;
+}
 
 - (void)mouseDown:(NSEvent*)event {
     [self handleMouseEvent:event button:radray::MouseButton::BUTTON_LEFT action:radray::Action::PRESSED];
@@ -259,24 +261,31 @@ static MouseButton MapCocoaNSButtonToMouseButton(NSInteger buttonNumber) noexcep
     NSEventModifierFlags flags = [event modifierFlags];
     radray::Action action;
     switch ([event keyCode]) {
-        case kVK_Shift: case kVK_RightShift:
-            action = (flags & NSEventModifierFlagShift) ? radray::Action::PRESSED : radray::Action::RELEASED; break;
-        case kVK_Control: case kVK_RightControl:
-            action = (flags & NSEventModifierFlagControl) ? radray::Action::PRESSED : radray::Action::RELEASED; break;
-        case kVK_Option: case kVK_RightOption:
-            action = (flags & NSEventModifierFlagOption) ? radray::Action::PRESSED : radray::Action::RELEASED; break;
-        case kVK_Command: case kVK_RightCommand:
-            action = (flags & NSEventModifierFlagCommand) ? radray::Action::PRESSED : radray::Action::RELEASED; break;
+        case kVK_Shift:
+        case kVK_RightShift:
+            action = (flags & NSEventModifierFlagShift) ? radray::Action::PRESSED : radray::Action::RELEASED;
+            break;
+        case kVK_Control:
+        case kVK_RightControl:
+            action = (flags & NSEventModifierFlagControl) ? radray::Action::PRESSED : radray::Action::RELEASED;
+            break;
+        case kVK_Option:
+        case kVK_RightOption:
+            action = (flags & NSEventModifierFlagOption) ? radray::Action::PRESSED : radray::Action::RELEASED;
+            break;
+        case kVK_Command:
+        case kVK_RightCommand:
+            action = (flags & NSEventModifierFlagCommand) ? radray::Action::PRESSED : radray::Action::RELEASED;
+            break;
         case kVK_CapsLock:
-            action = (flags & NSEventModifierFlagCapsLock) ? radray::Action::PRESSED : radray::Action::RELEASED; break;
+            action = (flags & NSEventModifierFlagCapsLock) ? radray::Action::PRESSED : radray::Action::RELEASED;
+            break;
         default: return;
     }
     _owner->_eventKeyboard(code, action);
 }
 
 @end
-
-// ---- C++ implementations ----
 
 namespace radray {
 
@@ -286,6 +295,15 @@ static void EnsureNSAppInitialized() {
     if (g_nsAppInitialized) return;
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+    NSMenu* menuBar = [[NSMenu alloc] init];
+    NSMenuItem* appMenuItem = [[NSMenuItem alloc] init];
+    [menuBar addItem:appMenuItem];
+    NSMenu* appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenuItem setSubmenu:appMenu];
+    [NSApp setMainMenu:menuBar];
+
     [NSApp finishLaunching];
     g_nsAppInitialized = true;
 }
@@ -305,9 +323,9 @@ Nullable<unique_ptr<CocoaWindow>> CreateCocoaWindow(const CocoaWindowCreateDescr
 
     NSWindow* window = [[NSWindow alloc]
         initWithContentRect:contentRect
-        styleMask:styleMask
-        backing:NSBackingStoreBuffered
-        defer:NO];
+                  styleMask:styleMask
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
     if (!window) {
         RADRAY_ERR_LOG("Failed to create NSWindow");
         return nullptr;

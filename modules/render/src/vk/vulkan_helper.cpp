@@ -168,9 +168,6 @@ VkPipelineStageFlags BufferUseToPipelineStageFlags(BufferUses v) noexcept {
     if (v.HasFlag(BufferUse::CBuffer) || v.HasFlag(BufferUse::UnorderedAccess)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                 VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     if (v.HasFlag(BufferUse::Indirect)) {
@@ -213,9 +210,6 @@ VkPipelineStageFlags TextureUseToPipelineStageFlags(TextureUses v, bool isSrc) n
     if (v.HasFlag(TextureUse::Resource)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                 VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     if (v.HasFlag(TextureUse::RenderTarget)) {
@@ -227,9 +221,6 @@ VkPipelineStageFlags TextureUseToPipelineStageFlags(TextureUses v, bool isSrc) n
     if (v.HasFlag(TextureUse::UnorderedAccess)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                 VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                 VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     if (v.HasFlag(TextureUse::Present)) {

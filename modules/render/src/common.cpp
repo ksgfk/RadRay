@@ -94,6 +94,37 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept {
     }
 }
 
+bool IsUintFormat(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::R8_UINT:
+        case TextureFormat::R16_UINT:
+        case TextureFormat::RG8_UINT:
+        case TextureFormat::R32_UINT:
+        case TextureFormat::RG16_UINT:
+        case TextureFormat::RGBA8_UINT:
+        case TextureFormat::RGB10A2_UINT:
+        case TextureFormat::RG32_UINT:
+        case TextureFormat::RGBA16_UINT:
+        case TextureFormat::RGBA32_UINT: return true;
+        default: return false;
+    }
+}
+
+bool IsSintFormat(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::R8_SINT:
+        case TextureFormat::R16_SINT:
+        case TextureFormat::RG8_SINT:
+        case TextureFormat::R32_SINT:
+        case TextureFormat::RG16_SINT:
+        case TextureFormat::RGBA8_SINT:
+        case TextureFormat::RG32_SINT:
+        case TextureFormat::RGBA16_SINT:
+        case TextureFormat::RGBA32_SINT: return true;
+        default: return false;
+    }
+}
+
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     switch (format) {
         case VertexFormat::UINT8X2:

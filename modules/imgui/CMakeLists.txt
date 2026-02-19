@@ -18,16 +18,22 @@ file(GLOB DEAR_IMGUI_OTHER
     $<$<PLATFORM_ID:Windows>:${RADRAY_IMGUI_ROOT}/misc/debuggers/imgui.natvis>)
 file(GLOB_RECURSE RADRAY_IMGUI_INC CONFIGURE_DEPENDS "include/*.h")
 file(GLOB RADRAY_IMGUI_SRC CONFIGURE_DEPENDS "src/*.cpp")
+if (APPLE)
+    file(GLOB RADRAY_IMGUI_OBJCXX_SRC CONFIGURE_DEPENDS "src/*.mm")
+endif()
 
 add_library(radrayimgui STATIC
     ${DEAR_IMGUI_SRC}
     ${DEAR_IMGUI_INC}
-    ${RADRAY_IMGUI_SRC} 
+    ${RADRAY_IMGUI_SRC}
     ${RADRAY_IMGUI_INC}
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.h>
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.cpp>
     $<$<PLATFORM_ID:Windows>:${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.h>
-    $<$<PLATFORM_ID:Windows>:${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp>)
+    $<$<PLATFORM_ID:Windows>:${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp>
+    $<$<PLATFORM_ID:Darwin>:${RADRAY_IMGUI_ROOT}/backends/imgui_impl_osx.h>
+    $<$<PLATFORM_ID:Darwin>:${RADRAY_IMGUI_ROOT}/backends/imgui_impl_osx.mm>
+    $<$<PLATFORM_ID:Darwin>:${RADRAY_IMGUI_OBJCXX_SRC}>)
 
 target_include_directories(radrayimgui PUBLIC
     include
@@ -42,6 +48,11 @@ target_link_libraries(radrayimgui PUBLIC
     radrayrender)
 target_link_libraries(radrayimgui PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:freetype>)
+if(APPLE)
+    target_link_libraries(radrayimgui PRIVATE
+        "-framework GameController"
+        "-framework AppKit")
+endif()
 
 target_compile_definitions(radrayimgui PUBLIC
     RADRAY_ENABLE_IMGUI

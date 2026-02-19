@@ -172,7 +172,7 @@ public:
                 rtView,
                 render::LoadAction::Clear,
                 render::StoreAction::Store,
-                render::ColorClearValue{0.0f, 0.0f, 0.0f, 1.0f}};
+                render::ColorClearValue{{{0.0f, 0.0f, 0.0f, 1.0f}}}};
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
             render::DepthStencilAttachment dsAttach{
                 frame->_dsv.get(),
@@ -410,7 +410,7 @@ public:
         vertLayout.ArrayStride = stride;
         vertLayout.StepMode = render::VertexStepMode::Vertex;
         vertLayout.Elements = vertElems;
-        render::ColorTargetState rtState = render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM);
+        render::ColorTargetState rtState = render::ColorTargetState::Default(render::TextureFormat::BGRA8_UNORM);
         render::GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = _rs.get();
         psoDesc.VS = {vsShader.get(), "VSMain"};

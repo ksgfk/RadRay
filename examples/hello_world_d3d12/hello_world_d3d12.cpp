@@ -201,7 +201,7 @@ void Init() {
 
 void Update() {
     uint32_t currentFrame = 0;
-    ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
+    ColorClearValue clear{{{0.0f, 0.0f, 0.0f, 1.0f}}};
     Stopwatch sw = Stopwatch::StartNew();
     int64_t time = 0;
     while (true) {
@@ -213,7 +213,7 @@ void Update() {
         float colorValue = t < 0.5 ? Lerp(0.0f, 1.0f, t * 2) : Lerp(1.0f, 0.0f, (t - 0.5f) * 2);
         Eigen::Vector3f color{0.0f, 0.0f, 0.0f};
         color[colorElement] = colorValue;
-        clear = {color.x(), color.y(), color.z(), 1.0f};
+        clear.Value = {color.x(), color.y(), color.z(), 1.0f};
         if (window->ShouldClose()) {
             break;
         }

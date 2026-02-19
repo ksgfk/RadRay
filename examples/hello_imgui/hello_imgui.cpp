@@ -58,7 +58,7 @@ public:
             rtAttach.Target = rtView;
             rtAttach.Load = radray::render::LoadAction::Clear;
             rtAttach.Store = radray::render::StoreAction::Store;
-            rtAttach.ClearValue = radray::render::ColorClearValue{0.1f, 0.1f, 0.1f, 1.0f};
+            rtAttach.ClearValue = radray::render::ColorClearValue{{{0.1f, 0.1f, 0.1f, 1.0f}}};
             rpDesc.ColorAttachments = std::span(&rtAttach, 1);
             pass = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
         }

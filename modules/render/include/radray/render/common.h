@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <variant>
 #include <optional>
 #include <span>
@@ -402,7 +403,7 @@ using TextureUses = EnumFlags<render::TextureUse>;
 namespace radray::render {
 
 struct ColorClearValue {
-    float R, G, B, A;
+    std::array<float, 4> Value{};
 };
 
 struct DepthStencilClearValue {
@@ -1157,6 +1158,8 @@ void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept;
 
 // --------------------------- Utility Functions ---------------------------
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+bool IsUintFormat(TextureFormat format) noexcept;
+bool IsSintFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;

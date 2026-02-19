@@ -118,9 +118,34 @@ void DynamicLibrary::Destroy() noexcept {
 #include <dlfcn.h>
 
 #include <cstdlib>
+#include <climits>
 #include <string>
 
+#ifdef RADRAY_PLATFORM_MACOS
+#include <mach-o/dyld.h>
+#elif defined(RADRAY_PLATFORM_LINUX)
+#include <unistd.h>
+#endif
+
 namespace radray {
+
+static string _GetExecutableDir() {
+    char buf[PATH_MAX];
+#ifdef RADRAY_PLATFORM_MACOS
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) != 0) return {};
+#elif defined(RADRAY_PLATFORM_LINUX)
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len == -1) return {};
+    buf[len] = '\0';
+#endif
+    string path(buf);
+    auto pos = path.rfind('/');
+    if (pos != string::npos) {
+        return path.substr(0, pos);
+    }
+    return {};
+}
 
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
     return std::aligned_alloc(alignment, size);
@@ -147,6 +172,15 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
 #else
 #error "unknown platform"
 #endif
+    auto exeDir = _GetExecutableDir();
+    if (!exeDir.empty()) {
+        auto fullPath = exeDir + "/" + name;
+        auto h = dlopen(fullPath.c_str(), RTLD_LAZY);
+        if (h != nullptr) {
+            _handle = h;
+            return;
+        }
+    }
     auto h = dlopen(name.c_str(), RTLD_LAZY);
     if (h == nullptr) {
         RADRAY_ERR_LOG("dlopen failed: {}", dlerror());

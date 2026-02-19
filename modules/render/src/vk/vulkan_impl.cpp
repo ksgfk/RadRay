@@ -4,6 +4,12 @@
 #include <bit>
 #include <cstring>
 
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+namespace radray {
+VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nsView, const VkAllocationCallbacks* allocator) noexcept;
+}  // namespace radray
+#endif
+
 namespace radray::render::vulkan {
 
 static Nullable<InstanceVulkanImpl*> g_vkInstance = nullptr;
@@ -146,6 +152,15 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         if (auto vr = vkCreateWin32SurfaceKHR(_instance->_instance, &win32SurfaceInfo, this->GetAllocationCallbacks(), &vkSurface);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkCreateWin32SurfaceKHR failed: {}", vr);
+            return nullptr;
+        }
+        surface = make_unique<SurfaceVulkan>(this, vkSurface);
+    }
+#elif defined(VK_USE_PLATFORM_METAL_EXT)
+    {
+        VkSurfaceKHR vkSurface = ::radray::CreateMacOSMetalSurface(_instance->_instance, std::bit_cast<void*>(desc.NativeHandler), this->GetAllocationCallbacks());
+        if (vkSurface == VK_NULL_HANDLE) {
+            RADRAY_ERR_LOG("vkCreateMetalSurfaceEXT failed");
             return nullptr;
         }
         surface = make_unique<SurfaceVulkan>(this, vkSurface);
@@ -1381,6 +1396,9 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     needExts.emplace(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
     needExts.emplace(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+#elif defined(VK_USE_PLATFORM_METAL_EXT)
+    needExts.emplace(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+    needExts.emplace(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
     needExts.emplace(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #endif
@@ -1472,6 +1490,10 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     createInfo.pApplicationInfo = &appInfo;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(needExtsCStr.size());
     createInfo.ppEnabledExtensionNames = needExtsCStr.empty() ? nullptr : needExtsCStr.data();
@@ -1676,6 +1698,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkEnumerateDeviceExtensionProperties failed: {}", vr);
         return nullptr;
+    }
+    if (IsValidateExtensions("VK_KHR_portability_subset", deviceExtsAvailable)) {
+        needExts.emplace("VK_KHR_portability_subset");
     }
     VkPhysicalDeviceProperties2 deviceProperties2{};
     deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -2156,10 +2181,22 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
         colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         fbs.emplace_back(imageView->_imageView);
         auto& clear = clearValues.emplace_back();
-        clear.color.float32[0] = i.ClearValue.R;
-        clear.color.float32[1] = i.ClearValue.G;
-        clear.color.float32[2] = i.ClearValue.B;
-        clear.color.float32[3] = i.ClearValue.A;
+        if (IsUintFormat(imageView->_mdesc.Format)) {
+            clear.color.uint32[0] = static_cast<uint32_t>(i.ClearValue.Value[0]);
+            clear.color.uint32[1] = static_cast<uint32_t>(i.ClearValue.Value[1]);
+            clear.color.uint32[2] = static_cast<uint32_t>(i.ClearValue.Value[2]);
+            clear.color.uint32[3] = static_cast<uint32_t>(i.ClearValue.Value[3]);
+        } else if (IsSintFormat(imageView->_mdesc.Format)) {
+            clear.color.int32[0] = static_cast<int32_t>(i.ClearValue.Value[0]);
+            clear.color.int32[1] = static_cast<int32_t>(i.ClearValue.Value[1]);
+            clear.color.int32[2] = static_cast<int32_t>(i.ClearValue.Value[2]);
+            clear.color.int32[3] = static_cast<int32_t>(i.ClearValue.Value[3]);
+        } else {
+            clear.color.float32[0] = i.ClearValue.Value[0];
+            clear.color.float32[1] = i.ClearValue.Value[1];
+            clear.color.float32[2] = i.ClearValue.Value[2];
+            clear.color.float32[3] = i.ClearValue.Value[3];
+        }
         if (width == std::numeric_limits<uint32_t>::max()) {
             width = imageView->_image->_mdesc.Width;
         } else {

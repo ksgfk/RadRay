@@ -70,7 +70,7 @@ void CreateSwapChain() {
     swapchainDesc.Height = (uint32_t)winSize.y();
     swapchainDesc.BackBufferCount = BACK_BUFFER_COUNT;
     swapchainDesc.FlightFrameCount = INFLIGHT_FRAME_COUNT;
-    swapchainDesc.Format = TextureFormat::RGBA8_UNORM;
+    swapchainDesc.Format = TextureFormat::BGRA8_UNORM;
     swapchainDesc.PresentMode = render::PresentMode::Mailbox;
     swapchain = StaticCastUniquePtr<vulkan::SwapChainVulkan>(device->CreateSwapChain(swapchainDesc).Unwrap());
     if (backBufRenderFinished.size() != swapchainDesc.BackBufferCount) {
@@ -112,6 +112,17 @@ void Init() {
         false,
         false,
         {}};
+    window = CreateNativeWindow(windowDesc).Unwrap();
+#elif defined(RADRAY_PLATFORM_MACOS)
+    CocoaWindowCreateDescriptor windowDesc{
+        RADRAY_APPNAME,
+        winSize.x(),
+        winSize.y(),
+        -1,
+        -1,
+        true,
+        false,
+        false};
     window = CreateNativeWindow(windowDesc).Unwrap();
 #endif
     if (!window) {
@@ -162,7 +173,7 @@ void Init() {
         VertexElement ve[] = {
             {0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
         VertexBufferLayout vl{12, VertexStepMode::Vertex, ve};
-        ColorTargetState cts = ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
+        ColorTargetState cts = ColorTargetState::Default(TextureFormat::BGRA8_UNORM);
         GraphicsPipelineStateDescriptor psoDesc{};
         psoDesc.RootSig = pipelineLayout.get();
         psoDesc.VS = {vs.get(), "VSMain"};
@@ -223,7 +234,7 @@ void Init() {
 
 void Update() {
     uint32_t currentFrame = 0;
-    ColorClearValue clear{0.0f, 0.0f, 0.0f, 1.0f};
+    ColorClearValue clear{{{0.0f, 0.0f, 0.0f, 1.0f}}};
     Stopwatch sw = Stopwatch::StartNew();
     int64_t time = 0;
     while (true) {
@@ -235,7 +246,7 @@ void Update() {
         float colorValue = t < 0.5 ? Lerp(0.0f, 1.0f, t * 2) : Lerp(1.0f, 0.0f, (t - 0.5f) * 2);
         Eigen::Vector3f color{0.0f, 0.0f, 0.0f};
         color[colorElement] = colorValue;
-        clear = {color.x(), color.y(), color.z(), 1.0f};
+        clear.Value = {color.x(), color.y(), color.z(), 1.0f};
         if (window->ShouldClose()) {
             break;
         }
@@ -259,7 +270,7 @@ void Update() {
             TextureViewDescriptor rtViewDesc{};
             rtViewDesc.Target = rt;
             rtViewDesc.Dim = TextureViewDimension::Dim2D;
-            rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
+            rtViewDesc.Format = TextureFormat::BGRA8_UNORM;
             rtViewDesc.Usage = TextureUse::RenderTarget;
             rtViewDesc.Range.BaseMipLevel = 0;
             rtViewDesc.Range.MipLevelCount = SubresourceRange::All;

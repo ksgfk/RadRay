@@ -19,6 +19,10 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);
 #endif
 
+#ifdef RADRAY_PLATFORM_MACOS
+#include "imgui_osx_bridge.h"
+#endif
+
 namespace radray {
 
 static void* _ImguiAllocBridge(size_t size, void* user_data) noexcept {
@@ -504,6 +508,9 @@ void ImGuiApplication::Destroy() noexcept {
 #ifdef RADRAY_PLATFORM_WINDOWS
         ImGui_ImplWin32_Shutdown();
 #endif
+#ifdef RADRAY_PLATFORM_MACOS
+        ImGuiOSXBridge_Shutdown();
+#endif
     }
     _imgui.reset();
     // window
@@ -544,6 +551,18 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
     desc.ExtraWndProcs = std::span{&imguiProc, 1};
     _window = CreateNativeWindow(desc).Unwrap();
 #endif
+#ifdef RADRAY_PLATFORM_MACOS
+    CocoaWindowCreateDescriptor desc{};
+    desc.Title = config.Title;
+    desc.Width = config.Width;
+    desc.Height = config.Height;
+    desc.X = -1;
+    desc.Y = -1;
+    desc.Resizable = true;
+    desc.StartMaximized = false;
+    desc.Fullscreen = false;
+    _window = CreateNativeWindow(desc).Unwrap();
+#endif
     if (!_window) {
         throw ImGuiApplicationException("create window failed");
     }
@@ -568,6 +587,18 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
         style.ScaleAllSizes(mainScale);
         style.FontScaleDpi = mainScale;
         ImGui_ImplWin32_Init(wnh.Handle);
+        io.Fonts->AddFontDefault();
+    }
+#endif
+#ifdef RADRAY_PLATFORM_MACOS
+    {
+        WindowNativeHandler wnh = _window->GetNativeHandler();
+        if (wnh.Type != WindowHandlerTag::NS_VIEW) {
+            throw ImGuiApplicationException("unknown window handler type");
+        }
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        ImGui::StyleColorsDark();
+        ImGuiOSXBridge_Init(wnh.Handle);
         io.Fonts->AddFontDefault();
     }
 #endif
@@ -706,6 +737,9 @@ void ImGuiApplication::LoopSingleThreaded() {
         _imgui->SetCurrent();
 #ifdef RADRAY_PLATFORM_WINDOWS
         ImGui_ImplWin32_NewFrame();
+#endif
+#ifdef RADRAY_PLATFORM_MACOS
+        ImGuiOSXBridge_NewFrame(_window->GetNativeHandler().Handle);
 #endif
         ImGui::NewFrame();
         this->OnImGui();
@@ -927,6 +961,9 @@ void ImGuiApplication::LoopMultiThreaded() {
 #ifdef RADRAY_PLATFORM_WINDOWS
             ImGui_ImplWin32_NewFrame();
 #endif
+#ifdef RADRAY_PLATFORM_MACOS
+            ImGuiOSXBridge_NewFrame(_window->GetNativeHandler().Handle);
+#endif
             ImGui::NewFrame();
             this->OnImGui();
             ImGui::Render();
@@ -1141,7 +1178,7 @@ ImGuiAppConfig ImGuiApplication::ParseArgsSimple(int argc, char** argv) noexcept
         std::nullopt,
         3,
         2,
-        radray::render::TextureFormat::RGBA8_UNORM,
+        radray::render::TextureFormat::BGRA8_UNORM,
         radray::render::PresentMode::Mailbox,
         isMultiThread,
         false,

@@ -748,10 +748,10 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     // D3D12_CLEAR_VALUE clear{};
     // clear.Format = rawFormat;
     // if (auto ccv = std::get_if<ColorClearValue>(&clearValue)) {
-    //     clear.Color[0] = ccv->R;
-    //     clear.Color[1] = ccv->G;
-    //     clear.Color[2] = ccv->B;
-    //     clear.Color[3] = ccv->A;
+    //     clear.Color[0] = ccv->Value[0];
+    //     clear.Color[1] = ccv->Value[1];
+    //     clear.Color[2] = ccv->Value[2];
+    //     clear.Color[3] = ccv->Value[3];
     // } else if (auto dcv = std::get_if<DepthStencilClearValue>(&clearValue)) {
     //     clear.DepthStencil.Depth = dcv->Depth;
     //     clear.DepthStencil.Stencil = (UINT8)dcv->Stencil;
@@ -1810,10 +1810,10 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         auto v = CastD3D12Object(color.Target);
         D3D12_CLEAR_VALUE clearColor{};
         clearColor.Format = v->_rawFormat;
-        clearColor.Color[0] = color.ClearValue.R;
-        clearColor.Color[1] = color.ClearValue.G;
-        clearColor.Color[2] = color.ClearValue.B;
-        clearColor.Color[3] = color.ClearValue.A;
+        clearColor.Color[0] = color.ClearValue.Value[0];
+        clearColor.Color[1] = color.ClearValue.Value[1];
+        clearColor.Color[2] = color.ClearValue.Value[2];
+        clearColor.Color[3] = color.ClearValue.Value[3];
         D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE beginningAccess = MapType(color.Load);
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
         auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
