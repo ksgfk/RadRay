@@ -22,6 +22,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif RADRAY_PLATFORM_MACOS
+#define VK_USE_PLATFORM_METAL_EXT
 #else
 #error "unknown platform"
 #endif

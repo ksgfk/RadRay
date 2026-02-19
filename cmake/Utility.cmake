@@ -46,7 +46,7 @@ endfunction()
 
 radray_detect_first_compiler_flag(RADRAY_DETECTED_SIMD_FLAG
     "/arch:AVX2" "/arch:AVX" "/arch:SSE2" "/arch:SSE"
-    "-mavx2" "-mavx" "-msse4.2" "-msse2" "-msse")
+    "-mcpu=native")
 radray_detect_first_compiler_flag(RADRAY_DETECTED_FMA_FLAG "-mfma")
 check_ipo_supported(RESULT _cmake_ipo_supported)
 if (_cmake_ipo_supported)
@@ -160,9 +160,9 @@ endfunction()
 
 function(radray_compile_flag_cpp20 target)
     if (MSVC)
-        target_compile_options(${target} PRIVATE /std:c++20)
+        target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/std:c++20>)
     else()
-        target_compile_options(${target} PRIVATE -std=c++20)
+        target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>)
     endif()
 endfunction()
 

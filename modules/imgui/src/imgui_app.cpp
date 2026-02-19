@@ -23,20 +23,12 @@ namespace radray {
 
 static void* _ImguiAllocBridge(size_t size, void* user_data) noexcept {
     RADRAY_UNUSED(user_data);
-#ifdef RADRAY_ENABLE_MIMALLOC
-    return mi_malloc(size);
-#else
     return std::malloc(size);
-#endif
 }
 
 static void _ImguiFreeBridge(void* ptr, void* user_data) noexcept {
     RADRAY_UNUSED(user_data);
-#ifdef RADRAY_ENABLE_MIMALLOC
-    mi_free(ptr);
-#else
     std::free(ptr);
-#endif
 }
 
 ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)

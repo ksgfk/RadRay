@@ -142,32 +142,59 @@ catch {
 
 if ($Manifest.Artifacts) {
     $CurrentPlatform = if ($IsWindows) { "windows" } elseif ($IsLinux) { "linux" } elseif ($IsMacOS) { "macos" } else { "unknown" }
+    $CurrentArch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        "X64"   { "x64" }
+        "Arm64" { "arm64" }
+        "X86"   { "x86" }
+        default { "unknown" }
+    }
+    Write-Host "当前平台: $CurrentPlatform, 架构: $CurrentArch" -ForegroundColor Cyan
     $ProcessedNames = @{}
 
     foreach ($Artifact in $Manifest.Artifacts) {
-        $ArtifactInfo = @{}
+        # 收集外层字段
+        $OuterInfo = @{}
         $Artifact.PSObject.Properties | ForEach-Object {
-            $ArtifactInfo[$_.Name] = $_.Value
+            if ($_.Name -ne "Triplets") {
+                $OuterInfo[$_.Name] = $_.Value
+            }
         }
 
-        $Name = $ArtifactInfo.Name
+        $Name = $OuterInfo.Name
 
-        # 检查平台兼容性
-        if ($ArtifactInfo.ContainsKey("Platform")) {
-            $SupportedPlatforms = $ArtifactInfo.Platform
-            if ($SupportedPlatforms -notcontains $CurrentPlatform) {
-                Write-Host "[$Name] 跳过: 当前平台 ($CurrentPlatform) 不在支持列表 ($($SupportedPlatforms -join ', ')) 中。" -ForegroundColor Yellow
-                continue
+        # 必须有 Triplets
+        if (-not $Artifact.Triplets -or $Artifact.Triplets.Count -eq 0) {
+            Write-Error "[$Name] 配置错误: 缺少 Triplets 定义。"
+            exit 1
+        }
+
+        # 查找匹配当前 platform+arch 的 triplet
+        $MatchedTriplet = $null
+        foreach ($Triplet in $Artifact.Triplets) {
+            if ($Triplet.Platform -eq $CurrentPlatform -and $Triplet.Arch -eq $CurrentArch) {
+                $MatchedTriplet = $Triplet
+                break
             }
+        }
+
+        if ($null -eq $MatchedTriplet) {
+            Write-Host "[$Name] 跳过: 没有匹配当前平台+架构 ($CurrentPlatform-$CurrentArch) 的 Triplet。" -ForegroundColor Yellow
+            continue
+        }
+
+        # 合并: 外层为基础，triplet 字段覆盖
+        $ArtifactInfo = $OuterInfo.Clone()
+        $MatchedTriplet.PSObject.Properties | ForEach-Object {
+            $ArtifactInfo[$_.Name] = $_.Value
         }
 
         # 检查 Name 是否重复
         if ($ProcessedNames.ContainsKey($Name)) {
-            Write-Error "配置错误: 发现重复的 SDK 名称 '$Name' 适用于当前平台 ($CurrentPlatform)。请检查 sdk_project_manifest.json。"
+            Write-Error "配置错误: 发现重复的 SDK 名称 '$Name' 适用于当前平台 ($CurrentPlatform-$CurrentArch)。请检查 project_manifest.json。"
             exit 1
         }
         $ProcessedNames[$Name] = $true
-        
+
         Fetch-SDK-Artifact -ArtifactInfo $ArtifactInfo
     }
 }

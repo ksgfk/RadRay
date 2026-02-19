@@ -2,96 +2,101 @@
     "version": 10,
     "configurePresets": [
         {
-            "name": "win",
-            "generator": "Visual Studio 18 2026",
-            "hidden": true
-        },
-        {
-            "name": "clangcl",
-            "inherits": [
-                "win"
-            ],
-            "toolset": {
-                "value": "ClangCL",
-                "strategy": "set"
-            },
-            "hidden": true
-        },
-        {
-            "name": "x64",
-            "architecture": {
-                "value": "x64",
-                "strategy": "external"
-            },
-            "hidden": true
-        },
-        {
             "name": "debug",
+            "hidden": true,
             "binaryDir": "build_debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
-            },
-            "hidden": true
+            }
         },
         {
             "name": "release",
+            "hidden": true,
             "binaryDir": "build_release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
-            },
-            "hidden": true
+            }
+        },
+        {
+            "name": "win-x64",
+            "hidden": true,
+            "generator": "Visual Studio 18 2026",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            }
+        },
+        {
+            "name": "win-x64-clangcl",
+            "hidden": true,
+            "inherits": ["win-x64"],
+            "toolset": {
+                "value": "ClangCL",
+                "strategy": "set"
+            }
+        },
+        {
+            "name": "macos-arm64",
+            "hidden": true,
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_OSX_ARCHITECTURES": "arm64"
+            }
         },
         {
             "name": "win-x64-debug",
-            "inherits": [
-                "debug",
-                "x64",
-                "win"
-            ],
-            "hidden": false
+            "inherits": ["debug", "win-x64"]
         },
         {
             "name": "win-x64-release",
-            "inherits": [
-                "release",
-                "x64",
-                "win"
-            ],
-            "hidden": false
+            "inherits": ["release", "win-x64"]
         },
         {
             "name": "win-x64-debug-clangcl",
-            "inherits": [
-                "debug",
-                "x64",
-                "clangcl"
-            ],
-            "hidden": false
+            "inherits": ["debug", "win-x64-clangcl"]
         },
         {
             "name": "win-x64-release-clangcl",
-            "inherits": [
-                "release",
-                "x64",
-                "clangcl"
-            ],
-            "hidden": false
+            "inherits": ["release", "win-x64-clangcl"]
+        },
+        {
+            "name": "macos-arm64-debug",
+            "inherits": ["debug", "macos-arm64"]
+        },
+        {
+            "name": "macos-arm64-release",
+            "inherits": ["release", "macos-arm64"]
         }
     ],
     "buildPresets": [
         {
-            "name": "max-parallel",
-            "configurePreset": "win",
-            "jobs": 0
+            "name": "win-x64-debug",
+            "configurePreset": "win-x64-debug",
+            "configuration": "Debug"
         },
         {
-            "name": "release_build",
+            "name": "win-x64-release",
             "configurePreset": "win-x64-release",
             "configuration": "Release"
         },
         {
-            "name": "release_build_clang",
+            "name": "win-x64-debug-clangcl",
+            "configurePreset": "win-x64-debug-clangcl",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-release-clangcl",
             "configurePreset": "win-x64-release-clangcl",
+            "configuration": "Release"
+        },
+        {
+            "name": "macos-arm64-debug",
+            "configurePreset": "macos-arm64-debug",
+            "configuration": "Debug"
+        },
+        {
+            "name": "macos-arm64-release",
+            "configurePreset": "macos-arm64-release",
             "configuration": "Release"
         }
     ]

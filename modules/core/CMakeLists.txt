@@ -8,13 +8,14 @@ target_link_libraries(radraycore PUBLIC
     Eigen3::Eigen
     Pal::Sigslot
     STDEXEC::stdexec
-    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-static>)
+    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-override>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
+    $<$<PLATFORM_ID:Darwin>:RADRAY_PLATFORM_MACOS>
     $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
@@ -22,6 +23,6 @@ if (MSVC)
     target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
 endif()
 target_compile_options(radraycore PRIVATE
-    $<$<BOOL:MSVC>:/W4>)
+    $<$<BOOL:${MSVC}>:/W4>)
 radray_optimize_flags_library(radraycore)
 radray_set_build_path(radraycore)

@@ -393,18 +393,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
         allocDesc.pDevice = device.Get();
         allocDesc.pAdapter = adapter.Get();
-#ifdef RADRAY_ENABLE_MIMALLOC
-        D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks{};
-        allocationCallbacks.pAllocate = [](size_t Size, size_t Alignment, void* pPrivateData) {
-            RADRAY_UNUSED(pPrivateData);
-            return mi_malloc_aligned(Size, Alignment);
-        };
-        allocationCallbacks.pFree = [](void* pMemory, void* pPrivateData) {
-            RADRAY_UNUSED(pPrivateData);
-            mi_free(pMemory);
-        };
-        allocDesc.pAllocationCallbacks = &allocationCallbacks;
-#endif
         allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
         if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
             FAILED(hr)) {

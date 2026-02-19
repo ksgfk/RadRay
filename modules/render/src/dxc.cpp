@@ -5,6 +5,10 @@
 #include <radray/utility.h>
 #include <radray/text_encoding.h>
 
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 namespace radray::render {
 
 std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::span<const byte> data) noexcept {
@@ -333,11 +337,17 @@ using Microsoft::WRL::ComPtr;
 #ifdef VOID
 #undef VOID
 #endif
-#else
-// TODO:
-#endif
-
 #include <dxc/dxcapi.h>
+#else
+#include "d3d12shader.h"
+#include <dxc/dxcapi.h>
+template <class T>
+class ComPtr : public CComPtr<T> {
+public:
+    using CComPtr<T>::CComPtr;
+    T* Get() const throw() { return this->operator->(); }
+};
+#endif
 
 #include <radray/logger.h>
 #include <radray/utility.h>
@@ -941,16 +951,16 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
     if (!dxilDll.IsValid()) {
         return nullptr;
     }
-    auto DxcCreateInstance2F = dxcDll.GetFunction<DxcCreateInstance2Proc>("DxcCreateInstance2");
-    if (!DxcCreateInstance2F) {
-        return nullptr;
-    }
     auto DxcCreateInstanceF = dxcDll.GetFunction<DxcCreateInstanceProc>("DxcCreateInstance");
     if (!DxcCreateInstanceF) {
         return nullptr;
     }
     ComPtr<IDxcCompiler3> dxc;
-#if RADRAY_ENABLE_MIMALLOC
+#ifdef RADRAY_ENABLE_MIMALLOC
+    auto DxcCreateInstance2F = dxcDll.GetFunction<DxcCreateInstance2Proc>("DxcCreateInstance2");
+    if (!DxcCreateInstance2F) {
+        return nullptr;
+    }
     ComPtr<MiMallocAdapter> mi{new MiMallocAdapter{}};
     if (HRESULT hr = DxcCreateInstance2F(mi.Get(), CLSID_DxcCompiler, IID_PPV_ARGS(&dxc));
         FAILED(hr)) {
@@ -1017,7 +1027,7 @@ static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
             default: return "??";
         }
     };
-    return format("{}_{}", fmtStage(stage), fmtSm(sm));
+    return radray::format("{}_{}", fmtStage(stage), fmtSm(sm));
 }
 
 std::optional<DxcOutput> Dxc::Compile(

@@ -18,17 +18,6 @@
 #include <list>
 #include <forward_list>
 
-#ifdef RADRAY_ENABLE_MIMALLOC
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-copy"
-#endif
-#include <mimalloc.h>
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-#endif
-
 namespace radray {
 
 using std::byte;
@@ -41,13 +30,8 @@ using std::uint16_t;
 using std::uint32_t;
 using std::uint64_t;
 
-#ifdef RADRAY_ENABLE_MIMALLOC
-template <class T>
-using allocator = mi_stl_allocator<T>;
-#else
 template <class T>
 using allocator = std::allocator<T>;
-#endif
 
 template <class T>
 using vector = std::vector<T, allocator<T>>;

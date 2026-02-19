@@ -3,11 +3,19 @@
         {
             "Name": "dxc",
             "Version": "1.8.2505.1",
-            "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-windows-x64.zip",
-            "Hash": "4ce002b83542a734712e957e13a01386a1ba4b4aaf15d25130b780f5731b91d9",
+            "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-{Platform}-{Arch}.zip",
             "EnforceHash": true,
-            "Platform": [
-                "windows"
+            "Triplets": [
+                {
+                    "Platform": "windows",
+                    "Arch": "x64",
+                    "Hash": "4ce002b83542a734712e957e13a01386a1ba4b4aaf15d25130b780f5731b91d9"
+                },
+                {
+                    "Platform": "macos",
+                    "Arch": "arm64",
+                    "Hash": "093e15df1dda60cfb1d5c4d2c32b3dbf0ea7de366d44eacf8e29575df4a6919f"
+                }
             ]
         }
     ],

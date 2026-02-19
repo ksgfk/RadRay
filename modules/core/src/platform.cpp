@@ -6,19 +6,11 @@
 namespace radray {
 
 void* Malloc(size_t size) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    return mi_malloc(size);
-#else
     return malloc(size);
-#endif
 }
 
 void Free(void* ptr) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    mi_free(ptr);
-#else
     free(ptr);
-#endif
 }
 
 DynamicLibrary::DynamicLibrary(DynamicLibrary&& other) noexcept : _handle(other._handle) {
@@ -71,19 +63,11 @@ static auto _Win32LastErrMessage() {
 }
 
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    return mi_aligned_alloc(alignment, size);
-#else
     return _aligned_malloc(size, alignment);
-#endif
 }
 
 void AlignedFree(void* ptr) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    mi_free(ptr);
-#else
     _aligned_free(ptr);
-#endif
 }
 
 static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?");
@@ -139,19 +123,11 @@ void DynamicLibrary::Destroy() noexcept {
 namespace radray {
 
 void* AlignedAlloc(size_t alignment, size_t size) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    return mi_aligned_alloc(alignment, size);
-#else
     return std::aligned_alloc(alignment, size);
-#endif
 }
 
 void AlignedFree(void* ptr) noexcept {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    mi_free(ptr);
-#else
     std::free(ptr);
-#endif
 }
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {

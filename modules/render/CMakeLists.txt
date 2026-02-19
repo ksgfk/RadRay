@@ -16,7 +16,7 @@ target_link_libraries(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:Vulkan::Headers>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:volk::volk_headers>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:GPUOpen::VulkanMemoryAllocator>
-    $<$<OR:$<BOOL:${RADRAY_ENABLE_DXC}>,$<BOOL:${RADRAY_ENABLE_D3D12}>>:Microsoft::DirectX-Headers>
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Headers>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Guids>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:D3D12MemoryAllocator>)
 target_link_libraries(radrayrender PRIVATE
@@ -31,7 +31,7 @@ target_compile_definitions(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>
     $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:RADRAY_ENABLE_SPIRV_CROSS>)
 target_compile_options(radrayrender PRIVATE
-    $<$<BOOL:MSVC>:/W4>)
+    $<$<BOOL:${MSVC}>:/W4>)
 radray_optimize_flags_library(radrayrender)
 radray_set_build_path(radrayrender)
 if (RADRAY_ENABLE_DXC)

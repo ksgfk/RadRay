@@ -151,7 +151,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         surface = make_unique<SurfaceVulkan>(this, vkSurface);
     }
 #else
-#error "unsupported platform for Vulkan surface creation"
+// TODO: other platform surface creation
 #endif
     if (surface == nullptr) {
         RADRAY_ERR_LOG("vk cannot create VkSurfaceKHR");
@@ -551,10 +551,11 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
 
         // Validate: Check for illegal mixed sets (bindless + other descriptors in same set)
         if (hasBindless && (hasRegularElements || hasStaticSamplers)) {
-            RADRAY_ERR_LOG("Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
-                          "Bindless arrays must be in their own descriptor set. "
-                          "This is not supported in HLSL and may cause validation errors.",
-                          setIdx);
+            RADRAY_ERR_LOG(
+                "Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
+                "Bindless arrays must be in their own descriptor set. "
+                "This is not supported in HLSL and may cause validation errors.",
+                setIdx);
             return nullptr;
         }
 
@@ -1427,25 +1428,6 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     }
 
     VkAllocationCallbacks* allocCbPtr = nullptr;
-#ifdef RADRAY_ENABLE_MIMALLOC
-    VkAllocationCallbacks allocCb{};
-    allocCb.pUserData = nullptr;
-    allocCb.pfnAllocation = [](void* pUserData, size_t size, size_t alignment, VkSystemAllocationScope) noexcept {
-        RADRAY_UNUSED(pUserData);
-        return mi_aligned_alloc(alignment, size);
-    };
-    allocCb.pfnReallocation = [](void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope) noexcept {
-        RADRAY_UNUSED(pUserData);
-        return mi_realloc_aligned(pOriginal, size, alignment);
-    };
-    allocCb.pfnFree = [](void* pUserData, void* pMemory) noexcept {
-        RADRAY_UNUSED(pUserData);
-        mi_free(pMemory);
-    };
-    allocCb.pfnInternalAllocation = nullptr;
-    allocCb.pfnInternalFree = nullptr;
-    allocCbPtr = &allocCb;
-#endif
 
     vector<VkValidationFeatureEnableEXT> validEnables{};
     VkValidationFeaturesEXT validFeature{};

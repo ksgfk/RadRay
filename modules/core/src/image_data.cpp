@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <bit>
+#include <stdexcept>
 
 #ifdef RADRAY_ENABLE_PNG
 #include <exception>
@@ -145,10 +146,10 @@ size_t ImageData::FormatSize(ImageFormat format) noexcept {
 
 #ifdef RADRAY_ENABLE_PNG
 
-class LibpngException : public std::exception {
+class LibpngException : public std::runtime_error {
 public:
-    LibpngException() : std::exception() {}
-    explicit LibpngException(const char* msg) : std::exception(msg) {}
+    LibpngException() : std::runtime_error("LibpngException") {}
+    explicit LibpngException(const char* msg) : std::runtime_error(msg) {}
     ~LibpngException() noexcept override = default;
 };
 static void radray_libpng_user_error_fn(png_structp png_ptr, png_const_charp msg) {
