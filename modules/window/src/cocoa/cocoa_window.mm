@@ -308,7 +308,7 @@ static void EnsureNSAppInitialized() {
     g_nsAppInitialized = true;
 }
 
-Nullable<unique_ptr<CocoaWindow>> CreateCocoaWindow(const CocoaWindowCreateDescriptor& desc) noexcept {
+Nullable<unique_ptr<NativeWindow>> CreateCocoaWindow(const CocoaWindowCreateDescriptor& desc) noexcept {
     EnsureNSAppInitialized();
 
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;

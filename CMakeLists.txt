@@ -1,10 +1,22 @@
-cmake_minimum_required(VERSION 3.23)
+cmake_minimum_required(VERSION 3.25)
 
 if (POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
 endif()
 
 project(RadRay)
+
+# ======== Apple platform detection ========
+set(RADRAY_PLATFORM_MACOS OFF)
+set(RADRAY_PLATFORM_IOS OFF)
+if (APPLE)
+    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(RADRAY_PLATFORM_IOS ON)
+    else()
+        # CMAKE_SYSTEM_NAME == "Darwin" for macOS
+        set(RADRAY_PLATFORM_MACOS ON)
+    endif()
+endif()
 
 include(cmake/Utility.cmake)
 
@@ -37,6 +49,7 @@ option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
 cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADRAY_BUILD_RENDER AND WIN32" OFF)
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
+cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUILD_RENDER AND APPLE" OFF)
 cmake_dependent_option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_SPVCROSS "Enable SPIR-V Cross support" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_IMGUI "Enable Dear ImGui support" ON "RADRAY_BUILD_RENDER" OFF)
@@ -49,8 +62,10 @@ cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADR
 # ======== Load manifest ========
 if (WIN32)
     set(RADRAY_SDKVAR_PLATFORM "windows")
-elseif (APPLE)
+elseif (RADRAY_PLATFORM_MACOS)
     set(RADRAY_SDKVAR_PLATFORM "macos")
+elseif (RADRAY_PLATFORM_IOS)
+    set(RADRAY_SDKVAR_PLATFORM "ios")
 elseif (UNIX)
     set(RADRAY_SDKVAR_PLATFORM "linux")
 else()

@@ -121,7 +121,7 @@ void DynamicLibrary::Destroy() noexcept {
 #include <climits>
 #include <string>
 
-#ifdef RADRAY_PLATFORM_MACOS
+#if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
 #include <mach-o/dyld.h>
 #elif defined(RADRAY_PLATFORM_LINUX)
 #include <unistd.h>
@@ -131,7 +131,7 @@ namespace radray {
 
 static string _GetExecutableDir() {
     char buf[PATH_MAX];
-#ifdef RADRAY_PLATFORM_MACOS
+#if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
     uint32_t size = PATH_MAX;
     if (_NSGetExecutablePath(buf, &size) != 0) return {};
 #elif defined(RADRAY_PLATFORM_LINUX)
@@ -157,13 +157,13 @@ void AlignedFree(void* ptr) noexcept {
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
     string name;
-#ifdef RADRAY_PLATFORM_MACOS
+#if defined(RADRAY_PLATFORM_MACOS) || defined(RADRAY_PLATFORM_IOS)
     if (name_.starts_with("lib") && name_.ends_with(".dylib")) {
         name = string{name_};
     } else {
         name = "lib" + string{name_} + ".dylib";
     }
-#elif RADRAY_PLATFORM_LINUX
+#elif defined(RADRAY_PLATFORM_LINUX)
     if (name_.starts_with("lib") && name_.ends_with(".so")) {
         name = string{name_};
     } else {

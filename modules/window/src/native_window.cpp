@@ -7,7 +7,7 @@
 #endif
 
 #if defined(RADRAY_PLATFORM_MACOS)
-#include "cocoa/cocoa_window.h"
+#include "cocoa/cocoa_window_cpp.h"
 #endif
 
 namespace radray {

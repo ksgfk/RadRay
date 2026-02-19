@@ -120,7 +120,8 @@ enum class ShaderStage : uint32_t {
 enum class ShaderBlobCategory {
     DXIL,
     SPIRV,
-    MSL
+    MSL,
+    METALLIB
 };
 
 enum class AddressMode {

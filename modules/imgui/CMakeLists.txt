@@ -48,10 +48,14 @@ target_link_libraries(radrayimgui PUBLIC
     radrayrender)
 target_link_libraries(radrayimgui PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:freetype>)
-if(APPLE)
+if(RADRAY_PLATFORM_MACOS)
     target_link_libraries(radrayimgui PRIVATE
         "-framework GameController"
         "-framework AppKit")
+elseif(RADRAY_PLATFORM_IOS)
+    target_link_libraries(radrayimgui PRIVATE
+        "-framework GameController"
+        "-framework UIKit")
 endif()
 
 target_compile_definitions(radrayimgui PUBLIC

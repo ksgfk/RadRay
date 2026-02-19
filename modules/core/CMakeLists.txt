@@ -16,6 +16,7 @@ target_link_libraries(radraycore PRIVATE
 target_compile_definitions(radraycore PUBLIC
     $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
     $<$<PLATFORM_ID:Darwin>:RADRAY_PLATFORM_MACOS>
+    $<$<PLATFORM_ID:iOS>:RADRAY_PLATFORM_IOS>
     $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)

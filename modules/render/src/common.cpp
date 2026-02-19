@@ -8,7 +8,7 @@
 #endif
 
 #ifdef RADRAY_ENABLE_METAL
-#include "metal/metal_device.h
+#include <radray/render/backend/metal_impl_cpp.h>
 #endif
 
 #ifdef RADRAY_ENABLE_VULKAN
@@ -257,6 +257,7 @@ std::string_view format_as(ShaderBlobCategory v) noexcept {
         case ShaderBlobCategory::DXIL: return "DXIL";
         case ShaderBlobCategory::SPIRV: return "SPIR-V";
         case ShaderBlobCategory::MSL: return "MSL";
+        case ShaderBlobCategory::METALLIB: return "METALLIB";
     }
     Unreachable();
 }

@@ -187,7 +187,7 @@ void Init() {
     }
     {
         float pos[] = {0, 0.5f, 0, -0.5f, -0.366f, 0, 0.5f, -0.366f, 0};
-        uint16_t i[] = {0, 1, 2};
+        uint16_t i[] = {0, 2, 1};
         const size_t vertexSize = sizeof(pos);
         const size_t indexSize = sizeof(i);
         auto vertUpload = device->CreateBuffer({vertexSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, {}}).Unwrap();
@@ -293,7 +293,7 @@ void Update() {
             auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
             rp->BindRootSignature(pipelineLayout.get());
             rp->BindGraphicsPipelineState(pso.get());
-            rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
+            rp->SetViewport({0, (float)winSize.y(), (float)winSize.x(), -(float)winSize.y(), 0.0f, 1.0f});
             rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
             VertexBufferView vbv[] = {{vertBuf.get(), 0, vertBuf->_allocInfo.size}};
             rp->BindVertexBuffer(vbv);

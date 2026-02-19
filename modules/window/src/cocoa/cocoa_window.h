@@ -1,14 +1,17 @@
 #pragma once
 
+#ifndef __OBJC__
+#error "This header can only be included in Objective-C++ files."
+#endif
+
+#import <Cocoa/Cocoa.h>
+
 #include <atomic>
 
 #include <radray/window/native_window.h>
+#include "cocoa_window_cpp.h"
 
-#ifdef __OBJC__
-@class NSWindow;
-@class NSView;
 @class RadrayWindowDelegate;
-#endif
 
 namespace radray {
 
@@ -51,7 +54,5 @@ public:
     sigslot::signal<KeyCode, Action> _eventKeyboard;
     sigslot::signal<int> _eventMouseWheel;
 };
-
-Nullable<unique_ptr<CocoaWindow>> CreateCocoaWindow(const CocoaWindowCreateDescriptor& desc) noexcept;
 
 }  // namespace radray

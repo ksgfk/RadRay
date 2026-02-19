@@ -10,10 +10,14 @@ endif()
 if (RADRAY_ENABLE_D3D12)
     file(GLOB_RECURSE RADRAY_RENDER_D3D12_SRC CONFIGURE_DEPENDS "src/d3d12/*.cpp")
 endif()
+if (RADRAY_ENABLE_METAL)
+    file(GLOB_RECURSE RADRAY_RENDER_METAL_SRC CONFIGURE_DEPENDS "src/metal/*.cpp" "src/metal/*.mm")
+endif()
 
 add_library(radrayrender STATIC ${RADRAY_RENDER_COMMON_SRC} ${RADRAY_RENDER_INC}
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:${RADRAY_RENDER_VULKAN_SRC}>
-    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:${RADRAY_RENDER_D3D12_SRC}>)
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:${RADRAY_RENDER_D3D12_SRC}>
+    $<$<BOOL:${RADRAY_ENABLE_METAL}>:${RADRAY_RENDER_METAL_SRC}>)
 target_include_directories(radrayrender PUBLIC include)
 target_link_libraries(radrayrender PUBLIC
     radraycore
@@ -32,10 +36,24 @@ target_link_libraries(radrayrender PRIVATE
 if (RADRAY_ENABLE_DXC AND CMAKE_VERSION VERSION_LESS "3.25")
     target_include_directories(radrayrender BEFORE PRIVATE ${RADRAY_DXC_INCLUDE_DIR})
 endif()
+if (RADRAY_ENABLE_METAL)
+    file(GLOB_RECURSE RADRAY_RENDER_METAL_MM_SRC CONFIGURE_DEPENDS "src/metal/*.mm")
+    set_source_files_properties(${RADRAY_RENDER_METAL_MM_SRC} PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(radrayrender PRIVATE
+        "-framework Metal"
+        "-framework QuartzCore")
+    if (RADRAY_PLATFORM_MACOS)
+        target_link_libraries(radrayrender PRIVATE "-framework Cocoa")
+    elseif (RADRAY_PLATFORM_IOS)
+        target_link_libraries(radrayrender PRIVATE "-framework UIKit")
+    endif()
+endif()
 target_compile_definitions(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_DXC}>:RADRAY_ENABLE_DXC>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:RADRAY_ENABLE_VULKAN>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>
+    $<$<BOOL:${RADRAY_ENABLE_METAL}>:RADRAY_ENABLE_METAL>
     $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:RADRAY_ENABLE_SPIRV_CROSS>)
 target_compile_options(radrayrender PRIVATE
     $<$<BOOL:${MSVC}>:/W4>)

@@ -1,0 +1,5 @@
+add_executable(hello_world_metal hello_world_metal.cpp)
+target_link_libraries(hello_world_metal PRIVATE radraywindow radrayrender)
+target_compile_options(hello_world_metal PRIVATE $<$<BOOL:${MSVC}>:/W4>)
+radray_optimize_flags_binary(hello_world_metal)
+radray_set_build_path(hello_world_metal)

@@ -1,0 +1,1225 @@
+#include <radray/render/backend/metal_impl.h>
+#include <radray/render/backend/metal_impl_cpp.h>
+
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <Cocoa/Cocoa.h>
+
+#include <radray/logger.h>
+#include <radray/utility.h>
+#include <radray/render/backend/metal_helper.h>
+
+namespace radray::render::metal {
+
+DeviceMetal::~DeviceMetal() noexcept { DestroyImpl(); }
+
+bool DeviceMetal::IsValid() const noexcept { return _device != nil; }
+
+void DeviceMetal::Destroy() noexcept { DestroyImpl(); }
+
+void DeviceMetal::DestroyImpl() noexcept {
+    for (auto& queueArr : _queues) {
+        queueArr.clear();
+    }
+    _device = nil;
+}
+
+DeviceDetail DeviceMetal::GetDetail() const noexcept { return _detail; }
+
+Nullable<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+    @autoreleasepool {
+        uint32_t index = static_cast<uint32_t>(type);
+        if (index >= (uint32_t)QueueType::MAX_COUNT) {
+            RADRAY_ERR_LOG("metal invalid queue type {}", index);
+            return nullptr;
+        }
+        auto& queues = _queues[index];
+        if (queues.size() <= slot) {
+            queues.resize(slot + 1);
+        }
+        auto& q = queues[slot];
+        if (q == nullptr) {
+            id<MTLCommandQueue> mtlQueue = [_device newCommandQueue];
+            if (mtlQueue == nil) {
+                RADRAY_ERR_LOG("metal cannot create command queue");
+                return nullptr;
+            }
+            q = make_unique<CmdQueueMetal>();
+            q->_device = this;
+            q->_queue = mtlQueue;
+        }
+        return q->IsValid() ? Nullable<CommandQueue*>{q.get()} : nullptr;
+    }
+}
+
+Nullable<unique_ptr<CommandBuffer>> DeviceMetal::CreateCommandBuffer(CommandQueue* queue) noexcept {
+    @autoreleasepool {
+        auto mtlQueue = CastMtlObject(queue);
+        auto cmdBuf = make_unique<CmdBufferMetal>();
+        cmdBuf->_device = this;
+        cmdBuf->_queue = mtlQueue;
+        return cmdBuf;
+    }
+}
+
+Nullable<unique_ptr<Fence>> DeviceMetal::CreateFence() noexcept {
+    @autoreleasepool {
+        id<MTLSharedEvent> event = [_device newSharedEvent];
+        if (event == nil) {
+            RADRAY_ERR_LOG("metal cannot create shared event for fence");
+            return nullptr;
+        }
+        auto fence = make_unique<FenceMetal>();
+        fence->_device = this;
+        fence->_event = event;
+        fence->_targetValue = 0;
+        fence->_submitted = false;
+        fence->_semaphore = dispatch_semaphore_create(0);
+        return fence;
+    }
+}
+
+Nullable<unique_ptr<Semaphore>> DeviceMetal::CreateSemaphoreDevice() noexcept {
+    @autoreleasepool {
+        id<MTLEvent> event = [_device newEvent];
+        if (event == nil) {
+            RADRAY_ERR_LOG("metal cannot create event for semaphore");
+            return nullptr;
+        }
+        auto sem = make_unique<SemaphoreMetal>();
+        sem->_device = this;
+        sem->_event = event;
+        sem->_value = 0;
+        return sem;
+    }
+}
+
+Nullable<unique_ptr<SwapChain>> DeviceMetal::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
+    @autoreleasepool {
+        NSView* nsView = (__bridge NSView*)desc.NativeHandler;
+        if (nsView == nil) {
+            RADRAY_ERR_LOG("metal swap chain requires a valid NSView");
+            return nullptr;
+        }
+        CAMetalLayer* layer = (CAMetalLayer*)[nsView layer];
+        if (layer == nil || ![layer isKindOfClass:[CAMetalLayer class]]) {
+            layer = [CAMetalLayer layer];
+            [nsView setLayer:layer];
+            [nsView setWantsLayer:YES];
+        }
+        layer.device = _device;
+        layer.pixelFormat = MapPixelFormat(desc.Format);
+        layer.drawableSize = CGSizeMake(desc.Width, desc.Height);
+        layer.maximumDrawableCount = desc.BackBufferCount;
+        switch (desc.PresentMode) {
+            case PresentMode::FIFO: layer.displaySyncEnabled = YES; break;
+            case PresentMode::Immediate: layer.displaySyncEnabled = NO; break;
+            case PresentMode::Mailbox: layer.displaySyncEnabled = YES; break;
+        }
+        auto sc = make_unique<SwapChainMetal>();
+        sc->_device = this;
+        sc->_presentQueue = CastMtlObject(desc.PresentQueue);
+        sc->_layer = layer;
+        sc->_backBufferCount = desc.BackBufferCount;
+        sc->_currentIndex = 0;
+        return sc;
+    }
+}
+
+Nullable<unique_ptr<Buffer>> DeviceMetal::CreateBuffer(const BufferDescriptor& desc) noexcept {
+    @autoreleasepool {
+        MTLResourceOptions options = MapResourceOptions(desc.Memory);
+        id<MTLBuffer> mtlBuf = [_device newBufferWithLength:desc.Size options:options];
+        if (mtlBuf == nil) {
+            RADRAY_ERR_LOG("metal cannot create buffer (size={})", desc.Size);
+            return nullptr;
+        }
+        if (desc.Name.size() > 0) {
+            mtlBuf.label = [[NSString alloc] initWithBytes:desc.Name.data()
+                                                    length:desc.Name.size()
+                                                  encoding:NSUTF8StringEncoding];
+        }
+        auto buf = make_unique<BufferMetal>();
+        buf->_device = this;
+        buf->_buffer = mtlBuf;
+        buf->_desc = desc;
+        return buf;
+    }
+}
+
+Nullable<unique_ptr<Texture>> DeviceMetal::CreateTexture(const TextureDescriptor& desc) noexcept {
+    @autoreleasepool {
+        MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+        td.textureType = MapTextureType(desc.Dim, desc.SampleCount);
+        td.pixelFormat = MapPixelFormat(desc.Format);
+        td.width = desc.Width;
+        td.height = desc.Height;
+        td.depth = (desc.Dim == TextureDimension::Dim3D) ? desc.DepthOrArraySize : 1;
+        td.arrayLength = (desc.Dim != TextureDimension::Dim3D && desc.DepthOrArraySize > 0) ? desc.DepthOrArraySize : 1;
+        td.mipmapLevelCount = (desc.MipLevels > 0) ? desc.MipLevels : 1;
+        td.sampleCount = (desc.SampleCount > 0) ? desc.SampleCount : 1;
+        td.storageMode = MTLStorageModePrivate;
+        MTLTextureUsage usage = MTLTextureUsageUnknown;
+        if (desc.Usage.HasFlag(TextureUse::Resource)) usage |= MTLTextureUsageShaderRead;
+        if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) usage |= MTLTextureUsageShaderWrite;
+        if (desc.Usage.HasFlag(TextureUse::RenderTarget) ||
+            desc.Usage.HasFlag(TextureUse::DepthStencilWrite) ||
+            desc.Usage.HasFlag(TextureUse::DepthStencilRead)) {
+            usage |= MTLTextureUsageRenderTarget;
+        }
+        td.usage = usage;
+        id<MTLTexture> mtlTex = [_device newTextureWithDescriptor:td];
+        if (mtlTex == nil) {
+            RADRAY_ERR_LOG("metal cannot create texture ({}x{})", desc.Width, desc.Height);
+            return nullptr;
+        }
+        if (desc.Name.size() > 0) {
+            mtlTex.label = [[NSString alloc] initWithBytes:desc.Name.data()
+                                                    length:desc.Name.size()
+                                                  encoding:NSUTF8StringEncoding];
+        }
+        auto tex = make_unique<TextureMetal>();
+        tex->_device = this;
+        tex->_texture = mtlTex;
+        tex->_desc = desc;
+        return tex;
+    }
+}
+
+Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
+    @autoreleasepool {
+        auto* mtlBuf = CastMtlObject(desc.Target);
+        auto view = make_unique<BufferViewMetal>();
+        view->_device = this;
+        view->_buffer = mtlBuf;
+        view->_desc = desc;
+        return view;
+    }
+}
+
+Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    @autoreleasepool {
+        auto* mtlTex = CastMtlObject(desc.Target);
+        MTLPixelFormat fmt = MapPixelFormat(desc.Format);
+        MTLTextureType texType = MapTextureViewType(desc.Dim);
+        NSRange levelRange = NSMakeRange(desc.Range.BaseMipLevel,
+                                         desc.Range.MipLevelCount == SubresourceRange::All ? mtlTex->_texture.mipmapLevelCount - desc.Range.BaseMipLevel : desc.Range.MipLevelCount);
+        NSRange sliceRange = NSMakeRange(desc.Range.BaseArrayLayer,
+                                         desc.Range.ArrayLayerCount == SubresourceRange::All ? mtlTex->_texture.arrayLength - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount);
+        id<MTLTexture> texView = [mtlTex->_texture newTextureViewWithPixelFormat:fmt
+                                                                     textureType:texType
+                                                                          levels:levelRange
+                                                                          slices:sliceRange];
+        if (texView == nil) {
+            RADRAY_ERR_LOG("metal cannot create texture view");
+            return nullptr;
+        }
+        auto view = make_unique<TextureViewMetal>();
+        view->_device = this;
+        view->_texture = mtlTex;
+        view->_textureView = texView;
+        view->_desc = desc;
+        return view;
+    }
+}
+
+Nullable<unique_ptr<Shader>> DeviceMetal::CreateShader(const ShaderDescriptor& desc) noexcept {
+    @autoreleasepool {
+        NSError* error = nil;
+        id<MTLLibrary> library = nil;
+        if (desc.Category == ShaderBlobCategory::MSL) {
+            NSString* source = [[NSString alloc] initWithBytes:desc.Source.data()
+                                                        length:desc.Source.size()
+                                                      encoding:NSUTF8StringEncoding];
+            library = [_device newLibraryWithSource:source options:nil error:&error];
+        } else if (desc.Category == ShaderBlobCategory::METALLIB) {
+            dispatch_data_t data = dispatch_data_create(desc.Source.data(), desc.Source.size(),
+                                                        dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+            library = [_device newLibraryWithData:data error:&error];
+        } else {
+            RADRAY_ERR_LOG("metal unsupported shader blob category {}", desc.Category);
+            return nullptr;
+        }
+        if (library == nil) {
+            if (error != nil) {
+                RADRAY_ERR_LOG("metal cannot create shader: {}", [error.localizedDescription UTF8String]);
+            } else {
+                RADRAY_ERR_LOG("metal cannot create shader");
+            }
+            return nullptr;
+        }
+        auto shader = make_unique<ShaderMetal>();
+        shader->_device = this;
+        shader->_library = library;
+        return shader;
+    }
+}
+
+Nullable<unique_ptr<RootSignature>> DeviceMetal::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
+    @autoreleasepool {
+        auto rootSig = make_unique<RootSignatureMetal>();
+        rootSig->_device = this;
+        rootSig->_rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
+        rootSig->_staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
+        if (desc.Constant.has_value()) {
+            rootSig->_pushConstant = desc.Constant.value();
+        }
+        for (auto& setDesc : desc.DescriptorSets) {
+            RootSignatureSetLayoutMetal layout;
+            layout.Elements.assign(setDesc.Elements.begin(), setDesc.Elements.end());
+            layout.IsBindless = !setDesc.BindlessDescriptors.empty();
+            rootSig->_setLayouts.emplace_back(std::move(layout));
+        }
+        return rootSig;
+    }
+}
+
+Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    @autoreleasepool {
+        MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+        auto* rootSig = CastMtlObject(desc.RootSig);
+
+        // vertex function
+        if (desc.VS.has_value()) {
+            auto* shader = CastMtlObject(desc.VS->Target);
+            NSString* entry = [[NSString alloc] initWithBytes:desc.VS->EntryPoint.data()
+                                                       length:desc.VS->EntryPoint.size()
+                                                     encoding:NSUTF8StringEncoding];
+            pd.vertexFunction = [shader->_library newFunctionWithName:entry];
+        }
+        // fragment function
+        if (desc.PS.has_value()) {
+            auto* shader = CastMtlObject(desc.PS->Target);
+            NSString* entry = [[NSString alloc] initWithBytes:desc.PS->EntryPoint.data()
+                                                       length:desc.PS->EntryPoint.size()
+                                                     encoding:NSUTF8StringEncoding];
+            pd.fragmentFunction = [shader->_library newFunctionWithName:entry];
+        }
+
+        // vertex descriptor
+        if (!desc.VertexLayouts.empty()) {
+            MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
+            for (uint32_t i = 0; i < desc.VertexLayouts.size(); i++) {
+                auto& layout = desc.VertexLayouts[i];
+                vd.layouts[i].stride = layout.ArrayStride;
+                vd.layouts[i].stepFunction = MapVertexStepFunction(layout.StepMode);
+                vd.layouts[i].stepRate = 1;
+                for (auto& elem : layout.Elements) {
+                    vd.attributes[elem.Location].format = MapVertexFormat(elem.Format);
+                    vd.attributes[elem.Location].offset = elem.Offset;
+                    vd.attributes[elem.Location].bufferIndex = i;
+                }
+            }
+            pd.vertexDescriptor = vd;
+        }
+
+        // color attachments
+        for (uint32_t i = 0; i < desc.ColorTargets.size(); i++) {
+            auto& ct = desc.ColorTargets[i];
+            pd.colorAttachments[i].pixelFormat = MapPixelFormat(ct.Format);
+            pd.colorAttachments[i].writeMask = MapColorWriteMask(ct.WriteMask);
+            if (ct.Blend.has_value()) {
+                pd.colorAttachments[i].blendingEnabled = YES;
+                pd.colorAttachments[i].sourceRGBBlendFactor = MapBlendFactor(ct.Blend->Color.Src);
+                pd.colorAttachments[i].destinationRGBBlendFactor = MapBlendFactor(ct.Blend->Color.Dst);
+                pd.colorAttachments[i].rgbBlendOperation = MapBlendOperation(ct.Blend->Color.Op);
+                pd.colorAttachments[i].sourceAlphaBlendFactor = MapBlendFactor(ct.Blend->Alpha.Src);
+                pd.colorAttachments[i].destinationAlphaBlendFactor = MapBlendFactor(ct.Blend->Alpha.Dst);
+                pd.colorAttachments[i].alphaBlendOperation = MapBlendOperation(ct.Blend->Alpha.Op);
+            }
+        }
+
+        // depth stencil
+        id<MTLDepthStencilState> dsState = nil;
+        if (desc.DepthStencil.has_value()) {
+            auto& ds = desc.DepthStencil.value();
+            pd.depthAttachmentPixelFormat = MapPixelFormat(ds.Format);
+            if (ds.Stencil.has_value()) {
+                pd.stencilAttachmentPixelFormat = MapPixelFormat(ds.Format);
+            }
+            MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+            dsd.depthCompareFunction = MapCompareFunction(ds.DepthCompare);
+            dsd.depthWriteEnabled = ds.DepthWriteEnable;
+            if (ds.Stencil.has_value()) {
+                auto& st = ds.Stencil.value();
+                MTLStencilDescriptor* front = [[MTLStencilDescriptor alloc] init];
+                front.stencilCompareFunction = MapCompareFunction(st.Front.Compare);
+                front.stencilFailureOperation = MapStencilOp(st.Front.FailOp);
+                front.depthFailureOperation = MapStencilOp(st.Front.DepthFailOp);
+                front.depthStencilPassOperation = MapStencilOp(st.Front.PassOp);
+                front.readMask = st.ReadMask;
+                front.writeMask = st.WriteMask;
+                dsd.frontFaceStencil = front;
+                MTLStencilDescriptor* back = [[MTLStencilDescriptor alloc] init];
+                back.stencilCompareFunction = MapCompareFunction(st.Back.Compare);
+                back.stencilFailureOperation = MapStencilOp(st.Back.FailOp);
+                back.depthFailureOperation = MapStencilOp(st.Back.DepthFailOp);
+                back.depthStencilPassOperation = MapStencilOp(st.Back.PassOp);
+                back.readMask = st.ReadMask;
+                back.writeMask = st.WriteMask;
+                dsd.backFaceStencil = back;
+            }
+            dsState = [_device newDepthStencilStateWithDescriptor:dsd];
+        }
+
+        // multisample
+        pd.rasterSampleCount = desc.MultiSample.Count > 0 ? desc.MultiSample.Count : 1;
+        pd.alphaToCoverageEnabled = desc.MultiSample.AlphaToCoverageEnable;
+
+        NSError* error = nil;
+        id<MTLRenderPipelineState> pso = [_device newRenderPipelineStateWithDescriptor:pd error:&error];
+        if (pso == nil) {
+            if (error != nil) {
+                RADRAY_ERR_LOG("metal cannot create graphics pipeline: {}", [error.localizedDescription UTF8String]);
+            }
+            return nullptr;
+        }
+
+        auto result = make_unique<GraphicsPipelineStateMetal>();
+        result->_device = this;
+        result->_pipelineState = pso;
+        result->_depthStencilState = dsState;
+        result->_primitiveType = MapPrimitiveType(desc.Primitive.Topology);
+        result->_cullMode = MapCullMode(desc.Primitive.Cull);
+        result->_winding = MapWinding(desc.Primitive.FaceClockwise);
+        result->_fillMode = (desc.Primitive.Poly == PolygonMode::Fill) ? MTLTriangleFillModeFill : MTLTriangleFillModeLines;
+        if (desc.DepthStencil.has_value()) {
+            result->_depthBiasConstant = static_cast<float>(desc.DepthStencil->DepthBias.Constant);
+            result->_depthBiasSlopeScale = desc.DepthStencil->DepthBias.SlopScale;
+            result->_depthBiasClamp = desc.DepthStencil->DepthBias.Clamp;
+        }
+        return result;
+    }
+}
+
+Nullable<unique_ptr<ComputePipelineState>> DeviceMetal::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    @autoreleasepool {
+        auto* shader = CastMtlObject(desc.CS.Target);
+        NSString* entry = [[NSString alloc] initWithBytes:desc.CS.EntryPoint.data()
+                                                   length:desc.CS.EntryPoint.size()
+                                                 encoding:NSUTF8StringEncoding];
+        id<MTLFunction> func = [shader->_library newFunctionWithName:entry];
+        if (func == nil) {
+            RADRAY_ERR_LOG("metal cannot find compute function '{}'", desc.CS.EntryPoint);
+            return nullptr;
+        }
+        NSError* error = nil;
+        id<MTLComputePipelineState> pso = [_device newComputePipelineStateWithFunction:func error:&error];
+        if (pso == nil) {
+            if (error != nil) {
+                RADRAY_ERR_LOG("metal cannot create compute pipeline: {}", [error.localizedDescription UTF8String]);
+            }
+            return nullptr;
+        }
+        auto result = make_unique<ComputePipelineStateMetal>();
+        result->_device = this;
+        result->_pipelineState = pso;
+        return result;
+    }
+}
+
+Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept {
+    @autoreleasepool {
+        auto* mtlRootSig = CastMtlObject(rootSig);
+        if (index >= mtlRootSig->_setLayouts.size()) {
+            RADRAY_ERR_LOG("metal descriptor set index {} out of range", index);
+            return nullptr;
+        }
+        auto ds = make_unique<DescriptorSetMetal>();
+        ds->_device = this;
+        ds->_rootSig = mtlRootSig;
+        ds->_setIndex = index;
+        return ds;
+    }
+}
+
+Nullable<unique_ptr<Sampler>> DeviceMetal::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    @autoreleasepool {
+        MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+        sd.sAddressMode = MapAddressMode(desc.AddressS);
+        sd.tAddressMode = MapAddressMode(desc.AddressT);
+        sd.rAddressMode = MapAddressMode(desc.AddressR);
+        sd.minFilter = MapMinMagFilter(desc.MinFilter);
+        sd.magFilter = MapMinMagFilter(desc.MagFilter);
+        sd.mipFilter = MapMipFilter(desc.MipmapFilter);
+        sd.lodMinClamp = desc.LodMin;
+        sd.lodMaxClamp = desc.LodMax;
+        if (desc.Compare.has_value()) {
+            sd.compareFunction = MapCompareFunction(desc.Compare.value());
+        }
+        sd.maxAnisotropy = desc.AnisotropyClamp > 0 ? desc.AnisotropyClamp : 1;
+        id<MTLSamplerState> sampler = [_device newSamplerStateWithDescriptor:sd];
+        if (sampler == nil) {
+            RADRAY_ERR_LOG("metal cannot create sampler");
+            return nullptr;
+        }
+        auto result = make_unique<SamplerMetal>();
+        result->_device = this;
+        result->_sampler = sampler;
+        return result;
+    }
+}
+
+Nullable<unique_ptr<BindlessArray>> DeviceMetal::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_WARN_LOG("metal CreateBindlessArray not implemented yet");
+    return nullptr;
+}
+
+CmdQueueMetal::~CmdQueueMetal() noexcept { DestroyImpl(); }
+
+bool CmdQueueMetal::IsValid() const noexcept { return _queue != nil; }
+
+void CmdQueueMetal::Destroy() noexcept { DestroyImpl(); }
+
+void CmdQueueMetal::DestroyImpl() noexcept {
+    _lastCmdBuffer = nil;
+    _queue = nil;
+}
+
+void CmdQueueMetal::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    @autoreleasepool {
+        for (auto* cmdBufBase : desc.CmdBuffers) {
+            auto* cmdBuf = CastMtlObject(cmdBufBase);
+            id<MTLCommandBuffer> mtlCmdBuf = cmdBuf->_cmdBuffer;
+            if (mtlCmdBuf == nil) continue;
+
+            // encode wait semaphores
+            for (auto* semBase : desc.WaitSemaphores) {
+                auto* sem = CastMtlObject(semBase);
+                [mtlCmdBuf encodeWaitForEvent:sem->_event value:sem->_value];
+            }
+
+            // encode signal semaphores
+            for (auto* semBase : desc.SignalSemaphores) {
+                auto* sem = CastMtlObject(semBase);
+                sem->_value++;
+                [mtlCmdBuf encodeSignalEvent:sem->_event value:sem->_value];
+            }
+
+            // signal fence
+            if (desc.SignalFence.HasValue()) {
+                auto* fence = CastMtlObject(desc.SignalFence.Get());
+                fence->_targetValue++;
+                fence->_submitted = true;
+                __block dispatch_semaphore_t fenceSem = fence->_semaphore;
+                [mtlCmdBuf encodeSignalEvent:fence->_event value:fence->_targetValue];
+                MTLSharedEventListener* listener = [[MTLSharedEventListener alloc] init];
+                [fence->_event notifyListener:listener
+                                      atValue:fence->_targetValue
+                                        block:^(id<MTLSharedEvent>, uint64_t) {
+                                            dispatch_semaphore_signal(fenceSem);
+                                        }];
+            }
+
+            [mtlCmdBuf commit];
+            _lastCmdBuffer = mtlCmdBuf;
+        }
+    }
+}
+
+void CmdQueueMetal::Wait() noexcept {
+    @autoreleasepool {
+        if (_lastCmdBuffer != nil) {
+            [_lastCmdBuffer waitUntilCompleted];
+            _lastCmdBuffer = nil;
+        }
+    }
+}
+
+CmdBufferMetal::~CmdBufferMetal() noexcept { DestroyImpl(); }
+
+bool CmdBufferMetal::IsValid() const noexcept { return _queue != nullptr; }
+
+void CmdBufferMetal::Destroy() noexcept { DestroyImpl(); }
+
+void CmdBufferMetal::DestroyImpl() noexcept {
+    _cmdBuffer = nil;
+    _queue = nullptr;
+}
+
+void CmdBufferMetal::Begin() noexcept {
+    @autoreleasepool {
+        _cmdBuffer = [_queue->_queue commandBuffer];
+    }
+}
+
+void CmdBufferMetal::End() noexcept {
+    // Metal commits in Submit, nothing to do here
+}
+
+void CmdBufferMetal::ResourceBarrier(
+    std::span<const BarrierBufferDescriptor> buffers,
+    std::span<const BarrierTextureDescriptor> textures) noexcept {
+    // Metal automatically tracks resource dependencies between encoders.
+    // Explicit memoryBarrier is only needed within an encoder for UAV access.
+    // Since ResourceBarrier is called at CommandBuffer level (between encoders),
+    // this is handled automatically by Metal.
+    RADRAY_UNUSED(buffers);
+    RADRAY_UNUSED(textures);
+}
+
+Nullable<unique_ptr<GraphicsCommandEncoder>> CmdBufferMetal::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
+    @autoreleasepool {
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        for (uint32_t i = 0; i < desc.ColorAttachments.size(); i++) {
+            auto& ca = desc.ColorAttachments[i];
+            auto* texView = CastMtlObject(ca.Target);
+            rpd.colorAttachments[i].texture = texView->_textureView;
+            rpd.colorAttachments[i].loadAction = MapLoadAction(ca.Load);
+            rpd.colorAttachments[i].storeAction = MapStoreAction(ca.Store);
+            rpd.colorAttachments[i].clearColor = MTLClearColorMake(
+                ca.ClearValue.Value[0], ca.ClearValue.Value[1],
+                ca.ClearValue.Value[2], ca.ClearValue.Value[3]);
+        }
+        if (desc.DepthStencilAttachment.has_value()) {
+            auto& dsa = desc.DepthStencilAttachment.value();
+            auto* texView = CastMtlObject(dsa.Target);
+            rpd.depthAttachment.texture = texView->_textureView;
+            rpd.depthAttachment.loadAction = MapLoadAction(dsa.DepthLoad);
+            rpd.depthAttachment.storeAction = MapStoreAction(dsa.DepthStore);
+            rpd.depthAttachment.clearDepth = dsa.ClearValue.Depth;
+            rpd.stencilAttachment.texture = texView->_textureView;
+            rpd.stencilAttachment.loadAction = MapLoadAction(dsa.StencilLoad);
+            rpd.stencilAttachment.storeAction = MapStoreAction(dsa.StencilStore);
+            rpd.stencilAttachment.clearStencil = dsa.ClearValue.Stencil;
+        }
+        id<MTLRenderCommandEncoder> encoder = [_cmdBuffer renderCommandEncoderWithDescriptor:rpd];
+        if (encoder == nil) {
+            RADRAY_ERR_LOG("metal cannot create render command encoder");
+            return nullptr;
+        }
+        if (!desc.Name.empty()) {
+            encoder.label = [[NSString alloc] initWithBytes:desc.Name.data()
+                                                     length:desc.Name.size()
+                                                   encoding:NSUTF8StringEncoding];
+        }
+        auto enc = make_unique<GraphicsCmdEncoderMetal>();
+        enc->_cmdBuffer = this;
+        enc->_encoder = encoder;
+        return enc;
+    }
+}
+
+void CmdBufferMetal::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
+    @autoreleasepool {
+        auto* enc = static_cast<GraphicsCmdEncoderMetal*>(encoder.get());
+        if (enc && enc->_encoder != nil) {
+            [enc->_encoder endEncoding];
+        }
+    }
+}
+
+Nullable<unique_ptr<ComputeCommandEncoder>> CmdBufferMetal::BeginComputePass() noexcept {
+    @autoreleasepool {
+        id<MTLComputeCommandEncoder> encoder = [_cmdBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            RADRAY_ERR_LOG("metal cannot create compute command encoder");
+            return nullptr;
+        }
+        auto enc = make_unique<ComputeCmdEncoderMetal>();
+        enc->_cmdBuffer = this;
+        enc->_encoder = encoder;
+        return enc;
+    }
+}
+
+void CmdBufferMetal::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    @autoreleasepool {
+        auto* enc = static_cast<ComputeCmdEncoderMetal*>(encoder.get());
+        if (enc && enc->_encoder != nil) {
+            [enc->_encoder endEncoding];
+        }
+    }
+}
+
+void CmdBufferMetal::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept {
+    @autoreleasepool {
+        auto* mtlDst = CastMtlObject(dst);
+        auto* mtlSrc = CastMtlObject(src);
+        id<MTLBlitCommandEncoder> blit = [_cmdBuffer blitCommandEncoder];
+        [blit copyFromBuffer:mtlSrc->_buffer
+                 sourceOffset:srcOffset
+                     toBuffer:mtlDst->_buffer
+            destinationOffset:dstOffset
+                         size:size];
+        [blit endEncoding];
+    }
+}
+
+void CmdBufferMetal::CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept {
+    @autoreleasepool {
+        auto* mtlDst = CastMtlObject(dst);
+        auto* mtlSrc = CastMtlObject(src);
+        const auto& texDesc = mtlDst->_desc;
+        uint32_t width = texDesc.Width;
+        uint32_t height = texDesc.Height;
+        id<MTLBlitCommandEncoder> blit = [_cmdBuffer blitCommandEncoder];
+        // TODO: handle mip levels and array layers properly
+        [blit copyFromBuffer:mtlSrc->_buffer
+                   sourceOffset:srcOffset
+              sourceBytesPerRow:0  // will be computed by Metal for compressed formats
+            sourceBytesPerImage:0
+                     sourceSize:MTLSizeMake(width, height, 1)
+                      toTexture:mtlDst->_texture
+               destinationSlice:dstRange.BaseArrayLayer
+               destinationLevel:dstRange.BaseMipLevel
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+    }
+}
+
+FenceMetal::~FenceMetal() noexcept { DestroyImpl(); }
+
+bool FenceMetal::IsValid() const noexcept { return _event != nil; }
+
+void FenceMetal::Destroy() noexcept { DestroyImpl(); }
+
+void FenceMetal::DestroyImpl() noexcept {
+    _event = nil;
+    _semaphore = nullptr;
+}
+
+FenceStatus FenceMetal::GetStatus() const noexcept {
+    if (!_submitted) return FenceStatus::NotSubmitted;
+    if (_event.signaledValue >= _targetValue) return FenceStatus::Complete;
+    return FenceStatus::Incomplete;
+}
+
+void FenceMetal::Wait() noexcept {
+    if (!_submitted) return;
+    if (_event.signaledValue >= _targetValue) return;
+    dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+}
+
+void FenceMetal::Reset() noexcept {
+    _submitted = false;
+}
+
+SemaphoreMetal::~SemaphoreMetal() noexcept { DestroyImpl(); }
+
+bool SemaphoreMetal::IsValid() const noexcept { return _event != nil; }
+
+void SemaphoreMetal::Destroy() noexcept { DestroyImpl(); }
+
+void SemaphoreMetal::DestroyImpl() noexcept {
+    _event = nil;
+}
+
+SwapChainMetal::~SwapChainMetal() noexcept { DestroyImpl(); }
+
+bool SwapChainMetal::IsValid() const noexcept { return _layer != nil; }
+
+void SwapChainMetal::Destroy() noexcept { DestroyImpl(); }
+
+void SwapChainMetal::DestroyImpl() noexcept {
+    _currentDrawable = nil;
+    _currentTexture.reset();
+    _layer = nil;
+}
+
+Nullable<Texture*> SwapChainMetal::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
+    @autoreleasepool {
+        RADRAY_UNUSED(signalSemaphore);
+        RADRAY_UNUSED(signalFence);
+        _currentDrawable = [_layer nextDrawable];
+        if (_currentDrawable == nil) {
+            RADRAY_ERR_LOG("metal cannot acquire next drawable");
+            return nullptr;
+        }
+        _currentTexture = make_unique<TextureMetal>();
+        _currentTexture->_device = _device;
+        _currentTexture->_texture = _currentDrawable.texture;
+        _currentTexture->_isExternalOwned = true;
+        _currentTexture->_desc.Width = static_cast<uint32_t>(_layer.drawableSize.width);
+        _currentTexture->_desc.Height = static_cast<uint32_t>(_layer.drawableSize.height);
+        _currentTexture->_desc.DepthOrArraySize = 1;
+        _currentTexture->_desc.MipLevels = 1;
+        _currentTexture->_desc.SampleCount = 1;
+        _currentTexture->_desc.Dim = TextureDimension::Dim2D;
+        _currentIndex = (_currentIndex + 1) % _backBufferCount;
+        return _currentTexture.get();
+    }
+}
+
+void SwapChainMetal::Present(std::span<Semaphore*> waitSemaphores) noexcept {
+    @autoreleasepool {
+        RADRAY_UNUSED(waitSemaphores);
+        if (_currentDrawable != nil && _presentQueue != nullptr) {
+            id<MTLCommandBuffer> cmdBuf = [_presentQueue->_queue commandBuffer];
+            [cmdBuf presentDrawable:_currentDrawable];
+            [cmdBuf commit];
+        }
+        _currentDrawable = nil;
+        _currentTexture.reset();
+    }
+}
+
+Nullable<Texture*> SwapChainMetal::GetCurrentBackBuffer() const noexcept {
+    if (_currentTexture) return _currentTexture.get();
+    return nullptr;
+}
+
+uint32_t SwapChainMetal::GetCurrentBackBufferIndex() const noexcept {
+    return _currentIndex;
+}
+
+uint32_t SwapChainMetal::GetBackBufferCount() const noexcept {
+    return _backBufferCount;
+}
+
+BufferMetal::~BufferMetal() noexcept { DestroyImpl(); }
+
+bool BufferMetal::IsValid() const noexcept { return _buffer != nil; }
+
+void BufferMetal::Destroy() noexcept { DestroyImpl(); }
+
+void BufferMetal::DestroyImpl() noexcept { _buffer = nil; }
+
+void* BufferMetal::Map(uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(size);
+    if (_buffer == nil) return nullptr;
+    return static_cast<uint8_t*>([_buffer contents]) + offset;
+}
+
+void BufferMetal::Unmap(uint64_t offset, uint64_t size) noexcept {
+#if defined(RADRAY_PLATFORM_MACOS)
+    if (_buffer != nil && _buffer.storageMode == MTLStorageModeManaged) {
+        [_buffer didModifyRange:NSMakeRange(offset, size)];
+    }
+#else
+    RADRAY_UNUSED(offset);
+    RADRAY_UNUSED(size);
+#endif
+}
+
+BufferDescriptor BufferMetal::GetDesc() const noexcept { return _desc; }
+
+TextureMetal::~TextureMetal() noexcept { DestroyImpl(); }
+
+bool TextureMetal::IsValid() const noexcept { return _texture != nil; }
+
+void TextureMetal::Destroy() noexcept { DestroyImpl(); }
+
+void TextureMetal::DestroyImpl() noexcept {
+    if (!_isExternalOwned) {
+        _texture = nil;
+    }
+    _texture = nil;
+}
+
+ShaderMetal::~ShaderMetal() noexcept { DestroyImpl(); }
+
+bool ShaderMetal::IsValid() const noexcept { return _library != nil; }
+
+void ShaderMetal::Destroy() noexcept { DestroyImpl(); }
+
+void ShaderMetal::DestroyImpl() noexcept { _library = nil; }
+
+RootSignatureMetal::~RootSignatureMetal() noexcept { DestroyImpl(); }
+
+bool RootSignatureMetal::IsValid() const noexcept { return _device != nullptr; }
+
+void RootSignatureMetal::Destroy() noexcept { DestroyImpl(); }
+
+void RootSignatureMetal::DestroyImpl() noexcept {
+    _rootDescriptors.clear();
+    _setLayouts.clear();
+    _staticSamplers.clear();
+    _pushConstant.reset();
+}
+
+GraphicsPipelineStateMetal::~GraphicsPipelineStateMetal() noexcept { DestroyImpl(); }
+
+bool GraphicsPipelineStateMetal::IsValid() const noexcept { return _pipelineState != nil; }
+
+void GraphicsPipelineStateMetal::Destroy() noexcept { DestroyImpl(); }
+
+void GraphicsPipelineStateMetal::DestroyImpl() noexcept {
+    _pipelineState = nil;
+    _depthStencilState = nil;
+}
+
+ComputePipelineStateMetal::~ComputePipelineStateMetal() noexcept { DestroyImpl(); }
+
+bool ComputePipelineStateMetal::IsValid() const noexcept { return _pipelineState != nil; }
+
+void ComputePipelineStateMetal::Destroy() noexcept { DestroyImpl(); }
+
+void ComputePipelineStateMetal::DestroyImpl() noexcept { _pipelineState = nil; }
+
+GraphicsCmdEncoderMetal::~GraphicsCmdEncoderMetal() noexcept { DestroyImpl(); }
+
+bool GraphicsCmdEncoderMetal::IsValid() const noexcept { return _encoder != nil; }
+
+void GraphicsCmdEncoderMetal::Destroy() noexcept { DestroyImpl(); }
+
+void GraphicsCmdEncoderMetal::DestroyImpl() noexcept { _encoder = nil; }
+
+CommandBuffer* GraphicsCmdEncoderMetal::GetCommandBuffer() const noexcept { return _cmdBuffer; }
+
+void GraphicsCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept {
+    _boundRootSig = CastMtlObject(rootSig);
+    // bind static samplers
+    if (_boundRootSig) {
+        @autoreleasepool {
+            for (auto& ss : _boundRootSig->_staticSamplers) {
+                MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+                sd.sAddressMode = MapAddressMode(ss.Desc.AddressS);
+                sd.tAddressMode = MapAddressMode(ss.Desc.AddressT);
+                sd.rAddressMode = MapAddressMode(ss.Desc.AddressR);
+                sd.minFilter = MapMinMagFilter(ss.Desc.MinFilter);
+                sd.magFilter = MapMinMagFilter(ss.Desc.MagFilter);
+                sd.mipFilter = MapMipFilter(ss.Desc.MipmapFilter);
+                sd.lodMinClamp = ss.Desc.LodMin;
+                sd.lodMaxClamp = ss.Desc.LodMax;
+                if (ss.Desc.Compare.has_value()) {
+                    sd.compareFunction = MapCompareFunction(ss.Desc.Compare.value());
+                }
+                sd.maxAnisotropy = ss.Desc.AnisotropyClamp > 0 ? ss.Desc.AnisotropyClamp : 1;
+                id<MTLSamplerState> sampler = [_cmdBuffer->_device->_device newSamplerStateWithDescriptor:sd];
+                if (ss.Stages.HasFlag(ShaderStage::Vertex)) {
+                    [_encoder setVertexSamplerState:sampler atIndex:ss.Slot];
+                }
+                if (ss.Stages.HasFlag(ShaderStage::Pixel)) {
+                    [_encoder setFragmentSamplerState:sampler atIndex:ss.Slot];
+                }
+            }
+        }
+    }
+}
+
+void GraphicsCmdEncoderMetal::PushConstant(const void* data, size_t length) noexcept {
+    if (_boundRootSig && _boundRootSig->_pushConstant.has_value()) {
+        auto& pc = _boundRootSig->_pushConstant.value();
+        if (pc.Stages.HasFlag(ShaderStage::Vertex)) {
+            [_encoder setVertexBytes:data length:length atIndex:pc.Slot];
+        }
+        if (pc.Stages.HasFlag(ShaderStage::Pixel)) {
+            [_encoder setFragmentBytes:data length:length atIndex:pc.Slot];
+        }
+    }
+}
+
+void GraphicsCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(size);
+    auto* mtlBuf = CastMtlObject(buffer);
+    if (_boundRootSig) {
+        for (auto& rd : _boundRootSig->_rootDescriptors) {
+            if (rd.Slot == slot) {
+                if (rd.Stages.HasFlag(ShaderStage::Vertex)) {
+                    [_encoder setVertexBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
+                }
+                if (rd.Stages.HasFlag(ShaderStage::Pixel)) {
+                    [_encoder setFragmentBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
+                }
+                return;
+            }
+        }
+    }
+    // fallback: bind to both stages
+    [_encoder setVertexBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
+    [_encoder setFragmentBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
+}
+
+void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    auto* ds = CastMtlObject(set);
+    if (!ds || !ds->_rootSig) return;
+    if (slot >= ds->_rootSig->_setLayouts.size()) return;
+    auto& layout = ds->_rootSig->_setLayouts[slot];
+    for (auto& binding : ds->_bindings) {
+        for (auto& elem : layout.Elements) {
+            if (elem.Slot != binding.Slot) continue;
+            if (auto* texView = dynamic_cast<TextureViewMetal*>(static_cast<ResourceView*>(binding.View))) {
+                if (elem.Stages.HasFlag(ShaderStage::Vertex)) {
+                    [_encoder setVertexTexture:texView->_textureView atIndex:elem.Slot];
+                }
+                if (elem.Stages.HasFlag(ShaderStage::Pixel)) {
+                    [_encoder setFragmentTexture:texView->_textureView atIndex:elem.Slot];
+                }
+            } else if (auto* bufView = dynamic_cast<BufferViewMetal*>(static_cast<ResourceView*>(binding.View))) {
+                if (elem.Stages.HasFlag(ShaderStage::Vertex)) {
+                    [_encoder setVertexBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
+                }
+                if (elem.Stages.HasFlag(ShaderStage::Pixel)) {
+                    [_encoder setFragmentBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
+                }
+            }
+        }
+    }
+}
+
+void GraphicsCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(array);
+    RADRAY_WARN_LOG("metal BindBindlessArray not implemented yet");
+}
+
+void GraphicsCmdEncoderMetal::SetViewport(Viewport vp) noexcept {
+    MTLViewport mtlVp;
+    mtlVp.originX = vp.X;
+    mtlVp.originY = vp.Y;
+    mtlVp.width = vp.Width;
+    mtlVp.height = vp.Height;
+    mtlVp.znear = vp.MinDepth;
+    mtlVp.zfar = vp.MaxDepth;
+    [_encoder setViewport:mtlVp];
+}
+
+void GraphicsCmdEncoderMetal::SetScissor(Rect rect) noexcept {
+    MTLScissorRect sr;
+    sr.x = rect.X >= 0 ? static_cast<NSUInteger>(rect.X) : 0;
+    sr.y = rect.Y >= 0 ? static_cast<NSUInteger>(rect.Y) : 0;
+    sr.width = rect.Width;
+    sr.height = rect.Height;
+    [_encoder setScissorRect:sr];
+}
+
+void GraphicsCmdEncoderMetal::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
+    for (uint32_t i = 0; i < vbv.size(); i++) {
+        auto* mtlBuf = CastMtlObject(vbv[i].Target);
+        [_encoder setVertexBuffer:mtlBuf->_buffer offset:vbv[i].Offset atIndex:i];
+    }
+}
+
+void GraphicsCmdEncoderMetal::BindIndexBuffer(IndexBufferView ibv) noexcept {
+    auto* mtlBuf = CastMtlObject(ibv.Target);
+    _indexBuffer = mtlBuf->_buffer;
+    _indexType = (ibv.Stride == 2) ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+    _indexBufferOffset = ibv.Offset;
+}
+
+void GraphicsCmdEncoderMetal::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
+    auto* mtlPso = CastMtlObject(pso);
+    [_encoder setRenderPipelineState:mtlPso->_pipelineState];
+    if (mtlPso->_depthStencilState != nil) {
+        [_encoder setDepthStencilState:mtlPso->_depthStencilState];
+    }
+    [_encoder setCullMode:mtlPso->_cullMode];
+    [_encoder setFrontFacingWinding:mtlPso->_winding];
+    [_encoder setTriangleFillMode:mtlPso->_fillMode];
+    [_encoder setDepthBias:mtlPso->_depthBiasConstant
+                slopeScale:mtlPso->_depthBiasSlopeScale
+                     clamp:mtlPso->_depthBiasClamp];
+    _primitiveType = mtlPso->_primitiveType;
+}
+
+void GraphicsCmdEncoderMetal::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
+    [_encoder drawPrimitives:_primitiveType
+                 vertexStart:firstVertex
+                 vertexCount:vertexCount
+               instanceCount:instanceCount
+                baseInstance:firstInstance];
+}
+
+void GraphicsCmdEncoderMetal::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
+    if (_indexBuffer == nil) {
+        RADRAY_ERR_LOG("metal DrawIndexed called without bound index buffer");
+        return;
+    }
+    NSUInteger indexStride = (_indexType == MTLIndexTypeUInt16) ? 2 : 4;
+    NSUInteger offset = _indexBufferOffset + firstIndex * indexStride;
+    [_encoder drawIndexedPrimitives:_primitiveType
+                         indexCount:indexCount
+                          indexType:_indexType
+                        indexBuffer:_indexBuffer
+                  indexBufferOffset:offset
+                      instanceCount:instanceCount
+                         baseVertex:vertexOffset
+                       baseInstance:firstInstance];
+}
+
+ComputeCmdEncoderMetal::~ComputeCmdEncoderMetal() noexcept { DestroyImpl(); }
+
+bool ComputeCmdEncoderMetal::IsValid() const noexcept { return _encoder != nil; }
+
+void ComputeCmdEncoderMetal::Destroy() noexcept { DestroyImpl(); }
+
+void ComputeCmdEncoderMetal::DestroyImpl() noexcept { _encoder = nil; }
+
+CommandBuffer* ComputeCmdEncoderMetal::GetCommandBuffer() const noexcept { return _cmdBuffer; }
+
+void ComputeCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept {
+    _boundRootSig = CastMtlObject(rootSig);
+    if (_boundRootSig) {
+        @autoreleasepool {
+            for (auto& ss : _boundRootSig->_staticSamplers) {
+                if (ss.Stages.HasFlag(ShaderStage::Compute)) {
+                    MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+                    sd.sAddressMode = MapAddressMode(ss.Desc.AddressS);
+                    sd.tAddressMode = MapAddressMode(ss.Desc.AddressT);
+                    sd.rAddressMode = MapAddressMode(ss.Desc.AddressR);
+                    sd.minFilter = MapMinMagFilter(ss.Desc.MinFilter);
+                    sd.magFilter = MapMinMagFilter(ss.Desc.MagFilter);
+                    sd.mipFilter = MapMipFilter(ss.Desc.MipmapFilter);
+                    sd.lodMinClamp = ss.Desc.LodMin;
+                    sd.lodMaxClamp = ss.Desc.LodMax;
+                    if (ss.Desc.Compare.has_value()) {
+                        sd.compareFunction = MapCompareFunction(ss.Desc.Compare.value());
+                    }
+                    sd.maxAnisotropy = ss.Desc.AnisotropyClamp > 0 ? ss.Desc.AnisotropyClamp : 1;
+                    id<MTLSamplerState> sampler = [_cmdBuffer->_device->_device newSamplerStateWithDescriptor:sd];
+                    [_encoder setSamplerState:sampler atIndex:ss.Slot];
+                }
+            }
+        }
+    }
+}
+
+void ComputeCmdEncoderMetal::PushConstant(const void* data, size_t length) noexcept {
+    if (_boundRootSig && _boundRootSig->_pushConstant.has_value()) {
+        auto& pc = _boundRootSig->_pushConstant.value();
+        [_encoder setBytes:data length:length atIndex:pc.Slot];
+    }
+}
+
+void ComputeCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(size);
+    auto* mtlBuf = CastMtlObject(buffer);
+    [_encoder setBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
+}
+
+void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    auto* ds = CastMtlObject(set);
+    if (!ds || !ds->_rootSig) return;
+    if (slot >= ds->_rootSig->_setLayouts.size()) return;
+    auto& layout = ds->_rootSig->_setLayouts[slot];
+    for (auto& binding : ds->_bindings) {
+        for (auto& elem : layout.Elements) {
+            if (elem.Slot != binding.Slot) continue;
+            if (auto* texView = dynamic_cast<TextureViewMetal*>(static_cast<ResourceView*>(binding.View))) {
+                [_encoder setTexture:texView->_textureView atIndex:elem.Slot];
+            } else if (auto* bufView = dynamic_cast<BufferViewMetal*>(static_cast<ResourceView*>(binding.View))) {
+                [_encoder setBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
+            }
+        }
+    }
+}
+
+void ComputeCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(array);
+    RADRAY_WARN_LOG("metal BindBindlessArray not implemented yet");
+}
+
+void ComputeCmdEncoderMetal::BindComputePipelineState(ComputePipelineState* pso) noexcept {
+    auto* mtlPso = CastMtlObject(pso);
+    [_encoder setComputePipelineState:mtlPso->_pipelineState];
+}
+
+void ComputeCmdEncoderMetal::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
+    MTLSize threadgroups = MTLSizeMake(groupCountX, groupCountY, groupCountZ);
+    [_encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:_threadGroupSize];
+}
+
+void ComputeCmdEncoderMetal::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept {
+    _threadGroupSize = MTLSizeMake(x, y, z);
+}
+
+TextureViewMetal::~TextureViewMetal() noexcept { DestroyImpl(); }
+
+bool TextureViewMetal::IsValid() const noexcept { return _textureView != nil; }
+
+void TextureViewMetal::Destroy() noexcept { DestroyImpl(); }
+
+void TextureViewMetal::DestroyImpl() noexcept { _textureView = nil; }
+
+BufferViewMetal::~BufferViewMetal() noexcept { DestroyImpl(); }
+
+bool BufferViewMetal::IsValid() const noexcept { return _buffer != nullptr; }
+
+void BufferViewMetal::Destroy() noexcept { DestroyImpl(); }
+
+void BufferViewMetal::DestroyImpl() noexcept { _buffer = nullptr; }
+
+SamplerMetal::~SamplerMetal() noexcept { DestroyImpl(); }
+
+bool SamplerMetal::IsValid() const noexcept { return _sampler != nil; }
+
+void SamplerMetal::Destroy() noexcept { DestroyImpl(); }
+
+void SamplerMetal::DestroyImpl() noexcept { _sampler = nil; }
+
+DescriptorSetMetal::~DescriptorSetMetal() noexcept { DestroyImpl(); }
+
+bool DescriptorSetMetal::IsValid() const noexcept { return _rootSig != nullptr; }
+
+void DescriptorSetMetal::Destroy() noexcept { DestroyImpl(); }
+
+void DescriptorSetMetal::DestroyImpl() noexcept { _bindings.clear(); }
+
+void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
+    // update or add binding
+    for (auto& b : _bindings) {
+        if (b.Slot == slot && b.Index == index) {
+            b.View = view;
+            return;
+        }
+    }
+    _bindings.push_back({slot, index, view});
+}
+
+BindlessArrayMetal::~BindlessArrayMetal() noexcept { DestroyImpl(); }
+bool BindlessArrayMetal::IsValid() const noexcept { return _device != nullptr; }
+void BindlessArrayMetal::Destroy() noexcept { DestroyImpl(); }
+void BindlessArrayMetal::DestroyImpl() noexcept { _argumentBuffer = nil; }
+
+void BindlessArrayMetal::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(bufView);
+    RADRAY_WARN_LOG("metal BindlessArray::SetBuffer not implemented yet");
+}
+
+void BindlessArrayMetal::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(texView);
+    RADRAY_UNUSED(sampler);
+    RADRAY_WARN_LOG("metal BindlessArray::SetTexture not implemented yet");
+}
+
+Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
+    @autoreleasepool {
+        id<MTLDevice> device = nil;
+#if defined(RADRAY_PLATFORM_MACOS)
+        NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+        if (devices.count == 0) {
+            RADRAY_ERR_LOG("metal cannot find any device");
+            return nullptr;
+        }
+        for (NSUInteger i = 0; i < devices.count; i++) {
+            RADRAY_INFO_LOG("metal find device: {}", [devices[i].name UTF8String]);
+        }
+        if (desc.DeviceIndex.has_value()) {
+            uint32_t need = desc.DeviceIndex.value();
+            if (need >= devices.count) {
+                RADRAY_ERR_LOG("metal device index out of range (count={}, need={})", (uint32_t)devices.count, need);
+                return nullptr;
+            }
+            device = devices[need];
+        } else {
+            device = devices[0];
+        }
+#else
+        device = MTLCreateSystemDefaultDevice();
+        if (device == nil) {
+            RADRAY_ERR_LOG("metal cannot create system default device");
+            return nullptr;
+        }
+#endif
+        auto result = make_shared<DeviceMetal>();
+        result->_device = device;
+        result->_detail.CBufferAlignment = 256;
+        result->_detail.TextureDataPitchAlignment = 256;
+        result->_detail.IsBindlessArraySupported = false;  // TODO: check argument buffer tier
+
+        RADRAY_INFO_LOG("metal select device: {}", [device.name UTF8String]);
+        RADRAY_INFO_LOG("========== Metal Feature ==========");
+        NSProcessInfo* pi = [NSProcessInfo processInfo];
+        NSOperatingSystemVersion ver = [pi operatingSystemVersion];
+        RADRAY_INFO_LOG("OS: macOS {}.{}.{}", (int)ver.majorVersion, (int)ver.minorVersion, (int)ver.patchVersion);
+        RADRAY_INFO_LOG("===================================");
+        return result;
+    }
+}
+
+}  // namespace radray::render::metal
