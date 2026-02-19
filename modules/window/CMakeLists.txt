@@ -7,6 +7,15 @@ if (WIN32)
     file(GLOB_RECURSE RADRAY_WINDOW_WIN32_SRC CONFIGURE_DEPENDS "src/win32/*.cpp")
     target_sources(radraywindow PRIVATE ${RADRAY_WINDOW_WIN32_SRC})
 endif()
+if (APPLE)
+    file(GLOB_RECURSE RADRAY_WINDOW_COCOA_SRC CONFIGURE_DEPENDS "src/cocoa/*.mm")
+    target_sources(radraywindow PRIVATE ${RADRAY_WINDOW_COCOA_SRC})
+    set_source_files_properties(${RADRAY_WINDOW_COCOA_SRC} PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(radraywindow PRIVATE
+        "-framework Cocoa"
+        "-framework QuartzCore")
+endif()
 target_link_libraries(radraywindow PUBLIC
     radraycore)
 target_compile_options(radraywindow PRIVATE

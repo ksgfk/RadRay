@@ -1,37 +1,93 @@
-#include <radray/logger.h>
+#include <gtest/gtest.h>
+
 #include <radray/window/native_window.h>
 
-int main() {
-    radray::unique_ptr<radray::NativeWindow> window;
-#ifdef RADRAY_PLATFORM_WINDOWS
-    radray::Win32WindowCreateDescriptor desc{
-        "Test Native Window Win32",
-        1280,
-        720,
-        -1,
-        -1,
-        true,
-        false,
-        false};
-    window = radray::CreateNativeWindow(desc).Unwrap();
+using namespace radray;
+
+static NativeWindowCreateDescriptor MakeDefaultDesc() {
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    return Win32WindowCreateDescriptor{
+        "Test Native Window",
+        800, 600,
+        -1, -1,
+        true, false, false};
+#elif defined(RADRAY_PLATFORM_MACOS)
+    return CocoaWindowCreateDescriptor{
+        "Test Native Window",
+        800, 600,
+        -1, -1,
+        true, false, false};
 #else
-    if (!window) {
-        return 0;
-    }
+    return {};
 #endif
-    sigslot::scoped_connection conn = window->EventResized().connect([](int w, int h) {
-        RADRAY_INFO_LOG("Window resized: {}x{}", w, h);
-    });
-    if (!window) {
-        RADRAY_ERR_LOG("Failed to create native window");
-        return -1;
+}
+
+class NativeWindowTest : public testing::Test {
+protected:
+    unique_ptr<NativeWindow> window;
+
+    void SetUp() override {
+        auto result = CreateNativeWindow(MakeDefaultDesc());
+        ASSERT_TRUE(result.HasValue());
+        window = std::move(result).Unwrap();
+        ASSERT_NE(window, nullptr);
     }
-    while (true) {
-        window->DispatchEvents();
-        if (window->ShouldClose()) {
-            break;
+
+    void TearDown() override {
+        if (window) {
+            window->Destroy();
         }
     }
-    conn.disconnect();
-    return 0;
+};
+
+TEST_F(NativeWindowTest, IsValidAfterCreation) {
+    EXPECT_TRUE(window->IsValid());
+}
+
+TEST_F(NativeWindowTest, ShouldCloseIsFalseInitially) {
+    EXPECT_FALSE(window->ShouldClose());
+}
+
+TEST_F(NativeWindowTest, GetSizeReturnsPositive) {
+    auto size = window->GetSize();
+    EXPECT_GT(size.X, 0);
+    EXPECT_GT(size.Y, 0);
+}
+
+TEST_F(NativeWindowTest, GetNativeHandlerIsValid) {
+    auto handler = window->GetNativeHandler();
+    EXPECT_NE(handler.Type, WindowHandlerTag::UNKNOWN);
+    EXPECT_NE(handler.Handle, nullptr);
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    EXPECT_EQ(handler.Type, WindowHandlerTag::HWND);
+#elif defined(RADRAY_PLATFORM_MACOS)
+    EXPECT_EQ(handler.Type, WindowHandlerTag::NS_VIEW);
+#endif
+}
+
+TEST_F(NativeWindowTest, IsNotMinimizedAfterCreation) {
+    EXPECT_FALSE(window->IsMinimized());
+}
+
+TEST_F(NativeWindowTest, DestroyMakesInvalid) {
+    window->Destroy();
+    EXPECT_FALSE(window->IsValid());
+}
+
+TEST_F(NativeWindowTest, EventSignalsAreAccessible) {
+    auto& resized = window->EventResized();
+    auto& resizing = window->EventResizing();
+    auto& touch = window->EventTouch();
+    auto& keyboard = window->EventKeyboard();
+    auto& mouseWheel = window->EventMouseWheel();
+    (void)resized;
+    (void)resizing;
+    (void)touch;
+    (void)keyboard;
+    (void)mouseWheel;
+}
+
+TEST_F(NativeWindowTest, DispatchEventsDoesNotCrash) {
+    window->DispatchEvents();
+    EXPECT_TRUE(window->IsValid());
 }

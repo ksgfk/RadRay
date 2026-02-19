@@ -6,6 +6,10 @@
 #include "win32/win32_window.h"
 #endif
 
+#if defined(RADRAY_PLATFORM_MACOS)
+#include "cocoa/cocoa_window.h"
+#endif
+
 namespace radray {
 
 Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDescriptor& desc) noexcept {
@@ -17,6 +21,13 @@ Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDe
                 return CreateWin32Window(specificDesc);
 #else
                 RADRAY_ERR_LOG("Win32Window disable");
+                return nullptr;
+#endif
+            } else if constexpr (std::is_same_v<T, CocoaWindowCreateDescriptor>) {
+#if defined(RADRAY_PLATFORM_MACOS)
+                return CreateCocoaWindow(specificDesc);
+#else
+                RADRAY_ERR_LOG("CocoaWindow disable");
                 return nullptr;
 #endif
             }

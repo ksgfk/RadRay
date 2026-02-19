@@ -13,7 +13,8 @@ namespace radray {
 
 enum class WindowHandlerTag {
     UNKNOWN,
-    HWND
+    HWND,
+    NS_VIEW
 };
 
 struct WindowNativeHandler {
@@ -35,7 +36,18 @@ struct Win32WindowCreateDescriptor {
     std::span<std::function<Win32MsgProc>> ExtraWndProcs{};
 };
 
-using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor>;
+struct CocoaWindowCreateDescriptor {
+    std::string_view Title{};
+    int32_t Width{0};
+    int32_t Height{0};
+    int32_t X{0};
+    int32_t Y{0};
+    bool Resizable{false};
+    bool StartMaximized{false};
+    bool Fullscreen{false};
+};
+
+using NativeWindowCreateDescriptor = std::variant<Win32WindowCreateDescriptor, CocoaWindowCreateDescriptor>;
 
 struct WindowVec2i {
     int32_t X;
