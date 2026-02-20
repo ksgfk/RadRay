@@ -181,6 +181,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                         1,
                         0,
                         render::TextureFormat::RGBA8_UNORM,
+                        render::MemoryType::Device,
                         render::TextureUse::Resource | render::TextureUse::CopyDestination,
                         {},
                         texName};

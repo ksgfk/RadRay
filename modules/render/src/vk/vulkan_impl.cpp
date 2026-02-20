@@ -297,6 +297,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
             1,
             1,
             desc.Format,
+            MemoryType::Device,
             TextureUse::RenderTarget,
             ResourceHint::None,
             name};
@@ -451,7 +452,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
-    vmaInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    vmaInfo.usage = MapType(desc.Memory);
     vmaInfo.requiredFlags = 0;
     vmaInfo.preferredFlags = 0;
     vmaInfo.memoryTypeBits = 0;
@@ -1846,8 +1847,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceR->_extProperties = *extProperties;
     {
         DeviceDetail& detail = deviceR->_detail;
+        const auto& props = selectPhyDevice.properties;
+        detail.GpuName = props.deviceName;
+        detail.VendorId = props.vendorID;
+        detail.DeviceId = props.deviceID;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
         detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
+        detail.IsUMA = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
+        detail.VramBudget = GetPhysicalDeviceMemoryAllSize(selectPhyDevice.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
         const auto& f12 = deviceR->_extFeatures.feature12;
         detail.IsBindlessArraySupported =
             selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&

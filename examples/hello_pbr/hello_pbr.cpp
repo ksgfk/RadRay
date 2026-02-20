@@ -254,6 +254,7 @@ public:
                 1,
                 1,
                 render::TextureFormat::D32_FLOAT,
+                render::MemoryType::Device,
                 render::TextureUse::DepthStencilWrite,
                 render::ResourceHint::None,
                 dsName};

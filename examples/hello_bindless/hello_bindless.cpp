@@ -197,6 +197,7 @@ public:
                 render::TextureDimension::Dim2D,
                 (uint32_t)_rtWidth, (uint32_t)_rtHeight, 1, 1, 1,
                 render::TextureFormat::D32_FLOAT,
+                render::MemoryType::Device,
                 render::TextureUse::DepthStencilWrite,
                 render::ResourceHint::None,
                 dsName};
@@ -239,6 +240,7 @@ private:
                 1,
                 0,
                 render::TextureFormat::RGBA8_UNORM,
+                render::MemoryType::Device,
                 render::TextureUse::Resource | render::TextureUse::CopyDestination,
                 {},
                 texName};

@@ -135,10 +135,12 @@ public:
 
 public:
     void DestroyImpl() noexcept;
+    void EndBlitEncoderIfActive() noexcept;
 
     DeviceMetal* _device{nullptr};
     CmdQueueMetal* _queue{nullptr};
     id<MTLCommandBuffer> _cmdBuffer{nil};
+    id<MTLBlitCommandEncoder> _blitEncoder{nil};
 };
 
 class FenceMetal final : public Fence {
@@ -266,6 +268,12 @@ public:
     id<MTLLibrary> _library{nil};
 };
 
+struct CachedStaticSampler {
+    id<MTLSamplerState> sampler{nil};
+    uint32_t Slot{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
+
 class RootSignatureMetal final : public RootSignature {
 public:
     ~RootSignatureMetal() noexcept override;
@@ -279,6 +287,7 @@ public:
 
     DeviceMetal* _device{nullptr};
     RootSignatureDescriptorContainer _container;
+    vector<CachedStaticSampler> _cachedStaticSamplers;
 };
 
 class GraphicsPipelineStateMetal final : public GraphicsPipelineState {

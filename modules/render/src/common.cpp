@@ -178,6 +178,60 @@ IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept {
     }
 }
 
+uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::R8_SINT:
+        case TextureFormat::R8_UINT:
+        case TextureFormat::R8_SNORM:
+        case TextureFormat::R8_UNORM:
+        case TextureFormat::S8: return 1;
+        case TextureFormat::R16_SINT:
+        case TextureFormat::R16_UINT:
+        case TextureFormat::R16_SNORM:
+        case TextureFormat::R16_UNORM:
+        case TextureFormat::R16_FLOAT:
+        case TextureFormat::RG8_SINT:
+        case TextureFormat::RG8_UINT:
+        case TextureFormat::RG8_SNORM:
+        case TextureFormat::RG8_UNORM:
+        case TextureFormat::D16_UNORM: return 2;
+        case TextureFormat::R32_SINT:
+        case TextureFormat::R32_UINT:
+        case TextureFormat::R32_FLOAT:
+        case TextureFormat::RG16_SINT:
+        case TextureFormat::RG16_UINT:
+        case TextureFormat::RG16_SNORM:
+        case TextureFormat::RG16_UNORM:
+        case TextureFormat::RG16_FLOAT:
+        case TextureFormat::RGBA8_SINT:
+        case TextureFormat::RGBA8_UINT:
+        case TextureFormat::RGBA8_SNORM:
+        case TextureFormat::RGBA8_UNORM:
+        case TextureFormat::RGBA8_UNORM_SRGB:
+        case TextureFormat::BGRA8_UNORM:
+        case TextureFormat::BGRA8_UNORM_SRGB:
+        case TextureFormat::RGB10A2_UINT:
+        case TextureFormat::RGB10A2_UNORM:
+        case TextureFormat::RG11B10_FLOAT:
+        case TextureFormat::D32_FLOAT:
+        case TextureFormat::D24_UNORM_S8_UINT: return 4;
+        case TextureFormat::RG32_SINT:
+        case TextureFormat::RG32_UINT:
+        case TextureFormat::RG32_FLOAT:
+        case TextureFormat::RGBA16_SINT:
+        case TextureFormat::RGBA16_UINT:
+        case TextureFormat::RGBA16_SNORM:
+        case TextureFormat::RGBA16_UNORM:
+        case TextureFormat::RGBA16_FLOAT:
+        case TextureFormat::D32_FLOAT_S8_UINT: return 8;
+        case TextureFormat::RGBA32_SINT:
+        case TextureFormat::RGBA32_UINT:
+        case TextureFormat::RGBA32_FLOAT: return 16;
+        case TextureFormat::UNKNOWN: return 0;
+    }
+    Unreachable();
+}
+
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";

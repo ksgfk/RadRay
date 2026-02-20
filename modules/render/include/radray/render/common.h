@@ -586,6 +586,7 @@ struct TextureDescriptor {
     uint32_t MipLevels{0};
     uint32_t SampleCount{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
+    MemoryType Memory{MemoryType::Device};
     TextureUses Usage{TextureUse::UNKNOWN};
     ResourceHints Hints{ResourceHint::None};
     std::string_view Name{};
@@ -859,8 +860,13 @@ struct IndexBufferView {
 };
 
 struct DeviceDetail {
+    string GpuName{};
+    uint32_t VendorId{0};
+    uint32_t DeviceId{0};
     uint32_t CBufferAlignment{0};
     uint32_t TextureDataPitchAlignment{1};
+    uint64_t VramBudget{0};
+    bool IsUMA{false};
     bool IsBindlessArraySupported{false};
 };
 
@@ -1164,6 +1170,7 @@ bool IsSintFormat(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
+uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
