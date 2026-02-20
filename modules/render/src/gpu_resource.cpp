@@ -87,7 +87,7 @@ Nullable<CBufferArena::Block*> CBufferArena::GetOrCreateBlock(uint64_t size) noe
             }
         }
     }
-    string name = radray::format("{}_{}", _desc.NamePrefix, _blocks.size());
+    string name = fmt::format("{}_{}", _desc.NamePrefix, _blocks.size());
     BufferDescriptor desc{};
     desc.Size = Align(std::max(_minBlockSize, std::max(size, _desc.BasicSize)), _desc.Alignment);
     desc.Memory = MemoryType::Upload;

@@ -48,6 +48,7 @@ public:
     unique_ptr<CommandBuffer> cmdBuffer;
     unique_ptr<Fence> execFence;
     unique_ptr<Semaphore> imageAvailable;
+    vector<unique_ptr<TextureView>> usedViews;
 };
 
 Eigen::Vector2i winSize;
@@ -89,6 +90,7 @@ void OnResized(int width, int height) {
     if (swapchain && width > 0 && height > 0) {
         for (auto& i : frames) {
             i.execFence->Wait();
+            i.usedViews.clear();
         }
         cmdQueue->Wait();
         swapchain.reset();
@@ -195,6 +197,7 @@ void Update() {
 
         Frame& frame = frames[currentFrame];
         frame.execFence->Wait();
+        frame.usedViews.clear();
         Semaphore* imageAvailSem = frame.imageAvailable.get();
         auto acq = swapchain->AcquireNext(imageAvailSem, nullptr);
         if (!acq.HasValue()) {
@@ -224,7 +227,7 @@ void Update() {
             auto rp = cmdBuffer->BeginRenderPass(rpDesc).Unwrap();
             rp->BindRootSignature(rootSig.get());
             rp->BindGraphicsPipelineState(pso.get());
-            rp->SetViewport({0, (float)winSize.y(), (float)winSize.x(), -(float)winSize.y(), 0.0f, 1.0f});
+            rp->SetViewport({0, 0, (float)winSize.x(), (float)winSize.y(), 0.0f, 1.0f});
             rp->SetScissor({0, 0, (uint32_t)winSize.x(), (uint32_t)winSize.y()});
             VertexBufferView vbv[] = {{vertBuf.get(), 0, vertBuf->GetDesc().Size}};
             rp->BindVertexBuffer(vbv);
@@ -243,6 +246,8 @@ void Update() {
         cmdQueue->Submit(submitDesc);
 
         swapchain->Present(signalSems);
+
+        frame.usedViews.emplace_back(std::move(rtView));
 
         currentFrame = (currentFrame + 1) % frames.size();
     }

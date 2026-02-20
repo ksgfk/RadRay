@@ -286,7 +286,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         std::array<float, 4> result;
         auto fullOpt = ParseNumberArray(data, result);
         if (!fullOpt.has_value()) {
-            _error += radray::format("at line {}: can't parse vertex {}\n", lineNum, data);
+            _error += fmt::format("at line {}: can't parse vertex {}\n", lineNum, data);
             _pos.emplace_back(Eigen::Vector3f::Zero());
         } else {
             _pos.emplace_back(SelectData<3>(result, fullOpt.value()));
@@ -295,7 +295,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         std::array<float, 3> result;
         auto fullOpt = ParseNumberArray(data, result);
         if (!fullOpt.has_value()) {
-            _error += radray::format("at line {}: can't parse uv {}\n", lineNum, data);
+            _error += fmt::format("at line {}: can't parse uv {}\n", lineNum, data);
             _uv.emplace_back(Eigen::Vector2f::Zero());
         } else {
             _uv.emplace_back(SelectData<2>(result, fullOpt.value()));
@@ -304,7 +304,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         std::array<float, 3> result;
         auto fullOpt = ParseNumberArray(data, result);
         if (!fullOpt.has_value()) {
-            _error += radray::format("at line {}: can't parse normal {}\n", lineNum, data);
+            _error += fmt::format("at line {}: can't parse normal {}\n", lineNum, data);
             _normal.emplace_back(Eigen::Vector3f::Zero());
         } else {
             _normal.emplace_back(SelectData<3>(result, fullOpt.value()));
@@ -313,7 +313,7 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
         WavefrontObjFace face;
         bool isSuccess = ParseFace(data, face);
         if (!isSuccess) {
-            _error += radray::format("at line {}: can't parse face {}\n", lineNum, data);
+            _error += fmt::format("at line {}: can't parse face {}\n", lineNum, data);
         }
         size_t index = _faces.size();
         _faces.emplace_back(face);
@@ -345,13 +345,13 @@ void WavefrontObjReader::Parse(std::string_view line, int lineNum) {
             } else if (v == "0") {
                 _objects.rbegin()->IsSmooth = false;
             } else {
-                _error += radray::format("at line {}: unknown smooth value {}\n", lineNum, v);
+                _error += fmt::format("at line {}: unknown smooth value {}\n", lineNum, v);
             }
         }
     } else if (cmd == "#") {
         // no op
     } else {
-        _error += radray::format("at line {}: unknown command {}\n", lineNum, cmd);
+        _error += fmt::format("at line {}: unknown command {}\n", lineNum, cmd);
     }
 }
 

@@ -193,7 +193,7 @@ string to_string(const Eigen::Matrix<Type, Rows, Cols>& v) {
 
 template <class Type>
 string to_string(const Eigen::Quaternion<Type>& v) {
-    return radray::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
+    return fmt::format("<{}, {}, {}, {}>", v.x(), v.y(), v.z(), v.w());
 }
 
 }  // namespace radray

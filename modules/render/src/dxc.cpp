@@ -1027,7 +1027,7 @@ static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
             default: return "??";
         }
     };
-    return radray::format("{}_{}", fmtStage(stage), fmtSm(sm));
+    return fmt::format("{}_{}", fmtStage(stage), fmtSm(sm));
 }
 
 std::optional<DxcOutput> Dxc::Compile(

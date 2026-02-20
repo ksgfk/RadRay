@@ -6,7 +6,7 @@ endif()
 
 project(RadRay)
 
-# ======== Apple platform detection ========
+# 这里设置区分 macOS 和 iOS
 set(RADRAY_PLATFORM_MACOS OFF)
 set(RADRAY_PLATFORM_IOS OFF)
 if (APPLE)
@@ -22,6 +22,7 @@ include(cmake/Utility.cmake)
 
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+# 设置全局编译器选项
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -33,6 +34,7 @@ if (MSVC)
     add_compile_options(/MP)
 endif()
 
+# 设置全局构建输出路径
 set(RADRAY_BUILD_PATH "" CACHE PATH "RadRay build binary path")
 if (NOT RADRAY_BUILD_PATH)
     if (DEFINED CMAKE_VS_MSBUILD_COMMAND)
@@ -42,6 +44,7 @@ if (NOT RADRAY_BUILD_PATH)
     endif()
 endif()
 
+# 编译配置项
 include(CMakeDependentOption)
 option(RADRAY_BUILD_TESTS "Build the RadRay tests" ON)
 cmake_dependent_option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks when release" ON "NOT CMAKE_BUILD_TYPE STREQUAL \"Release\"" OFF)
@@ -58,8 +61,11 @@ option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADRAY_ENABLE_ZLIB AND RADRAY_ENABLE_LIBPNG" OFF)
+if (RADRAY_PLATFORM_MACOS)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS version")
+endif()
 
-# ======== Load manifest ========
+# 加载 manifest
 if (WIN32)
     set(RADRAY_SDKVAR_PLATFORM "windows")
 elseif (RADRAY_PLATFORM_MACOS)
@@ -113,10 +119,9 @@ foreach(_INDEX RANGE ${RADRAY_MANIFEST_ARTIFACTS_LAST})
     set(RADRAY_SDK_${_NAME}_VERSION "${_VERSION}")
     message(STATUS "Loaded SDK artifact ${_NAME} version ${_VERSION}")
 endforeach()
-# ===============================
-
 set(RADRAY_THIRDPARTY_ROOT "${CMAKE_SOURCE_DIR}/third_party")
 
+# 配置 third party
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 include(FetchContent)
@@ -331,6 +336,7 @@ if (RADRAY_BUILD_TESTS)
     endif()
 endif()
 
+# 添加工程子目录
 add_subdirectory(modules)
 if (RADRAY_BUILD_TESTS)
     enable_testing()

@@ -172,7 +172,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                 if (tex->Status == ImTextureStatus_WantCreate) {
                     IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
                     IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
-                    string texName = format("imgui_tex_{}", tex->UniqueID);
+                    string texName = fmt::format("imgui_tex_{}", tex->UniqueID);
                     render::TextureDescriptor texDesc{
                         render::TextureDimension::Dim2D,
                         static_cast<uint32_t>(tex->Width),
@@ -205,7 +205,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                     const int uploadH = tex->Height;
                     const int uploadPitchSrc = uploadW * tex->BytesPerPixel;
                     const int uploadSize = uploadPitchSrc * uploadH;
-                    string uploadName = format("imgui_tex_upload_{}", tex->UniqueID);
+                    string uploadName = fmt::format("imgui_tex_upload_{}", tex->UniqueID);
                     render::BufferDescriptor uploadDesc{
                         static_cast<uint64_t>(uploadSize),
                         render::MemoryType::Upload,
@@ -239,7 +239,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
             frame._tempBufs.emplace_back(std::move(frame._vb));
         }
         int vertCount = drawData->TotalVtxCount + 5000;
-        string vbName = format("imgui_vb_{}", frameIndex);
+        string vbName = fmt::format("imgui_vb_{}", frameIndex);
         render::BufferDescriptor desc{
             vertCount * sizeof(ImDrawVert),
             render::MemoryType::Upload,
@@ -255,7 +255,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
             frame._tempBufs.emplace_back(std::move(frame._ib));
         }
         int idxCount = drawData->TotalIdxCount + 10000;
-        string ibName = format("imgui_ib_{}", frameIndex);
+        string ibName = fmt::format("imgui_ib_{}", frameIndex);
         render::BufferDescriptor desc{
             idxCount * sizeof(ImDrawIdx),
             render::MemoryType::Upload,

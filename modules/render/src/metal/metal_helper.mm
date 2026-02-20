@@ -1,5 +1,7 @@
 #include <radray/render/backend/metal_helper.h>
 
+#include <radray/utility.h>
+
 namespace radray::render::metal {
 
 MTLPixelFormat MapPixelFormat(TextureFormat v) noexcept {
@@ -297,3 +299,23 @@ MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept {
 }
 
 }  // namespace radray::render::metal
+
+std::string_view format_as(MTLLanguageVersion v) noexcept {
+    switch (v) {
+#ifndef __MAC_OS_X_VERSION_MAX_ALLOWED
+        case MTLLanguageVersion1_0: return "1.0";
+#endif
+        case MTLLanguageVersion1_1: return "1.1";
+        case MTLLanguageVersion1_2: return "1.2";
+        case MTLLanguageVersion2_0: return "2.0";
+        case MTLLanguageVersion2_1: return "2.1";
+        case MTLLanguageVersion2_2: return "2.2";
+        case MTLLanguageVersion2_3: return "2.3";
+        case MTLLanguageVersion2_4: return "2.4";
+        case MTLLanguageVersion3_0: return "3.0";
+        case MTLLanguageVersion3_1: return "3.1";
+        case MTLLanguageVersion3_2: return "3.2";
+        case MTLLanguageVersion4_0: return "4.0";
+    }
+    radray::Unreachable();
+}

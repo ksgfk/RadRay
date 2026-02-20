@@ -36,4 +36,6 @@ MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept;
 
 }  // namespace radray::render::metal
 
+std::string_view format_as(MTLLanguageVersion v) noexcept;
+
 #endif  // RADRAY_ENABLE_METAL

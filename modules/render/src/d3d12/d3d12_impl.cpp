@@ -412,7 +412,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         if (SUCCEEDED(hr)) {
             const int64_t mask = 0xFFFF;
             auto quad = l.QuadPart;
-            auto ver = radray::format(
+            auto ver = fmt::format(
                 "{}.{}.{}.{}",
                 quad >> 48,
                 (quad >> 32) & mask,
@@ -484,7 +484,7 @@ Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t sl
             SUCCEEDED(hr)) {
             auto f = fenceOpt.Release();
             auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
-            string debugName = radray::format("Queue-{}-{}", type, slot);
+            string debugName = fmt::format("Queue-{}-{}", type, slot);
             SetObjectName(debugName, ins->_queue.Get());
             q = std::move(ins);
         } else {

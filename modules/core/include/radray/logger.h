@@ -21,27 +21,6 @@ enum class LogLevel {
     Critical
 };
 
-using fmt_memory_buffer = fmt::basic_memory_buffer<char, 512, allocator<char>>;
-
-template <typename... Args>
-string format(fmt::format_string<Args...> fmtStr, Args&&... args) noexcept {
-    fmt_memory_buffer buf{};
-    fmt::vformat_to(fmt::appender(buf), fmtStr, fmt::make_format_args(args...));
-    return string{buf.data(), buf.size()};
-}
-
-template <typename Char>
-string vsprintf(fmt::basic_string_view<Char> fmt, typename fmt::vprintf_args<Char>::type args) {
-    fmt_memory_buffer buf{};
-    fmt::detail::vprintf(buf, fmt, args);
-    return {buf.data(), buf.size()};
-}
-
-template <typename S, typename... T, typename Char = fmt::detail::char_t<S>>
-string sprintf(const S& fmt, const T&... args) {
-    return radray::vsprintf(fmt::detail::to_string_view(fmt), fmt::make_format_args<fmt::basic_printf_context<Char>>(args...));
-}
-
 void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
 
 bool ShouldLog(LogLevel lvl) noexcept;
@@ -53,7 +32,7 @@ void LogFormat(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) no
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    auto str = fmt::format(fmt, std::forward<Args>(args)...);
     Log({}, lvl, str);
 }
 
@@ -62,7 +41,7 @@ void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Arg
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = radray::format(fmt, std::forward<Args>(args)...);
+    auto str = fmt::format(fmt, std::forward<Args>(args)...);
     Log(loc, lvl, str);
 }
 
@@ -71,7 +50,7 @@ void LogFormatSPrintf(LogLevel lvl, const S& fmt, Args&&... args) noexcept {
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
+    auto str = fmt::sprintf(fmt, std::forward<Args>(args)...);
     Log({}, lvl, str);
 }
 
@@ -80,7 +59,7 @@ void LogFormatSPrintfLoc(std::source_location loc, LogLevel lvl, fmt::format_str
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = radray::sprintf(fmt, std::forward<Args>(args)...);
+    auto str = fmt::sprintf(fmt, std::forward<Args>(args)...);
     Log(loc, lvl, str);
 }
 
@@ -202,6 +181,6 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 
 #define RADRAY_THROW(type, fmt, ...)                                    \
     do {                                                                \
-        auto tmp___ = ::radray::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
+        auto tmp___ = ::fmt::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
         throw type(tmp___.c_str());                                     \
     } while (0)

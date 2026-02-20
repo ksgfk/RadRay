@@ -245,7 +245,7 @@ public:
             auto frame = _frames[i].get();
             frame->_depthStencil.reset();
             frame->_dsv.reset();
-            string dsName = format("DepthStencil_{}", i);
+            string dsName = fmt::format("DepthStencil_{}", i);
             render::TextureDescriptor dsDesc{
                 render::TextureDimension::Dim2D,
                 (uint32_t)_rtWidth,

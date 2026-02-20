@@ -67,6 +67,7 @@ target_compile_definitions(radrayimgui PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:IMGUI_ENABLE_FREETYPE>)
 
 target_compile_options(radrayimgui PRIVATE
-    $<$<BOOL:${MSVC}>:/W4>)
+    $<$<BOOL:${MSVC}>:/W4>
+    $<$<BOOL:${APPLE}>:-fobjc-arc>)
 radray_optimize_flags_library(radrayimgui)
 radray_set_build_path(radrayimgui)

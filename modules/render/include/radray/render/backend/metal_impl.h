@@ -7,9 +7,11 @@
 #endif
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/CAMetalLayer.h>
-#include <radray/render/common.h>
-#include <radray/render/backend/metal_impl_cpp.h>
 #include <dispatch/dispatch.h>
+
+#include <radray/render/common.h>
+#include <radray/render/bind_bridge.h>
+#include <radray/render/backend/metal_impl_cpp.h>
 
 namespace radray::render::metal {
 
@@ -203,8 +205,9 @@ public:
     DeviceMetal* _device{nullptr};
     CmdQueueMetal* _presentQueue{nullptr};
     CAMetalLayer* _layer{nil};
-    id<CAMetalDrawable> _currentDrawable{nil};
-    unique_ptr<TextureMetal> _currentTexture;
+    NSMutableArray<id<CAMetalDrawable>>* _drawables{nil};
+    dispatch_semaphore_t _imageAcquiredSemaphore{nullptr};
+    vector<unique_ptr<TextureMetal>> _backBufferTextures;
     uint32_t _backBufferCount{0};
     uint32_t _currentIndex{0};
 };
@@ -263,11 +266,6 @@ public:
     id<MTLLibrary> _library{nil};
 };
 
-struct RootSignatureSetLayoutMetal {
-    vector<RootSignatureSetElement> Elements;
-    bool IsBindless{false};
-};
-
 class RootSignatureMetal final : public RootSignature {
 public:
     ~RootSignatureMetal() noexcept override;
@@ -280,10 +278,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceMetal* _device{nullptr};
-    vector<RootSignatureRootDescriptor> _rootDescriptors;
-    vector<RootSignatureSetLayoutMetal> _setLayouts;
-    vector<RootSignatureStaticSampler> _staticSamplers;
-    std::optional<RootSignatureConstant> _pushConstant;
+    RootSignatureDescriptorContainer _container;
 };
 
 class GraphicsPipelineStateMetal final : public GraphicsPipelineState {
@@ -494,8 +489,14 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    struct TrackedResource {
+        id<MTLResource> resource{nil};
+        MTLResourceUsage usage{MTLResourceUsageRead};
+    };
+
     DeviceMetal* _device{nullptr};
     id<MTLBuffer> _argumentBuffer{nil};
+    vector<TrackedResource> _trackedResources;
     uint32_t _size{0};
     BindlessSlotType _slotType{BindlessSlotType::Multiple};
 };

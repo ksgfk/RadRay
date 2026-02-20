@@ -122,6 +122,22 @@ Nullable<unique_ptr<SwapChain>> DeviceMetal::CreateSwapChain(const SwapChainDesc
         sc->_layer = layer;
         sc->_backBufferCount = desc.BackBufferCount;
         sc->_currentIndex = 0;
+        sc->_imageAcquiredSemaphore = dispatch_semaphore_create(desc.BackBufferCount - 1);
+        sc->_drawables = [[NSMutableArray alloc] initWithCapacity:desc.BackBufferCount];
+        for (uint32_t i = 0; i < desc.BackBufferCount; i++) {
+            [sc->_drawables addObject:(id<CAMetalDrawable>)[NSNull null]];
+        }
+        sc->_backBufferTextures.resize(desc.BackBufferCount);
+        for (uint32_t i = 0; i < desc.BackBufferCount; i++) {
+            auto tex = make_unique<TextureMetal>();
+            tex->_device = this;
+            tex->_isExternalOwned = true;
+            tex->_desc.DepthOrArraySize = 1;
+            tex->_desc.MipLevels = 1;
+            tex->_desc.SampleCount = 1;
+            tex->_desc.Dim = TextureDimension::Dim2D;
+            sc->_backBufferTextures[i] = std::move(tex);
+        }
         return sc;
     }
 }
@@ -259,17 +275,36 @@ Nullable<unique_ptr<RootSignature>> DeviceMetal::CreateRootSignature(const RootS
     @autoreleasepool {
         auto rootSig = make_unique<RootSignatureMetal>();
         rootSig->_device = this;
-        rootSig->_rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
-        rootSig->_staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
-        if (desc.Constant.has_value()) {
-            rootSig->_pushConstant = desc.Constant.value();
-        }
+        auto& c = rootSig->_container;
+        c._rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
+        c._staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
+        c._desc.Constant = desc.Constant;
+        size_t totalElements = 0;
+        size_t totalBindless = 0;
         for (auto& setDesc : desc.DescriptorSets) {
-            RootSignatureSetLayoutMetal layout;
-            layout.Elements.assign(setDesc.Elements.begin(), setDesc.Elements.end());
-            layout.IsBindless = !setDesc.BindlessDescriptors.empty();
-            rootSig->_setLayouts.emplace_back(std::move(layout));
+            totalElements += setDesc.Elements.size();
+            totalBindless += setDesc.BindlessDescriptors.size();
         }
+        c._elements.reserve(totalElements);
+        c._bindlessDescriptors.reserve(totalBindless);
+        c._descriptorSets.reserve(desc.DescriptorSets.size());
+        for (auto& setDesc : desc.DescriptorSets) {
+            size_t elemStart = c._elements.size();
+            size_t bindlessStart = c._bindlessDescriptors.size();
+            c._elements.insert(c._elements.end(), setDesc.Elements.begin(), setDesc.Elements.end());
+            c._bindlessDescriptors.insert(c._bindlessDescriptors.end(), setDesc.BindlessDescriptors.begin(), setDesc.BindlessDescriptors.end());
+            RootSignatureDescriptorSet ds{};
+            ds.Elements = std::span<const RootSignatureSetElement>{
+                c._elements.data() + elemStart,
+                setDesc.Elements.size()};
+            ds.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
+                c._bindlessDescriptors.data() + bindlessStart,
+                setDesc.BindlessDescriptors.size()};
+            c._descriptorSets.push_back(ds);
+        }
+        c._desc.RootDescriptors = c._rootDescriptors;
+        c._desc.DescriptorSets = c._descriptorSets;
+        c._desc.StaticSamplers = c._staticSamplers;
         return rootSig;
     }
 }
@@ -421,7 +456,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceMetal::CreateComputePipelineSta
 Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept {
     @autoreleasepool {
         auto* mtlRootSig = CastMtlObject(rootSig);
-        if (index >= mtlRootSig->_setLayouts.size()) {
+        if (index >= mtlRootSig->_container._descriptorSets.size()) {
             RADRAY_ERR_LOG("metal descriptor set index {} out of range", index);
             return nullptr;
         }
@@ -461,9 +496,30 @@ Nullable<unique_ptr<Sampler>> DeviceMetal::CreateSampler(const SamplerDescriptor
 }
 
 Nullable<unique_ptr<BindlessArray>> DeviceMetal::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_WARN_LOG("metal CreateBindlessArray not implemented yet");
-    return nullptr;
+    @autoreleasepool {
+        // Each slot is 16 bytes (sizeof(uint64_t) * 2), matching Metal GPU resource layout
+        static constexpr uint64_t kSlotSize = sizeof(uint64_t) * 2;
+        uint64_t bufferSize = static_cast<uint64_t>(desc.Size) * kSlotSize;
+        id<MTLBuffer> argBuf = [_device newBufferWithLength:bufferSize
+                                                    options:MTLResourceStorageModeShared];
+        if (argBuf == nil) {
+            RADRAY_ERR_LOG("metal cannot create bindless argument buffer (size={})", bufferSize);
+            return nullptr;
+        }
+        if (desc.Name.size() > 0) {
+            argBuf.label = [[NSString alloc] initWithBytes:desc.Name.data()
+                                                    length:desc.Name.size()
+                                                  encoding:NSUTF8StringEncoding];
+        }
+        memset(argBuf.contents, 0, bufferSize);
+        auto result = make_unique<BindlessArrayMetal>();
+        result->_device = this;
+        result->_argumentBuffer = argBuf;
+        result->_trackedResources.resize(desc.Size);
+        result->_size = desc.Size;
+        result->_slotType = desc.SlotType;
+        return result;
+    }
 }
 
 CmdQueueMetal::~CmdQueueMetal() noexcept { DestroyImpl(); }
@@ -524,6 +580,7 @@ void CmdQueueMetal::Wait() noexcept {
             [_lastCmdBuffer waitUntilCompleted];
             _lastCmdBuffer = nil;
         }
+        _lastCmdBuffer = nil;
     }
 }
 
@@ -540,21 +597,15 @@ void CmdBufferMetal::DestroyImpl() noexcept {
 
 void CmdBufferMetal::Begin() noexcept {
     @autoreleasepool {
-        _cmdBuffer = [_queue->_queue commandBuffer];
+        _cmdBuffer = [_queue->_queue commandBufferWithUnretainedReferences];
     }
 }
 
-void CmdBufferMetal::End() noexcept {
-    // Metal commits in Submit, nothing to do here
-}
+void CmdBufferMetal::End() noexcept {}
 
 void CmdBufferMetal::ResourceBarrier(
     std::span<const BarrierBufferDescriptor> buffers,
     std::span<const BarrierTextureDescriptor> textures) noexcept {
-    // Metal automatically tracks resource dependencies between encoders.
-    // Explicit memoryBarrier is only needed within an encoder for UAV access.
-    // Since ResourceBarrier is called at CommandBuffer level (between encoders),
-    // this is handled automatically by Metal.
     RADRAY_UNUSED(buffers);
     RADRAY_UNUSED(textures);
 }
@@ -713,50 +764,109 @@ bool SwapChainMetal::IsValid() const noexcept { return _layer != nil; }
 void SwapChainMetal::Destroy() noexcept { DestroyImpl(); }
 
 void SwapChainMetal::DestroyImpl() noexcept {
-    _currentDrawable = nil;
-    _currentTexture.reset();
+    if (_drawables != nil) {
+        [_drawables removeAllObjects];
+        _drawables = nil;
+    }
+    if (_imageAcquiredSemaphore != nullptr) {
+        // Drain semaphore before release
+        for (uint32_t i = 0; i < _backBufferCount - 1; i++) {
+            dispatch_semaphore_signal(_imageAcquiredSemaphore);
+        }
+        _imageAcquiredSemaphore = nullptr;
+    }
+    _backBufferTextures.clear();
     _layer = nil;
 }
 
 Nullable<Texture*> SwapChainMetal::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
     @autoreleasepool {
-        RADRAY_UNUSED(signalSemaphore);
-        RADRAY_UNUSED(signalFence);
-        _currentDrawable = [_layer nextDrawable];
-        if (_currentDrawable == nil) {
+        // Throttle drawable acquisition
+        dispatch_semaphore_wait(_imageAcquiredSemaphore, DISPATCH_TIME_FOREVER);
+
+        id<CAMetalDrawable> drawable = [_layer nextDrawable];
+        if (drawable == nil) {
+            dispatch_semaphore_signal(_imageAcquiredSemaphore);
             RADRAY_ERR_LOG("metal cannot acquire next drawable");
             return nullptr;
         }
-        _currentTexture = make_unique<TextureMetal>();
-        _currentTexture->_device = _device;
-        _currentTexture->_texture = _currentDrawable.texture;
-        _currentTexture->_isExternalOwned = true;
-        _currentTexture->_desc.Width = static_cast<uint32_t>(_layer.drawableSize.width);
-        _currentTexture->_desc.Height = static_cast<uint32_t>(_layer.drawableSize.height);
-        _currentTexture->_desc.DepthOrArraySize = 1;
-        _currentTexture->_desc.MipLevels = 1;
-        _currentTexture->_desc.SampleCount = 1;
-        _currentTexture->_desc.Dim = TextureDimension::Dim2D;
-        _currentIndex = (_currentIndex + 1) % _backBufferCount;
-        return _currentTexture.get();
+
+        uint32_t index = _currentIndex;
+        _drawables[index] = drawable;
+
+        auto& tex = _backBufferTextures[index];
+        tex->_texture = drawable.texture;
+        tex->_desc.Width = static_cast<uint32_t>(_layer.drawableSize.width);
+        tex->_desc.Height = static_cast<uint32_t>(_layer.drawableSize.height);
+
+        // Signal fence/semaphore if requested
+        if (signalSemaphore.HasValue() || signalFence.HasValue()) {
+            id<MTLCommandBuffer> signalCmd = [_presentQueue->_queue commandBufferWithUnretainedReferences];
+            if (signalSemaphore.HasValue()) {
+                auto* sem = CastMtlObject(signalSemaphore.Get());
+                sem->_value++;
+                [signalCmd encodeSignalEvent:sem->_event value:sem->_value];
+            }
+            if (signalFence.HasValue()) {
+                auto* fence = CastMtlObject(signalFence.Get());
+                fence->_targetValue++;
+                fence->_submitted = true;
+                __block dispatch_semaphore_t fenceSem = fence->_semaphore;
+                [signalCmd encodeSignalEvent:fence->_event value:fence->_targetValue];
+                MTLSharedEventListener* listener = [[MTLSharedEventListener alloc] init];
+                [fence->_event notifyListener:listener
+                                      atValue:fence->_targetValue
+                                        block:^(id<MTLSharedEvent>, uint64_t) {
+                                            dispatch_semaphore_signal(fenceSem);
+                                        }];
+            }
+            [signalCmd commit];
+        }
+
+        _currentIndex = (index + 1) % _backBufferCount;
+        return tex.get();
     }
 }
 
 void SwapChainMetal::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     @autoreleasepool {
-        RADRAY_UNUSED(waitSemaphores);
-        if (_currentDrawable != nil && _presentQueue != nullptr) {
-            id<MTLCommandBuffer> cmdBuf = [_presentQueue->_queue commandBuffer];
-            [cmdBuf presentDrawable:_currentDrawable];
-            [cmdBuf commit];
+        // The drawable to present is at the previous index (since _currentIndex was already advanced)
+        uint32_t presentIndex = (_currentIndex + _backBufferCount - 1) % _backBufferCount;
+        id<CAMetalDrawable> drawable = _drawables[presentIndex];
+        if (drawable == nil || drawable == (id<CAMetalDrawable>)[NSNull null]) {
+            RADRAY_ERR_LOG("metal no drawable at present index {}", presentIndex);
+            return;
         }
-        _currentDrawable = nil;
-        _currentTexture.reset();
+        if (_presentQueue == nullptr) return;
+
+        id<MTLCommandBuffer> cmdBuf = [_presentQueue->_queue commandBufferWithUnretainedReferences];
+
+        // Wait for semaphores
+        for (auto* semBase : waitSemaphores) {
+            auto* sem = CastMtlObject(semBase);
+            [cmdBuf encodeWaitForEvent:sem->_event value:sem->_value];
+        }
+
+        [cmdBuf presentDrawable:drawable];
+
+        // Clear drawable and signal semaphore on completion
+        __block NSMutableArray<id<CAMetalDrawable>>* drawables = _drawables;
+        __block uint32_t idx = presentIndex;
+        __block dispatch_semaphore_t acqSem = _imageAcquiredSemaphore;
+        [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) {
+            drawables[idx] = (id<CAMetalDrawable>)[NSNull null];
+            dispatch_semaphore_signal(acqSem);
+        }];
+
+        [cmdBuf commit];
     }
 }
 
 Nullable<Texture*> SwapChainMetal::GetCurrentBackBuffer() const noexcept {
-    if (_currentTexture) return _currentTexture.get();
+    uint32_t prevIndex = (_currentIndex + _backBufferCount - 1) % _backBufferCount;
+    if (prevIndex < _backBufferTextures.size() && _backBufferTextures[prevIndex]) {
+        return _backBufferTextures[prevIndex].get();
+    }
     return nullptr;
 }
 
@@ -823,10 +933,7 @@ bool RootSignatureMetal::IsValid() const noexcept { return _device != nullptr; }
 void RootSignatureMetal::Destroy() noexcept { DestroyImpl(); }
 
 void RootSignatureMetal::DestroyImpl() noexcept {
-    _rootDescriptors.clear();
-    _setLayouts.clear();
-    _staticSamplers.clear();
-    _pushConstant.reset();
+    _container = {};
 }
 
 GraphicsPipelineStateMetal::~GraphicsPipelineStateMetal() noexcept { DestroyImpl(); }
@@ -854,7 +961,10 @@ bool GraphicsCmdEncoderMetal::IsValid() const noexcept { return _encoder != nil;
 
 void GraphicsCmdEncoderMetal::Destroy() noexcept { DestroyImpl(); }
 
-void GraphicsCmdEncoderMetal::DestroyImpl() noexcept { _encoder = nil; }
+void GraphicsCmdEncoderMetal::DestroyImpl() noexcept {
+    _encoder = nil;
+    _indexBuffer = nil;
+}
 
 CommandBuffer* GraphicsCmdEncoderMetal::GetCommandBuffer() const noexcept { return _cmdBuffer; }
 
@@ -863,7 +973,7 @@ void GraphicsCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept
     // bind static samplers
     if (_boundRootSig) {
         @autoreleasepool {
-            for (auto& ss : _boundRootSig->_staticSamplers) {
+            for (auto& ss : _boundRootSig->_container._staticSamplers) {
                 MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
                 sd.sAddressMode = MapAddressMode(ss.Desc.AddressS);
                 sd.tAddressMode = MapAddressMode(ss.Desc.AddressT);
@@ -890,8 +1000,8 @@ void GraphicsCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept
 }
 
 void GraphicsCmdEncoderMetal::PushConstant(const void* data, size_t length) noexcept {
-    if (_boundRootSig && _boundRootSig->_pushConstant.has_value()) {
-        auto& pc = _boundRootSig->_pushConstant.value();
+    if (_boundRootSig && _boundRootSig->_container._desc.Constant.has_value()) {
+        auto& pc = _boundRootSig->_container._desc.Constant.value();
         if (pc.Stages.HasFlag(ShaderStage::Vertex)) {
             [_encoder setVertexBytes:data length:length atIndex:pc.Slot];
         }
@@ -905,7 +1015,7 @@ void GraphicsCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, 
     RADRAY_UNUSED(size);
     auto* mtlBuf = CastMtlObject(buffer);
     if (_boundRootSig) {
-        for (auto& rd : _boundRootSig->_rootDescriptors) {
+        for (auto& rd : _boundRootSig->_container._rootDescriptors) {
             if (rd.Slot == slot) {
                 if (rd.Stages.HasFlag(ShaderStage::Vertex)) {
                     [_encoder setVertexBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
@@ -917,16 +1027,13 @@ void GraphicsCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, 
             }
         }
     }
-    // fallback: bind to both stages
-    [_encoder setVertexBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
-    [_encoder setFragmentBuffer:mtlBuf->_buffer offset:offset atIndex:slot];
 }
 
 void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     auto* ds = CastMtlObject(set);
     if (!ds || !ds->_rootSig) return;
-    if (slot >= ds->_rootSig->_setLayouts.size()) return;
-    auto& layout = ds->_rootSig->_setLayouts[slot];
+    if (slot >= ds->_rootSig->_container._descriptorSets.size()) return;
+    auto& layout = ds->_rootSig->_container._descriptorSets[slot];
     for (auto& binding : ds->_bindings) {
         for (auto& elem : layout.Elements) {
             if (elem.Slot != binding.Slot) continue;
@@ -950,9 +1057,40 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
 }
 
 void GraphicsCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
-    RADRAY_UNUSED(slot);
-    RADRAY_UNUSED(array);
-    RADRAY_WARN_LOG("metal BindBindlessArray not implemented yet");
+    if (!_boundRootSig) return;
+    auto* bindless = CastMtlObject(array);
+    // Find the bindless descriptor matching this set index
+    const RootSignatureBindlessDescriptor* desc = nullptr;
+    for (auto& ds : _boundRootSig->_container._descriptorSets) {
+        for (auto& bd : ds.BindlessDescriptors) {
+            if (bd.SetIndex == slot) {
+                desc = &bd;
+                break;
+            }
+        }
+        if (desc) break;
+    }
+    if (!desc) {
+        RADRAY_ERR_LOG("metal BindBindlessArray: no bindless descriptor found for set index {}", slot);
+        return;
+    }
+    uint32_t bufferIndex = desc->Slot;
+    if (desc->Stages.HasFlag(ShaderStage::Vertex)) {
+        [_encoder setVertexBuffer:bindless->_argumentBuffer offset:0 atIndex:bufferIndex];
+    }
+    if (desc->Stages.HasFlag(ShaderStage::Pixel)) {
+        [_encoder setFragmentBuffer:bindless->_argumentBuffer offset:0 atIndex:bufferIndex];
+    }
+    // Declare resource residency for argument buffer and all tracked resources
+    MTLRenderStages stages = 0;
+    if (desc->Stages.HasFlag(ShaderStage::Vertex)) stages |= MTLRenderStageVertex;
+    if (desc->Stages.HasFlag(ShaderStage::Pixel)) stages |= MTLRenderStageFragment;
+    [_encoder useResource:bindless->_argumentBuffer usage:MTLResourceUsageRead stages:stages];
+    for (auto& tracked : bindless->_trackedResources) {
+        if (tracked.resource != nil) {
+            [_encoder useResource:tracked.resource usage:tracked.usage stages:stages];
+        }
+    }
 }
 
 void GraphicsCmdEncoderMetal::SetViewport(Viewport vp) noexcept {
@@ -1043,7 +1181,7 @@ void ComputeCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept 
     _boundRootSig = CastMtlObject(rootSig);
     if (_boundRootSig) {
         @autoreleasepool {
-            for (auto& ss : _boundRootSig->_staticSamplers) {
+            for (auto& ss : _boundRootSig->_container._staticSamplers) {
                 if (ss.Stages.HasFlag(ShaderStage::Compute)) {
                     MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
                     sd.sAddressMode = MapAddressMode(ss.Desc.AddressS);
@@ -1067,8 +1205,8 @@ void ComputeCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept 
 }
 
 void ComputeCmdEncoderMetal::PushConstant(const void* data, size_t length) noexcept {
-    if (_boundRootSig && _boundRootSig->_pushConstant.has_value()) {
-        auto& pc = _boundRootSig->_pushConstant.value();
+    if (_boundRootSig && _boundRootSig->_container._desc.Constant.has_value()) {
+        auto& pc = _boundRootSig->_container._desc.Constant.value();
         [_encoder setBytes:data length:length atIndex:pc.Slot];
     }
 }
@@ -1082,8 +1220,8 @@ void ComputeCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, u
 void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     auto* ds = CastMtlObject(set);
     if (!ds || !ds->_rootSig) return;
-    if (slot >= ds->_rootSig->_setLayouts.size()) return;
-    auto& layout = ds->_rootSig->_setLayouts[slot];
+    if (slot >= ds->_rootSig->_container._descriptorSets.size()) return;
+    auto& layout = ds->_rootSig->_container._descriptorSets[slot];
     for (auto& binding : ds->_bindings) {
         for (auto& elem : layout.Elements) {
             if (elem.Slot != binding.Slot) continue;
@@ -1097,9 +1235,32 @@ void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set
 }
 
 void ComputeCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
-    RADRAY_UNUSED(slot);
-    RADRAY_UNUSED(array);
-    RADRAY_WARN_LOG("metal BindBindlessArray not implemented yet");
+    if (!_boundRootSig) return;
+    auto* bindless = CastMtlObject(array);
+    // Find the bindless descriptor matching this set index
+    const RootSignatureBindlessDescriptor* desc = nullptr;
+    for (auto& ds : _boundRootSig->_container._descriptorSets) {
+        for (auto& bd : ds.BindlessDescriptors) {
+            if (bd.SetIndex == slot) {
+                desc = &bd;
+                break;
+            }
+        }
+        if (desc) break;
+    }
+    if (!desc) {
+        RADRAY_ERR_LOG("metal BindBindlessArray: no bindless descriptor found for set index {}", slot);
+        return;
+    }
+    uint32_t bufferIndex = desc->Slot;
+    [_encoder setBuffer:bindless->_argumentBuffer offset:0 atIndex:bufferIndex];
+    // Declare resource residency for argument buffer and all tracked resources
+    [_encoder useResource:bindless->_argumentBuffer usage:MTLResourceUsageRead];
+    for (auto& tracked : bindless->_trackedResources) {
+        if (tracked.resource != nil) {
+            [_encoder useResource:tracked.resource usage:tracked.usage];
+        }
+    }
 }
 
 void ComputeCmdEncoderMetal::BindComputePipelineState(ComputePipelineState* pso) noexcept {
@@ -1160,21 +1321,51 @@ void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView
 }
 
 BindlessArrayMetal::~BindlessArrayMetal() noexcept { DestroyImpl(); }
+
 bool BindlessArrayMetal::IsValid() const noexcept { return _device != nullptr; }
+
 void BindlessArrayMetal::Destroy() noexcept { DestroyImpl(); }
-void BindlessArrayMetal::DestroyImpl() noexcept { _argumentBuffer = nil; }
+
+void BindlessArrayMetal::DestroyImpl() noexcept {
+    _trackedResources.clear();
+    _argumentBuffer = nil;
+}
 
 void BindlessArrayMetal::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
-    RADRAY_UNUSED(slot);
-    RADRAY_UNUSED(bufView);
-    RADRAY_WARN_LOG("metal BindlessArray::SetBuffer not implemented yet");
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("metal BindlessArray::SetBuffer slot {} out of range (size={})", slot, _size);
+        return;
+    }
+    auto* mtlBufView = CastMtlObject(bufView);
+    static constexpr uint64_t kSlotSize = sizeof(uint64_t) * 2;
+    uint8_t* pArg = static_cast<uint8_t*>(_argumentBuffer.contents) + slot * kSlotSize;
+    // BUFFER layout: { uint64_t gpuAddress; uint64_t size; } — 16 bytes
+    uint64_t gpuAddr = mtlBufView->_buffer->_buffer.gpuAddress + mtlBufView->_desc.Range.Offset;
+    uint64_t bufSize = mtlBufView->_desc.Range.Size;
+    struct { uint64_t ptr; uint64_t size; } bufArg = { gpuAddr, bufSize };
+    memcpy(pArg, &bufArg, sizeof(bufArg));
+    MTLResourceUsage usage = mtlBufView->_desc.Usage.HasFlag(BufferUse::UnorderedAccess)
+                                 ? (MTLResourceUsageRead | MTLResourceUsageWrite)
+                                 : MTLResourceUsageRead;
+    _trackedResources[slot] = {mtlBufView->_buffer->_buffer, usage};
 }
 
 void BindlessArrayMetal::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
-    RADRAY_UNUSED(slot);
-    RADRAY_UNUSED(texView);
     RADRAY_UNUSED(sampler);
-    RADRAY_WARN_LOG("metal BindlessArray::SetTexture not implemented yet");
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("metal BindlessArray::SetTexture slot {} out of range (size={})", slot, _size);
+        return;
+    }
+    auto* mtlTexView = CastMtlObject(texView);
+    static constexpr uint64_t kSlotSize = sizeof(uint64_t) * 2;
+    uint8_t* pArg = static_cast<uint8_t*>(_argumentBuffer.contents) + slot * kSlotSize;
+    // TEXTURE layout: { MTLResourceID id; } — 8 bytes, padded to 16
+    struct { MTLResourceID id; } texArg = { mtlTexView->_textureView.gpuResourceID };
+    memcpy(pArg, &texArg, sizeof(texArg));
+    MTLResourceUsage usage = mtlTexView->_desc.Usage.HasFlag(TextureUse::UnorderedAccess)
+                                 ? (MTLResourceUsageRead | MTLResourceUsageWrite)
+                                 : MTLResourceUsageRead;
+    _trackedResources[slot] = {mtlTexView->_textureView, usage};
 }
 
 Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
@@ -1199,7 +1390,7 @@ Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
         } else {
             device = devices[0];
         }
-#else
+#elif defined(RADRAY_PLATFORM_IOS)
         device = MTLCreateSystemDefaultDevice();
         if (device == nil) {
             RADRAY_ERR_LOG("metal cannot create system default device");
@@ -1210,13 +1401,20 @@ Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
         result->_device = device;
         result->_detail.CBufferAlignment = 256;
         result->_detail.TextureDataPitchAlignment = 256;
-        result->_detail.IsBindlessArraySupported = false;  // TODO: check argument buffer tier
+        result->_detail.IsBindlessArraySupported = [device supportsFamily:MTLGPUFamilyMetal3];
 
         RADRAY_INFO_LOG("metal select device: {}", [device.name UTF8String]);
         RADRAY_INFO_LOG("========== Metal Feature ==========");
         NSProcessInfo* pi = [NSProcessInfo processInfo];
         NSOperatingSystemVersion ver = [pi operatingSystemVersion];
+#if defined(RADRAY_PLATFORM_MACOS)
         RADRAY_INFO_LOG("OS: macOS {}.{}.{}", (int)ver.majorVersion, (int)ver.minorVersion, (int)ver.patchVersion);
+#elif defined(RADRAY_PLATFORM_IOS)
+        RADRAY_INFO_LOG("OS: iOS {}.{}.{}", (int)ver.majorVersion, (int)ver.minorVersion, (int)ver.patchVersion);
+#endif
+        MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+        RADRAY_INFO_LOG("Support Metal 3: {}", [device supportsFamily:MTLGPUFamilyMetal3] ? true : false);
+        RADRAY_INFO_LOG("Language Version: {}", options.languageVersion);
         RADRAY_INFO_LOG("===================================");
         return result;
     }

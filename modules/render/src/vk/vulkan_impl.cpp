@@ -1,5 +1,9 @@
 #include <radray/render/backend/vulkan_impl.h>
 
+#if RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -284,7 +288,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
-        string name = radray::format("SwapChain Image {}", result->_frames.size() - 1);
+        string name = fmt::format("SwapChain Image {}", result->_frames.size() - 1);
         TextureDescriptor texDesc{
             TextureDimension::Dim2D,
             swapchianCreateInfo.imageExtent.width,
@@ -1446,6 +1450,20 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     }
 
     VkAllocationCallbacks* allocCbPtr = nullptr;
+#if RADRAY_ENABLE_MIMALLOC
+    VkAllocationCallbacks allocCb{
+        nullptr,
+        [](void* pUserData, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
+            return mi_malloc_aligned(size, alignment);
+        },
+        [](void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
+            return mi_realloc_aligned(pOriginal, size, alignment);
+        },
+        [](void* pUserData, void* pMemory) { mi_free(pMemory); },
+        nullptr,
+        nullptr};
+    allocCbPtr = &allocCb;
+#endif
 
     vector<VkValidationFeatureEnableEXT> validEnables{};
     VkValidationFeaturesEXT validFeature{};
@@ -1870,7 +1888,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 uint32_t minor = (driverVersion >> 14) & 0x0ff;
                 uint32_t patch = (driverVersion >> 6) & 0x0ff;
                 uint32_t build = driverVersion & 0x3f;
-                verStr = radray::format("{}.{}.{}.{}", major, minor, patch, build);
+                verStr = fmt::format("{}.{}.{}.{}", major, minor, patch, build);
                 break;
             }
             case 0x8086:  // Intel
@@ -1880,7 +1898,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
                 uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
                 uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
-                verStr = radray::format("{}.{}.{}.{}", variant, major, minor, patch);
+                verStr = fmt::format("{}.{}.{}.{}", variant, major, minor, patch);
                 break;
             }
         }

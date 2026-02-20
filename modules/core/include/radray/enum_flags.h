@@ -105,7 +105,7 @@ public:
     {
         using underlying_t = std::underlying_type_t<T>;
         using unsigned_t = std::make_unsigned_t<underlying_t>;
-        fmt_memory_buffer buffer;
+        fmt::memory_buffer buffer;
         fmt::format_to(std::back_inserter(buffer), "[");
         auto remaining = static_cast<unsigned_t>(this->value());
         bool first = true;
