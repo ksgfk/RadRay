@@ -1455,12 +1455,16 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     VkAllocationCallbacks allocCb{
         nullptr,
         [](void* pUserData, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
+            RADRAY_UNUSED(pUserData);
+            RADRAY_UNUSED(allocationScope);
             return mi_malloc_aligned(size, alignment);
         },
         [](void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
+            RADRAY_UNUSED(pUserData);
+            RADRAY_UNUSED(allocationScope);
             return mi_realloc_aligned(pOriginal, size, alignment);
         },
-        [](void* pUserData, void* pMemory) { mi_free(pMemory); },
+        [](void* pUserData, void* pMemory) { RADRAY_UNUSED(pUserData); mi_free(pMemory); },
         nullptr,
         nullptr};
     allocCbPtr = &allocCb;

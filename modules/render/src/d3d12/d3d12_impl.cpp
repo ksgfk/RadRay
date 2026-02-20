@@ -405,6 +405,25 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
     detail.IsBindlessArraySupported = false;
+    {
+        DXGI_ADAPTER_DESC1 adapDesc{};
+        if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
+            wstring name{adapDesc.Description};
+            detail.GpuName = text_encoding::ToMultiByte(name).value_or("???");
+            detail.VendorId = adapDesc.VendorId;
+            detail.DeviceId = adapDesc.DeviceId;
+        }
+    }
+    {
+        ComPtr<IDXGIAdapter3> adapter3;
+        if (SUCCEEDED(adapter.As(&adapter3))) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO memInfo{};
+            if (HRESULT hr = adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo);
+                SUCCEEDED(hr)) {
+                detail.VramBudget = memInfo.Budget;
+            }
+        }
+    }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
         LARGE_INTEGER l;
@@ -445,7 +464,8 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         RADRAY_INFO_LOG("Resource Binding Tier: {}", fs.ResourceBindingTier());
         RADRAY_INFO_LOG("Resource Heap Tier: {}", fs.ResourceHeapTier());
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
-        RADRAY_INFO_LOG("UMA: {}", static_cast<bool>(fs.UMA()));
+        detail.IsUMA = static_cast<bool>(fs.UMA());
+        RADRAY_INFO_LOG("UMA: {}", detail.IsUMA);
         detail.IsBindlessArraySupported =
             fs.ResourceBindingTier() >= D3D12_RESOURCE_BINDING_TIER_3 &&
             fs.HighestShaderModel() >= D3D_SHADER_MODEL_6_0;
@@ -761,7 +781,7 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     //     clearPtr = &clear;
     // }
     D3D12MA::ALLOCATION_DESC allocDesc{};
-    allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    allocDesc.HeapType = MapType(desc.Memory);
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }

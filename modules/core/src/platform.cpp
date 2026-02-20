@@ -57,7 +57,7 @@ static auto _Win32LastErrMessage() {
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
         (LPTSTR)&buffer,
         0, nullptr);
-    auto msg = format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
+    auto msg = fmt::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
     ::LocalFree(buffer);
     return msg;
 }
