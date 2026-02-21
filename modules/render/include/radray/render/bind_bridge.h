@@ -15,6 +15,9 @@ namespace radray::render {
 
 class RootSignatureDescriptorContainer {
 public:
+    RootSignatureDescriptorContainer() noexcept = default;
+    explicit RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept;
+
     const RootSignatureDescriptor& Get() const noexcept { return _desc; }
 
 public:

@@ -84,7 +84,7 @@ MTLTextureType MapTextureType(TextureDimension dim, uint32_t sampleCount) noexce
         case TextureDimension::Dim1D: return MTLTextureType1D;
         case TextureDimension::Dim1DArray: return MTLTextureType1DArray;
         case TextureDimension::Dim2D: return sampleCount > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
-        case TextureDimension::Dim2DArray: return MTLTextureType2DArray;
+        case TextureDimension::Dim2DArray: return sampleCount > 1 ? MTLTextureType2DMultisampleArray : MTLTextureType2DArray;
         case TextureDimension::Dim3D: return MTLTextureType3D;
         case TextureDimension::Cube: return MTLTextureTypeCube;
         case TextureDimension::CubeArray: return MTLTextureTypeCubeArray;

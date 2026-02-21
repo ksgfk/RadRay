@@ -9,6 +9,38 @@
 
 namespace radray::render {
 
+RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSignatureDescriptor& desc) noexcept {
+    _rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
+    _staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
+    size_t totalElements = 0;
+    size_t totalBindless = 0;
+    for (const auto& set : desc.DescriptorSets) {
+        totalElements += set.Elements.size();
+        totalBindless += set.BindlessDescriptors.size();
+    }
+    _elements.reserve(totalElements);
+    _bindlessDescriptors.reserve(totalBindless);
+    _descriptorSets.reserve(desc.DescriptorSets.size());
+    for (const auto& set : desc.DescriptorSets) {
+        size_t elemStart = _elements.size();
+        size_t bindlessStart = _bindlessDescriptors.size();
+        _elements.insert(_elements.end(), set.Elements.begin(), set.Elements.end());
+        _bindlessDescriptors.insert(_bindlessDescriptors.end(), set.BindlessDescriptors.begin(), set.BindlessDescriptors.end());
+        RootSignatureDescriptorSet ownedSet{};
+        ownedSet.Elements = std::span<const RootSignatureSetElement>{
+            _elements.data() + elemStart,
+            _elements.size() - elemStart};
+        ownedSet.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
+            _bindlessDescriptors.data() + bindlessStart,
+            _bindlessDescriptors.size() - bindlessStart};
+        _descriptorSets.push_back(ownedSet);
+    }
+    _desc.RootDescriptors = _rootDescriptors;
+    _desc.DescriptorSets = _descriptorSets;
+    _desc.StaticSamplers = _staticSamplers;
+    _desc.Constant = desc.Constant;
+}
+
 BindBridgeLayout::BindBridgeLayout(const HlslShaderDesc& desc, std::span<const BindBridgeStaticSampler> staticSamplers) noexcept {
     auto resOpt = this->BuildFromHlsl(desc);
     if (resOpt) {
@@ -95,10 +127,11 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
             }
         }
         if (hasBindless && hasOtherDescriptors) {
-            RADRAY_ERR_LOG("Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
-                          "Bindless arrays must be in their own descriptor set. "
-                          "This is not supported in HLSL and may cause validation errors.",
-                          setIndex);
+            RADRAY_ERR_LOG(
+                "Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
+                "Bindless arrays must be in their own descriptor set. "
+                "This is not supported in HLSL and may cause validation errors.",
+                setIndex);
         }
     }
 

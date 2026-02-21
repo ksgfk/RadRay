@@ -11,94 +11,6 @@
 
 namespace radray::render::metal {
 
-// Metal shares buffer binding space between vertex buffers and shader buffers.
-// Bind vertex buffers at high indices (30, 29, ...) to avoid conflicts with
-// shader buffer bindings (push constants, descriptor sets) at low indices.
-static constexpr uint32_t kMtlVertexBufferBase = 30;
-
-#if defined(RADRAY_PLATFORM_MACOS)
-static uint32_t GetIORegistryEntryProperty(io_registry_entry_t entry, CFStringRef propertyName) {
-    uint32_t value = 0;
-    CFTypeRef cfProp = IORegistryEntrySearchCFProperty(
-        entry, kIOServicePlane, propertyName, kCFAllocatorDefault,
-        kIORegistryIterateRecursively | kIORegistryIterateParents);
-    if (cfProp) {
-        if (CFGetTypeID(cfProp) == CFDataGetTypeID()) {
-            const uint32_t* pValue = reinterpret_cast<const uint32_t*>(CFDataGetBytePtr(static_cast<CFDataRef>(cfProp)));
-            if (pValue) {
-                value = *pValue;
-            }
-        }
-        CFRelease(cfProp);
-    }
-    return value;
-}
-
-static void QueryVendorAndDeviceId(id<MTLDevice> device, uint32_t* outVendorId, uint32_t* outDeviceId) {
-    uint32_t vendorId = 0;
-    uint32_t deviceId = 0;
-    bool isFound = false;
-
-    // Apple Silicon: no PCI device-id, synthesize from GPU family
-    if ([device supportsFamily:MTLGPUFamilyApple5]) {
-        vendorId = 0x106b;  // Apple
-        if ([device supportsFamily:MTLGPUFamilyApple7]) {
-            deviceId = 0xa140;
-        } else if ([device supportsFamily:MTLGPUFamilyApple6]) {
-            deviceId = 0xa130;
-        } else {
-            deviceId = 0xa120;
-        }
-    }
-
-    // Try registryID to find IOKit node
-    uint64_t regID = 0;
-    if ([device respondsToSelector:@selector(registryID)]) {
-        regID = device.registryID;
-    }
-    if (regID != 0) {
-        io_registry_entry_t entry = IOServiceGetMatchingService(
-            kIOMainPortDefault, IORegistryEntryIDMatching(regID));
-        if (entry) {
-            io_registry_entry_t parent;
-            if (IORegistryEntryGetParentEntry(entry, kIOServicePlane, &parent) == kIOReturnSuccess) {
-                isFound = true;
-                vendorId = GetIORegistryEntryProperty(parent, CFSTR("vendor-id"));
-                deviceId = GetIORegistryEntryProperty(parent, CFSTR("device-id"));
-                IOObjectRelease(parent);
-            }
-            IOObjectRelease(entry);
-        }
-    }
-
-    // Fallback: iterate IOPCIDevice entries
-    if (!isFound) {
-        io_iterator_t entryIterator;
-        if (IOServiceGetMatchingServices(kIOMainPortDefault,
-                                         IOServiceMatching("IOPCIDevice"), &entryIterator) == kIOReturnSuccess) {
-            io_registry_entry_t entry;
-            bool isUMA = device.hasUnifiedMemory;
-            while (!isFound && (entry = IOIteratorNext(entryIterator))) {
-                if (GetIORegistryEntryProperty(entry, CFSTR("class-code")) == 0x30000) {
-                    uint32_t vid = GetIORegistryEntryProperty(entry, CFSTR("vendor-id"));
-                    bool isIntegrated = (vid == 0x8086);  // Intel
-                    if (isIntegrated == isUMA) {
-                        isFound = true;
-                        vendorId = vid;
-                        deviceId = GetIORegistryEntryProperty(entry, CFSTR("device-id"));
-                    }
-                }
-                IOObjectRelease(entry);
-            }
-            IOObjectRelease(entryIterator);
-        }
-    }
-
-    *outVendorId = vendorId;
-    *outDeviceId = deviceId;
-}
-#endif
-
 DeviceMetal::DeviceMetal(id<MTLDevice> device) noexcept : _device(device) {}
 
 DeviceMetal::~DeviceMetal() noexcept { DestroyImpl(); }
@@ -241,8 +153,12 @@ Nullable<unique_ptr<Texture>> DeviceMetal::CreateTexture(const TextureDescriptor
         td.sampleCount = (desc.SampleCount > 0) ? desc.SampleCount : 1;
         td.storageMode = MapStorageMode(desc.Memory);
         MTLTextureUsage usage = MTLTextureUsageUnknown;
-        if (desc.Usage.HasFlag(TextureUse::Resource)) usage |= MTLTextureUsageShaderRead;
-        if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) usage |= MTLTextureUsageShaderWrite;
+        if (desc.Usage.HasFlag(TextureUse::Resource)) {
+            usage |= MTLTextureUsageShaderRead;
+        }
+        if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+            usage |= MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+        }
         if (desc.Usage.HasFlag(TextureUse::RenderTarget) ||
             desc.Usage.HasFlag(TextureUse::DepthStencilWrite) ||
             desc.Usage.HasFlag(TextureUse::DepthStencilRead)) {
@@ -259,10 +175,10 @@ Nullable<unique_ptr<Texture>> DeviceMetal::CreateTexture(const TextureDescriptor
                                                     length:desc.Name.size()
                                                   encoding:NSUTF8StringEncoding];
         }
-        auto tex = make_unique<TextureMetal>();
-        tex->_device = this;
-        tex->_texture = mtlTex;
+        auto tex = make_unique<TextureMetal>(this, mtlTex);
         tex->_desc = desc;
+        tex->_name = desc.Name;
+        tex->_desc.Name = tex->_name;
         return tex;
     }
 }
@@ -279,18 +195,13 @@ Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewD
 Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     @autoreleasepool {
         auto* mtlTex = CastMtlObject(desc.Target);
-        // frameBufferOnly textures (e.g. CAMetalLayer drawables) cannot create views;
-        // use the original texture directly as the "view"
         if (mtlTex->_texture.isFramebufferOnly) {
-            auto view = make_unique<TextureViewMetal>();
-            view->_device = this;
-            view->_texture = mtlTex;
-            view->_textureView = mtlTex->_texture;
+            auto view = make_unique<TextureViewMetal>(this, mtlTex, mtlTex->_texture);
             view->_desc = desc;
             return view;
         }
         MTLPixelFormat fmt = MapPixelFormat(desc.Format);
-        MTLTextureType texType = MapTextureViewType(desc.Dim);
+        MTLTextureType texType = MapTextureType(desc.Dim, mtlTex->_desc.SampleCount);
         NSRange levelRange = NSMakeRange(desc.Range.BaseMipLevel,
                                          desc.Range.MipLevelCount == SubresourceRange::All ? mtlTex->_texture.mipmapLevelCount - desc.Range.BaseMipLevel : desc.Range.MipLevelCount);
         NSRange sliceRange = NSMakeRange(desc.Range.BaseArrayLayer,
@@ -303,10 +214,7 @@ Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureVi
             RADRAY_ERR_LOG("metal cannot create texture view");
             return nullptr;
         }
-        auto view = make_unique<TextureViewMetal>();
-        view->_device = this;
-        view->_texture = mtlTex;
-        view->_textureView = texView;
+        auto view = make_unique<TextureViewMetal>(this, mtlTex, texView);
         view->_desc = desc;
         return view;
     }
@@ -333,53 +241,19 @@ Nullable<unique_ptr<Shader>> DeviceMetal::CreateShader(const ShaderDescriptor& d
             if (error != nil) {
                 RADRAY_ERR_LOG("metal cannot create shader: {}", [error.localizedDescription UTF8String]);
             } else {
-                RADRAY_ERR_LOG("metal cannot create shader");
+                RADRAY_ERR_LOG("metal cannot create shader: {}", "unknown error");
             }
             return nullptr;
         }
-        auto shader = make_unique<ShaderMetal>();
-        shader->_device = this;
-        shader->_library = library;
-        return shader;
+        return make_unique<ShaderMetal>(this, library);
     }
 }
 
 Nullable<unique_ptr<RootSignature>> DeviceMetal::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
     @autoreleasepool {
-        auto rootSig = make_unique<RootSignatureMetal>();
-        rootSig->_device = this;
-        auto& c = rootSig->_container;
-        c._rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
-        c._staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
-        c._desc.Constant = desc.Constant;
-        size_t totalElements = 0;
-        size_t totalBindless = 0;
-        for (auto& setDesc : desc.DescriptorSets) {
-            totalElements += setDesc.Elements.size();
-            totalBindless += setDesc.BindlessDescriptors.size();
-        }
-        c._elements.reserve(totalElements);
-        c._bindlessDescriptors.reserve(totalBindless);
-        c._descriptorSets.reserve(desc.DescriptorSets.size());
-        for (auto& setDesc : desc.DescriptorSets) {
-            size_t elemStart = c._elements.size();
-            size_t bindlessStart = c._bindlessDescriptors.size();
-            c._elements.insert(c._elements.end(), setDesc.Elements.begin(), setDesc.Elements.end());
-            c._bindlessDescriptors.insert(c._bindlessDescriptors.end(), setDesc.BindlessDescriptors.begin(), setDesc.BindlessDescriptors.end());
-            RootSignatureDescriptorSet ds{};
-            ds.Elements = std::span<const RootSignatureSetElement>{
-                c._elements.data() + elemStart,
-                setDesc.Elements.size()};
-            ds.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
-                c._bindlessDescriptors.data() + bindlessStart,
-                setDesc.BindlessDescriptors.size()};
-            c._descriptorSets.push_back(ds);
-        }
-        c._desc.RootDescriptors = c._rootDescriptors;
-        c._desc.DescriptorSets = c._descriptorSets;
-        c._desc.StaticSamplers = c._staticSamplers;
-        rootSig->_cachedStaticSamplers.reserve(c._staticSamplers.size());
-        for (auto& ss : c._staticSamplers) {
+        auto rootSig = make_unique<RootSignatureMetal>(this, desc);
+        rootSig->_cachedStaticSamplers.reserve(desc.StaticSamplers.size());
+        for (auto& ss : desc.StaticSamplers) {
             MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
             sd.sAddressMode = MapAddressMode(ss.Desc.AddressS);
             sd.tAddressMode = MapAddressMode(ss.Desc.AddressT);
@@ -408,9 +282,6 @@ Nullable<unique_ptr<RootSignature>> DeviceMetal::CreateRootSignature(const RootS
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
     @autoreleasepool {
         MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
-        auto* rootSig = CastMtlObject(desc.RootSig);
-
-        // vertex function
         if (desc.VS.has_value()) {
             auto* shader = CastMtlObject(desc.VS->Target);
             NSString* entry = [[NSString alloc] initWithBytes:desc.VS->EntryPoint.data()
@@ -418,7 +289,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
                                                      encoding:NSUTF8StringEncoding];
             pd.vertexFunction = [shader->_library newFunctionWithName:entry];
         }
-        // fragment function
         if (desc.PS.has_value()) {
             auto* shader = CastMtlObject(desc.PS->Target);
             NSString* entry = [[NSString alloc] initWithBytes:desc.PS->EntryPoint.data()
@@ -427,12 +297,11 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
             pd.fragmentFunction = [shader->_library newFunctionWithName:entry];
         }
 
-        // vertex descriptor
         if (!desc.VertexLayouts.empty()) {
             MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
             for (uint32_t i = 0; i < desc.VertexLayouts.size(); i++) {
                 auto& layout = desc.VertexLayouts[i];
-                uint32_t mtlBufIdx = kMtlVertexBufferBase - i;
+                uint32_t mtlBufIdx = i;
                 vd.layouts[mtlBufIdx].stride = layout.ArrayStride;
                 vd.layouts[mtlBufIdx].stepFunction = MapVertexStepFunction(layout.StepMode);
                 vd.layouts[mtlBufIdx].stepRate = 1;
@@ -445,7 +314,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
             pd.vertexDescriptor = vd;
         }
 
-        // color attachments
         for (uint32_t i = 0; i < desc.ColorTargets.size(); i++) {
             auto& ct = desc.ColorTargets[i];
             pd.colorAttachments[i].pixelFormat = MapPixelFormat(ct.Format);
@@ -461,7 +329,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
             }
         }
 
-        // depth stencil
         id<MTLDepthStencilState> dsState = nil;
         if (desc.DepthStencil.has_value()) {
             auto& ds = desc.DepthStencil.value();
@@ -494,7 +361,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
             dsState = [_device newDepthStencilStateWithDescriptor:dsd];
         }
 
-        // multisample
         pd.rasterSampleCount = desc.MultiSample.Count > 0 ? desc.MultiSample.Count : 1;
         pd.alphaToCoverageEnabled = desc.MultiSample.AlphaToCoverageEnable;
 
@@ -503,6 +369,8 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
         if (pso == nil) {
             if (error != nil) {
                 RADRAY_ERR_LOG("metal cannot create graphics pipeline: {}", [error.localizedDescription UTF8String]);
+            } else {
+                RADRAY_ERR_LOG("metal cannot create graphics pipeline: {}", "unknown error");
             }
             return nullptr;
         }
@@ -540,13 +408,12 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceMetal::CreateComputePipelineSta
         if (pso == nil) {
             if (error != nil) {
                 RADRAY_ERR_LOG("metal cannot create compute pipeline: {}", [error.localizedDescription UTF8String]);
+            } else {
+                RADRAY_ERR_LOG("metal cannot create compute pipeline: {}", "unknown error");
             }
             return nullptr;
         }
-        auto result = make_unique<ComputePipelineStateMetal>();
-        result->_device = this;
-        result->_pipelineState = pso;
-        return result;
+        return make_unique<ComputePipelineStateMetal>(this, pso);
     }
 }
 
@@ -639,10 +506,7 @@ Nullable<unique_ptr<Sampler>> DeviceMetal::CreateSampler(const SamplerDescriptor
             RADRAY_ERR_LOG("metal cannot create sampler");
             return nullptr;
         }
-        auto result = make_unique<SamplerMetal>();
-        result->_device = this;
-        result->_sampler = sampler;
-        return result;
+        return make_unique<SamplerMetal>(this, sampler);
     }
 }
 
@@ -956,8 +820,7 @@ SwapChainMetal::SwapChainMetal(
     }
     _backBufferTextures.reserve(backBufferCount);
     for (uint32_t i = 0; i < backBufferCount; i++) {
-        auto& tex = _backBufferTextures.emplace_back(make_unique<TextureMetal>());
-        tex->_device = _device;
+        auto& tex = _backBufferTextures.emplace_back(make_unique<TextureMetal>(_device, nil));
         tex->_isExternalOwned = true;
         auto& texDesc = tex->_desc;
         texDesc.Dim = TextureDimension::Dim2D;
@@ -967,7 +830,6 @@ SwapChainMetal::SwapChainMetal(
         texDesc.MipLevels = 1;
         texDesc.SampleCount = 1;
         texDesc.Format = format;
-        tex->_texture = nil;
     }
 }
 
@@ -1103,28 +965,39 @@ void BufferMetal::Unmap(uint64_t offset, uint64_t size) noexcept {
 
 BufferDescriptor BufferMetal::GetDesc() const noexcept { return _desc; }
 
-TextureMetal::~TextureMetal() noexcept { DestroyImpl(); }
-
 bool TextureMetal::IsValid() const noexcept { return _texture != nil; }
 
-void TextureMetal::Destroy() noexcept { DestroyImpl(); }
+TextureMetal::TextureMetal(
+    DeviceMetal* device,
+    id<MTLTexture> texture) noexcept
+    : _device(device),
+      _texture(texture) {}
 
-void TextureMetal::DestroyImpl() noexcept {
-    if (!_isExternalOwned) {
-        _texture = nil;
-    }
+void TextureMetal::Destroy() noexcept {
     _texture = nil;
+    _device = nullptr;
 }
 
-ShaderMetal::~ShaderMetal() noexcept { DestroyImpl(); }
+ShaderMetal::ShaderMetal(
+    DeviceMetal* device,
+    id<MTLLibrary> library) noexcept
+    : _device(device),
+      _library(library) {}
 
 bool ShaderMetal::IsValid() const noexcept { return _library != nil; }
 
-void ShaderMetal::Destroy() noexcept { DestroyImpl(); }
-
-void ShaderMetal::DestroyImpl() noexcept { _library = nil; }
+void ShaderMetal::Destroy() noexcept {
+    _library = nil;
+    _device = nullptr;
+}
 
 RootSignatureMetal::~RootSignatureMetal() noexcept { DestroyImpl(); }
+
+RootSignatureMetal::RootSignatureMetal(
+    DeviceMetal* device,
+    const RootSignatureDescriptor& desc) noexcept
+    : _device(device),
+      _container(desc) {}
 
 bool RootSignatureMetal::IsValid() const noexcept { return _device != nullptr; }
 
@@ -1144,15 +1017,21 @@ void GraphicsPipelineStateMetal::Destroy() noexcept { DestroyImpl(); }
 void GraphicsPipelineStateMetal::DestroyImpl() noexcept {
     _pipelineState = nil;
     _depthStencilState = nil;
+    _device = nullptr;
 }
 
-ComputePipelineStateMetal::~ComputePipelineStateMetal() noexcept { DestroyImpl(); }
+ComputePipelineStateMetal::ComputePipelineStateMetal(
+    DeviceMetal* device,
+    id<MTLComputePipelineState> pipelineState) noexcept
+    : _device(device),
+      _pipelineState(pipelineState) {}
 
 bool ComputePipelineStateMetal::IsValid() const noexcept { return _pipelineState != nil; }
 
-void ComputePipelineStateMetal::Destroy() noexcept { DestroyImpl(); }
-
-void ComputePipelineStateMetal::DestroyImpl() noexcept { _pipelineState = nil; }
+void ComputePipelineStateMetal::Destroy() noexcept {
+    _pipelineState = nil;
+    _device = nullptr;
+}
 
 GraphicsCmdEncoderMetal::~GraphicsCmdEncoderMetal() noexcept { DestroyImpl(); }
 
@@ -1306,7 +1185,7 @@ void GraphicsCmdEncoderMetal::SetScissor(Rect rect) noexcept {
 void GraphicsCmdEncoderMetal::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
     for (uint32_t i = 0; i < vbv.size(); i++) {
         auto* mtlBuf = CastMtlObject(vbv[i].Target);
-        [_encoder setVertexBuffer:mtlBuf->_buffer offset:vbv[i].Offset atIndex:(kMtlVertexBufferBase - i)];
+        [_encoder setVertexBuffer:mtlBuf->_buffer offset:vbv[i].Offset atIndex:i];
     }
 }
 
@@ -1457,13 +1336,21 @@ void ComputeCmdEncoderMetal::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t
     _threadGroupSize = MTLSizeMake(x, y, z);
 }
 
-TextureViewMetal::~TextureViewMetal() noexcept { DestroyImpl(); }
+TextureViewMetal::TextureViewMetal(
+    DeviceMetal* device,
+    TextureMetal* texture,
+    id<MTLTexture> textureView) noexcept
+    : _device(device),
+      _texture(texture),
+      _textureView(textureView) {}
 
 bool TextureViewMetal::IsValid() const noexcept { return _textureView != nil; }
 
-void TextureViewMetal::Destroy() noexcept { DestroyImpl(); }
-
-void TextureViewMetal::DestroyImpl() noexcept { _textureView = nil; }
+void TextureViewMetal::Destroy() noexcept {
+    _textureView = nil;
+    _texture = nullptr;
+    _device = nullptr;
+}
 
 BufferViewMetal::BufferViewMetal(
     DeviceMetal* device,
@@ -1478,13 +1365,18 @@ void BufferViewMetal::Destroy() noexcept {
     _device = nullptr;
 }
 
-SamplerMetal::~SamplerMetal() noexcept { DestroyImpl(); }
+SamplerMetal::SamplerMetal(
+    DeviceMetal* device,
+    id<MTLSamplerState> sampler) noexcept
+    : _device(device),
+      _sampler(sampler) {}
 
 bool SamplerMetal::IsValid() const noexcept { return _sampler != nil; }
 
-void SamplerMetal::Destroy() noexcept { DestroyImpl(); }
-
-void SamplerMetal::DestroyImpl() noexcept { _sampler = nil; }
+void SamplerMetal::Destroy() noexcept {
+    _sampler = nil;
+    _device = nullptr;
+}
 
 DescriptorSetMetal::~DescriptorSetMetal() noexcept { DestroyImpl(); }
 

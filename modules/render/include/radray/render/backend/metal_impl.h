@@ -259,32 +259,37 @@ public:
 
 class TextureMetal final : public Texture {
 public:
-    ~TextureMetal() noexcept override;
+    TextureMetal(
+        DeviceMetal* device,
+        id<MTLTexture> texture) noexcept;
+
+    ~TextureMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLTexture> _texture{nil};
     TextureDescriptor _desc{};
+    string _name;
     bool _isExternalOwned{false};
 };
 
 class ShaderMetal final : public Shader {
 public:
-    ~ShaderMetal() noexcept override;
+    ShaderMetal(
+        DeviceMetal* device,
+        id<MTLLibrary> library) noexcept;
+
+    ~ShaderMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLLibrary> _library{nil};
 };
@@ -298,6 +303,10 @@ struct CachedStaticSampler {
 
 class RootSignatureMetal final : public RootSignature {
 public:
+    RootSignatureMetal(
+        DeviceMetal* device,
+        const RootSignatureDescriptor& desc) noexcept;
+
     ~RootSignatureMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -337,18 +346,19 @@ public:
 
 class ComputePipelineStateMetal final : public ComputePipelineState {
 public:
-    ~ComputePipelineStateMetal() noexcept override;
+    ComputePipelineStateMetal(
+        DeviceMetal* device,
+        id<MTLComputePipelineState> pipelineState) noexcept;
+
+    ~ComputePipelineStateMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLComputePipelineState> _pipelineState{nil};
-    MTLSize _threadGroupSize{1, 1, 1};
 };
 
 class GraphicsCmdEncoderMetal final : public GraphicsCommandEncoder {
@@ -434,15 +444,18 @@ public:
 
 class TextureViewMetal final : public TextureView {
 public:
-    ~TextureViewMetal() noexcept override;
+    TextureViewMetal(
+        DeviceMetal* device,
+        TextureMetal* texture,
+        id<MTLTexture> textureView) noexcept;
+
+    ~TextureViewMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     TextureMetal* _texture{nullptr};
     id<MTLTexture> _textureView{nil};
@@ -469,15 +482,17 @@ public:
 
 class SamplerMetal final : public Sampler {
 public:
-    ~SamplerMetal() noexcept override;
+    SamplerMetal(
+        DeviceMetal* device,
+        id<MTLSamplerState> sampler) noexcept;
+
+    ~SamplerMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLSamplerState> _sampler{nil};
 };
