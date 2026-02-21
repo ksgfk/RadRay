@@ -282,10 +282,44 @@ protected:
     std::atomic_bool _needReLoop{false};
 };
 
+/*
+struct VS_INPUT {
+    [[vk::location(0)]] float2 pos : POSITION;
+    [[vk::location(1)]] float4 color : COLOR0;
+    [[vk::location(2)]] float2 uv : TEXCOORD0;
+};
+
+struct PS_INPUT {
+    float4 pos : SV_POSITION;
+    float4 color : COLOR0;
+    float2 uv : TEXCOORD0;
+};
+
+struct PushConstant {
+    float4x4 proj;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstant> _PC : register(b0);
+[[vk::binding(0, 0)]] Texture2D _Tex : register(t0);
+[[vk::binding(1, 0)]] SamplerState _Sampler : register(s0);
+
+PS_INPUT VSMain(VS_INPUT input) {
+    PS_INPUT output;
+    output.pos = mul(_PC.proj, float4(input.pos, 0.0f, 1.0f));
+    output.color = input.color;
+    output.uv = input.uv;
+    return output;
+}
+
+float4 PSMain(PS_INPUT input) : SV_Target {
+    return input.color * _Tex.Sample(_Sampler, input.uv);
+}
+*/
 std::span<const byte> GetImGuiShaderDXIL_VS() noexcept;
 std::span<const byte> GetImGuiShaderDXIL_PS() noexcept;
 std::span<const byte> GetImGuiShaderSPIRV_VS() noexcept;
 std::span<const byte> GetImGuiShaderSPIRV_PS() noexcept;
+std::span<const byte> GetImGuiShaderMETALLIB() noexcept;
 
 }  // namespace radray
 

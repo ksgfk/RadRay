@@ -861,8 +861,6 @@ struct IndexBufferView {
 
 struct DeviceDetail {
     string GpuName{};
-    uint32_t VendorId{0};
-    uint32_t DeviceId{0};
     uint32_t CBufferAlignment{0};
     uint32_t TextureDataPitchAlignment{1};
     uint64_t VramBudget{0};

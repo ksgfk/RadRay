@@ -34,6 +34,12 @@ MTLCullMode MapCullMode(CullMode v) noexcept;
 MTLWinding MapWinding(FrontFace v) noexcept;
 MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept;
 
+struct ArgumentDescriptorInfo {
+    MTLDataType dataType;
+    MTLBindingAccess access;
+};
+ArgumentDescriptorInfo MapResourceBindTypeToArgument(ResourceBindType type) noexcept;
+
 }  // namespace radray::render::metal
 
 std::string_view format_as(MTLLanguageVersion v) noexcept;

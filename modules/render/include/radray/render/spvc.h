@@ -137,6 +137,25 @@ public:
     ShaderStage UsedStages{ShaderStage::UNKNOWN};
 };
 
+enum class MslPlatform {
+    MacOS,
+    IOS
+};
+
+struct SpirvToMslOption {
+    uint32_t MslMajor{2};
+    uint32_t MslMinor{0};
+    uint32_t MslPatch{0};
+    MslPlatform Platform{MslPlatform::MacOS};
+    bool UseArgumentBuffers{false};
+    bool ForceNativeArrays{false};
+};
+
+struct SpirvToMslOutput {
+    string MslSource;
+    string EntryPointName;
+};
+
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
@@ -146,6 +165,12 @@ namespace radray::render {
 class DxcReflectionRadrayExt;
 
 std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes, std::span<const DxcReflectionRadrayExt*> extInfos);
+
+std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
+    std::span<const byte> spirvData,
+    std::string_view entryPoint,
+    ShaderStage stage,
+    const SpirvToMslOption& option = {});
 
 }  // namespace radray::render
 

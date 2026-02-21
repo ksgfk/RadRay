@@ -298,6 +298,26 @@ MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept {
     return result;
 }
 
+ArgumentDescriptorInfo MapResourceBindTypeToArgument(ResourceBindType type) noexcept {
+    switch (type) {
+        case ResourceBindType::CBuffer:
+            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
+        case ResourceBindType::Buffer:
+            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
+        case ResourceBindType::Texture:
+            return {MTLDataTypeTexture, MTLBindingAccessReadOnly};
+        case ResourceBindType::Sampler:
+            return {MTLDataTypeSampler, MTLBindingAccessReadOnly};
+        case ResourceBindType::RWBuffer:
+            return {MTLDataTypePointer, MTLBindingAccessReadWrite};
+        case ResourceBindType::RWTexture:
+            return {MTLDataTypeTexture, MTLBindingAccessReadWrite};
+        case ResourceBindType::UNKNOWN:
+            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
+    }
+    return {MTLDataTypePointer, MTLBindingAccessReadOnly};
+}
+
 }  // namespace radray::render::metal
 
 std::string_view format_as(MTLLanguageVersion v) noexcept {

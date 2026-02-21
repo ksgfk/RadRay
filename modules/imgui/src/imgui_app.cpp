@@ -88,6 +88,9 @@ ImGuiRenderer::ImGuiRenderer(
         shaderVS = device->CreateShader(descVS).Unwrap();
         render::ShaderDescriptor descPS{GetImGuiShaderSPIRV_PS(), render::ShaderBlobCategory::SPIRV};
         shaderPS = device->CreateShader(descPS).Unwrap();
+    } else if (backendType == render::RenderBackend::Metal) {
+        render::ShaderDescriptor desc{GetImGuiShaderMETALLIB(), render::ShaderBlobCategory::METALLIB};
+        shaderVS = device->CreateShader(desc).Unwrap();
     } else {
         throw ImGuiApplicationException("unsupported backend {}", backendType);
     }
@@ -110,7 +113,7 @@ ImGuiRenderer::ImGuiRenderer(
     staticSampler.SetIndex = 0;
     staticSampler.Stages = render::ShaderStage::Pixel;
     staticSampler.Desc = sampler;
-    if (backendType == render::RenderBackend::Vulkan) {
+    if (backendType == render::RenderBackend::Vulkan || backendType == render::RenderBackend::Metal) {
         staticSampler.Slot = 1;
     }
     render::RootSignatureDescriptorSet descSet{rsElems};
@@ -139,7 +142,7 @@ ImGuiRenderer::ImGuiRenderer(
     render::GraphicsPipelineStateDescriptor psoDesc{
         _rootSig.get(),
         render::ShaderEntry{shaderVS.get(), "VSMain"},
-        render::ShaderEntry{shaderPS.get(), "PSMain"},
+        render::ShaderEntry{backendType == render::RenderBackend::Metal ? shaderVS.get() : shaderPS.get(), "PSMain"},
         std::span{&vbLayout, 1},
         render::PrimitiveState::Default(),
         std::nullopt,
@@ -630,6 +633,12 @@ void ImGuiApplication::Init(const ImGuiAppConfig& config_) {
             devDesc = std::get<render::D3D12DeviceDescriptor>(config.DeviceDesc.value());
         }
         _device = CreateDevice(devDesc).Unwrap();
+    } else if (config.Backend == render::RenderBackend::Metal) {
+        render::MetalDeviceDescriptor devDesc{};
+        if (config.DeviceDesc.has_value()) {
+            devDesc = std::get<render::MetalDeviceDescriptor>(config.DeviceDesc.value());
+        }
+        _device = CreateDevice(devDesc).Unwrap();
     }
     if (!_device) {
         throw ImGuiApplicationException("create device failed");
@@ -795,6 +804,10 @@ void ImGuiApplication::LoopSingleThreaded() {
             }
             uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
             _backBuffers[backBufferIndex] = rtOpt.Release();
+            // Metal drawable textures change each frame; invalidate cached view
+            if (_device->GetBackend() == render::RenderBackend::Metal) {
+                _defaultRTVs[backBufferIndex].reset();
+            }
         }
         auto submitCmdBufs = this->OnRender(state.InFlightFrameIndex);
         {
@@ -923,6 +936,9 @@ void ImGuiApplication::LoopMultiThreaded() {
                 }
                 uint32_t backBufferIndex = _swapchain->GetCurrentBackBufferIndex();
                 _backBuffers[backBufferIndex] = rtOpt.Release();
+                if (_device->GetBackend() == render::RenderBackend::Metal) {
+                    _defaultRTVs[backBufferIndex].reset();
+                }
             }
             auto submitCmdBufs = this->OnRender(state.InFlightFrameIndex);
             {
@@ -1153,6 +1169,8 @@ ImGuiAppConfig ImGuiApplication::ParseArgsSimple(int argc, char** argv) noexcept
                 backend = radray::render::RenderBackend::Vulkan;
             } else if (backendStr == "d3d12") {
                 backend = radray::render::RenderBackend::D3D12;
+            } else if (backendStr == "metal") {
+                backend = radray::render::RenderBackend::Metal;
             } else {
                 RADRAY_WARN_LOG("unsupported backend: {}, using default Vulkan backend.", backendStr);
             }

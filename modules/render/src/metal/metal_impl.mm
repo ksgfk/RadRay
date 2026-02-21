@@ -5,15 +5,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Cocoa/Cocoa.h>
 
-#if defined(RADRAY_PLATFORM_MACOS)
-#import <IOKit/IOKitLib.h>
-#endif
-
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/render/backend/metal_helper.h>
 
 namespace radray::render::metal {
+
+// Metal shares buffer binding space between vertex buffers and shader buffers.
+// Bind vertex buffers at high indices (30, 29, ...) to avoid conflicts with
+// shader buffer bindings (push constants, descriptor sets) at low indices.
+static constexpr uint32_t kMtlVertexBufferBase = 30;
 
 #if defined(RADRAY_PLATFORM_MACOS)
 static uint32_t GetIORegistryEntryProperty(io_registry_entry_t entry, CFStringRef propertyName) {
@@ -24,7 +25,9 @@ static uint32_t GetIORegistryEntryProperty(io_registry_entry_t entry, CFStringRe
     if (cfProp) {
         if (CFGetTypeID(cfProp) == CFDataGetTypeID()) {
             const uint32_t* pValue = reinterpret_cast<const uint32_t*>(CFDataGetBytePtr(static_cast<CFDataRef>(cfProp)));
-            if (pValue) { value = *pValue; }
+            if (pValue) {
+                value = *pValue;
+            }
         }
         CFRelease(cfProp);
     }
@@ -72,7 +75,7 @@ static void QueryVendorAndDeviceId(id<MTLDevice> device, uint32_t* outVendorId, 
     if (!isFound) {
         io_iterator_t entryIterator;
         if (IOServiceGetMatchingServices(kIOMainPortDefault,
-                IOServiceMatching("IOPCIDevice"), &entryIterator) == kIOReturnSuccess) {
+                                         IOServiceMatching("IOPCIDevice"), &entryIterator) == kIOReturnSuccess) {
             io_registry_entry_t entry;
             bool isUMA = device.hasUnifiedMemory;
             while (!isFound && (entry = IOIteratorNext(entryIterator))) {
@@ -124,7 +127,7 @@ Nullable<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32_t sl
         }
         auto& q = queues[slot];
         if (q == nullptr) {
-            id<MTLCommandQueue> mtlQueue = [_device newCommandQueue];
+            id<MTLCommandQueue> mtlQueue = [_device newCommandQueueWithMaxCommandBufferCount:512];
             if (mtlQueue == nil) {
                 RADRAY_ERR_LOG("metal cannot create command queue");
                 return nullptr;
@@ -301,6 +304,16 @@ Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewD
 Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     @autoreleasepool {
         auto* mtlTex = CastMtlObject(desc.Target);
+        // frameBufferOnly textures (e.g. CAMetalLayer drawables) cannot create views;
+        // use the original texture directly as the "view"
+        if (mtlTex->_texture.isFramebufferOnly) {
+            auto view = make_unique<TextureViewMetal>();
+            view->_device = this;
+            view->_texture = mtlTex;
+            view->_textureView = mtlTex->_texture;
+            view->_desc = desc;
+            return view;
+        }
         MTLPixelFormat fmt = MapPixelFormat(desc.Format);
         MTLTextureType texType = MapTextureViewType(desc.Dim);
         NSRange levelRange = NSMakeRange(desc.Range.BaseMipLevel,
@@ -406,7 +419,12 @@ Nullable<unique_ptr<RootSignature>> DeviceMetal::CreateRootSignature(const RootS
             }
             sd.maxAnisotropy = ss.Desc.AnisotropyClamp > 0 ? ss.Desc.AnisotropyClamp : 1;
             id<MTLSamplerState> sampler = [_device newSamplerStateWithDescriptor:sd];
-            rootSig->_cachedStaticSamplers.push_back({sampler, ss.Slot, ss.Stages});
+            CachedStaticSampler css;
+            css.sampler = sampler;
+            css.Slot = ss.Slot;
+            css.SetIndex = ss.SetIndex;
+            css.Stages = ss.Stages;
+            rootSig->_cachedStaticSamplers.push_back(css);
         }
         return rootSig;
     }
@@ -439,13 +457,14 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceMetal::CreateGraphicsPipelineS
             MTLVertexDescriptor* vd = [[MTLVertexDescriptor alloc] init];
             for (uint32_t i = 0; i < desc.VertexLayouts.size(); i++) {
                 auto& layout = desc.VertexLayouts[i];
-                vd.layouts[i].stride = layout.ArrayStride;
-                vd.layouts[i].stepFunction = MapVertexStepFunction(layout.StepMode);
-                vd.layouts[i].stepRate = 1;
+                uint32_t mtlBufIdx = kMtlVertexBufferBase - i;
+                vd.layouts[mtlBufIdx].stride = layout.ArrayStride;
+                vd.layouts[mtlBufIdx].stepFunction = MapVertexStepFunction(layout.StepMode);
+                vd.layouts[mtlBufIdx].stepRate = 1;
                 for (auto& elem : layout.Elements) {
                     vd.attributes[elem.Location].format = MapVertexFormat(elem.Format);
                     vd.attributes[elem.Location].offset = elem.Offset;
-                    vd.attributes[elem.Location].bufferIndex = i;
+                    vd.attributes[elem.Location].bufferIndex = mtlBufIdx;
                 }
             }
             pd.vertexDescriptor = vd;
@@ -563,10 +582,64 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
             RADRAY_ERR_LOG("metal descriptor set index {} out of range", index);
             return nullptr;
         }
+        auto& layout = mtlRootSig->_container._descriptorSets[index];
+        NSMutableArray<MTLArgumentDescriptor*>* argDescs = [[NSMutableArray alloc] init];
+        ShaderStages combinedStages{ShaderStage::UNKNOWN};
+        for (auto& elem : layout.Elements) {
+            auto info = MapResourceBindTypeToArgument(elem.Type);
+            uint32_t count = std::max(elem.Count, 1u);
+            for (uint32_t i = 0; i < count; i++) {
+                MTLArgumentDescriptor* argDesc = [[MTLArgumentDescriptor alloc] init];
+                argDesc.dataType = info.dataType;
+                argDesc.access = info.access;
+                argDesc.index = elem.Slot + i;
+                if (info.dataType == MTLDataTypeTexture) {
+                    argDesc.textureType = MTLTextureType2D;
+                }
+                [argDescs addObject:argDesc];
+            }
+            combinedStages = combinedStages | elem.Stages;
+        }
+        // Include static samplers belonging to this descriptor set
+        for (auto& ss : mtlRootSig->_cachedStaticSamplers) {
+            if (ss.SetIndex == index) {
+                MTLArgumentDescriptor* argDesc = [[MTLArgumentDescriptor alloc] init];
+                argDesc.dataType = MTLDataTypeSampler;
+                argDesc.access = MTLBindingAccessReadOnly;
+                argDesc.index = ss.Slot;
+                [argDescs addObject:argDesc];
+                combinedStages = combinedStages | ss.Stages;
+            }
+        }
+        if (argDescs.count == 0) {
+            RADRAY_ERR_LOG("metal descriptor set {} has no elements", index);
+            return nullptr;
+        }
+        id<MTLArgumentEncoder> encoder = [_device newArgumentEncoderWithArguments:argDescs];
+        if (encoder == nil) {
+            RADRAY_ERR_LOG("metal cannot create argument encoder for set {}", index);
+            return nullptr;
+        }
+        id<MTLBuffer> argBuffer = [_device newBufferWithLength:encoder.encodedLength
+                                                       options:MTLResourceStorageModeShared];
+        if (argBuffer == nil) {
+            RADRAY_ERR_LOG("metal cannot create argument buffer for set {}", index);
+            return nullptr;
+        }
+        [encoder setArgumentBuffer:argBuffer offset:0];
+        // Encode static samplers into the argument buffer
+        for (auto& ss : mtlRootSig->_cachedStaticSamplers) {
+            if (ss.SetIndex == index) {
+                [encoder setSamplerState:ss.sampler atIndex:ss.Slot];
+            }
+        }
         auto ds = make_unique<DescriptorSetMetal>();
         ds->_device = this;
         ds->_rootSig = mtlRootSig;
         ds->_setIndex = index;
+        ds->_argumentEncoder = encoder;
+        ds->_argumentBuffer = argBuffer;
+        ds->_combinedStages = combinedStages;
         return ds;
     }
 }
@@ -808,10 +881,10 @@ void CmdBufferMetal::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer*
             _blitEncoder = [_cmdBuffer blitCommandEncoder];
         }
         [_blitEncoder copyFromBuffer:mtlSrc->_buffer
-                 sourceOffset:srcOffset
-                     toBuffer:mtlDst->_buffer
-            destinationOffset:dstOffset
-                         size:size];
+                        sourceOffset:srcOffset
+                            toBuffer:mtlDst->_buffer
+                   destinationOffset:dstOffset
+                                size:size];
     }
 }
 
@@ -825,11 +898,11 @@ void CmdBufferMetal::CopyBufferToTexture(Texture* dst, SubresourceRange dstRange
             _blitEncoder = [_cmdBuffer blitCommandEncoder];
         }
         uint32_t mipLevels = dstRange.MipLevelCount == SubresourceRange::All
-            ? texDesc.MipLevels - dstRange.BaseMipLevel
-            : dstRange.MipLevelCount;
+                                 ? texDesc.MipLevels - dstRange.BaseMipLevel
+                                 : dstRange.MipLevelCount;
         uint32_t layerCount = dstRange.ArrayLayerCount == SubresourceRange::All
-            ? texDesc.DepthOrArraySize - dstRange.BaseArrayLayer
-            : dstRange.ArrayLayerCount;
+                                  ? texDesc.DepthOrArraySize - dstRange.BaseArrayLayer
+                                  : dstRange.ArrayLayerCount;
         uint64_t bufferOffset = srcOffset;
         for (uint32_t mip = 0; mip < mipLevels; mip++) {
             uint32_t mipLevel = dstRange.BaseMipLevel + mip;
@@ -840,14 +913,14 @@ void CmdBufferMetal::CopyBufferToTexture(Texture* dst, SubresourceRange dstRange
             for (uint32_t layer = 0; layer < layerCount; layer++) {
                 uint32_t dstSlice = dstRange.BaseArrayLayer + layer;
                 [_blitEncoder copyFromBuffer:mtlSrc->_buffer
-                           sourceOffset:bufferOffset
-                      sourceBytesPerRow:bytesPerRow
-                    sourceBytesPerImage:bytesPerImage
-                             sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
-                              toTexture:mtlDst->_texture
-                       destinationSlice:dstSlice
-                       destinationLevel:mipLevel
-                      destinationOrigin:MTLOriginMake(0, 0, 0)];
+                                sourceOffset:bufferOffset
+                           sourceBytesPerRow:bytesPerRow
+                         sourceBytesPerImage:bytesPerImage
+                                  sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
+                                   toTexture:mtlDst->_texture
+                            destinationSlice:dstSlice
+                            destinationLevel:mipLevel
+                           destinationOrigin:MTLOriginMake(0, 0, 0)];
                 bufferOffset += bytesPerImage;
             }
         }
@@ -874,7 +947,11 @@ FenceStatus FenceMetal::GetStatus() const noexcept {
 void FenceMetal::Wait() noexcept {
     if (!_submitted) return;
     if (_event.signaledValue >= _targetValue) return;
-    dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+    if (@available(macOS 14.0, *)) {
+        [_event waitUntilSignaledValue:_targetValue timeoutMS:UINT64_MAX];
+    } else {
+        dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+    }
 }
 
 void FenceMetal::Reset() noexcept {
@@ -898,10 +975,7 @@ bool SwapChainMetal::IsValid() const noexcept { return _layer != nil; }
 void SwapChainMetal::Destroy() noexcept { DestroyImpl(); }
 
 void SwapChainMetal::DestroyImpl() noexcept {
-    if (_drawables != nil) {
-        [_drawables removeAllObjects];
-        _drawables = nil;
-    }
+    _drawables = nil;
     if (_imageAcquiredSemaphore != nullptr) {
         // Drain semaphore before release
         for (uint32_t i = 0; i < _backBufferCount - 1; i++) {
@@ -1150,31 +1224,35 @@ void GraphicsCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, 
 
 void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     auto* ds = CastMtlObject(set);
-    if (!ds || !ds->_rootSig) return;
-    if (slot >= ds->_rootSig->_container._descriptorSets.size()) return;
-    auto& layout = ds->_rootSig->_container._descriptorSets[slot];
-    for (auto& binding : ds->_bindings) {
-        for (auto& elem : layout.Elements) {
-            if (elem.Slot != binding.Slot) continue;
-            auto tag = binding.View->GetTag();
-            if (tag == RenderObjectTag::TextureView) {
-                auto* texView = static_cast<TextureViewMetal*>(binding.View);
-                if (elem.Stages.HasFlag(ShaderStage::Vertex)) {
-                    [_encoder setVertexTexture:texView->_textureView atIndex:elem.Slot];
-                }
-                if (elem.Stages.HasFlag(ShaderStage::Pixel)) {
-                    [_encoder setFragmentTexture:texView->_textureView atIndex:elem.Slot];
-                }
-            } else if (tag == RenderObjectTag::BufferView) {
-                auto* bufView = static_cast<BufferViewMetal*>(binding.View);
-                if (elem.Stages.HasFlag(ShaderStage::Vertex)) {
-                    [_encoder setVertexBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
-                }
-                if (elem.Stages.HasFlag(ShaderStage::Pixel)) {
-                    [_encoder setFragmentBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
-                }
-            }
+    if (!ds || !ds->_argumentBuffer) return;
+
+    uint32_t bufferIndex = ds->_setIndex;
+    if (ds->_combinedStages.HasFlag(ShaderStage::Vertex)) {
+        [_encoder setVertexBuffer:ds->_argumentBuffer offset:0 atIndex:bufferIndex];
+    }
+    if (ds->_combinedStages.HasFlag(ShaderStage::Pixel)) {
+        [_encoder setFragmentBuffer:ds->_argumentBuffer offset:0 atIndex:bufferIndex];
+    }
+
+    // Declare resource residency (batch)
+    MTLRenderStages stages = 0;
+    if (ds->_combinedStages.HasFlag(ShaderStage::Vertex)) stages |= MTLRenderStageVertex;
+    if (ds->_combinedStages.HasFlag(ShaderStage::Pixel)) stages |= MTLRenderStageFragment;
+    vector<id<MTLResource>> readResources;
+    vector<id<MTLResource>> readWriteResources;
+    for (auto& tracked : ds->_trackedResources) {
+        if (tracked.resource == nil) continue;
+        if (tracked.usage & MTLResourceUsageWrite) {
+            readWriteResources.push_back(tracked.resource);
+        } else {
+            readResources.push_back(tracked.resource);
         }
+    }
+    if (!readResources.empty()) {
+        [_encoder useResources:readResources.data() count:readResources.size() usage:MTLResourceUsageRead stages:stages];
+    }
+    if (!readWriteResources.empty()) {
+        [_encoder useResources:readWriteResources.data() count:readWriteResources.size() usage:(MTLResourceUsageRead | MTLResourceUsageWrite) stages:stages];
     }
 }
 
@@ -1238,7 +1316,7 @@ void GraphicsCmdEncoderMetal::SetScissor(Rect rect) noexcept {
 void GraphicsCmdEncoderMetal::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
     for (uint32_t i = 0; i < vbv.size(); i++) {
         auto* mtlBuf = CastMtlObject(vbv[i].Target);
-        [_encoder setVertexBuffer:mtlBuf->_buffer offset:vbv[i].Offset atIndex:i];
+        [_encoder setVertexBuffer:mtlBuf->_buffer offset:vbv[i].Offset atIndex:(kMtlVertexBufferBase - i)];
     }
 }
 
@@ -1325,21 +1403,24 @@ void ComputeCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, u
 
 void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
     auto* ds = CastMtlObject(set);
-    if (!ds || !ds->_rootSig) return;
-    if (slot >= ds->_rootSig->_container._descriptorSets.size()) return;
-    auto& layout = ds->_rootSig->_container._descriptorSets[slot];
-    for (auto& binding : ds->_bindings) {
-        for (auto& elem : layout.Elements) {
-            if (elem.Slot != binding.Slot) continue;
-            auto tag = binding.View->GetTag();
-            if (tag == RenderObjectTag::TextureView) {
-                auto* texView = static_cast<TextureViewMetal*>(binding.View);
-                [_encoder setTexture:texView->_textureView atIndex:elem.Slot];
-            } else if (tag == RenderObjectTag::BufferView) {
-                auto* bufView = static_cast<BufferViewMetal*>(binding.View);
-                [_encoder setBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:elem.Slot];
-            }
+    if (!ds || !ds->_argumentBuffer) return;
+
+    [_encoder setBuffer:ds->_argumentBuffer offset:0 atIndex:ds->_setIndex];
+    vector<id<MTLResource>> readResources;
+    vector<id<MTLResource>> readWriteResources;
+    for (auto& tracked : ds->_trackedResources) {
+        if (tracked.resource == nil) continue;
+        if (tracked.usage & MTLResourceUsageWrite) {
+            readWriteResources.push_back(tracked.resource);
+        } else {
+            readResources.push_back(tracked.resource);
         }
+    }
+    if (!readResources.empty()) {
+        [_encoder useResources:readResources.data() count:readResources.size() usage:MTLResourceUsageRead];
+    }
+    if (!readWriteResources.empty()) {
+        [_encoder useResources:readWriteResources.data() count:readWriteResources.size() usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
     }
 }
 
@@ -1412,21 +1493,43 @@ void SamplerMetal::DestroyImpl() noexcept { _sampler = nil; }
 
 DescriptorSetMetal::~DescriptorSetMetal() noexcept { DestroyImpl(); }
 
-bool DescriptorSetMetal::IsValid() const noexcept { return _rootSig != nullptr; }
+bool DescriptorSetMetal::IsValid() const noexcept { return _argumentBuffer != nil; }
 
 void DescriptorSetMetal::Destroy() noexcept { DestroyImpl(); }
 
-void DescriptorSetMetal::DestroyImpl() noexcept { _bindings.clear(); }
+void DescriptorSetMetal::DestroyImpl() noexcept {
+    _trackedResources.clear();
+    _argumentEncoder = nil;
+    _argumentBuffer = nil;
+}
 
 void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
-    // update or add binding
-    for (auto& b : _bindings) {
-        if (b.Slot == slot && b.Index == index) {
-            b.View = view;
-            return;
+    @autoreleasepool {
+        if (_argumentEncoder == nil || _argumentBuffer == nil) return;
+        [_argumentEncoder setArgumentBuffer:_argumentBuffer offset:0];
+        uint32_t argIndex = slot + index;
+        id<MTLResource> res = nil;
+        MTLResourceUsage usage = MTLResourceUsageRead;
+        auto tag = view->GetTag();
+        if (tag == RenderObjectTag::TextureView) {
+            auto* texView = static_cast<TextureViewMetal*>(view);
+            [_argumentEncoder setTexture:texView->_textureView atIndex:argIndex];
+            res = texView->_textureView;
+        } else if (tag == RenderObjectTag::BufferView) {
+            auto* bufView = static_cast<BufferViewMetal*>(view);
+            [_argumentEncoder setBuffer:bufView->_buffer->_buffer offset:bufView->_desc.Range.Offset atIndex:argIndex];
+            res = bufView->_buffer->_buffer;
         }
+        if (res == nil) return;
+        for (auto& t : _trackedResources) {
+            if (t.argIndex == argIndex) {
+                t.resource = res;
+                t.usage = usage;
+                return;
+            }
+        }
+        _trackedResources.push_back({argIndex, res, usage});
     }
-    _bindings.push_back({slot, index, view});
 }
 
 BindlessArrayMetal::~BindlessArrayMetal() noexcept { DestroyImpl(); }
@@ -1451,7 +1554,10 @@ void BindlessArrayMetal::SetBuffer(uint32_t slot, BufferView* bufView) noexcept 
     // BUFFER layout: { uint64_t gpuAddress; uint64_t size; } — 16 bytes
     uint64_t gpuAddr = mtlBufView->_buffer->_buffer.gpuAddress + mtlBufView->_desc.Range.Offset;
     uint64_t bufSize = mtlBufView->_desc.Range.Size;
-    struct { uint64_t ptr; uint64_t size; } bufArg = { gpuAddr, bufSize };
+    struct {
+        uint64_t ptr;
+        uint64_t size;
+    } bufArg = {gpuAddr, bufSize};
     memcpy(pArg, &bufArg, sizeof(bufArg));
     MTLResourceUsage usage = mtlBufView->_desc.Usage.HasFlag(BufferUse::UnorderedAccess)
                                  ? (MTLResourceUsageRead | MTLResourceUsageWrite)
@@ -1469,7 +1575,9 @@ void BindlessArrayMetal::SetTexture(uint32_t slot, TextureView* texView, Sampler
     static constexpr uint64_t kSlotSize = sizeof(uint64_t) * 2;
     uint8_t* pArg = static_cast<uint8_t*>(_argumentBuffer.contents) + slot * kSlotSize;
     // TEXTURE layout: { MTLResourceID id; } — 8 bytes, padded to 16
-    struct { MTLResourceID id; } texArg = { mtlTexView->_textureView.gpuResourceID };
+    struct {
+        MTLResourceID id;
+    } texArg = {mtlTexView->_textureView.gpuResourceID};
     memcpy(pArg, &texArg, sizeof(texArg));
     MTLResourceUsage usage = mtlTexView->_desc.Usage.HasFlag(TextureUse::UnorderedAccess)
                                  ? (MTLResourceUsageRead | MTLResourceUsageWrite)
@@ -1514,10 +1622,6 @@ Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
         result->_detail.VramBudget = device.recommendedMaxWorkingSetSize;
         result->_detail.IsUMA = device.hasUnifiedMemory;
         result->_detail.IsBindlessArraySupported = [device supportsFamily:MTLGPUFamilyMetal3];
-#if defined(RADRAY_PLATFORM_MACOS)
-        QueryVendorAndDeviceId(device, &result->_detail.VendorId, &result->_detail.DeviceId);
-#endif
-
         RADRAY_INFO_LOG("metal select device: {}", result->_detail.GpuName);
         RADRAY_INFO_LOG("========== Metal Feature ==========");
         NSProcessInfo* pi = [NSProcessInfo processInfo];
@@ -1527,7 +1631,6 @@ Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
 #elif defined(RADRAY_PLATFORM_IOS)
         RADRAY_INFO_LOG("OS: iOS {}.{}.{}", (int)ver.majorVersion, (int)ver.minorVersion, (int)ver.patchVersion);
 #endif
-        RADRAY_INFO_LOG("Vendor ID: 0x{:04X}, Device ID: 0x{:04X}", result->_detail.VendorId, result->_detail.DeviceId);
         RADRAY_INFO_LOG("UMA: {}, VRAM Budget: {}MB", result->_detail.IsUMA, result->_detail.VramBudget / (1024 * 1024));
         MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
         RADRAY_INFO_LOG("Support Metal 3: {}", [device supportsFamily:MTLGPUFamilyMetal3] ? true : false);

@@ -1,0 +1,7 @@
+if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPVCROSS)
+    add_executable(test_spvc_to_msl test_spvc_to_msl.cpp)
+    target_link_libraries(test_spvc_to_msl radraycore radrayrender GTest::gtest_main)
+    gtest_discover_tests(test_spvc_to_msl)
+    radray_optimize_flags_binary(test_spvc_to_msl)
+    radray_set_build_path(test_spvc_to_msl)
+endif()

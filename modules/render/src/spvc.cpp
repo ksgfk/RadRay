@@ -34,6 +34,8 @@ ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
 
 #include <spirv_cross.hpp>
+#include <spirv_cross_c.h>
+#include <spirv_msl.hpp>
 #include <radray/render/dxc.h>
 
 namespace radray::render {
@@ -479,6 +481,65 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> b
     }
     _MergeResourceBindings(desc);
     return desc;
+}
+
+static spv::ExecutionModel _MapShaderStageToExecutionModel(ShaderStage stage) {
+    switch (stage) {
+        case ShaderStage::Vertex: return spv::ExecutionModelVertex;
+        case ShaderStage::Pixel: return spv::ExecutionModelFragment;
+        case ShaderStage::Compute: return spv::ExecutionModelGLCompute;
+        default: return spv::ExecutionModelMax;
+    }
+}
+
+std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
+    std::span<const byte> spirvData,
+    std::string_view entryPoint,
+    ShaderStage stage,
+    const SpirvToMslOption& option) {
+    if (spirvData.size() % 4 != 0) {
+        RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
+        return std::nullopt;
+    }
+    try {
+        spirv_cross::CompilerMSL compiler{
+            std::bit_cast<const uint32_t*>(spirvData.data()),
+            spirvData.size() / sizeof(uint32_t)};
+
+        spirv_cross::CompilerMSL::Options mslOpt;
+        mslOpt.set_msl_version(option.MslMajor, option.MslMinor, option.MslPatch);
+        mslOpt.platform = (option.Platform == MslPlatform::IOS)
+                              ? spirv_cross::CompilerMSL::Options::iOS
+                              : spirv_cross::CompilerMSL::Options::macOS;
+        mslOpt.argument_buffers = option.UseArgumentBuffers;
+        mslOpt.force_native_arrays = option.ForceNativeArrays;
+        compiler.set_msl_options(mslOpt);
+
+        auto execModel = _MapShaderStageToExecutionModel(stage);
+        if (execModel == spv::ExecutionModelMax) {
+            RADRAY_ERR_LOG("unsupported shader stage for MSL conversion");
+            return std::nullopt;
+        }
+        compiler.set_entry_point(string(entryPoint), execModel);
+
+        std::string msl = compiler.compile();
+        std::string mslEntryPoint = compiler.get_cleansed_entry_point_name(
+            string(entryPoint), execModel);
+
+        SpirvToMslOutput output;
+        output.MslSource = string(msl);
+        output.EntryPointName = string(mslEntryPoint);
+        return output;
+    } catch (const spirv_cross::CompilerError& e) {
+        RADRAY_ERR_LOG("SPIRV-Cross MSL Compiler Error: {}", e.what());
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        RADRAY_ERR_LOG("SPIRV-Cross MSL error: {}", e.what());
+        return std::nullopt;
+    } catch (...) {
+        RADRAY_ERR_LOG("SPIRV-Cross MSL error: unknown error");
+        return std::nullopt;
+    }
 }
 
 }  // namespace radray::render

@@ -271,6 +271,7 @@ public:
 struct CachedStaticSampler {
     id<MTLSamplerState> sampler{nil};
     uint32_t Slot{0};
+    uint32_t SetIndex{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
@@ -458,12 +459,6 @@ public:
     id<MTLSamplerState> _sampler{nil};
 };
 
-struct DescriptorBindingMetal {
-    uint32_t Slot{0};
-    uint32_t Index{0};
-    ResourceView* View{nullptr};
-};
-
 class DescriptorSetMetal final : public DescriptorSet {
 public:
     ~DescriptorSetMetal() noexcept override;
@@ -477,10 +472,19 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    struct TrackedResource {
+        uint32_t argIndex{0};
+        id<MTLResource> resource{nil};
+        MTLResourceUsage usage{MTLResourceUsageRead};
+    };
+
     DeviceMetal* _device{nullptr};
     RootSignatureMetal* _rootSig{nullptr};
     uint32_t _setIndex{0};
-    vector<DescriptorBindingMetal> _bindings;
+    id<MTLArgumentEncoder> _argumentEncoder{nil};
+    id<MTLBuffer> _argumentBuffer{nil};
+    vector<TrackedResource> _trackedResources;
+    ShaderStages _combinedStages{ShaderStage::UNKNOWN};
 };
 
 class BindlessArrayMetal final : public BindlessArray {

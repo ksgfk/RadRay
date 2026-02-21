@@ -44,7 +44,7 @@ if (RADRAY_ENABLE_METAL)
         "-framework Metal"
         "-framework QuartzCore")
     if (RADRAY_PLATFORM_MACOS)
-        target_link_libraries(radrayrender PRIVATE "-framework Cocoa" "-framework IOKit")
+        target_link_libraries(radrayrender PRIVATE "-framework Cocoa")
     elseif (RADRAY_PLATFORM_IOS)
         target_link_libraries(radrayrender PRIVATE "-framework UIKit")
     endif()
