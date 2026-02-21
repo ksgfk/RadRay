@@ -318,8 +318,12 @@ VkFormat MapType(TextureFormat v) noexcept {
 
 VkImageType MapType(TextureDimension v) noexcept {
     switch (v) {
-        case TextureDimension::Dim1D: return VK_IMAGE_TYPE_1D;
-        case TextureDimension::Dim2D: return VK_IMAGE_TYPE_2D;
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim1DArray: return VK_IMAGE_TYPE_1D;
+        case TextureDimension::Dim2D:
+        case TextureDimension::Dim2DArray:
+        case TextureDimension::Cube:
+        case TextureDimension::CubeArray: return VK_IMAGE_TYPE_2D;
         case TextureDimension::Dim3D: return VK_IMAGE_TYPE_3D;
         case TextureDimension::UNKNOWN: return VK_IMAGE_TYPE_MAX_ENUM;
     }
@@ -339,16 +343,16 @@ VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept {
     }
 }
 
-VkImageViewType MapType(TextureViewDimension v) noexcept {
+VkImageViewType MapViewType(TextureDimension v) noexcept {
     switch (v) {
-        case TextureViewDimension::Dim1D: return VK_IMAGE_VIEW_TYPE_1D;
-        case TextureViewDimension::Dim2D: return VK_IMAGE_VIEW_TYPE_2D;
-        case TextureViewDimension::Dim3D: return VK_IMAGE_VIEW_TYPE_3D;
-        case TextureViewDimension::Dim1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
-        case TextureViewDimension::Dim2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-        case TextureViewDimension::Cube: return VK_IMAGE_VIEW_TYPE_CUBE;
-        case TextureViewDimension::CubeArray: return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-        case TextureViewDimension::UNKNOWN: return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+        case TextureDimension::Dim1D: return VK_IMAGE_VIEW_TYPE_1D;
+        case TextureDimension::Dim2D: return VK_IMAGE_VIEW_TYPE_2D;
+        case TextureDimension::Dim3D: return VK_IMAGE_VIEW_TYPE_3D;
+        case TextureDimension::Dim1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+        case TextureDimension::Dim2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        case TextureDimension::Cube: return VK_IMAGE_VIEW_TYPE_CUBE;
+        case TextureDimension::CubeArray: return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+        case TextureDimension::UNKNOWN: return VK_IMAGE_VIEW_TYPE_MAX_ENUM;
     }
     Unreachable();
 }

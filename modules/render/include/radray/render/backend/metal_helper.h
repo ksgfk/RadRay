@@ -16,7 +16,7 @@ MTLPixelFormat MapPixelFormat(TextureFormat v) noexcept;
 MTLLoadAction MapLoadAction(LoadAction v) noexcept;
 MTLStoreAction MapStoreAction(StoreAction v) noexcept;
 MTLTextureType MapTextureType(TextureDimension dim, uint32_t sampleCount) noexcept;
-MTLTextureType MapTextureViewType(TextureViewDimension dim) noexcept;
+MTLTextureType MapTextureViewType(TextureDimension dim) noexcept;
 MTLResourceOptions MapResourceOptions(MemoryType mem) noexcept;
 MTLStorageMode MapStorageMode(MemoryType mem) noexcept;
 MTLCompareFunction MapCompareFunction(CompareFunction v) noexcept;
@@ -43,5 +43,6 @@ ArgumentDescriptorInfo MapResourceBindTypeToArgument(ResourceBindType type) noex
 }  // namespace radray::render::metal
 
 std::string_view format_as(MTLLanguageVersion v) noexcept;
+std::string_view format_as(MTLArgumentBuffersTier v) noexcept;
 
 #endif  // RADRAY_ENABLE_METAL

@@ -426,7 +426,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     imgInfo.queueFamilyIndexCount = 0;
     imgInfo.pQueueFamilyIndices = nullptr;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (desc.Dim == TextureDimension::Dim2D && desc.DepthOrArraySize % 6 == 0 && desc.SampleCount == 1 && desc.Width == desc.Height) {
+    if (desc.Dim == TextureDimension::Cube || desc.Dim == TextureDimension::CubeArray) {
         imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     }
     if (desc.Usage.HasFlag(TextureUse::CopySource)) {
@@ -480,7 +480,7 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     createInfo.pNext = nullptr;
     createInfo.flags = 0;
     createInfo.image = image->_image;
-    createInfo.viewType = MapType(desc.Dim);
+    createInfo.viewType = MapViewType(desc.Dim);
     createInfo.format = MapType(desc.Format);
     createInfo.components = VkComponentMapping{
         VK_COMPONENT_SWIZZLE_R,
@@ -3738,12 +3738,12 @@ void BindlessArrayVulkan::SetTexture(uint32_t slot, TextureView* texView, Sample
     }
     auto view = CastVkObject(texView);
     auto dim = view->_mdesc.Dim;
-    if (dim != TextureViewDimension::Dim2D && dim != TextureViewDimension::Dim3D) {
+    if (dim != TextureDimension::Dim2D && dim != TextureDimension::Dim3D) {
         RADRAY_ERR_LOG("vk bindless array only support texture 2D/3D");
         return;
     }
     BindlessDescAllocator::Allocation* alloc = nullptr;
-    if (dim == TextureViewDimension::Dim2D) {
+    if (dim == TextureDimension::Dim2D) {
         if (_slotType == BindlessSlotType::Texture3DOnly) {
             RADRAY_ERR_LOG("vk bindless array does not support texture slots");
             return;

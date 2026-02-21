@@ -82,8 +82,12 @@ MTLStoreAction MapStoreAction(StoreAction v) noexcept {
 MTLTextureType MapTextureType(TextureDimension dim, uint32_t sampleCount) noexcept {
     switch (dim) {
         case TextureDimension::Dim1D: return MTLTextureType1D;
+        case TextureDimension::Dim1DArray: return MTLTextureType1DArray;
         case TextureDimension::Dim2D: return sampleCount > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
+        case TextureDimension::Dim2DArray: return MTLTextureType2DArray;
         case TextureDimension::Dim3D: return MTLTextureType3D;
+        case TextureDimension::Cube: return MTLTextureTypeCube;
+        case TextureDimension::CubeArray: return MTLTextureTypeCubeArray;
         case TextureDimension::UNKNOWN: return MTLTextureType2D;
     }
     return MTLTextureType2D;
@@ -93,7 +97,7 @@ MTLResourceOptions MapResourceOptions(MemoryType mem) noexcept {
     switch (mem) {
         case MemoryType::Device: return MTLResourceStorageModePrivate;
         case MemoryType::Upload: return MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined;
-        case MemoryType::ReadBack: return MTLResourceStorageModeShared;
+        case MemoryType::ReadBack: return MTLResourceStorageModeShared | MTLResourceCPUCacheModeDefaultCache;
     }
     return MTLResourceStorageModePrivate;
 }
@@ -107,16 +111,16 @@ MTLStorageMode MapStorageMode(MemoryType mem) noexcept {
     return MTLStorageModePrivate;
 }
 
-MTLTextureType MapTextureViewType(TextureViewDimension dim) noexcept {
+MTLTextureType MapTextureViewType(TextureDimension dim) noexcept {
     switch (dim) {
-        case TextureViewDimension::Dim1D: return MTLTextureType1D;
-        case TextureViewDimension::Dim2D: return MTLTextureType2D;
-        case TextureViewDimension::Dim3D: return MTLTextureType3D;
-        case TextureViewDimension::Dim1DArray: return MTLTextureType1DArray;
-        case TextureViewDimension::Dim2DArray: return MTLTextureType2DArray;
-        case TextureViewDimension::Cube: return MTLTextureTypeCube;
-        case TextureViewDimension::CubeArray: return MTLTextureTypeCubeArray;
-        case TextureViewDimension::UNKNOWN: return MTLTextureType2D;
+        case TextureDimension::Dim1D: return MTLTextureType1D;
+        case TextureDimension::Dim2D: return MTLTextureType2D;
+        case TextureDimension::Dim3D: return MTLTextureType3D;
+        case TextureDimension::Dim1DArray: return MTLTextureType1DArray;
+        case TextureDimension::Dim2DArray: return MTLTextureType2DArray;
+        case TextureDimension::Cube: return MTLTextureTypeCube;
+        case TextureDimension::CubeArray: return MTLTextureTypeCubeArray;
+        case TextureDimension::UNKNOWN: return MTLTextureType2D;
     }
     return MTLTextureType2D;
 }
@@ -336,6 +340,14 @@ std::string_view format_as(MTLLanguageVersion v) noexcept {
         case MTLLanguageVersion3_1: return "3.1";
         case MTLLanguageVersion3_2: return "3.2";
         case MTLLanguageVersion4_0: return "4.0";
+    }
+    radray::Unreachable();
+}
+
+std::string_view format_as(MTLArgumentBuffersTier v) noexcept {
+    switch (v) {
+        case MTLArgumentBuffersTier1: return "Tier 1";
+        case MTLArgumentBuffersTier2: return "Tier 2";
     }
     radray::Unreachable();
 }

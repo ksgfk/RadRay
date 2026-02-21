@@ -99,6 +99,8 @@ static void QueryVendorAndDeviceId(id<MTLDevice> device, uint32_t* outVendorId, 
 }
 #endif
 
+DeviceMetal::DeviceMetal(id<MTLDevice> device) noexcept : _device(device) {}
+
 DeviceMetal::~DeviceMetal() noexcept { DestroyImpl(); }
 
 bool DeviceMetal::IsValid() const noexcept { return _device != nil; }
@@ -123,7 +125,10 @@ Nullable<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32_t sl
         }
         auto& queues = _queues[index];
         if (queues.size() <= slot) {
-            queues.resize(slot + 1);
+            queues.reserve(slot + 1);
+            for (size_t i = queues.size(); i <= slot; i++) {
+                queues.emplace_back(unique_ptr<CmdQueueMetal>{nullptr});
+            }
         }
         auto& q = queues[slot];
         if (q == nullptr) {
@@ -132,21 +137,16 @@ Nullable<CommandQueue*> DeviceMetal::GetCommandQueue(QueueType type, uint32_t sl
                 RADRAY_ERR_LOG("metal cannot create command queue");
                 return nullptr;
             }
-            q = make_unique<CmdQueueMetal>();
-            q->_device = this;
-            q->_queue = mtlQueue;
+            q = make_unique<CmdQueueMetal>(this, mtlQueue);
         }
-        return q->IsValid() ? Nullable<CommandQueue*>{q.get()} : nullptr;
+        return q.get();
     }
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceMetal::CreateCommandBuffer(CommandQueue* queue) noexcept {
     @autoreleasepool {
         auto mtlQueue = CastMtlObject(queue);
-        auto cmdBuf = make_unique<CmdBufferMetal>();
-        cmdBuf->_device = this;
-        cmdBuf->_queue = mtlQueue;
-        return cmdBuf;
+        return make_unique<CmdBufferMetal>(this, mtlQueue);
     }
 }
 
@@ -157,13 +157,7 @@ Nullable<unique_ptr<Fence>> DeviceMetal::CreateFence() noexcept {
             RADRAY_ERR_LOG("metal cannot create shared event for fence");
             return nullptr;
         }
-        auto fence = make_unique<FenceMetal>();
-        fence->_device = this;
-        fence->_event = event;
-        fence->_targetValue = 0;
-        fence->_submitted = false;
-        fence->_semaphore = dispatch_semaphore_create(0);
-        return fence;
+        return make_unique<FenceMetal>(this, event, 1);
     }
 }
 
@@ -174,11 +168,7 @@ Nullable<unique_ptr<Semaphore>> DeviceMetal::CreateSemaphoreDevice() noexcept {
             RADRAY_ERR_LOG("metal cannot create event for semaphore");
             return nullptr;
         }
-        auto sem = make_unique<SemaphoreMetal>();
-        sem->_device = this;
-        sem->_event = event;
-        sem->_value = 0;
-        return sem;
+        return make_unique<SemaphoreMetal>(this, event, 1);
     }
 }
 
@@ -204,34 +194,18 @@ Nullable<unique_ptr<SwapChain>> DeviceMetal::CreateSwapChain(const SwapChainDesc
             case PresentMode::Immediate: layer.displaySyncEnabled = NO; break;
             case PresentMode::Mailbox: layer.displaySyncEnabled = YES; break;
         }
-        auto sc = make_unique<SwapChainMetal>();
-        sc->_device = this;
-        sc->_presentQueue = CastMtlObject(desc.PresentQueue);
-        sc->_layer = layer;
-        sc->_backBufferCount = desc.BackBufferCount;
-        sc->_currentIndex = 0;
-        sc->_imageAcquiredSemaphore = dispatch_semaphore_create(desc.BackBufferCount - 1);
-        sc->_drawables = [[NSMutableArray alloc] initWithCapacity:desc.BackBufferCount];
-        for (uint32_t i = 0; i < desc.BackBufferCount; i++) {
-            [sc->_drawables addObject:(id<CAMetalDrawable>)[NSNull null]];
-        }
-        sc->_backBufferTextures.resize(desc.BackBufferCount);
-        for (uint32_t i = 0; i < desc.BackBufferCount; i++) {
-            auto tex = make_unique<TextureMetal>();
-            tex->_device = this;
-            tex->_isExternalOwned = true;
-            tex->_desc.DepthOrArraySize = 1;
-            tex->_desc.MipLevels = 1;
-            tex->_desc.SampleCount = 1;
-            tex->_desc.Dim = TextureDimension::Dim2D;
-            sc->_backBufferTextures[i] = std::move(tex);
-        }
-        return sc;
+        auto presentQueue = CastMtlObject(desc.PresentQueue);
+        return make_unique<SwapChainMetal>(this, presentQueue, layer, desc.BackBufferCount, desc.Format);
     }
 }
 
-Nullable<unique_ptr<Buffer>> DeviceMetal::CreateBuffer(const BufferDescriptor& desc) noexcept {
+Nullable<unique_ptr<Buffer>> DeviceMetal::CreateBuffer(const BufferDescriptor& desc_) noexcept {
+    BufferDescriptor desc = desc_;
+    if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
+        desc.Size = Align(desc.Size, _detail.CBufferAlignment);
+    }
     @autoreleasepool {
+        MemoryType type;
         MTLResourceOptions options = MapResourceOptions(desc.Memory);
         id<MTLBuffer> mtlBuf = [_device newBufferWithLength:desc.Size options:options];
         if (mtlBuf == nil) {
@@ -243,10 +217,13 @@ Nullable<unique_ptr<Buffer>> DeviceMetal::CreateBuffer(const BufferDescriptor& d
                                                     length:desc.Name.size()
                                                   encoding:NSUTF8StringEncoding];
         }
-        auto buf = make_unique<BufferMetal>();
-        buf->_device = this;
-        buf->_buffer = mtlBuf;
+        auto buf = make_unique<BufferMetal>(this, mtlBuf);
+        if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
+            buf->_mappedPtr = mtlBuf.contents;
+        }
+        buf->_name = desc.Name;
         buf->_desc = desc;
+        buf->_desc.Name = buf->_name;
         return buf;
     }
 }
@@ -293,9 +270,7 @@ Nullable<unique_ptr<Texture>> DeviceMetal::CreateTexture(const TextureDescriptor
 Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
     @autoreleasepool {
         auto* mtlBuf = CastMtlObject(desc.Target);
-        auto view = make_unique<BufferViewMetal>();
-        view->_device = this;
-        view->_buffer = mtlBuf;
+        auto view = make_unique<BufferViewMetal>(this, mtlBuf);
         view->_desc = desc;
         return view;
     }
@@ -698,67 +673,57 @@ Nullable<unique_ptr<BindlessArray>> DeviceMetal::CreateBindlessArray(const Bindl
     }
 }
 
-CmdQueueMetal::~CmdQueueMetal() noexcept { DestroyImpl(); }
+CmdQueueMetal::CmdQueueMetal(
+    DeviceMetal* device,
+    id<MTLCommandQueue> queue) noexcept
+    : _device(device),
+      _queue(queue) {}
 
 bool CmdQueueMetal::IsValid() const noexcept { return _queue != nil; }
 
-void CmdQueueMetal::Destroy() noexcept { DestroyImpl(); }
-
-void CmdQueueMetal::DestroyImpl() noexcept {
-    _lastCmdBuffer = nil;
+void CmdQueueMetal::Destroy() noexcept {
     _queue = nil;
+    _device = nullptr;
 }
 
 void CmdQueueMetal::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    RADRAY_ASSERT(desc.CmdBuffers.size() > 0);
     @autoreleasepool {
+        for (auto* semBase : desc.WaitSemaphores) {
+            auto* sem = CastMtlObject(semBase);
+            auto* cmdBuf = CastMtlObject(desc.CmdBuffers[0]);
+            [cmdBuf->_cmdBuffer encodeWaitForEvent:sem->_event value:sem->_fenceValue - 1];
+        }
+        if (desc.SignalFence.HasValue()) {
+            auto* cmdBuf = CastMtlObject(desc.CmdBuffers[desc.CmdBuffers.size() - 1]);
+            auto* fence = CastMtlObject(desc.SignalFence.Get());
+            [cmdBuf->_cmdBuffer encodeSignalEvent:fence->_event value:fence->_fenceValue++];
+        }
+        for (auto* semBase : desc.SignalSemaphores) {
+            auto* sem = CastMtlObject(semBase);
+            auto* cmdBuf = CastMtlObject(desc.CmdBuffers[desc.CmdBuffers.size() - 1]);
+            [cmdBuf->_cmdBuffer encodeSignalEvent:sem->_event value:sem->_fenceValue++];
+        }
         for (auto* cmdBufBase : desc.CmdBuffers) {
             auto* cmdBuf = CastMtlObject(cmdBufBase);
-            id<MTLCommandBuffer> mtlCmdBuf = cmdBuf->_cmdBuffer;
-            if (mtlCmdBuf == nil) continue;
-
-            // encode wait semaphores
-            for (auto* semBase : desc.WaitSemaphores) {
-                auto* sem = CastMtlObject(semBase);
-                [mtlCmdBuf encodeWaitForEvent:sem->_event value:sem->_value];
-            }
-
-            // encode signal semaphores
-            for (auto* semBase : desc.SignalSemaphores) {
-                auto* sem = CastMtlObject(semBase);
-                sem->_value++;
-                [mtlCmdBuf encodeSignalEvent:sem->_event value:sem->_value];
-            }
-
-            // signal fence
-            if (desc.SignalFence.HasValue()) {
-                auto* fence = CastMtlObject(desc.SignalFence.Get());
-                fence->_targetValue++;
-                fence->_submitted = true;
-                __block dispatch_semaphore_t fenceSem = fence->_semaphore;
-                [mtlCmdBuf encodeSignalEvent:fence->_event value:fence->_targetValue];
-                MTLSharedEventListener* listener = [[MTLSharedEventListener alloc] init];
-                [fence->_event notifyListener:listener
-                                      atValue:fence->_targetValue
-                                        block:^(id<MTLSharedEvent>, uint64_t) {
-                                            dispatch_semaphore_signal(fenceSem);
-                                        }];
-            }
-
-            [mtlCmdBuf commit];
-            _lastCmdBuffer = mtlCmdBuf;
+            [cmdBuf->_cmdBuffer commit];
         }
     }
 }
 
 void CmdQueueMetal::Wait() noexcept {
     @autoreleasepool {
-        if (_lastCmdBuffer != nil) {
-            [_lastCmdBuffer waitUntilCompleted];
-            _lastCmdBuffer = nil;
-        }
-        _lastCmdBuffer = nil;
+        id<MTLCommandBuffer> cmdBuf = [_queue commandBufferWithUnretainedReferences];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
     }
 }
+
+CmdBufferMetal::CmdBufferMetal(
+    DeviceMetal* device,
+    CmdQueueMetal* queue) noexcept
+    : _device(device),
+      _queue(queue) {}
 
 CmdBufferMetal::~CmdBufferMetal() noexcept { DestroyImpl(); }
 
@@ -770,6 +735,7 @@ void CmdBufferMetal::DestroyImpl() noexcept {
     _blitEncoder = nil;
     _cmdBuffer = nil;
     _queue = nullptr;
+    _device = nullptr;
 }
 
 void CmdBufferMetal::EndBlitEncoderIfActive() noexcept {
@@ -927,45 +893,82 @@ void CmdBufferMetal::CopyBufferToTexture(Texture* dst, SubresourceRange dstRange
     }
 }
 
-FenceMetal::~FenceMetal() noexcept { DestroyImpl(); }
+FenceMetal::FenceMetal(
+    DeviceMetal* device,
+    id<MTLSharedEvent> event,
+    uint64_t initValue) noexcept
+    : _device(device),
+      _event(event),
+      _fenceValue(initValue) {}
 
 bool FenceMetal::IsValid() const noexcept { return _event != nil; }
 
-void FenceMetal::Destroy() noexcept { DestroyImpl(); }
-
-void FenceMetal::DestroyImpl() noexcept {
+void FenceMetal::Destroy() noexcept {
     _event = nil;
-    _semaphore = nullptr;
+    _device = nullptr;
 }
 
 FenceStatus FenceMetal::GetStatus() const noexcept {
-    if (!_submitted) return FenceStatus::NotSubmitted;
-    if (_event.signaledValue >= _targetValue) return FenceStatus::Complete;
-    return FenceStatus::Incomplete;
+    uint64_t completedValue = _event.signaledValue;
+    uint64_t signaledValue = _fenceValue - 1;
+    return completedValue < signaledValue ? FenceStatus::Incomplete : FenceStatus::Complete;
 }
 
 void FenceMetal::Wait() noexcept {
-    if (!_submitted) return;
-    if (_event.signaledValue >= _targetValue) return;
-    if (@available(macOS 14.0, *)) {
-        [_event waitUntilSignaledValue:_targetValue timeoutMS:UINT64_MAX];
-    } else {
-        dispatch_semaphore_wait(_semaphore, DISPATCH_TIME_FOREVER);
+    uint64_t completedValue = _event.signaledValue;
+    uint64_t signaledValue = _fenceValue - 1;
+    if (completedValue < signaledValue) {
+        [_event waitUntilSignaledValue:signaledValue timeoutMS:UINT64_MAX];
     }
 }
 
-void FenceMetal::Reset() noexcept {
-    _submitted = false;
-}
+void FenceMetal::Reset() noexcept {}
 
-SemaphoreMetal::~SemaphoreMetal() noexcept { DestroyImpl(); }
+SemaphoreMetal::SemaphoreMetal(
+    DeviceMetal* device,
+    id<MTLEvent> event,
+    uint64_t initValue) noexcept
+    : _device(device),
+      _event(event),
+      _fenceValue(initValue) {}
 
 bool SemaphoreMetal::IsValid() const noexcept { return _event != nil; }
 
-void SemaphoreMetal::Destroy() noexcept { DestroyImpl(); }
-
-void SemaphoreMetal::DestroyImpl() noexcept {
+void SemaphoreMetal::Destroy() noexcept {
     _event = nil;
+    _device = nullptr;
+}
+
+SwapChainMetal::SwapChainMetal(
+    DeviceMetal* device,
+    CmdQueueMetal* presentQueue,
+    CAMetalLayer* layer,
+    uint32_t backBufferCount,
+    TextureFormat format) noexcept
+    : _device(device),
+      _presentQueue(presentQueue),
+      _layer(layer) {
+    CFRetain((__bridge CFTypeRef)layer);
+    _imageAcquiredSemaphore = dispatch_semaphore_create(backBufferCount - 1);
+    _drawables = [[NSMutableArray alloc] initWithCapacity:backBufferCount];
+    for (uint32_t i = 0; i < backBufferCount; i++) {
+        [_drawables addObject:(id<CAMetalDrawable>)[NSNull null]];
+    }
+    _backBufferTextures.reserve(backBufferCount);
+    for (uint32_t i = 0; i < backBufferCount; i++) {
+        auto& tex = _backBufferTextures.emplace_back(make_unique<TextureMetal>());
+        tex->_device = _device;
+        tex->_isExternalOwned = true;
+        auto& texDesc = tex->_desc;
+        texDesc.Dim = TextureDimension::Dim2D;
+        texDesc.Width = static_cast<uint32_t>(layer.drawableSize.width);
+        texDesc.Height = static_cast<uint32_t>(layer.drawableSize.height);
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.SampleCount = 1;
+        texDesc.Format = format;
+        tex->_texture = nil;
+    }
 }
 
 SwapChainMetal::~SwapChainMetal() noexcept { DestroyImpl(); }
@@ -975,107 +978,82 @@ bool SwapChainMetal::IsValid() const noexcept { return _layer != nil; }
 void SwapChainMetal::Destroy() noexcept { DestroyImpl(); }
 
 void SwapChainMetal::DestroyImpl() noexcept {
-    _drawables = nil;
-    if (_imageAcquiredSemaphore != nullptr) {
-        // Drain semaphore before release
-        for (uint32_t i = 0; i < _backBufferCount - 1; i++) {
-            dispatch_semaphore_signal(_imageAcquiredSemaphore);
+    @autoreleasepool {
+        if (_imageAcquiredSemaphore) {
+            for (uint32_t i = 0; i < _backBufferTextures.size() - 1; i++) {
+                dispatch_semaphore_signal(_imageAcquiredSemaphore);
+            }
+            _imageAcquiredSemaphore = nil;
         }
-        _imageAcquiredSemaphore = nullptr;
+        _backBufferTextures.clear();
+        [_drawables removeAllObjects];
+        _drawables = nil;
+        if (_layer) {
+            CFRelease((__bridge CFTypeRef)_layer);
+            _layer = nil;
+        }
+        _presentQueue = nullptr;
+        _device = nullptr;
     }
-    _backBufferTextures.clear();
-    _layer = nil;
 }
 
 Nullable<Texture*> SwapChainMetal::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
     @autoreleasepool {
-        // Throttle drawable acquisition
         dispatch_semaphore_wait(_imageAcquiredSemaphore, DISPATCH_TIME_FOREVER);
-
         id<CAMetalDrawable> drawable = [_layer nextDrawable];
         if (drawable == nil) {
             dispatch_semaphore_signal(_imageAcquiredSemaphore);
             RADRAY_ERR_LOG("metal cannot acquire next drawable");
             return nullptr;
         }
-
         uint32_t index = _currentIndex;
         _drawables[index] = drawable;
-
-        auto& tex = _backBufferTextures[index];
+        auto* tex = _backBufferTextures[index].get();
         tex->_texture = drawable.texture;
-        tex->_desc.Width = static_cast<uint32_t>(_layer.drawableSize.width);
-        tex->_desc.Height = static_cast<uint32_t>(_layer.drawableSize.height);
-
-        // Signal fence/semaphore if requested
         if (signalSemaphore.HasValue() || signalFence.HasValue()) {
             id<MTLCommandBuffer> signalCmd = [_presentQueue->_queue commandBufferWithUnretainedReferences];
+            signalCmd.label = @"acquire signal";
             if (signalSemaphore.HasValue()) {
                 auto* sem = CastMtlObject(signalSemaphore.Get());
-                sem->_value++;
-                [signalCmd encodeSignalEvent:sem->_event value:sem->_value];
+                [signalCmd encodeSignalEvent:sem->_event value:sem->_fenceValue++];
             }
             if (signalFence.HasValue()) {
                 auto* fence = CastMtlObject(signalFence.Get());
-                fence->_targetValue++;
-                fence->_submitted = true;
-                __block dispatch_semaphore_t fenceSem = fence->_semaphore;
-                [signalCmd encodeSignalEvent:fence->_event value:fence->_targetValue];
+                [signalCmd encodeSignalEvent:fence->_event value:fence->_fenceValue++];
                 MTLSharedEventListener* listener = [[MTLSharedEventListener alloc] init];
-                [fence->_event notifyListener:listener
-                                      atValue:fence->_targetValue
-                                        block:^(id<MTLSharedEvent>, uint64_t) {
-                                            dispatch_semaphore_signal(fenceSem);
-                                        }];
             }
             [signalCmd commit];
         }
-
-        _currentIndex = (index + 1) % _backBufferCount;
-        return tex.get();
+        return tex;
     }
 }
 
 void SwapChainMetal::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     @autoreleasepool {
-        // The drawable to present is at the previous index (since _currentIndex was already advanced)
-        uint32_t presentIndex = (_currentIndex + _backBufferCount - 1) % _backBufferCount;
+        uint32_t presentIndex = _currentIndex;
         id<CAMetalDrawable> drawable = _drawables[presentIndex];
         if (drawable == nil || drawable == (id<CAMetalDrawable>)[NSNull null]) {
             RADRAY_ERR_LOG("metal no drawable at present index {}", presentIndex);
             return;
         }
-        if (_presentQueue == nullptr) return;
-
         id<MTLCommandBuffer> cmdBuf = [_presentQueue->_queue commandBufferWithUnretainedReferences];
-
-        // Wait for semaphores
+        cmdBuf.label = @"present";
         for (auto* semBase : waitSemaphores) {
             auto* sem = CastMtlObject(semBase);
-            [cmdBuf encodeWaitForEvent:sem->_event value:sem->_value];
+            [cmdBuf encodeWaitForEvent:sem->_event value:sem->_fenceValue - 1];
         }
-
         [cmdBuf presentDrawable:drawable];
-
-        // Clear drawable and signal semaphore on completion
-        __block NSMutableArray<id<CAMetalDrawable>>* drawables = _drawables;
-        __block uint32_t idx = presentIndex;
-        __block dispatch_semaphore_t acqSem = _imageAcquiredSemaphore;
         [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) {
-            drawables[idx] = (id<CAMetalDrawable>)[NSNull null];
-            dispatch_semaphore_signal(acqSem);
+            _drawables[presentIndex] = (id<CAMetalDrawable>)[NSNull null];
+            dispatch_semaphore_signal(_imageAcquiredSemaphore);
         }];
-
         [cmdBuf commit];
+        _currentIndex = (_currentIndex + 1) % _backBufferTextures.size();
     }
 }
 
 Nullable<Texture*> SwapChainMetal::GetCurrentBackBuffer() const noexcept {
-    uint32_t prevIndex = (_currentIndex + _backBufferCount - 1) % _backBufferCount;
-    if (prevIndex < _backBufferTextures.size() && _backBufferTextures[prevIndex]) {
-        return _backBufferTextures[prevIndex].get();
-    }
-    return nullptr;
+    return _backBufferTextures[_currentIndex].get();
 }
 
 uint32_t SwapChainMetal::GetCurrentBackBufferIndex() const noexcept {
@@ -1083,28 +1061,40 @@ uint32_t SwapChainMetal::GetCurrentBackBufferIndex() const noexcept {
 }
 
 uint32_t SwapChainMetal::GetBackBufferCount() const noexcept {
-    return _backBufferCount;
+    return _backBufferTextures.size();
 }
 
-BufferMetal::~BufferMetal() noexcept { DestroyImpl(); }
+BufferMetal::BufferMetal(
+    DeviceMetal* device,
+    id<MTLBuffer> buffer) noexcept
+    : _device(device),
+      _buffer(buffer) {}
 
 bool BufferMetal::IsValid() const noexcept { return _buffer != nil; }
 
-void BufferMetal::Destroy() noexcept { DestroyImpl(); }
-
-void BufferMetal::DestroyImpl() noexcept { _buffer = nil; }
+void BufferMetal::Destroy() noexcept {
+    _mappedPtr = nullptr;
+    _buffer = nil;
+    _device = nullptr;
+}
 
 void* BufferMetal::Map(uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(size);
-    if (_buffer == nil) return nullptr;
-    return static_cast<uint8_t*>([_buffer contents]) + offset;
+    RADRAY_ASSERT(size <= _desc.Size);
+    void* ptr = nullptr;
+    if (_mappedPtr) {
+        ptr = _mappedPtr;
+    } else {
+        ptr = _buffer.contents;
+    }
+    return static_cast<uint8_t*>(ptr) + offset;
 }
 
 void BufferMetal::Unmap(uint64_t offset, uint64_t size) noexcept {
 #if defined(RADRAY_PLATFORM_MACOS)
-    if (_buffer != nil && _buffer.storageMode == MTLStorageModeManaged) {
+    if (_buffer.storageMode == MTLStorageModeManaged) {
         [_buffer didModifyRange:NSMakeRange(offset, size)];
     }
+    _mappedPtr = nullptr;
 #else
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
@@ -1475,13 +1465,18 @@ void TextureViewMetal::Destroy() noexcept { DestroyImpl(); }
 
 void TextureViewMetal::DestroyImpl() noexcept { _textureView = nil; }
 
-BufferViewMetal::~BufferViewMetal() noexcept { DestroyImpl(); }
+BufferViewMetal::BufferViewMetal(
+    DeviceMetal* device,
+    BufferMetal* buffer) noexcept
+    : _device(device),
+      _buffer(buffer) {}
 
 bool BufferViewMetal::IsValid() const noexcept { return _buffer != nullptr; }
 
-void BufferViewMetal::Destroy() noexcept { DestroyImpl(); }
-
-void BufferViewMetal::DestroyImpl() noexcept { _buffer = nullptr; }
+void BufferViewMetal::Destroy() noexcept {
+    _buffer = nullptr;
+    _device = nullptr;
+}
 
 SamplerMetal::~SamplerMetal() noexcept { DestroyImpl(); }
 
@@ -1614,8 +1609,12 @@ Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {
             return nullptr;
         }
 #endif
-        auto result = make_shared<DeviceMetal>();
-        result->_device = device;
+        // TODO: 目前只适配 metal3+tier2
+        if (device.argumentBuffersSupport == MTLArgumentBuffersTier1) {
+            RADRAY_ERR_LOG("metal device too old, argument buffer {}", device.argumentBuffersSupport);
+            return nullptr;
+        }
+        auto result = make_shared<DeviceMetal>(device);
         result->_detail.GpuName = [device.name UTF8String];
         result->_detail.CBufferAlignment = 256;
         result->_detail.TextureDataPitchAlignment = 256;

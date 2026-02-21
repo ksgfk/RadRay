@@ -261,7 +261,7 @@ public:
             frame->_depthStencil = _device->CreateTexture(dsDesc).Unwrap();
             render::TextureViewDescriptor dsvDesc{
                 frame->_depthStencil.get(),
-                render::TextureViewDimension::Dim2D,
+                render::TextureDimension::Dim2D,
                 dsDesc.Format,
                 render::SubresourceRange::AllSub(),
                 render::TextureUse::DepthStencilWrite};

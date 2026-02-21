@@ -804,8 +804,12 @@ D3D12_HEAP_TYPE MapType(MemoryType v) noexcept {
 
 D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept {
     switch (v) {
-        case TextureDimension::Dim1D: return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
-        case TextureDimension::Dim2D: return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim1DArray: return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+        case TextureDimension::Dim2D:
+        case TextureDimension::Dim2DArray:
+        case TextureDimension::Cube:
+        case TextureDimension::CubeArray: return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         case TextureDimension::Dim3D: return D3D12_RESOURCE_DIMENSION_TEXTURE3D;
         case TextureDimension::UNKNOWN: return D3D12_RESOURCE_DIMENSION_UNKNOWN;
     }

@@ -86,13 +86,6 @@ enum class TextureDimension {
     UNKNOWN,
     Dim1D,
     Dim2D,
-    Dim3D
-};
-
-enum class TextureViewDimension {
-    UNKNOWN,
-    Dim1D,
-    Dim2D,
     Dim3D,
     Dim1DArray,
     Dim2DArray,
@@ -594,7 +587,7 @@ struct TextureDescriptor {
 
 struct TextureViewDescriptor {
     Texture* Target{nullptr};
-    TextureViewDimension Dim{TextureViewDimension::UNKNOWN};
+    TextureDimension Dim{TextureDimension::UNKNOWN};
     TextureFormat Format{TextureFormat::UNKNOWN};
     SubresourceRange Range{};
     TextureUses Usage{TextureUse::UNKNOWN};
@@ -1177,7 +1170,7 @@ std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
-std::string_view format_as(TextureViewDimension v) noexcept;
+std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;

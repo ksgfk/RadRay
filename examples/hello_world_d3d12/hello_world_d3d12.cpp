@@ -230,7 +230,7 @@ void Update() {
         if (rtViews[backBufferIndex] == nullptr) {
             TextureViewDescriptor rtViewDesc{};
             rtViewDesc.Target = rt;
-            rtViewDesc.Dim = TextureViewDimension::Dim2D;
+            rtViewDesc.Dim = TextureDimension::Dim2D;
             rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
             rtViewDesc.Usage = TextureUse::RenderTarget;
             rtViewDesc.Range.BaseMipLevel = 0;

@@ -191,7 +191,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                     unique_ptr<render::Texture> texObj = _device->CreateTexture(texDesc).Unwrap();
                     render::TextureViewDescriptor texViewDesc{
                         texObj.get(),
-                        render::TextureViewDimension::Dim2D,
+                        render::TextureDimension::Dim2D,
                         texDesc.Format,
                         render::SubresourceRange::AllSub(),
                         render::TextureUse::Resource};
@@ -704,7 +704,7 @@ render::TextureView* ImGuiApplication::GetDefaultRTV(uint32_t backBufferIndex) {
         render::Texture* backBuffer = _backBuffers[backBufferIndex];
         render::TextureViewDescriptor rtvDesc{
             backBuffer,
-            render::TextureViewDimension::Dim2D,
+            render::TextureDimension::Dim2D,
             _rtFormat,
             render::SubresourceRange::AllSub(),
             render::TextureUse::RenderTarget};

@@ -15,7 +15,6 @@ if (APPLE)
     if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         set(RADRAY_PLATFORM_IOS ON)
     else()
-        # CMAKE_SYSTEM_NAME == "Darwin" for macOS
         set(RADRAY_PLATFORM_MACOS ON)
     endif()
 endif()
@@ -63,9 +62,6 @@ option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADRAY_ENABLE_ZLIB AND RADRAY_ENABLE_LIBPNG" OFF)
-if (RADRAY_PLATFORM_MACOS)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS version")
-endif()
 
 # 加载 manifest
 if (WIN32)

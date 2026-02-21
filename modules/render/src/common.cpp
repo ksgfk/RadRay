@@ -362,16 +362,16 @@ std::string_view format_as(PolygonMode v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(TextureViewDimension v) noexcept {
+std::string_view format_as(TextureDimension v) noexcept {
     switch (v) {
-        case TextureViewDimension::UNKNOWN: return "UNKNOWN";
-        case TextureViewDimension::Dim1D: return "1D";
-        case TextureViewDimension::Dim2D: return "2D";
-        case TextureViewDimension::Dim3D: return "3D";
-        case TextureViewDimension::Dim1DArray: return "1DArray";
-        case TextureViewDimension::Dim2DArray: return "2DArray";
-        case TextureViewDimension::Cube: return "Cube";
-        case TextureViewDimension::CubeArray: return "CubeArray";
+        case TextureDimension::UNKNOWN: return "UNKNOWN";
+        case TextureDimension::Dim1D: return "1D";
+        case TextureDimension::Dim2D: return "2D";
+        case TextureDimension::Dim3D: return "3D";
+        case TextureDimension::Dim1DArray: return "1DArray";
+        case TextureDimension::Dim2DArray: return "2DArray";
+        case TextureDimension::Cube: return "Cube";
+        case TextureDimension::CubeArray: return "CubeArray";
     }
     Unreachable();
 }

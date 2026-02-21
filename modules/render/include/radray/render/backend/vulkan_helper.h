@@ -217,7 +217,7 @@ VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;
 VkImageType MapType(TextureDimension v) noexcept;
 VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept;
-VkImageViewType MapType(TextureViewDimension v) noexcept;
+VkImageViewType MapViewType(TextureDimension v) noexcept;
 VkAttachmentLoadOp MapType(LoadAction v) noexcept;
 VkAttachmentStoreOp MapType(StoreAction v) noexcept;
 VmaMemoryUsage MapType(MemoryType v) noexcept;

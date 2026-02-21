@@ -37,6 +37,8 @@ class BindlessArrayMetal;
 
 class DeviceMetal final : public Device {
 public:
+    explicit DeviceMetal(id<MTLDevice> device) noexcept;
+
     ~DeviceMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -89,7 +91,11 @@ public:
 
 class CmdQueueMetal final : public CommandQueue {
 public:
-    ~CmdQueueMetal() noexcept override;
+    CmdQueueMetal(
+        DeviceMetal* device,
+        id<MTLCommandQueue> queue) noexcept;
+
+    ~CmdQueueMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
@@ -100,15 +106,16 @@ public:
     void Wait() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLCommandQueue> _queue{nil};
-    id<MTLCommandBuffer> _lastCmdBuffer{nil};
 };
 
 class CmdBufferMetal final : public CommandBuffer {
 public:
+    CmdBufferMetal(
+        DeviceMetal* device,
+        CmdQueueMetal* queue) noexcept;
+
     ~CmdBufferMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -145,7 +152,12 @@ public:
 
 class FenceMetal final : public Fence {
 public:
-    ~FenceMetal() noexcept override;
+    FenceMetal(
+        DeviceMetal* device,
+        id<MTLSharedEvent> event,
+        uint64_t initValue) noexcept;
+
+    ~FenceMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
@@ -158,33 +170,39 @@ public:
     void Reset() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLSharedEvent> _event{nil};
-    uint64_t _targetValue{0};
-    bool _submitted{false};
-    dispatch_semaphore_t _semaphore{nullptr};
+    uint64_t _fenceValue{0};
 };
 
 class SemaphoreMetal final : public Semaphore {
 public:
-    ~SemaphoreMetal() noexcept override;
+    SemaphoreMetal(
+        DeviceMetal* device,
+        id<MTLEvent> event,
+        uint64_t initValue) noexcept;
+
+    ~SemaphoreMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLEvent> _event{nil};
-    uint64_t _value{0};
+    uint64_t _fenceValue{0};
 };
 
 class SwapChainMetal final : public SwapChain {
 public:
+    SwapChainMetal(
+        DeviceMetal* device,
+        CmdQueueMetal* presentQueue,
+        CAMetalLayer* layer,
+        uint32_t backBufferCount,
+        TextureFormat format) noexcept;
+
     ~SwapChainMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -208,15 +226,18 @@ public:
     CmdQueueMetal* _presentQueue{nullptr};
     CAMetalLayer* _layer{nil};
     NSMutableArray<id<CAMetalDrawable>>* _drawables{nil};
-    dispatch_semaphore_t _imageAcquiredSemaphore{nullptr};
+    dispatch_semaphore_t _imageAcquiredSemaphore{nil};
     vector<unique_ptr<TextureMetal>> _backBufferTextures;
-    uint32_t _backBufferCount{0};
     uint32_t _currentIndex{0};
 };
 
 class BufferMetal final : public Buffer {
 public:
-    ~BufferMetal() noexcept override;
+    BufferMetal(
+        DeviceMetal* device,
+        id<MTLBuffer> buffer) noexcept;
+
+    ~BufferMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
@@ -229,11 +250,11 @@ public:
     BufferDescriptor GetDesc() const noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     id<MTLBuffer> _buffer{nil};
+    void* _mappedPtr{nullptr};
     BufferDescriptor _desc{};
+    string _name;
 };
 
 class TextureMetal final : public Texture {
@@ -430,15 +451,17 @@ public:
 
 class BufferViewMetal final : public BufferView {
 public:
-    ~BufferViewMetal() noexcept override;
+    BufferViewMetal(
+        DeviceMetal* device,
+        BufferMetal* buffer) noexcept;
+
+    ~BufferViewMetal() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
 public:
-    void DestroyImpl() noexcept;
-
     DeviceMetal* _device{nullptr};
     BufferMetal* _buffer{nullptr};
     BufferViewDescriptor _desc{};
