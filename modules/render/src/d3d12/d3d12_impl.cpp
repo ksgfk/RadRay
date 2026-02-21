@@ -410,8 +410,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
             wstring name{adapDesc.Description};
             detail.GpuName = text_encoding::ToMultiByte(name).value_or("???");
-            detail.VendorId = adapDesc.VendorId;
-            detail.DeviceId = adapDesc.DeviceId;
         }
     }
     {
