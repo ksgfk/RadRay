@@ -156,7 +156,8 @@ static std::optional<SpirvShaderDesc> CompileSpirvDesc(
 static std::optional<MslShaderReflection> CompileMslRefl(
     Dxc& dxc,
     const char* hlsl,
-    std::span<std::pair<const char*, ShaderStage>> entries) {
+    std::span<std::pair<const char*, ShaderStage>> entries,
+    bool useArgBuffers = false) {
     std::vector<DxcOutput> outputs;
     std::vector<MslReflectParams> params;
     for (auto& [entry, stage] : entries) {
@@ -165,7 +166,7 @@ static std::optional<MslShaderReflection> CompileMslRefl(
         outputs.push_back(std::move(*out));
     }
     for (size_t i = 0; i < outputs.size(); i++) {
-        params.push_back({outputs[i].Data, entries[i].first, entries[i].second});
+        params.push_back({outputs[i].Data, entries[i].first, entries[i].second, useArgBuffers});
     }
     return ReflectMsl(params);
 }
@@ -432,6 +433,38 @@ TEST(BindBridgeLayout, MslRenderBasic) {
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
     EXPECT_FALSE(desc.DescriptorSets.empty());
+}
+
+TEST(BindBridgeLayout, MslRenderArgBuffers) {
+    auto dxc = CreateDxc();
+    ASSERT_TRUE(dxc.HasValue());
+
+    std::pair<const char*, ShaderStage> entries[] = {
+        {"VSMain", ShaderStage::Vertex},
+        {"PSMain", ShaderStage::Pixel}};
+    auto mslRefl = CompileMslRefl(*dxc, HLSL_RENDER_PUSHCONST, entries, true);
+    ASSERT_TRUE(mslRefl.has_value());
+
+    for (const auto& arg : mslRefl->Arguments) {
+        RADRAY_INFO_LOG("ArgBuffer Refl: name={} stage={} type={} index={} isPushConst={} descSet={}",
+                        arg.Name, format_as(arg.Stage), format_as(arg.Type), arg.Index, arg.IsPushConstant, arg.DescriptorSet);
+    }
+
+    BindBridgeLayout layout(*mslRefl);
+    auto container = layout.GetDescriptor();
+    const auto& desc = container.Get();
+
+    // Should have push constant
+    EXPECT_TRUE(desc.Constant.has_value()) << "Should have push constant for _Obj";
+
+    // Should have descriptor sets
+    EXPECT_FALSE(desc.DescriptorSets.empty());
+    for (size_t i = 0; i < desc.DescriptorSets.size(); i++) {
+        const auto& set = desc.DescriptorSets[i];
+        for (const auto& elem : set.Elements) {
+            RADRAY_INFO_LOG("DescSet[{}] elem: slot={} type={}", i, elem.Slot, static_cast<int>(elem.Type));
+        }
+    }
 }
 
 TEST(BindBridgeLayout, MslRenderSamplerSeparation) {

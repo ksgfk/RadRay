@@ -1,7 +1,7 @@
 #ifndef COMMON_HLSLI
 #define COMMON_HLSLI
 
-#ifdef VULKAN
+#if defined(VULKAN) || defined(METAL)
 #define VK_LOCATION(l)   [[vk::location(l)]]
 #define VK_BINDING(b, s) [[vk::binding(b, s)]]
 #define VK_PUSH_CONSTANT [[vk::push_constant]]

@@ -527,7 +527,18 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    struct ElementInfo {
+        uint32_t MtlIndex;
+        uint32_t Count;
+        ResourceBindType Type;
+        ShaderStages Stages;
+        vector<id<MTLResource>> Resources;
+    };
+
     DeviceMetal* _device{nullptr};
+    id<MTLBuffer> _argBuffer{nil};
+    vector<ElementInfo> _elements;
+    ShaderStages _stages{ShaderStage::UNKNOWN};
 };
 
 class BindlessArrayMetal final : public BindlessArray {

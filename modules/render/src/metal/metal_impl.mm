@@ -410,8 +410,71 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceMetal::CreateComputePipelineSta
 }
 
 Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept {
-    // TODO:
-    return nullptr;
+    @autoreleasepool {
+        auto* mtlRootSig = CastMtlObject(rootSig);
+        auto& desc = mtlRootSig->_container._desc;
+        if (index >= desc.DescriptorSets.size()) {
+            RADRAY_ERR_LOG("metal descriptor set index out of range: {}", index);
+            return nullptr;
+        }
+        auto& setDesc = desc.DescriptorSets[index];
+        if (setDesc.Elements.empty()) {
+            RADRAY_ERR_LOG("metal descriptor set {} has no elements", index);
+            return nullptr;
+        }
+        // 计算 argument buffer 大小: Tier2 每个 argument 占 8 字节
+        // 需要同时考虑 static sampler，因为使用 argument buffer 时 sampler 也在 argument buffer 内
+        uint32_t maxMtlIndex = 0;
+        ShaderStages combinedStages = ShaderStage::UNKNOWN;
+        vector<DescriptorSetMetal::ElementInfo> elements;
+        elements.reserve(setDesc.Elements.size());
+        for (auto& elem : setDesc.Elements) {
+            uint32_t endIndex = elem.Slot + elem.Count;
+            if (endIndex > maxMtlIndex) {
+                maxMtlIndex = endIndex;
+            }
+            combinedStages = combinedStages | elem.Stages;
+            auto& info = elements.emplace_back();
+            info.MtlIndex = elem.Slot;
+            info.Count = elem.Count;
+            info.Type = elem.Type;
+            info.Stages = elem.Stages;
+            info.Resources.resize(elem.Count, nil);
+        }
+        // 收集属于这个 descriptor set 的 static sampler
+        vector<std::pair<uint32_t, SamplerMetal*>> staticSamplersInSet;
+        for (size_t i = 0; i < desc.StaticSamplers.size(); i++) {
+            auto& ss = desc.StaticSamplers[i];
+            if (ss.SetIndex == index) {
+                uint32_t endIndex = ss.Slot + 1;
+                if (endIndex > maxMtlIndex) {
+                    maxMtlIndex = endIndex;
+                }
+                combinedStages = combinedStages | ss.Stages;
+                staticSamplersInSet.emplace_back(ss.Slot, mtlRootSig->_cachedStaticSamplers[i].get());
+            }
+        }
+        NSUInteger bufferSize = static_cast<NSUInteger>(maxMtlIndex) * 8;
+        id<MTLBuffer> argBuffer = [_device newBufferWithLength:bufferSize
+                                                       options:MTLResourceStorageModeShared];
+        if (argBuffer == nil) {
+            RADRAY_ERR_LOG("metal cannot create argument buffer (size={})", bufferSize);
+            return nullptr;
+        }
+        // 将 static sampler 写入 argument buffer
+        for (auto& [slot, sampler] : staticSamplersInSet) {
+            uint64_t* argData = reinterpret_cast<uint64_t*>(
+                static_cast<uint8_t*>([argBuffer contents]) + slot * 8);
+            MTLResourceID resId = [sampler->_sampler gpuResourceID];
+            memcpy(argData, &resId, sizeof(resId));
+        }
+        auto result = make_unique<DescriptorSetMetal>();
+        result->_device = this;
+        result->_argBuffer = argBuffer;
+        result->_elements = std::move(elements);
+        result->_stages = combinedStages;
+        return result;
+    }
 }
 
 Nullable<unique_ptr<Sampler>> DeviceMetal::CreateSampler(const SamplerDescriptor& desc) noexcept {
@@ -480,6 +543,13 @@ void CmdQueueMetal::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
             auto* sem = CastMtlObject(semBase);
             auto* cmdBuf = CastMtlObject(desc.CmdBuffers[desc.CmdBuffers.size() - 1]);
             [cmdBuf->_cmdBuffer encodeSignalEvent:sem->_event value:sem->_fenceValue++];
+        }
+        for (auto* cmdBuf : desc.CmdBuffers) {
+            auto* mtlCmdBuf = CastMtlObject(cmdBuf);
+            [mtlCmdBuf->_cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+                if (buffer.error != nil)
+                    RADRAY_ERR_LOG("metal failed to execute command buffer with error: {}", [buffer.error.description UTF8String]);
+            }];
         }
         for (auto* cmdBufBase : desc.CmdBuffers) {
             auto* cmdBuf = CastMtlObject(cmdBufBase);
@@ -558,10 +628,13 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdBufferMetal::BeginRenderPass(con
             rpd.depthAttachment.loadAction = MapLoadAction(dsa.DepthLoad);
             rpd.depthAttachment.storeAction = MapStoreAction(dsa.DepthStore);
             rpd.depthAttachment.clearDepth = dsa.ClearValue.Depth;
-            rpd.stencilAttachment.texture = texView->_textureView;
-            rpd.stencilAttachment.loadAction = MapLoadAction(dsa.StencilLoad);
-            rpd.stencilAttachment.storeAction = MapStoreAction(dsa.StencilStore);
-            rpd.stencilAttachment.clearStencil = dsa.ClearValue.Stencil;
+            MTLPixelFormat pf = texView->_textureView.pixelFormat;
+            if (IsStencilFormat(pf)) {
+                rpd.stencilAttachment.texture = texView->_textureView;
+                rpd.stencilAttachment.loadAction = MapLoadAction(dsa.StencilLoad);
+                rpd.stencilAttachment.storeAction = MapStoreAction(dsa.StencilStore);
+                rpd.stencilAttachment.clearStencil = dsa.ClearValue.Stencil;
+            }
         }
         id<MTLRenderCommandEncoder> encoder = [_cmdBuffer renderCommandEncoderWithDescriptor:rpd];
         if (encoder == nil) {
@@ -1015,7 +1088,54 @@ void GraphicsCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, 
 }
 
 void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
-    // TODO:
+    auto* mtlSet = CastMtlObject(set);
+    if (mtlSet->_argBuffer == nil) {
+        return;
+    }
+    uint32_t slotOffset = _cmdBuffer->_device->_detail.MaxVertexInputBindings;
+    uint32_t mtlSlot = slot + slotOffset + 1;
+    // useResources: 让 argument buffer 引用的资源对 GPU 可见，按 stage 和 usage 分类
+    {
+        vector<id<MTLResource>> vtxRead;
+        vector<id<MTLResource>> vtxReadWrite;
+        vector<id<MTLResource>> fragRead;
+        vector<id<MTLResource>> fragReadWrite;
+        for (auto& elem : mtlSet->_elements) {
+            bool isUAV = elem.Type == ResourceBindType::RWBuffer || elem.Type == ResourceBindType::RWTexture;
+            for (auto& res : elem.Resources) {
+                if (res != nil) {
+                    if (elem.Stages.HasFlag(ShaderStage::Vertex)) {
+                        (isUAV ? vtxReadWrite : vtxRead).push_back(res);
+                    }
+                    if (elem.Stages.HasFlag(ShaderStage::Pixel)) {
+                        (isUAV ? fragReadWrite : fragRead).push_back(res);
+                    }
+                }
+            }
+        }
+        if (!vtxRead.empty()) {
+            [_encoder useResources:vtxRead.data() count:vtxRead.size()
+                             usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+        }
+        if (!vtxReadWrite.empty()) {
+            [_encoder useResources:vtxReadWrite.data() count:vtxReadWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex];
+        }
+        if (!fragRead.empty()) {
+            [_encoder useResources:fragRead.data() count:fragRead.size()
+                             usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        }
+        if (!fragReadWrite.empty()) {
+            [_encoder useResources:fragReadWrite.data() count:fragReadWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageFragment];
+        }
+    }
+    if (mtlSet->_stages.HasFlag(ShaderStage::Vertex)) {
+        [_encoder setVertexBuffer:mtlSet->_argBuffer offset:0 atIndex:mtlSlot];
+    }
+    if (mtlSet->_stages.HasFlag(ShaderStage::Pixel)) {
+        [_encoder setFragmentBuffer:mtlSet->_argBuffer offset:0 atIndex:mtlSlot];
+    }
 }
 
 void GraphicsCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
@@ -1136,7 +1256,11 @@ void ComputeCmdEncoderMetal::BindRootDescriptor(uint32_t slot, Buffer* buffer, u
 }
 
 void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
-    // TODO:
+    auto* mtlSet = CastMtlObject(set);
+    if (mtlSet->_argBuffer == nil) {
+        return;
+    }
+    [_encoder setBuffer:mtlSet->_argBuffer offset:0 atIndex:slot];
 }
 
 void ComputeCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
@@ -1202,16 +1326,43 @@ void SamplerMetal::Destroy() noexcept {
 DescriptorSetMetal::~DescriptorSetMetal() noexcept { DestroyImpl(); }
 
 bool DescriptorSetMetal::IsValid() const noexcept {
-    return false;
+    return _argBuffer != nil;
 }
 
 void DescriptorSetMetal::Destroy() noexcept { DestroyImpl(); }
 
 void DescriptorSetMetal::DestroyImpl() noexcept {
+    _argBuffer = nil;
+    _elements.clear();
+    _device = nullptr;
 }
 
 void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
-    // TODO:
+    if (slot >= _elements.size()) {
+        RADRAY_ERR_LOG("metal descriptor set element slot out of range: {}", slot);
+        return;
+    }
+    auto& elem = _elements[slot];
+    if (index >= elem.Count) {
+        RADRAY_ERR_LOG("metal descriptor set array index out of range: {}", index);
+        return;
+    }
+    if (_argBuffer == nil) {
+        RADRAY_ERR_LOG("metal descriptor set argument buffer is nil");
+        return;
+    }
+    uint32_t mtlIndex = elem.MtlIndex + index;
+    uint64_t* argData = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>([_argBuffer contents]) + mtlIndex * 8);
+    if (view->GetTag() == RenderObjectTag::BufferView) {
+        auto* bufView = static_cast<BufferViewMetal*>(view);
+        *argData = [bufView->_buffer->_buffer gpuAddress] + bufView->_desc.Range.Offset;
+        elem.Resources[index] = bufView->_buffer->_buffer;
+    } else if (view->GetTag() == RenderObjectTag::TextureView) {
+        auto* texView = static_cast<TextureViewMetal*>(view);
+        MTLResourceID resId = [texView->_textureView gpuResourceID];
+        memcpy(argData, &resId, sizeof(resId));
+        elem.Resources[index] = texView->_textureView;
+    }
 }
 
 BindlessArrayMetal::~BindlessArrayMetal() noexcept { DestroyImpl(); }

@@ -41,6 +41,7 @@ MTLIndexType MapIndexType(IndexFormat v) noexcept;
 MTLCullMode MapCullMode(CullMode v) noexcept;
 MTLWinding MapWinding(FrontFace v) noexcept;
 MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept;
+bool IsStencilFormat(MTLPixelFormat format) noexcept;
 
 }  // namespace radray::render::metal
 

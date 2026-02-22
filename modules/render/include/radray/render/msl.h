@@ -154,6 +154,8 @@ public:
     uint32_t Index{0};
     bool IsActive{false};
     uint64_t ArrayLength{0};
+    bool IsPushConstant{false};
+    uint32_t DescriptorSet{0};
 
     uint64_t BufferAlignment{0};
     uint64_t BufferDataSize{0};
@@ -176,6 +178,7 @@ struct MslReflectParams {
     std::span<const byte> SpirV;
     std::string_view EntryPoint;
     ShaderStage Stage;
+    bool UseArgumentBuffers{false};
 };
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS

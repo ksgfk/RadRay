@@ -1,0 +1,6 @@
+if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPVCROSS)
+    add_executable(compile_imgui_metallib main.cpp)
+    target_link_libraries(compile_imgui_metallib radraycore radrayrender)
+    radray_optimize_flags_binary(compile_imgui_metallib)
+    radray_set_build_path(compile_imgui_metallib)
+endif()

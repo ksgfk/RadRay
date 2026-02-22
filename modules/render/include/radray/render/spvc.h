@@ -154,6 +154,10 @@ struct SpirvToMslOption {
 struct SpirvToMslOutput {
     string MslSource;
     string EntryPointName;
+
+    inline std::span<const byte> GetBlob() const noexcept {
+        return std::as_bytes(std::span{MslSource.data(), MslSource.size()});
+    }
 };
 
 }  // namespace radray::render

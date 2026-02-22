@@ -208,6 +208,168 @@ TEST(SpirvToMsl, ComputeNoOffset) {
         << "compute should not have buffer offset";
 }
 
+// 多 descriptor set 的 shader，用于测试 argument buffer 多 set 偏移
+const char* HLSL_MULTI_SPACE = R"(
+struct VS_INPUT
+{
+    [[vk::location(0)]] float3 pos : POSITION;
+};
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+};
+
+cbuffer SceneData : register(b0, space0)
+{
+    float4x4 viewProj;
+};
+
+cbuffer ObjectData : register(b0, space1)
+{
+    float4x4 world;
+};
+
+PS_INPUT VSMain(VS_INPUT vsIn)
+{
+    PS_INPUT o;
+    o.pos = mul(mul(float4(vsIn.pos, 1.0f), world), viewProj);
+    return o;
+}
+)";
+
+// VS shader with both push constant and descriptor set resources
+const char* HLSL_VS_WITH_PUSH_AND_DESC = R"(
+struct VS_INPUT
+{
+    [[vk::location(0)]] float3 pos : POSITION;
+    [[vk::location(1)]] float2 uv  : TEXCOORD0;
+};
+
+struct PS_INPUT
+{
+    float4 pos : SV_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+struct PushData
+{
+    float4x4 mvp;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushData> _Push : register(b0);
+
+cbuffer SceneData : register(b0, space0)
+{
+    float4 lightDir;
+};
+
+PS_INPUT VSMain(VS_INPUT vsIn)
+{
+    PS_INPUT o;
+    o.pos = mul(float4(vsIn.pos + lightDir.xyz, 1.0f), _Push.mvp);
+    o.uv = vsIn.uv;
+    return o;
+}
+)";
+
+// --- Argument Buffer Tests ---
+
+TEST(SpirvToMsl, ArgBufferVsPushConstantNoOverlap) {
+    auto dxc = CreateDxc();
+    ASSERT_TRUE(dxc.HasValue());
+    auto vs = dxc->Compile(HLSL_VS_WITH_PUSH_AND_DESC, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, true);
+    ASSERT_TRUE(vs.has_value());
+
+    SpirvToMslOption opt{};
+    opt.MslMajor = 3;
+    opt.MslMinor = 0;
+    opt.UseArgumentBuffers = true;
+    auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex, opt);
+    ASSERT_TRUE(result.has_value());
+    auto& msl = result->MslSource;
+    std::cout << "=== ArgBufferVsPushConstantNoOverlap MSL ===\n" << msl << "\n";
+
+    // push constant should be at buffer(16)
+    EXPECT_NE(msl.find("buffer(16)"), std::string::npos)
+        << "push constant should be at buffer(16)";
+    // argument buffer for desc set 0 should be at buffer(17), not buffer(16)
+    EXPECT_NE(msl.find("buffer(17)"), std::string::npos)
+        << "argument buffer for desc set 0 should be at buffer(17)";
+}
+
+TEST(SpirvToMsl, ArgBufferPsPushConstantNoOverlap) {
+    auto dxc = CreateDxc();
+    ASSERT_TRUE(dxc.HasValue());
+    auto ps = dxc->Compile(HLSL_VS_PS, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, {}, {}, true);
+    ASSERT_TRUE(ps.has_value());
+
+    SpirvToMslOption opt{};
+    opt.MslMajor = 3;
+    opt.MslMinor = 0;
+    opt.UseArgumentBuffers = true;
+    auto result = ConvertSpirvToMsl(ps->Data, "PSMain", ShaderStage::Pixel, opt);
+    ASSERT_TRUE(result.has_value());
+    auto& msl = result->MslSource;
+    std::cout << "=== ArgBufferPsPushConstantNoOverlap MSL ===\n" << msl << "\n";
+
+    // argument buffer for desc set 0 should be at buffer(17)
+    EXPECT_NE(msl.find("buffer(17)"), std::string::npos)
+        << "argument buffer for desc set 0 should be at buffer(17)";
+    // buffer(16) should not appear (PS has no push constant in HLSL_VS_PS)
+    // or if it does, it must not collide with argument buffer
+}
+
+TEST(SpirvToMsl, ArgBufferMultiDescriptorSet) {
+    auto dxc = CreateDxc();
+    ASSERT_TRUE(dxc.HasValue());
+    auto vs = dxc->Compile(HLSL_MULTI_SPACE, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, true);
+    ASSERT_TRUE(vs.has_value());
+
+    SpirvToMslOption opt{};
+    opt.MslMajor = 3;
+    opt.MslMinor = 0;
+    opt.UseArgumentBuffers = true;
+    auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex, opt);
+    ASSERT_TRUE(result.has_value());
+    auto& msl = result->MslSource;
+    std::cout << "=== ArgBufferMultiDescriptorSet MSL ===\n" << msl << "\n";
+
+    // desc set 0 -> buffer(17), desc set 1 -> buffer(18)
+    EXPECT_NE(msl.find("buffer(17)"), std::string::npos)
+        << "argument buffer for desc set 0 should be at buffer(17)";
+    EXPECT_NE(msl.find("buffer(18)"), std::string::npos)
+        << "argument buffer for desc set 1 should be at buffer(18)";
+    // no argument buffer should be at buffer(0)-buffer(15) (vertex buffer range)
+    for (int i = 0; i <= 15; i++) {
+        std::string pat = "buffer(" + std::to_string(i) + ")";
+        EXPECT_EQ(msl.find(pat), std::string::npos)
+            << "no argument buffer should be at " << pat;
+    }
+}
+
+TEST(SpirvToMsl, ArgBufferComputeNoOffset) {
+    auto dxc = CreateDxc();
+    ASSERT_TRUE(dxc.HasValue());
+    auto cs = dxc->Compile(HLSL_COMPUTE, "CSMain", ShaderStage::Compute, HlslShaderModel::SM60, true, {}, {}, true);
+    ASSERT_TRUE(cs.has_value());
+
+    SpirvToMslOption opt{};
+    opt.MslMajor = 3;
+    opt.MslMinor = 0;
+    opt.UseArgumentBuffers = true;
+    auto result = ConvertSpirvToMsl(cs->Data, "CSMain", ShaderStage::Compute, opt);
+    ASSERT_TRUE(result.has_value());
+    auto& msl = result->MslSource;
+    std::cout << "=== ArgBufferComputeNoOffset MSL ===\n" << msl << "\n";
+
+    // compute shader should not have buffer(17+) offset
+    EXPECT_EQ(msl.find("buffer(17)"), std::string::npos)
+        << "compute should not have argument buffer offset";
+    EXPECT_EQ(msl.find("buffer(16)"), std::string::npos)
+        << "compute should not have push constant offset";
+}
+
 TEST(SpirvToMsl, CBufferOffset) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());

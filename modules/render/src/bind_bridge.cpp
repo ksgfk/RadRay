@@ -539,7 +539,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         }
         return ShaderStage::UNKNOWN;
     };
-    // Merge arguments with same (Type, Index) across stages
+    // Merge arguments with same identity across stages
     struct MergedArg {
         string Name;
         ResourceBindType Type;
@@ -547,8 +547,19 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         ShaderStages Stages;
         uint64_t ArrayLength;
         bool IsSampler;
+        bool IsPushConstant;
+        uint32_t DescriptorSet;
+        uint64_t BufferDataSize;
     };
-    // Key: (MslArgumentType, Index)
+    // Key: (MslArgumentType, Index, IsPushConstant, DescriptorSet)
+    auto makeKey = [](const MslArgument& arg) -> uint64_t {
+        // Use IsPushConstant flag in the key to separate push constants from regular buffers
+        uint64_t pcBit = arg.IsPushConstant ? 1ULL : 0ULL;
+        return (static_cast<uint64_t>(arg.Type) << 48) |
+               (pcBit << 40) |
+               (static_cast<uint64_t>(arg.DescriptorSet) << 32) |
+               arg.Index;
+    };
     unordered_map<uint64_t, size_t> mergeMap;
     vector<MergedArg> merged;
     for (const auto& arg : desc.Arguments) {
@@ -556,7 +567,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         if (arg.Type == MslArgumentType::ThreadgroupMemory) continue;
         auto type = mapResourceType(arg);
         if (type == ResourceBindType::UNKNOWN) continue;
-        uint64_t key = (static_cast<uint64_t>(arg.Type) << 32) | arg.Index;
+        uint64_t key = makeKey(arg);
         auto it = mergeMap.find(key);
         if (it != mergeMap.end()) {
             merged[it->second].Stages = merged[it->second].Stages | mapStages(arg.Stage);
@@ -568,24 +579,40 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 arg.Index,
                 mapStages(arg.Stage),
                 arg.ArrayLength,
-                arg.Type == MslArgumentType::Sampler});
+                arg.Type == MslArgumentType::Sampler,
+                arg.IsPushConstant,
+                arg.DescriptorSet,
+                arg.BufferDataSize});
         }
     }
-    // Separate into resources (set 0) and samplers (set 1)
-    vector<const MergedArg*> resources, samplers;
-    for (const auto& m : merged) {
-        if (m.IsSampler) {
-            samplers.push_back(&m);
-        } else {
-            resources.push_back(&m);
-        }
-    }
-    auto sortByIndex = [](const MergedArg* a, const MergedArg* b) { return a->Index < b->Index; };
-    std::sort(resources.begin(), resources.end(), sortByIndex);
-    std::sort(samplers.begin(), samplers.end(), sortByIndex);
     vector<BindingEntry> bindingEntries;
+    // Emit push constants first
+    for (const auto& m : merged) {
+        if (!m.IsPushConstant) continue;
+        bindingEntries.emplace_back(PushConstEntry{
+            m.Name,
+            0,
+            0,
+            0,
+            m.Stages,
+            static_cast<uint32_t>(m.BufferDataSize)});
+    }
+    // Group non-push-constant resources by descriptor set
+    unordered_map<uint32_t, vector<const MergedArg*>> perSet;
+    vector<uint32_t> setOrder;
+    for (const auto& m : merged) {
+        if (m.IsPushConstant) continue;
+        if (perSet.find(m.DescriptorSet) == perSet.end()) {
+            setOrder.push_back(m.DescriptorSet);
+        }
+        perSet[m.DescriptorSet].push_back(&m);
+    }
+    std::sort(setOrder.begin(), setOrder.end());
+    auto sortByIndex = [](const MergedArg* a, const MergedArg* b) { return a->Index < b->Index; };
     uint32_t setIndex = 0;
-    auto emitSet = [&](const vector<const MergedArg*>& args, uint32_t si) {
+    for (auto descSet : setOrder) {
+        auto& args = perSet[descSet];
+        std::sort(args.begin(), args.end(), sortByIndex);
         uint32_t elemIndex = 0;
         for (const auto* m : args) {
             uint32_t count = m->ArrayLength == 0 ? 1u : static_cast<uint32_t>(m->ArrayLength);
@@ -597,17 +624,12 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 m->Index,
                 0,
                 m->Stages,
-                si,
+                setIndex,
                 elemIndex++,
                 false,
                 {}});
         }
-    };
-    if (!resources.empty()) {
-        emitSet(resources, setIndex++);
-    }
-    if (!samplers.empty()) {
-        emitSet(samplers, setIndex++);
+        setIndex++;
     }
     return std::make_optional(std::move(bindingEntries));
 }

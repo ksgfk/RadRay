@@ -500,6 +500,17 @@ MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept {
     return result;
 }
 
+bool IsStencilFormat(MTLPixelFormat format) noexcept {
+    switch (format) {
+        case MTLPixelFormatStencil8:
+        case MTLPixelFormatDepth24Unorm_Stencil8:
+        case MTLPixelFormatDepth32Float_Stencil8:
+            return true;
+        default:
+            return false;
+    }
+}
+
 }  // namespace radray::render::metal
 
 std::string_view format_as(MTLLanguageVersion v) noexcept {

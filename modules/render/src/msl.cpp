@@ -350,7 +350,9 @@ static void _ProcessMslBinding(
     MslArgumentType argType,
     MslStage stage,
     bool isReadOnly,
-    bool isWriteOnly) {
+    bool isWriteOnly,
+    bool isPushConstant = false,
+    uint32_t descriptorSet = 0) {
     auto& compiler = ctx.compiler;
     MslArgument arg{};
     arg.Name = compiler.get_name(res.id);
@@ -360,8 +362,11 @@ static void _ProcessMslBinding(
     arg.Stage = stage;
     arg.Type = argType;
     arg.IsActive = true;
+    arg.IsPushConstant = isPushConstant;
+    arg.DescriptorSet = descriptorSet;
     uint32_t mslBinding = compiler.get_automatic_msl_resource_binding(res.id);
-    arg.Index = (mslBinding != ~0u) ? mslBinding : 0;
+    uint32_t spvBinding = compiler.get_decoration(res.id, spv::DecorationBinding);
+    arg.Index = (mslBinding != ~0u) ? mslBinding : spvBinding;
     const auto& type = compiler.get_type(res.type_id);
     if (!type.array.empty()) {
         arg.ArrayLength = type.array[0];
@@ -392,6 +397,10 @@ static void _ProcessMslBinding(
 
 std::optional<MslShaderReflection> ReflectMsl(std::span<const MslReflectParams> msls) {
     MslShaderReflection refl{};
+    bool useArgBuffers = false;
+    if (!msls.empty()) {
+        useArgBuffers = msls[0].UseArgumentBuffers;
+    }
     for (const auto& msl : msls) {
         if (msl.SpirV.size() % 4 != 0) {
             RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
@@ -411,25 +420,49 @@ std::optional<MslShaderReflection> ReflectMsl(std::span<const MslReflectParams> 
             spirv_cross::CompilerMSL::Options mslOpt;
             mslOpt.set_msl_version(2, 0, 0);
             mslOpt.platform = spirv_cross::CompilerMSL::Options::macOS;
+            mslOpt.argument_buffers = useArgBuffers;
             compiler.set_msl_options(mslOpt);
             compiler.set_entry_point(string(msl.EntryPoint), execModel);
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-            // 为 vertex/fragment buffer 添加偏移，与 ConvertSpirvToMsl 保持一致
+            // 为 vertex/fragment stage 的资源绑定添加偏移，与 ConvertSpirvToMsl 保持一致
             if (msl.Stage == ShaderStage::Vertex || msl.Stage == ShaderStage::Pixel) {
-                auto addBufferBinding = [&](const spirv_cross::Resource& res) {
-                    uint32_t descSet = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
-                    uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
-                    spirv_cross::MSLResourceBinding b{};
-                    b.stage = execModel;
-                    b.desc_set = descSet;
-                    b.binding = binding;
-                    b.msl_buffer = binding + MetalMaxVertexInputBindings;
-                    b.msl_texture = binding;
-                    b.msl_sampler = binding;
-                    compiler.add_msl_resource_binding(b);
-                };
-                for (const auto& r : resources.uniform_buffers) addBufferBinding(r);
-                for (const auto& r : resources.storage_buffers) addBufferBinding(r);
+                if (useArgBuffers) {
+                    // 启用 argument buffer 时，每个 descriptor set 变成一个 argument buffer
+                    unordered_set<uint32_t> descSets;
+                    auto collectDescSet = [&](const spirv_cross::Resource& res) {
+                        descSets.insert(compiler.get_decoration(res.id, spv::DecorationDescriptorSet));
+                    };
+                    for (const auto& r : resources.uniform_buffers) collectDescSet(r);
+                    for (const auto& r : resources.storage_buffers) collectDescSet(r);
+                    for (const auto& r : resources.sampled_images) collectDescSet(r);
+                    for (const auto& r : resources.separate_images) collectDescSet(r);
+                    for (const auto& r : resources.storage_images) collectDescSet(r);
+                    for (const auto& r : resources.separate_samplers) collectDescSet(r);
+                    for (uint32_t descSet : descSets) {
+                        spirv_cross::MSLResourceBinding mslBinding{};
+                        mslBinding.stage = execModel;
+                        mslBinding.desc_set = descSet;
+                        mslBinding.binding = spirv_cross::kArgumentBufferBinding;
+                        mslBinding.msl_buffer = descSet + MetalMaxVertexInputBindings + 1;
+                        compiler.add_msl_resource_binding(mslBinding);
+                    }
+                } else {
+                    auto addBufferBinding = [&](const spirv_cross::Resource& res) {
+                        uint32_t descSet = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+                        uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
+                        spirv_cross::MSLResourceBinding b{};
+                        b.stage = execModel;
+                        b.desc_set = descSet;
+                        b.binding = binding;
+                        b.msl_buffer = binding + MetalMaxVertexInputBindings;
+                        b.msl_texture = binding;
+                        b.msl_sampler = binding;
+                        compiler.add_msl_resource_binding(b);
+                    };
+                    for (const auto& r : resources.uniform_buffers) addBufferBinding(r);
+                    for (const auto& r : resources.storage_buffers) addBufferBinding(r);
+                }
+                // push constant 偏移
                 if (!resources.push_constant_buffers.empty()) {
                     spirv_cross::MSLResourceBinding pcb{};
                     pcb.stage = execModel;
@@ -442,30 +475,33 @@ std::optional<MslShaderReflection> ReflectMsl(std::span<const MslReflectParams> 
             // 编译触发 binding 分配
             compiler.compile();
             MslReflCtx ctx{compiler, refl, structCache};
+            auto getDescSet = [&](const spirv_cross::Resource& res) -> uint32_t {
+                return compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+            };
             for (const auto& r : resources.uniform_buffers) {
-                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, true, false);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, true, false, false, getDescSet(r));
             }
             for (const auto& r : resources.storage_buffers) {
                 bool ro = compiler.get_decoration(r.id, spv::DecorationNonWritable) != 0;
                 bool wo = compiler.get_decoration(r.id, spv::DecorationNonReadable) != 0;
-                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, ro, wo);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, ro, wo, false, getDescSet(r));
             }
             for (const auto& r : resources.push_constant_buffers) {
-                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, true, false);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, true, false, true, 0);
             }
             for (const auto& r : resources.sampled_images) {
-                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, true, false);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, true, false, false, getDescSet(r));
             }
             for (const auto& r : resources.separate_images) {
-                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, true, false);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, true, false, false, getDescSet(r));
             }
             for (const auto& r : resources.storage_images) {
                 bool ro = compiler.get_decoration(r.id, spv::DecorationNonWritable) != 0;
                 bool wo = compiler.get_decoration(r.id, spv::DecorationNonReadable) != 0;
-                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, ro, wo);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Texture, mslStage, ro, wo, false, getDescSet(r));
             }
             for (const auto& r : resources.separate_samplers) {
-                _ProcessMslBinding(ctx, r, MslArgumentType::Sampler, mslStage, true, false);
+                _ProcessMslBinding(ctx, r, MslArgumentType::Sampler, mslStage, true, false, false, getDescSet(r));
             }
         } catch (const spirv_cross::CompilerError& e) {
             RADRAY_ERR_LOG("SPIRV-Cross MSL Reflect Error: {}", e.what());

@@ -523,23 +523,49 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
         compiler.set_entry_point(string(entryPoint), execModel);
 
         // 为 vertex/fragment stage 的 buffer 资源绑定添加偏移，避免和 vertex buffer slot 0-15 冲突
-        // texture 和 sampler 在 Metal 中是独立的索引空间，不需要偏移
         if (stage == ShaderStage::Vertex || stage == ShaderStage::Pixel) {
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-            auto addBufferBinding = [&](const spirv_cross::Resource& res) {
-                uint32_t descSet = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
-                uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
-                spirv_cross::MSLResourceBinding mslBinding{};
-                mslBinding.stage = execModel;
-                mslBinding.desc_set = descSet;
-                mslBinding.binding = binding;
-                mslBinding.msl_buffer = binding + MetalMaxVertexInputBindings;
-                mslBinding.msl_texture = binding;
-                mslBinding.msl_sampler = binding;
-                compiler.add_msl_resource_binding(mslBinding);
-            };
-            for (const auto& r : resources.uniform_buffers) addBufferBinding(r);
-            for (const auto& r : resources.storage_buffers) addBufferBinding(r);
+            if (option.UseArgumentBuffers) {
+                // 启用 argument buffer 时，每个 descriptor set 变成一个 argument buffer，
+                // 需要通过 kArgumentBufferBinding 将 argument buffer 的 buffer index 偏移，
+                // 避免和 vertex buffer slot 0-15 冲突
+                unordered_set<uint32_t> descSets;
+                auto collectDescSet = [&](const spirv_cross::Resource& res) {
+                    descSets.insert(compiler.get_decoration(res.id, spv::DecorationDescriptorSet));
+                };
+                for (const auto& r : resources.uniform_buffers) collectDescSet(r);
+                for (const auto& r : resources.storage_buffers) collectDescSet(r);
+                for (const auto& r : resources.sampled_images) collectDescSet(r);
+                for (const auto& r : resources.separate_images) collectDescSet(r);
+                for (const auto& r : resources.storage_images) collectDescSet(r);
+                for (const auto& r : resources.separate_samplers) collectDescSet(r);
+                for (uint32_t descSet : descSets) {
+                    spirv_cross::MSLResourceBinding mslBinding{};
+                    mslBinding.stage = execModel;
+                    mslBinding.desc_set = descSet;
+                    mslBinding.binding = spirv_cross::kArgumentBufferBinding;
+                    // +1 to reserve MetalMaxVertexInputBindings for push constants
+                    mslBinding.msl_buffer = descSet + MetalMaxVertexInputBindings + 1;
+                    compiler.add_msl_resource_binding(mslBinding);
+                }
+            } else {
+                // 未启用 argument buffer 时，只需偏移 buffer 类型资源
+                // texture 和 sampler 在 Metal 中是独立的索引空间，不需要偏移
+                auto addBufferBinding = [&](const spirv_cross::Resource& res) {
+                    uint32_t descSet = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+                    uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
+                    spirv_cross::MSLResourceBinding mslBinding{};
+                    mslBinding.stage = execModel;
+                    mslBinding.desc_set = descSet;
+                    mslBinding.binding = binding;
+                    mslBinding.msl_buffer = binding + MetalMaxVertexInputBindings;
+                    mslBinding.msl_texture = binding;
+                    mslBinding.msl_sampler = binding;
+                    compiler.add_msl_resource_binding(mslBinding);
+                };
+                for (const auto& r : resources.uniform_buffers) addBufferBinding(r);
+                for (const auto& r : resources.storage_buffers) addBufferBinding(r);
+            }
             // push constant 也需要偏移
             if (!resources.push_constant_buffers.empty()) {
                 spirv_cross::MSLResourceBinding pcBinding{};

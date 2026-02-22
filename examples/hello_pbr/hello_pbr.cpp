@@ -5,6 +5,8 @@
 #include <radray/file.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
+#include <radray/render/spvc.h>
+#include <radray/render/msl.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/render/bind_bridge.h>
 #include <radray/render/render_utility.h>
@@ -109,13 +111,19 @@ public:
             Eigen::Matrix4f vp = proj * view;
             Eigen::Matrix4f mvp = vp * model;
             auto bind = _binds[frameIndex].get();
-            bind->GetCBuffer("_Obj").GetVar("model").SetValue(model);
-            bind->GetCBuffer("_Obj").GetVar("mvp").SetValue(mvp);
-            bind->GetCBuffer("_Obj").GetVar("modelInv").SetValue(modelInv);
-            bind->GetCBuffer("_Camera").GetVar("view").SetValue(view);
-            bind->GetCBuffer("_Camera").GetVar("proj").SetValue(proj);
-            bind->GetCBuffer("_Camera").GetVar("viewProj").SetValue(vp);
-            bind->GetCBuffer("_Camera").GetVar("posW").SetValue(_camPos);
+            auto objCb = bind->GetCBuffer("_Obj");
+            auto cameraCb = bind->GetCBuffer("_Camera");
+            if (!objCb || !cameraCb) {
+                RADRAY_ERR_LOG("PBR cbuffer missing: _Obj valid={}, _Camera valid={}", objCb.IsValid(), cameraCb.IsValid());
+                return;
+            }
+            objCb.GetVar("model").SetValue(model);
+            objCb.GetVar("mvp").SetValue(mvp);
+            objCb.GetVar("modelInv").SetValue(modelInv);
+            cameraCb.GetVar("view").SetValue(view);
+            cameraCb.GetVar("proj").SetValue(proj);
+            cameraCb.GetVar("viewProj").SetValue(vp);
+            cameraCb.GetVar("posW").SetValue(_camPos);
             bind->Upload(_device.get(), cbArena);
             auto& drawData = frame->_drawDatas.emplace_back();
             drawData._rs = _rs.get();
@@ -177,7 +185,7 @@ public:
             render::DepthStencilAttachment dsAttach{
                 frame->_dsv.get(),
                 render::LoadAction::Clear,
-                render::StoreAction::Discard,
+                render::StoreAction::Store,
                 render::LoadAction::DontCare,
                 render::StoreAction::Discard,
                 {1.0f, 0}};
@@ -342,12 +350,16 @@ public:
                 defines.emplace_back("VULKAN");
             } else if (backend == render::RenderBackend::D3D12) {
                 defines.emplace_back("D3D12");
+            } else if (backend == render::RenderBackend::Metal) {
+                defines.emplace_back("METAL");
+            } else {
+                throw ImGuiApplicationException("unsupported render backend for shader compilation");
             }
             vector<std::string_view> includes;
             includes.emplace_back("shaderlib");
             render::DxcOutput vsBin;
             {
-                auto vs = _dxc->Compile(hlsl, "VSMain", render::ShaderStage::Vertex, render::HlslShaderModel::SM60, true, defines, includes, backend == render::RenderBackend::Vulkan);
+                auto vs = _dxc->Compile(hlsl, "VSMain", render::ShaderStage::Vertex, render::HlslShaderModel::SM60, true, defines, includes, backend != render::RenderBackend::D3D12);
                 if (!vs.has_value()) {
                     throw ImGuiApplicationException("Failed to compile vertex shader");
                 }
@@ -355,16 +367,36 @@ public:
             }
             render::DxcOutput psBin;
             {
-                auto ps = _dxc->Compile(hlsl, "PSMain", render::ShaderStage::Pixel, render::HlslShaderModel::SM60, true, defines, includes, backend == render::RenderBackend::Vulkan);
+                auto ps = _dxc->Compile(hlsl, "PSMain", render::ShaderStage::Pixel, render::HlslShaderModel::SM60, true, defines, includes, backend != render::RenderBackend::D3D12);
                 if (!ps.has_value()) {
                     throw ImGuiApplicationException("Failed to compile pixel shader");
                 }
                 psBin = std::move(ps.value());
             }
-            render::ShaderDescriptor vsDesc{vsBin.Data, vsBin.Category};
-            vsShader = _device->CreateShader(vsDesc).Unwrap();
-            render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
-            psShader = _device->CreateShader(psDesc).Unwrap();
+            if (backend == render::RenderBackend::Metal) {
+                render::SpirvToMslOption mslOption{
+                    3,
+                    0,
+                    0,
+#ifdef RADRAY_PLATFORM_MACOS
+                    render::MslPlatform::MacOS,
+#elif defined(RADRAY_PLATFORM_IOS)
+                    render::MslPlatform::IOS,
+#endif
+                    true,
+                    false};
+                auto vsMsl = render::ConvertSpirvToMsl(vsBin.Data, "VSMain", render::ShaderStage::Vertex, mslOption).value();
+                render::ShaderDescriptor vsDesc{vsMsl.GetBlob(), render::ShaderBlobCategory::MSL};
+                vsShader = _device->CreateShader(vsDesc).Unwrap();
+                auto psMsl = render::ConvertSpirvToMsl(psBin.Data, "PSMain", render::ShaderStage::Pixel, mslOption).value();
+                render::ShaderDescriptor psDesc{psMsl.GetBlob(), render::ShaderBlobCategory::MSL};
+                psShader = _device->CreateShader(psDesc).Unwrap();
+            } else {
+                render::ShaderDescriptor vsDesc{vsBin.Data, vsBin.Category};
+                vsShader = _device->CreateShader(vsDesc).Unwrap();
+                render::ShaderDescriptor psDesc{psBin.Data, psBin.Category};
+                psShader = _device->CreateShader(psDesc).Unwrap();
+            }
 
             render::BindBridgeLayout bindLayout;
             if (backend == render::RenderBackend::D3D12) {
@@ -380,6 +412,12 @@ public:
                 const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
                 auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
                 bindLayout = render::BindBridgeLayout{spirvDesc};
+            } else if (backend == render::RenderBackend::Metal) {
+                render::MslReflectParams mslParams[] = {
+                    {vsBin.Data, "VSMain", render::ShaderStage::Vertex, true},
+                    {psBin.Data, "PSMain", render::ShaderStage::Pixel, true}};
+                auto mslRefl = render::ReflectMsl(mslParams).value();
+                bindLayout = render::BindBridgeLayout{mslRefl};
             } else {
                 throw ImGuiApplicationException("unsupported render backend for shader reflection");
             }
