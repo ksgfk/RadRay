@@ -142,7 +142,6 @@ public:
 
 public:
     void DestroyImpl() noexcept;
-    void EndBlitEncoderIfActive() noexcept;
 
     DeviceMetal* _device{nullptr};
     CmdQueueMetal* _queue{nullptr};
@@ -301,6 +300,16 @@ struct CachedStaticSampler {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
+/**
+ * 为了简化实现，metal 后端不能用 root descriptor。
+ *
+ * vertex stage：
+ * * render pipeline slot 0-15 给 vertex buffer 使用，作为顶点缓冲
+ * * DescriptorSet(a.k.a MTLArgumentBuffer)，PushConstant(a.k.a setVertexBytes) 从 slot 16 (a.k.a DeviceDetail::MaxVertexInputBindings) 开始绑定
+ *
+ * fragment stage：
+ * * 为了和 vertex stage 一致，也从 slot 16 开始绑定 DescriptorSet 和 PushConstant
+ */
 class RootSignatureMetal final : public RootSignature {
 public:
     RootSignatureMetal(
@@ -318,7 +327,7 @@ public:
 
     DeviceMetal* _device{nullptr};
     RootSignatureDescriptorContainer _container;
-    vector<CachedStaticSampler> _cachedStaticSamplers;
+    vector<unique_ptr<SamplerMetal>> _cachedStaticSamplers;
 };
 
 class GraphicsPipelineStateMetal final : public GraphicsPipelineState {
@@ -363,6 +372,10 @@ public:
 
 class GraphicsCmdEncoderMetal final : public GraphicsCommandEncoder {
 public:
+    GraphicsCmdEncoderMetal(
+        CmdBufferMetal* cmdBuffer,
+        id<MTLRenderCommandEncoder> encoder) noexcept;
+
     ~GraphicsCmdEncoderMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -409,6 +422,10 @@ public:
 
 class ComputeCmdEncoderMetal final : public ComputeCommandEncoder {
 public:
+    ComputeCmdEncoderMetal(
+        CmdBufferMetal* cmdBuffer,
+        id<MTLComputeCommandEncoder> encoder) noexcept;
+
     ~ComputeCmdEncoderMetal() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -510,19 +527,7 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    struct TrackedResource {
-        uint32_t argIndex{0};
-        id<MTLResource> resource{nil};
-        MTLResourceUsage usage{MTLResourceUsageRead};
-    };
-
     DeviceMetal* _device{nullptr};
-    RootSignatureMetal* _rootSig{nullptr};
-    uint32_t _setIndex{0};
-    id<MTLArgumentEncoder> _argumentEncoder{nil};
-    id<MTLBuffer> _argumentBuffer{nil};
-    vector<TrackedResource> _trackedResources;
-    ShaderStages _combinedStages{ShaderStage::UNKNOWN};
 };
 
 class BindlessArrayMetal final : public BindlessArray {
@@ -540,16 +545,7 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    struct TrackedResource {
-        id<MTLResource> resource{nil};
-        MTLResourceUsage usage{MTLResourceUsageRead};
-    };
-
     DeviceMetal* _device{nullptr};
-    id<MTLBuffer> _argumentBuffer{nil};
-    vector<TrackedResource> _trackedResources;
-    uint32_t _size{0};
-    BindlessSlotType _slotType{BindlessSlotType::Multiple};
 };
 
 constexpr auto CastMtlObject(Device* p) noexcept { return static_cast<DeviceMetal*>(p); }
@@ -569,6 +565,8 @@ constexpr auto CastMtlObject(BufferView* p) noexcept { return static_cast<Buffer
 constexpr auto CastMtlObject(Sampler* p) noexcept { return static_cast<SamplerMetal*>(p); }
 constexpr auto CastMtlObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetMetal*>(p); }
 constexpr auto CastMtlObject(BindlessArray* p) noexcept { return static_cast<BindlessArrayMetal*>(p); }
+constexpr auto CastMtlObject(GraphicsCommandEncoder* p) noexcept { return static_cast<GraphicsCmdEncoderMetal*>(p); }
+constexpr auto CastMtlObject(ComputeCommandEncoder* p) noexcept { return static_cast<ComputeCmdEncoderMetal*>(p); }
 
 }  // namespace radray::render::metal
 

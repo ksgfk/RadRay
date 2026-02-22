@@ -12,6 +12,8 @@
 
 namespace radray::render {
 
+constexpr uint32_t MetalMaxVertexInputBindings = 16;
+
 enum class RenderBackend {
     D3D12,
     Vulkan,
@@ -857,6 +859,7 @@ struct DeviceDetail {
     uint32_t CBufferAlignment{0};
     uint32_t TextureDataPitchAlignment{1};
     uint64_t VramBudget{0};
+    uint32_t MaxVertexInputBindings{0};
     bool IsUMA{false};
     bool IsBindlessArraySupported{false};
 };

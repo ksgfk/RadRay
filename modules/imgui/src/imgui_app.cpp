@@ -1124,7 +1124,11 @@ void ImGuiApplication::SimpleMonitorIMGUI::OnImGui() {
     windowFlags |= ImGuiWindowFlags_NoMove;
     ImGui::SetNextWindowBgAlpha(0.35f);
     if (ImGui::Begin("RadrayMonitor", &_showMonitor, windowFlags)) {
-        ImGui::Text("Backend: %s (validate layer %s)", radray::render::format_as(_app._device->GetBackend()).data(), _app._enableValidation ? "On" : "Off");
+        if (_app._device->GetBackend() == radray::render::RenderBackend::Metal) {
+            ImGui::Text("Backend: %s", radray::render::format_as(_app._device->GetBackend()).data());
+        } else {
+            ImGui::Text("Backend: %s (validate layer %s)", radray::render::format_as(_app._device->GetBackend()).data(), _app._enableValidation ? "On" : "Off");
+        }
         ImGui::Text("CPU: (%09.4f ms) (%.2f fps)", _cpuAvgTime, _cpuFps);
         ImGui::Text("GPU: (%09.4f ms) (%.2f fps)", _gpuAvgTime, _gpuFps);
         ImGui::Separator();

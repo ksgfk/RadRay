@@ -522,6 +522,35 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
         }
         compiler.set_entry_point(string(entryPoint), execModel);
 
+        // 为 vertex/fragment stage 的 buffer 资源绑定添加偏移，避免和 vertex buffer slot 0-15 冲突
+        // texture 和 sampler 在 Metal 中是独立的索引空间，不需要偏移
+        if (stage == ShaderStage::Vertex || stage == ShaderStage::Pixel) {
+            spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+            auto addBufferBinding = [&](const spirv_cross::Resource& res) {
+                uint32_t descSet = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+                uint32_t binding = compiler.get_decoration(res.id, spv::DecorationBinding);
+                spirv_cross::MSLResourceBinding mslBinding{};
+                mslBinding.stage = execModel;
+                mslBinding.desc_set = descSet;
+                mslBinding.binding = binding;
+                mslBinding.msl_buffer = binding + MetalMaxVertexInputBindings;
+                mslBinding.msl_texture = binding;
+                mslBinding.msl_sampler = binding;
+                compiler.add_msl_resource_binding(mslBinding);
+            };
+            for (const auto& r : resources.uniform_buffers) addBufferBinding(r);
+            for (const auto& r : resources.storage_buffers) addBufferBinding(r);
+            // push constant 也需要偏移
+            if (!resources.push_constant_buffers.empty()) {
+                spirv_cross::MSLResourceBinding pcBinding{};
+                pcBinding.stage = execModel;
+                pcBinding.desc_set = spirv_cross::kPushConstDescSet;
+                pcBinding.binding = spirv_cross::kPushConstBinding;
+                pcBinding.msl_buffer = MetalMaxVertexInputBindings;
+                compiler.add_msl_resource_binding(pcBinding);
+            }
+        }
+
         std::string msl = compiler.compile();
         std::string mslEntryPoint = compiler.get_cleansed_entry_point_name(
             string(entryPoint), execModel);

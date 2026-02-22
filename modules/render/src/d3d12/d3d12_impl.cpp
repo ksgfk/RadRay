@@ -404,6 +404,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     DeviceDetail& detail = result->_detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    detail.MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
     detail.IsBindlessArraySupported = false;
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
@@ -1898,21 +1899,59 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
 void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
-
-    UINT subres = D3D12CalcSubresource(dstRange.BaseMipLevel, dstRange.BaseArrayLayer, 0, 1, dst->_desc.DepthOrArraySize);
     const D3D12_RESOURCE_DESC& dstDesc = dst->_rawDesc;
 
-    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    srcLoc.pResource = src->_buf.Get();
-    _device->_device->GetCopyableFootprints(&dstDesc, subres, 1, srcOffset, &srcLoc.PlacedFootprint, nullptr, nullptr, nullptr);
-    srcLoc.PlacedFootprint.Offset = srcOffset;
-    D3D12_TEXTURE_COPY_LOCATION dstLoc{};
-    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dstLoc.pResource = dst->_tex.Get();
-    dstLoc.SubresourceIndex = subres;
+    if (dstRange.MipLevelCount == SubresourceRange::All || dstRange.ArrayLayerCount == SubresourceRange::All) {
+        RADRAY_ERR_LOG("d3d12 CopyBufferToTexture requires explicit SubresourceRange count");
+        return;
+    }
 
-    _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+    uint32_t mipLevels = dstRange.MipLevelCount;
+    uint32_t layerCount = dstRange.ArrayLayerCount;
+    if (mipLevels == 0 || layerCount == 0) {
+        RADRAY_ERR_LOG("d3d12 CopyBufferToTexture invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
+        return;
+    }
+    if (dstRange.BaseMipLevel >= dst->_desc.MipLevels ||
+        dstRange.BaseMipLevel + mipLevels > dst->_desc.MipLevels) {
+        RADRAY_ERR_LOG("d3d12 CopyBufferToTexture mip range out of bounds (base={}, count={}, total={})",
+                       dstRange.BaseMipLevel, mipLevels, dst->_desc.MipLevels);
+        return;
+    }
+
+    uint32_t arraySize = dst->_desc.Dim == TextureDimension::Dim3D ? 1u : dst->_desc.DepthOrArraySize;
+    if (dstRange.BaseArrayLayer >= arraySize ||
+        dstRange.BaseArrayLayer + layerCount > arraySize) {
+        RADRAY_ERR_LOG("d3d12 CopyBufferToTexture array range out of bounds (base={}, count={}, total={})",
+                       dstRange.BaseArrayLayer, layerCount, arraySize);
+        return;
+    }
+
+    uint64_t bufferOffset = srcOffset;
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        uint32_t mipLevel = dstRange.BaseMipLevel + mip;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            uint32_t arrayLayer = dstRange.BaseArrayLayer + layer;
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, dst->_desc.MipLevels, arraySize);
+
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 totalBytes = 0;
+            _device->_device->GetCopyableFootprints(&dstDesc, subres, 1, bufferOffset, &footprint, nullptr, nullptr, &totalBytes);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            srcLoc.pResource = src->_buf.Get();
+            srcLoc.PlacedFootprint = footprint;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dstLoc.pResource = dst->_tex.Get();
+            dstLoc.SubresourceIndex = subres;
+
+            _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+            bufferOffset = footprint.Offset + totalBytes;
+        }
+    }
 }
 
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept

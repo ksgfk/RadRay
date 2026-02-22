@@ -77,6 +77,5 @@ Library targets: `radraycore`, `radraywindow`, `radrayrender`, `radrayimgui`.
 
 - C++20 with concepts, ranges; Objective-C++ (.mm) for Metal and Cocoa on macOS
 - Comments are mixed Chinese and English
-- macOS minimum deployment target: 10.15
 - CMake helper functions in `cmake/Utility.cmake`: `radray_set_build_path`, `radray_optimize_flags_library`, `radray_optimize_flags_binary`, `radray_example_files`
 - Tests use Google Test with `gtest_discover_tests()`, each in its own subdirectory under `tests/`
