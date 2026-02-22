@@ -9,8 +9,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <radray/render/common.h>
+#include <radray/render/msl.h>
 
 namespace radray::render::metal {
+
+MslDataType MapMslDataType(MTLDataType v) noexcept;
+MslTextureType MapMslTextureType(MTLTextureType v) noexcept;
+MslAccess MapMslAccess(MTLBindingAccess v) noexcept;
+MslArgumentType MapMslArgumentType(MTLBindingType v) noexcept;
+std::optional<MslShaderReflection> DumpPsoReflection(MTLRenderPipelineReflection* reflection);
+std::optional<MslShaderReflection> DumpPsoReflection(MTLComputePipelineReflection* reflection);
 
 MTLPixelFormat MapPixelFormat(TextureFormat v) noexcept;
 MTLLoadAction MapLoadAction(LoadAction v) noexcept;
@@ -33,12 +41,6 @@ MTLIndexType MapIndexType(IndexFormat v) noexcept;
 MTLCullMode MapCullMode(CullMode v) noexcept;
 MTLWinding MapWinding(FrontFace v) noexcept;
 MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept;
-
-struct ArgumentDescriptorInfo {
-    MTLDataType dataType;
-    MTLBindingAccess access;
-};
-ArgumentDescriptorInfo MapResourceBindTypeToArgument(ResourceBindType type) noexcept;
 
 }  // namespace radray::render::metal
 

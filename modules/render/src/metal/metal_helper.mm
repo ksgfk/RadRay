@@ -1,8 +1,206 @@
 #include <radray/render/backend/metal_helper.h>
 
 #include <radray/utility.h>
+#include <radray/logger.h>
 
 namespace radray::render::metal {
+
+MslDataType MapMslDataType(MTLDataType v) noexcept {
+    switch (v) {
+        case MTLDataTypeNone: return MslDataType::None;
+        case MTLDataTypeStruct: return MslDataType::Struct;
+        case MTLDataTypeArray: return MslDataType::Array;
+        case MTLDataTypeFloat: return MslDataType::Float;
+        case MTLDataTypeFloat2: return MslDataType::Float2;
+        case MTLDataTypeFloat3: return MslDataType::Float3;
+        case MTLDataTypeFloat4: return MslDataType::Float4;
+        case MTLDataTypeFloat2x2: return MslDataType::Float2x2;
+        case MTLDataTypeFloat2x3: return MslDataType::Float2x3;
+        case MTLDataTypeFloat2x4: return MslDataType::Float2x4;
+        case MTLDataTypeFloat3x2: return MslDataType::Float3x2;
+        case MTLDataTypeFloat3x3: return MslDataType::Float3x3;
+        case MTLDataTypeFloat3x4: return MslDataType::Float3x4;
+        case MTLDataTypeFloat4x2: return MslDataType::Float4x2;
+        case MTLDataTypeFloat4x3: return MslDataType::Float4x3;
+        case MTLDataTypeFloat4x4: return MslDataType::Float4x4;
+        case MTLDataTypeHalf: return MslDataType::Half;
+        case MTLDataTypeHalf2: return MslDataType::Half2;
+        case MTLDataTypeHalf3: return MslDataType::Half3;
+        case MTLDataTypeHalf4: return MslDataType::Half4;
+        case MTLDataTypeHalf2x2: return MslDataType::Half2x2;
+        case MTLDataTypeHalf2x3: return MslDataType::Half2x3;
+        case MTLDataTypeHalf2x4: return MslDataType::Half2x4;
+        case MTLDataTypeHalf3x2: return MslDataType::Half3x2;
+        case MTLDataTypeHalf3x3: return MslDataType::Half3x3;
+        case MTLDataTypeHalf3x4: return MslDataType::Half3x4;
+        case MTLDataTypeHalf4x2: return MslDataType::Half4x2;
+        case MTLDataTypeHalf4x3: return MslDataType::Half4x3;
+        case MTLDataTypeHalf4x4: return MslDataType::Half4x4;
+        case MTLDataTypeInt: return MslDataType::Int;
+        case MTLDataTypeInt2: return MslDataType::Int2;
+        case MTLDataTypeInt3: return MslDataType::Int3;
+        case MTLDataTypeInt4: return MslDataType::Int4;
+        case MTLDataTypeUInt: return MslDataType::UInt;
+        case MTLDataTypeUInt2: return MslDataType::UInt2;
+        case MTLDataTypeUInt3: return MslDataType::UInt3;
+        case MTLDataTypeUInt4: return MslDataType::UInt4;
+        case MTLDataTypeShort: return MslDataType::Short;
+        case MTLDataTypeShort2: return MslDataType::Short2;
+        case MTLDataTypeShort3: return MslDataType::Short3;
+        case MTLDataTypeShort4: return MslDataType::Short4;
+        case MTLDataTypeUShort: return MslDataType::UShort;
+        case MTLDataTypeUShort2: return MslDataType::UShort2;
+        case MTLDataTypeUShort3: return MslDataType::UShort3;
+        case MTLDataTypeUShort4: return MslDataType::UShort4;
+        case MTLDataTypeChar: return MslDataType::Char;
+        case MTLDataTypeChar2: return MslDataType::Char2;
+        case MTLDataTypeChar3: return MslDataType::Char3;
+        case MTLDataTypeChar4: return MslDataType::Char4;
+        case MTLDataTypeUChar: return MslDataType::UChar;
+        case MTLDataTypeUChar2: return MslDataType::UChar2;
+        case MTLDataTypeUChar3: return MslDataType::UChar3;
+        case MTLDataTypeUChar4: return MslDataType::UChar4;
+        case MTLDataTypeBool: return MslDataType::Bool;
+        case MTLDataTypeBool2: return MslDataType::Bool2;
+        case MTLDataTypeBool3: return MslDataType::Bool3;
+        case MTLDataTypeBool4: return MslDataType::Bool4;
+        case MTLDataTypeLong: return MslDataType::Long;
+        case MTLDataTypeLong2: return MslDataType::Long2;
+        case MTLDataTypeLong3: return MslDataType::Long3;
+        case MTLDataTypeLong4: return MslDataType::Long4;
+        case MTLDataTypeULong: return MslDataType::ULong;
+        case MTLDataTypeULong2: return MslDataType::ULong2;
+        case MTLDataTypeULong3: return MslDataType::ULong3;
+        case MTLDataTypeULong4: return MslDataType::ULong4;
+        case MTLDataTypeTexture: return MslDataType::Texture;
+        case MTLDataTypeSampler: return MslDataType::Sampler;
+        case MTLDataTypePointer: return MslDataType::Pointer;
+        default: return MslDataType::None;
+    }
+}
+
+MslTextureType MapMslTextureType(MTLTextureType v) noexcept {
+    switch (v) {
+        case MTLTextureType1D: return MslTextureType::Tex1D;
+        case MTLTextureType1DArray: return MslTextureType::Tex1DArray;
+        case MTLTextureType2D: return MslTextureType::Tex2D;
+        case MTLTextureType2DArray: return MslTextureType::Tex2DArray;
+        case MTLTextureType2DMultisample: return MslTextureType::Tex2DMS;
+        case MTLTextureType3D: return MslTextureType::Tex3D;
+        case MTLTextureTypeCube: return MslTextureType::TexCube;
+        case MTLTextureTypeCubeArray: return MslTextureType::TexCubeArray;
+        case MTLTextureTypeTextureBuffer: return MslTextureType::TexBuffer;
+        default: return MslTextureType::Tex2D;
+    }
+}
+
+MslAccess MapMslAccess(MTLBindingAccess v) noexcept {
+    switch (v) {
+        case MTLBindingAccessReadOnly: return MslAccess::ReadOnly;
+        case MTLBindingAccessReadWrite: return MslAccess::ReadWrite;
+        case MTLBindingAccessWriteOnly: return MslAccess::WriteOnly;
+    }
+    return MslAccess::ReadOnly;
+}
+
+MslArgumentType MapMslArgumentType(MTLBindingType v) noexcept {
+    switch (v) {
+        case MTLBindingTypeBuffer: return MslArgumentType::Buffer;
+        case MTLBindingTypeTexture: return MslArgumentType::Texture;
+        case MTLBindingTypeSampler: return MslArgumentType::Sampler;
+        case MTLBindingTypeThreadgroupMemory: return MslArgumentType::ThreadgroupMemory;
+        default: return MslArgumentType::Buffer;
+    }
+}
+
+static uint32_t _ReflectStructType(MTLStructType* structType, MslShaderReflection& refl);
+static uint32_t _ReflectArrayType(MTLArrayType* arrayType, MslShaderReflection& refl);
+
+static uint32_t _ReflectStructType(MTLStructType* structType, MslShaderReflection& refl) {
+    if (structType == nil) return UINT32_MAX;
+    uint32_t index = static_cast<uint32_t>(refl.StructTypes.size());
+    refl.StructTypes.emplace_back();
+    auto& st = refl.StructTypes[index];
+    for (MTLStructMember* member in structType.members) {
+        MslStructMember m;
+        m.Name = string([member.name UTF8String]);
+        m.Offset = member.offset;
+        m.DataType = MapMslDataType(member.dataType);
+        if (member.dataType == MTLDataTypeStruct) {
+            m.StructTypeIndex = _ReflectStructType(member.structType, refl);
+        }
+        if (member.dataType == MTLDataTypeArray) {
+            m.ArrayTypeIndex = _ReflectArrayType(member.arrayType, refl);
+        }
+        st.Members.emplace_back(std::move(m));
+    }
+    return index;
+}
+
+static uint32_t _ReflectArrayType(MTLArrayType* arrayType, MslShaderReflection& refl) {
+    if (arrayType == nil) return UINT32_MAX;
+    uint32_t index = static_cast<uint32_t>(refl.ArrayTypes.size());
+    refl.ArrayTypes.emplace_back();
+    auto& at = refl.ArrayTypes[index];
+    at.ElementType = MapMslDataType(arrayType.elementType);
+    at.ArrayLength = arrayType.arrayLength;
+    at.Stride = arrayType.stride;
+    if (arrayType.elementType == MTLDataTypeStruct) {
+        at.ElementStructTypeIndex = _ReflectStructType(arrayType.elementStructType, refl);
+    }
+    if (arrayType.elementType == MTLDataTypeArray) {
+        at.ElementArrayTypeIndex = _ReflectArrayType(arrayType.elementArrayType, refl);
+    }
+    return index;
+}
+
+static void _ReflectBindings(NSArray<id<MTLBinding>>* bindings, MslStage stage, MslShaderReflection& refl) {
+    for (id<MTLBinding> binding in bindings) {
+        MslArgument arg;
+        arg.Name = string([binding.name UTF8String]);
+        arg.Stage = stage;
+        arg.Type = MapMslArgumentType(binding.type);
+        arg.Access = MapMslAccess(binding.access);
+        arg.Index = static_cast<uint32_t>(binding.index);
+        arg.IsActive = binding.isUsed;
+        if ([binding conformsToProtocol:@protocol(MTLBufferBinding)]) {
+            id<MTLBufferBinding> bufBinding = (id<MTLBufferBinding>)binding;
+            arg.BufferAlignment = bufBinding.bufferAlignment;
+            arg.BufferDataSize = bufBinding.bufferDataSize;
+            arg.BufferDataType = MapMslDataType(bufBinding.bufferDataType);
+            if (bufBinding.bufferDataType == MTLDataTypeStruct && bufBinding.bufferStructType != nil) {
+                arg.BufferStructTypeIndex = _ReflectStructType(bufBinding.bufferStructType, refl);
+            }
+        }
+        if ([binding conformsToProtocol:@protocol(MTLTextureBinding)]) {
+            id<MTLTextureBinding> texBinding = (id<MTLTextureBinding>)binding;
+            arg.TextureType = MapMslTextureType(texBinding.textureType);
+            arg.TextureDataType = MapMslDataType(texBinding.textureDataType);
+            arg.IsDepthTexture = texBinding.isDepthTexture;
+            arg.ArrayLength = texBinding.arrayLength;
+        }
+        refl.Arguments.emplace_back(std::move(arg));
+    }
+}
+
+std::optional<MslShaderReflection> DumpPsoReflection(MTLRenderPipelineReflection* reflection) {
+    @autoreleasepool {
+        if (reflection == nil) return std::nullopt;
+        MslShaderReflection refl{};
+        _ReflectBindings(reflection.vertexBindings, MslStage::Vertex, refl);
+        _ReflectBindings(reflection.fragmentBindings, MslStage::Fragment, refl);
+        return refl;
+    }
+}
+
+std::optional<MslShaderReflection> DumpPsoReflection(MTLComputePipelineReflection* reflection) {
+    @autoreleasepool {
+        if (reflection == nil) return std::nullopt;
+        MslShaderReflection refl{};
+        _ReflectBindings(reflection.bindings, MslStage::Compute, refl);
+        return refl;
+    }
+}
 
 MTLPixelFormat MapPixelFormat(TextureFormat v) noexcept {
     switch (v) {
@@ -300,26 +498,6 @@ MTLColorWriteMask MapColorWriteMask(ColorWrites mask) noexcept {
     if (mask.HasFlag(ColorWrite::Blue)) result |= MTLColorWriteMaskBlue;
     if (mask.HasFlag(ColorWrite::Alpha)) result |= MTLColorWriteMaskAlpha;
     return result;
-}
-
-ArgumentDescriptorInfo MapResourceBindTypeToArgument(ResourceBindType type) noexcept {
-    switch (type) {
-        case ResourceBindType::CBuffer:
-            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
-        case ResourceBindType::Buffer:
-            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
-        case ResourceBindType::Texture:
-            return {MTLDataTypeTexture, MTLBindingAccessReadOnly};
-        case ResourceBindType::Sampler:
-            return {MTLDataTypeSampler, MTLBindingAccessReadOnly};
-        case ResourceBindType::RWBuffer:
-            return {MTLDataTypePointer, MTLBindingAccessReadWrite};
-        case ResourceBindType::RWTexture:
-            return {MTLDataTypeTexture, MTLBindingAccessReadWrite};
-        case ResourceBindType::UNKNOWN:
-            return {MTLDataTypePointer, MTLBindingAccessReadOnly};
-    }
-    return {MTLDataTypePointer, MTLBindingAccessReadOnly};
 }
 
 }  // namespace radray::render::metal

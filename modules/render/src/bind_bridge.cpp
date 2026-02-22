@@ -61,6 +61,16 @@ BindBridgeLayout::BindBridgeLayout(const SpirvShaderDesc& desc, std::span<const 
     }
 }
 
+BindBridgeLayout::BindBridgeLayout(const MslShaderReflection& desc, std::span<const BindBridgeStaticSampler> staticSamplers) noexcept {
+    auto resOpt = this->BuildFromMsl(desc);
+    if (resOpt) {
+        _bindings = std::move(resOpt.value());
+        this->BuildBindingIndex();
+        this->ApplyStaticSamplers(staticSamplers);
+        _cbStorageBuilder = this->CreateCBufferStorageBuilder(desc).value_or(StructuredBufferStorage::Builder{});
+    }
+}
+
 RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcept {
     RootSignatureDescriptorContainer container{};
     container._staticSamplers.clear();
@@ -496,6 +506,112 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
     return std::make_optional(std::move(bindingEntries));
 }
 
+std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFromMsl(const MslShaderReflection& desc) noexcept {
+    if (desc.Arguments.empty()) {
+        return std::make_optional(vector<BindingEntry>{});
+    }
+    auto mapResourceType = [](const MslArgument& arg) -> ResourceBindType {
+        switch (arg.Type) {
+            case MslArgumentType::Buffer:
+                if (arg.Access == MslAccess::ReadWrite || arg.Access == MslAccess::WriteOnly) {
+                    return ResourceBindType::RWBuffer;
+                }
+                if (arg.BufferDataType == MslDataType::Struct) {
+                    return ResourceBindType::CBuffer;
+                }
+                return ResourceBindType::Buffer;
+            case MslArgumentType::Texture:
+                if (arg.Access == MslAccess::ReadWrite || arg.Access == MslAccess::WriteOnly) {
+                    return ResourceBindType::RWTexture;
+                }
+                return ResourceBindType::Texture;
+            case MslArgumentType::Sampler:
+                return ResourceBindType::Sampler;
+            default:
+                return ResourceBindType::UNKNOWN;
+        }
+    };
+    auto mapStages = [](MslStage stage) -> ShaderStages {
+        switch (stage) {
+            case MslStage::Vertex: return ShaderStage::Vertex;
+            case MslStage::Fragment: return ShaderStage::Pixel;
+            case MslStage::Compute: return ShaderStage::Compute;
+        }
+        return ShaderStage::UNKNOWN;
+    };
+    // Merge arguments with same (Type, Index) across stages
+    struct MergedArg {
+        string Name;
+        ResourceBindType Type;
+        uint32_t Index;
+        ShaderStages Stages;
+        uint64_t ArrayLength;
+        bool IsSampler;
+    };
+    // Key: (MslArgumentType, Index)
+    unordered_map<uint64_t, size_t> mergeMap;
+    vector<MergedArg> merged;
+    for (const auto& arg : desc.Arguments) {
+        if (!arg.IsActive) continue;
+        if (arg.Type == MslArgumentType::ThreadgroupMemory) continue;
+        auto type = mapResourceType(arg);
+        if (type == ResourceBindType::UNKNOWN) continue;
+        uint64_t key = (static_cast<uint64_t>(arg.Type) << 32) | arg.Index;
+        auto it = mergeMap.find(key);
+        if (it != mergeMap.end()) {
+            merged[it->second].Stages = merged[it->second].Stages | mapStages(arg.Stage);
+        } else {
+            mergeMap[key] = merged.size();
+            merged.push_back(MergedArg{
+                arg.Name,
+                type,
+                arg.Index,
+                mapStages(arg.Stage),
+                arg.ArrayLength,
+                arg.Type == MslArgumentType::Sampler});
+        }
+    }
+    // Separate into resources (set 0) and samplers (set 1)
+    vector<const MergedArg*> resources, samplers;
+    for (const auto& m : merged) {
+        if (m.IsSampler) {
+            samplers.push_back(&m);
+        } else {
+            resources.push_back(&m);
+        }
+    }
+    auto sortByIndex = [](const MergedArg* a, const MergedArg* b) { return a->Index < b->Index; };
+    std::sort(resources.begin(), resources.end(), sortByIndex);
+    std::sort(samplers.begin(), samplers.end(), sortByIndex);
+    vector<BindingEntry> bindingEntries;
+    uint32_t setIndex = 0;
+    auto emitSet = [&](const vector<const MergedArg*>& args, uint32_t si) {
+        uint32_t elemIndex = 0;
+        for (const auto* m : args) {
+            uint32_t count = m->ArrayLength == 0 ? 1u : static_cast<uint32_t>(m->ArrayLength);
+            bindingEntries.emplace_back(DescriptorSetEntry{
+                m->Name,
+                0,
+                m->Type,
+                count,
+                m->Index,
+                0,
+                m->Stages,
+                si,
+                elemIndex++,
+                false,
+                {}});
+        }
+    };
+    if (!resources.empty()) {
+        emitSet(resources, setIndex++);
+    }
+    if (!samplers.empty()) {
+        emitSet(samplers, setIndex++);
+    }
+    return std::make_optional(std::move(bindingEntries));
+}
+
 std::optional<StructuredBufferStorage::Builder> BindBridgeLayout::CreateCBufferStorageBuilder(const HlslShaderDesc& desc) noexcept {
     StructuredBufferStorage::Builder builder{};
     builder.SetAlignment(0);
@@ -664,6 +780,74 @@ std::optional<StructuredBufferStorage::Builder> BindBridgeLayout::CreateCBufferS
                 createType(member.TypeIndex, bdTypeIdx, sizeInBytes);
             }
         }
+    }
+    return builder;
+}
+
+std::optional<StructuredBufferStorage::Builder> BindBridgeLayout::CreateCBufferStorageBuilder(const MslShaderReflection& desc) noexcept {
+    StructuredBufferStorage::Builder builder{};
+    builder.SetAlignment(0);
+    auto createType = [&](uint32_t structTypeIndex, StructuredBufferId bdType, size_t parentSize) {
+        struct TypeCreateCtx {
+            uint32_t structIdx;
+            StructuredBufferId bd;
+            size_t parentSize;
+        };
+        stack<TypeCreateCtx> s;
+        s.push({structTypeIndex, bdType, parentSize});
+        while (!s.empty()) {
+            auto ctx = s.top();
+            s.pop();
+            if (ctx.structIdx >= desc.StructTypes.size()) continue;
+            const auto& st = desc.StructTypes[ctx.structIdx];
+            for (size_t i = 0; i < st.Members.size(); i++) {
+                const auto& member = st.Members[i];
+                size_t sizeInBytes;
+                if (i + 1 < st.Members.size()) {
+                    sizeInBytes = st.Members[i + 1].Offset - member.Offset;
+                } else {
+                    sizeInBytes = ctx.parentSize - member.Offset;
+                }
+                if (member.DataType == MslDataType::Array && member.ArrayTypeIndex != UINT32_MAX) {
+                    const auto& arrType = desc.ArrayTypes[member.ArrayTypeIndex];
+                    size_t elemSize = sizeInBytes;
+                    if (arrType.ArrayLength > 0) {
+                        elemSize = sizeInBytes / arrType.ArrayLength;
+                    }
+                    auto childBdIdx = builder.AddType(member.Name, elemSize);
+                    if (arrType.ArrayLength > 0) {
+                        builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset, arrType.ArrayLength);
+                    } else {
+                        builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                    }
+                    if (arrType.ElementType == MslDataType::Struct && arrType.ElementStructTypeIndex != UINT32_MAX) {
+                        s.push({arrType.ElementStructTypeIndex, childBdIdx, elemSize});
+                    }
+                } else if (member.DataType == MslDataType::Struct && member.StructTypeIndex != UINT32_MAX) {
+                    auto childBdIdx = builder.AddType(member.Name, sizeInBytes);
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                    s.push({member.StructTypeIndex, childBdIdx, sizeInBytes});
+                } else {
+                    auto childBdIdx = builder.AddType(member.Name, sizeInBytes);
+                    builder.AddMemberForType(ctx.bd, childBdIdx, member.Name, member.Offset);
+                }
+            }
+        }
+    };
+    for (const auto& arg : desc.Arguments) {
+        if (!arg.IsActive) continue;
+        if (arg.Type != MslArgumentType::Buffer) continue;
+        if (arg.BufferDataType != MslDataType::Struct) continue;
+        if (arg.BufferStructTypeIndex == UINT32_MAX) continue;
+        if (arg.Access == MslAccess::ReadWrite || arg.Access == MslAccess::WriteOnly) continue;
+        size_t sizeInBytes = arg.BufferDataSize;
+        StructuredBufferId bdTypeIdx = builder.AddType(arg.Name, sizeInBytes);
+        if (arg.ArrayLength > 0) {
+            builder.AddRoot(arg.Name, bdTypeIdx, arg.ArrayLength);
+        } else {
+            builder.AddRoot(arg.Name, bdTypeIdx);
+        }
+        createType(arg.BufferStructTypeIndex, bdTypeIdx, sizeInBytes);
     }
     return builder;
 }

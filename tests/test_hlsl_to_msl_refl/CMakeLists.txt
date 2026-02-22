@@ -1,0 +1,7 @@
+if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPVCROSS)
+    add_executable(test_hlsl_to_msl_refl test_hlsl_to_msl_refl.cpp)
+    target_link_libraries(test_hlsl_to_msl_refl radraycore radrayrender GTest::gtest_main)
+    gtest_discover_tests(test_hlsl_to_msl_refl)
+    radray_optimize_flags_binary(test_hlsl_to_msl_refl)
+    radray_set_build_path(test_hlsl_to_msl_refl)
+endif()

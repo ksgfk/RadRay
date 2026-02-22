@@ -9,6 +9,7 @@
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
+#include <radray/render/msl.h>
 #include <radray/render/gpu_resource.h>
 
 namespace radray::render {
@@ -74,6 +75,7 @@ public:
     BindBridgeLayout() noexcept = default;
     explicit BindBridgeLayout(const HlslShaderDesc& desc, std::span<const BindBridgeStaticSampler> staticSamplers = {}) noexcept;
     explicit BindBridgeLayout(const SpirvShaderDesc& desc, std::span<const BindBridgeStaticSampler> staticSamplers = {}) noexcept;
+    explicit BindBridgeLayout(const MslShaderReflection& desc, std::span<const BindBridgeStaticSampler> staticSamplers = {}) noexcept;
 
     RootSignatureDescriptorContainer GetDescriptor() const noexcept;
     std::span<const BindingEntry> GetBindings() const noexcept { return _bindings; }
@@ -81,8 +83,10 @@ public:
 
     static std::optional<vector<BindingEntry>> BuildFromHlsl(const HlslShaderDesc& desc) noexcept;
     static std::optional<vector<BindingEntry>> BuildFromSpirv(const SpirvShaderDesc& desc) noexcept;
+    static std::optional<vector<BindingEntry>> BuildFromMsl(const MslShaderReflection& desc) noexcept;
     static std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const HlslShaderDesc& desc) noexcept;
     static std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const SpirvShaderDesc& desc) noexcept;
+    static std::optional<StructuredBufferStorage::Builder> CreateCBufferStorageBuilder(const MslShaderReflection& desc) noexcept;
 
 private:
     friend class BindBridge;
