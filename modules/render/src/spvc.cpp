@@ -584,6 +584,7 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
         SpirvToMslOutput output;
         output.MslSource = string(msl);
         output.EntryPointName = string(mslEntryPoint);
+        RADRAY_DEBUG_LOG("spvc convert msl entry point:{}\n{}", output.EntryPointName, output.MslSource);
         return output;
     } catch (const spirv_cross::CompilerError& e) {
         RADRAY_ERR_LOG("SPIRV-Cross MSL Compiler Error: {}", e.what());

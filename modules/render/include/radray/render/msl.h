@@ -172,6 +172,7 @@ public:
     vector<MslArgument> Arguments;
     vector<MslStructType> StructTypes;
     vector<MslArrayType> ArrayTypes;
+    bool UseArgumentBuffers{false};
 };
 
 struct MslReflectParams {

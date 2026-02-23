@@ -647,20 +647,12 @@ struct RootSignatureSetElement {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-struct RootSignatureBindlessDescriptor {
-    uint32_t Slot{0};
-    uint32_t Space{0};
-    uint32_t SetIndex{0};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    uint32_t Capacity{262144};  // Backend-specific capacity
+    std::optional<uint32_t> BindlessCapacity{};
 };
 
 struct RootSignatureDescriptorSet {
+    uint32_t SetIndex{0};
     std::span<const RootSignatureSetElement> Elements{};
-    std::span<const RootSignatureBindlessDescriptor> BindlessDescriptors{};
 };
 
 struct RootSignatureStaticSampler {

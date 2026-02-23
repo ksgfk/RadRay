@@ -413,11 +413,18 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
     @autoreleasepool {
         auto* mtlRootSig = CastMtlObject(rootSig);
         auto& desc = mtlRootSig->_container._desc;
-        if (index >= desc.DescriptorSets.size()) {
-            RADRAY_ERR_LOG("metal descriptor set index out of range: {}", index);
+        const RootSignatureDescriptorSet* foundSet = nullptr;
+        for (const auto& setDesc : desc.DescriptorSets) {
+            if (setDesc.SetIndex == index) {
+                foundSet = &setDesc;
+                break;
+            }
+        }
+        if (foundSet == nullptr) {
+            RADRAY_ERR_LOG("metal descriptor set index not found: {}", index);
             return nullptr;
         }
-        auto& setDesc = desc.DescriptorSets[index];
+        const auto& setDesc = *foundSet;
         if (setDesc.Elements.empty()) {
             RADRAY_ERR_LOG("metal descriptor set {} has no elements", index);
             return nullptr;
@@ -429,6 +436,10 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
         vector<DescriptorSetMetal::ElementInfo> elements;
         elements.reserve(setDesc.Elements.size());
         for (auto& elem : setDesc.Elements) {
+            if (elem.BindlessCapacity.has_value()) {
+                RADRAY_ERR_LOG("metal descriptor set {} does not support bindless elements", index);
+                return nullptr;
+            }
             uint32_t endIndex = elem.Slot + elem.Count;
             if (endIndex > maxMtlIndex) {
                 maxMtlIndex = endIndex;
@@ -445,7 +456,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
         vector<std::pair<uint32_t, SamplerMetal*>> staticSamplersInSet;
         for (size_t i = 0; i < desc.StaticSamplers.size(); i++) {
             auto& ss = desc.StaticSamplers[i];
-            if (ss.SetIndex == index) {
+            if (ss.SetIndex == setDesc.SetIndex) {
                 uint32_t endIndex = ss.Slot + 1;
                 if (endIndex > maxMtlIndex) {
                     maxMtlIndex = endIndex;
@@ -1070,12 +1081,11 @@ void GraphicsCmdEncoderMetal::BindRootSignature(RootSignature* rootSig) noexcept
 void GraphicsCmdEncoderMetal::PushConstant(const void* data, size_t length) noexcept {
     if (_boundRootSig && _boundRootSig->_container._desc.Constant.has_value()) {
         auto& pc = _boundRootSig->_container._desc.Constant.value();
-        uint32_t slotOffset = _cmdBuffer->_device->_detail.MaxVertexInputBindings;
         if (pc.Stages.HasFlag(ShaderStage::Vertex)) {
-            [_encoder setVertexBytes:data length:length atIndex:pc.Slot + slotOffset];
+            [_encoder setVertexBytes:data length:length atIndex:pc.Slot];
         }
         if (pc.Stages.HasFlag(ShaderStage::Pixel)) {
-            [_encoder setFragmentBytes:data length:length atIndex:pc.Slot + slotOffset];
+            [_encoder setFragmentBytes:data length:length atIndex:pc.Slot];
         }
     }
 }
@@ -1092,8 +1102,6 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
     if (mtlSet->_argBuffer == nil) {
         return;
     }
-    uint32_t slotOffset = _cmdBuffer->_device->_detail.MaxVertexInputBindings;
-    uint32_t mtlSlot = slot + slotOffset + 1;
     // useResources: 让 argument buffer 引用的资源对 GPU 可见，按 stage 和 usage 分类
     {
         vector<id<MTLResource>> vtxRead;
@@ -1131,10 +1139,10 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
         }
     }
     if (mtlSet->_stages.HasFlag(ShaderStage::Vertex)) {
-        [_encoder setVertexBuffer:mtlSet->_argBuffer offset:0 atIndex:mtlSlot];
+        [_encoder setVertexBuffer:mtlSet->_argBuffer offset:0 atIndex:slot];
     }
     if (mtlSet->_stages.HasFlag(ShaderStage::Pixel)) {
-        [_encoder setFragmentBuffer:mtlSet->_argBuffer offset:0 atIndex:mtlSlot];
+        [_encoder setFragmentBuffer:mtlSet->_argBuffer offset:0 atIndex:slot];
     }
 }
 

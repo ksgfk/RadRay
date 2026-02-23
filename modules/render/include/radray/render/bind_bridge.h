@@ -25,7 +25,6 @@ public:
     RootSignatureDescriptor _desc{};
     vector<RootSignatureRootDescriptor> _rootDescriptors;
     vector<RootSignatureSetElement> _elements;
-    vector<RootSignatureBindlessDescriptor> _bindlessDescriptors;
     vector<RootSignatureStaticSampler> _staticSamplers;
     vector<RootSignatureDescriptorSet> _descriptorSets;
 };

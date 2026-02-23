@@ -92,8 +92,8 @@ buffer(17+)   — argument buffers, one per descriptor set (set N → buffer(N +
 
 **Runtime binding** (`metal_impl.mm`):
 - `BindVertexBuffer` → `setVertexBuffer:atIndex:` with index 0-15
-- `SetPushConstant` → `set{Vertex,Fragment}Bytes:atIndex:` with `slot + MetalMaxVertexInputBindings`
-- `SetDescriptorSet` → `set{Vertex,Fragment}Buffer:atIndex:` with `slot + MetalMaxVertexInputBindings + 1`
+- `SetPushConstant` → `set{Vertex,Fragment}Bytes:atIndex:` with `slot` (no runtime offset)
+- `SetDescriptorSet` → `set{Vertex,Fragment}Buffer:atIndex:` with `slot` (no runtime offset)
 - Root descriptors are NOT supported in the Metal backend
 
 ### Key Patterns

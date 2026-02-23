@@ -13,26 +13,20 @@ RootSignatureDescriptorContainer::RootSignatureDescriptorContainer(const RootSig
     _rootDescriptors.assign(desc.RootDescriptors.begin(), desc.RootDescriptors.end());
     _staticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
     size_t totalElements = 0;
-    size_t totalBindless = 0;
     for (const auto& set : desc.DescriptorSets) {
         totalElements += set.Elements.size();
-        totalBindless += set.BindlessDescriptors.size();
     }
     _elements.reserve(totalElements);
-    _bindlessDescriptors.reserve(totalBindless);
     _descriptorSets.reserve(desc.DescriptorSets.size());
     for (const auto& set : desc.DescriptorSets) {
         size_t elemStart = _elements.size();
-        size_t bindlessStart = _bindlessDescriptors.size();
+        size_t elemCount = set.Elements.size();
         _elements.insert(_elements.end(), set.Elements.begin(), set.Elements.end());
-        _bindlessDescriptors.insert(_bindlessDescriptors.end(), set.BindlessDescriptors.begin(), set.BindlessDescriptors.end());
         RootSignatureDescriptorSet ownedSet{};
+        ownedSet.SetIndex = set.SetIndex;
         ownedSet.Elements = std::span<const RootSignatureSetElement>{
             _elements.data() + elemStart,
-            _elements.size() - elemStart};
-        ownedSet.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
-            _bindlessDescriptors.data() + bindlessStart,
-            _bindlessDescriptors.size() - bindlessStart};
+            elemCount};
         _descriptorSets.push_back(ownedSet);
     }
     _desc.RootDescriptors = _rootDescriptors;
@@ -119,7 +113,6 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
     // Pre-reserve to prevent reallocation that would invalidate spans
     // Also validate for illegal mixed sets (bindless + other descriptors in same set)
     size_t totalElements = 0;
-    size_t totalBindless = 0;
     size_t totalStaticSamplers = 0;
     for (auto setIndex : setOrder) {
         bool hasBindless = false;
@@ -129,7 +122,7 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
                 totalStaticSamplers += e->BindCount;
                 hasOtherDescriptors = true;
             } else if (e->BindCount == 0) {
-                totalBindless++;
+                totalElements++;
                 hasBindless = true;
             } else {
                 totalElements++;
@@ -146,7 +139,6 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
     }
 
     container._elements.reserve(totalElements);
-    container._bindlessDescriptors.reserve(totalBindless);
     container._staticSamplers.reserve(totalStaticSamplers);
     container._descriptorSets.reserve(setOrder.size());
     for (auto setIndex : setOrder) {
@@ -170,43 +162,29 @@ RootSignatureDescriptorContainer BindBridgeLayout::GetDescriptor() const noexcep
                 }
             }
         }
-        // Build regular elements and bindless descriptors
+        // Build regular elements and bindless elements
         size_t elemStart = container._elements.size();
-        size_t bindlessStart = container._bindlessDescriptors.size();
         for (const auto* e : elems) {
             if (e->IsStaticSampler) {
                 continue;
             }
+            RootSignatureSetElement elem{};
+            elem.Slot = e->BindPoint;
+            elem.Space = e->Space;
+            elem.Type = e->Type;
+            elem.Count = e->BindCount;
+            elem.Stages = e->Stages;
             if (e->BindCount == 0) {
-                // Bindless descriptor
-                RootSignatureBindlessDescriptor bindless{};
-                bindless.Slot = e->BindPoint;
-                bindless.Space = e->Space;
-                bindless.SetIndex = setIndex;
-                bindless.Type = e->Type;
-                bindless.Stages = e->Stages;
-                bindless.Capacity = 262144;  // Default capacity
-                container._bindlessDescriptors.push_back(bindless);
-            } else {
-                // Regular element
-                RootSignatureSetElement elem{};
-                elem.Slot = e->BindPoint;
-                elem.Space = e->Space;
-                elem.Type = e->Type;
-                elem.Count = e->BindCount;
-                elem.Stages = e->Stages;
-                container._elements.push_back(elem);
+                elem.BindlessCapacity = 262144;  // Default capacity
             }
+            container._elements.push_back(elem);
         }
         size_t elemCount = container._elements.size() - elemStart;
-        size_t bindlessCount = container._bindlessDescriptors.size() - bindlessStart;
         RootSignatureDescriptorSet setDesc{};
+        setDesc.SetIndex = setIndex;
         setDesc.Elements = std::span<const RootSignatureSetElement>{
             container._elements.data() + elemStart,
             elemCount};
-        setDesc.BindlessDescriptors = std::span<const RootSignatureBindlessDescriptor>{
-            container._bindlessDescriptors.data() + bindlessStart,
-            bindlessCount};
         container._descriptorSets.push_back(setDesc);
     }
 
@@ -472,7 +450,6 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         setIndices.push_back(setIndex);
     }
     std::sort(setIndices.begin(), setIndices.end());
-    uint32_t setOrderIndex = 0;
     for (auto setIndex : setIndices) {
         auto& bindings = perSet[setIndex];
         std::sort(bindings.begin(), bindings.end(), [](const SpirvResourceBinding* a, const SpirvResourceBinding* b) {
@@ -496,12 +473,11 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 b->Binding,
                 b->Set,
                 b->Stages,
-                setOrderIndex,
+                setIndex,
                 elemIndex++,
                 false,
                 {}});
         }
-        setOrderIndex++;
     }
     return std::make_optional(std::move(bindingEntries));
 }
@@ -592,7 +568,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         bindingEntries.emplace_back(PushConstEntry{
             m.Name,
             0,
-            0,
+            m.Index,
             0,
             m.Stages,
             static_cast<uint32_t>(m.BufferDataSize)});
@@ -609,10 +585,23 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
     }
     std::sort(setOrder.begin(), setOrder.end());
     auto sortByIndex = [](const MergedArg* a, const MergedArg* b) { return a->Index < b->Index; };
-    uint32_t setIndex = 0;
     for (auto descSet : setOrder) {
         auto& args = perSet[descSet];
         std::sort(args.begin(), args.end(), sortByIndex);
+        // 对齐 ConvertSpirvToMsl 的偏移逻辑：graphics stage 的 argument buffer 需要偏移
+        uint32_t setIndex = descSet;
+        if (desc.UseArgumentBuffers) {
+            bool isGraphics = false;
+            for (const auto* m : args) {
+                if (m->Stages.HasFlag(ShaderStage::Vertex) || m->Stages.HasFlag(ShaderStage::Pixel)) {
+                    isGraphics = true;
+                    break;
+                }
+            }
+            if (isGraphics) {
+                setIndex = descSet + MetalMaxVertexInputBindings + 1;
+            }
+        }
         uint32_t elemIndex = 0;
         for (const auto* m : args) {
             uint32_t count = m->ArrayLength == 0 ? 1u : static_cast<uint32_t>(m->ArrayLength);
@@ -629,7 +618,6 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 false,
                 {}});
         }
-        setIndex++;
     }
     return std::make_optional(std::move(bindingEntries));
 }

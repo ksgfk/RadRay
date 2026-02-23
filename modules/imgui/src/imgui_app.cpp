@@ -113,15 +113,22 @@ ImGuiRenderer::ImGuiRenderer(
     staticSampler.SetIndex = 0;
     staticSampler.Stages = render::ShaderStage::Pixel;
     staticSampler.Desc = sampler;
-    if (backendType == render::RenderBackend::Vulkan || backendType == render::RenderBackend::Metal) {
+    render::RootSignatureConstant rsConst{0, 0, 64, render::ShaderStage::Vertex};
+    if (backendType == render::RenderBackend::Vulkan) {
         staticSampler.Slot = 1;
     }
-    render::RootSignatureDescriptorSet descSet{rsElems};
+    if (backendType == render::RenderBackend::Metal) {
+        staticSampler.Slot = 1;
+        staticSampler.SetIndex = 17;
+        rsConst.Slot = 16;
+    }
+    const uint32_t descSetIndex = backendType == render::RenderBackend::Metal ? 17 : 0;
+    render::RootSignatureDescriptorSet descSet{descSetIndex, rsElems};
     render::RootSignatureDescriptor rsDesc{
         {},
         std::span{&descSet, 1},
         std::span{&staticSampler, 1},
-        render::RootSignatureConstant{0, 0, 64, render::ShaderStage::Vertex}};
+        rsConst};
     _rootSig = _device->CreateRootSignature(rsDesc).Unwrap();
     render::VertexElement vertexElems[] = {
         {offsetof(ImDrawVert, pos), "POSITION", 0, render::VertexFormat::FLOAT32X2, 0},
@@ -196,7 +203,8 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                         render::SubresourceRange::AllSub(),
                         render::TextureUse::Resource};
                     unique_ptr<render::TextureView> srv = _device->CreateTextureView(texViewDesc).Unwrap();
-                    unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), 0).Unwrap();
+                    const uint32_t setIndex = _device->GetBackend() == render::RenderBackend::Metal ? 17 : 0;
+                    unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), setIndex).Unwrap();
                     descSet->SetResource(0, 0, srv.get());
                     const auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiTexture>(std::move(texObj), std::move(srv), std::move(descSet)));
                     tex->SetTexID(std::bit_cast<ImU64>(ptr->_srv.get()));
@@ -385,19 +393,21 @@ void ImGuiRenderer::OnRender(uint32_t frameIndex, render::GraphicsCommandEncoder
                 scissor.Width = (int)(clipMax.x - clipMin.x);
                 scissor.Height = (int)(clipMax.y - clipMin.y);
                 encoder->SetScissor(scissor);
+                const uint32_t setIndex = _device->GetBackend() == render::RenderBackend::Metal ? 17 : 0;
                 if (cmd.TexRef._TexData) {
                     auto tex = std::bit_cast<ImGuiRenderer::ImGuiTexture*>(cmd.TexRef._TexData->BackendUserData);
-                    encoder->BindDescriptorSet(0, tex->_descSet.get());
+                    encoder->BindDescriptorSet(setIndex, tex->_descSet.get());
                 } else if (cmd.TexRef._TexID) {
                     auto texView = std::bit_cast<render::TextureView*>(cmd.TexRef._TexID);
                     auto it = frame._tempTexSets.find(texView);
                     if (it == frame._tempTexSets.end()) {
-                        unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), 0).Unwrap();
+                        const uint32_t setIndex = _device->GetBackend() == render::RenderBackend::Metal ? 17 : 0;
+                        unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), setIndex).Unwrap();
                         descSet->SetResource(0, 0, texView);
                         auto emplaceResult = frame._tempTexSets.emplace(texView, std::move(descSet));
                         it = emplaceResult.first;
                     }
-                    encoder->BindDescriptorSet(0, it->second.get());
+                    encoder->BindDescriptorSet(setIndex, it->second.get());
                 }
                 encoder->DrawIndexed(cmd.ElemCount, 1, cmd.IdxOffset + globalIdxOffset, cmd.VtxOffset + globalVtxOffset, 0);
             }

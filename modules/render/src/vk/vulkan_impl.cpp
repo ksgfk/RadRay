@@ -550,17 +550,48 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     vector<unique_ptr<DescriptorSetLayoutVulkan>> layouts;
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
     vector<uint8_t> isBindlessSet;
-    vkDescSetLayouts.reserve(desc.DescriptorSets.size());
-    isBindlessSet.reserve(desc.DescriptorSets.size());
-    for (uint32_t setIdx = 0; setIdx < desc.DescriptorSets.size(); setIdx++) {
-        const auto& i = desc.DescriptorSets[setIdx];
-        bool hasBindless = !i.BindlessDescriptors.empty();
-        bool hasRegularElements = !i.Elements.empty();
-        VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-        if (hasBindless) {
-            bindlessType = MapType(i.BindlessDescriptors[0].Type);
+    unordered_map<uint32_t, const RootSignatureDescriptorSet*> setsByIndex;
+    uint32_t maxSetIndex = 0;
+    for (const auto& set : desc.DescriptorSets) {
+        if (setsByIndex.find(set.SetIndex) != setsByIndex.end()) {
+            RADRAY_ERR_LOG("duplicate descriptor set index: {}", set.SetIndex);
+            return nullptr;
         }
-        // Collect static samplers for this set
+        setsByIndex.emplace(set.SetIndex, &set);
+        maxSetIndex = std::max(maxSetIndex, set.SetIndex);
+    }
+    for (const auto& ss : desc.StaticSamplers) {
+        maxSetIndex = std::max(maxSetIndex, ss.SetIndex);
+    }
+    if (!setsByIndex.empty() || !desc.StaticSamplers.empty()) {
+        vkDescSetLayouts.resize(maxSetIndex + 1, VK_NULL_HANDLE);
+        layouts.resize(maxSetIndex + 1);
+        isBindlessSet.resize(maxSetIndex + 1, false);
+    }
+
+    for (uint32_t setIdx = 0; setIdx < vkDescSetLayouts.size(); setIdx++) {
+        auto setIt = setsByIndex.find(setIdx);
+        const RootSignatureDescriptorSet* setDesc = setIt == setsByIndex.end() ? nullptr : setIt->second;
+        std::span<const RootSignatureSetElement> setElements = setDesc == nullptr ? std::span<const RootSignatureSetElement>{} : setDesc->Elements;
+
+        bool hasBindless = false;
+        bool hasRegularElements = false;
+        VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        for (const auto& elem : setElements) {
+            if (elem.BindlessCapacity.has_value()) {
+                VkDescriptorType elemType = MapType(elem.Type);
+                if (bindlessType == VK_DESCRIPTOR_TYPE_MAX_ENUM) {
+                    bindlessType = elemType;
+                } else if (bindlessType != elemType) {
+                    RADRAY_ERR_LOG("vk bindless set {} contains mixed descriptor types", setIdx);
+                    return nullptr;
+                }
+                hasBindless = true;
+            } else {
+                hasRegularElements = true;
+            }
+        }
+
         vector<RootSignatureStaticSampler> setStaticSamplers;
         for (const auto& ss : desc.StaticSamplers) {
             if (ss.SetIndex == setIdx) {
@@ -569,7 +600,6 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         }
         bool hasStaticSamplers = !setStaticSamplers.empty();
 
-        // Validate: Check for illegal mixed sets (bindless + other descriptors in same set)
         if (hasBindless && (hasRegularElements || hasStaticSamplers)) {
             RADRAY_ERR_LOG(
                 "Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
@@ -590,18 +620,21 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
                 RADRAY_ERR_LOG("vk failed to find global bindless layout for type {}", bindlessType);
                 return nullptr;
             }
-            vkDescSetLayouts.emplace_back(globalLayout);
-            layouts.emplace_back(nullptr);
-            isBindlessSet.push_back(true);
-        } else {
-            auto layout = this->CreateDescriptorSetLayout(i, setStaticSamplers);
-            if (!layout) {
-                return nullptr;
-            }
-            const auto& t = layouts.emplace_back(layout.Release());
-            vkDescSetLayouts.emplace_back(t->_layout);
-            isBindlessSet.push_back(false);
+            vkDescSetLayouts[setIdx] = globalLayout;
+            isBindlessSet[setIdx] = true;
+            continue;
         }
+
+        RootSignatureDescriptorSet emptySet{};
+        emptySet.SetIndex = setIdx;
+        auto layout = this->CreateDescriptorSetLayout(setDesc == nullptr ? emptySet : *setDesc, setStaticSamplers);
+        if (!layout) {
+            return nullptr;
+        }
+        auto layoutOwned = layout.Release();
+        vkDescSetLayouts[setIdx] = layoutOwned->_layout;
+        layouts[setIdx] = std::move(layoutOwned);
+        isBindlessSet[setIdx] = false;
     }
     VkPipelineLayoutCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -937,23 +970,19 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     };
     vector<BindingCtx> ctxs;
     bool hasBindless = false;
-    // Regular elements
+    // Set elements
     for (const auto& j : desc.Elements) {
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = j.Slot;
         ctx.binding.descriptorType = MapType(j.Type);
-        ctx.binding.descriptorCount = j.Count;
+        if (j.BindlessCapacity.has_value()) {
+            ctx.binding.descriptorCount = j.BindlessCapacity.value();
+            ctx.isBindless = true;
+            hasBindless = true;
+        } else {
+            ctx.binding.descriptorCount = j.Count;
+        }
         ctx.binding.stageFlags = MapType(j.Stages);
-    }
-    // Bindless descriptors
-    for (const auto& bd : desc.BindlessDescriptors) {
-        auto& ctx = ctxs.emplace_back();
-        ctx.binding.binding = bd.Slot;
-        ctx.binding.descriptorType = MapType(bd.Type);
-        ctx.binding.descriptorCount = bd.Capacity;
-        ctx.binding.stageFlags = MapType(bd.Stages);
-        ctx.isBindless = true;
-        hasBindless = true;
     }
     // Static samplers (immutable samplers)
     for (const auto& ss : staticSamplers) {
@@ -1160,6 +1189,10 @@ Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignat
         return nullptr;
     }
     const auto& layout = rootSig->_descSetLayouts[index];
+    if (!layout) {
+        RADRAY_ERR_LOG("cannot create descriptor set for missing layout set {}", index);
+        return nullptr;
+    }
     auto allocOpt = _descSetAlloc->Allocate(layout.get());
     if (!allocOpt.has_value()) {
         return nullptr;

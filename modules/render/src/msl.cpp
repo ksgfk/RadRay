@@ -401,6 +401,7 @@ std::optional<MslShaderReflection> ReflectMsl(std::span<const MslReflectParams> 
     if (!msls.empty()) {
         useArgBuffers = msls[0].UseArgumentBuffers;
     }
+    refl.UseArgumentBuffers = useArgBuffers;
     for (const auto& msl : msls) {
         if (msl.SpirV.size() % 4 != 0) {
             RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");

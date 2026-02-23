@@ -1092,32 +1092,39 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 totalRanges++;
             }
         }
-        for (const auto& bd : set.BindlessDescriptors) {
-            if (bd.Type != ResourceBindType::UNKNOWN) {
-                totalRanges++;
-            }
-        }
     }
     descRanges.reserve(totalRanges);
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     vector<uint8_t> isBindlessSet{};
     unordered_map<uint32_t, size_t> setIndexToTableIndex{};
-    isBindlessSet.resize(desc.DescriptorSets.size(), false);
-    for (uint32_t setIdx = 0; setIdx < desc.DescriptorSets.size(); setIdx++) {
-        const auto& set = desc.DescriptorSets[setIdx];
-        if (set.Elements.empty() && set.BindlessDescriptors.empty()) {
+    uint32_t maxSetIndex = 0;
+    for (const auto& set : desc.DescriptorSets) {
+        maxSetIndex = std::max(maxSetIndex, set.SetIndex);
+    }
+    isBindlessSet.assign(desc.DescriptorSets.empty() ? 0 : (maxSetIndex + 1), false);
+    for (const auto& set : desc.DescriptorSets) {
+        uint32_t setIdx = set.SetIndex;
+        if (set.Elements.empty()) {
             continue;
         }
         // Check if this set has bindless descriptors
-        bool isBindless = !set.BindlessDescriptors.empty();
+        bool isBindless = false;
         // Collect ranges for this set
         vector<D3D12_DESCRIPTOR_RANGE1> setRanges{};
         ShaderStages setStages = ShaderStage::UNKNOWN;
-        // Process regular elements
+        // Process set elements
         for (const auto& e : set.Elements) {
+            bool bindless = e.BindlessCapacity.has_value();
+            if (bindless) {
+                isBindless = true;
+            }
             D3D12_DESCRIPTOR_RANGE1 range{};
-            UINT numDesc = e.Count;
-            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+            UINT numDesc = bindless ? UINT_MAX : e.Count;
+            if (!bindless && numDesc == 0) {
+                RADRAY_ERR_LOG("invalid descriptor count for set {} slot {}", setIdx, e.Slot);
+                return nullptr;
+            }
+            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = bindless ? D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE : D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
             switch (e.Type) {
                 case ResourceBindType::CBuffer:
                     CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, numDesc, e.Slot, e.Space, rangeFlags);
@@ -1138,32 +1145,6 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             }
             setRanges.push_back(range);
             setStages |= e.Stages;
-        }
-        // Process bindless descriptors
-        for (const auto& bd : set.BindlessDescriptors) {
-            D3D12_DESCRIPTOR_RANGE1 range{};
-            UINT numDesc = UINT_MAX;  // Unbounded for bindless
-            D3D12_DESCRIPTOR_RANGE_FLAGS rangeFlags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-            switch (bd.Type) {
-                case ResourceBindType::CBuffer:
-                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, numDesc, bd.Slot, bd.Space, rangeFlags);
-                    break;
-                case ResourceBindType::Texture:
-                case ResourceBindType::Buffer:
-                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, numDesc, bd.Slot, bd.Space, rangeFlags);
-                    break;
-                case ResourceBindType::RWTexture:
-                case ResourceBindType::RWBuffer:
-                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, numDesc, bd.Slot, bd.Space, rangeFlags);
-                    break;
-                case ResourceBindType::Sampler:
-                    CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, numDesc, bd.Slot, bd.Space, rangeFlags);
-                    break;
-                case ResourceBindType::UNKNOWN:
-                    continue;
-            }
-            setRanges.push_back(range);
-            setStages |= bd.Stages;
         }
         if (setRanges.empty()) {
             continue;
@@ -1193,6 +1174,9 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             }
         }
         setIndexToTableIndex[setIdx] = tableIdx;
+        if (setIdx >= isBindlessSet.size()) {
+            isBindlessSet.resize(setIdx + 1, false);
+        }
         isBindlessSet[setIdx] = isBindless;
     }
     // Process static samplers from desc.StaticSamplers
