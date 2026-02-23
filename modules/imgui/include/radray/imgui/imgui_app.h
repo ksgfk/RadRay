@@ -6,6 +6,8 @@
 #include <span>
 #include <thread>
 #include <mutex>
+#include <future>
+#include <functional>
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -218,12 +220,14 @@ protected:
     void RecreateSwapChain();
     render::TextureView* GetDefaultRTV(uint32_t backBufferIndex);
     void RequestRecreateSwapChain(std::function<void()> setValueFunc);
+    void DispatchToMainThread(std::function<void()> task);
 
     Eigen::Vector2i GetRTSize() const noexcept;
 
 private:
     void LoopSingleThreaded();
     void LoopMultiThreaded();
+    void ProcessMainThreadDispatches();
 
 protected:
     class RenderFrameState {
@@ -261,6 +265,13 @@ protected:
     unique_ptr<std::thread> _renderThread;
     unique_ptr<BoundedChannel<uint32_t>> _freeFrames;
     unique_ptr<BoundedChannel<uint32_t>> _submitFrames;
+    // main-thread dispatch queue
+    struct MainThreadTask {
+        std::function<void()> Func;
+        std::promise<void> Done;
+    };
+    std::mutex _dispatchMutex;
+    std::deque<MainThreadTask> _dispatchQueue;
     // global configs
     int32_t _rtWidth{0};
     int32_t _rtHeight{0};

@@ -478,6 +478,13 @@ void ImGuiApplication::Run() {
 
 void ImGuiApplication::Destroy() noexcept {
     _needClose = true;
+    {
+        std::lock_guard<std::mutex> lock(_dispatchMutex);
+        for (auto& item : _dispatchQueue) {
+            item.Done.set_value();
+        }
+        _dispatchQueue.clear();
+    }
     if (_submitFrames) {
         _submitFrames->Complete();
     }
@@ -738,6 +745,32 @@ Eigen::Vector2i ImGuiApplication::GetRTSize() const noexcept {
     return Eigen::Vector2i{_rtWidth, _rtHeight};
 }
 
+void ImGuiApplication::DispatchToMainThread(std::function<void()> task) {
+    if (_renderThread == nullptr) {
+        task();
+        return;
+    }
+    std::promise<void> done;
+    auto future = done.get_future();
+    {
+        std::lock_guard<std::mutex> lock(_dispatchMutex);
+        _dispatchQueue.push_back({std::move(task), std::move(done)});
+    }
+    future.get();
+}
+
+void ImGuiApplication::ProcessMainThreadDispatches() {
+    std::deque<MainThreadTask> tasks;
+    {
+        std::lock_guard<std::mutex> lock(_dispatchMutex);
+        tasks.swap(_dispatchQueue);
+    }
+    for (auto& item : tasks) {
+        item.Func();
+        item.Done.set_value();
+    }
+}
+
 void ImGuiApplication::LoopSingleThreaded() {
     _frameCount = 0;
     _renderFrameStates.resize(_inFlightFrameCount);
@@ -753,6 +786,7 @@ void ImGuiApplication::LoopSingleThreaded() {
         if (_needClose) {
             break;
         }
+        ProcessMainThreadDispatches();
         this->OnUpdate();
         _imgui->SetCurrent();
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -904,8 +938,15 @@ void ImGuiApplication::LoopMultiThreaded() {
                 }
                 if (rtWidth > 0 && rtHeight > 0) {
                     if (needResize) {
-                        this->RecreateSwapChain();
-                        this->OnRecreateSwapChain();
+                        if (_device->GetBackend() == render::RenderBackend::Metal) {
+                            this->DispatchToMainThread([this]() {
+                                this->RecreateSwapChain();
+                                this->OnRecreateSwapChain();
+                            });
+                        } else {
+                            this->RecreateSwapChain();
+                            this->OnRecreateSwapChain();
+                        }
                         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
                             if (_renderFrameStates[i].IsValid()) {
                                 this->OnRenderComplete(_renderFrameStates[i].InFlightFrameIndex);
@@ -983,6 +1024,7 @@ void ImGuiApplication::LoopMultiThreaded() {
             if (_needClose) {
                 break;
             }
+            ProcessMainThreadDispatches();
             this->OnUpdate();
             _imgui->SetCurrent();
 #ifdef RADRAY_PLATFORM_WINDOWS
@@ -1001,7 +1043,12 @@ void ImGuiApplication::LoopMultiThreaded() {
                 if (_enableFrameDropping) {
                     isConsumed = _freeFrames->TryRead(frameIndex);
                 } else {
-                    isConsumed = _freeFrames->WaitRead(frameIndex);
+                    while (!_freeFrames->TryRead(frameIndex)) {
+                        ProcessMainThreadDispatches();
+                        if (_needClose.load() || _needReLoop.load()) break;
+                        std::this_thread::yield();
+                    }
+                    isConsumed = !(_needClose.load() || _needReLoop.load());
                 }
                 if (!isConsumed) {
                     continue;

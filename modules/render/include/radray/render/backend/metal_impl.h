@@ -300,16 +300,6 @@ struct CachedStaticSampler {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-/**
- * 为了简化实现，metal 后端不能用 root descriptor。
- *
- * vertex stage：
- * * render pipeline slot 0-15 给 vertex buffer 使用，作为顶点缓冲
- * * DescriptorSet(a.k.a MTLArgumentBuffer)，PushConstant(a.k.a setVertexBytes) 从 slot 16 (a.k.a DeviceDetail::MaxVertexInputBindings) 开始绑定
- *
- * fragment stage：
- * * 为了和 vertex stage 一致，也从 slot 16 开始绑定 DescriptorSet 和 PushConstant
- */
 class RootSignatureMetal final : public RootSignature {
 public:
     RootSignatureMetal(
