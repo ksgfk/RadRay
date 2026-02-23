@@ -5,10 +5,12 @@
 #define VK_LOCATION(l)   [[vk::location(l)]]
 #define VK_BINDING(b, s) [[vk::binding(b, s)]]
 #define VK_PUSH_CONSTANT [[vk::push_constant]]
+#define VK_IMAGE_FORMAT(fmt) [[vk::image_format(#fmt)]]
 #else
 #define VK_LOCATION(l)
 #define VK_BINDING(b, s)
 #define VK_PUSH_CONSTANT
+#define VK_IMAGE_FORMAT(fmt)
 #endif
 
 static const float PI = 3.14159265358979323846;

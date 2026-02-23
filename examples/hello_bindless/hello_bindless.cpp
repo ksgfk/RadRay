@@ -7,6 +7,7 @@
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
 #include <radray/render/bind_bridge.h>
+#include <radray/render/render_utility.h>
 
 using namespace radray;
 
@@ -304,88 +305,21 @@ private:
             throw ImGuiApplicationException("Failed to read bindless.hlsl");
         }
         string hlsl = std::move(hlslOpt.value());
-        vector<std::string_view> defines;
-        if (backend == render::RenderBackend::Vulkan) {
-            defines.emplace_back("VULKAN");
-        } else if (backend == render::RenderBackend::D3D12) {
-            defines.emplace_back("D3D12");
-        } else if (backend == render::RenderBackend::Metal) {
-            defines.emplace_back("METAL");
-        } else {
-            throw ImGuiApplicationException("unsupported render backend for shader compilation");
-        }
-        vector<std::string_view> includes;
-        includes.emplace_back("shaderlib");
-        auto vsOut = _dxc->Compile(
-            hlsl, "VSMain", render::ShaderStage::Vertex,
-            render::HlslShaderModel::SM60, true, defines, includes,
-            backend != render::RenderBackend::D3D12);
-        if (!vsOut.has_value()) throw ImGuiApplicationException("Failed to compile VS");
-        auto vsBin = std::move(vsOut.value());
-        auto psOut = _dxc->Compile(
-            hlsl, "PSMain", render::ShaderStage::Pixel,
-            render::HlslShaderModel::SM60, true, defines, includes,
-            backend != render::RenderBackend::D3D12);
-        if (!psOut.has_value()) throw ImGuiApplicationException("Failed to compile PS");
-        auto psBin = std::move(psOut.value());
-        unique_ptr<render::Shader> vsShader, psShader;
-        if (backend == render::RenderBackend::Metal) {
-            render::SpirvToMslOption mslOption{
-                3,
-                0,
-                0,
-#ifdef RADRAY_PLATFORM_MACOS
-                render::MslPlatform::MacOS,
-#elif defined(RADRAY_PLATFORM_IOS)
-                render::MslPlatform::IOS,
-#else
-                render::MslPlatform::MacOS,
-#endif
-                true,
-                false};
-            auto vsMsl = render::ConvertSpirvToMsl(vsBin.Data, "VSMain", render::ShaderStage::Vertex, mslOption).value();
-            render::ShaderDescriptor vsDesc{vsMsl.GetBlob(), render::ShaderBlobCategory::MSL};
-            vsShader = _device->CreateShader(vsDesc).Unwrap();
-            auto psMsl = render::ConvertSpirvToMsl(psBin.Data, "PSMain", render::ShaderStage::Pixel, mslOption).value();
-            render::ShaderDescriptor psDesc{psMsl.GetBlob(), render::ShaderBlobCategory::MSL};
-            psShader = _device->CreateShader(psDesc).Unwrap();
-        } else {
-            vsShader = _device->CreateShader({vsBin.Data, vsBin.Category}).Unwrap();
-            psShader = _device->CreateShader({psBin.Data, psBin.Category}).Unwrap();
-        }
-        render::BindBridgeStaticSampler staticSampler;
-        staticSampler.Name = "_Sampler";
-        staticSampler.Samplers.push_back(render::SamplerDescriptor{
-            render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
-            render::AddressMode::ClampToEdge,
-            render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest,
-            0.0f, 0.0f, std::nullopt, 0});
+        render::BindBridgeStaticSampler staticSampler{
+            "_Sampler",
+            {{render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
+              render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest,
+              0.0f, 0.0f, std::nullopt, 0}}};
         render::BindBridgeLayout bindLayout;
-        if (backend == render::RenderBackend::D3D12) {
-            auto vsRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
-            auto psRefl = _dxc->GetShaderDescFromOutput(render::ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
-            const render::HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
-            auto merged = render::MergeHlslShaderDesc(descs).value();
-            bindLayout = render::BindBridgeLayout{merged, std::span{&staticSampler, 1}};
-        } else if (backend == render::RenderBackend::Vulkan) {
-            render::SpirvBytecodeView spvs[] = {
-                {vsBin.Data, "VSMain", render::ShaderStage::Vertex},
-                {psBin.Data, "PSMain", render::ShaderStage::Pixel}};
-            const render::DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
-            auto spirvDesc = render::ReflectSpirv(spvs, extInfos).value();
-            bindLayout = render::BindBridgeLayout{spirvDesc, std::span{&staticSampler, 1}};
-        } else if (backend == render::RenderBackend::Metal) {
-            render::MslReflectParams mslParams[] = {
-                {vsBin.Data, "VSMain", render::ShaderStage::Vertex, true},
-                {psBin.Data, "PSMain", render::ShaderStage::Pixel, true}};
-            auto mslRefl = render::ReflectMsl(mslParams).value();
-            bindLayout = render::BindBridgeLayout{mslRefl};
-        } else {
-            throw ImGuiApplicationException("unsupported render backend for shader reflection");
+        unique_ptr<render::Shader> vsShader, psShader;
+        {
+            auto [VSResult, PSResult, BindLayout] = render::CompileShaderFromHLSL(_dxc.get(), _device.get(), hlsl, backend, {staticSampler}).value();
+            vsShader = std::move(VSResult);
+            psShader = std::move(PSResult);
+            bindLayout = std::move(BindLayout);
         }
         auto rsDesc = bindLayout.GetDescriptor();
         _rs = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
-        // 获取 bindless descriptor set 的绑定点（Metal 下包含偏移）
         {
             auto texId = bindLayout.GetBindingId("_Tex");
             if (texId.has_value()) {
