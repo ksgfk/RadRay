@@ -382,6 +382,8 @@ public:
                     render::MslPlatform::MacOS,
 #elif defined(RADRAY_PLATFORM_IOS)
                     render::MslPlatform::IOS,
+#else
+                    render::MslPlatform::MacOS,
 #endif
                     true,
                     false};

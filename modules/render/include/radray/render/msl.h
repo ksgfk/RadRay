@@ -154,6 +154,7 @@ public:
     uint32_t Index{0};
     bool IsActive{false};
     uint64_t ArrayLength{0};
+    bool IsUnboundedArray{false};
     bool IsPushConstant{false};
     uint32_t DescriptorSet{0};
 

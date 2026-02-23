@@ -477,7 +477,7 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
             uint64_t* argData = reinterpret_cast<uint64_t*>(
                 static_cast<uint8_t*>([argBuffer contents]) + slot * 8);
             MTLResourceID resId = [sampler->_sampler gpuResourceID];
-            memcpy(argData, &resId, sizeof(resId));
+            std::memcpy(argData, &resId, sizeof(resId));
         }
         auto result = make_unique<DescriptorSetMetal>();
         result->_device = this;
@@ -513,8 +513,39 @@ Nullable<unique_ptr<Sampler>> DeviceMetal::CreateSampler(const SamplerDescriptor
 }
 
 Nullable<unique_ptr<BindlessArray>> DeviceMetal::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
-    // TODO:
-    return nullptr;
+    @autoreleasepool {
+        if (!this->GetDetail().IsBindlessArraySupported) {
+            RADRAY_ERR_LOG("metal bindless array is not supported by this device");
+            return nullptr;
+        }
+        if (desc.Size == 0) {
+            RADRAY_ERR_LOG("metal bindless array size must be greater than 0");
+            return nullptr;
+        }
+        NSUInteger bufferSize = static_cast<NSUInteger>(desc.Size) * 8;
+        id<MTLBuffer> argBuffer = [_device newBufferWithLength:bufferSize
+                                                       options:MTLResourceStorageModeShared];
+        if (argBuffer == nil) {
+            RADRAY_ERR_LOG("metal cannot create bindless argument buffer (size={})", bufferSize);
+            return nullptr;
+        }
+        if (desc.Name.size() > 0) {
+            argBuffer.label = [NSString stringWithUTF8String:string(desc.Name).c_str()];
+        }
+        auto result = make_unique<BindlessArrayMetal>();
+        result->_device = this;
+        result->_argBuffer = argBuffer;
+        result->_size = desc.Size;
+        result->_slotType = desc.SlotType;
+        result->_name = string(desc.Name);
+        if (desc.SlotType == BindlessSlotType::BufferOnly || desc.SlotType == BindlessSlotType::Multiple) {
+            result->_bufferResources.resize(desc.Size, nil);
+        }
+        if (desc.SlotType == BindlessSlotType::Texture2DOnly || desc.SlotType == BindlessSlotType::Texture3DOnly || desc.SlotType == BindlessSlotType::Multiple) {
+            result->_textureResources.resize(desc.Size, nil);
+        }
+        return result;
+    }
 }
 
 CmdQueueMetal::CmdQueueMetal(
@@ -1147,7 +1178,37 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
 }
 
 void GraphicsCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
-    // TODO:
+    auto* bdls = static_cast<BindlessArrayMetal*>(array);
+    if (bdls->_argBuffer == nil) {
+        return;
+    }
+    // useResources: 让 bindless argument buffer 引用的资源对 GPU 可见
+    {
+        vector<id<MTLResource>> readWrite;
+        vector<id<MTLResource>> readOnly;
+        for (auto& res : bdls->_bufferResources) {
+            if (res != nil) {
+                readWrite.push_back(res);
+            }
+        }
+        for (auto& res : bdls->_textureResources) {
+            if (res != nil) {
+                readOnly.push_back(res);
+            }
+        }
+        if (!readWrite.empty()) {
+            [_encoder useResources:readWrite.data() count:readWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite
+                            stages:MTLRenderStageVertex | MTLRenderStageFragment];
+        }
+        if (!readOnly.empty()) {
+            [_encoder useResources:readOnly.data() count:readOnly.size()
+                             usage:MTLResourceUsageRead
+                            stages:MTLRenderStageVertex | MTLRenderStageFragment];
+        }
+    }
+    [_encoder setVertexBuffer:bdls->_argBuffer offset:0 atIndex:slot];
+    [_encoder setFragmentBuffer:bdls->_argBuffer offset:0 atIndex:slot];
 }
 
 void GraphicsCmdEncoderMetal::SetViewport(Viewport vp) noexcept {
@@ -1272,7 +1333,33 @@ void ComputeCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* set
 }
 
 void ComputeCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
-    // TODO:
+    auto* bdls = static_cast<BindlessArrayMetal*>(array);
+    if (bdls->_argBuffer == nil) {
+        return;
+    }
+    {
+        vector<id<MTLResource>> readWrite;
+        vector<id<MTLResource>> readOnly;
+        for (auto& res : bdls->_bufferResources) {
+            if (res != nil) {
+                readWrite.push_back(res);
+            }
+        }
+        for (auto& res : bdls->_textureResources) {
+            if (res != nil) {
+                readOnly.push_back(res);
+            }
+        }
+        if (!readWrite.empty()) {
+            [_encoder useResources:readWrite.data() count:readWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+        }
+        if (!readOnly.empty()) {
+            [_encoder useResources:readOnly.data() count:readOnly.size()
+                             usage:MTLResourceUsageRead];
+        }
+    }
+    [_encoder setBuffer:bdls->_argBuffer offset:0 atIndex:slot];
 }
 
 void ComputeCmdEncoderMetal::BindComputePipelineState(ComputePipelineState* pso) noexcept {
@@ -1368,7 +1455,7 @@ void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView
     } else if (view->GetTag() == RenderObjectTag::TextureView) {
         auto* texView = static_cast<TextureViewMetal*>(view);
         MTLResourceID resId = [texView->_textureView gpuResourceID];
-        memcpy(argData, &resId, sizeof(resId));
+        std::memcpy(argData, &resId, sizeof(resId));
         elem.Resources[index] = texView->_textureView;
     }
 }
@@ -1376,21 +1463,58 @@ void DescriptorSetMetal::SetResource(uint32_t slot, uint32_t index, ResourceView
 BindlessArrayMetal::~BindlessArrayMetal() noexcept { DestroyImpl(); }
 
 bool BindlessArrayMetal::IsValid() const noexcept {
-    return false;
+    return _argBuffer != nil;
 }
 
 void BindlessArrayMetal::Destroy() noexcept { DestroyImpl(); }
 
 void BindlessArrayMetal::DestroyImpl() noexcept {
-    // TODO:
+    _argBuffer = nil;
+    _bufferResources.clear();
+    _textureResources.clear();
 }
 
 void BindlessArrayMetal::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
-    // TODO:
+    if (_slotType != BindlessSlotType::BufferOnly && _slotType != BindlessSlotType::Multiple) {
+        RADRAY_ERR_LOG("metal bindless array does not support buffer slots");
+        return;
+    }
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
+        return;
+    }
+    if (!bufView) {
+        RADRAY_ERR_LOG("metal bindless array buffer view is null");
+        return;
+    }
+    auto* view = static_cast<BufferViewMetal*>(bufView);
+    uint64_t gpuAddr = [view->_buffer->_buffer gpuAddress] + view->_desc.Range.Offset;
+    uint64_t* argData = std::bit_cast<uint64_t*>(
+        static_cast<uint8_t*>([_argBuffer contents]) + static_cast<size_t>(slot) * 8);
+    *argData = gpuAddr;
+    _bufferResources[slot] = view->_buffer->_buffer;
 }
 
 void BindlessArrayMetal::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
-    // TODO:
+    RADRAY_UNUSED(sampler);
+    if (_slotType == BindlessSlotType::BufferOnly) {
+        RADRAY_ERR_LOG("metal bindless array does not support texture slots");
+        return;
+    }
+    if (slot >= _size) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
+        return;
+    }
+    if (!texView) {
+        RADRAY_ERR_LOG("metal bindless array texture view is null");
+        return;
+    }
+    auto* view = static_cast<TextureViewMetal*>(texView);
+    MTLResourceID resId = [view->_textureView gpuResourceID];
+    uint64_t* argData = std::bit_cast<uint64_t*>(
+        static_cast<uint8_t*>([_argBuffer contents]) + static_cast<size_t>(slot) * 8);
+    std::memcpy(argData, &resId, sizeof(resId));
+    _textureResources[slot] = view->_textureView;
 }
 
 Nullable<shared_ptr<Device>> CreateDevice(const MetalDeviceDescriptor& desc) {

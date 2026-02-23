@@ -524,6 +524,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         uint64_t ArrayLength;
         bool IsSampler;
         bool IsPushConstant;
+        bool IsUnboundedArray;
         uint32_t DescriptorSet;
         uint64_t BufferDataSize;
     };
@@ -557,6 +558,7 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
                 arg.ArrayLength,
                 arg.Type == MslArgumentType::Sampler,
                 arg.IsPushConstant,
+                arg.IsUnboundedArray,
                 arg.DescriptorSet,
                 arg.BufferDataSize});
         }
@@ -605,6 +607,9 @@ std::optional<vector<BindBridgeLayout::BindingEntry>> BindBridgeLayout::BuildFro
         uint32_t elemIndex = 0;
         for (const auto* m : args) {
             uint32_t count = m->ArrayLength == 0 ? 1u : static_cast<uint32_t>(m->ArrayLength);
+            if (m->IsUnboundedArray) {
+                count = 0;  // bindless
+            }
             bindingEntries.emplace_back(DescriptorSetEntry{
                 m->Name,
                 0,

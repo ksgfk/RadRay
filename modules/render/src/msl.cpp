@@ -344,6 +344,33 @@ static uint32_t _ReflectMslArrayType(MslReflCtx& ctx, const spirv_cross::SPIRTyp
     return idx;
 }
 
+// 计算 SPIR-V 类型在 Metal 中的对齐要求
+static uint32_t _GetMslTypeAlignment(const spirv_cross::Compiler& compiler, const spirv_cross::SPIRType& type) {
+    if (type.basetype == spirv_cross::SPIRType::Struct) {
+        uint32_t maxAlign = 1;
+        for (uint32_t i = 0; i < type.member_types.size(); i++) {
+            auto& memberType = compiler.get_type(type.member_types[i]);
+            maxAlign = std::max(maxAlign, _GetMslTypeAlignment(compiler, memberType));
+        }
+        return maxAlign;
+    }
+    uint32_t componentSize = type.width / 8;
+    uint32_t vecsize = type.vecsize;
+    // Metal: vec3 对齐同 vec4
+    if (vecsize == 3) vecsize = 4;
+    return vecsize * componentSize;
+}
+
+// 获取 Metal 中 struct 的实际大小（包含尾部 padding）
+static size_t _GetMslStructSize(const spirv_cross::Compiler& compiler, const spirv_cross::SPIRType& type) {
+    size_t declaredSize = compiler.get_declared_struct_size(type);
+    uint32_t alignment = _GetMslTypeAlignment(compiler, type);
+    if (alignment > 1) {
+        declaredSize = (declaredSize + alignment - 1) & ~(static_cast<size_t>(alignment) - 1);
+    }
+    return declaredSize;
+}
+
 static void _ProcessMslBinding(
     MslReflCtx& ctx,
     const spirv_cross::Resource& res,
@@ -370,6 +397,9 @@ static void _ProcessMslBinding(
     const auto& type = compiler.get_type(res.type_id);
     if (!type.array.empty()) {
         arg.ArrayLength = type.array[0];
+        if (type.array[0] == 0) {
+            arg.IsUnboundedArray = true;
+        }
     }
     if (argType == MslArgumentType::Buffer) {
         if (isReadOnly) arg.Access = MslAccess::ReadOnly;
@@ -378,7 +408,7 @@ static void _ProcessMslBinding(
         const auto& baseType = compiler.get_type(res.base_type_id);
         if (baseType.basetype == spirv_cross::SPIRType::Struct) {
             arg.BufferDataType = MslDataType::Struct;
-            arg.BufferDataSize = compiler.get_declared_struct_size(baseType);
+            arg.BufferDataSize = _GetMslStructSize(compiler, baseType);
             arg.BufferStructTypeIndex = _ReflectMslStructType(ctx, baseType);
         } else {
             arg.BufferDataType = _MapSpirvToMslDataType(baseType);
@@ -422,9 +452,28 @@ std::optional<MslShaderReflection> ReflectMsl(std::span<const MslReflectParams> 
             mslOpt.set_msl_version(2, 0, 0);
             mslOpt.platform = spirv_cross::CompilerMSL::Options::macOS;
             mslOpt.argument_buffers = useArgBuffers;
+            if (useArgBuffers) {
+                mslOpt.argument_buffers_tier = spirv_cross::CompilerMSL::Options::ArgumentBuffersTier::Tier2;
+            }
             compiler.set_msl_options(mslOpt);
             compiler.set_entry_point(string(msl.EntryPoint), execModel);
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+            // 对所有 stage，检查 runtime-sized array（bindless）并标记 device storage
+            if (useArgBuffers) {
+                auto markDeviceStorage = [&](const spirv_cross::Resource& res) {
+                    auto& type = compiler.get_type(res.type_id);
+                    if (!type.array.empty() && type.array.back() == 0) {
+                        uint32_t ds = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+                        compiler.set_argument_buffer_device_address_space(ds, true);
+                    }
+                };
+                for (const auto& r : resources.uniform_buffers) markDeviceStorage(r);
+                for (const auto& r : resources.storage_buffers) markDeviceStorage(r);
+                for (const auto& r : resources.sampled_images) markDeviceStorage(r);
+                for (const auto& r : resources.separate_images) markDeviceStorage(r);
+                for (const auto& r : resources.storage_images) markDeviceStorage(r);
+                for (const auto& r : resources.separate_samplers) markDeviceStorage(r);
+            }
             // 为 vertex/fragment stage 的资源绑定添加偏移，与 ConvertSpirvToMsl 保持一致
             if (msl.Stage == ShaderStage::Vertex || msl.Stage == ShaderStage::Pixel) {
                 if (useArgBuffers) {

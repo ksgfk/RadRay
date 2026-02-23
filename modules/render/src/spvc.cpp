@@ -512,6 +512,9 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
                               ? spirv_cross::CompilerMSL::Options::iOS
                               : spirv_cross::CompilerMSL::Options::macOS;
         mslOpt.argument_buffers = option.UseArgumentBuffers;
+        if (option.UseArgumentBuffers) {
+            mslOpt.argument_buffers_tier = spirv_cross::CompilerMSL::Options::ArgumentBuffersTier::Tier2;
+        }
         mslOpt.force_native_arrays = option.ForceNativeArrays;
         compiler.set_msl_options(mslOpt);
 
@@ -521,6 +524,24 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
             return std::nullopt;
         }
         compiler.set_entry_point(string(entryPoint), execModel);
+
+        // 对所有 stage，检查 runtime-sized array（bindless）并标记 device storage
+        if (option.UseArgumentBuffers) {
+            spirv_cross::ShaderResources allRes = compiler.get_shader_resources();
+            auto markDeviceStorage = [&](const spirv_cross::Resource& res) {
+                auto& type = compiler.get_type(res.type_id);
+                if (!type.array.empty() && type.array.back() == 0) {
+                    uint32_t ds = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
+                    compiler.set_argument_buffer_device_address_space(ds, true);
+                }
+            };
+            for (const auto& r : allRes.uniform_buffers) markDeviceStorage(r);
+            for (const auto& r : allRes.storage_buffers) markDeviceStorage(r);
+            for (const auto& r : allRes.sampled_images) markDeviceStorage(r);
+            for (const auto& r : allRes.separate_images) markDeviceStorage(r);
+            for (const auto& r : allRes.storage_images) markDeviceStorage(r);
+            for (const auto& r : allRes.separate_samplers) markDeviceStorage(r);
+        }
 
         // 为 vertex/fragment stage 的 buffer 资源绑定添加偏移，避免和 vertex buffer slot 0-15 冲突
         if (stage == ShaderStage::Vertex || stage == ShaderStage::Pixel) {

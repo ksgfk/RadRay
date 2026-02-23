@@ -557,6 +557,13 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceMetal* _device{nullptr};
+    id<MTLBuffer> _argBuffer{nil};
+    uint32_t _size{0};
+    BindlessSlotType _slotType{BindlessSlotType::Multiple};
+    // 追踪资源用于 useResources 调用，按 usage 分组
+    vector<id<MTLResource>> _bufferResources;   // read-write
+    vector<id<MTLResource>> _textureResources;  // read-only
+    string _name;
 };
 
 constexpr auto CastMtlObject(Device* p) noexcept { return static_cast<DeviceMetal*>(p); }

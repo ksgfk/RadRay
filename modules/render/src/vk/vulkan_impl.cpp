@@ -1894,8 +1894,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         const auto& f12 = deviceR->_extFeatures.feature12;
         detail.IsBindlessArraySupported =
             selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
-            f12.descriptorBindingUniformBufferUpdateAfterBind &&
-            f12.descriptorBindingSampledImageUpdateAfterBind;
+            f12.runtimeDescriptorArray &&
+            f12.descriptorBindingVariableDescriptorCount &&
+            f12.shaderSampledImageArrayNonUniformIndexing;
     }
     if (deviceR->_detail.IsBindlessArraySupported) {
         auto bdlsBufferOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 262144);
