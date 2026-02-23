@@ -155,12 +155,10 @@ public:
             render::IndexBufferView ibv{_ib.get(), 0, sizeof(uint16_t)};
             pass->BindVertexBuffer(std::span{&vbv, 1});
             pass->BindIndexBuffer(ibv);
-            for (uint32_t i = 0; i < TEX_COUNT; i++) {
-                bind->GetCBuffer("_Obj").GetVar("mvp").SetValue(_mvp);
-                bind->GetCBuffer("_Obj").GetVar("texIndex").SetValue(i);
-                bind->Bind(pass.get());
-                pass->DrawIndexed(6, 1, i * 6, 0, 0);
-            }
+            bind->GetCBuffer("_Obj").GetVar("mvp").SetValue(_mvp);
+            bind->GetCBuffer("_Obj").GetVar("baseTexIndex").SetValue((uint32_t)0);
+            bind->Bind(pass.get());
+            pass->DrawIndexed(6, 1, 0, 0, 0);
         }
         cmdBuffer->EndRenderPass(std::move(pass));
         {
@@ -423,35 +421,14 @@ private:
     }
 
     void CreateQuadMesh() {
-        // 4 sub-quads forming a 1x1 plane: top-left, top-right, bottom-left, bottom-right
-        // Each sub-quad is 0.5x0.5 with full UV range
+        // 单个矩形，UV [0,1]，shader中根据象限选择纹理
         QuadVertex vertices[] = {
-            // quad 0 top-left (a.png)
             {{-0.5f, 0.5f, 0}, {0, 0}},
-            {{0, 0.5f, 0}, {1, 0}},
-            {{0, 0, 0}, {1, 1}},
-            {{-0.5f, 0, 0}, {0, 1}},
-            // quad 1 top-right (b.png)
-            {{0, 0.5f, 0}, {0, 0}},
             {{0.5f, 0.5f, 0}, {1, 0}},
-            {{0.5f, 0, 0}, {1, 1}},
-            {{0, 0, 0}, {0, 1}},
-            // quad 2 bottom-left (c.png)
-            {{-0.5f, 0, 0}, {0, 0}},
-            {{0, 0, 0}, {1, 0}},
-            {{0, -0.5f, 0}, {1, 1}},
-            {{-0.5f, -0.5f, 0}, {0, 1}},
-            // quad 3 bottom-right (d.png)
-            {{0, 0, 0}, {0, 0}},
-            {{0.5f, 0, 0}, {1, 0}},
             {{0.5f, -0.5f, 0}, {1, 1}},
-            {{0, -0.5f, 0}, {0, 1}},
+            {{-0.5f, -0.5f, 0}, {0, 1}},
         };
-        uint16_t indices[] = {
-            0, 1, 2, 0, 2, 3,
-            4, 5, 6, 4, 6, 7,
-            8, 9, 10, 8, 10, 11,
-            12, 13, 14, 12, 14, 15};
+        uint16_t indices[] = {0, 1, 2, 0, 2, 3};
         render::BufferDescriptor vbDesc{
             sizeof(vertices), render::MemoryType::Upload, render::BufferUse::Vertex | render::BufferUse::MapWrite, {}, "QuadVB"};
         _vb = _device->CreateBuffer(vbDesc).Unwrap();

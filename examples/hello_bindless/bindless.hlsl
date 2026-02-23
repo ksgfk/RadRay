@@ -3,7 +3,7 @@
 struct PreObjectData
 {
     float4x4 mvp;
-    uint texIndex;
+    uint baseTexIndex;
 };
 
 struct VS_INPUT
@@ -32,6 +32,12 @@ PS_INPUT VSMain(VS_INPUT vsIn)
 
 float4 PSMain(PS_INPUT psIn) : SV_Target
 {
-    float4 color = _Tex[NonUniformResourceIndex(_Obj.texIndex)].Sample(_Sampler, psIn.uv);
+    // 根据UV判断象限: 左上0 右上1 左下2 右下3
+    uint qx = psIn.uv.x >= 0.5 ? 1 : 0;
+    uint qy = psIn.uv.y >= 0.5 ? 1 : 0;
+    uint quadrant = qy * 2 + qx;
+    // 将UV重映射到[0,1]
+    float2 localUV = frac(psIn.uv * 2.0);
+    float4 color = _Tex[NonUniformResourceIndex(_Obj.baseTexIndex + quadrant)].Sample(_Sampler, localUV);
     return float4(color.rgb, 1.0);
 }
