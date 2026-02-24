@@ -372,6 +372,154 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
     return true;
 }
 
+bool ValidateAccelerationStructureDescriptor(const AccelerationStructureDescriptor& desc) noexcept {
+    if (desc.MaxGeometryCount == 0 && desc.MaxInstanceCount == 0) {
+        RADRAY_ERR_LOG("AccelerationStructureDescriptor must define MaxGeometryCount or MaxInstanceCount");
+        return false;
+    }
+    if (desc.Type == AccelerationStructureType::BottomLevel && desc.MaxGeometryCount == 0) {
+        RADRAY_ERR_LOG("bottom-level AccelerationStructureDescriptor requires MaxGeometryCount > 0");
+        return false;
+    }
+    if (desc.Type == AccelerationStructureType::TopLevel && desc.MaxInstanceCount == 0) {
+        RADRAY_ERR_LOG("top-level AccelerationStructureDescriptor requires MaxInstanceCount > 0");
+        return false;
+    }
+    return true;
+}
+
+bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BuildBottomLevelASDescriptor.Target is null");
+        return false;
+    }
+    if (desc.ScratchBuffer == nullptr) {
+        RADRAY_ERR_LOG("BuildBottomLevelASDescriptor.ScratchBuffer is null");
+        return false;
+    }
+    if (desc.ScratchSize == 0) {
+        RADRAY_ERR_LOG("BuildBottomLevelASDescriptor.ScratchSize must be greater than 0");
+        return false;
+    }
+    if (!desc.ScratchBuffer->GetDesc().Usage.HasFlag(BufferUse::Scratch)) {
+        RADRAY_ERR_LOG("BuildBottomLevelASDescriptor.ScratchBuffer missing Scratch usage");
+        return false;
+    }
+    if (desc.Geometries.empty()) {
+        RADRAY_ERR_LOG("BuildBottomLevelASDescriptor.Geometries is empty");
+        return false;
+    }
+    for (const auto& geom : desc.Geometries) {
+        if (const auto* triangles = std::get_if<RayTracingTrianglesDesc>(&geom.Geometry)) {
+            if (triangles->VertexBuffer == nullptr || triangles->VertexCount == 0 || triangles->VertexStride == 0) {
+                RADRAY_ERR_LOG("invalid BLAS triangles geometry");
+                return false;
+            }
+            if (triangles->IndexBuffer != nullptr && triangles->IndexCount == 0) {
+                RADRAY_ERR_LOG("BLAS triangles index buffer requires IndexCount > 0");
+                return false;
+            }
+        } else if (const auto* aabbs = std::get_if<RayTracingAabbsDesc>(&geom.Geometry)) {
+            if (aabbs->Target == nullptr || aabbs->Count == 0 || aabbs->Stride == 0) {
+                RADRAY_ERR_LOG("invalid BLAS AABB geometry");
+                return false;
+            }
+        } else {
+            RADRAY_ERR_LOG("unknown BLAS geometry variant");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateBuildTopLevelASDescriptor(const BuildTopLevelASDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BuildTopLevelASDescriptor.Target is null");
+        return false;
+    }
+    if (desc.ScratchBuffer == nullptr) {
+        RADRAY_ERR_LOG("BuildTopLevelASDescriptor.ScratchBuffer is null");
+        return false;
+    }
+    if (desc.ScratchSize == 0) {
+        RADRAY_ERR_LOG("BuildTopLevelASDescriptor.ScratchSize must be greater than 0");
+        return false;
+    }
+    if (!desc.ScratchBuffer->GetDesc().Usage.HasFlag(BufferUse::Scratch)) {
+        RADRAY_ERR_LOG("BuildTopLevelASDescriptor.ScratchBuffer missing Scratch usage");
+        return false;
+    }
+    if (desc.Instances.empty()) {
+        RADRAY_ERR_LOG("BuildTopLevelASDescriptor.Instances is empty");
+        return false;
+    }
+    for (const auto& inst : desc.Instances) {
+        if (inst.Blas == nullptr) {
+            RADRAY_ERR_LOG("BuildTopLevelASDescriptor contains null BLAS");
+            return false;
+        }
+        if (inst.ForceOpaque && inst.ForceNoOpaque) {
+            RADRAY_ERR_LOG("instance cannot force opaque and non-opaque simultaneously");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateTraceRaysDescriptor(const TraceRaysDescriptor& desc, const DeviceDetail& detail) noexcept {
+    auto validateRegion = [&](const char* name, const ShaderBindingTableRegion& region, bool required, bool rayGen) -> bool {
+        if (region.Target == nullptr) {
+            if (!required) {
+                return true;
+            }
+            RADRAY_ERR_LOG("{} SBT region target is null", name);
+            return false;
+        }
+        if (region.Size == 0 || region.Stride == 0) {
+            RADRAY_ERR_LOG("{} SBT region size/stride must be greater than 0", name);
+            return false;
+        }
+        if (region.Size % region.Stride != 0) {
+            RADRAY_ERR_LOG("{} SBT region size must be a multiple of stride", name);
+            return false;
+        }
+        if (rayGen && region.Size != region.Stride) {
+            RADRAY_ERR_LOG("RayGen SBT region must contain exactly one record");
+            return false;
+        }
+        if (detail.ShaderTableAlignment > 0) {
+            if (region.Offset % detail.ShaderTableAlignment != 0 || region.Stride % detail.ShaderTableAlignment != 0) {
+                RADRAY_ERR_LOG("{} SBT region offset/stride is not aligned to {}", name, detail.ShaderTableAlignment);
+                return false;
+            }
+        }
+        const auto targetDesc = region.Target->GetDesc();
+        if (!targetDesc.Usage.HasFlag(BufferUse::ShaderTable)) {
+            RADRAY_ERR_LOG("{} SBT region target buffer missing ShaderTable usage", name);
+            return false;
+        }
+        if (region.Offset > targetDesc.Size || region.Size > targetDesc.Size - region.Offset) {
+            RADRAY_ERR_LOG("{} SBT region range is out of bounds", name);
+            return false;
+        }
+        return true;
+    };
+
+    if (desc.Width == 0 || desc.Height == 0 || desc.Depth == 0) {
+        RADRAY_ERR_LOG("TraceRaysDescriptor dimensions must be greater than 0");
+        return false;
+    }
+    if (!validateRegion("RayGen", desc.RayGen, true, true) ||
+        !validateRegion("Miss", desc.Miss, true, false) ||
+        !validateRegion("HitGroup", desc.HitGroup, true, false)) {
+        return false;
+    }
+    if (desc.Callable.has_value() && !validateRegion("Callable", desc.Callable.value(), false, false)) {
+        return false;
+    }
+    return true;
+}
+
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";
@@ -531,6 +679,10 @@ std::string_view format_as(BufferState v) noexcept {
         case BufferState::Indirect: return "Indirect";
         case BufferState::HostRead: return "HostRead";
         case BufferState::HostWrite: return "HostWrite";
+        case BufferState::AccelerationStructureBuildInput: return "AccelerationStructureBuildInput";
+        case BufferState::AccelerationStructureBuildScratch: return "AccelerationStructureBuildScratch";
+        case BufferState::AccelerationStructureRead: return "AccelerationStructureRead";
+        case BufferState::ShaderTable: return "ShaderTable";
     }
     Unreachable();
 }
@@ -583,7 +735,35 @@ std::string_view format_as(ResourceBindType v) noexcept {
         case ResourceBindType::Texture: return "Texture";
         case ResourceBindType::RWTexture: return "RWTexture";
         case ResourceBindType::Sampler: return "Sampler";
+        case ResourceBindType::AccelerationStructure: return "AccelerationStructure";
         case ResourceBindType::UNKNOWN: return "UNKNOWN";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(AccelerationStructureType v) noexcept {
+    switch (v) {
+        case AccelerationStructureType::BottomLevel: return "BottomLevel";
+        case AccelerationStructureType::TopLevel: return "TopLevel";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(AccelerationStructureBuildMode v) noexcept {
+    switch (v) {
+        case AccelerationStructureBuildMode::Build: return "Build";
+        case AccelerationStructureBuildMode::Update: return "Update";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(AccelerationStructureBuildFlag v) noexcept {
+    switch (v) {
+        case AccelerationStructureBuildFlag::None: return "None";
+        case AccelerationStructureBuildFlag::PreferFastTrace: return "PreferFastTrace";
+        case AccelerationStructureBuildFlag::PreferFastBuild: return "PreferFastBuild";
+        case AccelerationStructureBuildFlag::AllowUpdate: return "AllowUpdate";
+        case AccelerationStructureBuildFlag::AllowCompaction: return "AllowCompaction";
     }
     Unreachable();
 }
@@ -597,16 +777,19 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::CmdEncoder: return "CmdEncoder";
         case RenderObjectTag::GraphicsCmdEncoder: return "GraphicsCmdEncoder";
         case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";
+        case RenderObjectTag::RayTracingCmdEncoder: return "RayTracingCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
         case RenderObjectTag::RootSignature: return "RootSignature";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
         case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
+        case RenderObjectTag::RayTracingPipelineState: return "RayTracingPipelineState";
         case RenderObjectTag::SwapChain: return "SwapChain";
         case RenderObjectTag::Resource: return "Resource";
         case RenderObjectTag::Buffer: return "Buffer";
         case RenderObjectTag::Texture: return "Texture";
+        case RenderObjectTag::AccelerationStructure: return "AccelerationStructure";
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::BufferView: return "BufferView";
         case RenderObjectTag::TextureView: return "TextureView";

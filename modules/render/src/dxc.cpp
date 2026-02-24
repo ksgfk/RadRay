@@ -98,7 +98,7 @@ ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
         case HlslShaderInputType::UAV_APPEND_STRUCTURED:
         case HlslShaderInputType::UAV_CONSUME_STRUCTURED:
         case HlslShaderInputType::UAV_RWBYTEADDRESS: return ResourceBindType::RWBuffer;
-        case HlslShaderInputType::RTACCELERATIONSTRUCTURE: return ResourceBindType::Buffer;
+        case HlslShaderInputType::RTACCELERATIONSTRUCTURE: return ResourceBindType::AccelerationStructure;
         case HlslShaderInputType::UAV_FEEDBACKTEXTURE: return ResourceBindType::RWTexture;
         case HlslShaderInputType::UNKNOWN: return ResourceBindType::UNKNOWN;
     }

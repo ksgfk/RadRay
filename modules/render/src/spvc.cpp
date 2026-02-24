@@ -23,7 +23,7 @@ ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
         case SpirvResourceKind::StorageImage:
             return ResourceBindType::RWTexture;
         case SpirvResourceKind::AccelerationStructure:
-            return ResourceBindType::Buffer;
+            return ResourceBindType::AccelerationStructure;
         default:
             return ResourceBindType::UNKNOWN;
     }

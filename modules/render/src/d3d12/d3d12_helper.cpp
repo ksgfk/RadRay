@@ -1032,6 +1032,15 @@ D3D12_RESOURCE_STATES MapType(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::UnorderedAccess)) {
         result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
+    if (v.HasFlag(BufferState::AccelerationStructureBuildInput) || v.HasFlag(BufferState::ShaderTable)) {
+        result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureBuildScratch)) {
+        result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureRead)) {
+        result |= D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+    }
     if (v.HasFlag(BufferState::Indirect)) {
         result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
     }

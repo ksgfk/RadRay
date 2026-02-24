@@ -1,0 +1,5 @@
+add_executable(test_ray_tracing_api test_ray_tracing_api.cpp)
+target_link_libraries(test_ray_tracing_api radraycore radrayrender GTest::gtest_main)
+gtest_discover_tests(test_ray_tracing_api)
+radray_optimize_flags_binary(test_ray_tracing_api)
+radray_set_build_path(test_ray_tracing_api)

@@ -1102,6 +1102,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 break;
             }
             case ResourceBindType::Buffer:
+            case ResourceBindType::AccelerationStructure:
             case ResourceBindType::Texture: {
                 CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
                     rp,
@@ -1178,6 +1179,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     break;
                 case ResourceBindType::Texture:
                 case ResourceBindType::Buffer:
+                case ResourceBindType::AccelerationStructure:
                     CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, numDesc, e.Slot, e.Space, rangeFlags);
                     break;
                 case ResourceBindType::RWTexture:
@@ -1457,6 +1459,18 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
         return nullptr;
     }
     return make_unique<ComputePsoD3D12>(this, std::move(pso));
+}
+
+Nullable<unique_ptr<AccelerationStructure>> DeviceD3D12::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing acceleration structure is not implemented on D3D12 backend yet");
+    return nullptr;
+}
+
+Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing pipeline state is not implemented on D3D12 backend yet");
+    return nullptr;
 }
 
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
@@ -1919,6 +1933,17 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noe
 
 void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     encoder->Destroy();
+}
+
+Nullable<unique_ptr<RayTracingCommandEncoder>> CmdListD3D12::BeginRayTracingPass() noexcept {
+    RADRAY_ERR_LOG("ray tracing command encoder is not implemented on D3D12 backend yet");
+    return nullptr;
+}
+
+void CmdListD3D12::EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept {
+    if (encoder != nullptr) {
+        encoder->Destroy();
+    }
 }
 
 void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {

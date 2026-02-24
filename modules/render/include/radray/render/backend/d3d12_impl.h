@@ -307,6 +307,10 @@ public:
 
     Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
@@ -443,6 +447,10 @@ public:
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
 
     void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
+
+    Nullable<unique_ptr<RayTracingCommandEncoder>> BeginRayTracingPass() noexcept override;
+
+    void EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 

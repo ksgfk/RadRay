@@ -424,6 +424,18 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceMetal::CreateComputePipelineSta
     }
 }
 
+Nullable<unique_ptr<AccelerationStructure>> DeviceMetal::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing acceleration structure is not supported on Metal backend");
+    return nullptr;
+}
+
+Nullable<unique_ptr<RayTracingPipelineState>> DeviceMetal::CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing pipeline state is not supported on Metal backend");
+    return nullptr;
+}
+
 Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept {
     @autoreleasepool {
         auto* mtlRootSig = CastMtlObject(rootSig);
@@ -733,6 +745,17 @@ void CmdBufferMetal::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) n
     @autoreleasepool {
         auto* enc = CastMtlObject(encoder.get());
         [enc->_encoder endEncoding];
+    }
+}
+
+Nullable<unique_ptr<RayTracingCommandEncoder>> CmdBufferMetal::BeginRayTracingPass() noexcept {
+    RADRAY_ERR_LOG("ray tracing command encoder is not supported on Metal backend");
+    return nullptr;
+}
+
+void CmdBufferMetal::EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept {
+    if (encoder != nullptr) {
+        encoder->Destroy();
     }
 }
 

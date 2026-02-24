@@ -340,6 +340,20 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Usage.HasFlag(BufferUse::Indirect)) {
         bufInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     }
+    if (desc.Usage.HasFlag(BufferUse::AccelerationStructure)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+    }
+    if (desc.Usage.HasFlag(BufferUse::ShaderTable)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+    }
+    if (desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
+        desc.Usage.HasFlag(BufferUse::Scratch) ||
+        desc.Usage.HasFlag(BufferUse::ShaderTable)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
+    if (desc.Usage.HasFlag(BufferUse::Scratch)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    }
     VmaAllocationCreateInfo vmaInfo{};
     vmaInfo.flags = 0;
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
@@ -973,6 +987,18 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
         return nullptr;
     }
     return make_unique<ComputePipelineVulkan>(this, pipeline);
+}
+
+Nullable<unique_ptr<AccelerationStructure>> DeviceVulkan::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing acceleration structure is not implemented on Vulkan backend yet");
+    return nullptr;
+}
+
+Nullable<unique_ptr<RayTracingPipelineState>> DeviceVulkan::CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing pipeline state is not implemented on Vulkan backend yet");
+    return nullptr;
 }
 
 Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc, std::span<const RootSignatureStaticSampler> staticSamplers) noexcept {
@@ -2393,6 +2419,17 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferVulkan::BeginComputePas
 
 void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     _endedEncoders.emplace_back(std::move(encoder));
+}
+
+Nullable<unique_ptr<RayTracingCommandEncoder>> CommandBufferVulkan::BeginRayTracingPass() noexcept {
+    RADRAY_ERR_LOG("ray tracing command encoder is not implemented on Vulkan backend yet");
+    return nullptr;
+}
+
+void CommandBufferVulkan::EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept {
+    if (encoder != nullptr) {
+        _endedEncoders.emplace_back(std::move(encoder));
+    }
 }
 
 void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {

@@ -106,8 +106,15 @@ enum class ShaderStage : uint32_t {
     Vertex = 0x1,
     Pixel = Vertex << 1,
     Compute = Pixel << 1,
+    RayGen = Compute << 1,
+    Miss = RayGen << 1,
+    ClosestHit = Miss << 1,
+    AnyHit = ClosestHit << 1,
+    Intersection = AnyHit << 1,
+    Callable = Intersection << 1,
 
-    Graphics = Vertex | Pixel
+    Graphics = Vertex | Pixel,
+    RayTracing = RayGen | Miss | ClosestHit | AnyHit | Intersection | Callable
 };
 
 enum class ShaderBlobCategory {
@@ -269,7 +276,10 @@ enum struct BufferUse : uint32_t {
     CBuffer = Vertex << 1,
     Resource = CBuffer << 1,
     UnorderedAccess = Resource << 1,
-    Indirect = UnorderedAccess << 1
+    Indirect = UnorderedAccess << 1,
+    AccelerationStructure = Indirect << 1,
+    Scratch = AccelerationStructure << 1,
+    ShaderTable = Scratch << 1
 };
 
 enum class TextureUse : uint32_t {
@@ -296,7 +306,11 @@ enum class BufferState : uint32_t {
     UnorderedAccess = ShaderRead << 1,
     Indirect = UnorderedAccess << 1,
     HostRead = Indirect << 1,
-    HostWrite = HostRead << 1
+    HostWrite = HostRead << 1,
+    AccelerationStructureBuildInput = HostWrite << 1,
+    AccelerationStructureBuildScratch = AccelerationStructureBuildInput << 1,
+    AccelerationStructureRead = AccelerationStructureBuildScratch << 1,
+    ShaderTable = AccelerationStructureRead << 1
 };
 
 enum class TextureState : uint32_t {
@@ -359,7 +373,26 @@ enum class ResourceBindType {
     Texture,
     Sampler,
     RWBuffer,
-    RWTexture
+    RWTexture,
+    AccelerationStructure
+};
+
+enum class AccelerationStructureType {
+    BottomLevel,
+    TopLevel
+};
+
+enum class AccelerationStructureBuildMode {
+    Build,
+    Update
+};
+
+enum class AccelerationStructureBuildFlag : uint32_t {
+    None = 0x0,
+    PreferFastTrace = 0x1,
+    PreferFastBuild = PreferFastTrace << 1,
+    AllowUpdate = PreferFastBuild << 1,
+    AllowCompaction = AllowUpdate << 1
 };
 
 enum class FenceStatus {
@@ -406,7 +439,11 @@ enum class RenderObjectTag : uint32_t {
     DescriptorSet = ResourceView << 3,
     Sampler = DescriptorSet << 1,
     BindlessArray = Sampler << 1,
-    VkInstance = BindlessArray << 1,
+    RayTracingCmdEncoder = BindlessArray << 1,
+    AccelerationStructure = RayTracingCmdEncoder << 1,
+    RayTracingPipelineState = AccelerationStructure << 1,
+
+    VkInstance = RayTracingPipelineState << 1
 };
 
 }  // namespace radray::render
@@ -431,6 +468,8 @@ template <>
 struct is_flags<render::BufferState> : public std::true_type {};
 template <>
 struct is_flags<render::TextureState> : public std::true_type {};
+template <>
+struct is_flags<render::AccelerationStructureBuildFlag> : public std::true_type {};
 
 namespace render {
 
@@ -443,6 +482,7 @@ using TextureUses = EnumFlags<render::TextureUse>;
 using TextureViewUsages = EnumFlags<render::TextureViewUsage>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
+using AccelerationStructureBuildFlags = EnumFlags<render::AccelerationStructureBuildFlag>;
 
 }  // namespace render
 
@@ -467,6 +507,7 @@ class CommandBuffer;
 class CommandEncoder;
 class GraphicsCommandEncoder;
 class ComputeCommandEncoder;
+class RayTracingCommandEncoder;
 class Fence;
 class SwapChain;
 class Resource;
@@ -480,6 +521,8 @@ class RootSignature;
 class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
+class RayTracingPipelineState;
+class AccelerationStructure;
 class DescriptorSet;
 class Sampler;
 class BindlessArray;
@@ -886,6 +929,107 @@ struct ComputePipelineStateDescriptor {
     ShaderEntry CS{};
 };
 
+struct RayTracingTrianglesDesc {
+    Buffer* VertexBuffer{nullptr};
+    uint64_t VertexOffset{0};
+    uint32_t VertexStride{0};
+    uint32_t VertexCount{0};
+    VertexFormat VertexFmt{VertexFormat::UNKNOWN};
+    Buffer* IndexBuffer{nullptr};
+    uint64_t IndexOffset{0};
+    uint32_t IndexCount{0};
+    IndexFormat IndexFmt{IndexFormat::UINT32};
+    Buffer* TransformBuffer{nullptr};
+    uint64_t TransformOffset{0};
+};
+
+struct RayTracingAabbsDesc {
+    Buffer* Target{nullptr};
+    uint64_t Offset{0};
+    uint32_t Count{0};
+    uint32_t Stride{0};
+};
+
+struct RayTracingGeometryDesc {
+    std::variant<RayTracingTrianglesDesc, RayTracingAabbsDesc> Geometry{};
+    bool Opaque{true};
+};
+
+struct RayTracingInstanceDesc {
+    Eigen::Matrix4f Transform{Eigen::Matrix4f::Identity()};
+    uint32_t InstanceID{0};
+    uint32_t InstanceMask{0xFF};
+    uint32_t InstanceContributionToHitGroupIndex{0};
+    bool ForceOpaque{false};
+    bool ForceNoOpaque{false};
+    AccelerationStructure* Blas{nullptr};
+};
+
+struct AccelerationStructureDescriptor {
+    AccelerationStructureType Type{AccelerationStructureType::BottomLevel};
+    uint32_t MaxGeometryCount{0};
+    uint32_t MaxInstanceCount{0};
+    AccelerationStructureBuildFlags Flags{AccelerationStructureBuildFlag::None};
+    std::string_view Name{};
+};
+
+struct BuildBottomLevelASDescriptor {
+    AccelerationStructure* Target{nullptr};
+    std::span<const RayTracingGeometryDesc> Geometries{};
+    Buffer* ScratchBuffer{nullptr};
+    uint64_t ScratchOffset{0};
+    uint64_t ScratchSize{0};
+    AccelerationStructureBuildMode Mode{AccelerationStructureBuildMode::Build};
+};
+
+struct BuildTopLevelASDescriptor {
+    AccelerationStructure* Target{nullptr};
+    std::span<const RayTracingInstanceDesc> Instances{};
+    Buffer* ScratchBuffer{nullptr};
+    uint64_t ScratchOffset{0};
+    uint64_t ScratchSize{0};
+    AccelerationStructureBuildMode Mode{AccelerationStructureBuildMode::Build};
+};
+
+struct RayTracingShaderEntry {
+    Shader* Target{nullptr};
+    std::string_view EntryPoint{};
+    ShaderStage Stage{ShaderStage::UNKNOWN};
+};
+
+struct RayTracingHitGroupDescriptor {
+    std::string_view Name{};
+    std::optional<RayTracingShaderEntry> ClosestHit{};
+    std::optional<RayTracingShaderEntry> AnyHit{};
+    std::optional<RayTracingShaderEntry> Intersection{};
+};
+
+struct RayTracingPipelineStateDescriptor {
+    RootSignature* RootSig{nullptr};
+    std::span<const RayTracingShaderEntry> ShaderEntries{};
+    std::span<const RayTracingHitGroupDescriptor> HitGroups{};
+    uint32_t MaxRecursionDepth{1};
+    uint32_t MaxPayloadSize{0};
+    uint32_t MaxAttributeSize{0};
+};
+
+struct ShaderBindingTableRegion {
+    Buffer* Target{nullptr};
+    uint64_t Offset{0};
+    uint64_t Size{0};
+    uint64_t Stride{0};
+};
+
+struct TraceRaysDescriptor {
+    ShaderBindingTableRegion RayGen{};
+    ShaderBindingTableRegion Miss{};
+    ShaderBindingTableRegion HitGroup{};
+    std::optional<ShaderBindingTableRegion> Callable{};
+    uint32_t Width{1};
+    uint32_t Height{1};
+    uint32_t Depth{1};
+};
+
 struct VertexBufferView {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
@@ -904,8 +1048,13 @@ struct DeviceDetail {
     uint32_t TextureDataPitchAlignment{1};
     uint64_t VramBudget{0};
     uint32_t MaxVertexInputBindings{0};
+    uint32_t MaxRayRecursionDepth{0};
+    uint32_t ShaderTableAlignment{0};
+    uint32_t AccelerationStructureAlignment{0};
+    uint32_t AccelerationStructureScratchAlignment{0};
     bool IsUMA{false};
     bool IsBindlessArraySupported{false};
+    bool IsRayTracingSupported{false};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -944,6 +1093,10 @@ public:
 
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
@@ -981,6 +1134,10 @@ public:
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
 
     virtual void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept = 0;
+
+    virtual Nullable<unique_ptr<RayTracingCommandEncoder>> BeginRayTracingPass() noexcept = 0;
+
+    virtual void EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
@@ -1038,6 +1195,21 @@ public:
     virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept = 0;
 
     virtual void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept = 0;
+};
+
+class RayTracingCommandEncoder : public CommandEncoder {
+public:
+    virtual ~RayTracingCommandEncoder() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RayTracingCmdEncoder; }
+
+    virtual void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept = 0;
+
+    virtual void BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept = 0;
+
+    virtual void BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept = 0;
+
+    virtual void TraceRays(const TraceRaysDescriptor& desc) noexcept = 0;
 };
 
 class Fence : public RenderBase {
@@ -1149,6 +1321,20 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputePipelineState; }
 };
 
+class RayTracingPipelineState : public PipelineState {
+public:
+    virtual ~RayTracingPipelineState() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RayTracingPipelineState; }
+};
+
+class AccelerationStructure : public Resource {
+public:
+    virtual ~AccelerationStructure() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
+};
+
 class DescriptorSet : public RenderBase {
 public:
     virtual ~DescriptorSet() noexcept = default;
@@ -1211,6 +1397,10 @@ IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept;
 bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept;
+bool ValidateAccelerationStructureDescriptor(const AccelerationStructureDescriptor& desc) noexcept;
+bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& desc) noexcept;
+bool ValidateBuildTopLevelASDescriptor(const BuildTopLevelASDescriptor& desc) noexcept;
+bool ValidateTraceRaysDescriptor(const TraceRaysDescriptor& desc, const DeviceDetail& detail) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
@@ -1225,6 +1415,9 @@ std::string_view format_as(TextureState v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
 std::string_view format_as(BufferViewUsage v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
+std::string_view format_as(AccelerationStructureType v) noexcept;
+std::string_view format_as(AccelerationStructureBuildMode v) noexcept;
+std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;

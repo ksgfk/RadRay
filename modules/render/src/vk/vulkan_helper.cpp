@@ -151,6 +151,15 @@ VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::UnorderedAccess)) {
         access |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     }
+    if (v.HasFlag(BufferState::AccelerationStructureBuildInput) || v.HasFlag(BufferState::ShaderTable)) {
+        access |= VK_ACCESS_SHADER_READ_BIT;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureBuildScratch)) {
+        access |= VK_ACCESS_SHADER_WRITE_BIT;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureRead)) {
+        access |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    }
     if (v.HasFlag(BufferState::Indirect)) {
         access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
     }
@@ -178,6 +187,12 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureBuildInput) || v.HasFlag(BufferState::AccelerationStructureBuildScratch)) {
+        stage |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    }
+    if (v.HasFlag(BufferState::AccelerationStructureRead) || v.HasFlag(BufferState::ShaderTable)) {
+        stage |= VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
     }
     if (v.HasFlag(BufferState::Indirect)) {
         stage |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
@@ -431,6 +446,14 @@ VkShaderStageFlags MapType(ShaderStages v) noexcept {
     if (v.HasFlag(ShaderStage::Vertex)) flags |= VK_SHADER_STAGE_VERTEX_BIT;
     if (v.HasFlag(ShaderStage::Pixel)) flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
     if (v.HasFlag(ShaderStage::Compute)) flags |= VK_SHADER_STAGE_COMPUTE_BIT;
+
+    if (v.HasFlag(ShaderStage::RayGen)) flags |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    if (v.HasFlag(ShaderStage::Miss)) flags |= VK_SHADER_STAGE_MISS_BIT_KHR;
+    if (v.HasFlag(ShaderStage::ClosestHit)) flags |= VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    if (v.HasFlag(ShaderStage::AnyHit)) flags |= VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    if (v.HasFlag(ShaderStage::Intersection)) flags |= VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+    if (v.HasFlag(ShaderStage::Callable)) flags |= VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+
     return flags;
 }
 
@@ -442,6 +465,7 @@ VkDescriptorType MapType(ResourceBindType v) noexcept {
         case ResourceBindType::Sampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
         case ResourceBindType::RWBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         case ResourceBindType::RWTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case ResourceBindType::AccelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         case ResourceBindType::UNKNOWN: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     }
     Unreachable();
