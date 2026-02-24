@@ -333,7 +333,11 @@ private:
                     double dx = (double)(x - _lastMouseX) / h * _scale * 2.0;
                     double dy = (double)(y - _lastMouseY) / h * _scale * 2.0;
                     _centerX -= dx;
-                    _centerY -= dy;
+                    if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+                        _centerY -= dy;
+                    } else {
+                        _centerY += dy;
+                    }
                     _lastMouseX = x;
                     _lastMouseY = y;
                 }
@@ -355,6 +359,9 @@ private:
         ImVec2 mousePos = ImGui::GetIO().MousePos;
         float ndcX = (mousePos.x / w - 0.5f);
         float ndcY = (mousePos.y / h - 0.5f);
+        if (_device->GetBackend() != render::RenderBackend::Vulkan) {
+            ndcY = -ndcY;
+        }
         double mx = _centerX + (double)ndcX * aspect * _scale * 2.0;
         double my = _centerY + (double)ndcY * _scale * 2.0;
         double factor = (delta > 0) ? 0.85 : 1.0 / 0.85;
