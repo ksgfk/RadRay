@@ -1282,8 +1282,10 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
             b);
     }
 
+    RenderBackend backend = device->GetBackend();
     for (auto setIndex : allSetIndices) {
         auto it = setBindings.find(setIndex);
+        bool hasRegularBindings = it != setBindings.end();
         bool hasStaticSamplers = setsWithStaticSamplers.count(setIndex) > 0;
         bool hasBindless = setsWithBindless.count(setIndex) > 0;
 
@@ -1292,15 +1294,28 @@ BindBridge::BindBridge(Device* device, RootSignature* rootSig, const BindBridgeL
             continue;
         }
 
-        // Create descriptor set for sets with regular bindings or static samplers.
-        if (it == setBindings.end() && !hasStaticSamplers) {
+        // Backend-specific descriptor set creation policy.
+        bool shouldCreateDescSet = false;
+        switch (backend) {
+            case RenderBackend::D3D12:
+                // Static samplers are baked into root signature on D3D12.
+                shouldCreateDescSet = hasRegularBindings;
+                break;
+            case RenderBackend::Vulkan:
+            case RenderBackend::Metal:
+                shouldCreateDescSet = hasRegularBindings || hasStaticSamplers;
+                break;
+            default:
+                shouldCreateDescSet = hasRegularBindings || hasStaticSamplers;
+                break;
+        }
+        if (!shouldCreateDescSet) {
             continue;
         }
 
         auto setOpt = device->CreateDescriptorSet(rootSig, setIndex);
         if (!setOpt.HasValue()) {
-            // Backend doesn't need a descriptor set for this (e.g., D3D12 static-sampler-only set)
-            continue;
+            throw BindBridgeException("failed to create descriptor set for set index " + std::to_string(setIndex));
         }
         auto set = setOpt.Release();
         _descSets[setIndex].OwnedSet = std::move(set);

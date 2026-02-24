@@ -440,10 +440,6 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
             return nullptr;
         }
         const auto& setDesc = *foundSet;
-        if (setDesc.Elements.empty()) {
-            RADRAY_ERR_LOG("metal descriptor set {} has no elements", index);
-            return nullptr;
-        }
         // 计算 argument buffer 大小: Tier2 每个 argument 占 8 字节
         // 需要同时考虑 static sampler，因为使用 argument buffer 时 sampler 也在 argument buffer 内
         uint32_t maxMtlIndex = 0;
@@ -479,6 +475,10 @@ Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignatu
                 combinedStages = combinedStages | ss.Stages;
                 staticSamplersInSet.emplace_back(ss.Slot, mtlRootSig->_cachedStaticSamplers[i].get());
             }
+        }
+        if (setDesc.Elements.empty() && staticSamplersInSet.empty()) {
+            RADRAY_ERR_LOG("metal descriptor set {} has neither elements nor static samplers", index);
+            return nullptr;
         }
         NSUInteger bufferSize = static_cast<NSUInteger>(maxMtlIndex) * 8;
         id<MTLBuffer> argBuffer = [_device newBufferWithLength:bufferSize
@@ -888,6 +888,7 @@ SwapChainMetal::SwapChainMetal(
         texDesc.MipLevels = 1;
         texDesc.SampleCount = 1;
         texDesc.Format = format;
+        texDesc.Usage = TextureUse::RenderTarget;
     }
 }
 
@@ -1168,20 +1169,28 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
             }
         }
         if (!vtxRead.empty()) {
-            [_encoder useResources:vtxRead.data() count:vtxRead.size()
-                             usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+            [_encoder useResources:vtxRead.data()
+                             count:vtxRead.size()
+                             usage:MTLResourceUsageRead
+                            stages:MTLRenderStageVertex];
         }
         if (!vtxReadWrite.empty()) {
-            [_encoder useResources:vtxReadWrite.data() count:vtxReadWrite.size()
-                             usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex];
+            [_encoder useResources:vtxReadWrite.data()
+                             count:vtxReadWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite
+                            stages:MTLRenderStageVertex];
         }
         if (!fragRead.empty()) {
-            [_encoder useResources:fragRead.data() count:fragRead.size()
-                             usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            [_encoder useResources:fragRead.data()
+                             count:fragRead.size()
+                             usage:MTLResourceUsageRead
+                            stages:MTLRenderStageFragment];
         }
         if (!fragReadWrite.empty()) {
-            [_encoder useResources:fragReadWrite.data() count:fragReadWrite.size()
-                             usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageFragment];
+            [_encoder useResources:fragReadWrite.data()
+                             count:fragReadWrite.size()
+                             usage:MTLResourceUsageRead | MTLResourceUsageWrite
+                            stages:MTLRenderStageFragment];
         }
     }
     if (mtlSet->_stages.HasFlag(ShaderStage::Vertex)) {
@@ -1212,12 +1221,14 @@ void GraphicsCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* ar
             }
         }
         if (!readWrite.empty()) {
-            [_encoder useResources:readWrite.data() count:readWrite.size()
+            [_encoder useResources:readWrite.data()
+                             count:readWrite.size()
                              usage:MTLResourceUsageRead | MTLResourceUsageWrite
                             stages:MTLRenderStageVertex | MTLRenderStageFragment];
         }
         if (!readOnly.empty()) {
-            [_encoder useResources:readOnly.data() count:readOnly.size()
+            [_encoder useResources:readOnly.data()
+                             count:readOnly.size()
                              usage:MTLResourceUsageRead
                             stages:MTLRenderStageVertex | MTLRenderStageFragment];
         }
@@ -1366,11 +1377,13 @@ void ComputeCmdEncoderMetal::BindBindlessArray(uint32_t slot, BindlessArray* arr
             }
         }
         if (!readWrite.empty()) {
-            [_encoder useResources:readWrite.data() count:readWrite.size()
+            [_encoder useResources:readWrite.data()
+                             count:readWrite.size()
                              usage:MTLResourceUsageRead | MTLResourceUsageWrite];
         }
         if (!readOnly.empty()) {
-            [_encoder useResources:readOnly.data() count:readOnly.size()
+            [_encoder useResources:readOnly.data()
+                             count:readOnly.size()
                              usage:MTLResourceUsageRead];
         }
     }
