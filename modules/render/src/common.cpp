@@ -305,8 +305,8 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
         return true;
     };
 
-    switch (desc.Type) {
-        case BufferViewType::Uniform:
+    switch (desc.Usage) {
+        case BufferViewUsage::Uniform:
             if (!require(BufferUse::CBuffer)) {
                 return false;
             }
@@ -315,7 +315,7 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 return false;
             }
             break;
-        case BufferViewType::ReadOnlyStorage:
+        case BufferViewUsage::ReadOnlyStorage:
             if (!require(BufferUse::Resource)) {
                 return false;
             }
@@ -328,7 +328,7 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 return false;
             }
             break;
-        case BufferViewType::ReadWriteStorage:
+        case BufferViewUsage::ReadWriteStorage:
             if (!require(BufferUse::UnorderedAccess)) {
                 return false;
             }
@@ -341,7 +341,7 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 return false;
             }
             break;
-        case BufferViewType::TexelReadOnly:
+        case BufferViewUsage::TexelReadOnly:
             if (!require(BufferUse::Resource)) {
                 return false;
             }
@@ -354,7 +354,7 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 return false;
             }
             break;
-        case BufferViewType::TexelReadWrite:
+        case BufferViewUsage::TexelReadWrite:
             if (!require(BufferUse::UnorderedAccess)) {
                 return false;
             }
@@ -564,13 +564,13 @@ std::string_view format_as(TextureViewUsage v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(BufferViewType v) noexcept {
+std::string_view format_as(BufferViewUsage v) noexcept {
     switch (v) {
-        case BufferViewType::Uniform: return "Uniform";
-        case BufferViewType::ReadOnlyStorage: return "ReadOnlyStorage";
-        case BufferViewType::ReadWriteStorage: return "ReadWriteStorage";
-        case BufferViewType::TexelReadOnly: return "TexelReadOnly";
-        case BufferViewType::TexelReadWrite: return "TexelReadWrite";
+        case BufferViewUsage::Uniform: return "Uniform";
+        case BufferViewUsage::ReadOnlyStorage: return "ReadOnlyStorage";
+        case BufferViewUsage::ReadWriteStorage: return "ReadWriteStorage";
+        case BufferViewUsage::TexelReadOnly: return "TexelReadOnly";
+        case BufferViewUsage::TexelReadWrite: return "TexelReadWrite";
     }
     Unreachable();
 }

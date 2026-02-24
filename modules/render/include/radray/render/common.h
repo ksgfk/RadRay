@@ -274,9 +274,7 @@ enum struct BufferUse : uint32_t {
 
 enum class TextureUse : uint32_t {
     UNKNOWN = 0x0,
-    Uninitialized = 0x1,
-    Present = Uninitialized << 1,
-    CopySource = Present << 1,
+    CopySource = 0x1,
     CopyDestination = CopySource << 1,
     Resource = CopyDestination << 1,
     RenderTarget = Resource << 1,
@@ -315,6 +313,14 @@ enum class TextureState : uint32_t {
     UnorderedAccess = DepthWrite << 1
 };
 
+enum class BufferViewUsage : uint32_t {
+    Uniform,
+    ReadOnlyStorage,
+    ReadWriteStorage,
+    TexelReadOnly,
+    TexelReadWrite
+};
+
 enum class TextureViewUsage : uint32_t {
     UNKNOWN = 0x0,
     Resource = 0x1,
@@ -322,14 +328,6 @@ enum class TextureViewUsage : uint32_t {
     DepthRead = RenderTarget << 1,
     DepthWrite = DepthRead << 1,
     UnorderedAccess = DepthWrite << 1,
-};
-
-enum class BufferViewType : uint32_t {
-    Uniform,
-    ReadOnlyStorage,
-    ReadWriteStorage,
-    TexelReadOnly,
-    TexelReadWrite
 };
 
 enum class ResourceHint : uint32_t {
@@ -673,7 +671,7 @@ struct BufferViewDescriptor {
     BufferRange Range{};
     uint32_t Stride{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
-    BufferViewType Type{BufferViewType::ReadOnlyStorage};
+    BufferViewUsage Usage{BufferViewUsage::ReadOnlyStorage};
 };
 
 struct ShaderDescriptor {
@@ -1225,7 +1223,7 @@ std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;
 std::string_view format_as(TextureState v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
-std::string_view format_as(BufferViewType v) noexcept;
+std::string_view format_as(BufferViewUsage v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;

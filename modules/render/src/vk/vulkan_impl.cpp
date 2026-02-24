@@ -386,7 +386,7 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
         return nullptr;
     }
     unique_ptr<BufferViewVulkan> texelView;
-    if (desc.Type == BufferViewType::TexelReadOnly || desc.Type == BufferViewType::TexelReadWrite) {
+    if (desc.Usage == BufferViewUsage::TexelReadOnly || desc.Usage == BufferViewUsage::TexelReadWrite) {
         VkBufferViewCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
         info.pNext = nullptr;

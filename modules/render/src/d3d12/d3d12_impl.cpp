@@ -631,7 +631,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
             .SampleCount = 1,
             .Format = desc.Format,
             .Memory = MemoryType::Device,
-            .Usage = TextureUse::RenderTarget | TextureUse::Present};
+            .Usage = TextureUse::RenderTarget};
     }
     return result;
 }
@@ -732,7 +732,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
 
-    if (desc.Type == BufferViewType::Uniform) {
+    if (desc.Usage == BufferViewUsage::Uniform) {
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
@@ -744,7 +744,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         cbvDesc.SizeInBytes = (UINT)desc.Range.Size;
         heapView.GetHeap()->Create(cbvDesc, heapView.GetStart());
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
-    } else if (desc.Type == BufferViewType::ReadOnlyStorage || desc.Type == BufferViewType::TexelReadOnly) {
+    } else if (desc.Usage == BufferViewUsage::ReadOnlyStorage || desc.Usage == BufferViewUsage::TexelReadOnly) {
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate SRV descriptor");
@@ -756,7 +756,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Buffer.FirstElement = desc.Range.Offset;
-        if (desc.Type == BufferViewType::TexelReadOnly) {
+        if (desc.Usage == BufferViewUsage::TexelReadOnly) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
             srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
             srvDesc.Buffer.StructureByteStride = 0;
@@ -767,7 +767,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
         heapView.GetHeap()->Create(buf->_buf.Get(), srvDesc, heapView.GetStart());
         dxgiFormat = srvDesc.Format;
-    } else if (desc.Type == BufferViewType::ReadWriteStorage || desc.Type == BufferViewType::TexelReadWrite) {
+    } else if (desc.Usage == BufferViewUsage::ReadWriteStorage || desc.Usage == BufferViewUsage::TexelReadWrite) {
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate UAV descriptor");
@@ -778,7 +778,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         uavDesc.Format = MapType(desc.Format);
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uavDesc.Buffer.FirstElement = desc.Range.Offset;
-        if (desc.Type == BufferViewType::TexelReadWrite) {
+        if (desc.Usage == BufferViewUsage::TexelReadWrite) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
             uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
             uavDesc.Buffer.StructureByteStride = 0;
