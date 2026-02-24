@@ -1,6 +1,146 @@
 #include <radray/structured_buffer.h>
 
 namespace radray {
+namespace {
+
+struct CanonMemberBuilder {
+    std::string_view Name;
+    size_t Offset;
+    StructuredBufferId TypeIndex;
+    size_t ArraySize{0};
+};
+
+enum class VisitState : uint8_t {
+    Unvisited = 0,
+    Visiting = 1,
+    Done = 2,
+};
+
+enum class EqState : uint8_t {
+    Unknown = 0,
+    InProgress = 1,
+    Equal = 2,
+    NotEqual = 3,
+};
+
+static bool HasByValueCycleDfs(size_t typeIndex, const vector<StructuredBufferStorage::Builder::Type>& types, vector<VisitState>& visitState) noexcept {
+    VisitState& state = visitState[typeIndex];
+    if (state == VisitState::Visiting) {
+        return true;
+    }
+    if (state == VisitState::Done) {
+        return false;
+    }
+    state = VisitState::Visiting;
+    const auto& t = types[typeIndex];
+    for (const auto& m : t.Members) {
+        const size_t childType = static_cast<size_t>(m.TypeIndex);
+        if (childType >= types.size()) {
+            continue;
+        }
+        if (HasByValueCycleDfs(childType, types, visitState)) {
+            return true;
+        }
+    }
+    state = VisitState::Done;
+    return false;
+}
+
+static bool HasByValueCycle(const vector<StructuredBufferStorage::Builder::Type>& types) noexcept {
+    vector<VisitState> visitState(types.size(), VisitState::Unvisited);
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (visitState[i] == VisitState::Unvisited && HasByValueCycleDfs(i, types, visitState)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool EqualBuilderTypes(
+    size_t a,
+    size_t b,
+    const vector<StructuredBufferStorage::Builder::Type>& types,
+    const vector<vector<CanonMemberBuilder>>& canonMembers,
+    vector<EqState>& eqMemo,
+    size_t nTypes) noexcept {
+    if (a == b) {
+        return true;
+    }
+    if (a >= types.size() || b >= types.size()) {
+        return false;
+    }
+
+    const size_t x = std::min(a, b);
+    const size_t y = std::max(a, b);
+    EqState& state = eqMemo[x * nTypes + y];
+    if (state == EqState::Equal) {
+        return true;
+    }
+    if (state == EqState::NotEqual) {
+        return false;
+    }
+    if (state == EqState::InProgress) {
+        // A re-entry here indicates recursive equivalence expansion.
+        // Treat as non-equal to avoid accidental type merging.
+        RADRAY_ASSERT(false);
+        state = EqState::NotEqual;
+        return false;
+    }
+
+    state = EqState::InProgress;
+    const auto& ta = types[a];
+    const auto& tb = types[b];
+    if (ta.Name != tb.Name || ta.SizeInBytes != tb.SizeInBytes) {
+        state = EqState::NotEqual;
+        return false;
+    }
+
+    const auto& ma = canonMembers[a];
+    const auto& mb = canonMembers[b];
+    if (ma.size() != mb.size()) {
+        state = EqState::NotEqual;
+        return false;
+    }
+
+    for (size_t i = 0; i < ma.size(); ++i) {
+        if (ma[i].Offset != mb[i].Offset || ma[i].Name != mb[i].Name || ma[i].ArraySize != mb[i].ArraySize) {
+            state = EqState::NotEqual;
+            return false;
+        }
+        if (!EqualBuilderTypes(ma[i].TypeIndex, mb[i].TypeIndex, types, canonMembers, eqMemo, nTypes)) {
+            state = EqState::NotEqual;
+            return false;
+        }
+    }
+
+    state = EqState::Equal;
+    return true;
+}
+
+static size_t UfFind(size_t x, vector<size_t>& parent) noexcept {
+    while (parent[x] != x) {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    return x;
+}
+
+static void UfUnion(size_t a, size_t b, vector<size_t>& parent, vector<uint32_t>& rank) noexcept {
+    a = UfFind(a, parent);
+    b = UfFind(b, parent);
+    if (a == b) {
+        return;
+    }
+    if (rank[a] < rank[b]) {
+        std::swap(a, b);
+    }
+    parent[b] = a;
+    if (rank[a] == rank[b]) {
+        rank[a]++;
+    }
+}
+
+}  // namespace
 
 StructuredBufferId StructuredBufferStorage::Builder::AddType(std::string_view name, size_t size) noexcept {
     Type t{};
@@ -101,6 +241,9 @@ bool StructuredBufferStorage::Builder::IsValid() const noexcept {
             return false;
         }
     }
+    if (HasByValueCycle(_types)) {
+        return false;
+    }
     return true;
 }
 
@@ -144,13 +287,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
         return std::nullopt;
     }
     StructuredBufferStorage storage{};
-    // Phase 1: build the full builder type graph (canonicalized member order)
-    struct CanonMemberBuilder {
-        std::string_view Name;
-        size_t Offset;
-        StructuredBufferId TypeIndex;
-        size_t ArraySize{0};
-    };
+    // 构建类型图 (canonicalized member order)
     vector<vector<CanonMemberBuilder>> canonMembers;
     canonMembers.resize(_types.size());
     for (size_t ti = 0; ti < _types.size(); ++ti) {
@@ -167,108 +304,38 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
             if (a.Name != b.Name) {
                 return a.Name < b.Name;
             }
-            return a.TypeIndex < b.TypeIndex;
+            if (a.TypeIndex != b.TypeIndex) {
+                return a.TypeIndex < b.TypeIndex;
+            }
+            return a.ArraySize < b.ArraySize;
         });
     }
-    // Phase 2: merge graph nodes via recursive structural equality (no string signatures, no hash map)
-    // 0 = unknown, 1 = in-progress, 2 = equal, 3 = not-equal
+    // 通过递归合并等价图节点
     const size_t nTypes = _types.size();
-    vector<uint8_t> eqMemo;
-    eqMemo.resize(nTypes * nTypes, 0);
-    auto eqCell = [&](size_t a, size_t b) -> uint8_t& {
-        return eqMemo[a * nTypes + b];
-    };
-    const std::function<bool(size_t, size_t)> equalBuilderTypes = [&](size_t a, size_t b) -> bool {
-        if (a == b) {
-            return true;
-        }
-        if (a >= _types.size() || b >= _types.size()) {
-            return false;
-        }
-        // normalize key so (a,b) and (b,a) share memo
-        const size_t x = std::min(a, b);
-        const size_t y = std::max(a, b);
-        uint8_t& state = eqCell(x, y);
-        if (state == 2) {
-            return true;
-        }
-        if (state == 3) {
-            return false;
-        }
-        if (state == 1) {
-            // in-progress: break recursion loops conservatively
-            return true;
-        }
-        state = 1;
-        const auto& ta = _types[a];
-        const auto& tb = _types[b];
-        if (ta.Name != tb.Name || ta.SizeInBytes != tb.SizeInBytes) {
-            state = 3;
-            return false;
-        }
-        const auto& ma = canonMembers[a];
-        const auto& mb = canonMembers[b];
-        if (ma.size() != mb.size()) {
-            state = 3;
-            return false;
-        }
-        for (size_t i = 0; i < ma.size(); ++i) {
-            if (ma[i].Offset != mb[i].Offset || ma[i].Name != mb[i].Name) {
-                state = 3;
-                return false;
-            }
-            if (!equalBuilderTypes(ma[i].TypeIndex, mb[i].TypeIndex)) {
-                state = 3;
-                return false;
-            }
-        }
-        state = 2;
-        return true;
-    };
-    // union-find over builder type indices
+    vector<EqState> eqMemo;
+    eqMemo.resize(nTypes * nTypes, EqState::Unknown);
+    // 并查集合并节点
     vector<size_t> parent(_types.size());
     vector<uint32_t> rank(_types.size(), 0);
     for (size_t i = 0; i < parent.size(); ++i) {
         parent[i] = i;
     }
-    const std::function<size_t(size_t)> ufFind = [&](size_t x) -> size_t {
-        while (parent[x] != x) {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        return x;
-    };
-    auto ufUnion = [&](size_t a, size_t b) {
-        a = ufFind(a);
-        b = ufFind(b);
-        if (a == b) {
-            return;
-        }
-        if (rank[a] < rank[b]) {
-            std::swap(a, b);
-        }
-        parent[b] = a;
-        if (rank[a] == rank[b]) {
-            rank[a]++;
-        }
-    };
     for (size_t i = 0; i < _types.size(); ++i) {
         for (size_t j = 0; j < i; ++j) {
-            if (ufFind(i) == ufFind(j)) {
+            if (UfFind(i, parent) == UfFind(j, parent)) {
                 continue;
             }
-            if (equalBuilderTypes(i, j)) {
-                ufUnion(i, j);
+            if (EqualBuilderTypes(i, j, _types, canonMembers, eqMemo, nTypes)) {
+                UfUnion(i, j, parent, rank);
             }
         }
     }
-    // map union representative -> new deduped type id
     vector<size_t> repToNewId(_types.size(), StructuredBufferId::Invalid());
     vector<StructuredBufferId> builderToNewId(_types.size(), StructuredBufferId{StructuredBufferId::Invalid()});
     vector<size_t> newIdToRepBuilder;
     newIdToRepBuilder.reserve(_types.size());
     for (size_t i = 0; i < _types.size(); ++i) {
-        size_t rep = ufFind(i);
+        size_t rep = UfFind(i, parent);
         if (repToNewId[rep] == StructuredBufferId::Invalid().Value) {
             repToNewId[rep] = newIdToRepBuilder.size();
             newIdToRepBuilder.emplace_back(rep);
@@ -294,7 +361,7 @@ std::optional<StructuredBufferStorage> StructuredBufferStorage::Builder::Build()
             newType._members.emplace_back(std::move(v));
         }
     }
-    // Roots and buffer layout
+
     size_t totalSize = 0;
     storage._rootVarIds.reserve(_roots.size());
     for (const auto& r : _roots) {
