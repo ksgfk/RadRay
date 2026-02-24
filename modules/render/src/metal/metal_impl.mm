@@ -7,6 +7,7 @@
 
 #include <radray/logger.h>
 #include <radray/utility.h>
+#include <radray/render/msl.h>
 #include <radray/render/backend/metal_helper.h>
 
 namespace radray::render::metal {

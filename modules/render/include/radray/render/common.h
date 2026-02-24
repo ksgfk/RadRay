@@ -12,8 +12,6 @@
 
 namespace radray::render {
 
-constexpr uint32_t MetalMaxVertexInputBindings = 16;
-
 enum class RenderBackend {
     D3D12,
     Vulkan,

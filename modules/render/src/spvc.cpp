@@ -37,6 +37,7 @@ ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
 #include <spirv_cross_c.h>
 #include <spirv_msl.hpp>
 #include <radray/render/dxc.h>
+#include <radray/render/msl.h>
 
 namespace radray::render {
 

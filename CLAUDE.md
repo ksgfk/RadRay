@@ -67,7 +67,7 @@ Library targets: `radraycore`, `radraywindow`, `radrayrender`, `radrayimgui`.
 
 ### Metal Backend Buffer Binding Layout
 
-`MetalMaxVertexInputBindings = 16` (defined in `common.h`) is the key constant that drives the entire layout.
+`MetalMaxVertexInputBindings = 16` (defined in `msl.h`) is the key constant that drives the entire layout.
 
 **Graphics stages (Vertex/Fragment):**
 ```

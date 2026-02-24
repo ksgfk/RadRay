@@ -8,6 +8,8 @@
 
 namespace radray::render {
 
+constexpr uint32_t MetalMaxVertexInputBindings = 16;
+
 enum class MslDataType : uint32_t {
     None = 0,
     Struct,

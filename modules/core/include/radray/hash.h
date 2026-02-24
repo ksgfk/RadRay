@@ -4,6 +4,8 @@
 #include <string_view>
 #include <utility>
 
+#include <radray/types.h>
+
 namespace radray {
 
 struct StringHash {
@@ -14,6 +16,15 @@ struct StringHash {
     size_t operator()(std::string_view str) const noexcept { return hash_type{}(str); }
     template <class Char, class Traits, class Alloc>
     size_t operator()(std::basic_string<Char, Traits, Alloc> const& str) const noexcept { return hash_type{}(str); }
+};
+
+struct StringEqual {
+    using is_transparent = void;
+
+    bool operator()(std::string_view lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
+    bool operator()(const string& lhs, std::string_view rhs) const noexcept { return std::string_view{lhs} == rhs; }
+    bool operator()(std::string_view lhs, const string& rhs) const noexcept { return lhs == std::string_view{rhs}; }
+    bool operator()(const string& lhs, const string& rhs) const noexcept { return lhs == rhs; }
 };
 
 namespace hash {
