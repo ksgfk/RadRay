@@ -206,12 +206,13 @@ std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSu
 
 VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept;
 
-VkAccessFlags BufferUseToAccessFlags(BufferUses v) noexcept;
-VkPipelineStageFlags BufferUseToPipelineStageFlags(BufferUses v) noexcept;
+VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept;
+VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
 
-VkAccessFlags TextureUseToAccessFlags(TextureUses v) noexcept;
-VkPipelineStageFlags TextureUseToPipelineStageFlags(TextureUses v, bool isSrc) noexcept;
-VkImageLayout TextureUseToLayout(TextureUses v) noexcept;
+VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept;
+VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept;
+VkImageLayout TextureStateToLayout(TextureStates v) noexcept;
+VkImageLayout TextureViewUsageToLayout(TextureViewUsages v) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;

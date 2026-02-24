@@ -45,8 +45,8 @@ public:
         {
             radray::render::BarrierTextureDescriptor barrier{};
             barrier.Target = rt;
-            barrier.Before = radray::render::TextureUse::Uninitialized;
-            barrier.After = radray::render::TextureUse::RenderTarget;
+            barrier.Before = radray::render::TextureState::Undefined;
+            barrier.After = radray::render::TextureState::RenderTarget;
             barrier.IsFromOrToOtherQueue = false;
             barrier.IsSubresourceBarrier = false;
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
@@ -67,8 +67,8 @@ public:
         {
             radray::render::BarrierTextureDescriptor barrier{};
             barrier.Target = rt;
-            barrier.Before = radray::render::TextureUse::RenderTarget;
-            barrier.After = radray::render::TextureUse::Present;
+            barrier.Before = radray::render::TextureState::RenderTarget;
+            barrier.After = radray::render::TextureState::Present;
             barrier.IsFromOrToOtherQueue = false;
             barrier.IsSubresourceBarrier = false;
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});

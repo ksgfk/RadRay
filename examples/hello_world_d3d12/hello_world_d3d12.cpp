@@ -179,16 +179,16 @@ void Init() {
         cmdBuffer->Begin();
         {
             BarrierBufferDescriptor barriers[] = {
-                {vertBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false},
-                {idxBuf.get(), BufferUse::Common, BufferUse::CopyDestination, nullptr, false}};
+                {vertBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false},
+                {idxBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false}};
             cmdBuffer->ResourceBarrier(barriers, {});
         }
         cmdBuffer->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
         cmdBuffer->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
         {
             BarrierBufferDescriptor barriers[] = {
-                {vertBuf.get(), BufferUse::CopyDestination, BufferUse::Vertex, nullptr, false},
-                {idxBuf.get(), BufferUse::CopyDestination, BufferUse::Index, nullptr, false}};
+                {vertBuf.get(), BufferState::CopyDestination, BufferState::Vertex, nullptr, false},
+                {idxBuf.get(), BufferState::CopyDestination, BufferState::Index, nullptr, false}};
             cmdBuffer->ResourceBarrier(barriers, {});
         }
         cmdBuffer->End();
@@ -232,7 +232,7 @@ void Update() {
             rtViewDesc.Target = rt;
             rtViewDesc.Dim = TextureDimension::Dim2D;
             rtViewDesc.Format = TextureFormat::RGBA8_UNORM;
-            rtViewDesc.Usage = TextureUse::RenderTarget;
+            rtViewDesc.Usage = TextureViewUsage::RenderTarget;
             rtViewDesc.Range.BaseMipLevel = 0;
             rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
             rtViewDesc.Range.BaseArrayLayer = 0;
@@ -243,7 +243,7 @@ void Update() {
 
         cmdBuffer->Begin();
         {
-            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::Uninitialized, TextureUse::RenderTarget, {}, false, false, {}}};
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureState::Undefined, TextureState::RenderTarget, {}, false, false, {}}};
             cmdBuffer->ResourceBarrier({}, texDesc);
         }
         {
@@ -263,7 +263,7 @@ void Update() {
             cmdBuffer->EndRenderPass(std::move(rp));
         }
         {
-            BarrierTextureDescriptor texDesc[] = {{rt, TextureUse::RenderTarget, TextureUse::Present, {}, false, false, {}}};
+            BarrierTextureDescriptor texDesc[] = {{rt, TextureState::RenderTarget, TextureState::Present, {}, false, false, {}}};
             cmdBuffer->ResourceBarrier({}, texDesc);
         }
         cmdBuffer->End();

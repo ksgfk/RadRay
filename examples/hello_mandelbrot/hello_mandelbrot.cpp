@@ -31,7 +31,7 @@ public:
     unique_ptr<render::Texture> _computeOutput;
     unique_ptr<render::TextureView> _uav;
     unique_ptr<render::TextureView> _srv;
-    render::TextureUse _computeOutputUsage{render::TextureUse::Uninitialized};
+    render::TextureState _computeOutputUsage{render::TextureState::Undefined};
     render::CBufferArena _cbArena;
 };
 
@@ -126,9 +126,9 @@ public:
                 render::BarrierTextureDescriptor barrier{
                     frame->_computeOutput.get(),
                     frame->_computeOutputUsage,
-                    render::TextureUse::UnorderedAccess};
+                    render::TextureState::UnorderedAccess};
                 cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-                frame->_computeOutputUsage = render::TextureUse::UnorderedAccess;
+                frame->_computeOutputUsage = render::TextureState::UnorderedAccess;
             }
             // 2. Compute pass
             {
@@ -146,17 +146,17 @@ public:
             {
                 render::BarrierTextureDescriptor barrier{
                     frame->_computeOutput.get(),
-                    render::TextureUse::UnorderedAccess,
-                    render::TextureUse::Resource};
+                    render::TextureState::UnorderedAccess,
+                    render::TextureState::ShaderRead};
                 cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
-                frame->_computeOutputUsage = render::TextureUse::Resource;
+                frame->_computeOutputUsage = render::TextureState::ShaderRead;
             }
         }
 
         // 4. Barrier: back buffer -> RenderTarget
         {
             render::BarrierTextureDescriptor barrier{
-                rt, render::TextureUse::Uninitialized, render::TextureUse::RenderTarget};
+                rt, render::TextureState::Undefined, render::TextureState::RenderTarget};
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
 
@@ -199,7 +199,7 @@ public:
         // 7. Barrier: RenderTarget -> Present
         {
             render::BarrierTextureDescriptor barrier{
-                rt, render::TextureUse::RenderTarget, render::TextureUse::Present};
+                rt, render::TextureState::RenderTarget, render::TextureState::Present};
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
         cmdBuffer->End();
@@ -232,16 +232,16 @@ public:
                 render::TextureDimension::Dim2D,
                 render::TextureFormat::RGBA8_UNORM,
                 render::SubresourceRange::AllSub(),
-                render::TextureUse::UnorderedAccess};
+                render::TextureViewUsage::UnorderedAccess};
             frame->_uav = _device->CreateTextureView(uavDesc).Unwrap();
             render::TextureViewDescriptor srvDesc{
                 frame->_computeOutput.get(),
                 render::TextureDimension::Dim2D,
                 render::TextureFormat::RGBA8_UNORM,
                 render::SubresourceRange::AllSub(),
-                render::TextureUse::Resource};
+                render::TextureViewUsage::Resource};
             frame->_srv = _device->CreateTextureView(srvDesc).Unwrap();
-            frame->_computeOutputUsage = render::TextureUse::Uninitialized;
+            frame->_computeOutputUsage = render::TextureState::Undefined;
         }
         // Update compute binds to point to new UAV views (after resize)
         if (!_computeBinds.empty()) {

@@ -285,6 +285,53 @@ enum class TextureUse : uint32_t {
     UnorderedAccess = DepthStencilWrite << 1,
 };
 
+enum class BufferState : uint32_t {
+    UNKNOWN = 0x0,
+    Undefined = 0x1,
+    Common = Undefined << 1,
+    CopySource = Common << 1,
+    CopyDestination = CopySource << 1,
+    Vertex = CopyDestination << 1,
+    Index = Vertex << 1,
+    Uniform = Index << 1,
+    ShaderRead = Uniform << 1,
+    UnorderedAccess = ShaderRead << 1,
+    Indirect = UnorderedAccess << 1,
+    HostRead = Indirect << 1,
+    HostWrite = HostRead << 1
+};
+
+enum class TextureState : uint32_t {
+    UNKNOWN = 0x0,
+    Undefined = 0x1,
+    Common = Undefined << 1,
+    Present = Common << 1,
+    CopySource = Present << 1,
+    CopyDestination = CopySource << 1,
+    ShaderRead = CopyDestination << 1,
+    RenderTarget = ShaderRead << 1,
+    DepthRead = RenderTarget << 1,
+    DepthWrite = DepthRead << 1,
+    UnorderedAccess = DepthWrite << 1
+};
+
+enum class TextureViewUsage : uint32_t {
+    UNKNOWN = 0x0,
+    Resource = 0x1,
+    RenderTarget = Resource << 1,
+    DepthRead = RenderTarget << 1,
+    DepthWrite = DepthRead << 1,
+    UnorderedAccess = DepthWrite << 1,
+};
+
+enum class BufferViewType : uint32_t {
+    Uniform,
+    ReadOnlyStorage,
+    ReadWriteStorage,
+    TexelReadOnly,
+    TexelReadWrite
+};
+
 enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1
@@ -380,6 +427,12 @@ template <>
 struct is_flags<render::BufferUse> : public std::true_type {};
 template <>
 struct is_flags<render::TextureUse> : public std::true_type {};
+template <>
+struct is_flags<render::TextureViewUsage> : public std::true_type {};
+template <>
+struct is_flags<render::BufferState> : public std::true_type {};
+template <>
+struct is_flags<render::TextureState> : public std::true_type {};
 
 namespace render {
 
@@ -389,6 +442,9 @@ using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
 using BufferUses = EnumFlags<render::BufferUse>;
 using TextureUses = EnumFlags<render::TextureUse>;
+using TextureViewUsages = EnumFlags<render::TextureViewUsage>;
+using BufferStates = EnumFlags<render::BufferState>;
+using TextureStates = EnumFlags<render::TextureState>;
 
 }  // namespace render
 
@@ -520,8 +576,8 @@ struct CommandQueueSubmitDescriptor {
 
 struct BarrierBufferDescriptor {
     Buffer* Target{nullptr};
-    BufferUses Before{BufferUse::UNKNOWN};
-    BufferUses After{BufferUse::UNKNOWN};
+    BufferStates Before{BufferState::UNKNOWN};
+    BufferStates After{BufferState::UNKNOWN};
     Nullable<CommandQueue*> OtherQueue{nullptr};
     bool IsFromOrToOtherQueue{false};  // true: from, false: to
 };
@@ -541,8 +597,8 @@ struct SubresourceRange {
 
 struct BarrierTextureDescriptor {
     Texture* Target{nullptr};
-    TextureUses Before{TextureUse::UNKNOWN};
-    TextureUses After{TextureUse::UNKNOWN};
+    TextureStates Before{TextureState::UNKNOWN};
+    TextureStates After{TextureState::UNKNOWN};
     Nullable<CommandQueue*> OtherQueue{nullptr};
     bool IsFromOrToOtherQueue{false};
     bool IsSubresourceBarrier{false};
@@ -590,7 +646,7 @@ struct TextureViewDescriptor {
     TextureDimension Dim{TextureDimension::UNKNOWN};
     TextureFormat Format{TextureFormat::UNKNOWN};
     SubresourceRange Range{};
-    TextureUses Usage{TextureUse::UNKNOWN};
+    TextureViewUsages Usage{TextureViewUsage::UNKNOWN};
 };
 
 struct BufferDescriptor {
@@ -617,7 +673,7 @@ struct BufferViewDescriptor {
     BufferRange Range{};
     uint32_t Stride{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
-    BufferUses Usage{BufferUse::UNKNOWN};
+    BufferViewType Type{BufferViewType::ReadOnlyStorage};
 };
 
 struct ShaderDescriptor {
@@ -1155,6 +1211,8 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept;
+bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
@@ -1164,6 +1222,10 @@ std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
+std::string_view format_as(BufferState v) noexcept;
+std::string_view format_as(TextureState v) noexcept;
+std::string_view format_as(TextureViewUsage v) noexcept;
+std::string_view format_as(BufferViewType v) noexcept;
 std::string_view format_as(ResourceBindType v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;

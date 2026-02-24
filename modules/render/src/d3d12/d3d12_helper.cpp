@@ -1012,56 +1012,56 @@ D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept {
     Unreachable();
 }
 
-D3D12_RESOURCE_STATES MapType(BufferUses v) noexcept {
+D3D12_RESOURCE_STATES MapType(BufferStates v) noexcept {
     D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
-    if (v.HasFlag(BufferUse::CopySource)) {
+    if (v.HasFlag(BufferState::CopySource)) {
         result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
     }
-    if (v.HasFlag(BufferUse::CopyDestination)) {
+    if (v.HasFlag(BufferState::CopyDestination)) {
         result |= D3D12_RESOURCE_STATE_COPY_DEST;
     }
-    if (v.HasFlag(BufferUse::Index)) {
+    if (v.HasFlag(BufferState::Index)) {
         result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
     }
-    if (v.HasFlag(BufferUse::Vertex) || v.HasFlag(BufferUse::CBuffer)) {
+    if (v.HasFlag(BufferState::Vertex) || v.HasFlag(BufferState::Uniform)) {
         result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
     }
-    if (v.HasFlag(BufferUse::Resource)) {
+    if (v.HasFlag(BufferState::ShaderRead)) {
         result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
-    if (v.HasFlag(BufferUse::UnorderedAccess)) {
+    if (v.HasFlag(BufferState::UnorderedAccess)) {
         result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
-    if (v.HasFlag(BufferUse::Indirect)) {
+    if (v.HasFlag(BufferState::Indirect)) {
         result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
     }
     return result;
 }
 
-D3D12_RESOURCE_STATES MapType(TextureUses v) noexcept {
+D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept {
     D3D12_RESOURCE_STATES result = D3D12_RESOURCE_STATE_COMMON;
-    if (v.HasFlag(TextureUse::Present)) {
+    if (v.HasFlag(TextureState::Present)) {
         result |= D3D12_RESOURCE_STATE_PRESENT;
     }
-    if (v.HasFlag(TextureUse::CopySource)) {
+    if (v.HasFlag(TextureState::CopySource)) {
         result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
     }
-    if (v.HasFlag(TextureUse::CopyDestination)) {
+    if (v.HasFlag(TextureState::CopyDestination)) {
         result |= D3D12_RESOURCE_STATE_COPY_DEST;
     }
-    if (v.HasFlag(TextureUse::Resource)) {
+    if (v.HasFlag(TextureState::ShaderRead)) {
         result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     }
-    if (v.HasFlag(TextureUse::RenderTarget)) {
+    if (v.HasFlag(TextureState::RenderTarget)) {
         result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
     }
-    if (v.HasFlag(TextureUse::DepthStencilRead)) {
+    if (v.HasFlag(TextureState::DepthRead)) {
         result |= D3D12_RESOURCE_STATE_DEPTH_READ;
     }
-    if (v.HasFlag(TextureUse::DepthStencilWrite)) {
+    if (v.HasFlag(TextureState::DepthWrite)) {
         result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
     }
-    if (v.HasFlag(TextureUse::UnorderedAccess)) {
+    if (v.HasFlag(TextureState::UnorderedAccess)) {
         result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
     return result;

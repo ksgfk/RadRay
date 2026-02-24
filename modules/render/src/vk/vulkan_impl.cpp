@@ -377,9 +377,16 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
 }
 
 Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
+        return nullptr;
+    }
     auto buf = CastVkObject(desc.Target);
+    if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
+        return nullptr;
+    }
     unique_ptr<BufferViewVulkan> texelView;
-    if (buf->_usage.HasFlag(BufferUse::Resource) || buf->_usage.HasFlag(BufferUse::UnorderedAccess)) {
+    if (desc.Type == BufferViewType::TexelReadOnly || desc.Type == BufferViewType::TexelReadWrite) {
         VkBufferViewCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
         info.pNext = nullptr;
@@ -474,7 +481,14 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
 }
 
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
+        return nullptr;
+    }
     auto image = CastVkObject(desc.Target);
+    if (!ValidateTextureViewDescriptor(desc, image->_mdesc)) {
+        return nullptr;
+    }
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -2147,8 +2161,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         auto& bufBarrier = bufferBarriers.emplace_back();
         bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         bufBarrier.pNext = nullptr;
-        bufBarrier.srcAccessMask = BufferUseToAccessFlags(i.Before);
-        bufBarrier.dstAccessMask = BufferUseToAccessFlags(i.After);
+        bufBarrier.srcAccessMask = BufferStateToAccessFlags(i.Before);
+        bufBarrier.dstAccessMask = BufferStateToAccessFlags(i.After);
         if (i.OtherQueue.HasValue()) {
             auto otherQ = CastVkObject(i.OtherQueue.Get());
             if (i.IsFromOrToOtherQueue) {
@@ -2166,8 +2180,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         bufBarrier.offset = 0;
         bufBarrier.size = buf->_reqSize;
 
-        auto srcStage = BufferUseToPipelineStageFlags(i.Before);
-        auto dstStage = BufferUseToPipelineStageFlags(i.After);
+        auto srcStage = BufferStateToPipelineStageFlags(i.Before);
+        auto dstStage = BufferStateToPipelineStageFlags(i.After);
         srcStageMask |= srcStage;
         dstStageMask |= dstStage;
     }
@@ -2178,10 +2192,10 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         auto& imgBarrier = imageBarriers.emplace_back();
         imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         imgBarrier.pNext = nullptr;
-        imgBarrier.srcAccessMask = TextureUseToAccessFlags(i.Before);
-        imgBarrier.dstAccessMask = TextureUseToAccessFlags(i.After);
-        imgBarrier.oldLayout = TextureUseToLayout(i.Before);
-        imgBarrier.newLayout = TextureUseToLayout(i.After);
+        imgBarrier.srcAccessMask = TextureStateToAccessFlags(i.Before);
+        imgBarrier.dstAccessMask = TextureStateToAccessFlags(i.After);
+        imgBarrier.oldLayout = TextureStateToLayout(i.Before);
+        imgBarrier.newLayout = TextureStateToLayout(i.After);
         if (i.OtherQueue.HasValue()) {
             auto otherQ = CastVkObject(i.OtherQueue.Get());
             if (i.IsFromOrToOtherQueue) {
@@ -2202,8 +2216,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescripto
         imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.Range.BaseArrayLayer : 0;
         imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
 
-        auto srcStage = TextureUseToPipelineStageFlags(i.Before, true);
-        auto dstStage = TextureUseToPipelineStageFlags(i.After, false);
+        auto srcStage = TextureStateToPipelineStageFlags(i.Before, true);
+        auto dstStage = TextureStateToPipelineStageFlags(i.After, false);
         srcStageMask |= srcStage;
         dstStageMask |= dstStage;
     }
@@ -3537,7 +3551,7 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
     } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
         imgInfo.imageView = tv->_imageView;
-        imgInfo.imageLayout = TextureUseToLayout(tv->_mdesc.Usage);
+        imgInfo.imageLayout = TextureViewUsageToLayout(tv->_mdesc.Usage);
         writeDesc.pImageInfo = &imgInfo;
     } else {
         RADRAY_ERR_LOG("vk unsupported resource view: {}", tag);
@@ -3847,7 +3861,7 @@ void BindlessArrayVulkan::SetTexture(uint32_t slot, TextureView* texView, Sample
     VkDescriptorImageInfo imgInfo{};
     imgInfo.sampler = VK_NULL_HANDLE;
     imgInfo.imageView = view->_imageView;
-    imgInfo.imageLayout = TextureUseToLayout(view->_mdesc.Usage);
+    imgInfo.imageLayout = TextureViewUsageToLayout(view->_mdesc.Usage);
     VkWriteDescriptorSet writeDesc{};
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;

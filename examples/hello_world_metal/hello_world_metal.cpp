@@ -211,7 +211,7 @@ void Update() {
         rtViewDesc.Target = rt;
         rtViewDesc.Dim = TextureDimension::Dim2D;
         rtViewDesc.Format = TextureFormat::BGRA8_UNORM;
-        rtViewDesc.Usage = TextureUse::RenderTarget;
+        rtViewDesc.Usage = TextureViewUsage::RenderTarget;
         rtViewDesc.Range.BaseMipLevel = 0;
         rtViewDesc.Range.MipLevelCount = SubresourceRange::All;
         rtViewDesc.Range.BaseArrayLayer = 0;

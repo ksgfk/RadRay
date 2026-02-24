@@ -1531,7 +1531,7 @@ bool BindBridge::Upload(Device* device, CBufferArena& arena) {
                     BufferRange{alloc.Offset, uploadSize},
                     0,
                     TextureFormat::UNKNOWN,
-                    BufferUse::CBuffer};
+                    BufferViewType::Uniform};
                 auto bvOpt = device->CreateBufferView(viewDesc);
                 if (!bvOpt.HasValue()) {
                     RADRAY_ERR_LOG("Device::CreateBufferView failed");

@@ -43,7 +43,7 @@ public:
     unique_ptr<render::CommandBuffer> _cmdBuffer;
     unique_ptr<render::Texture> _depthStencil;
     unique_ptr<render::TextureView> _dsv;
-    render::TextureUse _dsvUsage;
+    render::TextureState _dsvUsage{render::TextureState::Undefined};
     render::CBufferArena _cbArena;
     vector<DrawMesh> _drawDatas;
 };
@@ -156,8 +156,8 @@ public:
             for (auto& buf : _renderMesh->_buffers) {
                 auto& b = bufBarriers.emplace_back();
                 b.Target = buf.get();
-                b.Before = render::BufferUse::CopyDestination;
-                b.After = render::BufferUse::Vertex | render::BufferUse::Index;
+                b.Before = render::BufferState::CopyDestination;
+                b.After = render::BufferState::Vertex | render::BufferState::Index;
             }
             cmdBuffer->ResourceBarrier(bufBarriers, {});
             _needsMeshUpload = false;
@@ -165,13 +165,13 @@ public:
         {
             render::BarrierTextureDescriptor barriers[] = {
                 {rt,
-                 render::TextureUse::Uninitialized,
-                 render::TextureUse::RenderTarget},
+                 render::TextureState::Undefined,
+                 render::TextureState::RenderTarget},
                 {frame->_depthStencil.get(),
                  frame->_dsvUsage,
-                 render::TextureUse::DepthStencilWrite}};
+                 render::TextureState::DepthWrite}};
             cmdBuffer->ResourceBarrier({}, barriers);
-            frame->_dsvUsage = render::TextureUse::DepthStencilWrite;
+            frame->_dsvUsage = render::TextureState::DepthWrite;
         }
         unique_ptr<render::GraphicsCommandEncoder> pass;
         {
@@ -231,8 +231,8 @@ public:
         {
             render::BarrierTextureDescriptor barrier{
                 rt,
-                render::TextureUse::RenderTarget,
-                render::TextureUse::Present};
+                render::TextureState::RenderTarget,
+                render::TextureState::Present};
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
         cmdBuffer->End();
@@ -272,9 +272,9 @@ public:
                 render::TextureDimension::Dim2D,
                 dsDesc.Format,
                 render::SubresourceRange::AllSub(),
-                render::TextureUse::DepthStencilWrite};
+                render::TextureViewUsage::DepthWrite};
             frame->_dsv = _device->CreateTextureView(dsvDesc).Unwrap();
-            frame->_dsvUsage = render::TextureUse::Uninitialized;
+            frame->_dsvUsage = render::TextureState::Undefined;
         }
     }
 

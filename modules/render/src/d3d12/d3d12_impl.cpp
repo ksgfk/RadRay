@@ -623,6 +623,15 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
             return nullptr;
         }
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
+        frame.image->_desc = TextureDescriptor{
+            .Width = desc.Width,
+            .Height = desc.Height,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .SampleCount = 1,
+            .Format = desc.Format,
+            .Memory = MemoryType::Device,
+            .Usage = TextureUse::RenderTarget | TextureUse::Present};
     }
     return result;
 }
@@ -710,48 +719,79 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
 }
 
 Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
+        return nullptr;
+    }
     auto buf = CastD3D12Object(desc.Target);
+    if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
+        return nullptr;
+    }
+
     CpuDescriptorAllocator* heap = _cpuResAlloc.get();
     CpuDescriptorHeapViewRAII heapView{};
-    {
+    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
+
+    if (desc.Type == BufferViewType::Uniform) {
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
             return nullptr;
         }
         heapView = {heap, heapViewOpt.value()};
-    }
-    DXGI_FORMAT dxgiFormat;
-    if (desc.Usage == BufferUse::CBuffer) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
         cbvDesc.BufferLocation = buf->_gpuAddr + desc.Range.Offset;
         cbvDesc.SizeInBytes = (UINT)desc.Range.Size;
         heapView.GetHeap()->Create(cbvDesc, heapView.GetStart());
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
-    } else if (desc.Usage == BufferUse::Resource) {
+    } else if (desc.Type == BufferViewType::ReadOnlyStorage || desc.Type == BufferViewType::TexelReadOnly) {
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate SRV descriptor");
+            return nullptr;
+        }
+        heapView = {heap, heapViewOpt.value()};
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = MapType(desc.Format);
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Buffer.FirstElement = desc.Range.Offset;
-        srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
-        srvDesc.Buffer.StructureByteStride = desc.Stride;
+        if (desc.Type == BufferViewType::TexelReadOnly) {
+            const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+            srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+            srvDesc.Buffer.StructureByteStride = 0;
+        } else {
+            srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+            srvDesc.Buffer.StructureByteStride = desc.Stride;
+        }
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
         heapView.GetHeap()->Create(buf->_buf.Get(), srvDesc, heapView.GetStart());
         dxgiFormat = srvDesc.Format;
-    } else if (desc.Usage == BufferUse::UnorderedAccess) {
+    } else if (desc.Type == BufferViewType::ReadWriteStorage || desc.Type == BufferViewType::TexelReadWrite) {
+        auto heapViewOpt = heap->Allocate(1);
+        if (!heapViewOpt.has_value()) {
+            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate UAV descriptor");
+            return nullptr;
+        }
+        heapView = {heap, heapViewOpt.value()};
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = MapType(desc.Format);
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uavDesc.Buffer.FirstElement = desc.Range.Offset;
-        uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
-        uavDesc.Buffer.StructureByteStride = desc.Stride;
+        if (desc.Type == BufferViewType::TexelReadWrite) {
+            const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+            uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+            uavDesc.Buffer.StructureByteStride = 0;
+        } else {
+            uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+            uavDesc.Buffer.StructureByteStride = desc.Stride;
+        }
         uavDesc.Buffer.CounterOffsetInBytes = 0;
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
         heapView.GetHeap()->Create(buf->_buf.Get(), uavDesc, heapView.GetStart());
         dxgiFormat = uavDesc.Format;
     } else {
-        RADRAY_ERR_LOG("invalid buffer view usage: {}", desc.Usage);
+        RADRAY_ERR_LOG("invalid buffer view type");
         return nullptr;
     }
     auto result = make_unique<BufferViewD3D12>(this, buf, std::move(heapView));
@@ -808,10 +848,17 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
 Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
+        return nullptr;
+    }
     auto tex = CastD3D12Object(desc.Target);
+    if (!ValidateTextureViewDescriptor(desc, tex->_desc)) {
+        return nullptr;
+    }
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
-    if (desc.Usage == TextureUse::Resource) {
+    if (desc.Usage == TextureViewUsage::Resource) {
         {
             auto heap = _cpuResAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -875,7 +922,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), srvDesc, heapView.GetStart());
         dxgiFormat = srvDesc.Format;
-    } else if (desc.Usage == TextureUse::RenderTarget) {
+    } else if (desc.Usage == TextureViewUsage::RenderTarget) {
         {
             auto heap = _cpuRtvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -921,7 +968,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
         dxgiFormat = rtvDesc.Format;
-    } else if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+    } else if (desc.Usage.HasFlag(TextureViewUsage::DepthRead) || desc.Usage.HasFlag(TextureViewUsage::DepthWrite)) {
         {
             auto heap = _cpuDsvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -960,7 +1007,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), dsvDesc, heapView.GetStart());
         dxgiFormat = dsvDesc.Format;
-    } else if (desc.Usage == TextureUse::UnorderedAccess) {
+    } else if (desc.Usage == TextureViewUsage::UnorderedAccess) {
         {
             auto heap = _cpuResAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -1740,7 +1787,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buff
     for (const BarrierBufferDescriptor& bb : buffers) {
         auto buf = CastD3D12Object(bb.Target);
         D3D12_RESOURCE_BARRIER raw{};
-        if (bb.Before == BufferUse::UnorderedAccess && bb.After == BufferUse::UnorderedAccess) {
+        if (bb.Before == BufferState::UnorderedAccess && bb.After == BufferState::UnorderedAccess) {
             raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
             raw.UAV.pResource = buf->_buf.Get();
@@ -1760,7 +1807,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buff
     for (const BarrierTextureDescriptor& tb : textures) {
         auto tex = CastD3D12Object(tb.Target);
         D3D12_RESOURCE_BARRIER raw{};
-        if (tb.Before == TextureUse::UnorderedAccess && tb.After == TextureUse::UnorderedAccess) {
+        if (tb.Before == TextureState::UnorderedAccess && tb.After == TextureState::UnorderedAccess) {
             raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
             raw.UAV.pResource = tex->_tex.Get();
@@ -1785,7 +1832,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buff
             raw.Transition.StateAfter = MapType(tb.After);
             // D3D12 COMMON 和 PRESENT flag 完全一致
             if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
-                if (tb.Before == TextureUse::Present || tb.After == TextureUse::Present) {
+                if (tb.Before == TextureState::Present || tb.After == TextureState::Present) {
                     continue;
                 }
             }

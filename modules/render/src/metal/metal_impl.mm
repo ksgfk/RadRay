@@ -186,7 +186,14 @@ Nullable<unique_ptr<Texture>> DeviceMetal::CreateTexture(const TextureDescriptor
 
 Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
     @autoreleasepool {
+        if (desc.Target == nullptr) {
+            RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
+            return nullptr;
+        }
         auto* mtlBuf = CastMtlObject(desc.Target);
+        if (!ValidateBufferViewDescriptor(desc, mtlBuf->GetDesc())) {
+            return nullptr;
+        }
         auto view = make_unique<BufferViewMetal>(this, mtlBuf);
         view->_desc = desc;
         return view;
@@ -195,7 +202,14 @@ Nullable<unique_ptr<BufferView>> DeviceMetal::CreateBufferView(const BufferViewD
 
 Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     @autoreleasepool {
+        if (desc.Target == nullptr) {
+            RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
+            return nullptr;
+        }
         auto* mtlTex = CastMtlObject(desc.Target);
+        if (!ValidateTextureViewDescriptor(desc, mtlTex->_desc)) {
+            return nullptr;
+        }
         if (mtlTex->_texture.isFramebufferOnly) {
             auto view = make_unique<TextureViewMetal>(this, mtlTex, mtlTex->_texture);
             view->_desc = desc;

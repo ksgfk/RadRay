@@ -38,7 +38,7 @@ public:
     unique_ptr<render::CommandBuffer> _cmdBuffer;
     unique_ptr<render::Texture> _depthStencil;
     unique_ptr<render::TextureView> _dsv;
-    render::TextureUse _dsvUsage{render::TextureUse::Uninitialized};
+    render::TextureState _dsvUsage{render::TextureState::Undefined};
     render::CBufferArena _cbArena;
 };
 
@@ -116,10 +116,10 @@ public:
         }
         {
             render::BarrierTextureDescriptor barriers[] = {
-                {rt, render::TextureUse::Uninitialized, render::TextureUse::RenderTarget},
-                {frame->_depthStencil.get(), frame->_dsvUsage, render::TextureUse::DepthStencilWrite}};
+                {rt, render::TextureState::Undefined, render::TextureState::RenderTarget},
+                {frame->_depthStencil.get(), frame->_dsvUsage, render::TextureState::DepthWrite}};
             cmdBuffer->ResourceBarrier({}, barriers);
-            frame->_dsvUsage = render::TextureUse::DepthStencilWrite;
+            frame->_dsvUsage = render::TextureState::DepthWrite;
         }
         unique_ptr<render::GraphicsCommandEncoder> pass;
         {
@@ -174,7 +174,7 @@ public:
         cmdBuffer->EndRenderPass(std::move(pass));
         {
             render::BarrierTextureDescriptor barrier{
-                rt, render::TextureUse::RenderTarget, render::TextureUse::Present};
+                rt, render::TextureState::RenderTarget, render::TextureState::Present};
             cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
         }
         cmdBuffer->End();
@@ -206,9 +206,9 @@ public:
                 render::TextureDimension::Dim2D,
                 dsDesc.Format,
                 render::SubresourceRange::AllSub(),
-                render::TextureUse::DepthStencilWrite};
+                render::TextureViewUsage::DepthWrite};
             frame->_dsv = _device->CreateTextureView(dsvDesc).Unwrap();
-            frame->_dsvUsage = render::TextureUse::Uninitialized;
+            frame->_dsvUsage = render::TextureState::Undefined;
         }
     }
 
@@ -249,7 +249,7 @@ private:
                 render::TextureDimension::Dim2D,
                 render::TextureFormat::RGBA8_UNORM,
                 render::SubresourceRange::AllSub(),
-                render::TextureUse::Resource};
+                render::TextureViewUsage::Resource};
             _texViews[i] = _device->CreateTextureView(tvDesc).Unwrap();
             string uploadName = string("Upload_") + TEX_NAMES[i];
             render::BufferDescriptor uploadDesc{
@@ -279,8 +279,8 @@ private:
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
             auto& b = barriers.emplace_back();
             b.Target = _textures[i].get();
-            b.Before = render::TextureUse::Uninitialized;
-            b.After = render::TextureUse::CopyDestination;
+            b.Before = render::TextureState::Undefined;
+            b.After = render::TextureState::CopyDestination;
         }
         cmdBuffer->ResourceBarrier({}, barriers);
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
@@ -291,8 +291,8 @@ private:
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
             auto& b = barriers.emplace_back();
             b.Target = _textures[i].get();
-            b.Before = render::TextureUse::CopyDestination;
-            b.After = render::TextureUse::Resource;
+            b.Before = render::TextureState::CopyDestination;
+            b.After = render::TextureState::ShaderRead;
         }
         cmdBuffer->ResourceBarrier({}, barriers);
         _needsUpload = false;

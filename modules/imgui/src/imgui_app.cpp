@@ -201,7 +201,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                         render::TextureDimension::Dim2D,
                         texDesc.Format,
                         render::SubresourceRange::AllSub(),
-                        render::TextureUse::Resource};
+                        render::TextureViewUsage::Resource};
                     unique_ptr<render::TextureView> srv = _device->CreateTextureView(texViewDesc).Unwrap();
                     const uint32_t setIndex = _device->GetBackend() == render::RenderBackend::Metal ? 17 : 0;
                     unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), setIndex).Unwrap();
@@ -326,8 +326,8 @@ void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cm
         for (const auto& payload : frame._uploadTexReqs) {
             auto& barrierBefore = barriers.emplace_back();
             barrierBefore.Target = payload._dst;
-            barrierBefore.Before = payload._isNew ? render::TextureUse::Uninitialized : render::TextureUse::Resource;
-            barrierBefore.After = render::TextureUse::CopyDestination;
+            barrierBefore.Before = payload._isNew ? render::TextureState::Undefined : render::TextureState::ShaderRead;
+            barrierBefore.After = render::TextureState::CopyDestination;
             barrierBefore.IsFromOrToOtherQueue = false;
             barrierBefore.IsSubresourceBarrier = false;
         }
@@ -340,8 +340,8 @@ void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cm
         for (const auto& payload : frame._uploadTexReqs) {
             auto& barrierBefore = barriers.emplace_back();
             barrierBefore.Target = payload._dst;
-            barrierBefore.Before = render::TextureUse::CopyDestination;
-            barrierBefore.After = render::TextureUse::Resource;
+            barrierBefore.Before = render::TextureState::CopyDestination;
+            barrierBefore.After = render::TextureState::ShaderRead;
             barrierBefore.IsFromOrToOtherQueue = false;
             barrierBefore.IsSubresourceBarrier = false;
         }
@@ -724,7 +724,7 @@ render::TextureView* ImGuiApplication::GetDefaultRTV(uint32_t backBufferIndex) {
             render::TextureDimension::Dim2D,
             _rtFormat,
             render::SubresourceRange::AllSub(),
-            render::TextureUse::RenderTarget};
+            render::TextureViewUsage::RenderTarget};
         _defaultRTVs[backBufferIndex] = _device->CreateTextureView(rtvDesc).Unwrap();
     }
     return _defaultRTVs[backBufferIndex].get();

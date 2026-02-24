@@ -232,6 +232,146 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
     Unreachable();
 }
 
+bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
+        return false;
+    }
+
+    if (desc.Usage == TextureViewUsage::UNKNOWN) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Usage cannot be UNKNOWN");
+        return false;
+    }
+
+    const auto require = [&](TextureViewUsage viewUsage, TextureUse texUsage) -> bool {
+        if (desc.Usage.HasFlag(viewUsage) && !targetDesc.Usage.HasFlag(texUsage)) {
+            RADRAY_ERR_LOG("TextureViewDescriptor.Usage must be a subset of target texture usage");
+            return false;
+        }
+        return true;
+    };
+    if (!require(TextureViewUsage::Resource, TextureUse::Resource) ||
+        !require(TextureViewUsage::RenderTarget, TextureUse::RenderTarget) ||
+        !require(TextureViewUsage::DepthRead, TextureUse::DepthStencilRead) ||
+        !require(TextureViewUsage::DepthWrite, TextureUse::DepthStencilWrite) ||
+        !require(TextureViewUsage::UnorderedAccess, TextureUse::UnorderedAccess)) {
+        return false;
+    }
+
+    const bool isDepth = IsDepthStencilFormat(desc.Format);
+    const bool hasDepthUsage = desc.Usage.HasFlag(TextureViewUsage::DepthRead) || desc.Usage.HasFlag(TextureViewUsage::DepthWrite);
+    if (isDepth) {
+        if (!hasDepthUsage) {
+            RADRAY_ERR_LOG("depth/stencil texture view must use depth/stencil usage");
+            return false;
+        }
+        if (desc.Usage.HasFlag(TextureViewUsage::RenderTarget) || desc.Usage.HasFlag(TextureViewUsage::UnorderedAccess)) {
+            RADRAY_ERR_LOG("depth/stencil texture view cannot use render target or unordered access usage");
+            return false;
+        }
+    } else if (hasDepthUsage) {
+        RADRAY_ERR_LOG("non-depth texture view cannot use depth/stencil usage");
+        return false;
+    }
+
+    if (desc.Range.MipLevelCount != SubresourceRange::All && (desc.Range.BaseMipLevel + desc.Range.MipLevelCount > targetDesc.MipLevels)) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Range mip range is out of bounds");
+        return false;
+    }
+    if (desc.Range.ArrayLayerCount != SubresourceRange::All &&
+        (desc.Range.BaseArrayLayer + desc.Range.ArrayLayerCount > targetDesc.DepthOrArraySize)) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Range array range is out of bounds");
+        return false;
+    }
+
+    return true;
+}
+
+bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
+        return false;
+    }
+    if (desc.Range.Size == 0 || desc.Range.Offset > targetDesc.Size || desc.Range.Size > targetDesc.Size - desc.Range.Offset) {
+        RADRAY_ERR_LOG("BufferViewDescriptor.Range is out of bounds");
+        return false;
+    }
+
+    const auto require = [&](BufferUse use) -> bool {
+        if (!targetDesc.Usage.HasFlag(use)) {
+            RADRAY_ERR_LOG("target buffer usage does not satisfy requested view type");
+            return false;
+        }
+        return true;
+    };
+
+    switch (desc.Type) {
+        case BufferViewType::Uniform:
+            if (!require(BufferUse::CBuffer)) {
+                return false;
+            }
+            if (desc.Format != TextureFormat::UNKNOWN) {
+                RADRAY_ERR_LOG("uniform buffer view must use UNKNOWN format");
+                return false;
+            }
+            break;
+        case BufferViewType::ReadOnlyStorage:
+            if (!require(BufferUse::Resource)) {
+                return false;
+            }
+            if (desc.Format != TextureFormat::UNKNOWN) {
+                RADRAY_ERR_LOG("read-only storage buffer view must use UNKNOWN format");
+                return false;
+            }
+            if (desc.Stride == 0) {
+                RADRAY_ERR_LOG("read-only storage buffer view stride must be non-zero");
+                return false;
+            }
+            break;
+        case BufferViewType::ReadWriteStorage:
+            if (!require(BufferUse::UnorderedAccess)) {
+                return false;
+            }
+            if (desc.Format != TextureFormat::UNKNOWN) {
+                RADRAY_ERR_LOG("read-write storage buffer view must use UNKNOWN format");
+                return false;
+            }
+            if (desc.Stride == 0) {
+                RADRAY_ERR_LOG("read-write storage buffer view stride must be non-zero");
+                return false;
+            }
+            break;
+        case BufferViewType::TexelReadOnly:
+            if (!require(BufferUse::Resource)) {
+                return false;
+            }
+            if (desc.Format == TextureFormat::UNKNOWN) {
+                RADRAY_ERR_LOG("texel read-only buffer view requires typed format");
+                return false;
+            }
+            if (desc.Stride == 0) {
+                RADRAY_ERR_LOG("texel read-only buffer view stride must be non-zero");
+                return false;
+            }
+            break;
+        case BufferViewType::TexelReadWrite:
+            if (!require(BufferUse::UnorderedAccess)) {
+                return false;
+            }
+            if (desc.Format == TextureFormat::UNKNOWN) {
+                RADRAY_ERR_LOG("texel read-write buffer view requires typed format");
+                return false;
+            }
+            if (desc.Stride == 0) {
+                RADRAY_ERR_LOG("texel read-write buffer view stride must be non-zero");
+                return false;
+            }
+            break;
+    }
+
+    return true;
+}
+
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";
@@ -372,6 +512,65 @@ std::string_view format_as(TextureDimension v) noexcept {
         case TextureDimension::Dim2DArray: return "2DArray";
         case TextureDimension::Cube: return "Cube";
         case TextureDimension::CubeArray: return "CubeArray";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(BufferState v) noexcept {
+    switch (v) {
+        case BufferState::UNKNOWN: return "UNKNOWN";
+        case BufferState::Undefined: return "Undefined";
+        case BufferState::Common: return "Common";
+        case BufferState::CopySource: return "CopySource";
+        case BufferState::CopyDestination: return "CopyDestination";
+        case BufferState::Vertex: return "Vertex";
+        case BufferState::Index: return "Index";
+        case BufferState::Uniform: return "Uniform";
+        case BufferState::ShaderRead: return "ShaderRead";
+        case BufferState::UnorderedAccess: return "UnorderedAccess";
+        case BufferState::Indirect: return "Indirect";
+        case BufferState::HostRead: return "HostRead";
+        case BufferState::HostWrite: return "HostWrite";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(TextureState v) noexcept {
+    switch (v) {
+        case TextureState::UNKNOWN: return "UNKNOWN";
+        case TextureState::Undefined: return "Undefined";
+        case TextureState::Common: return "Common";
+        case TextureState::Present: return "Present";
+        case TextureState::CopySource: return "CopySource";
+        case TextureState::CopyDestination: return "CopyDestination";
+        case TextureState::ShaderRead: return "ShaderRead";
+        case TextureState::RenderTarget: return "RenderTarget";
+        case TextureState::DepthRead: return "DepthRead";
+        case TextureState::DepthWrite: return "DepthWrite";
+        case TextureState::UnorderedAccess: return "UnorderedAccess";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(TextureViewUsage v) noexcept {
+    switch (v) {
+        case TextureViewUsage::UNKNOWN: return "UNKNOWN";
+        case TextureViewUsage::Resource: return "Resource";
+        case TextureViewUsage::RenderTarget: return "RenderTarget";
+        case TextureViewUsage::DepthRead: return "DepthRead";
+        case TextureViewUsage::DepthWrite: return "DepthWrite";
+        case TextureViewUsage::UnorderedAccess: return "UnorderedAccess";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(BufferViewType v) noexcept {
+    switch (v) {
+        case BufferViewType::Uniform: return "Uniform";
+        case BufferViewType::ReadOnlyStorage: return "ReadOnlyStorage";
+        case BufferViewType::ReadWriteStorage: return "ReadWriteStorage";
+        case BufferViewType::TexelReadOnly: return "TexelReadOnly";
+        case BufferViewType::TexelReadWrite: return "TexelReadWrite";
     }
     Unreachable();
 }
