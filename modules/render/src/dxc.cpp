@@ -1012,6 +1012,12 @@ static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
             case ShaderStage::Vertex: return "vs";
             case ShaderStage::Pixel: return "ps";
             case ShaderStage::Compute: return "cs";
+            case ShaderStage::RayGen:
+            case ShaderStage::Miss:
+            case ShaderStage::ClosestHit:
+            case ShaderStage::AnyHit:
+            case ShaderStage::Intersection:
+            case ShaderStage::Callable: return "lib";
             default: return "??";
         }
     };

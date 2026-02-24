@@ -3,10 +3,48 @@
 #include <bit>
 #include <cstring>
 #include <algorithm>
+#include <unordered_set>
 
 #include <radray/text_encoding.h>
 
 namespace radray::render::d3d12 {
+
+static ComPtr<ID3D12GraphicsCommandList4> _QueryCommandList4(ID3D12GraphicsCommandList* cmdList) noexcept {
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12GraphicsCommandList::QueryInterface(ID3D12GraphicsCommandList4) failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return cmdList4;
+}
+
+static D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS _MapBuildFlags(AccelerationStructureBuildFlags flags) noexcept {
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS result = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastTrace)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastBuild)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+    }
+    return result;
+}
+
+static std::optional<D3D12_HIT_GROUP_TYPE> _GetHitGroupType(const RayTracingHitGroupDescriptor& group) noexcept {
+    if (group.Intersection.has_value()) {
+        return D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE;
+    }
+    if (group.ClosestHit.has_value() || group.AnyHit.has_value()) {
+        return D3D12_HIT_GROUP_TYPE_TRIANGLES;
+    }
+    return std::nullopt;
+}
 
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
@@ -406,6 +444,11 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
     detail.MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
     detail.IsBindlessArraySupported = false;
+    detail.MaxRayRecursionDepth = 0;
+    detail.ShaderTableAlignment = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
+    detail.AccelerationStructureAlignment = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+    detail.AccelerationStructureScratchAlignment = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+    detail.IsRayTracingSupported = false;
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
         if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
@@ -471,6 +514,17 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         RADRAY_INFO_LOG("Bindless Array: {}", detail.IsBindlessArraySupported);
     } else {
         RADRAY_WARN_LOG("CD3DX12FeatureSupport::GetStatus failed");
+    }
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+        if (HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+            SUCCEEDED(hr)) {
+            detail.IsRayTracingSupported = options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
+            detail.MaxRayRecursionDepth = detail.IsRayTracingSupported ? 31u : 0u;
+            RADRAY_INFO_LOG("Ray Tracing: {} (tier={})", detail.IsRayTracingSupported, (int)options5.RaytracingTier);
+        } else {
+            RADRAY_WARN_LOG("ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5) failed: {} {}", GetErrorName(hr), hr);
+        }
     }
     RADRAY_INFO_LOG("=============================");
     return result;
@@ -654,7 +708,9 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     resDesc.SampleDesc.Quality = 0;
     resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+    if (desc.Usage.HasFlag(BufferUse::UnorderedAccess) ||
+        desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
+        desc.Usage.HasFlag(BufferUse::Scratch)) {
         resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
     if (desc.Memory == MemoryType::ReadBack) {
@@ -1462,15 +1518,286 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
 }
 
 Nullable<unique_ptr<AccelerationStructure>> DeviceD3D12::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("ray tracing acceleration structure is not implemented on D3D12 backend yet");
-    return nullptr;
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("d3d12 ray tracing acceleration structure is not supported by this device");
+        return nullptr;
+    }
+    if (!ValidateAccelerationStructureDescriptor(desc)) {
+        return nullptr;
+    }
+
+    uint64_t estimatedSize = 0;
+    if (desc.Type == AccelerationStructureType::BottomLevel) {
+        estimatedSize = std::max<uint64_t>(1ull << 20, uint64_t(std::max(1u, desc.MaxGeometryCount)) * (2ull << 20));
+    } else {
+        estimatedSize = std::max<uint64_t>(1ull << 20, uint64_t(std::max(1u, desc.MaxInstanceCount)) * 4096ull);
+    }
+    estimatedSize = Align(estimatedSize, uint64_t(this->GetDetail().AccelerationStructureAlignment));
+
+    D3D12_RESOURCE_DESC rawDesc{};
+    rawDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rawDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    rawDesc.Width = estimatedSize;
+    rawDesc.Height = 1;
+    rawDesc.DepthOrArraySize = 1;
+    rawDesc.MipLevels = 1;
+    rawDesc.Format = DXGI_FORMAT_UNKNOWN;
+    rawDesc.SampleDesc.Count = 1;
+    rawDesc.SampleDesc.Quality = 0;
+    rawDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rawDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+    if (desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+
+    ComPtr<ID3D12Resource> buffer;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    if (HRESULT hr = _mainAlloc->CreateResource(
+            &allocDesc,
+            &rawDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            allocRes.GetAddressOf(),
+            IID_PPV_ARGS(buffer.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource (AS) failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
+    return make_unique<AccelerationStructureD3D12>(this, std::move(buffer), std::move(allocRes), desc, estimatedSize);
 }
 
 Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("ray tracing pipeline state is not implemented on D3D12 backend yet");
-    return nullptr;
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("d3d12 ray tracing pipeline state is not supported by this device");
+        return nullptr;
+    }
+    if (desc.RootSig == nullptr) {
+        RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor.RootSig is null");
+        return nullptr;
+    }
+    if (desc.ShaderEntries.empty()) {
+        RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor.ShaderEntries is empty");
+        return nullptr;
+    }
+    if (desc.MaxRecursionDepth == 0 || desc.MaxRecursionDepth > this->GetDetail().MaxRayRecursionDepth) {
+        RADRAY_ERR_LOG("invalid MaxRecursionDepth {} (device max={})", desc.MaxRecursionDepth, this->GetDetail().MaxRayRecursionDepth);
+        return nullptr;
+    }
+    auto isRtStage = [](ShaderStage s) {
+        return s == ShaderStage::RayGen ||
+               s == ShaderStage::Miss ||
+               s == ShaderStage::ClosestHit ||
+               s == ShaderStage::AnyHit ||
+               s == ShaderStage::Intersection ||
+               s == ShaderStage::Callable;
+    };
+
+    vector<wstring> exportNamesW;
+    vector<D3D12_EXPORT_DESC> exportDescs;
+    vector<D3D12_DXIL_LIBRARY_DESC> libDescs;
+    vector<D3D12_STATE_SUBOBJECT> subobjects;
+    exportNamesW.reserve(desc.ShaderEntries.size() + desc.HitGroups.size());
+    exportDescs.reserve(desc.ShaderEntries.size());
+    libDescs.reserve(desc.ShaderEntries.size());
+    subobjects.reserve(desc.ShaderEntries.size() + desc.HitGroups.size() + 4);
+
+    unordered_set<string> exportNamesUtf8;
+    for (const auto& entry : desc.ShaderEntries) {
+        if (entry.Target == nullptr) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor contains null shader entry target");
+            return nullptr;
+        }
+        if (!isRtStage(entry.Stage)) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor shader entry has non-RT stage {}", entry.Stage);
+            return nullptr;
+        }
+        string exportNameUtf8{entry.EntryPoint};
+        if (exportNameUtf8.empty()) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor shader entry has empty export name");
+            return nullptr;
+        }
+        if (!exportNamesUtf8.insert(exportNameUtf8).second) {
+            RADRAY_ERR_LOG("duplicated RT export name '{}'", exportNameUtf8);
+            return nullptr;
+        }
+        auto exportNameWOpt = text_encoding::ToWideChar(exportNameUtf8);
+        if (!exportNameWOpt.has_value()) {
+            RADRAY_ERR_LOG("cannot convert RT export name to wide char '{}'", exportNameUtf8);
+            return nullptr;
+        }
+        exportNamesW.emplace_back(std::move(exportNameWOpt.value()));
+        auto* dxil = CastD3D12Object(entry.Target);
+        D3D12_EXPORT_DESC exportDesc{};
+        exportDesc.Name = exportNamesW.back().c_str();
+        exportDesc.ExportToRename = nullptr;
+        exportDesc.Flags = D3D12_EXPORT_FLAG_NONE;
+        exportDescs.push_back(exportDesc);
+
+        D3D12_DXIL_LIBRARY_DESC libDesc{};
+        libDesc.DXILLibrary = dxil->ToByteCode();
+        libDesc.NumExports = 1;
+        libDesc.pExports = &exportDescs.back();
+        libDescs.push_back(libDesc);
+    }
+
+    for (auto& i : libDescs) {
+        D3D12_STATE_SUBOBJECT subObj{};
+        subObj.Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY;
+        subObj.pDesc = &i;
+        subobjects.push_back(subObj);
+    }
+
+    vector<D3D12_HIT_GROUP_DESC> hitGroups;
+    hitGroups.reserve(desc.HitGroups.size());
+    vector<wstring> hitGroupClosestW;
+    vector<wstring> hitGroupAnyW;
+    vector<wstring> hitGroupIntersectW;
+    hitGroupClosestW.reserve(desc.HitGroups.size());
+    hitGroupAnyW.reserve(desc.HitGroups.size());
+    hitGroupIntersectW.reserve(desc.HitGroups.size());
+    for (const auto& hit : desc.HitGroups) {
+        auto hitGroupType = _GetHitGroupType(hit);
+        if (!hitGroupType.has_value()) {
+            RADRAY_ERR_LOG("invalid hit group '{}' without shader references", hit.Name);
+            return nullptr;
+        }
+        string groupNameUtf8{hit.Name};
+        if (groupNameUtf8.empty()) {
+            RADRAY_ERR_LOG("RayTracingHitGroupDescriptor.Name is empty");
+            return nullptr;
+        }
+        if (!exportNamesUtf8.insert(groupNameUtf8).second) {
+            RADRAY_ERR_LOG("duplicated RT hit group name '{}'", groupNameUtf8);
+            return nullptr;
+        }
+        auto groupNameWOpt = text_encoding::ToWideChar(groupNameUtf8);
+        if (!groupNameWOpt.has_value()) {
+            RADRAY_ERR_LOG("cannot convert hit group name '{}'", groupNameUtf8);
+            return nullptr;
+        }
+        exportNamesW.emplace_back(std::move(groupNameWOpt.value()));
+
+        D3D12_HIT_GROUP_DESC hg{};
+        hg.Type = hitGroupType.value();
+        hg.HitGroupExport = exportNamesW.back().c_str();
+        if (hit.ClosestHit.has_value()) {
+            string s{hit.ClosestHit->EntryPoint};
+            if (s.empty()) {
+                RADRAY_ERR_LOG("hit group '{}' has empty ClosestHit entry", groupNameUtf8);
+                return nullptr;
+            }
+            auto w = text_encoding::ToWideChar(s);
+            if (!w.has_value()) {
+                RADRAY_ERR_LOG("cannot convert ClosestHit entry '{}' to wide char", s);
+                return nullptr;
+            }
+            hitGroupClosestW.emplace_back(std::move(w.value()));
+            hg.ClosestHitShaderImport = hitGroupClosestW.back().c_str();
+        }
+        if (hit.AnyHit.has_value()) {
+            string s{hit.AnyHit->EntryPoint};
+            if (s.empty()) {
+                RADRAY_ERR_LOG("hit group '{}' has empty AnyHit entry", groupNameUtf8);
+                return nullptr;
+            }
+            auto w = text_encoding::ToWideChar(s);
+            if (!w.has_value()) {
+                RADRAY_ERR_LOG("cannot convert AnyHit entry '{}' to wide char", s);
+                return nullptr;
+            }
+            hitGroupAnyW.emplace_back(std::move(w.value()));
+            hg.AnyHitShaderImport = hitGroupAnyW.back().c_str();
+        }
+        if (hit.Intersection.has_value()) {
+            string s{hit.Intersection->EntryPoint};
+            if (s.empty()) {
+                RADRAY_ERR_LOG("hit group '{}' has empty Intersection entry", groupNameUtf8);
+                return nullptr;
+            }
+            auto w = text_encoding::ToWideChar(s);
+            if (!w.has_value()) {
+                RADRAY_ERR_LOG("cannot convert Intersection entry '{}' to wide char", s);
+                return nullptr;
+            }
+            hitGroupIntersectW.emplace_back(std::move(w.value()));
+            hg.IntersectionShaderImport = hitGroupIntersectW.back().c_str();
+        }
+        hitGroups.push_back(hg);
+    }
+    for (auto& i : hitGroups) {
+        D3D12_STATE_SUBOBJECT subObj{};
+        subObj.Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP;
+        subObj.pDesc = &i;
+        subobjects.push_back(subObj);
+    }
+
+    D3D12_RAYTRACING_SHADER_CONFIG shaderCfg{};
+    shaderCfg.MaxPayloadSizeInBytes = desc.MaxPayloadSize;
+    shaderCfg.MaxAttributeSizeInBytes = desc.MaxAttributeSize;
+    D3D12_STATE_SUBOBJECT shaderCfgSubObj{};
+    shaderCfgSubObj.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;
+    shaderCfgSubObj.pDesc = &shaderCfg;
+    subobjects.push_back(shaderCfgSubObj);
+
+    auto rootSig = CastD3D12Object(desc.RootSig);
+    ID3D12RootSignature* rawRootSig = rootSig->_rootSig.Get();
+    D3D12_STATE_SUBOBJECT globalRsSubObj{};
+    globalRsSubObj.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
+    globalRsSubObj.pDesc = &rawRootSig;
+    subobjects.push_back(globalRsSubObj);
+
+    D3D12_RAYTRACING_PIPELINE_CONFIG pipelineCfg{};
+    pipelineCfg.MaxTraceRecursionDepth = desc.MaxRecursionDepth;
+    D3D12_STATE_SUBOBJECT pipelineCfgSubObj{};
+    pipelineCfgSubObj.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
+    pipelineCfgSubObj.pDesc = &pipelineCfg;
+    subobjects.push_back(pipelineCfgSubObj);
+
+    D3D12_STATE_OBJECT_DESC soDesc{};
+    soDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
+    soDesc.NumSubobjects = static_cast<UINT>(subobjects.size());
+    soDesc.pSubobjects = subobjects.data();
+
+    ComPtr<ID3D12Device5> device5;
+    if (HRESULT hr = _device->QueryInterface(IID_PPV_ARGS(device5.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::QueryInterface(ID3D12Device5) failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    ComPtr<ID3D12StateObject> stateObject;
+    if (HRESULT hr = device5->CreateStateObject(&soDesc, IID_PPV_ARGS(stateObject.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device5::CreateStateObject failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    ComPtr<ID3D12StateObjectProperties> stateProps;
+    if (HRESULT hr = stateObject->QueryInterface(IID_PPV_ARGS(stateProps.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12StateObject::QueryInterface(ID3D12StateObjectProperties) failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+
+    auto result = make_unique<RayTracingPsoD3D12>(this, std::move(stateObject), std::move(stateProps), rootSig);
+    for (const auto& name : exportNamesUtf8) {
+        auto nameWOpt = text_encoding::ToWideChar(name);
+        if (!nameWOpt.has_value()) {
+            RADRAY_ERR_LOG("cannot convert export name '{}' to wide char", name);
+            return nullptr;
+        }
+        void* shaderId = result->_stateProps->GetShaderIdentifier(nameWOpt->c_str());
+        if (shaderId == nullptr) {
+            RADRAY_ERR_LOG("cannot get shader identifier for export '{}'", name);
+            return nullptr;
+        }
+        auto& id = result->_shaderIdentifiers[name];
+        std::memcpy(id.data(), shaderId, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+    }
+    return result;
 }
 
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
@@ -1772,11 +2099,13 @@ bool CmdListD3D12::IsValid() const noexcept {
 }
 
 void CmdListD3D12::Destroy() noexcept {
+    _keepAliveResources.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
 }
 
 void CmdListD3D12::Begin() noexcept {
+    _keepAliveResources.clear();
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
         RADRAY_ABORT("ID3D12CommandAllocator::Reset failed: {} {}", GetErrorName(hr), hr);
@@ -1936,8 +2265,18 @@ void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noe
 }
 
 Nullable<unique_ptr<RayTracingCommandEncoder>> CmdListD3D12::BeginRayTracingPass() noexcept {
-    RADRAY_ERR_LOG("ray tracing command encoder is not implemented on D3D12 backend yet");
-    return nullptr;
+    if (!_device->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("d3d12 ray tracing command encoder is not supported by this device");
+        return nullptr;
+    }
+    if (_type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        RADRAY_ERR_LOG("d3d12 ray tracing requires direct command list, current type={}", _type);
+        return nullptr;
+    }
+    if (_QueryCommandList4(_cmdList.Get()) == nullptr) {
+        return nullptr;
+    }
+    return make_unique<CmdRayTracingPassD3D12>(this);
 }
 
 void CmdListD3D12::EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept {
@@ -2307,6 +2646,386 @@ void CmdComputePassD3D12::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z)
     // D3D12: thread group size is defined in shader (numthreads), no-op here
 }
 
+// ======================== CmdRayTracingPassD3D12 ========================
+
+CmdRayTracingPassD3D12::CmdRayTracingPassD3D12(CmdListD3D12* cmdList) noexcept
+    : _cmdList(cmdList) {}
+
+bool CmdRayTracingPassD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdRayTracingPassD3D12::Destroy() noexcept {
+    _cmdList = nullptr;
+    _boundRootSig = nullptr;
+    _boundRtPso = nullptr;
+}
+
+CommandBuffer* CmdRayTracingPassD3D12::GetCommandBuffer() const noexcept {
+    return _cmdList;
+}
+
+void CmdRayTracingPassD3D12::BindRootSignature(RootSignature* rootSig) noexcept {
+    auto rs = CastD3D12Object(rootSig);
+    _cmdList->_cmdList->SetComputeRootSignature(rs->_rootSig.Get());
+    _boundRootSig = rs;
+}
+
+void CmdRayTracingPassD3D12::PushConstant(const void* data, size_t length) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::PushConstant");
+        return;
+    }
+    if (_boundRootSig->_desc.GetRootConstantCount() == 0) {
+        RADRAY_ERR_LOG("root signature has no root constants");
+        return;
+    }
+    auto dataRef = _boundRootSig->_desc.GetRootConstant(0);
+    size_t rcSize = dataRef.Param.Constants.Num32BitValues * 4;
+    if (length > rcSize) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "length", rcSize, length);
+        return;
+    }
+    _cmdList->_cmdList->SetComputeRoot32BitConstants((UINT)dataRef.Index, static_cast<UINT>(length / 4), data, 0);
+}
+
+void CmdRayTracingPassD3D12::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindRootDescriptor");
+        return;
+    }
+    if (slot >= _boundRootSig->_desc.GetRootDescriptorCount()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundRootSig->_desc.GetRootDescriptorCount(), slot);
+        return;
+    }
+    RADRAY_ASSERT(buffer != nullptr);
+    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(slot);
+    auto buf = CastD3D12Object(buffer);
+    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+    RADRAY_UNUSED(size);
+    switch (dataRef.Param.Type) {
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+            _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+            _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+            _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
+            break;
+        default:
+            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+            break;
+    }
+}
+
+void CmdRayTracingPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
+        return;
+    }
+    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+    if (!tableOpt.has_value()) {
+        RADRAY_ERR_LOG("no table for set index {}", slot);
+        return;
+    }
+    auto dataRef = tableOpt.value();
+    auto descHeapView = CastD3D12Object(set);
+    if (descHeapView->_resHeapView.IsValid()) {
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+    }
+    if (descHeapView->_samplerHeapView.IsValid()) {
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+    }
+}
+
+void CmdRayTracingPassD3D12::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (_boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (!_boundRootSig->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+        return;
+    }
+    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+    if (!tableOpt.has_value()) {
+        RADRAY_ERR_LOG("no table for bindless set index {}", slot);
+        return;
+    }
+    auto bdls = static_cast<BindlessArrayD3D12*>(array);
+    auto dataRef = tableOpt.value();
+    _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, bdls->_resHeap.HandleGpu());
+}
+
+void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept {
+    if (!ValidateBuildBottomLevelASDescriptor(desc)) {
+        return;
+    }
+    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    if (cmdList4 == nullptr) {
+        return;
+    }
+    auto target = CastD3D12Object(desc.Target);
+    auto scratch = CastD3D12Object(desc.ScratchBuffer);
+    if (target->_desc.Type != AccelerationStructureType::BottomLevel) {
+        RADRAY_ERR_LOG("BuildBottomLevelAS target type mismatch");
+        return;
+    }
+    if (desc.Mode == AccelerationStructureBuildMode::Update &&
+        !target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        RADRAY_ERR_LOG("BuildBottomLevelAS update requested without AllowUpdate flag");
+        return;
+    }
+
+    vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+    geometries.reserve(desc.Geometries.size());
+    for (const auto& geom : desc.Geometries) {
+        D3D12_RAYTRACING_GEOMETRY_DESC g{};
+        g.Flags = geom.Opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        if (const auto* tri = std::get_if<RayTracingTrianglesDesc>(&geom.Geometry)) {
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Triangles.VertexFormat = MapType(tri->VertexFmt);
+            g.Triangles.VertexCount = tri->VertexCount;
+            g.Triangles.VertexBuffer.StartAddress = CastD3D12Object(tri->VertexBuffer)->_gpuAddr + tri->VertexOffset;
+            g.Triangles.VertexBuffer.StrideInBytes = tri->VertexStride;
+            g.Triangles.Transform3x4 = tri->TransformBuffer ? (CastD3D12Object(tri->TransformBuffer)->_gpuAddr + tri->TransformOffset) : 0;
+            if (tri->IndexBuffer != nullptr) {
+                g.Triangles.IndexFormat = tri->IndexFmt == IndexFormat::UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+                g.Triangles.IndexCount = tri->IndexCount;
+                g.Triangles.IndexBuffer = CastD3D12Object(tri->IndexBuffer)->_gpuAddr + tri->IndexOffset;
+            } else {
+                g.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+                g.Triangles.IndexCount = 0;
+                g.Triangles.IndexBuffer = 0;
+            }
+        } else {
+            const auto* aabb = std::get_if<RayTracingAabbsDesc>(&geom.Geometry);
+            RADRAY_ASSERT(aabb != nullptr);
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            g.AABBs.AABBCount = aabb->Count;
+            g.AABBs.AABBs.StrideInBytes = aabb->Stride;
+            g.AABBs.AABBs.StartAddress = CastD3D12Object(aabb->Target)->_gpuAddr + aabb->Offset;
+        }
+        geometries.push_back(g);
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = static_cast<UINT>(geometries.size());
+    inputs.pGeometryDescs = geometries.data();
+    inputs.Flags = _MapBuildFlags(target->_desc.Flags);
+    if (desc.Mode == AccelerationStructureBuildMode::Update) {
+        inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+    }
+
+    ComPtr<ID3D12Device5> device5;
+    if (HRESULT hr = _cmdList->_device->_device->QueryInterface(IID_PPV_ARGS(device5.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::QueryInterface(ID3D12Device5) failed: {} {}", GetErrorName(hr), hr);
+        return;
+    }
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
+    device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
+    if (prebuild.ResultDataMaxSizeInBytes == 0) {
+        RADRAY_ERR_LOG("GetRaytracingAccelerationStructurePrebuildInfo returned invalid result size for BLAS");
+        return;
+    }
+    if (target->_asSize < prebuild.ResultDataMaxSizeInBytes) {
+        RADRAY_ERR_LOG("BLAS target AS buffer too small: need={}, actual={}", prebuild.ResultDataMaxSizeInBytes, target->_asSize);
+        return;
+    }
+    if (desc.ScratchSize < prebuild.ScratchDataSizeInBytes) {
+        RADRAY_ERR_LOG("BLAS scratch buffer too small: need={}, actual={}", prebuild.ScratchDataSizeInBytes, desc.ScratchSize);
+        return;
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
+    build.Inputs = inputs;
+    build.DestAccelerationStructureData = target->_gpuAddr;
+    build.ScratchAccelerationStructureData = scratch->_gpuAddr + desc.ScratchOffset;
+    if (desc.Mode == AccelerationStructureBuildMode::Update) {
+        build.SourceAccelerationStructureData = target->_gpuAddr;
+    }
+    cmdList4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+
+    D3D12_RESOURCE_BARRIER uavBarrier{};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    uavBarrier.UAV.pResource = target->_buffer.Get();
+    _cmdList->_cmdList->ResourceBarrier(1, &uavBarrier);
+}
+
+void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept {
+    if (!ValidateBuildTopLevelASDescriptor(desc)) {
+        return;
+    }
+    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    if (cmdList4 == nullptr) {
+        return;
+    }
+    auto target = CastD3D12Object(desc.Target);
+    auto scratch = CastD3D12Object(desc.ScratchBuffer);
+    if (target->_desc.Type != AccelerationStructureType::TopLevel) {
+        RADRAY_ERR_LOG("BuildTopLevelAS target type mismatch");
+        return;
+    }
+    if (desc.Mode == AccelerationStructureBuildMode::Update &&
+        !target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        RADRAY_ERR_LOG("BuildTopLevelAS update requested without AllowUpdate flag");
+        return;
+    }
+
+    const uint64_t instanceBufferSize = uint64_t(desc.Instances.size()) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    ComPtr<ID3D12Resource> instanceBuffer;
+    D3D12_HEAP_PROPERTIES heapProps{};
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resDesc.Alignment = 0;
+    resDesc.Width = Align(instanceBufferSize, 256ull);
+    resDesc.Height = 1;
+    resDesc.DepthOrArraySize = 1;
+    resDesc.MipLevels = 1;
+    resDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resDesc.SampleDesc.Count = 1;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (HRESULT hr = _cmdList->_device->_device->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &resDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(instanceBuffer.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("CreateCommittedResource for TLAS instances failed: {} {}", GetErrorName(hr), hr);
+        return;
+    }
+    _cmdList->_keepAliveResources.push_back(instanceBuffer);
+
+    auto* mapped = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(nullptr);
+    D3D12_RANGE mapRange{0, static_cast<SIZE_T>(instanceBufferSize)};
+    if (HRESULT hr = instanceBuffer->Map(0, &mapRange, reinterpret_cast<void**>(&mapped));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("Map TLAS instance buffer failed: {} {}", GetErrorName(hr), hr);
+        return;
+    }
+    for (size_t i = 0; i < desc.Instances.size(); i++) {
+        const auto& src = desc.Instances[i];
+        auto& dst = mapped[i];
+        dst.Transform[0][0] = src.Transform(0, 0);
+        dst.Transform[0][1] = src.Transform(0, 1);
+        dst.Transform[0][2] = src.Transform(0, 2);
+        dst.Transform[0][3] = src.Transform(0, 3);
+        dst.Transform[1][0] = src.Transform(1, 0);
+        dst.Transform[1][1] = src.Transform(1, 1);
+        dst.Transform[1][2] = src.Transform(1, 2);
+        dst.Transform[1][3] = src.Transform(1, 3);
+        dst.Transform[2][0] = src.Transform(2, 0);
+        dst.Transform[2][1] = src.Transform(2, 1);
+        dst.Transform[2][2] = src.Transform(2, 2);
+        dst.Transform[2][3] = src.Transform(2, 3);
+        dst.InstanceID = src.InstanceID;
+        dst.InstanceMask = src.InstanceMask;
+        dst.InstanceContributionToHitGroupIndex = src.InstanceContributionToHitGroupIndex;
+        dst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        if (src.ForceOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
+        if (src.ForceNoOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
+        dst.AccelerationStructure = CastD3D12Object(src.Blas)->_gpuAddr;
+    }
+    D3D12_RANGE unmapRange{0, static_cast<SIZE_T>(instanceBufferSize)};
+    instanceBuffer->Unmap(0, &unmapRange);
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = static_cast<UINT>(desc.Instances.size());
+    inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
+    inputs.Flags = _MapBuildFlags(target->_desc.Flags);
+    if (desc.Mode == AccelerationStructureBuildMode::Update) {
+        inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+    }
+
+    ComPtr<ID3D12Device5> device5;
+    if (HRESULT hr = _cmdList->_device->_device->QueryInterface(IID_PPV_ARGS(device5.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::QueryInterface(ID3D12Device5) failed: {} {}", GetErrorName(hr), hr);
+        return;
+    }
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild{};
+    device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
+    if (prebuild.ResultDataMaxSizeInBytes == 0) {
+        RADRAY_ERR_LOG("GetRaytracingAccelerationStructurePrebuildInfo returned invalid result size for TLAS");
+        return;
+    }
+    if (target->_asSize < prebuild.ResultDataMaxSizeInBytes) {
+        RADRAY_ERR_LOG("TLAS target AS buffer too small: need={}, actual={}", prebuild.ResultDataMaxSizeInBytes, target->_asSize);
+        return;
+    }
+    if (desc.ScratchSize < prebuild.ScratchDataSizeInBytes) {
+        RADRAY_ERR_LOG("TLAS scratch buffer too small: need={}, actual={}", prebuild.ScratchDataSizeInBytes, desc.ScratchSize);
+        return;
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
+    build.Inputs = inputs;
+    build.DestAccelerationStructureData = target->_gpuAddr;
+    build.ScratchAccelerationStructureData = scratch->_gpuAddr + desc.ScratchOffset;
+    if (desc.Mode == AccelerationStructureBuildMode::Update) {
+        build.SourceAccelerationStructureData = target->_gpuAddr;
+    }
+    cmdList4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+
+    D3D12_RESOURCE_BARRIER uavBarrier{};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    uavBarrier.UAV.pResource = target->_buffer.Get();
+    _cmdList->_cmdList->ResourceBarrier(1, &uavBarrier);
+}
+
+void CmdRayTracingPassD3D12::BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept {
+    _boundRtPso = CastD3D12Object(pso);
+}
+
+void CmdRayTracingPassD3D12::TraceRays(const TraceRaysDescriptor& desc) noexcept {
+    if (_boundRtPso == nullptr) {
+        RADRAY_ERR_LOG("bind ray tracing pipeline state before TraceRays");
+        return;
+    }
+    if (!ValidateTraceRaysDescriptor(desc, _cmdList->_device->GetDetail())) {
+        return;
+    }
+    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    if (cmdList4 == nullptr) {
+        return;
+    }
+
+    auto toRegion = [](const ShaderBindingTableRegion& v) {
+        auto* buf = CastD3D12Object(v.Target);
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE r{};
+        r.StartAddress = buf->_gpuAddr + v.Offset;
+        r.SizeInBytes = v.Size;
+        r.StrideInBytes = v.Stride;
+        return r;
+    };
+
+    D3D12_DISPATCH_RAYS_DESC dispatch{};
+    dispatch.RayGenerationShaderRecord.StartAddress = CastD3D12Object(desc.RayGen.Target)->_gpuAddr + desc.RayGen.Offset;
+    dispatch.RayGenerationShaderRecord.SizeInBytes = desc.RayGen.Size;
+    dispatch.MissShaderTable = toRegion(desc.Miss);
+    dispatch.HitGroupTable = toRegion(desc.HitGroup);
+    if (desc.Callable.has_value()) {
+        dispatch.CallableShaderTable = toRegion(desc.Callable.value());
+    }
+    dispatch.Width = desc.Width;
+    dispatch.Height = desc.Height;
+    dispatch.Depth = desc.Depth;
+
+    cmdList4->SetPipelineState1(_boundRtPso->_stateObject.Get());
+    cmdList4->DispatchRays(&dispatch);
+}
+
 SwapChainD3D12::SwapChainD3D12(
     DeviceD3D12* device,
     ComPtr<IDXGISwapChain3> swapchain,
@@ -2548,6 +3267,54 @@ bool ComputePsoD3D12::IsValid() const noexcept {
 
 void ComputePsoD3D12::Destroy() noexcept {
     _pso = nullptr;
+}
+
+AccelerationStructureD3D12::AccelerationStructureD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Resource> buffer,
+    ComPtr<D3D12MA::Allocation> alloc,
+    const AccelerationStructureDescriptor& desc,
+    uint64_t asSize) noexcept
+    : _device(device),
+      _buffer(std::move(buffer)),
+      _alloc(std::move(alloc)),
+      _desc(desc),
+      _asSize(asSize) {
+    if (_buffer != nullptr) {
+        _gpuAddr = _buffer->GetGPUVirtualAddress();
+    }
+    _name = desc.Name;
+    _desc.Name = _name;
+}
+
+bool AccelerationStructureD3D12::IsValid() const noexcept {
+    return _buffer != nullptr;
+}
+
+void AccelerationStructureD3D12::Destroy() noexcept {
+    _buffer = nullptr;
+    _alloc = nullptr;
+    _gpuAddr = 0;
+}
+
+RayTracingPsoD3D12::RayTracingPsoD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12StateObject> stateObject,
+    ComPtr<ID3D12StateObjectProperties> stateProps,
+    RootSigD3D12* rootSig) noexcept
+    : _device(device),
+      _stateObject(std::move(stateObject)),
+      _stateProps(std::move(stateProps)),
+      _rootSig(rootSig) {}
+
+bool RayTracingPsoD3D12::IsValid() const noexcept {
+    return _stateObject != nullptr && _stateProps != nullptr;
+}
+
+void RayTracingPsoD3D12::Destroy() noexcept {
+    _stateObject = nullptr;
+    _stateProps = nullptr;
+    _shaderIdentifiers.clear();
 }
 
 GpuDescriptorHeapViews::GpuDescriptorHeapViews(

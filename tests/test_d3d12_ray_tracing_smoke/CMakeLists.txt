@@ -1,0 +1,7 @@
+if (RADRAY_ENABLE_D3D12 AND RADRAY_ENABLE_DXC)
+    add_executable(test_d3d12_ray_tracing_smoke test_d3d12_ray_tracing_smoke.cpp)
+    target_link_libraries(test_d3d12_ray_tracing_smoke radraycore radrayrender GTest::gtest_main)
+    gtest_discover_tests(test_d3d12_ray_tracing_smoke)
+    radray_optimize_flags_binary(test_d3d12_ray_tracing_smoke)
+    radray_set_build_path(test_d3d12_ray_tracing_smoke)
+endif()

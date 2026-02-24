@@ -2,6 +2,8 @@
 
 #ifdef RADRAY_ENABLE_D3D12
 
+#include <array>
+
 #include <radray/allocator.h>
 #include <radray/platform.h>
 
@@ -28,6 +30,8 @@ class TextureViewD3D12;
 class RootSigD3D12;
 class GraphicsPsoD3D12;
 class ComputePsoD3D12;
+class AccelerationStructureD3D12;
+class RayTracingPsoD3D12;
 class GpuDescriptorHeapViews;
 class SamplerD3D12;
 
@@ -461,6 +465,7 @@ public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     D3D12_COMMAND_LIST_TYPE _type;
+    vector<ComPtr<ID3D12Resource>> _keepAliveResources;
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
@@ -535,6 +540,41 @@ public:
 public:
     CmdListD3D12* _cmdList;
     RootSigD3D12* _boundRootSig{nullptr};
+};
+
+class CmdRayTracingPassD3D12 final : public RayTracingCommandEncoder {
+public:
+    explicit CmdRayTracingPassD3D12(CmdListD3D12* cmdList) noexcept;
+    ~CmdRayTracingPassD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept override;
+
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
+
+    void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept override;
+
+    void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
+
+    void BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept override;
+
+    void BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept override;
+
+    void TraceRays(const TraceRaysDescriptor& desc) noexcept override;
+
+public:
+    CmdListD3D12* _cmdList;
+    RootSigD3D12* _boundRootSig{nullptr};
+    RayTracingPsoD3D12* _boundRtPso{nullptr};
 };
 
 class SwapChainD3D12 final : public SwapChain {
@@ -740,6 +780,51 @@ public:
     ComPtr<ID3D12PipelineState> _pso;
 };
 
+class AccelerationStructureD3D12 final : public AccelerationStructure {
+public:
+    AccelerationStructureD3D12(
+        DeviceD3D12* device,
+        ComPtr<ID3D12Resource> buffer,
+        ComPtr<D3D12MA::Allocation> alloc,
+        const AccelerationStructureDescriptor& desc,
+        uint64_t asSize) noexcept;
+    ~AccelerationStructureD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    ComPtr<ID3D12Resource> _buffer;
+    ComPtr<D3D12MA::Allocation> _alloc;
+    AccelerationStructureDescriptor _desc;
+    uint64_t _asSize{0};
+    D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr{0};
+    string _name;
+};
+
+class RayTracingPsoD3D12 final : public RayTracingPipelineState {
+public:
+    RayTracingPsoD3D12(
+        DeviceD3D12* device,
+        ComPtr<ID3D12StateObject> stateObject,
+        ComPtr<ID3D12StateObjectProperties> stateProps,
+        RootSigD3D12* rootSig) noexcept;
+    ~RayTracingPsoD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    ComPtr<ID3D12StateObject> _stateObject;
+    ComPtr<ID3D12StateObjectProperties> _stateProps;
+    RootSigD3D12* _rootSig{nullptr};
+    unordered_map<string, std::array<byte, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES>> _shaderIdentifiers;
+};
+
 class GpuDescriptorHeapViews final : public DescriptorSet {
 public:
     GpuDescriptorHeapViews(
@@ -828,6 +913,8 @@ constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<Tex
 constexpr auto CastD3D12Object(BufferView* v) noexcept { return static_cast<BufferViewD3D12*>(v); }
 constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(ComputePipelineState* v) noexcept { return static_cast<ComputePsoD3D12*>(v); }
+constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return static_cast<AccelerationStructureD3D12*>(v); }
+constexpr auto CastD3D12Object(RayTracingPipelineState* v) noexcept { return static_cast<RayTracingPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 }  // namespace radray::render::d3d12
