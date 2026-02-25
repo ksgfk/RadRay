@@ -2805,7 +2805,7 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
     for (const auto& geom : desc.Geometries) {
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Flags = geom.Opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
-        if (const auto* tri = std::get_if<RayTracingTrianglesDesc>(&geom.Geometry)) {
+        if (const auto* tri = std::get_if<RayTracingTrianglesDescriptor>(&geom.Geometry)) {
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
             g.Triangles.VertexFormat = MapType(tri->VertexFmt);
             g.Triangles.VertexCount = tri->VertexCount;
@@ -2822,7 +2822,7 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
                 g.Triangles.IndexBuffer = 0;
             }
         } else {
-            const auto* aabb = std::get_if<RayTracingAabbsDesc>(&geom.Geometry);
+            const auto* aabb = std::get_if<RayTracingAABBsDescriptor>(&geom.Geometry);
             RADRAY_ASSERT(aabb != nullptr);
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
             g.AABBs.AABBCount = aabb->Count;

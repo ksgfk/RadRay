@@ -418,7 +418,7 @@ bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& de
         return false;
     }
     for (const auto& geom : desc.Geometries) {
-        if (const auto* triangles = std::get_if<RayTracingTrianglesDesc>(&geom.Geometry)) {
+        if (const auto* triangles = std::get_if<RayTracingTrianglesDescriptor>(&geom.Geometry)) {
             if (triangles->VertexBuffer == nullptr || triangles->VertexCount == 0 || triangles->VertexStride == 0) {
                 RADRAY_ERR_LOG("invalid BLAS triangles geometry");
                 return false;
@@ -427,7 +427,7 @@ bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& de
                 RADRAY_ERR_LOG("BLAS triangles index buffer requires IndexCount > 0");
                 return false;
             }
-        } else if (const auto* aabbs = std::get_if<RayTracingAabbsDesc>(&geom.Geometry)) {
+        } else if (const auto* aabbs = std::get_if<RayTracingAABBsDescriptor>(&geom.Geometry)) {
             if (aabbs->Target == nullptr || aabbs->Count == 0 || aabbs->Stride == 0) {
                 RADRAY_ERR_LOG("invalid BLAS AABB geometry");
                 return false;

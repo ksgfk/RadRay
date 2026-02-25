@@ -239,8 +239,7 @@ void CreateBlitPipeline() {
     auto ps = device->CreateShader(psDesc).Unwrap();
 
     RootSignatureSetElement setElems[] = {
-        {0, 0, ResourceBindType::Texture, 1, ShaderStage::Pixel, std::nullopt}
-    };
+        {0, 0, ResourceBindType::Texture, 1, ShaderStage::Pixel, std::nullopt}};
     RootSignatureDescriptorSet descSet{0, std::span{setElems, 1}};
     SamplerDescriptor samplerDesc{};
     samplerDesc.AddressS = AddressMode::ClampToEdge;
@@ -292,8 +291,7 @@ void CreateRtPipelineAndSbt() {
 
     RootSignatureSetElement setElems[] = {
         {0, 0, ResourceBindType::RWTexture, 1, ShaderStage::RayGen, std::nullopt},
-        {0, 1, ResourceBindType::AccelerationStructure, 1, ShaderStage::RayGen, std::nullopt}
-    };
+        {0, 1, ResourceBindType::AccelerationStructure, 1, ShaderStage::RayGen, std::nullopt}};
     RootSignatureDescriptorSet descSet{0, std::span{setElems, 2}};
     RootSignatureDescriptor rsDesc{};
     rsDesc.DescriptorSets = std::span{&descSet, 1};
@@ -303,8 +301,7 @@ void CreateRtPipelineAndSbt() {
     RayTracingShaderEntry shaderEntries[] = {
         {rayGenShader.get(), "RayGenMain", ShaderStage::RayGen},
         {missShader.get(), "MissMain", ShaderStage::Miss},
-        {chShader.get(), "ClosestHitMain", ShaderStage::ClosestHit}
-    };
+        {chShader.get(), "ClosestHitMain", ShaderStage::ClosestHit}};
     RayTracingHitGroupDescriptor hitGroup{};
     hitGroup.Name = "HitGroup0";
     hitGroup.ClosestHit = RayTracingShaderEntry{chShader.get(), "ClosestHitMain", ShaderStage::ClosestHit};
@@ -346,8 +343,8 @@ void CreateGeometryAndAs() {
     // Equilateral triangle in NDC plane, vertex order: left, top, right.
     float pos[] = {
         -0.5f, -0.28867513f, 0.0f,  // left
-         0.0f,  0.57735027f, 0.0f,  // top
-         0.5f, -0.28867513f, 0.0f   // right
+        0.0f, 0.57735027f, 0.0f,    // top
+        0.5f, -0.28867513f, 0.0f    // right
     };
     uint16_t idx[] = {0, 1, 2};
     const uint64_t vertexSize = sizeof(pos);
@@ -370,20 +367,18 @@ void CreateGeometryAndAs() {
     auto uploadCmd = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
     uploadCmd->Begin();
     {
-        BarrierBufferDescriptor barriers[] = {
-            {vertBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false},
-            {idxBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false}
-        };
-        uploadCmd->ResourceBarrier(barriers, {});
+        ResourceBarrierDescriptor barriers[] = {
+            BarrierBufferDescriptor{vertBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false},
+            BarrierBufferDescriptor{idxBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false}};
+        uploadCmd->ResourceBarrier(barriers);
     }
     uploadCmd->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
     uploadCmd->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
     {
-        BarrierBufferDescriptor barriers[] = {
-            {vertBuf.get(), BufferState::CopyDestination, BufferState::AccelerationStructureBuildInput, nullptr, false},
-            {idxBuf.get(), BufferState::CopyDestination, BufferState::AccelerationStructureBuildInput, nullptr, false}
-        };
-        uploadCmd->ResourceBarrier(barriers, {});
+        ResourceBarrierDescriptor barriers[] = {
+            BarrierBufferDescriptor{vertBuf.get(), BufferState::CopyDestination, BufferState::AccelerationStructureBuildInput, nullptr, false},
+            BarrierBufferDescriptor{idxBuf.get(), BufferState::CopyDestination, BufferState::AccelerationStructureBuildInput, nullptr, false}};
+        uploadCmd->ResourceBarrier(barriers);
     }
     uploadCmd->End();
     CommandBuffer* submitCmd[] = {uploadCmd.get()};
@@ -408,7 +403,7 @@ void CreateGeometryAndAs() {
     tlasDesc.Name = "tlas";
     tlas = StaticCastUniquePtr<d3d12::AccelerationStructureD3D12>(device->CreateAccelerationStructure(tlasDesc).Unwrap());
 
-    RayTracingTrianglesDesc tri{};
+    RayTracingTrianglesDescriptor tri{};
     tri.VertexBuffer = vertBuf.get();
     tri.VertexStride = sizeof(float) * 3;
     tri.VertexCount = 3;
@@ -428,7 +423,7 @@ void CreateGeometryAndAs() {
     buildBlas.ScratchSize = asScratchBuf->GetDesc().Size;
     buildBlas.Mode = AccelerationStructureBuildMode::Build;
 
-    RayTracingInstanceDesc inst{};
+    RayTracingInstanceDescriptor inst{};
     inst.Transform = Eigen::Matrix4f::Identity();
     inst.InstanceID = 0;
     inst.InstanceMask = 0xFF;
@@ -458,8 +453,7 @@ void CreateGeometryAndAs() {
     }
     {
         ResourceBarrierDescriptor barriers[] = {
-            BarrierAccelerationStructureDescriptor{blas.get(), BufferState::AccelerationStructureRead, BufferState::AccelerationStructureRead, nullptr, false}
-        };
+            BarrierAccelerationStructureDescriptor{blas.get(), BufferState::AccelerationStructureRead, BufferState::AccelerationStructureRead, nullptr, false}};
         asCmd->ResourceBarrier(barriers);
     }
     {
@@ -564,11 +558,9 @@ void Update() {
         cmd->Begin();
 
         {
-            BarrierTextureDescriptor barrier{};
-            barrier.Target = rtOutputs[backBufferIndex].get();
-            barrier.Before = rtOutputStates[backBufferIndex];
-            barrier.After = TextureState::UnorderedAccess;
-            cmd->ResourceBarrier({}, std::span{&barrier, 1});
+            ResourceBarrierDescriptor barrier[] = {
+                BarrierTextureDescriptor{rtOutputs[backBufferIndex].get(), rtOutputStates[backBufferIndex], TextureState::UnorderedAccess}};
+            cmd->ResourceBarrier(barrier);
             rtOutputStates[backBufferIndex] = TextureState::UnorderedAccess;
         }
 
@@ -590,24 +582,13 @@ void Update() {
 
             cmd->EndRayTracingPass(std::move(rtPass));
         }
-
         {
-            BarrierTextureDescriptor barrier{};
-            barrier.Target = rtOutputs[backBufferIndex].get();
-            barrier.Before = TextureState::UnorderedAccess;
-            barrier.After = TextureState::ShaderRead;
-            cmd->ResourceBarrier({}, std::span{&barrier, 1});
+            ResourceBarrierDescriptor barriers[] = {
+                BarrierTextureDescriptor{backBuffer, TextureState::Undefined, TextureState::RenderTarget},
+                BarrierTextureDescriptor{rtOutputs[backBufferIndex].get(), TextureState::UnorderedAccess, TextureState::ShaderRead}};
+            cmd->ResourceBarrier(barriers);
             rtOutputStates[backBufferIndex] = TextureState::ShaderRead;
         }
-
-        {
-            BarrierTextureDescriptor barrier{};
-            barrier.Target = backBuffer;
-            barrier.Before = TextureState::Undefined;
-            barrier.After = TextureState::RenderTarget;
-            cmd->ResourceBarrier({}, std::span{&barrier, 1});
-        }
-
         {
             ColorAttachment colorAttach{};
             colorAttach.Target = swapchainRtViews[backBufferIndex].get();
@@ -627,11 +608,9 @@ void Update() {
         }
 
         {
-            BarrierTextureDescriptor barrier{};
-            barrier.Target = backBuffer;
-            barrier.Before = TextureState::RenderTarget;
-            barrier.After = TextureState::Present;
-            cmd->ResourceBarrier({}, std::span{&barrier, 1});
+            ResourceBarrierDescriptor barriers[] = {
+                BarrierTextureDescriptor{backBuffer, TextureState::RenderTarget, TextureState::Present}};
+            cmd->ResourceBarrier(barriers);
         }
 
         cmd->End();

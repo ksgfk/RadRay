@@ -43,13 +43,9 @@ public:
         cmdBuffer->Begin();
         _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
         {
-            radray::render::BarrierTextureDescriptor barrier{};
-            barrier.Target = rt;
-            barrier.Before = radray::render::TextureState::Undefined;
-            barrier.After = radray::render::TextureState::RenderTarget;
-            barrier.IsFromOrToOtherQueue = false;
-            barrier.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            radray::render::ResourceBarrierDescriptor barrier = radray::render::BarrierTextureDescriptor{
+                rt, radray::render::TextureState::Undefined, radray::render::TextureState::RenderTarget};
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
         radray::unique_ptr<radray::render::GraphicsCommandEncoder> pass;
         {
@@ -65,13 +61,9 @@ public:
         _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
-            radray::render::BarrierTextureDescriptor barrier{};
-            barrier.Target = rt;
-            barrier.Before = radray::render::TextureState::RenderTarget;
-            barrier.After = radray::render::TextureState::Present;
-            barrier.IsFromOrToOtherQueue = false;
-            barrier.IsSubresourceBarrier = false;
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            radray::render::ResourceBarrierDescriptor barrier = radray::render::BarrierTextureDescriptor{
+                rt, radray::render::TextureState::RenderTarget, radray::render::TextureState::Present};
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
         cmdBuffer->End();
         return {cmdBuffer};

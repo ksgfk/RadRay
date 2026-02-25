@@ -321,31 +321,33 @@ void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cm
         return;
     }
     if (frame._uploadTexReqs.size() > 0) {
-        vector<render::BarrierTextureDescriptor> barriers;
+        vector<render::ResourceBarrierDescriptor> barriers;
         barriers.reserve(frame._uploadTexReqs.size());
         for (const auto& payload : frame._uploadTexReqs) {
-            auto& barrierBefore = barriers.emplace_back();
-            barrierBefore.Target = payload._dst;
-            barrierBefore.Before = payload._isNew ? render::TextureState::Undefined : render::TextureState::ShaderRead;
-            barrierBefore.After = render::TextureState::CopyDestination;
-            barrierBefore.IsFromOrToOtherQueue = false;
-            barrierBefore.IsSubresourceBarrier = false;
+            barriers.emplace_back(render::BarrierTextureDescriptor{
+                payload._dst,
+                payload._isNew ? render::TextureState::Undefined : render::TextureState::ShaderRead,
+                render::TextureState::CopyDestination,
+                nullptr,
+                false,
+                false});
         }
-        cmdBuffer->ResourceBarrier({}, barriers);
+        cmdBuffer->ResourceBarrier(barriers);
         for (const auto& payload : frame._uploadTexReqs) {
             render::SubresourceRange range{0, 1, 0, 1};
             cmdBuffer->CopyBufferToTexture(payload._dst, range, payload._src, 0);
         }
         barriers.clear();
         for (const auto& payload : frame._uploadTexReqs) {
-            auto& barrierBefore = barriers.emplace_back();
-            barrierBefore.Target = payload._dst;
-            barrierBefore.Before = render::TextureState::CopyDestination;
-            barrierBefore.After = render::TextureState::ShaderRead;
-            barrierBefore.IsFromOrToOtherQueue = false;
-            barrierBefore.IsSubresourceBarrier = false;
+            barriers.emplace_back(render::BarrierTextureDescriptor{
+                payload._dst,
+                render::TextureState::CopyDestination,
+                render::TextureState::ShaderRead,
+                nullptr,
+                false,
+                false});
         }
-        cmdBuffer->ResourceBarrier({}, barriers);
+        cmdBuffer->ResourceBarrier(barriers);
         frame._uploadTexReqs.clear();
     }
 }
@@ -401,7 +403,6 @@ void ImGuiRenderer::OnRender(uint32_t frameIndex, render::GraphicsCommandEncoder
                     auto texView = std::bit_cast<render::TextureView*>(cmd.TexRef._TexID);
                     auto it = frame._tempTexSets.find(texView);
                     if (it == frame._tempTexSets.end()) {
-                        const uint32_t setIndex = _device->GetBackend() == render::RenderBackend::Metal ? 17 : 0;
                         unique_ptr<render::DescriptorSet> descSet = _device->CreateDescriptorSet(_rootSig.get(), setIndex).Unwrap();
                         descSet->SetResource(0, 0, texView);
                         auto emplaceResult = frame._tempTexSets.emplace(texView, std::move(descSet));

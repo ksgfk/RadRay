@@ -115,10 +115,10 @@ public:
             UploadTextures(cmdBuffer);
         }
         {
-            render::BarrierTextureDescriptor barriers[] = {
-                {rt, render::TextureState::Undefined, render::TextureState::RenderTarget},
-                {frame->_depthStencil.get(), frame->_dsvUsage, render::TextureState::DepthWrite}};
-            cmdBuffer->ResourceBarrier({}, barriers);
+            render::ResourceBarrierDescriptor barriers[] = {
+                render::BarrierTextureDescriptor{rt, render::TextureState::Undefined, render::TextureState::RenderTarget},
+                render::BarrierTextureDescriptor{frame->_depthStencil.get(), frame->_dsvUsage, render::TextureState::DepthWrite}};
+            cmdBuffer->ResourceBarrier(barriers);
             frame->_dsvUsage = render::TextureState::DepthWrite;
         }
         unique_ptr<render::GraphicsCommandEncoder> pass;
@@ -173,9 +173,9 @@ public:
         _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
-            render::BarrierTextureDescriptor barrier{
+            render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                 rt, render::TextureState::RenderTarget, render::TextureState::Present};
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
         cmdBuffer->End();
         return {cmdBuffer};
@@ -275,26 +275,20 @@ private:
     }
 
     void UploadTextures(render::CommandBuffer* cmdBuffer) {
-        vector<render::BarrierTextureDescriptor> barriers;
+        vector<render::ResourceBarrierDescriptor> barriers;
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
-            auto& b = barriers.emplace_back();
-            b.Target = _textures[i].get();
-            b.Before = render::TextureState::Undefined;
-            b.After = render::TextureState::CopyDestination;
+            barriers.emplace_back(render::BarrierTextureDescriptor{_textures[i].get(), render::TextureState::Undefined, render::TextureState::CopyDestination});
         }
-        cmdBuffer->ResourceBarrier({}, barriers);
+        cmdBuffer->ResourceBarrier(barriers);
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
             render::SubresourceRange range{0, 1, 0, 1};
             cmdBuffer->CopyBufferToTexture(_textures[i].get(), range, _uploadBuffers[i].get(), 0);
         }
         barriers.clear();
         for (uint32_t i = 0; i < TEX_COUNT; i++) {
-            auto& b = barriers.emplace_back();
-            b.Target = _textures[i].get();
-            b.Before = render::TextureState::CopyDestination;
-            b.After = render::TextureState::ShaderRead;
+            barriers.emplace_back(render::BarrierTextureDescriptor{_textures[i].get(), render::TextureState::CopyDestination, render::TextureState::ShaderRead});
         }
-        cmdBuffer->ResourceBarrier({}, barriers);
+        cmdBuffer->ResourceBarrier(barriers);
         _needsUpload = false;
     }
 

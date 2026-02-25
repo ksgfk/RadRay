@@ -950,7 +950,7 @@ struct ComputePipelineStateDescriptor {
     ShaderEntry CS{};
 };
 
-struct RayTracingTrianglesDesc {
+struct RayTracingTrianglesDescriptor {
     Buffer* VertexBuffer{nullptr};
     uint64_t VertexOffset{0};
     uint32_t VertexStride{0};
@@ -964,7 +964,7 @@ struct RayTracingTrianglesDesc {
     uint64_t TransformOffset{0};
 };
 
-struct RayTracingAabbsDesc {
+struct RayTracingAABBsDescriptor {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
     uint32_t Count{0};
@@ -972,11 +972,11 @@ struct RayTracingAabbsDesc {
 };
 
 struct RayTracingGeometryDesc {
-    std::variant<RayTracingTrianglesDesc, RayTracingAabbsDesc> Geometry{};
+    std::variant<RayTracingTrianglesDescriptor, RayTracingAABBsDescriptor> Geometry{};
     bool Opaque{true};
 };
 
-struct RayTracingInstanceDesc {
+struct RayTracingInstanceDescriptor {
     Eigen::Matrix4f Transform{Eigen::Matrix4f::Identity()};
     uint32_t InstanceID{0};
     uint32_t InstanceMask{0xFF};
@@ -1005,7 +1005,7 @@ struct BuildBottomLevelASDescriptor {
 
 struct BuildTopLevelASDescriptor {
     AccelerationStructure* Target{nullptr};
-    std::span<const RayTracingInstanceDesc> Instances{};
+    std::span<const RayTracingInstanceDescriptor> Instances{};
     Buffer* ScratchBuffer{nullptr};
     uint64_t ScratchOffset{0};
     uint64_t ScratchSize{0};
@@ -1149,18 +1149,6 @@ public:
     virtual void End() noexcept = 0;
 
     virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
-
-    void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
-        vector<ResourceBarrierDescriptor> all;
-        all.reserve(buffers.size() + textures.size());
-        for (const auto& b : buffers) {
-            all.emplace_back(b);
-        }
-        for (const auto& t : textures) {
-            all.emplace_back(t);
-        }
-        ResourceBarrier(std::span<const ResourceBarrierDescriptor>{all});
-    }
 
     virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 

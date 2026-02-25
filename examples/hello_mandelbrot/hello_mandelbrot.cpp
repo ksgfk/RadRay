@@ -91,7 +91,6 @@ public:
         auto& frame = _frames[frameIndex];
         Eigen::Vector2i rtSize = this->GetRTSize();
         float aspect = (float)rtSize.x() / (float)rtSize.y();
-        // Update compute bind: push constant _Params
         auto& cb = _computeBinds[frameIndex];
         auto params = cb->GetCBuffer("_Params");
         params.GetVar("centerX").SetValue((float)_centerX);
@@ -103,7 +102,7 @@ public:
         params.GetVar("height").SetValue((uint32_t)rtSize.y());
         params.GetVar("aaLevel").SetValue((uint32_t)_aaLevel);
         cb->Upload(_device.get(), frame->_cbArena);
-        // Update blit bind: set SRV
+
         _blitBinds[frameIndex]->SetResource("_Tex", frame->_srv.get());
         _blitBinds[frameIndex]->Upload(_device.get(), frame->_cbArena);
     }
@@ -121,16 +120,14 @@ public:
         _imguiRenderer->OnRenderBegin(frameIndex, cmdBuffer);
 
         if (_ready && frame->_computeOutput) {
-            // 1. Barrier: compute output -> UAV
             {
-                render::BarrierTextureDescriptor barrier{
+                render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                     frame->_computeOutput.get(),
                     frame->_computeOutputUsage,
                     render::TextureState::UnorderedAccess};
-                cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+                cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
                 frame->_computeOutputUsage = render::TextureState::UnorderedAccess;
             }
-            // 2. Compute pass
             {
                 auto computeEncoder = cmdBuffer->BeginComputePass().Unwrap();
                 computeEncoder->BindRootSignature(_computeRS.get());
@@ -142,25 +139,22 @@ public:
                 computeEncoder->Dispatch(gx, gy, 1);
                 cmdBuffer->EndComputePass(std::move(computeEncoder));
             }
-            // 3. Barrier: UAV -> SRV
             {
-                render::BarrierTextureDescriptor barrier{
+                render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                     frame->_computeOutput.get(),
                     render::TextureState::UnorderedAccess,
                     render::TextureState::ShaderRead};
-                cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+                cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
                 frame->_computeOutputUsage = render::TextureState::ShaderRead;
             }
         }
 
-        // 4. Barrier: back buffer -> RenderTarget
         {
-            render::BarrierTextureDescriptor barrier{
+            render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                 rt, render::TextureState::Undefined, render::TextureState::RenderTarget};
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
 
-        // 5. Blit pass
         {
             render::ColorAttachment rtAttach{
                 rtView, render::LoadAction::Clear, render::StoreAction::Store,
@@ -184,7 +178,6 @@ public:
             cmdBuffer->EndRenderPass(std::move(pass));
         }
 
-        // 6. ImGui pass
         {
             render::ColorAttachment rtAttach{
                 rtView, render::LoadAction::Load, render::StoreAction::Store,
@@ -196,11 +189,10 @@ public:
             cmdBuffer->EndRenderPass(std::move(pass));
         }
 
-        // 7. Barrier: RenderTarget -> Present
         {
-            render::BarrierTextureDescriptor barrier{
+            render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                 rt, render::TextureState::RenderTarget, render::TextureState::Present};
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
         cmdBuffer->End();
         return {cmdBuffer};

@@ -178,18 +178,18 @@ void Init() {
         auto cmdBuffer = StaticCastUniquePtr<d3d12::CmdListD3D12>(device->CreateCommandBuffer(cmdQueue).Unwrap());
         cmdBuffer->Begin();
         {
-            BarrierBufferDescriptor barriers[] = {
-                {vertBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false},
-                {idxBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false}};
-            cmdBuffer->ResourceBarrier(barriers, {});
+            ResourceBarrierDescriptor barriers[] = {
+                BarrierBufferDescriptor{vertBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false},
+                BarrierBufferDescriptor{idxBuf.get(), BufferState::Common, BufferState::CopyDestination, nullptr, false}};
+            cmdBuffer->ResourceBarrier(barriers);
         }
         cmdBuffer->CopyBufferToBuffer(vertBuf.get(), 0, vertUpload.get(), 0, vertexSize);
         cmdBuffer->CopyBufferToBuffer(idxBuf.get(), 0, idxUpload.get(), 0, indexSize);
         {
-            BarrierBufferDescriptor barriers[] = {
-                {vertBuf.get(), BufferState::CopyDestination, BufferState::Vertex, nullptr, false},
-                {idxBuf.get(), BufferState::CopyDestination, BufferState::Index, nullptr, false}};
-            cmdBuffer->ResourceBarrier(barriers, {});
+            ResourceBarrierDescriptor barriers[] = {
+                BarrierBufferDescriptor{vertBuf.get(), BufferState::CopyDestination, BufferState::Vertex, nullptr, false},
+                BarrierBufferDescriptor{idxBuf.get(), BufferState::CopyDestination, BufferState::Index, nullptr, false}};
+            cmdBuffer->ResourceBarrier(barriers);
         }
         cmdBuffer->End();
         CommandBuffer* submitCmdBuffers[] = {cmdBuffer.get()};
@@ -243,8 +243,9 @@ void Update() {
 
         cmdBuffer->Begin();
         {
-            BarrierTextureDescriptor texDesc[] = {{rt, TextureState::Undefined, TextureState::RenderTarget, {}, false, false, {}}};
-            cmdBuffer->ResourceBarrier({}, texDesc);
+            ResourceBarrierDescriptor texDesc[] = {
+                BarrierTextureDescriptor{rt, TextureState::Undefined, TextureState::RenderTarget, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier(texDesc);
         }
         {
             ColorAttachment rpColorAttch[] = {{rtView, LoadAction::Clear, StoreAction::Store, clear}};
@@ -263,8 +264,9 @@ void Update() {
             cmdBuffer->EndRenderPass(std::move(rp));
         }
         {
-            BarrierTextureDescriptor texDesc[] = {{rt, TextureState::RenderTarget, TextureState::Present, {}, false, false, {}}};
-            cmdBuffer->ResourceBarrier({}, texDesc);
+            ResourceBarrierDescriptor texDesc[] = {
+                BarrierTextureDescriptor{rt, TextureState::RenderTarget, TextureState::Present, {}, false, false, {}}};
+            cmdBuffer->ResourceBarrier(texDesc);
         }
         cmdBuffer->End();
 

@@ -152,25 +152,21 @@ public:
                 auto* dst = _renderMesh->_buffers[i].get();
                 cmdBuffer->CopyBufferToBuffer(dst, 0, src, 0, src->GetDesc().Size);
             }
-            vector<render::BarrierBufferDescriptor> bufBarriers;
+            vector<render::ResourceBarrierDescriptor> bufBarriers;
             for (auto& buf : _renderMesh->_buffers) {
-                auto& b = bufBarriers.emplace_back();
-                b.Target = buf.get();
-                b.Before = render::BufferState::CopyDestination;
-                b.After = render::BufferState::Vertex | render::BufferState::Index;
+                bufBarriers.emplace_back(render::BarrierBufferDescriptor{
+                    buf.get(),
+                    render::BufferState::CopyDestination,
+                    render::BufferState::Vertex | render::BufferState::Index});
             }
-            cmdBuffer->ResourceBarrier(bufBarriers, {});
+            cmdBuffer->ResourceBarrier(bufBarriers);
             _needsMeshUpload = false;
         }
         {
-            render::BarrierTextureDescriptor barriers[] = {
-                {rt,
-                 render::TextureState::Undefined,
-                 render::TextureState::RenderTarget},
-                {frame->_depthStencil.get(),
-                 frame->_dsvUsage,
-                 render::TextureState::DepthWrite}};
-            cmdBuffer->ResourceBarrier({}, barriers);
+            render::ResourceBarrierDescriptor barriers[] = {
+                render::BarrierTextureDescriptor{rt, render::TextureState::Undefined, render::TextureState::RenderTarget},
+                render::BarrierTextureDescriptor{frame->_depthStencil.get(), frame->_dsvUsage, render::TextureState::DepthWrite}};
+            cmdBuffer->ResourceBarrier(barriers);
             frame->_dsvUsage = render::TextureState::DepthWrite;
         }
         unique_ptr<render::GraphicsCommandEncoder> pass;
@@ -229,11 +225,11 @@ public:
         _imguiRenderer->OnRender(frameIndex, pass.get());
         cmdBuffer->EndRenderPass(std::move(pass));
         {
-            render::BarrierTextureDescriptor barrier{
+            render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                 rt,
                 render::TextureState::RenderTarget,
                 render::TextureState::Present};
-            cmdBuffer->ResourceBarrier({}, std::span{&barrier, 1});
+            cmdBuffer->ResourceBarrier(std::span{&barrier, 1});
         }
         cmdBuffer->End();
         return {cmdBuffer};

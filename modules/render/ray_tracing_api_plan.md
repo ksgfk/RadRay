@@ -27,8 +27,8 @@ Add:
 
 ### 3. New RT types/descriptors
 - `AccelerationStructureType`, `AccelerationStructureBuildMode`, `AccelerationStructureBuildFlags`.
-- `RayTracingTrianglesDesc`, `RayTracingAabbsDesc`, `RayTracingGeometryDesc`.
-- `RayTracingInstanceDesc` with `AccelerationStructure* Blas`.
+- `RayTracingTrianglesDescriptor`, `RayTracingAABBsDescriptor`, `RayTracingGeometryDesc`.
+- `RayTracingInstanceDescriptor` with `AccelerationStructure* Blas`.
 - `AccelerationStructureDescriptor`, `BuildBottomLevelASDescriptor`, `BuildTopLevelASDescriptor`.
 - `RayTracingShaderEntry`, `RayTracingHitGroupDescriptor`, `RayTracingPipelineStateDescriptor`.
 - `ShaderBindingTableRegion` (`Buffer* Target`, `Offset`, `Size`, `Stride`).
