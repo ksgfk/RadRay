@@ -235,6 +235,12 @@ Nullable<unique_ptr<TextureView>> DeviceMetal::CreateTextureView(const TextureVi
     }
 }
 
+Nullable<unique_ptr<AccelerationStructureView>> DeviceMetal::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing acceleration structure view is not supported on Metal backend");
+    return nullptr;
+}
+
 Nullable<unique_ptr<Shader>> DeviceMetal::CreateShader(const ShaderDescriptor& desc) noexcept {
     @autoreleasepool {
         NSError* error = nil;
@@ -666,11 +672,8 @@ void CmdBufferMetal::Begin() noexcept {
 
 void CmdBufferMetal::End() noexcept {}
 
-void CmdBufferMetal::ResourceBarrier(
-    std::span<const BarrierBufferDescriptor> buffers,
-    std::span<const BarrierTextureDescriptor> textures) noexcept {
-    RADRAY_UNUSED(buffers);
-    RADRAY_UNUSED(textures);
+void CmdBufferMetal::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    RADRAY_UNUSED(barriers);
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CmdBufferMetal::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {

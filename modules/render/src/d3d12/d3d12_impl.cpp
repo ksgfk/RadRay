@@ -9,43 +9,6 @@
 
 namespace radray::render::d3d12 {
 
-static ComPtr<ID3D12GraphicsCommandList4> _QueryCommandList4(ID3D12GraphicsCommandList* cmdList) noexcept {
-    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
-    if (HRESULT hr = cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12GraphicsCommandList::QueryInterface(ID3D12GraphicsCommandList4) failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    return cmdList4;
-}
-
-static D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS _MapBuildFlags(AccelerationStructureBuildFlags flags) noexcept {
-    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS result = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
-    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastTrace)) {
-        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    }
-    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastBuild)) {
-        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-    }
-    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
-        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
-    }
-    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
-        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
-    }
-    return result;
-}
-
-static std::optional<D3D12_HIT_GROUP_TYPE> _GetHitGroupType(const RayTracingHitGroupDescriptor& group) noexcept {
-    if (group.Intersection.has_value()) {
-        return D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE;
-    }
-    if (group.ClosestHit.has_value() || group.AnyHit.has_value()) {
-        return D3D12_HIT_GROUP_TYPE_TRIANGLES;
-    }
-    return std::nullopt;
-}
-
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
@@ -520,8 +483,8 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         if (HRESULT hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
             SUCCEEDED(hr)) {
             detail.IsRayTracingSupported = options5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED;
-            detail.MaxRayRecursionDepth = detail.IsRayTracingSupported ? 31u : 0u;
-            RADRAY_INFO_LOG("Ray Tracing: {} (tier={})", detail.IsRayTracingSupported, (int)options5.RaytracingTier);
+            detail.MaxRayRecursionDepth = D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH;
+            RADRAY_INFO_LOG("Ray Tracing: {} (tier={})", detail.IsRayTracingSupported, options5.RaytracingTier);
         } else {
             RADRAY_WARN_LOG("ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5) failed: {} {}", GetErrorName(hr), hr);
         }
@@ -1120,6 +1083,31 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
     return result;
 }
 
+Nullable<unique_ptr<AccelerationStructureView>> DeviceD3D12::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
+    if (!ValidateAccelerationStructureViewDescriptor(desc)) {
+        return nullptr;
+    }
+    auto target = CastD3D12Object(desc.Target);
+    auto heap = _cpuResAlloc.get();
+    auto heapViewOpt = heap->Allocate(1);
+    if (!heapViewOpt.has_value()) {
+        RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate RTAS SRV descriptor");
+        return nullptr;
+    }
+    CpuDescriptorHeapViewRAII heapView{heap, heapViewOpt.value()};
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.RaytracingAccelerationStructure.Location = target->_gpuAddr;
+    heapView.GetHeap()->Create(nullptr, srvDesc, heapView.GetStart());
+
+    auto result = make_unique<AccelerationStructureViewD3D12>(this, target, std::move(heapView));
+    result->_desc = desc;
+    return result;
+}
+
 Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& desc) noexcept {
     if (desc.Category != ShaderBlobCategory::DXIL) {
         RADRAY_ERR_LOG("d3d12 only support DXIL shader blobs");
@@ -1559,7 +1547,7 @@ Nullable<unique_ptr<AccelerationStructure>> DeviceD3D12::CreateAccelerationStruc
     if (HRESULT hr = _mainAlloc->CreateResource(
             &allocDesc,
             &rawDesc,
-            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
             nullptr,
             allocRes.GetAddressOf(),
             IID_PPV_ARGS(buffer.GetAddressOf()));
@@ -1596,6 +1584,11 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
                s == ShaderStage::Intersection ||
                s == ShaderStage::Callable;
     };
+    auto supportsShaderIdentifier = [](ShaderStage s) {
+        return s == ShaderStage::RayGen ||
+               s == ShaderStage::Miss ||
+               s == ShaderStage::Callable;
+    };
 
     vector<wstring> exportNamesW;
     vector<D3D12_EXPORT_DESC> exportDescs;
@@ -1607,6 +1600,7 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
     subobjects.reserve(desc.ShaderEntries.size() + desc.HitGroups.size() + 4);
 
     unordered_set<string> exportNamesUtf8;
+    unordered_set<string> shaderIdNamesUtf8;
     for (const auto& entry : desc.ShaderEntries) {
         if (entry.Target == nullptr) {
             RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor contains null shader entry target");
@@ -1624,6 +1618,9 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
         if (!exportNamesUtf8.insert(exportNameUtf8).second) {
             RADRAY_ERR_LOG("duplicated RT export name '{}'", exportNameUtf8);
             return nullptr;
+        }
+        if (supportsShaderIdentifier(entry.Stage)) {
+            shaderIdNamesUtf8.insert(exportNameUtf8);
         }
         auto exportNameWOpt = text_encoding::ToWideChar(exportNameUtf8);
         if (!exportNameWOpt.has_value()) {
@@ -1661,7 +1658,7 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
     hitGroupAnyW.reserve(desc.HitGroups.size());
     hitGroupIntersectW.reserve(desc.HitGroups.size());
     for (const auto& hit : desc.HitGroups) {
-        auto hitGroupType = _GetHitGroupType(hit);
+        auto hitGroupType = GetHitGroupType(hit);
         if (!hitGroupType.has_value()) {
             RADRAY_ERR_LOG("invalid hit group '{}' without shader references", hit.Name);
             return nullptr;
@@ -1675,6 +1672,7 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
             RADRAY_ERR_LOG("duplicated RT hit group name '{}'", groupNameUtf8);
             return nullptr;
         }
+        shaderIdNamesUtf8.insert(groupNameUtf8);
         auto groupNameWOpt = text_encoding::ToWideChar(groupNameUtf8);
         if (!groupNameWOpt.has_value()) {
             RADRAY_ERR_LOG("cannot convert hit group name '{}'", groupNameUtf8);
@@ -1783,7 +1781,7 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
     }
 
     auto result = make_unique<RayTracingPsoD3D12>(this, std::move(stateObject), std::move(stateProps), rootSig);
-    for (const auto& name : exportNamesUtf8) {
+    for (const auto& name : shaderIdNamesUtf8) {
         auto nameWOpt = text_encoding::ToWideChar(name);
         if (!nameWOpt.has_value()) {
             RADRAY_ERR_LOG("cannot convert export name '{}' to wide char", name);
@@ -2124,66 +2122,80 @@ void CmdListD3D12::End() noexcept {
     _cmdList->Close();
 }
 
-void CmdListD3D12::ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
+void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
     vector<D3D12_RESOURCE_BARRIER> rawBarriers;
-    rawBarriers.reserve(buffers.size() + textures.size());
-    for (const BarrierBufferDescriptor& bb : buffers) {
-        auto buf = CastD3D12Object(bb.Target);
-        D3D12_RESOURCE_BARRIER raw{};
-        if (bb.Before == BufferState::UnorderedAccess && bb.After == BufferState::UnorderedAccess) {
-            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            raw.UAV.pResource = buf->_buf.Get();
-        } else {
-            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            raw.Transition.pResource = buf->_buf.Get();
-            raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            raw.Transition.StateBefore = MapType(bb.Before);
-            raw.Transition.StateAfter = MapType(bb.After);
-            if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
-                continue;
-            }
-        }
-        rawBarriers.push_back(raw);
-    }
-    for (const BarrierTextureDescriptor& tb : textures) {
-        auto tex = CastD3D12Object(tb.Target);
-        D3D12_RESOURCE_BARRIER raw{};
-        if (tb.Before == TextureState::UnorderedAccess && tb.After == TextureState::UnorderedAccess) {
-            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            raw.UAV.pResource = tex->_tex.Get();
-        } else {
-            if (tb.Before == tb.After) {
-                continue;
-            }
-            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            raw.Transition.pResource = tex->_tex.Get();
-            if (tb.IsSubresourceBarrier) {
-                raw.Transition.Subresource = D3D12CalcSubresource(
-                    tb.Range.BaseMipLevel,
-                    tb.Range.BaseArrayLayer,
-                    0,
-                    tex->_desc.MipLevels,
-                    tex->_desc.DepthOrArraySize);
+    rawBarriers.reserve(barriers.size());
+    for (const auto& v : barriers) {
+        if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
+            auto buf = CastD3D12Object(bb->Target);
+            D3D12_RESOURCE_BARRIER raw{};
+            if (bb->Before == BufferState::UnorderedAccess && bb->After == BufferState::UnorderedAccess) {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = buf->_buf.Get();
             } else {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = buf->_buf.Get();
                 raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            }
-            raw.Transition.StateBefore = MapType(tb.Before);
-            raw.Transition.StateAfter = MapType(tb.After);
-            // D3D12 COMMON 和 PRESENT flag 完全一致
-            if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
-                if (tb.Before == TextureState::Present || tb.After == TextureState::Present) {
+                raw.Transition.StateBefore = MapType(bb->Before);
+                raw.Transition.StateAfter = MapType(bb->After);
+                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
                     continue;
                 }
             }
-            if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
-                continue;
+            rawBarriers.push_back(raw);
+        } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
+            auto tex = CastD3D12Object(tb->Target);
+            D3D12_RESOURCE_BARRIER raw{};
+            if (tb->Before == TextureState::UnorderedAccess && tb->After == TextureState::UnorderedAccess) {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = tex->_tex.Get();
+            } else {
+                if (tb->Before == tb->After) {
+                    continue;
+                }
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = tex->_tex.Get();
+                if (tb->IsSubresourceBarrier) {
+                    raw.Transition.Subresource = D3D12CalcSubresource(
+                        tb->Range.BaseMipLevel,
+                        tb->Range.BaseArrayLayer,
+                        0,
+                        tex->_desc.MipLevels,
+                        tex->_desc.DepthOrArraySize);
+                } else {
+                    raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                }
+                raw.Transition.StateBefore = MapType(tb->Before);
+                raw.Transition.StateAfter = MapType(tb->After);
+                // D3D12 COMMON 和 PRESENT flag 完全一致
+                if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
+                    if (tb->Before == TextureState::Present || tb->After == TextureState::Present) {
+                        continue;
+                    }
+                }
+                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                    continue;
+                }
+            }
+            rawBarriers.push_back(raw);
+        } else {
+            const auto* ab = std::get_if<BarrierAccelerationStructureDescriptor>(&v);
+            RADRAY_ASSERT(ab != nullptr);
+            auto as = CastD3D12Object(ab->Target);
+            if (ab->Before == BufferState::AccelerationStructureRead && ab->After == BufferState::AccelerationStructureRead) {
+                D3D12_RESOURCE_BARRIER raw{};
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = as->_buffer.Get();
+                rawBarriers.push_back(raw);
+            } else {
+                RADRAY_ERR_LOG("d3d12 acceleration structure state transition is not supported; use AccelerationStructureRead->AccelerationStructureRead for sync");
             }
         }
-        rawBarriers.push_back(raw);
     }
     if (!rawBarriers.empty()) {
         _cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
@@ -2273,7 +2285,7 @@ Nullable<unique_ptr<RayTracingCommandEncoder>> CmdListD3D12::BeginRayTracingPass
         RADRAY_ERR_LOG("d3d12 ray tracing requires direct command list, current type={}", _type);
         return nullptr;
     }
-    if (_QueryCommandList4(_cmdList.Get()) == nullptr) {
+    if (QueryCommandList4() == nullptr) {
         return nullptr;
     }
     return make_unique<CmdRayTracingPassD3D12>(this);
@@ -2347,6 +2359,16 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
             bufferOffset = footprint.Offset + totalBytes;
         }
     }
+}
+
+ComPtr<ID3D12GraphicsCommandList4> CmdListD3D12::QueryCommandList4() noexcept {
+    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
+    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12GraphicsCommandList::QueryInterface(ID3D12GraphicsCommandList4) failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return cmdList4;
 }
 
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
@@ -2762,7 +2784,7 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
     if (!ValidateBuildBottomLevelASDescriptor(desc)) {
         return;
     }
-    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
         return;
     }
@@ -2815,7 +2837,7 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     inputs.NumDescs = static_cast<UINT>(geometries.size());
     inputs.pGeometryDescs = geometries.data();
-    inputs.Flags = _MapBuildFlags(target->_desc.Flags);
+    inputs.Flags = MapBuildFlags(target->_desc.Flags);
     if (desc.Mode == AccelerationStructureBuildMode::Update) {
         inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     }
@@ -2849,19 +2871,13 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
         build.SourceAccelerationStructureData = target->_gpuAddr;
     }
     cmdList4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
-
-    D3D12_RESOURCE_BARRIER uavBarrier{};
-    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    uavBarrier.UAV.pResource = target->_buffer.Get();
-    _cmdList->_cmdList->ResourceBarrier(1, &uavBarrier);
 }
 
 void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept {
     if (!ValidateBuildTopLevelASDescriptor(desc)) {
         return;
     }
-    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
         return;
     }
@@ -2942,7 +2958,7 @@ void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& de
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     inputs.NumDescs = static_cast<UINT>(desc.Instances.size());
     inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
-    inputs.Flags = _MapBuildFlags(target->_desc.Flags);
+    inputs.Flags = MapBuildFlags(target->_desc.Flags);
     if (desc.Mode == AccelerationStructureBuildMode::Update) {
         inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     }
@@ -2976,12 +2992,6 @@ void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& de
         build.SourceAccelerationStructureData = target->_gpuAddr;
     }
     cmdList4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
-
-    D3D12_RESOURCE_BARRIER uavBarrier{};
-    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    uavBarrier.UAV.pResource = target->_buffer.Get();
-    _cmdList->_cmdList->ResourceBarrier(1, &uavBarrier);
 }
 
 void CmdRayTracingPassD3D12::BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept {
@@ -2996,7 +3006,7 @@ void CmdRayTracingPassD3D12::TraceRays(const TraceRaysDescriptor& desc) noexcept
     if (!ValidateTraceRaysDescriptor(desc, _cmdList->_device->GetDetail())) {
         return;
     }
-    auto cmdList4 = _QueryCommandList4(_cmdList->_cmdList.Get());
+    auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
         return;
     }
@@ -3297,6 +3307,24 @@ void AccelerationStructureD3D12::Destroy() noexcept {
     _gpuAddr = 0;
 }
 
+AccelerationStructureViewD3D12::AccelerationStructureViewD3D12(
+    DeviceD3D12* device,
+    AccelerationStructureD3D12* target,
+    CpuDescriptorHeapViewRAII heapView) noexcept
+    : _device(device),
+      _target(target),
+      _heapView(std::move(heapView)) {}
+
+bool AccelerationStructureViewD3D12::IsValid() const noexcept {
+    return _heapView.IsValid() && _target != nullptr;
+}
+
+void AccelerationStructureViewD3D12::Destroy() noexcept {
+    _heapView.Destroy();
+    _target = nullptr;
+    _device = nullptr;
+}
+
 RayTracingPsoD3D12::RayTracingPsoD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12StateObject> stateObject,
@@ -3346,6 +3374,9 @@ void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, Resource
     } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
         TextureViewD3D12* texView = static_cast<TextureViewD3D12*>(view);
         texView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+        auto* asView = static_cast<AccelerationStructureViewD3D12*>(view);
+        asView->_heapView.CopyTo(0, 1, _resHeapView, offset);
     } else {
         RADRAY_ERR_LOG("d3d12 unsupported RenderObjectTag", tag);
     }

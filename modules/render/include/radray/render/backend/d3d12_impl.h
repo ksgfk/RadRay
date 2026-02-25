@@ -303,6 +303,8 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<AccelerationStructureView>> CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
@@ -442,7 +444,8 @@ public:
 
     void End() noexcept override;
 
-    void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept override;
+    using CommandBuffer::ResourceBarrier;
+    void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
 
@@ -459,6 +462,8 @@ public:
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
+
+    ComPtr<ID3D12GraphicsCommandList4> QueryCommandList4() noexcept;
 
 public:
     DeviceD3D12* _device;
@@ -804,6 +809,25 @@ public:
     string _name;
 };
 
+class AccelerationStructureViewD3D12 final : public AccelerationStructureView {
+public:
+    AccelerationStructureViewD3D12(
+        DeviceD3D12* device,
+        AccelerationStructureD3D12* target,
+        CpuDescriptorHeapViewRAII heapView) noexcept;
+    ~AccelerationStructureViewD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    AccelerationStructureD3D12* _target;
+    CpuDescriptorHeapViewRAII _heapView;
+    AccelerationStructureViewDescriptor _desc;
+};
+
 class RayTracingPsoD3D12 final : public RayTracingPipelineState {
 public:
     RayTracingPsoD3D12(
@@ -914,6 +938,7 @@ constexpr auto CastD3D12Object(BufferView* v) noexcept { return static_cast<Buff
 constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(ComputePipelineState* v) noexcept { return static_cast<ComputePsoD3D12*>(v); }
 constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return static_cast<AccelerationStructureD3D12*>(v); }
+constexpr auto CastD3D12Object(AccelerationStructureView* v) noexcept { return static_cast<AccelerationStructureViewD3D12*>(v); }
 constexpr auto CastD3D12Object(RayTracingPipelineState* v) noexcept { return static_cast<RayTracingPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 

@@ -1135,6 +1135,33 @@ D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept {
     Unreachable();
 }
 
+D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS MapBuildFlags(AccelerationStructureBuildFlags flags) noexcept {
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS result = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastTrace)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::PreferFastBuild)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    }
+    if (flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
+        result |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+    }
+    return result;
+}
+
+std::optional<D3D12_HIT_GROUP_TYPE> GetHitGroupType(const RayTracingHitGroupDescriptor& group) noexcept {
+    if (group.Intersection.has_value()) {
+        return D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE;
+    }
+    if (group.ClosestHit.has_value() || group.AnyHit.has_value()) {
+        return D3D12_HIT_GROUP_TYPE_TRIANGLES;
+    }
+    return std::nullopt;
+}
+
 }  // namespace radray::render::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
@@ -1220,6 +1247,30 @@ std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
         case D3D12_ROOT_PARAMETER_TYPE_CBV: return "CBV";
         case D3D12_ROOT_PARAMETER_TYPE_SRV: return "SRV";
         case D3D12_ROOT_PARAMETER_TYPE_UAV: return "UAV";
+    }
+    radray::Unreachable();
+}
+
+std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept {
+    switch (v) {
+        case D3D12_COMMAND_LIST_TYPE_DIRECT: return "DIRECT";
+        case D3D12_COMMAND_LIST_TYPE_BUNDLE: return "BUNDLE";
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE: return "COMPUTE";
+        case D3D12_COMMAND_LIST_TYPE_COPY: return "COPY";
+        case D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE: return "VIDEO_DECODE";
+        case D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS: return "VIDEO_PROCESS";
+        case D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE: return "VIDEO_ENCODE";
+        case D3D12_COMMAND_LIST_TYPE_NONE: return "UNKNOWN";
+    }
+    radray::Unreachable();
+}
+
+std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept {
+    switch (v) {
+        case D3D12_RAYTRACING_TIER_NOT_SUPPORTED: return "NOT_SUPPORTED";
+        case D3D12_RAYTRACING_TIER_1_0: return "1.0";
+        case D3D12_RAYTRACING_TIER_1_1: return "1.1";
+        case D3D12_RAYTRACING_TIER_1_2: return "1.2";
     }
     radray::Unreachable();
 }

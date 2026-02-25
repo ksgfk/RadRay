@@ -372,6 +372,14 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
     return true;
 }
 
+bool ValidateAccelerationStructureViewDescriptor(const AccelerationStructureViewDescriptor& desc) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("AccelerationStructureViewDescriptor.Target is null");
+        return false;
+    }
+    return true;
+}
+
 bool ValidateAccelerationStructureDescriptor(const AccelerationStructureDescriptor& desc) noexcept {
     if (desc.MaxGeometryCount == 0 && desc.MaxInstanceCount == 0) {
         RADRAY_ERR_LOG("AccelerationStructureDescriptor must define MaxGeometryCount or MaxInstanceCount");
@@ -793,6 +801,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::BufferView: return "BufferView";
         case RenderObjectTag::TextureView: return "TextureView";
+        case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";
         case RenderObjectTag::DescriptorSet: return "DescriptorSet";
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
@@ -816,6 +825,24 @@ std::string_view format_as(PresentMode v) noexcept {
         case PresentMode::FIFO: return "FIFO";
         case PresentMode::Mailbox: return "Mailbox";
         case PresentMode::Immediate: return "Immediate";
+    }
+    Unreachable();
+}
+
+std::string_view format_as(ShaderStage v) noexcept {
+    switch (v) {
+        case ShaderStage::UNKNOWN: return "UNKNOWN";
+        case ShaderStage::Vertex: return "Vertex";
+        case ShaderStage::Pixel: return "Pixel";
+        case ShaderStage::Compute: return "Compute";
+        case ShaderStage::RayGen: return "RayGen";
+        case ShaderStage::Miss: return "Miss";
+        case ShaderStage::ClosestHit: return "ClosestHit";
+        case ShaderStage::AnyHit: return "AnyHit";
+        case ShaderStage::Intersection: return "Intersection";
+        case ShaderStage::Callable: return "Callable";
+        case ShaderStage::Graphics: return "Graphics";
+        case ShaderStage::RayTracing: return "RayTracing";
     }
     Unreachable();
 }

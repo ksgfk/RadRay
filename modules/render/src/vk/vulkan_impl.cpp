@@ -533,6 +533,12 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     return result;
 }
 
+Nullable<unique_ptr<AccelerationStructureView>> DeviceVulkan::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("ray tracing acceleration structure view is not implemented on Vulkan backend yet");
+    return nullptr;
+}
+
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
     if (desc.Category != ShaderBlobCategory::SPIRV) {
@@ -2177,75 +2183,81 @@ void CommandBufferVulkan::End() noexcept {
     }
 }
 
-void CommandBufferVulkan::ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
+void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
     VkPipelineStageFlags srcStageMask = 0;
     VkPipelineStageFlags dstStageMask = 0;
     vector<VkBufferMemoryBarrier> bufferBarriers;
-    bufferBarriers.reserve(buffers.size());
-    for (const auto& i : buffers) {
-        auto buf = CastVkObject(i.Target);
-        auto& bufBarrier = bufferBarriers.emplace_back();
-        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        bufBarrier.pNext = nullptr;
-        bufBarrier.srcAccessMask = BufferStateToAccessFlags(i.Before);
-        bufBarrier.dstAccessMask = BufferStateToAccessFlags(i.After);
-        if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Get());
-            if (i.IsFromOrToOtherQueue) {
-                bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-            } else {
-                bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-            }
-        } else {
-            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        }
-        bufBarrier.buffer = buf->_buffer;
-        bufBarrier.offset = 0;
-        bufBarrier.size = buf->_reqSize;
-
-        auto srcStage = BufferStateToPipelineStageFlags(i.Before);
-        auto dstStage = BufferStateToPipelineStageFlags(i.After);
-        srcStageMask |= srcStage;
-        dstStageMask |= dstStage;
-    }
     vector<VkImageMemoryBarrier> imageBarriers;
-    imageBarriers.reserve(textures.size());
-    for (const auto& i : textures) {
-        auto tex = CastVkObject(i.Target);
-        auto& imgBarrier = imageBarriers.emplace_back();
-        imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        imgBarrier.pNext = nullptr;
-        imgBarrier.srcAccessMask = TextureStateToAccessFlags(i.Before);
-        imgBarrier.dstAccessMask = TextureStateToAccessFlags(i.After);
-        imgBarrier.oldLayout = TextureStateToLayout(i.Before);
-        imgBarrier.newLayout = TextureStateToLayout(i.After);
-        if (i.OtherQueue.HasValue()) {
-            auto otherQ = CastVkObject(i.OtherQueue.Get());
-            if (i.IsFromOrToOtherQueue) {
-                imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+    bufferBarriers.reserve(barriers.size());
+    imageBarriers.reserve(barriers.size());
+    for (const auto& v : barriers) {
+        if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
+            auto buf = CastVkObject(bb->Target);
+            auto& bufBarrier = bufferBarriers.emplace_back();
+            bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            bufBarrier.pNext = nullptr;
+            bufBarrier.srcAccessMask = BufferStateToAccessFlags(bb->Before);
+            bufBarrier.dstAccessMask = BufferStateToAccessFlags(bb->After);
+            if (bb->OtherQueue.HasValue()) {
+                auto otherQ = CastVkObject(bb->OtherQueue.Get());
+                if (bb->IsFromOrToOtherQueue) {
+                    bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                    bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+                } else {
+                    bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                    bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+                }
             } else {
-                imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+                bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             }
-        } else {
-            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        }
-        imgBarrier.image = tex->_image;
-        imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-        imgBarrier.subresourceRange.baseMipLevel = i.IsSubresourceBarrier ? i.Range.BaseMipLevel : 0;
-        imgBarrier.subresourceRange.levelCount = i.IsSubresourceBarrier ? i.Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
-        imgBarrier.subresourceRange.baseArrayLayer = i.IsSubresourceBarrier ? i.Range.BaseArrayLayer : 0;
-        imgBarrier.subresourceRange.layerCount = i.IsSubresourceBarrier ? i.Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+            bufBarrier.buffer = buf->_buffer;
+            bufBarrier.offset = 0;
+            bufBarrier.size = buf->_reqSize;
 
-        auto srcStage = TextureStateToPipelineStageFlags(i.Before, true);
-        auto dstStage = TextureStateToPipelineStageFlags(i.After, false);
-        srcStageMask |= srcStage;
-        dstStageMask |= dstStage;
+            auto srcStage = BufferStateToPipelineStageFlags(bb->Before);
+            auto dstStage = BufferStateToPipelineStageFlags(bb->After);
+            srcStageMask |= srcStage;
+            dstStageMask |= dstStage;
+        } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
+            auto tex = CastVkObject(tb->Target);
+            auto& imgBarrier = imageBarriers.emplace_back();
+            imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            imgBarrier.pNext = nullptr;
+            imgBarrier.srcAccessMask = TextureStateToAccessFlags(tb->Before);
+            imgBarrier.dstAccessMask = TextureStateToAccessFlags(tb->After);
+            imgBarrier.oldLayout = TextureStateToLayout(tb->Before);
+            imgBarrier.newLayout = TextureStateToLayout(tb->After);
+            if (tb->OtherQueue.HasValue()) {
+                auto otherQ = CastVkObject(tb->OtherQueue.Get());
+                if (tb->IsFromOrToOtherQueue) {
+                    imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
+                    imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
+                } else {
+                    imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
+                    imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
+                }
+            } else {
+                imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            }
+            imgBarrier.image = tex->_image;
+            imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
+            imgBarrier.subresourceRange.baseMipLevel = tb->IsSubresourceBarrier ? tb->Range.BaseMipLevel : 0;
+            imgBarrier.subresourceRange.levelCount = tb->IsSubresourceBarrier ? tb->Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+            imgBarrier.subresourceRange.baseArrayLayer = tb->IsSubresourceBarrier ? tb->Range.BaseArrayLayer : 0;
+            imgBarrier.subresourceRange.layerCount = tb->IsSubresourceBarrier ? tb->Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+
+            auto srcStage = TextureStateToPipelineStageFlags(tb->Before, true);
+            auto dstStage = TextureStateToPipelineStageFlags(tb->After, false);
+            srcStageMask |= srcStage;
+            dstStageMask |= dstStage;
+        } else {
+            const auto* ab = std::get_if<BarrierAccelerationStructureDescriptor>(&v);
+            RADRAY_ASSERT(ab != nullptr);
+            RADRAY_UNUSED(ab);
+            RADRAY_ERR_LOG("vk acceleration structure barrier is not implemented");
+        }
     }
     _device->_ftb.vkCmdPipelineBarrier(
         _cmdBuffer,

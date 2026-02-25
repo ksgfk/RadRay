@@ -191,6 +191,8 @@ D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
 D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
 D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept;
+D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS MapBuildFlags(AccelerationStructureBuildFlags flags) noexcept;
+std::optional<D3D12_HIT_GROUP_TYPE> GetHitGroupType(const RayTracingHitGroupDescriptor& group) noexcept;
 
 }  // namespace radray::render::d3d12
 
@@ -201,5 +203,7 @@ std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
 std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept;
+std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept;
+std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept;
 
 #endif

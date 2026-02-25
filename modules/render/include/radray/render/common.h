@@ -4,6 +4,7 @@
 #include <variant>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -436,7 +437,8 @@ enum class RenderObjectTag : uint32_t {
     ResourceView = Resource << 3,
     BufferView = ResourceView | (ResourceView << 1),
     TextureView = ResourceView | (ResourceView << 2),
-    DescriptorSet = ResourceView << 3,
+    AccelerationStructureView = ResourceView | (ResourceView << 3),
+    DescriptorSet = ResourceView << 4,
     Sampler = DescriptorSet << 1,
     BindlessArray = Sampler << 1,
     RayTracingCmdEncoder = BindlessArray << 1,
@@ -516,6 +518,7 @@ class Buffer;
 class BufferView;
 class Texture;
 class TextureView;
+class AccelerationStructureView;
 class Shader;
 class RootSignature;
 class PipelineState;
@@ -646,6 +649,19 @@ struct BarrierTextureDescriptor {
     SubresourceRange Range{};
 };
 
+struct BarrierAccelerationStructureDescriptor {
+    AccelerationStructure* Target{nullptr};
+    BufferStates Before{BufferState::UNKNOWN};
+    BufferStates After{BufferState::UNKNOWN};
+    Nullable<CommandQueue*> OtherQueue{nullptr};
+    bool IsFromOrToOtherQueue{false};
+};
+
+using ResourceBarrierDescriptor = std::variant<
+    BarrierBufferDescriptor,
+    BarrierTextureDescriptor,
+    BarrierAccelerationStructureDescriptor>;
+
 struct ColorAttachment {
     TextureView* Target{nullptr};
     LoadAction Load{LoadAction::DontCare};
@@ -715,6 +731,11 @@ struct BufferViewDescriptor {
     uint32_t Stride{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
     BufferViewUsage Usage{BufferViewUsage::ReadOnlyStorage};
+};
+
+struct AccelerationStructureViewDescriptor {
+    AccelerationStructure* Target{nullptr};
+    std::string_view Name{};
 };
 
 struct ShaderDescriptor {
@@ -1085,6 +1106,8 @@ public:
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<AccelerationStructureView>> CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
@@ -1125,7 +1148,19 @@ public:
 
     virtual void End() noexcept = 0;
 
-    virtual void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept = 0;
+    virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
+
+    void ResourceBarrier(std::span<const BarrierBufferDescriptor> buffers, std::span<const BarrierTextureDescriptor> textures) noexcept {
+        vector<ResourceBarrierDescriptor> all;
+        all.reserve(buffers.size() + textures.size());
+        for (const auto& b : buffers) {
+            all.emplace_back(b);
+        }
+        for (const auto& t : textures) {
+            all.emplace_back(t);
+        }
+        ResourceBarrier(std::span<const ResourceBarrierDescriptor>{all});
+    }
 
     virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
 
@@ -1286,6 +1321,13 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
 
+class AccelerationStructureView : public ResourceView {
+public:
+    virtual ~AccelerationStructureView() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructureView; }
+};
+
 class Shader : public RenderBase {
 public:
     virtual ~Shader() noexcept = default;
@@ -1397,6 +1439,7 @@ IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept;
 bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept;
+bool ValidateAccelerationStructureViewDescriptor(const AccelerationStructureViewDescriptor& desc) noexcept;
 bool ValidateAccelerationStructureDescriptor(const AccelerationStructureDescriptor& desc) noexcept;
 bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& desc) noexcept;
 bool ValidateBuildTopLevelASDescriptor(const BuildTopLevelASDescriptor& desc) noexcept;
@@ -1421,5 +1464,6 @@ std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(FenceStatus v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
+std::string_view format_as(ShaderStage v) noexcept;
 
 }  // namespace radray::render
