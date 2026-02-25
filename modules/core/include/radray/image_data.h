@@ -43,6 +43,17 @@ public:
     bool IsFlipY{false};
 };
 
+struct PixelCompareResult {
+    string ErrorReason{};
+    size_t MismatchCount{0};
+    size_t FirstMismatchPixel{static_cast<size_t>(-1)};
+    uint32_t FirstMismatchChannel{0};
+    uint8_t ActualValue{0};
+    uint8_t ExpectedValue{0};
+
+    bool IsMatch() const noexcept { return MismatchCount == 0; }
+};
+
 class ImageData {
 public:
     ImageData() noexcept = default;
@@ -64,6 +75,9 @@ public:
     static bool IsPNG(std::istream& stream);
     static std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
     bool WritePNG(PNGWriteSettings settings = PNGWriteSettings{}) const;
+
+    static PixelCompareResult CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance) noexcept;
+    static ImageData ImageDiffRGBA8(const ImageData& actual, const ImageData& expected) noexcept;
 
     unique_ptr<byte[]> Data{};
     uint32_t Width{0};

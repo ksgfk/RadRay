@@ -5,130 +5,79 @@
 #include <stdexcept>
 #include <utility>
 
+#include <radray/file.h>
 #include <radray/image_data.h>
 #include <radray/render/common.h>
+#include <radray/render/dxc.h>
 
 namespace radray::render {
-
-class Dxc;
-
-struct TextureReadbackLayout {
-    uint32_t Width{0};
-    uint32_t Height{0};
-    uint32_t BytesPerPixel{0};
-    uint32_t RowPitchBytes{0};
-    uint32_t TightRowBytes{0};
-};
-
-struct TextureReadbackResult {
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    TextureReadbackLayout Layout{};
-    vector<byte> Data{};
-};
-
-std::optional<TextureReadbackResult> ReadbackTexture2D(
-    Device* device,
-    CommandQueue* queue,
-    Texture* src,
-    TextureState srcStateBeforeCopy,
-    uint32_t mipLevel = 0,
-    uint32_t arrayLayer = 0) noexcept;
-
-std::optional<ImageData> PackReadbackToTightRGBA8(const TextureReadbackResult& in) noexcept;
 
 class DebugException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-struct DebugContextDescriptor {
-    DeviceDescriptor DeviceDesc{};
-    QueueType Queue{QueueType::Direct};
-    uint32_t QueueIndex{0};
-    bool CreateDxc{false};
-};
-
-struct DebugOffscreenTargetDescriptor {
-    uint32_t Width{0};
-    uint32_t Height{0};
-    TextureFormat Format{TextureFormat::RGBA8_UNORM};
-    string Name{"debug_offscreen_rt"};
-};
-
-struct DebugOffscreenTarget {
-    unique_ptr<Texture> Texture{};
-    unique_ptr<TextureView> RTV{};
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    uint32_t Width{0};
-    uint32_t Height{0};
-};
-
-class DebugContext;
-
-class DebugPass {
+class OffScreenTestContext {
 public:
-    virtual ~DebugPass() noexcept = default;
-    virtual void Record(DebugContext& ctx, CommandBuffer* cmd, DebugOffscreenTarget& target) = 0;
-};
+    struct TextureReadbackResult {
+        vector<byte> Data{};
+        TextureFormat Format{TextureFormat::UNKNOWN};
+        uint32_t Width{0};
+        uint32_t Height{0};
+        uint32_t BytesPerPixel{0};
+        uint32_t RowPitchBytes{0};
+        uint32_t TightRowBytes{0};
+    };
 
-class DebugContext {
+    struct RasterShaders {
+        unique_ptr<Shader> VS;
+        string VSEntry;
+        unique_ptr<Shader> PS;
+        string PSEntry;
+    };
+
+    OffScreenTestContext(
+        std::string_view name,
+        DeviceDescriptor deviceDesc,
+        bool needDxc,
+        Eigen::Vector2i rtSize,
+        TextureFormat rtFormat);
+    OffScreenTestContext(const OffScreenTestContext&) = delete;
+    OffScreenTestContext& operator=(const OffScreenTestContext&) = delete;
+    OffScreenTestContext(OffScreenTestContext&&) = delete;
+    OffScreenTestContext& operator=(OffScreenTestContext&&) = delete;
+    virtual ~OffScreenTestContext() noexcept;
+
+    ImageData Run();
+
+    virtual void Init(CommandBuffer* cmd, Fence* fence) = 0;
+
+    virtual void ExecutePass(CommandBuffer* cmd, Fence* fence) = 0;
+
+    ImageData LoadBaseline();
+    TextureReadbackResult ReadbackTexture2D(Texture* target, TextureState before, uint32_t mipLevel = 0, uint32_t arrayLayer = 0);
+    ImageData PackReadbackRGBA8(const TextureReadbackResult& readback);
+    void WriteImageComparisonArtifacts(const ImageData& actual, const ImageData& expected, std::string_view name);
+    RasterShaders CompileRasterShaders(std::string_view src, HlslShaderModel sm = HlslShaderModel::SM60);
+    void UploadBuffer(Buffer* dst, std::span<const byte> data);
+    void Submit(CommandBuffer* cmd, Fence* fence);
+    void ThrowOnBackendValidationErrors(std::string_view stage);
+
 public:
-    static DebugContext Create(const DebugContextDescriptor& desc);
-
-    Device* GetDevice() const noexcept { return _device.get(); }
-    CommandQueue* GetQueue() const noexcept { return _queue; }
-
+    string _name;
+    std::filesystem::path _projectDir;
+    std::filesystem::path _testEnvDir;
+    std::filesystem::path _assetsDir;
+    std::filesystem::path _testArtifactsDir;
+    bool _needUpdateBaseline;
+    shared_ptr<Device> _device;
+    CommandQueue* _queue;
 #ifdef RADRAY_ENABLE_DXC
-    Dxc* GetDxc() const noexcept { return _dxc.get(); }
+    shared_ptr<Dxc> _dxc;
 #endif
-
-    DebugOffscreenTarget CreateOffscreenTarget(const DebugOffscreenTargetDescriptor& desc);
-
-    void ExecutePass(
-        DebugOffscreenTarget& target,
-        DebugPass& pass,
-        TextureState before = TextureState::Undefined,
-        TextureState after = TextureState::CopySource);
-
-    ImageData ReadbackRGBA8(
-        const DebugOffscreenTarget& target,
-        TextureState srcStateBeforeCopy = TextureState::CopySource,
-        uint32_t mipLevel = 0,
-        uint32_t arrayLayer = 0);
-
-    void WritePNG(const ImageData& img, const PNGWriteSettings& settings) const;
-
-private:
-    explicit DebugContext(shared_ptr<Device> device, CommandQueue* queue) noexcept
-        : _device(std::move(device)), _queue(queue) {}
-
-private:
-    shared_ptr<Device> _device{};
-    CommandQueue* _queue{};
-#ifdef RADRAY_ENABLE_DXC
-    shared_ptr<Dxc> _dxc{};
-#endif
+    unique_ptr<Texture> _rt;
+    unique_ptr<TextureView> _rtv;
+    TextureState _rtState{TextureState::Undefined};
 };
-
-struct PixelCompareResult {
-    size_t MismatchCount{0};
-    size_t FirstMismatchPixel{static_cast<size_t>(-1)};
-    uint32_t FirstMismatchChannel{0};
-    uint8_t ActualValue{0};
-    uint8_t ExpectedValue{0};
-
-    bool IsMatch() const noexcept { return MismatchCount == 0; }
-};
-
-PixelCompareResult CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance = 0);
-
-ImageData BuildDiffImageRGBA8(const ImageData& actual, const ImageData& expected);
-
-void WriteImageComparisonArtifacts(
-    const DebugContext& ctx,
-    const ImageData& actual,
-    const ImageData& expected,
-    std::string_view outputDir);
 
 }  // namespace radray::render
-

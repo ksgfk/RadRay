@@ -487,6 +487,69 @@ bool ImageData::WritePNG(PNGWriteSettings settings) const {
 }
 #endif
 
+PixelCompareResult ImageData::CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance) noexcept {
+    if (actual.Format != ImageFormat::RGBA8_BYTE || expected.Format != ImageFormat::RGBA8_BYTE) {
+        return PixelCompareResult{"only RGBA8_BYTE is supported"};
+    }
+    if (actual.Width != expected.Width || actual.Height != expected.Height) {
+        return PixelCompareResult{"image size mismatch"};
+    }
+    if (actual.Data == nullptr || expected.Data == nullptr) {
+        return PixelCompareResult{"image data is null"};
+    }
+    PixelCompareResult out{};
+    const size_t pxCount = static_cast<size_t>(actual.Width) * actual.Height;
+    for (size_t i = 0; i < pxCount; ++i) {
+        const size_t p = i * 4;
+        for (uint32_t c = 0; c < 4; ++c) {
+            const uint8_t a = std::to_integer<uint8_t>(actual.Data[p + c]);
+            const uint8_t e = std::to_integer<uint8_t>(expected.Data[p + c]);
+            const int delta = static_cast<int>(a) - static_cast<int>(e);
+            const uint8_t absDelta = static_cast<uint8_t>(delta < 0 ? -delta : delta);
+            if (absDelta > tolerance) {
+                ++out.MismatchCount;
+                if (out.FirstMismatchPixel == static_cast<size_t>(-1)) {
+                    out.FirstMismatchPixel = i;
+                    out.FirstMismatchChannel = c;
+                    out.ActualValue = a;
+                    out.ExpectedValue = e;
+                }
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+ImageData ImageData::ImageDiffRGBA8(const ImageData& actual, const ImageData& expected) noexcept {
+    if (actual.Format != ImageFormat::RGBA8_BYTE || expected.Format != ImageFormat::RGBA8_BYTE) {
+        return {};
+    }
+    if (actual.Width != expected.Width || actual.Height != expected.Height) {
+        return {};
+    }
+    if (actual.Data == nullptr || expected.Data == nullptr) {
+        return {};
+    }
+    ImageData diff{};
+    diff.Width = actual.Width;
+    diff.Height = actual.Height;
+    diff.Format = ImageFormat::RGBA8_BYTE;
+    diff.Data = std::make_unique<byte[]>(diff.GetSize());
+    const size_t pxCount = static_cast<size_t>(actual.Width) * actual.Height;
+    for (size_t i = 0; i < pxCount; ++i) {
+        const size_t p = i * 4;
+        for (uint32_t c = 0; c < 3; ++c) {
+            const int a = std::to_integer<int>(actual.Data[p + c]);
+            const int e = std::to_integer<int>(expected.Data[p + c]);
+            const int delta = a - e;
+            diff.Data[p + c] = static_cast<byte>(delta < 0 ? -delta : delta);
+        }
+        diff.Data[p + 3] = static_cast<byte>(0xFF);
+    }
+    return diff;
+}
+
 std::string_view format_as(ImageFormat val) noexcept {
     switch (val) {
         case radray::ImageFormat::R8_BYTE: return "R8_BYTE";

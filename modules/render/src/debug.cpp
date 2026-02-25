@@ -4,402 +4,474 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <fstream>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
-#ifdef RADRAY_ENABLE_DXC
-#include <radray/render/dxc.h>
+#include <radray/platform.h>
+#include <radray/render/render_utility.h>
+#ifdef RADRAY_ENABLE_D3D12
+#include <radray/render/backend/d3d12_impl.h>
 #endif
 
 namespace radray::render {
 
-namespace {
-
-[[noreturn]] void ThrowDebug(const std::string& where, const std::string& msg) {
-    throw DebugException(where + ": " + msg);
+OffScreenTestContext::OffScreenTestContext(
+    std::string_view name,
+    DeviceDescriptor deviceDesc,
+    bool needDxc,
+    Eigen::Vector2i rtSize,
+    TextureFormat rtFormat)
+    : _name(name) {
+    {
+        auto v = radray::GetEnv("RADRAY_PROJECT_DIR");
+        if (v.empty()) {
+            _projectDir = std::filesystem::current_path();
+        } else {
+            _projectDir = std::filesystem::path{v};
+        }
+    }
+    {
+        auto v = radray::GetEnv("RADRAY_TEST_ENV_DIR");
+        if (v.empty()) {
+            _testEnvDir = std::filesystem::current_path();
+        } else {
+            _testEnvDir = std::filesystem::path{v};
+        }
+    }
+    {
+        auto v = radray::GetEnv("RADRAY_ASSETS_DIR");
+        if (v.empty()) {
+            _assetsDir = std::filesystem::current_path();
+        } else {
+            _assetsDir = std::filesystem::path{v};
+        }
+    }
+    {
+        auto v = radray::GetEnv("RADRAY_TEST_ARTIFACTS_DIR");
+        if (v.empty()) {
+            _testArtifactsDir = _testEnvDir / "test_artifacts";
+        } else {
+            _testArtifactsDir = std::filesystem::path{v};
+        }
+    }
+    {
+        auto v = radray::GetEnv("RADRAY_TEST_UPDATE_BASELINE");
+        _needUpdateBaseline = (v == "1");
+    }
+    _device = CreateDevice(deviceDesc).Unwrap();
+    _queue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
+#ifdef RADRAY_ENABLE_DXC
+    if (needDxc) {
+        _dxc = CreateDxc().Unwrap();
+    }
+#else
+    if (needDxc) {
+        throw DebugException("dxc is required but RADRAY_ENABLE_DXC is off");
+    }
+#endif
+    if (rtSize.x() <= 0 || rtSize.y() <= 0) {
+        throw DebugException(fmt::format("invalid render target size: {}x{}", rtSize.x(), rtSize.y()));
+    }
+    TextureDescriptor rtDesc{
+        TextureDimension::Dim2D,
+        static_cast<uint32_t>(rtSize.x()),
+        static_cast<uint32_t>(rtSize.y()),
+        1,
+        1,
+        1,
+        rtFormat,
+        MemoryType::Device,
+        TextureUse::RenderTarget | TextureUse::CopySource,
+        ResourceHint::None,
+        "test_offscreen_rt"};
+    _rt = _device->CreateTexture(rtDesc).Unwrap();
+    TextureViewDescriptor rtvDesc{
+        _rt.get(),
+        TextureDimension::Dim2D,
+        rtFormat,
+        SubresourceRange{0, 1, 0, 1},
+        TextureViewUsage::RenderTarget};
+    _rtv = _device->CreateTextureView(rtvDesc).Unwrap();
 }
 
-}  // namespace
+OffScreenTestContext::~OffScreenTestContext() noexcept {
+    _rtv.reset();
+    _rt.reset();
+    _queue = nullptr;
+    _device.reset();
+    _dxc.reset();
+}
 
-std::optional<TextureReadbackResult> ReadbackTexture2D(
-    Device* device,
-    CommandQueue* queue,
-    Texture* src,
-    TextureState srcStateBeforeCopy,
-    uint32_t mipLevel,
-    uint32_t arrayLayer) noexcept {
-    if (device == nullptr || queue == nullptr || src == nullptr) {
-        RADRAY_ERR_LOG("ReadbackTexture2D got null input");
-        return std::nullopt;
+void OffScreenTestContext::ThrowOnBackendValidationErrors(std::string_view stage) {
+#ifdef RADRAY_ENABLE_D3D12
+    if (_device == nullptr || _device->GetBackend() != RenderBackend::D3D12) {
+        return;
+    }
+    auto* d3d12Device = d3d12::CastD3D12Object(_device.get());
+    if (d3d12Device == nullptr || d3d12Device->_device == nullptr) {
+        return;
     }
 
+    d3d12::ComPtr<ID3D12InfoQueue> infoQueue;
+    if (FAILED(d3d12Device->_device.As(&infoQueue)) || infoQueue == nullptr) {
+        return;
+    }
+
+    const UINT64 totalMessages = infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (totalMessages == 0) {
+        return;
+    }
+
+    constexpr UINT64 kMaxInspectCount = 64;
+    const UINT64 startIndex = totalMessages > kMaxInspectCount ? (totalMessages - kMaxInspectCount) : 0;
+    string errorMessages;
+    errorMessages.reserve(2048);
+    bool hasError = false;
+    for (UINT64 i = startIndex; i < totalMessages; ++i) {
+        SIZE_T messageLength = 0;
+        if (FAILED(infoQueue->GetMessage(i, nullptr, &messageLength)) || messageLength == 0) {
+            continue;
+        }
+        vector<byte> storage(messageLength);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(infoQueue->GetMessage(i, message, &messageLength))) {
+            continue;
+        }
+        if (message->Severity != D3D12_MESSAGE_SEVERITY_ERROR &&
+            message->Severity != D3D12_MESSAGE_SEVERITY_CORRUPTION) {
+            continue;
+        }
+        hasError = true;
+        const char* severityName =
+            message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
+                ? "CORRUPTION"
+                : "ERROR";
+        errorMessages += fmt::format(
+            "[{}][{}] {}\n",
+            severityName,
+            static_cast<int>(message->ID),
+            message->pDescription == nullptr ? "" : message->pDescription);
+    }
+    infoQueue->ClearStoredMessages();
+
+    if (hasError) {
+        throw DebugException(fmt::format(
+            "D3D12 validation failed at '{}':\n{}",
+            stage,
+            errorMessages));
+    }
+#else
+    RADRAY_UNUSED(stage);
+#endif
+}
+
+OffScreenTestContext::TextureReadbackResult OffScreenTestContext::ReadbackTexture2D(
+    Texture* src,
+    TextureState before,
+    uint32_t mipLevel,
+    uint32_t arrayLayer) {
     const TextureDescriptor srcDesc = src->GetDesc();
     if (srcDesc.Dim != TextureDimension::Dim2D && srcDesc.Dim != TextureDimension::Dim2DArray) {
-        RADRAY_ERR_LOG("ReadbackTexture2D only supports 2D textures, got {}", srcDesc.Dim);
-        return std::nullopt;
+        throw DebugException(fmt::format("ReadbackTexture2D only supports 2D textures, got {}", srcDesc.Dim));
     }
     if (srcDesc.MipLevels == 0 || mipLevel >= srcDesc.MipLevels) {
-        RADRAY_ERR_LOG("ReadbackTexture2D invalid mip level {}, total {}", mipLevel, srcDesc.MipLevels);
-        return std::nullopt;
+        throw DebugException(fmt::format("ReadbackTexture2D invalid mip level {}, total {}", mipLevel, srcDesc.MipLevels));
     }
     if (srcDesc.DepthOrArraySize == 0 || arrayLayer >= srcDesc.DepthOrArraySize) {
-        RADRAY_ERR_LOG("ReadbackTexture2D invalid array layer {}, total {}", arrayLayer, srcDesc.DepthOrArraySize);
-        return std::nullopt;
+        throw DebugException(fmt::format("ReadbackTexture2D invalid array layer {}, total {}", arrayLayer, srcDesc.DepthOrArraySize));
     }
-
     const uint32_t bpp = GetTextureFormatBytesPerPixel(srcDesc.Format);
     if (bpp == 0) {
-        RADRAY_ERR_LOG("ReadbackTexture2D invalid texture format {}", srcDesc.Format);
-        return std::nullopt;
+        throw DebugException(fmt::format("ReadbackTexture2D invalid texture format {}", srcDesc.Format));
     }
-
     const uint32_t width = std::max(srcDesc.Width >> mipLevel, 1u);
     const uint32_t height = std::max(srcDesc.Height >> mipLevel, 1u);
     const uint64_t tightRowBytes = static_cast<uint64_t>(width) * bpp;
-    const uint64_t rowPitchAlign = std::max<uint64_t>(1, device->GetDetail().TextureDataPitchAlignment);
+    const uint64_t rowPitchAlign = std::max<uint64_t>(1, _device->GetDetail().TextureDataPitchAlignment);
     const uint64_t rowPitchBytes = Align(tightRowBytes, rowPitchAlign);
     const uint64_t totalBytes = rowPitchBytes * height;
     if (rowPitchBytes > std::numeric_limits<uint32_t>::max() ||
         tightRowBytes > std::numeric_limits<uint32_t>::max() ||
         totalBytes > std::numeric_limits<uint32_t>::max()) {
-        RADRAY_ERR_LOG("ReadbackTexture2D readback size overflow");
-        return std::nullopt;
+        throw DebugException("ReadbackTexture2D readback size overflow");
     }
-
-    BufferDescriptor readbackDesc{};
-    readbackDesc.Size = totalBytes;
-    readbackDesc.Memory = MemoryType::ReadBack;
-    readbackDesc.Usage = BufferUse::MapRead | BufferUse::CopyDestination;
-    readbackDesc.Hints = ResourceHint::None;
-    readbackDesc.Name = "debug_readback_buffer";
-    auto readbackBufOpt = device->CreateBuffer(readbackDesc);
-    if (!readbackBufOpt.HasValue()) {
-        RADRAY_ERR_LOG("ReadbackTexture2D failed to create readback buffer");
-        return std::nullopt;
-    }
-    auto readbackBuf = readbackBufOpt.Release();
-
-    auto cmdOpt = device->CreateCommandBuffer(queue);
-    if (!cmdOpt.HasValue()) {
-        RADRAY_ERR_LOG("ReadbackTexture2D failed to create command buffer");
-        return std::nullopt;
-    }
-    auto cmd = cmdOpt.Release();
-
-    auto fenceOpt = device->CreateFence();
-    if (!fenceOpt.HasValue()) {
-        RADRAY_ERR_LOG("ReadbackTexture2D failed to create fence");
-        return std::nullopt;
-    }
-    auto fence = fenceOpt.Release();
-
+    BufferDescriptor readbackDesc{
+        totalBytes,
+        MemoryType::ReadBack,
+        BufferUse::MapRead | BufferUse::CopyDestination,
+        ResourceHint::Dedicated,
+        "debug_readback_buffer"};
+    auto readbackBuf = _device->CreateBuffer(readbackDesc).Unwrap();
+    auto cmd = _device->CreateCommandBuffer(_queue).Unwrap();
+    auto fence = _device->CreateFence().Unwrap();
     cmd->Begin();
     {
-        BarrierTextureDescriptor texBarrier{};
-        texBarrier.Target = src;
-        texBarrier.Before = srcStateBeforeCopy;
-        texBarrier.After = TextureState::CopySource;
-        texBarrier.IsSubresourceBarrier = true;
-        texBarrier.Range = SubresourceRange{arrayLayer, 1, mipLevel, 1};
-        const ResourceBarrierDescriptor barriers[] = {texBarrier};
-        cmd->ResourceBarrier(barriers);
+        ResourceBarrierDescriptor texBarrier = BarrierTextureDescriptor{
+            src,
+            before,
+            TextureState::CopySource,
+            nullptr,
+            false,
+            true,
+            SubresourceRange{arrayLayer, 1, mipLevel, 1}};
+        cmd->ResourceBarrier(std::span{&texBarrier, 1});
     }
     cmd->CopyTextureToBuffer(readbackBuf.get(), 0, src, SubresourceRange{arrayLayer, 1, mipLevel, 1});
-    {
-        // Readback buffers are CPU-visible and can be mapped directly after GPU execution completes.
-        // Avoid forcing backend-specific state transitions here.
-    }
     cmd->End();
-
     CommandBuffer* cmdRaw[] = {cmd.get()};
     CommandQueueSubmitDescriptor submitDesc{};
     submitDesc.CmdBuffers = cmdRaw;
     submitDesc.SignalFence = fence.get();
-    queue->Submit(submitDesc);
+    _queue->Submit(submitDesc);
     fence->Wait();
-
-    TextureReadbackResult result{};
-    result.Format = srcDesc.Format;
-    result.Layout.Width = width;
-    result.Layout.Height = height;
-    result.Layout.BytesPerPixel = bpp;
-    result.Layout.RowPitchBytes = static_cast<uint32_t>(rowPitchBytes);
-    result.Layout.TightRowBytes = static_cast<uint32_t>(tightRowBytes);
-    result.Data.resize(totalBytes);
-
+    ThrowOnBackendValidationErrors("ReadbackTexture2D");
     void* mapped = readbackBuf->Map(0, totalBytes);
     if (mapped == nullptr) {
-        RADRAY_ERR_LOG("ReadbackTexture2D map readback buffer failed");
-        return std::nullopt;
+        throw DebugException("ReadbackTexture2D map readback buffer failed");
     }
-    std::memcpy(result.Data.data(), mapped, totalBytes);
+    vector<byte> data{totalBytes};
+    std::memcpy(data.data(), mapped, totalBytes);
     readbackBuf->Unmap(0, totalBytes);
-    return result;
+    return {
+        std::move(data),
+        srcDesc.Format,
+        width,
+        height,
+        bpp,
+        static_cast<uint32_t>(rowPitchBytes),
+        static_cast<uint32_t>(tightRowBytes)};
 }
 
-std::optional<ImageData> PackReadbackToTightRGBA8(const TextureReadbackResult& in) noexcept {
-    if (in.Layout.Width == 0 || in.Layout.Height == 0 || in.Layout.BytesPerPixel != 4) {
-        RADRAY_ERR_LOG("PackReadbackToTightRGBA8 invalid readback layout");
-        return std::nullopt;
+ImageData OffScreenTestContext::PackReadbackRGBA8(const TextureReadbackResult& readback) {
+    if (readback.Width == 0 || readback.Height == 0 || readback.BytesPerPixel != 4) {
+        throw DebugException("PackReadbackToTightRGBA8 invalid readback layout");
     }
-    if (in.Format != TextureFormat::RGBA8_UNORM &&
-        in.Format != TextureFormat::BGRA8_UNORM &&
-        in.Format != TextureFormat::RGBA8_UNORM_SRGB &&
-        in.Format != TextureFormat::BGRA8_UNORM_SRGB) {
-        RADRAY_ERR_LOG("PackReadbackToTightRGBA8 unsupported format {}", in.Format);
-        return std::nullopt;
-    }
-
-    const uint64_t expectBytes = static_cast<uint64_t>(in.Layout.RowPitchBytes) * in.Layout.Height;
-    if (in.Data.size() < expectBytes) {
-        RADRAY_ERR_LOG("PackReadbackToTightRGBA8 input data too small, need {}, got {}", expectBytes, in.Data.size());
-        return std::nullopt;
+    const uint64_t expectBytes = static_cast<uint64_t>(readback.RowPitchBytes) * readback.Height;
+    if (readback.Data.size() < expectBytes) {
+        throw DebugException(fmt::format("PackReadbackToTightRGBA8 input data too small, need {}, got {}", expectBytes, readback.Data.size()));
     }
 
     ImageData out{};
-    out.Width = in.Layout.Width;
-    out.Height = in.Layout.Height;
+    out.Width = readback.Width;
+    out.Height = readback.Height;
     out.Format = ImageFormat::RGBA8_BYTE;
     out.Data = make_unique<byte[]>(static_cast<size_t>(out.GetSize()));
-    const bool isBGRA = (in.Format == TextureFormat::BGRA8_UNORM || in.Format == TextureFormat::BGRA8_UNORM_SRGB);
-    for (uint32_t y = 0; y < in.Layout.Height; ++y) {
-        const byte* srcRow = in.Data.data() + static_cast<size_t>(in.Layout.RowPitchBytes) * y;
-        byte* dstRow = out.Data.get() + static_cast<size_t>(in.Layout.TightRowBytes) * y;
-        if (!isBGRA) {
-            std::memcpy(dstRow, srcRow, in.Layout.TightRowBytes);
-            continue;
-        }
-        for (uint32_t x = 0; x < in.Layout.Width; ++x) {
-            const size_t p = static_cast<size_t>(x) * 4;
-            dstRow[p + 0] = srcRow[p + 2];
-            dstRow[p + 1] = srcRow[p + 1];
-            dstRow[p + 2] = srcRow[p + 0];
-            dstRow[p + 3] = srcRow[p + 3];
-        }
-    }
-    return out;
-}
-
-DebugContext DebugContext::Create(const DebugContextDescriptor& desc) {
-    auto devOpt = CreateDevice(desc.DeviceDesc);
-    if (!devOpt.HasValue()) {
-        ThrowDebug("DebugContext::Create", "CreateDevice failed");
-    }
-    auto device = devOpt.Unwrap();
-
-    auto queueOpt = device->GetCommandQueue(desc.Queue, desc.QueueIndex);
-    if (!queueOpt.HasValue()) {
-        ThrowDebug("DebugContext::Create", "GetCommandQueue failed");
-    }
-    auto* queue = queueOpt.Unwrap();
-
-    DebugContext ctx{device, queue};
-    if (desc.CreateDxc) {
-#ifdef RADRAY_ENABLE_DXC
-        auto dxcOpt = CreateDxc();
-        if (!dxcOpt.HasValue()) {
-            ThrowDebug("DebugContext::Create", "CreateDxc failed");
-        }
-        ctx._dxc = dxcOpt.Unwrap();
-#else
-        ThrowDebug("DebugContext::Create", "CreateDxc requested but RADRAY_ENABLE_DXC is off");
-#endif
-    }
-    return ctx;
-}
-
-DebugOffscreenTarget DebugContext::CreateOffscreenTarget(const DebugOffscreenTargetDescriptor& desc) {
-    if (desc.Width == 0 || desc.Height == 0) {
-        ThrowDebug("DebugContext::CreateOffscreenTarget", "invalid extent");
-    }
-
-    TextureDescriptor rtDesc{};
-    rtDesc.Dim = TextureDimension::Dim2D;
-    rtDesc.Width = desc.Width;
-    rtDesc.Height = desc.Height;
-    rtDesc.DepthOrArraySize = 1;
-    rtDesc.MipLevels = 1;
-    rtDesc.SampleCount = 1;
-    rtDesc.Format = desc.Format;
-    rtDesc.Memory = MemoryType::Device;
-    rtDesc.Usage = TextureUse::RenderTarget | TextureUse::CopySource;
-    rtDesc.Hints = ResourceHint::None;
-    rtDesc.Name = desc.Name;
-    auto rtOpt = _device->CreateTexture(rtDesc);
-    if (!rtOpt.HasValue()) {
-        ThrowDebug("DebugContext::CreateOffscreenTarget", "CreateTexture failed");
-    }
-
-    auto rt = rtOpt.Release();
-    TextureViewDescriptor rtvDesc{};
-    rtvDesc.Target = rt.get();
-    rtvDesc.Dim = TextureDimension::Dim2D;
-    rtvDesc.Format = desc.Format;
-    rtvDesc.Range = SubresourceRange{0, 1, 0, 1};
-    rtvDesc.Usage = TextureViewUsage::RenderTarget;
-    auto rtvOpt = _device->CreateTextureView(rtvDesc);
-    if (!rtvOpt.HasValue()) {
-        ThrowDebug("DebugContext::CreateOffscreenTarget", "CreateTextureView failed");
-    }
-
-    DebugOffscreenTarget target{};
-    target.Texture = std::move(rt);
-    target.RTV = rtvOpt.Release();
-    target.Format = desc.Format;
-    target.Width = desc.Width;
-    target.Height = desc.Height;
-    return target;
-}
-
-void DebugContext::ExecutePass(DebugOffscreenTarget& target, DebugPass& pass, TextureState before, TextureState after) {
-    if (target.Texture == nullptr || target.RTV == nullptr) {
-        ThrowDebug("DebugContext::ExecutePass", "offscreen target is incomplete");
-    }
-
-    auto cmdOpt = _device->CreateCommandBuffer(_queue);
-    if (!cmdOpt.HasValue()) {
-        ThrowDebug("DebugContext::ExecutePass", "CreateCommandBuffer failed");
-    }
-    auto fenceOpt = _device->CreateFence();
-    if (!fenceOpt.HasValue()) {
-        ThrowDebug("DebugContext::ExecutePass", "CreateFence failed");
-    }
-
-    auto cmd = cmdOpt.Release();
-    auto fence = fenceOpt.Release();
-    cmd->Begin();
-    {
-        const ResourceBarrierDescriptor b[] = {
-            BarrierTextureDescriptor{target.Texture.get(), before, TextureState::RenderTarget, nullptr, false, false, {}}};
-        cmd->ResourceBarrier(b);
-    }
-
-    pass.Record(*this, cmd.get(), target);
-
-    {
-        const ResourceBarrierDescriptor b[] = {
-            BarrierTextureDescriptor{target.Texture.get(), TextureState::RenderTarget, after, nullptr, false, false, {}}};
-        cmd->ResourceBarrier(b);
-    }
-    cmd->End();
-
-    CommandBuffer* submitBuffers[] = {cmd.get()};
-    CommandQueueSubmitDescriptor submitDesc{};
-    submitDesc.CmdBuffers = submitBuffers;
-    submitDesc.SignalFence = fence.get();
-    _queue->Submit(submitDesc);
-    fence->Wait();
-}
-
-ImageData DebugContext::ReadbackRGBA8(
-    const DebugOffscreenTarget& target,
-    TextureState srcStateBeforeCopy,
-    uint32_t mipLevel,
-    uint32_t arrayLayer) {
-    if (target.Texture == nullptr) {
-        ThrowDebug("DebugContext::ReadbackRGBA8", "target texture is null");
-    }
-
-    auto readback = ReadbackTexture2D(_device.get(), _queue, target.Texture.get(), srcStateBeforeCopy, mipLevel, arrayLayer);
-    if (!readback.has_value()) {
-        ThrowDebug("DebugContext::ReadbackRGBA8", "ReadbackTexture2D failed");
-    }
-    auto packed = PackReadbackToTightRGBA8(*readback);
-    if (!packed.has_value()) {
-        ThrowDebug("DebugContext::ReadbackRGBA8", "PackReadbackToTightRGBA8 failed");
-    }
-    return std::move(*packed);
-}
-
-void DebugContext::WritePNG(const ImageData& img, const PNGWriteSettings& settings) const {
-    if (!img.WritePNG(settings)) {
-        ThrowDebug("DebugContext::WritePNG", "ImageData::WritePNG failed");
-    }
-}
-
-PixelCompareResult CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance) {
-    if (actual.Format != ImageFormat::RGBA8_BYTE || expected.Format != ImageFormat::RGBA8_BYTE) {
-        ThrowDebug("CompareImageRGBA8", "only RGBA8_BYTE is supported");
-    }
-    if (actual.Width != expected.Width || actual.Height != expected.Height) {
-        ThrowDebug("CompareImageRGBA8", "image size mismatch");
-    }
-    if (actual.Data == nullptr || expected.Data == nullptr) {
-        ThrowDebug("CompareImageRGBA8", "image data is null");
-    }
-
-    PixelCompareResult out{};
-    const size_t pxCount = static_cast<size_t>(actual.Width) * actual.Height;
-    for (size_t i = 0; i < pxCount; ++i) {
-        const size_t p = i * 4;
-        for (uint32_t c = 0; c < 4; ++c) {
-            const uint8_t a = std::to_integer<uint8_t>(actual.Data[p + c]);
-            const uint8_t e = std::to_integer<uint8_t>(expected.Data[p + c]);
-            const int delta = static_cast<int>(a) - static_cast<int>(e);
-            const uint8_t absDelta = static_cast<uint8_t>(delta < 0 ? -delta : delta);
-            if (absDelta > tolerance) {
-                ++out.MismatchCount;
-                if (out.FirstMismatchPixel == static_cast<size_t>(-1)) {
-                    out.FirstMismatchPixel = i;
-                    out.FirstMismatchChannel = c;
-                    out.ActualValue = a;
-                    out.ExpectedValue = e;
-                }
-                break;
+    const bool isBGRA = (readback.Format == TextureFormat::BGRA8_UNORM || readback.Format == TextureFormat::BGRA8_UNORM_SRGB);
+    for (uint32_t y = 0; y < readback.Height; ++y) {
+        const byte* srcRow = readback.Data.data() + static_cast<size_t>(readback.RowPitchBytes) * y;
+        byte* dstRow = out.Data.get() + static_cast<size_t>(readback.TightRowBytes) * y;
+        if (isBGRA) {
+            for (uint32_t x = 0; x < readback.Width; ++x) {
+                const size_t p = static_cast<size_t>(x) * 4;
+                dstRow[p + 0] = srcRow[p + 2];
+                dstRow[p + 1] = srcRow[p + 1];
+                dstRow[p + 2] = srcRow[p + 0];
+                dstRow[p + 3] = srcRow[p + 3];
             }
+        } else {
+            std::memcpy(dstRow, srcRow, static_cast<size_t>(readback.TightRowBytes));
         }
     }
     return out;
 }
 
-ImageData BuildDiffImageRGBA8(const ImageData& actual, const ImageData& expected) {
-    if (actual.Format != ImageFormat::RGBA8_BYTE || expected.Format != ImageFormat::RGBA8_BYTE) {
-        ThrowDebug("BuildDiffImageRGBA8", "only RGBA8_BYTE is supported");
+ImageData OffScreenTestContext::Run() {
+    auto cmd = _device->CreateCommandBuffer(_queue).Unwrap();
+    auto fence = _device->CreateFence().Unwrap();
+    cmd->Begin();
+    Init(cmd.get(), fence.get());
+    {
+        const ResourceBarrierDescriptor b = BarrierTextureDescriptor{_rt.get(), TextureState::Undefined, TextureState::RenderTarget};
+        cmd->ResourceBarrier(std::span{&b, 1});
+        _rtState = TextureState::RenderTarget;
     }
-    if (actual.Width != expected.Width || actual.Height != expected.Height) {
-        ThrowDebug("BuildDiffImageRGBA8", "image size mismatch");
-    }
-    if (actual.Data == nullptr || expected.Data == nullptr) {
-        ThrowDebug("BuildDiffImageRGBA8", "image data is null");
+    ExecutePass(cmd.get(), fence.get());
+    {
+        const ResourceBarrierDescriptor b = BarrierTextureDescriptor{_rt.get(), _rtState, TextureState::CopySource};
+        cmd->ResourceBarrier(std::span{&b, 1});
+        _rtState = TextureState::CopySource;
     }
 
-    ImageData diff{};
-    diff.Width = actual.Width;
-    diff.Height = actual.Height;
-    diff.Format = ImageFormat::RGBA8_BYTE;
-    diff.Data = std::make_unique<byte[]>(diff.GetSize());
-
-    const size_t pxCount = static_cast<size_t>(actual.Width) * actual.Height;
-    for (size_t i = 0; i < pxCount; ++i) {
-        const size_t p = i * 4;
-        for (uint32_t c = 0; c < 3; ++c) {
-            const int a = std::to_integer<int>(actual.Data[p + c]);
-            const int e = std::to_integer<int>(expected.Data[p + c]);
-            const int delta = a - e;
-            diff.Data[p + c] = static_cast<byte>(delta < 0 ? -delta : delta);
-        }
-        diff.Data[p + 3] = static_cast<byte>(0xFF);
+    const TextureDescriptor srcDesc = _rt->GetDesc();
+    const uint32_t bpp = GetTextureFormatBytesPerPixel(srcDesc.Format);
+    if (bpp == 0) {
+        throw DebugException(fmt::format("ReadbackTexture2D invalid texture format {}", srcDesc.Format));
     }
-    return diff;
+    const uint32_t width = srcDesc.Width;
+    const uint32_t height = srcDesc.Height;
+    const uint64_t tightRowBytes = static_cast<uint64_t>(width) * bpp;
+    const uint64_t rowPitchAlign = std::max<uint64_t>(1, _device->GetDetail().TextureDataPitchAlignment);
+    const uint64_t rowPitchBytes = Align(tightRowBytes, rowPitchAlign);
+    const uint64_t totalBytes = rowPitchBytes * height;
+    if (rowPitchBytes > std::numeric_limits<uint32_t>::max() ||
+        tightRowBytes > std::numeric_limits<uint32_t>::max() ||
+        totalBytes > std::numeric_limits<uint32_t>::max()) {
+        throw DebugException("ReadbackTexture2D readback size overflow");
+    }
+    BufferDescriptor readbackDesc{
+        totalBytes,
+        MemoryType::ReadBack,
+        BufferUse::MapRead | BufferUse::CopyDestination,
+        ResourceHint::Dedicated,
+        "test_rt_readback_buffer"};
+    auto readbackBuf = _device->CreateBuffer(readbackDesc).Unwrap();
+    cmd->CopyTextureToBuffer(readbackBuf.get(), 0, _rt.get(), SubresourceRange{0, 1, 0, 1});
+
+    cmd->End();
+    {
+        CommandBuffer* submitBuffers[] = {cmd.get()};
+        CommandQueueSubmitDescriptor submitDesc{};
+        submitDesc.CmdBuffers = submitBuffers;
+        submitDesc.SignalFence = fence.get();
+        _queue->Submit(submitDesc);
+        fence->Wait();
+        ThrowOnBackendValidationErrors("Run");
+    }
+    void* mapped = readbackBuf->Map(0, totalBytes);
+    if (mapped == nullptr) {
+        throw DebugException("ReadbackTexture2D map readback buffer failed");
+    }
+    vector<byte> data{totalBytes};
+    std::memcpy(data.data(), mapped, totalBytes);
+    readbackBuf->Unmap(0, totalBytes);
+    TextureReadbackResult result{
+        std::move(data),
+        srcDesc.Format,
+        width,
+        height,
+        bpp,
+        static_cast<uint32_t>(rowPitchBytes),
+        static_cast<uint32_t>(tightRowBytes)};
+    auto packed = PackReadbackRGBA8(result);
+    if (_needUpdateBaseline) {
+        auto outPath = _testEnvDir / fmt::format("{}_baseline.png", _name);
+        packed.WritePNG({outPath.string(), false});
+    }
+    return packed;
 }
 
-void WriteImageComparisonArtifacts(
-    const DebugContext& ctx,
-    const ImageData& actual,
-    const ImageData& expected,
-    std::string_view outputDir) {
-    if (outputDir.empty()) {
-        ThrowDebug("WriteImageComparisonArtifacts", "outputDir is empty");
-    }
+ImageData OffScreenTestContext::LoadBaseline() {
+    auto inPath = _testEnvDir / fmt::format("{}_baseline.png", _name);
+    std::ifstream file{inPath, std::ios::binary};
+    return ImageData::LoadPNG(file, {.AddAlphaIfRGB = 0xFF, .IsFlipY = false}).value();
+}
 
-    const std::filesystem::path outPath{outputDir};
+void OffScreenTestContext::WriteImageComparisonArtifacts(const ImageData& actual, const ImageData& expected, std::string_view name) {
+    const std::filesystem::path outPath{_testArtifactsDir};
     std::error_code ec;
     std::filesystem::create_directories(outPath, ec);
 
-    const ImageData diff = BuildDiffImageRGBA8(actual, expected);
-    ctx.WritePNG(actual, {(outPath / "actual.png").string(), false});
-    ctx.WritePNG(expected, {(outPath / "expected.png").string(), false});
-    ctx.WritePNG(diff, {(outPath / "diff.png").string(), false});
+    const ImageData diff = ImageData::ImageDiffRGBA8(actual, expected);
+    actual.WritePNG({(outPath / fmt::format("{}_actual.png", name)).string(), false});
+    expected.WritePNG({(outPath / fmt::format("{}_expected.png", name)).string(), false});
+    diff.WritePNG({(outPath / fmt::format("{}_diff.png", name)).string(), false});
+}
+
+OffScreenTestContext::RasterShaders OffScreenTestContext::CompileRasterShaders(std::string_view src, HlslShaderModel sm) {
+    vector<string> defines;
+    auto backend = _device->GetBackend();
+    if (backend == RenderBackend::Vulkan) {
+        defines.emplace_back("VULKAN");
+    } else if (backend == RenderBackend::D3D12) {
+        defines.emplace_back("D3D12");
+    } else if (backend == RenderBackend::Metal) {
+        defines.emplace_back("METAL");
+    } else {
+        throw DebugException(fmt::format("unsupported backend for shader compilation {}", backend));
+    }
+    vector<std::string_view> defineViews;
+    for (const auto& d : defines) {
+        defineViews.emplace_back(d);
+    }
+    vector<string> includes;
+    includes.emplace_back((_projectDir / "shaderlib").generic_string());
+    vector<std::string_view> includeViews;
+    for (const auto& i : includes) {
+        includeViews.emplace_back(i);
+    }
+    auto entryVS = "VSMain";
+    auto entryPS = "PSMain";
+    auto vsBin = _dxc->Compile(
+                         src,
+                         entryVS,
+                         ShaderStage::Vertex,
+                         sm,
+                         false,
+                         defineViews,
+                         includeViews,
+                         backend != RenderBackend::D3D12)
+                     .value();
+    auto psBin = _dxc->Compile(
+                         src,
+                         entryPS,
+                         ShaderStage::Pixel,
+                         sm,
+                         false,
+                         defineViews,
+                         includeViews,
+                         backend != RenderBackend::D3D12)
+                     .value();
+    unique_ptr<Shader> vsShader, psShader;
+    if (backend == RenderBackend::Metal) {
+        SpirvToMslOption mslOption{
+            3,
+            0,
+            0,
+#ifdef RADRAY_PLATFORM_MACOS
+            MslPlatform::MacOS,
+#elif defined(RADRAY_PLATFORM_IOS)
+            MslPlatform::IOS,
+#else
+            MslPlatform::MacOS,
+#endif
+            true,
+            false};
+        auto vsMsl = ConvertSpirvToMsl(vsBin.Data, entryVS, ShaderStage::Vertex, mslOption).value();
+        vsShader = _device->CreateShader({vsMsl.GetBlob(), ShaderBlobCategory::MSL}).Unwrap();
+        auto psMsl = ConvertSpirvToMsl(psBin.Data, entryPS, ShaderStage::Pixel, mslOption).value();
+        psShader = _device->CreateShader({psMsl.GetBlob(), ShaderBlobCategory::MSL}).Unwrap();
+    } else {
+        vsShader = _device->CreateShader({vsBin.Data, vsBin.Category}).Unwrap();
+        psShader = _device->CreateShader({psBin.Data, psBin.Category}).Unwrap();
+    }
+    return {std::move(vsShader), entryVS, std::move(psShader), entryPS};
+}
+
+void OffScreenTestContext::UploadBuffer(Buffer* dst, std::span<const byte> data) {
+    auto upload = _device->CreateBuffer({data.size(), MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite, ResourceHint::None, "vb_upload"}).Unwrap();
+    void* mapped = upload->Map(0, data.size());
+    if (mapped == nullptr) {
+        throw DebugException("UploadBuffer map failed");
+    }
+    std::memcpy(mapped, data.data(), data.size());
+    upload->Unmap(0, data.size());
+    auto cmd = _device->CreateCommandBuffer(_queue).Unwrap();
+    auto fence = _device->CreateFence().Unwrap();
+    cmd->Begin();
+    {
+        ResourceBarrierDescriptor b[] = {
+            BarrierBufferDescriptor{dst, BufferState::Common, BufferState::CopyDestination}};
+        cmd->ResourceBarrier(b);
+    }
+    cmd->CopyBufferToBuffer(dst, 0, upload.get(), 0, data.size());
+    {
+        ResourceBarrierDescriptor b[] = {
+            BarrierBufferDescriptor{dst, BufferState::CopyDestination, BufferState::Common}};
+        cmd->ResourceBarrier(b);
+    }
+    cmd->End();
+    Submit(cmd.get(), fence.get());
+    fence->Wait();
+    ThrowOnBackendValidationErrors("UploadBuffer");
+}
+
+void OffScreenTestContext::Submit(CommandBuffer* cmd, Fence* fence) {
+    CommandBuffer* submitBuffers[] = {cmd};
+    CommandQueueSubmitDescriptor submitDesc{};
+    submitDesc.CmdBuffers = submitBuffers;
+    submitDesc.SignalFence = fence;
+    _queue->Submit(submitDesc);
 }
 
 }  // namespace radray::render

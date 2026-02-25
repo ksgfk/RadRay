@@ -23,6 +23,8 @@ void Free(void* ptr) noexcept;
 
 void AlignedFree(void* ptr) noexcept;
 
+string GetEnv(std::string_view name);
+
 class DynamicLibrary {
 public:
     constexpr DynamicLibrary() noexcept = default;

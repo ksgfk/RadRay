@@ -44,6 +44,7 @@ bool DynamicLibrary::IsValid() const noexcept {
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 #include <windows.h>
+#include <cstdlib>
 
 namespace radray {
 
@@ -68,6 +69,19 @@ void* AlignedAlloc(size_t alignment, size_t size) noexcept {
 
 void AlignedFree(void* ptr) noexcept {
     _aligned_free(ptr);
+}
+
+string GetEnv(std::string_view name) {
+    string envName{name};
+    char* value = nullptr;
+    size_t valueLen = 0;
+    auto err = _dupenv_s(&value, &valueLen, envName.c_str());
+    if (err != 0 || value == nullptr) {
+        return {};
+    }
+    string result{value};
+    std::free(value);
+    return result;
 }
 
 static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?");
@@ -153,6 +167,15 @@ void* AlignedAlloc(size_t alignment, size_t size) noexcept {
 
 void AlignedFree(void* ptr) noexcept {
     std::free(ptr);
+}
+
+string GetEnv(std::string_view name) {
+    string envName{name};
+    auto* value = std::getenv(envName.c_str());
+    if (value == nullptr) {
+        return {};
+    }
+    return string{value};
 }
 
 DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
