@@ -6,6 +6,7 @@
 #include <limits>
 #include <bit>
 #include <stdexcept>
+#include <fstream>
 
 #ifdef RADRAY_ENABLE_PNG
 #include <exception>
@@ -174,6 +175,22 @@ static void radray_libpng_read_fn(png_structp png_ptr, png_bytep data, png_size_
     stream->read(reinterpret_cast<char*>(data), length);
     if ((png_size_t)stream->gcount() != length) {
         png_error(png_ptr, "gcount not equal length");
+    }
+}
+
+static void radray_libpng_write_fn(png_structp png_ptr, png_bytep data, png_size_t length) {
+    auto* stream = static_cast<std::ostream*>(png_get_io_ptr(png_ptr));
+    stream->write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(length));
+    if (!stream->good()) {
+        png_error(png_ptr, "ostream write failed");
+    }
+}
+
+static void radray_libpng_flush_fn(png_structp png_ptr) {
+    auto* stream = static_cast<std::ostream*>(png_get_io_ptr(png_ptr));
+    stream->flush();
+    if (!stream->good()) {
+        png_error(png_ptr, "ostream flush failed");
     }
 }
 
@@ -353,6 +370,103 @@ std::optional<ImageData> ImageData::LoadPNG(std::istream& stream, PNGLoadSetting
         return std::nullopt;
     }
 }
+
+bool ImageData::WritePNG(PNGWriteSettings settings) const {
+    if (settings.FilePath.empty()) {
+        RADRAY_ERR_LOG("WritePNG file path is empty");
+        return false;
+    }
+    if (Data == nullptr || Width == 0 || Height == 0) {
+        RADRAY_ERR_LOG("WritePNG image data is invalid");
+        return false;
+    }
+    const size_t bytesPerPixel = ImageData::FormatSize(Format);
+    if (bytesPerPixel == 0) {
+        RADRAY_ERR_LOG("WritePNG invalid image format {}", Format);
+        return false;
+    }
+
+    png_byte colorType = 0;
+    int bitDepth = 8;
+    switch (Format) {
+        case ImageFormat::RGB8_BYTE: colorType = PNG_COLOR_TYPE_RGB; break;
+        case ImageFormat::RGBA8_BYTE: colorType = PNG_COLOR_TYPE_RGB_ALPHA; break;
+        default:
+            RADRAY_ERR_LOG("WritePNG unsupported image format {}, only RGB8/RGBA8 are supported", Format);
+            return false;
+    }
+
+    std::ofstream stream{std::string(settings.FilePath), std::ios::binary};
+    if (!stream.is_open()) {
+        RADRAY_ERR_LOG("WritePNG cannot open file '{}'", settings.FilePath);
+        return false;
+    }
+
+    png_structp png_ptr = nullptr;
+    png_infop info_ptr = nullptr;
+    auto guard_png_ptr = MakeScopeGuard([&]() {
+        if (png_ptr) {
+            png_destroy_write_struct(&png_ptr, info_ptr ? &info_ptr : nullptr);
+            png_ptr = nullptr;
+            info_ptr = nullptr;
+        }
+    });
+
+    try {
+        png_ptr = png_create_write_struct_2(
+            PNG_LIBPNG_VER_STRING,
+            nullptr, radray_libpng_user_error_fn, radray_libpng_user_warn_fn,
+            nullptr, radray_libpng_malloc_fn, radray_libpng_free_fn);
+        if (!png_ptr) {
+            throw LibpngException("png_create_write_struct_2 failed");
+        }
+        info_ptr = png_create_info_struct(png_ptr);
+        if (!info_ptr) {
+            throw LibpngException("png_create_info_struct failed");
+        }
+
+        png_set_write_fn(png_ptr, &stream, radray_libpng_write_fn, radray_libpng_flush_fn);
+        png_set_IHDR(
+            png_ptr,
+            info_ptr,
+            Width,
+            Height,
+            bitDepth,
+            colorType,
+            PNG_INTERLACE_NONE,
+            PNG_COMPRESSION_TYPE_DEFAULT,
+            PNG_FILTER_TYPE_DEFAULT);
+
+        const size_t rowBytes = static_cast<size_t>(Width) * bytesPerPixel;
+        const size_t expectedSize = rowBytes * static_cast<size_t>(Height);
+        if (expectedSize != GetSize()) {
+            RADRAY_ERR_LOG("WritePNG image byte size mismatch, expected={}, got={}", expectedSize, GetSize());
+            return false;
+        }
+
+        vector<png_bytep> rowPointers(static_cast<size_t>(Height));
+        png_bytep basePtr = reinterpret_cast<png_bytep>(Data.get());
+        if (settings.IsFlipY) {
+            for (size_t y = 0; y < Height; ++y) {
+                rowPointers[y] = basePtr + (static_cast<size_t>(Height) - 1 - y) * rowBytes;
+            }
+        } else {
+            for (size_t y = 0; y < Height; ++y) {
+                rowPointers[y] = basePtr + y * rowBytes;
+            }
+        }
+
+        png_set_rows(png_ptr, info_ptr, rowPointers.data());
+        png_write_png(png_ptr, info_ptr, PNG_TRANSFORM_IDENTITY, nullptr);
+        return true;
+    } catch (const LibpngException& e) {
+        RADRAY_ERR_LOG("WritePNG LibpngException: {}", e.what());
+        return false;
+    } catch (...) {
+        RADRAY_ERR_LOG("WritePNG failed with unknown error");
+        return false;
+    }
+}
 #else
 bool ImageData::IsPNG(std::istream& stream) {
     RADRAY_UNUSED(stream);
@@ -364,6 +478,12 @@ std::optional<ImageData> ImageData::LoadPNG(std::istream& stream, PNGLoadSetting
     RADRAY_UNUSED(settings);
     RADRAY_ERR_LOG("libpng support is not enabled");
     return std::nullopt;
+}
+
+bool ImageData::WritePNG(PNGWriteSettings settings) const {
+    RADRAY_UNUSED(settings);
+    RADRAY_ERR_LOG("libpng support is not enabled");
+    return false;
 }
 #endif
 

@@ -463,6 +463,8 @@ public:
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
 
+    void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
+
     ComPtr<ID3D12GraphicsCommandList4> QueryCommandList4() noexcept;
 
 public:
@@ -678,6 +680,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    TextureDescriptor GetDesc() const noexcept override { return _desc; }
 
 public:
     DeviceD3D12* _device;

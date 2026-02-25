@@ -2522,6 +2522,74 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
     }
 }
 
+void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
+    auto dst = CastVkObject(dst_);
+    auto src = CastVkObject(src_);
+    const auto& texDesc = src->_mdesc;
+    const uint32_t bpp = GetTextureFormatBytesPerPixel(texDesc.Format);
+    if (bpp == 0) {
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid texture format {}", texDesc.Format);
+        return;
+    }
+    if (srcRange.MipLevelCount == SubresourceRange::All || srcRange.ArrayLayerCount == SubresourceRange::All) {
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer requires explicit SubresourceRange count");
+        return;
+    }
+    uint32_t mipLevels = srcRange.MipLevelCount;
+    uint32_t layerCount = srcRange.ArrayLayerCount;
+    if (mipLevels == 0 || layerCount == 0) {
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
+        return;
+    }
+    if (srcRange.BaseMipLevel >= texDesc.MipLevels ||
+        srcRange.BaseMipLevel + mipLevels > texDesc.MipLevels) {
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
+                       srcRange.BaseMipLevel, mipLevels, texDesc.MipLevels);
+        return;
+    }
+    bool is3D = texDesc.Dim == TextureDimension::Dim3D;
+    uint32_t arraySize = is3D ? 1u : texDesc.DepthOrArraySize;
+    if (srcRange.BaseArrayLayer >= arraySize ||
+        srcRange.BaseArrayLayer + layerCount > arraySize) {
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
+                       srcRange.BaseArrayLayer, layerCount, arraySize);
+        return;
+    }
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_detail.TextureDataPitchAlignment);
+    VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(src->_rawFormat);
+    uint64_t bufferOffset = dstOffset;
+    for (uint32_t mip = 0; mip < mipLevels; mip++) {
+        uint32_t mipLevel = srcRange.BaseMipLevel + mip;
+        uint32_t mipWidth = std::max(texDesc.Width >> mipLevel, 1u);
+        uint32_t mipHeight = std::max(texDesc.Height >> mipLevel, 1u);
+        uint32_t mipDepth = is3D ? std::max(texDesc.DepthOrArraySize >> mipLevel, 1u) : 1u;
+        uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
+        uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
+        if (alignedBytesPerRow % bpp != 0) {
+            RADRAY_ERR_LOG(
+                "vk CopyTextureToBuffer row pitch cannot be represented in texels (alignedBytesPerRow={}, bpp={})", alignedBytesPerRow, bpp);
+            return;
+        }
+        uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / bpp);
+        uint64_t bytesPerImage = alignedBytesPerRow * mipHeight;
+        for (uint32_t layer = 0; layer < layerCount; layer++) {
+            uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
+            VkBufferImageCopy copyInfo{};
+            copyInfo.bufferOffset = bufferOffset;
+            copyInfo.bufferRowLength = bufferRowLength;
+            copyInfo.bufferImageHeight = 0;
+            copyInfo.imageSubresource.aspectMask = aspectMask;
+            copyInfo.imageSubresource.mipLevel = mipLevel;
+            copyInfo.imageSubresource.baseArrayLayer = arrayLayer;
+            copyInfo.imageSubresource.layerCount = 1;
+            copyInfo.imageOffset = {0, 0, 0};
+            copyInfo.imageExtent = {mipWidth, mipHeight, mipDepth};
+            _device->_ftb.vkCmdCopyImageToBuffer(_cmdBuffer, src->_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->_buffer, 1, &copyInfo);
+            bufferOffset += bytesPerImage * mipDepth;
+        }
+    }
+}
+
 SimulateCommandEncoderVulkan::SimulateCommandEncoderVulkan(
     DeviceVulkan* device,
     CommandBufferVulkan* cmdBuffer) noexcept

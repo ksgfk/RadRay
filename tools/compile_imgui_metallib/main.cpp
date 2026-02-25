@@ -109,8 +109,8 @@ int main(int argc, char* argv[]) {
         std::ofstream f(psPath);
         f << psMsl->MslSource;
     }
-    printf("VS MSL written to: %s\n", vsPath.c_str());
-    printf("PS MSL written to: %s\n", psPath.c_str());
+    printf("VS MSL written to: %s\n", vsPath.generic_string().c_str());
+    printf("PS MSL written to: %s\n", psPath.generic_string().c_str());
     printf("VS:\n%s\n", vsMsl->MslSource.c_str());
     printf("PS:\n%s\n", psMsl->MslSource.c_str());
 

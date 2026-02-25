@@ -37,6 +37,12 @@ public:
     bool IsFlipY{false};
 };
 
+class PNGWriteSettings {
+public:
+    std::string_view FilePath{};
+    bool IsFlipY{false};
+};
+
 class ImageData {
 public:
     ImageData() noexcept = default;
@@ -57,6 +63,7 @@ public:
     static size_t FormatSize(ImageFormat format) noexcept;
     static bool IsPNG(std::istream& stream);
     static std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
+    bool WritePNG(PNGWriteSettings settings = PNGWriteSettings{}) const;
 
     unique_ptr<byte[]> Data{};
     uint32_t Width{0};

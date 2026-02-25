@@ -151,6 +151,8 @@ public:
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
 
+    void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -278,6 +280,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    TextureDescriptor GetDesc() const noexcept override { return _desc; }
 
 public:
     DeviceMetal* _device{nullptr};

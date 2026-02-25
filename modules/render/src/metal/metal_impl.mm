@@ -841,6 +841,70 @@ void CmdBufferMetal::CopyBufferToTexture(Texture* dst, SubresourceRange dstRange
     }
 }
 
+void CmdBufferMetal::CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept {
+    @autoreleasepool {
+        auto* mtlDst = CastMtlObject(dst);
+        auto* mtlSrc = CastMtlObject(src);
+        const auto& texDesc = mtlSrc->_desc;
+        uint32_t bpp = GetTextureFormatBytesPerPixel(texDesc.Format);
+        if (bpp == 0) {
+            RADRAY_ERR_LOG("metal CopyTextureToBuffer invalid texture format {}", texDesc.Format);
+            return;
+        }
+        if (_blitEncoder == nil) {
+            _blitEncoder = [_cmdBuffer blitCommandEncoder];
+        }
+        if (srcRange.MipLevelCount == SubresourceRange::All || srcRange.ArrayLayerCount == SubresourceRange::All) {
+            RADRAY_ERR_LOG("metal CopyTextureToBuffer requires explicit SubresourceRange count");
+            return;
+        }
+        uint32_t mipLevels = srcRange.MipLevelCount;
+        uint32_t layerCount = srcRange.ArrayLayerCount;
+        if (mipLevels == 0 || layerCount == 0) {
+            RADRAY_ERR_LOG("metal CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
+            return;
+        }
+        if (srcRange.BaseMipLevel >= texDesc.MipLevels ||
+            srcRange.BaseMipLevel + mipLevels > texDesc.MipLevels) {
+            RADRAY_ERR_LOG("metal CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
+                           srcRange.BaseMipLevel, mipLevels, texDesc.MipLevels);
+            return;
+        }
+        bool is3D = texDesc.Dim == TextureDimension::Dim3D;
+        uint32_t arraySize = is3D ? 1u : texDesc.DepthOrArraySize;
+        if (srcRange.BaseArrayLayer >= arraySize ||
+            srcRange.BaseArrayLayer + layerCount > arraySize) {
+            RADRAY_ERR_LOG("metal CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
+                           srcRange.BaseArrayLayer, layerCount, arraySize);
+            return;
+        }
+        uint64_t bufferOffset = dstOffset;
+        uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_detail.TextureDataPitchAlignment);
+        for (uint32_t mip = 0; mip < mipLevels; mip++) {
+            uint32_t mipLevel = srcRange.BaseMipLevel + mip;
+            uint32_t mipWidth = std::max(texDesc.Width >> mipLevel, 1u);
+            uint32_t mipHeight = std::max(texDesc.Height >> mipLevel, 1u);
+            uint32_t mipDepth = is3D ? std::max(texDesc.DepthOrArraySize >> mipLevel, 1u) : 1u;
+            uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
+            NSUInteger bytesPerRow = static_cast<NSUInteger>(Align(tightBytesPerRow, rowPitchAlignment));
+            NSUInteger bytesPerImage = bytesPerRow * mipHeight;
+            for (uint32_t layer = 0; layer < layerCount; layer++) {
+                uint32_t srcSlice = is3D ? 0u : (srcRange.BaseArrayLayer + layer);
+                [_blitEncoder copyFromTexture:mtlSrc->_texture
+                                  sourceSlice:srcSlice
+                                  sourceLevel:mipLevel
+                                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                   sourceSize:MTLSizeMake(mipWidth, mipHeight, mipDepth)
+                                     toBuffer:mtlDst->_buffer
+                            destinationOffset:bufferOffset
+                       destinationBytesPerRow:bytesPerRow
+                     destinationBytesPerImage:bytesPerImage];
+                bufferOffset += bytesPerImage * mipDepth;
+            }
+        }
+    }
+}
+
 FenceMetal::FenceMetal(
     DeviceMetal* device,
     id<MTLSharedEvent> event,

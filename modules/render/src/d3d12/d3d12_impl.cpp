@@ -2361,6 +2361,64 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
     }
 }
 
+void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
+    auto dst = CastD3D12Object(dst_);
+    auto src = CastD3D12Object(src_);
+    const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
+
+    if (srcRange.MipLevelCount == SubresourceRange::All || srcRange.ArrayLayerCount == SubresourceRange::All) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer requires explicit SubresourceRange count");
+        return;
+    }
+
+    uint32_t mipLevels = srcRange.MipLevelCount;
+    uint32_t layerCount = srcRange.ArrayLayerCount;
+    if (mipLevels == 0 || layerCount == 0) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
+        return;
+    }
+    if (srcRange.BaseMipLevel >= src->_desc.MipLevels ||
+        srcRange.BaseMipLevel + mipLevels > src->_desc.MipLevels) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
+                       srcRange.BaseMipLevel, mipLevels, src->_desc.MipLevels);
+        return;
+    }
+
+    uint32_t arraySize = src->_desc.Dim == TextureDimension::Dim3D ? 1u : src->_desc.DepthOrArraySize;
+    if (srcRange.BaseArrayLayer >= arraySize ||
+        srcRange.BaseArrayLayer + layerCount > arraySize) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
+                       srcRange.BaseArrayLayer, layerCount, arraySize);
+        return;
+    }
+
+    uint64_t bufferOffset = dstOffset;
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        uint32_t mipLevel = srcRange.BaseMipLevel + mip;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, src->_desc.MipLevels, arraySize);
+
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 totalBytes = 0;
+            _device->_device->GetCopyableFootprints(&srcDesc, subres, 1, bufferOffset, &footprint, nullptr, nullptr, &totalBytes);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLoc.pResource = src->_tex.Get();
+            srcLoc.SubresourceIndex = subres;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dstLoc.pResource = dst->_buf.Get();
+            dstLoc.PlacedFootprint = footprint;
+
+            _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+            bufferOffset = footprint.Offset + totalBytes;
+        }
+    }
+}
+
 ComPtr<ID3D12GraphicsCommandList4> CmdListD3D12::QueryCommandList4() noexcept {
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
