@@ -1,9 +1,8 @@
 if (RADRAY_ENABLE_DXC)
-    add_executable(hello_mandelbrot hello_mandelbrot.cpp)
-    target_link_libraries(hello_mandelbrot PRIVATE radraywindow radrayrender radrayimgui)
-    target_compile_options(hello_mandelbrot PRIVATE $<$<BOOL:${MSVC}>:/W4>)
-    radray_optimize_flags_binary(hello_mandelbrot)
-    radray_set_build_path(hello_mandelbrot)
+    radray_add_example(hello_mandelbrot
+        SOURCES hello_mandelbrot.cpp
+        LINK_LIBS radraywindow radrayrender radrayimgui
+        COMPILE_OPTIONS $<$<BOOL:${MSVC}>:/W4>)
 
     radray_example_files(hello_mandelbrot
         ${CMAKE_CURRENT_SOURCE_DIR}/mandelbrot.hlsl

@@ -1,7 +1,5 @@
 if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPVCROSS)
-    add_executable(test_bind_bridge test_bind_bridge.cpp)
-    target_link_libraries(test_bind_bridge radraycore radrayrender GTest::gtest_main)
-    gtest_discover_tests(test_bind_bridge)
-    radray_optimize_flags_binary(test_bind_bridge)
-    radray_set_build_path(test_bind_bridge)
+    radray_add_test(test_bind_bridge
+        SOURCES test_bind_bridge.cpp
+        LINK_LIBS radraycore radrayrender)
 endif()

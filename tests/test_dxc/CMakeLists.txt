@@ -1,7 +1,5 @@
 if (RADRAY_ENABLE_DXC)
-    add_executable(test_dxc test_dxc.cpp)
-    target_link_libraries(test_dxc radraycore radrayrender GTest::gtest_main)
-    gtest_discover_tests(test_dxc)
-    radray_optimize_flags_binary(test_dxc)
-    radray_set_build_path(test_dxc)
+    radray_add_test(test_dxc
+        SOURCES test_dxc.cpp
+        LINK_LIBS radraycore radrayrender)
 endif()

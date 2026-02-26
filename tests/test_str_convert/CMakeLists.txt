@@ -1,5 +1,3 @@
-add_executable(test_str_convert test_str_convert.cpp)
-target_link_libraries(test_str_convert radraycore GTest::gtest_main)
-gtest_discover_tests(test_str_convert)
-radray_optimize_flags_binary(test_str_convert)
-radray_set_build_path(test_str_convert)
+radray_add_test(test_str_convert
+    SOURCES test_str_convert.cpp
+    LINK_LIBS radraycore)

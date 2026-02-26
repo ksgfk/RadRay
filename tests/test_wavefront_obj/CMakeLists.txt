@@ -1,5 +1,3 @@
-add_executable(test_wavefront_obj test_wavefront_obj.cpp)
-target_link_libraries(test_wavefront_obj radraycore GTest::gtest_main)
-gtest_discover_tests(test_wavefront_obj)
-radray_optimize_flags_binary(test_wavefront_obj)
-radray_set_build_path(test_wavefront_obj)
+radray_add_test(test_wavefront_obj
+    SOURCES test_wavefront_obj.cpp
+    LINK_LIBS radraycore)

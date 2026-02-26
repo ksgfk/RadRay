@@ -25,6 +25,10 @@ static std::filesystem::path MakeTempFilePath(const char* name) {
 
 TEST(PNG, SimpleLoad) {
     auto filename = GetAssetsPath() / "1735141462310.png";
+    if (!std::filesystem::exists(filename)) {
+        GTEST_SKIP() << "Test image not found: " << filename;
+        return;
+    }
     std::ifstream file{filename, std::ios::binary};
     ASSERT_TRUE(file.is_open());
     auto result = radray::ImageData::LoadPNG(file);
@@ -36,6 +40,10 @@ TEST(PNG, SimpleLoad) {
 
 TEST(PNG, ToRGBA8) {
     auto filename = GetAssetsPath() / "1735141462310.png";
+    if (!std::filesystem::exists(filename)) {
+        GTEST_SKIP() << "Test image not found: " << filename;
+        return;
+    }
     std::ifstream file{filename, std::ios::binary};
     ASSERT_TRUE(file.is_open());
     auto result = radray::ImageData::LoadPNG(file);

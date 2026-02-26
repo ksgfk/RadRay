@@ -1,7 +1,6 @@
 if (RADRAY_ENABLE_LIBPNG)
-    add_executable(test_img_rw test_img_rw.cpp)
-    target_link_libraries(test_img_rw radraycore GTest::gtest_main)
-    gtest_discover_tests(test_img_rw PROPERTIES ENVIRONMENT "RADRAY_ASSETS_DIR=${CMAKE_SOURCE_DIR}/assets")
-    radray_optimize_flags_binary(test_img_rw)
-    radray_set_build_path(test_img_rw)
+    radray_add_test(test_img_rw
+        SOURCES test_img_rw.cpp
+        LINK_LIBS radraycore
+        DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_ASSETS_DIR=${CMAKE_SOURCE_DIR}/assets")
 endif()

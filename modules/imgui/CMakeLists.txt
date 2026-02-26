@@ -14,8 +14,6 @@ file(GLOB DEAR_IMGUI_INC
     "${RADRAY_IMGUI_ROOT}/imstb_textedit.h"
     "${RADRAY_IMGUI_ROOT}/imstb_truetype.h"
     "${RADRAY_IMGUI_ROOT}/misc/cpp/imgui_stdlib.h")
-file(GLOB DEAR_IMGUI_OTHER
-    $<$<PLATFORM_ID:Windows>:${RADRAY_IMGUI_ROOT}/misc/debuggers/imgui.natvis>)
 file(GLOB_RECURSE RADRAY_IMGUI_INC CONFIGURE_DEPENDS "include/*.h")
 file(GLOB RADRAY_IMGUI_SRC CONFIGURE_DEPENDS "src/*.cpp")
 if (APPLE)

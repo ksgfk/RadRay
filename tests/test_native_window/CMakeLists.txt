@@ -1,7 +1,5 @@
 if (RADRAY_BUILD_WINDOW)
-    add_executable(test_native_window test_native_window.cpp)
-    target_link_libraries(test_native_window radraywindow GTest::gtest_main)
-    gtest_discover_tests(test_native_window)
-    radray_optimize_flags_binary(test_native_window)
-    radray_set_build_path(test_native_window)
+    radray_add_test(test_native_window
+        SOURCES test_native_window.cpp
+        LINK_LIBS radraywindow)
 endif()

@@ -1,5 +1,4 @@
-add_executable(hello_imgui hello_imgui.cpp)
-target_link_libraries(hello_imgui PRIVATE radraywindow radrayrender radrayimgui)
-target_compile_options(hello_imgui PRIVATE $<$<BOOL:${MSVC}>:/W4>)
-radray_optimize_flags_binary(hello_imgui)
-radray_set_build_path(hello_imgui)
+radray_add_example(hello_imgui
+    SOURCES hello_imgui.cpp
+    LINK_LIBS radraywindow radrayrender radrayimgui
+    COMPILE_OPTIONS $<$<BOOL:${MSVC}>:/W4>)

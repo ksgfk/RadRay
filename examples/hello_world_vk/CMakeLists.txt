@@ -1,5 +1,4 @@
-add_executable(hello_world_vk hello_world_vk.cpp)
-target_link_libraries(hello_world_vk PRIVATE radraywindow radrayrender)
-target_compile_options(hello_world_vk PRIVATE $<$<BOOL:${MSVC}>:/W4>)
-radray_optimize_flags_binary(hello_world_vk)
-radray_set_build_path(hello_world_vk)
+radray_add_example(hello_world_vk
+    SOURCES hello_world_vk.cpp
+    LINK_LIBS radraywindow radrayrender
+    COMPILE_OPTIONS $<$<BOOL:${MSVC}>:/W4>)
