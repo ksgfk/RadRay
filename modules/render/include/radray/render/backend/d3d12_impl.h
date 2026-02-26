@@ -178,11 +178,14 @@ public:
     class Page {
     public:
         unique_ptr<DescriptorHeap> Heap;
-        BuddyAllocator Allocator;
+        ComPtr<D3D12MA::VirtualBlock> Allocator;
         size_t Capacity = 0;
         size_t Used = 0;
 
-        Page(unique_ptr<DescriptorHeap> heap, size_t capacity) noexcept;
+        Page(
+            unique_ptr<DescriptorHeap> heap,
+            ComPtr<D3D12MA::VirtualBlock> allocator,
+            size_t capacity) noexcept;
         Page(const Page&) = delete;
         Page(Page&&) noexcept = delete;
         ~Page() noexcept = default;
@@ -195,11 +198,14 @@ public:
 
         Page* PagePtr = nullptr;
         size_t Offset = 0;
-        size_t NodeIndex = 0;
-        size_t BlockSize = 0;
+        D3D12MA::VirtualAllocation VirtualAlloc{};
 
-        static constexpr Allocation Invalid() noexcept {
-            return {nullptr, 0, 0, nullptr, 0, 0, 0};
+        constexpr static Allocation Invalid() noexcept {
+            return {nullptr, 0, 0, nullptr, 0, {}};
+        }
+
+        constexpr bool IsValid() const noexcept {
+            return Heap != nullptr && Length != 0 && PagePtr != nullptr && VirtualAlloc.AllocHandle != 0;
         }
     };
 

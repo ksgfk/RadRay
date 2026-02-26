@@ -138,9 +138,12 @@ CpuDescriptorAllocator::CpuDescriptorAllocator(
       _basicSize(basicSize),
       _freePageKeepCount(keepFreePages) {}
 
-CpuDescriptorAllocator::Page::Page(unique_ptr<DescriptorHeap> heap, size_t capacity) noexcept
+CpuDescriptorAllocator::Page::Page(
+    unique_ptr<DescriptorHeap> heap,
+    ComPtr<D3D12MA::VirtualBlock> allocator,
+    size_t capacity) noexcept
     : Heap(std::move(heap)),
-      Allocator(capacity),
+      Allocator(std::move(allocator)),
       Capacity(capacity) {}
 
 std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
@@ -148,7 +151,9 @@ std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Alloca
         return std::nullopt;
     }
     const size_t request = static_cast<size_t>(count);
-    const size_t blockSize = std::bit_ceil(request);
+    D3D12MA::VIRTUAL_ALLOCATION_DESC allocDesc{};
+    allocDesc.Size = static_cast<UINT64>(request);
+    allocDesc.Alignment = 1;
     if (!_pages.empty()) {
         const size_t n = _pages.size();
         const size_t start = (_hint < n) ? _hint : 0;
@@ -158,21 +163,24 @@ std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Alloca
             if (page.Capacity - page.Used < request) {
                 continue;
             }
-            auto allocOpt = page.Allocator.Allocate(request);
-            if (!allocOpt.has_value()) {
+            D3D12MA::VirtualAllocation vAlloc{};
+            UINT64 offset = 0;
+            if (FAILED(page.Allocator->Allocate(&allocDesc, &vAlloc, &offset))) {
                 continue;
             }
-            const auto a = allocOpt.value();
-            page.Used += blockSize;
+            if (offset > static_cast<UINT64>(std::numeric_limits<UINT>::max())) {
+                page.Allocator->FreeAllocation(vAlloc);
+                continue;
+            }
+            page.Used += request;
             _hint = pageIndex;
             return std::make_optional(Allocation{
                 .Heap = page.Heap.get(),
-                .Start = static_cast<UINT>(a.Offset),
+                .Start = static_cast<UINT>(offset),
                 .Length = count,
                 .PagePtr = _pages[pageIndex].get(),
-                .Offset = a.Offset,
-                .NodeIndex = a.NodeIndex,
-                .BlockSize = blockSize,
+                .Offset = static_cast<size_t>(offset),
+                .VirtualAlloc = vAlloc,
             });
         }
     }
@@ -188,27 +196,37 @@ std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Alloca
             static_cast<UINT>(pageCapacity),
             D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
             0});
-    auto newPage = make_unique<Page>(std::move(heap), pageCapacity);
+    D3D12MA::VIRTUAL_BLOCK_DESC blockDesc{};
+    blockDesc.Size = static_cast<UINT64>(pageCapacity);
+    blockDesc.Flags = D3D12MA::VIRTUAL_BLOCK_FLAG_NONE;
+    ComPtr<D3D12MA::VirtualBlock> block;
+    if (FAILED(D3D12MA::CreateVirtualBlock(&blockDesc, block.GetAddressOf()))) {
+        return std::nullopt;
+    }
+    auto newPage = make_unique<Page>(std::move(heap), std::move(block), pageCapacity);
     Page* newPagePtr = newPage.get();
     _pages.emplace_back(std::move(newPage));
     const size_t pageIndex = _pages.size() - 1;
     _hint = pageIndex;
     Page& page = *_pages.back();
-    auto allocOpt = page.Allocator.Allocate(request);
-    if (!allocOpt.has_value()) {
+    D3D12MA::VirtualAllocation vAlloc{};
+    UINT64 offset = 0;
+    if (FAILED(page.Allocator->Allocate(&allocDesc, &vAlloc, &offset)) ||
+        offset > static_cast<UINT64>(std::numeric_limits<UINT>::max())) {
+        if (vAlloc.AllocHandle != 0) {
+            page.Allocator->FreeAllocation(vAlloc);
+        }
         _pages.pop_back();
         return std::nullopt;
     }
-    const auto a = allocOpt.value();
-    page.Used += blockSize;
+    page.Used += request;
     return std::make_optional(Allocation{
         .Heap = page.Heap.get(),
-        .Start = static_cast<UINT>(a.Offset),
+        .Start = static_cast<UINT>(offset),
         .Length = count,
         .PagePtr = newPagePtr,
-        .Offset = a.Offset,
-        .NodeIndex = a.NodeIndex,
-        .BlockSize = blockSize,
+        .Offset = static_cast<size_t>(offset),
+        .VirtualAlloc = vAlloc,
     });
 }
 
@@ -218,8 +236,8 @@ void CpuDescriptorAllocator::Destroy(CpuDescriptorAllocator::Allocation view) no
     }
     auto* page = view.PagePtr;
     RADRAY_ASSERT(page->Heap.get() == view.Heap);
-    page->Allocator.Destroy(BuddyAllocator::Allocation{view.Offset, view.NodeIndex});
-    page->Used -= view.BlockSize;
+    page->Allocator->FreeAllocation(view.VirtualAlloc);
+    page->Used -= static_cast<size_t>(view.Length);
     if (page->Used == 0) {
         TryReleaseFreePages();
     }

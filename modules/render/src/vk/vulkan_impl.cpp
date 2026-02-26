@@ -2220,7 +2220,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
         vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
 
-        // Enable queried features conservatively.
         if (useCore12Bda) {
             extFeatures->feature12.bufferDeviceAddress = extFeatures->feature12.bufferDeviceAddress ? VK_TRUE : VK_FALSE;
             extFeatures->bufferDeviceAddress.bufferDeviceAddress = extFeatures->feature12.bufferDeviceAddress;
@@ -2387,6 +2386,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
     RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     RADRAY_INFO_LOG("Bindless Array: {}", deviceR->_detail.IsBindlessArraySupported);
+    RADRAY_INFO_LOG("Ray Tracing: {}", deviceR->_detail.IsRayTracingSupported);
     RADRAY_INFO_LOG("=============================");
     return deviceR;
 }
@@ -3533,12 +3533,11 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
         return _device->_ftb.vkGetBufferDeviceAddress(_device->_device, &info);
     };
     const uint64_t instanceBytes = sizeof(VkAccelerationStructureInstanceKHR) * desc.Instances.size();
-    auto instBufOpt = _device->CreateBuffer({
-        Align(instanceBytes, 16ull),
-        MemoryType::Upload,
-        BufferUse::Scratch | BufferUse::MapWrite,
-        ResourceHint::None,
-        "vk_tlas_instances"});
+    auto instBufOpt = _device->CreateBuffer({Align(instanceBytes, 16ull),
+                                             MemoryType::Upload,
+                                             BufferUse::Scratch | BufferUse::MapWrite,
+                                             ResourceHint::None,
+                                             "vk_tlas_instances"});
     if (!instBufOpt.HasValue()) {
         return;
     }

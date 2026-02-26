@@ -10,12 +10,6 @@
 #include <radray/utility.h>
 #include <radray/platform.h>
 #include <radray/render/render_utility.h>
-#ifdef RADRAY_ENABLE_D3D12
-#include <radray/render/backend/d3d12_impl.h>
-#endif
-#ifdef RADRAY_ENABLE_VULKAN
-#include <radray/render/backend/vulkan_impl.h>
-#endif
 
 namespace radray::render {
 
