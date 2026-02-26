@@ -368,6 +368,12 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Usage.HasFlag(BufferUse::Indirect)) {
         bufInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     }
+    if (desc.Usage.HasFlag(BufferUse::Vertex) ||
+        desc.Usage.HasFlag(BufferUse::Index) ||
+        desc.Usage.HasFlag(BufferUse::Resource) ||
+        desc.Usage.HasFlag(BufferUse::Scratch)) {
+        bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    }
     if (desc.Usage.HasFlag(BufferUse::AccelerationStructure)) {
         bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
     }
@@ -376,7 +382,10 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     }
     if (desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
         desc.Usage.HasFlag(BufferUse::Scratch) ||
-        desc.Usage.HasFlag(BufferUse::ShaderTable)) {
+        desc.Usage.HasFlag(BufferUse::ShaderTable) ||
+        desc.Usage.HasFlag(BufferUse::Vertex) ||
+        desc.Usage.HasFlag(BufferUse::Index) ||
+        desc.Usage.HasFlag(BufferUse::Resource)) {
         bufInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     if (desc.Usage.HasFlag(BufferUse::Scratch)) {
@@ -562,9 +571,17 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
 }
 
 Nullable<unique_ptr<AccelerationStructureView>> DeviceVulkan::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("ray tracing acceleration structure view is not implemented on Vulkan backend yet");
-    return nullptr;
+    if (!ValidateAccelerationStructureViewDescriptor(desc)) {
+        return nullptr;
+    }
+    auto target = CastVkObject(desc.Target);
+    if (!target->IsValid()) {
+        RADRAY_ERR_LOG("vk acceleration structure view target is invalid");
+        return nullptr;
+    }
+    auto result = make_unique<AccelerationStructureViewVulkan>(this, target);
+    result->_desc = desc;
+    return result;
 }
 
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
@@ -1024,15 +1041,259 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
 }
 
 Nullable<unique_ptr<AccelerationStructure>> DeviceVulkan::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("ray tracing acceleration structure is not implemented on Vulkan backend yet");
-    return nullptr;
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("vk ray tracing acceleration structure is not supported by this device");
+        return nullptr;
+    }
+    if (!ValidateAccelerationStructureDescriptor(desc)) {
+        return nullptr;
+    }
+    uint64_t estimatedSize = 0;
+    if (desc.Type == AccelerationStructureType::BottomLevel) {
+        estimatedSize = std::max<uint64_t>(1ull << 20, uint64_t(std::max(1u, desc.MaxGeometryCount)) * (2ull << 20));
+    } else {
+        estimatedSize = std::max<uint64_t>(1ull << 20, uint64_t(std::max(1u, desc.MaxInstanceCount)) * 4096ull);
+    }
+    uint64_t asAlignment = std::max<uint64_t>(256, this->GetDetail().AccelerationStructureAlignment);
+    estimatedSize = Align(estimatedSize, asAlignment);
+
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = estimatedSize;
+    bufInfo.usage =
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    VkBuffer vkBuf = VK_NULL_HANDLE;
+    VmaAllocation vmaAlloc = VK_NULL_HANDLE;
+    VmaAllocationInfo vmaAllocInfo{};
+    if (auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &allocInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vmaCreateBuffer (AS) failed: {}", vr);
+        return nullptr;
+    }
+    this->SetObjectName(desc.Name, vkBuf);
+
+    VkAccelerationStructureCreateInfoKHR asInfo{};
+    asInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    asInfo.buffer = vkBuf;
+    asInfo.offset = 0;
+    asInfo.size = estimatedSize;
+    asInfo.type = desc.Type == AccelerationStructureType::BottomLevel
+                      ? VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+                      : VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateAccelerationStructureKHR(_device, &asInfo, this->GetAllocationCallbacks(), &as);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateAccelerationStructureKHR failed: {}", vr);
+        vmaDestroyBuffer(_vma->_vma, vkBuf, vmaAlloc);
+        return nullptr;
+    }
+
+    auto result = make_unique<AccelerationStructureVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo, as, desc, estimatedSize);
+    VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
+    addrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    addrInfo.accelerationStructure = as;
+    result->_deviceAddress = _ftb.vkGetAccelerationStructureDeviceAddressKHR(_device, &addrInfo);
+    if (result->_deviceAddress == 0) {
+        RADRAY_ERR_LOG("vkGetAccelerationStructureDeviceAddressKHR returned 0");
+        return nullptr;
+    }
+    return result;
 }
 
 Nullable<unique_ptr<RayTracingPipelineState>> DeviceVulkan::CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept {
-    RADRAY_UNUSED(desc);
-    RADRAY_ERR_LOG("ray tracing pipeline state is not implemented on Vulkan backend yet");
-    return nullptr;
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("vk ray tracing pipeline state is not supported by this device");
+        return nullptr;
+    }
+    if (desc.RootSig == nullptr) {
+        RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor.RootSig is null");
+        return nullptr;
+    }
+    if (desc.ShaderEntries.empty()) {
+        RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor.ShaderEntries is empty");
+        return nullptr;
+    }
+    if (desc.MaxRecursionDepth == 0 || desc.MaxRecursionDepth > this->GetDetail().MaxRayRecursionDepth) {
+        RADRAY_ERR_LOG("invalid MaxRecursionDepth {} (device max={})", desc.MaxRecursionDepth, this->GetDetail().MaxRayRecursionDepth);
+        return nullptr;
+    }
+
+    auto rs = CastVkObject(desc.RootSig);
+    vector<string> entryNames{};
+    entryNames.reserve(desc.ShaderEntries.size());
+    vector<VkPipelineShaderStageCreateInfo> stages{};
+    stages.reserve(desc.ShaderEntries.size());
+    unordered_map<string, uint32_t> stageIndexByName{};
+    unordered_map<string, ShaderStage> stageKindByName{};
+
+    auto toVkRtStage = [](ShaderStage s) -> VkShaderStageFlagBits {
+        switch (s) {
+            case ShaderStage::RayGen: return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+            case ShaderStage::Miss: return VK_SHADER_STAGE_MISS_BIT_KHR;
+            case ShaderStage::ClosestHit: return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+            case ShaderStage::AnyHit: return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+            case ShaderStage::Intersection: return VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+            case ShaderStage::Callable: return VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+            default: return VK_SHADER_STAGE_ALL;
+        }
+    };
+    for (const auto& entry : desc.ShaderEntries) {
+        if (entry.Target == nullptr) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor contains null shader entry target");
+            return nullptr;
+        }
+        auto vkStage = toVkRtStage(entry.Stage);
+        if (vkStage == VK_SHADER_STAGE_ALL) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor shader entry has non-RT stage {}", entry.Stage);
+            return nullptr;
+        }
+        string ep{entry.EntryPoint};
+        if (ep.empty()) {
+            RADRAY_ERR_LOG("RayTracingPipelineStateDescriptor shader entry has empty entry point");
+            return nullptr;
+        }
+        if (stageIndexByName.contains(ep)) {
+            RADRAY_ERR_LOG("duplicated RT shader entry '{}'", ep);
+            return nullptr;
+        }
+        entryNames.push_back(ep);
+        auto sm = CastVkObject(entry.Target);
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = vkStage;
+        stageInfo.module = sm->_shaderModule;
+        stageInfo.pName = entryNames.back().c_str();
+        stageInfo.pSpecializationInfo = nullptr;
+        stageIndexByName.emplace(ep, static_cast<uint32_t>(stages.size()));
+        stageKindByName.emplace(ep, entry.Stage);
+        stages.push_back(stageInfo);
+    }
+
+    vector<VkRayTracingShaderGroupCreateInfoKHR> groups{};
+    groups.reserve(desc.ShaderEntries.size() + desc.HitGroups.size());
+    unordered_map<string, uint32_t> groupIndices{};
+    for (const auto& entry : desc.ShaderEntries) {
+        if (entry.Stage == ShaderStage::ClosestHit ||
+            entry.Stage == ShaderStage::AnyHit ||
+            entry.Stage == ShaderStage::Intersection) {
+            continue;
+        }
+        VkRayTracingShaderGroupCreateInfoKHR group{};
+        group.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        group.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        group.generalShader = stageIndexByName[string(entry.EntryPoint)];
+        group.closestHitShader = VK_SHADER_UNUSED_KHR;
+        group.anyHitShader = VK_SHADER_UNUSED_KHR;
+        group.intersectionShader = VK_SHADER_UNUSED_KHR;
+        groupIndices.emplace(string(entry.EntryPoint), static_cast<uint32_t>(groups.size()));
+        groups.push_back(group);
+    }
+    for (const auto& hg : desc.HitGroups) {
+        string groupName{hg.Name};
+        if (groupName.empty()) {
+            RADRAY_ERR_LOG("RayTracingHitGroupDescriptor.Name is empty");
+            return nullptr;
+        }
+        VkRayTracingShaderGroupCreateInfoKHR group{};
+        group.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        group.generalShader = VK_SHADER_UNUSED_KHR;
+        group.closestHitShader = VK_SHADER_UNUSED_KHR;
+        group.anyHitShader = VK_SHADER_UNUSED_KHR;
+        group.intersectionShader = VK_SHADER_UNUSED_KHR;
+        bool hasIntersection = false;
+        if (hg.ClosestHit.has_value()) {
+            auto it = stageIndexByName.find(string(hg.ClosestHit->EntryPoint));
+            if (it == stageIndexByName.end()) {
+                RADRAY_ERR_LOG("hit group '{}' references missing ClosestHit '{}'", groupName, hg.ClosestHit->EntryPoint);
+                return nullptr;
+            }
+            group.closestHitShader = it->second;
+        }
+        if (hg.AnyHit.has_value()) {
+            auto it = stageIndexByName.find(string(hg.AnyHit->EntryPoint));
+            if (it == stageIndexByName.end()) {
+                RADRAY_ERR_LOG("hit group '{}' references missing AnyHit '{}'", groupName, hg.AnyHit->EntryPoint);
+                return nullptr;
+            }
+            group.anyHitShader = it->second;
+        }
+        if (hg.Intersection.has_value()) {
+            auto it = stageIndexByName.find(string(hg.Intersection->EntryPoint));
+            if (it == stageIndexByName.end()) {
+                RADRAY_ERR_LOG("hit group '{}' references missing Intersection '{}'", groupName, hg.Intersection->EntryPoint);
+                return nullptr;
+            }
+            group.intersectionShader = it->second;
+            hasIntersection = true;
+        }
+        group.type = hasIntersection ? VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR
+                                     : VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        groupIndices.emplace(groupName, static_cast<uint32_t>(groups.size()));
+        groups.push_back(group);
+    }
+
+    VkRayTracingPipelineCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+    createInfo.stageCount = static_cast<uint32_t>(stages.size());
+    createInfo.pStages = stages.data();
+    createInfo.groupCount = static_cast<uint32_t>(groups.size());
+    createInfo.pGroups = groups.data();
+    createInfo.maxPipelineRayRecursionDepth = desc.MaxRecursionDepth;
+    createInfo.layout = rs->_layout;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (auto vr = _ftb.vkCreateRayTracingPipelinesKHR(_device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateRayTracingPipelinesKHR failed: {}", vr);
+        return nullptr;
+    }
+    auto result = make_unique<RayTracingPipelineVulkan>(this, pipeline, rs);
+    result->_groupIndices = std::move(groupIndices);
+    result->_groupCount = static_cast<uint32_t>(groups.size());
+    return result;
+}
+
+Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept {
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("vk shader binding table is not supported by this device");
+        return nullptr;
+    }
+    if (desc.Pipeline == nullptr) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor.Pipeline is null");
+        return nullptr;
+    }
+    if (desc.RayGenCount != 1) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor.RayGenCount must be exactly 1");
+        return nullptr;
+    }
+    auto* pipeline = CastVkObject(desc.Pipeline);
+    auto req = pipeline->GetShaderBindingTableRequirements();
+    if (req.HandleSize == 0 || req.BaseAlignment == 0) {
+        RADRAY_ERR_LOG("invalid Vulkan ray tracing pipeline SBT requirements");
+        return nullptr;
+    }
+    uint64_t recordSize = static_cast<uint64_t>(req.HandleSize) + static_cast<uint64_t>(desc.MaxLocalDataSize);
+    uint64_t recordStride = Align(recordSize, static_cast<uint64_t>(req.BaseAlignment));
+    uint64_t totalRecords = static_cast<uint64_t>(desc.RayGenCount) +
+                            static_cast<uint64_t>(desc.MissCount) +
+                            static_cast<uint64_t>(desc.HitGroupCount) +
+                            static_cast<uint64_t>(desc.CallableCount);
+    if (totalRecords == 0) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor has no records");
+        return nullptr;
+    }
+    uint64_t totalSize = recordStride * totalRecords;
+    auto buffer = this->CreateBuffer(
+        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None, desc.Name});
+    if (!buffer.HasValue()) {
+        return nullptr;
+    }
+    return make_unique<ShaderBindingTableVulkan>(this, pipeline, buffer.Release(), desc, recordStride);
 }
 
 Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc, std::span<const RootSignatureStaticSampler> staticSamplers) noexcept {
@@ -1852,6 +2113,17 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     if (IsValidateExtensions("VK_KHR_portability_subset", deviceExtsAvailable)) {
         needExts.emplace("VK_KHR_portability_subset");
     }
+    const bool hasRtExts =
+        IsValidateExtensions(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, deviceExtsAvailable) &&
+        IsValidateExtensions(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, deviceExtsAvailable) &&
+        IsValidateExtensions(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, deviceExtsAvailable) &&
+        IsValidateExtensions(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, deviceExtsAvailable);
+    if (hasRtExts) {
+        needExts.emplace(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        needExts.emplace(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        needExts.emplace(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        needExts.emplace(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+    }
     VkPhysicalDeviceProperties2 deviceProperties2{};
     deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     deviceProperties2.pNext = nullptr;
@@ -1862,6 +2134,20 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         cr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONSERVATIVE_RASTERIZATION_PROPERTIES_EXT;
         cr.pNext = nullptr;
         AddToHeadVulkanStruct(deviceProperties2, cr);
+    }
+    if (IsValidateExtensions(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, deviceExtsAvailable)) {
+        extProperties->accelerationStructure = VkPhysicalDeviceAccelerationStructurePropertiesKHR{};
+        auto& asProp = extProperties->accelerationStructure.value();
+        asProp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        asProp.pNext = nullptr;
+        AddToHeadVulkanStruct(deviceProperties2, asProp);
+    }
+    if (IsValidateExtensions(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, deviceExtsAvailable)) {
+        extProperties->rayTracingPipeline = VkPhysicalDeviceRayTracingPipelinePropertiesKHR{};
+        auto& rtProp = extProperties->rayTracingPipeline.value();
+        rtProp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+        rtProp.pNext = nullptr;
+        AddToHeadVulkanStruct(deviceProperties2, rtProp);
     }
     for (const auto& ext : needExts) {
         const char* exts[] = {ext.c_str()};
@@ -1912,7 +2198,39 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature13);
         }
 
+        const bool useCore12Bda = selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2;
+        extFeatures->bufferDeviceAddress = VkPhysicalDeviceBufferDeviceAddressFeatures{};
+        extFeatures->bufferDeviceAddress.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+        extFeatures->bufferDeviceAddress.pNext = nullptr;
+        if (!useCore12Bda) {
+            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->bufferDeviceAddress);
+        }
+
+        extFeatures->accelerationStructure = VkPhysicalDeviceAccelerationStructureFeaturesKHR{};
+        extFeatures->rayTracingPipeline = VkPhysicalDeviceRayTracingPipelineFeaturesKHR{};
+        if (hasRtExts) {
+            extFeatures->accelerationStructure.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+            extFeatures->accelerationStructure.pNext = nullptr;
+            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->accelerationStructure);
+
+            extFeatures->rayTracingPipeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+            extFeatures->rayTracingPipeline.pNext = nullptr;
+            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->rayTracingPipeline);
+        }
+
         vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
+
+        // Enable queried features conservatively.
+        if (useCore12Bda) {
+            extFeatures->feature12.bufferDeviceAddress = extFeatures->feature12.bufferDeviceAddress ? VK_TRUE : VK_FALSE;
+            extFeatures->bufferDeviceAddress.bufferDeviceAddress = extFeatures->feature12.bufferDeviceAddress;
+        } else {
+            extFeatures->bufferDeviceAddress.bufferDeviceAddress = extFeatures->bufferDeviceAddress.bufferDeviceAddress ? VK_TRUE : VK_FALSE;
+        }
+        if (hasRtExts) {
+            extFeatures->accelerationStructure.accelerationStructure = extFeatures->accelerationStructure.accelerationStructure ? VK_TRUE : VK_FALSE;
+            extFeatures->rayTracingPipeline.rayTracingPipeline = extFeatures->rayTracingPipeline.rayTracingPipeline ? VK_TRUE : VK_FALSE;
+        }
         deviceInfo.pNext = &deviceFeatures2;
         deviceInfo.pEnabledFeatures = nullptr;
     }
@@ -1947,6 +2265,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vmaImportVulkanFunctionsFromVolk failed: {}", vr);
         return nullptr;
+    }
+    if (extFeatures->bufferDeviceAddress.bufferDeviceAddress) {
+        vmaCreateInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     }
     VmaAllocator vma;
     if (auto vr = vmaCreateAllocator(&vmaCreateInfo, &vma);
@@ -1991,6 +2312,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             f12.runtimeDescriptorArray &&
             f12.descriptorBindingVariableDescriptorCount &&
             f12.shaderSampledImageArrayNonUniformIndexing;
+        detail.IsRayTracingSupported =
+            extFeatures->bufferDeviceAddress.bufferDeviceAddress &&
+            extFeatures->accelerationStructure.accelerationStructure &&
+            extFeatures->rayTracingPipeline.rayTracingPipeline;
+        if (detail.IsRayTracingSupported && extProperties->rayTracingPipeline.has_value() && extProperties->accelerationStructure.has_value()) {
+            const auto& rtProp = extProperties->rayTracingPipeline.value();
+            const auto& asProp = extProperties->accelerationStructure.value();
+            detail.MaxRayRecursionDepth = rtProp.maxRayRecursionDepth;
+            detail.ShaderTableAlignment = rtProp.shaderGroupBaseAlignment;
+            detail.AccelerationStructureAlignment = static_cast<uint32_t>(asProp.minAccelerationStructureScratchOffsetAlignment);
+            detail.AccelerationStructureScratchAlignment = static_cast<uint32_t>(asProp.minAccelerationStructureScratchOffsetAlignment);
+        }
     }
     if (deviceR->_detail.IsBindlessArraySupported) {
         auto bdlsBufferOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 262144);
@@ -2303,8 +2636,19 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
         } else {
             const auto* ab = std::get_if<BarrierAccelerationStructureDescriptor>(&v);
             RADRAY_ASSERT(ab != nullptr);
-            RADRAY_UNUSED(ab);
-            RADRAY_ERR_LOG("vk acceleration structure barrier is not implemented");
+            auto as = CastVkObject(ab->Target);
+            auto& asBarrier = bufferBarriers.emplace_back();
+            asBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            asBarrier.pNext = nullptr;
+            asBarrier.srcAccessMask = BufferStateToAccessFlags(ab->Before) | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            asBarrier.dstAccessMask = BufferStateToAccessFlags(ab->After);
+            asBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            asBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            asBarrier.buffer = as->_buffer;
+            asBarrier.offset = 0;
+            asBarrier.size = as->_asSize;
+            srcStageMask |= BufferStateToPipelineStageFlags(ab->Before) | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+            dstStageMask |= BufferStateToPipelineStageFlags(ab->After);
         }
     }
     _device->_ftb.vkCmdPipelineBarrier(
@@ -2482,8 +2826,11 @@ void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encod
 }
 
 Nullable<unique_ptr<RayTracingCommandEncoder>> CommandBufferVulkan::BeginRayTracingPass() noexcept {
-    RADRAY_ERR_LOG("ray tracing command encoder is not implemented on Vulkan backend yet");
-    return nullptr;
+    if (!_device->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("vk ray tracing command encoder is not supported by this device");
+        return nullptr;
+    }
+    return make_unique<CommandEncoderRayTracingVulkan>(_device, this);
 }
 
 void CommandBufferVulkan::EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept {
@@ -2931,6 +3278,409 @@ void SimulateComputeEncoderVulkan::SetThreadGroupSize(uint32_t x, uint32_t y, ui
     RADRAY_UNUSED(y);
     RADRAY_UNUSED(z);
     // Vulkan: thread group size is defined in shader (local_size), no-op here
+}
+
+// ======================== CommandEncoderRayTracingVulkan ========================
+
+CommandEncoderRayTracingVulkan::CommandEncoderRayTracingVulkan(
+    DeviceVulkan* device,
+    CommandBufferVulkan* cmdBuffer) noexcept
+    : _device(device),
+      _cmdBuffer(cmdBuffer) {}
+
+CommandEncoderRayTracingVulkan::~CommandEncoderRayTracingVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool CommandEncoderRayTracingVulkan::IsValid() const noexcept {
+    return _device != nullptr;
+}
+
+void CommandEncoderRayTracingVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void CommandEncoderRayTracingVulkan::DestroyImpl() noexcept {
+    _keepAliveBuffers.clear();
+    _boundRtPipeline = nullptr;
+    _boundPipeLayout = nullptr;
+    _cmdBuffer = nullptr;
+    _device = nullptr;
+}
+
+CommandBuffer* CommandEncoderRayTracingVulkan::GetCommandBuffer() const noexcept {
+    return _cmdBuffer;
+}
+
+void CommandEncoderRayTracingVulkan::BindRootSignature(RootSignature* rootSig) noexcept {
+    _boundPipeLayout = CastVkObject(rootSig);
+}
+
+void CommandEncoderRayTracingVulkan::PushConstant(const void* data, size_t length) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::PushConstant");
+        return;
+    }
+    if (!_boundPipeLayout->_pushConst.has_value()) {
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
+        return;
+    }
+    const auto& pc = _boundPipeLayout->_pushConst.value();
+    if (length > pc.size) {
+        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
+        return;
+    }
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+}
+
+void CommandEncoderRayTracingVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(slot);
+    RADRAY_UNUSED(buffer);
+    RADRAY_UNUSED(offset);
+    RADRAY_UNUSED(size);
+    RADRAY_ERR_LOG("unsupported RayTracingCommandEncoder::BindRootDescriptor in vk");
+}
+
+void CommandEncoderRayTracingVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+        return;
+    }
+    auto descSet = CastVkObject(set);
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        _boundPipeLayout->_layout,
+        slot,
+        1,
+        &descSet->_allocation.Set,
+        0, nullptr);
+}
+
+void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+    if (!_boundPipeLayout) {
+        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindBindlessArray");
+        return;
+    }
+    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+        return;
+    }
+    if (!_boundPipeLayout->IsBindlessSet(slot)) {
+        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+        return;
+    }
+    auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (bdlsArray->_tex2dAlloc.IsValid()) {
+        set = bdlsArray->_tex2dAlloc.Set;
+    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
+        set = bdlsArray->_tex3dAlloc.Set;
+    } else if (bdlsArray->_bufferAlloc.IsValid()) {
+        set = bdlsArray->_bufferAlloc.Set;
+    }
+    if (set == VK_NULL_HANDLE) {
+        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        return;
+    }
+    _device->_ftb.vkCmdBindDescriptorSets(
+        _cmdBuffer->_cmdBuffer,
+        VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        _boundPipeLayout->_layout,
+        slot,
+        1,
+        &set,
+        0, nullptr);
+}
+
+void CommandEncoderRayTracingVulkan::BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept {
+    if (!ValidateBuildBottomLevelASDescriptor(desc)) {
+        return;
+    }
+    auto target = CastVkObject(desc.Target);
+    auto scratch = CastVkObject(desc.ScratchBuffer);
+    if (target->_desc.Type != AccelerationStructureType::BottomLevel) {
+        RADRAY_ERR_LOG("BuildBottomLevelAS target type mismatch");
+        return;
+    }
+    if (desc.Mode == AccelerationStructureBuildMode::Update &&
+        !target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        RADRAY_ERR_LOG("BuildBottomLevelAS update requested without AllowUpdate flag");
+        return;
+    }
+    auto getBufferAddress = [&](BufferVulkan* b) -> VkDeviceAddress {
+        VkBufferDeviceAddressInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = b->_buffer;
+        return _device->_ftb.vkGetBufferDeviceAddress(_device->_device, &info);
+    };
+    vector<VkAccelerationStructureGeometryKHR> geometries{};
+    vector<VkAccelerationStructureBuildRangeInfoKHR> ranges{};
+    vector<uint32_t> primitiveCounts{};
+    geometries.reserve(desc.Geometries.size());
+    ranges.reserve(desc.Geometries.size());
+    primitiveCounts.reserve(desc.Geometries.size());
+    for (const auto& geom : desc.Geometries) {
+        VkAccelerationStructureGeometryKHR g{};
+        g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        g.flags = geom.Opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        if (const auto* tri = std::get_if<RayTracingTrianglesDescriptor>(&geom.Geometry)) {
+            g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+            g.geometry.triangles.vertexFormat = MapType(tri->VertexFmt);
+            g.geometry.triangles.vertexData.deviceAddress = getBufferAddress(CastVkObject(tri->VertexBuffer)) + tri->VertexOffset;
+            g.geometry.triangles.vertexStride = tri->VertexStride;
+            g.geometry.triangles.maxVertex = tri->VertexCount == 0 ? 0 : (tri->VertexCount - 1);
+            if (tri->IndexBuffer != nullptr) {
+                g.geometry.triangles.indexType = tri->IndexFmt == IndexFormat::UINT16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+                g.geometry.triangles.indexData.deviceAddress = getBufferAddress(CastVkObject(tri->IndexBuffer)) + tri->IndexOffset;
+                range.primitiveCount = tri->IndexCount / 3;
+            } else {
+                g.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+                range.primitiveCount = tri->VertexCount / 3;
+            }
+            if (tri->TransformBuffer != nullptr) {
+                g.geometry.triangles.transformData.deviceAddress = getBufferAddress(CastVkObject(tri->TransformBuffer)) + tri->TransformOffset;
+            }
+        } else {
+            const auto* aabb = std::get_if<RayTracingAABBsDescriptor>(&geom.Geometry);
+            RADRAY_ASSERT(aabb != nullptr);
+            g.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+            g.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+            g.geometry.aabbs.data.deviceAddress = getBufferAddress(CastVkObject(aabb->Target)) + aabb->Offset;
+            g.geometry.aabbs.stride = aabb->Stride;
+            range.primitiveCount = aabb->Count;
+        }
+        range.primitiveOffset = 0;
+        range.firstVertex = 0;
+        range.transformOffset = 0;
+        primitiveCounts.push_back(range.primitiveCount);
+        geometries.push_back(g);
+        ranges.push_back(range);
+    }
+
+    VkBuildAccelerationStructureFlagsKHR buildFlags = 0;
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::PreferFastTrace)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::PreferFastBuild)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    }
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags = buildFlags;
+    buildInfo.mode = desc.Mode == AccelerationStructureBuildMode::Update
+                         ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.srcAccelerationStructure = desc.Mode == AccelerationStructureBuildMode::Update ? target->_accelerationStructure : VK_NULL_HANDLE;
+    buildInfo.dstAccelerationStructure = target->_accelerationStructure;
+    buildInfo.geometryCount = static_cast<uint32_t>(geometries.size());
+    buildInfo.pGeometries = geometries.data();
+
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    _device->_ftb.vkGetAccelerationStructureBuildSizesKHR(
+        _device->_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo,
+        primitiveCounts.data(),
+        &sizeInfo);
+    if (target->_asSize < sizeInfo.accelerationStructureSize) {
+        RADRAY_ERR_LOG("BLAS target AS buffer too small: need={}, actual={}", sizeInfo.accelerationStructureSize, target->_asSize);
+        return;
+    }
+    if (desc.ScratchSize < sizeInfo.buildScratchSize) {
+        RADRAY_ERR_LOG("BLAS scratch buffer too small: need={}, actual={}", sizeInfo.buildScratchSize, desc.ScratchSize);
+        return;
+    }
+    buildInfo.scratchData.deviceAddress = getBufferAddress(scratch) + desc.ScratchOffset;
+    const VkAccelerationStructureBuildRangeInfoKHR* rangePtr = ranges.data();
+    _device->_ftb.vkCmdBuildAccelerationStructuresKHR(_cmdBuffer->_cmdBuffer, 1, &buildInfo, &rangePtr);
+}
+
+void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept {
+    if (!ValidateBuildTopLevelASDescriptor(desc)) {
+        return;
+    }
+    auto target = CastVkObject(desc.Target);
+    auto scratch = CastVkObject(desc.ScratchBuffer);
+    if (target->_desc.Type != AccelerationStructureType::TopLevel) {
+        RADRAY_ERR_LOG("BuildTopLevelAS target type mismatch");
+        return;
+    }
+    if (desc.Mode == AccelerationStructureBuildMode::Update &&
+        !target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        RADRAY_ERR_LOG("BuildTopLevelAS update requested without AllowUpdate flag");
+        return;
+    }
+    auto getBufferAddress = [&](BufferVulkan* b) -> VkDeviceAddress {
+        VkBufferDeviceAddressInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = b->_buffer;
+        return _device->_ftb.vkGetBufferDeviceAddress(_device->_device, &info);
+    };
+    const uint64_t instanceBytes = sizeof(VkAccelerationStructureInstanceKHR) * desc.Instances.size();
+    auto instBufOpt = _device->CreateBuffer({
+        Align(instanceBytes, 16ull),
+        MemoryType::Upload,
+        BufferUse::Scratch | BufferUse::MapWrite,
+        ResourceHint::None,
+        "vk_tlas_instances"});
+    if (!instBufOpt.HasValue()) {
+        return;
+    }
+    auto instBuf = instBufOpt.Release();
+    auto* mapped = static_cast<VkAccelerationStructureInstanceKHR*>(instBuf->Map(0, instanceBytes));
+    for (size_t i = 0; i < desc.Instances.size(); i++) {
+        const auto& src = desc.Instances[i];
+        auto& dst = mapped[i];
+        std::memset(&dst, 0, sizeof(dst));
+        dst.transform.matrix[0][0] = src.Transform(0, 0);
+        dst.transform.matrix[0][1] = src.Transform(0, 1);
+        dst.transform.matrix[0][2] = src.Transform(0, 2);
+        dst.transform.matrix[0][3] = src.Transform(0, 3);
+        dst.transform.matrix[1][0] = src.Transform(1, 0);
+        dst.transform.matrix[1][1] = src.Transform(1, 1);
+        dst.transform.matrix[1][2] = src.Transform(1, 2);
+        dst.transform.matrix[1][3] = src.Transform(1, 3);
+        dst.transform.matrix[2][0] = src.Transform(2, 0);
+        dst.transform.matrix[2][1] = src.Transform(2, 1);
+        dst.transform.matrix[2][2] = src.Transform(2, 2);
+        dst.transform.matrix[2][3] = src.Transform(2, 3);
+        dst.instanceCustomIndex = src.InstanceID;
+        dst.mask = src.InstanceMask;
+        dst.instanceShaderBindingTableRecordOffset = src.InstanceContributionToHitGroupIndex;
+        dst.flags = 0;
+        if (src.ForceOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        if (src.ForceNoOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        dst.accelerationStructureReference = CastVkObject(src.Blas)->_deviceAddress;
+    }
+    instBuf->Unmap(0, instanceBytes);
+    auto instBufRaw = CastVkObject(instBuf.get());
+
+    VkBuildAccelerationStructureFlagsKHR buildFlags = 0;
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::PreferFastTrace)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::PreferFastBuild)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowUpdate)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    }
+    if (target->_desc.Flags.HasFlag(AccelerationStructureBuildFlag::AllowCompaction)) {
+        buildFlags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+    }
+
+    VkAccelerationStructureGeometryInstancesDataKHR instData{};
+    instData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    instData.arrayOfPointers = VK_FALSE;
+    instData.data.deviceAddress = getBufferAddress(instBufRaw);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances = instData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags = buildFlags;
+    buildInfo.mode = desc.Mode == AccelerationStructureBuildMode::Update
+                         ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.srcAccelerationStructure = desc.Mode == AccelerationStructureBuildMode::Update ? target->_accelerationStructure : VK_NULL_HANDLE;
+    buildInfo.dstAccelerationStructure = target->_accelerationStructure;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+
+    uint32_t primitiveCount = static_cast<uint32_t>(desc.Instances.size());
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    _device->_ftb.vkGetAccelerationStructureBuildSizesKHR(
+        _device->_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo,
+        &primitiveCount,
+        &sizeInfo);
+    if (target->_asSize < sizeInfo.accelerationStructureSize) {
+        RADRAY_ERR_LOG("TLAS target AS buffer too small: need={}, actual={}", sizeInfo.accelerationStructureSize, target->_asSize);
+        return;
+    }
+    if (desc.ScratchSize < sizeInfo.buildScratchSize) {
+        RADRAY_ERR_LOG("TLAS scratch buffer too small: need={}, actual={}", sizeInfo.buildScratchSize, desc.ScratchSize);
+        return;
+    }
+    buildInfo.scratchData.deviceAddress = getBufferAddress(scratch) + desc.ScratchOffset;
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* rangePtr = &range;
+    _device->_ftb.vkCmdBuildAccelerationStructuresKHR(_cmdBuffer->_cmdBuffer, 1, &buildInfo, &rangePtr);
+    _keepAliveBuffers.emplace_back(std::move(instBuf));
+}
+
+void CommandEncoderRayTracingVulkan::BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept {
+    _boundRtPipeline = CastVkObject(pso);
+}
+
+void CommandEncoderRayTracingVulkan::TraceRays(const TraceRaysDescriptor& desc) noexcept {
+    if (_boundRtPipeline == nullptr) {
+        RADRAY_ERR_LOG("bind ray tracing pipeline state before TraceRays");
+        return;
+    }
+    TraceRaysDescriptor resolved = desc;
+    if (desc.Sbt != nullptr) {
+        auto regions = desc.Sbt->GetRegions();
+        resolved.RayGen = regions.RayGen;
+        resolved.Miss = regions.Miss;
+        resolved.HitGroup = regions.HitGroup;
+        resolved.Callable = regions.Callable;
+    }
+    if (!ValidateTraceRaysDescriptor(resolved, _device->GetDetail())) {
+        return;
+    }
+    auto toRegion = [&](const ShaderBindingTableRegion& r) {
+        VkBufferDeviceAddressInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = CastVkObject(r.Target)->_buffer;
+        VkDeviceAddress base = _device->_ftb.vkGetBufferDeviceAddress(_device->_device, &info);
+        VkStridedDeviceAddressRegionKHR out{};
+        out.deviceAddress = base + r.Offset;
+        out.size = r.Size;
+        out.stride = r.Stride;
+        return out;
+    };
+    VkStridedDeviceAddressRegionKHR rayGen = toRegion(resolved.RayGen);
+    VkStridedDeviceAddressRegionKHR miss = toRegion(resolved.Miss);
+    VkStridedDeviceAddressRegionKHR hit = toRegion(resolved.HitGroup);
+    VkStridedDeviceAddressRegionKHR callable{};
+    if (resolved.Callable.has_value()) {
+        callable = toRegion(resolved.Callable.value());
+    }
+    _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, _boundRtPipeline->_pipeline);
+    _device->_ftb.vkCmdTraceRaysKHR(
+        _cmdBuffer->_cmdBuffer,
+        &rayGen,
+        &miss,
+        &hit,
+        &callable,
+        resolved.Width,
+        resolved.Height,
+        resolved.Depth);
 }
 
 RenderPassVulkan::RenderPassVulkan(
@@ -3592,6 +4342,253 @@ void ComputePipelineVulkan::DestroyImpl() noexcept {
     }
 }
 
+RayTracingPipelineVulkan::RayTracingPipelineVulkan(
+    DeviceVulkan* device,
+    VkPipeline pipeline,
+    PipelineLayoutVulkan* rootSig) noexcept
+    : _device(device),
+      _pipeline(pipeline),
+      _rootSig(rootSig) {}
+
+RayTracingPipelineVulkan::~RayTracingPipelineVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool RayTracingPipelineVulkan::IsValid() const noexcept {
+    return _pipeline != VK_NULL_HANDLE;
+}
+
+void RayTracingPipelineVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void RayTracingPipelineVulkan::DestroyImpl() noexcept {
+    if (_pipeline != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
+        _pipeline = VK_NULL_HANDLE;
+    }
+    _groupIndices.clear();
+    _groupCount = 0;
+    _rootSig = nullptr;
+}
+
+ShaderBindingTableRequirements RayTracingPipelineVulkan::GetShaderBindingTableRequirements() const noexcept {
+    ShaderBindingTableRequirements req{};
+    if (_device == nullptr || !_device->_extProperties.rayTracingPipeline.has_value()) {
+        return req;
+    }
+    const auto& prop = _device->_extProperties.rayTracingPipeline.value();
+    req.HandleSize = prop.shaderGroupHandleSize;
+    req.HandleAlignment = prop.shaderGroupHandleAlignment;
+    req.BaseAlignment = prop.shaderGroupBaseAlignment;
+    return req;
+}
+
+std::optional<vector<byte>> RayTracingPipelineVulkan::GetShaderBindingTableHandle(std::string_view shaderName) const noexcept {
+    auto it = _groupIndices.find(string(shaderName));
+    if (it == _groupIndices.end()) {
+        return std::nullopt;
+    }
+    auto req = this->GetShaderBindingTableRequirements();
+    if (req.HandleSize == 0) {
+        return std::nullopt;
+    }
+    vector<byte> handle(req.HandleSize);
+    auto vr = _device->_ftb.vkGetRayTracingShaderGroupHandlesKHR(
+        _device->_device,
+        _pipeline,
+        it->second,
+        1,
+        handle.size(),
+        handle.data());
+    if (vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkGetRayTracingShaderGroupHandlesKHR failed: {}", vr);
+        return std::nullopt;
+    }
+    return handle;
+}
+
+ShaderBindingTableVulkan::ShaderBindingTableVulkan(
+    DeviceVulkan* device,
+    RayTracingPipelineVulkan* pipeline,
+    unique_ptr<Buffer> buffer,
+    const ShaderBindingTableDescriptor& desc,
+    uint64_t recordStride) noexcept
+    : _device(device),
+      _pipeline(pipeline),
+      _buffer(std::move(buffer)),
+      _desc(desc),
+      _recordStride(recordStride) {
+    _rayGenOffset = 0;
+    _missOffset = _recordStride * _desc.RayGenCount;
+    _hitGroupOffset = _missOffset + _recordStride * _desc.MissCount;
+    _callableOffset = _hitGroupOffset + _recordStride * _desc.HitGroupCount;
+}
+
+ShaderBindingTableVulkan::~ShaderBindingTableVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool ShaderBindingTableVulkan::IsValid() const noexcept {
+    return _device != nullptr && _pipeline != nullptr && _buffer != nullptr;
+}
+
+void ShaderBindingTableVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void ShaderBindingTableVulkan::DestroyImpl() noexcept {
+    _buffer.reset();
+    _pipeline = nullptr;
+    _device = nullptr;
+    _isBuilt = false;
+}
+
+bool ShaderBindingTableVulkan::Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept {
+    if (!this->IsValid()) {
+        return false;
+    }
+    auto req = _pipeline->GetShaderBindingTableRequirements();
+    if (req.HandleSize == 0 || _recordStride < req.HandleSize) {
+        RADRAY_ERR_LOG("invalid SBT record stride/handle size");
+        return false;
+    }
+    uint64_t totalSize = _buffer->GetDesc().Size;
+    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map SBT buffer");
+        return false;
+    }
+    std::memset(mapped, 0, static_cast<size_t>(totalSize));
+    for (const auto& entry : entries) {
+        uint32_t count = 0;
+        uint64_t baseOffset = 0;
+        switch (entry.Type) {
+            case ShaderBindingTableEntryType::RayGen:
+                count = _desc.RayGenCount;
+                baseOffset = _rayGenOffset;
+                break;
+            case ShaderBindingTableEntryType::Miss:
+                count = _desc.MissCount;
+                baseOffset = _missOffset;
+                break;
+            case ShaderBindingTableEntryType::HitGroup:
+                count = _desc.HitGroupCount;
+                baseOffset = _hitGroupOffset;
+                break;
+            case ShaderBindingTableEntryType::Callable:
+                count = _desc.CallableCount;
+                baseOffset = _callableOffset;
+                break;
+        }
+        if (entry.RecordIndex >= count) {
+            RADRAY_ERR_LOG("SBT record index out of range: type={}, index={}, count={}", static_cast<uint32_t>(entry.Type), entry.RecordIndex, count);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        auto handle = _pipeline->GetShaderBindingTableHandle(entry.ShaderName);
+        if (!handle.has_value()) {
+            RADRAY_ERR_LOG("cannot find shader handle '{}'", entry.ShaderName);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        if (entry.LocalData.size() > _recordStride - req.HandleSize) {
+            RADRAY_ERR_LOG("local data too large for SBT record '{}'", entry.ShaderName);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        uint64_t dstOffset = baseOffset + _recordStride * entry.RecordIndex;
+        auto* dst = mapped + dstOffset;
+        std::memcpy(dst, handle->data(), req.HandleSize);
+        if (!entry.LocalData.empty()) {
+            std::memcpy(dst + req.HandleSize, entry.LocalData.data(), entry.LocalData.size());
+        }
+    }
+    _buffer->Unmap(0, totalSize);
+    _isBuilt = true;
+    return true;
+}
+
+bool ShaderBindingTableVulkan::IsBuilt() const noexcept {
+    return _isBuilt;
+}
+
+ShaderBindingTableRegions ShaderBindingTableVulkan::GetRegions() const noexcept {
+    ShaderBindingTableRegions regions{};
+    regions.RayGen = {_buffer.get(), _rayGenOffset, _recordStride * _desc.RayGenCount, _recordStride};
+    regions.Miss = {_buffer.get(), _missOffset, _recordStride * _desc.MissCount, _recordStride};
+    regions.HitGroup = {_buffer.get(), _hitGroupOffset, _recordStride * _desc.HitGroupCount, _recordStride};
+    if (_desc.CallableCount > 0) {
+        regions.Callable = ShaderBindingTableRegion{_buffer.get(), _callableOffset, _recordStride * _desc.CallableCount, _recordStride};
+    }
+    return regions;
+}
+
+AccelerationStructureVulkan::AccelerationStructureVulkan(
+    DeviceVulkan* device,
+    VkBuffer buffer,
+    VmaAllocation allocation,
+    VmaAllocationInfo allocInfo,
+    VkAccelerationStructureKHR accelerationStructure,
+    const AccelerationStructureDescriptor& desc,
+    uint64_t asSize) noexcept
+    : _device(device),
+      _buffer(buffer),
+      _allocation(allocation),
+      _allocInfo(allocInfo),
+      _accelerationStructure(accelerationStructure),
+      _desc(desc),
+      _asSize(asSize),
+      _name(desc.Name) {}
+
+AccelerationStructureVulkan::~AccelerationStructureVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool AccelerationStructureVulkan::IsValid() const noexcept {
+    return _buffer != VK_NULL_HANDLE && _allocation != VK_NULL_HANDLE && _accelerationStructure != VK_NULL_HANDLE;
+}
+
+void AccelerationStructureVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void AccelerationStructureVulkan::DestroyImpl() noexcept {
+    if (_accelerationStructure != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyAccelerationStructureKHR(_device->_device, _accelerationStructure, _device->GetAllocationCallbacks());
+        _accelerationStructure = VK_NULL_HANDLE;
+    }
+    if (_buffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(_device->_vma->_vma, _buffer, _allocation);
+        _buffer = VK_NULL_HANDLE;
+        _allocation = VK_NULL_HANDLE;
+        _allocInfo = VmaAllocationInfo{};
+    }
+    _deviceAddress = 0;
+}
+
+AccelerationStructureViewVulkan::AccelerationStructureViewVulkan(
+    DeviceVulkan* device,
+    AccelerationStructureVulkan* target) noexcept
+    : _device(device),
+      _target(target) {}
+
+AccelerationStructureViewVulkan::~AccelerationStructureViewVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool AccelerationStructureViewVulkan::IsValid() const noexcept {
+    return _target != nullptr && _target->IsValid();
+}
+
+void AccelerationStructureViewVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void AccelerationStructureViewVulkan::DestroyImpl() noexcept {
+    _target = nullptr;
+}
+
 ShaderModuleVulkan::ShaderModuleVulkan(
     DeviceVulkan* device,
     VkShaderModule shaderModule) noexcept
@@ -3703,6 +4700,7 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
     writeDesc.pTexelBufferView = nullptr;
     VkDescriptorBufferInfo bufInfo{};
     VkDescriptorImageInfo imgInfo{};
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
     if (tag.HasFlag(RenderObjectTag::BufferView)) {
         auto bv = static_cast<SimulateBufferViewVulkan*>(view);
         if (bv->_texelView) {
@@ -3718,6 +4716,17 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
         imgInfo.imageView = tv->_imageView;
         imgInfo.imageLayout = TextureViewUsageToLayout(tv->_mdesc.Usage);
         writeDesc.pImageInfo = &imgInfo;
+    } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+        auto asView = static_cast<AccelerationStructureViewVulkan*>(view);
+        if (asView->_target == nullptr || asView->_target->_accelerationStructure == VK_NULL_HANDLE) {
+            RADRAY_ERR_LOG("vk invalid acceleration structure view");
+            return;
+        }
+        asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        asInfo.pNext = nullptr;
+        asInfo.accelerationStructureCount = 1;
+        asInfo.pAccelerationStructures = &asView->_target->_accelerationStructure;
+        writeDesc.pNext = &asInfo;
     } else {
         RADRAY_ERR_LOG("vk unsupported resource view: {}", tag);
         return;
@@ -3830,6 +4839,7 @@ DescriptorPoolVulkan* DescriptorSetAllocatorVulkan::NewPage() noexcept {
         poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 8192});
         poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1024});
         poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024});
+        poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1024});
         if (_device->_extFeatures.feature13.inlineUniformBlock) {
             poolSizes.push_back(VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK_EXT, 1024});
             pInlineInfo = &inlineInfo;

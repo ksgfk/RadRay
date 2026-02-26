@@ -151,11 +151,14 @@ VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::UnorderedAccess)) {
         access |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     }
-    if (v.HasFlag(BufferState::AccelerationStructureBuildInput) || v.HasFlag(BufferState::ShaderTable)) {
+    if (v.HasFlag(BufferState::AccelerationStructureBuildInput)) {
+        access |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    }
+    if (v.HasFlag(BufferState::ShaderTable)) {
         access |= VK_ACCESS_SHADER_READ_BIT;
     }
     if (v.HasFlag(BufferState::AccelerationStructureBuildScratch)) {
-        access |= VK_ACCESS_SHADER_WRITE_BIT;
+        access |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     }
     if (v.HasFlag(BufferState::AccelerationStructureRead)) {
         access |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;

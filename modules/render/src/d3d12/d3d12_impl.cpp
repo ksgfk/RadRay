@@ -1861,6 +1861,44 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceD3D12::CreateRayTracingPipel
     return result;
 }
 
+Nullable<unique_ptr<ShaderBindingTable>> DeviceD3D12::CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept {
+    if (!this->GetDetail().IsRayTracingSupported) {
+        RADRAY_ERR_LOG("d3d12 shader binding table is not supported by this device");
+        return nullptr;
+    }
+    if (desc.Pipeline == nullptr) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor.Pipeline is null");
+        return nullptr;
+    }
+    if (desc.RayGenCount != 1) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor.RayGenCount must be exactly 1");
+        return nullptr;
+    }
+    auto* pipeline = CastD3D12Object(desc.Pipeline);
+    auto req = pipeline->GetShaderBindingTableRequirements();
+    if (req.HandleSize == 0) {
+        RADRAY_ERR_LOG("invalid SBT handle size");
+        return nullptr;
+    }
+    uint64_t recordSize = static_cast<uint64_t>(req.HandleSize) + static_cast<uint64_t>(desc.MaxLocalDataSize);
+    uint64_t recordStride = Align(recordSize, static_cast<uint64_t>(this->GetDetail().ShaderTableAlignment));
+    uint64_t totalRecords = static_cast<uint64_t>(desc.RayGenCount) +
+                            static_cast<uint64_t>(desc.MissCount) +
+                            static_cast<uint64_t>(desc.HitGroupCount) +
+                            static_cast<uint64_t>(desc.CallableCount);
+    if (totalRecords == 0) {
+        RADRAY_ERR_LOG("ShaderBindingTableDescriptor has no records");
+        return nullptr;
+    }
+    uint64_t totalSize = recordStride * totalRecords;
+    auto buffer = this->CreateBuffer(
+        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None, desc.Name});
+    if (!buffer.HasValue()) {
+        return nullptr;
+    }
+    return make_unique<ShaderBindingTableD3D12>(this, pipeline, buffer.Release(), desc, recordStride);
+}
+
 Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastD3D12Object(rootSig_);
     if (rootSig->IsBindlessSet(index)) {
@@ -3124,7 +3162,15 @@ void CmdRayTracingPassD3D12::TraceRays(const TraceRaysDescriptor& desc) noexcept
         RADRAY_ERR_LOG("bind ray tracing pipeline state before TraceRays");
         return;
     }
-    if (!ValidateTraceRaysDescriptor(desc, _cmdList->_device->GetDetail())) {
+    TraceRaysDescriptor resolved = desc;
+    if (desc.Sbt != nullptr) {
+        auto regions = desc.Sbt->GetRegions();
+        resolved.RayGen = regions.RayGen;
+        resolved.Miss = regions.Miss;
+        resolved.HitGroup = regions.HitGroup;
+        resolved.Callable = regions.Callable;
+    }
+    if (!ValidateTraceRaysDescriptor(resolved, _cmdList->_device->GetDetail())) {
         return;
     }
     auto cmdList4 = _cmdList->QueryCommandList4();
@@ -3142,16 +3188,16 @@ void CmdRayTracingPassD3D12::TraceRays(const TraceRaysDescriptor& desc) noexcept
     };
 
     D3D12_DISPATCH_RAYS_DESC dispatch{};
-    dispatch.RayGenerationShaderRecord.StartAddress = CastD3D12Object(desc.RayGen.Target)->_gpuAddr + desc.RayGen.Offset;
-    dispatch.RayGenerationShaderRecord.SizeInBytes = desc.RayGen.Size;
-    dispatch.MissShaderTable = toRegion(desc.Miss);
-    dispatch.HitGroupTable = toRegion(desc.HitGroup);
-    if (desc.Callable.has_value()) {
-        dispatch.CallableShaderTable = toRegion(desc.Callable.value());
+    dispatch.RayGenerationShaderRecord.StartAddress = CastD3D12Object(resolved.RayGen.Target)->_gpuAddr + resolved.RayGen.Offset;
+    dispatch.RayGenerationShaderRecord.SizeInBytes = resolved.RayGen.Size;
+    dispatch.MissShaderTable = toRegion(resolved.Miss);
+    dispatch.HitGroupTable = toRegion(resolved.HitGroup);
+    if (resolved.Callable.has_value()) {
+        dispatch.CallableShaderTable = toRegion(resolved.Callable.value());
     }
-    dispatch.Width = desc.Width;
-    dispatch.Height = desc.Height;
-    dispatch.Depth = desc.Depth;
+    dispatch.Width = resolved.Width;
+    dispatch.Height = resolved.Height;
+    dispatch.Depth = resolved.Depth;
 
     cmdList4->SetPipelineState1(_boundRtPso->_stateObject.Get());
     cmdList4->DispatchRays(&dispatch);
@@ -3464,6 +3510,131 @@ void RayTracingPsoD3D12::Destroy() noexcept {
     _stateObject = nullptr;
     _stateProps = nullptr;
     _shaderIdentifiers.clear();
+}
+
+ShaderBindingTableRequirements RayTracingPsoD3D12::GetShaderBindingTableRequirements() const noexcept {
+    return {
+        D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
+        D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
+        _device == nullptr ? 0u : _device->GetDetail().ShaderTableAlignment};
+}
+
+std::optional<vector<byte>> RayTracingPsoD3D12::GetShaderBindingTableHandle(std::string_view shaderName) const noexcept {
+    auto it = _shaderIdentifiers.find(string(shaderName));
+    if (it == _shaderIdentifiers.end()) {
+        return std::nullopt;
+    }
+    vector<byte> out(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+    std::memcpy(out.data(), it->second.data(), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+    return out;
+}
+
+ShaderBindingTableD3D12::ShaderBindingTableD3D12(
+    DeviceD3D12* device,
+    RayTracingPsoD3D12* pipeline,
+    unique_ptr<Buffer> buffer,
+    const ShaderBindingTableDescriptor& desc,
+    uint64_t recordStride) noexcept
+    : _device(device),
+      _pipeline(pipeline),
+      _buffer(std::move(buffer)),
+      _desc(desc),
+      _recordStride(recordStride) {
+    _rayGenOffset = 0;
+    _missOffset = _recordStride * _desc.RayGenCount;
+    _hitGroupOffset = _missOffset + _recordStride * _desc.MissCount;
+    _callableOffset = _hitGroupOffset + _recordStride * _desc.HitGroupCount;
+}
+
+bool ShaderBindingTableD3D12::IsValid() const noexcept {
+    return _device != nullptr && _pipeline != nullptr && _buffer != nullptr;
+}
+
+void ShaderBindingTableD3D12::Destroy() noexcept {
+    _buffer.reset();
+    _pipeline = nullptr;
+    _device = nullptr;
+    _isBuilt = false;
+}
+
+bool ShaderBindingTableD3D12::Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept {
+    if (!this->IsValid()) {
+        return false;
+    }
+    auto req = _pipeline->GetShaderBindingTableRequirements();
+    if (req.HandleSize == 0 || _recordStride < req.HandleSize) {
+        RADRAY_ERR_LOG("invalid SBT record stride/handle size");
+        return false;
+    }
+    uint64_t totalSize = _buffer->GetDesc().Size;
+    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map SBT buffer");
+        return false;
+    }
+    std::memset(mapped, 0, static_cast<size_t>(totalSize));
+    for (const auto& entry : entries) {
+        uint32_t count = 0;
+        uint64_t baseOffset = 0;
+        switch (entry.Type) {
+            case ShaderBindingTableEntryType::RayGen:
+                count = _desc.RayGenCount;
+                baseOffset = _rayGenOffset;
+                break;
+            case ShaderBindingTableEntryType::Miss:
+                count = _desc.MissCount;
+                baseOffset = _missOffset;
+                break;
+            case ShaderBindingTableEntryType::HitGroup:
+                count = _desc.HitGroupCount;
+                baseOffset = _hitGroupOffset;
+                break;
+            case ShaderBindingTableEntryType::Callable:
+                count = _desc.CallableCount;
+                baseOffset = _callableOffset;
+                break;
+        }
+        if (entry.RecordIndex >= count) {
+            RADRAY_ERR_LOG("SBT record index out of range: type={}, index={}, count={}", static_cast<uint32_t>(entry.Type), entry.RecordIndex, count);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        auto handle = _pipeline->GetShaderBindingTableHandle(entry.ShaderName);
+        if (!handle.has_value()) {
+            RADRAY_ERR_LOG("cannot find shader handle '{}'", entry.ShaderName);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        if (entry.LocalData.size() > _recordStride - req.HandleSize) {
+            RADRAY_ERR_LOG("local data too large for SBT record '{}'", entry.ShaderName);
+            _buffer->Unmap(0, totalSize);
+            return false;
+        }
+        uint64_t dstOffset = baseOffset + _recordStride * entry.RecordIndex;
+        auto* dst = mapped + dstOffset;
+        std::memcpy(dst, handle->data(), req.HandleSize);
+        if (!entry.LocalData.empty()) {
+            std::memcpy(dst + req.HandleSize, entry.LocalData.data(), entry.LocalData.size());
+        }
+    }
+    _buffer->Unmap(0, totalSize);
+    _isBuilt = true;
+    return true;
+}
+
+bool ShaderBindingTableD3D12::IsBuilt() const noexcept {
+    return _isBuilt;
+}
+
+ShaderBindingTableRegions ShaderBindingTableD3D12::GetRegions() const noexcept {
+    ShaderBindingTableRegions regions{};
+    regions.RayGen = {_buffer.get(), _rayGenOffset, _recordStride * _desc.RayGenCount, _recordStride};
+    regions.Miss = {_buffer.get(), _missOffset, _recordStride * _desc.MissCount, _recordStride};
+    regions.HitGroup = {_buffer.get(), _hitGroupOffset, _recordStride * _desc.HitGroupCount, _recordStride};
+    if (_desc.CallableCount > 0) {
+        regions.Callable = ShaderBindingTableRegion{_buffer.get(), _callableOffset, _recordStride * _desc.CallableCount, _recordStride};
+    }
+    return regions;
 }
 
 GpuDescriptorHeapViews::GpuDescriptorHeapViews(

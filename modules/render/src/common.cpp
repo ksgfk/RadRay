@@ -475,6 +475,19 @@ bool ValidateBuildTopLevelASDescriptor(const BuildTopLevelASDescriptor& desc) no
 }
 
 bool ValidateTraceRaysDescriptor(const TraceRaysDescriptor& desc, const DeviceDetail& detail) noexcept {
+    TraceRaysDescriptor resolved = desc;
+    if (desc.Sbt != nullptr) {
+        if (!desc.Sbt->IsBuilt()) {
+            RADRAY_ERR_LOG("TraceRaysDescriptor.Sbt is not built");
+            return false;
+        }
+        auto regions = desc.Sbt->GetRegions();
+        resolved.RayGen = regions.RayGen;
+        resolved.Miss = regions.Miss;
+        resolved.HitGroup = regions.HitGroup;
+        resolved.Callable = regions.Callable;
+    }
+
     auto validateRegion = [&](const char* name, const ShaderBindingTableRegion& region, bool required, bool rayGen) -> bool {
         if (region.Target == nullptr) {
             if (!required) {
@@ -513,16 +526,16 @@ bool ValidateTraceRaysDescriptor(const TraceRaysDescriptor& desc, const DeviceDe
         return true;
     };
 
-    if (desc.Width == 0 || desc.Height == 0 || desc.Depth == 0) {
+    if (resolved.Width == 0 || resolved.Height == 0 || resolved.Depth == 0) {
         RADRAY_ERR_LOG("TraceRaysDescriptor dimensions must be greater than 0");
         return false;
     }
-    if (!validateRegion("RayGen", desc.RayGen, true, true) ||
-        !validateRegion("Miss", desc.Miss, true, false) ||
-        !validateRegion("HitGroup", desc.HitGroup, true, false)) {
+    if (!validateRegion("RayGen", resolved.RayGen, true, true) ||
+        !validateRegion("Miss", resolved.Miss, true, false) ||
+        !validateRegion("HitGroup", resolved.HitGroup, true, false)) {
         return false;
     }
-    if (desc.Callable.has_value() && !validateRegion("Callable", desc.Callable.value(), false, false)) {
+    if (resolved.Callable.has_value() && !validateRegion("Callable", resolved.Callable.value(), false, false)) {
         return false;
     }
     return true;
@@ -798,6 +811,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::Buffer: return "Buffer";
         case RenderObjectTag::Texture: return "Texture";
         case RenderObjectTag::AccelerationStructure: return "AccelerationStructure";
+        case RenderObjectTag::ShaderBindingTable: return "ShaderBindingTable";
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::BufferView: return "BufferView";
         case RenderObjectTag::TextureView: return "TextureView";

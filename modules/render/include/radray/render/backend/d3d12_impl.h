@@ -317,6 +317,8 @@ public:
 
     Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<ShaderBindingTable>> CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
@@ -850,12 +852,49 @@ public:
 
     void Destroy() noexcept override;
 
+    ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept override;
+
+    std::optional<vector<byte>> GetShaderBindingTableHandle(std::string_view shaderName) const noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12StateObject> _stateObject;
     ComPtr<ID3D12StateObjectProperties> _stateProps;
     RootSigD3D12* _rootSig{nullptr};
     unordered_map<string, std::array<byte, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES>> _shaderIdentifiers;
+};
+
+class ShaderBindingTableD3D12 final : public ShaderBindingTable {
+public:
+    ShaderBindingTableD3D12(
+        DeviceD3D12* device,
+        RayTracingPsoD3D12* pipeline,
+        unique_ptr<Buffer> buffer,
+        const ShaderBindingTableDescriptor& desc,
+        uint64_t recordStride) noexcept;
+    ~ShaderBindingTableD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept override;
+
+    bool IsBuilt() const noexcept override;
+
+    ShaderBindingTableRegions GetRegions() const noexcept override;
+
+public:
+    DeviceD3D12* _device;
+    RayTracingPsoD3D12* _pipeline;
+    unique_ptr<Buffer> _buffer;
+    ShaderBindingTableDescriptor _desc;
+    uint64_t _recordStride{0};
+    uint64_t _rayGenOffset{0};
+    uint64_t _missOffset{0};
+    uint64_t _hitGroupOffset{0};
+    uint64_t _callableOffset{0};
+    bool _isBuilt{false};
 };
 
 class GpuDescriptorHeapViews final : public DescriptorSet {
@@ -949,6 +988,7 @@ constexpr auto CastD3D12Object(ComputePipelineState* v) noexcept { return static
 constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return static_cast<AccelerationStructureD3D12*>(v); }
 constexpr auto CastD3D12Object(AccelerationStructureView* v) noexcept { return static_cast<AccelerationStructureViewD3D12*>(v); }
 constexpr auto CastD3D12Object(RayTracingPipelineState* v) noexcept { return static_cast<RayTracingPsoD3D12*>(v); }
+constexpr auto CastD3D12Object(ShaderBindingTable* v) noexcept { return static_cast<ShaderBindingTableD3D12*>(v); }
 constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<GpuDescriptorHeapViews*>(v); }
 
 }  // namespace radray::render::d3d12

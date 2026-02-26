@@ -444,8 +444,9 @@ enum class RenderObjectTag : uint32_t {
     RayTracingCmdEncoder = BindlessArray << 1,
     AccelerationStructure = RayTracingCmdEncoder << 1,
     RayTracingPipelineState = AccelerationStructure << 1,
+    ShaderBindingTable = RayTracingPipelineState << 1,
 
-    VkInstance = RayTracingPipelineState << 1
+    VkInstance = ShaderBindingTable << 1
 };
 
 }  // namespace radray::render
@@ -525,6 +526,7 @@ class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
 class RayTracingPipelineState;
+class ShaderBindingTable;
 class AccelerationStructure;
 class DescriptorSet;
 class Sampler;
@@ -1040,6 +1042,36 @@ struct RayTracingPipelineStateDescriptor {
     uint32_t MaxAttributeSize{0};
 };
 
+struct ShaderBindingTableRequirements {
+    uint32_t HandleSize{0};
+    uint32_t HandleAlignment{0};
+    uint32_t BaseAlignment{0};
+};
+
+enum class ShaderBindingTableEntryType : uint8_t {
+    RayGen,
+    Miss,
+    HitGroup,
+    Callable
+};
+
+struct ShaderBindingTableBuildEntry {
+    ShaderBindingTableEntryType Type{ShaderBindingTableEntryType::RayGen};
+    std::string_view ShaderName{};
+    uint32_t RecordIndex{0};
+    std::span<const byte> LocalData{};
+};
+
+struct ShaderBindingTableDescriptor {
+    RayTracingPipelineState* Pipeline{nullptr};
+    uint32_t RayGenCount{1};
+    uint32_t MissCount{0};
+    uint32_t HitGroupCount{0};
+    uint32_t CallableCount{0};
+    uint32_t MaxLocalDataSize{0};
+    std::string_view Name{};
+};
+
 struct ShaderBindingTableRegion {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
@@ -1047,7 +1079,15 @@ struct ShaderBindingTableRegion {
     uint64_t Stride{0};
 };
 
+struct ShaderBindingTableRegions {
+    ShaderBindingTableRegion RayGen{};
+    ShaderBindingTableRegion Miss{};
+    ShaderBindingTableRegion HitGroup{};
+    std::optional<ShaderBindingTableRegion> Callable{};
+};
+
 struct TraceRaysDescriptor {
+    ShaderBindingTable* Sbt{nullptr};
     ShaderBindingTableRegion RayGen{};
     ShaderBindingTableRegion Miss{};
     ShaderBindingTableRegion HitGroup{};
@@ -1125,6 +1165,8 @@ public:
     virtual Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<ShaderBindingTable>> CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
 
@@ -1366,6 +1408,23 @@ public:
     virtual ~RayTracingPipelineState() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RayTracingPipelineState; }
+
+    virtual ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept = 0;
+
+    virtual std::optional<vector<byte>> GetShaderBindingTableHandle(std::string_view shaderName) const noexcept = 0;
+};
+
+class ShaderBindingTable : public RenderBase {
+public:
+    virtual ~ShaderBindingTable() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderBindingTable; }
+
+    virtual bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept = 0;
+
+    virtual bool IsBuilt() const noexcept = 0;
+
+    virtual ShaderBindingTableRegions GetRegions() const noexcept = 0;
 };
 
 class AccelerationStructure : public Resource {

@@ -1049,6 +1049,15 @@ std::optional<DxcOutput> Dxc::Compile(
     vector<std::string_view> args{};
     if (isSpirv) {
         args.emplace_back("-spirv");
+        if (stage == ShaderStage::RayGen ||
+            stage == ShaderStage::Miss ||
+            stage == ShaderStage::ClosestHit ||
+            stage == ShaderStage::AnyHit ||
+            stage == ShaderStage::Intersection ||
+            stage == ShaderStage::Callable) {
+            args.emplace_back("-fspv-target-env=vulkan1.2");
+            args.emplace_back("-fspv-extension=SPV_KHR_ray_tracing");
+        }
     }
     args.emplace_back("-all_resources_bound");
     {

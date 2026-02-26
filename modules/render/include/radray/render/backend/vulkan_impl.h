@@ -3,6 +3,7 @@
 #ifdef RADRAY_ENABLE_VULKAN
 
 #include <array>
+#include <unordered_map>
 
 #include <radray/allocator.h>
 #include <radray/render/backend/vulkan_helper.h>
@@ -41,6 +42,10 @@ class BindlessDescriptorSetVulkan;
 class BindlessDescAllocator;
 class SamplerVulkan;
 class BindlessArrayVulkan;
+class AccelerationStructureVulkan;
+class AccelerationStructureViewVulkan;
+class RayTracingPipelineVulkan;
+class CommandEncoderRayTracingVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -51,10 +56,15 @@ struct ExtFeaturesVulkan {
     VkPhysicalDeviceVulkan11Features feature11;
     VkPhysicalDeviceVulkan12Features feature12;
     VkPhysicalDeviceVulkan13Features feature13;
+    VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddress;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructure;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipeline;
 };
 
 struct ExtPropertiesVulkan {
     std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
+    std::optional<VkPhysicalDeviceAccelerationStructurePropertiesKHR> accelerationStructure;
+    std::optional<VkPhysicalDeviceRayTracingPipelinePropertiesKHR> rayTracingPipeline;
 };
 
 class InstanceVulkanImpl final : public InstanceVulkan {
@@ -152,6 +162,8 @@ public:
     Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<ShaderBindingTable>> CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept override;
 
@@ -390,6 +402,48 @@ public:
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
     PipelineLayoutVulkan* _boundPipeLayout{nullptr};
+};
+
+class CommandEncoderRayTracingVulkan final : public RayTracingCommandEncoder {
+public:
+    CommandEncoderRayTracingVulkan(
+        DeviceVulkan* device,
+        CommandBufferVulkan* cmdBuffer) noexcept;
+
+    ~CommandEncoderRayTracingVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void BindRootSignature(RootSignature* rootSig) noexcept override;
+
+    void PushConstant(const void* data, size_t length) noexcept override;
+
+    void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept override;
+
+    void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept override;
+
+    void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept override;
+
+    void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
+
+    void BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept override;
+
+    void BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept override;
+
+    void TraceRays(const TraceRaysDescriptor& desc) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device{nullptr};
+    CommandBufferVulkan* _cmdBuffer{nullptr};
+    PipelineLayoutVulkan* _boundPipeLayout{nullptr};
+    RayTracingPipelineVulkan* _boundRtPipeline{nullptr};
+    vector<unique_ptr<Buffer>> _keepAliveBuffers{};
 };
 
 class RenderPassVulkan final : public RenderBase {
@@ -846,6 +900,68 @@ public:
     VkPipeline _pipeline;
 };
 
+class RayTracingPipelineVulkan final : public RayTracingPipelineState {
+public:
+    RayTracingPipelineVulkan(
+        DeviceVulkan* device,
+        VkPipeline pipeline,
+        PipelineLayoutVulkan* rootSig) noexcept;
+
+    ~RayTracingPipelineVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept override;
+
+    std::optional<vector<byte>> GetShaderBindingTableHandle(std::string_view shaderName) const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkPipeline _pipeline{VK_NULL_HANDLE};
+    PipelineLayoutVulkan* _rootSig{nullptr};
+    unordered_map<string, uint32_t> _groupIndices;
+    uint32_t _groupCount{0};
+};
+
+class ShaderBindingTableVulkan final : public ShaderBindingTable {
+public:
+    ShaderBindingTableVulkan(
+        DeviceVulkan* device,
+        RayTracingPipelineVulkan* pipeline,
+        unique_ptr<Buffer> buffer,
+        const ShaderBindingTableDescriptor& desc,
+        uint64_t recordStride) noexcept;
+    ~ShaderBindingTableVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept override;
+
+    bool IsBuilt() const noexcept override;
+
+    ShaderBindingTableRegions GetRegions() const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    RayTracingPipelineVulkan* _pipeline;
+    unique_ptr<Buffer> _buffer;
+    ShaderBindingTableDescriptor _desc;
+    uint64_t _recordStride{0};
+    uint64_t _rayGenOffset{0};
+    uint64_t _missOffset{0};
+    uint64_t _hitGroupOffset{0};
+    uint64_t _callableOffset{0};
+    bool _isBuilt{false};
+};
+
 class ShaderModuleVulkan final : public Shader {
 public:
     ShaderModuleVulkan(
@@ -1002,6 +1118,57 @@ public:
     string _name;
 };
 
+class AccelerationStructureVulkan final : public AccelerationStructure {
+public:
+    AccelerationStructureVulkan(
+        DeviceVulkan* device,
+        VkBuffer buffer,
+        VmaAllocation allocation,
+        VmaAllocationInfo allocInfo,
+        VkAccelerationStructureKHR accelerationStructure,
+        const AccelerationStructureDescriptor& desc,
+        uint64_t asSize) noexcept;
+
+    ~AccelerationStructureVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkBuffer _buffer{VK_NULL_HANDLE};
+    VmaAllocation _allocation{VK_NULL_HANDLE};
+    VmaAllocationInfo _allocInfo{};
+    VkAccelerationStructureKHR _accelerationStructure{VK_NULL_HANDLE};
+    VkDeviceAddress _deviceAddress{0};
+    AccelerationStructureDescriptor _desc{};
+    uint64_t _asSize{0};
+    string _name;
+};
+
+class AccelerationStructureViewVulkan final : public AccelerationStructureView {
+public:
+    AccelerationStructureViewVulkan(
+        DeviceVulkan* device,
+        AccelerationStructureVulkan* target) noexcept;
+
+    ~AccelerationStructureViewVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    AccelerationStructureVulkan* _target;
+    AccelerationStructureViewDescriptor _desc;
+};
+
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
 
 Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanInstanceDescriptor& desc);
@@ -1021,6 +1188,10 @@ constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModul
 constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
 constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
+constexpr auto CastVkObject(AccelerationStructure* p) noexcept { return static_cast<AccelerationStructureVulkan*>(p); }
+constexpr auto CastVkObject(AccelerationStructureView* p) noexcept { return static_cast<AccelerationStructureViewVulkan*>(p); }
+constexpr auto CastVkObject(RayTracingPipelineState* p) noexcept { return static_cast<RayTracingPipelineVulkan*>(p); }
+constexpr auto CastVkObject(ShaderBindingTable* p) noexcept { return static_cast<ShaderBindingTableVulkan*>(p); }
 constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkan*>(p); }
 
 }  // namespace radray::render::vulkan

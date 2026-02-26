@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 
 #include <gtest/gtest.h>
@@ -11,9 +12,6 @@
 #include <radray/render/common.h>
 #include <radray/render/debug.h>
 #include <radray/render/dxc.h>
-#if defined(RADRAY_PLATFORM_WINDOWS) && defined(RADRAY_ENABLE_D3D12)
-#include <radray/render/backend/d3d12_impl.h>
-#endif
 
 using namespace radray;
 using namespace radray::render;
@@ -22,7 +20,7 @@ constexpr uint32_t kWidth = 256;
 constexpr uint32_t kHeight = 256;
 
 const char* kRtShaderSrc = R"(
-RaytracingAccelerationStructure g_TLAS : register(t0, space1);
+RaytracingAccelerationStructure g_TLAS : register(t1);
 RWTexture2D<float4> g_Output : register(u0);
 
 struct Payload {
@@ -78,15 +76,15 @@ public:
         _asScratchBuf.reset();
         _idxBuf.reset();
         _vertBuf.reset();
-        _shaderTableBuf.reset();
+        _sbt.reset();
         _rtPso.reset();
         _rtRs.reset();
     }
 
     void Init(CommandBuffer* cmd, Fence* fence) override {
         auto backend = _device->GetBackend();
-        if (backend != RenderBackend::D3D12) {
-            throw DebugException("test_hello_world_rt only supports D3D12 currently");
+        if (backend != RenderBackend::D3D12 && backend != RenderBackend::Vulkan) {
+            throw DebugException("test_hello_world_rt only supports D3D12/Vulkan currently");
         }
         CreateRtPipelineAndSbt();
         CreateGeometryAndAs(cmd);
@@ -117,9 +115,7 @@ public:
         rtPass->BindRayTracingPipelineState(_rtPso.get());
 
         TraceRaysDescriptor traceDesc{};
-        traceDesc.RayGen = {_shaderTableBuf.get(), _shaderRecordStride * 0, _shaderRecordStride, _shaderRecordStride};
-        traceDesc.Miss = {_shaderTableBuf.get(), _shaderRecordStride * 1, _shaderRecordStride, _shaderRecordStride};
-        traceDesc.HitGroup = {_shaderTableBuf.get(), _shaderRecordStride * 2, _shaderRecordStride, _shaderRecordStride};
+        traceDesc.Sbt = _sbt.get();
         traceDesc.Width = kWidth;
         traceDesc.Height = kHeight;
         traceDesc.Depth = 1;
@@ -130,7 +126,11 @@ public:
 private:
     std::optional<DxcOutput> CompileRtShader(std::string_view entry, ShaderStage stage) {
         vector<string> defines;
-        defines.emplace_back("D3D12");
+        if (_device->GetBackend() == RenderBackend::D3D12) {
+            defines.emplace_back("D3D12");
+        } else if (_device->GetBackend() == RenderBackend::Vulkan) {
+            defines.emplace_back("VULKAN");
+        }
         vector<std::string_view> defineViews;
         for (const auto& d : defines) {
             defineViews.emplace_back(d);
@@ -149,7 +149,7 @@ private:
             false,
             defineViews,
             includeViews,
-            false);
+            _device->GetBackend() == RenderBackend::Vulkan);
     }
 
     void CreateRtPipelineAndSbt() {
@@ -163,7 +163,7 @@ private:
 
         RootSignatureSetElement setElems[] = {
             {0, 0, ResourceBindType::RWTexture, 1, ShaderStage::RayGen, std::nullopt},
-            {0, 1, ResourceBindType::AccelerationStructure, 1, ShaderStage::RayGen, std::nullopt},
+            {1, 0, ResourceBindType::AccelerationStructure, 1, ShaderStage::RayGen, std::nullopt},
         };
         RootSignatureDescriptorSet descSet{0, std::span{setElems, 2}};
         RootSignatureDescriptor rsDesc{};
@@ -188,28 +188,22 @@ private:
         psoDesc.MaxAttributeSize = sizeof(float) * 2;
         _rtPso = _device->CreateRayTracingPipelineState(psoDesc).Unwrap();
 
-#if defined(RADRAY_PLATFORM_WINDOWS) && defined(RADRAY_ENABLE_D3D12)
-        auto detail = _device->GetDetail();
-        _shaderRecordStride = Align(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, static_cast<uint64_t>(detail.ShaderTableAlignment));
-        const uint64_t sbtSize = _shaderRecordStride * 3;
-        _shaderTableBuf = _device->CreateBuffer(
-                                     {sbtSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None, "rt_sbt"})
-                              .Unwrap();
+        ShaderBindingTableDescriptor sbtDesc{};
+        sbtDesc.Pipeline = _rtPso.get();
+        sbtDesc.RayGenCount = 1;
+        sbtDesc.MissCount = 1;
+        sbtDesc.HitGroupCount = 1;
+        sbtDesc.Name = "rt_sbt";
+        _sbt = _device->CreateShaderBindingTable(sbtDesc).Unwrap();
 
-        auto* pso = static_cast<d3d12::RayTracingPsoD3D12*>(_rtPso.get());
-        auto& idRayGen = pso->_shaderIdentifiers.at("RayGenMain");
-        auto& idMiss = pso->_shaderIdentifiers.at("MissMain");
-        auto& idHitGroup = pso->_shaderIdentifiers.at("HitGroup0");
-
-        radray::byte* map = static_cast<radray::byte*>(_shaderTableBuf->Map(0, sbtSize));
-        std::memset(map, 0, static_cast<size_t>(sbtSize));
-        std::memcpy(map + _shaderRecordStride * 0, idRayGen.data(), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-        std::memcpy(map + _shaderRecordStride * 1, idMiss.data(), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-        std::memcpy(map + _shaderRecordStride * 2, idHitGroup.data(), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-        _shaderTableBuf->Unmap(0, sbtSize);
-#else
-        throw DebugException("D3D12 backend is required for RT shader table creation");
-#endif
+        ShaderBindingTableBuildEntry sbtEntries[] = {
+            {ShaderBindingTableEntryType::RayGen, "RayGenMain", 0, {}},
+            {ShaderBindingTableEntryType::Miss, "MissMain", 0, {}},
+            {ShaderBindingTableEntryType::HitGroup, "HitGroup0", 0, {}},
+        };
+        if (!_sbt->Build(sbtEntries)) {
+            throw DebugException("failed to build ray tracing shader binding table");
+        }
     }
     void CreateGeometryAndAs(CommandBuffer* cmd) {
         constexpr float vertices[] = {
@@ -299,7 +293,9 @@ private:
         }
 
         ResourceBarrierDescriptor blasBarrier[] = {
-            BarrierAccelerationStructureDescriptor{_blas.get(), BufferState::AccelerationStructureRead, BufferState::AccelerationStructureRead}};
+            BarrierAccelerationStructureDescriptor{_blas.get(), BufferState::AccelerationStructureRead, BufferState::AccelerationStructureRead},
+            BarrierBufferDescriptor{_asScratchBuf.get(), BufferState::AccelerationStructureBuildScratch, BufferState::AccelerationStructureBuildScratch},
+        };
         cmd->ResourceBarrier(blasBarrier);
 
         {
@@ -320,8 +316,7 @@ private:
     unique_ptr<DescriptorSet> _rtSet{};
     unique_ptr<TextureView> _rtUav{};
 
-    unique_ptr<Buffer> _shaderTableBuf{};
-    uint64_t _shaderRecordStride{0};
+    unique_ptr<ShaderBindingTable> _sbt{};
 
     unique_ptr<Buffer> _vertBuf{};
     unique_ptr<Buffer> _idxBuf{};
@@ -332,10 +327,24 @@ private:
 };
 
 void CompareWithBaseline(TestHelloWorldRT& test, const ImageData& actual) {
-    ASSERT_TRUE(test.GetCapturedRenderErrors().empty());
-    const auto baselinePath = test._testEnvDir / "baseline.png";
+    auto errors = test.GetCapturedRenderErrors();
+    if (!errors.empty()) {
+        std::string msg;
+        for (size_t i = 0; i < errors.size(); ++i) {
+            msg += "[" + std::to_string(i) + "] " + errors[i] + "\n";
+        }
+        FAIL() << msg;
+    }
+    auto baselinePath = test._testEnvDir / "baseline.png";
+    if (!std::filesystem::exists(baselinePath)) {
+        baselinePath = test._projectDir / "tests" / "test_hello_world_rt" / "baseline.png";
+    }
     ASSERT_TRUE(std::filesystem::exists(baselinePath)) << "missing baseline: " << baselinePath.string();
-    ImageData expected = test.LoadBaseline("baseline.png");
+    std::ifstream file{baselinePath, std::ios::binary};
+    ASSERT_TRUE(file.good()) << "cannot open baseline: " << baselinePath.string();
+    auto expectedOpt = ImageData::LoadPNG(file, {.AddAlphaIfRGB = 0xFF, .IsFlipY = false});
+    ASSERT_TRUE(expectedOpt.has_value()) << "failed to load baseline: " << baselinePath.string();
+    ImageData expected = std::move(expectedOpt.value());
     ASSERT_EQ(actual.Width, expected.Width);
     ASSERT_EQ(actual.Height, expected.Height);
     ASSERT_EQ(actual.Format, expected.Format);
@@ -358,6 +367,27 @@ TEST(HelloWorldRT, D3D12) {
 #endif
     D3D12DeviceDescriptor desc{std::nullopt, true, true};
     TestHelloWorldRT test{"d3d12", desc, true, {kWidth, kHeight}, TextureFormat::RGBA8_UNORM};
+    if (!test._device->GetDetail().IsRayTracingSupported) {
+        GTEST_SKIP() << "D3D12 ray tracing is not supported on this device.";
+    }
     ImageData actual = test.Run();
     CompareWithBaseline(test, actual);
+}
+
+TEST(HelloWorldRT, Vulkan) {
+#if !defined(RADRAY_ENABLE_VULKAN)
+    GTEST_SKIP() << "Vulkan is not enabled.";
+#else
+    VulkanCommandQueueDescriptor queues[] = {
+        {QueueType::Direct, 1},
+    };
+    VulkanDeviceDescriptor desc{};
+    desc.Queues = std::span{queues, 1};
+    TestHelloWorldRT test{"vulkan", desc, true, {kWidth, kHeight}, TextureFormat::RGBA8_UNORM};
+    if (!test._device->GetDetail().IsRayTracingSupported) {
+        GTEST_SKIP() << "Vulkan ray tracing is not supported on this device.";
+    }
+    ImageData actual = test.Run();
+    CompareWithBaseline(test, actual);
+#endif
 }

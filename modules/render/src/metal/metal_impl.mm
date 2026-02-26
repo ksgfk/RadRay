@@ -442,6 +442,12 @@ Nullable<unique_ptr<RayTracingPipelineState>> DeviceMetal::CreateRayTracingPipel
     return nullptr;
 }
 
+Nullable<unique_ptr<ShaderBindingTable>> DeviceMetal::CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept {
+    RADRAY_UNUSED(desc);
+    RADRAY_ERR_LOG("shader binding table is not supported on Metal backend");
+    return nullptr;
+}
+
 Nullable<unique_ptr<DescriptorSet>> DeviceMetal::CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept {
     @autoreleasepool {
         auto* mtlRootSig = CastMtlObject(rootSig);
