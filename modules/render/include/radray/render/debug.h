@@ -4,6 +4,8 @@
 #include <string_view>
 #include <stdexcept>
 #include <utility>
+#include <mutex>
+#include <vector>
 
 #include <radray/file.h>
 #include <radray/image_data.h>
@@ -54,14 +56,19 @@ public:
 
     virtual void ExecutePass(CommandBuffer* cmd, Fence* fence) = 0;
 
-    ImageData LoadBaseline();
+    ImageData LoadBaseline(std::string_view name = {}) const;
     TextureReadbackResult ReadbackTexture2D(Texture* target, TextureState before, uint32_t mipLevel = 0, uint32_t arrayLayer = 0);
     ImageData PackReadbackRGBA8(const TextureReadbackResult& readback);
     void WriteImageComparisonArtifacts(const ImageData& actual, const ImageData& expected, std::string_view name);
     RasterShaders CompileRasterShaders(std::string_view src, HlslShaderModel sm = HlslShaderModel::SM60);
     void UploadBuffer(Buffer* dst, std::span<const byte> data);
     void Submit(CommandBuffer* cmd, Fence* fence);
-    void ThrowOnBackendValidationErrors(std::string_view stage);
+
+    bool HasCapturedRenderErrors() const;
+    vector<string> GetCapturedRenderErrors() const;
+    void ClearCapturedRenderErrors();
+    static void DeviceLogBridge(LogLevel level, std::string_view message, void* userData);
+    void OnDeviceLog(LogLevel level, std::string_view message);
 
 public:
     string _name;
@@ -70,6 +77,7 @@ public:
     std::filesystem::path _assetsDir;
     std::filesystem::path _testArtifactsDir;
     bool _needUpdateBaseline;
+    unique_ptr<InstanceVulkan> _vkIns;
     shared_ptr<Device> _device;
     CommandQueue* _queue;
 #ifdef RADRAY_ENABLE_DXC
@@ -78,6 +86,11 @@ public:
     unique_ptr<Texture> _rt;
     unique_ptr<TextureView> _rtv;
     TextureState _rtState{TextureState::Undefined};
+
+    RenderLogCallback _prevLogCallback{nullptr};
+    void* _prevLogUserData{nullptr};
+    mutable std::mutex _capturedRenderErrorsMutex;
+    std::vector<std::string> _capturedRenderErrors;
 };
 
 }  // namespace radray::render

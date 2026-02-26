@@ -204,3 +204,70 @@ function(radray_add_example target)
     radray_optimize_flags_binary(${target})
     radray_set_build_path(${target})
 endfunction()
+
+# radray_add_gtest_case(<test_name> TARGET <target> FILTER <gtest_filter> [ALSO_RUN_DISABLED] [WORKING_DIRECTORY <dir>] [ENV <key=value>...])
+function(radray_add_gtest_case test_name)
+    set(_options ALSO_RUN_DISABLED)
+    set(_one_value_args TARGET FILTER WORKING_DIRECTORY)
+    set(_multi_value_args ENV)
+    cmake_parse_arguments(RADRAY_GTEST_CASE "${_options}" "${_one_value_args}" "${_multi_value_args}" ${ARGN})
+
+    if (NOT RADRAY_GTEST_CASE_TARGET)
+        message(FATAL_ERROR "radray_add_gtest_case: TARGET is required for test ${test_name}")
+    endif()
+    if (NOT RADRAY_GTEST_CASE_FILTER)
+        message(FATAL_ERROR "radray_add_gtest_case: FILTER is required for test ${test_name}")
+    endif()
+
+    set(_cmd ${RADRAY_GTEST_CASE_TARGET} "--gtest_filter=${RADRAY_GTEST_CASE_FILTER}")
+    if (RADRAY_GTEST_CASE_ALSO_RUN_DISABLED)
+        list(APPEND _cmd "--gtest_also_run_disabled_tests")
+    endif()
+    add_test(NAME ${test_name} COMMAND ${_cmd})
+
+    if (RADRAY_GTEST_CASE_WORKING_DIRECTORY)
+        set_tests_properties(${test_name} PROPERTIES WORKING_DIRECTORY "${RADRAY_GTEST_CASE_WORKING_DIRECTORY}")
+    endif()
+    if (RADRAY_GTEST_CASE_ENV)
+        set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "${RADRAY_GTEST_CASE_ENV}")
+    endif()
+endfunction()
+
+function(radray_add_radray_gtest_case test_name)
+    set(_options ALSO_RUN_DISABLED)
+    set(_one_value_args TARGET FILTER WORKING_DIRECTORY TEST_ENV_DIR TEST_ARTIFACTS_DIR UPDATE_BASELINE)
+    set(_multi_value_args ENV)
+    cmake_parse_arguments(RADRAY_CASE "${_options}" "${_one_value_args}" "${_multi_value_args}" ${ARGN})
+
+    if (NOT RADRAY_CASE_TEST_ENV_DIR)
+        set(RADRAY_CASE_TEST_ENV_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+    if (NOT RADRAY_CASE_TEST_ARTIFACTS_DIR)
+        set(RADRAY_CASE_TEST_ARTIFACTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+    if (NOT DEFINED RADRAY_CASE_UPDATE_BASELINE)
+        set(RADRAY_CASE_UPDATE_BASELINE 0)
+    endif()
+
+    set(_radray_common_env
+        "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}"
+        "RADRAY_TEST_ENV_DIR=${RADRAY_CASE_TEST_ENV_DIR}"
+        "RADRAY_ASSETS_DIR=${CMAKE_SOURCE_DIR}/assets"
+        "RADRAY_TEST_ARTIFACTS_DIR=${RADRAY_CASE_TEST_ARTIFACTS_DIR}"
+        "RADRAY_TEST_UPDATE_BASELINE=${RADRAY_CASE_UPDATE_BASELINE}")
+    if (RADRAY_CASE_ENV)
+        list(APPEND _radray_common_env ${RADRAY_CASE_ENV})
+    endif()
+
+    set(_radray_case_args
+        TARGET ${RADRAY_CASE_TARGET}
+        FILTER ${RADRAY_CASE_FILTER}
+        ENV ${_radray_common_env})
+    if (RADRAY_CASE_WORKING_DIRECTORY)
+        list(APPEND _radray_case_args WORKING_DIRECTORY "${RADRAY_CASE_WORKING_DIRECTORY}")
+    endif()
+    if (RADRAY_CASE_ALSO_RUN_DISABLED)
+        list(APPEND _radray_case_args ALSO_RUN_DISABLED)
+    endif()
+    radray_add_gtest_case(${test_name} ${_radray_case_args})
+endfunction()

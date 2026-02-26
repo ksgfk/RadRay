@@ -13,6 +13,9 @@
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
 #endif
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_impl.h>
+#endif
 
 namespace radray::render {
 
@@ -59,6 +62,30 @@ OffScreenTestContext::OffScreenTestContext(
         auto v = radray::GetEnv("RADRAY_TEST_UPDATE_BASELINE");
         _needUpdateBaseline = (v == "1");
     }
+    std::visit(
+        [this](auto& desc) {
+            using DescT = std::decay_t<decltype(desc)>;
+            if constexpr (std::is_same_v<DescT, D3D12DeviceDescriptor>) {
+                _prevLogCallback = desc.LogCallback;
+                _prevLogUserData = desc.LogUserData;
+                desc.LogCallback = &OffScreenTestContext::DeviceLogBridge;
+                desc.LogUserData = this;
+            }
+        },
+        deviceDesc);
+    if (std::holds_alternative<VulkanDeviceDescriptor>(deviceDesc)) {
+        auto appName = fmt::format("{}_vk_instance", _name);
+        render::VulkanInstanceDescriptor insDesc{
+            appName,
+            1,
+            "RadRay",
+            1,
+            true,
+            false,
+            &OffScreenTestContext::DeviceLogBridge,
+            this};
+        _vkIns = CreateVulkanInstance(insDesc).Unwrap();
+    }
     _device = CreateDevice(deviceDesc).Unwrap();
     _queue = _device->GetCommandQueue(QueueType::Direct, 0).Unwrap();
 #ifdef RADRAY_ENABLE_DXC
@@ -101,69 +128,9 @@ OffScreenTestContext::~OffScreenTestContext() noexcept {
     _queue = nullptr;
     _device.reset();
     _dxc.reset();
-}
-
-void OffScreenTestContext::ThrowOnBackendValidationErrors(std::string_view stage) {
-#ifdef RADRAY_ENABLE_D3D12
-    if (_device == nullptr || _device->GetBackend() != RenderBackend::D3D12) {
-        return;
+    if (_vkIns) {
+        DestroyVulkanInstance(std::move(_vkIns));
     }
-    auto* d3d12Device = d3d12::CastD3D12Object(_device.get());
-    if (d3d12Device == nullptr || d3d12Device->_device == nullptr) {
-        return;
-    }
-
-    d3d12::ComPtr<ID3D12InfoQueue> infoQueue;
-    if (FAILED(d3d12Device->_device.As(&infoQueue)) || infoQueue == nullptr) {
-        return;
-    }
-
-    const UINT64 totalMessages = infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
-    if (totalMessages == 0) {
-        return;
-    }
-
-    constexpr UINT64 kMaxInspectCount = 64;
-    const UINT64 startIndex = totalMessages > kMaxInspectCount ? (totalMessages - kMaxInspectCount) : 0;
-    string errorMessages;
-    errorMessages.reserve(2048);
-    bool hasError = false;
-    for (UINT64 i = startIndex; i < totalMessages; ++i) {
-        SIZE_T messageLength = 0;
-        if (FAILED(infoQueue->GetMessage(i, nullptr, &messageLength)) || messageLength == 0) {
-            continue;
-        }
-        vector<byte> storage(messageLength);
-        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-        if (FAILED(infoQueue->GetMessage(i, message, &messageLength))) {
-            continue;
-        }
-        if (message->Severity != D3D12_MESSAGE_SEVERITY_ERROR &&
-            message->Severity != D3D12_MESSAGE_SEVERITY_CORRUPTION) {
-            continue;
-        }
-        hasError = true;
-        const char* severityName =
-            message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
-                ? "CORRUPTION"
-                : "ERROR";
-        errorMessages += fmt::format(
-            "[{}][{}] {}\n",
-            severityName,
-            static_cast<int>(message->ID),
-            message->pDescription == nullptr ? "" : message->pDescription);
-    }
-    infoQueue->ClearStoredMessages();
-
-    if (hasError) {
-        throw DebugException(fmt::format(
-            "D3D12 validation failed at '{}':\n{}",
-            stage,
-            errorMessages));
-    }
-#else
-    RADRAY_UNUSED(stage);
-#endif
 }
 
 OffScreenTestContext::TextureReadbackResult OffScreenTestContext::ReadbackTexture2D(
@@ -225,7 +192,6 @@ OffScreenTestContext::TextureReadbackResult OffScreenTestContext::ReadbackTextur
     submitDesc.SignalFence = fence.get();
     _queue->Submit(submitDesc);
     fence->Wait();
-    ThrowOnBackendValidationErrors("ReadbackTexture2D");
     void* mapped = readbackBuf->Map(0, totalBytes);
     if (mapped == nullptr) {
         throw DebugException("ReadbackTexture2D map readback buffer failed");
@@ -326,7 +292,6 @@ ImageData OffScreenTestContext::Run() {
         submitDesc.SignalFence = fence.get();
         _queue->Submit(submitDesc);
         fence->Wait();
-        ThrowOnBackendValidationErrors("Run");
     }
     void* mapped = readbackBuf->Map(0, totalBytes);
     if (mapped == nullptr) {
@@ -351,8 +316,8 @@ ImageData OffScreenTestContext::Run() {
     return packed;
 }
 
-ImageData OffScreenTestContext::LoadBaseline() {
-    auto inPath = _testEnvDir / fmt::format("{}_baseline.png", _name);
+ImageData OffScreenTestContext::LoadBaseline(std::string_view name) const {
+    auto inPath = _testEnvDir / (name.empty() ? fmt::format("{}_baseline.png", _name) : string{name});
     std::ifstream file{inPath, std::ios::binary};
     return ImageData::LoadPNG(file, {.AddAlphaIfRGB = 0xFF, .IsFlipY = false}).value();
 }
@@ -463,7 +428,6 @@ void OffScreenTestContext::UploadBuffer(Buffer* dst, std::span<const byte> data)
     cmd->End();
     Submit(cmd.get(), fence.get());
     fence->Wait();
-    ThrowOnBackendValidationErrors("UploadBuffer");
 }
 
 void OffScreenTestContext::Submit(CommandBuffer* cmd, Fence* fence) {
@@ -472,6 +436,39 @@ void OffScreenTestContext::Submit(CommandBuffer* cmd, Fence* fence) {
     submitDesc.CmdBuffers = submitBuffers;
     submitDesc.SignalFence = fence;
     _queue->Submit(submitDesc);
+}
+
+bool OffScreenTestContext::HasCapturedRenderErrors() const {
+    std::lock_guard<std::mutex> lock(_capturedRenderErrorsMutex);
+    return !_capturedRenderErrors.empty();
+}
+
+vector<string> OffScreenTestContext::GetCapturedRenderErrors() const {
+    std::lock_guard<std::mutex> lock(_capturedRenderErrorsMutex);
+    return _capturedRenderErrors;
+}
+
+void OffScreenTestContext::ClearCapturedRenderErrors() {
+    std::lock_guard<std::mutex> lock(_capturedRenderErrorsMutex);
+    _capturedRenderErrors.clear();
+}
+
+void OffScreenTestContext::DeviceLogBridge(LogLevel level, std::string_view message, void* userData) {
+    auto* self = static_cast<OffScreenTestContext*>(userData);
+    if (self == nullptr) {
+        return;
+    }
+    self->OnDeviceLog(level, message);
+}
+
+void OffScreenTestContext::OnDeviceLog(LogLevel level, std::string_view message) {
+    if (level == LogLevel::Err || level == LogLevel::Critical) {
+        std::lock_guard<std::mutex> lock(_capturedRenderErrorsMutex);
+        _capturedRenderErrors.emplace_back(message);
+    }
+    if (_prevLogCallback != nullptr) {
+        _prevLogCallback(level, message, _prevLogUserData);
+    }
 }
 
 }  // namespace radray::render

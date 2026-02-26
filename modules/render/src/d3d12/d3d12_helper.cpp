@@ -714,7 +714,7 @@ DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept {
         case DXGI_FORMAT_FORCE_UINT:
         case DXGI_FORMAT_A4B4G4R4_UNORM: return DXGI_FORMAT_UNKNOWN;
     }
-    Unreachable();
+    return DXGI_FORMAT_UNKNOWN;
 }
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept {
@@ -1180,7 +1180,7 @@ std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {
         case D3D_FEATURE_LEVEL_10_0:
         case D3D_FEATURE_LEVEL_10_1: return "UNKNOWN";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
@@ -1199,7 +1199,7 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
 
         case D3D_SHADER_MODEL_NONE: return "UNKNOWN";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
@@ -1207,7 +1207,7 @@ std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept {
         case D3D12_RESOURCE_HEAP_TIER_1: return "1";
         case D3D12_RESOURCE_HEAP_TIER_2: return "2";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
@@ -1216,7 +1216,7 @@ std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept {
         case D3D12_RESOURCE_BINDING_TIER_2: return "2";
         case D3D12_RESOURCE_BINDING_TIER_3: return "3";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
@@ -1228,7 +1228,7 @@ std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept {
 
         case D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES: return "UNKNOWN";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
@@ -1237,7 +1237,7 @@ std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept {
         case D3D_ROOT_SIGNATURE_VERSION_1_1: return "1.1";
         case D3D_ROOT_SIGNATURE_VERSION_1_2: return "1.2";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
@@ -1248,7 +1248,7 @@ std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept {
         case D3D12_ROOT_PARAMETER_TYPE_SRV: return "SRV";
         case D3D12_ROOT_PARAMETER_TYPE_UAV: return "UAV";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept {
@@ -1262,7 +1262,7 @@ std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept {
         case D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE: return "VIDEO_ENCODE";
         case D3D12_COMMAND_LIST_TYPE_NONE: return "UNKNOWN";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
 }
 
 std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept {
@@ -1272,5 +1272,33 @@ std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept {
         case D3D12_RAYTRACING_TIER_1_1: return "1.1";
         case D3D12_RAYTRACING_TIER_1_2: return "1.2";
     }
-    radray::Unreachable();
+    return "UNKNOWN";
+}
+
+std::string_view format_as(D3D12_MESSAGE_SEVERITY v) noexcept {
+    switch (v) {
+        case D3D12_MESSAGE_SEVERITY_CORRUPTION: return "CORRUPTION";
+        case D3D12_MESSAGE_SEVERITY_ERROR: return "ERROR";
+        case D3D12_MESSAGE_SEVERITY_WARNING: return "WARNING";
+        case D3D12_MESSAGE_SEVERITY_INFO: return "INFO";
+        case D3D12_MESSAGE_SEVERITY_MESSAGE: return "MESSAGE";
+    }
+    return "UNKNOWN";
+}
+
+std::string_view format_as(D3D12_MESSAGE_CATEGORY v) noexcept {
+    switch (v) {
+        case D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED: return "APPLICATION_DEFINED";
+        case D3D12_MESSAGE_CATEGORY_MISCELLANEOUS: return "MISCELLANEOUS";
+        case D3D12_MESSAGE_CATEGORY_INITIALIZATION: return "INITIALIZATION";
+        case D3D12_MESSAGE_CATEGORY_CLEANUP: return "CLEANUP";
+        case D3D12_MESSAGE_CATEGORY_COMPILATION: return "COMPILATION";
+        case D3D12_MESSAGE_CATEGORY_STATE_CREATION: return "STATE_CREATION";
+        case D3D12_MESSAGE_CATEGORY_STATE_SETTING: return "STATE_SETTING";
+        case D3D12_MESSAGE_CATEGORY_STATE_GETTING: return "STATE_GETTING";
+        case D3D12_MESSAGE_CATEGORY_RESOURCE_MANIPULATION: return "RESOURCE_MANIPULATION";
+        case D3D12_MESSAGE_CATEGORY_EXECUTION: return "EXECUTION";
+        case D3D12_MESSAGE_CATEGORY_SHADER: return "SHADER";
+    }
+    return "UNKNOWN";
 }

@@ -344,6 +344,11 @@ public:
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
+
+    RenderLogCallback _logCallback{nullptr};
+    void* _logUserData{nullptr};
+    ComPtr<ID3D12InfoQueue1> _infoQueue1;
+    DWORD _infoQueueCallbackCookie{0};
 };
 
 class CmdQueueD3D12 final : public CommandQueue {

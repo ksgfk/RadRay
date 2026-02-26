@@ -548,6 +548,8 @@ public:
     virtual void Destroy() noexcept = 0;
 };
 
+using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
+
 class VulkanInstanceDescriptor {
 public:
     std::string_view AppName{};
@@ -556,6 +558,8 @@ public:
     uint32_t EngineVersion{0};
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
+    RenderLogCallback LogCallback{nullptr};
+    void* LogUserData{nullptr};
 };
 
 class D3D12DeviceDescriptor {
@@ -563,6 +567,8 @@ public:
     std::optional<uint32_t> AdapterIndex{};
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
+    RenderLogCallback LogCallback{nullptr};
+    void* LogUserData{nullptr};
 };
 
 class MetalDeviceDescriptor {

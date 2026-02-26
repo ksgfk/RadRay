@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -41,11 +42,11 @@ float4 PSMain(V2P v2p) : SV_Target {
     return float4(v2p.color, 1);
 })";
 
-class TestTriangleD3D12 final : public OffScreenTestContext {
+class TestTriangle final : public OffScreenTestContext {
 public:
     using OffScreenTestContext::OffScreenTestContext;
 
-    ~TestTriangleD3D12() noexcept {
+    ~TestTriangle() noexcept {
         _vertBuf.reset();
         _idxBuf.reset();
         _pso.reset();
@@ -93,7 +94,11 @@ public:
         auto encoder = cmd->BeginRenderPass(rpDesc).Unwrap();
         encoder->BindRootSignature(_rs.get());
         encoder->BindGraphicsPipelineState(_pso.get());
-        encoder->SetViewport({0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0.0f, 1.0f});
+        if (_device->GetBackend() == RenderBackend::Vulkan) {
+            encoder->SetViewport({0, static_cast<float>(kHeight), static_cast<float>(kWidth), -static_cast<float>(kHeight), 0.0f, 1.0f});
+        } else {
+            encoder->SetViewport({0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0.0f, 1.0f});
+        }
         encoder->SetScissor({0, 0, kWidth, kHeight});
         VertexBufferView vbv[] = {{_vertBuf.get(), 0, 36}};
         encoder->BindVertexBuffer(vbv);
@@ -109,10 +114,38 @@ public:
 };
 
 TEST(HelloWorldTriangle, D3D12) {
-    D3D12DeviceDescriptor desc{};
-    TestTriangleD3D12 test{"d3d12", desc, true, {kWidth, kHeight}, TextureFormat::RGBA8_UNORM};
+#if !defined(RADRAY_PLATFORM_WINDOWS) || !defined(RADRAY_ENABLE_D3D12)
+    GTEST_SKIP() << "D3D12 is not supported on this platform or not enabled.";
+#endif
+    D3D12DeviceDescriptor desc{std::nullopt, true, true};
+    TestTriangle test{"d3d12", desc, true, {kWidth, kHeight}, TextureFormat::RGBA8_UNORM};
     ImageData actual = test.Run();
-    ImageData expected = test.LoadBaseline();
+    ASSERT_TRUE(test.GetCapturedRenderErrors().empty());
+    ImageData expected = test.LoadBaseline("baseline.png");
+    ASSERT_EQ(actual.Width, expected.Width);
+    ASSERT_EQ(actual.Height, expected.Height);
+    ASSERT_EQ(actual.Format, expected.Format);
+    auto compare = ImageData::CompareImageRGBA8(actual, expected, 1);
+    ASSERT_EQ(compare.MismatchCount, 0u)
+        << "pixel mismatch count=" << compare.MismatchCount
+        << ", first mismatch pixel=(" << (compare.FirstMismatchPixel % actual.Width) << ","
+        << (compare.FirstMismatchPixel / actual.Width) << ")"
+        << ", channel=" << compare.FirstMismatchChannel << ", actual=" << static_cast<uint32_t>(compare.ActualValue)
+        << ", expected=" << static_cast<uint32_t>(compare.ExpectedValue)
+        << ", artifacts_dir=" << test._testArtifactsDir.string();
+}
+
+TEST(HelloWorldTriangle, VK) {
+#if !defined(RADRAY_ENABLE_VULKAN)
+    GTEST_SKIP() << "Vulkan is not supported on this platform or not enabled.";
+#endif
+    render::VulkanCommandQueueDescriptor queueDesc = {render::QueueType::Direct, 1};
+    render::VulkanDeviceDescriptor devDesc{};
+    devDesc.Queues = std::span{&queueDesc, 1};
+    TestTriangle test{"vulkan", devDesc, true, {kWidth, kHeight}, TextureFormat::RGBA8_UNORM};
+    ImageData actual = test.Run();
+    ASSERT_TRUE(test.GetCapturedRenderErrors().empty());
+    ImageData expected = test.LoadBaseline("baseline.png");
     ASSERT_EQ(actual.Width, expected.Width);
     ASSERT_EQ(actual.Height, expected.Height);
     ASSERT_EQ(actual.Format, expected.Format);

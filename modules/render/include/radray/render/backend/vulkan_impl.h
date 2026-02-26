@@ -80,6 +80,10 @@ public:
     std::optional<VkAllocationCallbacks> _allocCb;
     vector<string> _exts;
     vector<string> _layers;
+
+    RenderLogCallback _logCallback{nullptr};
+    void* _logUserData{nullptr};
+    VkDebugUtilsMessengerEXT _debugMessenger{VK_NULL_HANDLE};
 };
 
 class VMA final : public RenderBase {

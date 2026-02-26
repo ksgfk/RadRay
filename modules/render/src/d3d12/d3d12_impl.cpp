@@ -9,6 +9,36 @@
 
 namespace radray::render::d3d12 {
 
+static void WINAPI _D3D12ValidationMessageCallback(
+    D3D12_MESSAGE_CATEGORY category,
+    D3D12_MESSAGE_SEVERITY severity,
+    D3D12_MESSAGE_ID id,
+    LPCSTR pDescription,
+    void* pContext) noexcept {
+    auto* device = static_cast<DeviceD3D12*>(pContext);
+    if (device == nullptr || device->_logCallback == nullptr) {
+        return;
+    }
+    try {
+        LogLevel lvl;
+        switch (severity) {
+            case D3D12_MESSAGE_SEVERITY_CORRUPTION: lvl = LogLevel::Critical; break;
+            case D3D12_MESSAGE_SEVERITY_ERROR: lvl = LogLevel::Err; break;
+            case D3D12_MESSAGE_SEVERITY_WARNING: lvl = LogLevel::Warn; break;
+            case D3D12_MESSAGE_SEVERITY_INFO: lvl = LogLevel::Info; break;
+            case D3D12_MESSAGE_SEVERITY_MESSAGE: lvl = LogLevel::Debug; break;
+            default: lvl = LogLevel::Info; break;
+        }
+        const auto message = fmt::format(
+            "category={} id={} {}",
+            category,
+            static_cast<uint32_t>(id),
+            pDescription == nullptr ? "" : pDescription);
+        device->_logCallback(lvl, message, device->_logUserData);
+    } catch (...) {
+    }
+}
+
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
@@ -288,6 +318,17 @@ void DeviceD3D12::Destroy() noexcept {
 }
 
 void DeviceD3D12::DestroyImpl() noexcept {
+    if (_infoQueue1 != nullptr && _infoQueueCallbackCookie != 0) {
+        if (HRESULT hr = _infoQueue1->UnregisterMessageCallback(_infoQueueCallbackCookie);
+            FAILED(hr)) {
+            RADRAY_WARN_LOG("ID3D12InfoQueue1::UnregisterMessageCallback failed: {} {}", GetErrorName(hr), hr);
+        }
+    }
+    _infoQueueCallbackCookie = 0;
+    _infoQueue1 = nullptr;
+    _logCallback = nullptr;
+    _logUserData = nullptr;
+
     _cpuResAlloc = nullptr;
     _cpuRtvAlloc = nullptr;
     _cpuDsvAlloc = nullptr;
@@ -402,6 +443,28 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
+    result->_logCallback = desc.LogCallback;
+    result->_logUserData = desc.LogUserData;
+    if (result->_logCallback != nullptr) {
+        ComPtr<ID3D12InfoQueue1> infoQueue1;
+        if (HRESULT hr = device.As(&infoQueue1);
+            SUCCEEDED(hr) && infoQueue1 != nullptr) {
+            DWORD callbackCookie = 0;
+            if (HRESULT hr2 = infoQueue1->RegisterMessageCallback(
+                    &_D3D12ValidationMessageCallback,
+                    D3D12_MESSAGE_CALLBACK_FLAG_NONE,
+                    result.get(),
+                    &callbackCookie);
+                SUCCEEDED(hr2)) {
+                result->_infoQueue1 = std::move(infoQueue1);
+                result->_infoQueueCallbackCookie = callbackCookie;
+            } else {
+                RADRAY_WARN_LOG("ID3D12InfoQueue1::RegisterMessageCallback failed: {} {}", GetErrorName(hr2), hr2);
+            }
+        } else {
+            RADRAY_WARN_LOG("ID3D12Device::As<ID3D12InfoQueue1> failed: {} {}", GetErrorName(hr), hr);
+        }
+    }
     DeviceDetail& detail = result->_detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;

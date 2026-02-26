@@ -205,5 +205,7 @@ std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
 std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept;
 std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept;
 std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept;
+std::string_view format_as(D3D12_MESSAGE_SEVERITY v) noexcept;
+std::string_view format_as(D3D12_MESSAGE_CATEGORY v) noexcept;
 
 #endif

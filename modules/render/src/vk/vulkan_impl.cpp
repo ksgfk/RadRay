@@ -23,17 +23,37 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
     void* pUserData) noexcept {
-    RADRAY_UNUSED(pUserData);
-    if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        RADRAY_ERR_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        RADRAY_WARN_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-        RADRAY_INFO_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
-    } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-        LogDebug("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
-    } else if (messageType & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
-        RADRAY_INFO_LOG("vk Validation Layer\n{}: {}: {}", pCallbackData->messageIdNumber, pCallbackData->pMessageIdName, pCallbackData->pMessage);
+    auto* instance = static_cast<InstanceVulkanImpl*>(pUserData);
+    try {
+        LogLevel lvl = LogLevel::Info;
+        if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+            lvl = LogLevel::Err;
+        } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+            lvl = LogLevel::Warn;
+        } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
+            lvl = LogLevel::Info;
+        } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
+            lvl = LogLevel::Debug;
+        }
+        const auto msg = fmt::format(
+            "type={} id={} {}: {}",
+            FormatVkDebugUtilsMessageTypeFlagsEXT(messageType),
+            pCallbackData == nullptr ? 0 : pCallbackData->messageIdNumber,
+            (pCallbackData == nullptr || pCallbackData->pMessageIdName == nullptr) ? "" : pCallbackData->pMessageIdName,
+            (pCallbackData == nullptr || pCallbackData->pMessage == nullptr) ? "" : pCallbackData->pMessage);
+        if (instance != nullptr && instance->_logCallback != nullptr) {
+            instance->_logCallback(lvl, msg, instance->_logUserData);
+        } else {
+            switch (lvl) {
+                case LogLevel::Critical: RADRAY_ERR_LOG("vk Validation Layer\n{}", msg); break;
+                case LogLevel::Err: RADRAY_ERR_LOG("vk Validation Layer\n{}", msg); break;
+                case LogLevel::Warn: RADRAY_WARN_LOG("vk Validation Layer\n{}", msg); break;
+                case LogLevel::Info: RADRAY_INFO_LOG("vk Validation Layer\n{}", msg); break;
+                case LogLevel::Debug: RADRAY_DEBUG_LOG("vk Validation Layer\n{}", msg); break;
+                case LogLevel::Trace: RADRAY_DEBUG_LOG("vk Validation Layer\n{}", msg); break;
+            }
+        }
+    } catch (...) {
     }
     return VK_FALSE;
 }
@@ -61,6 +81,14 @@ const VkAllocationCallbacks* InstanceVulkanImpl::GetAllocationCallbacks() const 
 }
 
 void InstanceVulkanImpl::DestroyImpl() noexcept {
+    if (_debugMessenger != VK_NULL_HANDLE) {
+        if (vkDestroyDebugUtilsMessengerEXT != nullptr) {
+            vkDestroyDebugUtilsMessengerEXT(_instance, _debugMessenger, this->GetAllocationCallbacks());
+        }
+        _debugMessenger = VK_NULL_HANDLE;
+    }
+    _logCallback = nullptr;
+    _logUserData = nullptr;
     if (_instance != nullptr) {
         const VkAllocationCallbacks* allocCbPtr = this->GetAllocationCallbacks();
         vkDestroyInstance(_instance, allocCbPtr);
@@ -1528,6 +1556,7 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     for (const auto& i : needLayers) {
         needLayersCStr.emplace_back(i.c_str());
     }
+    const bool hasDebugUtilsExt = needExts.contains(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     VkAllocationCallbacks* allocCbPtr = nullptr;
 #if RADRAY_ENABLE_MIMALLOC
@@ -1603,7 +1632,9 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     createInfo.ppEnabledLayerNames = needLayersCStr.empty() ? nullptr : needLayersCStr.data();
     if (isValidFeatureExtEnable) {
         createInfo.pNext = &validFeature;
-        validFeature.pNext = &debugCreateInfo;
+        validFeature.pNext = hasDebugUtilsExt ? &debugCreateInfo : nullptr;
+    } else if (hasDebugUtilsExt) {
+        createInfo.pNext = &debugCreateInfo;
     }
     uint32_t apiVersionsToTry[] = {
         VK_API_VERSION_1_3,
@@ -1632,6 +1663,23 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
         allocCbPtr ? std::make_optional(*allocCbPtr) : std::nullopt,
         vector<string>{needExts.begin(), needExts.end()},
         vector<string>{needLayers.begin(), needLayers.end()});
+    result->_logCallback = desc.LogCallback;
+    result->_logUserData = desc.LogUserData;
+    if (hasDebugUtilsExt) {
+        debugCreateInfo.pUserData = result.get();
+        if (vkCreateDebugUtilsMessengerEXT != nullptr) {
+            if (const auto vr = vkCreateDebugUtilsMessengerEXT(
+                    instance,
+                    &debugCreateInfo,
+                    result->GetAllocationCallbacks(),
+                    &result->_debugMessenger);
+                vr != VK_SUCCESS) {
+                RADRAY_WARN_LOG("vkCreateDebugUtilsMessengerEXT failed: {}", vr);
+            }
+        } else {
+            RADRAY_WARN_LOG("vkCreateDebugUtilsMessengerEXT is null");
+        }
+    }
     g_vkInstance = result.get();
     return result;
 }
