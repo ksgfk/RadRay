@@ -1,0 +1,4 @@
+if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_LIBPNG)
+    radray_add_test(test_hello_world_rt SOURCES test_hello_world_rt.cpp LINK_LIBS radraycore radrayrender)
+    radray_add_radray_gtest_case(HelloWorldRT.D3D12 TARGET test_hello_world_rt FILTER HelloWorldRT.D3D12 ALSO_RUN_DISABLED WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endif()

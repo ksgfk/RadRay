@@ -109,7 +109,7 @@ OffScreenTestContext::OffScreenTestContext(
         1,
         rtFormat,
         MemoryType::Device,
-        TextureUse::RenderTarget | TextureUse::CopySource,
+        TextureUse::RenderTarget | TextureUse::UnorderedAccess | TextureUse::CopySource,
         ResourceHint::None,
         "test_offscreen_rt"};
     _rt = _device->CreateTexture(rtDesc).Unwrap();
@@ -310,7 +310,7 @@ ImageData OffScreenTestContext::Run() {
         static_cast<uint32_t>(tightRowBytes)};
     auto packed = PackReadbackRGBA8(result);
     if (_needUpdateBaseline) {
-        auto outPath = _testEnvDir / fmt::format("{}_baseline.png", _name);
+        auto outPath = _testEnvDir / fmt::format("baseline.png", _name);
         packed.WritePNG({outPath.string(), false});
     }
     return packed;

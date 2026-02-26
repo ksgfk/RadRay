@@ -1,6 +1,3 @@
-if (RADRAY_ENABLE_D3D12)
-    add_subdirectory(hello_world_rt_d3d12)
-endif()
 if (RADRAY_ENABLE_IMGUI)
     add_subdirectory(hello_imgui)
     add_subdirectory(hello_pbr)
