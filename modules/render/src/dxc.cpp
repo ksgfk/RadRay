@@ -90,9 +90,9 @@ ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
         case HlslShaderInputType::TBUFFER:
         case HlslShaderInputType::STRUCTURED:
         case HlslShaderInputType::BYTEADDRESS: return ResourceBindType::Buffer;
-        case HlslShaderInputType::TEXTURE: return IsBufferDimension(Dimension) ? ResourceBindType::Buffer : ResourceBindType::Texture;
+        case HlslShaderInputType::TEXTURE: return IsBufferDimension(Dimension) ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
         case HlslShaderInputType::SAMPLER: return ResourceBindType::Sampler;
-        case HlslShaderInputType::UAV_RWTYPED: return IsBufferDimension(Dimension) ? ResourceBindType::RWBuffer : ResourceBindType::RWTexture;
+        case HlslShaderInputType::UAV_RWTYPED: return IsBufferDimension(Dimension) ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
         case HlslShaderInputType::UAV_RWSTRUCTURED:
         case HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
         case HlslShaderInputType::UAV_APPEND_STRUCTURED:

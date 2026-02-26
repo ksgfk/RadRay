@@ -209,6 +209,8 @@ public:
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     std::unique_ptr<DescriptorSetAllocatorVulkan> _descSetAlloc;
     std::unique_ptr<BindlessDescAllocator> _bdlsBuffer;
+    std::unique_ptr<BindlessDescAllocator> _bdlsBufferTexelRo;
+    std::unique_ptr<BindlessDescAllocator> _bdlsBufferTexelRw;
     std::unique_ptr<BindlessDescAllocator> _bdlsTex2d;
     std::unique_ptr<BindlessDescAllocator> _bdlsTex3d;
     DeviceFuncTable _ftb;
@@ -680,7 +682,7 @@ public:
     SimulateBufferViewVulkan(
         DeviceVulkan* device,
         BufferVulkan* buffer,
-        BufferRange range) noexcept;
+        const BufferViewDescriptor& desc) noexcept;
 
     ~SimulateBufferViewVulkan() noexcept override;
 
@@ -693,7 +695,7 @@ public:
 
     DeviceVulkan* _device;
     BufferVulkan* _buffer;
-    BufferRange _range;
+    BufferViewDescriptor _desc;
     unique_ptr<BufferViewVulkan> _texelView;
 };
 
@@ -852,6 +854,8 @@ public:
 
     bool IsBindlessSet(uint32_t index) const noexcept;
 
+    VkDescriptorType GetBindlessSetType(uint32_t index) const noexcept;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -859,6 +863,7 @@ public:
     VkPipelineLayout _layout;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _descSetLayouts;
     vector<uint8_t> _isBindlessSet;
+    vector<VkDescriptorType> _bindlessSetTypes;
     std::optional<VkPushConstantRange> _pushConst;
 };
 
@@ -1110,8 +1115,12 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    VkDescriptorSet GetSetForDescriptorType(VkDescriptorType type) const noexcept;
+
     DeviceVulkan* _device;
     BindlessDescAllocator::Allocation _bufferAlloc{};
+    BindlessDescAllocator::Allocation _bufferTexelRoAlloc{};
+    BindlessDescAllocator::Allocation _bufferTexelRwAlloc{};
     BindlessDescAllocator::Allocation _tex2dAlloc{};
     BindlessDescAllocator::Allocation _tex3dAlloc{};
     uint32_t _size;

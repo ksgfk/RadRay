@@ -859,8 +859,9 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
             RADRAY_ERR_LOG("d3d12 uniform buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
             return nullptr;
         }
-        if (desc.Range.Size % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
-            RADRAY_ERR_LOG("d3d12 uniform buffer view size must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        uint64_t alignedSize = Align(desc.Range.Size, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
+        if (desc.Range.Offset > buf->_rawDesc.Width || alignedSize > buf->_rawDesc.Width - desc.Range.Offset) {
+            RADRAY_ERR_LOG("d3d12 uniform buffer view aligned size is out of bounds");
             return nullptr;
         }
         auto heapViewOpt = heap->Allocate(1);
@@ -871,7 +872,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         heapView = {heap, heapViewOpt.value()};
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
         cbvDesc.BufferLocation = buf->_gpuAddr + desc.Range.Offset;
-        cbvDesc.SizeInBytes = (UINT)desc.Range.Size;
+        cbvDesc.SizeInBytes = static_cast<UINT>(alignedSize);
         heapView.GetHeap()->Create(cbvDesc, heapView.GetStart());
         dxgiFormat = DXGI_FORMAT_UNKNOWN;
     } else if (desc.Usage == BufferViewUsage::ReadOnlyStorage || desc.Usage == BufferViewUsage::TexelReadOnly) {
@@ -1295,6 +1296,8 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     MapShaderStages(rootDesc.Stages));
                 break;
             }
+            case ResourceBindType::TexelBuffer:
+            case ResourceBindType::RWTexelBuffer:
             case ResourceBindType::UNKNOWN:
             case ResourceBindType::Sampler: {
                 RADRAY_ERR_LOG("invalid root binding type: {}", rootDesc.Type);
@@ -1352,11 +1355,13 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                     break;
                 case ResourceBindType::Texture:
                 case ResourceBindType::Buffer:
+                case ResourceBindType::TexelBuffer:
                 case ResourceBindType::AccelerationStructure:
                     CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, numDesc, e.Slot, e.Space, rangeFlags);
                     break;
                 case ResourceBindType::RWTexture:
                 case ResourceBindType::RWBuffer:
+                case ResourceBindType::RWTexelBuffer:
                     CD3DX12_DESCRIPTOR_RANGE1::Init(range, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, numDesc, e.Slot, e.Space, rangeFlags);
                     break;
                 case ResourceBindType::Sampler:

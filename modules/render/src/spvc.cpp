@@ -10,6 +10,7 @@
 namespace radray::render {
 
 ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
+    const bool isBufferImage = ImageInfo.has_value() && ImageInfo->Dim == SpirvImageDim::Buffer;
     switch (Kind) {
         case SpirvResourceKind::UniformBuffer:
             return ResourceBindType::CBuffer;
@@ -17,11 +18,11 @@ ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
             return (ReadOnly && !WriteOnly) ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
         case SpirvResourceKind::SampledImage:
         case SpirvResourceKind::SeparateImage:
-            return ResourceBindType::Texture;
+            return isBufferImage ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
         case SpirvResourceKind::SeparateSampler:
             return ResourceBindType::Sampler;
         case SpirvResourceKind::StorageImage:
-            return ResourceBindType::RWTexture;
+            return isBufferImage ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
         case SpirvResourceKind::AccelerationStructure:
             return ResourceBindType::AccelerationStructure;
         default:

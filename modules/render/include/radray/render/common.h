@@ -371,9 +371,11 @@ enum class ResourceBindType {
     UNKNOWN,
     CBuffer,
     Buffer,
+    TexelBuffer,
     Texture,
     Sampler,
     RWBuffer,
+    RWTexelBuffer,
     RWTexture,
     AccelerationStructure
 };

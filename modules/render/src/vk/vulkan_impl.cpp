@@ -58,6 +58,21 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     return VK_FALSE;
 }
 
+static VkDescriptorType BufferViewUsageToDescriptorType(BufferViewUsage usage) noexcept {
+    switch (usage) {
+        case BufferViewUsage::Uniform: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case BufferViewUsage::ReadOnlyStorage: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case BufferViewUsage::ReadWriteStorage: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case BufferViewUsage::TexelReadOnly: return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        case BufferViewUsage::TexelReadWrite: return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+    }
+    Unreachable();
+}
+
+static bool IsTexelDescriptorType(VkDescriptorType type) noexcept {
+    return type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+}
+
 InstanceVulkanImpl::InstanceVulkanImpl(
     VkInstance instance,
     std::optional<VkAllocationCallbacks> allocCb,
@@ -488,12 +503,12 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
         info.offset = desc.Range.Offset;
         info.range = desc.Range.Size;
         auto bv = this->CreateBufferView(info);
-        if (!bv->IsValid()) {
+        if (!bv) {
             return nullptr;
         }
         texelView = bv.Release();
     }
-    auto result = make_unique<SimulateBufferViewVulkan>(this, buf, desc.Range);
+    auto result = make_unique<SimulateBufferViewVulkan>(this, buf, desc);
     result->_texelView = std::move(texelView);
     return result;
 }
@@ -670,6 +685,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     vector<unique_ptr<DescriptorSetLayoutVulkan>> layouts;
     vector<VkDescriptorSetLayout> vkDescSetLayouts;
     vector<uint8_t> isBindlessSet;
+    vector<VkDescriptorType> bindlessSetTypes;
     unordered_map<uint32_t, const RootSignatureDescriptorSet*> setsByIndex;
     uint32_t maxSetIndex = 0;
     for (const auto& set : desc.DescriptorSets) {
@@ -687,6 +703,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         vkDescSetLayouts.resize(maxSetIndex + 1, VK_NULL_HANDLE);
         layouts.resize(maxSetIndex + 1);
         isBindlessSet.resize(maxSetIndex + 1, false);
+        bindlessSetTypes.resize(maxSetIndex + 1, VK_DESCRIPTOR_TYPE_MAX_ENUM);
     }
 
     for (uint32_t setIdx = 0; setIdx < vkDescSetLayouts.size(); setIdx++) {
@@ -735,6 +752,10 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
                 globalLayout = _bdlsTex2d->GetLayout();
             } else if (bindlessType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
                 globalLayout = _bdlsBuffer->GetLayout();
+            } else if (bindlessType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+                globalLayout = _bdlsBufferTexelRo->GetLayout();
+            } else if (bindlessType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+                globalLayout = _bdlsBufferTexelRw->GetLayout();
             }
             if (globalLayout == VK_NULL_HANDLE) {
                 RADRAY_ERR_LOG("vk failed to find global bindless layout for type {}", bindlessType);
@@ -742,6 +763,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
             }
             vkDescSetLayouts[setIdx] = globalLayout;
             isBindlessSet[setIdx] = true;
+            bindlessSetTypes[setIdx] = bindlessType;
             continue;
         }
 
@@ -755,6 +777,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         vkDescSetLayouts[setIdx] = layoutOwned->_layout;
         layouts[setIdx] = std::move(layoutOwned);
         isBindlessSet[setIdx] = false;
+        bindlessSetTypes[setIdx] = VK_DESCRIPTOR_TYPE_MAX_ENUM;
     }
     VkPipelineLayoutCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -773,6 +796,7 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     auto result = make_unique<PipelineLayoutVulkan>(this, pipelineLayout);
     result->_descSetLayouts = std::move(layouts);
     result->_isBindlessSet = std::move(isBindlessSet);
+    result->_bindlessSetTypes = std::move(bindlessSetTypes);
     if (pushConstantPtr == nullptr) {
         result->_pushConst = std::nullopt;
     } else {
@@ -1625,10 +1649,24 @@ Nullable<unique_ptr<BindlessArray>> DeviceVulkan::CreateBindlessArray(const Bind
     if (desc.SlotType == BindlessSlotType::BufferOnly || desc.SlotType == BindlessSlotType::Multiple) {
         auto allocOpt = _bdlsBuffer->Allocate(desc.Size);
         if (!allocOpt.has_value()) {
-            RADRAY_ERR_LOG("vk bindless array failed to allocate buffer descriptors (size={})", desc.Size);
+            RADRAY_ERR_LOG("vk bindless array failed to allocate storage buffer descriptors (size={})", desc.Size);
             return nullptr;
         }
         result->_bufferAlloc = allocOpt.value();
+
+        auto texelRoAllocOpt = _bdlsBufferTexelRo->Allocate(desc.Size);
+        if (!texelRoAllocOpt.has_value()) {
+            RADRAY_ERR_LOG("vk bindless array failed to allocate uniform texel buffer descriptors (size={})", desc.Size);
+            return nullptr;
+        }
+        result->_bufferTexelRoAlloc = texelRoAllocOpt.value();
+
+        auto texelRwAllocOpt = _bdlsBufferTexelRw->Allocate(desc.Size);
+        if (!texelRwAllocOpt.has_value()) {
+            RADRAY_ERR_LOG("vk bindless array failed to allocate storage texel buffer descriptors (size={})", desc.Size);
+            return nullptr;
+        }
+        result->_bufferTexelRwAlloc = texelRwAllocOpt.value();
     }
     if (desc.SlotType == BindlessSlotType::Texture2DOnly || desc.SlotType == BindlessSlotType::Multiple) {
         auto allocOpt = _bdlsTex2d->Allocate(desc.Size);
@@ -1711,7 +1749,9 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
         RADRAY_ERR_LOG("vkCreateBufferView failed: {}", vr);
         return nullptr;
     }
-    return make_unique<BufferViewVulkan>(this, bufferView);
+    auto result = make_unique<BufferViewVulkan>(this, bufferView);
+    result->_rawInfo = info;
+    return result;
 }
 
 Nullable<unique_ptr<RenderPassVulkan>> DeviceVulkan::CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept {
@@ -1754,6 +1794,8 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 
 void DeviceVulkan::DestroyImpl() noexcept {
     _bdlsBuffer.reset();
+    _bdlsBufferTexelRo.reset();
+    _bdlsBufferTexelRw.reset();
     _bdlsTex2d.reset();
     _bdlsTex3d.reset();
     _descSetAlloc.reset();
@@ -2371,6 +2413,16 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             return nullptr;
         }
         deviceR->_bdlsBuffer = make_unique<BindlessDescAllocator>(bdlsBufferOpt.Release());
+        auto bdlsBufferTexelRoOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 262144);
+        if (!bdlsBufferTexelRoOpt) {
+            return nullptr;
+        }
+        deviceR->_bdlsBufferTexelRo = make_unique<BindlessDescAllocator>(bdlsBufferTexelRoOpt.Release());
+        auto bdlsBufferTexelRwOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 262144);
+        if (!bdlsBufferTexelRwOpt) {
+            return nullptr;
+        }
+        deviceR->_bdlsBufferTexelRw = make_unique<BindlessDescAllocator>(bdlsBufferTexelRwOpt.Release());
         auto bdlsTex2dOpt = deviceR->CreateBindlessDescriptorSetVulkan(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 262144);
         if (!bdlsTex2dOpt) {
             return nullptr;
@@ -3159,16 +3211,10 @@ void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArra
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (bdlsArray->_tex2dAlloc.IsValid()) {
-        set = bdlsArray->_tex2dAlloc.Set;
-    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
-        set = bdlsArray->_tex3dAlloc.Set;
-    } else if (bdlsArray->_bufferAlloc.IsValid()) {
-        set = bdlsArray->_bufferAlloc.Set;
-    }
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
-        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
         return;
     }
     _device->_ftb.vkCmdBindDescriptorSets(
@@ -3283,16 +3329,10 @@ void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArra
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (bdlsArray->_tex2dAlloc.IsValid()) {
-        set = bdlsArray->_tex2dAlloc.Set;
-    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
-        set = bdlsArray->_tex3dAlloc.Set;
-    } else if (bdlsArray->_bufferAlloc.IsValid()) {
-        set = bdlsArray->_bufferAlloc.Set;
-    }
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
-        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
         return;
     }
     _device->_ftb.vkCmdBindDescriptorSets(
@@ -3416,16 +3456,10 @@ void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t slot, BindlessAr
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (bdlsArray->_tex2dAlloc.IsValid()) {
-        set = bdlsArray->_tex2dAlloc.Set;
-    } else if (bdlsArray->_tex3dAlloc.IsValid()) {
-        set = bdlsArray->_tex3dAlloc.Set;
-    } else if (bdlsArray->_bufferAlloc.IsValid()) {
-        set = bdlsArray->_bufferAlloc.Set;
-    }
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
-        RADRAY_ERR_LOG("bindless array has no valid allocation");
+        RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
         return;
     }
     _device->_ftb.vkCmdBindDescriptorSets(
@@ -4139,10 +4173,10 @@ void BufferViewVulkan::DestroyImpl() noexcept {
 SimulateBufferViewVulkan::SimulateBufferViewVulkan(
     DeviceVulkan* device,
     BufferVulkan* buffer,
-    BufferRange range) noexcept
+    const BufferViewDescriptor& desc) noexcept
     : _device(device),
       _buffer(buffer),
-      _range(range) {}
+      _desc(desc) {}
 
 SimulateBufferViewVulkan::~SimulateBufferViewVulkan() noexcept {
     this->DestroyImpl();
@@ -4158,6 +4192,7 @@ void SimulateBufferViewVulkan::Destroy() noexcept {
 
 void SimulateBufferViewVulkan::DestroyImpl() noexcept {
     _texelView.reset();
+    _desc = {};
     _buffer = nullptr;
 }
 
@@ -4348,6 +4383,13 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
 
 bool PipelineLayoutVulkan::IsBindlessSet(uint32_t index) const noexcept {
     return index < _isBindlessSet.size() && _isBindlessSet[index];
+}
+
+VkDescriptorType PipelineLayoutVulkan::GetBindlessSetType(uint32_t index) const noexcept {
+    if (index >= _bindlessSetTypes.size()) {
+        return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+    }
+    return _bindlessSetTypes[index];
 }
 
 GraphicsPipelineVulkan::GraphicsPipelineVulkan(
@@ -4761,12 +4803,24 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
     if (tag.HasFlag(RenderObjectTag::BufferView)) {
         auto bv = static_cast<SimulateBufferViewVulkan*>(view);
-        if (bv->_texelView) {
+        VkDescriptorType requiredType = BufferViewUsageToDescriptorType(bv->_desc.Usage);
+        if (requiredType != writeDesc.descriptorType) {
+            RADRAY_ERR_LOG(
+                "descriptor type mismatch for buffer view usage. expected={}, actual={}",
+                requiredType,
+                writeDesc.descriptorType);
+            return;
+        }
+        if (IsTexelDescriptorType(writeDesc.descriptorType)) {
+            if (!bv->_texelView) {
+                RADRAY_ERR_LOG("texel buffer requires texel descriptor type with valid VkBufferView");
+                return;
+            }
             writeDesc.pTexelBufferView = &bv->_texelView->_bufferView;
         } else {
             bufInfo.buffer = bv->_buffer->_buffer;
-            bufInfo.offset = bv->_range.Offset;
-            bufInfo.range = bv->_range.Size;
+            bufInfo.offset = bv->_desc.Range.Offset;
+            bufInfo.range = bv->_desc.Range.Size;
             writeDesc.pBufferInfo = &bufInfo;
         }
     } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
@@ -4995,7 +5049,12 @@ BindlessArrayVulkan::~BindlessArrayVulkan() noexcept {
 }
 
 bool BindlessArrayVulkan::IsValid() const noexcept {
-    return _device != nullptr && (_bufferAlloc.IsValid() || _tex2dAlloc.IsValid() || _tex3dAlloc.IsValid());
+    return _device != nullptr &&
+           (_bufferAlloc.IsValid() ||
+            _bufferTexelRoAlloc.IsValid() ||
+            _bufferTexelRwAlloc.IsValid() ||
+            _tex2dAlloc.IsValid() ||
+            _tex3dAlloc.IsValid());
 }
 
 void BindlessArrayVulkan::Destroy() noexcept {
@@ -5010,6 +5069,14 @@ void BindlessArrayVulkan::DestroyImpl() noexcept {
         _device->_bdlsBuffer->Destroy(_bufferAlloc);
         _bufferAlloc = BindlessDescAllocator::Allocation::Invalid();
     }
+    if (_bufferTexelRoAlloc.IsValid()) {
+        _device->_bdlsBufferTexelRo->Destroy(_bufferTexelRoAlloc);
+        _bufferTexelRoAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
+    if (_bufferTexelRwAlloc.IsValid()) {
+        _device->_bdlsBufferTexelRw->Destroy(_bufferTexelRwAlloc);
+        _bufferTexelRwAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
     if (_tex2dAlloc.IsValid()) {
         _device->_bdlsTex2d->Destroy(_tex2dAlloc);
         _tex2dAlloc = BindlessDescAllocator::Allocation::Invalid();
@@ -5017,6 +5084,27 @@ void BindlessArrayVulkan::DestroyImpl() noexcept {
     if (_tex3dAlloc.IsValid()) {
         _device->_bdlsTex3d->Destroy(_tex3dAlloc);
         _tex3dAlloc = BindlessDescAllocator::Allocation::Invalid();
+    }
+}
+
+VkDescriptorSet BindlessArrayVulkan::GetSetForDescriptorType(VkDescriptorType type) const noexcept {
+    switch (type) {
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            return _bufferAlloc.IsValid() ? _bufferAlloc.Set : VK_NULL_HANDLE;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            return _bufferTexelRoAlloc.IsValid() ? _bufferTexelRoAlloc.Set : VK_NULL_HANDLE;
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            return _bufferTexelRwAlloc.IsValid() ? _bufferTexelRwAlloc.Set : VK_NULL_HANDLE;
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            if (_tex2dAlloc.IsValid()) {
+                return _tex2dAlloc.Set;
+            }
+            if (_tex3dAlloc.IsValid()) {
+                return _tex3dAlloc.Set;
+            }
+            return VK_NULL_HANDLE;
+        default:
+            return VK_NULL_HANDLE;
     }
 }
 
@@ -5034,21 +5122,50 @@ void BindlessArrayVulkan::SetBuffer(uint32_t slot, BufferView* bufView) noexcept
         return;
     }
     auto view = static_cast<SimulateBufferViewVulkan*>(bufView);
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = view->_buffer->_buffer;
-    bufInfo.offset = view->_range.Offset;
-    bufInfo.range = view->_range.Size;
+    VkDescriptorType requiredType = BufferViewUsageToDescriptorType(view->_desc.Usage);
+    BindlessDescAllocator::Allocation* alloc = nullptr;
+    if (requiredType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+        alloc = &_bufferAlloc;
+    } else if (requiredType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+        alloc = &_bufferTexelRoAlloc;
+    } else if (requiredType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+        alloc = &_bufferTexelRwAlloc;
+    } else {
+        RADRAY_ERR_LOG("vk bindless array does not support buffer view usage {}", view->_desc.Usage);
+        return;
+    }
+    if (!alloc->IsValid()) {
+        RADRAY_ERR_LOG("vk bindless array allocator is invalid for descriptor type {}", requiredType);
+        return;
+    }
+    if (alloc->Type != requiredType) {
+        RADRAY_ERR_LOG("descriptor type mismatch for buffer view usage. expected={}, actual={}", requiredType, alloc->Type);
+        return;
+    }
     VkWriteDescriptorSet writeDesc{};
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;
-    writeDesc.dstSet = _bufferAlloc.Set;
+    writeDesc.dstSet = alloc->Set;
     writeDesc.dstBinding = 0;
-    writeDesc.dstArrayElement = static_cast<uint32_t>(_bufferAlloc.Range.Start + slot);
+    writeDesc.dstArrayElement = static_cast<uint32_t>(alloc->Range.Start + slot);
     writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = _bufferAlloc.Type;
-    writeDesc.pBufferInfo = &bufInfo;
+    writeDesc.descriptorType = alloc->Type;
+    VkDescriptorBufferInfo bufInfo{};
+    if (IsTexelDescriptorType(requiredType)) {
+        if (!view->_texelView) {
+            RADRAY_ERR_LOG("texel buffer requires texel descriptor type with valid VkBufferView");
+            return;
+        }
+        writeDesc.pBufferInfo = nullptr;
+        writeDesc.pTexelBufferView = &view->_texelView->_bufferView;
+    } else {
+        bufInfo.buffer = view->_buffer->_buffer;
+        bufInfo.offset = view->_desc.Range.Offset;
+        bufInfo.range = view->_desc.Range.Size;
+        writeDesc.pBufferInfo = &bufInfo;
+        writeDesc.pTexelBufferView = nullptr;
+    }
     writeDesc.pImageInfo = nullptr;
-    writeDesc.pTexelBufferView = nullptr;
     _device->_ftb.vkUpdateDescriptorSets(
         _device->_device,
         1,

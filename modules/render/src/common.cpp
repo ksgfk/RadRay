@@ -331,6 +331,10 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 RADRAY_ERR_LOG("read-only storage buffer view stride must be non-zero");
                 return false;
             }
+            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                RADRAY_ERR_LOG("read-only storage buffer view offset/size must align to stride");
+                return false;
+            }
             break;
         case BufferViewUsage::ReadWriteStorage:
             if (!require(BufferUse::UnorderedAccess)) {
@@ -342,6 +346,10 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
             }
             if (desc.Stride == 0) {
                 RADRAY_ERR_LOG("read-write storage buffer view stride must be non-zero");
+                return false;
+            }
+            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                RADRAY_ERR_LOG("read-write storage buffer view offset/size must align to stride");
                 return false;
             }
             break;
@@ -357,6 +365,14 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
                 RADRAY_ERR_LOG("texel read-only buffer view stride must be non-zero");
                 return false;
             }
+            if (const auto bpp = GetTextureFormatBytesPerPixel(desc.Format); desc.Stride != bpp) {
+                RADRAY_ERR_LOG("texel read-only buffer view stride must equal format bytes");
+                return false;
+            }
+            if (const auto bpp = GetTextureFormatBytesPerPixel(desc.Format); desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                RADRAY_ERR_LOG("texel read-only buffer view offset/size must align to format bytes");
+                return false;
+            }
             break;
         case BufferViewUsage::TexelReadWrite:
             if (!require(BufferUse::UnorderedAccess)) {
@@ -368,6 +384,14 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
             }
             if (desc.Stride == 0) {
                 RADRAY_ERR_LOG("texel read-write buffer view stride must be non-zero");
+                return false;
+            }
+            if (const auto bpp = GetTextureFormatBytesPerPixel(desc.Format); desc.Stride != bpp) {
+                RADRAY_ERR_LOG("texel read-write buffer view stride must equal format bytes");
+                return false;
+            }
+            if (const auto bpp = GetTextureFormatBytesPerPixel(desc.Format); desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                RADRAY_ERR_LOG("texel read-write buffer view offset/size must align to format bytes");
                 return false;
             }
             break;
@@ -756,7 +780,9 @@ std::string_view format_as(ResourceBindType v) noexcept {
     switch (v) {
         case ResourceBindType::CBuffer: return "CBuffer";
         case ResourceBindType::Buffer: return "Buffer";
+        case ResourceBindType::TexelBuffer: return "TexelBuffer";
         case ResourceBindType::RWBuffer: return "RWBuffer";
+        case ResourceBindType::RWTexelBuffer: return "RWTexelBuffer";
         case ResourceBindType::Texture: return "Texture";
         case ResourceBindType::RWTexture: return "RWTexture";
         case ResourceBindType::Sampler: return "Sampler";

@@ -665,6 +665,18 @@ TEST(SPVC, MapResourceBindType) {
     }
 }
 
+TEST(SPVC, MapResourceBindTypeTexelBuffer) {
+    SpirvResourceBinding srv{};
+    srv.Kind = SpirvResourceKind::SeparateImage;
+    srv.ImageInfo = SpirvImageInfo{.Dim = SpirvImageDim::Buffer};
+    EXPECT_EQ(srv.MapResourceBindType(), ResourceBindType::TexelBuffer);
+
+    SpirvResourceBinding uav{};
+    uav.Kind = SpirvResourceKind::StorageImage;
+    uav.ImageInfo = SpirvImageInfo{.Dim = SpirvImageDim::Buffer};
+    EXPECT_EQ(uav.MapResourceBindType(), ResourceBindType::RWTexelBuffer);
+}
+
 // ============================================================
 // Test: Error cases
 // ============================================================

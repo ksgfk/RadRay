@@ -660,6 +660,12 @@ std::optional<BindBridgeIR> BindBridgeLayout::BuildIRFromMsl(const MslShaderRefl
                 }
                 return ResourceBindType::Buffer;
             case MslArgumentType::Texture:
+                if (arg.TextureType == MslTextureType::TexBuffer) {
+                    if (arg.Access == MslAccess::ReadWrite || arg.Access == MslAccess::WriteOnly) {
+                        return ResourceBindType::RWTexelBuffer;
+                    }
+                    return ResourceBindType::TexelBuffer;
+                }
                 if (arg.Access == MslAccess::ReadWrite || arg.Access == MslAccess::WriteOnly) {
                     return ResourceBindType::RWTexture;
                 }

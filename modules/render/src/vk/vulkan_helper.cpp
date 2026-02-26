@@ -464,9 +464,11 @@ VkDescriptorType MapType(ResourceBindType v) noexcept {
     switch (v) {
         case ResourceBindType::CBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         case ResourceBindType::Buffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case ResourceBindType::TexelBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
         case ResourceBindType::Texture: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         case ResourceBindType::Sampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
         case ResourceBindType::RWBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case ResourceBindType::RWTexelBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
         case ResourceBindType::RWTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         case ResourceBindType::AccelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         case ResourceBindType::UNKNOWN: return VK_DESCRIPTOR_TYPE_MAX_ENUM;

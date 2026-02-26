@@ -1252,7 +1252,9 @@ void GraphicsCmdEncoderMetal::BindDescriptorSet(uint32_t slot, DescriptorSet* se
         vector<id<MTLResource>> fragRead;
         vector<id<MTLResource>> fragReadWrite;
         for (auto& elem : mtlSet->_elements) {
-            bool isUAV = elem.Type == ResourceBindType::RWBuffer || elem.Type == ResourceBindType::RWTexture;
+            bool isUAV = elem.Type == ResourceBindType::RWBuffer ||
+                         elem.Type == ResourceBindType::RWTexelBuffer ||
+                         elem.Type == ResourceBindType::RWTexture;
             for (auto& res : elem.Resources) {
                 if (res != nil) {
                     if (elem.Stages.HasFlag(ShaderStage::Vertex)) {

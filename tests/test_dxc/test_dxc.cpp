@@ -166,6 +166,18 @@ TEST(DXC, CreateDxc) {
     EXPECT_TRUE(dxc->IsValid());
 }
 
+TEST(DXC, MapResourceBindTypeTexelBuffer) {
+    HlslInputBindDesc srvDesc{};
+    srvDesc.Type = HlslShaderInputType::TEXTURE;
+    srvDesc.Dimension = HlslSRVDimension::BUFFER;
+    EXPECT_EQ(srvDesc.MapResourceBindType(), ResourceBindType::TexelBuffer);
+
+    HlslInputBindDesc uavDesc{};
+    uavDesc.Type = HlslShaderInputType::UAV_RWTYPED;
+    uavDesc.Dimension = HlslSRVDimension::BUFFER;
+    EXPECT_EQ(uavDesc.MapResourceBindType(), ResourceBindType::RWTexelBuffer);
+}
+
 // ============================================================
 // Test: Basic compilation — vertex, pixel, compute (DXIL)
 // ============================================================
