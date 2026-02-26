@@ -424,6 +424,9 @@ public:
     void Reset() noexcept override;
 
     uint64_t GetCompletedValue() const noexcept;
+
+public:
+    bool _submitted{false};
 };
 
 class SemaphoreD3D12 final : public Semaphore, public FenceD3D12Impl {
@@ -438,6 +441,9 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+public:
+    bool _signaled{false};
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -626,6 +632,7 @@ public:
     };
 
     DeviceD3D12* _device;
+    CmdQueueD3D12* _presentQueue{nullptr};
     ComPtr<IDXGISwapChain3> _swapchain;
     HANDLE _frameLatencyEvent{nullptr};
     vector<Frame> _frames;
@@ -660,6 +667,7 @@ public:
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
+    uint64_t _reqSize{0};
 };
 
 class BufferViewD3D12 final : public BufferView {

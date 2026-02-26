@@ -296,6 +296,10 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
         RADRAY_ERR_LOG("BufferViewDescriptor.Range is out of bounds");
         return false;
     }
+    if (targetDesc.Memory == MemoryType::ReadBack) {
+        RADRAY_ERR_LOG("readback buffer does not support shader views");
+        return false;
+    }
 
     const auto require = [&](BufferUse use) -> bool {
         if (!targetDesc.Usage.HasFlag(use)) {

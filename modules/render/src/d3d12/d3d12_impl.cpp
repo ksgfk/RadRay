@@ -722,6 +722,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         }
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
         frame.image->_desc = TextureDescriptor{
+            .Dim = TextureDimension::Dim2D,
             .Width = desc.Width,
             .Height = desc.Height,
             .DepthOrArraySize = 1,
@@ -729,13 +730,30 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
             .SampleCount = 1,
             .Format = desc.Format,
             .Memory = MemoryType::Device,
-            .Usage = TextureUse::RenderTarget};
+            .Usage = TextureUse::RenderTarget,
+            .Name = "SwapChain BackBuffer"};
     }
     return result;
 }
 
 Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
+    const bool wantsMapRead = desc_.Usage.HasFlag(BufferUse::MapRead);
+    const bool wantsMapWrite = desc_.Usage.HasFlag(BufferUse::MapWrite);
+    if (wantsMapRead && wantsMapWrite) {
+        RADRAY_ERR_LOG("buffer cannot be both map-read and map-write");
+        return nullptr;
+    }
+    if (wantsMapRead && desc_.Memory != MemoryType::ReadBack) {
+        RADRAY_ERR_LOG("map-read buffer must use readback memory");
+        return nullptr;
+    }
+    if (wantsMapWrite && desc_.Memory != MemoryType::Upload) {
+        RADRAY_ERR_LOG("map-write buffer must use upload memory");
+        return nullptr;
+    }
+
     BufferDescriptor desc = desc_;
+    const uint64_t logicalSize = desc.Size;
     D3D12_RESOURCE_DESC resDesc{};
     resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
@@ -743,7 +761,10 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     resDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
     // D3D12 要求 cbuffer 是 256 字节对齐
     // https://github.com/d3dcoder/d3d12book/blob/master/Common/d3dUtil.h#L99
-    resDesc.Width = desc.Usage.HasFlag(BufferUse::CBuffer) ? Align(desc.Size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) : desc.Size;
+    uint64_t allocSize = desc.Usage.HasFlag(BufferUse::CBuffer)
+                             ? Align(desc.Size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)
+                             : desc.Size;
+    resDesc.Width = allocSize;
     resDesc.Height = 1;
     resDesc.DepthOrArraySize = 1;
     resDesc.MipLevels = 1;
@@ -763,7 +784,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     UINT64 paddedSize;
     _device->GetCopyableFootprints(&resDesc, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
     if (paddedSize != UINT64_MAX) {
-        desc.Size = paddedSize;
+        allocSize = paddedSize;
         resDesc.Width = paddedSize;
     }
     D3D12_RESOURCE_STATES rawInitState = MapMemoryTypeToResourceState(desc.Memory);
@@ -815,6 +836,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
+    result->_reqSize = logicalSize;
     return result;
 }
 
@@ -833,6 +855,14 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
     DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
 
     if (desc.Usage == BufferViewUsage::Uniform) {
+        if (desc.Range.Offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+            RADRAY_ERR_LOG("d3d12 uniform buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+            return nullptr;
+        }
+        if (desc.Range.Size % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+            RADRAY_ERR_LOG("d3d12 uniform buffer view size must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+            return nullptr;
+        }
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
@@ -855,12 +885,21 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         srvDesc.Format = MapType(desc.Format);
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Buffer.FirstElement = desc.Range.Offset;
         if (desc.Usage == BufferViewUsage::TexelReadOnly) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                RADRAY_ERR_LOG("texel buffer view offset/size must align to format bytes");
+                return nullptr;
+            }
+            srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
             srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
             srvDesc.Buffer.StructureByteStride = 0;
         } else {
+            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                RADRAY_ERR_LOG("structured buffer view offset/size must align to stride");
+                return nullptr;
+            }
+            srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
             srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
             srvDesc.Buffer.StructureByteStride = desc.Stride;
         }
@@ -877,12 +916,21 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = MapType(desc.Format);
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.FirstElement = desc.Range.Offset;
         if (desc.Usage == BufferViewUsage::TexelReadWrite) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                RADRAY_ERR_LOG("texel buffer view offset/size must align to format bytes");
+                return nullptr;
+            }
+            uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
             uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
             uavDesc.Buffer.StructureByteStride = 0;
         } else {
+            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                RADRAY_ERR_LOG("structured buffer view offset/size must align to stride");
+                return nullptr;
+            }
+            uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
             uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
             uavDesc.Buffer.StructureByteStride = desc.Stride;
         }
@@ -2115,10 +2163,12 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (desc.SignalFence.HasValue()) {
         auto f = CastD3D12Object(desc.SignalFence.Get());
         _queue->Signal(f->_fence.Get(), f->_fenceValue++);
+        f->_submitted = true;
     }
     for (size_t i = 0; i < desc.SignalSemaphores.size(); i++) {
         auto f = CastD3D12Object(desc.SignalSemaphores[i]);
         _queue->Signal(f->_fence.Get(), f->_fenceValue++);
+        f->_signaled = true;
     }
 }
 
@@ -2171,16 +2221,23 @@ void FenceD3D12::Destroy() noexcept {
 }
 
 FenceStatus FenceD3D12::GetStatus() const noexcept {
+    if (!_submitted) {
+        return FenceStatus::NotSubmitted;
+    }
     UINT64 completedValue = _fence->GetCompletedValue();
     uint64_t signaledValue = _fenceValue - 1;
     return completedValue < signaledValue ? FenceStatus::Incomplete : FenceStatus::Complete;
 }
 
 void FenceD3D12::Wait() noexcept {
-    Impl::Wait();
+    if (_submitted) {
+        Impl::Wait();
+    }
 }
 
-void FenceD3D12::Reset() noexcept {}
+void FenceD3D12::Reset() noexcept {
+    _submitted = false;
+}
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     return Impl::GetCompletedValue();
@@ -3226,12 +3283,17 @@ SwapChainD3D12::SwapChainD3D12(
     ComPtr<IDXGISwapChain3> swapchain,
     const SwapChainDescriptor& desc) noexcept
     : _device(device),
+      _presentQueue(CastD3D12Object(desc.PresentQueue)),
       _swapchain(std::move(swapchain)),
       _mode(desc.PresentMode) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
     _swapchain = nullptr;
+    if (_frameLatencyEvent) {
+        CloseHandle(_frameLatencyEvent);
+        _frameLatencyEvent = nullptr;
+    }
 }
 
 bool SwapChainD3D12::IsValid() const noexcept {
@@ -3241,25 +3303,42 @@ bool SwapChainD3D12::IsValid() const noexcept {
 void SwapChainD3D12::Destroy() noexcept {
     _frames.clear();
     _swapchain = nullptr;
+    if (_frameLatencyEvent) {
+        CloseHandle(_frameLatencyEvent);
+        _frameLatencyEvent = nullptr;
+    }
 }
 
 Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
-    RADRAY_UNUSED(signalSemaphore);
-    RADRAY_UNUSED(signalFence);
     ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
-    auto& frame = _frames[curr];
-    return frame.image.get();
+    if (signalSemaphore.HasValue()) {
+        auto sem = CastD3D12Object(signalSemaphore.Get());
+        sem->_fence->Signal(sem->_fenceValue++);
+        sem->_signaled = true;
+    }
+    if (signalFence.HasValue()) {
+        auto f = CastD3D12Object(signalFence.Get());
+        f->_fence->Signal(f->_fenceValue++);
+        f->_submitted = true;
+    }
+    return _frames[curr].image.get();
 }
 
 void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
-    RADRAY_UNUSED(waitSemaphores);
+    for (auto sem : waitSemaphores) {
+        auto f = CastD3D12Object(sem);
+        if (f->_signaled) {
+            _presentQueue->_queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
+            f->_signaled = false;
+        }
+    }
     UINT syncInterval = 0;
     UINT presentFlags = 0;
     switch (_mode) {
         case PresentMode::FIFO: {
             syncInterval = 1;
-            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+            presentFlags = 0;  // FIFO 使用阻塞 present，保证 VSync 语义
             break;
         }
         case PresentMode::Mailbox: {
@@ -3279,6 +3358,7 @@ void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
         FAILED(hr)) {
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            RADRAY_WARN_LOG("IDXGISwapChain::Present DXGI_ERROR_WAS_STILL_DRAWING");
             return;
         }
         RADRAY_ABORT("IDXGISwapChain::Present failed: {} {}", GetErrorName(hr), hr);
@@ -3335,7 +3415,7 @@ void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
 
 BufferDescriptor BufferD3D12::GetDesc() const noexcept {
     return BufferDescriptor{
-        _rawDesc.Width,
+        _reqSize,
         _memory,
         _usage,
         _hints,

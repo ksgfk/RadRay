@@ -335,11 +335,40 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
 }
 
 Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
+    const bool wantsMapRead = desc.Usage.HasFlag(BufferUse::MapRead);
+    const bool wantsMapWrite = desc.Usage.HasFlag(BufferUse::MapWrite);
+    if (wantsMapRead && wantsMapWrite) {
+        RADRAY_ERR_LOG("vk buffer cannot be both map-read and map-write");
+        return nullptr;
+    }
+    if (wantsMapRead && desc.Memory != MemoryType::ReadBack) {
+        RADRAY_ERR_LOG("vk map-read buffer must use readback memory");
+        return nullptr;
+    }
+    if (wantsMapWrite && desc.Memory != MemoryType::Upload) {
+        RADRAY_ERR_LOG("vk map-write buffer must use upload memory");
+        return nullptr;
+    }
+    const bool rtSupported = _detail.IsRayTracingSupported;
+    if (!rtSupported &&
+        (desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
+         desc.Usage.HasFlag(BufferUse::Scratch) ||
+         desc.Usage.HasFlag(BufferUse::ShaderTable))) {
+        RADRAY_ERR_LOG("vk ray tracing buffer usage requested but ray tracing is not supported");
+        return nullptr;
+    }
+
+    const uint64_t logicalSize = desc.Size;
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.pNext = nullptr;
     bufInfo.flags = 0;
-    bufInfo.size = desc.Size;
+    uint64_t allocSize = desc.Size;
+    if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
+        const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
+        allocSize = Align(allocSize, align);
+    }
+    bufInfo.size = allocSize;
     bufInfo.usage = 0;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     bufInfo.queueFamilyIndexCount = 0;
@@ -368,25 +397,29 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Usage.HasFlag(BufferUse::Indirect)) {
         bufInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     }
-    if (desc.Usage.HasFlag(BufferUse::Vertex) ||
-        desc.Usage.HasFlag(BufferUse::Index) ||
-        desc.Usage.HasFlag(BufferUse::Resource) ||
-        desc.Usage.HasFlag(BufferUse::Scratch)) {
-        bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    if (rtSupported) {
+        if (desc.Usage.HasFlag(BufferUse::Vertex) ||
+            desc.Usage.HasFlag(BufferUse::Index) ||
+            desc.Usage.HasFlag(BufferUse::Resource) ||
+            desc.Usage.HasFlag(BufferUse::Scratch)) {
+            bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        }
+        if (desc.Usage.HasFlag(BufferUse::AccelerationStructure)) {
+            bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+        }
+        if (desc.Usage.HasFlag(BufferUse::ShaderTable)) {
+            bufInfo.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+        }
     }
-    if (desc.Usage.HasFlag(BufferUse::AccelerationStructure)) {
-        bufInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
-    }
-    if (desc.Usage.HasFlag(BufferUse::ShaderTable)) {
-        bufInfo.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
-    }
-    if (desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
-        desc.Usage.HasFlag(BufferUse::Scratch) ||
-        desc.Usage.HasFlag(BufferUse::ShaderTable) ||
-        desc.Usage.HasFlag(BufferUse::Vertex) ||
-        desc.Usage.HasFlag(BufferUse::Index) ||
-        desc.Usage.HasFlag(BufferUse::Resource)) {
-        bufInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    if (_extFeatures.bufferDeviceAddress.bufferDeviceAddress) {
+        if (desc.Usage.HasFlag(BufferUse::AccelerationStructure) ||
+            desc.Usage.HasFlag(BufferUse::Scratch) ||
+            desc.Usage.HasFlag(BufferUse::ShaderTable) ||
+            desc.Usage.HasFlag(BufferUse::Vertex) ||
+            desc.Usage.HasFlag(BufferUse::Index) ||
+            desc.Usage.HasFlag(BufferUse::Resource)) {
+            bufInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        }
     }
     if (desc.Usage.HasFlag(BufferUse::Scratch)) {
         bufInfo.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -420,6 +453,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     this->SetObjectName(desc.Name, vkBuf);
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
     result->_reqSize = bufInfo.size;
+    result->_reqSizeLogical = logicalSize;
     result->_name = desc.Name;
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
@@ -435,6 +469,13 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
     auto buf = CastVkObject(desc.Target);
     if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
         return nullptr;
+    }
+    if (desc.Usage == BufferViewUsage::Uniform) {
+        const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
+        if (desc.Range.Offset % align != 0) {
+            RADRAY_ERR_LOG("uniform buffer view offset must align to CBuffer alignment");
+            return nullptr;
+        }
     }
     unique_ptr<BufferViewVulkan> texelView;
     if (desc.Usage == BufferViewUsage::TexelReadOnly || desc.Usage == BufferViewUsage::TexelReadWrite) {
@@ -3930,7 +3971,7 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Semaphore*> signalSemap
         }
         Frame& imageFrame = _frames[_currentTextureIndex];
         return imageFrame.image.get();
-    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR
+    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_SUBOPTIMAL_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR 或 VK_SUBOPTIMAL_KHR
         if (signalFence.HasValue()) {
             auto fenceObj = CastVkObject(signalFence.Get());
             _device->_ftb.vkResetFences(_device->_device, 1, &fenceObj->_fence);
@@ -3967,7 +4008,12 @@ void SwapChainVulkan::Present(std::span<Semaphore*> waitSemaphores) noexcept {
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &_currentTextureIndex;
     presentInfo.pResults = nullptr;
-    _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    auto presentResult = _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        RADRAY_WARN_LOG("vkQueuePresentKHR: {}", presentResult);
+    } else if (presentResult != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkQueuePresentKHR failed: {}", presentResult);
+    }
 }
 
 Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
@@ -4021,7 +4067,6 @@ void BufferVulkan::DestroyImpl() noexcept {
 }
 
 void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(size);
     void* mappedData = nullptr;
     if (_allocInfo.pMappedData) {
         mappedData = static_cast<byte*>(_allocInfo.pMappedData) + offset;
@@ -4032,12 +4077,26 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
         }
         mappedData = static_cast<byte*>(mappedData) + offset;
     }
+    if (_allocation != VK_NULL_HANDLE && _usage.HasFlag(BufferUse::MapRead)) {
+        VkMemoryPropertyFlags flags{};
+        vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
+        if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+            VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
+            vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+        }
+    }
     return mappedData;
 }
 
 void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(offset);
-    RADRAY_UNUSED(size);
+    if (_allocation != VK_NULL_HANDLE && _usage.HasFlag(BufferUse::MapWrite)) {
+        VkMemoryPropertyFlags flags{};
+        vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
+        if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
+            VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
+            vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+        }
+    }
     if (!_allocInfo.pMappedData) {
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
     }
@@ -4045,7 +4104,7 @@ void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
 
 BufferDescriptor BufferVulkan::GetDesc() const noexcept {
     return BufferDescriptor{
-        _allocInfo.size,
+        _reqSizeLogical,
         _memory,
         _usage,
         _hints,

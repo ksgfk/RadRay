@@ -650,6 +650,7 @@ public:
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
+    uint64_t _reqSizeLogical{0};
 };
 
 class BufferViewVulkan final : public RenderBase {

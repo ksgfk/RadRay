@@ -113,7 +113,7 @@
             "Name": "imgui",
             "Type": "git",
             "Git": "https://github.com/ocornut/imgui.git",
-            "Tag": "v1.92.5"
+            "Tag": "v1.92.6"
         },
         {
             "Name": "stdexec",
