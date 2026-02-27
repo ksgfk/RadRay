@@ -6,7 +6,7 @@
 modules/render/
 ├── CMakeLists.txt
 ├── include/radray/render/
-│   ├── common.h          # 核心接口定义 (~1526 行)
+│   ├── common.h          # 核心接口定义
 │   ├── dxc.h             # HLSL 编译器封装
 │   ├── spvc.h            # SPIR-V Cross 封装
 │   ├── msl.h             # Metal Shading Language 工具
@@ -58,18 +58,6 @@ DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, Vu
 - `.Unwrap()` — 提取（空时抛异常）
 - `.Release()` — 无异常提取
 
-### 类层次结构
-
-| 类别 | 类 |
-|------|-----|
-| 命令 | `CommandQueue`, `CommandBuffer` |
-| 编码器 | `CommandEncoder` → `GraphicsCommandEncoder` / `ComputeCommandEncoder` / `RayTracingCommandEncoder` |
-| 资源 | `Resource` → `Buffer`, `Texture`, `AccelerationStructure` |
-| 资源视图 | `ResourceView` → `BufferView`, `TextureView`, `AccelerationStructureView` |
-| 管线 | `Shader`, `RootSignature`, `PipelineState` → `GraphicsPipelineState` / `ComputePipelineState` / `RayTracingPipelineState` |
-| 绑定 | `DescriptorSet`, `Sampler`, `BindlessArray` |
-| 同步 | `Fence`, `Semaphore`, `SwapChain` |
-
 ## Shader 编译流程
 
 ```
@@ -78,22 +66,6 @@ HLSL
  ├─[DXC]──→ SPIR-V      (Vulkan)
  └─[DXC]──→ SPIR-V ──[SPIR-V Cross]──→ MSL  (Metal)
 ```
-
-### DXC (dxc.h)
-- `Dxc` — 编译器实例
-- `DxcCompileParams` — 编译参数
-- `DxcOutput` — 编译结果（字节码 + 反射数据）
-- `HlslShaderDesc` — HLSL 反射信息（常量缓冲、绑定、签名）
-
-### SPIR-V Cross (spvc.h)
-- `ConvertSpirvToMsl()` — SPIR-V 转 MSL
-- `SpirvShaderDesc` — SPIR-V 反射（类型、顶点输入、资源绑定、push constants）
-- `SpirvToMslOption` — MSL 版本、平台（macOS/iOS）、argument buffers 开关
-
-### MSL 工具 (msl.h)
-- `MslShaderReflection` — MSL 反射信息
-- `MetalMaxVertexInputBindings = 16` — **关键常量**，驱动整个 Metal 绑定布局
-
 ## Metal 后端绑定布局
 
 **Graphics 阶段（Vertex/Fragment）：**
@@ -130,45 +102,12 @@ buffer(17+)   — argument buffers，每个 descriptor set 一个
 
 跨后端资源绑定抽象层，屏蔽各后端差异。
 
-**核心类：**
-- `BindBridgeLayout` — 分析 shader 反射，创建绑定布局
-- `BindBridge` — 运行时绑定管理器
-- `IBindBridgeLayoutPlanner` — 后端特定布局规划接口
-  - `D3D12BindBridgeLayoutPlanner`
-  - `VulkanBindBridgeLayoutPlanner`
-  - `MetalBindBridgeLayoutPlanner`
-
-**绑定条目类型：**
-- `BindBridgePushConstEntry` — Push constants
-- `BindBridgeRootDescriptorEntry` — Root descriptors（D3D12 概念）
-- `BindBridgeDescriptorSetEntry` — Descriptor set 绑定
-
-**工作流：**
-1. 从 shader 反射（HLSL/SPIR-V/MSL）构建 IR
-2. 使用后端特定 planner 规划布局
-3. 从规划布局创建 `RootSignature`
-4. 运行时使用 `BindBridge` 绑定资源
-
 ## GPU 资源辅助 (gpu_resource.h)
 
 - `RenderMesh` — 顶点/索引缓冲管理，含绘制数据
 - `CBufferArena` — 常量缓冲 arena 分配器，支持帧级 reset/clear
   - `Allocation` — 已分配的常量缓冲区域
   - `Block` — 内部内存块
-
-## 关键枚举与标志
-
-使用 `EnumFlags<T>` + `is_flags<T>` trait 实现位运算枚举：
-
-| 枚举 | 用途 |
-|------|------|
-| `ShaderStage` | Vertex, Pixel, Compute, RayGen, Miss, ClosestHit, AnyHit, Intersection, Callable |
-| `BufferUse` | Common, MapRead/Write, CopySource/Dest, Index, Vertex, CBuffer, Resource, UAV, Indirect, AS, Scratch, ShaderTable |
-| `TextureUse` | CopySource/Dest, Resource, RenderTarget, DepthStencilRead/Write, UAV |
-| `BufferState` / `TextureState` | 资源状态追踪，用于 barrier |
-| `TextureFormat` | 40+ 格式（R8-RGBA32、深度模板、压缩格式） |
-| `VertexFormat` | 30+ 顶点属性格式 |
-| `ResourceBindType` | CBuffer, Buffer, Texture, Sampler, RWBuffer, RWTexture, AccelerationStructure |
 
 ## CMake 构建配置
 
@@ -179,20 +118,9 @@ buffer(17+)   — argument buffers，每个 descriptor set 一个
 - `RADRAY_ENABLE_DXC` — DXC shader 编译器
 - `RADRAY_ENABLE_SPVCROSS` — SPIR-V Cross
 
-**依赖：**
-- Public：`radraycore`, Vulkan-Headers, volk, VMA, DirectX-Headers, D3D12MemoryAllocator
-- Private：dxcompiler, spirv-cross (core/glsl/msl/util)
-- Metal 框架：Metal, QuartzCore, Cocoa (macOS) / UIKit (iOS)
-
-**特殊处理：**
-- Metal `.mm` 文件使用 `-fobjc-arc` 编译（自动引用计数）
-- DXC 运行时 DLL 在构建后复制到输出目录
-
 ## 关键模式与约定
 
 1. **Nullable 模式**：`Nullable<T>` 包装指针类型，`.HasValue()` / `.Unwrap()` / `.Release()`
 2. **RAII**：所有 GPU 资源通过 `RenderBase` 禁止拷贝/移动
 3. **工厂模式**：`Device` 创建所有 GPU 对象，返回 `Nullable<unique_ptr<T>>`
-4. **Variant 描述符**：`std::variant` 用于后端特定描述符
 5. **显式状态管理**：`BufferState` / `TextureState` 枚举追踪资源状态，手动插入 barrier
-6. **多语言注释**：代码注释中英混用，C++20 特性（concepts、ranges），Metal 使用 Objective-C++

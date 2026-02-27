@@ -2778,14 +2778,16 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             dstStageMask |= BufferStateToPipelineStageFlags(ab->After);
         }
     }
-    _device->_ftb.vkCmdPipelineBarrier(
-        _cmdBuffer,
-        srcStageMask,
-        dstStageMask,
-        0,
-        0, nullptr,
-        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),
-        static_cast<uint32_t>(imageBarriers.size()), imageBarriers.data());
+    if (bufferBarriers.size() > 0 || imageBarriers.size() > 0) {
+        _device->_ftb.vkCmdPipelineBarrier(
+            _cmdBuffer,
+            srcStageMask,
+            dstStageMask,
+            0,
+            0, nullptr,
+            static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.size() == 0 ? nullptr : bufferBarriers.data(),
+            static_cast<uint32_t>(imageBarriers.size()), imageBarriers.size() == 0 ? nullptr : imageBarriers.data());
+    }
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassDescriptor& desc) noexcept {
