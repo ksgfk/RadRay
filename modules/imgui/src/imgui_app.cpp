@@ -813,6 +813,7 @@ void ImGuiApplication::LoopSingleThreaded() {
                 fence->Reset();
             } else {
                 fence->Wait();
+                fence->Reset();
             }
         }
         if (state.IsSubmitted) {
@@ -914,6 +915,7 @@ void ImGuiApplication::LoopMultiThreaded() {
             if (state.IsSubmitted) {
                 render::Fence* fence = _inFlightFences[processIndex].get();
                 fence->Wait();
+                fence->Reset();
                 this->OnRenderComplete(state.InFlightFrameIndex);
                 _freeFrames->WaitWrite(state.InFlightFrameIndex);
                 state = RenderFrameState::Invalid();

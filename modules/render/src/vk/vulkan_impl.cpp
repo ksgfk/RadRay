@@ -158,7 +158,15 @@ DeviceDetail DeviceVulkan::GetDetail() const noexcept {
 }
 
 Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
-    return _queues[static_cast<std::underlying_type_t<QueueType>>(type)][slot].get();
+    auto index = static_cast<std::underlying_type_t<QueueType>>(type);
+    if (index >= static_cast<std::underlying_type_t<QueueType>>(QueueType::MAX_COUNT)) {
+        return nullptr;
+    }
+    auto& queues = _queues[index];
+    if (slot >= queues.size()) {
+        return nullptr;
+    }
+    return queues[slot].get();
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
@@ -3870,8 +3878,6 @@ void FenceVulkan::Wait() noexcept {
             vr != VK_SUCCESS) {
             RADRAY_ABORT("vkWaitForFences failed: {}", vr);
         }
-        _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
-        _submitted = false;
     }
 }
 

@@ -1340,6 +1340,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     vector<uint8_t> isBindlessSet{};
     unordered_map<uint32_t, size_t> setIndexToTableIndex{};
+    unordered_map<uint32_t, size_t> setIndexToSamplerTableIndex{};
     unordered_set<uint32_t> setsWithStaticSamplers{};
     for (const auto& ss : desc.StaticSamplers) {
         setsWithStaticSamplers.insert(ss.SetIndex);
@@ -1411,30 +1412,52 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             continue;
         }
         allStages |= setStages;
-        // Store ranges in descRanges and create one root parameter
-        size_t rangeStart = descRanges.size();
+        // Split ranges into resource (CBV/SRV/UAV) and sampler groups.
+        // D3D12 requires all ranges in a single descriptor table to reference the same heap type.
+        vector<D3D12_DESCRIPTOR_RANGE1> resRanges{};
+        vector<D3D12_DESCRIPTOR_RANGE1> samplerRanges{};
         for (auto& r : setRanges) {
-            descRanges.push_back(r);
-        }
-        D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
-        CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
-            rp,
-            static_cast<UINT>(setRanges.size()),
-            &descRanges[rangeStart],
-            MapShaderStages(setStages));
-        size_t tableIdx = 0;
-        // Count how many tables we have so far (this will be computed by VersionedRootSignatureDescContainer)
-        // We just need to record the mapping from setIndex to the table index
-        size_t tableCount = 0;
-        for (size_t pi = 0; pi < rootParmas.size(); pi++) {
-            if (rootParmas[pi].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
-                if (pi == rootParmas.size() - 1) {
-                    tableIdx = tableCount;
-                }
-                tableCount++;
+            if (r.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) {
+                samplerRanges.push_back(r);
+            } else {
+                resRanges.push_back(r);
             }
         }
-        setIndexToTableIndex[setIdx] = tableIdx;
+        auto countCurrentTableIndex = [&]() -> size_t {
+            size_t tableCount = 0;
+            for (size_t pi = 0; pi < rootParmas.size(); pi++) {
+                if (rootParmas[pi].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                    tableCount++;
+                }
+            }
+            return tableCount > 0 ? tableCount - 1 : 0;
+        };
+        if (!resRanges.empty()) {
+            size_t rangeStart = descRanges.size();
+            for (auto& r : resRanges) {
+                descRanges.push_back(r);
+            }
+            D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+            CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                rp,
+                static_cast<UINT>(resRanges.size()),
+                &descRanges[rangeStart],
+                MapShaderStages(setStages));
+            setIndexToTableIndex[setIdx] = countCurrentTableIndex();
+        }
+        if (!samplerRanges.empty()) {
+            size_t rangeStart = descRanges.size();
+            for (auto& r : samplerRanges) {
+                descRanges.push_back(r);
+            }
+            D3D12_ROOT_PARAMETER1& rp = rootParmas.emplace_back();
+            CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                rp,
+                static_cast<UINT>(samplerRanges.size()),
+                &descRanges[rangeStart],
+                MapShaderStages(setStages));
+            setIndexToSamplerTableIndex[setIdx] = countCurrentTableIndex();
+        }
         if (setIdx >= isBindlessSet.size()) {
             isBindlessSet.resize(setIdx + 1, false);
         }
@@ -1512,6 +1535,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     result->_desc = VersionedRootSignatureDescContainer{versionDesc};
     result->_isBindlessSet = std::move(isBindlessSet);
     result->_setIndexToTableIndex = std::move(setIndexToTableIndex);
+    result->_setIndexToSamplerTableIndex = std::move(setIndexToSamplerTableIndex);
     return result;
 }
 
@@ -2786,18 +2810,22 @@ void CmdRenderPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) no
         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
         return;
     }
-    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
-    if (!tableOpt.has_value()) {
-        RADRAY_ERR_LOG("no table for set index {}", slot);
-        return;
-    }
-    auto dataRef = tableOpt.value();
     auto descHeapView = CastD3D12Object(set);
     if (descHeapView->_resHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+        auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+        if (!tableOpt.has_value()) {
+            RADRAY_ERR_LOG("no resource table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
     }
     if (descHeapView->_samplerHeapView.IsValid()) {
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+        auto samplerTableOpt = _boundRootSig->GetSamplerTableBySetIndex(slot);
+        if (!samplerTableOpt.has_value()) {
+            RADRAY_ERR_LOG("no sampler table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
     }
 }
 
@@ -2901,18 +2929,22 @@ void CmdComputePassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set) n
         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
         return;
     }
-    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
-    if (!tableOpt.has_value()) {
-        RADRAY_ERR_LOG("no table for set index {}", slot);
-        return;
-    }
-    auto dataRef = tableOpt.value();
     auto descHeapView = CastD3D12Object(set);
     if (descHeapView->_resHeapView.IsValid()) {
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+        auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+        if (!tableOpt.has_value()) {
+            RADRAY_ERR_LOG("no resource table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
     }
     if (descHeapView->_samplerHeapView.IsValid()) {
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+        auto samplerTableOpt = _boundRootSig->GetSamplerTableBySetIndex(slot);
+        if (!samplerTableOpt.has_value()) {
+            RADRAY_ERR_LOG("no sampler table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
     }
 }
 
@@ -3029,18 +3061,22 @@ void CmdRayTracingPassD3D12::BindDescriptorSet(uint32_t slot, DescriptorSet* set
         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
         return;
     }
-    auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
-    if (!tableOpt.has_value()) {
-        RADRAY_ERR_LOG("no table for set index {}", slot);
-        return;
-    }
-    auto dataRef = tableOpt.value();
     auto descHeapView = CastD3D12Object(set);
     if (descHeapView->_resHeapView.IsValid()) {
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_resHeapView.HandleGpu());
+        auto tableOpt = _boundRootSig->GetTableBySetIndex(slot);
+        if (!tableOpt.has_value()) {
+            RADRAY_ERR_LOG("no resource table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
     }
     if (descHeapView->_samplerHeapView.IsValid()) {
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)dataRef.Index, descHeapView->_samplerHeapView.HandleGpu());
+        auto samplerTableOpt = _boundRootSig->GetSamplerTableBySetIndex(slot);
+        if (!samplerTableOpt.has_value()) {
+            RADRAY_ERR_LOG("no sampler table for set index {}", slot);
+            return;
+        }
+        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
     }
 }
 
@@ -3556,6 +3592,14 @@ bool RootSigD3D12::IsBindlessSet(uint32_t setIndex) const noexcept {
 std::optional<VersionedRootSignatureDescContainer::RootParamRef> RootSigD3D12::GetTableBySetIndex(uint32_t setIndex) const noexcept {
     auto it = _setIndexToTableIndex.find(setIndex);
     if (it == _setIndexToTableIndex.end()) {
+        return std::nullopt;
+    }
+    return _desc.GetTable(it->second);
+}
+
+std::optional<VersionedRootSignatureDescContainer::RootParamRef> RootSigD3D12::GetSamplerTableBySetIndex(uint32_t setIndex) const noexcept {
+    auto it = _setIndexToSamplerTableIndex.find(setIndex);
+    if (it == _setIndexToSamplerTableIndex.end()) {
         return std::nullopt;
     }
     return _desc.GetTable(it->second);
