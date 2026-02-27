@@ -402,9 +402,12 @@ static void _ProcessMslBinding(
         }
     }
     if (argType == MslArgumentType::Buffer) {
-        if (isReadOnly) arg.Access = MslAccess::ReadOnly;
-        else if (isWriteOnly) arg.Access = MslAccess::WriteOnly;
-        else arg.Access = MslAccess::ReadWrite;
+        if (isReadOnly)
+            arg.Access = MslAccess::ReadOnly;
+        else if (isWriteOnly)
+            arg.Access = MslAccess::WriteOnly;
+        else
+            arg.Access = MslAccess::ReadWrite;
         const auto& baseType = compiler.get_type(res.base_type_id);
         if (baseType.basetype == spirv_cross::SPIRType::Struct) {
             arg.BufferDataType = MslDataType::Struct;
@@ -414,9 +417,12 @@ static void _ProcessMslBinding(
             arg.BufferDataType = _MapSpirvToMslDataType(baseType);
         }
     } else if (argType == MslArgumentType::Texture) {
-        if (isReadOnly) arg.Access = MslAccess::ReadOnly;
-        else if (isWriteOnly) arg.Access = MslAccess::WriteOnly;
-        else arg.Access = MslAccess::ReadWrite;
+        if (isReadOnly)
+            arg.Access = MslAccess::ReadOnly;
+        else if (isWriteOnly)
+            arg.Access = MslAccess::WriteOnly;
+        else
+            arg.Access = MslAccess::ReadWrite;
         arg.TextureType = _MapImageToMslTextureType(type);
         arg.IsDepthTexture = type.image.depth;
         const auto& sampledType = compiler.get_type(type.image.type);

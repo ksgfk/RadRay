@@ -37,7 +37,7 @@ TEST(BuddyAllocatorTest, FullCapacityAllocation) {
     ASSERT_TRUE(alloc.has_value());
     EXPECT_EQ(alloc->Offset, 0);
     allocator.Destroy(*alloc);
-    
+
     // Should be able to allocate again
     alloc = allocator.Allocate(1024);
     ASSERT_TRUE(alloc.has_value());
@@ -47,7 +47,7 @@ TEST(BuddyAllocatorTest, FullCapacityAllocation) {
 TEST(BuddyAllocatorTest, NonPowerOfTwoCapacity) {
     size_t capacity = 100;
     BuddyAllocator allocator(capacity);
-    
+
     // Should be able to allocate full capacity
     auto alloc = allocator.Allocate(100);
     ASSERT_TRUE(alloc.has_value());
@@ -65,19 +65,19 @@ TEST(BuddyAllocatorTest, NonPowerOfTwoCapacityFragmentation) {
     // RR(96-127) -> RRL(96-111), RRR(112-127)
     // Capacity cuts off at 100.
     // RR(96-127) has actual capacity 4 (96, 97, 98, 99).
-    
+
     BuddyAllocator allocator(100);
-    
+
     // Allocate 64. Should take L(0-63).
     auto a1 = allocator.Allocate(64);
     ASSERT_TRUE(a1.has_value());
     EXPECT_EQ(a1->Offset, 0);
-    
+
     // Allocate 32. Should take RL(64-95).
     auto a2 = allocator.Allocate(32);
     ASSERT_TRUE(a2.has_value());
     EXPECT_EQ(a2->Offset, 64);
-    
+
     // Allocate 4. Should take RRL(96-111) which has capacity 4?
     // Wait, RRL(96-111) size is 16. Actual capacity is min(16, 100-96=4) = 4.
     // If we request 4. Target size 4.
@@ -87,15 +87,15 @@ TEST(BuddyAllocatorTest, NonPowerOfTwoCapacityFragmentation) {
     auto a3 = allocator.Allocate(4);
     ASSERT_TRUE(a3.has_value());
     EXPECT_EQ(a3->Offset, 96);
-    
+
     // Now full (64+32+4 = 100).
     auto a4 = allocator.Allocate(1);
     EXPECT_FALSE(a4.has_value());
-    
+
     allocator.Destroy(*a1);
     allocator.Destroy(*a2);
     allocator.Destroy(*a3);
-    
+
     // Should be empty
     auto aFull = allocator.Allocate(100);
     ASSERT_TRUE(aFull.has_value());
@@ -105,22 +105,22 @@ TEST(BuddyAllocatorTest, NonPowerOfTwoCapacityFragmentation) {
 TEST(BuddyAllocatorTest, MultipleAllocations) {
     BuddyAllocator allocator(1024);
     std::vector<BuddyAllocator::Allocation> allocs;
-    
+
     for (int i = 0; i < 4; ++i) {
         auto alloc = allocator.Allocate(256);
         ASSERT_TRUE(alloc.has_value());
         allocs.push_back(*alloc);
     }
-    
+
     // Should be full
     auto alloc = allocator.Allocate(1);
     EXPECT_FALSE(alloc.has_value());
-    
+
     // Free all
     for (auto& a : allocs) {
         allocator.Destroy(a);
     }
-    
+
     // Should be empty and merge back
     alloc = allocator.Allocate(1024);
     ASSERT_TRUE(alloc.has_value());
@@ -129,29 +129,29 @@ TEST(BuddyAllocatorTest, MultipleAllocations) {
 
 TEST(BuddyAllocatorTest, FragmentationAndCoalescing) {
     BuddyAllocator allocator(1024);
-    
+
     auto a1 = allocator.Allocate(256);
     auto a2 = allocator.Allocate(256);
     auto a3 = allocator.Allocate(256);
     auto a4 = allocator.Allocate(256);
-    
+
     ASSERT_TRUE(a1 && a2 && a3 && a4);
-    
+
     // Free middle ones
     allocator.Destroy(*a2);
     allocator.Destroy(*a3);
-    
+
     // Should NOT be able to allocate 512 because free blocks are not buddies
     auto a5 = allocator.Allocate(512);
     EXPECT_FALSE(a5.has_value());
-    
+
     // Free a1. Now a1(0-255) and a2(256-511) are free. They are buddies.
     allocator.Destroy(*a1);
-    
+
     auto a6 = allocator.Allocate(512);
     ASSERT_TRUE(a6.has_value());
     EXPECT_EQ(a6->Offset, 0);
-    
+
     allocator.Destroy(*a6);
     allocator.Destroy(*a4);
 }
@@ -161,7 +161,7 @@ TEST(BuddyAllocatorTest, RandomStress) {
     BuddyAllocator allocator(capacity);
     std::vector<BuddyAllocator::Allocation> allocations;
     std::mt19937 rng(42);
-    
+
     for (int i = 0; i < 2000; ++i) {
         if (allocations.empty() || (std::uniform_int_distribution<>(0, 2)(rng) != 0)) {
             // Allocate (2/3 chance)
@@ -177,11 +177,11 @@ TEST(BuddyAllocatorTest, RandomStress) {
             allocations.erase(allocations.begin() + index);
         }
     }
-    
+
     for (auto& alloc : allocations) {
         allocator.Destroy(alloc);
     }
-    
+
     // Should be fully free
     auto finalAlloc = allocator.Allocate(capacity);
     EXPECT_TRUE(finalAlloc.has_value());
@@ -195,21 +195,21 @@ TEST(BuddyAllocatorTest, AlignmentCheck) {
     // The implementation uses bit_ceil(request).
     // bit_ceil(1) = 1.
     // bit_ceil(3) = 4.
-    
+
     auto a1 = allocator.Allocate(1);
     ASSERT_TRUE(a1.has_value());
     // Offset should be aligned to 1.
-    
+
     auto a2 = allocator.Allocate(3);
     ASSERT_TRUE(a2.has_value());
     // Size 4. Offset should be multiple of 4.
     EXPECT_EQ(a2->Offset % 4, 0);
-    
+
     auto a3 = allocator.Allocate(12);
     ASSERT_TRUE(a3.has_value());
     // Size 16. Offset should be multiple of 16.
     EXPECT_EQ(a3->Offset % 16, 0);
-    
+
     allocator.Destroy(*a1);
     allocator.Destroy(*a2);
     allocator.Destroy(*a3);

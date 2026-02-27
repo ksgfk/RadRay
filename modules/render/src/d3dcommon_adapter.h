@@ -1,3 +1,5 @@
+// clang-format off
+
 #pragma once
 
 typedef 
@@ -721,3 +723,5 @@ enum D3D_FORMAT_COMPONENT_INTERPRETATION
         D3DFCI_UNORM_SRGB	= 2,
         D3DFCI_BIASED_FIXED_2_8	= 3
     } 	D3D_FORMAT_COMPONENT_INTERPRETATION;
+
+// clang-format on

@@ -1,3 +1,5 @@
+// clang-format off
+
 //////////////////////////////////////////////////////////////////////////////
 //
 //  Copyright (c) Microsoft Corporation.
@@ -498,3 +500,5 @@ extern "C" {
 #endif //__D3D12SHADER_H__
 
 #undef interface
+
+// clang-format on

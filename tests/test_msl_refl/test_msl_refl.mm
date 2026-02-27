@@ -105,9 +105,9 @@ TEST_F(MslReflTest, ComputeShader) {
     MTLComputePipelineReflection* reflection = nil;
     id<MTLComputePipelineState> pso = [_device
         newComputePipelineStateWithFunction:fn
-        options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
-        reflection:&reflection
-        error:&error];
+                                    options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                 reflection:&reflection
+                                      error:&error];
     ASSERT_NE(pso, nil) << [[error localizedDescription] UTF8String];
 
     auto refl = DumpPsoReflection(reflection);
@@ -140,9 +140,9 @@ TEST_F(MslReflTest, ComputeCBufferStruct) {
     MTLComputePipelineReflection* reflection = nil;
     id<MTLComputePipelineState> pso = [_device
         newComputePipelineStateWithFunction:fn
-        options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
-        reflection:&reflection
-        error:&error];
+                                    options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                 reflection:&reflection
+                                      error:&error];
     ASSERT_NE(pso, nil);
 
     auto refl = DumpPsoReflection(reflection);
@@ -195,9 +195,9 @@ TEST_F(MslReflTest, RenderPipeline) {
     MTLRenderPipelineReflection* reflection = nil;
     id<MTLRenderPipelineState> pso = [_device
         newRenderPipelineStateWithDescriptor:desc
-        options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
-        reflection:&reflection
-        error:&error];
+                                     options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+                                  reflection:&reflection
+                                       error:&error];
     ASSERT_NE(pso, nil) << [[error localizedDescription] UTF8String];
 
     auto refl = DumpPsoReflection(reflection);

@@ -484,16 +484,18 @@ TEST(BindBridgeLayout, MslRenderSamplerSeparation) {
     bool hasSamplerBinding = false;
     bool hasNonSamplerBinding = false;
     for (const auto& b : bindings) {
-        std::visit([&](const auto& e) {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
-                if (e.Type == ResourceBindType::Sampler) {
-                    hasSamplerBinding = true;
-                } else {
-                    hasNonSamplerBinding = true;
+        std::visit(
+            [&](const auto& e) {
+                using T = std::decay_t<decltype(e)>;
+                if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
+                    if (e.Type == ResourceBindType::Sampler) {
+                        hasSamplerBinding = true;
+                    } else {
+                        hasNonSamplerBinding = true;
+                    }
                 }
-            }
-        }, b);
+            },
+            b);
     }
     EXPECT_TRUE(hasSamplerBinding) << "should have sampler binding";
     EXPECT_TRUE(hasNonSamplerBinding) << "should have non-sampler binding";

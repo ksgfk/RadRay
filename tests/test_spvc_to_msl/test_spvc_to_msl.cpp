@@ -160,7 +160,8 @@ TEST(SpirvToMsl, VertexBufferOffset) {
     auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== VertexBufferOffset MSL ===\n" << msl << "\n";
+    std::cout << "=== VertexBufferOffset MSL ===\n"
+              << msl << "\n";
 
     // push constant 应该在 buffer(16)，即 MetalMaxVertexInputBindings
     EXPECT_NE(msl.find("buffer(16)"), std::string::npos)
@@ -179,7 +180,8 @@ TEST(SpirvToMsl, FragmentBufferOffset) {
     auto result = ConvertSpirvToMsl(ps->Data, "PSMain", ShaderStage::Pixel);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== FragmentBufferOffset MSL ===\n" << msl << "\n";
+    std::cout << "=== FragmentBufferOffset MSL ===\n"
+              << msl << "\n";
 
     // texture 应该保持在 texture(0)，不偏移
     EXPECT_NE(msl.find("texture(0)"), std::string::npos)
@@ -198,7 +200,8 @@ TEST(SpirvToMsl, ComputeNoOffset) {
     auto result = ConvertSpirvToMsl(cs->Data, "CSMain", ShaderStage::Compute);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== ComputeNoOffset MSL ===\n" << msl << "\n";
+    std::cout << "=== ComputeNoOffset MSL ===\n"
+              << msl << "\n";
 
     // compute shader 不需要偏移，buffer 应该在 buffer(0)
     EXPECT_NE(msl.find("buffer(0)"), std::string::npos)
@@ -288,7 +291,8 @@ TEST(SpirvToMsl, ArgBufferVsPushConstantNoOverlap) {
     auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex, opt);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== ArgBufferVsPushConstantNoOverlap MSL ===\n" << msl << "\n";
+    std::cout << "=== ArgBufferVsPushConstantNoOverlap MSL ===\n"
+              << msl << "\n";
 
     // push constant should be at buffer(16)
     EXPECT_NE(msl.find("buffer(16)"), std::string::npos)
@@ -311,7 +315,8 @@ TEST(SpirvToMsl, ArgBufferPsPushConstantNoOverlap) {
     auto result = ConvertSpirvToMsl(ps->Data, "PSMain", ShaderStage::Pixel, opt);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== ArgBufferPsPushConstantNoOverlap MSL ===\n" << msl << "\n";
+    std::cout << "=== ArgBufferPsPushConstantNoOverlap MSL ===\n"
+              << msl << "\n";
 
     // argument buffer for desc set 0 should be at buffer(17)
     EXPECT_NE(msl.find("buffer(17)"), std::string::npos)
@@ -333,7 +338,8 @@ TEST(SpirvToMsl, ArgBufferMultiDescriptorSet) {
     auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex, opt);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== ArgBufferMultiDescriptorSet MSL ===\n" << msl << "\n";
+    std::cout << "=== ArgBufferMultiDescriptorSet MSL ===\n"
+              << msl << "\n";
 
     // desc set 0 -> buffer(17), desc set 1 -> buffer(18)
     EXPECT_NE(msl.find("buffer(17)"), std::string::npos)
@@ -361,7 +367,8 @@ TEST(SpirvToMsl, ArgBufferComputeNoOffset) {
     auto result = ConvertSpirvToMsl(cs->Data, "CSMain", ShaderStage::Compute, opt);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== ArgBufferComputeNoOffset MSL ===\n" << msl << "\n";
+    std::cout << "=== ArgBufferComputeNoOffset MSL ===\n"
+              << msl << "\n";
 
     // compute shader should not have buffer(17+) offset
     EXPECT_EQ(msl.find("buffer(17)"), std::string::npos)
@@ -379,7 +386,8 @@ TEST(SpirvToMsl, CBufferOffset) {
     auto result = ConvertSpirvToMsl(vs->Data, "VSMain", ShaderStage::Vertex);
     ASSERT_TRUE(result.has_value());
     auto& msl = result->MslSource;
-    std::cout << "=== CBufferOffset MSL ===\n" << msl << "\n";
+    std::cout << "=== CBufferOffset MSL ===\n"
+              << msl << "\n";
 
     // cbuffer 应该在 buffer(16)
     EXPECT_NE(msl.find("buffer(16)"), std::string::npos)

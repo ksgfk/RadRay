@@ -179,8 +179,8 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 
 #define RADRAY_ASSERT(x) assert(x)
 
-#define RADRAY_THROW(type, fmt, ...)                                    \
-    do {                                                                \
+#define RADRAY_THROW(type, fmt, ...)                                 \
+    do {                                                             \
         auto tmp___ = ::fmt::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
-        throw type(tmp___.c_str());                                     \
+        throw type(tmp___.c_str());                                  \
     } while (0)
