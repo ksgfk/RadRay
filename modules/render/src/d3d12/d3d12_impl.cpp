@@ -2738,8 +2738,7 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = buf->_gpuAddr + ibv.Offset;
     view.SizeInBytes = (UINT)buf->_rawDesc.Width - ibv.Offset;
-    view.Format = ibv.Stride == 1 ? DXGI_FORMAT_R8_UINT : ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT
-                                                                          : DXGI_FORMAT_R32_UINT;
+    view.Format = ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
     _cmdList->_cmdList->IASetIndexBuffer(&view);
 }
 

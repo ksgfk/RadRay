@@ -2544,7 +2544,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkSemaphore> waitSemaphores;
     waitSemaphores.reserve(desc.WaitSemaphores.size());
     vector<VkPipelineStageFlags> waitStages;
-    waitStages.resize(desc.WaitSemaphores.size(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    waitStages.resize(desc.WaitSemaphores.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     for (auto i : desc.WaitSemaphores) {
         auto semaphore = CastVkObject(i);
         if (semaphore->_signaled) {
@@ -3033,7 +3033,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
             VkBufferImageCopy copyInfo{};
             copyInfo.bufferOffset = bufferOffset;
             copyInfo.bufferRowLength = bufferRowLength;
-            copyInfo.bufferImageHeight = 0;
+            copyInfo.bufferImageHeight = mipHeight;
             copyInfo.imageSubresource.aspectMask = aspectMask;
             copyInfo.imageSubresource.mipLevel = mipLevel;
             copyInfo.imageSubresource.baseArrayLayer = arrayLayer;
@@ -3101,7 +3101,7 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
             VkBufferImageCopy copyInfo{};
             copyInfo.bufferOffset = bufferOffset;
             copyInfo.bufferRowLength = bufferRowLength;
-            copyInfo.bufferImageHeight = 0;
+            copyInfo.bufferImageHeight = mipHeight;
             copyInfo.imageSubresource.aspectMask = aspectMask;
             copyInfo.imageSubresource.mipLevel = mipLevel;
             copyInfo.imageSubresource.baseArrayLayer = arrayLayer;
