@@ -1023,7 +1023,7 @@ D3D12_RESOURCE_STATES MapType(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::Index)) {
         result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
     }
-    if (v.HasFlag(BufferState::Vertex) || v.HasFlag(BufferState::Uniform)) {
+    if (v.HasFlag(BufferState::Vertex) || v.HasFlag(BufferState::CBuffer)) {
         result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
     }
     if (v.HasFlag(BufferState::ShaderRead)) {

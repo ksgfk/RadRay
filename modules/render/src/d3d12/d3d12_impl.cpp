@@ -854,7 +854,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
 
-    if (desc.Usage == BufferViewUsage::Uniform) {
+    if (desc.Usage == BufferViewUsage::CBuffer) {
         if (desc.Range.Offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
             RADRAY_ERR_LOG("d3d12 uniform buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
             return nullptr;

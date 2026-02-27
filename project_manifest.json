@@ -77,13 +77,13 @@
             "Name": "Vulkan-Headers",
             "Type": "git",
             "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
-            "Tag": "v1.4.321"
+            "Tag": "v1.4.341"
         },
         {
             "Name": "volk",
             "Type": "git",
             "Git": "https://github.com/zeux/volk.git",
-            "Tag": "vulkan-sdk-1.4.321.0"
+            "Tag": "vulkan-sdk-1.4.341.0"
         },
         {
             "Name": "VulkanMemoryAllocator",
@@ -95,19 +95,19 @@
             "Name": "SPIRV-Cross",
             "Type": "git",
             "Git": "https://github.com/KhronosGroup/SPIRV-Cross.git",
-            "Tag": "vulkan-sdk-1.4.321.0"
+            "Tag": "vulkan-sdk-1.4.341.0"
         },
         {
             "Name": "DirectX-Headers",
             "Type": "git",
             "Git": "https://github.com/microsoft/DirectX-Headers.git",
-            "Tag": "v1.618.2"
+            "Tag": "v1.619.0"
         },
         {
             "Name": "D3D12MemoryAllocator",
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
-            "Tag": "v3.0.1"
+            "Tag": "v3.1.0"
         },
         {
             "Name": "imgui",

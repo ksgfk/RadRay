@@ -142,7 +142,7 @@ VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::Vertex)) {
         access |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     }
-    if (v.HasFlag(BufferState::Uniform)) {
+    if (v.HasFlag(BufferState::CBuffer)) {
         access |= VK_ACCESS_UNIFORM_READ_BIT;
     }
     if (v.HasFlag(BufferState::ShaderRead)) {
@@ -186,7 +186,7 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept {
     if (v.HasFlag(BufferState::Index) || v.HasFlag(BufferState::Vertex)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
     }
-    if (v.HasFlag(BufferState::Uniform) || v.HasFlag(BufferState::ShaderRead) || v.HasFlag(BufferState::UnorderedAccess)) {
+    if (v.HasFlag(BufferState::CBuffer) || v.HasFlag(BufferState::ShaderRead) || v.HasFlag(BufferState::UnorderedAccess)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;

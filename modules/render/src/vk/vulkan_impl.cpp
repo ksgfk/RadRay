@@ -60,7 +60,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
 
 static VkDescriptorType BufferViewUsageToDescriptorType(BufferViewUsage usage) noexcept {
     switch (usage) {
-        case BufferViewUsage::Uniform: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case BufferViewUsage::CBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         case BufferViewUsage::ReadOnlyStorage: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         case BufferViewUsage::ReadWriteStorage: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         case BufferViewUsage::TexelReadOnly: return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
@@ -493,7 +493,7 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
     if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
         return nullptr;
     }
-    if (desc.Usage == BufferViewUsage::Uniform) {
+    if (desc.Usage == BufferViewUsage::CBuffer) {
         const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
         if (desc.Range.Offset % align != 0) {
             RADRAY_ERR_LOG("uniform buffer view offset must align to CBuffer alignment");

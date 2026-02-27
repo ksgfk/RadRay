@@ -301,8 +301,8 @@ enum class BufferState : uint32_t {
     CopyDestination = CopySource << 1,
     Vertex = CopyDestination << 1,
     Index = Vertex << 1,
-    Uniform = Index << 1,
-    ShaderRead = Uniform << 1,
+    CBuffer = Index << 1,
+    ShaderRead = CBuffer << 1,
     UnorderedAccess = ShaderRead << 1,
     Indirect = UnorderedAccess << 1,
     HostRead = Indirect << 1,
@@ -328,7 +328,7 @@ enum class TextureState : uint32_t {
 };
 
 enum class BufferViewUsage : uint32_t {
-    Uniform,
+    CBuffer,
     ReadOnlyStorage,
     ReadWriteStorage,
     TexelReadOnly,

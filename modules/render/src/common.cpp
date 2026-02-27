@@ -437,7 +437,7 @@ bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const Buffer
     };
 
     switch (desc.Usage) {
-        case BufferViewUsage::Uniform:
+        case BufferViewUsage::CBuffer:
             if (!require(BufferUse::CBuffer)) {
                 return false;
             }
@@ -848,7 +848,7 @@ std::string_view format_as(BufferState v) noexcept {
         case BufferState::CopyDestination: return "CopyDestination";
         case BufferState::Vertex: return "Vertex";
         case BufferState::Index: return "Index";
-        case BufferState::Uniform: return "Uniform";
+        case BufferState::CBuffer: return "CBuffer";
         case BufferState::ShaderRead: return "ShaderRead";
         case BufferState::UnorderedAccess: return "UnorderedAccess";
         case BufferState::Indirect: return "Indirect";
@@ -893,7 +893,7 @@ std::string_view format_as(TextureViewUsage v) noexcept {
 
 std::string_view format_as(BufferViewUsage v) noexcept {
     switch (v) {
-        case BufferViewUsage::Uniform: return "Uniform";
+        case BufferViewUsage::CBuffer: return "CBuffer";
         case BufferViewUsage::ReadOnlyStorage: return "ReadOnlyStorage";
         case BufferViewUsage::ReadWriteStorage: return "ReadWriteStorage";
         case BufferViewUsage::TexelReadOnly: return "TexelReadOnly";
