@@ -784,7 +784,6 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
         case TextureFormat::RGBA32_SINT: return DXGI_FORMAT_R32G32B32A32_SINT;
         case TextureFormat::RGBA32_UINT: return DXGI_FORMAT_R32G32B32A32_UINT;
         case TextureFormat::RGBA32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case TextureFormat::S8: return DXGI_FORMAT_R8_UINT;
         case TextureFormat::D16_UNORM: return DXGI_FORMAT_D16_UNORM;
         case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -972,6 +971,7 @@ std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
     if (v == ColorWrite::Green) return D3D12_COLOR_WRITE_ENABLE_GREEN;
     if (v == ColorWrite::Blue) return D3D12_COLOR_WRITE_ENABLE_BLUE;
     if (v == ColorWrite::Alpha) return D3D12_COLOR_WRITE_ENABLE_ALPHA;
+    if (v == ColorWrite::Color) return static_cast<D3D12_COLOR_WRITE_ENABLE>(D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE);
     if (v == ColorWrite::All) return D3D12_COLOR_WRITE_ENABLE_ALL;
     return std::nullopt;
 }

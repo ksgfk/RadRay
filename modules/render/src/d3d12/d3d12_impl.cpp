@@ -951,6 +951,9 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
     TextureDescriptor desc = desc_;
+    if (!ValidateTextureDescriptor(desc)) {
+        return nullptr;
+    }
     D3D12_RESOURCE_DESC resDesc = MapTextureDesc(desc);
     D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
     // D3D12_CLEAR_VALUE clear{};
@@ -1063,7 +1066,14 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 srvDesc.TextureCubeArray.MostDetailedMip = desc.Range.BaseMipLevel;
                 srvDesc.TextureCubeArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 srvDesc.TextureCubeArray.First2DArrayFace = desc.Range.BaseArrayLayer;
-                srvDesc.TextureCubeArray.NumCubes = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                {
+                    const uint32_t layers = desc.Range.ArrayLayerCount == SubresourceRange::All ? tex->_desc.DepthOrArraySize - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount;
+                    if ((layers % 6) != 0) {
+                        RADRAY_ERR_LOG("cube array texture view layer count must be a multiple of 6");
+                        return nullptr;
+                    }
+                    srvDesc.TextureCubeArray.NumCubes = layers / 6;
+                }
                 break;
             default:
                 RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
@@ -1111,6 +1121,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 rtvDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
                 rtvDesc.Texture3D.FirstWSlice = desc.Range.BaseArrayLayer;
                 rtvDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                break;
             default:
                 RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
                 return nullptr;
@@ -1129,6 +1140,14 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = MapType(desc.Format);
+        dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+        const bool readOnlyDepth = desc.Usage == TextureViewUsage::DepthRead;
+        if (readOnlyDepth) {
+            dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_DEPTH);
+            if (IsStencilFormatDXGI(dsvDesc.Format)) {
+                dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_STENCIL);
+            }
+        }
         switch (desc.Dim) {
             case TextureDimension::Dim1D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
@@ -1281,7 +1300,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
                     rp,
                     rootDesc.Slot,
-                    0,
+                    rootDesc.Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
                     MapShaderStages(rootDesc.Stages));
                 break;
@@ -1291,7 +1310,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 CD3DX12_ROOT_PARAMETER1::InitAsUnorderedAccessView(
                     rp,
                     rootDesc.Slot,
-                    0,
+                    rootDesc.Space,
                     D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
                     MapShaderStages(rootDesc.Stages));
                 break;
@@ -1321,6 +1340,10 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
     vector<uint8_t> isBindlessSet{};
     unordered_map<uint32_t, size_t> setIndexToTableIndex{};
+    unordered_set<uint32_t> setsWithStaticSamplers{};
+    for (const auto& ss : desc.StaticSamplers) {
+        setsWithStaticSamplers.insert(ss.SetIndex);
+    }
     uint32_t maxSetIndex = 0;
     for (const auto& set : desc.DescriptorSets) {
         maxSetIndex = std::max(maxSetIndex, set.SetIndex);
@@ -1333,6 +1356,7 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         }
         // Check if this set has bindless descriptors
         bool isBindless = false;
+        bool hasRegularElements = false;
         // Collect ranges for this set
         vector<D3D12_DESCRIPTOR_RANGE1> setRanges{};
         ShaderStages setStages = ShaderStage::UNKNOWN;
@@ -1341,6 +1365,8 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             bool bindless = e.BindlessCapacity.has_value();
             if (bindless) {
                 isBindless = true;
+            } else {
+                hasRegularElements = true;
             }
             D3D12_DESCRIPTOR_RANGE1 range{};
             UINT numDesc = bindless ? UINT_MAX : e.Count;
@@ -1372,6 +1398,14 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
             }
             setRanges.push_back(range);
             setStages |= e.Stages;
+        }
+        bool hasStaticSamplers = setsWithStaticSamplers.find(setIdx) != setsWithStaticSamplers.end();
+        if (isBindless && (hasRegularElements || hasStaticSamplers)) {
+            RADRAY_ERR_LOG(
+                "Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
+                "Bindless arrays must be in their own descriptor set.",
+                setIdx);
+            return nullptr;
         }
         if (setRanges.empty()) {
             continue;
@@ -1482,6 +1516,12 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (desc.Primitive.StripIndexFormat.has_value() &&
+        desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
+        desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
+        RADRAY_ERR_LOG("StripIndexFormat is only valid for LineStrip or TriangleStrip topology");
+        return nullptr;
+    }
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
     vector<uint64_t> arrayStrides(desc.VertexLayouts.size(), 0);
@@ -2666,6 +2706,10 @@ void CmdRenderPassD3D12::BindVertexBuffer(std::span<const VertexBufferView> vbv)
 }
 
 void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
+    if (ibv.Stride != 2 && ibv.Stride != 4) {
+        RADRAY_ERR_LOG("d3d12 index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
+        return;
+    }
     auto buf = CastD3D12Object(ibv.Target);
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = buf->_gpuAddr + ibv.Offset;

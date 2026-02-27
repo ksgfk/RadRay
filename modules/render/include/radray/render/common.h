@@ -76,7 +76,6 @@ enum class TextureFormat {
     RGBA32_UINT,
     RGBA32_FLOAT,
 
-    S8,
     D16_UNORM,
     D32_FLOAT,
     D24_UNORM_S8_UINT,
@@ -1154,8 +1153,6 @@ public:
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<AccelerationStructureView>> CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept = 0;
-
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
@@ -1165,6 +1162,8 @@ public:
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<AccelerationStructureView>> CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept = 0;
 
@@ -1496,6 +1495,7 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+bool ValidateTextureDescriptor(const TextureDescriptor& desc) noexcept;
 bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept;
 bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept;
 bool ValidateAccelerationStructureViewDescriptor(const AccelerationStructureViewDescriptor& desc) noexcept;

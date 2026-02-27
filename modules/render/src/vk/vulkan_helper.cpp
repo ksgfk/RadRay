@@ -366,7 +366,6 @@ VkFormat MapType(TextureFormat v) noexcept {
         case TextureFormat::RGBA32_SINT: return VK_FORMAT_R32G32B32A32_SINT;
         case TextureFormat::RGBA32_UINT: return VK_FORMAT_R32G32B32A32_UINT;
         case TextureFormat::RGBA32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
-        case TextureFormat::S8: return VK_FORMAT_S8_UINT;
         case TextureFormat::D16_UNORM: return VK_FORMAT_D16_UNORM;
         case TextureFormat::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;

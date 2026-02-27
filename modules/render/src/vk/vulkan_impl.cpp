@@ -514,6 +514,9 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
+    if (!ValidateTextureDescriptor(desc)) {
+        return nullptr;
+    }
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -608,12 +611,18 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         VK_COMPONENT_SWIZZLE_G,
         VK_COMPONENT_SWIZZLE_B,
         VK_COMPONENT_SWIZZLE_A};
+    uint32_t baseArrayLayer = desc.Range.BaseArrayLayer;
+    uint32_t layerCount = desc.Range.ArrayLayerCount == SubresourceRange::All ? VK_REMAINING_ARRAY_LAYERS : desc.Range.ArrayLayerCount;
+    if (desc.Dim == TextureDimension::Dim3D) {
+        baseArrayLayer = 0;
+        layerCount = 1;
+    }
     createInfo.subresourceRange = {
         ImageFormatToAspectFlags(createInfo.format),
         desc.Range.BaseMipLevel,
         desc.Range.MipLevelCount == SubresourceRange::All ? VK_REMAINING_MIP_LEVELS : desc.Range.MipLevelCount,
-        desc.Range.BaseArrayLayer,
-        desc.Range.ArrayLayerCount == SubresourceRange::All ? VK_REMAINING_ARRAY_LAYERS : desc.Range.ArrayLayerCount};
+        baseArrayLayer,
+        layerCount};
     VkImageView imageView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
         vr != VK_SUCCESS) {
@@ -806,7 +815,18 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (desc.Primitive.StripIndexFormat.has_value() &&
+        desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
+        desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
+        RADRAY_ERR_LOG("StripIndexFormat is only valid for LineStrip or TriangleStrip topology");
+        return nullptr;
+    }
+    if (desc.Primitive.Poly == PolygonMode::Point && !_feature.fillModeNonSolid) {
+        RADRAY_ERR_LOG("vk point polygon mode requires fillModeNonSolid feature");
+        return nullptr;
+    }
     vector<VkPipelineShaderStageCreateInfo> shaderStages;
+    vector<string> entryPointsOwned;
     {
         struct ShaderWithStage {
             std::optional<ShaderEntry> shader;
@@ -820,17 +840,23 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
             if (i.shader.has_value()) cnt++;
         }
         shaderStages.reserve(cnt);
+        entryPointsOwned.reserve(cnt);
         for (const auto& i : ss) {
             if (!i.shader.has_value()) continue;
             const auto& src = i.shader.value();
+            if (src.EntryPoint.empty()) {
+                RADRAY_ERR_LOG("vk graphics shader entry point is empty");
+                return nullptr;
+            }
             auto shaderVulkan = CastVkObject(src.Target);
+            entryPointsOwned.emplace_back(src.EntryPoint);
             auto& stage = shaderStages.emplace_back();
             stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             stage.pNext = nullptr;
             stage.flags = 0;
             stage.stage = i.stage;
             stage.module = shaderVulkan->_shaderModule;
-            stage.pName = src.EntryPoint.data();
+            stage.pName = entryPointsOwned.back().c_str();
             stage.pSpecializationInfo = nullptr;
         }
     }
@@ -3139,6 +3165,10 @@ void SimulateCommandEncoderVulkan::BindVertexBuffer(std::span<const VertexBuffer
 void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept {
     auto buffer = CastVkObject(ibv.Target);
     auto indexType = MapIndexType(ibv.Stride);
+    if (indexType == VK_INDEX_TYPE_MAX_ENUM) {
+        RADRAY_ERR_LOG("vk index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
+        return;
+    }
     _device->_ftb.vkCmdBindIndexBuffer(_cmdBuffer->_cmdBuffer, buffer->_buffer, ibv.Offset, indexType);
 }
 
@@ -4415,6 +4445,7 @@ void GraphicsPipelineVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;
     }
+    _renderPass.reset();
 }
 
 ComputePipelineVulkan::ComputePipelineVulkan(

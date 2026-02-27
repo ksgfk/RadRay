@@ -247,7 +247,6 @@ MTLPixelFormat MapPixelFormat(TextureFormat v) noexcept {
         case TextureFormat::RGBA32_SINT: return MTLPixelFormatRGBA32Sint;
         case TextureFormat::RGBA32_UINT: return MTLPixelFormatRGBA32Uint;
         case TextureFormat::RGBA32_FLOAT: return MTLPixelFormatRGBA32Float;
-        case TextureFormat::S8: return MTLPixelFormatStencil8;
         case TextureFormat::D16_UNORM: return MTLPixelFormatDepth16Unorm;
         case TextureFormat::D32_FLOAT: return MTLPixelFormatDepth32Float;
 #if defined(RADRAY_PLATFORM_MACOS)

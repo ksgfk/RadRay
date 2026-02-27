@@ -237,7 +237,7 @@ private:
                 img.Height,
                 1,
                 1,
-                0,
+                1,
                 render::TextureFormat::RGBA8_UNORM,
                 render::MemoryType::Device,
                 render::TextureUse::Resource | render::TextureUse::CopyDestination,

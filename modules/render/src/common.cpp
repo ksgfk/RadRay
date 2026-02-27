@@ -85,7 +85,6 @@ void DestroyVulkanInstance(unique_ptr<InstanceVulkan> instance) noexcept {
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept {
     switch (format) {
-        case TextureFormat::S8:
         case TextureFormat::D16_UNORM:
         case TextureFormat::D32_FLOAT:
         case TextureFormat::D24_UNORM_S8_UINT:
@@ -183,8 +182,7 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
         case TextureFormat::R8_SINT:
         case TextureFormat::R8_UINT:
         case TextureFormat::R8_SNORM:
-        case TextureFormat::R8_UNORM:
-        case TextureFormat::S8: return 1;
+        case TextureFormat::R8_UNORM: return 1;
         case TextureFormat::R16_SINT:
         case TextureFormat::R16_UINT:
         case TextureFormat::R16_SNORM:
@@ -232,14 +230,106 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
     Unreachable();
 }
 
+bool ValidateTextureDescriptor(const TextureDescriptor& desc) noexcept {
+    if (desc.Dim == TextureDimension::UNKNOWN) {
+        RADRAY_ERR_LOG("TextureDescriptor.Dim cannot be UNKNOWN");
+        return false;
+    }
+    if (desc.Format == TextureFormat::UNKNOWN) {
+        RADRAY_ERR_LOG("TextureDescriptor.Format cannot be UNKNOWN");
+        return false;
+    }
+    if (desc.Width == 0 || desc.Height == 0) {
+        RADRAY_ERR_LOG("TextureDescriptor.Width/Height must be greater than 0");
+        return false;
+    }
+    if (desc.DepthOrArraySize == 0) {
+        RADRAY_ERR_LOG("TextureDescriptor.DepthOrArraySize must be greater than 0");
+        return false;
+    }
+    if (desc.MipLevels == 0) {
+        RADRAY_ERR_LOG("TextureDescriptor.MipLevels must be greater than 0");
+        return false;
+    }
+    if (desc.SampleCount == 0) {
+        RADRAY_ERR_LOG("TextureDescriptor.SampleCount must be greater than 0");
+        return false;
+    }
+    if (desc.Usage == TextureUse::UNKNOWN) {
+        RADRAY_ERR_LOG("TextureDescriptor.Usage cannot be UNKNOWN");
+        return false;
+    }
+
+    switch (desc.Dim) {
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim2D:
+            if (desc.DepthOrArraySize != 1) {
+                RADRAY_ERR_LOG("TextureDescriptor.DepthOrArraySize must be 1 for non-array 1D/2D textures");
+                return false;
+            }
+            break;
+        case TextureDimension::Dim1DArray:
+        case TextureDimension::Dim2DArray:
+        case TextureDimension::Dim3D:
+            break;
+        case TextureDimension::Cube:
+            if (desc.DepthOrArraySize != 6) {
+                RADRAY_ERR_LOG("TextureDescriptor.DepthOrArraySize must be 6 for cube texture");
+                return false;
+            }
+            break;
+        case TextureDimension::CubeArray:
+            if (desc.DepthOrArraySize < 6 || (desc.DepthOrArraySize % 6) != 0) {
+                RADRAY_ERR_LOG("TextureDescriptor.DepthOrArraySize for cube array must be a multiple of 6");
+                return false;
+            }
+            break;
+        case TextureDimension::UNKNOWN:
+            Unreachable();
+    }
+
+    if (desc.SampleCount > 1) {
+        if (desc.Dim != TextureDimension::Dim2D && desc.Dim != TextureDimension::Dim2DArray) {
+            RADRAY_ERR_LOG("MSAA textures only support 2D or 2DArray dimensions");
+            return false;
+        }
+        if (desc.MipLevels != 1) {
+            RADRAY_ERR_LOG("MSAA textures must have exactly one mip level");
+            return false;
+        }
+    }
+
+    const bool isDepth = IsDepthStencilFormat(desc.Format);
+    const bool usesDepth = desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite);
+    if (isDepth) {
+        if (!usesDepth) {
+            RADRAY_ERR_LOG("depth/stencil texture must include depth/stencil usage");
+            return false;
+        }
+        if (desc.Usage.HasFlag(TextureUse::RenderTarget) || desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+            RADRAY_ERR_LOG("depth/stencil texture cannot use render target or unordered access usage");
+            return false;
+        }
+    } else if (usesDepth) {
+        RADRAY_ERR_LOG("non-depth texture cannot use depth/stencil usage");
+        return false;
+    }
+
+    return true;
+}
+
 bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept {
     if (desc.Target == nullptr) {
         RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
         return false;
     }
 
-    if (desc.Usage == TextureViewUsage::UNKNOWN) {
-        RADRAY_ERR_LOG("TextureViewDescriptor.Usage cannot be UNKNOWN");
+    if (desc.Usage != TextureViewUsage::Resource &&
+        desc.Usage != TextureViewUsage::RenderTarget &&
+        desc.Usage != TextureViewUsage::DepthRead &&
+        desc.Usage != TextureViewUsage::DepthWrite &&
+        desc.Usage != TextureViewUsage::UnorderedAccess) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Usage must be a single usage value");
         return false;
     }
 
@@ -274,14 +364,51 @@ bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const Text
         return false;
     }
 
+    if (desc.Range.BaseMipLevel >= targetDesc.MipLevels) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Range base mip level is out of bounds");
+        return false;
+    }
     if (desc.Range.MipLevelCount != SubresourceRange::All && (desc.Range.BaseMipLevel + desc.Range.MipLevelCount > targetDesc.MipLevels)) {
         RADRAY_ERR_LOG("TextureViewDescriptor.Range mip range is out of bounds");
         return false;
     }
-    if (desc.Range.ArrayLayerCount != SubresourceRange::All &&
-        (desc.Range.BaseArrayLayer + desc.Range.ArrayLayerCount > targetDesc.DepthOrArraySize)) {
-        RADRAY_ERR_LOG("TextureViewDescriptor.Range array range is out of bounds");
+    if (desc.Dim != TextureDimension::Dim3D && desc.Range.BaseArrayLayer >= targetDesc.DepthOrArraySize) {
+        RADRAY_ERR_LOG("TextureViewDescriptor.Range base array layer is out of bounds");
         return false;
+    }
+    if (desc.Dim == TextureDimension::Dim3D) {
+        if (desc.Range.BaseArrayLayer != 0) {
+            RADRAY_ERR_LOG("3D texture view BaseArrayLayer must be 0");
+            return false;
+        }
+        if (desc.Range.ArrayLayerCount != SubresourceRange::All && desc.Range.ArrayLayerCount != 1) {
+            RADRAY_ERR_LOG("3D texture view ArrayLayerCount must be 1");
+            return false;
+        }
+    } else if (desc.Dim == TextureDimension::Cube) {
+        if ((desc.Range.BaseArrayLayer % 6) != 0) {
+            RADRAY_ERR_LOG("cube texture view BaseArrayLayer must align to 6");
+            return false;
+        }
+        if (desc.Range.ArrayLayerCount != SubresourceRange::All && desc.Range.ArrayLayerCount != 6) {
+            RADRAY_ERR_LOG("cube texture view ArrayLayerCount must be 6");
+            return false;
+        }
+    } else if (desc.Dim == TextureDimension::CubeArray) {
+        if ((desc.Range.BaseArrayLayer % 6) != 0) {
+            RADRAY_ERR_LOG("cube array texture view BaseArrayLayer must align to 6");
+            return false;
+        }
+        if (desc.Range.ArrayLayerCount != SubresourceRange::All && (desc.Range.ArrayLayerCount % 6) != 0) {
+            RADRAY_ERR_LOG("cube array texture view ArrayLayerCount must be a multiple of 6");
+            return false;
+        }
+    } else {
+        if (desc.Range.ArrayLayerCount != SubresourceRange::All &&
+            (desc.Range.BaseArrayLayer + desc.Range.ArrayLayerCount > targetDesc.DepthOrArraySize)) {
+            RADRAY_ERR_LOG("TextureViewDescriptor.Range array range is out of bounds");
+            return false;
+        }
     }
 
     return true;
@@ -624,7 +751,6 @@ std::string_view format_as(TextureFormat v) noexcept {
         case TextureFormat::RGBA32_SINT: return "RGBA32_SINT";
         case TextureFormat::RGBA32_UINT: return "RGBA32_UINT";
         case TextureFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
-        case TextureFormat::S8: return "S8";
         case TextureFormat::D16_UNORM: return "D16_UNORM";
         case TextureFormat::D32_FLOAT: return "D32_FLOAT";
         case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";

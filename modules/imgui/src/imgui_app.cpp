@@ -189,7 +189,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex, ImDrawData* drawData) {
                         static_cast<uint32_t>(tex->Height),
                         1,
                         1,
-                        0,
+                        1,
                         render::TextureFormat::RGBA8_UNORM,
                         render::MemoryType::Device,
                         render::TextureUse::Resource | render::TextureUse::CopyDestination,
