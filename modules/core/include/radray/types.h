@@ -69,6 +69,9 @@ using list = std::list<T, allocator<T>>;
 template <class T>
 using forward_list = std::forward_list<T, allocator<T>>;
 
+template <class T, class Container = std::vector<T, allocator<T>>, class Compare = std::less<typename Container::value_type>>
+using priority_queue = std::priority_queue<T, Container, Compare>;
+
 using std::unique_ptr;
 using std::shared_ptr;
 using std::weak_ptr;

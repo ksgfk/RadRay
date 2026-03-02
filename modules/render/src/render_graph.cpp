@@ -1,653 +1,1746 @@
 #include <radray/render/render_graph.h>
 
 #include <algorithm>
-#include <cassert>
-#include <cstring>
-#include <memory>
+#include <iterator>
+
+#include <fmt/format.h>
 
 #include <radray/logger.h>
 
-namespace radray::render::rg {
+namespace radray::render {
 
-// ============================================================
-// Internal resource type tag
-// ============================================================
+namespace {
 
-enum class RGResourceType : uint8_t {
-    Texture,
-    Buffer
-};
+constexpr bool RGIsTextureResourceType(RGResourceType type) noexcept {
+    return type == RGResourceType::Texture;
+}
 
-// ============================================================
-// Per-resource usage record within a pass
-// ============================================================
+constexpr bool RGIsBufferResourceType(RGResourceType type) noexcept {
+    return type == RGResourceType::Buffer || type == RGResourceType::IndirectArgs;
+}
 
-struct RGPassResourceUsage {
-    uint32_t ResourceIndex;
-    RGResourceType ResType;
-    RGAccessFlags Access;
-    RGResourceUsage Usage;
-};
+const RGTextureDescriptor* RGGetTextureDescriptor(const VirtualResource& resource) noexcept {
+    return std::get_if<RGTextureDescriptor>(&resource.Descriptor);
+}
 
-// ============================================================
-// Color/DepthStencil attachment declaration (from PassBuilder)
-// ============================================================
-
-struct RGColorAttachmentDecl {
-    uint32_t Slot;
-    uint32_t TextureResourceIndex;
-    LoadAction Load;
-    StoreAction Store;
-    ColorClearValue ClearValue;
-};
-
-struct RGDepthStencilAttachmentDecl {
-    uint32_t TextureResourceIndex;
-    LoadAction DepthLoad;
-    StoreAction DepthStore;
-    LoadAction StencilLoad;
-    StoreAction StencilStore;
-    DepthStencilClearValue ClearValue;
-};
-
-// ============================================================
-// RGPassData — full data for a single pass
-// ============================================================
-
-struct RGPassData {
-    std::string_view Name;
-    RGPassType Type;
-    RGPassFlags Flags{RGPassFlags::None};
-
-    // Resources used by this pass
-    radray::vector<RGPassResourceUsage> ResourceUsages;
-
-    // Raster pass attachment declarations
-    radray::vector<RGColorAttachmentDecl> ColorAttachments;
-    std::optional<RGDepthStencilAttachmentDecl> DepthStencilAttachment;
-
-    // User data + callbacks
-    radray::vector<std::byte> PassDataStorage;  // aligned storage for PassData
-    size_t PassDataOffset{0};                   // offset to aligned data within storage
-    std::function<void(RGPassBuilder&, void*)> SetupFn;
-    std::function<void(const void*, RGPassContext&)> ExecFn;
-};
-
-// ============================================================
-// RGResourceEntry — per-resource metadata
-// ============================================================
-
-struct RGResourceEntry {
-    RGResourceType Type;
-    bool IsImported{false};
-    uint32_t CurrentVersion{0};
-
-    // For transient texture
-    std::optional<RGTextureDescriptor> TexDesc;
-    // For transient buffer
-    std::optional<RGBufferDescriptor> BufDesc;
-
-    // For imported resources
-    Texture* ImportedTexture{nullptr};
-    Buffer* ImportedBuffer{nullptr};
-    SwapChain* ImportedSwapChain{nullptr};
-
-    // Initial state (imported resources)
-    TextureStates InitialTextureState{TextureState::UNKNOWN};
-    BufferStates InitialBufferState{BufferState::UNKNOWN};
-
-    // Accumulated usage flags (for transient resources)
-    TextureUses AccumulatedTexUsage{TextureUse::UNKNOWN};
-    BufferUses AccumulatedBufUsage{BufferUse::UNKNOWN};
-};
-
-// ============================================================
-// RenderGraph::Impl
-// ============================================================
-
-struct RenderGraph::Impl {
-    Device* Dev{nullptr};
-    radray::vector<RGResourceEntry> Resources;
-    radray::vector<RGPassData> Passes;
-};
-
-// ============================================================
-// State mapping helpers
-// ============================================================
-
-static TextureStates MapUsageToTextureState(RGResourceUsage usage, [[maybe_unused]] RGAccessFlags access) {
-    switch (usage) {
-        case RGResourceUsage::ShaderResource:
-            return TextureState::ShaderRead;
-        case RGResourceUsage::UnorderedAccess:
-            return TextureState::UnorderedAccess;
-        case RGResourceUsage::CopySource:
-            return TextureState::CopySource;
-        case RGResourceUsage::CopyDestination:
-            return TextureState::CopyDestination;
-        case RGResourceUsage::ColorAttachment:
-            return TextureState::RenderTarget;
-        case RGResourceUsage::DepthStencilRead:
-            return TextureState::DepthRead;
-        case RGResourceUsage::DepthStencilWrite:
-            return TextureState::DepthWrite;
-        default:
-            return TextureState::UNKNOWN;
+const RGBufferDescriptor* RGGetBufferDescriptor(const VirtualResource& resource) noexcept {
+    if (const auto* buffer = std::get_if<RGBufferDescriptor>(&resource.Descriptor)) {
+        return buffer;
     }
-}
-
-static BufferStates MapUsageToBufferState(RGResourceUsage usage, [[maybe_unused]] RGAccessFlags access) {
-    switch (usage) {
-        case RGResourceUsage::ShaderResource:
-            return BufferState::ShaderRead;
-        case RGResourceUsage::UnorderedAccess:
-            return BufferState::UnorderedAccess;
-        case RGResourceUsage::CopySource:
-            return BufferState::CopySource;
-        case RGResourceUsage::CopyDestination:
-            return BufferState::CopyDestination;
-        case RGResourceUsage::Vertex:
-            return BufferState::Vertex;
-        case RGResourceUsage::Index:
-            return BufferState::Index;
-        case RGResourceUsage::Indirect:
-            return BufferState::Indirect;
-        case RGResourceUsage::AccelerationStructureInput:
-            return BufferState::AccelerationStructureBuildInput;
-        case RGResourceUsage::AccelerationStructureRead:
-            return BufferState::AccelerationStructureRead;
-        default:
-            return BufferState::UNKNOWN;
+    if (const auto* indirect = std::get_if<RGIndirectArgsDescriptor>(&resource.Descriptor)) {
+        return &indirect->Buffer;
     }
+    return nullptr;
 }
 
-static TextureUses MapUsageToTextureUse(RGResourceUsage usage) {
-    switch (usage) {
-        case RGResourceUsage::ShaderResource:
-            return TextureUse::Resource;
-        case RGResourceUsage::UnorderedAccess:
-            return TextureUse::UnorderedAccess;
-        case RGResourceUsage::CopySource:
-            return TextureUse::CopySource;
-        case RGResourceUsage::CopyDestination:
-            return TextureUse::CopyDestination;
-        case RGResourceUsage::ColorAttachment:
-            return TextureUse::RenderTarget;
-        case RGResourceUsage::DepthStencilRead:
-            return TextureUse::DepthStencilRead;
-        case RGResourceUsage::DepthStencilWrite:
-            return TextureUse::DepthStencilWrite;
-        default:
-            return TextureUse::UNKNOWN;
+uint64_t RGIntervalEnd(uint64_t begin, uint64_t count, uint64_t allValue) noexcept {
+    if (count == allValue) {
+        return std::numeric_limits<uint64_t>::max();
     }
-}
-
-static BufferUses MapUsageToBufferUse(RGResourceUsage usage) {
-    switch (usage) {
-        case RGResourceUsage::ShaderResource:
-            return BufferUse::Resource;
-        case RGResourceUsage::UnorderedAccess:
-            return BufferUse::UnorderedAccess;
-        case RGResourceUsage::CopySource:
-            return BufferUse::CopySource;
-        case RGResourceUsage::CopyDestination:
-            return BufferUse::CopyDestination;
-        case RGResourceUsage::Vertex:
-            return BufferUse::Vertex;
-        case RGResourceUsage::Index:
-            return BufferUse::Index;
-        case RGResourceUsage::Indirect:
-            return BufferUse::Indirect;
-        case RGResourceUsage::AccelerationStructureInput:
-            return BufferUse::AccelerationStructure;
-        case RGResourceUsage::AccelerationStructureRead:
-            return BufferUse::AccelerationStructure;
-        default:
-            return BufferUse::UNKNOWN;
+    if (begin > std::numeric_limits<uint64_t>::max() - count) {
+        return std::numeric_limits<uint64_t>::max();
     }
+    return begin + count;
 }
 
-// ============================================================
-// RenderGraph
-// ============================================================
-
-RenderGraph::RenderGraph(Device* device) : _impl(make_unique<Impl>()) {
-    _impl->Dev = device;
+bool RGIntervalsOverlap(
+    uint64_t beginA,
+    uint64_t countA,
+    uint64_t beginB,
+    uint64_t countB,
+    uint64_t allValue) noexcept {
+    const uint64_t endA = RGIntervalEnd(beginA, countA, allValue);
+    const uint64_t endB = RGIntervalEnd(beginB, countB, allValue);
+    return beginA < endB && beginB < endA;
 }
 
-RenderGraph::~RenderGraph() = default;
-
-RGTextureHandle RenderGraph::CreateTexture(const RGTextureDescriptor& desc) {
-    uint32_t index = static_cast<uint32_t>(_impl->Resources.size());
-    auto& entry = _impl->Resources.emplace_back();
-    entry.Type = RGResourceType::Texture;
-    entry.IsImported = false;
-    entry.CurrentVersion = 0;
-    entry.TexDesc = desc;
-    entry.AccumulatedTexUsage = desc.Usage;
-    return RGTextureHandle{index, 0};
+bool RGTextureRangesOverlap(const RGTextureRange& lhs, const RGTextureRange& rhs) noexcept {
+    return RGIntervalsOverlap(
+               lhs.BaseMipLevel,
+               lhs.MipLevelCount,
+               rhs.BaseMipLevel,
+               rhs.MipLevelCount,
+               RGTextureRange::All) &&
+           RGIntervalsOverlap(
+               lhs.BaseArrayLayer,
+               lhs.ArrayLayerCount,
+               rhs.BaseArrayLayer,
+               rhs.ArrayLayerCount,
+               RGTextureRange::All);
 }
 
-RGBufferHandle RenderGraph::CreateBuffer(const RGBufferDescriptor& desc) {
-    uint32_t index = static_cast<uint32_t>(_impl->Resources.size());
-    auto& entry = _impl->Resources.emplace_back();
-    entry.Type = RGResourceType::Buffer;
-    entry.IsImported = false;
-    entry.CurrentVersion = 0;
-    entry.BufDesc = desc;
-    entry.AccumulatedBufUsage = desc.Usage;
-    return RGBufferHandle{index, 0};
+bool RGBufferRangesOverlap(const RGBufferRange& lhs, const RGBufferRange& rhs) noexcept {
+    return RGIntervalsOverlap(lhs.Offset, lhs.Size, rhs.Offset, rhs.Size, RGBufferRange::All);
 }
 
-RGTextureHandle RenderGraph::ImportTexture(Texture* texture, TextureStates currentState) {
-    uint32_t index = static_cast<uint32_t>(_impl->Resources.size());
-    auto& entry = _impl->Resources.emplace_back();
-    entry.Type = RGResourceType::Texture;
-    entry.IsImported = true;
-    entry.CurrentVersion = 0;
-    entry.ImportedTexture = texture;
-    entry.InitialTextureState = currentState;
-    return RGTextureHandle{index, 0};
-}
-
-RGBufferHandle RenderGraph::ImportBuffer(Buffer* buffer, BufferStates currentState) {
-    uint32_t index = static_cast<uint32_t>(_impl->Resources.size());
-    auto& entry = _impl->Resources.emplace_back();
-    entry.Type = RGResourceType::Buffer;
-    entry.IsImported = true;
-    entry.CurrentVersion = 0;
-    entry.ImportedBuffer = buffer;
-    entry.InitialBufferState = currentState;
-    return RGBufferHandle{index, 0};
-}
-
-RGTextureHandle RenderGraph::ImportSwapChain(SwapChain* swapChain, TextureStates currentState) {
-    uint32_t index = static_cast<uint32_t>(_impl->Resources.size());
-    auto& entry = _impl->Resources.emplace_back();
-    entry.Type = RGResourceType::Texture;
-    entry.IsImported = true;
-    entry.CurrentVersion = 0;
-    entry.ImportedSwapChain = swapChain;
-    entry.InitialTextureState = currentState;
-    return RGTextureHandle{index, 0};
-}
-
-uint32_t RenderGraph::AddPassInternal(
-    std::string_view name, RGPassType type,
-    size_t passDataSize, size_t passDataAlign,
-    std::function<void(RGPassBuilder&, void*)> setupFn,
-    std::function<void(const void*, RGPassContext&)> execFn) {
-    uint32_t passIndex = static_cast<uint32_t>(_impl->Passes.size());
-    auto& pass = _impl->Passes.emplace_back();
-    pass.Name = name;
-    pass.Type = type;
-    pass.SetupFn = std::move(setupFn);
-    pass.ExecFn = std::move(execFn);
-
-    // Allocate aligned storage for user PassData
-    size_t alignedSize = (passDataSize + passDataAlign - 1) & ~(passDataAlign - 1);
-    pass.PassDataStorage.resize(alignedSize + passDataAlign);
-    // Find aligned pointer within storage
-    void* rawPtr = pass.PassDataStorage.data();
-    size_t space = pass.PassDataStorage.size();
-    std::align(passDataAlign, passDataSize, rawPtr, space);
-    pass.PassDataOffset = static_cast<size_t>(static_cast<std::byte*>(rawPtr) - pass.PassDataStorage.data());
-    // Zero-initialize (default construct via memset)
-    std::memset(rawPtr, 0, passDataSize);
-
-    // Run setup
-    RGPassBuilder builder(pass, *this);
-    pass.SetupFn(builder, rawPtr);
-
-    return passIndex;
-}
-
-void* RenderGraph::GetPassData(uint32_t passIndex) {
-    auto& pass = _impl->Passes[passIndex];
-    return pass.PassDataStorage.data() + pass.PassDataOffset;
-}
-
-const void* RenderGraph::GetPassData(uint32_t passIndex) const {
-    auto& pass = _impl->Passes[passIndex];
-    return pass.PassDataStorage.data() + pass.PassDataOffset;
-}
-
-void RenderGraph::InvokePassExec(uint32_t passIndex, RGPassContext& ctx) const {
-    auto& pass = _impl->Passes[passIndex];
-    pass.ExecFn(pass.PassDataStorage.data() + pass.PassDataOffset, ctx);
-}
-
-// ============================================================
-// RGPassBuilder
-// ============================================================
-
-RGPassBuilder::RGPassBuilder(RGPassData& passData, RenderGraph& graph) noexcept
-    : _passData(passData), _graph(graph) {}
-
-RGTextureHandle RGPassBuilder::UseTexture(RGTextureHandle handle, RGAccessFlags access, RGResourceUsage usage) {
-    assert(handle.IsValid());
-    auto& resources = _graph._impl->Resources;
-    assert(handle.Index < resources.size());
-    auto& entry = resources[handle.Index];
-    assert(entry.Type == RGResourceType::Texture);
-
-    // Record usage
-    _passData.ResourceUsages.push_back({handle.Index, RGResourceType::Texture, access, usage});
-
-    // Accumulate usage flags for transient resources
-    if (!entry.IsImported) {
-        entry.AccumulatedTexUsage = entry.AccumulatedTexUsage | MapUsageToTextureUse(usage);
-    }
-
-    // Write creates a new version (SSA)
-    if ((static_cast<uint8_t>(access) & static_cast<uint8_t>(RGAccessFlags::Write)) != 0) {
-        entry.CurrentVersion++;
-        return RGTextureHandle{handle.Index, entry.CurrentVersion};
-    }
-    return handle;
-}
-
-RGBufferHandle RGPassBuilder::UseBuffer(RGBufferHandle handle, RGAccessFlags access, RGResourceUsage usage) {
-    assert(handle.IsValid());
-    auto& resources = _graph._impl->Resources;
-    assert(handle.Index < resources.size());
-    auto& entry = resources[handle.Index];
-    assert(entry.Type == RGResourceType::Buffer);
-
-    _passData.ResourceUsages.push_back({handle.Index, RGResourceType::Buffer, access, usage});
-
-    if (!entry.IsImported) {
-        entry.AccumulatedBufUsage = entry.AccumulatedBufUsage | MapUsageToBufferUse(usage);
-    }
-
-    if ((static_cast<uint8_t>(access) & static_cast<uint8_t>(RGAccessFlags::Write)) != 0) {
-        entry.CurrentVersion++;
-        return RGBufferHandle{handle.Index, entry.CurrentVersion};
-    }
-    return handle;
-}
-
-void RGPassBuilder::SetColorAttachment(uint32_t index, RGTextureHandle handle,
-                                       LoadAction load, StoreAction store,
-                                       ColorClearValue clearValue) {
-    assert(handle.IsValid());
-    // Ensure the vector is large enough
-    if (index >= _passData.ColorAttachments.size()) {
-        _passData.ColorAttachments.resize(index + 1);
-    }
-    _passData.ColorAttachments[index] = {
-        index,
-        handle.Index,
-        load,
-        store,
-        clearValue};
-}
-
-void RGPassBuilder::SetDepthStencilAttachment(RGTextureHandle handle,
-                                              LoadAction depthLoad, StoreAction depthStore,
-                                              LoadAction stencilLoad, StoreAction stencilStore,
-                                              DepthStencilClearValue clearValue) {
-    assert(handle.IsValid());
-    _passData.DepthStencilAttachment = {
-        handle.Index,
-        depthLoad,
-        depthStore,
-        stencilLoad,
-        stencilStore,
-        clearValue};
-}
-
-void RGPassBuilder::SetFlags(RGPassFlags flags) {
-    _passData.Flags = flags;
-}
-
-// ============================================================
-// RGPassContext
-// ============================================================
-
-Texture* RGPassContext::GetTexture(RGTextureHandle handle) const {
-    assert(handle.IsValid());
-    assert(handle.Index < _textureCount);
-    return _textures[handle.Index];
-}
-
-Buffer* RGPassContext::GetBuffer(RGBufferHandle handle) const {
-    assert(handle.IsValid());
-    assert(handle.Index < _bufferCount);
-    return _buffers[handle.Index];
-}
-
-// ============================================================
-// Compile
-// ============================================================
-
-RGCompiledGraph RenderGraph::Compile() {
-    RGCompiledGraph result;
-    result._graph = this;
-
-    auto& resources = _impl->Resources;
-    auto& passes = _impl->Passes;
-    uint32_t passCount = static_cast<uint32_t>(passes.size());
-
-    if (passCount == 0) {
-        return result;
-    }
-
-    // --------------------------------------------------------
-    // 1. Build dependency graph
-    //    Track which pass last wrote each resource (by index).
-    //    If pass B reads/writes a resource that was last written by pass A,
-    //    then B depends on A.
-    // --------------------------------------------------------
-
-    // lastWriter[resourceIndex] = passIndex that last wrote it, or ~0u if none
-    radray::vector<uint32_t> lastWriter(resources.size(), ~0u);
-    // adjacency: inDegree[pass] and edges
-    radray::vector<uint32_t> inDegree(passCount, 0);
-    radray::vector<radray::vector<uint32_t>> successors(passCount);
-
-    for (uint32_t pi = 0; pi < passCount; ++pi) {
-        auto& pass = passes[pi];
-        for (auto& ru : pass.ResourceUsages) {
-            uint32_t ri = ru.ResourceIndex;
-            uint32_t writer = lastWriter[ri];
-            // If someone wrote this resource before, this pass depends on them
-            if (writer != ~0u && writer != pi) {
-                // Avoid duplicate edges
-                auto& succ = successors[writer];
-                if (std::find(succ.begin(), succ.end(), pi) == succ.end()) {
-                    succ.push_back(pi);
-                    inDegree[pi]++;
-                }
-            }
-            // If this pass writes, update lastWriter
-            if ((static_cast<uint8_t>(ru.Access) & static_cast<uint8_t>(RGAccessFlags::Write)) != 0) {
-                lastWriter[ri] = pi;
-            }
+bool RGSubresourceRangesOverlap(
+    const VirtualResource& resource,
+    const RGSubresourceRange& lhs,
+    const RGSubresourceRange& rhs) {
+    if (RGIsTextureResourceType(resource.GetType())) {
+        if (!std::holds_alternative<RGTextureRange>(lhs) || !std::holds_alternative<RGTextureRange>(rhs)) {
+            return false;
         }
+        return RGTextureRangesOverlap(
+            std::get<RGTextureRange>(lhs),
+            std::get<RGTextureRange>(rhs));
     }
 
-    // --------------------------------------------------------
-    // 2. Topological sort (Kahn's algorithm, stable by declaration order)
-    // --------------------------------------------------------
-
-    radray::vector<uint32_t> sortedPasses;
-    sortedPasses.reserve(passCount);
-
-    // Use a simple queue that processes in index order for stability
-    radray::vector<uint32_t> readyQueue;
-    for (uint32_t i = 0; i < passCount; ++i) {
-        if (inDegree[i] == 0) {
-            readyQueue.push_back(i);
-        }
+    if (!std::holds_alternative<RGBufferRange>(lhs) || !std::holds_alternative<RGBufferRange>(rhs)) {
+        return false;
     }
-    // Sort to ensure stability (process lower indices first)
-    std::sort(readyQueue.begin(), readyQueue.end());
+    return RGBufferRangesOverlap(
+        std::get<RGBufferRange>(lhs),
+        std::get<RGBufferRange>(rhs));
+}
 
-    while (!readyQueue.empty()) {
-        uint32_t current = readyQueue.front();
-        readyQueue.erase(readyQueue.begin());
-        sortedPasses.push_back(current);
+template <typename T>
+void RGSortAndUnique(vector<T>* values) {
+    if (values == nullptr || values->empty()) {
+        return;
+    }
+    std::sort(values->begin(), values->end());
+    values->erase(std::unique(values->begin(), values->end()), values->end());
+}
 
-        radray::vector<uint32_t> newReady;
-        for (uint32_t succ : successors[current]) {
-            inDegree[succ]--;
-            if (inDegree[succ] == 0) {
-                newReady.push_back(succ);
-            }
-        }
-        // Insert newly ready passes in sorted order
-        if (!newReady.empty()) {
-            std::sort(newReady.begin(), newReady.end());
-            // Merge into readyQueue maintaining sorted order
-            radray::vector<uint32_t> merged;
-            merged.reserve(readyQueue.size() + newReady.size());
-            std::merge(readyQueue.begin(), readyQueue.end(),
-                       newReady.begin(), newReady.end(),
-                       std::back_inserter(merged));
-            readyQueue = std::move(merged);
-        }
+uint64_t RGRangeEnd(uint64_t begin, uint64_t count) noexcept {
+    if (count == RGBufferRange::All) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    if (begin > std::numeric_limits<uint64_t>::max() - count) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return begin + count;
+}
+
+vector<RGSubresourceRange> RGBuildAtomicTextureRanges(const vector<RGTextureRange>& usedRanges) {
+    vector<RGSubresourceRange> atomicRanges{};
+    if (usedRanges.empty()) {
+        return atomicRanges;
     }
 
-    if (sortedPasses.size() != passCount) {
-        RADRAY_ERR_LOG("Render graph has cyclic dependencies");
-        return result;
+    vector<uint32_t> mipCuts{};
+    vector<uint32_t> layerCuts{};
+    mipCuts.reserve(usedRanges.size() * 2u);
+    layerCuts.reserve(usedRanges.size() * 2u);
+
+    for (const auto& range : usedRanges) {
+        mipCuts.push_back(range.BaseMipLevel);
+        mipCuts.push_back(range.BaseMipLevel + range.MipLevelCount);
+        layerCuts.push_back(range.BaseArrayLayer);
+        layerCuts.push_back(range.BaseArrayLayer + range.ArrayLayerCount);
     }
 
-    // --------------------------------------------------------
-    // 3. Build transient resource descriptors with accumulated usage
-    // --------------------------------------------------------
+    RGSortAndUnique(&mipCuts);
+    RGSortAndUnique(&layerCuts);
+    if (mipCuts.size() < 2 || layerCuts.size() < 2) {
+        return atomicRanges;
+    }
 
-    for (uint32_t ri = 0; ri < static_cast<uint32_t>(resources.size()); ++ri) {
-        auto& entry = resources[ri];
-        if (entry.IsImported) {
+    for (size_t mipIndex = 0; mipIndex + 1 < mipCuts.size(); ++mipIndex) {
+        const uint32_t mipBegin = mipCuts[mipIndex];
+        const uint32_t mipEnd = mipCuts[mipIndex + 1];
+        if (mipEnd <= mipBegin) {
             continue;
         }
-        if (entry.Type == RGResourceType::Texture && entry.TexDesc.has_value()) {
-            auto& rgDesc = entry.TexDesc.value();
-            TextureDescriptor gpuDesc{};
-            gpuDesc.Dim = rgDesc.Dim;
-            gpuDesc.Width = rgDesc.Width;
-            gpuDesc.Height = rgDesc.Height;
-            gpuDesc.DepthOrArraySize = rgDesc.DepthOrArraySize;
-            gpuDesc.MipLevels = rgDesc.MipLevels;
-            gpuDesc.SampleCount = rgDesc.SampleCount;
-            gpuDesc.Format = rgDesc.Format;
-            gpuDesc.Memory = MemoryType::Device;
-            gpuDesc.Usage = entry.AccumulatedTexUsage;
-            gpuDesc.Hints = ResourceHint::None;
-            gpuDesc.Name = rgDesc.Name;
-            result.TransientTextures.push_back({ri, gpuDesc});
-        } else if (entry.Type == RGResourceType::Buffer && entry.BufDesc.has_value()) {
-            auto& rgDesc = entry.BufDesc.value();
-            BufferDescriptor gpuDesc{};
-            gpuDesc.Size = rgDesc.Size;
-            gpuDesc.Memory = MemoryType::Device;
-            gpuDesc.Usage = entry.AccumulatedBufUsage;
-            gpuDesc.Hints = ResourceHint::None;
-            gpuDesc.Name = rgDesc.Name;
-            result.TransientBuffers.push_back({ri, gpuDesc});
+        for (size_t layerIndex = 0; layerIndex + 1 < layerCuts.size(); ++layerIndex) {
+            const uint32_t layerBegin = layerCuts[layerIndex];
+            const uint32_t layerEnd = layerCuts[layerIndex + 1];
+            if (layerEnd <= layerBegin) {
+                continue;
+            }
+
+            RGTextureRange slice{
+                .BaseMipLevel = mipBegin,
+                .MipLevelCount = mipEnd - mipBegin,
+                .BaseArrayLayer = layerBegin,
+                .ArrayLayerCount = layerEnd - layerBegin};
+
+            const bool used = std::any_of(
+                usedRanges.begin(),
+                usedRanges.end(),
+                [&slice](const RGTextureRange& range) {
+                    return RGTextureRangesOverlap(slice, range);
+                });
+            if (used) {
+                atomicRanges.push_back(slice);
+            }
         }
     }
 
-    // --------------------------------------------------------
-    // 4. Infer barriers — track per-resource state across sorted passes
-    // --------------------------------------------------------
-
-    // Current state tracking
-    struct ResourceState {
-        TextureStates TexState{TextureState::UNKNOWN};
-        BufferStates BufState{BufferState::UNKNOWN};
-    };
-
-    radray::vector<ResourceState> currentState(resources.size());
-    // Initialize states
-    for (uint32_t ri = 0; ri < static_cast<uint32_t>(resources.size()); ++ri) {
-        auto& entry = resources[ri];
-        if (entry.IsImported) {
-            currentState[ri].TexState = entry.InitialTextureState;
-            currentState[ri].BufState = entry.InitialBufferState;
-        } else {
-            currentState[ri].TexState = TextureState::Undefined;
-            currentState[ri].BufState = BufferState::Undefined;
-        }
-    }
-
-    result.Passes.reserve(sortedPasses.size());
-
-    for (uint32_t sortedIdx = 0; sortedIdx < static_cast<uint32_t>(sortedPasses.size()); ++sortedIdx) {
-        uint32_t pi = sortedPasses[sortedIdx];
-        auto& pass = passes[pi];
-
-        RGCompiledPass compiledPass{};
-        compiledPass.OriginalPassIndex = pi;
-        compiledPass.Type = pass.Type;
-
-        // Collect required states for this pass and generate barriers
-        for (auto& ru : pass.ResourceUsages) {
-            uint32_t ri = ru.ResourceIndex;
-            auto& entry = resources[ri];
-
-            if (entry.Type == RGResourceType::Texture) {
-                TextureStates requiredState = MapUsageToTextureState(ru.Usage, ru.Access);
-                TextureStates curState = currentState[ri].TexState;
-
-                if (curState.value() != requiredState.value()) {
-                    BarrierTextureDescriptor barrier{};
-                    // For imported resources, Target is the real texture
-                    // For transient resources, Target will be resolved at execute time
-                    // We store nullptr for transient; executor must patch it
-                    barrier.Target = entry.IsImported ? entry.ImportedTexture : nullptr;
-                    barrier.Before = curState;
-                    barrier.After = requiredState;
-                    compiledPass.PreBarriers.push_back(barrier);
-                    currentState[ri].TexState = requiredState;
-                }
-            } else {
-                BufferStates requiredState = MapUsageToBufferState(ru.Usage, ru.Access);
-                BufferStates curState = currentState[ri].BufState;
-
-                if (curState.value() != requiredState.value()) {
-                    BarrierBufferDescriptor barrier{};
-                    barrier.Target = entry.IsImported ? entry.ImportedBuffer : nullptr;
-                    barrier.Before = curState;
-                    barrier.After = requiredState;
-                    compiledPass.PreBarriers.push_back(barrier);
-                    currentState[ri].BufState = requiredState;
-                }
-            }
-        }
-
-        // --------------------------------------------------------
-        // 5. Build raster pass attachment descriptors
-        // --------------------------------------------------------
-
-        if (pass.Type == RGPassType::Raster) {
-            for (auto& ca : pass.ColorAttachments) {
-                RGCompiledPass::RGColorAttachmentDesc desc{};
-                desc.TextureResourceIndex = ca.TextureResourceIndex;
-                desc.Load = ca.Load;
-                desc.Store = ca.Store;
-                desc.ClearValue = ca.ClearValue;
-                compiledPass.ColorAttachments.push_back(desc);
-            }
-            if (pass.DepthStencilAttachment.has_value()) {
-                auto& dsa = pass.DepthStencilAttachment.value();
-                RGCompiledPass::RGDepthStencilAttachmentDesc desc{};
-                desc.TextureResourceIndex = dsa.TextureResourceIndex;
-                desc.DepthLoad = dsa.DepthLoad;
-                desc.DepthStore = dsa.DepthStore;
-                desc.StencilLoad = dsa.StencilLoad;
-                desc.StencilStore = dsa.StencilStore;
-                desc.ClearValue = dsa.ClearValue;
-                compiledPass.DepthStencilAttachment = desc;
-            }
-        }
-
-        result.Passes.push_back(std::move(compiledPass));
-    }
-
-    return result;
+    return atomicRanges;
 }
 
-}  // namespace radray::render::rg
+vector<RGSubresourceRange> RGBuildAtomicBufferRanges(const vector<RGBufferRange>& usedRanges) {
+    vector<RGSubresourceRange> atomicRanges{};
+    if (usedRanges.empty()) {
+        return atomicRanges;
+    }
+
+    vector<uint64_t> cuts{};
+    cuts.reserve(usedRanges.size() * 2u);
+    bool hasUnboundedTail = false;
+    for (const auto& range : usedRanges) {
+        const uint64_t end = RGRangeEnd(range.Offset, range.Size);
+        cuts.push_back(range.Offset);
+        if (range.Size == RGBufferRange::All || end == std::numeric_limits<uint64_t>::max()) {
+            hasUnboundedTail = true;
+        } else {
+            cuts.push_back(end);
+        }
+    }
+
+    RGSortAndUnique(&cuts);
+    if (cuts.empty()) {
+        return atomicRanges;
+    }
+
+    for (size_t i = 0; i + 1 < cuts.size(); ++i) {
+        const uint64_t begin = cuts[i];
+        const uint64_t end = cuts[i + 1];
+        if (end <= begin) {
+            continue;
+        }
+
+        RGBufferRange slice{
+            .Offset = begin,
+            .Size = end - begin};
+
+        const bool used = std::any_of(
+            usedRanges.begin(),
+            usedRanges.end(),
+            [&slice](const RGBufferRange& range) {
+                return RGBufferRangesOverlap(slice, range);
+            });
+        if (used) {
+            atomicRanges.push_back(slice);
+        }
+    }
+
+    if (hasUnboundedTail) {
+        RGBufferRange tail{
+            .Offset = cuts.back(),
+            .Size = RGBufferRange::All};
+        const bool used = std::any_of(
+            usedRanges.begin(),
+            usedRanges.end(),
+            [&tail](const RGBufferRange& range) {
+                return RGBufferRangesOverlap(tail, range);
+            });
+        if (used) {
+            atomicRanges.push_back(tail);
+        }
+    }
+
+    return atomicRanges;
+}
+
+vector<RGSubresourceRange> RGCollectAtomicRanges(
+    const VirtualResource& resource,
+    const vector<RGSubresourceRange>& usedRanges) {
+    if (usedRanges.empty()) {
+        return {};
+    }
+
+    if (RGIsTextureResourceType(resource.GetType())) {
+        vector<RGTextureRange> textureRanges{};
+        textureRanges.reserve(usedRanges.size());
+        for (const auto& range : usedRanges) {
+            if (std::holds_alternative<RGTextureRange>(range)) {
+                textureRanges.push_back(std::get<RGTextureRange>(range));
+            }
+        }
+        return RGBuildAtomicTextureRanges(textureRanges);
+    }
+
+    vector<RGBufferRange> bufferRanges{};
+    bufferRanges.reserve(usedRanges.size());
+    for (const auto& range : usedRanges) {
+        if (std::holds_alternative<RGBufferRange>(range)) {
+            bufferRanges.push_back(std::get<RGBufferRange>(range));
+        }
+    }
+    return RGBuildAtomicBufferRanges(bufferRanges);
+}
+
+struct RGRegionKey {
+    uint32_t ResourceIndex{0};
+    RGSubresourceRange Range{RGTextureRange{}};
+
+    friend bool operator==(const RGRegionKey& lhs, const RGRegionKey& rhs) noexcept = default;
+};
+
+size_t RGHashCombine(size_t seed, size_t value) noexcept {
+    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
+}
+
+struct RGRegionKeyHash {
+    size_t operator()(const RGRegionKey& key) const noexcept {
+        size_t seed = 0;
+        seed = RGHashCombine(seed, std::hash<uint32_t>{}(key.ResourceIndex));
+        seed = RGHashCombine(seed, std::hash<size_t>{}(key.Range.index()));
+        if (std::holds_alternative<RGTextureRange>(key.Range)) {
+            const auto& texture = std::get<RGTextureRange>(key.Range);
+            seed = RGHashCombine(seed, std::hash<uint32_t>{}(texture.BaseMipLevel));
+            seed = RGHashCombine(seed, std::hash<uint32_t>{}(texture.MipLevelCount));
+            seed = RGHashCombine(seed, std::hash<uint32_t>{}(texture.BaseArrayLayer));
+            seed = RGHashCombine(seed, std::hash<uint32_t>{}(texture.ArrayLayerCount));
+        } else {
+            const auto& buffer = std::get<RGBufferRange>(key.Range);
+            seed = RGHashCombine(seed, std::hash<uint64_t>{}(buffer.Offset));
+            seed = RGHashCombine(seed, std::hash<uint64_t>{}(buffer.Size));
+        }
+        return seed;
+    }
+};
+
+bool RGCanonicalizeTextureRange(
+    const RGTextureDescriptor& desc,
+    const RGTextureRange& input,
+    RGTextureRange* outRange) {
+    const uint32_t mipLevels = desc.MipLevels == 0 ? 1 : desc.MipLevels;
+    const uint32_t arrayLayers = desc.DepthOrArraySize == 0 ? 1 : desc.DepthOrArraySize;
+
+    if (input.BaseMipLevel >= mipLevels) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: texture range base mip {} out of bounds (mips={})",
+            input.BaseMipLevel,
+            mipLevels);
+        return false;
+    }
+    if (input.BaseArrayLayer >= arrayLayers) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: texture range base layer {} out of bounds (layers={})",
+            input.BaseArrayLayer,
+            arrayLayers);
+        return false;
+    }
+
+    const uint32_t maxMipCount = mipLevels - input.BaseMipLevel;
+    const uint32_t maxLayerCount = arrayLayers - input.BaseArrayLayer;
+
+    const uint32_t mipCount = input.MipLevelCount == RGTextureRange::All
+                                  ? maxMipCount
+                                  : input.MipLevelCount;
+    const uint32_t layerCount = input.ArrayLayerCount == RGTextureRange::All
+                                    ? maxLayerCount
+                                    : input.ArrayLayerCount;
+
+    if (mipCount == 0 || mipCount > maxMipCount) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: texture mip count {} out of bounds (max={})",
+            mipCount,
+            maxMipCount);
+        return false;
+    }
+    if (layerCount == 0 || layerCount > maxLayerCount) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: texture layer count {} out of bounds (max={})",
+            layerCount,
+            maxLayerCount);
+        return false;
+    }
+
+    *outRange = RGTextureRange{
+        .BaseMipLevel = input.BaseMipLevel,
+        .MipLevelCount = mipCount,
+        .BaseArrayLayer = input.BaseArrayLayer,
+        .ArrayLayerCount = layerCount};
+    return true;
+}
+
+bool RGCanonicalizeBufferRange(
+    const RGBufferDescriptor& desc,
+    const RGBufferRange& input,
+    RGBufferRange* outRange) {
+    if (input.Size == 0) {
+        RADRAY_ERR_LOG("RenderGraph: buffer range size must not be 0");
+        return false;
+    }
+
+    if (desc.Size == RGBufferRange::All) {
+        *outRange = RGBufferRange{
+            .Offset = input.Offset,
+            .Size = input.Size == RGBufferRange::All ? RGBufferRange::All : input.Size};
+        return true;
+    }
+
+    if (input.Offset >= desc.Size) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: buffer range offset {} out of bounds (size={})",
+            input.Offset,
+            desc.Size);
+        return false;
+    }
+
+    const uint64_t maxSize = desc.Size - input.Offset;
+    const uint64_t size = input.Size == RGBufferRange::All ? maxSize : input.Size;
+    if (size == 0 || size > maxSize) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: buffer range size {} out of bounds (max={})",
+            size,
+            maxSize);
+        return false;
+    }
+
+    *outRange = RGBufferRange{
+        .Offset = input.Offset,
+        .Size = size};
+    return true;
+}
+
+bool RGAccessEdgeEquals(const ResourceAccessEdge& lhs, const ResourceAccessEdge& rhs) noexcept {
+    return lhs.Handle == rhs.Handle && lhs.Mode == rhs.Mode && lhs.Range == rhs.Range;
+}
+
+bool RGContainsEdge(
+    const vector<ResourceAccessEdge>& edges,
+    const ResourceAccessEdge& candidate) noexcept {
+    return std::find_if(
+               edges.begin(),
+               edges.end(),
+               [&candidate](const ResourceAccessEdge& edge) {
+                   return RGAccessEdgeEquals(edge, candidate);
+               }) != edges.end();
+}
+
+std::optional<RGRegionKey> RGMakeRegionKey(
+    const vector<VirtualResource>& resources,
+    const ResourceAccessEdge& edge) {
+    if (!edge.Handle.IsValid() || edge.Handle.Index >= resources.size()) {
+        return std::nullopt;
+    }
+
+    const auto& resource = resources[edge.Handle.Index];
+    if (RGIsTextureResourceType(resource.GetType()) && !std::holds_alternative<RGTextureRange>(edge.Range)) {
+        return std::nullopt;
+    }
+    if (RGIsBufferResourceType(resource.GetType()) && !std::holds_alternative<RGBufferRange>(edge.Range)) {
+        return std::nullopt;
+    }
+
+    return RGRegionKey{
+        .ResourceIndex = edge.Handle.Index,
+        .Range = edge.Range};
+}
+
+bool RGEdgesOverlap(
+    const VirtualResource& resource,
+    const ResourceAccessEdge& lhs,
+    const ResourceAccessEdge& rhs) {
+    if (lhs.Handle.Index != rhs.Handle.Index) {
+        return false;
+    }
+    return RGSubresourceRangesOverlap(resource, lhs.Range, rhs.Range);
+}
+
+bool RGPassesConflict(
+    const vector<VirtualResource>& resources,
+    const RGPassNode& lhs,
+    const RGPassNode& rhs) {
+    // RAW + WAW
+    for (const auto& lhsWrite : lhs.Writes) {
+        for (const auto& rhsRead : rhs.Reads) {
+            if (lhsWrite.Handle.Index == rhsRead.Handle.Index && RGEdgesOverlap(resources[lhsWrite.Handle.Index], lhsWrite, rhsRead)) {
+                return true;
+            }
+        }
+        for (const auto& rhsWrite : rhs.Writes) {
+            if (lhsWrite.Handle.Index == rhsWrite.Handle.Index && RGEdgesOverlap(resources[lhsWrite.Handle.Index], lhsWrite, rhsWrite)) {
+                return true;
+            }
+        }
+    }
+
+    // WAR
+    for (const auto& lhsRead : lhs.Reads) {
+        for (const auto& rhsWrite : rhs.Writes) {
+            if (lhsRead.Handle.Index == rhsWrite.Handle.Index && RGEdgesOverlap(resources[lhsRead.Handle.Index], lhsRead, rhsWrite)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+ResourceAccessEdge RGMakeFullRangeEdge(
+    uint32_t resourceIndex,
+    const VirtualResource& resource) {
+    ResourceAccessEdge edge{};
+    edge.Handle = RGResourceHandle{resourceIndex};
+    edge.Mode = RGAccessMode::Unknown;
+    if (RGIsTextureResourceType(resource.GetType())) {
+        edge.Range = RGTextureRange{};
+    } else {
+        edge.Range = RGBufferRange{};
+    }
+    return edge;
+}
+
+vector<ResourceAccessEdge> RGCollectImplicitRoots(const RGGraphBuilder& graph) {
+    vector<ResourceAccessEdge> roots{};
+    const auto& resources = graph.GetResources();
+    for (uint32_t i = 0; i < static_cast<uint32_t>(resources.size()); ++i) {
+        const auto& resource = resources[i];
+        if (resource.Flags.HasFlag(RGResourceFlag::Persistent) || resource.Flags.HasFlag(RGResourceFlag::Output) || resource.Flags.HasFlag(RGResourceFlag::ForceRetain) || resource.Flags.HasFlag(RGResourceFlag::Temporal)) {
+            roots.push_back(RGMakeFullRangeEdge(i, resource));
+        }
+    }
+    return roots;
+}
+
+string RGFormatTextureRange(const RGTextureRange& range) {
+    const string mipCount = range.MipLevelCount == RGTextureRange::All
+                                ? "*"
+                                : fmt::format("{}", range.MipLevelCount);
+    const string layerCount = range.ArrayLayerCount == RGTextureRange::All
+                                  ? "*"
+                                  : fmt::format("{}", range.ArrayLayerCount);
+    return fmt::format(
+        "mip[{}+{}] layer[{}+{}]",
+        range.BaseMipLevel,
+        mipCount,
+        range.BaseArrayLayer,
+        layerCount);
+}
+
+string RGFormatBufferRange(const RGBufferRange& range) {
+    const string size = range.Size == RGBufferRange::All
+                            ? "*"
+                            : fmt::format("{}", range.Size);
+    return fmt::format("offset[{}] size[{}]", range.Offset, size);
+}
+
+string RGFormatEdgeRange(const ResourceAccessEdge& edge) {
+    if (std::holds_alternative<RGTextureRange>(edge.Range)) {
+        return RGFormatTextureRange(std::get<RGTextureRange>(edge.Range));
+    }
+    return RGFormatBufferRange(std::get<RGBufferRange>(edge.Range));
+}
+
+string RGFormatSubresourceRange(const RGSubresourceRange& range) {
+    if (std::holds_alternative<RGTextureRange>(range)) {
+        return RGFormatTextureRange(std::get<RGTextureRange>(range));
+    }
+    return RGFormatBufferRange(std::get<RGBufferRange>(range));
+}
+
+bool RGNeedBarrier(RGAccessMode stateBefore, RGAccessMode stateAfter) {
+    if (stateBefore != stateAfter) {
+        return true;
+    }
+    return RGIsWriteAccess(stateAfter);
+}
+
+RGAccessMode RGMergeRequestedMode(RGAccessMode current, RGAccessMode incoming) {
+    if (current == RGAccessMode::Unknown) {
+        return incoming;
+    }
+    if (incoming == RGAccessMode::Unknown || current == incoming) {
+        return current;
+    }
+
+    const bool currentWrite = RGIsWriteAccess(current);
+    const bool incomingWrite = RGIsWriteAccess(incoming);
+    if (currentWrite != incomingWrite) {
+        return incomingWrite ? incoming : current;
+    }
+    return incoming;
+}
+
+bool RGTryMergeBufferRanges(
+    const RGBufferRange& lhs,
+    const RGBufferRange& rhs,
+    RGBufferRange* outRange) {
+    if (outRange == nullptr) {
+        return false;
+    }
+
+    RGBufferRange a = lhs;
+    RGBufferRange b = rhs;
+    if (b.Offset < a.Offset) {
+        std::swap(a, b);
+    }
+
+    if (a.Size == RGBufferRange::All) {
+        if (b.Offset < a.Offset) {
+            return false;
+        }
+        *outRange = a;
+        return true;
+    }
+
+    const uint64_t endA = RGRangeEnd(a.Offset, a.Size);
+    if (b.Size == RGBufferRange::All) {
+        if (b.Offset > endA) {
+            return false;
+        }
+        *outRange = RGBufferRange{
+            .Offset = a.Offset,
+            .Size = RGBufferRange::All};
+        return true;
+    }
+
+    if (b.Offset > endA) {
+        return false;
+    }
+
+    const uint64_t endB = RGRangeEnd(b.Offset, b.Size);
+    const uint64_t mergedEnd = std::max(endA, endB);
+    if (mergedEnd == std::numeric_limits<uint64_t>::max()) {
+        *outRange = RGBufferRange{
+            .Offset = a.Offset,
+            .Size = RGBufferRange::All};
+        return true;
+    }
+
+    *outRange = RGBufferRange{
+        .Offset = a.Offset,
+        .Size = mergedEnd - a.Offset};
+    return true;
+}
+
+bool RGTryMergeTextureRanges(
+    const RGTextureRange& lhs,
+    const RGTextureRange& rhs,
+    RGTextureRange* outRange) {
+    if (outRange == nullptr) {
+        return false;
+    }
+
+    if (lhs.BaseArrayLayer == rhs.BaseArrayLayer && lhs.ArrayLayerCount == rhs.ArrayLayerCount) {
+        const uint64_t lhsEndMip = static_cast<uint64_t>(lhs.BaseMipLevel) + lhs.MipLevelCount;
+        const uint64_t rhsEndMip = static_cast<uint64_t>(rhs.BaseMipLevel) + rhs.MipLevelCount;
+        if (rhs.BaseMipLevel > lhsEndMip || lhs.BaseMipLevel > rhsEndMip) {
+            return false;
+        }
+
+        const uint64_t mergedBaseMip = std::min<uint64_t>(lhs.BaseMipLevel, rhs.BaseMipLevel);
+        const uint64_t mergedEndMip = std::max<uint64_t>(lhsEndMip, rhsEndMip);
+        if (mergedEndMip > std::numeric_limits<uint32_t>::max()) {
+            return false;
+        }
+
+        *outRange = RGTextureRange{
+            .BaseMipLevel = static_cast<uint32_t>(mergedBaseMip),
+            .MipLevelCount = static_cast<uint32_t>(mergedEndMip - mergedBaseMip),
+            .BaseArrayLayer = lhs.BaseArrayLayer,
+            .ArrayLayerCount = lhs.ArrayLayerCount};
+        return true;
+    }
+
+    if (lhs.BaseMipLevel == rhs.BaseMipLevel && lhs.MipLevelCount == rhs.MipLevelCount) {
+        const uint64_t lhsEndLayer = static_cast<uint64_t>(lhs.BaseArrayLayer) + lhs.ArrayLayerCount;
+        const uint64_t rhsEndLayer = static_cast<uint64_t>(rhs.BaseArrayLayer) + rhs.ArrayLayerCount;
+        if (rhs.BaseArrayLayer > lhsEndLayer || lhs.BaseArrayLayer > rhsEndLayer) {
+            return false;
+        }
+
+        const uint64_t mergedBaseLayer = std::min<uint64_t>(lhs.BaseArrayLayer, rhs.BaseArrayLayer);
+        const uint64_t mergedEndLayer = std::max<uint64_t>(lhsEndLayer, rhsEndLayer);
+        if (mergedEndLayer > std::numeric_limits<uint32_t>::max()) {
+            return false;
+        }
+
+        *outRange = RGTextureRange{
+            .BaseMipLevel = lhs.BaseMipLevel,
+            .MipLevelCount = lhs.MipLevelCount,
+            .BaseArrayLayer = static_cast<uint32_t>(mergedBaseLayer),
+            .ArrayLayerCount = static_cast<uint32_t>(mergedEndLayer - mergedBaseLayer)};
+        return true;
+    }
+
+    return false;
+}
+
+bool RGBarrierMergeKeyEquals(const RGBarrier& lhs, const RGBarrier& rhs) {
+    return lhs.Handle == rhs.Handle && lhs.StateBefore == rhs.StateBefore && lhs.StateAfter == rhs.StateAfter && lhs.Range.index() == rhs.Range.index();
+}
+
+vector<RGBarrier> RGMergePassBarriers(vector<RGBarrier> barriers) {
+    if (barriers.empty()) {
+        return barriers;
+    }
+
+    std::sort(
+        barriers.begin(),
+        barriers.end(),
+        [](const RGBarrier& lhs, const RGBarrier& rhs) {
+            if (lhs.Handle.Index != rhs.Handle.Index) {
+                return lhs.Handle.Index < rhs.Handle.Index;
+            }
+            if (lhs.Range.index() != rhs.Range.index()) {
+                return lhs.Range.index() < rhs.Range.index();
+            }
+            if (lhs.StateBefore != rhs.StateBefore) {
+                return lhs.StateBefore < rhs.StateBefore;
+            }
+            if (lhs.StateAfter != rhs.StateAfter) {
+                return lhs.StateAfter < rhs.StateAfter;
+            }
+
+            if (std::holds_alternative<RGTextureRange>(lhs.Range) && std::holds_alternative<RGTextureRange>(rhs.Range)) {
+                const auto& left = std::get<RGTextureRange>(lhs.Range);
+                const auto& right = std::get<RGTextureRange>(rhs.Range);
+                if (left.BaseArrayLayer != right.BaseArrayLayer) {
+                    return left.BaseArrayLayer < right.BaseArrayLayer;
+                }
+                if (left.ArrayLayerCount != right.ArrayLayerCount) {
+                    return left.ArrayLayerCount < right.ArrayLayerCount;
+                }
+                if (left.BaseMipLevel != right.BaseMipLevel) {
+                    return left.BaseMipLevel < right.BaseMipLevel;
+                }
+                return left.MipLevelCount < right.MipLevelCount;
+            }
+
+            const auto& left = std::get<RGBufferRange>(lhs.Range);
+            const auto& right = std::get<RGBufferRange>(rhs.Range);
+            if (left.Offset != right.Offset) {
+                return left.Offset < right.Offset;
+            }
+            return left.Size < right.Size;
+        });
+
+    vector<RGBarrier> merged{};
+    merged.reserve(barriers.size());
+    RGBarrier current = barriers.front();
+
+    for (size_t i = 1; i < barriers.size(); ++i) {
+        const RGBarrier& next = barriers[i];
+        if (!RGBarrierMergeKeyEquals(current, next)) {
+            merged.push_back(current);
+            current = next;
+            continue;
+        }
+
+        RGSubresourceRange mergedRange = current.Range;
+        bool mergedThisStep = false;
+        if (std::holds_alternative<RGTextureRange>(current.Range) && std::holds_alternative<RGTextureRange>(next.Range)) {
+            RGTextureRange mergedTexture{};
+            mergedThisStep = RGTryMergeTextureRanges(
+                std::get<RGTextureRange>(current.Range),
+                std::get<RGTextureRange>(next.Range),
+                &mergedTexture);
+            if (mergedThisStep) {
+                mergedRange = mergedTexture;
+            }
+        } else if (std::holds_alternative<RGBufferRange>(current.Range) && std::holds_alternative<RGBufferRange>(next.Range)) {
+            RGBufferRange mergedBuffer{};
+            mergedThisStep = RGTryMergeBufferRanges(
+                std::get<RGBufferRange>(current.Range),
+                std::get<RGBufferRange>(next.Range),
+                &mergedBuffer);
+            if (mergedThisStep) {
+                mergedRange = mergedBuffer;
+            }
+        }
+
+        if (mergedThisStep) {
+            current.Range = mergedRange;
+            continue;
+        }
+
+        merged.push_back(current);
+        current = next;
+    }
+
+    merged.push_back(current);
+    return merged;
+}
+
+}  // namespace
+
+RGPassBuilder::RGPassBuilder(RGGraphBuilder* graph, uint32_t passIndex) noexcept
+    : _graph(graph), _passIndex(passIndex) {}
+
+RGPassBuilder& RGPassBuilder::ReadTexture(
+    RGResourceHandle handle,
+    const RGTextureRange& range,
+    RGAccessMode mode) {
+    if (_graph == nullptr) {
+        return *this;
+    }
+    _graph->AddReadTextureEdge(_passIndex, handle, range, mode);
+    return *this;
+}
+
+RGPassBuilder& RGPassBuilder::ReadBuffer(
+    RGResourceHandle handle,
+    const RGBufferRange& range,
+    RGAccessMode mode) {
+    if (_graph == nullptr) {
+        return *this;
+    }
+    _graph->AddReadBufferEdge(_passIndex, handle, range, mode);
+    return *this;
+}
+
+RGResourceHandle RGPassBuilder::WriteTexture(
+    RGResourceHandle handle,
+    const RGTextureRange& range,
+    RGAccessMode mode) {
+    if (_graph == nullptr) {
+        return RGResourceHandle::Invalid();
+    }
+    return _graph->AddWriteTextureEdge(_passIndex, handle, range, mode);
+}
+
+RGResourceHandle RGPassBuilder::WriteBuffer(
+    RGResourceHandle handle,
+    const RGBufferRange& range,
+    RGAccessMode mode) {
+    if (_graph == nullptr) {
+        return RGResourceHandle::Invalid();
+    }
+    return _graph->AddWriteBufferEdge(_passIndex, handle, range, mode);
+}
+
+RGResourceHandle RGPassBuilder::ReadWriteTexture(
+    RGResourceHandle handle,
+    const RGTextureRange& range,
+    RGAccessMode readMode,
+    RGAccessMode writeMode) {
+    ReadTexture(handle, range, readMode);
+    return WriteTexture(handle, range, writeMode);
+}
+
+RGResourceHandle RGPassBuilder::ReadWriteBuffer(
+    RGResourceHandle handle,
+    const RGBufferRange& range,
+    RGAccessMode readMode,
+    RGAccessMode writeMode) {
+    ReadBuffer(handle, range, readMode);
+    return WriteBuffer(handle, range, writeMode);
+}
+
+RGPassBuilder& RGPassBuilder::SetExecuteFunc(RGPassExecuteFunc func) {
+    if (_graph == nullptr || _passIndex >= _graph->_passes.size()) {
+        return *this;
+    }
+    _graph->_passes[_passIndex].ExecuteFunc = std::move(func);
+    return *this;
+}
+
+RGResourceHandle RGGraphBuilder::CreateTexture(const RGTextureDescriptor& desc) {
+    const uint32_t index = static_cast<uint32_t>(_resources.size());
+    VirtualResource resource{};
+    resource.Flags = desc.Flags;
+    resource.Name = string{desc.Name};
+    resource.Descriptor = desc;
+    _resources.push_back(resource);
+    return RGResourceHandle{index};
+}
+
+RGResourceHandle RGGraphBuilder::CreateBuffer(const RGBufferDescriptor& desc) {
+    const uint32_t index = static_cast<uint32_t>(_resources.size());
+    VirtualResource resource{};
+    resource.Flags = desc.Flags;
+    resource.Name = string{desc.Name};
+    resource.Descriptor = desc;
+    _resources.push_back(resource);
+    return RGResourceHandle{index};
+}
+
+RGResourceHandle RGGraphBuilder::CreateIndirectArgs(const RGBufferDescriptor& desc) {
+    const uint32_t index = static_cast<uint32_t>(_resources.size());
+    VirtualResource resource{};
+    resource.Flags = desc.Flags;
+    resource.Name = string{desc.Name};
+    RGIndirectArgsDescriptor indirectDesc{};
+    indirectDesc.Buffer = desc;
+    resource.Descriptor = indirectDesc;
+    _resources.push_back(resource);
+    return RGResourceHandle{index};
+}
+
+RGResourceHandle RGGraphBuilder::ImportExternalTexture(
+    std::string_view name,
+    RGResourceFlags flags,
+    RGAccessMode initialMode) {
+    RGTextureDescriptor desc{};
+    desc.Width = 1;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleCount = 1;
+    desc.Format = TextureFormat::UNKNOWN;
+    desc.Flags = flags | RGResourceFlag::External;
+    desc.Name = name;
+    const auto handle = CreateTexture(desc);
+    if (ValidateHandleIndex(handle)) {
+        _resources[handle.Index].InitialMode = initialMode;
+    }
+    return handle;
+}
+
+RGResourceHandle RGGraphBuilder::ImportExternalBuffer(
+    std::string_view name,
+    RGResourceFlags flags,
+    RGAccessMode initialMode) {
+    RGBufferDescriptor desc{};
+    desc.Size = RGBufferRange::All;
+    desc.Flags = flags | RGResourceFlag::External;
+    desc.Name = name;
+    const auto handle = CreateBuffer(desc);
+    if (ValidateHandleIndex(handle)) {
+        _resources[handle.Index].InitialMode = initialMode;
+    }
+    return handle;
+}
+
+RGPassBuilder RGGraphBuilder::AddPass(std::string_view name, QueueType queueClass) {
+    const uint32_t passId = static_cast<uint32_t>(_passes.size());
+    RGPassNode node{};
+    node.Id = passId;
+    node.Name = string{name};
+    node.QueueClass = queueClass;
+    _passes.push_back(std::move(node));
+    return RGPassBuilder{this, passId};
+}
+
+void RGGraphBuilder::MarkOutput(RGResourceHandle handle) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Output;
+    AddRootEdge(MakeFullRangeEdge(handle));
+}
+
+void RGGraphBuilder::MarkOutput(RGResourceHandle handle, const RGTextureRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Output;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+void RGGraphBuilder::MarkOutput(RGResourceHandle handle, const RGBufferRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Output;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+void RGGraphBuilder::ForceRetain(RGResourceHandle handle) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::ForceRetain;
+    AddRootEdge(MakeFullRangeEdge(handle));
+}
+
+void RGGraphBuilder::ForceRetain(RGResourceHandle handle, const RGTextureRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::ForceRetain;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+void RGGraphBuilder::ForceRetain(RGResourceHandle handle, const RGBufferRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::ForceRetain;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+void RGGraphBuilder::ExportTemporal(RGResourceHandle handle) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Temporal;
+    AddRootEdge(MakeFullRangeEdge(handle));
+}
+
+void RGGraphBuilder::ExportTemporal(RGResourceHandle handle, const RGTextureRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Temporal;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+void RGGraphBuilder::ExportTemporal(RGResourceHandle handle, const RGBufferRange& range) {
+    if (!ValidateHandleIndex(handle)) {
+        return;
+    }
+    _resources[handle.Index].Flags |= RGResourceFlag::Temporal;
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = RGAccessMode::Unknown;
+    edge.Range = range;
+    AddRootEdge(edge);
+}
+
+bool RGGraphBuilder::ValidateHandleIndex(RGResourceHandle handle) const noexcept {
+    return handle.IsValid() && handle.Index < _resources.size();
+}
+
+RGResourceHandle RGGraphBuilder::AddReadTextureEdge(
+    uint32_t passIndex,
+    RGResourceHandle handle,
+    const RGTextureRange& range,
+    RGAccessMode mode) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in AddReadTextureEdge", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid handle {} in ReadTexture", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!RGIsReadAccess(mode)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid read mode {} in ReadTexture", mode);
+        return RGResourceHandle::Invalid();
+    }
+
+    const auto& resource = _resources[handle.Index];
+    const auto* textureDesc = RGGetTextureDescriptor(resource);
+    if (!RGIsTextureResourceType(resource.GetType()) || textureDesc == nullptr) {
+        RADRAY_ERR_LOG("RenderGraph: ReadTexture used on non-texture resource {}", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGTextureRange canonical{};
+    if (!RGCanonicalizeTextureRange(*textureDesc, range, &canonical)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = mode;
+    edge.Range = canonical;
+
+    auto& reads = _passes[passIndex].Reads;
+    if (!RGContainsEdge(reads, edge)) {
+        reads.push_back(edge);
+    }
+    return handle;
+}
+
+RGResourceHandle RGGraphBuilder::AddReadBufferEdge(
+    uint32_t passIndex,
+    RGResourceHandle handle,
+    const RGBufferRange& range,
+    RGAccessMode mode) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in AddReadBufferEdge", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid handle {} in ReadBuffer", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!RGIsReadAccess(mode)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid read mode {} in ReadBuffer", mode);
+        return RGResourceHandle::Invalid();
+    }
+
+    const auto& resource = _resources[handle.Index];
+    const auto* bufferDesc = RGGetBufferDescriptor(resource);
+    if (!RGIsBufferResourceType(resource.GetType()) || bufferDesc == nullptr) {
+        RADRAY_ERR_LOG("RenderGraph: ReadBuffer used on non-buffer resource {}", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGBufferRange canonical{};
+    if (!RGCanonicalizeBufferRange(*bufferDesc, range, &canonical)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = mode;
+    edge.Range = canonical;
+
+    auto& reads = _passes[passIndex].Reads;
+    if (!RGContainsEdge(reads, edge)) {
+        reads.push_back(edge);
+    }
+    return handle;
+}
+
+RGResourceHandle RGGraphBuilder::AddWriteTextureEdge(
+    uint32_t passIndex,
+    RGResourceHandle handle,
+    const RGTextureRange& range,
+    RGAccessMode mode) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in AddWriteTextureEdge", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid handle {} in WriteTexture", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!RGIsWriteAccess(mode)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid write mode {} in WriteTexture", mode);
+        return RGResourceHandle::Invalid();
+    }
+
+    const auto& resource = _resources[handle.Index];
+    const auto* textureDesc = RGGetTextureDescriptor(resource);
+    if (!RGIsTextureResourceType(resource.GetType()) || textureDesc == nullptr) {
+        RADRAY_ERR_LOG("RenderGraph: WriteTexture used on non-texture resource {}", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGTextureRange canonical{};
+    if (!RGCanonicalizeTextureRange(*textureDesc, range, &canonical)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = mode;
+    edge.Range = canonical;
+
+    auto& writes = _passes[passIndex].Writes;
+    if (!RGContainsEdge(writes, edge)) {
+        writes.push_back(edge);
+    }
+    return handle;
+}
+
+RGResourceHandle RGGraphBuilder::AddWriteBufferEdge(
+    uint32_t passIndex,
+    RGResourceHandle handle,
+    const RGBufferRange& range,
+    RGAccessMode mode) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in AddWriteBufferEdge", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid handle {} in WriteBuffer", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!RGIsWriteAccess(mode)) {
+        RADRAY_ERR_LOG("RenderGraph: invalid write mode {} in WriteBuffer", mode);
+        return RGResourceHandle::Invalid();
+    }
+
+    const auto& resource = _resources[handle.Index];
+    const auto* bufferDesc = RGGetBufferDescriptor(resource);
+    if (!RGIsBufferResourceType(resource.GetType()) || bufferDesc == nullptr) {
+        RADRAY_ERR_LOG("RenderGraph: WriteBuffer used on non-buffer resource {}", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGBufferRange canonical{};
+    if (!RGCanonicalizeBufferRange(*bufferDesc, range, &canonical)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    ResourceAccessEdge edge{};
+    edge.Handle = handle;
+    edge.Mode = mode;
+    edge.Range = canonical;
+
+    auto& writes = _passes[passIndex].Writes;
+    if (!RGContainsEdge(writes, edge)) {
+        writes.push_back(edge);
+    }
+    return handle;
+}
+
+void RGGraphBuilder::AddRootEdge(const ResourceAccessEdge& edge) {
+    if (!ValidateHandleIndex(edge.Handle)) {
+        return;
+    }
+
+    auto normalized = edge;
+    const auto& resource = _resources[edge.Handle.Index];
+    if (RGIsTextureResourceType(resource.GetType())) {
+        const auto* textureDesc = RGGetTextureDescriptor(resource);
+        if (textureDesc == nullptr) {
+            return;
+        }
+        RGTextureRange canonical{};
+        RGTextureRange inputRange = RGTextureRange{};
+        if (std::holds_alternative<RGTextureRange>(normalized.Range)) {
+            inputRange = std::get<RGTextureRange>(normalized.Range);
+        }
+        if (!RGCanonicalizeTextureRange(*textureDesc, inputRange, &canonical)) {
+            return;
+        }
+        normalized.Range = canonical;
+    } else {
+        const auto* bufferDesc = RGGetBufferDescriptor(resource);
+        if (bufferDesc == nullptr) {
+            return;
+        }
+        RGBufferRange canonical{};
+        RGBufferRange inputRange = RGBufferRange{};
+        if (std::holds_alternative<RGBufferRange>(normalized.Range)) {
+            inputRange = std::get<RGBufferRange>(normalized.Range);
+        }
+        if (!RGCanonicalizeBufferRange(*bufferDesc, inputRange, &canonical)) {
+            return;
+        }
+        normalized.Range = canonical;
+    }
+    normalized.Mode = RGAccessMode::Unknown;
+
+    if (!RGContainsEdge(_roots, normalized)) {
+        _roots.push_back(normalized);
+    }
+}
+
+ResourceAccessEdge RGGraphBuilder::MakeFullRangeEdge(RGResourceHandle handle) const {
+    if (!ValidateHandleIndex(handle)) {
+        return ResourceAccessEdge{};
+    }
+    return RGMakeFullRangeEdge(handle.Index, _resources[handle.Index]);
+}
+
+CompiledGraph RGGraphBuilder::Compile() const {
+    CompiledGraph compiled{};
+    compiled.Success = true;
+    compiled.Allocations.resize(_resources.size());
+
+    if (_passes.empty()) {
+        return compiled;
+    }
+
+    const auto& resources = _resources;
+    const auto& passes = _passes;
+
+    vector<ResourceAccessEdge> roots = _roots;
+    const auto implicitRoots = RGCollectImplicitRoots(*this);
+    for (const auto& root : implicitRoots) {
+        if (!RGContainsEdge(roots, root)) {
+            roots.push_back(root);
+        }
+    }
+
+    struct WriterRef {
+        uint32_t PassIndex{0};
+        const ResourceAccessEdge* Edge{nullptr};
+    };
+    vector<vector<WriterRef>> writersByResource(resources.size());
+    for (uint32_t passIndex = 0; passIndex < static_cast<uint32_t>(passes.size()); ++passIndex) {
+        const auto& pass = passes[passIndex];
+        for (const auto& writeEdge : pass.Writes) {
+            if (!ValidateHandleIndex(writeEdge.Handle)) {
+                continue;
+            }
+            writersByResource[writeEdge.Handle.Index].push_back(WriterRef{
+                .PassIndex = passIndex,
+                .Edge = &writeEdge});
+        }
+    }
+
+    vector<bool> passAlive(passes.size(), false);
+    queue<ResourceAccessEdge> worklist{};
+    unordered_set<RGRegionKey, RGRegionKeyHash> visitedRegions{};
+
+    auto enqueueRegion = [&](const ResourceAccessEdge& edge) {
+        const auto key = RGMakeRegionKey(resources, edge);
+        if (!key.has_value()) {
+            return;
+        }
+        if (visitedRegions.insert(key.value()).second) {
+            worklist.push(edge);
+        }
+    };
+
+    for (const auto& root : roots) {
+        enqueueRegion(root);
+    }
+
+    while (!worklist.empty()) {
+        const auto target = worklist.front();
+        worklist.pop();
+
+        if (!ValidateHandleIndex(target.Handle)) {
+            continue;
+        }
+
+        const uint32_t resourceIndex = target.Handle.Index;
+        const auto& resource = resources[resourceIndex];
+        for (const auto& writer : writersByResource[resourceIndex]) {
+            if (writer.Edge == nullptr) {
+                continue;
+            }
+            if (!RGEdgesOverlap(resource, *writer.Edge, target)) {
+                continue;
+            }
+
+            if (passAlive[writer.PassIndex]) {
+                continue;
+            }
+            passAlive[writer.PassIndex] = true;
+
+            for (const auto& readEdge : passes[writer.PassIndex].Reads) {
+                enqueueRegion(readEdge);
+            }
+        }
+    }
+
+    uint32_t aliveCount = 0;
+    for (uint32_t passIndex = 0; passIndex < static_cast<uint32_t>(passes.size()); ++passIndex) {
+        if (passAlive[passIndex]) {
+            aliveCount += 1;
+        } else {
+            compiled.CulledPasses.push_back(passIndex);
+        }
+    }
+    if (aliveCount == 0) {
+        return compiled;
+    }
+
+    vector<vector<uint32_t>> successors(passes.size());
+    vector<uint32_t> indegree(passes.size(), 0);
+
+    for (uint32_t lhsPass = 0; lhsPass < static_cast<uint32_t>(passes.size()); ++lhsPass) {
+        if (!passAlive[lhsPass]) {
+            continue;
+        }
+        for (uint32_t rhsPass = lhsPass + 1; rhsPass < static_cast<uint32_t>(passes.size()); ++rhsPass) {
+            if (!passAlive[rhsPass]) {
+                continue;
+            }
+            if (!RGPassesConflict(resources, passes[lhsPass], passes[rhsPass])) {
+                continue;
+            }
+
+            successors[lhsPass].push_back(rhsPass);
+            indegree[rhsPass] += 1;
+            compiled.DependencyEdges.push_back(std::pair<uint32_t, uint32_t>{lhsPass, rhsPass});
+        }
+    }
+
+    priority_queue<uint32_t, vector<uint32_t>, std::greater<uint32_t>> ready{};
+    for (uint32_t passIndex = 0; passIndex < static_cast<uint32_t>(passes.size()); ++passIndex) {
+        if (passAlive[passIndex] && indegree[passIndex] == 0) {
+            ready.push(passIndex);
+        }
+    }
+
+    compiled.SortedPasses.reserve(aliveCount);
+    while (!ready.empty()) {
+        const uint32_t currentPass = ready.top();
+        ready.pop();
+        compiled.SortedPasses.push_back(currentPass);
+
+        for (uint32_t succ : successors[currentPass]) {
+            if (indegree[succ] == 0) {
+                continue;
+            }
+            indegree[succ] -= 1;
+            if (indegree[succ] == 0) {
+                ready.push(succ);
+            }
+        }
+    }
+
+    if (compiled.SortedPasses.size() != aliveCount) {
+        compiled.Success = false;
+        compiled.ErrorMessage = "Fatal Error: Circular Dependency Detected";
+        RADRAY_ERR_LOG("RenderGraph: {}", compiled.ErrorMessage);
+        return compiled;
+    }
+
+    vector<vector<RGSubresourceRange>> usedRangesByResource(resources.size());
+    for (uint32_t sortedIndex = 0; sortedIndex < static_cast<uint32_t>(compiled.SortedPasses.size()); ++sortedIndex) {
+        const auto passIndex = compiled.SortedPasses[sortedIndex];
+        const auto& pass = passes[passIndex];
+        for (const auto& readEdge : pass.Reads) {
+            if (ValidateHandleIndex(readEdge.Handle)) {
+                usedRangesByResource[readEdge.Handle.Index].push_back(readEdge.Range);
+            }
+        }
+        for (const auto& writeEdge : pass.Writes) {
+            if (ValidateHandleIndex(writeEdge.Handle)) {
+                usedRangesByResource[writeEdge.Handle.Index].push_back(writeEdge.Range);
+            }
+        }
+    }
+
+    vector<vector<RGSubresourceRange>> atomicRangesByResource(resources.size());
+    for (uint32_t resourceIndex = 0; resourceIndex < static_cast<uint32_t>(resources.size()); ++resourceIndex) {
+        atomicRangesByResource[resourceIndex] = RGCollectAtomicRanges(
+            resources[resourceIndex],
+            usedRangesByResource[resourceIndex]);
+    }
+
+    compiled.PassBarriers.resize(compiled.SortedPasses.size());
+    unordered_map<RGRegionKey, RGAccessMode, RGRegionKeyHash> stateByRegion{};
+    for (uint32_t resourceIndex = 0; resourceIndex < static_cast<uint32_t>(resources.size()); ++resourceIndex) {
+        const RGAccessMode initialMode = resources[resourceIndex].InitialMode;
+        const auto& atomicRanges = atomicRangesByResource[resourceIndex];
+        for (const auto& atomicRange : atomicRanges) {
+            ResourceAccessEdge regionEdge{};
+            regionEdge.Handle = RGResourceHandle{resourceIndex};
+            regionEdge.Mode = RGAccessMode::Unknown;
+            regionEdge.Range = atomicRange;
+            const auto key = RGMakeRegionKey(resources, regionEdge);
+            if (!key.has_value()) {
+                continue;
+            }
+            stateByRegion.insert_or_assign(key.value(), initialMode);
+        }
+    }
+
+    auto collectAtomicRangesForEdge = [&](const ResourceAccessEdge& edge) {
+        vector<RGSubresourceRange> ranges{};
+        if (!ValidateHandleIndex(edge.Handle)) {
+            return ranges;
+        }
+
+        const uint32_t resourceIndex = edge.Handle.Index;
+        const auto& resource = resources[resourceIndex];
+        const auto& atomicRanges = atomicRangesByResource[resourceIndex];
+
+        if (atomicRanges.empty()) {
+            ranges.push_back(edge.Range);
+            return ranges;
+        }
+
+        for (const auto& atomicRange : atomicRanges) {
+            if (RGSubresourceRangesOverlap(resource, edge.Range, atomicRange)) {
+                ranges.push_back(atomicRange);
+            }
+        }
+        if (ranges.empty()) {
+            ranges.push_back(edge.Range);
+        }
+        return ranges;
+    };
+
+    for (uint32_t sortedIndex = 0; sortedIndex < static_cast<uint32_t>(compiled.SortedPasses.size()); ++sortedIndex) {
+        const uint32_t passIndex = compiled.SortedPasses[sortedIndex];
+        const auto& pass = passes[passIndex];
+
+        unordered_map<RGRegionKey, RGAccessMode, RGRegionKeyHash> requestedModeByRegion{};
+        auto mergeEdgeRequest = [&](const ResourceAccessEdge& edge) {
+            if (!ValidateHandleIndex(edge.Handle)) {
+                return;
+            }
+
+            const auto overlappedAtomicRanges = collectAtomicRangesForEdge(edge);
+            for (const auto& range : overlappedAtomicRanges) {
+                ResourceAccessEdge regionEdge{};
+                regionEdge.Handle = edge.Handle;
+                regionEdge.Mode = RGAccessMode::Unknown;
+                regionEdge.Range = range;
+
+                const auto key = RGMakeRegionKey(resources, regionEdge);
+                if (!key.has_value()) {
+                    continue;
+                }
+
+                const auto requestIt = requestedModeByRegion.find(key.value());
+                if (requestIt == requestedModeByRegion.end()) {
+                    requestedModeByRegion.insert_or_assign(key.value(), edge.Mode);
+                } else {
+                    requestIt->second = RGMergeRequestedMode(requestIt->second, edge.Mode);
+                }
+            }
+        };
+
+        for (const auto& readEdge : pass.Reads) {
+            mergeEdgeRequest(readEdge);
+        }
+        for (const auto& writeEdge : pass.Writes) {
+            mergeEdgeRequest(writeEdge);
+        }
+
+        vector<RGBarrier> passBarriers{};
+        passBarriers.reserve(requestedModeByRegion.size());
+        for (const auto& [region, requestedMode] : requestedModeByRegion) {
+            const RGAccessMode defaultState = resources[region.ResourceIndex].InitialMode;
+            const auto stateIt = stateByRegion.find(region);
+            const RGAccessMode stateBefore = stateIt == stateByRegion.end()
+                                                 ? defaultState
+                                                 : stateIt->second;
+
+            if (RGNeedBarrier(stateBefore, requestedMode)) {
+                passBarriers.push_back(RGBarrier{
+                    .Handle = RGResourceHandle{region.ResourceIndex},
+                    .Range = region.Range,
+                    .StateBefore = stateBefore,
+                    .StateAfter = requestedMode});
+            }
+            stateByRegion.insert_or_assign(region, requestedMode);
+        }
+
+        compiled.PassBarriers[sortedIndex] = RGMergePassBarriers(std::move(passBarriers));
+    }
+
+    unordered_map<RGRegionKey, uint32_t, RGRegionKeyHash> lifetimeIndexByRegion{};
+    vector<bool> lifetimeHasRead{};
+    vector<bool> lifetimeHasWrite{};
+
+    auto touchSingleLifetimeRange = [&](RGResourceHandle handle, const RGSubresourceRange& range, uint32_t sortedIndex, bool isRead) {
+        ResourceAccessEdge regionEdge{};
+        regionEdge.Handle = handle;
+        regionEdge.Mode = RGAccessMode::Unknown;
+        regionEdge.Range = range;
+
+        const auto key = RGMakeRegionKey(resources, regionEdge);
+        if (!key.has_value()) {
+            return;
+        }
+
+        const auto it = lifetimeIndexByRegion.find(key.value());
+        uint32_t lifetimeIndex = 0;
+        if (it == lifetimeIndexByRegion.end()) {
+            lifetimeIndex = static_cast<uint32_t>(compiled.SubresourceLifetimes.size());
+            lifetimeIndexByRegion.insert_or_assign(key.value(), lifetimeIndex);
+
+            RGSubresourceLifetime lifetime{};
+            lifetime.Handle = handle;
+            lifetime.Range = range;
+            lifetime.FirstPass = sortedIndex;
+            lifetime.LastPass = sortedIndex;
+            lifetime.IsExternal = resources[handle.Index].Flags.HasFlag(RGResourceFlag::External);
+            compiled.SubresourceLifetimes.push_back(lifetime);
+            lifetimeHasRead.push_back(false);
+            lifetimeHasWrite.push_back(false);
+        } else {
+            lifetimeIndex = it->second;
+            compiled.SubresourceLifetimes[lifetimeIndex].LastPass = sortedIndex;
+        }
+
+        if (isRead) {
+            lifetimeHasRead[lifetimeIndex] = true;
+        } else {
+            lifetimeHasWrite[lifetimeIndex] = true;
+        }
+    };
+
+    auto touchLifetime = [&](const ResourceAccessEdge& edge, uint32_t sortedIndex, bool isRead) {
+        if (!ValidateHandleIndex(edge.Handle)) {
+            return;
+        }
+
+        const uint32_t resourceIndex = edge.Handle.Index;
+        const auto& resource = resources[resourceIndex];
+        const auto& atomicRanges = atomicRangesByResource[resourceIndex];
+
+        if (atomicRanges.empty()) {
+            touchSingleLifetimeRange(edge.Handle, edge.Range, sortedIndex, isRead);
+            return;
+        }
+
+        for (const auto& atomicRange : atomicRanges) {
+            if (!RGSubresourceRangesOverlap(resource, edge.Range, atomicRange)) {
+                continue;
+            }
+            touchSingleLifetimeRange(edge.Handle, atomicRange, sortedIndex, isRead);
+        }
+    };
+
+    for (uint32_t sortedIndex = 0; sortedIndex < static_cast<uint32_t>(compiled.SortedPasses.size()); ++sortedIndex) {
+        const auto passIndex = compiled.SortedPasses[sortedIndex];
+        const auto& pass = passes[passIndex];
+        for (const auto& readEdge : pass.Reads) {
+            touchLifetime(readEdge, sortedIndex, true);
+        }
+        for (const auto& writeEdge : pass.Writes) {
+            touchLifetime(writeEdge, sortedIndex, false);
+        }
+    }
+
+    if (!compiled.SortedPasses.empty()) {
+        const uint32_t graphLastPass = static_cast<uint32_t>(compiled.SortedPasses.size() - 1);
+        for (uint32_t i = 0; i < static_cast<uint32_t>(compiled.SubresourceLifetimes.size()); ++i) {
+            auto& lifetime = compiled.SubresourceLifetimes[i];
+            if (!ValidateHandleIndex(lifetime.Handle)) {
+                continue;
+            }
+            const auto& flags = resources[lifetime.Handle.Index].Flags;
+            const bool isRootLike = flags.HasFlag(RGResourceFlag::Output) || flags.HasFlag(RGResourceFlag::ForceRetain) || flags.HasFlag(RGResourceFlag::Persistent) || flags.HasFlag(RGResourceFlag::Temporal);
+            if (isRootLike && lifetimeHasWrite[i]) {
+                lifetime.LastPass = graphLastPass;
+            }
+        }
+    }
+
+    std::sort(
+        compiled.DependencyEdges.begin(),
+        compiled.DependencyEdges.end(),
+        [](const auto& lhs, const auto& rhs) {
+            if (lhs.first != rhs.first) {
+                return lhs.first < rhs.first;
+            }
+            return lhs.second < rhs.second;
+        });
+
+    return compiled;
+}
+
+string RGGraphBuilder::DumpRecording() const {
+    fmt::memory_buffer buffer{};
+    fmt::format_to(std::back_inserter(buffer), "RenderGraph Recording\n");
+    fmt::format_to(std::back_inserter(buffer), "Resources: {}\n", _resources.size());
+
+    for (uint32_t resourceIndex = 0; resourceIndex < static_cast<uint32_t>(_resources.size()); ++resourceIndex) {
+        const auto& resource = _resources[resourceIndex];
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  [{}] {} type={} flags={}\n",
+            resourceIndex,
+            resource.Name,
+            resource.GetType(),
+            resource.Flags);
+    }
+
+    fmt::format_to(std::back_inserter(buffer), "Passes: {}\n", _passes.size());
+    for (const auto& pass : _passes) {
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  Pass[{}] {} queue={} reads={} writes={}\n",
+            pass.Id,
+            pass.Name,
+            pass.QueueClass,
+            pass.Reads.size(),
+            pass.Writes.size());
+        for (const auto& readEdge : pass.Reads) {
+            fmt::format_to(
+                std::back_inserter(buffer),
+                "    R res[{}] mode={} {}\n",
+                readEdge.Handle.Index,
+                readEdge.Mode,
+                RGFormatEdgeRange(readEdge));
+        }
+        for (const auto& writeEdge : pass.Writes) {
+            fmt::format_to(
+                std::back_inserter(buffer),
+                "    W res[{}] mode={} {}\n",
+                writeEdge.Handle.Index,
+                writeEdge.Mode,
+                RGFormatEdgeRange(writeEdge));
+        }
+    }
+
+    return string{buffer.data(), buffer.size()};
+}
+
+string RGGraphBuilder::DumpCompiledGraph(const CompiledGraph& compiled) const {
+    fmt::memory_buffer buffer{};
+    fmt::format_to(std::back_inserter(buffer), "RenderGraph Compiled\n");
+    fmt::format_to(std::back_inserter(buffer), "success={}", compiled.Success ? "true" : "false");
+    if (!compiled.ErrorMessage.empty()) {
+        fmt::format_to(std::back_inserter(buffer), " error=\"{}\"", compiled.ErrorMessage);
+    }
+    fmt::format_to(std::back_inserter(buffer), "\n");
+
+    fmt::format_to(std::back_inserter(buffer), "sorted_passes:");
+    for (uint32_t passIndex : compiled.SortedPasses) {
+        fmt::format_to(std::back_inserter(buffer), " {}", passIndex);
+    }
+    fmt::format_to(std::back_inserter(buffer), "\n");
+
+    fmt::format_to(std::back_inserter(buffer), "culled_passes:");
+    for (uint32_t passIndex : compiled.CulledPasses) {
+        fmt::format_to(std::back_inserter(buffer), " {}", passIndex);
+    }
+    fmt::format_to(std::back_inserter(buffer), "\n");
+
+    fmt::format_to(std::back_inserter(buffer), "dependency_edges:");
+    for (const auto& edge : compiled.DependencyEdges) {
+        fmt::format_to(std::back_inserter(buffer), " ({}->{})", edge.first, edge.second);
+    }
+    fmt::format_to(std::back_inserter(buffer), "\n");
+
+    fmt::format_to(std::back_inserter(buffer), "subresource_lifetimes:\n");
+    for (const auto& lifetime : compiled.SubresourceLifetimes) {
+        const string range = RGFormatSubresourceRange(lifetime.Range);
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  res[{}] {} [{}, {}] external={}\n",
+            lifetime.Handle.Index,
+            range,
+            lifetime.FirstPass,
+            lifetime.LastPass,
+            lifetime.IsExternal ? "true" : "false");
+    }
+
+    fmt::format_to(std::back_inserter(buffer), "pass_barriers:\n");
+    for (uint32_t sortedIndex = 0; sortedIndex < static_cast<uint32_t>(compiled.PassBarriers.size()); ++sortedIndex) {
+        const uint32_t passIndex = sortedIndex < static_cast<uint32_t>(compiled.SortedPasses.size())
+                                       ? compiled.SortedPasses[sortedIndex]
+                                       : RGSubresourceLifetime::InvalidPassIndex;
+        for (const auto& barrier : compiled.PassBarriers[sortedIndex]) {
+            fmt::format_to(
+                std::back_inserter(buffer),
+                "  [Pass {}] Barrier: handle={} range={} {} -> {}\n",
+                passIndex,
+                barrier.Handle.Index,
+                RGFormatSubresourceRange(barrier.Range),
+                barrier.StateBefore,
+                barrier.StateAfter);
+        }
+    }
+
+    fmt::format_to(std::back_inserter(buffer), "allocations: {}\n", compiled.Allocations.size());
+
+    return string{buffer.data(), buffer.size()};
+}
+
+std::string_view format_as(RGResourceType v) noexcept {
+    switch (v) {
+        case RGResourceType::Unknown: return "UNKNOWN";
+        case RGResourceType::Texture: return "Texture";
+        case RGResourceType::Buffer: return "Buffer";
+        case RGResourceType::IndirectArgs: return "IndirectArgs";
+    }
+    return "UNKNOWN";
+}
+
+std::string_view format_as(RGResourceFlag v) noexcept {
+    switch (v) {
+        case RGResourceFlag::None: return "None";
+        case RGResourceFlag::Persistent: return "Persistent";
+        case RGResourceFlag::External: return "External";
+        case RGResourceFlag::Output: return "Output";
+        case RGResourceFlag::ForceRetain: return "ForceRetain";
+        case RGResourceFlag::Temporal: return "Temporal";
+    }
+    return "UNKNOWN";
+}
+
+std::string_view format_as(RGAccessMode v) noexcept {
+    switch (v) {
+        case RGAccessMode::Unknown: return "Unknown";
+        case RGAccessMode::SampledRead: return "SampledRead";
+        case RGAccessMode::StorageRead: return "StorageRead";
+        case RGAccessMode::StorageWrite: return "StorageWrite";
+        case RGAccessMode::ColorAttachmentWrite: return "ColorAttachmentWrite";
+        case RGAccessMode::DepthStencilRead: return "DepthStencilRead";
+        case RGAccessMode::DepthStencilWrite: return "DepthStencilWrite";
+        case RGAccessMode::CopySource: return "CopySource";
+        case RGAccessMode::CopyDestination: return "CopyDestination";
+        case RGAccessMode::IndirectRead: return "IndirectRead";
+    }
+    return "UNKNOWN";
+}
+
+}  // namespace radray::render
