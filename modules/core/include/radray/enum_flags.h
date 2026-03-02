@@ -31,6 +31,12 @@ public:
 
     constexpr EnumFlags(T v) noexcept : _value(v) {}
 
+    constexpr explicit EnumFlags(std::underlying_type_t<T> v) noexcept : _value(static_cast<T>(v)) {}
+
+    template <class U>
+    requires std::is_convertible_v<U, T>
+    constexpr explicit EnumFlags(U v) noexcept : _value(static_cast<T>(v)) {}
+
     constexpr bool HasFlag(EnumFlags f) const noexcept {
         auto v = static_cast<std::underlying_type_t<T>>(f._value);
         auto my = static_cast<std::underlying_type_t<T>>(_value);
@@ -73,12 +79,36 @@ public:
         return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) | static_cast<std::underlying_type_t<T>>(r._value));
     }
 
+    friend constexpr EnumFlags operator|(EnumFlags l, T r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) | static_cast<std::underlying_type_t<T>>(r));
+    }
+
+    friend constexpr EnumFlags operator|(T l, EnumFlags r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) | static_cast<std::underlying_type_t<T>>(r._value));
+    }
+
     friend constexpr EnumFlags operator&(EnumFlags l, EnumFlags r) noexcept {
         return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) & static_cast<std::underlying_type_t<T>>(r._value));
     }
 
+    friend constexpr EnumFlags operator&(EnumFlags l, T r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) & static_cast<std::underlying_type_t<T>>(r));
+    }
+
+    friend constexpr EnumFlags operator&(T l, EnumFlags r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) & static_cast<std::underlying_type_t<T>>(r._value));
+    }
+
     friend constexpr EnumFlags operator^(EnumFlags l, EnumFlags r) noexcept {
         return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) ^ static_cast<std::underlying_type_t<T>>(r._value));
+    }
+
+    friend constexpr EnumFlags operator^(EnumFlags l, T r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l._value) ^ static_cast<std::underlying_type_t<T>>(r));
+    }
+
+    friend constexpr EnumFlags operator^(T l, EnumFlags r) noexcept {
+        return static_cast<T>(static_cast<std::underlying_type_t<T>>(l) ^ static_cast<std::underlying_type_t<T>>(r._value));
     }
 
     friend constexpr EnumFlags operator~(EnumFlags v) noexcept {

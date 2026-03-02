@@ -37,7 +37,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
         }
         const auto msg = fmt::format(
             "type={} id={} {}: {}",
-            FormatVkDebugUtilsMessageTypeFlagsEXT(messageType),
+            VulkanDebugUtilsMessageTypeFlagsEXT{static_cast<int32_t>(messageType)},
             pCallbackData == nullptr ? 0 : pCallbackData->messageIdNumber,
             (pCallbackData == nullptr || pCallbackData->pMessageIdName == nullptr) ? "" : pCallbackData->pMessageIdName,
             (pCallbackData == nullptr || pCallbackData->pMessage == nullptr) ? "" : pCallbackData->pMessage);
@@ -2176,7 +2176,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 r.requiredCount = i.Count;
             } else {
                 r.requiredCount = 0;
-                RADRAY_WARN_LOG("vk unsupported queue type: {}", FormatVkQueueFlags(r.requiredFlag));
+                RADRAY_WARN_LOG("vk unsupported queue type: {}", VulkanQueueFlags{static_cast<int32_t>(r.requiredFlag)});
             }
         }
         for (auto& req : queueRequests) {
@@ -2190,7 +2190,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         }
         for (const auto& i : queueRequests) {
             if (i.queueIndices.size() < i.requiredCount) {
-                RADRAY_ERR_LOG("vk not enough queue family for type: {}", FormatVkQueueFlags(i.requiredFlag));
+                RADRAY_ERR_LOG("vk not enough queue family for type: {}", VulkanQueueFlags{static_cast<int32_t>(i.requiredFlag)});
                 return nullptr;
             }
         }

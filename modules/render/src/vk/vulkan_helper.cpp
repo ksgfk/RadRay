@@ -691,35 +691,36 @@ VkPresentModeKHR MapType(PresentMode v) noexcept {
     Unreachable();
 }
 
-std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept {
-    if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT) {
-        return "General";
-    } else if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
-        return "Validation";
-    } else if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT) {
-        return "Performance";
-    } else if (v & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) {
-        return "DeviceAddressBinding";
-    } else {
-        return "UNKNOWN";
+}  // namespace radray::render::vulkan
+
+std::string_view format_as(VkQueueFlagBits v) noexcept {
+    switch (v) {
+        case VK_QUEUE_GRAPHICS_BIT: return "Graphics";
+        case VK_QUEUE_COMPUTE_BIT: return "Compute";
+        case VK_QUEUE_TRANSFER_BIT: return "Transfer";
+        case VK_QUEUE_SPARSE_BINDING_BIT: return "SparseBinding";
+        case VK_QUEUE_PROTECTED_BIT: return "Protected";
+        case VK_QUEUE_VIDEO_DECODE_BIT_KHR: return "VideoDecode";
+        case VK_QUEUE_VIDEO_ENCODE_BIT_KHR: return "VideoEncode";
+        case VK_QUEUE_OPTICAL_FLOW_BIT_NV: return "OpticalFlow";
+        case VK_QUEUE_DATA_GRAPH_BIT_ARM: return "DataGraph";
+        case VK_QUEUE_FLAG_BITS_MAX_ENUM: return "UNKNOWN";
     }
+    return "UNKNOWN";
 }
 
-std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept {
-    if (v & VK_QUEUE_GRAPHICS_BIT) {
-        return "Graphics";
-    } else if (v & VK_QUEUE_COMPUTE_BIT) {
-        return "Compute";
-    } else if (v & VK_QUEUE_TRANSFER_BIT) {
-        return "Transfer";
-    } else if (v & VK_QUEUE_SPARSE_BINDING_BIT) {
-        return "SparseBinding";
-    } else {
-        return "UNKNOWN";
+std::string_view format_as(VkDebugUtilsMessageTypeFlagBitsEXT v) noexcept {
+    switch (v) {
+        case VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: return "General";
+        case VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: return "Validation";
+        case VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: return "Performance";
+        case VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT: return "DeviceAddressBinding";
+        case VK_DEBUG_UTILS_MESSAGE_TYPE_FLAG_BITS_MAX_ENUM_EXT: return "UNKNOWN";
     }
+    return "UNKNOWN";
 }
 
-std::string_view to_string(enum VkPhysicalDeviceType v) noexcept {
+std::string_view format_as(VkPhysicalDeviceType v) noexcept {
     switch (v) {
         case VK_PHYSICAL_DEVICE_TYPE_OTHER: return "Other";
         case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated";
@@ -728,10 +729,10 @@ std::string_view to_string(enum VkPhysicalDeviceType v) noexcept {
         case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
         case VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM: return "UNKNOWN";
     }
-    Unreachable();
+    return "UNKNOWN";
 }
 
-std::string_view to_string(VkResult v) noexcept {
+std::string_view format_as(VkResult v) noexcept {
     switch (v) {
         case VK_SUCCESS: return "Success";
         case VK_NOT_READY: return "NotReady";
@@ -782,12 +783,13 @@ std::string_view to_string(VkResult v) noexcept {
         case VK_INCOMPATIBLE_SHADER_BINARY_EXT: return "IncompatibleShaderBinaryEXT";
         case VK_PIPELINE_BINARY_MISSING_KHR: return "PipelineBinaryMissingKHR";
         case VK_ERROR_NOT_ENOUGH_SPACE_KHR: return "ErrorNotEnoughSpaceKHR";
+        case VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT: return "ErrorPresentTimingQueueFullEXT";
         case VK_RESULT_MAX_ENUM: return "UNKNOWN";
     }
-    Unreachable();
+    return "UNKNOWN";
 }
 
-std::string_view to_string(VkFormat v) noexcept {
+std::string_view format_as(VkFormat v) noexcept {
     switch (v) {
         case VK_FORMAT_UNDEFINED: return "UNDEFINED";
         case VK_FORMAT_R4G4_UNORM_PACK8: return "R4G4_UNORM_PACK8";
@@ -1039,12 +1041,57 @@ std::string_view to_string(VkFormat v) noexcept {
         case VK_FORMAT_PVRTC2_2BPP_SRGB_BLOCK_IMG: return "PVRTC2_2BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_PVRTC2_4BPP_SRGB_BLOCK_IMG: return "PVRTC2_4BPP_SRGB_BLOCK_IMG";
         case VK_FORMAT_R16G16_SFIXED5_NV: return "R16G16_SFIXED5_NV";
-
-        default: return "UNKNOWN";
+        case VK_FORMAT_ASTC_3x3x3_UNORM_BLOCK_EXT: return "ASTC_3x3x3_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_3x3x3_SRGB_BLOCK_EXT: return "ASTC_3x3x3_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_3x3x3_SFLOAT_BLOCK_EXT: return "ASTC_3x3x3_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x3x3_UNORM_BLOCK_EXT: return "ASTC_4x3x3_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x3x3_SRGB_BLOCK_EXT: return "ASTC_4x3x3_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x3x3_SFLOAT_BLOCK_EXT: return "ASTC_4x3x3_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x3_UNORM_BLOCK_EXT: return "ASTC_4x4x3_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x3_SRGB_BLOCK_EXT: return "ASTC_4x4x3_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x3_SFLOAT_BLOCK_EXT: return "ASTC_4x4x3_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x4_UNORM_BLOCK_EXT: return "ASTC_4x4x4_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x4_SRGB_BLOCK_EXT: return "ASTC_4x4x4_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_4x4x4_SFLOAT_BLOCK_EXT: return "ASTC_4x4x4_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x4x4_UNORM_BLOCK_EXT: return "ASTC_5x4x4_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x4x4_SRGB_BLOCK_EXT: return "ASTC_5x4x4_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x4x4_SFLOAT_BLOCK_EXT: return "ASTC_5x4x4_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x4_UNORM_BLOCK_EXT: return "ASTC_5x5x4_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x4_SRGB_BLOCK_EXT: return "ASTC_5x5x4_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x4_SFLOAT_BLOCK_EXT: return "ASTC_5x5x4_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x5_UNORM_BLOCK_EXT: return "ASTC_5x5x5_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x5_SRGB_BLOCK_EXT: return "ASTC_5x5x5_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_5x5x5_SFLOAT_BLOCK_EXT: return "ASTC_5x5x5_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x5x5_UNORM_BLOCK_EXT: return "ASTC_6x5x5_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x5x5_SRGB_BLOCK_EXT: return "ASTC_6x5x5_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x5x5_SFLOAT_BLOCK_EXT: return "ASTC_6x5x5_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x5_UNORM_BLOCK_EXT: return "ASTC_6x6x5_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x5_SRGB_BLOCK_EXT: return "ASTC_6x6x5_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x5_SFLOAT_BLOCK_EXT: return "ASTC_6x6x5_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x6_UNORM_BLOCK_EXT: return "ASTC_6x6x6_UNORM_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x6_SRGB_BLOCK_EXT: return "ASTC_6x6x6_SRGB_BLOCK_EXT";
+        case VK_FORMAT_ASTC_6x6x6_SFLOAT_BLOCK_EXT: return "ASTC_6x6x6_SFLOAT_BLOCK_EXT";
+        case VK_FORMAT_R8_BOOL_ARM: return "R8_BOOL_ARM";
+        case VK_FORMAT_R10X6_UINT_PACK16_ARM: return "R10X6_UINT_PACK16_ARM";
+        case VK_FORMAT_R10X6G10X6_UINT_2PACK16_ARM: return "R10X6G10X6_UINT_2PACK16_ARM";
+        case VK_FORMAT_R10X6G10X6B10X6A10X6_UINT_4PACK16_ARM: return "R10X6G10X6B10X6A10X6_UINT_4PACK16_ARM";
+        case VK_FORMAT_R12X4_UINT_PACK16_ARM: return "R12X4_UINT_PACK16_ARM";
+        case VK_FORMAT_R12X4G12X4_UINT_2PACK16_ARM: return "R12X4G12X4_UINT_2PACK16_ARM";
+        case VK_FORMAT_R12X4G12X4B12X4A12X4_UINT_4PACK16_ARM: return "R12X4G12X4B12X4A12X4_UINT_4PACK16_ARM";
+        case VK_FORMAT_R14X2_UINT_PACK16_ARM: return "R14X2_UINT_PACK16_ARM";
+        case VK_FORMAT_R14X2G14X2_UINT_2PACK16_ARM: return "R14X2G14X2_UINT_2PACK16_ARM";
+        case VK_FORMAT_R14X2G14X2B14X2A14X2_UINT_4PACK16_ARM: return "R14X2G14X2B14X2A14X2_UINT_4PACK16_ARM";
+        case VK_FORMAT_R14X2_UNORM_PACK16_ARM: return "R14X2_UNORM_PACK16_ARM";
+        case VK_FORMAT_R14X2G14X2_UNORM_2PACK16_ARM: return "R14X2G14X2_UNORM_2PACK16_ARM";
+        case VK_FORMAT_R14X2G14X2B14X2A14X2_UNORM_4PACK16_ARM: return "R14X2G14X2B14X2A14X2_UNORM_4PACK16_ARM";
+        case VK_FORMAT_G14X2_B14X2R14X2_2PLANE_420_UNORM_3PACK16_ARM: return "G14X2_B14X2R14X2_2PLANE_420_UNORM_3PACK16_ARM";
+        case VK_FORMAT_G14X2_B14X2R14X2_2PLANE_422_UNORM_3PACK16_ARM: return "G14X2_B14X2R14X2_2PLANE_422_UNORM_3PACK16_ARM";
+        case VK_FORMAT_MAX_ENUM: return "UNKNOWN";
     }
+    return "UNKNOWN";
 }
 
-std::string_view to_string(VkPresentModeKHR v) noexcept {
+std::string_view format_as(VkPresentModeKHR v) noexcept {
     switch (v) {
         case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE_KHR";
         case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX_KHR";
@@ -1055,10 +1102,10 @@ std::string_view to_string(VkPresentModeKHR v) noexcept {
         case VK_PRESENT_MODE_FIFO_LATEST_READY_KHR: return "FIFO_LATEST_READY_KHR";
         case VK_PRESENT_MODE_MAX_ENUM_KHR: return "UNKNOWN";
     }
-    Unreachable();
+    return "UNKNOWN";
 }
 
-std::string_view to_string(VkDescriptorType v) noexcept {
+std::string_view format_as(VkDescriptorType v) noexcept {
     switch (v) {
         case VK_DESCRIPTOR_TYPE_SAMPLER: return "SAMPLER";
         case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return "COMBINED_IMAGE_SAMPLER";
@@ -1081,7 +1128,5 @@ std::string_view to_string(VkDescriptorType v) noexcept {
         case VK_DESCRIPTOR_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_NV: return "PARTITIONED_ACCELERATION_STRUCTURE_NV";
         case VK_DESCRIPTOR_TYPE_MAX_ENUM: return "UNKNOWN";
     }
-    Unreachable();
+    return "UNKNOWN";
 }
-
-}  // namespace radray::render::vulkan

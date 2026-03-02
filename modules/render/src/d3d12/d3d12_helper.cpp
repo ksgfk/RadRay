@@ -1196,7 +1196,7 @@ std::string_view format_as(D3D_SHADER_MODEL v) noexcept {
         case D3D_SHADER_MODEL_6_7: return "6.7";
         case D3D_SHADER_MODEL_6_8: return "6.8";
         case D3D_SHADER_MODEL_6_9: return "6.9";
-
+        case D3D_SHADER_MODEL_6_10: return "6.10";
         case D3D_SHADER_MODEL_NONE: return "UNKNOWN";
     }
     return "UNKNOWN";

@@ -248,33 +248,25 @@ VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept;
 VkSamplerAddressMode MapType(AddressMode v) noexcept;
 VkPresentModeKHR MapType(PresentMode v) noexcept;
 
-std::string_view FormatVkDebugUtilsMessageTypeFlagsEXT(VkDebugUtilsMessageTypeFlagsEXT v) noexcept;
-std::string_view FormatVkQueueFlags(VkQueueFlags v) noexcept;
-std::string_view to_string(VkPhysicalDeviceType v) noexcept;
-std::string_view to_string(VkResult v) noexcept;
-std::string_view to_string(VkFormat v) noexcept;
-std::string_view to_string(VkPresentModeKHR v) noexcept;
-std::string_view to_string(VkDescriptorType v) noexcept;
-
 }  // namespace radray::render::vulkan
 
-template <class VkType, class CharT>
-struct RadrayVkTypeFormat : fmt::formatter<std::string_view, CharT> {
-    template <class FormatContext>
-    auto format(VkType val, FormatContext& ctx) const {
-        return fmt::formatter<std::string_view, CharT>::format(radray::render::vulkan::to_string(val), ctx);
-    }
-};
+namespace radray {
+template <>
+struct is_flags<VkQueueFlagBits> : std::true_type {};
+template <>
+struct is_flags<VkDebugUtilsMessageTypeFlagBitsEXT> : std::true_type {};
+}  // namespace radray
+namespace radray::render::vulkan {
+using VulkanQueueFlags = radray::EnumFlags<VkQueueFlagBits>;
+using VulkanDebugUtilsMessageTypeFlagsEXT = radray::EnumFlags<VkDebugUtilsMessageTypeFlagBitsEXT>;
+}  // namespace radray::render::vulkan
 
-template <class CharT>
-struct fmt::formatter<VkPhysicalDeviceType, CharT> : RadrayVkTypeFormat<VkPhysicalDeviceType, CharT> {};
-template <class CharT>
-struct fmt::formatter<VkResult, CharT> : RadrayVkTypeFormat<VkResult, CharT> {};
-template <class CharT>
-struct fmt::formatter<VkFormat, CharT> : RadrayVkTypeFormat<VkFormat, CharT> {};
-template <class CharT>
-struct fmt::formatter<VkPresentModeKHR, CharT> : RadrayVkTypeFormat<VkPresentModeKHR, CharT> {};
-template <class CharT>
-struct fmt::formatter<VkDescriptorType, CharT> : RadrayVkTypeFormat<VkDescriptorType, CharT> {};
+std::string_view format_as(VkQueueFlagBits v) noexcept;
+std::string_view format_as(VkDebugUtilsMessageTypeFlagBitsEXT v) noexcept;
+std::string_view format_as(VkPhysicalDeviceType v) noexcept;
+std::string_view format_as(VkResult v) noexcept;
+std::string_view format_as(VkFormat v) noexcept;
+std::string_view format_as(VkPresentModeKHR v) noexcept;
+std::string_view format_as(VkDescriptorType v) noexcept;
 
 #endif

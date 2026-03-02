@@ -2,19 +2,19 @@
     "Artifacts": [
         {
             "Name": "dxc",
-            "Version": "1.8.2505.1",
+            "Version": "1.9.2602",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-{Platform}-{Arch}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "4ce002b83542a734712e957e13a01386a1ba4b4aaf15d25130b780f5731b91d9"
+                    "Hash": "6cfc2ee68198d19f87319a0fd1f97b1895f845c648b48971b4acccd0b0ee0082"
                 },
                 {
                     "Platform": "macos",
                     "Arch": "arm64",
-                    "Hash": "093e15df1dda60cfb1d5c4d2c32b3dbf0ea7de366d44eacf8e29575df4a6919f"
+                    "Hash": "88e82882b539e1f982ae7a5003155476d1921d456fd5529e7f904b4519c63c5b"
                 }
             ]
         }
@@ -71,7 +71,7 @@
             "Name": "freetype",
             "Type": "git",
             "Git": "https://github.com/freetype/freetype.git",
-            "Tag": "VER-2-14-1"
+            "Tag": "VER-2-14-2"
         },
         {
             "Name": "Vulkan-Headers",
