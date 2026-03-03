@@ -166,9 +166,7 @@ struct SpirvToMslOutput {
 
 namespace radray::render {
 
-class DxcReflectionRadrayExt;
-
-std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes, std::span<const DxcReflectionRadrayExt*> extInfos);
+std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes);
 
 std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
     std::span<const byte> spirvData,

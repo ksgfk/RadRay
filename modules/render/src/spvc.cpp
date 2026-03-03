@@ -37,7 +37,6 @@ ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
 #include <spirv_cross.hpp>
 #include <spirv_cross_c.h>
 #include <spirv_msl.hpp>
-#include <radray/render/dxc.h>
 #include <radray/render/msl.h>
 
 namespace radray::render {
@@ -135,8 +134,77 @@ struct SpirvReflectionContext {
     const spirv_cross::Compiler& compiler;
     SpirvShaderDesc& desc;
     unordered_map<uint32_t, uint32_t>& typeCache;
-    Nullable<const DxcReflectionRadrayExt*> ext;
 };
+
+static bool _IsConstantBufferViewType(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::SPIRType& cbufferType,
+    std::string_view cbufferName) {
+    if (cbufferType.basetype != spirv_cross::SPIRType::Struct || cbufferType.member_types.size() != 1) {
+        return false;
+    }
+    std::string memberName = compiler.get_member_name(cbufferType.self, 0);
+    if (memberName == cbufferName) {
+        return true;
+    }
+    const uint32_t memberTypeId = cbufferType.member_types[0];
+    std::string memberTypeName = compiler.get_name(memberTypeId);
+    if (memberTypeName.empty()) {
+        memberTypeName = compiler.get_fallback_name(memberTypeId);
+    }
+    return memberTypeName == cbufferName;
+}
+
+static bool _IsLikelyConstantBufferViewTypeName(std::string_view typeName) {
+    return typeName.starts_with("type.ConstantBuffer.") || typeName.starts_with("ConstantBuffer<");
+}
+
+static bool _InferIsViewInHlsl(
+    const spirv_cross::Compiler& compiler,
+    const spirv_cross::Resource& res,
+    std::string_view cbufferName) {
+    const auto& type = compiler.get_type(res.type_id);
+    if (_IsConstantBufferViewType(compiler, type, cbufferName)) {
+        return true;
+    }
+    const auto& baseType = compiler.get_type(res.base_type_id);
+    if (_IsConstantBufferViewType(compiler, baseType, cbufferName)) {
+        return true;
+    }
+    if (type.parent_type != 0) {
+        const auto& parentType = compiler.get_type(type.parent_type);
+        if (_IsConstantBufferViewType(compiler, parentType, cbufferName)) {
+            return true;
+        }
+    }
+    if (baseType.parent_type != 0) {
+        const auto& parentType = compiler.get_type(baseType.parent_type);
+        if (_IsConstantBufferViewType(compiler, parentType, cbufferName)) {
+            return true;
+        }
+    }
+    if (res.base_type_id == 0) {
+        return false;
+    }
+    std::string baseTypeName = compiler.get_name(res.base_type_id);
+    if (baseTypeName.empty()) {
+        baseTypeName = compiler.get_fallback_name(res.base_type_id);
+    }
+    if (_IsLikelyConstantBufferViewTypeName(baseTypeName)) {
+        return true;
+    }
+    if (baseTypeName == cbufferName) {
+        return true;
+    }
+    std::string typeName = compiler.get_name(res.type_id);
+    if (typeName.empty()) {
+        typeName = compiler.get_fallback_name(res.type_id);
+    }
+    if (_IsLikelyConstantBufferViewTypeName(typeName)) {
+        return true;
+    }
+    return false;
+}
 
 static uint32_t _ReflectType(
     SpirvReflectionContext& ctx,
@@ -299,18 +367,8 @@ static void _ProcessResource(
         access = compiler.get_decoration(res.id, spv::DecorationNonWritable);
         binding.ReadOnly = (access != 0);
     }
-    if (kind == SpirvResourceKind::UniformBuffer || kind == SpirvResourceKind::PushConstant) {
-        // 检查扩展信息，确定是否为HLSL视图
-        if (ctx.ext.HasValue()) {
-            auto it = std::find_if(
-                ctx.ext->CBuffers.begin(), ctx.ext->CBuffers.end(),
-                [&](const DxcReflectionRadrayExtCBuffer& cb) {
-                    return cb.Name == binding.Name && cb.Space == binding.Set && cb.BindPoint == binding.Binding;
-                });
-            if (it != ctx.ext->CBuffers.end()) {
-                binding.IsViewInHlsl = it->IsViewInHlsl;
-            }
-        }
+    if (kind == SpirvResourceKind::UniformBuffer) {
+        binding.IsViewInHlsl = _InferIsViewInHlsl(compiler, res, binding.Name);
         const auto* typePtr = &type;
         while (!typePtr->array.empty()) {
             typePtr = &compiler.get_type(typePtr->parent_type);
@@ -442,10 +500,9 @@ static void _MergeResourceBindings(SpirvShaderDesc& desc) {
     }
 }
 
-std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes, std::span<const DxcReflectionRadrayExt*> extInfos) {
+std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes) {
     SpirvShaderDesc desc;
-    for (size_t i = 0; i < bytecodes.size(); i++) {
-        const auto& bytecode = bytecodes[i];
+    for (const auto& bytecode : bytecodes) {
         if (bytecode.Data.size() % 4 != 0) {
             RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
             return std::nullopt;
@@ -457,11 +514,7 @@ std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> b
                 bytecode.Data.size() / sizeof(uint32_t)};
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
             desc.UsedStages = desc.UsedStages | bytecode.Stage;
-            Nullable<const DxcReflectionRadrayExt*> ext{nullptr};
-            if (i < extInfos.size()) {
-                ext = extInfos[i];
-            }
-            SpirvReflectionContext ctx{compiler, desc, typeCache, ext};
+            SpirvReflectionContext ctx{compiler, desc, typeCache};
             if (bytecode.Stage == ShaderStage::Vertex) {
                 _ReflectVertexInputs(ctx, resources);
             }

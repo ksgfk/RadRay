@@ -144,8 +144,8 @@ std::optional<ShaderCompileResult> CompileShaderFromHLSL(
     }
     BindBridgeLayout bindLayout;
     if (backend == RenderBackend::D3D12) {
-        auto vsRefl = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vsBin.Refl, vsBin.ReflExt).value();
-        auto psRefl = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, psBin.Refl, psBin.ReflExt).value();
+        auto vsRefl = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vsBin.Refl).value();
+        auto psRefl = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, psBin.Refl).value();
         const HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
         auto merged = MergeHlslShaderDesc(descs).value();
         bindLayout = BindBridgeLayout{merged, staticSamplers};
@@ -153,8 +153,7 @@ std::optional<ShaderCompileResult> CompileShaderFromHLSL(
         SpirvBytecodeView spvs[] = {
             {vsBin.Data, entryVS, ShaderStage::Vertex},
             {psBin.Data, entryPS, ShaderStage::Pixel}};
-        const DxcReflectionRadrayExt* extInfos[] = {&vsBin.ReflExt, &psBin.ReflExt};
-        auto spirvDesc = ReflectSpirv(spvs, extInfos).value();
+        auto spirvDesc = ReflectSpirv(spvs).value();
         bindLayout = BindBridgeLayout{spirvDesc, staticSamplers};
     } else if (backend == RenderBackend::Metal) {
         MslReflectParams mslParams[] = {
@@ -220,15 +219,14 @@ std::optional<ComputeShaderCompileResult> CompileComputeShaderFromHLSL(
         bindLayout = BindBridgeLayout{mslRefl, {}};
     } else if (backend == RenderBackend::D3D12) {
         csShader = device->CreateShader({csBin.Data, csBin.Category}).Unwrap();
-        auto csRefl = dxc->GetShaderDescFromOutput(ShaderStage::Compute, csBin.Refl, csBin.ReflExt).value();
+        auto csRefl = dxc->GetShaderDescFromOutput(ShaderStage::Compute, csBin.Refl).value();
         const HlslShaderDesc* descs[] = {&csRefl};
         auto merged = MergeHlslShaderDesc(descs).value();
         bindLayout = BindBridgeLayout{merged, {}};
     } else if (backend == RenderBackend::Vulkan) {
         csShader = device->CreateShader({csBin.Data, csBin.Category}).Unwrap();
         SpirvBytecodeView spvs[] = {{csBin.Data, entryCS, ShaderStage::Compute}};
-        const DxcReflectionRadrayExt* extInfos[] = {&csBin.ReflExt};
-        auto spirvDesc = ReflectSpirv(spvs, extInfos).value();
+        auto spirvDesc = ReflectSpirv(spvs).value();
         bindLayout = BindBridgeLayout{spirvDesc, {}};
     }
     return ComputeShaderCompileResult{std::move(csShader), std::move(bindLayout)};

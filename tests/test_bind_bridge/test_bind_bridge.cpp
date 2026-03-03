@@ -114,7 +114,7 @@ static std::optional<HlslShaderDesc> CompileHlslDesc(
     ShaderStage stage) {
     auto out = dxc.Compile(hlsl, entry, stage, HlslShaderModel::SM60, true);
     if (!out.has_value()) return std::nullopt;
-    return dxc.GetShaderDescFromOutput(stage, out->Refl, out->ReflExt);
+    return dxc.GetShaderDescFromOutput(stage, out->Refl);
 }
 
 // ============================================================
@@ -137,7 +137,6 @@ static std::optional<SpirvShaderDesc> CompileSpirvDesc(
     std::span<std::pair<const char*, ShaderStage>> entries) {
     std::vector<DxcOutput> outputs;
     std::vector<SpirvBytecodeView> views;
-    std::vector<const DxcReflectionRadrayExt*> exts;
     for (auto& [entry, stage] : entries) {
         auto out = CompileSpirv(dxc, hlsl, entry, stage);
         if (!out.has_value()) return std::nullopt;
@@ -145,9 +144,8 @@ static std::optional<SpirvShaderDesc> CompileSpirvDesc(
     }
     for (size_t i = 0; i < outputs.size(); i++) {
         views.push_back({outputs[i].Data, entries[i].first, entries[i].second});
-        exts.push_back(&outputs[i].ReflExt);
     }
-    return ReflectSpirv(views, exts);
+    return ReflectSpirv(views);
 }
 
 // ============================================================

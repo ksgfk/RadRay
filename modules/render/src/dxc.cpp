@@ -13,50 +13,6 @@
 
 namespace radray::render {
 
-std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::span<const byte> data) noexcept {
-    const byte* ptr = data.data();
-    const byte* end = ptr + data.size();
-    auto readU32 = [&]() -> uint32_t {
-        if (ptr + sizeof(uint32_t) > end) return 0;
-        uint32_t v;
-        std::memcpy(&v, ptr, sizeof(uint32_t));
-        ptr += sizeof(uint32_t);
-        return v;
-    };
-    auto readU8 = [&]() -> uint8_t {
-        if (ptr + sizeof(uint8_t) > end) return 0;
-        uint8_t v;
-        std::memcpy(&v, ptr, sizeof(uint8_t));
-        ptr += sizeof(uint8_t);
-        return v;
-    };
-    uint32_t magic = readU32();
-    constexpr uint32_t Magic = 0x52524558;  // RREX
-    if (magic != Magic) {
-        return std::nullopt;
-    }
-    DxcReflectionRadrayExt result;
-    result.TargetType = readU8();
-    uint32_t count = readU32();
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t nameLen = readU32();
-        string name;
-        if (ptr + nameLen <= end) {
-            name.assign(reinterpret_cast<const char*>(ptr), nameLen);
-            ptr += nameLen;
-        }
-        uint32_t bindPoint = readU32();
-        uint32_t space = readU32();
-        uint8_t isViewInHlsl = readU8();
-        DxcReflectionRadrayExtCBuffer& cbExt = result.CBuffers.emplace_back();
-        cbExt.Name = std::move(name);
-        cbExt.BindPoint = bindPoint;
-        cbExt.Space = space;
-        cbExt.IsViewInHlsl = isViewInHlsl != 0;
-    }
-    return result;
-}
-
 bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
     return Class == HlslShaderVariableClass::SCALAR ||
            Class == HlslShaderVariableClass::VECTOR ||
@@ -757,30 +713,16 @@ public:
         if (compileResult->HasOutput(DXC_OUT_REFLECTION)) {
             reflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION);
         }
-        std::span<const byte> radrayReflData{};
-        if (compileResult->HasOutput(DXC_OUT_REFLECTION_RADRAY)) {
-            radrayReflData = GetBlobData(compileResult.Get(), DXC_OUT_REFLECTION_RADRAY);
-        } else {
-            RADRAY_ERR_LOG("dxc no radray ext reflection data");
-            return std::nullopt;
-        }
-        auto reflExtOpt = DeserializeDxcReflectionRadrayExt(radrayReflData);
-        if (!reflExtOpt.has_value()) {
-            RADRAY_ERR_LOG("dxc no radray ext reflection data");
-            return std::nullopt;
-        }
         auto argsData = ParseArgs(args);
         return DxcOutput{
             {resultData.begin(), resultData.end()},
             {reflData.begin(), reflData.end()},
-            std::move(reflExtOpt.value()),
             argsData.category};
     }
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(
         ShaderStage stage,
-        std::span<const byte> refl,
-        const DxcReflectionRadrayExt& ext) noexcept {
+        std::span<const byte> refl) noexcept {
         if (refl.empty()) {
             return std::nullopt;
         }
@@ -885,25 +827,40 @@ public:
             ibDesc.Stages = stage;
         }
 
+        /**
+         * 识别 HLSL 中的模板常量缓冲视图 ConstantBuffer<T>。
+         *
+         * 由于标准 DXC 反射并未直接提供标识 ConstantBuffer<T> 的独立字段，这里利用了一项业界通用的特征约定：
+         * 当在 HLSL 中声明 `ConstantBuffer<T> myCB;` 时，DXC 会在反射返回的数据中：
+         * 1. 建立一个名为 "myCB" 的 CBuffer
+         * 2. 该 CBuffer 内部只包含唯一一个变量 (Variable)
+         * 3. 这个变量的名称 (或其包含的类型名称) 必定也等于该 CBuffer 的名称 "myCB"
+         *
+         * 通过比对这个排他性的结构特征，我们可以完全剥离自定义 DXC 拓展，
+         * 直接利用标准 DXC 反射推断其是否为模板视图 (IsViewInHlsl)。
+         *
+         * `cbuffer myCB { T myCB; };` 确实也会产生与上述完全一致的特征，因此 hlsl 内需要极力避免这种写法
+         */
+        auto inferCBufferIsViewInHlsl = [&](const HlslShaderBufferDesc& cb) noexcept {
+            if (cb.Variables.size() != 1) {
+                return false;
+            }
+            const size_t varIdx = cb.Variables[0];
+            if (varIdx >= result.Variables.size()) {
+                return false;
+            }
+            const auto& var = result.Variables[varIdx];
+            const size_t varTypeIdx = static_cast<size_t>(var.Type);
+            if (varTypeIdx >= result.Types.size()) {
+                return false;
+            }
+            const auto& varType = result.Types[varTypeIdx];
+            return var.Name == cb.Name || varType.Name == cb.Name;
+        };
         for (auto& cb : result.ConstantBuffers) {
-            if (cb.Type != HlslCBufferType::CBUFFER) {
-                continue;
+            if (cb.Type == HlslCBufferType::CBUFFER) {
+                cb.IsViewInHlsl = inferCBufferIsViewInHlsl(cb);
             }
-            auto bindIt = std::find_if(result.BoundResources.begin(), result.BoundResources.end(), [&](const HlslInputBindDesc& bind) {
-                return bind.Name == cb.Name;
-            });
-            if (bindIt == result.BoundResources.end()) {
-                RADRAY_ERR_LOG("dxc failed to find bound resource for cbuffer: {}", cb.Name);
-                return std::nullopt;
-            }
-            auto extIt = std::find_if(ext.CBuffers.begin(), ext.CBuffers.end(), [&](const DxcReflectionRadrayExtCBuffer& extCb) {
-                return extCb.BindPoint == bindIt->BindPoint && extCb.Space == bindIt->Space;
-            });
-            if (extIt == ext.CBuffers.end()) {
-                RADRAY_ERR_LOG("dxc no radray ext reflection data for cbuffer: {}", cb.Name);
-                return std::nullopt;
-            }
-            cb.IsViewInHlsl = extIt->IsViewInHlsl;
         }
 
         for (UINT i = 0; i < shaderDesc.InputParameters; i++) {
@@ -1131,9 +1088,8 @@ std::optional<DxcOutput> Dxc::Compile(const DxcCompileParams& params) noexcept {
 
 std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(
     ShaderStage stage,
-    std::span<const byte> refl,
-    const DxcReflectionRadrayExt& ext) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(stage, refl, ext);
+    std::span<const byte> refl) noexcept {
+    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(stage, refl);
 }
 
 }  // namespace radray::render

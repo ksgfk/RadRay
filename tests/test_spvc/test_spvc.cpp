@@ -234,8 +234,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
 TEST(SPVC, ReflectSingleVertexStage) {
     auto [dxc, vs] = CompileSpirv(SIMPLE_VS, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
     EXPECT_EQ(desc->UsedStages, ShaderStage::Vertex);
 }
@@ -243,8 +242,7 @@ TEST(SPVC, ReflectSingleVertexStage) {
 TEST(SPVC, ReflectSinglePixelStage) {
     auto [dxc, ps] = CompileSpirv(SIMPLE_PS, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
     EXPECT_EQ(desc->UsedStages, ShaderStage::Pixel);
 }
@@ -252,8 +250,7 @@ TEST(SPVC, ReflectSinglePixelStage) {
 TEST(SPVC, ReflectSingleComputeStage) {
     auto [dxc, cs] = CompileSpirv(SIMPLE_CS, "CSMain", ShaderStage::Compute);
     SpirvBytecodeView bytecodes[] = {{.Data = cs.Data, .EntryPointName = "CSMain", .Stage = ShaderStage::Compute}};
-    const DxcReflectionRadrayExt* exts[] = {&cs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
     EXPECT_EQ(desc->UsedStages, ShaderStage::Compute);
 }
@@ -269,8 +266,7 @@ TEST(SPVC, ReflectMultiStage) {
     SpirvBytecodeView bytecodes[] = {
         {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex},
         {.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt, &ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // UsedStages should combine both
@@ -284,8 +280,7 @@ TEST(SPVC, MergedResourceStageFlags) {
     SpirvBytecodeView bytecodes[] = {
         {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex},
         {.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt, &ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // Resources used in both stages should have merged stage flags
@@ -304,8 +299,7 @@ TEST(SPVC, MergedResourceStageFlags) {
 TEST(SPVC, VertexInputs) {
     auto [dxc, vs] = CompileSpirv(SIMPLE_VS, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // VS_INPUT: float3 pos (location 0), float2 uv (location 1)
@@ -320,8 +314,7 @@ TEST(SPVC, VertexInputs) {
 TEST(SPVC, VertexInputsThreeAttributes) {
     auto [dxc, vs] = CompileSpirv(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // VS_INPUT: float3 pos (0), float3 nor (1), float2 uv (2)
@@ -337,8 +330,7 @@ TEST(SPVC, VertexInputsThreeAttributes) {
 TEST(SPVC, PixelShaderHasNoVertexInputs) {
     auto [dxc, ps] = CompileSpirv(SIMPLE_PS, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
     EXPECT_TRUE(desc->VertexInputs.empty());
 }
@@ -350,8 +342,7 @@ TEST(SPVC, PixelShaderHasNoVertexInputs) {
 TEST(SPVC, ComputeThreadGroupSize) {
     auto [dxc, cs] = CompileSpirv(SIMPLE_CS, "CSMain", ShaderStage::Compute);
     SpirvBytecodeView bytecodes[] = {{.Data = cs.Data, .EntryPointName = "CSMain", .Stage = ShaderStage::Compute}};
-    const DxcReflectionRadrayExt* exts[] = {&cs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     ASSERT_TRUE(desc->ComputeInfo.has_value());
@@ -363,8 +354,7 @@ TEST(SPVC, ComputeThreadGroupSize) {
 TEST(SPVC, NonComputeHasNoComputeInfo) {
     auto [dxc, vs] = CompileSpirv(SIMPLE_VS, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
     EXPECT_FALSE(desc->ComputeInfo.has_value());
 }
@@ -376,8 +366,7 @@ TEST(SPVC, NonComputeHasNoComputeInfo) {
 TEST(SPVC, ResourceBindingKinds) {
     auto [dxc, ps] = CompileSpirv(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     bool hasUniformBuffer = false;
@@ -396,8 +385,7 @@ TEST(SPVC, ResourceBindingKinds) {
 TEST(SPVC, StorageBufferReflection) {
     auto [dxc, cs] = CompileSpirv(SHADER_STORAGE_BUFFER, "CSMain", ShaderStage::Compute);
     SpirvBytecodeView bytecodes[] = {{.Data = cs.Data, .EntryPointName = "CSMain", .Stage = ShaderStage::Compute}};
-    const DxcReflectionRadrayExt* exts[] = {&cs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // Should have two storage buffers: _Input (read-only) and _Output (read-write)
@@ -419,8 +407,7 @@ TEST(SPVC, StorageBufferReflection) {
 TEST(SPVC, ImageInfoForTextures) {
     auto [dxc, ps] = CompileSpirv(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -440,8 +427,7 @@ TEST(SPVC, ImageInfoForTextures) {
 TEST(SPVC, PushConstantReflection) {
     auto [dxc, vs] = CompileSpirv(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     ASSERT_FALSE(desc->PushConstants.empty());
@@ -457,8 +443,7 @@ TEST(SPVC, PushConstantMergedStages) {
     SpirvBytecodeView bytecodes[] = {
         {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex},
         {.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt, &ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // Push constants used in both stages should be merged
@@ -476,8 +461,7 @@ TEST(SPVC, PushConstantMergedStages) {
 TEST(SPVC, IsViewInHlslFlag) {
     auto [dxc, ps] = CompileSpirv(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -500,8 +484,7 @@ TEST(SPVC, IsViewInHlslFlag) {
 TEST(SPVC, TypeInfoStruct) {
     auto [dxc, vs] = CompileSpirv(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     EXPECT_FALSE(desc->Types.empty());
@@ -519,8 +502,7 @@ TEST(SPVC, TypeInfoStruct) {
 TEST(SPVC, TypeInfoMatrix) {
     auto [dxc, vs] = CompileSpirv(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // Should have float4x4 type (4 columns, 4 vector size)
@@ -540,8 +522,7 @@ TEST(SPVC, TypeInfoMatrix) {
 TEST(SPVC, CBufferArrayMember) {
     auto [dxc, ps] = CompileSpirv(SHADER_CBUFFER_ARRAY, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // Should have _Lights uniform buffer
@@ -562,8 +543,7 @@ TEST(SPVC, CBufferArrayMember) {
 TEST(SPVC, CBufferNotViewWithArrayVariable) {
     auto [dxc, ps] = CompileSpirv(SHADER_CBUFFER_IN_CBUFFER, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     // _DirectionalLight is ConstantBuffer<T> (view), PointLightsCB is cbuffer (not view)
@@ -602,8 +582,7 @@ TEST(SPVC, ResourceNamesNoFilePaths) {
     SpirvBytecodeView bytecodes[] = {
         {.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex},
         {.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt, &ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -619,8 +598,7 @@ TEST(SPVC, ResourceNamesNoFilePaths) {
 TEST(SPVC, ResourceNamesNoFilePathsCompute) {
     auto [dxc, cs] = CompileSpirv(SHADER_STORAGE_BUFFER, "CSMain", ShaderStage::Compute);
     SpirvBytecodeView bytecodes[] = {{.Data = cs.Data, .EntryPointName = "CSMain", .Stage = ShaderStage::Compute}};
-    const DxcReflectionRadrayExt* exts[] = {&cs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -632,8 +610,7 @@ TEST(SPVC, ResourceNamesNoFilePathsCompute) {
 TEST(SPVC, ResourceNamesNoFilePathsCBufferArray) {
     auto [dxc, ps] = CompileSpirv(SHADER_CBUFFER_ARRAY, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -649,8 +626,7 @@ TEST(SPVC, ResourceNamesNoFilePathsCBufferArray) {
 TEST(SPVC, MapResourceBindType) {
     auto [dxc, ps] = CompileSpirv(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -684,9 +660,7 @@ TEST(SPVC, MapResourceBindTypeTexelBuffer) {
 TEST(SPVC, InvalidSpirvDataFails) {
     std::vector<byte> garbage(16, byte{0xFF});
     SpirvBytecodeView bytecodes[] = {{.Data = garbage, .EntryPointName = "main", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt ext{};
-    const DxcReflectionRadrayExt* exts[] = {&ext};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     EXPECT_FALSE(desc.has_value());
 }
 
@@ -694,18 +668,14 @@ TEST(SPVC, NonAlignedSpirvDataFails) {
     // SPIR-V must be 4-byte aligned
     std::vector<byte> bad(13, byte{0x00});
     SpirvBytecodeView bytecodes[] = {{.Data = bad, .EntryPointName = "main", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt ext{};
-    const DxcReflectionRadrayExt* exts[] = {&ext};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     EXPECT_FALSE(desc.has_value());
 }
 
 TEST(SPVC, EmptySpirvDataFails) {
     std::span<const byte> empty{};
     SpirvBytecodeView bytecodes[] = {{.Data = empty, .EntryPointName = "main", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt ext{};
-    const DxcReflectionRadrayExt* exts[] = {&ext};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     // Empty data is 0 bytes, which is 4-byte aligned (0 % 4 == 0), but spirv-cross should fail
     EXPECT_FALSE(desc.has_value());
 }
@@ -717,8 +687,7 @@ TEST(SPVC, EmptySpirvDataFails) {
 TEST(SPVC, UniformBufferSizePopulated) {
     auto [dxc, vs] = CompileSpirv(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex);
     SpirvBytecodeView bytecodes[] = {{.Data = vs.Data, .EntryPointName = "VSMain", .Stage = ShaderStage::Vertex}};
-    const DxcReflectionRadrayExt* exts[] = {&vs.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -736,8 +705,7 @@ TEST(SPVC, UniformBufferSizePopulated) {
 TEST(SPVC, BindingNumbers) {
     auto [dxc, ps] = CompileSpirv(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel);
     SpirvBytecodeView bytecodes[] = {{.Data = ps.Data, .EntryPointName = "PSMain", .Stage = ShaderStage::Pixel}};
-    const DxcReflectionRadrayExt* exts[] = {&ps.ReflExt};
-    auto desc = ReflectSpirv(bytecodes, exts);
+    auto desc = ReflectSpirv(bytecodes);
     ASSERT_TRUE(desc.has_value());
 
     for (const auto& res : desc->ResourceBindings) {
@@ -747,3 +715,4 @@ TEST(SPVC, BindingNumbers) {
         if (res.Name == "_AlbedoSampler") EXPECT_EQ(res.Binding, 5u);
     }
 }
+

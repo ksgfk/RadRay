@@ -354,7 +354,7 @@ TEST(DXC, ReflectionVertexInputParameters) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SIMPLE_VS, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // VS_INPUT has: float3 pos : POSITION, float2 uv : TEXCOORD0
@@ -376,7 +376,7 @@ TEST(DXC, ReflectionVertexStageFlag) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SIMPLE_VS, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
     EXPECT_EQ(desc->Stages, ShaderStages{ShaderStage::Vertex});
 }
@@ -389,7 +389,7 @@ TEST(DXC, ReflectionPixelInputParameters) {
     auto dxc = CreateDxc();
     auto ps = dxc->Compile(SIMPLE_PS, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
     ASSERT_TRUE(ps.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // PS_INPUT has: SV_POSITION, TEXCOORD0
@@ -407,7 +407,7 @@ TEST(DXC, ReflectionComputeThreadGroupSize) {
     auto dxc = CreateDxc();
     auto cs = dxc->Compile(SIMPLE_CS, "CSMain", ShaderStage::Compute, HlslShaderModel::SM60, true);
     ASSERT_TRUE(cs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Compute, cs->Refl, cs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Compute, cs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     EXPECT_EQ(desc->GroupSizeX, 64u);
@@ -424,7 +424,7 @@ TEST(DXC, ReflectionBoundResources) {
     auto dxc = CreateDxc();
     auto ps = dxc->Compile(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
     ASSERT_TRUE(ps.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // PSMain uses: _Obj(b0), _Camera(b1), _Global(b2), TestCBuffer(b3), _AlbedoTex(t0), _AlbedoSampler(s0)
@@ -448,7 +448,7 @@ TEST(DXC, ReflectionComputeUAV) {
     auto dxc = CreateDxc();
     auto cs = dxc->Compile(SIMPLE_CS, "CSMain", ShaderStage::Compute, HlslShaderModel::SM60, true);
     ASSERT_TRUE(cs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Compute, cs->Refl, cs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Compute, cs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     ASSERT_GE(desc->BoundResources.size(), 1u);
@@ -471,7 +471,7 @@ TEST(DXC, ReflectionConstantBufferDetails) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // VSMain uses _Obj, _Camera, _Global
@@ -492,7 +492,7 @@ TEST(DXC, ReflectionCBufferIsViewFlag) {
     auto dxc = CreateDxc();
     auto ps = dxc->Compile(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
     ASSERT_TRUE(ps.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // ConstantBuffer<T> should have IsViewInHlsl = true
@@ -514,7 +514,7 @@ TEST(DXC, ReflectionTypeInfo) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     EXPECT_FALSE(desc->Types.empty());
@@ -538,7 +538,7 @@ TEST(DXC, ReflectionRegisterSpaces) {
     auto dxc = CreateDxc();
     auto ps = dxc->Compile(SHADER_MULTI_REGISTER_SPACE, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
     ASSERT_TRUE(ps.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl);
     ASSERT_TRUE(desc.has_value());
 
     // Verify resources in different spaces
@@ -569,9 +569,9 @@ TEST(DXC, MergeShaderDescs) {
     auto ps = dxc->Compile(SHADER_WITH_RESOURCES, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
     ASSERT_TRUE(ps.has_value());
 
-    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(vsDesc.has_value());
-    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl, ps->ReflExt);
+    auto psDesc = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, ps->Refl);
     ASSERT_TRUE(psDesc.has_value());
 
     const HlslShaderDesc* descs[] = {&*vsDesc, &*psDesc};
@@ -595,66 +595,13 @@ TEST(DXC, MergeSingleDesc) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SIMPLE_VS, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto vsDesc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(vsDesc.has_value());
 
     const HlslShaderDesc* descs[] = {&*vsDesc};
     auto merged = MergeHlslShaderDesc(descs);
     ASSERT_TRUE(merged.has_value());
     EXPECT_EQ(merged->Stages, ShaderStages{ShaderStage::Vertex});
-}
-
-// ============================================================
-// Test: DxcReflectionRadrayExt
-// ============================================================
-
-TEST(DXC, ReflectionExtCBufferInfo) {
-    auto dxc = CreateDxc();
-    auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
-    ASSERT_TRUE(vs.has_value());
-
-    // ReflExt should contain CBuffer metadata
-    EXPECT_FALSE(vs->ReflExt.CBuffers.empty());
-    for (const auto& cb : vs->ReflExt.CBuffers) {
-        EXPECT_FALSE(cb.Name.empty());
-    }
-}
-
-TEST(DXC, ReflectionExtTargetType) {
-    auto dxc = CreateDxc();
-
-    // DXIL compilation
-    auto dxil = dxc->Compile(SIMPLE_PS, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true);
-    ASSERT_TRUE(dxil.has_value());
-    EXPECT_EQ(dxil->ReflExt.TargetType, 0u);  // 0 = DXIL
-
-    // SPIR-V compilation
-    auto spirv = dxc->Compile(SIMPLE_PS, "PSMain", ShaderStage::Pixel, HlslShaderModel::SM60, true, {}, {}, true);
-    ASSERT_TRUE(spirv.has_value());
-    EXPECT_EQ(spirv->ReflExt.TargetType, 1u);  // 1 = SPIR-V
-}
-
-// ============================================================
-// Test: DeserializeDxcReflectionRadrayExt round-trip
-// ============================================================
-
-TEST(DXC, DeserializeReflectionExt) {
-    auto dxc = CreateDxc();
-    auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
-    ASSERT_TRUE(vs.has_value());
-    EXPECT_FALSE(vs->Refl.empty());
-
-    // The Refl blob should be deserializable
-    auto ext = DeserializeDxcReflectionRadrayExt(vs->Refl);
-    // Note: DeserializeDxcReflectionRadrayExt may or may not succeed on the raw Refl blob
-    // depending on the format. The ReflExt is already populated by Compile().
-    // This test verifies the function doesn't crash on valid data.
-}
-
-TEST(DXC, DeserializeEmptyDataReturnsNullopt) {
-    std::span<const byte> empty{};
-    auto result = DeserializeDxcReflectionRadrayExt(empty);
-    EXPECT_FALSE(result.has_value());
 }
 
 // ============================================================
@@ -707,20 +654,6 @@ TEST(DXC, DxilAndSpirvDifferentOutput) {
 }
 
 // ============================================================
-// Test: Reflection from SPIR-V compilation
-// ============================================================
-
-TEST(DXC, ReflectionFromSpirvCompile) {
-    auto dxc = CreateDxc();
-    auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true, {}, {}, true);
-    ASSERT_TRUE(vs.has_value());
-
-    // SPIR-V output should still have reflection extension data
-    EXPECT_FALSE(vs->ReflExt.CBuffers.empty());
-    EXPECT_EQ(vs->ReflExt.TargetType, 1u);
-}
-
-// ============================================================
 // Test: FindCBufferByName
 // ============================================================
 
@@ -728,7 +661,7 @@ TEST(DXC, FindCBufferByNameFound) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SHADER_WITH_RESOURCES, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     auto found = desc->FindCBufferByName("_Obj");
@@ -740,9 +673,10 @@ TEST(DXC, FindCBufferByNameNotFound) {
     auto dxc = CreateDxc();
     auto vs = dxc->Compile(SIMPLE_VS, "VSMain", ShaderStage::Vertex, HlslShaderModel::SM60, true);
     ASSERT_TRUE(vs.has_value());
-    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl, vs->ReflExt);
+    auto desc = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vs->Refl);
     ASSERT_TRUE(desc.has_value());
 
     auto found = desc->FindCBufferByName("NonExistent");
     EXPECT_FALSE(found.has_value());
 }
+

@@ -205,27 +205,10 @@ enum class HlslShaderVariableType {
     UINT64,
 };
 
-class DxcReflectionRadrayExtCBuffer {
-public:
-    string Name;
-    uint32_t BindPoint;
-    uint32_t Space;
-    bool IsViewInHlsl{false};
-};
-
-class DxcReflectionRadrayExt {
-public:
-    vector<DxcReflectionRadrayExtCBuffer> CBuffers;
-    uint8_t TargetType{0};  // 0: DXIL, 1: SPIR-V
-};
-
-std::optional<DxcReflectionRadrayExt> DeserializeDxcReflectionRadrayExt(std::span<const byte> data) noexcept;
-
 class DxcOutput {
 public:
     vector<byte> Data;
     vector<byte> Refl;
-    DxcReflectionRadrayExt ReflExt;
     ShaderBlobCategory Category;
 };
 
@@ -395,8 +378,7 @@ public:
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(
         ShaderStage stage,
-        std::span<const byte> refl,
-        const DxcReflectionRadrayExt& ext) noexcept;
+        std::span<const byte> refl) noexcept;
 
 private:
     unique_ptr<Impl> _impl;
