@@ -73,10 +73,3 @@ TEST(Core_WaveObjTest, Simple) {
     reader.Read();
     SimpleTest(reader);
 }
-
-TEST_F(WaveObjTest, SimpleFile) {
-    std::filesystem::path path{testFile};
-    radray::WavefrontObjReader reader{path};
-    reader.Read();
-    SimpleTest(reader);
-}

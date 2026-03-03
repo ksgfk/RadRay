@@ -1,3 +1,1 @@
-radray_add_test(test_free_list_alloc
-    SOURCES test_free_list_alloc.cpp
-    LINK_LIBS radraycore)
+radray_add_test(test_free_list_alloc SOURCES test_free_list_alloc.cpp LINK_LIBS radraycore)

@@ -1494,14 +1494,6 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
-bool ValidateTextureDescriptor(const TextureDescriptor& desc) noexcept;
-bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const TextureDescriptor& targetDesc) noexcept;
-bool ValidateBufferViewDescriptor(const BufferViewDescriptor& desc, const BufferDescriptor& targetDesc) noexcept;
-bool ValidateAccelerationStructureViewDescriptor(const AccelerationStructureViewDescriptor& desc) noexcept;
-bool ValidateAccelerationStructureDescriptor(const AccelerationStructureDescriptor& desc) noexcept;
-bool ValidateBuildBottomLevelASDescriptor(const BuildBottomLevelASDescriptor& desc) noexcept;
-bool ValidateBuildTopLevelASDescriptor(const BuildTopLevelASDescriptor& desc) noexcept;
-bool ValidateTraceRaysDescriptor(const TraceRaysDescriptor& desc, const DeviceDetail& detail) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

@@ -490,9 +490,6 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
         return nullptr;
     }
     auto buf = CastVkObject(desc.Target);
-    if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
-        return nullptr;
-    }
     if (desc.Usage == BufferViewUsage::CBuffer) {
         const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
         if (desc.Range.Offset % align != 0) {
@@ -522,9 +519,6 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
-    if (!ValidateTextureDescriptor(desc)) {
-        return nullptr;
-    }
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -604,9 +598,6 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         return nullptr;
     }
     auto image = CastVkObject(desc.Target);
-    if (!ValidateTextureViewDescriptor(desc, image->_mdesc)) {
-        return nullptr;
-    }
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -644,9 +635,6 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
 }
 
 Nullable<unique_ptr<AccelerationStructureView>> DeviceVulkan::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
-    if (!ValidateAccelerationStructureViewDescriptor(desc)) {
-        return nullptr;
-    }
     auto target = CastVkObject(desc.Target);
     if (!target->IsValid()) {
         RADRAY_ERR_LOG("vk acceleration structure view target is invalid");
@@ -1142,9 +1130,6 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
 Nullable<unique_ptr<AccelerationStructure>> DeviceVulkan::CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept {
     if (!this->GetDetail().IsRayTracingSupported) {
         RADRAY_ERR_LOG("vk ray tracing acceleration structure is not supported by this device");
-        return nullptr;
-    }
-    if (!ValidateAccelerationStructureDescriptor(desc)) {
         return nullptr;
     }
     uint64_t estimatedSize = 0;
@@ -3513,9 +3498,6 @@ void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t slot, BindlessAr
 }
 
 void CommandEncoderRayTracingVulkan::BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept {
-    if (!ValidateBuildBottomLevelASDescriptor(desc)) {
-        return;
-    }
     auto target = CastVkObject(desc.Target);
     auto scratch = CastVkObject(desc.ScratchBuffer);
     if (target->_desc.Type != AccelerationStructureType::BottomLevel) {
@@ -3627,9 +3609,6 @@ void CommandEncoderRayTracingVulkan::BuildBottomLevelAS(const BuildBottomLevelAS
 }
 
 void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept {
-    if (!ValidateBuildTopLevelASDescriptor(desc)) {
-        return;
-    }
     auto target = CastVkObject(desc.Target);
     auto scratch = CastVkObject(desc.ScratchBuffer);
     if (target->_desc.Type != AccelerationStructureType::TopLevel) {
@@ -3763,9 +3742,6 @@ void CommandEncoderRayTracingVulkan::TraceRays(const TraceRaysDescriptor& desc) 
         resolved.Miss = regions.Miss;
         resolved.HitGroup = regions.HitGroup;
         resolved.Callable = regions.Callable;
-    }
-    if (!ValidateTraceRaysDescriptor(resolved, _device->GetDetail())) {
-        return;
     }
     auto toRegion = [&](const ShaderBindingTableRegion& r) {
         VkBufferDeviceAddressInfo info{};

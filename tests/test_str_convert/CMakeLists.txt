@@ -1,3 +1,1 @@
-radray_add_test(test_str_convert
-    SOURCES test_str_convert.cpp
-    LINK_LIBS radraycore)
+radray_add_test(test_str_convert SOURCES test_str_convert.cpp LINK_LIBS radraycore)

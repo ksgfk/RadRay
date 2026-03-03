@@ -746,21 +746,6 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
 }
 
 Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
-    const bool wantsMapRead = desc_.Usage.HasFlag(BufferUse::MapRead);
-    const bool wantsMapWrite = desc_.Usage.HasFlag(BufferUse::MapWrite);
-    if (wantsMapRead && wantsMapWrite) {
-        RADRAY_ERR_LOG("buffer cannot be both map-read and map-write");
-        return nullptr;
-    }
-    if (wantsMapRead && desc_.Memory != MemoryType::ReadBack) {
-        RADRAY_ERR_LOG("map-read buffer must use readback memory");
-        return nullptr;
-    }
-    if (wantsMapWrite && desc_.Memory != MemoryType::Upload) {
-        RADRAY_ERR_LOG("map-write buffer must use upload memory");
-        return nullptr;
-    }
-
     BufferDescriptor desc = desc_;
     const uint64_t logicalSize = desc.Size;
     D3D12_RESOURCE_DESC resDesc{};
@@ -855,10 +840,6 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         return nullptr;
     }
     auto buf = CastD3D12Object(desc.Target);
-    if (!ValidateBufferViewDescriptor(desc, buf->GetDesc())) {
-        return nullptr;
-    }
-
     CpuDescriptorAllocator* heap = _cpuResAlloc.get();
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
@@ -960,9 +941,6 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
     TextureDescriptor desc = desc_;
-    if (!ValidateTextureDescriptor(desc)) {
-        return nullptr;
-    }
     D3D12_RESOURCE_DESC resDesc = MapTextureDesc(desc);
     D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
     // D3D12_CLEAR_VALUE clear{};
@@ -1014,9 +992,6 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         return nullptr;
     }
     auto tex = CastD3D12Object(desc.Target);
-    if (!ValidateTextureViewDescriptor(desc, tex->_desc)) {
-        return nullptr;
-    }
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
     if (desc.Usage == TextureViewUsage::Resource) {
@@ -1242,9 +1217,6 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
 }
 
 Nullable<unique_ptr<AccelerationStructureView>> DeviceD3D12::CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept {
-    if (!ValidateAccelerationStructureViewDescriptor(desc)) {
-        return nullptr;
-    }
     auto target = CastD3D12Object(desc.Target);
     auto heap = _cpuResAlloc.get();
     auto heapViewOpt = heap->Allocate(1);
@@ -1717,10 +1689,6 @@ Nullable<unique_ptr<AccelerationStructure>> DeviceD3D12::CreateAccelerationStruc
         RADRAY_ERR_LOG("d3d12 ray tracing acceleration structure is not supported by this device");
         return nullptr;
     }
-    if (!ValidateAccelerationStructureDescriptor(desc)) {
-        return nullptr;
-    }
-
     uint64_t estimatedSize = 0;
     if (desc.Type == AccelerationStructureType::BottomLevel) {
         estimatedSize = std::max<uint64_t>(1ull << 20, uint64_t(std::max(1u, desc.MaxGeometryCount)) * (2ull << 20));
@@ -3108,9 +3076,6 @@ void CmdRayTracingPassD3D12::BindBindlessArray(uint32_t slot, BindlessArray* arr
 }
 
 void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept {
-    if (!ValidateBuildBottomLevelASDescriptor(desc)) {
-        return;
-    }
     auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
         return;
@@ -3201,9 +3166,6 @@ void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescript
 }
 
 void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept {
-    if (!ValidateBuildTopLevelASDescriptor(desc)) {
-        return;
-    }
     auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
         return;
@@ -3337,9 +3299,6 @@ void CmdRayTracingPassD3D12::TraceRays(const TraceRaysDescriptor& desc) noexcept
         resolved.Miss = regions.Miss;
         resolved.HitGroup = regions.HitGroup;
         resolved.Callable = regions.Callable;
-    }
-    if (!ValidateTraceRaysDescriptor(resolved, _cmdList->_device->GetDetail())) {
-        return;
     }
     auto cmdList4 = _cmdList->QueryCommandList4();
     if (cmdList4 == nullptr) {
