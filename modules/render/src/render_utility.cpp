@@ -82,7 +82,7 @@ std::optional<ShaderCompileResult> CompileShaderFromHLSL(
     Device* device,
     std::string_view hlsl,
     RenderBackend backend,
-    const vector<BindBridgeStaticSampler> staticSamplers,
+    const vector<StaticSamplerBinding> staticSamplers,
     std::string_view entryVS,
     std::string_view entryPS,
     HlslShaderModel shaderModel,
@@ -142,25 +142,25 @@ std::optional<ShaderCompileResult> CompileShaderFromHLSL(
         vsShader = device->CreateShader({vsBin.Data, vsBin.Category}).Unwrap();
         psShader = device->CreateShader({psBin.Data, psBin.Category}).Unwrap();
     }
-    BindBridgeLayout bindLayout;
+    PipelineLayout bindLayout;
     if (backend == RenderBackend::D3D12) {
         auto vsRefl = dxc->GetShaderDescFromOutput(ShaderStage::Vertex, vsBin.Refl).value();
         auto psRefl = dxc->GetShaderDescFromOutput(ShaderStage::Pixel, psBin.Refl).value();
         const HlslShaderDesc* descs[] = {&vsRefl, &psRefl};
         auto merged = MergeHlslShaderDesc(descs).value();
-        bindLayout = BindBridgeLayout{merged, staticSamplers};
+        bindLayout = PipelineLayout{merged, staticSamplers};
     } else if (backend == RenderBackend::Vulkan) {
         SpirvBytecodeView spvs[] = {
             {vsBin.Data, entryVS, ShaderStage::Vertex},
             {psBin.Data, entryPS, ShaderStage::Pixel}};
         auto spirvDesc = ReflectSpirv(spvs).value();
-        bindLayout = BindBridgeLayout{spirvDesc, staticSamplers};
+        bindLayout = PipelineLayout{spirvDesc, staticSamplers};
     } else if (backend == RenderBackend::Metal) {
         MslReflectParams mslParams[] = {
             {vsBin.Data, entryVS, ShaderStage::Vertex, true},
             {psBin.Data, entryPS, ShaderStage::Pixel, true}};
         auto mslRefl = ReflectMsl(mslParams).value();
-        bindLayout = BindBridgeLayout{mslRefl, staticSamplers};
+        bindLayout = PipelineLayout{mslRefl, staticSamplers};
     }
     return ShaderCompileResult{std::move(vsShader), std::move(psShader), std::move(bindLayout)};
 }
@@ -200,7 +200,7 @@ std::optional<ComputeShaderCompileResult> CompileComputeShaderFromHLSL(
     }
     auto csBin = std::move(csOut.value());
     unique_ptr<Shader> csShader;
-    BindBridgeLayout bindLayout;
+    PipelineLayout bindLayout;
     if (backend == RenderBackend::Metal) {
         SpirvToMslOption mslOption{
             3, 0, 0,
@@ -216,18 +216,18 @@ std::optional<ComputeShaderCompileResult> CompileComputeShaderFromHLSL(
         csShader = device->CreateShader({csMsl.GetBlob(), ShaderBlobCategory::MSL}).Unwrap();
         MslReflectParams mslParams[] = {{csBin.Data, entryCS, ShaderStage::Compute, true}};
         auto mslRefl = ReflectMsl(mslParams).value();
-        bindLayout = BindBridgeLayout{mslRefl, {}};
+        bindLayout = PipelineLayout{mslRefl, {}};
     } else if (backend == RenderBackend::D3D12) {
         csShader = device->CreateShader({csBin.Data, csBin.Category}).Unwrap();
         auto csRefl = dxc->GetShaderDescFromOutput(ShaderStage::Compute, csBin.Refl).value();
         const HlslShaderDesc* descs[] = {&csRefl};
         auto merged = MergeHlslShaderDesc(descs).value();
-        bindLayout = BindBridgeLayout{merged, {}};
+        bindLayout = PipelineLayout{merged, {}};
     } else if (backend == RenderBackend::Vulkan) {
         csShader = device->CreateShader({csBin.Data, csBin.Category}).Unwrap();
         SpirvBytecodeView spvs[] = {{csBin.Data, entryCS, ShaderStage::Compute}};
         auto spirvDesc = ReflectSpirv(spvs).value();
-        bindLayout = BindBridgeLayout{spirvDesc, {}};
+        bindLayout = PipelineLayout{spirvDesc, {}};
     }
     return ComputeShaderCompileResult{std::move(csShader), std::move(bindLayout)};
 }

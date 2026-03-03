@@ -26,7 +26,8 @@ enum class RGResourceFlag : uint32_t {
     External = Persistent << 1,
     Output = External << 1,
     ForceRetain = Output << 1,
-    Temporal = ForceRetain << 1
+    Temporal = ForceRetain << 1,
+    PassLocal = Temporal << 1
 };
 
 enum class RGAccessMode : uint8_t {
@@ -116,10 +117,13 @@ struct RGIndirectArgsDescriptor {
 using RGResourceDescriptor = std::variant<RGTextureDescriptor, RGBufferDescriptor, RGIndirectArgsDescriptor>;
 
 struct VirtualResource {
+    static constexpr uint32_t InvalidPassIndex = std::numeric_limits<uint32_t>::max();
+
     string Name{};
     RGResourceDescriptor Descriptor{RGTextureDescriptor{}};
     RGResourceFlags Flags{RGResourceFlag::None};
     RGAccessMode InitialMode{RGAccessMode::Unknown};
+    uint32_t ScopePassId{InvalidPassIndex};
 
     constexpr RGResourceType GetType() const noexcept {
         return std::visit(
@@ -137,11 +141,23 @@ struct VirtualResource {
             },
             Descriptor);
     }
+
+    constexpr bool IsPassLocal() const noexcept {
+        return Flags.HasFlag(RGResourceFlag::PassLocal);
+    }
 };
 
 struct ResourceAccessEdge {
     RGResourceHandle Handle{};
     RGAccessMode Mode{RGAccessMode::Unknown};
+    RGSubresourceRange Range{RGTextureRange{}};
+};
+
+class PipelineLayout;
+
+struct RGParameterBinding {
+    string Name{};
+    RGResourceHandle Handle{};
     RGSubresourceRange Range{RGTextureRange{}};
 };
 
@@ -154,6 +170,8 @@ struct RGPassNode {
     QueueType QueueClass{QueueType::Direct};
     vector<ResourceAccessEdge> Reads{};
     vector<ResourceAccessEdge> Writes{};
+    const PipelineLayout* Layout{nullptr};
+    vector<RGParameterBinding> ParameterBindings{};
     RGPassExecuteFunc ExecuteFunc{};
     bool IsAlive{false};
 };
@@ -229,6 +247,16 @@ public:
         RGAccessMode readMode = RGAccessMode::StorageRead,
         RGAccessMode writeMode = RGAccessMode::StorageWrite);
 
+    RGPassBuilder& SetPipelineLayout(const PipelineLayout* layout);
+
+    RGPassBuilder& SetResource(std::string_view name, RGResourceHandle handle);
+
+    RGPassBuilder& SetResource(std::string_view name, RGResourceHandle handle, uint32_t mip, uint32_t slice);
+
+    RGResourceHandle CreateLocalTexture(const RGTextureDescriptor& desc);
+
+    RGResourceHandle CreateLocalBuffer(const RGBufferDescriptor& desc);
+
     RGPassBuilder& SetExecuteFunc(RGPassExecuteFunc func);
 
 private:
@@ -286,11 +314,15 @@ private:
     friend class RGPassBuilder;
 
     bool ValidateHandleIndex(RGResourceHandle handle) const noexcept;
+    bool ValidatePassLocalAccess(uint32_t passIndex, RGResourceHandle handle, std::string_view operation) const noexcept;
+    void ResolveReflectionDependencies();
 
     RGResourceHandle AddReadTextureEdge(uint32_t passIndex, RGResourceHandle handle, const RGTextureRange& range, RGAccessMode mode);
     RGResourceHandle AddReadBufferEdge(uint32_t passIndex, RGResourceHandle handle, const RGBufferRange& range, RGAccessMode mode);
     RGResourceHandle AddWriteTextureEdge(uint32_t passIndex, RGResourceHandle handle, const RGTextureRange& range, RGAccessMode mode);
     RGResourceHandle AddWriteBufferEdge(uint32_t passIndex, RGResourceHandle handle, const RGBufferRange& range, RGAccessMode mode);
+    RGResourceHandle CreatePassLocalTexture(uint32_t passIndex, const RGTextureDescriptor& desc);
+    RGResourceHandle CreatePassLocalBuffer(uint32_t passIndex, const RGBufferDescriptor& desc);
 
     void AddRootEdge(const ResourceAccessEdge& edge);
     ResourceAccessEdge MakeFullRangeEdge(RGResourceHandle handle) const;

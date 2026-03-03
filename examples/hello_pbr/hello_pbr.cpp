@@ -8,7 +8,7 @@
 #include <radray/render/spvc.h>
 #include <radray/render/msl.h>
 #include <radray/render/gpu_resource.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/resource_binder.h>
 #include <radray/render/render_utility.h>
 
 using namespace radray;
@@ -21,7 +21,7 @@ public:
     public:
         render::RootSignature* _rs;
         render::GraphicsPipelineState* _pso;
-        render::BindBridge* _bind;
+        render::ResourceBinder* _bind;
         render::RenderMesh* _mesh;
     };
 
@@ -349,7 +349,7 @@ public:
             _rs = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
             _binds.reserve(_inFlightFrameCount);
             for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-                _binds.emplace_back(std::make_unique<render::BindBridge>(_device.get(), _rs.get(), bindLayout));
+                _binds.emplace_back(std::make_unique<render::ResourceBinder>(_device.get(), _rs.get(), bindLayout));
             }
         }
         const auto& prim = sphereModel.Primitives[0];
@@ -490,7 +490,7 @@ private:
     unique_ptr<render::RenderMesh> _renderMesh;
     vector<unique_ptr<render::Buffer>> _meshUploadBuffers;
     bool _needsMeshUpload{false};
-    vector<unique_ptr<render::BindBridge>> _binds;
+    vector<unique_ptr<render::ResourceBinder>> _binds;
     Eigen::Vector3f _modelPos{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f _modelScale{1.0f, 1.0f, 1.0f};
     Eigen::Quaternionf _modelRot{Eigen::Quaternionf::Identity()};

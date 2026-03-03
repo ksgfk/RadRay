@@ -4,7 +4,7 @@
 #include <radray/render/dxc.h>
 #include <radray/render/spvc.h>
 #include <radray/render/msl.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/pipeline_layout.h>
 
 using namespace radray;
 using namespace radray::render;
@@ -170,36 +170,36 @@ static std::optional<MslShaderReflection> CompileMslRefl(
 }
 
 // ============================================================
-// BindBridgeLayout — HLSL construction
+// PipelineLayout — HLSL construction
 // ============================================================
 
-TEST(BindBridgeLayout, HlslComputeBasic) {
+TEST(PipelineLayout, HlslComputeBasic) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
     auto csDesc = CompileHlslDesc(*dxc, HLSL_COMPUTE, "CSMain", ShaderStage::Compute);
     ASSERT_TRUE(csDesc.has_value());
 
-    BindBridgeLayout layout(*csDesc);
+    PipelineLayout layout(*csDesc);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 
     // Should find Params (cbuffer) and _Output (RWStructuredBuffer)
-    auto paramsId = layout.GetBindingId("Params");
-    auto outputId = layout.GetBindingId("_Output");
+    auto paramsId = layout.GetParameterId("Params");
+    auto outputId = layout.GetParameterId("_Output");
     EXPECT_TRUE(paramsId.has_value()) << "Params binding not found";
     EXPECT_TRUE(outputId.has_value()) << "_Output binding not found";
     EXPECT_NE(paramsId.value(), outputId.value());
 }
 
-TEST(BindBridgeLayout, HlslComputeDescriptor) {
+TEST(PipelineLayout, HlslComputeDescriptor) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
     auto csDesc = CompileHlslDesc(*dxc, HLSL_COMPUTE, "CSMain", ShaderStage::Compute);
     ASSERT_TRUE(csDesc.has_value());
 
-    BindBridgeLayout layout(*csDesc);
+    PipelineLayout layout(*csDesc);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
@@ -208,7 +208,7 @@ TEST(BindBridgeLayout, HlslComputeDescriptor) {
     EXPECT_TRUE(hasContent) << "descriptor should have content";
 }
 
-TEST(BindBridgeLayout, HlslRenderMerged) {
+TEST(PipelineLayout, HlslRenderMerged) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -221,17 +221,17 @@ TEST(BindBridgeLayout, HlslRenderMerged) {
     auto merged = MergeHlslShaderDesc(descs);
     ASSERT_TRUE(merged.has_value());
 
-    BindBridgeLayout layout(*merged);
+    PipelineLayout layout(*merged);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 
     // Should find _Obj, _Tex, _Sampler
-    EXPECT_TRUE(layout.GetBindingId("_Obj").has_value());
-    EXPECT_TRUE(layout.GetBindingId("_Tex").has_value());
-    EXPECT_TRUE(layout.GetBindingId("_Sampler").has_value());
+    EXPECT_TRUE(layout.GetParameterId("_Obj").has_value());
+    EXPECT_TRUE(layout.GetParameterId("_Tex").has_value());
+    EXPECT_TRUE(layout.GetParameterId("_Sampler").has_value());
 }
 
-TEST(BindBridgeLayout, HlslRenderDescriptorSets) {
+TEST(PipelineLayout, HlslRenderDescriptorSets) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -244,7 +244,7 @@ TEST(BindBridgeLayout, HlslRenderDescriptorSets) {
     auto merged = MergeHlslShaderDesc(descs);
     ASSERT_TRUE(merged.has_value());
 
-    BindBridgeLayout layout(*merged);
+    PipelineLayout layout(*merged);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
@@ -253,7 +253,7 @@ TEST(BindBridgeLayout, HlslRenderDescriptorSets) {
     EXPECT_TRUE(hasDescSets) << "should have descriptor sets for texture/sampler";
 }
 
-TEST(BindBridgeLayout, HlslStaticSampler) {
+TEST(PipelineLayout, HlslStaticSampler) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -267,26 +267,26 @@ TEST(BindBridgeLayout, HlslStaticSampler) {
     ASSERT_TRUE(merged.has_value());
 
     SamplerDescriptor sampDesc{};
-    BindBridgeStaticSampler ss{"_Sampler", {sampDesc}};
-    BindBridgeLayout layout(*merged, std::span{&ss, 1});
+    StaticSamplerBinding ss{"_Sampler", {sampDesc}};
+    PipelineLayout layout(*merged, std::span{&ss, 1});
 
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
     EXPECT_FALSE(desc.StaticSamplers.empty()) << "should have static samplers";
 }
 
-TEST(BindBridgeLayout, HlslEmptyShader) {
+TEST(PipelineLayout, HlslEmptyShader) {
     HlslShaderDesc emptyDesc{};
-    BindBridgeLayout layout(emptyDesc);
+    PipelineLayout layout(emptyDesc);
     EXPECT_TRUE(layout.GetBindings().empty());
-    EXPECT_FALSE(layout.GetBindingId("anything").has_value());
+    EXPECT_FALSE(layout.GetParameterId("anything").has_value());
 }
 
 // ============================================================
-// BindBridgeLayout — SPIR-V construction
+// PipelineLayout — SPIR-V construction
 // ============================================================
 
-TEST(BindBridgeLayout, SpvComputeBasic) {
+TEST(PipelineLayout, SpvComputeBasic) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -294,12 +294,12 @@ TEST(BindBridgeLayout, SpvComputeBasic) {
     auto spvDesc = CompileSpirvDesc(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(spvDesc.has_value());
 
-    BindBridgeLayout layout(*spvDesc);
+    PipelineLayout layout(*spvDesc);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 }
 
-TEST(BindBridgeLayout, SpvComputeDescriptor) {
+TEST(PipelineLayout, SpvComputeDescriptor) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -307,7 +307,7 @@ TEST(BindBridgeLayout, SpvComputeDescriptor) {
     auto spvDesc = CompileSpirvDesc(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(spvDesc.has_value());
 
-    BindBridgeLayout layout(*spvDesc);
+    PipelineLayout layout(*spvDesc);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
@@ -315,7 +315,7 @@ TEST(BindBridgeLayout, SpvComputeDescriptor) {
     EXPECT_TRUE(hasContent);
 }
 
-TEST(BindBridgeLayout, SpvRenderPushConst) {
+TEST(PipelineLayout, SpvRenderPushConst) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -325,7 +325,7 @@ TEST(BindBridgeLayout, SpvRenderPushConst) {
     auto spvDesc = CompileSpirvDesc(*dxc, HLSL_RENDER_PUSHCONST, entries);
     ASSERT_TRUE(spvDesc.has_value());
 
-    BindBridgeLayout layout(*spvDesc);
+    PipelineLayout layout(*spvDesc);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 
@@ -338,7 +338,7 @@ TEST(BindBridgeLayout, SpvRenderPushConst) {
     }
 }
 
-TEST(BindBridgeLayout, SpvRenderDescriptorSets) {
+TEST(PipelineLayout, SpvRenderDescriptorSets) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -348,14 +348,14 @@ TEST(BindBridgeLayout, SpvRenderDescriptorSets) {
     auto spvDesc = CompileSpirvDesc(*dxc, HLSL_RENDER_PUSHCONST, entries);
     ASSERT_TRUE(spvDesc.has_value());
 
-    BindBridgeLayout layout(*spvDesc);
+    PipelineLayout layout(*spvDesc);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
     EXPECT_FALSE(desc.DescriptorSets.empty()) << "should have descriptor sets";
 }
 
-TEST(BindBridgeLayout, SpvStaticSampler) {
+TEST(PipelineLayout, SpvStaticSampler) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -366,25 +366,25 @@ TEST(BindBridgeLayout, SpvStaticSampler) {
     ASSERT_TRUE(spvDesc.has_value());
 
     SamplerDescriptor sampDesc{};
-    BindBridgeStaticSampler ss{"_Sampler", {sampDesc}};
-    BindBridgeLayout layout(*spvDesc, std::span{&ss, 1});
+    StaticSamplerBinding ss{"_Sampler", {sampDesc}};
+    PipelineLayout layout(*spvDesc, std::span{&ss, 1});
 
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
     EXPECT_FALSE(desc.StaticSamplers.empty()) << "should have static samplers";
 }
 
-TEST(BindBridgeLayout, SpvEmpty) {
+TEST(PipelineLayout, SpvEmpty) {
     SpirvShaderDesc emptyDesc{};
-    BindBridgeLayout layout(emptyDesc);
+    PipelineLayout layout(emptyDesc);
     EXPECT_TRUE(layout.GetBindings().empty());
 }
 
 // ============================================================
-// BindBridgeLayout — MSL construction
+// PipelineLayout — MSL construction
 // ============================================================
 
-TEST(BindBridgeLayout, MslComputeBasic) {
+TEST(PipelineLayout, MslComputeBasic) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -392,12 +392,12 @@ TEST(BindBridgeLayout, MslComputeBasic) {
     auto mslRefl = CompileMslRefl(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(mslRefl.has_value());
 
-    BindBridgeLayout layout(*mslRefl);
+    PipelineLayout layout(*mslRefl);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 }
 
-TEST(BindBridgeLayout, MslComputeDescriptor) {
+TEST(PipelineLayout, MslComputeDescriptor) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -405,7 +405,7 @@ TEST(BindBridgeLayout, MslComputeDescriptor) {
     auto mslRefl = CompileMslRefl(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(mslRefl.has_value());
 
-    BindBridgeLayout layout(*mslRefl);
+    PipelineLayout layout(*mslRefl);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
@@ -413,7 +413,7 @@ TEST(BindBridgeLayout, MslComputeDescriptor) {
     EXPECT_TRUE(hasContent) << "MSL layout should have descriptor sets";
 }
 
-TEST(BindBridgeLayout, MslRenderBasic) {
+TEST(PipelineLayout, MslRenderBasic) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -423,7 +423,7 @@ TEST(BindBridgeLayout, MslRenderBasic) {
     auto mslRefl = CompileMslRefl(*dxc, HLSL_RENDER_PUSHCONST, entries);
     ASSERT_TRUE(mslRefl.has_value());
 
-    BindBridgeLayout layout(*mslRefl);
+    PipelineLayout layout(*mslRefl);
     auto bindings = layout.GetBindings();
     EXPECT_FALSE(bindings.empty());
 
@@ -433,7 +433,7 @@ TEST(BindBridgeLayout, MslRenderBasic) {
     EXPECT_FALSE(desc.DescriptorSets.empty());
 }
 
-TEST(BindBridgeLayout, MslRenderArgBuffers) {
+TEST(PipelineLayout, MslRenderArgBuffers) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -448,7 +448,7 @@ TEST(BindBridgeLayout, MslRenderArgBuffers) {
                         arg.Name, format_as(arg.Stage), format_as(arg.Type), arg.Index, arg.IsPushConstant, arg.DescriptorSet);
     }
 
-    BindBridgeLayout layout(*mslRefl);
+    PipelineLayout layout(*mslRefl);
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
 
@@ -465,7 +465,7 @@ TEST(BindBridgeLayout, MslRenderArgBuffers) {
     }
 }
 
-TEST(BindBridgeLayout, MslRenderSamplerSeparation) {
+TEST(PipelineLayout, MslRenderSamplerSeparation) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -475,31 +475,27 @@ TEST(BindBridgeLayout, MslRenderSamplerSeparation) {
     auto mslRefl = CompileMslRefl(*dxc, HLSL_RENDER_PUSHCONST, entries);
     ASSERT_TRUE(mslRefl.has_value());
 
-    BindBridgeLayout layout(*mslRefl);
+    PipelineLayout layout(*mslRefl);
     auto bindings = layout.GetBindings();
 
     // MSL separates resources and samplers into different sets
     bool hasSamplerBinding = false;
     bool hasNonSamplerBinding = false;
     for (const auto& b : bindings) {
-        std::visit(
-            [&](const auto& e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, BindBridgeLayout::DescriptorSetEntry>) {
-                    if (e.Type == ResourceBindType::Sampler) {
-                        hasSamplerBinding = true;
-                    } else {
-                        hasNonSamplerBinding = true;
-                    }
-                }
-            },
-            b);
+        if (!std::holds_alternative<DescriptorTableLocation>(b.Location)) {
+            continue;
+        }
+        if (b.Parameter.Type == ResourceBindType::Sampler) {
+            hasSamplerBinding = true;
+        } else {
+            hasNonSamplerBinding = true;
+        }
     }
     EXPECT_TRUE(hasSamplerBinding) << "should have sampler binding";
     EXPECT_TRUE(hasNonSamplerBinding) << "should have non-sampler binding";
 }
 
-TEST(BindBridgeLayout, MslStaticSampler) {
+TEST(PipelineLayout, MslStaticSampler) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
@@ -510,17 +506,17 @@ TEST(BindBridgeLayout, MslStaticSampler) {
     ASSERT_TRUE(mslRefl.has_value());
 
     SamplerDescriptor sampDesc{};
-    BindBridgeStaticSampler ss{"_Sampler", {sampDesc}};
-    BindBridgeLayout layout(*mslRefl, std::span{&ss, 1});
+    StaticSamplerBinding ss{"_Sampler", {sampDesc}};
+    PipelineLayout layout(*mslRefl, std::span{&ss, 1});
 
     auto container = layout.GetDescriptor();
     const auto& desc = container.Get();
     EXPECT_FALSE(desc.StaticSamplers.empty()) << "should have static samplers";
 }
 
-TEST(BindBridgeLayout, MslEmpty) {
+TEST(PipelineLayout, MslEmpty) {
     MslShaderReflection emptyRefl{};
-    BindBridgeLayout layout(emptyRefl);
+    PipelineLayout layout(emptyRefl);
     EXPECT_TRUE(layout.GetBindings().empty());
 }
 
@@ -529,25 +525,25 @@ TEST(BindBridgeLayout, MslEmpty) {
 // compatible layouts for the same shader
 // ============================================================
 
-TEST(BindBridgeLayout, CrossPathComputeConsistency) {
+TEST(PipelineLayout, CrossPathComputeConsistency) {
     auto dxc = CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
 
     // HLSL path
     auto hlslDesc = CompileHlslDesc(*dxc, HLSL_COMPUTE, "CSMain", ShaderStage::Compute);
     ASSERT_TRUE(hlslDesc.has_value());
-    BindBridgeLayout hlslLayout(*hlslDesc);
+    PipelineLayout hlslLayout(*hlslDesc);
 
     // SPV path
     std::pair<const char*, ShaderStage> entries[] = {{"CSMain", ShaderStage::Compute}};
     auto spvDesc = CompileSpirvDesc(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(spvDesc.has_value());
-    BindBridgeLayout spvLayout(*spvDesc);
+    PipelineLayout spvLayout(*spvDesc);
 
     // MSL path
     auto mslRefl = CompileMslRefl(*dxc, HLSL_COMPUTE, entries);
     ASSERT_TRUE(mslRefl.has_value());
-    BindBridgeLayout mslLayout(*mslRefl);
+    PipelineLayout mslLayout(*mslRefl);
 
     // All three should produce non-empty bindings
     EXPECT_FALSE(hlslLayout.GetBindings().empty());
@@ -596,3 +592,4 @@ TEST(RootSignatureDescriptorContainer, CopyFromDescriptor) {
     EXPECT_EQ(desc.RootDescriptors[0].Slot, 0u);
     EXPECT_EQ(desc.RootDescriptors[0].Type, ResourceBindType::CBuffer);
 }
+

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <string_view>
 
+#include <radray/render/pipeline_layout.h>
 #include <radray/render/render_graph.h>
 
 using namespace radray::render;
@@ -19,6 +20,11 @@ RGTextureDescriptor MakeTextureDesc(std::string_view name, uint32_t mipLevels = 
     desc.Format = TextureFormat::RGBA8_UNORM;
     desc.Name = name;
     return desc;
+}
+
+PipelineLayout MakePipelineLayout(std::span<const ShaderParameter> parameters) {
+    D3D12LayoutPlanner planner{};
+    return PipelineLayout{parameters, planner};
 }
 
 bool HasDependencyEdge(const CompiledGraph& compiled, uint32_t from, uint32_t to) {
@@ -151,6 +157,164 @@ TEST(RenderGraphPhase2, persistent_resource_survives_dce) {
     ASSERT_TRUE(compiled.Success);
     EXPECT_EQ(compiled.SortedPasses.size(), 1u);
     EXPECT_TRUE(compiled.CulledPasses.empty());
+}
+
+TEST(RenderGraphPhase4, pass_local_persistent_resource_survives_dce) {
+    RGGraphBuilder graph{};
+
+    RGTextureDescriptor historyDesc = MakeTextureDesc("history_local");
+    historyDesc.Flags = RGResourceFlag::Persistent;
+
+    auto pass = graph.AddPass("history_update");
+    const auto history = pass.CreateLocalTexture(historyDesc);
+    pass.WriteTexture(history);
+
+    const auto& resource = graph.GetResources()[history.Index];
+    EXPECT_TRUE(resource.Flags.HasFlag(RGResourceFlag::PassLocal));
+    EXPECT_TRUE(resource.Flags.HasFlag(RGResourceFlag::Persistent));
+    EXPECT_EQ(resource.ScopePassId, 0u);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+    EXPECT_EQ(compiled.SortedPasses.size(), 1u);
+    EXPECT_TRUE(compiled.CulledPasses.empty());
+}
+
+TEST(RenderGraphPhase4, pass_local_resource_cannot_be_accessed_by_other_pass) {
+    RGGraphBuilder graph{};
+
+    auto ownerPass = graph.AddPass("owner");
+    const auto localTex = ownerPass.CreateLocalTexture(MakeTextureDesc("local_tex"));
+    ownerPass.WriteTexture(localTex);
+
+    const auto out = graph.CreateTexture(MakeTextureDesc("out"));
+    auto otherPass = graph.AddPass("other");
+    otherPass.ReadTexture(localTex);
+    otherPass.WriteTexture(out);
+    graph.MarkOutput(out);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+    ASSERT_EQ(compiled.SortedPasses.size(), 1u);
+    EXPECT_EQ(compiled.SortedPasses[0], 1u);
+    EXPECT_FALSE(HasDependencyEdge(compiled, 0u, 1u));
+}
+
+TEST(RenderGraphPhase4, reflection_parameter_binding_auto_infers_dependencies) {
+    RGGraphBuilder graph{};
+
+    const auto src = graph.CreateTexture(MakeTextureDesc("src"));
+    const auto out = graph.CreateTexture(MakeTextureDesc("out"));
+
+    auto passProduce = graph.AddPass("produce_src");
+    passProduce.WriteTexture(src);
+
+    const radray::vector<ShaderParameter> params{
+        ShaderParameter{
+            .Name = "u_InputTex",
+            .Type = ResourceBindType::Texture,
+            .Register = 0,
+            .Space = 0,
+            .ArrayLength = 1,
+            .TypeSizeInBytes = 0,
+            .Stages = ShaderStage::Compute},
+        ShaderParameter{
+            .Name = "u_OutputTex",
+            .Type = ResourceBindType::RWTexture,
+            .Register = 1,
+            .Space = 0,
+            .ArrayLength = 1,
+            .TypeSizeInBytes = 0,
+            .Stages = ShaderStage::Compute}};
+    auto layout = MakePipelineLayout(params);
+
+    auto passShade = graph.AddPass("shade");
+    passShade.SetPipelineLayout(&layout);
+    passShade.SetResource("u_InputTex", src);
+    passShade.SetResource("u_OutputTex", out);
+    graph.MarkOutput(out);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+    EXPECT_EQ(compiled.SortedPasses.size(), 2u);
+    EXPECT_TRUE(HasDependencyEdge(compiled, 0u, 1u));
+}
+
+TEST(RenderGraphPhase4, reflection_parameter_binding_supports_mip_slice_overload) {
+    RGGraphBuilder graph{};
+
+    const auto tex = graph.CreateTexture(MakeTextureDesc("tex", 2));
+    const auto out0 = graph.CreateTexture(MakeTextureDesc("out0"));
+    const auto out1 = graph.CreateTexture(MakeTextureDesc("out1"));
+
+    const RGTextureRange mip0{
+        .BaseMipLevel = 0,
+        .MipLevelCount = 1,
+        .BaseArrayLayer = 0,
+        .ArrayLayerCount = 1};
+
+    auto passWriteMip0 = graph.AddPass("write_mip0");
+    passWriteMip0.WriteTexture(tex, mip0);
+
+    const radray::vector<ShaderParameter> params{
+        ShaderParameter{
+            .Name = "u_InputTex",
+            .Type = ResourceBindType::Texture,
+            .Register = 0,
+            .Space = 0,
+            .ArrayLength = 1,
+            .TypeSizeInBytes = 0,
+            .Stages = ShaderStage::Compute}};
+    auto layout = MakePipelineLayout(params);
+
+    auto passReadMip0 = graph.AddPass("read_mip0");
+    passReadMip0.SetPipelineLayout(&layout);
+    passReadMip0.SetResource("u_InputTex", tex, 0, 0);
+    passReadMip0.WriteTexture(out0);
+    graph.MarkOutput(out0);
+
+    auto passReadMip1 = graph.AddPass("read_mip1");
+    passReadMip1.SetPipelineLayout(&layout);
+    passReadMip1.SetResource("u_InputTex", tex, 1, 0);
+    passReadMip1.WriteTexture(out1);
+    graph.MarkOutput(out1);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+    EXPECT_TRUE(HasDependencyEdge(compiled, 0u, 1u));
+    EXPECT_FALSE(HasDependencyEdge(compiled, 0u, 2u));
+}
+
+TEST(RenderGraphPhase4, reflection_and_explicit_edges_can_mix) {
+    RGGraphBuilder graph{};
+
+    const auto src = graph.CreateTexture(MakeTextureDesc("src"));
+    const auto out = graph.CreateTexture(MakeTextureDesc("out"));
+
+    auto passProduce = graph.AddPass("produce_src");
+    passProduce.WriteTexture(src);
+
+    const radray::vector<ShaderParameter> params{
+        ShaderParameter{
+            .Name = "u_AutoRead",
+            .Type = ResourceBindType::Texture,
+            .Register = 0,
+            .Space = 0,
+            .ArrayLength = 1,
+            .TypeSizeInBytes = 0,
+            .Stages = ShaderStage::Compute}};
+    auto layout = MakePipelineLayout(params);
+
+    auto passMix = graph.AddPass("mix");
+    passMix.SetPipelineLayout(&layout);
+    passMix.SetResource("u_AutoRead", src);
+    passMix.WriteTexture(out);
+    graph.MarkOutput(out);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+    EXPECT_EQ(compiled.SortedPasses.size(), 2u);
+    EXPECT_TRUE(HasDependencyEdge(compiled, 0u, 1u));
 }
 
 TEST(RenderGraphPhase2, topo_sort_orders_hazards) {

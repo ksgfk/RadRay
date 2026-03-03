@@ -4,7 +4,7 @@
 #include <radray/file.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/resource_binder.h>
 #include <radray/render/render_utility.h>
 
 using namespace radray;
@@ -260,7 +260,7 @@ private:
         _computeRS = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
         _computeBinds.reserve(_inFlightFrameCount);
         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _computeBinds.emplace_back(make_unique<render::BindBridge>(_device.get(), _computeRS.get(), bindLayout));
+            _computeBinds.emplace_back(make_unique<render::ResourceBinder>(_device.get(), _computeRS.get(), bindLayout));
             _computeBinds[i]->SetResource("_Output", _frames[i]->_uav.get());
         }
         render::ComputePipelineStateDescriptor psoDesc{};
@@ -275,7 +275,7 @@ private:
         if (!hlslOpt.has_value()) {
             throw ImGuiApplicationException("Failed to read blit.hlsl");
         }
-        render::BindBridgeStaticSampler staticSampler{
+        render::StaticSamplerBinding staticSampler{
             "_Sampler",
             {{render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
               render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest,
@@ -290,7 +290,7 @@ private:
         _blitRS = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
         _blitBinds.reserve(_inFlightFrameCount);
         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _blitBinds.emplace_back(make_unique<render::BindBridge>(_device.get(), _blitRS.get(), bindLayout));
+            _blitBinds.emplace_back(make_unique<render::ResourceBinder>(_device.get(), _blitRS.get(), bindLayout));
         }
         render::ColorTargetState rtState = render::ColorTargetState::Default(_rtFormat);
         render::GraphicsPipelineStateDescriptor psoDesc{};
@@ -367,10 +367,10 @@ private:
     vector<unique_ptr<HelloMandelbrotFrame>> _frames;
     unique_ptr<render::RootSignature> _computeRS;
     unique_ptr<render::ComputePipelineState> _computePSO;
-    vector<unique_ptr<render::BindBridge>> _computeBinds;
+    vector<unique_ptr<render::ResourceBinder>> _computeBinds;
     unique_ptr<render::RootSignature> _blitRS;
     unique_ptr<render::GraphicsPipelineState> _blitPSO;
-    vector<unique_ptr<render::BindBridge>> _blitBinds;
+    vector<unique_ptr<render::ResourceBinder>> _blitBinds;
     double _centerX{-0.5};
     double _centerY{0.0};
     double _scale{1.5};

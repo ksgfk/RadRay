@@ -10,7 +10,7 @@
 #include <dispatch/dispatch.h>
 
 #include <radray/render/common.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/pipeline_layout.h>
 #include <radray/render/backend/metal_impl_cpp.h>
 
 namespace radray::render::metal {

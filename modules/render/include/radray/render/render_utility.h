@@ -3,7 +3,7 @@
 #include <radray/vertex_data.h>
 #include <radray/render/common.h>
 #include <radray/render/dxc.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/pipeline_layout.h>
 
 namespace radray::render {
 
@@ -21,14 +21,14 @@ Nullable<unique_ptr<RootSignature>> CreateSerializedRootSignature(Device* device
 struct ShaderCompileResult {
     unique_ptr<Shader> VSResult;
     unique_ptr<Shader> PSResult;
-    render::BindBridgeLayout BindLayout;
+    render::PipelineLayout BindLayout;
 };
 std::optional<ShaderCompileResult> CompileShaderFromHLSL(
     Dxc* dxc,
     Device* device,
     std::string_view hlsl,
     RenderBackend backend,
-    const vector<BindBridgeStaticSampler> staticSamplers = {},
+    const vector<StaticSamplerBinding> staticSamplers = {},
     std::string_view entryVS = "VSMain",
     std::string_view entryPS = "PSMain",
     render::HlslShaderModel shaderModel = render::HlslShaderModel::SM60,
@@ -37,7 +37,7 @@ std::optional<ShaderCompileResult> CompileShaderFromHLSL(
 
 struct ComputeShaderCompileResult {
     unique_ptr<Shader> CSResult;
-    render::BindBridgeLayout BindLayout;
+    render::PipelineLayout BindLayout;
 };
 std::optional<ComputeShaderCompileResult> CompileComputeShaderFromHLSL(
     Dxc* dxc,

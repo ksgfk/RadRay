@@ -6,6 +6,7 @@
 #include <fmt/format.h>
 
 #include <radray/logger.h>
+#include <radray/render/pipeline_layout.h>
 
 namespace radray::render {
 
@@ -490,6 +491,92 @@ vector<ResourceAccessEdge> RGCollectImplicitRoots(const RGGraphBuilder& graph) {
     return roots;
 }
 
+struct RGInferredBinding {
+    bool IsValid{false};
+    bool IsIgnored{false};
+    bool IsRead{true};
+    RGAccessMode Mode{RGAccessMode::Unknown};
+    RGResourceType ExpectedType{RGResourceType::Unknown};
+};
+
+const ParameterMapping* RGFindParameterMappingById(
+    std::span<const ParameterMapping> mappings,
+    uint32_t id) noexcept {
+    const auto it = std::find_if(
+        mappings.begin(),
+        mappings.end(),
+        [id](const ParameterMapping& mapping) {
+            return mapping.Id == id;
+        });
+    if (it == mappings.end()) {
+        return nullptr;
+    }
+    return &(*it);
+}
+
+RGInferredBinding RGInferBinding(const ParameterMapping& mapping) noexcept {
+    if (mapping.IsStaticSampler || mapping.Parameter.IsPushConstant) {
+        return RGInferredBinding{
+            .IsIgnored = true};
+    }
+
+    switch (mapping.Parameter.Type) {
+        case ResourceBindType::Texture:
+            return RGInferredBinding{
+                .IsValid = true,
+                .IsRead = true,
+                .Mode = RGAccessMode::SampledRead,
+                .ExpectedType = RGResourceType::Texture};
+        case ResourceBindType::RWTexture:
+            return RGInferredBinding{
+                .IsValid = true,
+                .IsRead = false,
+                .Mode = RGAccessMode::StorageWrite,
+                .ExpectedType = RGResourceType::Texture};
+        case ResourceBindType::CBuffer:
+        case ResourceBindType::Buffer:
+        case ResourceBindType::TexelBuffer:
+        case ResourceBindType::AccelerationStructure:
+            return RGInferredBinding{
+                .IsValid = true,
+                .IsRead = true,
+                .Mode = RGAccessMode::StorageRead,
+                .ExpectedType = RGResourceType::Buffer};
+        case ResourceBindType::RWBuffer:
+        case ResourceBindType::RWTexelBuffer:
+            return RGInferredBinding{
+                .IsValid = true,
+                .IsRead = false,
+                .Mode = RGAccessMode::StorageWrite,
+                .ExpectedType = RGResourceType::Buffer};
+        case ResourceBindType::Sampler:
+            return RGInferredBinding{
+                .IsIgnored = true};
+        default:
+            return RGInferredBinding{};
+    }
+}
+
+void RGUpsertParameterBinding(
+    vector<RGParameterBinding>* bindings,
+    RGParameterBinding binding) {
+    if (bindings == nullptr || binding.Name.empty()) {
+        return;
+    }
+
+    const auto it = std::find_if(
+        bindings->begin(),
+        bindings->end(),
+        [&binding](const RGParameterBinding& current) {
+            return current.Name == binding.Name;
+        });
+    if (it == bindings->end()) {
+        bindings->push_back(std::move(binding));
+        return;
+    }
+    *it = std::move(binding);
+}
+
 string RGFormatTextureRange(const RGTextureRange& range) {
     const string mipCount = range.MipLevelCount == RGTextureRange::All
                                 ? "*"
@@ -815,6 +902,99 @@ RGResourceHandle RGPassBuilder::ReadWriteBuffer(
     return WriteBuffer(handle, range, writeMode);
 }
 
+RGPassBuilder& RGPassBuilder::SetPipelineLayout(const PipelineLayout* layout) {
+    if (_graph == nullptr || _passIndex >= _graph->_passes.size()) {
+        return *this;
+    }
+    _graph->_passes[_passIndex].Layout = layout;
+    return *this;
+}
+
+RGPassBuilder& RGPassBuilder::SetResource(
+    std::string_view name,
+    RGResourceHandle handle) {
+    if (_graph == nullptr || _passIndex >= _graph->_passes.size()) {
+        return *this;
+    }
+    if (name.empty()) {
+        RADRAY_ERR_LOG("RenderGraph: SetResource requires non-empty parameter name");
+        return *this;
+    }
+    if (!_graph->ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: SetResource invalid handle {}", handle.Index);
+        return *this;
+    }
+    if (!_graph->ValidatePassLocalAccess(_passIndex, handle, "SetResource")) {
+        return *this;
+    }
+
+    const auto& resource = _graph->_resources[handle.Index];
+    RGParameterBinding binding{};
+    binding.Name = string{name};
+    binding.Handle = handle;
+    if (RGIsTextureResourceType(resource.GetType())) {
+        binding.Range = RGTextureRange{};
+    } else {
+        binding.Range = RGBufferRange{};
+    }
+    RGUpsertParameterBinding(&_graph->_passes[_passIndex].ParameterBindings, std::move(binding));
+    return *this;
+}
+
+RGPassBuilder& RGPassBuilder::SetResource(
+    std::string_view name,
+    RGResourceHandle handle,
+    uint32_t mip,
+    uint32_t slice) {
+    if (_graph == nullptr || _passIndex >= _graph->_passes.size()) {
+        return *this;
+    }
+    if (name.empty()) {
+        RADRAY_ERR_LOG("RenderGraph: SetResource requires non-empty parameter name");
+        return *this;
+    }
+    if (!_graph->ValidateHandleIndex(handle)) {
+        RADRAY_ERR_LOG("RenderGraph: SetResource invalid handle {}", handle.Index);
+        return *this;
+    }
+    if (!_graph->ValidatePassLocalAccess(_passIndex, handle, "SetResource")) {
+        return *this;
+    }
+
+    const auto& resource = _graph->_resources[handle.Index];
+    if (!RGIsTextureResourceType(resource.GetType())) {
+        RADRAY_ERR_LOG(
+            "RenderGraph: SetResource(name, handle, mip, slice) requires texture handle, got {}",
+            resource.GetType());
+        return *this;
+    }
+
+    RGParameterBinding binding{};
+    binding.Name = string{name};
+    binding.Handle = handle;
+    binding.Range = RGTextureRange{
+        .BaseMipLevel = mip,
+        .MipLevelCount = 1,
+        .BaseArrayLayer = slice,
+        .ArrayLayerCount = 1};
+    RGUpsertParameterBinding(&_graph->_passes[_passIndex].ParameterBindings, std::move(binding));
+    return *this;
+}
+
+RGResourceHandle RGPassBuilder::CreateLocalTexture(const RGTextureDescriptor& desc) {
+    if (_graph == nullptr) {
+        return RGResourceHandle::Invalid();
+    }
+    return _graph->CreatePassLocalTexture(_passIndex, desc);
+}
+
+RGResourceHandle RGPassBuilder::CreateLocalBuffer(const RGBufferDescriptor& desc) {
+    if (_graph == nullptr) {
+        return RGResourceHandle::Invalid();
+    }
+    return _graph->CreatePassLocalBuffer(_passIndex, desc);
+}
+
 RGPassBuilder& RGPassBuilder::SetExecuteFunc(RGPassExecuteFunc func) {
     if (_graph == nullptr || _passIndex >= _graph->_passes.size()) {
         return *this;
@@ -853,6 +1033,48 @@ RGResourceHandle RGGraphBuilder::CreateIndirectArgs(const RGBufferDescriptor& de
     resource.Descriptor = indirectDesc;
     _resources.push_back(resource);
     return RGResourceHandle{index};
+}
+
+RGResourceHandle RGGraphBuilder::CreatePassLocalTexture(
+    uint32_t passIndex,
+    const RGTextureDescriptor& desc) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in CreatePassLocalTexture", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGTextureDescriptor localDesc = desc;
+    localDesc.Flags |= RGResourceFlag::PassLocal;
+    const auto handle = CreateTexture(localDesc);
+    if (!ValidateHandleIndex(handle)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    auto& resource = _resources[handle.Index];
+    resource.Flags |= RGResourceFlag::PassLocal;
+    resource.ScopePassId = passIndex;
+    return handle;
+}
+
+RGResourceHandle RGGraphBuilder::CreatePassLocalBuffer(
+    uint32_t passIndex,
+    const RGBufferDescriptor& desc) {
+    if (passIndex >= _passes.size()) {
+        RADRAY_ERR_LOG("RenderGraph: invalid pass index {} in CreatePassLocalBuffer", passIndex);
+        return RGResourceHandle::Invalid();
+    }
+
+    RGBufferDescriptor localDesc = desc;
+    localDesc.Flags |= RGResourceFlag::PassLocal;
+    const auto handle = CreateBuffer(localDesc);
+    if (!ValidateHandleIndex(handle)) {
+        return RGResourceHandle::Invalid();
+    }
+
+    auto& resource = _resources[handle.Index];
+    resource.Flags |= RGResourceFlag::PassLocal;
+    resource.ScopePassId = passIndex;
+    return handle;
 }
 
 RGResourceHandle RGGraphBuilder::ImportExternalTexture(
@@ -1000,6 +1222,134 @@ bool RGGraphBuilder::ValidateHandleIndex(RGResourceHandle handle) const noexcept
     return handle.IsValid() && handle.Index < _resources.size();
 }
 
+bool RGGraphBuilder::ValidatePassLocalAccess(
+    uint32_t passIndex,
+    RGResourceHandle handle,
+    std::string_view operation) const noexcept {
+    if (!ValidateHandleIndex(handle)) {
+        return false;
+    }
+
+    const auto& resource = _resources[handle.Index];
+    if (!resource.IsPassLocal()) {
+        return true;
+    }
+    if (resource.ScopePassId == passIndex) {
+        return true;
+    }
+
+    RADRAY_ERR_LOG(
+        "RenderGraph: {} cannot access pass-local resource res[{}] '{}' owned by pass {} (access pass={})",
+        operation,
+        handle.Index,
+        resource.Name,
+        resource.ScopePassId,
+        passIndex);
+    return false;
+}
+
+void RGGraphBuilder::ResolveReflectionDependencies() {
+    for (uint32_t passIndex = 0; passIndex < static_cast<uint32_t>(_passes.size()); ++passIndex) {
+        auto& pass = _passes[passIndex];
+        if (pass.Layout == nullptr || pass.ParameterBindings.empty()) {
+            continue;
+        }
+
+        const auto mappings = pass.Layout->GetMappings();
+        for (const auto& binding : pass.ParameterBindings) {
+            if (!ValidateHandleIndex(binding.Handle)) {
+                RADRAY_ERR_LOG(
+                    "RenderGraph: pass '{}' has invalid SetResource handle {} for '{}'",
+                    pass.Name,
+                    binding.Handle.Index,
+                    binding.Name);
+                continue;
+            }
+            if (!ValidatePassLocalAccess(passIndex, binding.Handle, "SetResource")) {
+                continue;
+            }
+
+            const auto parameterId = pass.Layout->GetParameterId(binding.Name);
+            if (!parameterId.has_value()) {
+                RADRAY_ERR_LOG(
+                    "RenderGraph: pass '{}' cannot resolve parameter '{}' in pipeline layout",
+                    pass.Name,
+                    binding.Name);
+                continue;
+            }
+
+            const auto* mapping = RGFindParameterMappingById(mappings, parameterId.value());
+            if (mapping == nullptr) {
+                RADRAY_ERR_LOG(
+                    "RenderGraph: pass '{}' found parameter id {} for '{}' but mapping is missing",
+                    pass.Name,
+                    parameterId.value(),
+                    binding.Name);
+                continue;
+            }
+
+            const auto inferred = RGInferBinding(*mapping);
+            if (inferred.IsIgnored) {
+                continue;
+            }
+            if (!inferred.IsValid) {
+                RADRAY_ERR_LOG(
+                    "RenderGraph: pass '{}' parameter '{}' has unsupported bind type {}",
+                    pass.Name,
+                    binding.Name,
+                    static_cast<uint32_t>(mapping->Parameter.Type));
+                continue;
+            }
+
+            const auto& resource = _resources[binding.Handle.Index];
+            if (inferred.ExpectedType == RGResourceType::Texture) {
+                if (!RGIsTextureResourceType(resource.GetType())) {
+                    RADRAY_ERR_LOG(
+                        "RenderGraph: pass '{}' parameter '{}' expects texture but handle {} is {}",
+                        pass.Name,
+                        binding.Name,
+                        binding.Handle.Index,
+                        resource.GetType());
+                    continue;
+                }
+
+                RGTextureRange range{};
+                if (std::holds_alternative<RGTextureRange>(binding.Range)) {
+                    range = std::get<RGTextureRange>(binding.Range);
+                }
+                if (inferred.IsRead) {
+                    AddReadTextureEdge(passIndex, binding.Handle, range, inferred.Mode);
+                } else {
+                    AddWriteTextureEdge(passIndex, binding.Handle, range, inferred.Mode);
+                }
+                continue;
+            }
+
+            if (inferred.ExpectedType == RGResourceType::Buffer) {
+                if (!RGIsBufferResourceType(resource.GetType())) {
+                    RADRAY_ERR_LOG(
+                        "RenderGraph: pass '{}' parameter '{}' expects buffer but handle {} is {}",
+                        pass.Name,
+                        binding.Name,
+                        binding.Handle.Index,
+                        resource.GetType());
+                    continue;
+                }
+
+                RGBufferRange range{};
+                if (std::holds_alternative<RGBufferRange>(binding.Range)) {
+                    range = std::get<RGBufferRange>(binding.Range);
+                }
+                if (inferred.IsRead) {
+                    AddReadBufferEdge(passIndex, binding.Handle, range, inferred.Mode);
+                } else {
+                    AddWriteBufferEdge(passIndex, binding.Handle, range, inferred.Mode);
+                }
+            }
+        }
+    }
+}
+
 RGResourceHandle RGGraphBuilder::AddReadTextureEdge(
     uint32_t passIndex,
     RGResourceHandle handle,
@@ -1011,6 +1361,9 @@ RGResourceHandle RGGraphBuilder::AddReadTextureEdge(
     }
     if (!ValidateHandleIndex(handle)) {
         RADRAY_ERR_LOG("RenderGraph: invalid handle {} in ReadTexture", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidatePassLocalAccess(passIndex, handle, "ReadTexture")) {
         return RGResourceHandle::Invalid();
     }
     if (!RGIsReadAccess(mode)) {
@@ -1055,6 +1408,9 @@ RGResourceHandle RGGraphBuilder::AddReadBufferEdge(
         RADRAY_ERR_LOG("RenderGraph: invalid handle {} in ReadBuffer", handle.Index);
         return RGResourceHandle::Invalid();
     }
+    if (!ValidatePassLocalAccess(passIndex, handle, "ReadBuffer")) {
+        return RGResourceHandle::Invalid();
+    }
     if (!RGIsReadAccess(mode)) {
         RADRAY_ERR_LOG("RenderGraph: invalid read mode {} in ReadBuffer", mode);
         return RGResourceHandle::Invalid();
@@ -1097,6 +1453,9 @@ RGResourceHandle RGGraphBuilder::AddWriteTextureEdge(
         RADRAY_ERR_LOG("RenderGraph: invalid handle {} in WriteTexture", handle.Index);
         return RGResourceHandle::Invalid();
     }
+    if (!ValidatePassLocalAccess(passIndex, handle, "WriteTexture")) {
+        return RGResourceHandle::Invalid();
+    }
     if (!RGIsWriteAccess(mode)) {
         RADRAY_ERR_LOG("RenderGraph: invalid write mode {} in WriteTexture", mode);
         return RGResourceHandle::Invalid();
@@ -1137,6 +1496,9 @@ RGResourceHandle RGGraphBuilder::AddWriteBufferEdge(
     }
     if (!ValidateHandleIndex(handle)) {
         RADRAY_ERR_LOG("RenderGraph: invalid handle {} in WriteBuffer", handle.Index);
+        return RGResourceHandle::Invalid();
+    }
+    if (!ValidatePassLocalAccess(passIndex, handle, "WriteBuffer")) {
         return RGResourceHandle::Invalid();
     }
     if (!RGIsWriteAccess(mode)) {
@@ -1219,19 +1581,22 @@ ResourceAccessEdge RGGraphBuilder::MakeFullRangeEdge(RGResourceHandle handle) co
 }
 
 CompiledGraph RGGraphBuilder::Compile() const {
+    RGGraphBuilder resolvedGraph = *this;
+    resolvedGraph.ResolveReflectionDependencies();
+
     CompiledGraph compiled{};
     compiled.Success = true;
-    compiled.Allocations.resize(_resources.size());
+    compiled.Allocations.resize(resolvedGraph._resources.size());
 
-    if (_passes.empty()) {
+    if (resolvedGraph._passes.empty()) {
         return compiled;
     }
 
-    const auto& resources = _resources;
-    const auto& passes = _passes;
+    const auto& resources = resolvedGraph._resources;
+    const auto& passes = resolvedGraph._passes;
 
-    vector<ResourceAccessEdge> roots = _roots;
-    const auto implicitRoots = RGCollectImplicitRoots(*this);
+    vector<ResourceAccessEdge> roots = resolvedGraph._roots;
+    const auto implicitRoots = RGCollectImplicitRoots(resolvedGraph);
     for (const auto& root : implicitRoots) {
         if (!RGContainsEdge(roots, root)) {
             roots.push_back(root);
@@ -1723,6 +2088,7 @@ std::string_view format_as(RGResourceFlag v) noexcept {
         case RGResourceFlag::Output: return "Output";
         case RGResourceFlag::ForceRetain: return "ForceRetain";
         case RGResourceFlag::Temporal: return "Temporal";
+        case RGResourceFlag::PassLocal: return "PassLocal";
     }
     return "UNKNOWN";
 }

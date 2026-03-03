@@ -6,7 +6,7 @@
 #include <radray/image_data.h>
 #include <radray/imgui/imgui_app.h>
 #include <radray/render/dxc.h>
-#include <radray/render/bind_bridge.h>
+#include <radray/render/resource_binder.h>
 #include <radray/render/render_utility.h>
 
 using namespace radray;
@@ -299,12 +299,12 @@ private:
             throw ImGuiApplicationException("Failed to read bindless.hlsl");
         }
         string hlsl = std::move(hlslOpt.value());
-        render::BindBridgeStaticSampler staticSampler{
+        render::StaticSamplerBinding staticSampler{
             "_Sampler",
             {{render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
               render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest,
               0.0f, 0.0f, std::nullopt, 0}}};
-        render::BindBridgeLayout bindLayout;
+        render::PipelineLayout bindLayout;
         unique_ptr<render::Shader> vsShader, psShader;
         {
             auto [VSResult, PSResult, BindLayout] = render::CompileShaderFromHLSL(_dxc.get(), _device.get(), hlsl, backend, {staticSampler}).value();
@@ -315,17 +315,22 @@ private:
         auto rsDesc = bindLayout.GetDescriptor();
         _rs = _device->CreateRootSignature(rsDesc.Get()).Unwrap();
         {
-            auto texId = bindLayout.GetBindingId("_Tex");
+            auto texId = bindLayout.GetParameterId("_Tex");
             if (texId.has_value()) {
-                auto& entry = std::get<render::BindBridgeLayout::DescriptorSetEntry>(bindLayout.GetBindings()[texId.value()]);
-                _bindlessSlot = entry.SetIndex;
+                auto mappings = bindLayout.GetMappings();
+                const auto& mapping = mappings[texId.value()];
+                auto* location = std::get_if<render::DescriptorTableLocation>(&mapping.Location);
+                if (!location) {
+                    throw ImGuiApplicationException("Binding _Tex is not in descriptor table");
+                }
+                _bindlessSlot = location->SetIndex;
             } else {
                 throw ImGuiApplicationException("Failed to find binding for _Tex");
             }
         }
         _binds.reserve(_inFlightFrameCount);
         for (uint32_t i = 0; i < _inFlightFrameCount; i++) {
-            _binds.emplace_back(std::make_unique<render::BindBridge>(_device.get(), _rs.get(), bindLayout));
+            _binds.emplace_back(std::make_unique<render::ResourceBinder>(_device.get(), _rs.get(), bindLayout));
         }
         render::VertexElement vertElems[] = {
             {0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0},
@@ -447,7 +452,7 @@ private:
     // pipeline
     unique_ptr<render::RootSignature> _rs;
     unique_ptr<render::GraphicsPipelineState> _pso;
-    vector<unique_ptr<render::BindBridge>> _binds;
+    vector<unique_ptr<render::ResourceBinder>> _binds;
     uint32_t _bindlessSlot{0};
     unique_ptr<render::BindlessArray> _bindlessArray;
     // textures
