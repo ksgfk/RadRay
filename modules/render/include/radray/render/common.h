@@ -105,7 +105,9 @@ enum class ShaderStage : uint32_t {
     UNKNOWN = 0x0,
     Vertex = 0x1,
     Pixel = Vertex << 1,
+
     Compute = Pixel << 1,
+
     RayGen = Compute << 1,
     Miss = RayGen << 1,
     ClosestHit = Miss << 1,
@@ -379,6 +381,25 @@ enum class ResourceBindType {
     AccelerationStructure
 };
 
+enum class FenceStatus {
+    Complete,
+    Incomplete,
+    NotSubmitted
+};
+
+enum class PresentMode {
+    FIFO,
+    Mailbox,
+    Immediate
+};
+
+enum class BindlessSlotType {
+    Multiple,
+    BufferOnly,
+    Texture2DOnly,
+    Texture3DOnly
+};
+
 enum class AccelerationStructureType {
     BottomLevel,
     TopLevel
@@ -397,23 +418,11 @@ enum class AccelerationStructureBuildFlag : uint32_t {
     AllowCompaction = AllowUpdate << 1
 };
 
-enum class FenceStatus {
-    Complete,
-    Incomplete,
-    NotSubmitted
-};
-
-enum class PresentMode {
-    FIFO,
-    Mailbox,
-    Immediate
-};
-
-enum class BindlessSlotType {
-    Multiple,
-    BufferOnly,
-    Texture2DOnly,
-    Texture3DOnly
+enum class ShaderBindingTableEntryType : uint8_t {
+    RayGen,
+    Miss,
+    HitGroup,
+    Callable
 };
 
 enum class RenderObjectTag : uint32_t {
@@ -494,17 +503,6 @@ using AccelerationStructureBuildFlags = EnumFlags<render::AccelerationStructureB
 
 namespace radray::render {
 
-struct ColorClearValue {
-    std::array<float, 4> Value{};
-};
-
-struct DepthStencilClearValue {
-    float Depth;
-    uint8_t Stencil;
-};
-
-using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
-
 class Device;
 class CommandQueue;
 class CommandBuffer;
@@ -534,6 +532,17 @@ class Sampler;
 class BindlessArray;
 class InstanceVulkan;
 class Semaphore;
+
+struct ColorClearValue {
+    std::array<float, 4> Value{};
+};
+
+struct DepthStencilClearValue {
+    float Depth;
+    uint8_t Stencil;
+};
+
+using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
 class RenderBase {
 public:
@@ -616,8 +625,8 @@ struct SamplerDescriptor {
     std::optional<CompareFunction> Compare{};
     uint32_t AnisotropyClamp{0};
 
-    friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
-    friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept;
+    friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
+    friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
 };
 
 struct CommandQueueSubmitDescriptor {
@@ -666,10 +675,7 @@ struct BarrierAccelerationStructureDescriptor {
     bool IsFromOrToOtherQueue{false};
 };
 
-using ResourceBarrierDescriptor = std::variant<
-    BarrierBufferDescriptor,
-    BarrierTextureDescriptor,
-    BarrierAccelerationStructureDescriptor>;
+using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierAccelerationStructureDescriptor>;
 
 struct ColorAttachment {
     TextureView* Target{nullptr};
@@ -990,9 +996,9 @@ struct RayTracingInstanceDescriptor {
     uint32_t InstanceID{0};
     uint32_t InstanceMask{0xFF};
     uint32_t InstanceContributionToHitGroupIndex{0};
+    AccelerationStructure* Blas{nullptr};
     bool ForceOpaque{false};
     bool ForceNoOpaque{false};
-    AccelerationStructure* Blas{nullptr};
 };
 
 struct AccelerationStructureDescriptor {
@@ -1049,28 +1055,21 @@ struct ShaderBindingTableRequirements {
     uint32_t BaseAlignment{0};
 };
 
-enum class ShaderBindingTableEntryType : uint8_t {
-    RayGen,
-    Miss,
-    HitGroup,
-    Callable
-};
-
 struct ShaderBindingTableBuildEntry {
     ShaderBindingTableEntryType Type{ShaderBindingTableEntryType::RayGen};
     std::string_view ShaderName{};
-    uint32_t RecordIndex{0};
     std::span<const byte> LocalData{};
+    uint32_t RecordIndex{0};
 };
 
 struct ShaderBindingTableDescriptor {
+    std::string_view Name{};
     RayTracingPipelineState* Pipeline{nullptr};
     uint32_t RayGenCount{1};
     uint32_t MissCount{0};
     uint32_t HitGroupCount{0};
     uint32_t CallableCount{0};
     uint32_t MaxLocalDataSize{0};
-    std::string_view Name{};
 };
 
 struct ShaderBindingTableRegion {

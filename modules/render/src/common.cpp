@@ -17,23 +17,6 @@
 
 namespace radray::render {
 
-bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
-    return lhs.AddressS == rhs.AddressS &&
-           lhs.AddressT == rhs.AddressT &&
-           lhs.AddressR == rhs.AddressR &&
-           lhs.MinFilter == rhs.MinFilter &&
-           lhs.MagFilter == rhs.MagFilter &&
-           lhs.MipmapFilter == rhs.MipmapFilter &&
-           lhs.LodMin == rhs.LodMin &&
-           lhs.LodMax == rhs.LodMax &&
-           lhs.Compare == rhs.Compare &&
-           lhs.AnisotropyClamp == rhs.AnisotropyClamp;
-}
-
-bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept {
-    return !(lhs == rhs);
-}
-
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
     return std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {

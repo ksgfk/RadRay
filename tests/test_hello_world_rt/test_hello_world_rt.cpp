@@ -103,6 +103,20 @@ public:
     }
 
     void ExecutePass(CommandBuffer* cmd, Fence* fence) override {
+        // D3D12 requires RT/DS resources from CREATE_NOT_ZEROED heaps to be
+        // initialized via Clear/Discard/Copy before other ops (like UAV writes/copy).
+        const ColorAttachment clearAttachment{
+            _rtv.get(),
+            LoadAction::Clear,
+            StoreAction::Store,
+            ColorClearValue{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        const RenderPassDescriptor clearPassDesc{
+            std::span{&clearAttachment, 1},
+            std::nullopt,
+            "init_offscreen_rt"};
+        auto clearPass = cmd->BeginRenderPass(clearPassDesc).Unwrap();
+        cmd->EndRenderPass(std::move(clearPass));
+
         ResourceBarrierDescriptor beginRtBarrier[] = {
             BarrierTextureDescriptor{_rt.get(), TextureState::RenderTarget, TextureState::UnorderedAccess},
         };
@@ -197,9 +211,9 @@ private:
         _sbt = _device->CreateShaderBindingTable(sbtDesc).Unwrap();
 
         ShaderBindingTableBuildEntry sbtEntries[] = {
-            {ShaderBindingTableEntryType::RayGen, "RayGenMain", 0, {}},
-            {ShaderBindingTableEntryType::Miss, "MissMain", 0, {}},
-            {ShaderBindingTableEntryType::HitGroup, "HitGroup0", 0, {}},
+            {ShaderBindingTableEntryType::RayGen, "RayGenMain", {}, 0},
+            {ShaderBindingTableEntryType::Miss, "MissMain", {}, 0},
+            {ShaderBindingTableEntryType::HitGroup, "HitGroup0", {}, 0},
         };
         if (!_sbt->Build(sbtEntries)) {
             throw DebugException("failed to build ray tracing shader binding table");
