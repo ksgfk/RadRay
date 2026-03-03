@@ -135,7 +135,8 @@ enum class HlslShaderVariableClass {
     MATRIX_COLUMNS,
     OBJECT,
     STRUCTURE,
-    ARRAY
+    ARRAY,
+    FORCE_DWORD
 };
 
 enum class HlslShaderVariableType {
@@ -203,6 +204,7 @@ enum class HlslShaderVariableType {
     FLOAT16,
     INT64,
     UINT64,
+    FORCE_DWORD
 };
 
 class DxcOutput {

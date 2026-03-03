@@ -13,6 +13,12 @@
 #ifndef __D3D12SHADER_H__
 #define __D3D12SHADER_H__
 
+#ifndef __cplusplus
+#error ERROR: This header requires C++!  Please use a .cpp suffix for this file
+#endif
+namespace radray {
+}
+
 #include <dxc/WinAdapter.h>
 #include "d3dcommon_adapter.h"
 

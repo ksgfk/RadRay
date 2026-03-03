@@ -2,6 +2,12 @@
 
 #pragma once
 
+#ifndef __cplusplus
+#error ERROR: This header requires C++!  Please use a .cpp suffix for this file
+#endif
+namespace radray {
+}
+
 typedef 
 enum D3D_DRIVER_TYPE
     {

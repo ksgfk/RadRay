@@ -15,7 +15,7 @@ struct ArrayTrait<T[N]> {
 template <typename T>
 requires(std::is_bounded_array_v<T>)
 constexpr auto ArrayLength(const T& arr) noexcept {
-    RADRAY_UNUSED(arr);
+    (void)(arr);
     return ArrayTrait<T>::length;
 }
 

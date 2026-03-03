@@ -319,8 +319,8 @@ static HlslCBufferType _MapCBufferType(D3D_CBUFFER_TYPE type) noexcept {
         case D3D_CT_TBUFFER: return HlslCBufferType::TBUFFER;
         case D3D_CT_INTERFACE_POINTERS: return HlslCBufferType::INTERFACE_POINTERS;
         case D3D_CT_RESOURCE_BIND_INFO: return HlslCBufferType::RESOURCE_BIND_INFO;
-        default: return HlslCBufferType::UNKNOWN;
     }
+    return HlslCBufferType::UNKNOWN;
 }
 
 static HlslShaderInputType _MapInputType(D3D_SHADER_INPUT_TYPE type) noexcept {
@@ -339,8 +339,8 @@ static HlslShaderInputType _MapInputType(D3D_SHADER_INPUT_TYPE type) noexcept {
         case D3D_SIT_UAV_RWBYTEADDRESS: return HlslShaderInputType::UAV_RWBYTEADDRESS;
         case D3D_SIT_RTACCELERATIONSTRUCTURE: return HlslShaderInputType::RTACCELERATIONSTRUCTURE;
         case D3D_SIT_UAV_FEEDBACKTEXTURE: return HlslShaderInputType::UAV_FEEDBACKTEXTURE;
-        default: return HlslShaderInputType::UNKNOWN;
     }
+    return HlslShaderInputType::UNKNOWN;
 }
 
 static HlslResourceReturnType _MapReturnType(D3D_RESOURCE_RETURN_TYPE type) noexcept {
@@ -353,8 +353,8 @@ static HlslResourceReturnType _MapReturnType(D3D_RESOURCE_RETURN_TYPE type) noex
         case D3D_RETURN_TYPE_MIXED: return HlslResourceReturnType::MIXED;
         case D3D_RETURN_TYPE_DOUBLE: return HlslResourceReturnType::DOUBLE;
         case D3D_RETURN_TYPE_CONTINUED: return HlslResourceReturnType::CONTINUED;
-        default: return HlslResourceReturnType::UNKNOWN;
     }
+    return HlslResourceReturnType::UNKNOWN;
 }
 
 static HlslSRVDimension _MapSRVDimension(D3D_SRV_DIMENSION dim) noexcept {
@@ -370,8 +370,9 @@ static HlslSRVDimension _MapSRVDimension(D3D_SRV_DIMENSION dim) noexcept {
         case D3D_SRV_DIMENSION_TEXTURECUBE: return HlslSRVDimension::TEXTURECUBE;
         case D3D_SRV_DIMENSION_TEXTURECUBEARRAY: return HlslSRVDimension::TEXTURECUBEARRAY;
         case D3D_SRV_DIMENSION_BUFFEREX: return HlslSRVDimension::BUFFEREX;
-        default: return HlslSRVDimension::UNKNOWN;
+        case D3D_SRV_DIMENSION_UNKNOWN: return HlslSRVDimension::UNKNOWN;
     }
+    return HlslSRVDimension::UNKNOWN;
 }
 
 static HlslSystemValueType _MapSystemValue(D3D_NAME name) noexcept {
@@ -402,8 +403,9 @@ static HlslSystemValueType _MapSystemValue(D3D_NAME name) noexcept {
         case D3D_NAME_DEPTH_LESS_EQUAL: return HlslSystemValueType::DEPTH_LESS_EQUAL;
         case D3D_NAME_STENCIL_REF: return HlslSystemValueType::STENCIL_REF;
         case D3D_NAME_INNER_COVERAGE: return HlslSystemValueType::INNER_COVERAGE;
-        default: return HlslSystemValueType::UNDEFINED;
+        case D3D_NAME_UNDEFINED: return HlslSystemValueType::UNDEFINED;
     }
+    return HlslSystemValueType::UNDEFINED;
 }
 
 static HlslRegisterComponentType _MapComponentType(D3D_REGISTER_COMPONENT_TYPE type) noexcept {
@@ -417,8 +419,9 @@ static HlslRegisterComponentType _MapComponentType(D3D_REGISTER_COMPONENT_TYPE t
         case D3D_REGISTER_COMPONENT_UINT64: return HlslRegisterComponentType::UINT64;
         case D3D_REGISTER_COMPONENT_SINT64: return HlslRegisterComponentType::SINT64;
         case D3D_REGISTER_COMPONENT_FLOAT64: return HlslRegisterComponentType::FLOAT64;
-        default: return HlslRegisterComponentType::UNKNOWN;
+        case D3D_REGISTER_COMPONENT_UNKNOWN: return HlslRegisterComponentType::UNKNOWN;
     }
+    return HlslRegisterComponentType::UNKNOWN;
 }
 
 static HlslFeatureLevel _MapFeatureLevel(D3D_FEATURE_LEVEL level) noexcept {
@@ -433,8 +436,10 @@ static HlslFeatureLevel _MapFeatureLevel(D3D_FEATURE_LEVEL level) noexcept {
         case D3D_FEATURE_LEVEL_12_0: return HlslFeatureLevel::LEVEL12_0;
         case D3D_FEATURE_LEVEL_12_1: return HlslFeatureLevel::LEVEL12_1;
         case D3D_FEATURE_LEVEL_12_2: return HlslFeatureLevel::LEVEL12_2;
-        default: return HlslFeatureLevel::UNKNOWN;
+        case D3D_FEATURE_LEVEL_1_0_GENERIC:
+        case D3D_FEATURE_LEVEL_1_0_CORE: return HlslFeatureLevel::UNKNOWN;
     }
+    return HlslFeatureLevel::UNKNOWN;
 }
 
 static HlslShaderVariableClass _MapShaderVariableClass(D3D_SHADER_VARIABLE_CLASS cls) noexcept {
@@ -447,8 +452,9 @@ static HlslShaderVariableClass _MapShaderVariableClass(D3D_SHADER_VARIABLE_CLASS
         case D3D_SVC_STRUCT: return HlslShaderVariableClass::STRUCTURE;
         case D3D_SVC_INTERFACE_CLASS: return HlslShaderVariableClass::OBJECT;
         case D3D_SVC_INTERFACE_POINTER: return HlslShaderVariableClass::OBJECT;
-        default: return HlslShaderVariableClass::UNKNOWN;
+        case D3D_SVC_FORCE_DWORD: return HlslShaderVariableClass::FORCE_DWORD;
     }
+    return HlslShaderVariableClass::UNKNOWN;
 }
 
 static HlslShaderVariableType _MapShaderVariableType(D3D_SHADER_VARIABLE_TYPE type) noexcept {
@@ -516,8 +522,42 @@ static HlslShaderVariableType _MapShaderVariableType(D3D_SHADER_VARIABLE_TYPE ty
         case D3D_SVT_FLOAT16: return HlslShaderVariableType::FLOAT16;
         case D3D_SVT_INT64: return HlslShaderVariableType::INT64;
         case D3D_SVT_UINT64: return HlslShaderVariableType::UINT64;
-        default: return HlslShaderVariableType::UNKNOWN;
+        case D3D_SVT_FORCE_DWORD: return HlslShaderVariableType::FORCE_DWORD;
     }
+    return HlslShaderVariableType::UNKNOWN;
+}
+
+static size_t _GetTypeIndex(
+    HlslShaderDesc& result,
+    vector<ID3D12ShaderReflectionType*>& typeCache,
+    ID3D12ShaderReflectionType* type) noexcept {
+    if (!type) return HlslShaderTypeId::Invalid;
+    for (size_t i = 0; i < typeCache.size(); i++) {
+        if (typeCache[i]->IsEqual(type) == S_OK) {
+            return i;
+        }
+    }
+    D3D12_SHADER_TYPE_DESC typeDesc{};
+    if (FAILED(type->GetDesc(&typeDesc))) return HlslShaderTypeId::Invalid;
+    HlslShaderTypeDesc desc{};
+    desc.Name = typeDesc.Name ? typeDesc.Name : "";
+    desc.Class = _MapShaderVariableClass(typeDesc.Class);
+    desc.Type = _MapShaderVariableType(typeDesc.Type);
+    desc.Rows = typeDesc.Rows;
+    desc.Columns = typeDesc.Columns;
+    desc.Elements = typeDesc.Elements;
+    desc.Offset = typeDesc.Offset;
+    for (UINT i = 0; i < typeDesc.Members; i++) {
+        ID3D12ShaderReflectionType* memberType = type->GetMemberTypeByIndex(i);
+        LPCSTR memberName = type->GetMemberTypeName(i);
+        size_t memberTypeIdx = _GetTypeIndex(result, typeCache, memberType);
+        auto& member = desc.Members.emplace_back();
+        member.Name = memberName ? memberName : "";
+        member.Type = memberTypeIdx;
+    }
+    result.Types.push_back(std::move(desc));
+    typeCache.push_back(type);
+    return result.Types.size() - 1;
 }
 
 #ifdef RADRAY_ENABLE_MIMALLOC
@@ -741,7 +781,7 @@ public:
         }
 
         HlslShaderDesc result{};
-        result.Creator = shaderDesc.Creator;
+        result.Creator = shaderDesc.Creator ? shaderDesc.Creator : "";
         result.Version = shaderDesc.Version;
         result.Flags = shaderDesc.Flags;
         D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
@@ -751,44 +791,14 @@ public:
         result.Stages = stage;
         sr->GetThreadGroupSize(&result.GroupSizeX, &result.GroupSizeY, &result.GroupSizeZ);
 
-        std::vector<ID3D12ShaderReflectionType*> typeCache;
-        std::function<size_t(ID3D12ShaderReflectionType*)> getTypeIndex =
-            [&](ID3D12ShaderReflectionType* type) -> size_t {
-            if (!type) return HlslShaderTypeId::Invalid;
-            for (size_t i = 0; i < typeCache.size(); i++) {
-                if (typeCache[i]->IsEqual(type) == S_OK) {
-                    return i;
-                }
-            }
-            D3D12_SHADER_TYPE_DESC typeDesc{};
-            if (FAILED(type->GetDesc(&typeDesc))) return HlslShaderTypeId::Invalid;
-            HlslShaderTypeDesc desc{};
-            desc.Name = typeDesc.Name;
-            desc.Class = _MapShaderVariableClass(typeDesc.Class);
-            desc.Type = _MapShaderVariableType(typeDesc.Type);
-            desc.Rows = typeDesc.Rows;
-            desc.Columns = typeDesc.Columns;
-            desc.Elements = typeDesc.Elements;
-            desc.Offset = typeDesc.Offset;
-            for (UINT i = 0; i < typeDesc.Members; i++) {
-                ID3D12ShaderReflectionType* memberType = type->GetMemberTypeByIndex(i);
-                LPCSTR memberName = type->GetMemberTypeName(i);
-                size_t memberTypeIdx = getTypeIndex(memberType);
-                auto& member = desc.Members.emplace_back();
-                member.Name = memberName;
-                member.Type = memberTypeIdx;
-            }
-            result.Types.push_back(std::move(desc));
-            typeCache.push_back(type);
-            return result.Types.size() - 1;
-        };
+        vector<ID3D12ShaderReflectionType*> typeCache;
 
         for (UINT i = 0; i < shaderDesc.ConstantBuffers; i++) {
             ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByIndex(i);
             D3D12_SHADER_BUFFER_DESC cbDesc{};
             if (FAILED(cb->GetDesc(&cbDesc))) continue;
             auto& bufDesc = result.ConstantBuffers.emplace_back();
-            bufDesc.Name = cbDesc.Name;
+            bufDesc.Name = cbDesc.Name ? cbDesc.Name : "";
             bufDesc.Type = _MapCBufferType(cbDesc.Type);
             bufDesc.Size = cbDesc.Size;
             bufDesc.Flags = cbDesc.uFlags;
@@ -798,7 +808,7 @@ public:
                 D3D12_SHADER_VARIABLE_DESC varDesc{};
                 if (FAILED(var->GetDesc(&varDesc))) continue;
                 auto& vDesc = result.Variables.emplace_back();
-                vDesc.Name = varDesc.Name;
+                vDesc.Name = varDesc.Name ? varDesc.Name : "";
                 vDesc.StartOffset = varDesc.StartOffset;
                 vDesc.Size = varDesc.Size;
                 vDesc.uFlags = varDesc.uFlags;
@@ -806,7 +816,7 @@ public:
                 vDesc.TextureSize = varDesc.TextureSize;
                 vDesc.StartSampler = varDesc.StartSampler;
                 vDesc.SamplerSize = varDesc.SamplerSize;
-                vDesc.Type = getTypeIndex(var->GetType());
+                vDesc.Type = _GetTypeIndex(result, typeCache, var->GetType());
                 bufDesc.Variables.push_back(result.Variables.size() - 1);
             }
         }
@@ -815,7 +825,7 @@ public:
             D3D12_SHADER_INPUT_BIND_DESC bindDesc{};
             if (FAILED(sr->GetResourceBindingDesc(i, &bindDesc))) continue;
             auto& ibDesc = result.BoundResources.emplace_back();
-            ibDesc.Name = bindDesc.Name;
+            ibDesc.Name = bindDesc.Name ? bindDesc.Name : "";
             ibDesc.Type = _MapInputType(bindDesc.Type);
             ibDesc.BindPoint = bindDesc.BindPoint;
             ibDesc.BindCount = bindDesc.BindCount;
@@ -867,7 +877,7 @@ public:
             D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
             if (FAILED(sr->GetInputParameterDesc(i, &paramDesc))) continue;
             auto& spDesc = result.InputParameters.emplace_back();
-            spDesc.SemanticName = paramDesc.SemanticName;
+            spDesc.SemanticName = paramDesc.SemanticName ? paramDesc.SemanticName : "";
             spDesc.SemanticIndex = paramDesc.SemanticIndex;
             spDesc.Register = paramDesc.Register;
             spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
@@ -879,7 +889,7 @@ public:
             D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
             if (FAILED(sr->GetOutputParameterDesc(i, &paramDesc))) continue;
             auto& spDesc = result.OutputParameters.emplace_back();
-            spDesc.SemanticName = paramDesc.SemanticName;
+            spDesc.SemanticName = paramDesc.SemanticName ? paramDesc.SemanticName : "";
             spDesc.SemanticIndex = paramDesc.SemanticIndex;
             spDesc.Register = paramDesc.Register;
             spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
