@@ -30,7 +30,7 @@ std::optional<vector<VertexElement>> MapVertexElements(std::span<const VertexBuf
         }
         VertexElement& ve = result.emplace_back();
         ve.Offset = found->Offset;
-        ve.Semantic = found->Semantic;
+        ve.Semantic = want.Semantic;
         ve.SemanticIndex = found->SemanticIndex;
         ve.Format = want.Format;
         ve.Location = want.Location;

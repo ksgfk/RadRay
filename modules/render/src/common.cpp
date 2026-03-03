@@ -350,9 +350,11 @@ bool ValidateTextureViewDescriptor(const TextureViewDescriptor& desc, const Text
 
     const bool isDepth = IsDepthStencilFormat(desc.Format);
     const bool hasDepthUsage = desc.Usage.HasFlag(TextureViewUsage::DepthRead) || desc.Usage.HasFlag(TextureViewUsage::DepthWrite);
+    const bool isResourceUsage = desc.Usage.HasFlag(TextureViewUsage::Resource);
     if (isDepth) {
-        if (!hasDepthUsage) {
-            RADRAY_ERR_LOG("depth/stencil texture view must use depth/stencil usage");
+        // Depth formats may be used as read-only shader resources (e.g. depth sampling in deferred lighting).
+        if (!hasDepthUsage && !isResourceUsage) {
+            RADRAY_ERR_LOG("depth/stencil texture view must use depth/stencil or resource usage");
             return false;
         }
         if (desc.Usage.HasFlag(TextureViewUsage::RenderTarget) || desc.Usage.HasFlag(TextureViewUsage::UnorderedAccess)) {

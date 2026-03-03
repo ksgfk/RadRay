@@ -27,6 +27,8 @@ public:
 
     Texture* GetTexture(RGResourceHandle handle) const noexcept;
     Buffer* GetBuffer(RGResourceHandle handle) const noexcept;
+    RGAccessMode ResolveStateBefore(RGResourceHandle handle, RGAccessMode fallback) const noexcept;
+    void CommitStateAfter(RGResourceHandle handle, RGAccessMode state) noexcept;
 
     bool EnsureResources(const RGGraphBuilder& graph, const CompiledGraph& compiled) noexcept;
 
@@ -55,6 +57,13 @@ private:
     shared_ptr<Device> _device{};
     unordered_map<uint32_t, TextureBinding> _textures{};
     unordered_map<uint32_t, BufferBinding> _buffers{};
+    unordered_map<uint32_t, RGAccessMode> _resourceStates{};
+};
+
+struct RGRecordOptions {
+    bool EmitBarriers{true};
+    bool ValidateQueueClass{true};
+    QueueType RecordQueueClass{QueueType::Direct};
 };
 
 class RGExecutor {
@@ -62,11 +71,12 @@ public:
     explicit RGExecutor(shared_ptr<Device> device) noexcept;
     virtual ~RGExecutor() noexcept = default;
 
-    bool Execute(
-        Nullable<CommandQueue*> queue,
+    bool Record(
+        CommandBuffer* cmd,
         const RGGraphBuilder& graph,
         const CompiledGraph& compiled,
-        RGRegistry* registry) noexcept;
+        RGRegistry* registry,
+        const RGRecordOptions& options = {}) noexcept;
 
     static unique_ptr<RGExecutor> Create(shared_ptr<Device> device) noexcept;
 

@@ -274,11 +274,14 @@ bool RGExecutorD3D12::EmitPassBarriers(
 
             const auto beforeState = d3d12::MapType(RGAccessModeToTextureState(barrier.StateBefore));
             const auto afterState = d3d12::MapType(RGAccessModeToTextureState(barrier.StateAfter));
-            if (beforeState == afterState && RGIsWriteAccess(barrier.StateAfter)) {
-                auto& raw = rawBarriers.emplace_back();
-                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                raw.UAV.pResource = texture->_tex.Get();
+            if (beforeState == afterState) {
+                // UAV barrier is only valid for UAV-write hazards.
+                if (barrier.StateAfter == RGAccessMode::StorageWrite) {
+                    auto& raw = rawBarriers.emplace_back();
+                    raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                    raw.UAV.pResource = texture->_tex.Get();
+                }
                 continue;
             }
 
@@ -334,11 +337,14 @@ bool RGExecutorD3D12::EmitPassBarriers(
 
             const auto beforeState = d3d12::MapType(RGAccessModeToBufferState(barrier.StateBefore));
             const auto afterState = d3d12::MapType(RGAccessModeToBufferState(barrier.StateAfter));
-            if (beforeState == afterState && RGIsWriteAccess(barrier.StateAfter)) {
-                auto& raw = rawBarriers.emplace_back();
-                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                raw.UAV.pResource = buffer->_buf.Get();
+            if (beforeState == afterState) {
+                // UAV barrier is only valid for UAV-write hazards.
+                if (barrier.StateAfter == RGAccessMode::StorageWrite) {
+                    auto& raw = rawBarriers.emplace_back();
+                    raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                    raw.UAV.pResource = buffer->_buf.Get();
+                }
                 continue;
             }
 
@@ -538,6 +544,7 @@ bool RGRegistry::ImportPhysicalTexture(RGResourceHandle handle, Texture* texture
     _textures.insert_or_assign(handle.Index, TextureBinding{
                                                  .Ptr = texture,
                                                  .Owned = {}});
+    _resourceStates.insert_or_assign(handle.Index, RGAccessMode::Unknown);
     return true;
 }
 
@@ -548,6 +555,7 @@ bool RGRegistry::ImportPhysicalBuffer(RGResourceHandle handle, Buffer* buffer) n
     _buffers.insert_or_assign(handle.Index, BufferBinding{
                                                 .Ptr = buffer,
                                                 .Owned = {}});
+    _resourceStates.insert_or_assign(handle.Index, RGAccessMode::Unknown);
     return true;
 }
 
@@ -561,12 +569,30 @@ Buffer* RGRegistry::GetBuffer(RGResourceHandle handle) const noexcept {
     return it == _buffers.end() ? nullptr : it->second.Ptr;
 }
 
+RGAccessMode RGRegistry::ResolveStateBefore(RGResourceHandle handle, RGAccessMode fallback) const noexcept {
+    if (!handle.IsValid()) {
+        return fallback;
+    }
+    const auto it = _resourceStates.find(handle.Index);
+    return it == _resourceStates.end() ? fallback : it->second;
+}
+
+void RGRegistry::CommitStateAfter(RGResourceHandle handle, RGAccessMode state) noexcept {
+    if (!handle.IsValid()) {
+        return;
+    }
+    _resourceStates.insert_or_assign(handle.Index, state);
+}
+
 bool RGRegistry::EnsureTexture(
     uint32_t resourceIndex,
     const VirtualResource& resource,
     const RGGraphBuilder& graph,
     const CompiledGraph& compiled) noexcept {
     if (_textures.contains(resourceIndex)) {
+        if (!_resourceStates.contains(resourceIndex)) {
+            _resourceStates.insert_or_assign(resourceIndex, RGAccessMode::Unknown);
+        }
         return true;
     }
     if (resource.Flags.HasFlag(RGResourceFlag::External)) {
@@ -604,6 +630,7 @@ bool RGRegistry::EnsureTexture(
     _textures.insert_or_assign(resourceIndex, TextureBinding{
                                                   .Ptr = raw,
                                                   .Owned = std::move(owned)});
+    _resourceStates.insert_or_assign(resourceIndex, RGAccessMode::Unknown);
     return true;
 }
 
@@ -613,6 +640,9 @@ bool RGRegistry::EnsureBuffer(
     const RGGraphBuilder& graph,
     const CompiledGraph& compiled) noexcept {
     if (_buffers.contains(resourceIndex)) {
+        if (!_resourceStates.contains(resourceIndex)) {
+            _resourceStates.insert_or_assign(resourceIndex, RGAccessMode::Unknown);
+        }
         return true;
     }
     if (resource.Flags.HasFlag(RGResourceFlag::External)) {
@@ -655,6 +685,7 @@ bool RGRegistry::EnsureBuffer(
     _buffers.insert_or_assign(resourceIndex, BufferBinding{
                                                  .Ptr = raw,
                                                  .Owned = std::move(owned)});
+    _resourceStates.insert_or_assign(resourceIndex, RGAccessMode::Unknown);
     return true;
 }
 
@@ -685,12 +716,13 @@ bool RGRegistry::EnsureResources(const RGGraphBuilder& graph, const CompiledGrap
 RGExecutor::RGExecutor(shared_ptr<Device> device) noexcept
     : _device(std::move(device)) {}
 
-bool RGExecutor::Execute(
-    Nullable<CommandQueue*> queue,
+bool RGExecutor::Record(
+    CommandBuffer* cmd,
     const RGGraphBuilder& graph,
     const CompiledGraph& compiled,
-    RGRegistry* registry) noexcept {
-    if (_device == nullptr || registry == nullptr || !compiled.Success) {
+    RGRegistry* registry,
+    const RGRecordOptions& options) noexcept {
+    if (_device == nullptr || cmd == nullptr || registry == nullptr || !compiled.Success) {
         return false;
     }
     if (!registry->EnsureResources(graph, compiled)) {
@@ -705,34 +737,37 @@ bool RGExecutor::Execute(
         }
         const auto& pass = passes[passIndex];
 
-        CommandQueue* executeQueue = nullptr;
-        if (queue.HasValue()) {
-            executeQueue = queue.Get();
-        } else {
-            auto queueOpt = _device->GetCommandQueue(pass.QueueClass, 0);
-            if (!queueOpt.HasValue()) {
-                return false;
-            }
-            executeQueue = queueOpt.Get();
-        }
-
-        auto cmdOpt = _device->CreateCommandBuffer(executeQueue);
-        if (!cmdOpt.HasValue()) {
+        if (options.ValidateQueueClass && pass.QueueClass != options.RecordQueueClass) {
+            RADRAY_ERR_LOG(
+                "RenderGraphExecutor: pass '{}' queue class {} mismatches record queue {}",
+                pass.Name,
+                pass.QueueClass,
+                options.RecordQueueClass);
             return false;
         }
-        auto cmd = cmdOpt.Unwrap();
-        cmd->Begin();
 
-        if (sortedIndex < compiled.PassBarriers.size()) {
+        if (options.EmitBarriers && sortedIndex < compiled.PassBarriers.size()) {
             const auto& passBarriers = compiled.PassBarriers[sortedIndex];
-            if (!passBarriers.empty() && !EmitPassBarriers(cmd.get(), passBarriers, graph, *registry)) {
-                return false;
+            if (!passBarriers.empty()) {
+                vector<RGBarrier> runtimeBarriers{};
+                runtimeBarriers.reserve(passBarriers.size());
+                for (const auto& barrier : passBarriers) {
+                    RGBarrier runtimeBarrier = barrier;
+                    runtimeBarrier.StateBefore = registry->ResolveStateBefore(barrier.Handle, barrier.StateBefore);
+                    runtimeBarriers.push_back(runtimeBarrier);
+                }
+                if (!EmitPassBarriers(cmd, runtimeBarriers, graph, *registry)) {
+                    return false;
+                }
+                for (const auto& barrier : runtimeBarriers) {
+                    registry->CommitStateAfter(barrier.Handle, barrier.StateAfter);
+                }
             }
         }
 
         if (pass.ExecuteFunc) {
             RGPassContext ctx{};
-            ctx.Cmd = cmd.get();
+            ctx.Cmd = cmd;
             ctx.Registry = registry;
             ctx.QueueClass = pass.QueueClass;
             ctx.SortedPassIndex = sortedIndex;
@@ -740,13 +775,6 @@ bool RGExecutor::Execute(
             ctx.PassName = pass.Name;
             pass.ExecuteFunc(ctx);
         }
-
-        cmd->End();
-        CommandBuffer* rawCmd = cmd.get();
-        CommandQueueSubmitDescriptor submit{};
-        submit.CmdBuffers = std::span<CommandBuffer*>{&rawCmd, 1};
-        executeQueue->Submit(submit);
-        executeQueue->Wait();
     }
 
     return true;

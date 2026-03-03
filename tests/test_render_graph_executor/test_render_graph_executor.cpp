@@ -251,14 +251,15 @@ TEST(RenderGraphExecutor, executes_callbacks_and_dispatches_barriers) {
     auto executor = RGExecutor::Create(device);
     ASSERT_NE(executor, nullptr);
 
-    EXPECT_TRUE(executor->Execute(nullptr, graph, compiled, &registry));
+    FakeCommandBuffer cmd{};
+    cmd.Begin();
+    EXPECT_TRUE(executor->Record(&cmd, graph, compiled, &registry));
+    cmd.End();
     EXPECT_EQ(executeCount, 2u);
-    EXPECT_EQ(device->_queue.SubmitCount, 2u);
-    EXPECT_EQ(device->_queue.WaitCount, 2u);
-    EXPECT_GE(device->_queue.SubmittedBarrierCalls, 1u);
-    EXPECT_GE(device->_queue.SubmittedBarrierCount, 1u);
-    EXPECT_EQ(device->_queue.SubmittedBeginCount, 2u);
-    EXPECT_EQ(device->_queue.SubmittedEndCount, 2u);
+    EXPECT_EQ(cmd.BeginCount, 1u);
+    EXPECT_EQ(cmd.EndCount, 1u);
+    EXPECT_GE(cmd.BarrierCalls, 1u);
+    EXPECT_GE(cmd.BarrierCount, 1u);
 }
 
 TEST(RenderGraphExecutor, external_resource_requires_registry_import) {
@@ -280,7 +281,10 @@ TEST(RenderGraphExecutor, external_resource_requires_registry_import) {
     auto executor = RGExecutor::Create(device);
     ASSERT_NE(executor, nullptr);
 
-    EXPECT_FALSE(executor->Execute(nullptr, graph, compiled, &registry));
+    FakeCommandBuffer cmd{};
+    cmd.Begin();
+    EXPECT_FALSE(executor->Record(&cmd, graph, compiled, &registry));
+    cmd.End();
 
     BufferDescriptor desc{};
     desc.Size = 256;
@@ -291,5 +295,69 @@ TEST(RenderGraphExecutor, external_resource_requires_registry_import) {
     auto externalBuffer = device->CreateBuffer(desc).Unwrap();
     ASSERT_TRUE(registry.ImportPhysicalBuffer(ext, externalBuffer.get()));
 
-    EXPECT_TRUE(executor->Execute(nullptr, graph, compiled, &registry));
+    cmd.Begin();
+    EXPECT_TRUE(executor->Record(&cmd, graph, compiled, &registry));
+    cmd.End();
+}
+
+TEST(RenderGraphExecutor, queue_class_mismatch_fails_when_validation_enabled) {
+    RGGraphBuilder graph{};
+    const auto out = graph.CreateTexture(MakeTextureDesc("out"));
+
+    auto pass = graph.AddPass("direct_pass", QueueType::Direct);
+    pass.WriteTexture(out);
+    graph.MarkOutput(out);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+
+    auto device = make_shared<FakeDevice>();
+    RGRegistry registry{device};
+    auto executor = RGExecutor::Create(device);
+    ASSERT_NE(executor, nullptr);
+
+    FakeCommandBuffer cmd{};
+    cmd.Begin();
+    RGRecordOptions options{};
+    options.ValidateQueueClass = true;
+    options.RecordQueueClass = QueueType::Compute;
+    EXPECT_FALSE(executor->Record(&cmd, graph, compiled, &registry, options));
+    cmd.End();
+}
+
+TEST(RenderGraphExecutor, can_disable_barrier_emission) {
+    RGGraphBuilder graph{};
+
+    const auto src = graph.CreateTexture(MakeTextureDesc("src"));
+    const auto out = graph.CreateTexture(MakeTextureDesc("out"));
+
+    uint32_t executeCount = 0;
+    auto passA = graph.AddPass("pass_a");
+    passA.WriteTexture(src);
+    passA.SetExecuteFunc([&](RGPassContext&) { executeCount += 1; });
+
+    auto passB = graph.AddPass("pass_b");
+    passB.ReadTexture(src);
+    passB.WriteTexture(out);
+    passB.SetExecuteFunc([&](RGPassContext&) { executeCount += 1; });
+    graph.MarkOutput(out);
+
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled.Success);
+
+    auto device = make_shared<FakeDevice>();
+    RGRegistry registry{device};
+    auto executor = RGExecutor::Create(device);
+    ASSERT_NE(executor, nullptr);
+
+    FakeCommandBuffer cmd{};
+    cmd.Begin();
+    RGRecordOptions options{};
+    options.EmitBarriers = false;
+    EXPECT_TRUE(executor->Record(&cmd, graph, compiled, &registry, options));
+    cmd.End();
+
+    EXPECT_EQ(executeCount, 2u);
+    EXPECT_EQ(cmd.BarrierCalls, 0u);
+    EXPECT_EQ(cmd.BarrierCount, 0u);
 }
