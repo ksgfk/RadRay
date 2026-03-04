@@ -8,7 +8,6 @@
 #include <fmt/format.h>
 
 #include <radray/types.h>
-#include <radray/logger.h>
 
 namespace radray {
 
@@ -64,7 +63,7 @@ public:
     }
 
     friend constexpr bool operator!=(EnumFlags l, EnumFlags r) noexcept {
-        return static_cast<std::underlying_type_t<T>>(l) != static_cast<std::underlying_type_t<T>>(r);
+        return static_cast<std::underlying_type_t<T>>(l._value) != static_cast<std::underlying_type_t<T>>(r._value);
     }
 
     friend constexpr bool operator!=(EnumFlags l, T r) noexcept {

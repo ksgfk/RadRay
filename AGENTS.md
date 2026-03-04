@@ -16,8 +16,6 @@
 - Fetch dependencies when missing:
   - `./fetch_third_party.ps1`
   - `./fetch_sdks.ps1`
-- Generate compile commands for editors:
-  - `./win_gen_compile_commands.ps1 -BuildDir ./build_debug -Configuration Debug`
 
 ## Coding Style & Naming Conventions
 - Language baseline: C++20 (`CMAKE_CXX_STANDARD 20`), C11 for C sources.
@@ -29,13 +27,3 @@
 - Framework: GoogleTest via `gtest_discover_tests(...)` in each test target.
 - Add new tests under `tests/test_<feature>/` with a local `CMakeLists.txt` and source file `test_<feature>.cpp`.
 - Prefer focused unit tests for core logic and backend-specific tests only where platform APIs are required.
-- Run `ctest` before submitting; use `--output-on-failure` to capture failing assertions.
-
-## Commit & Pull Request Guidelines
-- Commit style in history is short, imperative, and lowercase (for example `fix build and render`, `improve bindless example`).
-- Keep commits scoped to one change set; avoid mixing refactors with behavior changes.
-- PRs should include:
-  - clear summary of behavior change,
-  - affected modules/tests,
-  - platform notes (Windows/macOS, D3D12/Vulkan/Metal),
-  - screenshots or logs for rendering/UI changes.
