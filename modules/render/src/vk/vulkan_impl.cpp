@@ -171,7 +171,31 @@ Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t s
 
 Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
     auto queue = CastVkObject(queue_);
-    return CreateCommandBufferVulkan(queue);
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.pNext = nullptr;
+    poolInfo.flags = 0;
+    poolInfo.queueFamilyIndex = queue->_family.Family;
+    VkCommandPool pool{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
+        return nullptr;
+    }
+    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
+    VkCommandBufferAllocateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    bufferInfo.pNext = nullptr;
+    bufferInfo.commandPool = cmdPool->_cmdPool;
+    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    bufferInfo.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
+    if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
+        return nullptr;
+    }
+    return make_unique<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
@@ -1569,34 +1593,6 @@ Nullable<unique_ptr<BindlessDescriptorSetVulkan>> DeviceVulkan::CreateBindlessDe
     return bdls;
 }
 
-Nullable<unique_ptr<CommandBufferVulkan>> DeviceVulkan::CreateCommandBufferVulkan(QueueVulkan* queue) noexcept {
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.pNext = nullptr;
-    poolInfo.flags = 0;
-    poolInfo.queueFamilyIndex = queue->_family.Family;
-    VkCommandPool pool{VK_NULL_HANDLE};
-    if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
-        return nullptr;
-    }
-    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
-    VkCommandBufferAllocateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    bufferInfo.pNext = nullptr;
-    bufferInfo.commandPool = cmdPool->_cmdPool;
-    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    bufferInfo.commandBufferCount = 1;
-    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
-    if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
-        return nullptr;
-    }
-    return make_unique<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
-}
-
 Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
     auto rootSig = CastVkObject(rootSig_);
     if (index >= rootSig->_descSetLayouts.size()) {
@@ -2645,6 +2641,13 @@ bool CommandBufferVulkan::IsValid() const noexcept {
 
 void CommandBufferVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void CommandBufferVulkan::SetDebugName(std::string_view name) noexcept {
+    auto listName = fmt::format("CmdBuffer_{}", name);
+    auto allocName = fmt::format("CmdPool_{}", name);
+    _device->SetObjectName(listName, _cmdBuffer);
+    _device->SetObjectName(allocName, _cmdPool->_cmdPool);
 }
 
 void CommandBufferVulkan::DestroyImpl() noexcept {

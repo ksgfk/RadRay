@@ -34,10 +34,10 @@ public:
 
     void Destroy() noexcept;
 
+    static std::optional<Win32Event> Create() noexcept;
+
 private:
     HANDLE _event{nullptr};
-
-    friend std::optional<Win32Event> MakeWin32Event() noexcept;
 };
 
 class VersionedRootSignatureDescContainer {
@@ -95,6 +95,12 @@ public:
 
     class View {
     public:
+        View() noexcept = default;
+        View(const View&) = delete;
+        View& operator=(const View&) = delete;
+        View(View&&) = default;
+        View& operator=(View&&) = default;
+
         const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Get() const noexcept { return &_desc; }
 
     private:
@@ -137,8 +143,6 @@ private:
     vector<size_t> _rootConstantsOffsets;
     vector<size_t> _rootDescriptorsOffsets;
 };
-
-std::optional<Win32Event> MakeWin32Event() noexcept;
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
 

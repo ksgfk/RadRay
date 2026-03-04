@@ -29,7 +29,7 @@ void Win32Event::Destroy() noexcept {
     }
 }
 
-std::optional<Win32Event> MakeWin32Event() noexcept {
+std::optional<Win32Event> Win32Event::Create() noexcept {
     HANDLE event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
         DWORD err = ::GetLastError();

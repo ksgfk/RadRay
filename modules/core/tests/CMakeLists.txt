@@ -1,5 +1,5 @@
 radray_add_test(test_buddy_alloc SOURCES test_buddy_alloc.cpp LINK_LIBS radraycore)
-radray_add_test(test_free_list_alloc SOURCES test_free_list_alloc.cpp LINK_LIBS radraycore)
+radray_add_test(test_first_fit_alloc SOURCES test_first_fit_alloc.cpp LINK_LIBS radraycore)
 radray_add_test(test_wavefront_obj SOURCES test_wavefront_obj.cpp LINK_LIBS radraycore)
 radray_add_test(test_str_convert SOURCES test_str_convert.cpp LINK_LIBS radraycore)
 if (RADRAY_ENABLE_LIBPNG)

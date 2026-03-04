@@ -40,6 +40,10 @@ public:
     DescriptorHeap(
         ID3D12Device* device,
         D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept;
+    DescriptorHeap(const DescriptorHeap&) = delete;
+    DescriptorHeap& operator=(const DescriptorHeap&) = delete;
+    DescriptorHeap(DescriptorHeap&&) noexcept = default;
+    DescriptorHeap& operator=(DescriptorHeap&&) noexcept = default;
 
     ID3D12DescriptorHeap* Get() const noexcept;
 
@@ -241,10 +245,10 @@ public:
         UINT Start{0};
         UINT Length{0};
 
-        FreeListAllocator::Allocation ParentAllocation;
+        FirstFitAllocator::Allocation ParentAllocation;
 
         static constexpr Allocation Invalid() noexcept {
-            return {nullptr, 0, 0, FreeListAllocator::Allocation::Invalid()};
+            return {nullptr, 0, 0, FirstFitAllocator::Allocation::Invalid()};
         }
     };
 
@@ -265,7 +269,7 @@ public:
 private:
     ID3D12Device* _device;
     unique_ptr<DescriptorHeap> _heap;
-    FreeListAllocator _allocator;
+    FirstFitAllocator _allocator;
 };
 
 static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>, "GpuDescriptorAllocator is not an allocator");
@@ -382,6 +386,9 @@ public:
     D3D12_COMMAND_LIST_TYPE _type;
 };
 
+/**
+ * Fence 保存的 _fenceValue 表示下一个可用的值, _fenceValue - 1 表示已提交的的值
+ */
 class FenceD3D12Impl {
 public:
     FenceD3D12Impl(
@@ -458,11 +465,12 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     void Begin() noexcept override;
 
     void End() noexcept override;
 
-    using CommandBuffer::ResourceBarrier;
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;

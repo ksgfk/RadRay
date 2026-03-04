@@ -1192,6 +1192,8 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
 
+    virtual void SetDebugName(std::string_view name) noexcept = 0;
+
     virtual void Begin() noexcept = 0;
 
     virtual void End() noexcept = 0;

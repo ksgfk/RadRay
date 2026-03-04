@@ -190,8 +190,6 @@ public:
 
     Nullable<unique_ptr<BindlessDescriptorSetVulkan>> CreateBindlessDescriptorSetVulkan(VkDescriptorType type, uint32_t capacity) noexcept;
 
-    Nullable<unique_ptr<CommandBufferVulkan>> CreateCommandBufferVulkan(QueueVulkan* queue) noexcept;
-
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
     void SetObjectName(std::string_view name, VkObjectType type, void* vkObject) const noexcept;
@@ -285,11 +283,12 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     void Begin() noexcept override;
 
     void End() noexcept override;
 
-    using CommandBuffer::ResourceBarrier;
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
@@ -816,11 +815,11 @@ public:
 class BindlessDescAllocator {
 public:
     struct Allocation {
-        FreeListAllocator::Allocation Range{};
+        FirstFitAllocator::Allocation Range{};
         VkDescriptorSet Set{VK_NULL_HANDLE};
         VkDescriptorType Type{};
 
-        static constexpr Allocation Invalid() noexcept { return Allocation{FreeListAllocator::Allocation::Invalid()}; }
+        static constexpr Allocation Invalid() noexcept { return Allocation{FirstFitAllocator::Allocation::Invalid()}; }
 
         constexpr bool IsValid() const noexcept { return Range.Length != 0; }
     };
@@ -835,7 +834,7 @@ public:
 
 private:
     unique_ptr<BindlessDescriptorSetVulkan> _bdls;
-    FreeListAllocator _allocator;
+    FirstFitAllocator _allocator;
 };
 
 static_assert(is_allocator<BindlessDescAllocator, BindlessDescAllocator::Allocation>, "BindlessDescAllocator does not satisfy the allocator concept");

@@ -360,6 +360,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _cpuResAlloc = nullptr;
     _cpuRtvAlloc = nullptr;
     _cpuDsvAlloc = nullptr;
+    _cpuSamplerAlloc = nullptr;
     _gpuResHeap = nullptr;
     _gpuSamplerHeap = nullptr;
     _mainAlloc = nullptr;
@@ -658,7 +659,7 @@ Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreDevice() noexcept {
         RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    std::optional<Win32Event> e = MakeWin32Event();
+    std::optional<Win32Event> e = Win32Event::Create();
     if (!e.has_value()) {
         return nullptr;
     }
@@ -2164,7 +2165,7 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
         RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    std::optional<Win32Event> e = MakeWin32Event();
+    std::optional<Win32Event> e = Win32Event::Create();
     if (!e.has_value()) {
         return nullptr;
     }
@@ -2195,7 +2196,10 @@ void CmdQueueD3D12::Destroy() noexcept {
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.WaitSemaphores.size(); i++) {
         auto f = CastD3D12Object(desc.WaitSemaphores[i]);
-        _queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
+        if (f->_signaled) {
+            _queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
+            f->_signaled = false;
+        }
     }
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
@@ -2213,8 +2217,10 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
     for (size_t i = 0; i < desc.SignalSemaphores.size(); i++) {
         auto f = CastD3D12Object(desc.SignalSemaphores[i]);
-        _queue->Signal(f->_fence.Get(), f->_fenceValue++);
-        f->_signaled = true;
+        if (!f->_signaled) {
+            _queue->Signal(f->_fence.Get(), f->_fenceValue++);
+            f->_signaled = true;
+        }
     }
 }
 
@@ -2322,6 +2328,13 @@ void CmdListD3D12::Destroy() noexcept {
     _keepAliveResources.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
+}
+
+void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
+    auto listName = fmt::format("CmdList_{}", name);
+    auto allocName = fmt::format("CmdAlloc_{}", name);
+    SetObjectName(name, _cmdList.Get());
+    SetObjectName(name, _cmdAlloc.Get());
 }
 
 void CmdListD3D12::Begin() noexcept {
