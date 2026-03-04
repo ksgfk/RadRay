@@ -12,7 +12,7 @@ enum class TestFlags : uint32_t {
 namespace radray {
 template <>
 struct is_flags<TestFlags> : std::true_type {};
-}
+}  // namespace radray
 
 TEST(EnumFlagsTest, BasicConstructionAndEvaluation) {
     radray::EnumFlags<TestFlags> flag1;

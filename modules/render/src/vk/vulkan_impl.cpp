@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <type_traits>
 
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 namespace radray {
@@ -199,7 +200,19 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
-    return this->CreateLegacyFence(0);
+    unique_ptr<FenceVulkan> result;
+    if (_extFeatures.feature12.timelineSemaphore) {
+        auto timeline = this->CreateTimelineSemaphore(0);
+        if (timeline.HasValue()) {
+            result = make_unique<FenceVulkan>(this, timeline.Release());
+        }
+    } else {
+        auto legacy = this->CreateLegacyFence(0);
+        if (legacy.HasValue()) {
+            result = make_unique<FenceVulkan>(this, legacy.Release());
+        }
+    }
+    return result;
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
@@ -377,17 +390,23 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     const uint32_t frameCount = static_cast<uint32_t>(result->_frames.size());
     result->_acquireSemaphores.reserve(frameCount);
     result->_renderFinishSemaphores.reserve(frameCount);
+    result->_acquireFences.reserve(frameCount);
     for (uint32_t i = 0; i < frameCount; i++) {
         auto acquireSem = this->CreateLegacySemaphore(0);
-        if (!acquireSem.has_value()) {
+        if (!acquireSem) {
             return nullptr;
         }
         auto renderFinishSem = this->CreateLegacySemaphore(0);
-        if (!renderFinishSem.has_value()) {
+        if (!renderFinishSem) {
             return nullptr;
         }
-        result->_acquireSemaphores.emplace_back(acquireSem.value());
-        result->_renderFinishSemaphores.emplace_back(renderFinishSem.value());
+        auto acquireFence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT);
+        if (!acquireFence) {
+            return nullptr;
+        }
+        result->_acquireSemaphores.emplace_back(acquireSem.Release());
+        result->_renderFinishSemaphores.emplace_back(renderFinishSem.Release());
+        result->_acquireFences.emplace_back(acquireFence.Release());
     }
     return result;
 }
@@ -1713,7 +1732,7 @@ Nullable<unique_ptr<BindlessArray>> DeviceVulkan::CreateBindlessArray(const Bind
     return result;
 }
 
-Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
+Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.pNext = nullptr;
@@ -1724,12 +1743,10 @@ Nullable<unique_ptr<FenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateF
         RADRAY_ERR_LOG("vkCreateFence failed: {}", vr);
         return nullptr;
     }
-    auto v = make_unique<FenceVulkan>(this, fence);
-    v->_submitted = false;
-    return v;
+    return make_unique<LegacyFenceVulkan>(this, fence);
 }
 
-std::optional<VkSemaphore> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
+Nullable<unique_ptr<LegacySemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = nullptr;
@@ -1738,9 +1755,9 @@ std::optional<VkSemaphore> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreate
     if (auto vr = _ftb.vkCreateSemaphore(_device, &info, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
-        return std::nullopt;
+        return nullptr;
     }
-    return semaphore;
+    return make_unique<LegacySemaphoreVulkan>(this, semaphore);
 }
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
@@ -2210,7 +2227,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     auto extProperties = make_unique<ExtPropertiesVulkan>();
     unordered_set<string> needExts;
     needExts.emplace(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     vector<VkExtensionProperties> deviceExtsAvailable;
     if (auto vr = EnumerateVectorFromVkFunc(deviceExtsAvailable, vkEnumerateDeviceExtensionProperties, selectPhyDevice.device, nullptr);
         vr != VK_SUCCESS) {
@@ -2219,6 +2235,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     if (IsValidateExtensions("VK_KHR_portability_subset", deviceExtsAvailable)) {
         needExts.emplace("VK_KHR_portability_subset");
+    }
+    if (IsValidateExtensions(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, deviceExtsAvailable)) {
+        needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     }
     const bool hasRtExts =
         IsValidateExtensions(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, deviceExtsAvailable) &&
@@ -2537,40 +2556,90 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         auto cmdBuffer = CastVkObject(i);
         cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
     }
-    VkSemaphore waitSemaphore = _pendingSwapChainWaitSemaphore;
-    VkSemaphore signalSemaphore = _pendingSwapChainSignalSemaphore;
+    VkSemaphore pendingWaitSemaphore = _pendingSwapChainWaitSemaphore;
+    VkSemaphore pendingSignalSemaphore = _pendingSwapChainSignalSemaphore;
+    vector<VkSemaphore> waitSemaphores;
+    vector<VkSemaphore> signalSemaphores;
+    vector<uint64_t> waitValues;
+    vector<uint64_t> signalValues;
     vector<VkPipelineStageFlags> waitStages;
-    if (waitSemaphore != VK_NULL_HANDLE) {
+    bool useTimelineSubmit = false;
+    if (pendingWaitSemaphore != VK_NULL_HANDLE) {
+        waitSemaphores.emplace_back(pendingWaitSemaphore);
         waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        waitValues.emplace_back(0);
+    }
+    if (pendingSignalSemaphore != VK_NULL_HANDLE) {
+        signalSemaphores.emplace_back(pendingSignalSemaphore);
+        signalValues.emplace_back(0);
+    }
+    VkFence submitFence = VK_NULL_HANDLE;
+    if (desc.SignalFence.HasValue()) {
+        auto* fenceObj = CastVkObject(desc.SignalFence.Get());
+        std::visit(
+            [&](auto& fence) noexcept {
+                using T = std::decay_t<decltype(fence)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                    RADRAY_ABORT("invalid fence: monostate");
+                } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
+                    if (fence == nullptr || !fence->IsValid()) {
+                        RADRAY_ABORT("invalid timeline fence");
+                    }
+                    useTimelineSubmit = true;
+                    uint64_t signalValue = fenceObj->_fenceValue++;
+                    signalSemaphores.emplace_back(fence->_semaphore);
+                    signalValues.emplace_back(signalValue);
+                } else {
+                    if (fence == nullptr || !fence->IsValid()) {
+                        RADRAY_ABORT("invalid legacy fence");
+                    }
+                    if (fenceObj->_legacyPendingSubmit) {
+                        VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, fence->_fence);
+                        if (status == VK_SUCCESS) {
+                            if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
+                                vr != VK_SUCCESS) {
+                                RADRAY_ABORT("vkResetFences failed: {}", vr);
+                            }
+                        } else if (status == VK_NOT_READY) {
+                            RADRAY_ABORT("legacy fence is still pending, explicit Wait is required before re-submit");
+                        } else {
+                            RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
+                        }
+                    }
+                    submitFence = fence->_fence;
+                    fenceObj->_fenceValue++;
+                    fenceObj->_legacyPendingSubmit = true;
+                }
+            },
+            fenceObj->_fence);
+    }
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    if (useTimelineSubmit) {
+        timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineInfo.pNext = nullptr;
+        timelineInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size());
+        timelineInfo.pWaitSemaphoreValues = waitValues.empty() ? nullptr : waitValues.data();
+        timelineInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalValues.size());
+        timelineInfo.pSignalSemaphoreValues = signalValues.empty() ? nullptr : signalValues.data();
     }
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.pNext = nullptr;
-    submitInfo.waitSemaphoreCount = waitSemaphore == VK_NULL_HANDLE ? 0u : 1u;
-    submitInfo.pWaitSemaphores = waitSemaphore == VK_NULL_HANDLE ? nullptr : &waitSemaphore;
+    submitInfo.pNext = useTimelineSubmit ? &timelineInfo : nullptr;
+    submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+    submitInfo.pWaitSemaphores = waitSemaphores.empty() ? nullptr : waitSemaphores.data();
     submitInfo.pWaitDstStageMask = waitStages.empty() ? nullptr : waitStages.data();
     submitInfo.commandBufferCount = static_cast<uint32_t>(cmdBufs.size());
     submitInfo.pCommandBuffers = cmdBufs.empty() ? nullptr : cmdBufs.data();
-    submitInfo.signalSemaphoreCount = signalSemaphore == VK_NULL_HANDLE ? 0u : 1u;
-    submitInfo.pSignalSemaphores = signalSemaphore == VK_NULL_HANDLE ? nullptr : &signalSemaphore;
+    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
+    submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
 
-    VkFence signalFence = VK_NULL_HANDLE;
-    if (desc.SignalFence.HasValue()) {
-        auto fence = CastVkObject(desc.SignalFence.Get());
-        signalFence = fence->_fence;
-    }
-
-    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, signalFence);
+    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, submitFence);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
-
-    if (desc.SignalFence.HasValue()) {
-        auto fence = CastVkObject(desc.SignalFence.Get());
-        fence->_submitted = true;
-    }
-    if (signalSemaphore != VK_NULL_HANDLE) {
-        _submittedSwapChainSignalSemaphore = signalSemaphore;
+    if (pendingSignalSemaphore != VK_NULL_HANDLE) {
+        _submittedSwapChainSignalSemaphore = pendingSignalSemaphore;
     }
     _pendingSwapChainWaitSemaphore = VK_NULL_HANDLE;
     _pendingSwapChainSignalSemaphore = VK_NULL_HANDLE;
@@ -2709,6 +2778,9 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             bufBarrier.srcAccessMask = BufferStateToAccessFlags(bb->Before);
             bufBarrier.dstAccessMask = BufferStateToAccessFlags(bb->After);
             if (bb->OtherQueue.HasValue()) {
+                if (!_device->_extFeatures.feature12.timelineSemaphore) {
+                    RADRAY_ABORT("cross-queue sync requires timeline semaphore support on Vulkan backend");
+                }
                 auto otherQ = CastVkObject(bb->OtherQueue.Get());
                 if (bb->IsFromOrToOtherQueue) {
                     bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
@@ -2739,6 +2811,9 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             imgBarrier.oldLayout = TextureStateToLayout(tb->Before);
             imgBarrier.newLayout = TextureStateToLayout(tb->After);
             if (tb->OtherQueue.HasValue()) {
+                if (!_device->_extFeatures.feature12.timelineSemaphore) {
+                    RADRAY_ABORT("cross-queue sync requires timeline semaphore support on Vulkan backend");
+                }
                 auto otherQ = CastVkObject(tb->OtherQueue.Get());
                 if (tb->IsFromOrToOtherQueue) {
                     imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
@@ -3840,52 +3915,179 @@ void FrameBufferVulkan::DestroyImpl() noexcept {
     }
 }
 
-FenceVulkan::FenceVulkan(
+LegacyFenceVulkan::LegacyFenceVulkan(
     DeviceVulkan* device,
     VkFence fence) noexcept
     : _device(device),
       _fence(fence) {}
 
+LegacyFenceVulkan::~LegacyFenceVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool LegacyFenceVulkan::IsValid() const noexcept {
+    return _fence != VK_NULL_HANDLE;
+}
+
+void LegacyFenceVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void LegacyFenceVulkan::Wait() noexcept {
+    if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vkWaitForFences failed: {}", vr);
+    }
+    _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
+}
+
+void LegacyFenceVulkan::DestroyImpl() noexcept {
+    if (_fence != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroyFence(_device->_device, _fence, _device->GetAllocationCallbacks());
+        _fence = VK_NULL_HANDLE;
+    }
+}
+
+LegacySemaphoreVulkan::LegacySemaphoreVulkan(
+    DeviceVulkan* device,
+    VkSemaphore semaphore) noexcept
+    : _device(device),
+      _semaphore(semaphore) {}
+
+LegacySemaphoreVulkan::~LegacySemaphoreVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+bool LegacySemaphoreVulkan::IsValid() const noexcept {
+    return _semaphore != VK_NULL_HANDLE;
+}
+
+void LegacySemaphoreVulkan::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
+void LegacySemaphoreVulkan::DestroyImpl() noexcept {
+    if (_semaphore != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySemaphore(_device->_device, _semaphore, _device->GetAllocationCallbacks());
+        _semaphore = VK_NULL_HANDLE;
+    }
+}
+
+FenceVulkan::FenceVulkan(
+    DeviceVulkan* device,
+    unique_ptr<TimelineSemaphoreVulkan> timelineSemaphore) noexcept
+    : _device(device),
+      _fence(std::move(timelineSemaphore)),
+      _fenceValue(1) {}
+
+FenceVulkan::FenceVulkan(
+    DeviceVulkan* device,
+    unique_ptr<LegacyFenceVulkan> legacyFence) noexcept
+    : _device(device),
+      _fence(std::move(legacyFence)),
+      _fenceValue(1) {}
+
 FenceVulkan::~FenceVulkan() noexcept {
     this->DestroyImpl();
 }
 
+void FenceVulkan::DestroyImpl() noexcept {
+    _fence = std::monostate{};
+    _fenceValue = 0;
+    _legacyPendingSubmit = false;
+}
+
 bool FenceVulkan::IsValid() const noexcept {
-    return _fence != VK_NULL_HANDLE;
+    return std::visit(
+        [](const auto& fence) noexcept {
+            using T = std::decay_t<decltype(fence)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return false;
+            } else {
+                return fence != nullptr && fence->IsValid();
+            }
+        },
+        _fence);
 }
 
 void FenceVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-FenceStatus FenceVulkan::GetStatus() const noexcept {
-    if (_submitted) {
-        VkResult vr = _device->_ftb.vkGetFenceStatus(_device->_device, _fence);
-        return vr == VK_SUCCESS ? FenceStatus::Complete : FenceStatus::Incomplete;
-    } else {
-        return FenceStatus::NotSubmitted;
-    }
+uint64_t FenceVulkan::GetCompletedValue() const noexcept {
+    return std::visit(
+        [&](const auto& fence) noexcept -> uint64_t {
+            using T = std::decay_t<decltype(fence)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return 0;
+            } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
+                if (fence == nullptr || !fence->IsValid()) {
+                    return 0;
+                }
+                return fence->GetCompletedValue();
+            } else {
+                if (_fenceValue == 0) {
+                    return 0;
+                }
+                uint64_t signaledValue = _fenceValue - 1;
+                if (fence == nullptr || !fence->IsValid()) {
+                    return signaledValue;
+                }
+                if (!_legacyPendingSubmit) {
+                    return signaledValue;
+                }
+                VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, fence->_fence);
+                if (status == VK_SUCCESS) {
+                    return signaledValue;
+                }
+                if (status == VK_NOT_READY) {
+                    return signaledValue == 0 ? 0 : signaledValue - 1;
+                }
+                RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
+                return 0;
+            }
+        },
+        _fence);
 }
 
 void FenceVulkan::Wait() noexcept {
-    if (_submitted) {
-        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);
-            vr != VK_SUCCESS) {
-            RADRAY_ABORT("vkWaitForFences failed: {}", vr);
-        }
-    }
-}
-
-void FenceVulkan::Reset() noexcept {
-    _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
-    _submitted = false;
-}
-
-void FenceVulkan::DestroyImpl() noexcept {
-    if (_fence != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroyFence(_device->_device, _fence, _device->GetAllocationCallbacks());
-        _fence = VK_NULL_HANDLE;
-    }
+    std::visit(
+        [&](auto& fence) noexcept {
+            using T = std::decay_t<decltype(fence)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return;
+            } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
+                if (fence == nullptr || !fence->IsValid()) {
+                    RADRAY_ABORT("invalid timeline fence");
+                }
+                if (_fenceValue <= 1) {
+                    return;
+                }
+                uint64_t waitValue = _fenceValue - 1;
+                VkSemaphore waitSemaphore = fence->_semaphore;
+                VkSemaphoreWaitInfo waitInfo{};
+                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                waitInfo.pNext = nullptr;
+                waitInfo.flags = 0;
+                waitInfo.semaphoreCount = 1;
+                waitInfo.pSemaphores = &waitSemaphore;
+                waitInfo.pValues = &waitValue;
+                if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
+                    vr != VK_SUCCESS) {
+                    RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
+                }
+            } else {
+                if (fence == nullptr || !fence->IsValid()) {
+                    RADRAY_ABORT("invalid legacy fence");
+                }
+                if (!_legacyPendingSubmit) {
+                    return;
+                }
+                fence->Wait();
+                _legacyPendingSubmit = false;
+            }
+        },
+        _fence);
 }
 
 TimelineSemaphoreVulkan::TimelineSemaphoreVulkan(
@@ -3976,18 +4178,9 @@ void SwapChainVulkan::DestroyImpl() noexcept {
         i.image->DangerousDestroy();
     }
     _frames.clear();
-    for (auto sem : _acquireSemaphores) {
-        if (sem != VK_NULL_HANDLE) {
-            _device->_ftb.vkDestroySemaphore(_device->_device, sem, _device->GetAllocationCallbacks());
-        }
-    }
     _acquireSemaphores.clear();
-    for (auto sem : _renderFinishSemaphores) {
-        if (sem != VK_NULL_HANDLE) {
-            _device->_ftb.vkDestroySemaphore(_device->_device, sem, _device->GetAllocationCallbacks());
-        }
-    }
     _renderFinishSemaphores.clear();
+    _acquireFences.clear();
     _nextSemaphoreSlot = 0;
     _currentSemaphoreSlot = std::numeric_limits<uint32_t>::max();
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
@@ -3998,17 +4191,23 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Fence*> signalFence) noexcept {
-    if (_acquireSemaphores.empty() || _renderFinishSemaphores.empty()) {
+Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
+    if (_acquireSemaphores.empty() || _renderFinishSemaphores.empty() || _acquireFences.empty()) {
         RADRAY_ERR_LOG("vk swapchain semaphores are not initialized");
         return nullptr;
     }
     const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
-    VkSemaphore semaphore = _acquireSemaphores[slot];
-    VkFence fence = VK_NULL_HANDLE;
-    if (signalFence.HasValue()) {
-        auto f = CastVkObject(signalFence.Get());
-        fence = f->_fence;
+    auto semaphore = _acquireSemaphores[slot].get();
+    auto fence = _acquireFences[slot].get();
+    if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
+        return nullptr;
+    }
+    if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
+        return nullptr;
     }
     _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
     _currentSemaphoreSlot = std::numeric_limits<uint32_t>::max();
@@ -4017,27 +4216,18 @@ Nullable<Texture*> SwapChainVulkan::AcquireNext(Nullable<Fence*> signalFence) no
         _device->_device,
         _swapchain,
         UINT64_MAX,
-        semaphore,
-        fence,
+        semaphore->_semaphore,
+        fence->_fence,
         &_currentTextureIndex);
     if (vr == VK_SUCCESS) {
-        if (signalFence.HasValue()) {
-            auto fenceObj = CastVkObject(signalFence.Get());
-            fenceObj->_submitted = true;
-        }
         _currentSemaphoreSlot = slot;
         _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
         _queue->SetSwapChainSyncSemaphores(
-            _acquireSemaphores[slot],
-            _renderFinishSemaphores[slot]);
+            _acquireSemaphores[slot]->_semaphore,
+            _renderFinishSemaphores[slot]->_semaphore);
         Frame& imageFrame = _frames[_currentTextureIndex];
         return imageFrame.image.get();
     } else if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_SUBOPTIMAL_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR 或 VK_SUBOPTIMAL_KHR
-        if (signalFence.HasValue()) {
-            auto fenceObj = CastVkObject(signalFence.Get());
-            _device->_ftb.vkResetFences(_device->_device, 1, &fenceObj->_fence);
-            fenceObj->_submitted = false;
-        }
         _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return nullptr;

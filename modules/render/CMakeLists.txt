@@ -84,3 +84,7 @@ if (RADRAY_ENABLE_DXC)
     unset(_DXC_COPY_CMDS)
     unset(_DXC_RUNTIME_DLLS)
 endif()
+
+if (RADRAY_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

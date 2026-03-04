@@ -64,8 +64,8 @@ TEST(Core_Allocator_FirstFit, FirstFitByAddress) {
     (void)a5;
 
     // Free in reverse address order: old implementation could pick Start=6 first.
-    alloc.Destroy(a3); // [6,2]
-    alloc.Destroy(a1); // [2,2]
+    alloc.Destroy(a3);  // [6,2]
+    alloc.Destroy(a1);  // [2,2]
 
     auto pick = alloc.Allocate(2);
     ASSERT_TRUE(pick.has_value());
@@ -76,10 +76,10 @@ TEST(Core_Allocator_FirstFit, FirstFitByAddress) {
 TEST(Core_Allocator_FirstFit, CoalesceBothSides) {
     FirstFitAllocator alloc{10};
 
-    auto a = alloc.Allocate(2).value(); // [0,2]
-    auto b = alloc.Allocate(3).value(); // [2,3]
-    auto c = alloc.Allocate(2).value(); // [5,2]
-    auto d = alloc.Allocate(3).value(); // [7,3]
+    auto a = alloc.Allocate(2).value();  // [0,2]
+    auto b = alloc.Allocate(3).value();  // [2,3]
+    auto c = alloc.Allocate(2).value();  // [5,2]
+    auto d = alloc.Allocate(3).value();  // [7,3]
 
     alloc.Destroy(b);
     alloc.Destroy(d);
@@ -102,15 +102,15 @@ TEST(Core_Allocator_FirstFit, CoalesceBothSides) {
 TEST(Core_Allocator_FirstFit, FragmentationReuseLowerAddressFirst) {
     FirstFitAllocator alloc{16};
 
-    auto a = alloc.Allocate(4).value(); // [0,4]
-    auto b = alloc.Allocate(4).value(); // [4,4]
-    auto c = alloc.Allocate(4).value(); // [8,4]
-    auto d = alloc.Allocate(4).value(); // [12,4]
+    auto a = alloc.Allocate(4).value();  // [0,4]
+    auto b = alloc.Allocate(4).value();  // [4,4]
+    auto c = alloc.Allocate(4).value();  // [8,4]
+    auto d = alloc.Allocate(4).value();  // [12,4]
     (void)a;
     (void)c;
 
-    alloc.Destroy(d); // [12,4]
-    alloc.Destroy(b); // [4,4]
+    alloc.Destroy(d);  // [12,4]
+    alloc.Destroy(b);  // [4,4]
 
     auto first = alloc.Allocate(3);
     ASSERT_TRUE(first.has_value());

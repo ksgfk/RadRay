@@ -381,12 +381,6 @@ enum class ResourceBindType {
     AccelerationStructure
 };
 
-enum class FenceStatus {
-    Complete,
-    Incomplete,
-    NotSubmitted
-};
-
 enum class PresentMode {
     FIFO,
     Mailbox,
@@ -1287,11 +1281,9 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
 
-    virtual FenceStatus GetStatus() const noexcept = 0;
+    virtual uint64_t GetCompletedValue() const noexcept = 0;
 
     virtual void Wait() noexcept = 0;
-
-    virtual void Reset() noexcept = 0;
 };
 
 class SwapChain : public RenderBase {
@@ -1300,7 +1292,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept = 0;
+    virtual Nullable<Texture*> AcquireNext() noexcept = 0;
 
     virtual void Present() noexcept = 0;
 
@@ -1501,7 +1493,6 @@ std::string_view format_as(AccelerationStructureType v) noexcept;
 std::string_view format_as(AccelerationStructureBuildMode v) noexcept;
 std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
-std::string_view format_as(FenceStatus v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
 std::string_view format_as(ShaderStage v) noexcept;
 

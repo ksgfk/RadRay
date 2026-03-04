@@ -17,7 +17,6 @@ class CpuDescriptorAllocator;
 class GpuDescriptorAllocator;
 class DeviceD3D12;
 class CmdQueueD3D12;
-class FenceD3D12Impl;
 class FenceD3D12;
 class CmdListD3D12;
 class CmdRenderPassD3D12;
@@ -365,7 +364,7 @@ public:
         DeviceD3D12* device,
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
-        unique_ptr<FenceD3D12Impl> fence) noexcept;
+        unique_ptr<FenceD3D12> fence) noexcept;
     ~CmdQueueD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -379,19 +378,19 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;
-    unique_ptr<FenceD3D12Impl> _fence;
+    unique_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
 };
 
 /**
  * Fence 保存的 _fenceValue 表示下一个可用的值, _fenceValue - 1 表示已提交的的值
  */
-class FenceD3D12Impl {
+class FenceD3D12 final : public Fence {
 public:
-    FenceD3D12Impl(
+    FenceD3D12(
         ComPtr<ID3D12Fence> fence,
         Win32Event event) noexcept;
-    virtual ~FenceD3D12Impl() noexcept = default;
+    virtual ~FenceD3D12() noexcept = default;
 
     bool IsValid() const noexcept;
 
@@ -405,31 +404,6 @@ public:
     ComPtr<ID3D12Fence> _fence;
     uint64_t _fenceValue{0};
     Win32Event _event{};
-};
-
-class FenceD3D12 final : public Fence, public FenceD3D12Impl {
-public:
-    using Impl = FenceD3D12Impl;
-
-    FenceD3D12(
-        ComPtr<ID3D12Fence> fence,
-        Win32Event event) noexcept;
-    ~FenceD3D12() noexcept override;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    FenceStatus GetStatus() const noexcept override;
-
-    void Wait() noexcept override;
-
-    void Reset() noexcept override;
-
-    uint64_t GetCompletedValue() const noexcept;
-
-public:
-    bool _submitted{false};
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -602,7 +576,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept override;
+    Nullable<Texture*> AcquireNext() noexcept override;
 
     void Present() noexcept override;
 

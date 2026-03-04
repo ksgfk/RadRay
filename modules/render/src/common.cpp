@@ -497,15 +497,6 @@ std::string_view format_as(RenderObjectTag v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(FenceStatus v) noexcept {
-    switch (v) {
-        case FenceStatus::Complete: return "Complete";
-        case FenceStatus::Incomplete: return "Incomplete";
-        case FenceStatus::NotSubmitted: return "NotSubmitted";
-    }
-    Unreachable();
-}
-
 std::string_view format_as(PresentMode v) noexcept {
     switch (v) {
         case PresentMode::FIFO: return "FIFO";

@@ -21,6 +21,8 @@ class CommandBufferVulkan;
 class SimulateCommandEncoderVulkan;
 class RenderPassVulkan;
 class FrameBufferVulkan;
+class LegacyFenceVulkan;
+class LegacySemaphoreVulkan;
 class FenceVulkan;
 class TimelineSemaphoreVulkan;
 class SurfaceVulkan;
@@ -169,9 +171,9 @@ public:
     Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept override;
 
 public:
-    Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
+    Nullable<unique_ptr<LegacyFenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
-    std::optional<VkSemaphore> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+    Nullable<unique_ptr<LegacySemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
 
     Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
@@ -234,17 +236,18 @@ public:
 
     void Wait() noexcept override;
 
+public:
+    void DestroyImpl() noexcept;
+
     void SetSwapChainSyncSemaphores(VkSemaphore waitSemaphore, VkSemaphore signalSemaphore) noexcept;
 
     VkSemaphore ConsumeSubmittedSwapChainSignalSemaphore() noexcept;
-
-public:
-    void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkQueue _queue;
     QueueIndexInFamily _family;
     QueueType _type;
+
     VkSemaphore _pendingSwapChainWaitSemaphore{VK_NULL_HANDLE};
     VkSemaphore _pendingSwapChainSignalSemaphore{VK_NULL_HANDLE};
     VkSemaphore _submittedSwapChainSignalSemaphore{VK_NULL_HANDLE};
@@ -493,11 +496,58 @@ public:
     VkFramebuffer _framebuffer;
 };
 
+class LegacyFenceVulkan final : public RenderBase {
+public:
+    LegacyFenceVulkan(
+        DeviceVulkan* device,
+        VkFence fence) noexcept;
+
+    ~LegacyFenceVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void Wait() noexcept;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkFence _fence;
+};
+
+class LegacySemaphoreVulkan final : public RenderBase {
+public:
+    LegacySemaphoreVulkan(
+        DeviceVulkan* device,
+        VkSemaphore semaphore) noexcept;
+
+    ~LegacySemaphoreVulkan() noexcept;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSemaphore _semaphore;
+};
+
 class FenceVulkan final : public Fence {
 public:
     FenceVulkan(
         DeviceVulkan* device,
-        VkFence fence) noexcept;
+        unique_ptr<TimelineSemaphoreVulkan> timelineSemaphore) noexcept;
+    FenceVulkan(
+        DeviceVulkan* device,
+        unique_ptr<LegacyFenceVulkan> legacyFence) noexcept;
 
     ~FenceVulkan() noexcept override;
 
@@ -505,18 +555,17 @@ public:
 
     void Destroy() noexcept override;
 
-    FenceStatus GetStatus() const noexcept override;
+    uint64_t GetCompletedValue() const noexcept override;
 
     void Wait() noexcept override;
-
-    void Reset() noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
-    VkFence _fence;
-    bool _submitted{false};
+    std::variant<std::monostate, unique_ptr<TimelineSemaphoreVulkan>, unique_ptr<LegacyFenceVulkan>> _fence;
+    uint64_t _fenceValue{0};
+    bool _legacyPendingSubmit{false};
 };
 
 class TimelineSemaphoreVulkan final : public RenderBase {
@@ -577,7 +626,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept override;
+    Nullable<Texture*> AcquireNext() noexcept override;
 
     void Present() noexcept override;
 
@@ -600,8 +649,9 @@ public:
     unique_ptr<SurfaceVulkan> _surface;
     VkSwapchainKHR _swapchain;
     vector<Frame> _frames;
-    vector<VkSemaphore> _acquireSemaphores;
-    vector<VkSemaphore> _renderFinishSemaphores;
+    vector<unique_ptr<LegacySemaphoreVulkan>> _acquireSemaphores;
+    vector<unique_ptr<LegacySemaphoreVulkan>> _renderFinishSemaphores;
+    vector<unique_ptr<LegacyFenceVulkan>> _acquireFences;
     uint32_t _nextSemaphoreSlot{0};
     uint32_t _currentSemaphoreSlot{std::numeric_limits<uint32_t>::max()};
     uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};

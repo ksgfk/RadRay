@@ -179,6 +179,8 @@ public:
 
     FenceStatus GetStatus() const noexcept override;
 
+    uint64_t GetCompletedValue() const noexcept override;
+
     void Wait() noexcept override;
 
     void Reset() noexcept override;
@@ -223,7 +225,7 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
+    Nullable<Texture*> AcquireNext() noexcept override;
 
     void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
 

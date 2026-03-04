@@ -2161,7 +2161,7 @@ CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
     D3D12_COMMAND_LIST_TYPE type,
-    unique_ptr<FenceD3D12Impl> fence) noexcept
+    unique_ptr<FenceD3D12> fence) noexcept
     : _device(device),
       _queue(std::move(queue)),
       _fence(std::move(fence)),
@@ -2189,7 +2189,6 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (desc.SignalFence.HasValue()) {
         auto f = CastD3D12Object(desc.SignalFence.Get());
         _queue->Signal(f->_fence.Get(), f->_fenceValue++);
-        f->_submitted = true;
     }
 }
 
@@ -2198,22 +2197,22 @@ void CmdQueueD3D12::Wait() noexcept {
     _fence->Wait();
 }
 
-FenceD3D12Impl::FenceD3D12Impl(
+FenceD3D12::FenceD3D12(
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept
     : _fence(std::move(fence)),
       _event(std::move(event)) {}
 
-bool FenceD3D12Impl::IsValid() const noexcept {
+bool FenceD3D12::IsValid() const noexcept {
     return _fence != nullptr;
 }
 
-void FenceD3D12Impl::Destroy() noexcept {
+void FenceD3D12::Destroy() noexcept {
     _fence = nullptr;
     _event.Destroy();
 }
 
-void FenceD3D12Impl::Wait() noexcept {
+void FenceD3D12::Wait() noexcept {
     UINT64 completedValue = _fence->GetCompletedValue();
     uint64_t signaledValue = _fenceValue - 1;
     if (completedValue < signaledValue) {
@@ -2222,46 +2221,8 @@ void FenceD3D12Impl::Wait() noexcept {
     }
 }
 
-uint64_t FenceD3D12Impl::GetCompletedValue() const noexcept {
-    return _fence->GetCompletedValue();
-}
-
-FenceD3D12::FenceD3D12(
-    ComPtr<ID3D12Fence> fence,
-    Win32Event event) noexcept
-    : FenceD3D12Impl(std::move(fence), std::move(event)) {}
-
-FenceD3D12::~FenceD3D12() noexcept = default;
-
-bool FenceD3D12::IsValid() const noexcept {
-    return Impl::IsValid();
-}
-
-void FenceD3D12::Destroy() noexcept {
-    Impl::Destroy();
-}
-
-FenceStatus FenceD3D12::GetStatus() const noexcept {
-    if (!_submitted) {
-        return FenceStatus::NotSubmitted;
-    }
-    UINT64 completedValue = _fence->GetCompletedValue();
-    uint64_t signaledValue = _fenceValue - 1;
-    return completedValue < signaledValue ? FenceStatus::Incomplete : FenceStatus::Complete;
-}
-
-void FenceD3D12::Wait() noexcept {
-    if (_submitted) {
-        Impl::Wait();
-    }
-}
-
-void FenceD3D12::Reset() noexcept {
-    _submitted = false;
-}
-
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
-    return Impl::GetCompletedValue();
+    return _fence->GetCompletedValue();
 }
 
 CmdListD3D12::CmdListD3D12(
@@ -3328,14 +3289,9 @@ void SwapChainD3D12::Destroy() noexcept {
     }
 }
 
-Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Fence*> signalFence) noexcept {
+Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
     ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
-    if (signalFence.HasValue()) {
-        auto f = CastD3D12Object(signalFence.Get());
-        f->_fence->Signal(f->_fenceValue++);
-        f->_submitted = true;
-    }
     return _frames[curr].image.get();
 }
 
