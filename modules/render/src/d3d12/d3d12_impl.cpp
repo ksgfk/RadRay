@@ -651,23 +651,6 @@ Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
     return this->CreateFenceD3D12(0);
 }
 
-Nullable<unique_ptr<Semaphore>> DeviceD3D12::CreateSemaphoreDevice() noexcept {
-    const uint64_t initValue = 0;
-    ComPtr<ID3D12Fence> fence;
-    if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    std::optional<Win32Event> e = Win32Event::Create();
-    if (!e.has_value()) {
-        return nullptr;
-    }
-    auto result = make_unique<SemaphoreD3D12>(std::move(fence), std::move(e.value()));
-    result->_fenceValue = initValue + 1;
-    return result;
-}
-
 Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
     // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
@@ -2194,13 +2177,6 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
-    for (size_t i = 0; i < desc.WaitSemaphores.size(); i++) {
-        auto f = CastD3D12Object(desc.WaitSemaphores[i]);
-        if (f->_signaled) {
-            _queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
-            f->_signaled = false;
-        }
-    }
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
     for (auto& i : desc.CmdBuffers) {
@@ -2214,13 +2190,6 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         auto f = CastD3D12Object(desc.SignalFence.Get());
         _queue->Signal(f->_fence.Get(), f->_fenceValue++);
         f->_submitted = true;
-    }
-    for (size_t i = 0; i < desc.SignalSemaphores.size(); i++) {
-        auto f = CastD3D12Object(desc.SignalSemaphores[i]);
-        if (!f->_signaled) {
-            _queue->Signal(f->_fence.Get(), f->_fenceValue++);
-            f->_signaled = true;
-        }
     }
 }
 
@@ -2293,21 +2262,6 @@ void FenceD3D12::Reset() noexcept {
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     return Impl::GetCompletedValue();
-}
-
-SemaphoreD3D12::SemaphoreD3D12(
-    ComPtr<ID3D12Fence> fence,
-    Win32Event event) noexcept
-    : FenceD3D12Impl(std::move(fence), std::move(event)) {}
-
-SemaphoreD3D12::~SemaphoreD3D12() noexcept = default;
-
-bool SemaphoreD3D12::IsValid() const noexcept {
-    return Impl::IsValid();
-}
-
-void SemaphoreD3D12::Destroy() noexcept {
-    Impl::Destroy();
 }
 
 CmdListD3D12::CmdListD3D12(
@@ -3374,14 +3328,9 @@ void SwapChainD3D12::Destroy() noexcept {
     }
 }
 
-Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept {
+Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Fence*> signalFence) noexcept {
     ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
-    if (signalSemaphore.HasValue()) {
-        auto sem = CastD3D12Object(signalSemaphore.Get());
-        sem->_fence->Signal(sem->_fenceValue++);
-        sem->_signaled = true;
-    }
     if (signalFence.HasValue()) {
         auto f = CastD3D12Object(signalFence.Get());
         f->_fence->Signal(f->_fenceValue++);
@@ -3390,14 +3339,7 @@ Nullable<Texture*> SwapChainD3D12::AcquireNext(Nullable<Semaphore*> signalSemaph
     return _frames[curr].image.get();
 }
 
-void SwapChainD3D12::Present(std::span<Semaphore*> waitSemaphores) noexcept {
-    for (auto sem : waitSemaphores) {
-        auto f = CastD3D12Object(sem);
-        if (f->_signaled) {
-            _presentQueue->_queue->Wait(f->_fence.Get(), f->_fenceValue - 1);
-            f->_signaled = false;
-        }
-    }
+void SwapChainD3D12::Present() noexcept {
     UINT syncInterval = 0;
     UINT presentFlags = 0;
     switch (_mode) {

@@ -434,8 +434,7 @@ enum class RenderObjectTag : uint32_t {
     GraphicsCmdEncoder = CmdEncoder | (CmdEncoder << 1),
     ComputeCmdEncoder = CmdEncoder | (CmdEncoder << 2),
     Fence = CmdEncoder << 3,
-    Semaphore = Fence << 1,
-    Shader = Semaphore << 1,
+    Shader = Fence << 1,
     RootSignature = Shader << 1,
     PipelineState = RootSignature << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
@@ -531,7 +530,6 @@ class DescriptorSet;
 class Sampler;
 class BindlessArray;
 class InstanceVulkan;
-class Semaphore;
 
 struct ColorClearValue {
     std::array<float, 4> Value{};
@@ -632,8 +630,6 @@ struct SamplerDescriptor {
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     Nullable<Fence*> SignalFence{nullptr};
-    std::span<Semaphore*> WaitSemaphores{};
-    std::span<Semaphore*> SignalSemaphores{};
 };
 
 struct BarrierBufferDescriptor {
@@ -1140,8 +1136,6 @@ public:
 
     virtual Nullable<unique_ptr<Fence>> CreateFence() noexcept = 0;
 
-    virtual Nullable<unique_ptr<Semaphore>> CreateSemaphoreDevice() noexcept = 0;  // a.k.a. CreateSemaphore. make windows.h happy :)
-
     virtual Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
@@ -1306,9 +1300,9 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept = 0;
+    virtual Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept = 0;
 
-    virtual void Present(std::span<Semaphore*> waitSemaphores) noexcept = 0;
+    virtual void Present() noexcept = 0;
 
     virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
 
@@ -1473,13 +1467,6 @@ public:
     virtual ~InstanceVulkan() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
-};
-
-class Semaphore : public RenderBase {
-public:
-    virtual ~Semaphore() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Semaphore; }
 };
 
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc);

@@ -19,7 +19,6 @@ class DeviceD3D12;
 class CmdQueueD3D12;
 class FenceD3D12Impl;
 class FenceD3D12;
-class SemaphoreD3D12;
 class CmdListD3D12;
 class CmdRenderPassD3D12;
 class SwapChainD3D12;
@@ -301,8 +300,6 @@ public:
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
 
-    Nullable<unique_ptr<Semaphore>> CreateSemaphoreDevice() noexcept override;
-
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
@@ -433,23 +430,6 @@ public:
 
 public:
     bool _submitted{false};
-};
-
-class SemaphoreD3D12 final : public Semaphore, public FenceD3D12Impl {
-public:
-    using Impl = FenceD3D12Impl;
-
-    SemaphoreD3D12(
-        ComPtr<ID3D12Fence> fence,
-        Win32Event event) noexcept;
-    ~SemaphoreD3D12() noexcept override;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-public:
-    bool _signaled{false};
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -622,9 +602,9 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
+    Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept override;
 
-    void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
+    void Present() noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -1000,7 +980,6 @@ constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<Cm
 constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
-constexpr auto CastD3D12Object(Semaphore* v) noexcept { return static_cast<SemaphoreD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }

@@ -22,7 +22,6 @@ class SimulateCommandEncoderVulkan;
 class RenderPassVulkan;
 class FrameBufferVulkan;
 class FenceVulkan;
-class SemaphoreVulkan;
 class TimelineSemaphoreVulkan;
 class SurfaceVulkan;
 class SwapChainVulkan;
@@ -137,8 +136,6 @@ public:
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
 
-    Nullable<unique_ptr<Semaphore>> CreateSemaphoreDevice() noexcept override;
-
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
@@ -174,7 +171,7 @@ public:
 public:
     Nullable<unique_ptr<FenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
-    Nullable<unique_ptr<SemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+    std::optional<VkSemaphore> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
 
     Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
 
@@ -237,6 +234,10 @@ public:
 
     void Wait() noexcept override;
 
+    void SetSwapChainSyncSemaphores(VkSemaphore waitSemaphore, VkSemaphore signalSemaphore) noexcept;
+
+    VkSemaphore ConsumeSubmittedSwapChainSignalSemaphore() noexcept;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -244,6 +245,9 @@ public:
     VkQueue _queue;
     QueueIndexInFamily _family;
     QueueType _type;
+    VkSemaphore _pendingSwapChainWaitSemaphore{VK_NULL_HANDLE};
+    VkSemaphore _pendingSwapChainSignalSemaphore{VK_NULL_HANDLE};
+    VkSemaphore _submittedSwapChainSignalSemaphore{VK_NULL_HANDLE};
 };
 
 class CommandPoolVulkan final : public RenderBase {
@@ -515,26 +519,6 @@ public:
     bool _submitted{false};
 };
 
-class SemaphoreVulkan final : public Semaphore {
-public:
-    SemaphoreVulkan(
-        DeviceVulkan* device,
-        VkSemaphore semaphore) noexcept;
-
-    ~SemaphoreVulkan() noexcept;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    VkSemaphore _semaphore;
-    bool _signaled{false};
-};
-
 class TimelineSemaphoreVulkan final : public RenderBase {
 public:
     TimelineSemaphoreVulkan(
@@ -593,9 +577,9 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext(Nullable<Semaphore*> signalSemaphore, Nullable<Fence*> signalFence) noexcept override;
+    Nullable<Texture*> AcquireNext(Nullable<Fence*> signalFence) noexcept override;
 
-    void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
+    void Present() noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -616,7 +600,11 @@ public:
     unique_ptr<SurfaceVulkan> _surface;
     VkSwapchainKHR _swapchain;
     vector<Frame> _frames;
-    uint32_t _currentTextureIndex{0};
+    vector<VkSemaphore> _acquireSemaphores;
+    vector<VkSemaphore> _renderFinishSemaphores;
+    uint32_t _nextSemaphoreSlot{0};
+    uint32_t _currentSemaphoreSlot{std::numeric_limits<uint32_t>::max()};
+    uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};
 };
 
 class BufferVulkan final : public Buffer {
@@ -1188,7 +1176,6 @@ constexpr auto CastVkObject(CommandQueue* p) noexcept { return static_cast<Queue
 constexpr auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
 constexpr auto CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
-constexpr auto CastVkObject(Semaphore* p) noexcept { return static_cast<SemaphoreVulkan*>(p); }
 constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
