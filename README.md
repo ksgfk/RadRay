@@ -2,6 +2,9 @@
 
 TODO
 
+## TodoList
+* [P2] SwapChain 支持 HDR
+
 ## compile
 
 * cmake config
@@ -23,6 +26,7 @@ install extensions: C/C++ Extension Pack, clangd
 ```json
 {
     "xmake.additionalConfigArguments": [],
+    "xmake.compileCommandsDirectory": ".vscode",
     "C_Cpp.codeAnalysis.runAutomatically": true,
     "C_Cpp.intelliSenseEngine": "disabled",
     "C_Cpp.formatting": "disabled",
@@ -50,45 +54,30 @@ install extensions: C/C++ Extension Pack, clangd
         "--pch-storage=memory"
     ],
     "VSCodeCounter.exclude": [
-        "**/.gitignore",
+        "**/.github/**",
         "**/.vscode/**",
-        "**/node_modules/**",
-        "**/build_debug/**",
+        "**/build**/**",
+        "**/assets/**",
+        "**/third_party/**",
+        "**/SDKs/**",
+        "**/dear_imgui_shader_spirv.cpp",
+        "**/dear_imgui_shader_dxil.cpp",
+        "**/dear_imgui_shader_metallib.cpp",
+        "**/imgui.ini"
+    ],
+    "files.readonlyInclude": {
+        "**/build**/**": true,
+        "**/third_party/**": true,
+        "**/SDKs/**": true
+    },
+    "cmake.buildArgs": [
+        "--parallel",
+        "24"
     ]
 }
 ```
 
 ### launch.json
-
-example
-
-```json
-{
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "(msvc) Launch",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${command:cmake.launchTargetPath}",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "PATH",
-                    "value": "${command:cmake.getLaunchTargetDirectory}:${env:PATH}"
-                }
-            ],
-            "console": "integratedTerminal"
-        }
-    ]
-}
-```
-
-### special launch settings
-
-#### hello_imgui
 
 ```json
 {
@@ -100,9 +89,12 @@ example
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
             "args": [
+                "--backend",
                 // "vulkan",
                 "d3d12",
-                // "-st"
+                // "metal",
+                "--multithread",
+                "--valid-layer"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

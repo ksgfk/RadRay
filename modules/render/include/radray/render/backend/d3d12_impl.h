@@ -625,10 +625,10 @@ public:
     D3D12_RESOURCE_DESC _rawDesc;
     D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
     string _name;
+    uint64_t _reqSize{0};
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
-    uint64_t _reqSize{0};
 };
 
 class BufferViewD3D12 final : public BufferView {
@@ -663,15 +663,19 @@ public:
 
     void Destroy() noexcept override;
 
-    TextureDescriptor GetDesc() const noexcept override { return _desc; }
+    TextureDescriptor GetDesc() const noexcept override;
 
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _tex;
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _rawDesc;
-    TextureDescriptor _desc;
     string _name;
+    TextureDimension _dimension{TextureDimension::UNKNOWN};
+    TextureFormat _format{TextureFormat::UNKNOWN};
+    MemoryType _memory{MemoryType::Device};
+    TextureUses _usage{TextureUse::UNKNOWN};
+    ResourceHints _hints{ResourceHint::None};
 };
 
 class TextureViewD3D12 final : public TextureView {

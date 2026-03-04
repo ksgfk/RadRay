@@ -686,10 +686,10 @@ public:
     VmaAllocationInfo _allocInfo;
     VkDeviceSize _reqSize;
     string _name;
+    uint64_t _reqSizeLogical{0};
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
-    uint64_t _reqSizeLogical{0};
 };
 
 class BufferViewVulkan final : public RenderBase {
@@ -750,22 +750,27 @@ public:
 
     void Destroy() noexcept override;
 
-    TextureDescriptor GetDesc() const noexcept override { return _mdesc; }
-
-    void DangerousDestroy() noexcept;
+    TextureDescriptor GetDesc() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
-
-    void SetExtData(const TextureDescriptor& desc) noexcept;
 
     DeviceVulkan* _device;
     VkImage _image;
     VmaAllocation _allocation;
     VmaAllocationInfo _allocInfo;
-    TextureDescriptor _mdesc;
     string _name;
     VkFormat _rawFormat;
+    TextureDimension _dim{TextureDimension::UNKNOWN};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _depthOrArraySize{0};
+    uint32_t _mipLevels{0};
+    uint32_t _sampleCount{0};
+    TextureFormat _format{TextureFormat::UNKNOWN};
+    MemoryType _memory{MemoryType::Device};
+    TextureUses _usage{TextureUse::UNKNOWN};
+    ResourceHints _hints{ResourceHint::None};
 };
 
 class ImageViewVulkan final : public TextureView {

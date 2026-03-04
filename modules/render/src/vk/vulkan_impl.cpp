@@ -372,20 +372,19 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = result->_frames.emplace_back();
         f.image = make_unique<ImageVulkan>(this, img, VK_NULL_HANDLE, VmaAllocationInfo{});
-        string name = fmt::format("SwapChain Image {}", result->_frames.size() - 1);
-        TextureDescriptor texDesc{
-            TextureDimension::Dim2D,
-            swapchianCreateInfo.imageExtent.width,
-            swapchianCreateInfo.imageExtent.height,
-            1,
-            1,
-            1,
-            desc.Format,
-            MemoryType::Device,
-            TextureUse::RenderTarget,
-            ResourceHint::None,
-            name};
-        f.image->SetExtData(texDesc);
+        auto name = fmt::format("SwapChain_Image_{}", result->_frames.size() - 1);
+        f.image->_name = name;
+        f.image->_rawFormat = needFormat.format;
+        f.image->_dim = TextureDimension::Dim2D;
+        f.image->_width = swapchianCreateInfo.imageExtent.width;
+        f.image->_height = swapchianCreateInfo.imageExtent.height;
+        f.image->_depthOrArraySize = 1;
+        f.image->_mipLevels = 1;
+        f.image->_sampleCount = 1;
+        f.image->_format = desc.Format;
+        f.image->_memory = MemoryType::Device;
+        f.image->_usage = TextureUse::RenderTarget | TextureUse::Resource | TextureUse::CopySource;
+        f.image->_hints = ResourceHint::External;
     }
     const uint32_t frameCount = static_cast<uint32_t>(result->_frames.size());
     result->_acquireSemaphores.reserve(frameCount);
@@ -642,7 +641,18 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     }
     this->SetObjectName(desc.Name, vkImg);
     auto result = make_unique<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
-    result->SetExtData(desc);
+    result->_name = desc.Name;
+    result->_rawFormat = imgInfo.format;
+    result->_dim = desc.Dim;
+    result->_width = desc.Width;
+    result->_height = desc.Height;
+    result->_depthOrArraySize = desc.DepthOrArraySize;
+    result->_mipLevels = desc.MipLevels;
+    result->_sampleCount = desc.SampleCount;
+    result->_format = desc.Format;
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
     return result;
 }
 
@@ -2883,7 +2893,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
         auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
-        attachDesc.samples = MapSampleCount(imageView->_image->_mdesc.SampleCount);
+        attachDesc.samples = MapSampleCount(imageView->_image->_sampleCount);
         attachDesc.loadOp = MapType(i.Load);
         attachDesc.storeOp = MapType(i.Store);
         attachDesc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2910,17 +2920,17 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
             clear.color.float32[3] = i.ClearValue.Value[3];
         }
         if (width == std::numeric_limits<uint32_t>::max()) {
-            width = imageView->_image->_mdesc.Width;
+            width = imageView->_image->_width;
         } else {
-            if (width != imageView->_image->_mdesc.Width) {
-                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
+            if (width != imageView->_image->_width) {
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_width);
                 return nullptr;
             }
         }
         if (height == std::numeric_limits<uint32_t>::max()) {
-            height = imageView->_image->_mdesc.Height;
-        } else if (height != imageView->_image->_mdesc.Height) {
-            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
+            height = imageView->_image->_height;
+        } else if (height != imageView->_image->_height) {
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_height);
             return nullptr;
         }
     }
@@ -2930,7 +2940,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
         auto& attachDesc = attachs.emplace_back();
         attachDesc.flags = 0;
         attachDesc.format = imageView->_rawFormat;
-        attachDesc.samples = MapSampleCount(imageView->_image->_mdesc.SampleCount);
+        attachDesc.samples = MapSampleCount(imageView->_image->_sampleCount);
         attachDesc.loadOp = MapType(i.DepthLoad);
         attachDesc.storeOp = MapType(i.DepthStore);
         attachDesc.stencilLoadOp = MapType(i.StencilLoad);
@@ -2945,17 +2955,17 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
         clear.depthStencil.depth = i.ClearValue.Depth;
         clear.depthStencil.stencil = i.ClearValue.Stencil;
         if (width == std::numeric_limits<uint32_t>::max()) {
-            width = imageView->_image->_mdesc.Width;
+            width = imageView->_image->_width;
         } else {
-            if (width != imageView->_image->_mdesc.Width) {
-                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_mdesc.Width);
+            if (width != imageView->_image->_width) {
+                RADRAY_ERR_LOG("vk render pass color attachment width mismatch, expected: {}, got: {}", width, imageView->_image->_width);
                 return nullptr;
             }
         }
         if (height == std::numeric_limits<uint32_t>::max()) {
-            height = imageView->_image->_mdesc.Height;
-        } else if (height != imageView->_image->_mdesc.Height) {
-            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_mdesc.Height);
+            height = imageView->_image->_height;
+        } else if (height != imageView->_image->_height) {
+            RADRAY_ERR_LOG("vk render pass color attachment height mismatch, expected: {}, got: {}", height, imageView->_image->_height);
             return nullptr;
         }
     }
@@ -3058,10 +3068,9 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const auto& texDesc = dst->_mdesc;
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(texDesc.Format);
+    const uint32_t bpp = GetTextureFormatBytesPerPixel(dst->_format);
     if (bpp == 0) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture invalid texture format {}", texDesc.Format);
+        RADRAY_ERR_LOG("vk CopyBufferToTexture invalid texture format {}", dst->_format);
         return;
     }
     if (dstRange.MipLevelCount == SubresourceRange::All || dstRange.ArrayLayerCount == SubresourceRange::All) {
@@ -3074,14 +3083,14 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
         RADRAY_ERR_LOG("vk CopyBufferToTexture invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
         return;
     }
-    if (dstRange.BaseMipLevel >= texDesc.MipLevels ||
-        dstRange.BaseMipLevel + mipLevels > texDesc.MipLevels) {
+    if (dstRange.BaseMipLevel >= dst->_mipLevels ||
+        dstRange.BaseMipLevel + mipLevels > dst->_mipLevels) {
         RADRAY_ERR_LOG("vk CopyBufferToTexture mip range out of bounds (base={}, count={}, total={})",
-                       dstRange.BaseMipLevel, mipLevels, texDesc.MipLevels);
+                       dstRange.BaseMipLevel, mipLevels, dst->_mipLevels);
         return;
     }
-    bool is3D = texDesc.Dim == TextureDimension::Dim3D;
-    uint32_t arraySize = is3D ? 1u : texDesc.DepthOrArraySize;
+    bool is3D = dst->_dim == TextureDimension::Dim3D;
+    uint32_t arraySize = is3D ? 1u : dst->_depthOrArraySize;
     if (dstRange.BaseArrayLayer >= arraySize ||
         dstRange.BaseArrayLayer + layerCount > arraySize) {
         RADRAY_ERR_LOG("vk CopyBufferToTexture array range out of bounds (base={}, count={}, total={})",
@@ -3093,9 +3102,9 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
     uint64_t bufferOffset = srcOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = dstRange.BaseMipLevel + mip;
-        uint32_t mipWidth = std::max(texDesc.Width >> mipLevel, 1u);
-        uint32_t mipHeight = std::max(texDesc.Height >> mipLevel, 1u);
-        uint32_t mipDepth = is3D ? std::max(texDesc.DepthOrArraySize >> mipLevel, 1u) : 1u;
+        uint32_t mipWidth = std::max(dst->_width >> mipLevel, 1u);
+        uint32_t mipHeight = std::max(dst->_height >> mipLevel, 1u);
+        uint32_t mipDepth = is3D ? std::max(dst->_depthOrArraySize >> mipLevel, 1u) : 1u;
         uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
         if (alignedBytesPerRow % bpp != 0) {
@@ -3126,10 +3135,9 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
 void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const auto& texDesc = src->_mdesc;
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(texDesc.Format);
+    const uint32_t bpp = GetTextureFormatBytesPerPixel(src->_format);
     if (bpp == 0) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid texture format {}", texDesc.Format);
+        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid texture format {}", src->_format);
         return;
     }
     if (srcRange.MipLevelCount == SubresourceRange::All || srcRange.ArrayLayerCount == SubresourceRange::All) {
@@ -3142,14 +3150,14 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
         RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
         return;
     }
-    if (srcRange.BaseMipLevel >= texDesc.MipLevels ||
-        srcRange.BaseMipLevel + mipLevels > texDesc.MipLevels) {
+    if (srcRange.BaseMipLevel >= src->_mipLevels ||
+        srcRange.BaseMipLevel + mipLevels > src->_mipLevels) {
         RADRAY_ERR_LOG("vk CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
-                       srcRange.BaseMipLevel, mipLevels, texDesc.MipLevels);
+                       srcRange.BaseMipLevel, mipLevels, src->_mipLevels);
         return;
     }
-    bool is3D = texDesc.Dim == TextureDimension::Dim3D;
-    uint32_t arraySize = is3D ? 1u : texDesc.DepthOrArraySize;
+    bool is3D = src->_dim == TextureDimension::Dim3D;
+    uint32_t arraySize = is3D ? 1u : src->_depthOrArraySize;
     if (srcRange.BaseArrayLayer >= arraySize ||
         srcRange.BaseArrayLayer + layerCount > arraySize) {
         RADRAY_ERR_LOG("vk CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
@@ -3161,9 +3169,9 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
     uint64_t bufferOffset = dstOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = srcRange.BaseMipLevel + mip;
-        uint32_t mipWidth = std::max(texDesc.Width >> mipLevel, 1u);
-        uint32_t mipHeight = std::max(texDesc.Height >> mipLevel, 1u);
-        uint32_t mipDepth = is3D ? std::max(texDesc.DepthOrArraySize >> mipLevel, 1u) : 1u;
+        uint32_t mipWidth = std::max(src->_width >> mipLevel, 1u);
+        uint32_t mipHeight = std::max(src->_height >> mipLevel, 1u);
+        uint32_t mipDepth = is3D ? std::max(src->_depthOrArraySize >> mipLevel, 1u) : 1u;
         uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
         if (alignedBytesPerRow % bpp != 0) {
@@ -4174,9 +4182,6 @@ void SwapChainVulkan::Destroy() noexcept {
 void SwapChainVulkan::DestroyImpl() noexcept {
     _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
     _queue->ConsumeSubmittedSwapChainSignalSemaphore();
-    for (auto& i : _frames) {
-        i.image->DangerousDestroy();
-    }
     _frames.clear();
     _acquireSemaphores.clear();
     _renderFinishSemaphores.clear();
@@ -4432,29 +4437,36 @@ void ImageVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-void ImageVulkan::DangerousDestroy() noexcept {
-    _image = VK_NULL_HANDLE;
-    _allocation = VK_NULL_HANDLE;
+TextureDescriptor ImageVulkan::GetDesc() const noexcept {
+    return TextureDescriptor{
+        _dim,
+        _width,
+        _height,
+        _depthOrArraySize,
+        _mipLevels,
+        _sampleCount,
+        _format,
+        _memory,
+        _usage,
+        _hints,
+        _name};
 }
 
 void ImageVulkan::DestroyImpl() noexcept {
     if (_image != VK_NULL_HANDLE) {
-        if (_allocation == VK_NULL_HANDLE) {
-            _device->_ftb.vkDestroyImage(_device->_device, _image, _device->GetAllocationCallbacks());
+        if (_hints.HasFlag(ResourceHint::External)) {
             _image = VK_NULL_HANDLE;
         } else {
-            vmaDestroyImage(_device->_vma->_vma, _image, _allocation);
-            _image = VK_NULL_HANDLE;
-            _allocation = VK_NULL_HANDLE;
+            if (_allocation == VK_NULL_HANDLE) {
+                _device->_ftb.vkDestroyImage(_device->_device, _image, _device->GetAllocationCallbacks());
+                _image = VK_NULL_HANDLE;
+            } else {
+                vmaDestroyImage(_device->_vma->_vma, _image, _allocation);
+                _image = VK_NULL_HANDLE;
+                _allocation = VK_NULL_HANDLE;
+            }
         }
     }
-}
-
-void ImageVulkan::SetExtData(const TextureDescriptor& desc) noexcept {
-    _mdesc = desc;
-    _name = desc.Name;
-    _mdesc.Name = _name;
-    _rawFormat = MapType(_mdesc.Format);
 }
 
 ImageViewVulkan::ImageViewVulkan(

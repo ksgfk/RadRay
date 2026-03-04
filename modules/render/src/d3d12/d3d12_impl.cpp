@@ -713,18 +713,21 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
             RADRAY_ERR_LOG("IDXGISwapChain1::GetBuffer failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
+        auto name = fmt::format("SwapChain_BackBuffer_{}", i);
         frame.image = make_unique<TextureD3D12>(this, std::move(rt), ComPtr<D3D12MA::Allocation>{});
-        frame.image->_desc = TextureDescriptor{
-            .Dim = TextureDimension::Dim2D,
-            .Width = desc.Width,
-            .Height = desc.Height,
-            .DepthOrArraySize = 1,
-            .MipLevels = 1,
-            .SampleCount = 1,
-            .Format = desc.Format,
-            .Memory = MemoryType::Device,
-            .Usage = TextureUse::RenderTarget,
-            .Name = "SwapChain BackBuffer"};
+        frame.image->_name = name;
+        frame.image->_dimension = TextureDimension::Dim2D;
+        frame.image->_format = desc.Format;
+        frame.image->_memory = MemoryType::Device;
+        frame.image->_usage = TextureUse::UNKNOWN | TextureUse::CopySource;
+        if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) {
+            frame.image->_usage |= TextureUse::RenderTarget;
+        }
+        if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) {
+            frame.image->_usage |= TextureUse::Resource;
+        }
+        frame.image->_hints = ResourceHint::External;
+        SetObjectName(name, frame.image->_tex.Get());
     }
     return result;
 }
@@ -962,9 +965,12 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     }
     SetObjectName(desc.Name, texture.Get(), allocRes.Get());
     auto result = make_unique<TextureD3D12>(this, std::move(texture), std::move(allocRes));
-    result->_desc = desc;
     result->_name = desc.Name;
-    result->_desc.Name = result->_name;
+    result->_dimension = desc.Dim;
+    result->_format = desc.Format;
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
     return result;
 }
 
@@ -1035,7 +1041,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 srvDesc.TextureCubeArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                 srvDesc.TextureCubeArray.First2DArrayFace = desc.Range.BaseArrayLayer;
                 {
-                    const uint32_t layers = desc.Range.ArrayLayerCount == SubresourceRange::All ? tex->_desc.DepthOrArraySize - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount;
+                    const uint32_t layers = desc.Range.ArrayLayerCount == SubresourceRange::All ? tex->_rawDesc.DepthOrArraySize - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount;
                     if ((layers % 6) != 0) {
                         RADRAY_ERR_LOG("cube array texture view layer count must be a multiple of 6");
                         return nullptr;
@@ -2314,8 +2320,8 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                         tb->Range.BaseMipLevel,
                         tb->Range.BaseArrayLayer,
                         0,
-                        tex->_desc.MipLevels,
-                        tex->_desc.DepthOrArraySize);
+                        tex->_rawDesc.MipLevels,
+                        tex->_rawDesc.DepthOrArraySize);
                 } else {
                     raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                 }
@@ -2469,14 +2475,14 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
         RADRAY_ERR_LOG("d3d12 CopyBufferToTexture invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
         return;
     }
-    if (dstRange.BaseMipLevel >= dst->_desc.MipLevels ||
-        dstRange.BaseMipLevel + mipLevels > dst->_desc.MipLevels) {
+    if (dstRange.BaseMipLevel >= dst->_rawDesc.MipLevels ||
+        dstRange.BaseMipLevel + mipLevels > dst->_rawDesc.MipLevels) {
         RADRAY_ERR_LOG("d3d12 CopyBufferToTexture mip range out of bounds (base={}, count={}, total={})",
-                       dstRange.BaseMipLevel, mipLevels, dst->_desc.MipLevels);
+                       dstRange.BaseMipLevel, mipLevels, dst->_rawDesc.MipLevels);
         return;
     }
 
-    uint32_t arraySize = dst->_desc.Dim == TextureDimension::Dim3D ? 1u : dst->_desc.DepthOrArraySize;
+    uint32_t arraySize = dst->_dimension == TextureDimension::Dim3D ? 1u : dst->_rawDesc.DepthOrArraySize;
     if (dstRange.BaseArrayLayer >= arraySize ||
         dstRange.BaseArrayLayer + layerCount > arraySize) {
         RADRAY_ERR_LOG("d3d12 CopyBufferToTexture array range out of bounds (base={}, count={}, total={})",
@@ -2489,7 +2495,7 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
         uint32_t mipLevel = dstRange.BaseMipLevel + mip;
         for (uint32_t layer = 0; layer < layerCount; ++layer) {
             uint32_t arrayLayer = dstRange.BaseArrayLayer + layer;
-            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, dst->_desc.MipLevels, arraySize);
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, dst->_rawDesc.MipLevels, arraySize);
 
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
             UINT64 totalBytes = 0;
@@ -2527,14 +2533,14 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
         RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
         return;
     }
-    if (srcRange.BaseMipLevel >= src->_desc.MipLevels ||
-        srcRange.BaseMipLevel + mipLevels > src->_desc.MipLevels) {
+    if (srcRange.BaseMipLevel >= src->_rawDesc.MipLevels ||
+        srcRange.BaseMipLevel + mipLevels > src->_rawDesc.MipLevels) {
         RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
-                       srcRange.BaseMipLevel, mipLevels, src->_desc.MipLevels);
+                       srcRange.BaseMipLevel, mipLevels, src->_rawDesc.MipLevels);
         return;
     }
 
-    uint32_t arraySize = src->_desc.Dim == TextureDimension::Dim3D ? 1u : src->_desc.DepthOrArraySize;
+    uint32_t arraySize = src->_dimension == TextureDimension::Dim3D ? 1u : src->_rawDesc.DepthOrArraySize;
     if (srcRange.BaseArrayLayer >= arraySize ||
         srcRange.BaseArrayLayer + layerCount > arraySize) {
         RADRAY_ERR_LOG("d3d12 CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
@@ -2547,7 +2553,7 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
         uint32_t mipLevel = srcRange.BaseMipLevel + mip;
         for (uint32_t layer = 0; layer < layerCount; ++layer) {
             uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
-            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, src->_desc.MipLevels, arraySize);
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, src->_rawDesc.MipLevels, arraySize);
 
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
             UINT64 totalBytes = 0;
@@ -3418,6 +3424,21 @@ bool TextureD3D12::IsValid() const noexcept {
 void TextureD3D12::Destroy() noexcept {
     _tex = nullptr;
     _alloc = nullptr;
+}
+
+TextureDescriptor TextureD3D12::GetDesc() const noexcept {
+    return TextureDescriptor{
+        _dimension,
+        static_cast<uint32_t>(_rawDesc.Width),
+        static_cast<uint32_t>(_rawDesc.Height),
+        static_cast<uint32_t>(_rawDesc.DepthOrArraySize),
+        _rawDesc.MipLevels,
+        _rawDesc.SampleDesc.Count,
+        _format,
+        _memory,
+        _usage,
+        _hints,
+        _name};
 }
 
 TextureViewD3D12::TextureViewD3D12(

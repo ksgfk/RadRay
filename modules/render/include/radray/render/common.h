@@ -348,7 +348,8 @@ enum class TextureViewUsage : uint32_t {
 
 enum class ResourceHint : uint32_t {
     None = 0x0,
-    Dedicated = 0x1
+    Dedicated = 0x1,
+    External = Dedicated << 1,
 };
 
 enum class LoadAction {
