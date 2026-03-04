@@ -1,19 +1,7 @@
 #include <radray/imgui/imgui_app.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef _WINDOWS
-#define _WINDOWS
-#endif
-#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS
-#endif
-#include <windows.h>
+#include <radray/platform/win32_headers.h>
 #include <imgui_impl_win32.h>
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam, ImGuiIO& io);

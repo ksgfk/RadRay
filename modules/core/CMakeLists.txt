@@ -21,6 +21,12 @@ target_compile_definitions(radraycore PUBLIC
     $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
+if (WIN32)
+    target_compile_definitions(radraycore PRIVATE UNICODE _UNICODE)
+endif()
+if (MSVC)
+    target_compile_definitions(radraycore PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 if (MSVC)
     target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
     target_compile_options(radraycore PUBLIC /wd4324)

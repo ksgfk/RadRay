@@ -1,19 +1,7 @@
 #include <radray/text_encoding.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef _WINDOWS
-#define _WINDOWS
-#endif
-#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS
-#endif
-#include <windows.h>
+#include <radray/platform/win32_headers.h>
 #endif
 
 #include <radray/logger.h>

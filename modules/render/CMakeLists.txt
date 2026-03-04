@@ -55,6 +55,13 @@ target_compile_definitions(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>
     $<$<BOOL:${RADRAY_ENABLE_METAL}>:RADRAY_ENABLE_METAL>
     $<$<BOOL:${RADRAY_ENABLE_SPVCROSS}>:RADRAY_ENABLE_SPIRV_CROSS>)
+if (WIN32)
+    target_compile_definitions(radrayrender PRIVATE UNICODE _UNICODE)
+    target_compile_definitions(radrayrender INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+if (MSVC)
+    target_compile_definitions(radrayrender PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 target_compile_options(radrayrender PRIVATE
     $<$<BOOL:${MSVC}>:/W4>)
 radray_optimize_flags_library(radrayrender)

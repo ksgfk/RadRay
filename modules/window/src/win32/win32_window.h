@@ -3,20 +3,7 @@
 #include <atomic>
 
 #include <radray/window/native_window.h>
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef _WINDOWS
-#define _WINDOWS
-#endif
-#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS
-#endif
-#include <windows.h>
+#include <radray/platform/win32_headers.h>
 
 namespace radray {
 

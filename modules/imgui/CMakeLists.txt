@@ -63,6 +63,12 @@ target_compile_definitions(radrayimgui PUBLIC
     $<$<BOOL:${RADRAY_DISABLE_IMGUI_DEMO}>:IMGUI_DISABLE_DEMO_WINDOWS>)
 target_compile_definitions(radrayimgui PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_FREETYPE}>:IMGUI_ENABLE_FREETYPE>)
+if (WIN32)
+    target_compile_definitions(radrayimgui PRIVATE UNICODE _UNICODE)
+endif()
+if (MSVC)
+    target_compile_definitions(radrayimgui PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 target_compile_options(radrayimgui PRIVATE
     $<$<BOOL:${MSVC}>:/W4>

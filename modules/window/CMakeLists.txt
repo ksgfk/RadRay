@@ -18,6 +18,12 @@ if (RADRAY_PLATFORM_MACOS)
 endif()
 target_link_libraries(radraywindow PUBLIC
     radraycore)
+if (WIN32)
+    target_compile_definitions(radraywindow PRIVATE UNICODE _UNICODE)
+endif()
+if (MSVC)
+    target_compile_definitions(radraywindow PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 target_compile_options(radraywindow PRIVATE
     $<$<BOOL:${MSVC}>:/W4>)
 radray_optimize_flags_library(radraywindow)
