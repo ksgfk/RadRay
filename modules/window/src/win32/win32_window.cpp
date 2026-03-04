@@ -2,6 +2,7 @@
 
 #include <radray/platform.h>
 #include <radray/text_encoding.h>
+#include <radray/logger.h>
 
 // make windows happy :)
 #ifdef DELETE

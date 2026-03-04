@@ -5,8 +5,10 @@
 #include <type_traits>
 #include <source_location>
 #include <stdexcept>
+#include <memory>
 
-#include <radray/logger.h>
+#include <fmt/format.h>
+
 #include <radray/trait.h>
 
 namespace radray {

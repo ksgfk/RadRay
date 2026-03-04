@@ -343,12 +343,11 @@ if (RADRAY_BUILD_BENCHMARKS)
 endif()
 
 # 添加工程子目录
-add_subdirectory(modules)
 if (RADRAY_BUILD_TESTS)
     enable_testing()
     include(GoogleTest)
-    add_subdirectory(tests)
 endif()
+add_subdirectory(modules)
 if (RADRAY_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()

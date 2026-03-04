@@ -29,3 +29,7 @@ target_compile_options(radraycore PRIVATE
     $<$<BOOL:${MSVC}>:/W4>)
 radray_optimize_flags_library(radraycore)
 radray_set_build_path(radraycore)
+
+if (RADRAY_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
