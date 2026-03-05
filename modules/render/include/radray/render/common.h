@@ -554,6 +554,13 @@ public:
     virtual void Destroy() noexcept = 0;
 };
 
+class IDebugName {
+public:
+    virtual ~IDebugName() noexcept = default;
+
+    virtual void SetDebugName(std::string_view name) noexcept = 0;
+};
+
 using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
 
 class VulkanInstanceDescriptor {
@@ -710,7 +717,6 @@ struct TextureDescriptor {
     MemoryType Memory{MemoryType::Device};
     TextureUses Usage{TextureUse::UNKNOWN};
     ResourceHints Hints{ResourceHint::None};
-    std::string_view Name{};
 };
 
 struct TextureViewDescriptor {
@@ -726,13 +732,11 @@ struct BufferDescriptor {
     MemoryType Memory{};
     BufferUses Usage{BufferUse::UNKNOWN};
     ResourceHints Hints{};
-    std::string_view Name{};
 };
 
 struct BindlessArrayDescriptor {
     uint32_t Size{0};
     BindlessSlotType SlotType{BindlessSlotType::Multiple};
-    std::string_view Name{};
 };
 
 struct BufferRange {
@@ -750,7 +754,6 @@ struct BufferViewDescriptor {
 
 struct AccelerationStructureViewDescriptor {
     AccelerationStructure* Target{nullptr};
-    std::string_view Name{};
 };
 
 struct ShaderDescriptor {
@@ -1006,7 +1009,6 @@ struct AccelerationStructureDescriptor {
     uint32_t MaxGeometryCount{0};
     uint32_t MaxInstanceCount{0};
     AccelerationStructureBuildFlags Flags{AccelerationStructureBuildFlag::None};
-    std::string_view Name{};
 };
 
 struct BuildBottomLevelASDescriptor {
@@ -1063,7 +1065,6 @@ struct ShaderBindingTableBuildEntry {
 };
 
 struct ShaderBindingTableDescriptor {
-    std::string_view Name{};
     RayTracingPipelineState* Pipeline{nullptr};
     uint32_t RayGenCount{1};
     uint32_t MissCount{0};
@@ -1184,13 +1185,11 @@ public:
     virtual void Wait() noexcept = 0;
 };
 
-class CommandBuffer : public RenderBase {
+class CommandBuffer : public RenderBase, IDebugName {
 public:
     virtual ~CommandBuffer() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
-
-    virtual void SetDebugName(std::string_view name) noexcept = 0;
 
     virtual void Begin() noexcept = 0;
 
@@ -1285,7 +1284,7 @@ public:
     virtual void TraceRays(const TraceRaysDescriptor& desc) noexcept = 0;
 };
 
-class Fence : public RenderBase {
+class Fence : public RenderBase, public IDebugName {
 public:
     virtual ~Fence() noexcept = default;
 
@@ -1320,12 +1319,12 @@ public:
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
 };
 
-class Resource : public RenderBase {
+class Resource : public RenderBase, public IDebugName {
 public:
     virtual ~Resource() noexcept = default;
 };
 
-class ResourceView : public RenderBase {
+class ResourceView : public RenderBase, public IDebugName {
 public:
     virtual ~ResourceView() noexcept = default;
 };
@@ -1380,14 +1379,14 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Shader; }
 };
 
-class RootSignature : public RenderBase {
+class RootSignature : public RenderBase, public IDebugName {
 public:
     virtual ~RootSignature() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
 };
 
-class PipelineState : public RenderBase {
+class PipelineState : public RenderBase, public IDebugName {
 public:
     virtual ~PipelineState() noexcept = default;
 
@@ -1419,7 +1418,7 @@ public:
     virtual std::optional<vector<byte>> GetShaderBindingTableHandle(std::string_view shaderName) const noexcept = 0;
 };
 
-class ShaderBindingTable : public RenderBase {
+class ShaderBindingTable : public RenderBase, public IDebugName {
 public:
     virtual ~ShaderBindingTable() noexcept = default;
 
@@ -1439,7 +1438,7 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
 };
 
-class DescriptorSet : public RenderBase {
+class DescriptorSet : public RenderBase, public IDebugName {
 public:
     virtual ~DescriptorSet() noexcept = default;
 
@@ -1448,14 +1447,14 @@ public:
     virtual void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept = 0;
 };
 
-class Sampler : public RenderBase {
+class Sampler : public RenderBase, public IDebugName {
 public:
     virtual ~Sampler() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
 };
 
-class BindlessArray : public RenderBase {
+class BindlessArray : public RenderBase, public IDebugName {
 public:
     virtual ~BindlessArray() noexcept = default;
 

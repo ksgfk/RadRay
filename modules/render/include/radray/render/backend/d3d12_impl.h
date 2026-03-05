@@ -397,6 +397,8 @@ public:
 
     void Destroy() noexcept;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     void Wait() noexcept;
 
     uint64_t GetCompletedValue() const noexcept;
@@ -617,6 +619,8 @@ public:
 
     void Unmap(uint64_t offset, uint64_t size) noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     BufferDescriptor GetDesc() const noexcept override;
 
 public:
@@ -644,6 +648,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     DeviceD3D12* _device;
     BufferD3D12* _buffer;
@@ -663,6 +669,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     TextureDescriptor GetDesc() const noexcept override;
 
@@ -690,6 +698,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -728,6 +738,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     bool IsBindlessSet(uint32_t setIndex) const noexcept;
 
     std::optional<VersionedRootSignatureDescContainer::RootParamRef> GetTableBySetIndex(uint32_t setIndex) const noexcept;
@@ -756,6 +768,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12PipelineState> _pso;
@@ -773,6 +787,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -792,6 +808,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -815,6 +833,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     DeviceD3D12* _device;
     AccelerationStructureD3D12* _target;
@@ -834,6 +854,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept override;
 
@@ -861,6 +883,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept override;
 
     bool IsBuilt() const noexcept override;
@@ -878,6 +902,7 @@ public:
     uint64_t _hitGroupOffset{0};
     uint64_t _callableOffset{0};
     bool _isBuilt{false};
+    string _name;
 };
 
 class GpuDescriptorHeapViews final : public DescriptorSet {
@@ -892,6 +917,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept override;
 
 public:
@@ -900,6 +927,7 @@ public:
     GpuDescriptorHeapViewRAII _samplerHeapView;
     VersionedRootSignatureDescContainer::RootParameter _table;
     vector<uint32_t> _elemToHeapOffset;
+    string _name;
 };
 
 class SamplerD3D12 final : public Sampler {
@@ -913,9 +941,12 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
+    string _name;
 };
 
 class BindlessArrayD3D12 final : public BindlessArray {
@@ -930,6 +961,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
 

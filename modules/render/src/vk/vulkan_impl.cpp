@@ -530,11 +530,9 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
         RADRAY_ERR_LOG("vmaCreateBuffer failed: {}", vr);
         return nullptr;
     }
-    this->SetObjectName(desc.Name, vkBuf);
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
     result->_reqSize = bufInfo.size;
     result->_reqSizeLogical = logicalSize;
-    result->_name = desc.Name;
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
@@ -643,9 +641,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
         RADRAY_ERR_LOG("vmaCreateImage failed: {}", vr);
         return nullptr;
     }
-    this->SetObjectName(desc.Name, vkImg);
     auto result = make_unique<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
-    result->_name = desc.Name;
     result->_rawFormat = imgInfo.format;
     result->_dim = desc.Dim;
     result->_width = desc.Width;
@@ -1229,8 +1225,6 @@ Nullable<unique_ptr<AccelerationStructure>> DeviceVulkan::CreateAccelerationStru
         RADRAY_ERR_LOG("vmaCreateBuffer (AS) failed: {}", vr);
         return nullptr;
     }
-    this->SetObjectName(desc.Name, vkBuf);
-
     VkAccelerationStructureCreateInfoKHR asInfo{};
     asInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     asInfo.buffer = vkBuf;
@@ -1442,7 +1436,7 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(
     }
     uint64_t totalSize = recordStride * totalRecords;
     auto buffer = this->CreateBuffer(
-        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None, desc.Name});
+        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None});
     if (!buffer.HasValue()) {
         return nullptr;
     }
@@ -3747,12 +3741,12 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
     auto instBufOpt = _device->CreateBuffer({Align(instanceBytes, 16ull),
                                              MemoryType::Upload,
                                              BufferUse::Scratch | BufferUse::MapWrite,
-                                             ResourceHint::None,
-                                             "vk_tlas_instances"});
+                                             ResourceHint::None});
     if (!instBufOpt.HasValue()) {
         return;
     }
     auto instBuf = instBufOpt.Release();
+    instBuf->SetDebugName("vk_tlas_instances");
     auto* mapped = static_cast<VkAccelerationStructureInstanceKHR*>(instBuf->Map(0, instanceBytes));
     for (size_t i = 0; i < desc.Instances.size(); i++) {
         const auto& src = desc.Instances[i];
@@ -4037,6 +4031,23 @@ bool FenceVulkan::IsValid() const noexcept {
 
 void FenceVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void FenceVulkan::SetDebugName(std::string_view name) noexcept {
+    std::visit(
+        [&](const auto& fence) noexcept {
+            using T = std::decay_t<decltype(fence)>;
+            if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
+                if (fence) {
+                    _device->SetObjectName(fmt::format("FenceTimeline_{}", name), fence->_semaphore);
+                }
+            } else if constexpr (std::is_same_v<T, unique_ptr<LegacyFenceVulkan>>) {
+                if (fence) {
+                    _device->SetObjectName(fmt::format("FenceLegacy_{}", name), fence->_fence);
+                }
+            }
+        },
+        _fence);
 }
 
 uint64_t FenceVulkan::GetCompletedValue() const noexcept {
@@ -4388,13 +4399,17 @@ void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
     }
 }
 
+void BufferVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    _device->SetObjectName(name, _buffer);
+}
+
 BufferDescriptor BufferVulkan::GetDesc() const noexcept {
     return BufferDescriptor{
         _reqSizeLogical,
         _memory,
         _usage,
-        _hints,
-        _name};
+        _hints};
 }
 
 BufferViewVulkan::BufferViewVulkan(
@@ -4442,6 +4457,12 @@ void SimulateBufferViewVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void SimulateBufferViewVulkan::SetDebugName(std::string_view name) noexcept {
+    if (_texelView) {
+        _device->SetObjectName(name, _texelView->_bufferView);
+    }
+}
+
 void SimulateBufferViewVulkan::DestroyImpl() noexcept {
     _texelView.reset();
     _desc = {};
@@ -4470,6 +4491,11 @@ void ImageVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void ImageVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    _device->SetObjectName(name, _image);
+}
+
 TextureDescriptor ImageVulkan::GetDesc() const noexcept {
     return TextureDescriptor{
         _dim,
@@ -4481,8 +4507,7 @@ TextureDescriptor ImageVulkan::GetDesc() const noexcept {
         _format,
         _memory,
         _usage,
-        _hints,
-        _name};
+        _hints};
 }
 
 void ImageVulkan::DestroyImpl() noexcept {
@@ -4520,6 +4545,10 @@ bool ImageViewVulkan::IsValid() const noexcept {
 
 void ImageViewVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void ImageViewVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _imageView);
 }
 
 void ImageViewVulkan::DestroyImpl() noexcept {
@@ -4633,6 +4662,16 @@ void PipelineLayoutVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _layout);
+    for (size_t i = 0; i < _descSetLayouts.size(); i++) {
+        auto* layout = _descSetLayouts[i].get();
+        if (layout) {
+            _device->SetObjectName(fmt::format("{}_SetLayout_{}", name, i), layout->_layout);
+        }
+    }
+}
+
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     if (_layout != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
@@ -4669,6 +4708,13 @@ void GraphicsPipelineVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void GraphicsPipelineVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _pipeline);
+    if (_renderPass) {
+        _device->SetObjectName(fmt::format("{}_RenderPass", name), _renderPass->_renderPass);
+    }
+}
+
 void GraphicsPipelineVulkan::DestroyImpl() noexcept {
     if (_pipeline != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
@@ -4693,6 +4739,10 @@ bool ComputePipelineVulkan::IsValid() const noexcept {
 
 void ComputePipelineVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void ComputePipelineVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _pipeline);
 }
 
 void ComputePipelineVulkan::DestroyImpl() noexcept {
@@ -4720,6 +4770,10 @@ bool RayTracingPipelineVulkan::IsValid() const noexcept {
 
 void RayTracingPipelineVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void RayTracingPipelineVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _pipeline);
 }
 
 void RayTracingPipelineVulkan::DestroyImpl() noexcept {
@@ -4802,6 +4856,13 @@ void ShaderBindingTableVulkan::DestroyImpl() noexcept {
     _pipeline = nullptr;
     _device = nullptr;
     _isBuilt = false;
+}
+
+void ShaderBindingTableVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    if (_buffer) {
+        _buffer->SetDebugName(_name);
+    }
 }
 
 bool ShaderBindingTableVulkan::Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept {
@@ -4898,8 +4959,7 @@ AccelerationStructureVulkan::AccelerationStructureVulkan(
       _allocInfo(allocInfo),
       _accelerationStructure(accelerationStructure),
       _desc(desc),
-      _asSize(asSize),
-      _name(desc.Name) {}
+      _asSize(asSize) {}
 
 AccelerationStructureVulkan::~AccelerationStructureVulkan() noexcept {
     this->DestroyImpl();
@@ -4911,6 +4971,11 @@ bool AccelerationStructureVulkan::IsValid() const noexcept {
 
 void AccelerationStructureVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void AccelerationStructureVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    _device->SetObjectName(name, _buffer);
 }
 
 void AccelerationStructureVulkan::DestroyImpl() noexcept {
@@ -4943,6 +5008,10 @@ bool AccelerationStructureViewVulkan::IsValid() const noexcept {
 
 void AccelerationStructureViewVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void AccelerationStructureViewVulkan::SetDebugName(std::string_view name) noexcept {
+    RADRAY_UNUSED(name);
 }
 
 void AccelerationStructureViewVulkan::DestroyImpl() noexcept {
@@ -5023,6 +5092,12 @@ bool DescriptorSetVulkan::IsValid() const noexcept {
 
 void DescriptorSetVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void DescriptorSetVulkan::SetDebugName(std::string_view name) noexcept {
+    if (_allocation.IsValid()) {
+        _device->SetObjectName(name, _allocation.Set);
+    }
 }
 
 void DescriptorSetVulkan::DestroyImpl() noexcept {
@@ -5289,6 +5364,10 @@ void SamplerVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void SamplerVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _sampler);
+}
+
 void SamplerVulkan::DestroyImpl() noexcept {
     if (_sampler != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySampler(_device->_device, _sampler, _device->GetAllocationCallbacks());
@@ -5301,8 +5380,7 @@ BindlessArrayVulkan::BindlessArrayVulkan(
     const BindlessArrayDescriptor& desc) noexcept
     : _device(device),
       _size(desc.Size),
-      _slotType(desc.SlotType),
-      _name(desc.Name) {}
+      _slotType(desc.SlotType) {}
 
 BindlessArrayVulkan::~BindlessArrayVulkan() noexcept {
     this->DestroyImpl();
@@ -5319,6 +5397,10 @@ bool BindlessArrayVulkan::IsValid() const noexcept {
 
 void BindlessArrayVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void BindlessArrayVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
 }
 
 void BindlessArrayVulkan::DestroyImpl() noexcept {

@@ -93,14 +93,15 @@ Nullable<CBufferArena::Block*> CBufferArena::GetOrCreateBlock(uint64_t size) noe
     desc.Memory = MemoryType::Upload;
     desc.Usage = BufferUse::CBuffer | BufferUse::MapWrite | BufferUse::CopySource;
     desc.Hints = ResourceHint::None;
-    desc.Name = name;
     CBufferArena::Block* result = nullptr;
     {
         auto bufOpt = _device->CreateBuffer(desc);
         if (!bufOpt.HasValue()) {
             return nullptr;
         }
-        result = _blocks.emplace_back(make_unique<CBufferArena::Block>(bufOpt.Release())).get();
+        auto buf = bufOpt.Release();
+        buf->SetDebugName(name);
+        result = _blocks.emplace_back(make_unique<CBufferArena::Block>(std::move(buf))).get();
     }
     return result;
 }

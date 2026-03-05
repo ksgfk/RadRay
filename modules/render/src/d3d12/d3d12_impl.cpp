@@ -837,9 +837,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
             return nullptr;
         }
     }
-    SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
     auto result = make_unique<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
-    result->_name = desc.Name;
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
@@ -1014,9 +1012,7 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
         RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    SetObjectName(desc.Name, texture.Get(), allocRes.Get());
     auto result = make_unique<TextureD3D12>(this, std::move(texture), std::move(allocRes));
-    result->_name = desc.Name;
     result->_dimension = desc.Dim;
     result->_format = desc.Format;
     result->_memory = desc.Memory;
@@ -1767,7 +1763,6 @@ Nullable<unique_ptr<AccelerationStructure>> DeviceD3D12::CreateAccelerationStruc
         RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource (AS) failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    SetObjectName(desc.Name, buffer.Get(), allocRes.Get());
     return make_unique<AccelerationStructureD3D12>(this, std::move(buffer), std::move(allocRes), desc, estimatedSize);
 }
 
@@ -2041,7 +2036,7 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceD3D12::CreateShaderBindingTable(c
     }
     uint64_t totalSize = recordStride * totalRecords;
     auto buffer = this->CreateBuffer(
-        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None, desc.Name});
+        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None});
     if (!buffer.HasValue()) {
         return nullptr;
     }
@@ -2267,6 +2262,10 @@ bool FenceD3D12::IsValid() const noexcept {
 void FenceD3D12::Destroy() noexcept {
     _fence = nullptr;
     _event.Destroy();
+}
+
+void FenceD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _fence.Get());
 }
 
 void FenceD3D12::Wait() noexcept {
@@ -3436,13 +3435,17 @@ void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
     _buf->Unmap(0, &range);
 }
 
+void BufferD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    SetObjectName(name, _buf.Get(), _alloc.Get());
+}
+
 BufferDescriptor BufferD3D12::GetDesc() const noexcept {
     return BufferDescriptor{
         _reqSize,
         _memory,
         _usage,
-        _hints,
-        _name};
+        _hints};
 }
 
 BufferViewD3D12::BufferViewD3D12(
@@ -3459,6 +3462,10 @@ bool BufferViewD3D12::IsValid() const noexcept {
 
 void BufferViewD3D12::Destroy() noexcept {
     _heapView.Destroy();
+}
+
+void BufferViewD3D12::SetDebugName(std::string_view name) noexcept {
+    RADRAY_UNUSED(name);
 }
 
 TextureD3D12::TextureD3D12(
@@ -3480,6 +3487,11 @@ void TextureD3D12::Destroy() noexcept {
     _alloc = nullptr;
 }
 
+void TextureD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    SetObjectName(name, _tex.Get(), _alloc.Get());
+}
+
 TextureDescriptor TextureD3D12::GetDesc() const noexcept {
     return TextureDescriptor{
         _dimension,
@@ -3491,8 +3503,7 @@ TextureDescriptor TextureD3D12::GetDesc() const noexcept {
         _format,
         _memory,
         _usage,
-        _hints,
-        _name};
+        _hints};
 }
 
 TextureViewD3D12::TextureViewD3D12(
@@ -3509,6 +3520,10 @@ bool TextureViewD3D12::IsValid() const noexcept {
 
 void TextureViewD3D12::Destroy() noexcept {
     _heapView.Destroy();
+}
+
+void TextureViewD3D12::SetDebugName(std::string_view name) noexcept {
+    RADRAY_UNUSED(name);
 }
 
 bool Dxil::IsValid() const noexcept {
@@ -3536,6 +3551,10 @@ bool RootSigD3D12::IsValid() const noexcept {
 
 void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
+}
+
+void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _rootSig.Get());
 }
 
 bool RootSigD3D12::IsBindlessSet(uint32_t setIndex) const noexcept {
@@ -3576,6 +3595,10 @@ void GraphicsPsoD3D12::Destroy() noexcept {
     _pso = nullptr;
 }
 
+void GraphicsPsoD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _pso.Get());
+}
+
 ComputePsoD3D12::ComputePsoD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12PipelineState> pso) noexcept
@@ -3588,6 +3611,10 @@ bool ComputePsoD3D12::IsValid() const noexcept {
 
 void ComputePsoD3D12::Destroy() noexcept {
     _pso = nullptr;
+}
+
+void ComputePsoD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _pso.Get());
 }
 
 AccelerationStructureD3D12::AccelerationStructureD3D12(
@@ -3604,8 +3631,6 @@ AccelerationStructureD3D12::AccelerationStructureD3D12(
     if (_buffer != nullptr) {
         _gpuAddr = _buffer->GetGPUVirtualAddress();
     }
-    _name = desc.Name;
-    _desc.Name = _name;
 }
 
 bool AccelerationStructureD3D12::IsValid() const noexcept {
@@ -3616,6 +3641,11 @@ void AccelerationStructureD3D12::Destroy() noexcept {
     _buffer = nullptr;
     _alloc = nullptr;
     _gpuAddr = 0;
+}
+
+void AccelerationStructureD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    SetObjectName(name, _buffer.Get(), _alloc.Get());
 }
 
 AccelerationStructureViewD3D12::AccelerationStructureViewD3D12(
@@ -3636,6 +3666,10 @@ void AccelerationStructureViewD3D12::Destroy() noexcept {
     _device = nullptr;
 }
 
+void AccelerationStructureViewD3D12::SetDebugName(std::string_view name) noexcept {
+    RADRAY_UNUSED(name);
+}
+
 RayTracingPsoD3D12::RayTracingPsoD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12StateObject> stateObject,
@@ -3654,6 +3688,10 @@ void RayTracingPsoD3D12::Destroy() noexcept {
     _stateObject = nullptr;
     _stateProps = nullptr;
     _shaderIdentifiers.clear();
+}
+
+void RayTracingPsoD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _stateObject.Get());
 }
 
 ShaderBindingTableRequirements RayTracingPsoD3D12::GetShaderBindingTableRequirements() const noexcept {
@@ -3699,6 +3737,13 @@ void ShaderBindingTableD3D12::Destroy() noexcept {
     _pipeline = nullptr;
     _device = nullptr;
     _isBuilt = false;
+}
+
+void ShaderBindingTableD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    if (_buffer) {
+        _buffer->SetDebugName(_name);
+    }
 }
 
 bool ShaderBindingTableD3D12::Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept {
@@ -3798,6 +3843,10 @@ void GpuDescriptorHeapViews::Destroy() noexcept {
     _samplerHeapView.Destroy();
 }
 
+void GpuDescriptorHeapViews::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+}
+
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
     RADRAY_ASSERT(slot < _table.Ranges.size());
     const auto& e = _table.Ranges[slot];
@@ -3832,6 +3881,10 @@ void SamplerD3D12::Destroy() noexcept {
     _samplerView.Destroy();
 }
 
+void SamplerD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+}
+
 BindlessArrayD3D12::BindlessArrayD3D12(
     DeviceD3D12* device,
     const BindlessArrayDescriptor& desc,
@@ -3842,8 +3895,7 @@ BindlessArrayD3D12::BindlessArrayD3D12(
       _samplerHeap(std::move(samplerHeap)),
       _slotKinds(desc.Size, SlotKind::None),
       _size(desc.Size),
-      _slotType(desc.SlotType),
-      _name(desc.Name) {}
+      _slotType(desc.SlotType) {}
 
 bool BindlessArrayD3D12::IsValid() const noexcept {
     return _device != nullptr && (_resHeap.IsValid() || _samplerHeap.IsValid());
@@ -3853,6 +3905,10 @@ void BindlessArrayD3D12::Destroy() noexcept {
     _resHeap.Destroy();
     _samplerHeap.Destroy();
     _device = nullptr;
+}
+
+void BindlessArrayD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
 }
 
 void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {

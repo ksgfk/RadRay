@@ -550,6 +550,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     uint64_t GetCompletedValue() const noexcept override;
 
     void Wait() noexcept override;
@@ -684,6 +686,8 @@ public:
 
     void Unmap(uint64_t offset, uint64_t size) noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     BufferDescriptor GetDesc() const noexcept override;
 
 public:
@@ -736,6 +740,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -758,6 +764,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     TextureDescriptor GetDesc() const noexcept override;
 
@@ -795,6 +803,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -904,6 +914,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     bool IsBindlessSet(uint32_t index) const noexcept;
 
     VkDescriptorType GetBindlessSetType(uint32_t index) const noexcept;
@@ -931,6 +943,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -951,6 +965,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -970,6 +986,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept override;
 
@@ -999,6 +1017,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept override;
 
     bool IsBuilt() const noexcept override;
@@ -1018,6 +1038,7 @@ public:
     uint64_t _hitGroupOffset{0};
     uint64_t _callableOffset{0};
     bool _isBuilt{false};
+    string _name;
 };
 
 class ShaderModuleVulkan final : public Shader {
@@ -1118,6 +1139,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
     void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept override;
 
 public:
@@ -1140,6 +1163,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -1159,6 +1184,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
     void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
 
@@ -1197,6 +1224,8 @@ public:
 
     void Destroy() noexcept override;
 
+    void SetDebugName(std::string_view name) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -1222,6 +1251,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
