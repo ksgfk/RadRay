@@ -149,7 +149,7 @@ bool CreateDeviceForBackend(
             D3D12DeviceDescriptor desc{};
             desc.AdapterIndex = std::nullopt;
             desc.IsEnableDebugLayer = true;
-            desc.IsEnableGpuBasedValid = false;
+            desc.IsEnableGpuBasedValid = true;
             desc.LogCallback = &LogCollector::Callback;
             desc.LogUserData = logs;
             auto devOpt = CreateDevice(desc);
@@ -323,10 +323,14 @@ bool RenderFrames(
         }
 
         Texture* backBuffer = nullptr;
+        SwapChainSyncObject* waitToDrawSync = nullptr;
+        SwapChainSyncObject* readyToPresentSync = nullptr;
         for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
             auto acquired = runtime.Swapchain->AcquireNext();
-            if (acquired.HasValue()) {
-                backBuffer = acquired.Release();
+            if (acquired.BackBuffer.HasValue()) {
+                backBuffer = acquired.BackBuffer.Get();
+                waitToDrawSync = acquired.WaitToDraw;
+                readyToPresentSync = acquired.ReadyToPresent;
                 break;
             }
             window->DispatchEvents();
@@ -385,8 +389,10 @@ bool RenderFrames(
         CommandQueueSubmitDescriptor submitDesc{};
         submitDesc.CmdBuffers = submitCmds;
         submitDesc.SignalFence = fence;
+        submitDesc.WaitToExecute = waitToDrawSync;
+        submitDesc.ReadyToPresent = readyToPresentSync;
         queue->Submit(submitDesc);
-        runtime.Swapchain->Present();
+        runtime.Swapchain->Present(readyToPresentSync);
 
         runtime.BackBufferStates[backBufferIndex] = TextureState::Present;
         expectedCompletedValues[slot]++;

@@ -506,6 +506,7 @@ class ComputeCommandEncoder;
 class RayTracingCommandEncoder;
 class Fence;
 class SwapChain;
+class SwapChainSyncObject;
 class Resource;
 class ResourceView;
 class Buffer;
@@ -625,6 +626,14 @@ struct SamplerDescriptor {
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     Nullable<Fence*> SignalFence{nullptr};
+    SwapChainSyncObject* WaitToExecute{nullptr};
+    SwapChainSyncObject* ReadyToPresent{nullptr};
+};
+
+struct AcquireResult {
+    Nullable<Texture*> BackBuffer{nullptr};
+    SwapChainSyncObject* WaitToDraw{nullptr};
+    SwapChainSyncObject* ReadyToPresent{nullptr};
 };
 
 struct BarrierBufferDescriptor {
@@ -1287,15 +1296,22 @@ public:
     virtual void Wait() noexcept = 0;
 };
 
+class SwapChainSyncObject : public RenderBase {
+public:
+    virtual ~SwapChainSyncObject() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+};
+
 class SwapChain : public RenderBase {
 public:
     virtual ~SwapChain() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual Nullable<Texture*> AcquireNext() noexcept = 0;
+    virtual AcquireResult AcquireNext() noexcept = 0;
 
-    virtual void Present() noexcept = 0;
+    virtual void Present(SwapChainSyncObject* waitToPresent) noexcept = 0;
 
     virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
 

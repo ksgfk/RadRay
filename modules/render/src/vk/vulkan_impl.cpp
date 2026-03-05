@@ -385,11 +385,13 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         f.image->_memory = MemoryType::Device;
         f.image->_usage = TextureUse::RenderTarget | TextureUse::Resource | TextureUse::CopySource;
         f.image->_hints = ResourceHint::External;
+        f.image->_isSwapchainImage = true;
     }
     const uint32_t frameCount = static_cast<uint32_t>(result->_frames.size());
     result->_acquireSemaphores.reserve(frameCount);
     result->_renderFinishSemaphores.reserve(frameCount);
     result->_acquireFences.reserve(frameCount);
+    result->_acquireFenceShouldWait.reserve(frameCount);
     for (uint32_t i = 0; i < frameCount; i++) {
         auto acquireSem = this->CreateLegacySemaphore(0);
         if (!acquireSem) {
@@ -403,9 +405,11 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         if (!acquireFence) {
             return nullptr;
         }
-        result->_acquireSemaphores.emplace_back(acquireSem.Release());
-        result->_renderFinishSemaphores.emplace_back(renderFinishSem.Release());
+        result->_acquireSemaphores.emplace_back(make_unique<SwapChainSyncObjectVulkan>(acquireSem.Release()));
+        result->_renderFinishSemaphores.emplace_back(make_unique<SwapChainSyncObjectVulkan>(renderFinishSem.Release()));
         result->_acquireFences.emplace_back(acquireFence.Release());
+        // 创建 signaled fence，使用时 wait+reset
+        result->_acquireFenceShouldWait.emplace_back(1);
     }
     return result;
 }
@@ -2168,14 +2172,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     vector<VkDeviceQueueCreateInfo> queueInfos;
     vector<float> queuePriorities;
     vector<QueueRequest> queueRequests;
+    struct QueueFamilyUsage {
+        uint32_t familyIndex;
+        VkQueueFlags flags;
+        uint32_t maxCount;
+        uint32_t usedCount;
+    };
+    vector<VkQueueFamilyProperties> queueFamilyProps;
     {
-        struct QueueFamilyUsage {
-            uint32_t familyIndex;
-            VkQueueFlags flags;
-            uint32_t maxCount;
-            uint32_t usedCount;
-        };
-        vector<VkQueueFamilyProperties> queueFamilyProps;
         EnumerateVectorFromVkFunc(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
         if (queueFamilyProps.empty()) {
             RADRAY_ERR_LOG("vk no queue family found");
@@ -2419,7 +2423,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 RADRAY_ERR_LOG("vkGetDeviceQueue failed: {} {}", j.Family, j.IndexInFamily);
                 return nullptr;
             }
-            auto queue = make_unique<QueueVulkan>(deviceR.get(), queuePtr, j, i.rawType);
+            auto queue = make_unique<QueueVulkan>(
+                deviceR.get(),
+                queuePtr,
+                j,
+                i.rawType,
+                queueFamilyProps[j.Family].queueFlags);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
@@ -2541,11 +2550,13 @@ QueueVulkan::QueueVulkan(
     DeviceVulkan* device,
     VkQueue queue,
     QueueIndexInFamily family,
-    QueueType type) noexcept
+    QueueType type,
+    VkQueueFlags queueFlags) noexcept
     : _device(device),
       _queue(queue),
       _family(family),
-      _type(type) {}
+      _type(type),
+      _queueFlags(queueFlags) {}
 
 QueueVulkan::~QueueVulkan() noexcept {
     this->DestroyImpl();
@@ -2566,23 +2577,42 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         auto cmdBuffer = CastVkObject(i);
         cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
     }
-    VkSemaphore pendingWaitSemaphore = _pendingSwapChainWaitSemaphore;
-    VkSemaphore pendingSignalSemaphore = _pendingSwapChainSignalSemaphore;
+
     vector<VkSemaphore> waitSemaphores;
     vector<VkSemaphore> signalSemaphores;
     vector<uint64_t> waitValues;
     vector<uint64_t> signalValues;
     vector<VkPipelineStageFlags> waitStages;
     bool useTimelineSubmit = false;
-    if (pendingWaitSemaphore != VK_NULL_HANDLE) {
-        waitSemaphores.emplace_back(pendingWaitSemaphore);
-        waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+    if (desc.WaitToExecute != nullptr) {
+        auto* waitSync = CastVkObject(desc.WaitToExecute);
+        if (waitSync == nullptr || !waitSync->IsValid()) {
+            RADRAY_ABORT("invalid swapchain wait sync object");
+        }
+        waitSemaphores.emplace_back(waitSync->_semaphore->_semaphore);
+        VkPipelineStageFlags waitStageMask = 0;
+        if ((_queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+            waitStageMask |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        }
+        if ((_queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
+            waitStageMask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        }
+        if (waitStageMask == 0) {
+            waitStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        waitStages.emplace_back(waitStageMask);
         waitValues.emplace_back(0);
     }
-    if (pendingSignalSemaphore != VK_NULL_HANDLE) {
-        signalSemaphores.emplace_back(pendingSignalSemaphore);
+    if (desc.ReadyToPresent != nullptr) {
+        auto* signalSync = CastVkObject(desc.ReadyToPresent);
+        if (signalSync == nullptr || !signalSync->IsValid()) {
+            RADRAY_ABORT("invalid swapchain signal sync object");
+        }
+        signalSemaphores.emplace_back(signalSync->_semaphore->_semaphore);
         signalValues.emplace_back(0);
     }
+
     VkFence submitFence = VK_NULL_HANDLE;
     if (desc.SignalFence.HasValue()) {
         auto* fenceObj = CastVkObject(desc.SignalFence.Get());
@@ -2633,6 +2663,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         timelineInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalValues.size());
         timelineInfo.pSignalSemaphoreValues = signalValues.empty() ? nullptr : signalValues.data();
     }
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.pNext = useTimelineSubmit ? &timelineInfo : nullptr;
@@ -2648,22 +2679,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
-    if (pendingSignalSemaphore != VK_NULL_HANDLE) {
-        _submittedSwapChainSignalSemaphore = pendingSignalSemaphore;
-    }
-    _pendingSwapChainWaitSemaphore = VK_NULL_HANDLE;
-    _pendingSwapChainSignalSemaphore = VK_NULL_HANDLE;
-}
-
-void QueueVulkan::SetSwapChainSyncSemaphores(VkSemaphore waitSemaphore, VkSemaphore signalSemaphore) noexcept {
-    _pendingSwapChainWaitSemaphore = waitSemaphore;
-    _pendingSwapChainSignalSemaphore = signalSemaphore;
-}
-
-VkSemaphore QueueVulkan::ConsumeSubmittedSwapChainSignalSemaphore() noexcept {
-    VkSemaphore result = _submittedSwapChainSignalSemaphore;
-    _submittedSwapChainSignalSemaphore = VK_NULL_HANDLE;
-    return result;
 }
 
 void QueueVulkan::Wait() noexcept {
@@ -2677,9 +2692,6 @@ void QueueVulkan::DestroyImpl() noexcept {
     if (_queue != VK_NULL_HANDLE) {
         _queue = VK_NULL_HANDLE;
     }
-    _pendingSwapChainWaitSemaphore = VK_NULL_HANDLE;
-    _pendingSwapChainSignalSemaphore = VK_NULL_HANDLE;
-    _submittedSwapChainSignalSemaphore = VK_NULL_HANDLE;
 }
 
 CommandPoolVulkan::CommandPoolVulkan(
@@ -2845,6 +2857,10 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
 
             auto srcStage = TextureStateToPipelineStageFlags(tb->Before, true);
             auto dstStage = TextureStateToPipelineStageFlags(tb->After, false);
+            // 如果是 swapchain image 从 undefined 转换, 增加 src stage 确保之前的写入操作都能被正确同步
+            if (tex->_isSwapchainImage && tb->Before == TextureState::Undefined) {
+                srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            }
             srcStageMask |= srcStage;
             dstStageMask |= dstStage;
         } else {
@@ -4157,6 +4173,17 @@ void SurfaceVulkan::DestroyImpl() noexcept {
     }
 }
 
+SwapChainSyncObjectVulkan::SwapChainSyncObjectVulkan(unique_ptr<LegacySemaphoreVulkan> semaphore) noexcept
+    : _semaphore(std::move(semaphore)) {}
+
+bool SwapChainSyncObjectVulkan::IsValid() const noexcept {
+    return _semaphore != nullptr && _semaphore->IsValid();
+}
+
+void SwapChainSyncObjectVulkan::Destroy() noexcept {
+    _semaphore.reset();
+}
+
 SwapChainVulkan::SwapChainVulkan(
     DeviceVulkan* device,
     QueueVulkan* queue,
@@ -4180,14 +4207,12 @@ void SwapChainVulkan::Destroy() noexcept {
 }
 
 void SwapChainVulkan::DestroyImpl() noexcept {
-    _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    _queue->ConsumeSubmittedSwapChainSignalSemaphore();
     _frames.clear();
     _acquireSemaphores.clear();
     _renderFinishSemaphores.clear();
     _acquireFences.clear();
+    _acquireFenceShouldWait.clear();
     _nextSemaphoreSlot = 0;
-    _currentSemaphoreSlot = std::numeric_limits<uint32_t>::max();
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     if (_swapchain != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
@@ -4196,61 +4221,78 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-Nullable<Texture*> SwapChainVulkan::AcquireNext() noexcept {
-    if (_acquireSemaphores.empty() || _renderFinishSemaphores.empty() || _acquireFences.empty()) {
-        RADRAY_ERR_LOG("vk swapchain semaphores are not initialized");
-        return nullptr;
+AcquireResult SwapChainVulkan::AcquireNext() noexcept {
+    AcquireResult result{};
+    if (_acquireSemaphores.empty() || _renderFinishSemaphores.empty() || _acquireFences.empty() ||
+        _acquireFenceShouldWait.size() != _acquireFences.size()) {
+        RADRAY_ERR_LOG("vk swapchain sync objects are not initialized");
+        return result;
     }
+
     const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
-    auto semaphore = _acquireSemaphores[slot].get();
-    auto fence = _acquireFences[slot].get();
-    if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
-        return nullptr;
+    auto* semaphore = _acquireSemaphores[slot].get();
+    auto* fence = _acquireFences[slot].get();
+    if (_acquireFenceShouldWait[slot] != 0) {
+        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
+            return result;
+        }
+        if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
+            return result;
+        }
+        _acquireFenceShouldWait[slot] = 0;
     }
-    if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
-        return nullptr;
-    }
-    _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    _currentSemaphoreSlot = std::numeric_limits<uint32_t>::max();
+
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     auto vr = _device->_ftb.vkAcquireNextImageKHR(
         _device->_device,
         _swapchain,
         UINT64_MAX,
-        semaphore->_semaphore,
+        semaphore->_semaphore->_semaphore,
         fence->_fence,
         &_currentTextureIndex);
-    if (vr == VK_SUCCESS) {
-        _currentSemaphoreSlot = slot;
+    if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
+        _acquireFenceShouldWait[slot] = 1;
         _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
-        _queue->SetSwapChainSyncSemaphores(
-            _acquireSemaphores[slot]->_semaphore,
-            _renderFinishSemaphores[slot]->_semaphore);
         Frame& imageFrame = _frames[_currentTextureIndex];
-        return imageFrame.image.get();
-    } else if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_SUBOPTIMAL_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {  // 窗口大小改变时可能返回 VK_ERROR_OUT_OF_DATE_KHR 或 VK_SUBOPTIMAL_KHR
-        _queue->SetSwapChainSyncSemaphores(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
-        return nullptr;
-    } else {
-        RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
-        return nullptr;
+        result.BackBuffer = imageFrame.image.get();
+        result.WaitToDraw = CastVkObject(_acquireSemaphores[slot].get());
+        result.ReadyToPresent = CastVkObject(_renderFinishSemaphores[slot].get());
+        if (vr == VK_SUBOPTIMAL_KHR) {
+            RADRAY_WARN_LOG("vkAcquireNextImageKHR returned suboptimal swapchain");
+        }
+        return result;
     }
+    if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {
+        // 在这些故障情况下，Fence 不能保证 signal
+        _acquireFenceShouldWait[slot] = 0;
+        RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
+        return result;
+    }
+
+    _acquireFenceShouldWait[slot] = 0;
+    RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
+    return result;
 }
 
-void SwapChainVulkan::Present() noexcept {
+void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
     if (_currentTextureIndex >= _frames.size()) {
         RADRAY_WARN_LOG("vkQueuePresentKHR skipped: no acquired back buffer");
         return;
     }
+
     VkSemaphore waitSem = VK_NULL_HANDLE;
-    if (_currentSemaphoreSlot < _renderFinishSemaphores.size()) {
-        waitSem = _queue->ConsumeSubmittedSwapChainSignalSemaphore();
+    if (waitToPresent != nullptr) {
+        auto* waitSync = CastVkObject(waitToPresent);
+        if (waitSync == nullptr || !waitSync->IsValid()) {
+            RADRAY_ABORT("invalid swapchain present wait sync object");
+        }
+        waitSem = waitSync->_semaphore->_semaphore;
     }
+
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.pNext = nullptr;
@@ -4266,7 +4308,6 @@ void SwapChainVulkan::Present() noexcept {
     } else if (presentResult != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkQueuePresentKHR failed: {}", presentResult);
     }
-    _currentSemaphoreSlot = std::numeric_limits<uint32_t>::max();
 }
 
 Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {

@@ -27,6 +27,7 @@ class FenceVulkan;
 class TimelineSemaphoreVulkan;
 class SurfaceVulkan;
 class SwapChainVulkan;
+class SwapChainSyncObjectVulkan;
 class BufferVulkan;
 class BufferViewVulkan;
 class SimulateBufferViewVulkan;
@@ -224,7 +225,8 @@ public:
         DeviceVulkan* device,
         VkQueue queue,
         QueueIndexInFamily family,
-        QueueType type) noexcept;
+        QueueType type,
+        VkQueueFlags queueFlags) noexcept;
 
     ~QueueVulkan() noexcept override;
 
@@ -239,18 +241,11 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    void SetSwapChainSyncSemaphores(VkSemaphore waitSemaphore, VkSemaphore signalSemaphore) noexcept;
-
-    VkSemaphore ConsumeSubmittedSwapChainSignalSemaphore() noexcept;
-
     DeviceVulkan* _device;
     VkQueue _queue;
     QueueIndexInFamily _family;
     QueueType _type;
-
-    VkSemaphore _pendingSwapChainWaitSemaphore{VK_NULL_HANDLE};
-    VkSemaphore _pendingSwapChainSignalSemaphore{VK_NULL_HANDLE};
-    VkSemaphore _submittedSwapChainSignalSemaphore{VK_NULL_HANDLE};
+    VkQueueFlags _queueFlags{0};
 };
 
 class CommandPoolVulkan final : public RenderBase {
@@ -612,6 +607,20 @@ public:
     VkSurfaceKHR _surface;
 };
 
+class SwapChainSyncObjectVulkan final : public SwapChainSyncObject {
+public:
+    explicit SwapChainSyncObjectVulkan(unique_ptr<LegacySemaphoreVulkan> semaphore) noexcept;
+
+    ~SwapChainSyncObjectVulkan() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    unique_ptr<LegacySemaphoreVulkan> _semaphore{nullptr};
+};
+
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(
@@ -626,9 +635,9 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext() noexcept override;
+    AcquireResult AcquireNext() noexcept override;
 
-    void Present() noexcept override;
+    void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -649,11 +658,11 @@ public:
     unique_ptr<SurfaceVulkan> _surface;
     VkSwapchainKHR _swapchain;
     vector<Frame> _frames;
-    vector<unique_ptr<LegacySemaphoreVulkan>> _acquireSemaphores;
-    vector<unique_ptr<LegacySemaphoreVulkan>> _renderFinishSemaphores;
+    vector<unique_ptr<SwapChainSyncObjectVulkan>> _acquireSemaphores;
+    vector<unique_ptr<SwapChainSyncObjectVulkan>> _renderFinishSemaphores;
     vector<unique_ptr<LegacyFenceVulkan>> _acquireFences;
+    vector<uint8_t> _acquireFenceShouldWait;
     uint32_t _nextSemaphoreSlot{0};
-    uint32_t _currentSemaphoreSlot{std::numeric_limits<uint32_t>::max()};
     uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};
 };
 
@@ -771,6 +780,7 @@ public:
     MemoryType _memory{MemoryType::Device};
     TextureUses _usage{TextureUse::UNKNOWN};
     ResourceHints _hints{ResourceHint::None};
+    bool _isSwapchainImage{false};
 };
 
 class ImageViewVulkan final : public TextureView {
@@ -1244,6 +1254,7 @@ constexpr auto CastVkObject(AccelerationStructureView* p) noexcept { return stat
 constexpr auto CastVkObject(RayTracingPipelineState* p) noexcept { return static_cast<RayTracingPipelineVulkan*>(p); }
 constexpr auto CastVkObject(ShaderBindingTable* p) noexcept { return static_cast<ShaderBindingTableVulkan*>(p); }
 constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkan*>(p); }
+constexpr auto CastVkObject(SwapChainSyncObject* p) noexcept { return static_cast<SwapChainSyncObjectVulkan*>(p); }
 
 }  // namespace radray::render::vulkan
 

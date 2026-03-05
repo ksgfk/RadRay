@@ -9,6 +9,49 @@
 
 namespace radray::render::d3d12 {
 
+static LogLevel _MapD3D12ValidationLogLevel(D3D12_MESSAGE_SEVERITY severity) noexcept {
+    switch (severity) {
+        case D3D12_MESSAGE_SEVERITY_CORRUPTION: return LogLevel::Critical;
+        case D3D12_MESSAGE_SEVERITY_ERROR: return LogLevel::Err;
+        case D3D12_MESSAGE_SEVERITY_WARNING: return LogLevel::Warn;
+        case D3D12_MESSAGE_SEVERITY_INFO: return LogLevel::Info;
+        case D3D12_MESSAGE_SEVERITY_MESSAGE: return LogLevel::Debug;
+        default: return LogLevel::Info;
+    }
+}
+
+static void _LogD3D12ValidationMessage(
+    DeviceD3D12* device,
+    D3D12_MESSAGE_CATEGORY category,
+    D3D12_MESSAGE_SEVERITY severity,
+    D3D12_MESSAGE_ID id,
+    const char* description) noexcept {
+    if (device == nullptr) {
+        return;
+    }
+    try {
+        const LogLevel lvl = _MapD3D12ValidationLogLevel(severity);
+        const auto message = fmt::format(
+            "d3d12 validation message. category:{} id:{}\n{}",
+            category,
+            static_cast<uint32_t>(id),
+            description == nullptr ? "" : description);
+        if (device->_logCallback) {
+            device->_logCallback.Get()(lvl, message, device->_logUserData.Get());
+            return;
+        }
+        switch (lvl) {
+            case LogLevel::Critical: RADRAY_ERR_LOG("{}", message); break;
+            case LogLevel::Err: RADRAY_ERR_LOG("{}", message); break;
+            case LogLevel::Warn: RADRAY_WARN_LOG("{}", message); break;
+            case LogLevel::Info: RADRAY_INFO_LOG("{}", message); break;
+            case LogLevel::Debug: RADRAY_DEBUG_LOG("{}", message); break;
+            default: RADRAY_INFO_LOG("{}", message); break;
+        }
+    } catch (...) {
+    }
+}
+
 static void WINAPI _D3D12ValidationMessageCallback(
     D3D12_MESSAGE_CATEGORY category,
     D3D12_MESSAGE_SEVERITY severity,
@@ -16,39 +59,10 @@ static void WINAPI _D3D12ValidationMessageCallback(
     LPCSTR pDescription,
     void* pContext) noexcept {
     auto* device = static_cast<DeviceD3D12*>(pContext);
-    if (device == nullptr) {
+    if (device == nullptr || !device->_isDebugLayerEnabled) {
         return;
     }
-    try {
-        LogLevel lvl;
-        switch (severity) {
-            case D3D12_MESSAGE_SEVERITY_CORRUPTION: lvl = LogLevel::Critical; break;
-            case D3D12_MESSAGE_SEVERITY_ERROR: lvl = LogLevel::Err; break;
-            case D3D12_MESSAGE_SEVERITY_WARNING: lvl = LogLevel::Warn; break;
-            case D3D12_MESSAGE_SEVERITY_INFO: lvl = LogLevel::Info; break;
-            case D3D12_MESSAGE_SEVERITY_MESSAGE: lvl = LogLevel::Debug; break;
-            default: lvl = LogLevel::Info; break;
-        }
-        const auto message = fmt::format(
-            "d3dd12 validation message. category:{} id:{}\n{}",
-            category,
-            static_cast<uint32_t>(id),
-            pDescription == nullptr ? "" : pDescription);
-
-        if (device->_logCallback) {
-            device->_logCallback.Get()(lvl, message, device->_logUserData.Get());
-        } else {
-            switch (lvl) {
-                case LogLevel::Critical: RADRAY_ERR_LOG("{}", message); break;
-                case LogLevel::Err: RADRAY_ERR_LOG("{}", message); break;
-                case LogLevel::Warn: RADRAY_WARN_LOG("{}", message); break;
-                case LogLevel::Info: RADRAY_INFO_LOG("{}", message); break;
-                case LogLevel::Debug: RADRAY_DEBUG_LOG("{}", message); break;
-                default: RADRAY_INFO_LOG("{}", message); break;
-            }
-        }
-    } catch (...) {
-    }
+    _LogD3D12ValidationMessage(device, category, severity, id, pDescription);
 }
 
 DescriptorHeap::DescriptorHeap(
@@ -348,12 +362,15 @@ void DeviceD3D12::Destroy() noexcept {
 }
 
 void DeviceD3D12::DestroyImpl() noexcept {
-    if (_infoQueueCallbackCookie != 0) {
+    TryDrainValidationMessages();
+    if (_isDebugLayerEnabled && _infoQueueCallbackCookie != 0) {
         ComPtr<ID3D12InfoQueue1> infoQueue1;
-        _device.As(&infoQueue1);
-        infoQueue1->UnregisterMessageCallback(_infoQueueCallbackCookie);
+        if (SUCCEEDED(_device.As(&infoQueue1)) && infoQueue1 != nullptr) {
+            infoQueue1->UnregisterMessageCallback(_infoQueueCallbackCookie);
+        }
     }
     _infoQueueCallbackCookie = 0;
+    _isDebugLayerEnabled = false;
     _logCallback = nullptr;
     _logUserData = nullptr;
 
@@ -472,9 +489,10 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
+    result->_isDebugLayerEnabled = desc.IsEnableDebugLayer;
     result->_logCallback = desc.LogCallback;
     result->_logUserData = desc.LogUserData;
-    {
+    if (result->_isDebugLayerEnabled) {
         ComPtr<ID3D12InfoQueue1> infoQueue1;
         if (HRESULT hr = device.As(&infoQueue1);
             SUCCEEDED(hr) && infoQueue1 != nullptr) {
@@ -490,7 +508,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 RADRAY_WARN_LOG("ID3D12InfoQueue1::RegisterMessageCallback failed: {} {}", GetErrorName(hr2), hr2);
             }
         } else {
-            RADRAY_WARN_LOG("ID3D12Device::As<ID3D12InfoQueue1> failed: {} {}", GetErrorName(hr), hr);
+            RADRAY_WARN_LOG("ID3D12Device::As<ID3D12InfoQueue1> failed: {} {} {}", GetErrorName(hr), hr, "pump validation messages at fixed points");
         }
     }
     DeviceDetail& detail = result->_detail;
@@ -2163,6 +2181,34 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
     return result;
 }
 
+void DeviceD3D12::TryDrainValidationMessages() {
+    if (!_isDebugLayerEnabled || _infoQueueCallbackCookie != 0) {
+        return;
+    }
+    ComPtr<ID3D12InfoQueue> infoQueue;
+    if (HRESULT hr = _device.As(&infoQueue);
+        FAILED(hr) || infoQueue == nullptr) {
+        return;
+    }
+
+    const UINT64 messageCount = infoQueue->GetNumStoredMessages();
+    for (UINT64 i = 0; i < messageCount; i++) {
+        SIZE_T messageByteLength = 0;
+        if (FAILED(infoQueue->GetMessage(i, nullptr, &messageByteLength)) || messageByteLength == 0) {
+            continue;
+        }
+        vector<byte> data(static_cast<size_t>(messageByteLength));
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(data.data());
+        if (FAILED(infoQueue->GetMessage(i, message, &messageByteLength))) {
+            continue;
+        }
+        _LogD3D12ValidationMessage(this, message->Category, message->Severity, message->ID, message->pDescription);
+    }
+    if (messageCount != 0) {
+        infoQueue->ClearStoredMessages();
+    }
+}
+
 CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
@@ -2196,11 +2242,13 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         auto f = CastD3D12Object(desc.SignalFence.Get());
         _queue->Signal(f->_fence.Get(), f->_fenceValue++);
     }
+    _device->TryDrainValidationMessages();
 }
 
 void CmdQueueD3D12::Wait() noexcept {
     _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue++);
     _fence->Wait();
+    _device->TryDrainValidationMessages();
 }
 
 FenceD3D12::FenceD3D12(
@@ -3295,13 +3343,16 @@ void SwapChainD3D12::Destroy() noexcept {
     }
 }
 
-Nullable<Texture*> SwapChainD3D12::AcquireNext() noexcept {
+AcquireResult SwapChainD3D12::AcquireNext() noexcept {
     ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
     auto curr = _swapchain->GetCurrentBackBufferIndex();
-    return _frames[curr].image.get();
+    AcquireResult result{};
+    result.BackBuffer = _frames[curr].image.get();
+    return result;
 }
 
-void SwapChainD3D12::Present() noexcept {
+void SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
+    (void)waitToPresent;
     UINT syncInterval = 0;
     UINT presentFlags = 0;
     switch (_mode) {

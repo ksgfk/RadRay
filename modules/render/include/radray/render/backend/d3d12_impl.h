@@ -338,6 +338,8 @@ public:
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
+    void TryDrainValidationMessages();
+
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
@@ -352,6 +354,7 @@ public:
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
+    bool _isDebugLayerEnabled = false;
 
     DWORD _infoQueueCallbackCookie{0};
     Nullable<RenderLogCallback> _logCallback{};
@@ -576,9 +579,9 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext() noexcept override;
+    AcquireResult AcquireNext() noexcept override;
 
-    void Present() noexcept override;
+    void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
