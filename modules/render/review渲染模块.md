@@ -4,6 +4,13 @@
 * Device::GetCommandQueue
 * Device::CreateCommandBuffer
 * Device::CreateFence
+* Device::CreateSwapChain
+* SwapChain::AcquireNext
+* SwapChain::Present
+* Device::CreateBuffer
+* Device::CreateBufferView
+* Device::CreateTexture
+* Device::CreateTextureView
 
 ## D3D12
 * D3D12 DescriptorHeap

@@ -550,7 +550,7 @@ Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferView
     if (desc.Usage == BufferViewUsage::CBuffer) {
         const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
         if (desc.Range.Offset % align != 0) {
-            RADRAY_ERR_LOG("uniform buffer view offset must align to CBuffer alignment");
+            RADRAY_ERR_LOG("vk uniform buffer view offset must align to CBuffer alignment");
             return nullptr;
         }
     }
@@ -661,11 +661,12 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
 }
 
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
-    if (desc.Target == nullptr) {
-        RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
-        return nullptr;
-    }
     auto image = CastVkObject(desc.Target);
+    /**
+     * https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewCreateInfo.html
+     * 如果视图类型是 1D、2D 或 3D 视图，且 layerCount 不使用 VK_REMAINING_ARRAY_LAYERS 这个特殊宏，那么 layerCount 必须为 1
+     * 由于创建 3D 纹理时 arrayLayers 必须为 1，那么取视图时 baseArrayLayer 必须严格小于 1，因此在正整数范围内必定只能为 0
+     */
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -4222,13 +4223,6 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 }
 
 AcquireResult SwapChainVulkan::AcquireNext() noexcept {
-    AcquireResult result{};
-    if (_acquireSemaphores.empty() || _renderFinishSemaphores.empty() || _acquireFences.empty() ||
-        _acquireFenceShouldWait.size() != _acquireFences.size()) {
-        RADRAY_ERR_LOG("vk swapchain sync objects are not initialized");
-        return result;
-    }
-
     const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
     auto* semaphore = _acquireSemaphores[slot].get();
     auto* fence = _acquireFences[slot].get();
@@ -4236,12 +4230,12 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
-            return result;
+            return {};
         }
         if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
-            return result;
+            return {};
         }
         _acquireFenceShouldWait[slot] = 0;
     }
@@ -4258,6 +4252,7 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         _acquireFenceShouldWait[slot] = 1;
         _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
         Frame& imageFrame = _frames[_currentTextureIndex];
+        AcquireResult result{};
         result.BackBuffer = imageFrame.image.get();
         result.WaitToDraw = CastVkObject(_acquireSemaphores[slot].get());
         result.ReadyToPresent = CastVkObject(_renderFinishSemaphores[slot].get());
@@ -4270,12 +4265,12 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         // 在这些故障情况下，Fence 不能保证 signal
         _acquireFenceShouldWait[slot] = 0;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
-        return result;
+        return {};
     }
 
     _acquireFenceShouldWait[slot] = 0;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
-    return result;
+    return {};
 }
 
 void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
@@ -4287,9 +4282,6 @@ void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
     VkSemaphore waitSem = VK_NULL_HANDLE;
     if (waitToPresent != nullptr) {
         auto* waitSync = CastVkObject(waitToPresent);
-        if (waitSync == nullptr || !waitSync->IsValid()) {
-            RADRAY_ABORT("invalid swapchain present wait sync object");
-        }
         waitSem = waitSync->_semaphore->_semaphore;
     }
 

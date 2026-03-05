@@ -334,8 +334,6 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    D3D12_RESOURCE_DESC MapTextureDesc(const TextureDescriptor& desc) noexcept;
-
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
     void TryDrainValidationMessages();

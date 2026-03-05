@@ -795,6 +795,14 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     }
     ComPtr<ID3D12Resource> buffer;
     ComPtr<D3D12MA::Allocation> allocRes;
+    /**
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_heap_type
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
+     * upload 和 readback 只能以 GENERIC_READ 和 COPY_DEST 状态创建且不可转换。而 UAV 需要 UNORDERED_ACCESS 状态，需求冲突
+     * 利用 Custom 堆开启 L0 系统内存并设置 WRITE_COMBINE 可以绕开 Abstract 堆的限制
+     * L0 系统内存既可由 CPU 读写，NUMA 可由设备通过 PCIe 读写，UMA 更是能直接读写，可以同时满足 CPU 想 Mapped 读写，GPU 想 UAV 读写的需求
+     * WRITE_COMBINE 设置后 CPU 写入会合并到缓冲区批量提交，NUMA 通过 PCIe 上传到设备。但 CPU 读取会变慢
+     */
     if (allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT && (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
         D3D12_HEAP_PROPERTIES heapProps{};
         heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
@@ -851,14 +859,10 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
 
     if (desc.Usage == BufferViewUsage::CBuffer) {
         if (desc.Range.Offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
-            RADRAY_ERR_LOG("d3d12 uniform buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+            RADRAY_ERR_LOG("d3d12 constant buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
             return nullptr;
         }
         uint64_t alignedSize = Align(desc.Range.Size, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
-        if (desc.Range.Offset > buf->_rawDesc.Width || alignedSize > buf->_rawDesc.Width - desc.Range.Offset) {
-            RADRAY_ERR_LOG("d3d12 uniform buffer view aligned size is out of bounds");
-            return nullptr;
-        }
         auto heapViewOpt = heap->Allocate(1);
         if (!heapViewOpt.has_value()) {
             RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
@@ -884,7 +888,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         if (desc.Usage == BufferViewUsage::TexelReadOnly) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
             if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
-                RADRAY_ERR_LOG("texel buffer view offset/size must align to format bytes");
+                RADRAY_ERR_LOG("d3d12 texel buffer view offset/size must align to format bytes");
                 return nullptr;
             }
             srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
@@ -892,7 +896,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
             srvDesc.Buffer.StructureByteStride = 0;
         } else {
             if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
-                RADRAY_ERR_LOG("structured buffer view offset/size must align to stride");
+                RADRAY_ERR_LOG("d3d12 structured buffer view offset/size must align to stride");
                 return nullptr;
             }
             srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
@@ -915,7 +919,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
         if (desc.Usage == BufferViewUsage::TexelReadWrite) {
             const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
             if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
-                RADRAY_ERR_LOG("texel buffer view offset/size must align to format bytes");
+                RADRAY_ERR_LOG("d3d12 texel buffer view offset/size must align to format bytes");
                 return nullptr;
             }
             uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
@@ -923,7 +927,7 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
             uavDesc.Buffer.StructureByteStride = 0;
         } else {
             if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
-                RADRAY_ERR_LOG("structured buffer view offset/size must align to stride");
+                RADRAY_ERR_LOG("d3d12 structured buffer view offset/size must align to stride");
                 return nullptr;
             }
             uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
@@ -946,7 +950,36 @@ Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewD
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
     TextureDescriptor desc = desc_;
-    D3D12_RESOURCE_DESC resDesc = MapTextureDesc(desc);
+    DXGI_FORMAT rawFormat = MapType(desc.Format);
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = MapType(desc.Dim);
+    resDesc.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+    resDesc.Width = desc.Width;
+    resDesc.Height = desc.Height;
+    resDesc.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
+    resDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
+    resDesc.Format = FormatToTypeless(rawFormat);
+    /**
+     * https://learn.microsoft.com/en-us/windows/win32/api/dxgicommon/ns-dxgicommon-dxgi_sample_desc
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_multisample_quality_levels
+     * https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules#multisample-anti-aliasing-rasterization-rules
+     * 无 MSAA 时 quality 必须为 0 或 1
+     * DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN 使用标准的 MSAA 模式, 避免厂商差异
+     * 使用前需要调用 CheckFeatureSupport 确定 Format 支持的 quality，或直接用 DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN
+     */
+    resDesc.SampleDesc.Count = desc.SampleCount ? desc.SampleCount : 1;
+    resDesc.SampleDesc.Quality = 0;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
     D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
     // D3D12_CLEAR_VALUE clear{};
     // clear.Format = rawFormat;
@@ -995,10 +1028,6 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
 Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
-    if (desc.Target == nullptr) {
-        RADRAY_ERR_LOG("TextureViewDescriptor.Target is null");
-        return nullptr;
-    }
     auto tex = CastD3D12Object(desc.Target);
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
@@ -1061,14 +1090,14 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 {
                     const uint32_t layers = desc.Range.ArrayLayerCount == SubresourceRange::All ? tex->_rawDesc.DepthOrArraySize - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount;
                     if ((layers % 6) != 0) {
-                        RADRAY_ERR_LOG("cube array texture view layer count must be a multiple of 6");
+                        RADRAY_ERR_LOG("d3d12 cube array texture view layer count must be a multiple of 6");
                         return nullptr;
                     }
                     srvDesc.TextureCubeArray.NumCubes = layers / 6;
                 }
                 break;
             default:
-                RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), srvDesc, heapView.GetStart());
@@ -1115,7 +1144,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 rtvDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
@@ -1162,7 +1191,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 dsvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), dsvDesc, heapView.GetStart());
@@ -1209,13 +1238,13 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 uavDesc.Texture3D.WSize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             default:
-                RADRAY_ERR_LOG("invalid texture view dimension: {}", desc.Dim);
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
                 return nullptr;
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), uavDesc, heapView.GetStart());
         dxgiFormat = uavDesc.Format;
     } else {
-        RADRAY_ERR_LOG("invalid texture view usage: {}", desc.Usage);
+        RADRAY_ERR_LOG("d3d12 invalid texture view usage: {}", desc.Usage);
         return nullptr;
     }
     auto result = make_unique<TextureViewD3D12>(this, tex, std::move(heapView));
@@ -2137,32 +2166,6 @@ Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const Bindl
         desc,
         std::move(resHeapView),
         std::move(samplerHeapView));
-}
-
-D3D12_RESOURCE_DESC DeviceD3D12::MapTextureDesc(const TextureDescriptor& desc) noexcept {
-    DXGI_FORMAT rawFormat = MapType(desc.Format);
-    D3D12_RESOURCE_DESC resDesc{};
-    resDesc.Dimension = MapType(desc.Dim);
-    resDesc.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
-    resDesc.Width = desc.Width;
-    resDesc.Height = desc.Height;
-    resDesc.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
-    resDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
-    resDesc.Format = FormatToTypeless(rawFormat);
-    resDesc.SampleDesc.Count = desc.SampleCount ? desc.SampleCount : 1;
-    resDesc.SampleDesc.Quality = 0;
-    resDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    }
-    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    }
-    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
-        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    }
-    return resDesc;
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
