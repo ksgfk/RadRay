@@ -443,7 +443,8 @@ enum class RenderObjectTag : uint32_t {
     TextureView = ResourceView | (ResourceView << 2),
     AccelerationStructureView = ResourceView | (ResourceView << 3),
     DescriptorSet = ResourceView << 4,
-    Sampler = DescriptorSet << 1,
+    DescriptorSetLayout = DescriptorSet << 1,
+    Sampler = DescriptorSetLayout << 1,
     BindlessArray = Sampler << 1,
     RayTracingCmdEncoder = BindlessArray << 1,
     AccelerationStructure = RayTracingCmdEncoder << 1,
@@ -523,6 +524,7 @@ class RayTracingPipelineState;
 class ShaderBindingTable;
 class AccelerationStructure;
 class DescriptorSet;
+class DescriptorSetLayout;
 class Sampler;
 class BindlessArray;
 class InstanceVulkan;
@@ -761,47 +763,63 @@ struct ShaderDescriptor {
     ShaderBlobCategory Category{};
 };
 
-struct RootSignatureConstant {
+struct BindingDescriptor {
     uint32_t Slot{0};
-    uint32_t Space{0};
+    uint32_t Count{1};
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
+
+struct DescriptorSetLayoutDescriptor {
+    std::span<const BindingDescriptor> Bindings{};
+};
+
+struct BindlessGroupLayoutDescriptor {
+    uint32_t Capacity{0};
+    BindlessSlotType SlotType{BindlessSlotType::Multiple};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
+
+struct InlineBindingDescriptor {
+    uint32_t Slot{0};
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+};
+
+struct PushConstantRange {
+    uint32_t Offset{0};
     uint32_t Size{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-struct RootSignatureRootDescriptor {
+struct StaticSamplerDescriptor {
+    uint32_t GroupIndex{0};
     uint32_t Slot{0};
-    uint32_t Space{0};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-struct RootSignatureSetElement {
-    uint32_t Slot{0};
-    uint32_t Space{0};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::optional<uint32_t> BindlessCapacity{};
-};
-
-struct RootSignatureDescriptorSet {
-    uint32_t SetIndex{0};
-    std::span<const RootSignatureSetElement> Elements{};
-};
-
-struct RootSignatureStaticSampler {
-    uint32_t Slot{0};
-    uint32_t Space{0};
-    uint32_t SetIndex{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     SamplerDescriptor Desc{};
 };
 
+struct BindGroupEntry {
+    uint32_t GroupIndex{0};
+    Nullable<DescriptorSetLayout*> Layout{nullptr};
+};
+
+struct BindlessGroupEntry {
+    uint32_t GroupIndex{0};
+    BindlessGroupLayoutDescriptor Desc{};
+};
+
+struct InlineBindingEntry {
+    uint32_t GroupIndex{0};
+    InlineBindingDescriptor Desc{};
+};
+
 struct RootSignatureDescriptor {
-    std::span<const RootSignatureRootDescriptor> RootDescriptors{};
-    std::span<const RootSignatureDescriptorSet> DescriptorSets{};
-    std::span<const RootSignatureStaticSampler> StaticSamplers{};
-    std::optional<RootSignatureConstant> Constant{};
+    std::span<const BindGroupEntry> BindGroups{};
+    std::span<const BindlessGroupEntry> BindlessGroups{};
+    std::span<const InlineBindingEntry> InlineBindings{};
+    std::span<const PushConstantRange> PushConstants{};
+    std::span<const StaticSamplerDescriptor> StaticSamplers{};
 };
 
 struct VertexElement {
@@ -1153,6 +1171,8 @@ public:
 
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<DescriptorSetLayout>> CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
@@ -1167,7 +1187,7 @@ public:
 
     virtual Nullable<unique_ptr<ShaderBindingTable>> CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, uint32_t index) noexcept = 0;
+    virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(DescriptorSetLayout* layout) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
@@ -1226,13 +1246,13 @@ public:
 
     virtual void BindRootSignature(RootSignature* rootSig) noexcept = 0;
 
-    virtual void PushConstant(const void* data, size_t length) noexcept = 0;
+    virtual void PushConstant(uint32_t offset, const void* data, uint32_t size) noexcept = 0;
 
-    virtual void BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept = 0;
+    virtual void BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept = 0;
 
-    virtual void BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept = 0;
+    virtual void BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept = 0;
 
-    virtual void BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept = 0;
+    virtual void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1438,13 +1458,22 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
 };
 
+class DescriptorSetLayout : public RenderBase, public IDebugName {
+public:
+    virtual ~DescriptorSetLayout() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSetLayout; }
+};
+
 class DescriptorSet : public RenderBase, public IDebugName {
 public:
     virtual ~DescriptorSet() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
 
-    virtual void SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept = 0;
+    virtual void SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept = 0;
+
+    virtual void SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept = 0;
 };
 
 class Sampler : public RenderBase, public IDebugName {

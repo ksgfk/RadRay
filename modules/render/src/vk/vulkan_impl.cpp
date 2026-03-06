@@ -738,140 +738,157 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
 }
 
 Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
-    if (!desc.RootDescriptors.empty()) {
-        // vk 要模拟 dx D3D12_ROOT_PARAMETER_TYPE_CBV/SRV/UAV 的 root binding 有亿点麻烦, 也没那么简单, 先不做了 (欸嘿
-        RADRAY_ERR_LOG("vk unsupported root descriptors in root signature");
+    if (!desc.InlineBindings.empty()) {
+        RADRAY_ERR_LOG("vk unsupported inline bindings in root signature");
         return nullptr;
     }
-    vector<VkDescriptorSetLayoutBinding> bindings;
-    VkPushConstantRange pushConstant{};
-    VkPushConstantRange* pushConstantPtr = nullptr;
-    if (desc.Constant.has_value()) {
-        pushConstant.stageFlags = MapType(desc.Constant->Stages);
-        pushConstant.offset = 0;
-        pushConstant.size = desc.Constant->Size;
-        pushConstantPtr = &pushConstant;
-    }
-    vector<unique_ptr<DescriptorSetLayoutVulkan>> layouts;
-    vector<VkDescriptorSetLayout> vkDescSetLayouts;
-    vector<uint8_t> isBindlessSet;
-    vector<VkDescriptorType> bindlessSetTypes;
-    unordered_map<uint32_t, const RootSignatureDescriptorSet*> setsByIndex;
-    uint32_t maxSetIndex = 0;
-    for (const auto& set : desc.DescriptorSets) {
-        if (setsByIndex.find(set.SetIndex) != setsByIndex.end()) {
-            RADRAY_ERR_LOG("duplicate descriptor set index: {}", set.SetIndex);
+
+    vector<VkPushConstantRange> pushConstants{};
+    pushConstants.reserve(desc.PushConstants.size());
+    for (const auto& i : desc.PushConstants) {
+        if (i.Size == 0) {
+            RADRAY_ERR_LOG("vk push constant range size must be greater than 0");
             return nullptr;
         }
-        setsByIndex.emplace(set.SetIndex, &set);
-        maxSetIndex = std::max(maxSetIndex, set.SetIndex);
-    }
-    for (const auto& ss : desc.StaticSamplers) {
-        maxSetIndex = std::max(maxSetIndex, ss.SetIndex);
-    }
-    if (!setsByIndex.empty() || !desc.StaticSamplers.empty()) {
-        vkDescSetLayouts.resize(maxSetIndex + 1, VK_NULL_HANDLE);
-        layouts.resize(maxSetIndex + 1);
-        isBindlessSet.resize(maxSetIndex + 1, false);
-        bindlessSetTypes.resize(maxSetIndex + 1, VK_DESCRIPTOR_TYPE_MAX_ENUM);
+        VkPushConstantRange range{};
+        range.stageFlags = MapType(i.Stages);
+        range.offset = i.Offset;
+        range.size = i.Size;
+        pushConstants.push_back(range);
     }
 
-    for (uint32_t setIdx = 0; setIdx < vkDescSetLayouts.size(); setIdx++) {
-        auto setIt = setsByIndex.find(setIdx);
-        const RootSignatureDescriptorSet* setDesc = setIt == setsByIndex.end() ? nullptr : setIt->second;
-        std::span<const RootSignatureSetElement> setElements = setDesc == nullptr ? std::span<const RootSignatureSetElement>{} : setDesc->Elements;
+    unordered_map<uint32_t, DescriptorSetLayoutVulkan*> bindGroupLayouts{};
+    unordered_map<uint32_t, BindlessGroupLayoutDescriptor> bindlessGroups{};
+    unordered_map<uint32_t, vector<StaticSamplerDescriptor>> staticSamplerGroups{};
+    unordered_set<uint32_t> declaredGroups{};
+    uint32_t maxGroupIndex = 0;
 
-        bool hasBindless = false;
-        bool hasRegularElements = false;
-        VkDescriptorType bindlessType = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-        for (const auto& elem : setElements) {
-            if (elem.BindlessCapacity.has_value()) {
-                VkDescriptorType elemType = MapType(elem.Type);
-                if (bindlessType == VK_DESCRIPTOR_TYPE_MAX_ENUM) {
-                    bindlessType = elemType;
-                } else if (bindlessType != elemType) {
-                    RADRAY_ERR_LOG("vk bindless set {} contains mixed descriptor types", setIdx);
-                    return nullptr;
-                }
-                hasBindless = true;
-            } else {
-                hasRegularElements = true;
-            }
-        }
-
-        vector<RootSignatureStaticSampler> setStaticSamplers;
-        for (const auto& ss : desc.StaticSamplers) {
-            if (ss.SetIndex == setIdx) {
-                setStaticSamplers.push_back(ss);
-            }
-        }
-        bool hasStaticSamplers = !setStaticSamplers.empty();
-
-        if (hasBindless && (hasRegularElements || hasStaticSamplers)) {
-            RADRAY_ERR_LOG(
-                "Illegal descriptor set layout: Set {} contains both bindless array and other descriptors. "
-                "Bindless arrays must be in their own descriptor set. "
-                "This is not supported in HLSL and may cause validation errors.",
-                setIdx);
+    for (const auto& group : desc.BindGroups) {
+        if (!group.Layout) {
+            RADRAY_ERR_LOG("vk bind group {} has null layout", group.GroupIndex);
             return nullptr;
         }
+        if (!declaredGroups.insert(group.GroupIndex).second) {
+            RADRAY_ERR_LOG("vk duplicate group index {}", group.GroupIndex);
+            return nullptr;
+        }
+        auto* layout = CastVkObject(group.Layout.Get());
+        if (layout == nullptr || !layout->IsValid()) {
+            RADRAY_ERR_LOG("vk bind group {} layout is invalid", group.GroupIndex);
+            return nullptr;
+        }
+        bindGroupLayouts.emplace(group.GroupIndex, layout);
+        maxGroupIndex = std::max(maxGroupIndex, group.GroupIndex);
+    }
 
-        if (hasBindless && !hasRegularElements && !hasStaticSamplers) {
+    for (const auto& group : desc.BindlessGroups) {
+        if (!declaredGroups.insert(group.GroupIndex).second) {
+            RADRAY_ERR_LOG("vk duplicate group index {}", group.GroupIndex);
+            return nullptr;
+        }
+        bindlessGroups.emplace(group.GroupIndex, group.Desc);
+        maxGroupIndex = std::max(maxGroupIndex, group.GroupIndex);
+    }
+
+    for (const auto& sampler : desc.StaticSamplers) {
+        staticSamplerGroups[sampler.GroupIndex].push_back(sampler);
+        maxGroupIndex = std::max(maxGroupIndex, sampler.GroupIndex);
+    }
+
+    vector<unique_ptr<DescriptorSetLayoutVulkan>> ownedLayouts{};
+    vector<VkDescriptorSetLayout> vkLayouts{};
+    if (!declaredGroups.empty() || !staticSamplerGroups.empty()) {
+        ownedLayouts.resize(maxGroupIndex + 1);
+        vkLayouts.resize(maxGroupIndex + 1, VK_NULL_HANDLE);
+    }
+
+    for (uint32_t groupIndex = 0; groupIndex < vkLayouts.size(); groupIndex++) {
+        auto staticSamplerIt = staticSamplerGroups.find(groupIndex);
+        std::span<const StaticSamplerDescriptor> groupStaticSamplers{};
+        if (staticSamplerIt != staticSamplerGroups.end()) {
+            groupStaticSamplers = staticSamplerIt->second;
+        }
+        auto bindlessIt = bindlessGroups.find(groupIndex);
+        if (bindlessIt != bindlessGroups.end()) {
             VkDescriptorSetLayout globalLayout = VK_NULL_HANDLE;
-            if (bindlessType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
-                globalLayout = _bdlsTex2d->GetLayout();
-            } else if (bindlessType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-                globalLayout = _bdlsBuffer->GetLayout();
-            } else if (bindlessType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
-                globalLayout = _bdlsBufferTexelRo->GetLayout();
-            } else if (bindlessType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
-                globalLayout = _bdlsBufferTexelRw->GetLayout();
+            switch (bindlessIt->second.SlotType) {
+                case BindlessSlotType::BufferOnly:
+                    globalLayout = _bdlsBuffer->GetLayout();
+                    break;
+                case BindlessSlotType::Multiple:
+                case BindlessSlotType::Texture2DOnly:
+                    globalLayout = _bdlsTex2d->GetLayout();
+                    break;
+                case BindlessSlotType::Texture3DOnly:
+                    globalLayout = _bdlsTex3d->GetLayout();
+                    break;
             }
             if (globalLayout == VK_NULL_HANDLE) {
-                RADRAY_ERR_LOG("vk failed to find global bindless layout for type {}", bindlessType);
+                RADRAY_ERR_LOG("vk failed to find global bindless layout for group {}", groupIndex);
                 return nullptr;
             }
-            vkDescSetLayouts[setIdx] = globalLayout;
-            isBindlessSet[setIdx] = true;
-            bindlessSetTypes[setIdx] = bindlessType;
+            if (!groupStaticSamplers.empty()) {
+                RADRAY_ERR_LOG("vk bindless group {} cannot contain static samplers", groupIndex);
+                return nullptr;
+            }
+            vkLayouts[groupIndex] = globalLayout;
             continue;
         }
 
-        RootSignatureDescriptorSet emptySet{};
-        emptySet.SetIndex = setIdx;
-        auto layout = this->CreateDescriptorSetLayout(setDesc == nullptr ? emptySet : *setDesc, setStaticSamplers);
-        if (!layout) {
+        auto bindGroupIt = bindGroupLayouts.find(groupIndex);
+        if (bindGroupIt != bindGroupLayouts.end()) {
+            if (!groupStaticSamplers.empty()) {
+                RADRAY_ERR_LOG("vk static samplers mixed with external descriptor set layout on group {} is unsupported", groupIndex);
+                return nullptr;
+            }
+            vkLayouts[groupIndex] = bindGroupIt->second->_layout;
+            continue;
+        }
+        DescriptorSetLayoutDescriptor setLayoutDesc{};
+        auto layoutOpt = this->CreateDescriptorSetLayout(setLayoutDesc, groupStaticSamplers);
+        if (!layoutOpt.HasValue()) {
             return nullptr;
         }
-        auto layoutOwned = layout.Release();
-        vkDescSetLayouts[setIdx] = layoutOwned->_layout;
-        layouts[setIdx] = std::move(layoutOwned);
-        isBindlessSet[setIdx] = false;
-        bindlessSetTypes[setIdx] = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        auto layoutOwned = layoutOpt.Release();
+        vkLayouts[groupIndex] = layoutOwned->_layout;
+        ownedLayouts[groupIndex] = std::move(layoutOwned);
     }
+
     VkPipelineLayoutCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     createInfo.pNext = nullptr;
     createInfo.flags = 0;
-    createInfo.setLayoutCount = static_cast<uint32_t>(vkDescSetLayouts.size());
-    createInfo.pSetLayouts = vkDescSetLayouts.empty() ? nullptr : vkDescSetLayouts.data();
-    createInfo.pushConstantRangeCount = pushConstantPtr == nullptr ? 0 : 1;
-    createInfo.pPushConstantRanges = pushConstantPtr;
+    createInfo.setLayoutCount = static_cast<uint32_t>(vkLayouts.size());
+    createInfo.pSetLayouts = vkLayouts.empty() ? nullptr : vkLayouts.data();
+    createInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstants.size());
+    createInfo.pPushConstantRanges = pushConstants.empty() ? nullptr : pushConstants.data();
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreatePipelineLayout(_device, &createInfo, this->GetAllocationCallbacks(), &pipelineLayout);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
+
     auto result = make_unique<PipelineLayoutVulkan>(this, pipelineLayout);
-    result->_descSetLayouts = std::move(layouts);
-    result->_isBindlessSet = std::move(isBindlessSet);
-    result->_bindlessSetTypes = std::move(bindlessSetTypes);
-    if (pushConstantPtr == nullptr) {
-        result->_pushConst = std::nullopt;
-    } else {
-        result->_pushConst = *pushConstantPtr;
+    result->_ownedLayouts = std::move(ownedLayouts);
+    for (const auto& i : desc.BindGroups) {
+        result->_groups.insert(i.GroupIndex);
     }
+    for (const auto& i : desc.BindlessGroups) {
+        result->_groups.insert(i.GroupIndex);
+        result->_bindlessGroups.insert(i.GroupIndex);
+        switch (i.Desc.SlotType) {
+            case BindlessSlotType::BufferOnly:
+                result->_bindlessGroupTypes[i.GroupIndex] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                break;
+            case BindlessSlotType::Texture3DOnly:
+            case BindlessSlotType::Multiple:
+            case BindlessSlotType::Texture2DOnly:
+                result->_bindlessGroupTypes[i.GroupIndex] = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                break;
+        }
+    }
+    result->_pushConsts = std::move(pushConstants);
     return result;
 }
 
@@ -1443,36 +1460,55 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(
     return make_unique<ShaderBindingTableVulkan>(this, pipeline, buffer.Release(), desc, recordStride);
 }
 
-Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const RootSignatureDescriptorSet& desc, std::span<const RootSignatureStaticSampler> staticSamplers) noexcept {
+Nullable<unique_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc) noexcept {
+    auto layoutOpt = this->CreateDescriptorSetLayout(desc, {});
+    if (!layoutOpt.HasValue()) {
+        return nullptr;
+    }
+    unique_ptr<DescriptorSetLayoutVulkan> layoutOwned = layoutOpt.Release();
+    return unique_ptr<DescriptorSetLayout>(std::move(layoutOwned));
+}
+
+Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc, std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
     struct BindingCtx {
         VkDescriptorSetLayoutBinding binding;
+        ResourceBindType bindType{ResourceBindType::UNKNOWN};
         vector<unique_ptr<SamplerVulkan>> staticSamplers;
         vector<VkSampler> tmpSS;
-        bool isBindless{false};
     };
     vector<BindingCtx> ctxs;
-    bool hasBindless = false;
-    // Set elements
-    for (const auto& j : desc.Elements) {
+    unordered_set<uint32_t> usedBindingSlots{};
+    for (const auto& j : desc.Bindings) {
+        if (j.Type == ResourceBindType::UNKNOWN) {
+            RADRAY_ERR_LOG("vk descriptor set layout contains unknown binding type");
+            return nullptr;
+        }
+        if (j.Count == 0) {
+            RADRAY_ERR_LOG("vk descriptor set layout binding count must be greater than 0");
+            return nullptr;
+        }
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = j.Slot;
         ctx.binding.descriptorType = MapType(j.Type);
-        if (j.BindlessCapacity.has_value()) {
-            ctx.binding.descriptorCount = j.BindlessCapacity.value();
-            ctx.isBindless = true;
-            hasBindless = true;
-        } else {
-            ctx.binding.descriptorCount = j.Count;
-        }
+        ctx.binding.descriptorCount = j.Count;
         ctx.binding.stageFlags = MapType(j.Stages);
+        ctx.bindType = j.Type;
+        if (!usedBindingSlots.insert(ctx.binding.binding).second) {
+            RADRAY_ERR_LOG("vk duplicate binding slot {}, Vulkan binding index must be unique per set", j.Slot);
+            return nullptr;
+        }
     }
-    // Static samplers (immutable samplers)
     for (const auto& ss : staticSamplers) {
         auto& ctx = ctxs.emplace_back();
         ctx.binding.binding = ss.Slot;
         ctx.binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
         ctx.binding.descriptorCount = 1;
         ctx.binding.stageFlags = MapType(ss.Stages);
+        ctx.bindType = ResourceBindType::Sampler;
+        if (!usedBindingSlots.insert(ctx.binding.binding).second) {
+            RADRAY_ERR_LOG("vk duplicate static sampler binding slot {}", ss.Slot);
+            return nullptr;
+        }
         auto samplerOpt = this->CreateSamplerVulkan(ss.Desc);
         if (!samplerOpt.HasValue()) {
             return nullptr;
@@ -1482,9 +1518,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
         ctx.staticSamplers.emplace_back(std::move(sampler));
     }
     vector<VkDescriptorSetLayoutBinding> bindings;
-    vector<VkDescriptorBindingFlags> bindingFlags;
     bindings.reserve(ctxs.size());
-    bindingFlags.reserve(ctxs.size());
     for (const auto& i : ctxs) {
         auto b = i.binding;
         if (i.tmpSS.empty()) {
@@ -1493,27 +1527,11 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
             b.pImmutableSamplers = i.tmpSS.data();
         }
         bindings.emplace_back(b);
-        // Set UPDATE_AFTER_BIND flag for bindless bindings
-        VkDescriptorBindingFlags flags = 0;
-        if (i.isBindless) {
-            flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-        }
-        bindingFlags.emplace_back(flags);
     }
-    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    if (hasBindless) {
-        flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-        flagsInfo.pNext = nullptr;
-        flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
-        flagsInfo.pBindingFlags = bindingFlags.data();
-        dslci.pNext = &flagsInfo;
-        dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    } else {
-        dslci.pNext = nullptr;
-        dslci.flags = 0;
-    }
+    dslci.pNext = nullptr;
+    dslci.flags = 0;
     dslci.bindingCount = static_cast<uint32_t>(bindings.size());
     dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
@@ -1525,7 +1543,7 @@ Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSe
     auto result = make_unique<DescriptorSetLayoutVulkan>(this, layout);
     result->_bindings.reserve(ctxs.size());
     for (auto& ctx : ctxs) {
-        result->_bindings.emplace_back(ctx.binding, std::move(ctx.staticSamplers));
+        result->_bindings.emplace_back(ctx.binding, ctx.bindType, std::move(ctx.staticSamplers));
     }
     return result;
 }
@@ -1632,26 +1650,17 @@ Nullable<unique_ptr<BindlessDescriptorSetVulkan>> DeviceVulkan::CreateBindlessDe
     return bdls;
 }
 
-Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig_, uint32_t index) noexcept {
-    auto rootSig = CastVkObject(rootSig_);
-    if (index >= rootSig->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "index", rootSig->_descSetLayouts.size(), index);
+Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
+    auto layout = CastVkObject(layout_);
+    if (layout == nullptr || !layout->IsValid()) {
+        RADRAY_ERR_LOG("vk descriptor set layout is invalid");
         return nullptr;
     }
-    if (rootSig->IsBindlessSet(index)) {
-        RADRAY_ERR_LOG("cannot create descriptor set for bindless set {}", index);
-        return nullptr;
-    }
-    const auto& layout = rootSig->_descSetLayouts[index];
-    if (!layout) {
-        RADRAY_ERR_LOG("cannot create descriptor set for missing layout set {}", index);
-        return nullptr;
-    }
-    auto allocOpt = _descSetAlloc->Allocate(layout.get());
+    auto allocOpt = _descSetAlloc->Allocate(layout);
     if (!allocOpt.has_value()) {
         return nullptr;
     }
-    return make_unique<DescriptorSetVulkan>(this, layout.get(), _descSetAlloc.get(), allocOpt.value());
+    return make_unique<DescriptorSetVulkan>(this, layout, _descSetAlloc.get(), allocOpt.value());
 }
 
 Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
@@ -3288,38 +3297,39 @@ void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineSta
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
 }
 
-void SimulateCommandEncoderVulkan::PushConstant(const void* data, size_t length) noexcept {
+void SimulateCommandEncoderVulkan::PushConstant(uint32_t offset, const void* data, uint32_t size) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before CommandEncoder::PushConstant");
         return;
     }
-    if (!_boundPipeLayout->_pushConst.has_value()) {
-        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
+    auto pcOpt = _boundPipeLayout->FindPushConstantRange(offset, size);
+    if (!pcOpt.has_value()) {
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant range covering offset={} size={}", offset, size);
         return;
     }
-    const auto& pc = _boundPipeLayout->_pushConst.value();
-    if (length > pc.size) {
-        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
-        return;
-    }
-    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+    const auto& pc = pcOpt.value();
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, offset, size, data);
 }
 
-void SimulateCommandEncoderVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(slot);
+void SimulateCommandEncoderVulkan::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(inlineIndex);
     RADRAY_UNUSED(buffer);
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
-    RADRAY_ERR_LOG("unsupported CommandEncoder::BindRootDescriptor in vk");
+    RADRAY_ERR_LOG("unsupported CommandEncoder::BindInlineBuffer in vk");
 }
 
-void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
+        return;
+    }
+    if (_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is bindless, use BindBindlessArray", groupIndex);
         return;
     }
     auto descSet = CastVkObject(set);
@@ -3327,27 +3337,27 @@ void SimulateCommandEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSe
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &descSet->_allocation.Set,
         0, nullptr);
 }
 
-void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindBindlessArray");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
         return;
     }
-    if (!_boundPipeLayout->IsBindlessSet(slot)) {
-        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+    if (!_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is not a bindless group", groupIndex);
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessGroupType(groupIndex);
     VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
@@ -3357,7 +3367,7 @@ void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArra
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &set,
         0, nullptr);
@@ -3406,38 +3416,39 @@ void SimulateComputeEncoderVulkan::BindRootSignature(RootSignature* rootSig) noe
     _boundPipeLayout = layout;
 }
 
-void SimulateComputeEncoderVulkan::PushConstant(const void* data, size_t length) noexcept {
+void SimulateComputeEncoderVulkan::PushConstant(uint32_t offset, const void* data, uint32_t size) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::PushConstant");
         return;
     }
-    if (!_boundPipeLayout->_pushConst.has_value()) {
-        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
+    auto pcOpt = _boundPipeLayout->FindPushConstantRange(offset, size);
+    if (!pcOpt.has_value()) {
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant range covering offset={} size={}", offset, size);
         return;
     }
-    const auto& pc = _boundPipeLayout->_pushConst.value();
-    if (length > pc.size) {
-        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
-        return;
-    }
-    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+    const auto& pc = pcOpt.value();
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, offset, size, data);
 }
 
-void SimulateComputeEncoderVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(slot);
+void SimulateComputeEncoderVulkan::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(inlineIndex);
     RADRAY_UNUSED(buffer);
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
-    RADRAY_ERR_LOG("unsupported ComputeCommandEncoder::BindRootDescriptor in vk");
+    RADRAY_ERR_LOG("unsupported ComputeCommandEncoder::BindInlineBuffer in vk");
 }
 
-void SimulateComputeEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+void SimulateComputeEncoderVulkan::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
+        return;
+    }
+    if (_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is bindless, use BindBindlessArray", groupIndex);
         return;
     }
     auto descSet = CastVkObject(set);
@@ -3445,27 +3456,27 @@ void SimulateComputeEncoderVulkan::BindDescriptorSet(uint32_t slot, DescriptorSe
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &descSet->_allocation.Set,
         0, nullptr);
 }
 
-void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindBindlessArray");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
         return;
     }
-    if (!_boundPipeLayout->IsBindlessSet(slot)) {
-        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+    if (!_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is not a bindless group", groupIndex);
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessGroupType(groupIndex);
     VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
@@ -3475,7 +3486,7 @@ void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t slot, BindlessArra
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &set,
         0, nullptr);
@@ -3533,38 +3544,39 @@ void CommandEncoderRayTracingVulkan::BindRootSignature(RootSignature* rootSig) n
     _boundPipeLayout = CastVkObject(rootSig);
 }
 
-void CommandEncoderRayTracingVulkan::PushConstant(const void* data, size_t length) noexcept {
+void CommandEncoderRayTracingVulkan::PushConstant(uint32_t offset, const void* data, uint32_t size) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::PushConstant");
         return;
     }
-    if (!_boundPipeLayout->_pushConst.has_value()) {
-        RADRAY_ERR_LOG("VkPipelineLayout has no push constant");
+    auto pcOpt = _boundPipeLayout->FindPushConstantRange(offset, size);
+    if (!pcOpt.has_value()) {
+        RADRAY_ERR_LOG("VkPipelineLayout has no push constant range covering offset={} size={}", offset, size);
         return;
     }
-    const auto& pc = _boundPipeLayout->_pushConst.value();
-    if (length > pc.size) {
-        RADRAY_ERR_LOG("vk push constant length {} exceeds VkPipelineLayout push constant size {}", length, pc.size);
-        return;
-    }
-    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, 0, static_cast<uint32_t>(length), data);
+    const auto& pc = pcOpt.value();
+    _device->_ftb.vkCmdPushConstants(_cmdBuffer->_cmdBuffer, _boundPipeLayout->_layout, pc.stageFlags, offset, size, data);
 }
 
-void CommandEncoderRayTracingVulkan::BindRootDescriptor(uint32_t slot, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    RADRAY_UNUSED(slot);
+void CommandEncoderRayTracingVulkan::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+    RADRAY_UNUSED(inlineIndex);
     RADRAY_UNUSED(buffer);
     RADRAY_UNUSED(offset);
     RADRAY_UNUSED(size);
-    RADRAY_ERR_LOG("unsupported RayTracingCommandEncoder::BindRootDescriptor in vk");
+    RADRAY_ERR_LOG("unsupported RayTracingCommandEncoder::BindInlineBuffer in vk");
 }
 
-void CommandEncoderRayTracingVulkan::BindDescriptorSet(uint32_t slot, DescriptorSet* set) noexcept {
+void CommandEncoderRayTracingVulkan::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
+        return;
+    }
+    if (_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is bindless, use BindBindlessArray", groupIndex);
         return;
     }
     auto descSet = CastVkObject(set);
@@ -3572,27 +3584,27 @@ void CommandEncoderRayTracingVulkan::BindDescriptorSet(uint32_t slot, Descriptor
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &descSet->_allocation.Set,
         0, nullptr);
 }
 
-void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t slot, BindlessArray* array) noexcept {
+void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (!_boundPipeLayout) {
         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindBindlessArray");
         return;
     }
-    if (slot >= _boundPipeLayout->_descSetLayouts.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _boundPipeLayout->_descSetLayouts.size(), slot);
+    if (!_boundPipeLayout->HasGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} not declared in root signature", groupIndex);
         return;
     }
-    if (!_boundPipeLayout->IsBindlessSet(slot)) {
-        RADRAY_ERR_LOG("set {} is not a bindless set", slot);
+    if (!_boundPipeLayout->IsBindlessGroup(groupIndex)) {
+        RADRAY_ERR_LOG("group {} is not a bindless group", groupIndex);
         return;
     }
     auto bdlsArray = static_cast<BindlessArrayVulkan*>(array);
-    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessSetType(slot);
+    VkDescriptorType bindlessType = _boundPipeLayout->GetBindlessGroupType(groupIndex);
     VkDescriptorSet set = bdlsArray->GetSetForDescriptorType(bindlessType);
     if (set == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("bindless array has no valid allocation for descriptor type {}", bindlessType);
@@ -3602,7 +3614,7 @@ void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t slot, BindlessAr
         _cmdBuffer->_cmdBuffer,
         VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         _boundPipeLayout->_layout,
-        slot,
+        groupIndex,
         1,
         &set,
         0, nullptr);
@@ -4560,8 +4572,11 @@ void ImageViewVulkan::DestroyImpl() noexcept {
 
 DescriptorSetLayoutBindingVulkanContainer::DescriptorSetLayoutBindingVulkanContainer(
     const VkDescriptorSetLayoutBinding& binding,
+    ResourceBindType bindType,
     vector<unique_ptr<SamplerVulkan>> immutableSamplers) noexcept
-    : binding(binding.binding),
+    : slot(binding.binding),
+      bindType(bindType),
+      binding(binding.binding),
       descriptorType(binding.descriptorType),
       descriptorCount(binding.descriptorCount),
       stageFlags(binding.stageFlags),
@@ -4583,6 +4598,12 @@ bool DescriptorSetLayoutVulkan::IsValid() const noexcept {
 
 void DescriptorSetLayoutVulkan::Destroy() noexcept {
     this->DestroyImpl();
+}
+
+void DescriptorSetLayoutVulkan::SetDebugName(std::string_view name) noexcept {
+    if (_layout != VK_NULL_HANDLE) {
+        _device->SetObjectName(name, _layout);
+    }
 }
 
 void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
@@ -4664,8 +4685,8 @@ void PipelineLayoutVulkan::Destroy() noexcept {
 
 void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
     _device->SetObjectName(name, _layout);
-    for (size_t i = 0; i < _descSetLayouts.size(); i++) {
-        auto* layout = _descSetLayouts[i].get();
+    for (size_t i = 0; i < _ownedLayouts.size(); i++) {
+        auto* layout = _ownedLayouts[i].get();
         if (layout) {
             _device->SetObjectName(fmt::format("{}_SetLayout_{}", name, i), layout->_layout);
         }
@@ -4673,21 +4694,36 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
+    _ownedLayouts.clear();
     if (_layout != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
         _layout = VK_NULL_HANDLE;
     }
 }
 
-bool PipelineLayoutVulkan::IsBindlessSet(uint32_t index) const noexcept {
-    return index < _isBindlessSet.size() && _isBindlessSet[index];
+bool PipelineLayoutVulkan::HasGroup(uint32_t groupIndex) const noexcept {
+    return _groups.find(groupIndex) != _groups.end();
 }
 
-VkDescriptorType PipelineLayoutVulkan::GetBindlessSetType(uint32_t index) const noexcept {
-    if (index >= _bindlessSetTypes.size()) {
+bool PipelineLayoutVulkan::IsBindlessGroup(uint32_t groupIndex) const noexcept {
+    return _bindlessGroups.find(groupIndex) != _bindlessGroups.end();
+}
+
+VkDescriptorType PipelineLayoutVulkan::GetBindlessGroupType(uint32_t groupIndex) const noexcept {
+    auto it = _bindlessGroupTypes.find(groupIndex);
+    if (it == _bindlessGroupTypes.end()) {
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     }
-    return _bindlessSetTypes[index];
+    return it->second;
+}
+
+std::optional<VkPushConstantRange> PipelineLayoutVulkan::FindPushConstantRange(uint32_t offset, uint32_t size) const noexcept {
+    for (const auto& range : _pushConsts) {
+        if (offset >= range.offset && (offset + size) <= (range.offset + range.size)) {
+            return range;
+        }
+    }
+    return std::nullopt;
 }
 
 GraphicsPipelineVulkan::GraphicsPipelineVulkan(
@@ -5107,29 +5143,54 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
     }
 }
 
-void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceView* view) noexcept {
+void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept {
     if (!_layout || !_allocation.IsValid()) {
         RADRAY_ERR_LOG("vk invalid descriptor set");
         return;
     }
-    if (slot >= _layout->_bindings.size()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _layout->_bindings.size(), slot);
-        return;
-    }
-    const auto& e = _layout->_bindings[slot];
-    if (index >= e.descriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "index", e.descriptorCount, index);
-        return;
-    }
     auto tag = view->GetTag();
+    ResourceBindType requiredBindType = ResourceBindType::UNKNOWN;
+    if (tag.HasFlag(RenderObjectTag::BufferView)) {
+        auto bv = static_cast<SimulateBufferViewVulkan*>(view);
+        switch (bv->_desc.Usage) {
+            case BufferViewUsage::CBuffer: requiredBindType = ResourceBindType::CBuffer; break;
+            case BufferViewUsage::ReadOnlyStorage: requiredBindType = ResourceBindType::Buffer; break;
+            case BufferViewUsage::ReadWriteStorage: requiredBindType = ResourceBindType::RWBuffer; break;
+            case BufferViewUsage::TexelReadOnly: requiredBindType = ResourceBindType::TexelBuffer; break;
+            case BufferViewUsage::TexelReadWrite: requiredBindType = ResourceBindType::RWTexelBuffer; break;
+        }
+    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+        auto tv = static_cast<ImageViewVulkan*>(view);
+        requiredBindType = tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess ? ResourceBindType::RWTexture : ResourceBindType::Texture;
+    } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+        requiredBindType = ResourceBindType::AccelerationStructure;
+    } else {
+        RADRAY_ERR_LOG("vk unsupported resource view: {}", tag);
+        return;
+    }
+    const DescriptorSetLayoutBindingVulkanContainer* binding = nullptr;
+    for (const auto& e : _layout->_bindings) {
+        if (e.slot == slot && e.bindType == requiredBindType) {
+            binding = &e;
+            break;
+        }
+    }
+    if (binding == nullptr) {
+        RADRAY_ERR_LOG("vk no matching descriptor binding for slot={} type={}", slot, requiredBindType);
+        return;
+    }
+    if (arrayIndex >= binding->descriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->descriptorCount, arrayIndex);
+        return;
+    }
     VkWriteDescriptorSet writeDesc{};
     writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writeDesc.pNext = nullptr;
     writeDesc.dstSet = _allocation.Set;
-    writeDesc.dstBinding = e.binding;
-    writeDesc.dstArrayElement = index;
+    writeDesc.dstBinding = binding->binding;
+    writeDesc.dstArrayElement = arrayIndex;
     writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = e.descriptorType;
+    writeDesc.descriptorType = binding->descriptorType;
     writeDesc.pBufferInfo = nullptr;
     writeDesc.pImageInfo = nullptr;
     writeDesc.pTexelBufferView = nullptr;
@@ -5160,6 +5221,11 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
         }
     } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
+        if ((tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
+            (tv->_mdesc.Usage != TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
+            RADRAY_ERR_LOG("descriptor type mismatch for texture view usage");
+            return;
+        }
         imgInfo.imageView = tv->_imageView;
         imgInfo.imageLayout = TextureViewUsageToLayout(tv->_mdesc.Usage);
         writeDesc.pImageInfo = &imgInfo;
@@ -5174,9 +5240,6 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
         asInfo.accelerationStructureCount = 1;
         asInfo.pAccelerationStructures = &asView->_target->_accelerationStructure;
         writeDesc.pNext = &asInfo;
-    } else {
-        RADRAY_ERR_LOG("vk unsupported resource view: {}", tag);
-        return;
     }
     _device->_ftb.vkUpdateDescriptorSets(
         _device->_device,
@@ -5184,6 +5247,49 @@ void DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t index, ResourceVie
         &writeDesc,
         0,
         nullptr);
+}
+
+void DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept {
+    if (!_layout || !_allocation.IsValid()) {
+        RADRAY_ERR_LOG("vk invalid descriptor set");
+        return;
+    }
+    if (sampler == nullptr) {
+        RADRAY_ERR_LOG("vk sampler is null");
+        return;
+    }
+    const DescriptorSetLayoutBindingVulkanContainer* binding = nullptr;
+    for (const auto& e : _layout->_bindings) {
+        if (e.slot == slot && e.bindType == ResourceBindType::Sampler) {
+            binding = &e;
+            break;
+        }
+    }
+    if (binding == nullptr) {
+        RADRAY_ERR_LOG("vk no matching sampler binding for slot {}", slot);
+        return;
+    }
+    if (arrayIndex >= binding->descriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->descriptorCount, arrayIndex);
+        return;
+    }
+    auto* sam = CastVkObject(sampler);
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler = sam->_sampler;
+    imgInfo.imageView = VK_NULL_HANDLE;
+    imgInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = _allocation.Set;
+    writeDesc.dstBinding = binding->binding;
+    writeDesc.dstArrayElement = arrayIndex;
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writeDesc.pBufferInfo = nullptr;
+    writeDesc.pImageInfo = &imgInfo;
+    writeDesc.pTexelBufferView = nullptr;
+    _device->_ftb.vkUpdateDescriptorSets(_device->_device, 1, &writeDesc, 0, nullptr);
 }
 
 DescriptorSetAllocatorVulkan::DescriptorSetAllocatorVulkan(
