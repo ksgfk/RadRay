@@ -1279,340 +1279,305 @@ Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& d
     return make_unique<Dxil>(desc.Source.begin(), desc.Source.end());
 }
 
-Nullable<unique_ptr<DescriptorSetLayout>> DeviceD3D12::CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc) noexcept {
-    auto layout = make_unique<DescriptorSetLayoutD3D12>(this);
-    unordered_set<uint64_t> usedBindingSlots{};
-    for (const auto& binding : desc.Bindings) {
-        if (binding.Type == ResourceBindType::UNKNOWN) {
-            RADRAY_ERR_LOG("d3d12 descriptor set layout contains unknown binding type");
-            return nullptr;
-        }
-        if (binding.Count == 0) {
-            RADRAY_ERR_LOG("d3d12 descriptor set layout binding count must be greater than 0");
-            return nullptr;
-        }
-        uint64_t key = (static_cast<uint64_t>(binding.Slot) << 32) | static_cast<uint64_t>(binding.Type);
-        if (!usedBindingSlots.insert(key).second) {
-            RADRAY_ERR_LOG("d3d12 duplicate binding slot/type pair, slot={}, type={}", binding.Slot, binding.Type);
-            return nullptr;
-        }
-        DescriptorSetLayoutD3D12::HeapBinding heapBinding{};
-        heapBinding.Slot = binding.Slot;
-        heapBinding.Type = binding.Type;
-        heapBinding.Count = binding.Count;
-        heapBinding.Stages = binding.Stages;
-        if (binding.Type == ResourceBindType::Sampler) {
-            heapBinding.HeapOffset = layout->_samplerDescriptorCount;
-            layout->_samplerDescriptorCount += binding.Count;
-            layout->_samplerBindings.push_back(heapBinding);
-        } else {
-            heapBinding.HeapOffset = layout->_resourceDescriptorCount;
-            layout->_resourceDescriptorCount += binding.Count;
-            layout->_resourceBindings.push_back(heapBinding);
-        }
-    }
-    return layout;
-}
-
 Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootSignatureDescriptor& desc) noexcept {
-    auto ToRangeType = [](ResourceBindType type) -> std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> {
-        switch (type) {
-            case ResourceBindType::CBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-            case ResourceBindType::Texture:
-            case ResourceBindType::Buffer:
-            case ResourceBindType::TexelBuffer:
-            case ResourceBindType::AccelerationStructure:
-                return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-            case ResourceBindType::RWTexture:
-            case ResourceBindType::RWBuffer:
-            case ResourceBindType::RWTexelBuffer:
-                return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-            case ResourceBindType::Sampler: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-            case ResourceBindType::UNKNOWN: return std::nullopt;
-        }
-        Unreachable();
-    };
+    // auto ToRangeType = [](ResourceBindType type) -> std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> {
+    //     switch (type) {
+    //         case ResourceBindType::CBuffer: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    //         case ResourceBindType::Texture:
+    //         case ResourceBindType::Buffer:
+    //         case ResourceBindType::TexelBuffer:
+    //         case ResourceBindType::AccelerationStructure:
+    //             return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    //         case ResourceBindType::RWTexture:
+    //         case ResourceBindType::RWBuffer:
+    //         case ResourceBindType::RWTexelBuffer:
+    //             return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    //         case ResourceBindType::Sampler: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    //         case ResourceBindType::UNKNOWN: return std::nullopt;
+    //     }
+    //     Unreachable();
+    // };
 
-    vector<D3D12_ROOT_PARAMETER1> rootParams{};
-    vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
-    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
-    ShaderStages allStages = ShaderStage::UNKNOWN;
+    // vector<D3D12_ROOT_PARAMETER1> rootParams{};
+    // vector<D3D12_DESCRIPTOR_RANGE1> descRanges{};
+    // vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers{};
+    // ShaderStages allStages = ShaderStage::UNKNOWN;
 
-    size_t totalRanges = 0;
-    totalRanges += desc.BindlessGroups.size() * 2;
-    for (const auto& bindGroup : desc.BindGroups) {
-        if (!bindGroup.Layout) {
-            continue;
-        }
-        auto* layout = CastD3D12Object(bindGroup.Layout.Get());
-        if (layout != nullptr) {
-            totalRanges += layout->_resourceBindings.size();
-            totalRanges += layout->_samplerBindings.size();
-        }
-    }
-    descRanges.reserve(totalRanges);
+    // size_t totalRanges = 0;
+    // totalRanges += desc.BindlessGroups.size() * 2;
+    // for (const auto& bindGroup : desc.BindGroups) {
+    //     if (!bindGroup.Layout) {
+    //         continue;
+    //     }
+    //     auto* layout = CastD3D12Object(bindGroup.Layout.Get());
+    //     if (layout != nullptr) {
+    //         totalRanges += layout->_resourceBindings.size();
+    //         totalRanges += layout->_samplerBindings.size();
+    //     }
+    // }
+    // descRanges.reserve(totalRanges);
 
-    if (!desc.PushConstants.empty()) {
-        uint32_t maxEnd = 0;
-        ShaderStages pushStages = ShaderStage::UNKNOWN;
-        for (const auto& range : desc.PushConstants) {
-            if ((range.Offset % 4) != 0 || (range.Size % 4) != 0 || range.Size == 0) {
-                RADRAY_ERR_LOG("d3d12 push constant range must be 4-byte aligned and non-empty");
-                return nullptr;
-            }
-            maxEnd = std::max(maxEnd, range.Offset + range.Size);
-            pushStages |= range.Stages;
-        }
-        auto& rp = rootParams.emplace_back();
-        CD3DX12_ROOT_PARAMETER1::InitAsConstants(
-            rp,
-            maxEnd / 4,
-            0,
-            0,
-            MapShaderStages(pushStages));
-        allStages |= pushStages;
-    }
+    // if (!desc.PushConstants.empty()) {
+    //     uint32_t maxEnd = 0;
+    //     ShaderStages pushStages = ShaderStage::UNKNOWN;
+    //     for (const auto& range : desc.PushConstants) {
+    //         if ((range.Offset % 4) != 0 || (range.Size % 4) != 0 || range.Size == 0) {
+    //             RADRAY_ERR_LOG("d3d12 push constant range must be 4-byte aligned and non-empty");
+    //             return nullptr;
+    //         }
+    //         maxEnd = std::max(maxEnd, range.Offset + range.Size);
+    //         pushStages |= range.Stages;
+    //     }
+    //     auto& rp = rootParams.emplace_back();
+    //     CD3DX12_ROOT_PARAMETER1::InitAsConstants(
+    //         rp,
+    //         maxEnd / 4,
+    //         0,
+    //         0,
+    //         MapShaderStages(pushStages));
+    //     allStages |= pushStages;
+    // }
 
-    for (const auto& inlineEntry : desc.InlineBindings) {
-        auto& rp = rootParams.emplace_back();
-        const auto& inlineDesc = inlineEntry.Desc;
-        switch (inlineDesc.Type) {
-            case ResourceBindType::CBuffer: {
-                CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
-                    rp,
-                    inlineDesc.Slot,
-                    inlineEntry.GroupIndex,
-                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
-                    MapShaderStages(inlineDesc.Stages));
-                break;
-            }
-            case ResourceBindType::Buffer:
-            case ResourceBindType::AccelerationStructure:
-            case ResourceBindType::Texture: {
-                CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
-                    rp,
-                    inlineDesc.Slot,
-                    inlineEntry.GroupIndex,
-                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
-                    MapShaderStages(inlineDesc.Stages));
-                break;
-            }
-            case ResourceBindType::RWBuffer:
-            case ResourceBindType::RWTexture: {
-                CD3DX12_ROOT_PARAMETER1::InitAsUnorderedAccessView(
-                    rp,
-                    inlineDesc.Slot,
-                    inlineEntry.GroupIndex,
-                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
-                    MapShaderStages(inlineDesc.Stages));
-                break;
-            }
-            case ResourceBindType::TexelBuffer:
-            case ResourceBindType::RWTexelBuffer:
-            case ResourceBindType::UNKNOWN:
-            case ResourceBindType::Sampler: {
-                RADRAY_ERR_LOG("invalid inline binding type: {}", inlineDesc.Type);
-                return nullptr;
-            }
-        }
-        allStages |= inlineDesc.Stages;
-    }
+    // for (const auto& inlineEntry : desc.InlineBindings) {
+    //     auto& rp = rootParams.emplace_back();
+    //     const auto& inlineDesc = inlineEntry.Desc;
+    //     switch (inlineDesc.Type) {
+    //         case ResourceBindType::CBuffer: {
+    //             CD3DX12_ROOT_PARAMETER1::InitAsConstantBufferView(
+    //                 rp,
+    //                 inlineDesc.Slot,
+    //                 inlineEntry.GroupIndex,
+    //                 D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+    //                 MapShaderStages(inlineDesc.Stages));
+    //             break;
+    //         }
+    //         case ResourceBindType::Buffer:
+    //         case ResourceBindType::AccelerationStructure:
+    //         case ResourceBindType::Texture: {
+    //             CD3DX12_ROOT_PARAMETER1::InitAsShaderResourceView(
+    //                 rp,
+    //                 inlineDesc.Slot,
+    //                 inlineEntry.GroupIndex,
+    //                 D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+    //                 MapShaderStages(inlineDesc.Stages));
+    //             break;
+    //         }
+    //         case ResourceBindType::RWBuffer:
+    //         case ResourceBindType::RWTexture: {
+    //             CD3DX12_ROOT_PARAMETER1::InitAsUnorderedAccessView(
+    //                 rp,
+    //                 inlineDesc.Slot,
+    //                 inlineEntry.GroupIndex,
+    //                 D3D12_ROOT_DESCRIPTOR_FLAG_NONE,
+    //                 MapShaderStages(inlineDesc.Stages));
+    //             break;
+    //         }
+    //         case ResourceBindType::TexelBuffer:
+    //         case ResourceBindType::RWTexelBuffer:
+    //         case ResourceBindType::UNKNOWN:
+    //         case ResourceBindType::Sampler: {
+    //             RADRAY_ERR_LOG("invalid inline binding type: {}", inlineDesc.Type);
+    //             return nullptr;
+    //         }
+    //     }
+    //     allStages |= inlineDesc.Stages;
+    // }
 
-    vector<uint8_t> isBindlessGroup{};
-    unordered_map<uint32_t, size_t> groupIndexToTableIndex{};
-    unordered_map<uint32_t, size_t> groupIndexToSamplerTableIndex{};
-    unordered_set<uint32_t> usedGroupIndex{};
-    size_t tableCount = 0;
+    // vector<uint8_t> isBindlessGroup{};
+    // unordered_map<uint32_t, size_t> groupIndexToTableIndex{};
+    // unordered_map<uint32_t, size_t> groupIndexToSamplerTableIndex{};
+    // unordered_set<uint32_t> usedGroupIndex{};
+    // size_t tableCount = 0;
 
-    auto AddDescriptorTable = [&](uint32_t groupIndex, std::span<const D3D12_DESCRIPTOR_RANGE1> ranges, ShaderStages stages, bool samplerTable) {
-        if (ranges.empty()) {
-            return;
-        }
-        size_t rangeStart = descRanges.size();
-        descRanges.insert(descRanges.end(), ranges.begin(), ranges.end());
-        auto& rp = rootParams.emplace_back();
-        CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
-            rp,
-            static_cast<UINT>(ranges.size()),
-            &descRanges[rangeStart],
-            MapShaderStages(stages));
-        if (samplerTable) {
-            groupIndexToSamplerTableIndex[groupIndex] = tableCount;
-        } else {
-            groupIndexToTableIndex[groupIndex] = tableCount;
-        }
-        tableCount += 1;
-    };
+    // auto AddDescriptorTable = [&](uint32_t groupIndex, std::span<const D3D12_DESCRIPTOR_RANGE1> ranges, ShaderStages stages, bool samplerTable) {
+    //     if (ranges.empty()) {
+    //         return;
+    //     }
+    //     size_t rangeStart = descRanges.size();
+    //     descRanges.insert(descRanges.end(), ranges.begin(), ranges.end());
+    //     auto& rp = rootParams.emplace_back();
+    //     CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+    //         rp,
+    //         static_cast<UINT>(ranges.size()),
+    //         &descRanges[rangeStart],
+    //         MapShaderStages(stages));
+    //     if (samplerTable) {
+    //         groupIndexToSamplerTableIndex[groupIndex] = tableCount;
+    //     } else {
+    //         groupIndexToTableIndex[groupIndex] = tableCount;
+    //     }
+    //     tableCount += 1;
+    // };
 
-    for (const auto& bindGroup : desc.BindGroups) {
-        if (!bindGroup.Layout) {
-            RADRAY_ERR_LOG("d3d12 bind group {} has null layout", bindGroup.GroupIndex);
-            return nullptr;
-        }
-        if (!usedGroupIndex.insert(bindGroup.GroupIndex).second) {
-            RADRAY_ERR_LOG("d3d12 duplicate group index {}", bindGroup.GroupIndex);
-            return nullptr;
-        }
-        auto* layout = CastD3D12Object(bindGroup.Layout.Get());
-        if (layout == nullptr || !layout->IsValid()) {
-            RADRAY_ERR_LOG("d3d12 bind group {} layout is invalid", bindGroup.GroupIndex);
-            return nullptr;
-        }
-        vector<D3D12_DESCRIPTOR_RANGE1> resRanges{};
-        vector<D3D12_DESCRIPTOR_RANGE1> samplerRanges{};
-        ShaderStages groupStages = ShaderStage::UNKNOWN;
-        for (const auto& binding : layout->_resourceBindings) {
-            auto rangeTypeOpt = ToRangeType(binding.Type);
-            if (!rangeTypeOpt.has_value() || rangeTypeOpt.value() == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) {
-                RADRAY_ERR_LOG("d3d12 invalid resource binding type in layout: {}", binding.Type);
-                return nullptr;
-            }
-            D3D12_DESCRIPTOR_RANGE1 range{};
-            CD3DX12_DESCRIPTOR_RANGE1::Init(
-                range,
-                rangeTypeOpt.value(),
-                binding.Count,
-                binding.Slot,
-                bindGroup.GroupIndex,
-                D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
-            resRanges.push_back(range);
-            groupStages |= binding.Stages;
-        }
-        for (const auto& binding : layout->_samplerBindings) {
-            D3D12_DESCRIPTOR_RANGE1 range{};
-            CD3DX12_DESCRIPTOR_RANGE1::Init(
-                range,
-                D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
-                binding.Count,
-                binding.Slot,
-                bindGroup.GroupIndex,
-                D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
-            samplerRanges.push_back(range);
-            groupStages |= binding.Stages;
-        }
-        AddDescriptorTable(bindGroup.GroupIndex, resRanges, groupStages, false);
-        AddDescriptorTable(bindGroup.GroupIndex, samplerRanges, groupStages, true);
-        if (bindGroup.GroupIndex >= isBindlessGroup.size()) {
-            isBindlessGroup.resize(bindGroup.GroupIndex + 1, false);
-        }
-        isBindlessGroup[bindGroup.GroupIndex] = false;
-        allStages |= groupStages;
-    }
+    // for (const auto& bindGroup : desc.BindGroups) {
+    //     if (!bindGroup.Layout) {
+    //         RADRAY_ERR_LOG("d3d12 bind group {} has null layout", bindGroup.GroupIndex);
+    //         return nullptr;
+    //     }
+    //     if (!usedGroupIndex.insert(bindGroup.GroupIndex).second) {
+    //         RADRAY_ERR_LOG("d3d12 duplicate group index {}", bindGroup.GroupIndex);
+    //         return nullptr;
+    //     }
+    //     auto* layout = CastD3D12Object(bindGroup.Layout.Get());
+    //     if (layout == nullptr || !layout->IsValid()) {
+    //         RADRAY_ERR_LOG("d3d12 bind group {} layout is invalid", bindGroup.GroupIndex);
+    //         return nullptr;
+    //     }
+    //     vector<D3D12_DESCRIPTOR_RANGE1> resRanges{};
+    //     vector<D3D12_DESCRIPTOR_RANGE1> samplerRanges{};
+    //     ShaderStages groupStages = ShaderStage::UNKNOWN;
+    //     for (const auto& binding : layout->_resourceBindings) {
+    //         auto rangeTypeOpt = ToRangeType(binding.Type);
+    //         if (!rangeTypeOpt.has_value() || rangeTypeOpt.value() == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) {
+    //             RADRAY_ERR_LOG("d3d12 invalid resource binding type in layout: {}", binding.Type);
+    //             return nullptr;
+    //         }
+    //         D3D12_DESCRIPTOR_RANGE1 range{};
+    //         CD3DX12_DESCRIPTOR_RANGE1::Init(
+    //             range,
+    //             rangeTypeOpt.value(),
+    //             binding.Count,
+    //             binding.Slot,
+    //             bindGroup.GroupIndex,
+    //             D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
+    //         resRanges.push_back(range);
+    //         groupStages |= binding.Stages;
+    //     }
+    //     for (const auto& binding : layout->_samplerBindings) {
+    //         D3D12_DESCRIPTOR_RANGE1 range{};
+    //         CD3DX12_DESCRIPTOR_RANGE1::Init(
+    //             range,
+    //             D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+    //             binding.Count,
+    //             binding.Slot,
+    //             bindGroup.GroupIndex,
+    //             D3D12_DESCRIPTOR_RANGE_FLAG_NONE);
+    //         samplerRanges.push_back(range);
+    //         groupStages |= binding.Stages;
+    //     }
+    //     AddDescriptorTable(bindGroup.GroupIndex, resRanges, groupStages, false);
+    //     AddDescriptorTable(bindGroup.GroupIndex, samplerRanges, groupStages, true);
+    //     if (bindGroup.GroupIndex >= isBindlessGroup.size()) {
+    //         isBindlessGroup.resize(bindGroup.GroupIndex + 1, false);
+    //     }
+    //     isBindlessGroup[bindGroup.GroupIndex] = false;
+    //     allStages |= groupStages;
+    // }
 
-    for (const auto& bindlessGroup : desc.BindlessGroups) {
-        if (!usedGroupIndex.insert(bindlessGroup.GroupIndex).second) {
-            RADRAY_ERR_LOG("d3d12 duplicate group index {}", bindlessGroup.GroupIndex);
-            return nullptr;
-        }
-        if (bindlessGroup.Desc.Capacity == 0) {
-            RADRAY_ERR_LOG("d3d12 bindless group capacity must be greater than 0");
-            return nullptr;
-        }
-        if (bindlessGroup.GroupIndex >= isBindlessGroup.size()) {
-            isBindlessGroup.resize(bindlessGroup.GroupIndex + 1, false);
-        }
-        isBindlessGroup[bindlessGroup.GroupIndex] = true;
-        vector<D3D12_DESCRIPTOR_RANGE1> resRanges{};
-        vector<D3D12_DESCRIPTOR_RANGE1> samplerRanges{};
-        D3D12_DESCRIPTOR_RANGE1 resRange{};
-        CD3DX12_DESCRIPTOR_RANGE1::Init(
-            resRange,
-            D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            UINT_MAX,
-            0,
-            bindlessGroup.GroupIndex,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-        resRanges.push_back(resRange);
-        if (bindlessGroup.Desc.SlotType != BindlessSlotType::BufferOnly) {
-            D3D12_DESCRIPTOR_RANGE1 samplerRange{};
-            CD3DX12_DESCRIPTOR_RANGE1::Init(
-                samplerRange,
-                D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
-                UINT_MAX,
-                0,
-                bindlessGroup.GroupIndex,
-                D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
-            samplerRanges.push_back(samplerRange);
-        }
-        AddDescriptorTable(bindlessGroup.GroupIndex, resRanges, bindlessGroup.Desc.Stages, false);
-        AddDescriptorTable(bindlessGroup.GroupIndex, samplerRanges, bindlessGroup.Desc.Stages, true);
-        allStages |= bindlessGroup.Desc.Stages;
-    }
+    // for (const auto& bindlessGroup : desc.BindlessGroups) {
+    //     if (!usedGroupIndex.insert(bindlessGroup.GroupIndex).second) {
+    //         RADRAY_ERR_LOG("d3d12 duplicate group index {}", bindlessGroup.GroupIndex);
+    //         return nullptr;
+    //     }
+    //     if (bindlessGroup.Desc.Capacity == 0) {
+    //         RADRAY_ERR_LOG("d3d12 bindless group capacity must be greater than 0");
+    //         return nullptr;
+    //     }
+    //     if (bindlessGroup.GroupIndex >= isBindlessGroup.size()) {
+    //         isBindlessGroup.resize(bindlessGroup.GroupIndex + 1, false);
+    //     }
+    //     isBindlessGroup[bindlessGroup.GroupIndex] = true;
+    //     vector<D3D12_DESCRIPTOR_RANGE1> resRanges{};
+    //     vector<D3D12_DESCRIPTOR_RANGE1> samplerRanges{};
+    //     D3D12_DESCRIPTOR_RANGE1 resRange{};
+    //     CD3DX12_DESCRIPTOR_RANGE1::Init(
+    //         resRange,
+    //         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+    //         UINT_MAX,
+    //         0,
+    //         bindlessGroup.GroupIndex,
+    //         D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+    //     resRanges.push_back(resRange);
+    //     if (bindlessGroup.Desc.SlotType != BindlessSlotType::BufferOnly) {
+    //         D3D12_DESCRIPTOR_RANGE1 samplerRange{};
+    //         CD3DX12_DESCRIPTOR_RANGE1::Init(
+    //             samplerRange,
+    //             D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+    //             UINT_MAX,
+    //             0,
+    //             bindlessGroup.GroupIndex,
+    //             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+    //         samplerRanges.push_back(samplerRange);
+    //     }
+    //     AddDescriptorTable(bindlessGroup.GroupIndex, resRanges, bindlessGroup.Desc.Stages, false);
+    //     AddDescriptorTable(bindlessGroup.GroupIndex, samplerRanges, bindlessGroup.Desc.Stages, true);
+    //     allStages |= bindlessGroup.Desc.Stages;
+    // }
 
-    for (const auto& ss : desc.StaticSamplers) {
-        D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
-        ssDesc.Filter = MapType(ss.Desc.MinFilter, ss.Desc.MagFilter, ss.Desc.MipmapFilter, ss.Desc.Compare.has_value(), ss.Desc.AnisotropyClamp);
-        ssDesc.AddressU = MapType(ss.Desc.AddressS);
-        ssDesc.AddressV = MapType(ss.Desc.AddressT);
-        ssDesc.AddressW = MapType(ss.Desc.AddressR);
-        ssDesc.MipLODBias = 0;
-        ssDesc.MaxAnisotropy = ss.Desc.AnisotropyClamp;
-        ssDesc.ComparisonFunc = ss.Desc.Compare.has_value() ? MapType(ss.Desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
-        ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-        ssDesc.MinLOD = ss.Desc.LodMin;
-        ssDesc.MaxLOD = ss.Desc.LodMax;
-        ssDesc.ShaderRegister = ss.Slot;
-        ssDesc.RegisterSpace = ss.GroupIndex;
-        ssDesc.ShaderVisibility = MapShaderStages(ss.Stages);
-        allStages |= ss.Stages;
-    }
+    // for (const auto& ss : desc.StaticSamplers) {
+    //     D3D12_STATIC_SAMPLER_DESC& ssDesc = staticSamplers.emplace_back();
+    //     ssDesc.Filter = MapType(ss.Desc.MinFilter, ss.Desc.MagFilter, ss.Desc.MipmapFilter, ss.Desc.Compare.has_value(), ss.Desc.AnisotropyClamp);
+    //     ssDesc.AddressU = MapType(ss.Desc.AddressS);
+    //     ssDesc.AddressV = MapType(ss.Desc.AddressT);
+    //     ssDesc.AddressW = MapType(ss.Desc.AddressR);
+    //     ssDesc.MipLODBias = 0;
+    //     ssDesc.MaxAnisotropy = ss.Desc.AnisotropyClamp;
+    //     ssDesc.ComparisonFunc = ss.Desc.Compare.has_value() ? MapType(ss.Desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+    //     ssDesc.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    //     ssDesc.MinLOD = ss.Desc.LodMin;
+    //     ssDesc.MaxLOD = ss.Desc.LodMax;
+    //     ssDesc.ShaderRegister = ss.Slot;
+    //     ssDesc.RegisterSpace = ss.GroupIndex;
+    //     ssDesc.ShaderVisibility = MapShaderStages(ss.Stages);
+    //     allStages |= ss.Stages;
+    // }
 
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
-    versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
-    D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
-    rsDesc.NumParameters = static_cast<UINT>(rootParams.size());
-    rsDesc.pParameters = rootParams.empty() ? nullptr : rootParams.data();
-    rsDesc.NumStaticSamplers = static_cast<UINT>(staticSamplers.size());
-    rsDesc.pStaticSamplers = staticSamplers.empty() ? nullptr : staticSamplers.data();
-    D3D12_ROOT_SIGNATURE_FLAGS flag =
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
-    if (!allStages.HasFlag(ShaderStage::Vertex)) {
-        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
-    }
-    if (!allStages.HasFlag(ShaderStage::Pixel)) {
-        flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
-    }
-    rsDesc.Flags = flag;
-    ComPtr<ID3DBlob> rootSigBlob, errorBlob;
-    if (HRESULT hr = ::D3DX12SerializeVersionedRootSignature(
-            &versionDesc,
-            D3D_ROOT_SIGNATURE_VERSION_1_1,
-            rootSigBlob.GetAddressOf(),
-            errorBlob.GetAddressOf());
-        FAILED(hr)) {
-        std::string_view reason;
-        if (errorBlob) {
-            const char* const errInfoBegin = std::bit_cast<const char*>(errorBlob->GetBufferPointer());
-            auto errInfoSize = static_cast<size_t>(errorBlob->GetBufferSize());
-            reason = std::string_view{errInfoBegin, errInfoSize};
-        } else {
-            reason = GetErrorName(hr);
-        }
-        RADRAY_ERR_LOG("D3DX12SerializeVersionedRootSignature failed: {} {}", reason, hr);
-        return nullptr;
-    }
-    ComPtr<ID3D12RootSignature> rootSig;
-    if (HRESULT hr = _device->CreateRootSignature(
-            0,
-            rootSigBlob->GetBufferPointer(),
-            rootSigBlob->GetBufferSize(),
-            IID_PPV_ARGS(rootSig.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    auto result = make_unique<RootSigD3D12>(this, std::move(rootSig));
-    result->_desc = VersionedRootSignatureDescContainer{versionDesc};
-    result->_isBindlessGroup = std::move(isBindlessGroup);
-    result->_groupIndexToTableIndex = std::move(groupIndexToTableIndex);
-    result->_groupIndexToSamplerTableIndex = std::move(groupIndexToSamplerTableIndex);
-    return result;
+    // D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
+    // versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    // versionDesc.Desc_1_1 = D3D12_ROOT_SIGNATURE_DESC1{};
+    // D3D12_ROOT_SIGNATURE_DESC1& rsDesc = versionDesc.Desc_1_1;
+    // rsDesc.NumParameters = static_cast<UINT>(rootParams.size());
+    // rsDesc.pParameters = rootParams.empty() ? nullptr : rootParams.data();
+    // rsDesc.NumStaticSamplers = static_cast<UINT>(staticSamplers.size());
+    // rsDesc.pStaticSamplers = staticSamplers.empty() ? nullptr : staticSamplers.data();
+    // D3D12_ROOT_SIGNATURE_FLAGS flag =
+    //     D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+    //     D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+    //     D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+    //     D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
+    //     D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
+    //     D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
+    // if (!allStages.HasFlag(ShaderStage::Vertex)) {
+    //     flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+    // }
+    // if (!allStages.HasFlag(ShaderStage::Pixel)) {
+    //     flag |= D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
+    // }
+    // rsDesc.Flags = flag;
+    // ComPtr<ID3DBlob> rootSigBlob, errorBlob;
+    // if (HRESULT hr = ::D3DX12SerializeVersionedRootSignature(
+    //         &versionDesc,
+    //         D3D_ROOT_SIGNATURE_VERSION_1_1,
+    //         rootSigBlob.GetAddressOf(),
+    //         errorBlob.GetAddressOf());
+    //     FAILED(hr)) {
+    //     std::string_view reason;
+    //     if (errorBlob) {
+    //         const char* const errInfoBegin = std::bit_cast<const char*>(errorBlob->GetBufferPointer());
+    //         auto errInfoSize = static_cast<size_t>(errorBlob->GetBufferSize());
+    //         reason = std::string_view{errInfoBegin, errInfoSize};
+    //     } else {
+    //         reason = GetErrorName(hr);
+    //     }
+    //     RADRAY_ERR_LOG("D3DX12SerializeVersionedRootSignature failed: {} {}", reason, hr);
+    //     return nullptr;
+    // }
+    // ComPtr<ID3D12RootSignature> rootSig;
+    // if (HRESULT hr = _device->CreateRootSignature(
+    //         0,
+    //         rootSigBlob->GetBufferPointer(),
+    //         rootSigBlob->GetBufferSize(),
+    //         IID_PPV_ARGS(rootSig.GetAddressOf()));
+    //     FAILED(hr)) {
+    //     RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {} {}", GetErrorName(hr), hr);
+    //     return nullptr;
+    // }
+    // auto result = make_unique<RootSigD3D12>(this, std::move(rootSig));
+    // result->_desc = VersionedRootSignatureDescContainer{versionDesc};
+    // result->_isBindlessGroup = std::move(isBindlessGroup);
+    // result->_groupIndexToTableIndex = std::move(groupIndexToTableIndex);
+    // result->_groupIndexToSamplerTableIndex = std::move(groupIndexToSamplerTableIndex);
+    // return result;
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
@@ -2105,36 +2070,36 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceD3D12::CreateShaderBindingTable(c
     return make_unique<ShaderBindingTableD3D12>(this, pipeline, buffer.Release(), desc, recordStride);
 }
 
-Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
-    auto layout = CastD3D12Object(layout_);
-    if (layout == nullptr || !layout->IsValid()) {
-        RADRAY_ERR_LOG("d3d12 descriptor set layout is invalid");
-        return nullptr;
-    }
-    const UINT resCount = layout->_resourceDescriptorCount;
-    const UINT samplerCount = layout->_samplerDescriptorCount;
+// Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
+//     auto layout = CastD3D12Object(layout_);
+//     if (layout == nullptr || !layout->IsValid()) {
+//         RADRAY_ERR_LOG("d3d12 descriptor set layout is invalid");
+//         return nullptr;
+//     }
+//     const UINT resCount = layout->_resourceDescriptorCount;
+//     const UINT samplerCount = layout->_samplerDescriptorCount;
 
-    GpuDescriptorHeapViewRAII resHeapView{};
-    if (resCount > 0) {
-        auto gpuResHeapAllocationOpt = _gpuResHeap->Allocate(resCount);
-        if (!gpuResHeapAllocationOpt.has_value()) {
-            RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate GPU CBV/SRV/UAV descriptors");
-            return nullptr;
-        }
-        resHeapView = {_gpuResHeap.get(), gpuResHeapAllocationOpt.value()};
-    }
-    GpuDescriptorHeapViewRAII samplerHeapView{};
-    if (samplerCount > 0) {
-        auto gpuSamplerHeapAllocationOpt = _gpuSamplerHeap->Allocate(samplerCount);
-        if (!gpuSamplerHeapAllocationOpt.has_value()) {
-            RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate GPU Sampler descriptors");
-            return nullptr;
-        }
-        samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
-    }
-    auto result = make_unique<GpuDescriptorHeapViews>(this, layout, std::move(resHeapView), std::move(samplerHeapView));
-    return result;
-}
+//     GpuDescriptorHeapViewRAII resHeapView{};
+//     if (resCount > 0) {
+//         auto gpuResHeapAllocationOpt = _gpuResHeap->Allocate(resCount);
+//         if (!gpuResHeapAllocationOpt.has_value()) {
+//             RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate GPU CBV/SRV/UAV descriptors");
+//             return nullptr;
+//         }
+//         resHeapView = {_gpuResHeap.get(), gpuResHeapAllocationOpt.value()};
+//     }
+//     GpuDescriptorHeapViewRAII samplerHeapView{};
+//     if (samplerCount > 0) {
+//         auto gpuSamplerHeapAllocationOpt = _gpuSamplerHeap->Allocate(samplerCount);
+//         if (!gpuSamplerHeapAllocationOpt.has_value()) {
+//             RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate GPU Sampler descriptors");
+//             return nullptr;
+//         }
+//         samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
+//     }
+//     auto result = make_unique<GpuDescriptorHeapViews>(this, layout, std::move(resHeapView), std::move(samplerHeapView));
+//     return result;
+// }
 
 Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
     D3D12_SAMPLER_DESC rawDesc{};
@@ -2778,59 +2743,59 @@ void CmdRenderPassD3D12::PushConstant(uint32_t offset, const void* data, uint32_
     _cmdList->_cmdList->SetGraphicsRoot32BitConstants((UINT)dataRef.Index, size / 4, data, offset / 4);
 }
 
-void CmdRenderPassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindInlineBuffer");
-        return;
-    }
-    if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
-        return;
-    }
-    RADRAY_ASSERT(buffer != nullptr);
-    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
-    auto buf = CastD3D12Object(buffer);
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
-    RADRAY_UNUSED(size);
-    switch (dataRef.Param.Type) {
-        case D3D12_ROOT_PARAMETER_TYPE_SRV:
-            _cmdList->_cmdList->SetGraphicsRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_CBV:
-            _cmdList->_cmdList->SetGraphicsRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_UAV:
-            _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
-            break;
-        default:
-            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
-            break;
-    }
-}
+// void CmdRenderPassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindInlineBuffer");
+//         return;
+//     }
+//     if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
+//         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
+//         return;
+//     }
+//     RADRAY_ASSERT(buffer != nullptr);
+//     auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
+//     auto buf = CastD3D12Object(buffer);
+//     D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+//     RADRAY_UNUSED(size);
+//     switch (dataRef.Param.Type) {
+//         case D3D12_ROOT_PARAMETER_TYPE_SRV:
+//             _cmdList->_cmdList->SetGraphicsRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_CBV:
+//             _cmdList->_cmdList->SetGraphicsRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_UAV:
+//             _cmdList->_cmdList->SetGraphicsRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         default:
+//             RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+//             break;
+//     }
+// }
 
-void CmdRenderPassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
-        return;
-    }
-    auto descHeapView = CastD3D12Object(set);
-    if (descHeapView->_resHeapView.IsValid()) {
-        auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
-        if (!tableOpt.has_value()) {
-            RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
-    }
-    if (descHeapView->_samplerHeapView.IsValid()) {
-        auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
-        if (!samplerTableOpt.has_value()) {
-            RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
-    }
-}
+// void CmdRenderPassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
+//         return;
+//     }
+//     auto descHeapView = CastD3D12Object(set);
+//     if (descHeapView->_resHeapView.IsValid()) {
+//         auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
+//         if (!tableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
+//     }
+//     if (descHeapView->_samplerHeapView.IsValid()) {
+//         auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
+//         if (!samplerTableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetGraphicsRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
+//     }
+// }
 
 void CmdRenderPassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (_boundRootSig == nullptr) {
@@ -2908,59 +2873,59 @@ void CmdComputePassD3D12::PushConstant(uint32_t offset, const void* data, uint32
     _cmdList->_cmdList->SetComputeRoot32BitConstants((UINT)dataRef.Index, size / 4, data, offset / 4);
 }
 
-void CmdComputePassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindInlineBuffer");
-        return;
-    }
-    if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
-        return;
-    }
-    RADRAY_ASSERT(buffer != nullptr);
-    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
-    auto buf = CastD3D12Object(buffer);
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
-    RADRAY_UNUSED(size);
-    switch (dataRef.Param.Type) {
-        case D3D12_ROOT_PARAMETER_TYPE_SRV:
-            _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_CBV:
-            _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_UAV:
-            _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
-            break;
-        default:
-            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
-            break;
-    }
-}
+// void CmdComputePassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindInlineBuffer");
+//         return;
+//     }
+//     if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
+//         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
+//         return;
+//     }
+//     RADRAY_ASSERT(buffer != nullptr);
+//     auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
+//     auto buf = CastD3D12Object(buffer);
+//     D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+//     RADRAY_UNUSED(size);
+//     switch (dataRef.Param.Type) {
+//         case D3D12_ROOT_PARAMETER_TYPE_SRV:
+//             _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_CBV:
+//             _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_UAV:
+//             _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         default:
+//             RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+//             break;
+//     }
+// }
 
-void CmdComputePassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
-        return;
-    }
-    auto descHeapView = CastD3D12Object(set);
-    if (descHeapView->_resHeapView.IsValid()) {
-        auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
-        if (!tableOpt.has_value()) {
-            RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
-    }
-    if (descHeapView->_samplerHeapView.IsValid()) {
-        auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
-        if (!samplerTableOpt.has_value()) {
-            RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
-    }
-}
+// void CmdComputePassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before ComputeCommandEncoder::BindDescriptorSet");
+//         return;
+//     }
+//     auto descHeapView = CastD3D12Object(set);
+//     if (descHeapView->_resHeapView.IsValid()) {
+//         auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
+//         if (!tableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
+//     }
+//     if (descHeapView->_samplerHeapView.IsValid()) {
+//         auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
+//         if (!samplerTableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
+//     }
+// }
 
 void CmdComputePassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (_boundRootSig == nullptr) {
@@ -3048,59 +3013,59 @@ void CmdRayTracingPassD3D12::PushConstant(uint32_t offset, const void* data, uin
     _cmdList->_cmdList->SetComputeRoot32BitConstants((UINT)dataRef.Index, size / 4, data, offset / 4);
 }
 
-void CmdRayTracingPassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindInlineBuffer");
-        return;
-    }
-    if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
-        return;
-    }
-    RADRAY_ASSERT(buffer != nullptr);
-    auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
-    auto buf = CastD3D12Object(buffer);
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
-    RADRAY_UNUSED(size);
-    switch (dataRef.Param.Type) {
-        case D3D12_ROOT_PARAMETER_TYPE_SRV:
-            _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_CBV:
-            _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
-            break;
-        case D3D12_ROOT_PARAMETER_TYPE_UAV:
-            _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
-            break;
-        default:
-            RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
-            break;
-    }
-}
+// void CmdRayTracingPassD3D12::BindInlineBuffer(uint32_t inlineIndex, Buffer* buffer, uint64_t offset, uint64_t size) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindInlineBuffer");
+//         return;
+//     }
+//     if (inlineIndex >= _boundRootSig->_desc.GetRootDescriptorCount()) {
+//         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "inlineIndex", _boundRootSig->_desc.GetRootDescriptorCount(), inlineIndex);
+//         return;
+//     }
+//     RADRAY_ASSERT(buffer != nullptr);
+//     auto dataRef = _boundRootSig->_desc.GetRootDescriptor(inlineIndex);
+//     auto buf = CastD3D12Object(buffer);
+//     D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = buf->_gpuAddr + offset;
+//     RADRAY_UNUSED(size);
+//     switch (dataRef.Param.Type) {
+//         case D3D12_ROOT_PARAMETER_TYPE_SRV:
+//             _cmdList->_cmdList->SetComputeRootShaderResourceView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_CBV:
+//             _cmdList->_cmdList->SetComputeRootConstantBufferView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         case D3D12_ROOT_PARAMETER_TYPE_UAV:
+//             _cmdList->_cmdList->SetComputeRootUnorderedAccessView((UINT)dataRef.Index, gpuAddr);
+//             break;
+//         default:
+//             RADRAY_ERR_LOG("invalid root parameter type for root descriptor: {}", dataRef.Param.Type);
+//             break;
+//     }
+// }
 
-void CmdRayTracingPassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
-    if (_boundRootSig == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
-        return;
-    }
-    auto descHeapView = CastD3D12Object(set);
-    if (descHeapView->_resHeapView.IsValid()) {
-        auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
-        if (!tableOpt.has_value()) {
-            RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
-    }
-    if (descHeapView->_samplerHeapView.IsValid()) {
-        auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
-        if (!samplerTableOpt.has_value()) {
-            RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
-            return;
-        }
-        _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
-    }
-}
+// void CmdRayTracingPassD3D12::BindDescriptorSet(uint32_t groupIndex, DescriptorSet* set) noexcept {
+//     if (_boundRootSig == nullptr) {
+//         RADRAY_ERR_LOG("bind root signature before RayTracingCommandEncoder::BindDescriptorSet");
+//         return;
+//     }
+//     auto descHeapView = CastD3D12Object(set);
+//     if (descHeapView->_resHeapView.IsValid()) {
+//         auto tableOpt = _boundRootSig->GetResourceTableByGroupIndex(groupIndex);
+//         if (!tableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no resource table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)tableOpt.value().Index, descHeapView->_resHeapView.HandleGpu());
+//     }
+//     if (descHeapView->_samplerHeapView.IsValid()) {
+//         auto samplerTableOpt = _boundRootSig->GetSamplerTableByGroupIndex(groupIndex);
+//         if (!samplerTableOpt.has_value()) {
+//             RADRAY_ERR_LOG("no sampler table for group index {}", groupIndex);
+//             return;
+//         }
+//         _cmdList->_cmdList->SetComputeRootDescriptorTable((UINT)samplerTableOpt.value().Index, descHeapView->_samplerHeapView.HandleGpu());
+//     }
+// }
 
 void CmdRayTracingPassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
     if (_boundRootSig == nullptr) {
@@ -3916,99 +3881,99 @@ void GpuDescriptorHeapViews::SetDebugName(std::string_view name) noexcept {
 }
 
 void GpuDescriptorHeapViews::SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept {
-    if (_layout == nullptr) {
-        RADRAY_ERR_LOG("d3d12 descriptor set has no layout");
-        return;
-    }
-    auto tag = view->GetTag();
-    const DescriptorSetLayoutD3D12::HeapBinding* binding = nullptr;
-    auto isTypeMatch = [&](ResourceBindType type) noexcept {
-        if (tag.HasFlag(RenderObjectTag::BufferView)) {
-            auto* bufferView = static_cast<BufferViewD3D12*>(view);
-            switch (bufferView->_desc.Usage) {
-                case BufferViewUsage::CBuffer: return type == ResourceBindType::CBuffer;
-                case BufferViewUsage::ReadOnlyStorage: return type == ResourceBindType::Buffer;
-                case BufferViewUsage::ReadWriteStorage: return type == ResourceBindType::RWBuffer;
-                case BufferViewUsage::TexelReadOnly: return type == ResourceBindType::TexelBuffer;
-                case BufferViewUsage::TexelReadWrite: return type == ResourceBindType::RWTexelBuffer;
-            }
-            Unreachable();
-        }
-        if (tag.HasFlag(RenderObjectTag::TextureView)) {
-            auto* textureView = static_cast<TextureViewD3D12*>(view);
-            if (textureView->_desc.Usage == TextureViewUsage::UnorderedAccess) {
-                return type == ResourceBindType::RWTexture;
-            }
-            return type == ResourceBindType::Texture;
-        }
-        if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
-            return type == ResourceBindType::AccelerationStructure;
-        }
-        return false;
-    };
-    for (const auto& i : _layout->_resourceBindings) {
-        if (i.Slot == slot && isTypeMatch(i.Type)) {
-            binding = &i;
-            break;
-        }
-    }
-    if (binding == nullptr) {
-        RADRAY_ERR_LOG("d3d12 no matching resource binding for slot {}", slot);
-        return;
-    }
-    if (arrayIndex >= binding->Count) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->Count, arrayIndex);
-        return;
-    }
-    if (!_resHeapView.IsValid()) {
-        RADRAY_ERR_LOG("d3d12 descriptor set has no resource heap allocation");
-        return;
-    }
-    auto offset = binding->HeapOffset + arrayIndex;
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
-        bufferView->_heapView.CopyTo(0, 1, _resHeapView, offset);
-    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
-        TextureViewD3D12* texView = static_cast<TextureViewD3D12*>(view);
-        texView->_heapView.CopyTo(0, 1, _resHeapView, offset);
-    } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
-        auto* asView = static_cast<AccelerationStructureViewD3D12*>(view);
-        asView->_heapView.CopyTo(0, 1, _resHeapView, offset);
-    } else {
-        RADRAY_ERR_LOG("d3d12 unsupported RenderObjectTag", tag);
-    }
+    // if (_layout == nullptr) {
+    //     RADRAY_ERR_LOG("d3d12 descriptor set has no layout");
+    //     return;
+    // }
+    // auto tag = view->GetTag();
+    // const DescriptorSetLayoutD3D12::HeapBinding* binding = nullptr;
+    // auto isTypeMatch = [&](ResourceBindType type) noexcept {
+    //     if (tag.HasFlag(RenderObjectTag::BufferView)) {
+    //         auto* bufferView = static_cast<BufferViewD3D12*>(view);
+    //         switch (bufferView->_desc.Usage) {
+    //             case BufferViewUsage::CBuffer: return type == ResourceBindType::CBuffer;
+    //             case BufferViewUsage::ReadOnlyStorage: return type == ResourceBindType::Buffer;
+    //             case BufferViewUsage::ReadWriteStorage: return type == ResourceBindType::RWBuffer;
+    //             case BufferViewUsage::TexelReadOnly: return type == ResourceBindType::TexelBuffer;
+    //             case BufferViewUsage::TexelReadWrite: return type == ResourceBindType::RWTexelBuffer;
+    //         }
+    //         Unreachable();
+    //     }
+    //     if (tag.HasFlag(RenderObjectTag::TextureView)) {
+    //         auto* textureView = static_cast<TextureViewD3D12*>(view);
+    //         if (textureView->_desc.Usage == TextureViewUsage::UnorderedAccess) {
+    //             return type == ResourceBindType::RWTexture;
+    //         }
+    //         return type == ResourceBindType::Texture;
+    //     }
+    //     if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+    //         return type == ResourceBindType::AccelerationStructure;
+    //     }
+    //     return false;
+    // };
+    // for (const auto& i : _layout->_resourceBindings) {
+    //     if (i.Slot == slot && isTypeMatch(i.Type)) {
+    //         binding = &i;
+    //         break;
+    //     }
+    // }
+    // if (binding == nullptr) {
+    //     RADRAY_ERR_LOG("d3d12 no matching resource binding for slot {}", slot);
+    //     return;
+    // }
+    // if (arrayIndex >= binding->Count) {
+    //     RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->Count, arrayIndex);
+    //     return;
+    // }
+    // if (!_resHeapView.IsValid()) {
+    //     RADRAY_ERR_LOG("d3d12 descriptor set has no resource heap allocation");
+    //     return;
+    // }
+    // auto offset = binding->HeapOffset + arrayIndex;
+    // if (tag.HasFlag(RenderObjectTag::BufferView)) {
+    //     BufferViewD3D12* bufferView = static_cast<BufferViewD3D12*>(view);
+    //     bufferView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    // } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+    //     TextureViewD3D12* texView = static_cast<TextureViewD3D12*>(view);
+    //     texView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    // } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+    //     auto* asView = static_cast<AccelerationStructureViewD3D12*>(view);
+    //     asView->_heapView.CopyTo(0, 1, _resHeapView, offset);
+    // } else {
+    //     RADRAY_ERR_LOG("d3d12 unsupported RenderObjectTag", tag);
+    // }
 }
 
 void GpuDescriptorHeapViews::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept {
-    if (_layout == nullptr) {
-        RADRAY_ERR_LOG("d3d12 descriptor set has no layout");
-        return;
-    }
-    const DescriptorSetLayoutD3D12::HeapBinding* binding = nullptr;
-    for (const auto& i : _layout->_samplerBindings) {
-        if (i.Slot == slot) {
-            binding = &i;
-            break;
-        }
-    }
-    if (binding == nullptr) {
-        RADRAY_ERR_LOG("d3d12 no matching sampler binding for slot {}", slot);
-        return;
-    }
-    if (arrayIndex >= binding->Count) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->Count, arrayIndex);
-        return;
-    }
-    if (!_samplerHeapView.IsValid()) {
-        RADRAY_ERR_LOG("d3d12 descriptor set has no sampler heap allocation");
-        return;
-    }
-    if (sampler == nullptr) {
-        RADRAY_ERR_LOG("d3d12 sampler is null");
-        return;
-    }
-    auto* sam = CastD3D12Object(sampler);
-    sam->_samplerView.CopyTo(0, 1, _samplerHeapView, binding->HeapOffset + arrayIndex);
+    // if (_layout == nullptr) {
+    //     RADRAY_ERR_LOG("d3d12 descriptor set has no layout");
+    //     return;
+    // }
+    // const DescriptorSetLayoutD3D12::HeapBinding* binding = nullptr;
+    // for (const auto& i : _layout->_samplerBindings) {
+    //     if (i.Slot == slot) {
+    //         binding = &i;
+    //         break;
+    //     }
+    // }
+    // if (binding == nullptr) {
+    //     RADRAY_ERR_LOG("d3d12 no matching sampler binding for slot {}", slot);
+    //     return;
+    // }
+    // if (arrayIndex >= binding->Count) {
+    //     RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->Count, arrayIndex);
+    //     return;
+    // }
+    // if (!_samplerHeapView.IsValid()) {
+    //     RADRAY_ERR_LOG("d3d12 descriptor set has no sampler heap allocation");
+    //     return;
+    // }
+    // if (sampler == nullptr) {
+    //     RADRAY_ERR_LOG("d3d12 sampler is null");
+    //     return;
+    // }
+    // auto* sam = CastD3D12Object(sampler);
+    // sam->_samplerView.CopyTo(0, 1, _samplerHeapView, binding->HeapOffset + arrayIndex);
 }
 
 SamplerD3D12::SamplerD3D12(

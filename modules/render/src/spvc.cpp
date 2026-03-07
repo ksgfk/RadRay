@@ -9,27 +9,6 @@
 
 namespace radray::render {
 
-ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
-    const bool isBufferImage = ImageInfo.has_value() && ImageInfo->Dim == SpirvImageDim::Buffer;
-    switch (Kind) {
-        case SpirvResourceKind::UniformBuffer:
-            return ResourceBindType::CBuffer;
-        case SpirvResourceKind::StorageBuffer:
-            return (ReadOnly && !WriteOnly) ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
-        case SpirvResourceKind::SampledImage:
-        case SpirvResourceKind::SeparateImage:
-            return isBufferImage ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
-        case SpirvResourceKind::SeparateSampler:
-            return ResourceBindType::Sampler;
-        case SpirvResourceKind::StorageImage:
-            return isBufferImage ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
-        case SpirvResourceKind::AccelerationStructure:
-            return ResourceBindType::AccelerationStructure;
-        default:
-            return ResourceBindType::UNKNOWN;
-    }
-}
-
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
@@ -328,8 +307,7 @@ static uint32_t _ReflectType(
 static void _ProcessResource(
     SpirvReflectionContext& ctx,
     const spirv_cross::Resource& res,
-    SpirvResourceKind kind,
-    ShaderStage stage) {
+    SpirvResourceKind kind) {
     auto& compiler = ctx.compiler;
     auto& desc = ctx.desc;
     SpirvResourceBinding binding{};
@@ -339,7 +317,6 @@ static void _ProcessResource(
         binding.Name = string(res.name);
     }
     binding.Kind = kind;
-    binding.Stages = stage;
     binding.Set = compiler.get_decoration(res.id, spv::DecorationDescriptorSet);
     binding.Binding = compiler.get_decoration(res.id, spv::DecorationBinding);
     const auto& type = compiler.get_type(res.type_id);
@@ -389,28 +366,27 @@ static void _ProcessResource(
 
 static void _ReflectResourceBindings(
     SpirvReflectionContext& ctx,
-    const spirv_cross::ShaderResources& resources,
-    ShaderStage stage) {
+    const spirv_cross::ShaderResources& resources) {
     for (const auto& ubo : resources.uniform_buffers) {
-        _ProcessResource(ctx, ubo, SpirvResourceKind::UniformBuffer, stage);
+        _ProcessResource(ctx, ubo, SpirvResourceKind::UniformBuffer);
     }
     for (const auto& ssbo : resources.storage_buffers) {
-        _ProcessResource(ctx, ssbo, SpirvResourceKind::StorageBuffer, stage);
+        _ProcessResource(ctx, ssbo, SpirvResourceKind::StorageBuffer);
     }
     for (const auto& img : resources.sampled_images) {
-        _ProcessResource(ctx, img, SpirvResourceKind::SampledImage, stage);
+        _ProcessResource(ctx, img, SpirvResourceKind::SampledImage);
     }
     for (const auto& img : resources.storage_images) {
-        _ProcessResource(ctx, img, SpirvResourceKind::StorageImage, stage);
+        _ProcessResource(ctx, img, SpirvResourceKind::StorageImage);
     }
     for (const auto& img : resources.separate_images) {
-        _ProcessResource(ctx, img, SpirvResourceKind::SeparateImage, stage);
+        _ProcessResource(ctx, img, SpirvResourceKind::SeparateImage);
     }
     for (const auto& smp : resources.separate_samplers) {
-        _ProcessResource(ctx, smp, SpirvResourceKind::SeparateSampler, stage);
+        _ProcessResource(ctx, smp, SpirvResourceKind::SeparateSampler);
     }
     for (const auto& as : resources.acceleration_structures) {
-        _ProcessResource(ctx, as, SpirvResourceKind::AccelerationStructure, stage);
+        _ProcessResource(ctx, as, SpirvResourceKind::AccelerationStructure);
     }
 }
 
@@ -425,7 +401,7 @@ static void _ReflectVertexInputs(
         vertexInput.Location = compiler.get_decoration(input.id, spv::DecorationLocation);
         const auto& type = compiler.get_type(input.type_id);
         vertexInput.TypeIndex = _ReflectType(ctx, type);
-        vertexInput.Format = _InferVertexFormat(type);
+        // vertexInput.Format = _InferVertexFormat(type);
         desc.VertexInputs.push_back(std::move(vertexInput));
     }
     std::sort(
@@ -438,14 +414,12 @@ static void _ReflectVertexInputs(
 
 static void _ReflectPushConstants(
     SpirvReflectionContext& ctx,
-    const spirv_cross::ShaderResources& resources,
-    ShaderStage stage) {
+    const spirv_cross::ShaderResources& resources) {
     auto& compiler = ctx.compiler;
     auto& desc = ctx.desc;
     for (const auto& pc : resources.push_constant_buffers) {
         SpirvPushConstantRange range{};
         range.Name = string(pc.name);
-        range.Stages = stage;
         const auto& type = compiler.get_type(pc.type_id);
         range.TypeIndex = _ReflectType(ctx, type);
         range.Size = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
@@ -468,73 +442,60 @@ static void _ReflectComputeInfo(
     }
 }
 
-static void _MergeResourceBindings(SpirvShaderDesc& desc) {
-    for (size_t i = 0; i < desc.ResourceBindings.size(); ++i) {
-        for (size_t j = i + 1; j < desc.ResourceBindings.size();) {
-            if (desc.ResourceBindings[i].Set == desc.ResourceBindings[j].Set &&
-                desc.ResourceBindings[i].Binding == desc.ResourceBindings[j].Binding &&
-                desc.ResourceBindings[i].Name == desc.ResourceBindings[j].Name) {
-                desc.ResourceBindings[i].Stages =
-                    static_cast<ShaderStage>(
-                        static_cast<uint32_t>(desc.ResourceBindings[i].Stages) |
-                        static_cast<uint32_t>(desc.ResourceBindings[j].Stages));
+// static void _MergeResourceBindings(SpirvShaderDesc& desc) {
+//     for (size_t i = 0; i < desc.ResourceBindings.size(); ++i) {
+//         for (size_t j = i + 1; j < desc.ResourceBindings.size();) {
+//             if (desc.ResourceBindings[i].Set == desc.ResourceBindings[j].Set &&
+//                 desc.ResourceBindings[i].Binding == desc.ResourceBindings[j].Binding &&
+//                 desc.ResourceBindings[i].Name == desc.ResourceBindings[j].Name) {
+//                 desc.ResourceBindings.erase(desc.ResourceBindings.begin() + j);
+//             } else {
+//                 ++j;
+//             }
+//         }
+//     }
+//     for (size_t i = 0; i < desc.PushConstants.size(); ++i) {
+//         for (size_t j = i + 1; j < desc.PushConstants.size();) {
+//             if (desc.PushConstants[i].Name == desc.PushConstants[j].Name) {
+//                 desc.PushConstants.erase(desc.PushConstants.begin() + j);
+//             } else {
+//                 ++j;
+//             }
+//         }
+//     }
+// }
 
-                desc.ResourceBindings.erase(desc.ResourceBindings.begin() + j);
-            } else {
-                ++j;
-            }
-        }
-    }
-    for (size_t i = 0; i < desc.PushConstants.size(); ++i) {
-        for (size_t j = i + 1; j < desc.PushConstants.size();) {
-            if (desc.PushConstants[i].Name == desc.PushConstants[j].Name) {
-                desc.PushConstants[i].Stages =
-                    static_cast<ShaderStage>(
-                        static_cast<uint32_t>(desc.PushConstants[i].Stages) |
-                        static_cast<uint32_t>(desc.PushConstants[j].Stages));
-                desc.PushConstants.erase(desc.PushConstants.begin() + j);
-            } else {
-                ++j;
-            }
-        }
-    }
-}
-
-std::optional<SpirvShaderDesc> ReflectSpirv(std::span<const SpirvBytecodeView> bytecodes) {
+std::optional<SpirvShaderDesc> ReflectSpirv(SpirvBytecodeView bytecode) {
     SpirvShaderDesc desc;
-    for (const auto& bytecode : bytecodes) {
-        if (bytecode.Data.size() % 4 != 0) {
-            RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
-            return std::nullopt;
-        }
-        unordered_map<uint32_t, uint32_t> typeCache;
-        try {
-            spirv_cross::Compiler compiler{
-                std::bit_cast<const uint32_t*>(bytecode.Data.data()),
-                bytecode.Data.size() / sizeof(uint32_t)};
-            spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-            desc.UsedStages = desc.UsedStages | bytecode.Stage;
-            SpirvReflectionContext ctx{compiler, desc, typeCache};
-            if (bytecode.Stage == ShaderStage::Vertex) {
-                _ReflectVertexInputs(ctx, resources);
-            }
-            _ReflectResourceBindings(ctx, resources, bytecode.Stage);
-            _ReflectPushConstants(ctx, resources, bytecode.Stage);
-            if (bytecode.Stage == ShaderStage::Compute) {
-                _ReflectComputeInfo(ctx);
-            }
-        } catch (const spirv_cross::CompilerError& e) {
-            RADRAY_ERR_LOG("SPIRV-Cross Compiler Error: {}", e.what());
-            return std::nullopt;
-        } catch (const std::exception& e) {
-            RADRAY_ERR_LOG("SPIRV-Cross error: {}", e.what());
-            return std::nullopt;
-        } catch (...) {
-            RADRAY_ERR_LOG("SPIRV-Cross error: {}", "unknown error");
-            return std::nullopt;
-        }
+    if (bytecode.Data.size() % 4 != 0) {
+        RADRAY_ERR_LOG("invalid SPIR-V data size, not multiple of 4 bytes");
+        return std::nullopt;
     }
-    _MergeResourceBindings(desc);
+    unordered_map<uint32_t, uint32_t> typeCache;
+    try {
+        spirv_cross::Compiler compiler{
+            std::bit_cast<const uint32_t*>(bytecode.Data.data()),
+            bytecode.Data.size() / sizeof(uint32_t)};
+        spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+        SpirvReflectionContext ctx{compiler, desc, typeCache};
+        if (bytecode.Stage == ShaderStage::Vertex) {
+            _ReflectVertexInputs(ctx, resources);
+        }
+        _ReflectResourceBindings(ctx, resources);
+        _ReflectPushConstants(ctx, resources);
+        if (bytecode.Stage == ShaderStage::Compute) {
+            _ReflectComputeInfo(ctx);
+        }
+    } catch (const spirv_cross::CompilerError& e) {
+        RADRAY_ERR_LOG("SPIRV-Cross Compiler Error: {}", e.what());
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        RADRAY_ERR_LOG("SPIRV-Cross error: {}", e.what());
+        return std::nullopt;
+    } catch (...) {
+        RADRAY_ERR_LOG("SPIRV-Cross error: {}", "unknown error");
+        return std::nullopt;
+    }
     return desc;
 }
 
