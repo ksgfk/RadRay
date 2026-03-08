@@ -522,8 +522,6 @@ public:
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
-    void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept override;
-
 public:
     CmdListD3D12* _cmdList;
     RootSigD3D12* _boundRootSig{nullptr};
@@ -768,6 +766,7 @@ public:
         uint32_t DescriptorCount{0};
         bool IsReadOnly{true};
         bool IsBindless{false};
+        bool IsStaticSampler{false};
         BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t DescriptorHeapOffset{0};
@@ -809,6 +808,10 @@ public:
 
     std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override { return _bindlessSetLayouts; }
 
+    uint32_t GetStaticSamplerCount() const noexcept override { return static_cast<uint32_t>(_staticSamplerLayouts.size()); }
+
+    std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept override { return _staticSamplerLayouts; }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
 
     Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
@@ -828,6 +831,7 @@ public:
     BindingLayout _bindingLayout{};
     vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
     vector<BindlessSetLayout> _bindlessSetLayouts{};
+    vector<StaticSamplerLayout> _staticSamplerLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
     vector<ParameterBindingInfo> _parameters{};
     vector<DescriptorSetInfo> _descriptorSets{};
@@ -1114,6 +1118,7 @@ struct D3D12BindingParameterInfo {
     uint32_t Count{0};
     bool IsReadOnly{true};
     bool IsBindless{false};
+    bool IsStaticSampler{false};
     BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
     uint32_t PushConstantOffset{0};
     uint32_t PushConstantSize{0};

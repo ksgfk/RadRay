@@ -392,8 +392,6 @@ public:
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
-    void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept override;
-
 public:
     void DestroyImpl() noexcept;
 
@@ -909,6 +907,7 @@ public:
         uint32_t DescriptorCount{0};
         bool IsReadOnly{true};
         bool IsBindless{false};
+        bool IsStaticSampler{false};
         BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
         uint32_t DescriptorWriteOffset{0};
@@ -949,6 +948,10 @@ public:
 
     std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override { return _bindlessSetLayouts; }
 
+    uint32_t GetStaticSamplerCount() const noexcept override { return static_cast<uint32_t>(_staticSamplerLayouts.size()); }
+
+    std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept override { return _staticSamplerLayouts; }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
 
     Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
@@ -967,6 +970,7 @@ public:
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _ownedLayouts;
     vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
     vector<BindlessSetLayout> _bindlessSetLayouts{};
+    vector<StaticSamplerLayout> _staticSamplerLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
     vector<ParameterBindingInfo> _parameters{};
     vector<BindlessSetInfo> _bindlessSets{};
@@ -1374,6 +1378,7 @@ struct VulkanBindingParameterInfo {
     uint32_t DescriptorCount{0};
     bool IsReadOnly{true};
     bool IsBindless{false};
+    bool IsStaticSampler{false};
     BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
     VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
     uint32_t Offset{0};

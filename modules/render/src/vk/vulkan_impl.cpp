@@ -75,7 +75,7 @@ static bool IsTexelDescriptorType(VkDescriptorType type) noexcept {
 }
 
 constexpr uint32_t kBindlessDescriptorCapacityVulkan = 262144;
-    
+
 static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceView* view) noexcept {
     if (view == nullptr) {
         return std::nullopt;
@@ -97,6 +97,105 @@ static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceVi
         return ResourceBindType::Texture;
     }
     return std::nullopt;
+}
+
+struct _StaticSamplerSelectionVulkan {
+    vector<BindingParameterLayout> PublicParameters{};
+    vector<StaticSamplerLayout> StaticSamplers{};
+    vector<uint8_t> IsStaticParameter{};
+};
+
+static std::optional<_StaticSamplerSelectionVulkan> _SelectStaticSamplersVulkan(
+    const BindingLayout& layout,
+    std::span<const VulkanBindingParameterInfo> lowering,
+    std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
+    const auto parameters = layout.GetParameters();
+    if (lowering.size() != parameters.size()) {
+        RADRAY_ERR_LOG("internal error: static sampler selection metadata size mismatch");
+        return std::nullopt;
+    }
+
+    _StaticSamplerSelectionVulkan result{};
+    result.IsStaticParameter.resize(parameters.size(), 0);
+    result.PublicParameters.reserve(parameters.size());
+    result.StaticSamplers.reserve(staticSamplers.size());
+
+    for (const auto& staticSampler : staticSamplers) {
+        size_t matchedIndex = parameters.size();
+        for (size_t i = 0; i < parameters.size(); ++i) {
+            const auto& parameter = parameters[i];
+            if (parameter.Kind != BindingParameterKind::Sampler) {
+                continue;
+            }
+            const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+            if (abi.Set == staticSampler.Set && abi.Binding == staticSampler.Binding) {
+                matchedIndex = i;
+                break;
+            }
+        }
+        if (matchedIndex == parameters.size()) {
+            RADRAY_ERR_LOG(
+                "static sampler at set {} binding {} does not match any shader sampler binding",
+                staticSampler.Set.Value,
+                staticSampler.Binding);
+            return std::nullopt;
+        }
+        if (result.IsStaticParameter[matchedIndex]) {
+            RADRAY_ERR_LOG(
+                "duplicate static sampler declaration at set {} binding {}",
+                staticSampler.Set.Value,
+                staticSampler.Binding);
+            return std::nullopt;
+        }
+
+        const auto& parameter = parameters[matchedIndex];
+        const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+        const auto& vkInfo = lowering[matchedIndex];
+        if (abi.Type != ResourceBindType::Sampler || abi.IsBindless) {
+            RADRAY_ERR_LOG(
+                "static sampler '{}' must target a non-bindless sampler binding",
+                parameter.Name);
+            return std::nullopt;
+        }
+        if (abi.Count != 1) {
+            RADRAY_ERR_LOG(
+                "static sampler '{}' does not support sampler arrays (count={})",
+                parameter.Name,
+                abi.Count);
+            return std::nullopt;
+        }
+        if (vkInfo.DescriptorType != VK_DESCRIPTOR_TYPE_SAMPLER) {
+            RADRAY_ERR_LOG("vk lowering metadata is unavailable for static sampler '{}'", parameter.Name);
+            return std::nullopt;
+        }
+        if (staticSampler.Stages != ShaderStage::UNKNOWN && staticSampler.Stages != parameter.Stages) {
+            RADRAY_ERR_LOG(
+                "static sampler '{}' stage mismatch. shader={}, rootSignature={}",
+                parameter.Name,
+                parameter.Stages,
+                staticSampler.Stages);
+            return std::nullopt;
+        }
+
+        result.IsStaticParameter[matchedIndex] = 1;
+        const ShaderStages effectiveStages = staticSampler.Stages == ShaderStage::UNKNOWN ? parameter.Stages : staticSampler.Stages;
+        const string effectiveName = staticSampler.Name.empty() ? parameter.Name : staticSampler.Name;
+        result.StaticSamplers.push_back(StaticSamplerLayout{
+            .Name = effectiveName,
+            .Id = parameter.Id,
+            .Set = abi.Set,
+            .Binding = abi.Binding,
+            .Stages = effectiveStages,
+            .Desc = staticSampler.Desc,
+        });
+    }
+
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        if (!result.IsStaticParameter[i]) {
+            result.PublicParameters.push_back(parameters[i]);
+        }
+    }
+    return result;
 }
 
 static unique_ptr<DescriptorSetLayoutVulkan> _CreateDescriptorSetLayoutVulkan(
@@ -1112,20 +1211,32 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         return nullptr;
     }
     auto merged = std::move(mergedOpt.value());
-    const auto parameters = merged.Layout.GetParameters();
-    if (merged.Parameters.size() != parameters.size()) {
+    const auto allParameters = merged.Layout.GetParameters();
+    if (merged.Parameters.size() != allParameters.size()) {
         RADRAY_ERR_LOG("internal error: merged parameter metadata size mismatch");
         return nullptr;
     }
+    auto staticSamplerSelectionOpt = _SelectStaticSamplersVulkan(
+        merged.Layout,
+        merged.Parameters,
+        desc.StaticSamplers);
+    if (!staticSamplerSelectionOpt.has_value()) {
+        return nullptr;
+    }
+    auto staticSamplerSelection = std::move(staticSamplerSelectionOpt.value());
+    BindingLayout publicLayout{std::move(staticSamplerSelection.PublicParameters)};
+    const auto parameters = allParameters;
 
     vector<PipelineLayoutVulkan::ParameterBindingInfo> parameterInfos(parameters.size());
     vector<vector<BindingParameterLayout>> descriptorSetLayouts(merged.SetLayoutCount);
     vector<BindlessSetLayout> bindlessSetLayouts{};
+    vector<StaticSamplerLayout> staticSamplerLayouts = std::move(staticSamplerSelection.StaticSamplers);
     vector<PushConstantRange> pushConstantRanges{};
     vector<PipelineLayoutVulkan::BindlessSetInfo> bindlessSets{};
     vector<vector<VkDescriptorSetLayoutBinding>> rawBindingsBySet(merged.SetLayoutCount);
     vector<vector<DescriptorSetLayoutBindingVulkanContainer>> bindingContainersBySet(merged.SetLayoutCount);
     vector<vector<VkDescriptorBindingFlags>> bindingFlagsBySet(merged.SetLayoutCount);
+    vector<vector<VkSampler>> immutableSamplerHandles{};
     vector<VkPushConstantRange> pushRanges{};
     pushRanges.reserve(parameters.size());
     vector<uint32_t> resourceCountsBySet(merged.SetLayoutCount, 0);
@@ -1180,6 +1291,41 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
         info.IsBindless = abi.IsBindless;
         info.BindlessSlotType = vkInfo.BindlessSlotType;
         info.DescriptorType = vkInfo.DescriptorType;
+        if (staticSamplerSelection.IsStaticParameter[i]) {
+            auto staticSamplerIt = std::find_if(
+                staticSamplerLayouts.begin(),
+                staticSamplerLayouts.end(),
+                [&](const StaticSamplerLayout& staticSampler) {
+                    return staticSampler.Id == parameter.Id;
+                });
+            if (staticSamplerIt == staticSamplerLayouts.end()) {
+                RADRAY_ERR_LOG("internal error: static sampler metadata is unavailable for '{}'", parameter.Name);
+                return nullptr;
+            }
+            auto samplerOpt = this->CreateSampler(staticSamplerIt->Desc);
+            if (!samplerOpt.HasValue()) {
+                RADRAY_ERR_LOG("failed to create immutable sampler for '{}'", parameter.Name);
+                return nullptr;
+            }
+            vector<unique_ptr<SamplerVulkan>> immutableSamplers{};
+            auto samplerBase = samplerOpt.Release();
+            immutableSamplers.emplace_back(static_cast<SamplerVulkan*>(samplerBase.release()));
+            immutableSamplerHandles.push_back(vector<VkSampler>{immutableSamplers[0]->_sampler});
+
+            info.IsStaticSampler = true;
+            info.DescriptorWriteOffset = 0;
+
+            VkDescriptorSetLayoutBinding rawBinding{};
+            rawBinding.binding = abi.Binding;
+            rawBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            rawBinding.descriptorCount = 1;
+            rawBinding.stageFlags = MapType(staticSamplerIt->Stages);
+            rawBinding.pImmutableSamplers = immutableSamplerHandles.back().data();
+            rawBindingsBySet[abi.Set.Value].push_back(rawBinding);
+            bindingContainersBySet[abi.Set.Value].emplace_back(rawBinding, abi.Type, std::move(immutableSamplers));
+            bindingFlagsBySet[abi.Set.Value].push_back(0);
+            continue;
+        }
         VkDescriptorSetLayoutBinding rawBinding{};
         rawBinding.binding = abi.Binding;
         rawBinding.descriptorType = vkInfo.DescriptorType;
@@ -1258,11 +1404,12 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     result->_ownedLayouts = std::move(ownedLayouts);
     result->_descriptorSetLayouts = std::move(descriptorSetLayouts);
     result->_bindlessSetLayouts = std::move(bindlessSetLayouts);
+    result->_staticSamplerLayouts = std::move(staticSamplerLayouts);
     result->_pushConstantRanges = std::move(pushConstantRanges);
     result->_parameters = std::move(parameterInfos);
     result->_bindlessSets = std::move(bindlessSets);
     result->_setLayoutCount = merged.SetLayoutCount;
-    result->_bindingLayout = std::move(merged.Layout);
+    result->_bindingLayout = std::move(publicLayout);
     return result;
 }
 
@@ -3709,8 +3856,6 @@ void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t ins
     _device->_ftb.vkCmdDrawIndexed(_cmdBuffer->_cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
-// ======================== SimulateComputeEncoderVulkan ========================
-
 SimulateComputeEncoderVulkan::SimulateComputeEncoderVulkan(
     DeviceVulkan* device,
     CommandBufferVulkan* cmdBuffer) noexcept
@@ -3763,13 +3908,6 @@ void SimulateComputeEncoderVulkan::BindComputePipelineState(ComputePipelineState
 
 void SimulateComputeEncoderVulkan::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
     _device->_ftb.vkCmdDispatch(_cmdBuffer->_cmdBuffer, groupCountX, groupCountY, groupCountZ);
-}
-
-void SimulateComputeEncoderVulkan::SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept {
-    RADRAY_UNUSED(x);
-    RADRAY_UNUSED(y);
-    RADRAY_UNUSED(z);
-    // Vulkan: thread group size is defined in shader (local_size), no-op here
 }
 
 CommandEncoderRayTracingVulkan::CommandEncoderRayTracingVulkan(
@@ -4895,6 +5033,7 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _ownedLayouts.clear();
     _descriptorSetLayouts.clear();
     _bindlessSetLayouts.clear();
+    _staticSamplerLayouts.clear();
     _pushConstantRanges.clear();
     _parameters.clear();
     _bindlessSets.clear();
@@ -5438,6 +5577,10 @@ bool DescriptorSetVulkan::WriteSampler(BindingParameterId id, Sampler* sampler, 
         return false;
     }
     const auto* info = infoOpt.Get();
+    if (info->IsStaticSampler) {
+        RADRAY_ERR_LOG("binding parameter id {} is a static sampler and cannot be written through DescriptorSet", id.Value);
+        return false;
+    }
     if (info->Kind != BindingParameterKind::Sampler) {
         RADRAY_ERR_LOG("binding parameter id {} is not a sampler parameter", id.Value);
         return false;

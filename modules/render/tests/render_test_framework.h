@@ -137,7 +137,8 @@ public:
         std::string_view source,
         std::string_view entryPoint,
         bool enableUnbounded,
-        string* reason) noexcept;
+        string* reason,
+        std::span<const StaticSamplerDescriptor> staticSamplers = {}) noexcept;
 
     void AppendHostWriteBarrier(
         vector<ResourceBarrierDescriptor>& barriers,

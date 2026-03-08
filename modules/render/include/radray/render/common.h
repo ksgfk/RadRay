@@ -870,8 +870,26 @@ struct BindlessSetLayout {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
+struct StaticSamplerDescriptor {
+    string Name{};
+    DescriptorSetIndex Set{0};
+    uint32_t Binding{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    SamplerDescriptor Desc{};
+};
+
+struct StaticSamplerLayout {
+    string Name{};
+    BindingParameterId Id{0};
+    DescriptorSetIndex Set{0};
+    uint32_t Binding{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    SamplerDescriptor Desc{};
+};
+
 struct RootSignatureDescriptor {
     std::span<Shader*> Shaders{};
+    std::span<const StaticSamplerDescriptor> StaticSamplers{};
 };
 
 struct VertexElement {
@@ -1333,8 +1351,6 @@ public:
     virtual void BindComputePipelineState(ComputePipelineState* pso) noexcept = 0;
 
     virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept = 0;
-
-    virtual void SetThreadGroupSize(uint32_t x, uint32_t y, uint32_t z) noexcept = 0;
 };
 
 class RayTracingCommandEncoder : public CommandEncoder {
@@ -1467,6 +1483,10 @@ public:
 
     virtual std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept = 0;
 
+    virtual uint32_t GetStaticSamplerCount() const noexcept = 0;
+
+    virtual std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept = 0;
+
     virtual std::span<const PushConstantRange> GetPushConstantRanges() const noexcept = 0;
 
     bool HasBindlessSet(DescriptorSetIndex set) const noexcept {
@@ -1477,6 +1497,24 @@ public:
         for (const auto& bindlessSet : GetBindlessSetLayouts()) {
             if (bindlessSet.Set == set) {
                 return &bindlessSet;
+            }
+        }
+        return nullptr;
+    }
+
+    Nullable<const StaticSamplerLayout*> FindStaticSampler(BindingParameterId id) const noexcept {
+        for (const auto& staticSampler : GetStaticSamplerLayouts()) {
+            if (staticSampler.Id == id) {
+                return &staticSampler;
+            }
+        }
+        return nullptr;
+    }
+
+    Nullable<const StaticSamplerLayout*> FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept {
+        for (const auto& staticSampler : GetStaticSamplerLayouts()) {
+            if (staticSampler.Set == set && staticSampler.Binding == binding) {
+                return &staticSampler;
             }
         }
         return nullptr;

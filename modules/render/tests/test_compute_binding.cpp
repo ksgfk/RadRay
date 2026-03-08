@@ -508,6 +508,193 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     this->ExpectNoCapturedErrors();
 }
 
+TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
+    string reason{};
+    SamplerDescriptor staticSamplerDesc{};
+    staticSamplerDesc.AddressS = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressT = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressR = AddressMode::ClampToEdge;
+    staticSamplerDesc.MinFilter = FilterMode::Nearest;
+    staticSamplerDesc.MagFilter = FilterMode::Nearest;
+    staticSamplerDesc.MipmapFilter = FilterMode::Nearest;
+    staticSamplerDesc.LodMin = 0.0f;
+    staticSamplerDesc.LodMax = 0.0f;
+    staticSamplerDesc.Compare = std::nullopt;
+    staticSamplerDesc.AnisotropyClamp = 1;
+
+    const StaticSamplerDescriptor staticSamplers[] = {
+        StaticSamplerDescriptor{
+            .Name = "gSamp",
+            .Set = DescriptorSetIndex{0},
+            .Binding = 1,
+            .Stages = ShaderStage::UNKNOWN,
+            .Desc = staticSamplerDesc,
+        },
+    };
+    auto programOpt = _ctx.CreateComputeProgram(kTextureSamplerShader, "CSMain", false, &reason, staticSamplers);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    ASSERT_EQ(program.RootSignatureObject->GetStaticSamplerCount(), 1u);
+    EXPECT_FALSE(program.RootSignatureObject->FindParameterId("gSamp").has_value());
+    auto staticSampler = program.RootSignatureObject->FindStaticSampler(DescriptorSetIndex{0}, 1);
+    ASSERT_TRUE(staticSampler.HasValue());
+
+    TextureDescriptor textureDesc{};
+    textureDesc.Dim = TextureDimension::Dim2D;
+    textureDesc.Width = 2;
+    textureDesc.Height = 2;
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = 1;
+    textureDesc.SampleCount = 1;
+    textureDesc.Format = TextureFormat::RGBA8_UNORM;
+    textureDesc.Memory = MemoryType::Device;
+    textureDesc.Usage = TextureUse::CopyDestination | TextureUse::Resource;
+    auto texture = this->CreateTextureOrNull(textureDesc, "Create static sampler test texture");
+    ASSERT_NE(texture, nullptr);
+    std::array<byte, 16> texels = {
+        byte{0x11}, byte{0x22}, byte{0x33}, byte{0xFF},
+        byte{0x99}, byte{0x88}, byte{0x77}, byte{0xFF},
+        byte{0x44}, byte{0x55}, byte{0x66}, byte{0xFF},
+        byte{0xAA}, byte{0xBB}, byte{0xCC}, byte{0xFF}};
+    ASSERT_TRUE(_ctx.UploadTexture2D(texture.get(), texels, &reason))
+        << fmt::format("UploadTexture2D failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    TextureViewDescriptor textureViewDesc{};
+    textureViewDesc.Target = texture.get();
+    textureViewDesc.Dim = TextureDimension::Dim2D;
+    textureViewDesc.Format = TextureFormat::RGBA8_UNORM;
+    textureViewDesc.Range = SubresourceRange{0, 1, 0, 1};
+    textureViewDesc.Usage = TextureViewUsage::Resource;
+    auto textureView = this->CreateTextureViewOrNull(textureViewDesc, "Create static sampler texture SRV");
+    ASSERT_NE(textureView, nullptr);
+
+    auto runtimeSampler = this->CreateSamplerOrNull(staticSamplerDesc, "Create runtime sampler");
+    ASSERT_NE(runtimeSampler, nullptr);
+
+    constexpr uint64_t kOutputSize = sizeof(uint32_t);
+    BufferDescriptor outputBufferDesc{};
+    outputBufferDesc.Size = kOutputSize;
+    outputBufferDesc.Memory = MemoryType::Device;
+    outputBufferDesc.Usage = BufferUse::CopySource | BufferUse::UnorderedAccess;
+    auto outputBuffer = this->CreateBufferOrNull(outputBufferDesc, "Create static sampler output buffer");
+    ASSERT_NE(outputBuffer, nullptr);
+
+    BufferDescriptor readbackBufferDesc{};
+    readbackBufferDesc.Size = kOutputSize;
+    readbackBufferDesc.Memory = MemoryType::ReadBack;
+    readbackBufferDesc.Usage = BufferUse::MapRead | BufferUse::CopyDestination;
+    auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create static sampler readback buffer");
+    ASSERT_NE(readbackBuffer, nullptr);
+
+    BufferViewDescriptor outputViewDesc{};
+    outputViewDesc.Target = outputBuffer.get();
+    outputViewDesc.Range = BufferRange{0, kOutputSize};
+    outputViewDesc.Stride = sizeof(uint32_t);
+    outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
+    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create static sampler output UAV");
+    ASSERT_NE(outputView, nullptr);
+
+    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    ASSERT_NE(set0, nullptr);
+    ASSERT_TRUE(set0->WriteResource("gTex", textureView.get()));
+    EXPECT_FALSE(set0->WriteSampler(staticSampler.Get()->Id, runtimeSampler.get()));
+    const string staticWriteCaptured = _ctx.JoinCapturedErrors();
+    EXPECT_NE(staticWriteCaptured.find("static sampler"), string::npos)
+        << fmt::format("Expected static sampler write rejection on {}, log:\n{}", _ctx.GetBackendName(), staticWriteCaptured);
+    _ctx.ClearCapturedErrors();
+
+    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    ASSERT_NE(set1, nullptr);
+    ASSERT_TRUE(set1->WriteResource("gOut", outputView.get()));
+
+    auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
+    ASSERT_TRUE(cmdOpt.HasValue())
+        << fmt::format("CreateCommandBuffer failed on {}: {}", _ctx.GetBackendName(), reason);
+    auto cmd = cmdOpt.Release();
+
+    _ctx.ClearCapturedErrors();
+    cmd->Begin();
+    ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::Common,
+        .After = BufferState::UnorderedAccess,
+    };
+    cmd->ResourceBarrier(std::span{&toUav, 1});
+
+    auto encoderOpt = cmd->BeginComputePass();
+    ASSERT_TRUE(encoderOpt.HasValue())
+        << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
+    auto encoder = encoderOpt.Release();
+    encoder->BindRootSignature(program.RootSignatureObject.get());
+    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
+    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
+    encoder->Dispatch(1, 1, 1);
+    cmd->EndComputePass(std::move(encoder));
+
+    vector<ResourceBarrierDescriptor> preCopy{};
+    preCopy.push_back(BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::UnorderedAccess,
+        .After = BufferState::CopySource,
+    });
+    _ctx.AppendReadbackPreCopyBarrier(preCopy, readbackBuffer.get());
+    cmd->ResourceBarrier(preCopy);
+    cmd->CopyBufferToBuffer(readbackBuffer.get(), 0, outputBuffer.get(), 0, kOutputSize);
+    vector<ResourceBarrierDescriptor> postCopy{};
+    _ctx.AppendReadbackPostCopyBarrier(postCopy, readbackBuffer.get());
+    if (!postCopy.empty()) {
+        cmd->ResourceBarrier(postCopy);
+    }
+    cmd->End();
+
+    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason))
+        << fmt::format("SubmitAndWait failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    vector<uint32_t> actual = this->ReadBufferVectorOrEmpty<uint32_t>(readbackBuffer.get(), 1);
+    ASSERT_EQ(actual.size(), 1u);
+    constexpr uint32_t kExpectedPacked = 0xFF332211u;
+    EXPECT_EQ(actual[0], kExpectedPacked)
+        << fmt::format("Unexpected static sampler texel on {}", _ctx.GetBackendName());
+    this->ExpectNoCapturedErrors();
+}
+
+TEST_P(ComputeBindingRuntimeTest, CreateRootSignatureFailsWhenStaticSamplerBindingIsMissing) {
+    string reason{};
+    SamplerDescriptor staticSamplerDesc{};
+    staticSamplerDesc.AddressS = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressT = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressR = AddressMode::ClampToEdge;
+    staticSamplerDesc.MinFilter = FilterMode::Nearest;
+    staticSamplerDesc.MagFilter = FilterMode::Nearest;
+    staticSamplerDesc.MipmapFilter = FilterMode::Nearest;
+    staticSamplerDesc.LodMin = 0.0f;
+    staticSamplerDesc.LodMax = 0.0f;
+    staticSamplerDesc.Compare = std::nullopt;
+    staticSamplerDesc.AnisotropyClamp = 1;
+
+    const StaticSamplerDescriptor staticSamplers[] = {
+        StaticSamplerDescriptor{
+            .Name = "MissingSampler",
+            .Set = DescriptorSetIndex{0},
+            .Binding = 7,
+            .Stages = ShaderStage::UNKNOWN,
+            .Desc = staticSamplerDesc,
+        },
+    };
+
+    _ctx.ClearCapturedErrors();
+    auto programOpt = _ctx.CreateComputeProgram(kTextureSamplerShader, "CSMain", false, &reason, staticSamplers);
+    EXPECT_FALSE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram unexpectedly succeeded on {}", _ctx.GetBackendName());
+
+    const string captured = _ctx.JoinCapturedErrors();
+    EXPECT_NE(captured.find("does not match any shader sampler binding"), string::npos)
+        << fmt::format("Expected missing static sampler binding error on {}, log:\n{}", _ctx.GetBackendName(), captured);
+}
+
 TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
     if (!_ctx.GetDeviceDetail().IsBindlessArraySupported) {
         GTEST_SKIP() << fmt::format("Bindless arrays are not supported on {}", _ctx.GetBackendName());

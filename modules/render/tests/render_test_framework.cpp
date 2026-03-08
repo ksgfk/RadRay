@@ -644,7 +644,8 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     std::string_view source,
     std::string_view entryPoint,
     bool enableUnbounded,
-    string* reason) noexcept {
+    string* reason,
+    std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
     if (_device == nullptr || _dxc == nullptr) {
         _StoreReason(reason, "device or dxc is not initialized");
         return std::nullopt;
@@ -722,6 +723,7 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     Shader* shaders[] = {program.ShaderObject.get()};
     RootSignatureDescriptor rootSignatureDesc{};
     rootSignatureDesc.Shaders = shaders;
+    rootSignatureDesc.StaticSamplers = staticSamplers;
     auto rootSigOpt = _device->CreateRootSignature(rootSignatureDesc);
     if (!rootSigOpt.HasValue()) {
         _StoreReason(

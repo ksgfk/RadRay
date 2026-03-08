@@ -9,8 +9,11 @@ namespace {
 
 class FakeRootSignature final : public RootSignature {
 public:
-    explicit FakeRootSignature(BindingLayout layout) noexcept
-        : _layout(std::move(layout)) {
+    FakeRootSignature(
+        BindingLayout layout,
+        vector<StaticSamplerLayout> staticSamplers = {}) noexcept
+        : _layout(std::move(layout)),
+          _staticSamplerLayouts(std::move(staticSamplers)) {
         vector<BindingParameterLayout> setLayout{};
         for (const auto& parameter : _layout.GetParameters()) {
             if (parameter.Kind == BindingParameterKind::PushConstant) {
@@ -67,6 +70,14 @@ public:
         return _bindlessSetLayouts;
     }
 
+    uint32_t GetStaticSamplerCount() const noexcept override {
+        return static_cast<uint32_t>(_staticSamplerLayouts.size());
+    }
+
+    std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept override {
+        return _staticSamplerLayouts;
+    }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override {
         return _pushConstantRanges;
     }
@@ -77,6 +88,7 @@ private:
     BindingLayout _layout{};
     vector<vector<BindingParameterLayout>> _setLayouts{};
     vector<BindlessSetLayout> _bindlessSetLayouts{};
+    vector<StaticSamplerLayout> _staticSamplerLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
 };
 
@@ -217,7 +229,27 @@ TEST(DescriptorSetTest, NameHelpersResolveThroughRootSignatureLayout) {
 }
 
 TEST(RootSignatureTest, ExposesDescriptorSetLayoutsAndPushConstantRanges) {
-    FakeRootSignature rootSig{MakeBindingLayoutForHelpers()};
+    vector<StaticSamplerLayout> staticSamplers{};
+    staticSamplers.push_back(StaticSamplerLayout{
+        .Name = "StaticLinear",
+        .Id = BindingParameterId{3},
+        .Set = DescriptorSetIndex{0},
+        .Binding = 3,
+        .Stages = ShaderStage::Pixel,
+        .Desc = SamplerDescriptor{
+            .AddressS = AddressMode::ClampToEdge,
+            .AddressT = AddressMode::ClampToEdge,
+            .AddressR = AddressMode::ClampToEdge,
+            .MinFilter = FilterMode::Linear,
+            .MagFilter = FilterMode::Linear,
+            .MipmapFilter = FilterMode::Linear,
+            .LodMin = 0.0f,
+            .LodMax = 0.0f,
+            .Compare = std::nullopt,
+            .AnisotropyClamp = 1,
+        },
+    });
+    FakeRootSignature rootSig{MakeBindingLayoutForHelpers(), std::move(staticSamplers)};
 
     EXPECT_EQ(rootSig.GetDescriptorSetCount(), 1u);
     auto setLayout = rootSig.GetDescriptorSetLayout(DescriptorSetIndex{0});
@@ -231,6 +263,13 @@ TEST(RootSignatureTest, ExposesDescriptorSetLayoutsAndPushConstantRanges) {
     EXPECT_EQ(ranges[0].Id, BindingParameterId{2});
     EXPECT_EQ(ranges[0].Offset, 0u);
     EXPECT_EQ(ranges[0].Size, sizeof(uint32_t));
+
+    EXPECT_FALSE(rootSig.FindParameterId("StaticLinear").has_value());
+    auto staticSampler = rootSig.FindStaticSampler(DescriptorSetIndex{0}, 3);
+    ASSERT_TRUE(staticSampler.HasValue());
+    EXPECT_EQ(staticSampler.Get()->Id, BindingParameterId{3});
+    EXPECT_EQ(staticSampler.Get()->Name, "StaticLinear");
+    EXPECT_EQ(rootSig.GetStaticSamplerCount(), 1u);
 }
 
 }  // namespace radray::render
