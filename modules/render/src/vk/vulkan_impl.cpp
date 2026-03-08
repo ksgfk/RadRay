@@ -95,101 +95,96 @@ static unique_ptr<DescriptorSetLayoutVulkan> _CreateDescriptorSetLayoutVulkan(
     return result;
 }
 
-static bool _BindBindingSetVulkan(
+static bool _BindDescriptorSetVulkan(
     DeviceVulkan* device,
     CommandBufferVulkan* cmdBuffer,
     PipelineLayoutVulkan* boundPipeLayout,
-    BindingSet* set_,
+    DescriptorSetIndex setIndex,
+    DescriptorSet* set_,
     VkPipelineBindPoint bindPoint) noexcept {
     if (boundPipeLayout == nullptr) {
-        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindBindingSet");
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindDescriptorSet");
         return false;
     }
     if (set_ == nullptr) {
-        RADRAY_ERR_LOG("binding set is null");
+        RADRAY_ERR_LOG("descriptor set is null");
         return false;
     }
     auto* set = CastVkObject(set_);
     if (set == nullptr || !set->IsValid()) {
-        RADRAY_ERR_LOG("binding set is invalid");
+        RADRAY_ERR_LOG("descriptor set is invalid");
         return false;
     }
     if (set->GetRootSignature() != boundPipeLayout) {
-        RADRAY_ERR_LOG("binding set belongs to a different root signature");
+        RADRAY_ERR_LOG("descriptor set belongs to a different root signature");
+        return false;
+    }
+    if (set->GetSetIndex() != setIndex) {
+        RADRAY_ERR_LOG(
+            "descriptor set index mismatch expected: {}, actual: {}",
+            setIndex.Value,
+            set->GetSetIndex().Value);
         return false;
     }
     if (!set->IsFullyWritten()) {
-        const auto params = boundPipeLayout->GetBindingLayout().GetParameters();
-        const auto infos = boundPipeLayout->GetParameterInfos();
-        if (params.size() != infos.size()) {
-            RADRAY_ERR_LOG("internal error: vk parameter metadata size mismatch");
-            return false;
-        }
-        for (size_t i = 0; i < params.size(); ++i) {
-            const auto& param = params[i];
-            const auto& info = infos[i];
-            if (info.Kind == BindingParameterKind::PushConstant) {
-                if (i >= set->_pushConstantWritten.size() || !set->_pushConstantWritten[i]) {
-                    RADRAY_ERR_LOG("binding set is missing push constant '{}'", param.Name);
-                    break;
-                }
-                continue;
-            }
-            const auto& written = info.Kind == BindingParameterKind::Sampler ? set->_samplerWritten : set->_resourceWritten;
-            bool complete = true;
-            for (uint32_t j = 0; j < info.DescriptorCount; ++j) {
-                const uint32_t index = info.DescriptorWriteOffset + j;
-                if (index >= written.size() || !written[index]) {
-                    complete = false;
-                    break;
-                }
-            }
-            if (!complete) {
-                RADRAY_ERR_LOG("binding set is missing parameter '{}'", param.Name);
-                break;
-            }
+        for (const auto& param : boundPipeLayout->GetDescriptorSetLayout(setIndex)) {
+            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", param.Name);
+            break;
         }
         return false;
     }
+    device->_ftb.vkCmdBindDescriptorSets(
+        cmdBuffer->_cmdBuffer,
+        bindPoint,
+        boundPipeLayout->_layout,
+        setIndex.Value,
+        1,
+        &set->_allocation.Set,
+        0,
+        nullptr);
+    return true;
+}
 
-    if (!set->_sets.empty()) {
-        vector<VkDescriptorSet> rawSets{};
-        rawSets.reserve(set->_sets.size());
-        for (const auto& descriptorSet : set->_sets) {
-            if (!descriptorSet || !descriptorSet->IsValid()) {
-                RADRAY_ERR_LOG("binding set contains an invalid descriptor set");
-                return false;
-            }
-            rawSets.push_back(descriptorSet->_allocation.Set);
-        }
-        device->_ftb.vkCmdBindDescriptorSets(
-            cmdBuffer->_cmdBuffer,
-            bindPoint,
-            boundPipeLayout->_layout,
-            0,
-            static_cast<uint32_t>(rawSets.size()),
-            rawSets.data(),
-            0,
-            nullptr);
+static bool _PushConstantsVulkan(
+    DeviceVulkan* device,
+    CommandBufferVulkan* cmdBuffer,
+    PipelineLayoutVulkan* boundPipeLayout,
+    BindingParameterId id,
+    const void* data,
+    uint32_t size) noexcept {
+    if (boundPipeLayout == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::PushConstants");
+        return false;
     }
-
-    const auto infos = boundPipeLayout->GetParameterInfos();
-    for (const auto& info : infos) {
-        if (info.Kind != BindingParameterKind::PushConstant) {
-            continue;
-        }
-        if (info.PushConstantStorageOffset + info.PushConstantSize > set->_pushConstantData.size()) {
-            RADRAY_ERR_LOG("internal error: push constant storage range is out of bounds");
-            return false;
-        }
-        device->_ftb.vkCmdPushConstants(
-            cmdBuffer->_cmdBuffer,
-            boundPipeLayout->_layout,
-            MapType(info.Stages),
-            info.PushConstantOffset,
-            info.PushConstantSize,
-            set->_pushConstantData.data() + info.PushConstantStorageOffset);
+    if (data == nullptr) {
+        RADRAY_ERR_LOG("push constant data is null");
+        return false;
     }
+    auto infoOpt = boundPipeLayout->FindParameterInfo(id);
+    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
+        return false;
+    }
+    const auto* info = infoOpt.Get();
+    if (info->Kind != BindingParameterKind::PushConstant) {
+        RADRAY_ERR_LOG("binding parameter id {} is not a push constant parameter", id.Value);
+        return false;
+    }
+    if (size != info->PushConstantSize) {
+        RADRAY_ERR_LOG(
+            "push constant size mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            info->PushConstantSize,
+            size);
+        return false;
+    }
+    device->_ftb.vkCmdPushConstants(
+        cmdBuffer->_cmdBuffer,
+        boundPipeLayout->_layout,
+        MapType(info->Stages),
+        info->PushConstantOffset,
+        info->PushConstantSize,
+        data);
     return true;
 }
 
@@ -873,14 +868,14 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
     }
 
     vector<PipelineLayoutVulkan::ParameterBindingInfo> parameterInfos(parameters.size());
+    vector<vector<BindingParameterLayout>> descriptorSetLayouts(merged.SetLayoutCount);
+    vector<PushConstantRange> pushConstantRanges{};
     vector<vector<VkDescriptorSetLayoutBinding>> rawBindingsBySet(merged.SetLayoutCount);
     vector<vector<DescriptorSetLayoutBindingVulkanContainer>> bindingContainersBySet(merged.SetLayoutCount);
     vector<VkPushConstantRange> pushRanges{};
     pushRanges.reserve(parameters.size());
-
-    uint32_t resourceDescriptorCount = 0;
-    uint32_t samplerDescriptorCount = 0;
-    uint32_t pushConstantStorageSize = 0;
+    vector<uint32_t> resourceCountsBySet(merged.SetLayoutCount, 0);
+    vector<uint32_t> samplerCountsBySet(merged.SetLayoutCount, 0);
 
     for (size_t i = 0; i < parameters.size(); ++i) {
         const auto& parameter = parameters[i];
@@ -908,8 +903,13 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
             });
             info.PushConstantOffset = abi.Offset;
             info.PushConstantSize = abi.Size;
-            info.PushConstantStorageOffset = pushConstantStorageSize;
-            pushConstantStorageSize += abi.Size;
+            pushConstantRanges.push_back(PushConstantRange{
+                .Name = parameter.Name,
+                .Id = parameter.Id,
+                .Stages = parameter.Stages,
+                .Offset = abi.Offset,
+                .Size = abi.Size,
+            });
             continue;
         }
 
@@ -918,27 +918,28 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
             RADRAY_ERR_LOG("vk lowering metadata is unavailable for '{}'", parameter.Name);
             return nullptr;
         }
+        descriptorSetLayouts[abi.Set.Value].push_back(parameter);
         VkDescriptorSetLayoutBinding rawBinding{};
-        rawBinding.binding = abi.BindingOrRegister;
+        rawBinding.binding = abi.Binding;
         rawBinding.descriptorType = vkInfo.DescriptorType;
         rawBinding.descriptorCount = abi.Count;
         rawBinding.stageFlags = MapType(parameter.Stages);
         rawBinding.pImmutableSamplers = nullptr;
-        rawBindingsBySet[abi.SpaceOrSet].push_back(rawBinding);
-        bindingContainersBySet[abi.SpaceOrSet].emplace_back(rawBinding, abi.Type, vector<unique_ptr<SamplerVulkan>>{});
+        rawBindingsBySet[abi.Set.Value].push_back(rawBinding);
+        bindingContainersBySet[abi.Set.Value].emplace_back(rawBinding, abi.Type, vector<unique_ptr<SamplerVulkan>>{});
 
         info.Type = abi.Type;
-        info.SetIndex = abi.SpaceOrSet;
-        info.BindingIndex = abi.BindingOrRegister;
+        info.SetIndex = abi.Set;
+        info.BindingIndex = abi.Binding;
         info.DescriptorCount = abi.Count;
         info.IsReadOnly = abi.IsReadOnly;
         info.DescriptorType = vkInfo.DescriptorType;
         if (parameter.Kind == BindingParameterKind::Sampler) {
-            info.DescriptorWriteOffset = samplerDescriptorCount;
-            samplerDescriptorCount += abi.Count;
+            info.DescriptorWriteOffset = samplerCountsBySet[abi.Set.Value];
+            samplerCountsBySet[abi.Set.Value] += abi.Count;
         } else {
-            info.DescriptorWriteOffset = resourceDescriptorCount;
-            resourceDescriptorCount += abi.Count;
+            info.DescriptorWriteOffset = resourceCountsBySet[abi.Set.Value];
+            resourceCountsBySet[abi.Set.Value] += abi.Count;
         }
     }
 
@@ -972,16 +973,15 @@ Nullable<unique_ptr<RootSignature>> DeviceVulkan::CreateRootSignature(const Root
 
     auto result = make_unique<PipelineLayoutVulkan>(this, layout);
     result->_ownedLayouts = std::move(ownedLayouts);
+    result->_descriptorSetLayouts = std::move(descriptorSetLayouts);
+    result->_pushConstantRanges = std::move(pushConstantRanges);
     result->_parameters = std::move(parameterInfos);
     result->_setLayoutCount = merged.SetLayoutCount;
-    result->_resourceDescriptorCount = resourceDescriptorCount;
-    result->_samplerDescriptorCount = samplerDescriptorCount;
-    result->_pushConstantStorageSize = pushConstantStorageSize;
     result->_bindingLayout = std::move(merged.Layout);
     return result;
 }
 
-Nullable<unique_ptr<BindingSet>> DeviceVulkan::CreateBindingSet(RootSignature* rootSig) noexcept {
+Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(RootSignature* rootSig, DescriptorSetIndex setIndex) noexcept {
     if (rootSig == nullptr) {
         RADRAY_ERR_LOG("root signature is null");
         return nullptr;
@@ -991,28 +991,41 @@ Nullable<unique_ptr<BindingSet>> DeviceVulkan::CreateBindingSet(RootSignature* r
         RADRAY_ERR_LOG("root signature is invalid");
         return nullptr;
     }
-
-    vector<unique_ptr<DescriptorSetVulkan>> sets{};
-    sets.reserve(layout->GetSetLayoutCount());
-    for (uint32_t setIndex = 0; setIndex < layout->GetSetLayoutCount(); ++setIndex) {
-        auto setLayout = layout->GetSetLayout(setIndex);
-        if (!setLayout.HasValue() || setLayout.Get() == nullptr) {
-            RADRAY_ERR_LOG("internal error: vk set layout {} is unavailable", setIndex);
-            return nullptr;
-        }
-        auto allocOpt = _descSetAlloc->Allocate(setLayout.Get());
-        if (!allocOpt.has_value()) {
-            RADRAY_ERR_LOG("failed to allocate vk descriptor set for set {}", setIndex);
-            return nullptr;
-        }
-        sets.push_back(make_unique<DescriptorSetVulkan>(this, setLayout.Get(), _descSetAlloc.get(), allocOpt.value()));
+    if (setIndex.Value >= layout->GetDescriptorSetCount()) {
+        RADRAY_ERR_LOG("descriptor set {} is out of range", setIndex.Value);
+        return nullptr;
+    }
+    auto setLayout = layout->GetSetLayout(setIndex.Value);
+    if (!setLayout.HasValue() || setLayout.Get() == nullptr) {
+        RADRAY_ERR_LOG("internal error: vk set layout {} is unavailable", setIndex.Value);
+        return nullptr;
+    }
+    auto allocOpt = _descSetAlloc->Allocate(setLayout.Get());
+    if (!allocOpt.has_value()) {
+        RADRAY_ERR_LOG("failed to allocate vk descriptor set for set {}", setIndex.Value);
+        return nullptr;
     }
 
-    auto result = make_unique<BindingSetVulkan>(this, layout, std::move(sets));
-    result->_resourceWritten.resize(layout->GetResourceDescriptorCount(), 0);
-    result->_samplerWritten.resize(layout->GetSamplerDescriptorCount(), 0);
-    result->_pushConstantWritten.resize(layout->GetBindingLayout().GetParameters().size(), 0);
-    result->_pushConstantData.resize(layout->GetPushConstantStorageSize());
+    uint32_t resourceDescriptorCount = 0;
+    uint32_t samplerDescriptorCount = 0;
+    for (const auto& parameter : layout->GetDescriptorSetLayout(setIndex)) {
+        auto infoOpt = layout->FindParameterInfo(parameter.Id);
+        if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+            RADRAY_ERR_LOG("internal error: vk parameter metadata is unavailable for '{}'", parameter.Name);
+            return nullptr;
+        }
+        const auto* info = infoOpt.Get();
+        const uint32_t count = info->DescriptorWriteOffset + info->DescriptorCount;
+        if (info->Kind == BindingParameterKind::Sampler) {
+            samplerDescriptorCount = std::max(samplerDescriptorCount, count);
+        } else {
+            resourceDescriptorCount = std::max(resourceDescriptorCount, count);
+        }
+    }
+
+    auto result = make_unique<DescriptorSetVulkan>(this, layout, setIndex, setLayout.Get(), _descSetAlloc.get(), allocOpt.value());
+    result->_resourceWritten.resize(resourceDescriptorCount, 0);
+    result->_samplerWritten.resize(samplerDescriptorCount, 0);
     return result;
 }
 
@@ -1775,18 +1788,6 @@ Nullable<unique_ptr<BindlessDescriptorSetVulkan>> DeviceVulkan::CreateBindlessDe
     return bdls;
 }
 
-Nullable<unique_ptr<DescriptorSet>> DeviceVulkan::CreateDescriptorSet(DescriptorSetLayout* layout_) noexcept {
-    auto layout = CastVkObject(layout_);
-    if (layout == nullptr || !layout->IsValid()) {
-        RADRAY_ERR_LOG("vk descriptor set layout is invalid");
-        return nullptr;
-    }
-    auto allocOpt = _descSetAlloc->Allocate(layout);
-    if (!allocOpt.has_value()) {
-        return nullptr;
-    }
-    return make_unique<DescriptorSetVulkan>(this, layout, _descSetAlloc.get(), allocOpt.value());
-}
 #endif
 
 Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
@@ -3423,8 +3424,12 @@ void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineSta
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
 }
 
-void SimulateCommandEncoderVulkan::BindBindingSet(BindingSet* set) noexcept {
-    _BindBindingSetVulkan(_device, _cmdBuffer, _boundPipeLayout, set, VK_PIPELINE_BIND_POINT_GRAPHICS);
+void SimulateCommandEncoderVulkan::BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept {
+    _BindDescriptorSetVulkan(_device, _cmdBuffer, _boundPipeLayout, setIndex, set, VK_PIPELINE_BIND_POINT_GRAPHICS);
+}
+
+void SimulateCommandEncoderVulkan::PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept {
+    _PushConstantsVulkan(_device, _cmdBuffer, _boundPipeLayout, id, data, size);
 }
 
 void SimulateCommandEncoderVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
@@ -3480,8 +3485,12 @@ void SimulateComputeEncoderVulkan::BindRootSignature(RootSignature* rootSig) noe
     _boundPipeLayout = layout;
 }
 
-void SimulateComputeEncoderVulkan::BindBindingSet(BindingSet* set) noexcept {
-    _BindBindingSetVulkan(_device, _cmdBuffer, _boundPipeLayout, set, VK_PIPELINE_BIND_POINT_COMPUTE);
+void SimulateComputeEncoderVulkan::BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept {
+    _BindDescriptorSetVulkan(_device, _cmdBuffer, _boundPipeLayout, setIndex, set, VK_PIPELINE_BIND_POINT_COMPUTE);
+}
+
+void SimulateComputeEncoderVulkan::PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept {
+    _PushConstantsVulkan(_device, _cmdBuffer, _boundPipeLayout, id, data, size);
 }
 
 void SimulateComputeEncoderVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
@@ -3544,8 +3553,12 @@ void CommandEncoderRayTracingVulkan::BindRootSignature(RootSignature* rootSig) n
     _boundPipeLayout = CastVkObject(rootSig);
 }
 
-void CommandEncoderRayTracingVulkan::BindBindingSet(BindingSet* set) noexcept {
-    _BindBindingSetVulkan(_device, _cmdBuffer, _boundPipeLayout, set, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+void CommandEncoderRayTracingVulkan::BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept {
+    _BindDescriptorSetVulkan(_device, _cmdBuffer, _boundPipeLayout, setIndex, set, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);
+}
+
+void CommandEncoderRayTracingVulkan::PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept {
+    _PushConstantsVulkan(_device, _cmdBuffer, _boundPipeLayout, id, data, size);
 }
 
 void CommandEncoderRayTracingVulkan::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
@@ -4633,11 +4646,10 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
 
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _ownedLayouts.clear();
+    _descriptorSetLayouts.clear();
+    _pushConstantRanges.clear();
     _parameters.clear();
     _setLayoutCount = 0;
-    _resourceDescriptorCount = 0;
-    _samplerDescriptorCount = 0;
-    _pushConstantStorageSize = 0;
     _bindingLayout = {};
     if (_layout != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
@@ -4650,6 +4662,13 @@ Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*> PipelineLayoutVulkan
         return nullptr;
     }
     return &_parameters[id.Value];
+}
+
+std::span<const BindingParameterLayout> PipelineLayoutVulkan::GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept {
+    if (set.Value >= _descriptorSetLayouts.size()) {
+        return {};
+    }
+    return _descriptorSetLayouts[set.Value];
 }
 
 Nullable<DescriptorSetLayoutVulkan*> PipelineLayoutVulkan::GetSetLayout(uint32_t setIndex) const noexcept {
@@ -5052,10 +5071,14 @@ void DescriptorPoolVulkan::DestroyImpl() noexcept {
 
 DescriptorSetVulkan::DescriptorSetVulkan(
     DeviceVulkan* device,
+    PipelineLayoutVulkan* rootSig,
+    DescriptorSetIndex setIndex,
     DescriptorSetLayoutVulkan* layout,
     DescriptorSetAllocatorVulkan* allocator,
     DescriptorSetAllocatorVulkan::Allocation allocation) noexcept
     : _device(device),
+      _rootSig(rootSig),
+      _setIndex(setIndex),
       _layout(layout),
       _allocator(allocator),
       _allocation(allocation) {}
@@ -5065,7 +5088,12 @@ DescriptorSetVulkan::~DescriptorSetVulkan() noexcept {
 }
 
 bool DescriptorSetVulkan::IsValid() const noexcept {
-    return _allocation.IsValid();
+    return _device != nullptr &&
+           _rootSig != nullptr &&
+           _rootSig->IsValid() &&
+           _layout != nullptr &&
+           _allocation.IsValid() &&
+           _setIndex.Value < _rootSig->GetDescriptorSetCount();
 }
 
 void DescriptorSetVulkan::Destroy() noexcept {
@@ -5073,6 +5101,7 @@ void DescriptorSetVulkan::Destroy() noexcept {
 }
 
 void DescriptorSetVulkan::SetDebugName(std::string_view name) noexcept {
+    _name = string{name};
     if (_allocation.IsValid()) {
         _device->SetObjectName(name, _allocation.Set);
     }
@@ -5083,6 +5112,100 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
         _allocator->Destroy(_allocation);
         _allocation = DescriptorSetAllocatorVulkan::Allocation::Invalid();
     }
+    _resourceWritten.clear();
+    _samplerWritten.clear();
+    _setIndex = DescriptorSetIndex{};
+    _rootSig = nullptr;
+    _layout = nullptr;
+    _allocator = nullptr;
+    _device = nullptr;
+    _name.clear();
+}
+
+bool DescriptorSetVulkan::WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept {
+    if (!this->IsValid()) {
+        RADRAY_ERR_LOG("descriptor set is invalid");
+        return false;
+    }
+    if (view == nullptr) {
+        RADRAY_ERR_LOG("resource view is null");
+        return false;
+    }
+    auto infoOpt = _rootSig->FindParameterInfo(id);
+    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
+        return false;
+    }
+    const auto* info = infoOpt.Get();
+    if (info->Kind != BindingParameterKind::Resource) {
+        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
+        return false;
+    }
+    if (info->SetIndex != _setIndex) {
+        RADRAY_ERR_LOG(
+            "binding parameter id {} belongs to descriptor set {}, not {}",
+            id.Value,
+            info->SetIndex.Value,
+            _setIndex.Value);
+        return false;
+    }
+    if (arrayIndex >= info->DescriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+        return false;
+    }
+    if (!SetResource(info->BindingIndex, arrayIndex, view)) {
+        return false;
+    }
+    const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
+    if (writtenIndex >= _resourceWritten.size()) {
+        RADRAY_ERR_LOG("internal error: resource written-state index {} is out of range", writtenIndex);
+        return false;
+    }
+    _resourceWritten[writtenIndex] = 1;
+    return true;
+}
+
+bool DescriptorSetVulkan::WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
+    if (!this->IsValid()) {
+        RADRAY_ERR_LOG("descriptor set is invalid");
+        return false;
+    }
+    if (sampler == nullptr) {
+        RADRAY_ERR_LOG("sampler is null");
+        return false;
+    }
+    auto infoOpt = _rootSig->FindParameterInfo(id);
+    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
+        return false;
+    }
+    const auto* info = infoOpt.Get();
+    if (info->Kind != BindingParameterKind::Sampler) {
+        RADRAY_ERR_LOG("binding parameter id {} is not a sampler parameter", id.Value);
+        return false;
+    }
+    if (info->SetIndex != _setIndex) {
+        RADRAY_ERR_LOG(
+            "binding parameter id {} belongs to descriptor set {}, not {}",
+            id.Value,
+            info->SetIndex.Value,
+            _setIndex.Value);
+        return false;
+    }
+    if (arrayIndex >= info->DescriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+        return false;
+    }
+    if (!SetSampler(info->BindingIndex, arrayIndex, sampler)) {
+        return false;
+    }
+    const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
+    if (writtenIndex >= _samplerWritten.size()) {
+        RADRAY_ERR_LOG("internal error: sampler written-state index {} is out of range", writtenIndex);
+        return false;
+    }
+    _samplerWritten[writtenIndex] = 1;
+    return true;
 }
 
 bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept {
@@ -5240,172 +5363,16 @@ bool DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler
     return true;
 }
 
-BindingSetVulkan::BindingSetVulkan(
-    DeviceVulkan* device,
-    PipelineLayoutVulkan* rootSig,
-    vector<unique_ptr<DescriptorSetVulkan>> sets) noexcept
-    : _device(device),
-      _rootSig(rootSig),
-      _sets(std::move(sets)) {}
-
-bool BindingSetVulkan::IsValid() const noexcept {
-    if (_device == nullptr || _rootSig == nullptr || !_rootSig->IsValid()) {
+bool DescriptorSetVulkan::IsFullyWritten() const noexcept {
+    if (!this->IsValid()) {
         return false;
     }
-    if (_sets.size() != _rootSig->GetSetLayoutCount()) {
-        return false;
-    }
-    for (const auto& set : _sets) {
-        if (!set || !set->IsValid()) {
+    for (const auto& parameter : _rootSig->GetDescriptorSetLayout(_setIndex)) {
+        auto infoOpt = _rootSig->FindParameterInfo(parameter.Id);
+        if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
             return false;
         }
-    }
-    return true;
-}
-
-void BindingSetVulkan::Destroy() noexcept {
-    DestroyImpl();
-}
-
-void BindingSetVulkan::SetDebugName(std::string_view name) noexcept {
-    _name = string{name};
-    for (size_t i = 0; i < _sets.size(); ++i) {
-        if (_sets[i]) {
-            _sets[i]->SetDebugName(fmt::format("{}_Set_{}", _name, i));
-        }
-    }
-}
-
-bool BindingSetVulkan::WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("binding set is invalid");
-        return false;
-    }
-    if (view == nullptr) {
-        RADRAY_ERR_LOG("resource view is null");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
-    }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != BindingParameterKind::Resource) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
-        return false;
-    }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
-        return false;
-    }
-    if (info->SetIndex >= _sets.size() || !_sets[info->SetIndex]) {
-        RADRAY_ERR_LOG("internal error: descriptor set {} is unavailable", info->SetIndex);
-        return false;
-    }
-    if (!_sets[info->SetIndex]->SetResource(info->BindingIndex, arrayIndex, view)) {
-        return false;
-    }
-    const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
-    if (writtenIndex >= _resourceWritten.size()) {
-        RADRAY_ERR_LOG("internal error: resource written-state index {} is out of range", writtenIndex);
-        return false;
-    }
-    _resourceWritten[writtenIndex] = 1;
-    return true;
-}
-
-bool BindingSetVulkan::WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("binding set is invalid");
-        return false;
-    }
-    if (sampler == nullptr) {
-        RADRAY_ERR_LOG("sampler is null");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
-    }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != BindingParameterKind::Sampler) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a sampler parameter", id.Value);
-        return false;
-    }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
-        return false;
-    }
-    if (info->SetIndex >= _sets.size() || !_sets[info->SetIndex]) {
-        RADRAY_ERR_LOG("internal error: descriptor set {} is unavailable", info->SetIndex);
-        return false;
-    }
-    if (!_sets[info->SetIndex]->SetSampler(info->BindingIndex, arrayIndex, sampler)) {
-        return false;
-    }
-    const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
-    if (writtenIndex >= _samplerWritten.size()) {
-        RADRAY_ERR_LOG("internal error: sampler written-state index {} is out of range", writtenIndex);
-        return false;
-    }
-    _samplerWritten[writtenIndex] = 1;
-    return true;
-}
-
-bool BindingSetVulkan::WritePushConstant(BindingParameterId id, const void* data, uint32_t size) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("binding set is invalid");
-        return false;
-    }
-    if (data == nullptr) {
-        RADRAY_ERR_LOG("push constant data is null");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
-    }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != BindingParameterKind::PushConstant) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a push constant parameter", id.Value);
-        return false;
-    }
-    if (size != info->PushConstantSize) {
-        RADRAY_ERR_LOG(
-            "push constant size mismatch for binding parameter id {} expected: {}, actual: {}",
-            id.Value,
-            info->PushConstantSize,
-            size);
-        return false;
-    }
-    if (info->PushConstantStorageOffset + size > _pushConstantData.size()) {
-        RADRAY_ERR_LOG("internal error: push constant storage range is out of bounds for binding parameter id {}", id.Value);
-        return false;
-    }
-    std::memcpy(_pushConstantData.data() + info->PushConstantStorageOffset, data, size);
-    if (id.Value >= _pushConstantWritten.size()) {
-        RADRAY_ERR_LOG("internal error: push constant written-state index {} is out of range", id.Value);
-        return false;
-    }
-    _pushConstantWritten[id.Value] = 1;
-    return true;
-}
-
-bool BindingSetVulkan::IsFullyWritten() const noexcept {
-    if (!this->IsValid()) {
-        return false;
-    }
-    for (uint32_t i = 0; i < _rootSig->_parameters.size(); ++i) {
-        const auto& info = _rootSig->_parameters[i];
-        if (info.Kind == BindingParameterKind::PushConstant) {
-            if (i >= _pushConstantWritten.size() || !_pushConstantWritten[i]) {
-                return false;
-            }
-            continue;
-        }
+        const auto& info = *infoOpt.Get();
         const auto& written = info.Kind == BindingParameterKind::Sampler ? _samplerWritten : _resourceWritten;
         for (uint32_t j = 0; j < info.DescriptorCount; ++j) {
             const uint32_t index = info.DescriptorWriteOffset + j;
@@ -5415,17 +5382,6 @@ bool BindingSetVulkan::IsFullyWritten() const noexcept {
         }
     }
     return true;
-}
-
-void BindingSetVulkan::DestroyImpl() noexcept {
-    _sets.clear();
-    _resourceWritten.clear();
-    _samplerWritten.clear();
-    _pushConstantWritten.clear();
-    _pushConstantData.clear();
-    _rootSig = nullptr;
-    _device = nullptr;
-    _name.clear();
 }
 
 DescriptorSetAllocatorVulkan::DescriptorSetAllocatorVulkan(

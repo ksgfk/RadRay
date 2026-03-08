@@ -4,13 +4,13 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <fmt/ranges.h>
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
@@ -93,18 +93,12 @@ struct SwapChainRuntime {
 };
 
 std::string JoinErrors(const std::vector<std::string>& errors, size_t maxCount = 8) {
-    std::ostringstream oss;
     const size_t count = std::min(maxCount, errors.size());
-    for (size_t i = 0; i < count; ++i) {
-        if (i > 0) {
-            oss << '\n';
-        }
-        oss << errors[i];
-    }
+    std::string result = fmt::format("{}", fmt::join(errors.begin(), errors.begin() + count, "\n"));
     if (errors.size() > count) {
-        oss << "\n...(" << (errors.size() - count) << " more)";
+        result += fmt::format("\n...({} more)", errors.size() - count);
     }
-    return oss.str();
+    return result;
 }
 
 Nullable<unique_ptr<NativeWindow>> CreateTestWindow(uint32_t width, uint32_t height) noexcept {

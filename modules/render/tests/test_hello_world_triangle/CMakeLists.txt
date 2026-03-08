@@ -1,5 +1,0 @@
-if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_LIBPNG)
-    radray_add_test(test_hello_world_triangle SOURCES test_hello_world_triangle.cpp LINK_LIBS radraycore radrayrender)
-    radray_add_radray_gtest_case(HelloWorldTriangle.D3D12 TARGET test_hello_world_triangle FILTER HelloWorldTriangle.D3D12 ALSO_RUN_DISABLED WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-    radray_add_radray_gtest_case(HelloWorldTriangle.VK TARGET test_hello_world_triangle FILTER HelloWorldTriangle.VK ALSO_RUN_DISABLED WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-endif()

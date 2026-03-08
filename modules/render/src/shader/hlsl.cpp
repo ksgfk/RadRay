@@ -33,27 +33,6 @@ size_t HlslShaderTypeDesc::GetSizeInBytes() const noexcept {
     }
 }
 
-// ResourceBindType HlslInputBindDesc::MapResourceBindType() const noexcept {
-//     switch (Type) {
-//         case HlslShaderInputType::CBUFFER: return ResourceBindType::CBuffer;
-//         case HlslShaderInputType::TBUFFER:
-//         case HlslShaderInputType::STRUCTURED:
-//         case HlslShaderInputType::BYTEADDRESS: return ResourceBindType::Buffer;
-//         case HlslShaderInputType::TEXTURE: return IsBufferDimension(Dimension) ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
-//         case HlslShaderInputType::SAMPLER: return ResourceBindType::Sampler;
-//         case HlslShaderInputType::UAV_RWTYPED: return IsBufferDimension(Dimension) ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
-//         case HlslShaderInputType::UAV_RWSTRUCTURED:
-//         case HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
-//         case HlslShaderInputType::UAV_APPEND_STRUCTURED:
-//         case HlslShaderInputType::UAV_CONSUME_STRUCTURED:
-//         case HlslShaderInputType::UAV_RWBYTEADDRESS: return ResourceBindType::RWBuffer;
-//         case HlslShaderInputType::RTACCELERATIONSTRUCTURE: return ResourceBindType::AccelerationStructure;
-//         case HlslShaderInputType::UAV_FEEDBACKTEXTURE: return ResourceBindType::RWTexture;
-//         case HlslShaderInputType::UNKNOWN: return ResourceBindType::UNKNOWN;
-//     }
-//     Unreachable();
-// }
-
 bool HlslInputBindDesc::IsUnboundArray() const noexcept {
     return BindCount == 0;
 }

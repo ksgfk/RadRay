@@ -41,7 +41,6 @@ class ComputePipelineVulkan;
 class ShaderModuleVulkan;
 class DescriptorSetVulkan;
 class DescriptorSetAllocatorVulkan;
-class BindingSetVulkan;
 class BindlessDescriptorSetVulkan;
 class BindlessDescAllocator;
 class SamplerVulkan;
@@ -155,7 +154,7 @@ public:
 
     Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<BindingSet>> CreateBindingSet(RootSignature* rootSig) noexcept override;
+    Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, DescriptorSetIndex set) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
@@ -347,7 +346,9 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
-    void BindBindingSet(BindingSet* set) noexcept override;
+    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
+
+    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
     void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
 
@@ -381,7 +382,9 @@ public:
 
     void BindRootSignature(RootSignature* rootSig) noexcept override;
 
-    void BindBindingSet(BindingSet* set) noexcept override;
+    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
+
+    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
     void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
 
@@ -415,7 +418,9 @@ public:
 
     void BindRootSignature(RootSignature* rootSig) noexcept override;
 
-    void BindBindingSet(BindingSet* set) noexcept override;
+    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
+
+    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
     void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
 
@@ -899,7 +904,7 @@ public:
     struct ParameterBindingInfo {
         BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
         ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t SetIndex{0};
+        DescriptorSetIndex SetIndex{0};
         uint32_t BindingIndex{0};
         uint32_t DescriptorCount{0};
         bool IsReadOnly{true};
@@ -907,7 +912,6 @@ public:
         uint32_t DescriptorWriteOffset{0};
         uint32_t PushConstantOffset{0};
         uint32_t PushConstantSize{0};
-        uint32_t PushConstantStorageOffset{0};
         ShaderStages Stages{ShaderStage::UNKNOWN};
     };
 
@@ -925,19 +929,17 @@ public:
 
     const BindingLayout& GetBindingLayout() const noexcept override { return _bindingLayout; }
 
+    uint32_t GetDescriptorSetCount() const noexcept override { return _setLayoutCount; }
+
+    std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept override;
+
+    std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
+
     Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
 
     std::span<const ParameterBindingInfo> GetParameterInfos() const noexcept { return _parameters; }
 
-    uint32_t GetSetLayoutCount() const noexcept { return _setLayoutCount; }
-
     Nullable<DescriptorSetLayoutVulkan*> GetSetLayout(uint32_t setIndex) const noexcept;
-
-    uint32_t GetResourceDescriptorCount() const noexcept { return _resourceDescriptorCount; }
-
-    uint32_t GetSamplerDescriptorCount() const noexcept { return _samplerDescriptorCount; }
-
-    uint32_t GetPushConstantStorageSize() const noexcept { return _pushConstantStorageSize; }
 
 public:
     void DestroyImpl() noexcept;
@@ -945,11 +947,10 @@ public:
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _ownedLayouts;
+    vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
+    vector<PushConstantRange> _pushConstantRanges{};
     vector<ParameterBindingInfo> _parameters{};
     uint32_t _setLayoutCount{0};
-    uint32_t _resourceDescriptorCount{0};
-    uint32_t _samplerDescriptorCount{0};
-    uint32_t _pushConstantStorageSize{0};
     BindingLayout _bindingLayout{};
 };
 
@@ -1157,44 +1158,17 @@ private:
     uint32_t _keepFreePages;
 };
 
-class DescriptorSetVulkan final : public RenderBase, public IDebugName {
+class DescriptorSetVulkan final : public DescriptorSet {
 public:
     DescriptorSetVulkan(
         DeviceVulkan* device,
+        PipelineLayoutVulkan* rootSig,
+        DescriptorSetIndex setIndex,
         DescriptorSetLayoutVulkan* layout,
         DescriptorSetAllocatorVulkan* allocator,
         DescriptorSetAllocatorVulkan::Allocation allocation) noexcept;
 
     ~DescriptorSetVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-    bool SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept;
-
-    bool SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    DescriptorSetLayoutVulkan* _layout;
-    DescriptorSetAllocatorVulkan* _allocator;
-    DescriptorSetAllocatorVulkan::Allocation _allocation;
-};
-
-class BindingSetVulkan final : public BindingSet {
-public:
-    BindingSetVulkan(
-        DeviceVulkan* device,
-        PipelineLayoutVulkan* rootSig,
-        vector<unique_ptr<DescriptorSetVulkan>> sets) noexcept;
-    ~BindingSetVulkan() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
@@ -1204,24 +1178,29 @@ public:
 
     RootSignature* GetRootSignature() const noexcept override { return _rootSig; }
 
+    DescriptorSetIndex GetSetIndex() const noexcept override { return _setIndex; }
+
     bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept override;
 
     bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept override;
 
-    bool WritePushConstant(BindingParameterId id, const void* data, uint32_t size) noexcept override;
+    bool SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept;
+
+    bool SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept;
 
     bool IsFullyWritten() const noexcept;
 
 public:
     void DestroyImpl() noexcept;
 
-    DeviceVulkan* _device{nullptr};
-    PipelineLayoutVulkan* _rootSig{nullptr};
-    vector<unique_ptr<DescriptorSetVulkan>> _sets{};
+    DeviceVulkan* _device;
+    PipelineLayoutVulkan* _rootSig;
+    DescriptorSetIndex _setIndex{0};
+    DescriptorSetLayoutVulkan* _layout;
+    DescriptorSetAllocatorVulkan* _allocator;
+    DescriptorSetAllocatorVulkan::Allocation _allocation;
     vector<uint8_t> _resourceWritten{};
     vector<uint8_t> _samplerWritten{};
-    vector<uint8_t> _pushConstantWritten{};
-    vector<byte> _pushConstantData{};
     string _name{};
 };
 
@@ -1351,7 +1330,7 @@ constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageV
 constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(RootSignature* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
-constexpr auto CastVkObject(BindingSet* p) noexcept { return static_cast<BindingSetVulkan*>(p); }
+constexpr auto CastVkObject(DescriptorSet* p) noexcept { return static_cast<DescriptorSetVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
 constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
 constexpr auto CastVkObject(AccelerationStructure* p) noexcept { return static_cast<AccelerationStructureVulkan*>(p); }

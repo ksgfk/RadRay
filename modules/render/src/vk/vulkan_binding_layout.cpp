@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <utility>
 
 #include <radray/logger.h>
 #include <radray/render/shader/spirv.h>
@@ -49,6 +50,32 @@ std::optional<ResourceBindType> _MapSpirvResourceType(const SpirvResourceBinding
     return std::nullopt;
 }
 
+std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
+    const SpirvResourceBinding& binding) noexcept {
+    const bool hasHlslAbi = binding.HlslSpace.has_value() || binding.HlslRegister.has_value();
+    if (hasHlslAbi && (!binding.HlslSpace.has_value() || !binding.HlslRegister.has_value())) {
+        RADRAY_ERR_LOG("incomplete hlsl register metadata for '{}'", binding.Name);
+        return std::nullopt;
+    }
+    if (binding.HlslSpace.has_value() && binding.HlslSpace.value() != binding.Set) {
+        RADRAY_ERR_LOG(
+            "binding abi conflict for '{}': vk set {} != d3d12 space {}",
+            binding.Name,
+            binding.Set,
+            binding.HlslSpace.value());
+        return std::nullopt;
+    }
+    if (binding.HlslRegister.has_value() && binding.HlslRegister.value() != binding.Binding) {
+        RADRAY_ERR_LOG(
+            "binding abi conflict for '{}': vk binding {} != d3d12 register {}",
+            binding.Name,
+            binding.Binding,
+            binding.HlslRegister.value());
+        return std::nullopt;
+    }
+    return std::pair{DescriptorSetIndex{binding.Set}, binding.Binding};
+}
+
 bool _HasSameAbi(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
     if (lhs.Kind != rhs.Kind) {
         return false;
@@ -60,8 +87,8 @@ bool _HasSameAbi(const BindingParameterLayout& lhs, const BindingParameterLayout
     }
     const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
     const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.SpaceOrSet == rhsAbi.SpaceOrSet &&
-           lhsAbi.BindingOrRegister == rhsAbi.BindingOrRegister &&
+    return lhsAbi.Set == rhsAbi.Set &&
+           lhsAbi.Binding == rhsAbi.Binding &&
            lhsAbi.Type == rhsAbi.Type;
 }
 
@@ -71,8 +98,8 @@ bool _SharesBindingLocation(const BindingParameterLayout& lhs, const BindingPara
     }
     const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
     const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.SpaceOrSet == rhsAbi.SpaceOrSet &&
-           lhsAbi.BindingOrRegister == rhsAbi.BindingOrRegister;
+    return lhsAbi.Set == rhsAbi.Set &&
+           lhsAbi.Binding == rhsAbi.Binding;
 }
 
 bool _HasCompatiblePayload(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
@@ -86,8 +113,8 @@ bool _HasCompatiblePayload(const ParameterRecord& lhs, const ParameterRecord& rh
     }
     const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
     const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
-    return lhsAbi.SpaceOrSet == rhsAbi.SpaceOrSet &&
-           lhsAbi.BindingOrRegister == rhsAbi.BindingOrRegister &&
+    return lhsAbi.Set == rhsAbi.Set &&
+           lhsAbi.Binding == rhsAbi.Binding &&
            lhsAbi.Type == rhsAbi.Type &&
            lhsAbi.Count == rhsAbi.Count &&
            lhsAbi.IsReadOnly == rhsAbi.IsReadOnly &&
@@ -128,8 +155,8 @@ bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) no
                 "vk binding location conflict: '{}' and '{}' share set={} binding={}",
                 record.Layout.Name,
                 incoming.Layout.Name,
-                std::get<ResourceBindingAbi>(incoming.Layout.Abi).SpaceOrSet,
-                std::get<ResourceBindingAbi>(incoming.Layout.Abi).BindingOrRegister);
+                std::get<ResourceBindingAbi>(incoming.Layout.Abi).Set.Value,
+                std::get<ResourceBindingAbi>(incoming.Layout.Abi).Binding);
             return false;
         }
         if (record.Layout.Name == incoming.Layout.Name) {
@@ -162,6 +189,11 @@ bool _AppendSpirvBindings(
             RADRAY_ERR_LOG("unsupported spirv resource type for '{}'", resource.Name);
             return false;
         }
+        auto unifiedAbiOpt = _ResolveUnifiedBinding(resource);
+        if (!unifiedAbiOpt.has_value()) {
+            return false;
+        }
+        const auto [setIndex, bindingIndex] = unifiedAbiOpt.value();
 
         ParameterRecord record{};
         record.Layout.Name = resource.Name;
@@ -170,16 +202,16 @@ bool _AppendSpirvBindings(
                                  : BindingParameterKind::Resource;
         record.Layout.Stages = stages;
         record.Layout.Abi = ResourceBindingAbi{
-            .SpaceOrSet = resource.Set,
-            .BindingOrRegister = resource.Binding,
+            .Set = setIndex,
+            .Binding = bindingIndex,
             .Type = bindTypeOpt.value(),
             .Count = resource.ArraySize == 0 ? 1u : resource.ArraySize,
             .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
         };
         record.Vulkan.Kind = record.Layout.Kind;
         record.Vulkan.Stages = stages;
-        record.Vulkan.SetIndex = resource.Set;
-        record.Vulkan.BindingIndex = resource.Binding;
+        record.Vulkan.SetIndex = setIndex.Value;
+        record.Vulkan.BindingIndex = bindingIndex;
         record.Vulkan.ResourceType = bindTypeOpt.value();
         record.Vulkan.DescriptorCount = std::get<ResourceBindingAbi>(record.Layout.Abi).Count;
         record.Vulkan.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
@@ -227,8 +259,8 @@ bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noex
     }
     const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
     const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
-    return std::tie(lhsAbi.SpaceOrSet, lhsAbi.BindingOrRegister, lhs.Layout.Kind, lhs.Layout.Name) <
-           std::tie(rhsAbi.SpaceOrSet, rhsAbi.BindingOrRegister, rhs.Layout.Kind, rhs.Layout.Name);
+    return std::tie(lhsAbi.Set, lhsAbi.Binding, lhs.Layout.Kind, lhs.Layout.Name) <
+           std::tie(rhsAbi.Set, rhsAbi.Binding, rhs.Layout.Kind, rhs.Layout.Name);
 }
 
 }  // namespace
@@ -277,7 +309,7 @@ std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::spa
         result.Parameters.push_back(record.Vulkan);
         if (record.Layout.Kind != BindingParameterKind::PushConstant) {
             const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
-            maxSetPlusOne = std::max(maxSetPlusOne, abi.SpaceOrSet + 1);
+            maxSetPlusOne = std::max(maxSetPlusOne, abi.Set.Value + 1);
         }
     }
     result.Layout = BindingLayout{std::move(layouts)};

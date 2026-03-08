@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -277,8 +278,9 @@ public:
     uint32_t NumSamples{0};
     uint32_t Space{0};
     uint32_t Flags{0};
+    std::optional<uint32_t> VkBinding{};
+    std::optional<uint32_t> VkSet{};
 
-    // ResourceBindType MapResourceBindType() const noexcept;
     bool IsUnboundArray() const noexcept;
 
     friend auto operator<=>(const HlslInputBindDesc& lhs, const HlslInputBindDesc& rhs) noexcept = default;

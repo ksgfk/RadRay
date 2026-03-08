@@ -44,12 +44,16 @@ SpirvResourceBinding MakeSpirvBinding(
     bool isUnbounded = false,
     bool readOnly = true,
     bool writeOnly = false,
-    SpirvImageDim imageDim = SpirvImageDim::Dim2D) {
+    SpirvImageDim imageDim = SpirvImageDim::Dim2D,
+    std::optional<uint32_t> hlslRegister = std::nullopt,
+    std::optional<uint32_t> hlslSpace = std::nullopt) {
     SpirvResourceBinding resource{};
     resource.Name = string{name};
     resource.Kind = kind;
     resource.Set = set;
     resource.Binding = binding;
+    resource.HlslRegister = hlslRegister;
+    resource.HlslSpace = hlslSpace;
     resource.ArraySize = arraySize;
     resource.TypeIndex = 1;
     resource.ReadOnly = readOnly;
@@ -134,8 +138,8 @@ TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     EXPECT_EQ(parameters[1].Id, BindingParameterId{1});
     EXPECT_EQ(parameters[1].Kind, BindingParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).SpaceOrSet, 0u);
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).BindingOrRegister, 1u);
+    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Set, DescriptorSetIndex{0});
+    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Binding, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
     EXPECT_EQ(parameters[2].Id, BindingParameterId{2});
@@ -227,6 +231,33 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenSameSetBindingUsesDifferentKindsOr
             MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 1),
         })}};
     vector<Shader*> shaders{&vs, &ps};
+    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+}
+
+TEST(VulkanBindingLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeSpirvShaderDesc({
+            MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 1, 0, 1, false, true, false, SpirvImageDim::Dim2D, 0, 1),
+        })}};
+    vector<Shader*> shaders{&shader};
+
+    auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
+    const auto& abi = std::get<ResourceBindingAbi>(merged->Layout.GetParameters()[0].Abi);
+    EXPECT_EQ(abi.Set, DescriptorSetIndex{1});
+    EXPECT_EQ(abi.Binding, 0u);
+    EXPECT_EQ(merged->SetLayoutCount, 2u);
+}
+
+TEST(VulkanBindingLayoutBuilderTest, FailsWhenHlslRegisterMetadataConflictsWithVkBinding) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeSpirvShaderDesc({
+            MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 1, 0, 1, false, true, false, SpirvImageDim::Dim2D, 0, 0),
+        })}};
+    vector<Shader*> shaders{&shader};
     EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
 }
 

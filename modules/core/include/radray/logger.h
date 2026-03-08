@@ -21,11 +21,17 @@ enum class LogLevel {
     Critical
 };
 
+using LogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
+
 void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept;
 
 bool ShouldLog(LogLevel lvl) noexcept;
 
 void FlushLog() noexcept;
+
+void SetLogCallback(LogCallback callback, void* userData) noexcept;
+
+void ClearLogCallback() noexcept;
 
 template <typename... Args>
 void LogFormat(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) noexcept {

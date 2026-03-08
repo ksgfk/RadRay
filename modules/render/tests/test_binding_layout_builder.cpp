@@ -10,7 +10,24 @@ namespace {
 class FakeRootSignature final : public RootSignature {
 public:
     explicit FakeRootSignature(BindingLayout layout) noexcept
-        : _layout(std::move(layout)) {}
+        : _layout(std::move(layout)) {
+        vector<BindingParameterLayout> setLayout{};
+        for (const auto& parameter : _layout.GetParameters()) {
+            if (parameter.Kind == BindingParameterKind::PushConstant) {
+                const auto& abi = std::get<PushConstantBindingAbi>(parameter.Abi);
+                _pushConstantRanges.push_back(PushConstantRange{
+                    .Name = parameter.Name,
+                    .Id = parameter.Id,
+                    .Stages = parameter.Stages,
+                    .Offset = abi.Offset,
+                    .Size = abi.Size,
+                });
+                continue;
+            }
+            setLayout.push_back(parameter);
+        }
+        _setLayouts.push_back(std::move(setLayout));
+    }
 
     bool IsValid() const noexcept override { return _valid; }
 
@@ -20,20 +37,35 @@ public:
 
     const BindingLayout& GetBindingLayout() const noexcept override { return _layout; }
 
+    uint32_t GetDescriptorSetCount() const noexcept override { return static_cast<uint32_t>(_setLayouts.size()); }
+
+    std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept override {
+        if (set.Value >= _setLayouts.size()) {
+            return {};
+        }
+        return _setLayouts[set.Value];
+    }
+
+    std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override {
+        return _pushConstantRanges;
+    }
+
 private:
     bool _valid{true};
     string _name{};
     BindingLayout _layout{};
+    vector<vector<BindingParameterLayout>> _setLayouts{};
+    vector<PushConstantRange> _pushConstantRanges{};
 };
 
-class FakeBindingSet final : public BindingSet {
+class FakeDescriptorSet final : public DescriptorSet {
 public:
-    using BindingSet::WritePushConstant;
-    using BindingSet::WriteResource;
-    using BindingSet::WriteSampler;
+    using DescriptorSet::WriteResource;
+    using DescriptorSet::WriteSampler;
 
-    explicit FakeBindingSet(RootSignature* rootSig) noexcept
-        : _rootSig(rootSig) {}
+    explicit FakeDescriptorSet(RootSignature* rootSig, DescriptorSetIndex setIndex = DescriptorSetIndex{0}) noexcept
+        : _rootSig(rootSig),
+          _setIndex(setIndex) {}
 
     bool IsValid() const noexcept override { return _valid; }
 
@@ -42,6 +74,8 @@ public:
     void SetDebugName(std::string_view name) noexcept override { _name = string{name}; }
 
     RootSignature* GetRootSignature() const noexcept override { return _rootSig; }
+
+    DescriptorSetIndex GetSetIndex() const noexcept override { return _setIndex; }
 
     bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept override {
         LastResourceId = id;
@@ -57,13 +91,6 @@ public:
         return true;
     }
 
-    bool WritePushConstant(BindingParameterId id, const void* data, uint32_t size) noexcept override {
-        LastPushConstantId = id;
-        LastPushConstantData = data;
-        LastPushConstantSize = size;
-        return true;
-    }
-
     std::optional<BindingParameterId> LastResourceId{};
     ResourceView* LastResourceView{nullptr};
     uint32_t LastResourceArrayIndex{0};
@@ -72,13 +99,10 @@ public:
     Sampler* LastSampler{nullptr};
     uint32_t LastSamplerArrayIndex{0};
 
-    std::optional<BindingParameterId> LastPushConstantId{};
-    const void* LastPushConstantData{nullptr};
-    uint32_t LastPushConstantSize{0};
-
 private:
     bool _valid{true};
     RootSignature* _rootSig{nullptr};
+    DescriptorSetIndex _setIndex{0};
     string _name{};
 };
 
@@ -116,8 +140,8 @@ BindingLayout MakeBindingLayoutForHelpers() {
         .Kind = BindingParameterKind::Resource,
         .Stages = ShaderStage::Pixel,
         .Abi = ResourceBindingAbi{
-            .SpaceOrSet = 0,
-            .BindingOrRegister = 1,
+            .Set = DescriptorSetIndex{0},
+            .Binding = 1,
             .Type = ResourceBindType::Texture,
             .Count = 1,
             .IsReadOnly = true,
@@ -128,8 +152,8 @@ BindingLayout MakeBindingLayoutForHelpers() {
         .Kind = BindingParameterKind::Sampler,
         .Stages = ShaderStage::Pixel,
         .Abi = ResourceBindingAbi{
-            .SpaceOrSet = 0,
-            .BindingOrRegister = 2,
+            .Set = DescriptorSetIndex{0},
+            .Binding = 2,
             .Type = ResourceBindType::Sampler,
             .Count = 1,
             .IsReadOnly = true,
@@ -148,34 +172,43 @@ BindingLayout MakeBindingLayoutForHelpers() {
 
 }  // namespace
 
-TEST(BindingSetTest, NameHelpersResolveThroughRootSignatureLayout) {
+TEST(DescriptorSetTest, NameHelpersResolveThroughRootSignatureLayout) {
     FakeRootSignature rootSig{MakeBindingLayoutForHelpers()};
-    FakeBindingSet bindingSet{&rootSig};
+    FakeDescriptorSet descriptorSet{&rootSig};
     DummyTextureView texView{};
     DummySampler sampler{};
-    const uint32_t pushConstantValue = 7;
 
-    EXPECT_TRUE(bindingSet.WriteResource("Tex", &texView, 2));
-    ASSERT_TRUE(bindingSet.LastResourceId.has_value());
-    EXPECT_EQ(bindingSet.LastResourceId.value(), BindingParameterId{0});
-    EXPECT_EQ(bindingSet.LastResourceView, &texView);
-    EXPECT_EQ(bindingSet.LastResourceArrayIndex, 2u);
+    EXPECT_TRUE(descriptorSet.WriteResource("Tex", &texView, 2));
+    ASSERT_TRUE(descriptorSet.LastResourceId.has_value());
+    EXPECT_EQ(descriptorSet.LastResourceId.value(), BindingParameterId{0});
+    EXPECT_EQ(descriptorSet.LastResourceView, &texView);
+    EXPECT_EQ(descriptorSet.LastResourceArrayIndex, 2u);
 
-    EXPECT_TRUE(bindingSet.WriteSampler("Linear", &sampler, 1));
-    ASSERT_TRUE(bindingSet.LastSamplerId.has_value());
-    EXPECT_EQ(bindingSet.LastSamplerId.value(), BindingParameterId{1});
-    EXPECT_EQ(bindingSet.LastSampler, &sampler);
-    EXPECT_EQ(bindingSet.LastSamplerArrayIndex, 1u);
+    EXPECT_TRUE(descriptorSet.WriteSampler("Linear", &sampler, 1));
+    ASSERT_TRUE(descriptorSet.LastSamplerId.has_value());
+    EXPECT_EQ(descriptorSet.LastSamplerId.value(), BindingParameterId{1});
+    EXPECT_EQ(descriptorSet.LastSampler, &sampler);
+    EXPECT_EQ(descriptorSet.LastSamplerArrayIndex, 1u);
 
-    EXPECT_TRUE(bindingSet.WritePushConstant("Pc", &pushConstantValue, sizeof(pushConstantValue)));
-    ASSERT_TRUE(bindingSet.LastPushConstantId.has_value());
-    EXPECT_EQ(bindingSet.LastPushConstantId.value(), BindingParameterId{2});
-    EXPECT_EQ(bindingSet.LastPushConstantData, &pushConstantValue);
-    EXPECT_EQ(bindingSet.LastPushConstantSize, sizeof(pushConstantValue));
+    EXPECT_FALSE(descriptorSet.WriteResource("Missing", &texView));
+    EXPECT_FALSE(descriptorSet.WriteSampler("Missing", &sampler));
+}
 
-    EXPECT_FALSE(bindingSet.WriteResource("Missing", &texView));
-    EXPECT_FALSE(bindingSet.WriteSampler("Missing", &sampler));
-    EXPECT_FALSE(bindingSet.WritePushConstant("Missing", &pushConstantValue, sizeof(pushConstantValue)));
+TEST(RootSignatureTest, ExposesDescriptorSetLayoutsAndPushConstantRanges) {
+    FakeRootSignature rootSig{MakeBindingLayoutForHelpers()};
+
+    EXPECT_EQ(rootSig.GetDescriptorSetCount(), 1u);
+    auto setLayout = rootSig.GetDescriptorSetLayout(DescriptorSetIndex{0});
+    ASSERT_EQ(setLayout.size(), 2u);
+    EXPECT_EQ(setLayout[0].Name, "Tex");
+    EXPECT_EQ(setLayout[1].Name, "Linear");
+
+    auto ranges = rootSig.GetPushConstantRanges();
+    ASSERT_EQ(ranges.size(), 1u);
+    EXPECT_EQ(ranges[0].Name, "Pc");
+    EXPECT_EQ(ranges[0].Id, BindingParameterId{2});
+    EXPECT_EQ(ranges[0].Offset, 0u);
+    EXPECT_EQ(ranges[0].Size, sizeof(uint32_t));
 }
 
 }  // namespace radray::render

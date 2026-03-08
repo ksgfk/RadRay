@@ -41,7 +41,9 @@ HlslInputBindDesc MakeHlslBinding(
     uint32_t bindPoint,
     uint32_t space = 0,
     uint32_t bindCount = 1,
-    HlslSRVDimension dimension = HlslSRVDimension::TEXTURE2D) {
+    HlslSRVDimension dimension = HlslSRVDimension::TEXTURE2D,
+    std::optional<uint32_t> vkBinding = std::nullopt,
+    std::optional<uint32_t> vkSet = std::nullopt) {
     HlslInputBindDesc binding{};
     binding.Name = string{name};
     binding.Type = type;
@@ -49,6 +51,8 @@ HlslInputBindDesc MakeHlslBinding(
     binding.BindCount = bindCount;
     binding.Dimension = dimension;
     binding.Space = space;
+    binding.VkBinding = vkBinding;
+    binding.VkSet = vkSet;
     return binding;
 }
 
@@ -117,7 +121,8 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     EXPECT_EQ(parameters[1].Id, BindingParameterId{1});
     EXPECT_EQ(parameters[1].Kind, BindingParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).BindingOrRegister, 1u);
+    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Set, DescriptorSetIndex{0});
+    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Binding, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
     EXPECT_EQ(parameters[2].Id, BindingParameterId{2});
@@ -135,8 +140,11 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
 
     ASSERT_EQ(merged->D3D12Parameters.size(), parameters.size());
     EXPECT_EQ(merged->D3D12Parameters[1].Id, BindingParameterId{1});
+    EXPECT_EQ(merged->D3D12Parameters[1].SetIndex, DescriptorSetIndex{0});
+    EXPECT_EQ(merged->D3D12Parameters[1].BindingIndex, 1u);
     EXPECT_EQ(merged->D3D12Parameters[1].ShaderRegister, 1u);
     EXPECT_EQ(merged->D3D12Parameters[2].Kind, BindingParameterKind::PushConstant);
+    EXPECT_EQ(merged->SetCount, 1u);
 }
 
 TEST(D3D12BindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
@@ -190,6 +198,33 @@ TEST(D3D12BindingLayoutBuilderTest, FailsOnUnboundedArray) {
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
             MakeHlslBinding("Textures", HlslShaderInputType::TEXTURE, 0, 0, 0),
+        })}};
+    vector<Shader*> shaders{&shader};
+    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+}
+
+TEST(D3D12BindingLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeHlslShaderDesc({
+            MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 0, 1, 1, HlslSRVDimension::TEXTURE2D, 0, 1),
+        })}};
+    vector<Shader*> shaders{&shader};
+
+    auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
+    const auto& abi = std::get<ResourceBindingAbi>(merged->Layout.GetParameters()[0].Abi);
+    EXPECT_EQ(abi.Set, DescriptorSetIndex{1});
+    EXPECT_EQ(abi.Binding, 0u);
+    EXPECT_EQ(merged->SetCount, 2u);
+}
+
+TEST(D3D12BindingLayoutBuilderTest, FailsWhenVkBindingMetadataConflictsWithRegisterSpace) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeHlslShaderDesc({
+            MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 0, 0, 1, HlslSRVDimension::TEXTURE2D, 0, 1),
         })}};
     vector<Shader*> shaders{&shader};
     EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());

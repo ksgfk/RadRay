@@ -88,6 +88,8 @@ struct SpirvResourceBinding {
     SpirvResourceKind Kind{SpirvResourceKind::UNKNOWN};
     uint32_t Set{0};
     uint32_t Binding{0};
+    std::optional<uint32_t> HlslRegister{};
+    std::optional<uint32_t> HlslSpace{};
     uint32_t ArraySize{0};
     uint32_t TypeIndex{0};
 

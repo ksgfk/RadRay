@@ -489,7 +489,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::BufferView: return "BufferView";
         case RenderObjectTag::TextureView: return "TextureView";
         case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";
-        case RenderObjectTag::BindingSet: return "BindingSet";
+        case RenderObjectTag::DescriptorSet: return "DescriptorSet";
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
         case RenderObjectTag::BindlessArray: return "BindlessArray";

@@ -1,6 +1,7 @@
 #include <radray/logger.h>
 
 #include <cctype>
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
@@ -46,6 +47,14 @@ static spdlog::logger g_logger = []() {
     return l;
 }();
 
+struct LogCallbackState {
+    std::mutex Mutex;
+    LogCallback Callback{nullptr};
+    void* UserData{nullptr};
+};
+
+static LogCallbackState g_logCallback{};
+
 static spdlog::level::level_enum _ToSpdlogLogLevel(LogLevel level) {
     switch (level) {
         case LogLevel::Trace: return spdlog::level::trace;
@@ -63,6 +72,17 @@ void Log(std::source_location loc, LogLevel lvl, fmt::string_view msg) noexcept 
         spdlog::source_loc{loc.file_name(), (int)loc.line(), loc.function_name()},
         _ToSpdlogLogLevel(lvl),
         msg);
+
+    LogCallback callback = nullptr;
+    void* userData = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_logCallback.Mutex);
+        callback = g_logCallback.Callback;
+        userData = g_logCallback.UserData;
+    }
+    if (callback != nullptr) {
+        callback(lvl, std::string_view{msg.data(), msg.size()}, userData);
+    }
 }
 
 bool ShouldLog(LogLevel lvl) noexcept {
@@ -71,6 +91,18 @@ bool ShouldLog(LogLevel lvl) noexcept {
 
 void FlushLog() noexcept {
     g_logger.flush();
+}
+
+void SetLogCallback(LogCallback callback, void* userData) noexcept {
+    std::lock_guard<std::mutex> lock(g_logCallback.Mutex);
+    g_logCallback.Callback = callback;
+    g_logCallback.UserData = userData;
+}
+
+void ClearLogCallback() noexcept {
+    std::lock_guard<std::mutex> lock(g_logCallback.Mutex);
+    g_logCallback.Callback = nullptr;
+    g_logCallback.UserData = nullptr;
 }
 
 }  // namespace radray
