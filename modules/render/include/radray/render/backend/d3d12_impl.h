@@ -486,7 +486,7 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -516,7 +516,7 @@ public:
 
     void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
@@ -546,7 +546,7 @@ public:
 
     void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
 
@@ -767,10 +767,24 @@ public:
         uint32_t RegisterSpace{0};
         uint32_t DescriptorCount{0};
         bool IsReadOnly{true};
+        bool IsBindless{false};
+        BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t DescriptorHeapOffset{0};
         uint32_t PushConstantOffset{0};
         uint32_t PushConstantSize{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+    };
+
+    struct BindlessSetInfo {
+        DescriptorSetIndex SetIndex{0};
+        BindingParameterId Id{0};
+        uint32_t BindingIndex{0};
+        uint32_t ShaderRegister{0};
+        uint32_t RegisterSpace{0};
+        ResourceBindType Type{ResourceBindType::UNKNOWN};
+        BindlessSlotType SlotType{BindlessSlotType::Multiple};
+        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         ShaderStages Stages{ShaderStage::UNKNOWN};
     };
 
@@ -791,11 +805,17 @@ public:
 
     std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept override;
 
+    uint32_t GetBindlessSetCount() const noexcept override { return static_cast<uint32_t>(_bindlessSetLayouts.size()); }
+
+    std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override { return _bindlessSetLayouts; }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
 
     Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
 
     Nullable<const DescriptorSetInfo*> FindDescriptorSetInfo(DescriptorSetIndex set) const noexcept;
+
+    Nullable<const BindlessSetInfo*> FindBindlessSetInfo(DescriptorSetIndex set) const noexcept;
 
     std::span<const DescriptorTableInfo> GetResourceTables() const noexcept { return _resourceTables; }
 
@@ -807,9 +827,11 @@ public:
     VersionedRootSignatureDescContainer _desc;
     BindingLayout _bindingLayout{};
     vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
+    vector<BindlessSetLayout> _bindlessSetLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
     vector<ParameterBindingInfo> _parameters{};
     vector<DescriptorSetInfo> _descriptorSets{};
+    vector<BindlessSetInfo> _bindlessSets{};
     vector<DescriptorTableInfo> _resourceTables{};
     vector<DescriptorTableInfo> _samplerTables{};
 };
@@ -1048,9 +1070,12 @@ public:
     };
 
     DeviceD3D12* _device;
+    BindlessArrayDescriptor _desc{};
     GpuDescriptorHeapViewRAII _resHeap;
     GpuDescriptorHeapViewRAII _samplerHeap;
     vector<SlotKind> _slotKinds{};
+    vector<ResourceBindType> _slotResourceTypes{};
+    vector<Nullable<ResourceView*>> _slotViews{};
     uint32_t _size;
     BindlessSlotType _slotType{BindlessSlotType::Multiple};
     string _name;
@@ -1088,6 +1113,8 @@ struct D3D12BindingParameterInfo {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{0};
     bool IsReadOnly{true};
+    bool IsBindless{false};
+    BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
     uint32_t PushConstantOffset{0};
     uint32_t PushConstantSize{0};
 };

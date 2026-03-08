@@ -209,11 +209,43 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
     EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsOnUnboundedArray) {
+TEST(VulkanBindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
-            MakeSpirvBinding("Textures", SpirvResourceKind::SeparateImage, 0, 0, 0, true),
+            MakeSpirvBinding("Buffers", SpirvResourceKind::StorageBuffer, 0, 0, 0, true),
+        })}};
+    vector<Shader*> shaders{&shader};
+    auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
+    const auto& parameter = merged->Layout.GetParameters()[0];
+    const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+    EXPECT_TRUE(abi.IsBindless);
+    EXPECT_EQ(abi.Count, 0u);
+    EXPECT_EQ(parameter.Kind, BindingParameterKind::Resource);
+    ASSERT_EQ(merged->Parameters.size(), 1u);
+    EXPECT_TRUE(merged->Parameters[0].IsBindless);
+    EXPECT_EQ(merged->Parameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
+}
+
+TEST(VulkanBindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeSpirvShaderDesc({
+            MakeSpirvBinding("Buffers", SpirvResourceKind::StorageBuffer, 0, 0, 0, true),
+            MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 1),
+        })}};
+    vector<Shader*> shaders{&shader};
+    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+}
+
+TEST(VulkanBindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeSpirvShaderDesc({
+            MakeSpirvBinding("BuffersA", SpirvResourceKind::StorageBuffer, 0, 0, 0, true),
+            MakeSpirvBinding("BuffersB", SpirvResourceKind::StorageBuffer, 0, 1, 0, true),
         })}};
     vector<Shader*> shaders{&shader};
     EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());

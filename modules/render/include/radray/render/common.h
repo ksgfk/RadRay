@@ -803,6 +803,7 @@ struct ResourceBindingAbi {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{1};
     bool IsReadOnly{true};
+    bool IsBindless{false};
 };
 
 struct PushConstantBindingAbi {
@@ -857,6 +858,16 @@ struct PushConstantRange {
     ShaderStages Stages{ShaderStage::UNKNOWN};
     uint32_t Offset{0};
     uint32_t Size{0};
+};
+
+struct BindlessSetLayout {
+    string Name{};
+    BindingParameterId Id{0};
+    DescriptorSetIndex Set{0};
+    uint32_t Binding{0};
+    ResourceBindType Type{ResourceBindType::UNKNOWN};
+    BindlessSlotType SlotType{BindlessSlotType::Multiple};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
 struct RootSignatureDescriptor {
@@ -1289,7 +1300,7 @@ public:
 
     virtual void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept = 0;
 
-    virtual void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept = 0;
+    virtual void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1452,7 +1463,24 @@ public:
 
     virtual std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept = 0;
 
+    virtual uint32_t GetBindlessSetCount() const noexcept = 0;
+
+    virtual std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept = 0;
+
     virtual std::span<const PushConstantRange> GetPushConstantRanges() const noexcept = 0;
+
+    bool HasBindlessSet(DescriptorSetIndex set) const noexcept {
+        return FindBindlessSet(set).HasValue();
+    }
+
+    Nullable<const BindlessSetLayout*> FindBindlessSet(DescriptorSetIndex set) const noexcept {
+        for (const auto& bindlessSet : GetBindlessSetLayouts()) {
+            if (bindlessSet.Set == set) {
+                return &bindlessSet;
+            }
+        }
+        return nullptr;
+    }
 
     std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept {
         return GetBindingLayout().FindParameterId(name);
@@ -1624,5 +1652,6 @@ std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
 std::string_view format_as(ShaderStage v) noexcept;
+std::string_view format_as(BindlessSlotType v) noexcept;
 
 }  // namespace radray::render

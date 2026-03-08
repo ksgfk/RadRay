@@ -24,7 +24,20 @@ public:
                 });
                 continue;
             }
-            setLayout.push_back(parameter);
+            const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+            if (abi.IsBindless) {
+                _bindlessSetLayouts.push_back(BindlessSetLayout{
+                    .Name = parameter.Name,
+                    .Id = parameter.Id,
+                    .Set = abi.Set,
+                    .Binding = abi.Binding,
+                    .Type = abi.Type,
+                    .SlotType = BindlessSlotType::BufferOnly,
+                    .Stages = parameter.Stages,
+                });
+            } else {
+                setLayout.push_back(parameter);
+            }
         }
         _setLayouts.push_back(std::move(setLayout));
     }
@@ -46,6 +59,14 @@ public:
         return _setLayouts[set.Value];
     }
 
+    uint32_t GetBindlessSetCount() const noexcept override {
+        return static_cast<uint32_t>(_bindlessSetLayouts.size());
+    }
+
+    std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override {
+        return _bindlessSetLayouts;
+    }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override {
         return _pushConstantRanges;
     }
@@ -55,6 +76,7 @@ private:
     string _name{};
     BindingLayout _layout{};
     vector<vector<BindingParameterLayout>> _setLayouts{};
+    vector<BindlessSetLayout> _bindlessSetLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
 };
 

@@ -397,6 +397,27 @@ Nullable<unique_ptr<DescriptorSet>> ComputeTestContext::CreateDescriptorSet(
     return setOpt;
 }
 
+Nullable<unique_ptr<BindlessArray>> ComputeTestContext::CreateBindlessArray(
+    const BindlessArrayDescriptor& desc,
+    string* reason) noexcept {
+    if (_device == nullptr) {
+        _StoreReason(reason, "device is not initialized");
+        return nullptr;
+    }
+    auto bindlessOpt = _device->CreateBindlessArray(desc);
+    if (!bindlessOpt.HasValue()) {
+        _StoreReason(
+            reason,
+            fmt::format(
+                "CreateBindlessArray failed on {} (size={}, slotType={})",
+                this->GetBackendName(),
+                desc.Size,
+                static_cast<uint32_t>(desc.SlotType)));
+        return nullptr;
+    }
+    return bindlessOpt;
+}
+
 bool ComputeTestContext::SubmitAndWait(CommandBuffer* cmd, string* reason) noexcept {
     if (_queue == nullptr) {
         _StoreReason(reason, "queue is not initialized");
@@ -622,6 +643,7 @@ bool ComputeTestContext::UploadTexture2D(
 std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     std::string_view source,
     std::string_view entryPoint,
+    bool enableUnbounded,
     string* reason) noexcept {
     if (_device == nullptr || _dxc == nullptr) {
         _StoreReason(reason, "device or dxc is not initialized");
@@ -635,7 +657,7 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     params.SM = HlslShaderModel::SM60;
     params.IsOptimize = false;
     params.IsSpirv = _backend == TestBackend::Vulkan;
-    params.EnableUnbounded = false;
+    params.EnableUnbounded = enableUnbounded;
     auto outputOpt = _dxc->Compile(params);
     if (!outputOpt.has_value()) {
         _StoreReason(

@@ -115,6 +115,10 @@ public:
         DescriptorSetIndex setIndex,
         string* reason) noexcept;
 
+    Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(
+        const BindlessArrayDescriptor& desc,
+        string* reason) noexcept;
+
     bool SubmitAndWait(CommandBuffer* cmd, string* reason) noexcept;
 
     bool WriteHostVisibleBuffer(Buffer* buffer, std::span<const byte> data, string* reason) const noexcept;
@@ -132,6 +136,7 @@ public:
     std::optional<ComputeProgram> CreateComputeProgram(
         std::string_view source,
         std::string_view entryPoint,
+        bool enableUnbounded,
         string* reason) noexcept;
 
     void AppendHostWriteBarrier(

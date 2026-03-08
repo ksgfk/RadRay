@@ -222,6 +222,99 @@ static bool _BindDescriptorSetD3D12(
     return true;
 }
 
+static bool _BindlessArrayMatchesD3D12(
+    const RootSigD3D12::BindlessSetInfo& bindlessInfo,
+    const BindlessArrayD3D12* array) noexcept {
+    if (array == nullptr || !array->IsValid()) {
+        RADRAY_ERR_LOG("bindless array is invalid");
+        return false;
+    }
+    if (array->_slotType != bindlessInfo.SlotType) {
+        RADRAY_ERR_LOG(
+            "bindless array slot type mismatch for set {} expected: {}, actual: {}",
+            bindlessInfo.SetIndex.Value,
+            static_cast<uint32_t>(bindlessInfo.SlotType),
+            static_cast<uint32_t>(array->_slotType));
+        return false;
+    }
+    for (size_t i = 0; i < array->_slotResourceTypes.size(); ++i) {
+        const ResourceBindType slotType = array->_slotResourceTypes[i];
+        if (slotType == ResourceBindType::UNKNOWN) {
+            continue;
+        }
+        bool isCompatible = false;
+        switch (bindlessInfo.Type) {
+            case ResourceBindType::Buffer:
+            case ResourceBindType::RWBuffer:
+                isCompatible = slotType == bindlessInfo.Type;
+                break;
+            case ResourceBindType::Texture:
+                isCompatible = slotType == ResourceBindType::Texture;
+                break;
+            default:
+                isCompatible = false;
+                break;
+        }
+        if (!isCompatible) {
+            RADRAY_ERR_LOG(
+                "bindless array slot {} type mismatch for set {} expected: {}, actual: {}",
+                i,
+                bindlessInfo.SetIndex.Value,
+                bindlessInfo.Type,
+                slotType);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool _BindBindlessArrayD3D12(
+    CmdListD3D12* cmdList,
+    RootSigD3D12* boundRootSig,
+    DescriptorSetIndex setIndex,
+    BindlessArray* array_,
+    bool graphicsRoot) noexcept {
+    if (boundRootSig == nullptr) {
+        RADRAY_ERR_LOG("bind root signature before CommandEncoder::BindBindlessArray");
+        return false;
+    }
+    if (array_ == nullptr) {
+        RADRAY_ERR_LOG("bindless array is null");
+        return false;
+    }
+    auto* array = static_cast<BindlessArrayD3D12*>(array_);
+    if (array == nullptr || !array->IsValid()) {
+        RADRAY_ERR_LOG("bindless array is invalid");
+        return false;
+    }
+    auto bindlessInfoOpt = boundRootSig->FindBindlessSetInfo(setIndex);
+    if (!bindlessInfoOpt.HasValue() || bindlessInfoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("set {} is not declared as a bindless set", setIndex.Value);
+        return false;
+    }
+    const auto* bindlessInfo = bindlessInfoOpt.Get();
+    if (!_BindlessArrayMatchesD3D12(*bindlessInfo, array)) {
+        return false;
+    }
+    if (!array->_resHeap.IsValid()) {
+        RADRAY_ERR_LOG("bindless array does not have a resource descriptor heap slice");
+        return false;
+    }
+
+    ID3D12DescriptorHeap* heaps[] = {
+        cmdList->_device->_gpuResHeap->GetNative(),
+        cmdList->_device->_gpuSamplerHeap->GetNative()};
+    cmdList->_cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
+
+    const auto handle = array->_resHeap.GetHeap()->HandleGpu(array->_resHeap.GetStart());
+    if (graphicsRoot) {
+        cmdList->_cmdList->SetGraphicsRootDescriptorTable(bindlessInfo->RootParameterIndex, handle);
+    } else {
+        cmdList->_cmdList->SetComputeRootDescriptorTable(bindlessInfo->RootParameterIndex, handle);
+    }
+    return true;
+}
+
 static bool _PushConstantsD3D12(
     CmdListD3D12* cmdList,
     RootSigD3D12* boundRootSig,
@@ -1513,16 +1606,19 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
 
     vector<RootSigD3D12::ParameterBindingInfo> parameterInfos(parameters.size());
     vector<vector<BindingParameterLayout>> descriptorSetLayouts(merged.SetCount);
+    vector<BindlessSetLayout> bindlessSetLayouts{};
     vector<PushConstantRange> pushConstantRanges{};
     vector<RootSigD3D12::DescriptorSetInfo> descriptorSets(merged.SetCount);
     for (uint32_t setIndex = 0; setIndex < merged.SetCount; ++setIndex) {
         descriptorSets[setIndex].SetIndex = DescriptorSetIndex{setIndex};
         descriptorSets[setIndex].RegisterSpace = setIndex;
     }
+    vector<RootSigD3D12::BindlessSetInfo> bindlessSets{};
     vector<RootSigD3D12::DescriptorTableInfo> resourceTables{};
     vector<RootSigD3D12::DescriptorTableInfo> samplerTables{};
     vector<vector<D3D12_DESCRIPTOR_RANGE1>> resourceRanges{};
     vector<vector<D3D12_DESCRIPTOR_RANGE1>> samplerRanges{};
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> bindlessRanges{};
     vector<D3D12_ROOT_PARAMETER1> rootParams{};
     rootParams.reserve(parameters.size());
 
@@ -1537,6 +1633,9 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
                 continue;
             }
             const auto& abi = std::get<ResourceBindingAbi>(param.Abi);
+            if (abi.IsBindless) {
+                continue;
+            }
             const auto& d3d12 = merged.D3D12Parameters[i];
             if (!d3d12.IsAvailable) {
                 RADRAY_ERR_LOG("d3d12 lowering metadata is unavailable for '{}'", param.Name);
@@ -1626,8 +1725,85 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
         return true;
     };
 
+    auto appendBindlessTables = [&]() noexcept -> bool {
+        for (size_t i = 0; i < parameters.size(); ++i) {
+            const auto& param = parameters[i];
+            if (param.Kind != BindingParameterKind::Resource) {
+                continue;
+            }
+            const auto& abi = std::get<ResourceBindingAbi>(param.Abi);
+            if (!abi.IsBindless) {
+                continue;
+            }
+            const auto& d3d12 = merged.D3D12Parameters[i];
+            if (!d3d12.IsAvailable || !d3d12.IsBindless) {
+                RADRAY_ERR_LOG("d3d12 bindless lowering metadata is unavailable for '{}'", param.Name);
+                return false;
+            }
+            auto rangeType = _MapDescriptorRangeType(abi.Type);
+            if (!rangeType.has_value() || rangeType.value() == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) {
+                RADRAY_ERR_LOG("unsupported d3d12 bindless descriptor type for '{}'", param.Name);
+                return false;
+            }
+            bindlessRanges.push_back(vector<D3D12_DESCRIPTOR_RANGE1>{});
+            auto& rangeList = bindlessRanges.back();
+            rangeList.push_back(CD3DX12_DESCRIPTOR_RANGE1{
+                rangeType.value(),
+                UINT_MAX,
+                d3d12.ShaderRegister,
+                d3d12.RegisterSpace,
+                D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
+                0});
+
+            auto& rp = rootParams.emplace_back();
+            const uint32_t rootParameterIndex = static_cast<uint32_t>(rootParams.size() - 1);
+            CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
+                rp,
+                static_cast<UINT>(rangeList.size()),
+                rangeList.data(),
+                MapShaderStages(param.Stages));
+
+            auto& info = parameterInfos[i];
+            info.Kind = BindingParameterKind::Resource;
+            info.Type = abi.Type;
+            info.SetIndex = abi.Set;
+            info.BindingIndex = abi.Binding;
+            info.ShaderRegister = d3d12.ShaderRegister;
+            info.RegisterSpace = d3d12.RegisterSpace;
+            info.DescriptorCount = 0;
+            info.IsReadOnly = abi.IsReadOnly;
+            info.IsBindless = true;
+            info.BindlessSlotType = d3d12.BindlessSlotType;
+            info.RootParameterIndex = rootParameterIndex;
+            info.Stages = param.Stages;
+
+            bindlessSetLayouts.push_back(BindlessSetLayout{
+                .Name = param.Name,
+                .Id = param.Id,
+                .Set = abi.Set,
+                .Binding = abi.Binding,
+                .Type = abi.Type,
+                .SlotType = d3d12.BindlessSlotType,
+                .Stages = param.Stages,
+            });
+            bindlessSets.push_back(RootSigD3D12::BindlessSetInfo{
+                .SetIndex = abi.Set,
+                .Id = param.Id,
+                .BindingIndex = abi.Binding,
+                .ShaderRegister = d3d12.ShaderRegister,
+                .RegisterSpace = d3d12.RegisterSpace,
+                .Type = abi.Type,
+                .SlotType = d3d12.BindlessSlotType,
+                .RootParameterIndex = rootParameterIndex,
+                .Stages = param.Stages,
+            });
+        }
+        return true;
+    };
+
     if (!appendTables(BindingParameterKind::Resource) ||
-        !appendTables(BindingParameterKind::Sampler)) {
+        !appendTables(BindingParameterKind::Sampler) ||
+        !appendBindlessTables()) {
         return nullptr;
     }
 
@@ -1723,9 +1899,11 @@ Nullable<unique_ptr<RootSignature>> DeviceD3D12::CreateRootSignature(const RootS
     result->_desc = VersionedRootSignatureDescContainer{versionDesc};
     result->_bindingLayout = std::move(merged.Layout);
     result->_descriptorSetLayouts = std::move(descriptorSetLayouts);
+    result->_bindlessSetLayouts = std::move(bindlessSetLayouts);
     result->_pushConstantRanges = std::move(pushConstantRanges);
     result->_parameters = std::move(parameterInfos);
     result->_descriptorSets = std::move(descriptorSets);
+    result->_bindlessSets = std::move(bindlessSets);
     result->_resourceTables = std::move(resourceTables);
     result->_samplerTables = std::move(samplerTables);
     return result;
@@ -1739,6 +1917,10 @@ Nullable<unique_ptr<DescriptorSet>> DeviceD3D12::CreateDescriptorSet(RootSignatu
     auto* rootSig = CastD3D12Object(rootSig_);
     if (rootSig == nullptr || !rootSig->IsValid()) {
         RADRAY_ERR_LOG("root signature is invalid");
+        return nullptr;
+    }
+    if (rootSig->HasBindlessSet(setIndex)) {
+        RADRAY_ERR_LOG("descriptor set {} is declared as a bindless set", setIndex.Value);
         return nullptr;
     }
     auto setInfoOpt = rootSig->FindDescriptorSetInfo(setIndex);
@@ -2302,6 +2484,13 @@ Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const Bindl
         RADRAY_ERR_LOG("d3d12 bindless array size must be greater than 0");
         return nullptr;
     }
+    if (desc.SlotType != BindlessSlotType::BufferOnly &&
+        desc.SlotType != BindlessSlotType::Texture2DOnly) {
+        RADRAY_ERR_LOG(
+            "d3d12 bindless array slot type {} is not supported by the shader-derived path",
+            desc.SlotType);
+        return nullptr;
+    }
     GpuDescriptorHeapViewRAII resHeapView{};
     {
         auto gpuResHeapAllocationOpt = _gpuResHeap->Allocate(desc.Size);
@@ -2311,20 +2500,11 @@ Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const Bindl
         }
         resHeapView = {_gpuResHeap.get(), gpuResHeapAllocationOpt.value()};
     }
-    GpuDescriptorHeapViewRAII samplerHeapView{};
-    if (desc.SlotType != BindlessSlotType::BufferOnly) {
-        auto gpuSamplerHeapAllocationOpt = _gpuSamplerHeap->Allocate(desc.Size);
-        if (!gpuSamplerHeapAllocationOpt.has_value()) {
-            RADRAY_ERR_LOG("GpuDescriptorAllocator::Allocate failed: {}", "cannot allocate bindless sampler descriptors");
-            return nullptr;
-        }
-        samplerHeapView = {_gpuSamplerHeap.get(), gpuSamplerHeapAllocationOpt.value()};
-    }
     return make_unique<BindlessArrayD3D12>(
         this,
         desc,
         std::move(resHeapView),
-        std::move(samplerHeapView));
+        GpuDescriptorHeapViewRAII{});
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
@@ -2892,10 +3072,8 @@ void CmdRenderPassD3D12::PushConstants(BindingParameterId id, const void* data, 
     _PushConstantsD3D12(_cmdList, _boundRootSig, id, data, size, true);
 }
 
-void CmdRenderPassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
-    RADRAY_UNUSED(groupIndex);
-    RADRAY_UNUSED(array);
-    RADRAY_ERR_LOG("BindBindlessArray is not supported by the shader-derived d3d12 root signature path");
+void CmdRenderPassD3D12::BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept {
+    _BindBindlessArrayD3D12(_cmdList, _boundRootSig, set, array, true);
 }
 
 void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
@@ -2937,10 +3115,8 @@ void CmdComputePassD3D12::PushConstants(BindingParameterId id, const void* data,
     _PushConstantsD3D12(_cmdList, _boundRootSig, id, data, size, false);
 }
 
-void CmdComputePassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
-    RADRAY_UNUSED(groupIndex);
-    RADRAY_UNUSED(array);
-    RADRAY_ERR_LOG("BindBindlessArray is not supported by the shader-derived d3d12 root signature path");
+void CmdComputePassD3D12::BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept {
+    _BindBindlessArrayD3D12(_cmdList, _boundRootSig, set, array, false);
 }
 
 void CmdComputePassD3D12::BindComputePipelineState(ComputePipelineState* pso) noexcept {
@@ -2992,10 +3168,8 @@ void CmdRayTracingPassD3D12::PushConstants(BindingParameterId id, const void* da
     _PushConstantsD3D12(_cmdList, _boundRootSig, id, data, size, false);
 }
 
-void CmdRayTracingPassD3D12::BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept {
-    RADRAY_UNUSED(groupIndex);
-    RADRAY_UNUSED(array);
-    RADRAY_ERR_LOG("BindBindlessArray is not supported by the shader-derived d3d12 root signature path");
+void CmdRayTracingPassD3D12::BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept {
+    _BindBindlessArrayD3D12(_cmdList, _boundRootSig, set, array, false);
 }
 
 void CmdRayTracingPassD3D12::BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept {
@@ -3494,9 +3668,11 @@ void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
     _bindingLayout = {};
     _descriptorSetLayouts.clear();
+    _bindlessSetLayouts.clear();
     _pushConstantRanges.clear();
     _parameters.clear();
     _descriptorSets.clear();
+    _bindlessSets.clear();
     _resourceTables.clear();
     _samplerTables.clear();
 }
@@ -3524,6 +3700,15 @@ Nullable<const RootSigD3D12::DescriptorSetInfo*> RootSigD3D12::FindDescriptorSet
         return nullptr;
     }
     return &_descriptorSets[set.Value];
+}
+
+Nullable<const RootSigD3D12::BindlessSetInfo*> RootSigD3D12::FindBindlessSetInfo(DescriptorSetIndex set) const noexcept {
+    for (const auto& bindlessSet : _bindlessSets) {
+        if (bindlessSet.SetIndex == set) {
+            return &bindlessSet;
+        }
+    }
+    return nullptr;
 }
 
 GraphicsPsoD3D12::GraphicsPsoD3D12(
@@ -3968,19 +4153,28 @@ BindlessArrayD3D12::BindlessArrayD3D12(
     GpuDescriptorHeapViewRAII resHeap,
     GpuDescriptorHeapViewRAII samplerHeap) noexcept
     : _device(device),
+      _desc(desc),
       _resHeap(std::move(resHeap)),
       _samplerHeap(std::move(samplerHeap)),
       _slotKinds(desc.Size, SlotKind::None),
+      _slotResourceTypes(desc.Size, ResourceBindType::UNKNOWN),
+      _slotViews(desc.Size, nullptr),
       _size(desc.Size),
       _slotType(desc.SlotType) {}
 
 bool BindlessArrayD3D12::IsValid() const noexcept {
-    return _device != nullptr && (_resHeap.IsValid() || _samplerHeap.IsValid());
+    return _device != nullptr && _resHeap.IsValid();
 }
 
 void BindlessArrayD3D12::Destroy() noexcept {
     _resHeap.Destroy();
     _samplerHeap.Destroy();
+    _slotKinds.clear();
+    _slotResourceTypes.clear();
+    _slotViews.clear();
+    _desc = {};
+    _size = 0;
+    _slotType = BindlessSlotType::Multiple;
     _device = nullptr;
 }
 
@@ -3989,7 +4183,7 @@ void BindlessArrayD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
-    if (_slotType != BindlessSlotType::BufferOnly && _slotType != BindlessSlotType::Multiple) {
+    if (_slotType != BindlessSlotType::BufferOnly) {
         RADRAY_ERR_LOG("d3d12 bindless array does not support buffer slots");
         return;
     }
@@ -3997,21 +4191,39 @@ void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept 
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
+    if (bufView == nullptr) {
+        RADRAY_ERR_LOG("d3d12 bindless array buffer view is null");
+        return;
+    }
+    auto bindType = _GetResourceViewBindType(bufView);
+    if (!bindType.has_value() ||
+        (bindType.value() != ResourceBindType::Buffer &&
+         bindType.value() != ResourceBindType::RWBuffer)) {
+        RADRAY_ERR_LOG(
+            "d3d12 bindless array does not support buffer view type {}",
+            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+        return;
+    }
     auto bufferView = CastD3D12Object(bufView);
     bufferView->_heapView.CopyTo(0, 1, _resHeap, slot);
     _slotKinds[slot] = SlotKind::Buffer;
+    _slotResourceTypes[slot] = bindType.value();
+    _slotViews[slot] = bufView;
 }
 
 void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
-    auto textureView = CastD3D12Object(texView);
-    auto dim = textureView->_desc.Dim;
-    if (dim != TextureDimension::Dim2D && dim != TextureDimension::Dim3D) {
-        RADRAY_ERR_LOG("d3d12 bindless array only support texture 2D/3D");
+    RADRAY_UNUSED(sampler);
+    if (texView == nullptr) {
+        RADRAY_ERR_LOG("d3d12 bindless array texture view is null");
         return;
     }
-    if (_slotType == BindlessSlotType::BufferOnly ||
-        (_slotType == BindlessSlotType::Texture2DOnly && dim != TextureDimension::Dim2D) ||
-        (_slotType == BindlessSlotType::Texture3DOnly && dim != TextureDimension::Dim3D)) {
+    auto textureView = CastD3D12Object(texView);
+    auto dim = textureView->_desc.Dim;
+    if (dim != TextureDimension::Dim2D) {
+        RADRAY_ERR_LOG("d3d12 bindless array only supports texture 2D");
+        return;
+    }
+    if (_slotType != BindlessSlotType::Texture2DOnly) {
         RADRAY_ERR_LOG("d3d12 bindless array does not support texture slots");
         return;
     }
@@ -4019,12 +4231,17 @@ void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
-    textureView->_heapView.CopyTo(0, 1, _resHeap, slot);
-    if (sampler != nullptr) {
-        auto sam = CastD3D12Object(sampler);
-        sam->_samplerView.CopyTo(0, 1, _samplerHeap, slot);
+    auto bindType = _GetResourceViewBindType(texView);
+    if (!bindType.has_value() || bindType.value() != ResourceBindType::Texture) {
+        RADRAY_ERR_LOG(
+            "d3d12 bindless array does not support texture view type {}",
+            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+        return;
     }
-    _slotKinds[slot] = dim == TextureDimension::Dim2D ? SlotKind::Texture2D : SlotKind::Texture3D;
+    textureView->_heapView.CopyTo(0, 1, _resHeap, slot);
+    _slotKinds[slot] = SlotKind::Texture2D;
+    _slotResourceTypes[slot] = bindType.value();
+    _slotViews[slot] = texView;
 }
 
 }  // namespace radray::render::d3d12

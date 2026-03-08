@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include <radray/logger.h>
@@ -48,6 +49,28 @@ std::optional<ResourceBindType> _MapSpirvResourceType(const SpirvResourceBinding
             return std::nullopt;
     }
     return std::nullopt;
+}
+
+std::optional<BindlessSlotType> _MapBindlessSlotType(
+    const SpirvResourceBinding& binding,
+    ResourceBindType type) noexcept {
+    switch (type) {
+        case ResourceBindType::Buffer:
+        case ResourceBindType::RWBuffer:
+            if (binding.Kind != SpirvResourceKind::StorageBuffer) {
+                return std::nullopt;
+            }
+            return BindlessSlotType::BufferOnly;
+        case ResourceBindType::Texture:
+            if ((binding.Kind == SpirvResourceKind::SampledImage || binding.Kind == SpirvResourceKind::SeparateImage) &&
+                binding.ImageInfo.has_value() &&
+                binding.ImageInfo->Dim == SpirvImageDim::Dim2D) {
+                return BindlessSlotType::Texture2DOnly;
+            }
+            return std::nullopt;
+        default:
+            return std::nullopt;
+    }
 }
 
 std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
@@ -118,6 +141,7 @@ bool _HasCompatiblePayload(const ParameterRecord& lhs, const ParameterRecord& rh
            lhsAbi.Type == rhsAbi.Type &&
            lhsAbi.Count == rhsAbi.Count &&
            lhsAbi.IsReadOnly == rhsAbi.IsReadOnly &&
+           lhsAbi.IsBindless == rhsAbi.IsBindless &&
            lhs.Vulkan.DescriptorType == rhs.Vulkan.DescriptorType;
 }
 
@@ -180,10 +204,6 @@ bool _AppendSpirvBindings(
     const SpirvShaderDesc& reflection,
     ShaderStages stages) noexcept {
     for (const auto& resource : reflection.ResourceBindings) {
-        if (resource.IsUnboundedArray) {
-            RADRAY_ERR_LOG("unbounded resource array is not supported: '{}'", resource.Name);
-            return false;
-        }
         auto bindTypeOpt = _MapSpirvResourceType(resource);
         if (!bindTypeOpt.has_value()) {
             RADRAY_ERR_LOG("unsupported spirv resource type for '{}'", resource.Name);
@@ -194,6 +214,7 @@ bool _AppendSpirvBindings(
             return false;
         }
         const auto [setIndex, bindingIndex] = unifiedAbiOpt.value();
+        const bool isBindless = resource.IsUnboundedArray;
 
         ParameterRecord record{};
         record.Layout.Name = resource.Name;
@@ -201,13 +222,37 @@ bool _AppendSpirvBindings(
                                  ? BindingParameterKind::Sampler
                                  : BindingParameterKind::Resource;
         record.Layout.Stages = stages;
-        record.Layout.Abi = ResourceBindingAbi{
-            .Set = setIndex,
-            .Binding = bindingIndex,
-            .Type = bindTypeOpt.value(),
-            .Count = resource.ArraySize == 0 ? 1u : resource.ArraySize,
-            .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
-        };
+        record.Vulkan.IsBindless = isBindless;
+        if (isBindless) {
+            auto bindlessSlotTypeOpt = _MapBindlessSlotType(resource, bindTypeOpt.value());
+            if (!bindlessSlotTypeOpt.has_value()) {
+                RADRAY_ERR_LOG(
+                    "unsupported bindless resource '{}' with kind {} and image dimension {}",
+                    resource.Name,
+                    static_cast<uint32_t>(resource.Kind),
+                    resource.ImageInfo.has_value() ? static_cast<uint32_t>(resource.ImageInfo->Dim) : static_cast<uint32_t>(SpirvImageDim::UNKNOWN));
+                return false;
+            }
+            record.Layout.Kind = BindingParameterKind::Resource;
+            record.Layout.Abi = ResourceBindingAbi{
+                .Set = setIndex,
+                .Binding = bindingIndex,
+                .Type = bindTypeOpt.value(),
+                .Count = 0,
+                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
+                .IsBindless = true,
+            };
+            record.Vulkan.BindlessSlotType = bindlessSlotTypeOpt.value();
+        } else {
+            record.Layout.Abi = ResourceBindingAbi{
+                .Set = setIndex,
+                .Binding = bindingIndex,
+                .Type = bindTypeOpt.value(),
+                .Count = resource.ArraySize == 0 ? 1u : resource.ArraySize,
+                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
+                .IsBindless = false,
+            };
+        }
         record.Vulkan.Kind = record.Layout.Kind;
         record.Vulkan.Stages = stages;
         record.Vulkan.SetIndex = setIndex.Value;
@@ -239,6 +284,46 @@ bool _AppendSpirvBindings(
         record.Vulkan.Offset = pushConstant.Offset;
         record.Vulkan.Size = pushConstant.Size;
         if (!_MergeRecord(records, std::move(record))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
+    unordered_map<uint32_t, const ParameterRecord*> bindlessBySet{};
+    unordered_map<uint32_t, uint32_t> descriptorCountBySet{};
+    for (const auto& record : records) {
+        if (record.Layout.Kind == BindingParameterKind::PushConstant) {
+            continue;
+        }
+        const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
+        const uint32_t setIndex = abi.Set.Value;
+        descriptorCountBySet[setIndex] += 1;
+        if (!abi.IsBindless) {
+            continue;
+        }
+        if (record.Layout.Kind != BindingParameterKind::Resource) {
+            RADRAY_ERR_LOG("bindless parameter '{}' must be a resource", record.Layout.Name);
+            return false;
+        }
+        auto [it, inserted] = bindlessBySet.emplace(setIndex, &record);
+        if (!inserted) {
+            RADRAY_ERR_LOG(
+                "bindless set {} cannot contain more than one bindless parameter ('{}' and '{}')",
+                setIndex,
+                it->second->Layout.Name,
+                record.Layout.Name);
+            return false;
+        }
+    }
+    for (const auto& [setIndex, bindlessRecord] : bindlessBySet) {
+        RADRAY_UNUSED(bindlessRecord);
+        auto countIt = descriptorCountBySet.find(setIndex);
+        if (countIt != descriptorCountBySet.end() && countIt->second != 1) {
+            RADRAY_ERR_LOG(
+                "bindless set {} cannot contain ordinary descriptors together with bindless resources",
+                setIndex);
             return false;
         }
     }
@@ -292,6 +377,10 @@ std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::spa
         if (!_AppendSpirvBindings(records, *spirv, stages)) {
             return std::nullopt;
         }
+    }
+
+    if (!_ValidateBindlessSets(records)) {
+        return std::nullopt;
     }
 
     std::sort(records.begin(), records.end(), _ParameterLess);

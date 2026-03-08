@@ -524,4 +524,14 @@ std::string_view format_as(ShaderStage v) noexcept {
     Unreachable();
 }
 
+std::string_view format_as(BindlessSlotType v) noexcept {
+    switch (v) {
+        case BindlessSlotType::Multiple: return "Multiple";
+        case BindlessSlotType::BufferOnly: return "BufferOnly";
+        case BindlessSlotType::Texture2DOnly: return "Texture2DOnly";
+        case BindlessSlotType::Texture3DOnly: return "Texture3DOnly";
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render

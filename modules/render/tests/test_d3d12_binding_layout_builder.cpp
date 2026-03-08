@@ -193,11 +193,44 @@ TEST(D3D12BindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
     EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsOnUnboundedArray) {
+TEST(D3D12BindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
-            MakeHlslBinding("Textures", HlslShaderInputType::TEXTURE, 0, 0, 0),
+            MakeHlslBinding("Buffers", HlslShaderInputType::STRUCTURED, 0, 0, 0, HlslSRVDimension::BUFFER),
+        })}};
+    vector<Shader*> shaders{&shader};
+    auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
+    const auto& parameter = merged->Layout.GetParameters()[0];
+    const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+    EXPECT_TRUE(abi.IsBindless);
+    EXPECT_EQ(abi.Count, 0u);
+    EXPECT_EQ(abi.Set, DescriptorSetIndex{0});
+    EXPECT_EQ(parameter.Kind, BindingParameterKind::Resource);
+    ASSERT_EQ(merged->D3D12Parameters.size(), 1u);
+    EXPECT_TRUE(merged->D3D12Parameters[0].IsBindless);
+    EXPECT_EQ(merged->D3D12Parameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
+}
+
+TEST(D3D12BindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeHlslShaderDesc({
+            MakeHlslBinding("Buffers", HlslShaderInputType::STRUCTURED, 0, 0, 0, HlslSRVDimension::BUFFER),
+            MakeHlslBinding("Sampler0", HlslShaderInputType::SAMPLER, 1, 0),
+        })}};
+    vector<Shader*> shaders{&shader};
+    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+}
+
+TEST(D3D12BindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeHlslShaderDesc({
+            MakeHlslBinding("BuffersA", HlslShaderInputType::STRUCTURED, 0, 0, 0, HlslSRVDimension::BUFFER),
+            MakeHlslBinding("BuffersB", HlslShaderInputType::STRUCTURED, 1, 0, 0, HlslSRVDimension::BUFFER),
         })}};
     vector<Shader*> shaders{&shader};
     EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());

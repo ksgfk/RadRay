@@ -350,7 +350,7 @@ public:
 
     void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -386,7 +386,7 @@ public:
 
     void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
@@ -422,7 +422,7 @@ public:
 
     void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
 
-    void BindBindlessArray(uint32_t groupIndex, BindlessArray* array) noexcept override;
+    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
 
@@ -908,10 +908,22 @@ public:
         uint32_t BindingIndex{0};
         uint32_t DescriptorCount{0};
         bool IsReadOnly{true};
+        bool IsBindless{false};
+        BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
         uint32_t DescriptorWriteOffset{0};
         uint32_t PushConstantOffset{0};
         uint32_t PushConstantSize{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+    };
+
+    struct BindlessSetInfo {
+        DescriptorSetIndex SetIndex{0};
+        BindingParameterId Id{0};
+        uint32_t BindingIndex{0};
+        ResourceBindType Type{ResourceBindType::UNKNOWN};
+        BindlessSlotType SlotType{BindlessSlotType::Multiple};
+        VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
         ShaderStages Stages{ShaderStage::UNKNOWN};
     };
 
@@ -933,9 +945,15 @@ public:
 
     std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept override;
 
+    uint32_t GetBindlessSetCount() const noexcept override { return static_cast<uint32_t>(_bindlessSetLayouts.size()); }
+
+    std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override { return _bindlessSetLayouts; }
+
     std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
 
     Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
+
+    Nullable<const BindlessSetInfo*> FindBindlessSetInfo(DescriptorSetIndex set) const noexcept;
 
     std::span<const ParameterBindingInfo> GetParameterInfos() const noexcept { return _parameters; }
 
@@ -948,8 +966,10 @@ public:
     VkPipelineLayout _layout;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _ownedLayouts;
     vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
+    vector<BindlessSetLayout> _bindlessSetLayouts{};
     vector<PushConstantRange> _pushConstantRanges{};
     vector<ParameterBindingInfo> _parameters{};
+    vector<BindlessSetInfo> _bindlessSets{};
     uint32_t _setLayoutCount{0};
     BindingLayout _bindingLayout{};
 };
@@ -1227,6 +1247,14 @@ public:
 
 class BindlessArrayVulkan final : public BindlessArray {
 public:
+    struct CachedDescriptorSet {
+        DescriptorSetLayoutVulkan* Layout{nullptr};
+        DescriptorSetAllocatorVulkan::Allocation Allocation{};
+        uint32_t BindingIndex{0};
+        VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
+        bool Dirty{true};
+    };
+
     BindlessArrayVulkan(
         DeviceVulkan* device,
         const BindlessArrayDescriptor& desc) noexcept;
@@ -1246,16 +1274,13 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    VkDescriptorSet GetSetForDescriptorType(VkDescriptorType type) const noexcept;
-
     DeviceVulkan* _device;
-    BindlessDescAllocator::Allocation _bufferAlloc{};
-    BindlessDescAllocator::Allocation _bufferTexelRoAlloc{};
-    BindlessDescAllocator::Allocation _bufferTexelRwAlloc{};
-    BindlessDescAllocator::Allocation _tex2dAlloc{};
-    BindlessDescAllocator::Allocation _tex3dAlloc{};
+    BindlessArrayDescriptor _desc{};
     uint32_t _size;
     BindlessSlotType _slotType;
+    vector<ResourceBindType> _slotResourceTypes{};
+    vector<Nullable<ResourceView*>> _slotViews{};
+    vector<CachedDescriptorSet> _cachedSets{};
     string _name;
 };
 
@@ -1348,6 +1373,8 @@ struct VulkanBindingParameterInfo {
     ResourceBindType ResourceType{ResourceBindType::UNKNOWN};
     uint32_t DescriptorCount{0};
     bool IsReadOnly{true};
+    bool IsBindless{false};
+    BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
     VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
     uint32_t Offset{0};
     uint32_t Size{0};
