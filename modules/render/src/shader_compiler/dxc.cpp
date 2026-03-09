@@ -470,8 +470,13 @@ public:
         }
         auto [status, errMsg] = GetCompileState(compileResult.Get());
         if (!errMsg.empty()) {
-            RADRAY_ERR_LOG("dxc compile message");
-            RADRAY_ERR_LOG("{}", errMsg);
+            if (FAILED(status)) {
+                RADRAY_ERR_LOG("dxc compile message");
+                RADRAY_ERR_LOG("{}", errMsg);
+            } else {
+                RADRAY_WARN_LOG("dxc compile message");
+                RADRAY_WARN_LOG("{}", errMsg);
+            }
         }
         if (FAILED(status)) {
             return std::nullopt;

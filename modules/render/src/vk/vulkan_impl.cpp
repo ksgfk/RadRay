@@ -811,6 +811,9 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     swapchianCreateInfo.imageExtent = swapchainSize;
     swapchianCreateInfo.imageArrayLayers = 1;
     swapchianCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (surfaceProperties.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+        swapchianCreateInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     swapchianCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swapchianCreateInfo.queueFamilyIndexCount = 0;
     swapchianCreateInfo.pQueueFamilyIndices = nullptr;
