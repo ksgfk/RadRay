@@ -6,7 +6,7 @@
 
 #include <radray/nullable.h>
 
-#include <radray/runtime/frame_snapshot_builder.h>
+#include <radray/runtime/frame_snapshot.h>
 #include <radray/runtime/frame_snapshot_queue.h>
 #include <radray/runtime/renderer_runtime.h>
 

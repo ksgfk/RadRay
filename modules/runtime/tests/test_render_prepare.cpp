@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/triangle_mesh.h>
-#include <radray/runtime/frame_snapshot_builder.h>
+#include <radray/runtime/frame_snapshot.h>
 #include <radray/runtime/render_prepare.h>
 
 #include "runtime_test_framework.h"

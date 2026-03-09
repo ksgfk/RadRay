@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/triangle_mesh.h>
-#include <radray/runtime/frame_snapshot_builder.h>
+#include <radray/runtime/frame_snapshot.h>
 #include <radray/runtime/renderer_runtime.h>
 #include <radray/runtime/runtime_driver.h>
 #include <radray/window/native_window.h>

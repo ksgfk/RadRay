@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <radray/runtime/frame_snapshot_builder.h>
+#include <radray/runtime/frame_snapshot.h>
 #include <radray/runtime/frame_snapshot_queue.h>
 
 using namespace radray;
