@@ -197,7 +197,8 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
     window->DispatchEvents();
     ASSERT_TRUE(renderer.RenderFrame(
         BuildQuadSnapshot(createDesc.Width, createDesc.Height, meshHandle, materialHandle),
-        &reason)) << reason;
+        &reason))
+        << reason;
     renderer.WaitIdle();
     ASSERT_TRUE(assets.GetPendingUploads().empty());
 
@@ -223,7 +224,8 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
             static_cast<uint32_t>(resizedSize.Y),
             meshHandle,
             materialHandle),
-        &reason)) << reason;
+        &reason))
+        << reason;
     renderer.WaitIdle();
 
     pixel = renderer.ReadCapturedPixel(

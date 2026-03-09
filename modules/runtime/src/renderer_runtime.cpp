@@ -93,10 +93,10 @@ struct FrameSlot {
 
     explicit FrameSlot(render::Device* device) noexcept
         : CBufferArena(device, render::CBufferArena::Descriptor{
-                                  .BasicSize = 256 * 256,
-                                  .Alignment = std::max<uint64_t>(256, device->GetDetail().CBufferAlignment),
-                                  .MaxResetSize = 1024 * 1024,
-                                  .NamePrefix = "runtime_frame_cb"}) {}
+                                   .BasicSize = 256 * 256,
+                                   .Alignment = std::max<uint64_t>(256, device->GetDetail().CBufferAlignment),
+                                   .MaxResetSize = 1024 * 1024,
+                                   .NamePrefix = "runtime_frame_cb"}) {}
 };
 
 struct GraphicsProgram {

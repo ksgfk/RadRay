@@ -3,6 +3,7 @@
 #include <span>
 
 #include <radray/basic_math.h>
+#include <radray/nullable.h>
 #include <radray/types.h>
 
 #include <radray/runtime/handles.h>
@@ -74,13 +75,29 @@ public:
     vector<VisibleMeshBatch> MeshBatches{};
     vector<RenderViewRequest> Views{};
 
-    std::span<const CameraRenderData> GetCameras() const noexcept { return Cameras; }
-    std::span<const VisibleMeshBatch> GetMeshBatches() const noexcept { return MeshBatches; }
-    std::span<const RenderViewRequest> GetViews() const noexcept { return Views; }
+    std::span<const CameraRenderData> GetCameras() const noexcept;
+    std::span<const VisibleMeshBatch> GetMeshBatches() const noexcept;
+    std::span<const RenderViewRequest> GetViews() const noexcept;
 
-    bool IsEmpty() const noexcept {
-        return Cameras.empty() && MeshBatches.empty() && Views.empty();
-    }
+    bool IsEmpty() const noexcept;
+};
+
+class FrameSnapshotBuilder {
+public:
+    void Reset(uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds = 0.0) noexcept;
+
+    CameraRenderData& AddCamera();
+
+    VisibleMeshBatch& AddMeshBatch();
+
+    RenderViewRequest& AddView();
+
+    FrameSnapshot Finalize(Nullable<string*> reason = nullptr) noexcept;
+
+private:
+    bool Validate(string* reason) const noexcept;
+
+    FrameSnapshot _snapshot{};
 };
 
 }  // namespace radray::runtime

@@ -1,54 +1,47 @@
-#pragma once
+#include <radray/runtime/frame_snapshot.h>
 
 #include <algorithm>
-#include <optional>
-
-#include <radray/logger.h>
-#include <radray/nullable.h>
-#include <radray/types.h>
-
-#include <radray/runtime/frame_snapshot.h>
+#include <string_view>
+#include <utility>
 
 namespace radray::runtime {
 
-class FrameSnapshotBuilder {
-public:
-    void Reset(uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds = 0.0) noexcept;
+std::span<const CameraRenderData> FrameSnapshot::GetCameras() const noexcept {
+    return Cameras;
+}
 
-    CameraRenderData& AddCamera();
+std::span<const VisibleMeshBatch> FrameSnapshot::GetMeshBatches() const noexcept {
+    return MeshBatches;
+}
 
-    VisibleMeshBatch& AddMeshBatch();
+std::span<const RenderViewRequest> FrameSnapshot::GetViews() const noexcept {
+    return Views;
+}
 
-    RenderViewRequest& AddView();
+bool FrameSnapshot::IsEmpty() const noexcept {
+    return Cameras.empty() && MeshBatches.empty() && Views.empty();
+}
 
-    FrameSnapshot Finalize(Nullable<string*> reason = nullptr) noexcept;
-
-private:
-    bool Validate(string* reason) const noexcept;
-
-    FrameSnapshot _snapshot{};
-};
-
-inline void FrameSnapshotBuilder::Reset(uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds) noexcept {
+void FrameSnapshotBuilder::Reset(uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds) noexcept {
     _snapshot = FrameSnapshot{};
     _snapshot.Header.FrameId = frameId;
     _snapshot.Header.SimulationTick = simulationTick;
     _snapshot.Header.CpuTimeSeconds = cpuTimeSeconds;
 }
 
-inline CameraRenderData& FrameSnapshotBuilder::AddCamera() {
+CameraRenderData& FrameSnapshotBuilder::AddCamera() {
     return _snapshot.Cameras.emplace_back();
 }
 
-inline VisibleMeshBatch& FrameSnapshotBuilder::AddMeshBatch() {
+VisibleMeshBatch& FrameSnapshotBuilder::AddMeshBatch() {
     return _snapshot.MeshBatches.emplace_back();
 }
 
-inline RenderViewRequest& FrameSnapshotBuilder::AddView() {
+RenderViewRequest& FrameSnapshotBuilder::AddView() {
     return _snapshot.Views.emplace_back();
 }
 
-inline FrameSnapshot FrameSnapshotBuilder::Finalize(Nullable<string*> reason) noexcept {
+FrameSnapshot FrameSnapshotBuilder::Finalize(Nullable<string*> reason) noexcept {
     if (!this->Validate(reason.HasValue() ? reason.Get() : nullptr)) {
         return FrameSnapshot{};
     }
@@ -59,7 +52,7 @@ inline FrameSnapshot FrameSnapshotBuilder::Finalize(Nullable<string*> reason) no
     return std::move(_snapshot);
 }
 
-inline bool FrameSnapshotBuilder::Validate(string* reason) const noexcept {
+bool FrameSnapshotBuilder::Validate(string* reason) const noexcept {
     auto fail = [&](std::string_view message) noexcept {
         if (reason != nullptr) {
             *reason = string{message};
