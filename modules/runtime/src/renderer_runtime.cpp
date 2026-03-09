@@ -11,6 +11,8 @@
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/render/shader_compiler/spvc.h>
 
+#include <radray/runtime/render_graph.h>
+#include <radray/runtime/render_pipeline.h>
 #include <radray/runtime/renderer_runtime.h>
 
 namespace radray::runtime {
@@ -82,9 +84,10 @@ struct FrameSlot {
     unique_ptr<render::CommandBuffer> CommandBuffer{};
     unique_ptr<render::Fence> Fence{};
     render::CBufferArena CBufferArena;
-    vector<unique_ptr<render::BufferView>> TemporaryBufferViews{};
-    vector<unique_ptr<render::DescriptorSet>> TemporaryDescriptorSets{};
+    FrameLinearAllocator CPUArena{};
+    DescriptorArena DescriptorArena{};
     unique_ptr<render::Buffer> CaptureReadbackBuffer{};
+    render::BufferState CaptureBufferState{render::BufferState::Common};
     uint64_t CaptureRowPitch{0};
     uint64_t CaptureSize{0};
     uint32_t CaptureWidth{0};
@@ -96,7 +99,8 @@ struct FrameSlot {
                                    .BasicSize = 256 * 256,
                                    .Alignment = std::max<uint64_t>(256, device->GetDetail().CBufferAlignment),
                                    .MaxResetSize = 1024 * 1024,
-                                   .NamePrefix = "runtime_frame_cb"}) {}
+                                   .NamePrefix = "runtime_frame_cb"}),
+          DescriptorArena(device) {}
 };
 
 struct GraphicsProgram {
@@ -138,20 +142,6 @@ bool AppendHostWriteBarrier(
         .After = after,
     });
     return true;
-}
-
-void AppendReadbackPreCopyBarrier(
-    render::Device* device,
-    vector<render::ResourceBarrierDescriptor>& barriers,
-    render::Buffer* buffer) {
-    if (device == nullptr || buffer == nullptr || device->GetBackend() != render::RenderBackend::Vulkan) {
-        return;
-    }
-    barriers.push_back(render::BarrierBufferDescriptor{
-        .Target = buffer,
-        .Before = render::BufferState::Common,
-        .After = render::BufferState::CopyDestination,
-    });
 }
 
 void AppendReadbackPostCopyBarrier(
@@ -268,6 +258,47 @@ std::optional<PipelineKey> BuildPipelineKey(const MeshSubmesh& submesh, render::
     };
 }
 
+const PreparedView* FindMainColorPreparedView(const RenderFrameContext& frame) noexcept {
+    if (frame.Snapshot == nullptr) {
+        return nullptr;
+    }
+
+    for (const auto& viewRequest : frame.Snapshot->Views) {
+        if (viewRequest.Type != RenderViewType::MainColor) {
+            continue;
+        }
+        const auto it = std::find_if(
+            frame.Prepared.Views.begin(),
+            frame.Prepared.Views.end(),
+            [&](const PreparedView& view) noexcept { return view.ViewId == viewRequest.ViewId; });
+        if (it != frame.Prepared.Views.end()) {
+            return &(*it);
+        }
+    }
+    return nullptr;
+}
+
+class RendererRuntimeImpl;
+
+struct MainScenePassResources {
+    GraphicsProgram Program{};
+};
+
+class UploadPassExecutor {
+public:
+    UploadSystem* Uploads{nullptr};
+    RenderAssetRegistry* Assets{nullptr};
+
+    bool Execute(RenderGraphPassContext& passCtx, Nullable<string*> reason) const noexcept;
+};
+
+class MainScenePassExecutor {
+public:
+    RendererRuntimeImpl* Runtime{nullptr};
+
+    bool Execute(RenderGraphPassContext& passCtx, Nullable<string*> reason) const noexcept;
+};
+
 class RendererRuntimeImpl {
 public:
     shared_ptr<render::Device> Device{};
@@ -275,7 +306,11 @@ public:
     unique_ptr<render::SwapChain> Swapchain{};
     unique_ptr<RenderAssetRegistry> AssetRegistry{};
     UploadSystem Uploader{};
-    GraphicsProgram Program{};
+    UploadPassExecutor UploadExecutor{};
+    PersistentResourceRegistry PersistentResources{};
+    unique_ptr<IRenderPipeline> Pipeline{};
+    MainScenePassResources MainSceneResources{};
+    MainScenePassExecutor MainSceneExecutor{};
     vector<FrameSlot> Frames{};
     vector<render::TextureState> BackBufferStates{};
     vector<unique_ptr<render::TextureView>> BackBufferRtvs{};
@@ -292,7 +327,7 @@ public:
     bool CaptureEnabled{false};
     std::optional<uint32_t> LastCaptureSlot{};
 
-    bool InitializeProgram(Nullable<string*> reason) noexcept;
+    bool InitializeMainSceneResources(Nullable<string*> reason) noexcept;
 
     bool EnsureBackBufferRtv(uint32_t backBufferIndex, render::Texture* backBuffer, Nullable<string*> reason) noexcept;
 
@@ -302,9 +337,8 @@ public:
 
     render::DescriptorSet* GetOrCreateMaterialSet(MaterialHandle handle, Nullable<string*> reason) noexcept;
 
-    vector<PreparedView> PrepareViews(const FrameSnapshot& snapshot) const;
-
-    const CameraRenderData* FindCamera(const FrameSnapshot& snapshot, uint32_t cameraId) const noexcept;
+    bool EnsureCaptureReadbackBuffer(FrameSlot& slot, uint32_t frameIndex, Nullable<string*> reason) noexcept;
+    bool ExecuteMainScenePass(RenderGraphPassContext& passCtx, Nullable<string*> reason) noexcept;
 };
 
 }  // namespace
@@ -475,45 +509,54 @@ void UploadSystem::ReleaseFrameResources(FrameInFlight& frame) noexcept {
 
 namespace {
 
-bool RendererRuntimeImpl::InitializeProgram(Nullable<string*> reason) noexcept {
+bool UploadPassExecutor::Execute(RenderGraphPassContext& passCtx, Nullable<string*> reason) const noexcept {
+    auto& frame = passCtx.Frame();
+    if (Uploads == nullptr || Assets == nullptr || frame.InFlight == nullptr) {
+        return StoreReason(reason, "upload pass executor is missing runtime dependencies");
+    }
+    return Uploads->ProcessPendingUploads(passCtx.Cmd(), *Assets, *frame.InFlight, reason);
+}
+
+bool RendererRuntimeImpl::InitializeMainSceneResources(Nullable<string*> reason) noexcept {
 #if !defined(RADRAY_ENABLE_DXC)
     return StoreReason(reason, "runtime fixed pipeline requires DXC");
 #else
-    if (Program.RootSignature != nullptr) {
+    auto& program = MainSceneResources.Program;
+    if (program.RootSignature != nullptr) {
         return true;
     }
     auto dxcOpt = render::CreateDxc();
     if (!dxcOpt.HasValue()) {
         return StoreReason(reason, "CreateDxc failed");
     }
-    Program.DxcCompiler = dxcOpt.Release();
+    program.DxcCompiler = dxcOpt.Release();
     if (!CreateShaderFromDxcOutput(
             Device.get(),
             Device->GetBackend(),
-            Program.DxcCompiler,
+            program.DxcCompiler,
             kForwardShaderSource,
             "VSMain",
             render::ShaderStage::Vertex,
-            Program.VertexBlob,
-            Program.VertexShader,
+            program.VertexBlob,
+            program.VertexShader,
             reason)) {
         return false;
     }
     if (!CreateShaderFromDxcOutput(
             Device.get(),
             Device->GetBackend(),
-            Program.DxcCompiler,
+            program.DxcCompiler,
             kForwardShaderSource,
             "PSMain",
             render::ShaderStage::Pixel,
-            Program.PixelBlob,
-            Program.PixelShader,
+            program.PixelBlob,
+            program.PixelShader,
             reason)) {
         return false;
     }
     render::Shader* shaders[] = {
-        Program.VertexShader.get(),
-        Program.PixelShader.get(),
+        program.VertexShader.get(),
+        program.PixelShader.get(),
     };
     render::RootSignatureDescriptor rootSignatureDesc{};
     rootSignatureDesc.Shaders = shaders;
@@ -521,16 +564,16 @@ bool RendererRuntimeImpl::InitializeProgram(Nullable<string*> reason) noexcept {
     if (!rootSigOpt.HasValue()) {
         return StoreReason(reason, "CreateRootSignature failed for fixed forward pipeline");
     }
-    Program.RootSignature = rootSigOpt.Release();
-    Program.RootSignature->SetDebugName("runtime_forward_root_signature");
-    Program.DrawConstantsId = Program.RootSignature->FindParameterId("gDraw");
-    Program.FrameConstantsId = Program.RootSignature->FindParameterId("gFrame");
-    Program.AlbedoId = Program.RootSignature->FindParameterId("gAlbedo");
-    Program.AlbedoSamplerId = Program.RootSignature->FindParameterId("gAlbedoSampler");
-    if (!Program.DrawConstantsId.has_value() ||
-        !Program.FrameConstantsId.has_value() ||
-        !Program.AlbedoId.has_value() ||
-        !Program.AlbedoSamplerId.has_value()) {
+    program.RootSignature = rootSigOpt.Release();
+    program.RootSignature->SetDebugName("runtime_forward_root_signature");
+    program.DrawConstantsId = program.RootSignature->FindParameterId("gDraw");
+    program.FrameConstantsId = program.RootSignature->FindParameterId("gFrame");
+    program.AlbedoId = program.RootSignature->FindParameterId("gAlbedo");
+    program.AlbedoSamplerId = program.RootSignature->FindParameterId("gAlbedoSampler");
+    if (!program.DrawConstantsId.has_value() ||
+        !program.FrameConstantsId.has_value() ||
+        !program.AlbedoId.has_value() ||
+        !program.AlbedoSamplerId.has_value()) {
         return StoreReason(reason, "fixed forward pipeline parameter lookup failed");
     }
     return true;
@@ -606,25 +649,26 @@ bool RendererRuntimeImpl::CreateSwapchain(Nullable<string*> reason) noexcept {
 }
 
 render::GraphicsPipelineState* RendererRuntimeImpl::GetOrCreatePipeline(const MeshSubmesh& submesh, Nullable<string*> reason) noexcept {
+    auto& program = MainSceneResources.Program;
     const auto keyOpt = BuildPipelineKey(submesh, ActiveFormat);
     if (!keyOpt.has_value()) {
         StoreReason(reason, "unsupported mesh vertex layout for runtime forward pipeline");
         return nullptr;
     }
-    auto found = Program.PipelineStates.find(keyOpt.value());
-    if (found != Program.PipelineStates.end()) {
+    auto found = program.PipelineStates.find(keyOpt.value());
+    if (found != program.PipelineStates.end()) {
         return found->second.get();
     }
 
     render::ColorTargetState colorTarget = render::ColorTargetState::Default(ActiveFormat);
     render::GraphicsPipelineStateDescriptor psoDesc{};
-    psoDesc.RootSig = Program.RootSignature.get();
+    psoDesc.RootSig = program.RootSignature.get();
     psoDesc.VS = render::ShaderEntry{
-        .Target = Program.VertexShader.get(),
+        .Target = program.VertexShader.get(),
         .EntryPoint = "VSMain",
     };
     psoDesc.PS = render::ShaderEntry{
-        .Target = Program.PixelShader.get(),
+        .Target = program.PixelShader.get(),
         .EntryPoint = "PSMain",
     };
     psoDesc.VertexLayouts = std::span{&submesh.VertexLayout, 1};
@@ -648,13 +692,14 @@ render::GraphicsPipelineState* RendererRuntimeImpl::GetOrCreatePipeline(const Me
     auto pso = psoOpt.Release();
     pso->SetDebugName("runtime_forward_pso");
     auto* result = pso.get();
-    Program.PipelineStates.emplace(keyOpt.value(), std::move(pso));
+    program.PipelineStates.emplace(keyOpt.value(), std::move(pso));
     return result;
 }
 
 render::DescriptorSet* RendererRuntimeImpl::GetOrCreateMaterialSet(MaterialHandle handle, Nullable<string*> reason) noexcept {
-    auto found = Program.MaterialDescriptorSets.find(handle.Value);
-    if (found != Program.MaterialDescriptorSets.end()) {
+    auto& program = MainSceneResources.Program;
+    auto found = program.MaterialDescriptorSets.find(handle.Value);
+    if (found != program.MaterialDescriptorSets.end()) {
         return found->second.get();
     }
 
@@ -670,82 +715,229 @@ render::DescriptorSet* RendererRuntimeImpl::GetOrCreateMaterialSet(MaterialHandl
         return nullptr;
     }
 
-    auto setOpt = Device->CreateDescriptorSet(Program.RootSignature.get(), render::DescriptorSetIndex{1});
+    auto setOpt = Device->CreateDescriptorSet(program.RootSignature.get(), render::DescriptorSetIndex{1});
     if (!setOpt.HasValue()) {
         StoreReason(reason, "CreateDescriptorSet failed for material set");
         return nullptr;
     }
     auto set = setOpt.Release();
-    if (!set->WriteResource(Program.AlbedoId.value(), textureOpt.Get()->DefaultView.get()) ||
-        !set->WriteSampler(Program.AlbedoSamplerId.value(), samplerOpt.Get()->SamplerObject.get())) {
+    if (!set->WriteResource(program.AlbedoId.value(), textureOpt.Get()->DefaultView.get()) ||
+        !set->WriteSampler(program.AlbedoSamplerId.value(), samplerOpt.Get()->SamplerObject.get())) {
         StoreReason(reason, "failed to populate material descriptor set");
         return nullptr;
     }
     set->SetDebugName(fmt::format("runtime_material_set_{}", handle.Value));
     auto* result = set.get();
-    Program.MaterialDescriptorSets.emplace(handle.Value, std::move(set));
+    program.MaterialDescriptorSets.emplace(handle.Value, std::move(set));
     return result;
 }
 
-vector<PreparedView> RendererRuntimeImpl::PrepareViews(const FrameSnapshot& snapshot) const {
-    vector<PreparedView> views{};
-    views.reserve(snapshot.Views.size());
-    for (const auto& viewRequest : snapshot.Views) {
-        views.push_back(PreparedView{
-            .ViewId = viewRequest.ViewId,
-            .CameraId = viewRequest.CameraId,
-            .OutputWidth = viewRequest.OutputWidth,
-            .OutputHeight = viewRequest.OutputHeight,
-        });
+bool MainScenePassExecutor::Execute(RenderGraphPassContext& passCtx, Nullable<string*> reason) const noexcept {
+    if (Runtime == nullptr) {
+        return StoreReason(reason, "main scene pass executor is not initialized");
     }
-    for (auto& view : views) {
-        for (const auto& meshBatch : snapshot.MeshBatches) {
-            if (meshBatch.ViewMask != 0 && (meshBatch.ViewMask & 0x1u) == 0u) {
-                continue;
-            }
-            view.DrawItems.push_back(PreparedDrawItem{
-                .Mesh = meshBatch.Mesh,
-                .Material = meshBatch.Material,
-                .SubmeshIndex = meshBatch.SubmeshIndex,
-                .LocalToWorld = meshBatch.LocalToWorld,
-                .Tint = Eigen::Vector4f::Ones(),
-                .SortKeyHigh = meshBatch.SortKeyHigh,
-                .SortKeyLow = meshBatch.SortKeyLow,
-            });
-        }
-        std::sort(
-            view.DrawItems.begin(),
-            view.DrawItems.end(),
-            [](const PreparedDrawItem& lhs, const PreparedDrawItem& rhs) noexcept {
-                if (lhs.SortKeyHigh != rhs.SortKeyHigh) {
-                    return lhs.SortKeyHigh < rhs.SortKeyHigh;
-                }
-                if (lhs.SortKeyLow != rhs.SortKeyLow) {
-                    return lhs.SortKeyLow < rhs.SortKeyLow;
-                }
-                if (lhs.Material.Value != rhs.Material.Value) {
-                    return lhs.Material.Value < rhs.Material.Value;
-                }
-                if (lhs.Mesh.Value != rhs.Mesh.Value) {
-                    return lhs.Mesh.Value < rhs.Mesh.Value;
-                }
-                return lhs.SubmeshIndex < rhs.SubmeshIndex;
-            });
-    }
-    return views;
+    return Runtime->ExecuteMainScenePass(passCtx, reason);
 }
 
-const CameraRenderData* RendererRuntimeImpl::FindCamera(const FrameSnapshot& snapshot, uint32_t cameraId) const noexcept {
-    auto it = std::find_if(
-        snapshot.Cameras.begin(),
-        snapshot.Cameras.end(),
-        [&](const CameraRenderData& camera) noexcept {
-            return camera.CameraId == cameraId;
-        });
-    return it == snapshot.Cameras.end() ? nullptr : &(*it);
+bool RendererRuntimeImpl::EnsureCaptureReadbackBuffer(
+    FrameSlot& slot,
+    uint32_t frameIndex,
+    Nullable<string*> reason) noexcept {
+    const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(ActiveFormat);
+    const uint64_t rowPitch = Align(
+        static_cast<uint64_t>(Width) * bytesPerPixel,
+        std::max<uint64_t>(1, Device->GetDetail().TextureDataPitchAlignment));
+    const uint64_t captureSize = rowPitch * Height;
+    if (slot.CaptureReadbackBuffer == nullptr || slot.CaptureSize != captureSize) {
+        render::BufferDescriptor captureDesc{};
+        captureDesc.Size = captureSize;
+        captureDesc.Memory = render::MemoryType::ReadBack;
+        captureDesc.Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead;
+        auto captureOpt = Device->CreateBuffer(captureDesc);
+        if (!captureOpt.HasValue()) {
+            return StoreReason(reason, "failed to create capture readback buffer");
+        }
+        slot.CaptureReadbackBuffer = captureOpt.Release();
+        slot.CaptureReadbackBuffer->SetDebugName(fmt::format("runtime_capture_{}", frameIndex));
+        slot.CaptureBufferState = render::BufferState::Common;
+    }
+    slot.CaptureRowPitch = rowPitch;
+    slot.CaptureSize = captureSize;
+    slot.CaptureWidth = Width;
+    slot.CaptureHeight = Height;
+    slot.CaptureFormat = ActiveFormat;
+    return true;
+}
+
+bool RendererRuntimeImpl::ExecuteMainScenePass(RenderGraphPassContext& passCtx, Nullable<string*> reason) noexcept {
+    auto& frame = passCtx.Frame();
+    auto& program = MainSceneResources.Program;
+    render::TextureView* colorTarget = passCtx.GetTextureView(frame.SwapchainColorHandle);
+    if (passCtx.Cmd() == nullptr || colorTarget == nullptr || frame.Device == nullptr ||
+        frame.Descriptors == nullptr || frame.UploadArena == nullptr) {
+        return StoreReason(reason, "render frame context is missing main scene dependencies");
+    }
+
+    const PreparedView* preparedView = FindMainColorPreparedView(frame);
+    if (preparedView == nullptr || preparedView->Camera == nullptr) {
+        return StoreReason(reason, "prepared scene does not contain a valid main color view");
+    }
+    const CameraRenderData* camera = preparedView->Camera;
+
+    const uint64_t frameCBufferSize = Align(
+        sizeof(FrameConstantsCpu),
+        std::max<uint64_t>(16, frame.Device->GetDetail().CBufferAlignment));
+    auto frameAlloc = frame.UploadArena->Allocate(frameCBufferSize);
+    if (frameAlloc.Target == nullptr || frameAlloc.Mapped == nullptr) {
+        return StoreReason(reason, "failed to allocate frame constant buffer memory");
+    }
+    std::memset(frameAlloc.Mapped, 0, static_cast<size_t>(frameCBufferSize));
+    auto* frameConstants = static_cast<FrameConstantsCpu*>(frameAlloc.Mapped);
+    frameConstants->ViewProj = camera->ViewProj;
+
+    auto frameCbv = frame.Descriptors->CreateBufferView(render::BufferViewDescriptor{
+        .Target = frameAlloc.Target,
+        .Range = render::BufferRange{frameAlloc.Offset, frameCBufferSize},
+        .Stride = 0,
+        .Format = render::TextureFormat::UNKNOWN,
+        .Usage = render::BufferViewUsage::CBuffer,
+    });
+    if (!frameCbv.HasValue()) {
+        return StoreReason(reason, "failed to create frame constant buffer view");
+    }
+    frameCbv.Get()->SetDebugName(fmt::format("runtime_frame_cbv_{}", frame.FrameIndex));
+
+    auto frameSet = frame.Descriptors->CreateDescriptorSet(program.RootSignature.get(), render::DescriptorSetIndex{0});
+    if (!frameSet.HasValue()) {
+        return StoreReason(reason, "failed to create frame descriptor set");
+    }
+    if (!frameSet.Get()->WriteResource(program.FrameConstantsId.value(), frameCbv.Get())) {
+        return StoreReason(reason, "failed to write frame constant descriptor");
+    }
+    frameSet.Get()->SetDebugName(fmt::format("runtime_frame_set_{}", frame.FrameIndex));
+
+    const render::ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+    render::ColorAttachment colorAttachment{
+        .Target = colorTarget,
+        .Load = render::LoadAction::Clear,
+        .Store = render::StoreAction::Store,
+        .ClearValue = clearValue,
+    };
+    render::RenderPassDescriptor renderPassDesc{};
+    renderPassDesc.Name = "RuntimeMainScene";
+    renderPassDesc.ColorAttachments = std::span{&colorAttachment, 1};
+    auto encoderOpt = passCtx.Cmd()->BeginRenderPass(renderPassDesc);
+    if (!encoderOpt.HasValue()) {
+        return StoreReason(reason, "BeginRenderPass failed in renderer runtime");
+    }
+    auto encoder = encoderOpt.Release();
+    encoder->SetViewport(Viewport{
+        .X = 0.0f,
+        .Y = 0.0f,
+        .Width = static_cast<float>(preparedView->OutputWidth),
+        .Height = static_cast<float>(preparedView->OutputHeight),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f,
+    });
+    encoder->SetScissor(Rect{
+        .X = 0,
+        .Y = 0,
+        .Width = preparedView->OutputWidth,
+        .Height = preparedView->OutputHeight,
+    });
+    encoder->BindRootSignature(program.RootSignature.get());
+    encoder->BindDescriptorSet(render::DescriptorSetIndex{0}, frameSet.Get());
+
+    MaterialHandle lastMaterial{};
+    PipelineKey lastPipelineKey{};
+    bool hasLastPipelineKey{false};
+    for (const auto& drawItem : preparedView->DrawItems) {
+        auto meshOpt = AssetRegistry->ResolveMesh(drawItem.Mesh);
+        auto materialOpt = AssetRegistry->ResolveMaterial(drawItem.Material);
+        if (!meshOpt.HasValue() || !materialOpt.HasValue()) {
+            continue;
+        }
+        const auto* mesh = meshOpt.Get();
+        if (!mesh->IsUploaded || drawItem.SubmeshIndex >= mesh->Submeshes.size()) {
+            continue;
+        }
+        const auto& submesh = mesh->Submeshes[drawItem.SubmeshIndex];
+        auto* materialSet = this->GetOrCreateMaterialSet(drawItem.Material, reason);
+        if (materialSet == nullptr) {
+            return false;
+        }
+        const auto keyOpt = BuildPipelineKey(submesh, ActiveFormat);
+        if (!keyOpt.has_value()) {
+            continue;
+        }
+        if (!hasLastPipelineKey || keyOpt.value() != lastPipelineKey) {
+            auto* pso = this->GetOrCreatePipeline(submesh, reason);
+            if (pso == nullptr) {
+                return false;
+            }
+            encoder->BindGraphicsPipelineState(pso);
+            lastPipelineKey = keyOpt.value();
+            hasLastPipelineKey = true;
+        }
+        if (!lastMaterial.IsValid() || lastMaterial != drawItem.Material) {
+            encoder->BindDescriptorSet(render::DescriptorSetIndex{1}, materialSet);
+            lastMaterial = drawItem.Material;
+        }
+        encoder->BindVertexBuffer(std::span{&submesh.VertexBuffer, 1});
+        encoder->BindIndexBuffer(submesh.IndexBuffer);
+        DrawConstantsCpu drawConstants{};
+        drawConstants.LocalToWorld = drawItem.LocalToWorld;
+        drawConstants.Tint = materialOpt.Get()->Desc.Tint.cwiseProduct(drawItem.Tint);
+        encoder->PushConstants(program.DrawConstantsId.value(), &drawConstants, sizeof(drawConstants));
+        encoder->DrawIndexed(submesh.IndexCount, 1, 0, 0, 0);
+    }
+    passCtx.Cmd()->EndRenderPass(std::move(encoder));
+    return true;
 }
 
 }  // namespace
+
+namespace {
+
+class ForwardPipeline final : public IRenderPipeline {
+public:
+    explicit ForwardPipeline(ForwardPipelineCreateDesc desc) noexcept
+        : _desc(std::move(desc)) {}
+
+    bool Build(RenderGraph& graph, const RenderFrameContext& frame, Nullable<string*> reason) override {
+        if (!frame.SwapchainColorHandle.IsValid()) {
+            return StoreReason(reason, "forward pipeline requires a valid render runtime context");
+        }
+        if (!_desc.UploadPassExecute || !_desc.MainScenePassExecute) {
+            return StoreReason(reason, "forward pipeline execute callbacks are not initialized");
+        }
+
+        graph.AddCopyPass("UploadPass", [this](PassBuilder& builder) {
+            builder.SetExecute(_desc.UploadPassExecute);
+        });
+
+        graph.AddRasterPass("MainScenePass", [this, backBuffer = frame.SwapchainColorHandle](PassBuilder& builder) {
+            builder.SetColorAttachment(backBuffer);
+            builder.SetExecute(_desc.MainScenePassExecute);
+        });
+
+        graph.AddCopyPass("PresentPass", [backBuffer = frame.SwapchainColorHandle](PassBuilder& builder) {
+            builder.SetPresentTarget(backBuffer);
+            builder.SetExecute([](RenderGraphPassContext&, Nullable<string*>) { return true; });
+        });
+
+        return true;
+    }
+
+private:
+    ForwardPipelineCreateDesc _desc{};
+};
+
+}  // namespace
+
+unique_ptr<IRenderPipeline> CreateForwardPipeline(const ForwardPipelineCreateDesc& desc) {
+    return make_unique<ForwardPipeline>(desc);
+}
 
 class RendererRuntime::Impl : public RendererRuntimeImpl {
 };
@@ -756,7 +948,17 @@ RendererRuntime::~RendererRuntime() noexcept {
     this->Destroy();
 }
 
-bool RendererRuntime::Initialize(const RendererRuntimeCreateDesc& desc, Nullable<string*> reason) noexcept {
+Nullable<unique_ptr<RendererRuntime>> RendererRuntime::Create(
+    const RendererRuntimeCreateDesc& desc,
+    Nullable<string*> reason) noexcept {
+    auto runtime = unique_ptr<RendererRuntime>(new RendererRuntime{});
+    if (!runtime->InitializeImpl(desc, reason)) {
+        return nullptr;
+    }
+    return runtime;
+}
+
+bool RendererRuntime::InitializeImpl(const RendererRuntimeCreateDesc& desc, Nullable<string*> reason) noexcept {
     this->Destroy();
     if (desc.Device == nullptr) {
         return StoreReason(reason, "renderer runtime requires a valid device");
@@ -806,11 +1008,22 @@ bool RendererRuntime::Initialize(const RendererRuntimeCreateDesc& desc, Nullable
     }
 
     impl->AssetRegistry = make_unique<RenderAssetRegistry>(impl->Device.get());
+    impl->UploadExecutor.Uploads = &impl->Uploader;
+    impl->UploadExecutor.Assets = impl->AssetRegistry.get();
+    impl->MainSceneExecutor.Runtime = impl.get();
+    impl->PersistentResources.Reset(impl->Device.get());
     if (!impl->Uploader.Initialize(impl->Device.get())) {
         return StoreReason(reason, "failed to initialize upload system");
     }
-    if (!impl->InitializeProgram(reason)) {
+    if (!impl->InitializeMainSceneResources(reason)) {
         return false;
+    }
+    impl->Pipeline = CreateForwardPipeline(ForwardPipelineCreateDesc{
+        .UploadPassExecute = [executor = impl->UploadExecutor](RenderGraphPassContext& passCtx, Nullable<string*> failureReason) { return executor.Execute(passCtx, failureReason); },
+        .MainScenePassExecute = [executor = impl->MainSceneExecutor](RenderGraphPassContext& passCtx, Nullable<string*> failureReason) { return executor.Execute(passCtx, failureReason); },
+    });
+    if (impl->Pipeline == nullptr) {
+        return StoreReason(reason, "failed to create forward pipeline");
     }
 
     _impl = std::move(impl);
@@ -856,8 +1069,8 @@ bool RendererRuntime::RenderFrame(const FrameSnapshot& snapshot, Nullable<string
     }
     _impl->Uploader.ReleaseFrameResources(slot.PublicState);
     slot.CBufferArena.Reset();
-    slot.TemporaryBufferViews.clear();
-    slot.TemporaryDescriptorSets.clear();
+    slot.CPUArena.Reset();
+    slot.DescriptorArena.Reset(_impl->Device.get());
 
     render::Texture* backBuffer = nullptr;
     render::SwapChainSyncObject* waitToDrawSync = nullptr;
@@ -884,193 +1097,94 @@ bool RendererRuntime::RenderFrame(const FrameSnapshot& snapshot, Nullable<string
     context.FrameIndex = slotIndex;
     context.BackBufferIndex = backBufferIndex;
     context.Snapshot = &snapshot;
-    context.PreparedViews = _impl->PrepareViews(snapshot);
-    if (context.PreparedViews.empty()) {
+    context.CPUArena = &slot.CPUArena;
+    context.UploadArena = &slot.CBufferArena;
+    context.Descriptors = &slot.DescriptorArena;
+    context.Device = _impl->Device.get();
+    context.CommandBuffer = slot.CommandBuffer.get();
+    context.SwapchainColor = ImportedTextureDesc{
+        .Texture = backBuffer,
+        .DefaultView = _impl->BackBufferRtvs[backBufferIndex].get(),
+        .Desc = backBuffer->GetDesc(),
+        .InitialState = _impl->BackBufferStates[backBufferIndex],
+    };
+    context.BackBuffer = backBuffer;
+    context.BackBufferRtv = _impl->BackBufferRtvs[backBufferIndex].get();
+    context.AssetRegistry = _impl->AssetRegistry.get();
+    context.Uploads = &_impl->Uploader;
+    context.PersistentResources = &_impl->PersistentResources;
+    context.InFlight = &slot.PublicState;
+    context.CaptureEnabled = _impl->CaptureEnabled;
+    if (!PrepareScene(snapshot, *_impl->AssetRegistry, context.Prepared, reason)) {
+        return false;
+    }
+    if (context.Prepared.Views.empty()) {
         return StoreReason(reason, "frame snapshot did not produce any prepared views");
     }
 
-    const PreparedView& preparedView = context.PreparedViews.front();
-    const CameraRenderData* camera = _impl->FindCamera(snapshot, preparedView.CameraId);
-    if (camera == nullptr) {
-        return StoreReason(reason, "prepared render view does not resolve to a camera");
-    }
-
-    const uint64_t frameCBufferSize = Align(
-        sizeof(FrameConstantsCpu),
-        std::max<uint64_t>(16, _impl->Device->GetDetail().CBufferAlignment));
-    auto frameAlloc = slot.CBufferArena.Allocate(frameCBufferSize);
-    if (frameAlloc.Target == nullptr || frameAlloc.Mapped == nullptr) {
-        return StoreReason(reason, "failed to allocate frame constant buffer memory");
-    }
-    std::memset(frameAlloc.Mapped, 0, static_cast<size_t>(frameCBufferSize));
-    auto* frameConstants = static_cast<FrameConstantsCpu*>(frameAlloc.Mapped);
-    frameConstants->ViewProj = camera->ViewProj;
-
-    render::BufferViewDescriptor frameCbvDesc{};
-    frameCbvDesc.Target = frameAlloc.Target;
-    frameCbvDesc.Range = render::BufferRange{frameAlloc.Offset, frameCBufferSize};
-    frameCbvDesc.Usage = render::BufferViewUsage::CBuffer;
-    auto frameCbvOpt = _impl->Device->CreateBufferView(frameCbvDesc);
-    if (!frameCbvOpt.HasValue()) {
-        return StoreReason(reason, "failed to create frame constant buffer view");
-    }
-    auto frameCbv = frameCbvOpt.Release();
-    frameCbv->SetDebugName(fmt::format("runtime_frame_cbv_{}", slotIndex));
-
-    auto frameSetOpt = _impl->Device->CreateDescriptorSet(_impl->Program.RootSignature.get(), render::DescriptorSetIndex{0});
-    if (!frameSetOpt.HasValue()) {
-        return StoreReason(reason, "failed to create frame descriptor set");
-    }
-    auto frameSet = frameSetOpt.Release();
-    if (!frameSet->WriteResource(_impl->Program.FrameConstantsId.value(), frameCbv.get())) {
-        return StoreReason(reason, "failed to write frame constant descriptor");
-    }
-    frameSet->SetDebugName(fmt::format("runtime_frame_set_{}", slotIndex));
-
-    slot.TemporaryBufferViews.push_back(std::move(frameCbv));
-    slot.TemporaryDescriptorSets.push_back(std::move(frameSet));
-    auto* frameDescriptorSet = slot.TemporaryDescriptorSets.back().get();
-
     auto* cmd = slot.CommandBuffer.get();
     cmd->Begin();
-    if (!_impl->Uploader.ProcessPendingUploads(cmd, *_impl->AssetRegistry, slot.PublicState, reason)) {
-        return false;
-    }
-
-    render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
-        .Target = backBuffer,
-        .Before = _impl->BackBufferStates[backBufferIndex],
-        .After = render::TextureState::RenderTarget,
-    };
-    cmd->ResourceBarrier(std::span{&toRenderTarget, 1});
-
-    const render::ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
-    render::ColorAttachment colorAttachment{
-        .Target = _impl->BackBufferRtvs[backBufferIndex].get(),
-        .Load = render::LoadAction::Clear,
-        .Store = render::StoreAction::Store,
-        .ClearValue = clearValue,
-    };
-    render::RenderPassDescriptor renderPassDesc{};
-    renderPassDesc.Name = "RuntimeMainScene";
-    renderPassDesc.ColorAttachments = std::span{&colorAttachment, 1};
-    auto encoderOpt = cmd->BeginRenderPass(renderPassDesc);
-    if (!encoderOpt.HasValue()) {
-        return StoreReason(reason, "BeginRenderPass failed in renderer runtime");
-    }
-    auto encoder = encoderOpt.Release();
-    encoder->SetViewport(Viewport{
-        .X = 0.0f,
-        .Y = 0.0f,
-        .Width = static_cast<float>(preparedView.OutputWidth),
-        .Height = static_cast<float>(preparedView.OutputHeight),
-        .MinDepth = 0.0f,
-        .MaxDepth = 1.0f,
-    });
-    encoder->SetScissor(Rect{
-        .X = 0,
-        .Y = 0,
-        .Width = preparedView.OutputWidth,
-        .Height = preparedView.OutputHeight,
-    });
-    encoder->BindRootSignature(_impl->Program.RootSignature.get());
-    encoder->BindDescriptorSet(render::DescriptorSetIndex{0}, frameDescriptorSet);
-
-    MaterialHandle lastMaterial{};
-    PipelineKey lastPipelineKey{};
-    bool hasLastPipelineKey{false};
-    for (const auto& drawItem : preparedView.DrawItems) {
-        auto meshOpt = _impl->AssetRegistry->ResolveMesh(drawItem.Mesh);
-        auto materialOpt = _impl->AssetRegistry->ResolveMaterial(drawItem.Material);
-        if (!meshOpt.HasValue() || !materialOpt.HasValue()) {
-            continue;
-        }
-        const auto* mesh = meshOpt.Get();
-        if (!mesh->IsUploaded || drawItem.SubmeshIndex >= mesh->Submeshes.size()) {
-            continue;
-        }
-        const auto& submesh = mesh->Submeshes[drawItem.SubmeshIndex];
-        auto* materialSet = _impl->GetOrCreateMaterialSet(drawItem.Material, reason);
-        if (materialSet == nullptr) {
+    RenderGraph graph{_impl->Device.get(), &_impl->PersistentResources};
+    context.SwapchainColorHandle = graph.ImportTexture("SwapchainBackBuffer", context.SwapchainColor);
+    if (_impl->CaptureEnabled) {
+        if (!_impl->EnsureCaptureReadbackBuffer(slot, slotIndex, reason)) {
             return false;
         }
-        const auto keyOpt = BuildPipelineKey(submesh, _impl->ActiveFormat);
-        if (!keyOpt.has_value()) {
-            continue;
-        }
-        if (!hasLastPipelineKey || keyOpt.value() != lastPipelineKey) {
-            auto* pso = _impl->GetOrCreatePipeline(submesh, reason);
-            if (pso == nullptr) {
-                return false;
-            }
-            encoder->BindGraphicsPipelineState(pso);
-            lastPipelineKey = keyOpt.value();
-            hasLastPipelineKey = true;
-        }
-        if (!lastMaterial.IsValid() || lastMaterial != drawItem.Material) {
-            encoder->BindDescriptorSet(render::DescriptorSetIndex{1}, materialSet);
-            lastMaterial = drawItem.Material;
-        }
-        encoder->BindVertexBuffer(std::span{&submesh.VertexBuffer, 1});
-        encoder->BindIndexBuffer(submesh.IndexBuffer);
-        DrawConstantsCpu drawConstants{};
-        drawConstants.LocalToWorld = drawItem.LocalToWorld;
-        drawConstants.Tint = materialOpt.Get()->Desc.Tint.cwiseProduct(drawItem.Tint);
-        encoder->PushConstants(_impl->Program.DrawConstantsId.value(), &drawConstants, sizeof(drawConstants));
-        encoder->DrawIndexed(submesh.IndexCount, 1, 0, 0, 0);
-    }
-    cmd->EndRenderPass(std::move(encoder));
-
-    if (_impl->CaptureEnabled) {
-        const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(_impl->ActiveFormat);
-        const uint64_t rowPitch = Align(
-            static_cast<uint64_t>(_impl->Width) * bytesPerPixel,
-            std::max<uint64_t>(1, _impl->Device->GetDetail().TextureDataPitchAlignment));
-        const uint64_t captureSize = rowPitch * _impl->Height;
-        if (slot.CaptureReadbackBuffer == nullptr || slot.CaptureSize != captureSize) {
-            render::BufferDescriptor captureDesc{};
-            captureDesc.Size = captureSize;
-            captureDesc.Memory = render::MemoryType::ReadBack;
-            captureDesc.Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead;
-            auto captureOpt = _impl->Device->CreateBuffer(captureDesc);
-            if (!captureOpt.HasValue()) {
-                return StoreReason(reason, "failed to create capture readback buffer");
-            }
-            slot.CaptureReadbackBuffer = captureOpt.Release();
-            slot.CaptureReadbackBuffer->SetDebugName(fmt::format("runtime_capture_{}", slotIndex));
-        }
-        slot.CaptureRowPitch = rowPitch;
-        slot.CaptureSize = captureSize;
-        slot.CaptureWidth = _impl->Width;
-        slot.CaptureHeight = _impl->Height;
-        slot.CaptureFormat = _impl->ActiveFormat;
-
-        vector<render::ResourceBarrierDescriptor> preCopy{};
-        AppendReadbackPreCopyBarrier(_impl->Device.get(), preCopy, slot.CaptureReadbackBuffer.get());
-        preCopy.push_back(render::BarrierTextureDescriptor{
-            .Target = backBuffer,
-            .Before = render::TextureState::RenderTarget,
-            .After = render::TextureState::CopySource,
-        });
-        cmd->ResourceBarrier(preCopy);
-        cmd->CopyTextureToBuffer(slot.CaptureReadbackBuffer.get(), 0, backBuffer, render::SubresourceRange{0, 1, 0, 1});
-
-        vector<render::ResourceBarrierDescriptor> postCopy{};
-        AppendReadbackPostCopyBarrier(_impl->Device.get(), postCopy, slot.CaptureReadbackBuffer.get());
-        postCopy.push_back(render::BarrierTextureDescriptor{
-            .Target = backBuffer,
-            .Before = render::TextureState::CopySource,
-            .After = render::TextureState::Present,
-        });
-        cmd->ResourceBarrier(postCopy);
-        _impl->LastCaptureSlot = slotIndex;
-    } else {
-        render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
-            .Target = backBuffer,
-            .Before = render::TextureState::RenderTarget,
-            .After = render::TextureState::Present,
+        context.CaptureReadback = ImportedBufferDesc{
+            .Buffer = slot.CaptureReadbackBuffer.get(),
+            .Desc = slot.CaptureReadbackBuffer->GetDesc(),
+            .InitialState = slot.CaptureBufferState,
         };
-        cmd->ResourceBarrier(std::span{&toPresent, 1});
+        context.CaptureReadbackHandle = graph.ImportBuffer("CaptureReadback", context.CaptureReadback);
+    }
+    if (!_impl->Pipeline->Build(graph, context, reason)) {
+        return false;
+    }
+    if (_impl->CaptureEnabled) {
+        const uint32_t captureSlotIndex = slotIndex;
+        graph.AddCopyPass(
+            "ReadbackPass",
+            [this, captureSlotIndex, backBuffer = context.SwapchainColorHandle, readback = context.CaptureReadbackHandle](PassBuilder& builder) {
+                builder.ReadTexture(backBuffer);
+                builder.WriteBuffer(readback);
+                builder.SetExecute(
+                    [this, captureSlotIndex, backBuffer, readback](RenderGraphPassContext& passCtx, Nullable<string*> failureReason) {
+                        render::Texture* texture = passCtx.GetTexture(backBuffer);
+                        render::Buffer* buffer = passCtx.GetBuffer(readback);
+                        if (texture == nullptr || buffer == nullptr) {
+                            return StoreReason(failureReason, "readback pass could not resolve imported graph resources");
+                        }
+                        passCtx.Cmd()->CopyTextureToBuffer(
+                            buffer,
+                            0,
+                            texture,
+                            render::SubresourceRange{0, 1, 0, 1});
+                        vector<render::ResourceBarrierDescriptor> postCopy{};
+                        AppendReadbackPostCopyBarrier(passCtx.Frame().Device, postCopy, buffer);
+                        if (!postCopy.empty()) {
+                            passCtx.Cmd()->ResourceBarrier(postCopy);
+                        }
+
+                        auto& captureSlot = _impl->Frames[captureSlotIndex];
+                        captureSlot.CaptureBufferState =
+                            passCtx.Frame().Device != nullptr &&
+                                    passCtx.Frame().Device->GetBackend() == render::RenderBackend::Vulkan
+                                ? render::BufferState::HostRead
+                                : render::BufferState::CopyDestination;
+                        _impl->LastCaptureSlot = captureSlotIndex;
+                        return true;
+                    });
+            });
+        graph.AddCopyPass("CapturePresentPass", [backBuffer = context.SwapchainColorHandle](PassBuilder& builder) {
+            builder.SetPresentTarget(backBuffer);
+            builder.SetExecute([](RenderGraphPassContext&, Nullable<string*>) { return true; });
+        });
+    }
+    if (!graph.Compile(reason)) {
+        return false;
+    }
+    if (!graph.Execute(context, reason)) {
+        return false;
     }
     cmd->End();
 
@@ -1083,7 +1197,8 @@ bool RendererRuntime::RenderFrame(const FrameSnapshot& snapshot, Nullable<string
     _impl->Queue->Submit(submitDesc);
     _impl->Swapchain->Present(readyToPresentSync);
 
-    _impl->BackBufferStates[backBufferIndex] = render::TextureState::Present;
+    _impl->BackBufferStates[backBufferIndex] =
+        graph.GetCompiledFinalTextureState(context.SwapchainColorHandle).value_or(render::TextureState::Present);
     slot.PublicState.ExpectedFenceValue++;
     _impl->FrameCounter++;
     return true;

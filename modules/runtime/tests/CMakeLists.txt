@@ -10,6 +10,9 @@ radray_add_test(
     test_runtime_snapshot_builder
     SOURCES
         test_frame_snapshot_builder.cpp
+        test_frame_snapshot_queue.cpp
+        test_runtime_driver.cpp
+        test_render_graph.cpp
     LINK_LIBS
         radraycore
         radrayruntime)
@@ -20,6 +23,7 @@ if (RADRAY_RUNTIME_DEVICE_TEST_ENABLED)
         SOURCES
             runtime_test_framework.cpp
             test_render_asset_registry.cpp
+            test_render_prepare.cpp
         LINK_LIBS
             radraycore
             radrayrender

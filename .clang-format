@@ -126,7 +126,7 @@ SpaceBeforeSquareBrackets: false
 BitFieldColonSpacing: Both
 Standard:        Auto
 TabWidth:        4
-UseCRLF:         true
+# UseCRLF:         true
 UseTab:          Never
 ---
 Language:        ObjC

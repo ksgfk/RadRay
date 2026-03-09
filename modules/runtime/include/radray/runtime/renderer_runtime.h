@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 
 #include <radray/nullable.h>
@@ -8,38 +9,67 @@
 #include <radray/types.h>
 
 #include <radray/runtime/frame_snapshot.h>
+#include <radray/runtime/persistent_resource_registry.h>
 #include <radray/runtime/render_asset_registry.h>
+#include <radray/runtime/render_graph.h>
+#include <radray/runtime/render_prepare.h>
 
 namespace radray::runtime {
 
-struct PreparedDrawItem {
-    MeshHandle Mesh{};
-    MaterialHandle Material{};
-    uint32_t SubmeshIndex{0};
-    Eigen::Matrix4f LocalToWorld{Eigen::Matrix4f::Identity()};
-    Eigen::Vector4f Tint{Eigen::Vector4f::Ones()};
-    uint32_t SortKeyHigh{0};
-    uint32_t SortKeyLow{0};
-};
-
-struct PreparedView {
-    uint32_t ViewId{0};
-    uint32_t CameraId{0};
-    uint32_t OutputWidth{0};
-    uint32_t OutputHeight{0};
-    vector<PreparedDrawItem> DrawItems{};
-};
+class UploadSystem;
 
 struct FrameInFlight {
     uint32_t FrameIndex{0};
     uint64_t ExpectedFenceValue{0};
 };
 
+class FrameLinearAllocator {
+public:
+    void Reset() noexcept;
+    void* Allocate(size_t size, size_t alignment = alignof(std::max_align_t)) noexcept;
+
+private:
+    vector<byte> _storage{};
+    size_t _cursor{0};
+};
+
+class DescriptorArena {
+public:
+    explicit DescriptorArena(render::Device* device = nullptr) noexcept;
+
+    void Reset(render::Device* device = nullptr) noexcept;
+
+    Nullable<render::BufferView*> CreateBufferView(const render::BufferViewDescriptor& desc) noexcept;
+
+    Nullable<render::DescriptorSet*> CreateDescriptorSet(render::RootSignature* rootSig, render::DescriptorSetIndex set) noexcept;
+
+private:
+    render::Device* _device{nullptr};
+    vector<unique_ptr<render::BufferView>> _bufferViews{};
+    vector<unique_ptr<render::DescriptorSet>> _descriptorSets{};
+};
+
 struct RenderFrameContext {
     uint32_t FrameIndex{0};
     uint32_t BackBufferIndex{0};
     const FrameSnapshot* Snapshot{nullptr};
-    vector<PreparedView> PreparedViews{};
+    PreparedScene Prepared{};
+    FrameLinearAllocator* CPUArena{nullptr};
+    render::CBufferArena* UploadArena{nullptr};
+    DescriptorArena* Descriptors{nullptr};
+    render::Device* Device{nullptr};
+    render::CommandBuffer* CommandBuffer{nullptr};
+    ImportedTextureDesc SwapchainColor{};
+    RgResourceHandle SwapchainColorHandle{};
+    ImportedBufferDesc CaptureReadback{};
+    RgResourceHandle CaptureReadbackHandle{};
+    bool CaptureEnabled{false};
+    render::Texture* BackBuffer{nullptr};
+    render::TextureView* BackBufferRtv{nullptr};
+    RenderAssetRegistry* AssetRegistry{nullptr};
+    UploadSystem* Uploads{nullptr};
+    PersistentResourceRegistry* PersistentResources{nullptr};
+    FrameInFlight* InFlight{nullptr};
 };
 
 class UploadSystem {
@@ -78,10 +108,11 @@ struct RendererRuntimeCreateDesc {
 
 class RendererRuntime {
 public:
-    RendererRuntime() noexcept;
-    ~RendererRuntime() noexcept;
+    static Nullable<unique_ptr<RendererRuntime>> Create(
+        const RendererRuntimeCreateDesc& desc,
+        Nullable<string*> reason = nullptr) noexcept;
 
-    bool Initialize(const RendererRuntimeCreateDesc& desc, Nullable<string*> reason = nullptr) noexcept;
+    ~RendererRuntime() noexcept;
 
     void Destroy() noexcept;
 
@@ -102,6 +133,9 @@ public:
     std::optional<uint32_t> ReadCapturedPixel(uint32_t x, uint32_t y, Nullable<string*> reason = nullptr) const noexcept;
 
 private:
+    RendererRuntime() noexcept;
+    bool InitializeImpl(const RendererRuntimeCreateDesc& desc, Nullable<string*> reason = nullptr) noexcept;
+
     class Impl;
 
     unique_ptr<Impl> _impl{};

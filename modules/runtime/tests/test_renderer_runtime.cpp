@@ -7,6 +7,7 @@
 #include <radray/triangle_mesh.h>
 #include <radray/runtime/frame_snapshot_builder.h>
 #include <radray/runtime/renderer_runtime.h>
+#include <radray/runtime/runtime_driver.h>
 #include <radray/window/native_window.h>
 
 #include "runtime_test_framework.h"
@@ -131,6 +132,29 @@ void DispatchWindowFrames(NativeWindow* window, uint32_t iterations) {
     }
 }
 
+std::optional<uint32_t> WaitForCapturedPixel(
+    RendererRuntime& renderer,
+    NativeWindow* window,
+    uint32_t x,
+    uint32_t y,
+    Nullable<string*> reason) {
+    string lastReason{};
+    for (uint32_t attempt = 0; attempt < 200; ++attempt) {
+        if (window != nullptr) {
+            window->DispatchEvents();
+        }
+        auto pixel = renderer.ReadCapturedPixel(x, y, &lastReason);
+        if (pixel.has_value()) {
+            return pixel;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (reason.HasValue()) {
+        *reason.Get() = lastReason.empty() ? "timed out waiting for a captured pixel" : lastReason;
+    }
+    return std::nullopt;
+}
+
 void RunRuntimeScenario(runtime::test::TestBackend backend) {
     auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
     if (!windowOpt.HasValue()) {
@@ -149,7 +173,6 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
         GTEST_SKIP() << "Window size is invalid before runtime initialization.";
     }
 
-    RendererRuntime renderer{};
     RendererRuntimeCreateDesc createDesc{};
     createDesc.Device = ctx.GetDevice();
     createDesc.NativeHandler = window->GetNativeHandler().Handle;
@@ -159,9 +182,11 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
     createDesc.FlightFrameCount = 2;
     createDesc.Format = render::TextureFormat::BGRA8_UNORM;
     createDesc.PresentMode = render::PresentMode::FIFO;
-    ASSERT_TRUE(renderer.Initialize(createDesc, &reason)) << reason;
+    auto rendererOpt = RendererRuntime::Create(createDesc, &reason);
+    ASSERT_TRUE(rendererOpt.HasValue()) << reason;
+    auto renderer = rendererOpt.Release();
 
-    RenderAssetRegistry& assets = renderer.Assets();
+    RenderAssetRegistry& assets = renderer->Assets();
     const MeshHandle meshHandle = assets.RegisterMesh(CreateQuadMeshResource());
     ASSERT_TRUE(meshHandle.IsValid());
 
@@ -193,16 +218,16 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
     ASSERT_TRUE(materialHandle.IsValid());
     ASSERT_EQ(assets.GetPendingUploads().size(), 2u);
 
-    renderer.SetCaptureEnabled(true);
+    renderer->SetCaptureEnabled(true);
     window->DispatchEvents();
-    ASSERT_TRUE(renderer.RenderFrame(
+    ASSERT_TRUE(renderer->RenderFrame(
         BuildQuadSnapshot(createDesc.Width, createDesc.Height, meshHandle, materialHandle),
         &reason))
         << reason;
-    renderer.WaitIdle();
+    renderer->WaitIdle();
     ASSERT_TRUE(assets.GetPendingUploads().empty());
 
-    auto pixel = renderer.ReadCapturedPixel(createDesc.Width / 2, createDesc.Height / 2, &reason);
+    auto pixel = renderer->ReadCapturedPixel(createDesc.Width / 2, createDesc.Height / 2, &reason);
     ASSERT_TRUE(pixel.has_value()) << reason;
     EXPECT_NE(pixel.value(), 0xFF000000u);
     EXPECT_NE(pixel.value() & 0x00FFFFFFu, 0u);
@@ -216,9 +241,9 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
             static_cast<int32_t>(kResizedHeight),
         };
     }
-    renderer.Resize(static_cast<uint32_t>(resizedSize.X), static_cast<uint32_t>(resizedSize.Y));
+    renderer->Resize(static_cast<uint32_t>(resizedSize.X), static_cast<uint32_t>(resizedSize.Y));
     window->DispatchEvents();
-    ASSERT_TRUE(renderer.RenderFrame(
+    ASSERT_TRUE(renderer->RenderFrame(
         BuildQuadSnapshot(
             static_cast<uint32_t>(resizedSize.X),
             static_cast<uint32_t>(resizedSize.Y),
@@ -226,9 +251,9 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
             materialHandle),
         &reason))
         << reason;
-    renderer.WaitIdle();
+    renderer->WaitIdle();
 
-    pixel = renderer.ReadCapturedPixel(
+    pixel = renderer->ReadCapturedPixel(
         static_cast<uint32_t>(resizedSize.X / 2),
         static_cast<uint32_t>(resizedSize.Y / 2),
         &reason);
@@ -238,7 +263,130 @@ void RunRuntimeScenario(runtime::test::TestBackend backend) {
     const auto errors = ctx.GetCapturedErrors();
     EXPECT_TRUE(errors.empty()) << ctx.JoinCapturedErrors();
 
-    renderer.Destroy();
+    renderer->Destroy();
+    window->Destroy();
+}
+
+void PublishDriverSnapshot(RuntimeDriver& driver, FrameSnapshot&& snapshot) {
+    FrameSnapshotSlot* slot = driver.BeginSnapshotBuild();
+    ASSERT_NE(slot, nullptr);
+    ASSERT_TRUE(driver.PublishSnapshot(*slot, std::move(snapshot)));
+}
+
+void RunRuntimeDriverScenario(runtime::test::TestBackend backend) {
+    auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
+    if (!windowOpt.HasValue()) {
+        GTEST_SKIP() << "Cannot create native window for this platform.";
+    }
+    auto window = windowOpt.Release();
+
+    runtime::test::RuntimeTestContext ctx{};
+    string reason{};
+    if (!ctx.Initialize(backend, &reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto initialSize = window->GetSize();
+    if (initialSize.X <= 0 || initialSize.Y <= 0) {
+        GTEST_SKIP() << "Window size is invalid before runtime driver initialization.";
+    }
+    const uint32_t initialWidth = static_cast<uint32_t>(initialSize.X);
+    const uint32_t initialHeight = static_cast<uint32_t>(initialSize.Y);
+
+    RuntimeDriverCreateDesc driverDesc{};
+    driverDesc.Mode = RuntimeDriverMode::DualThread;
+    driverDesc.Renderer.Device = ctx.GetDevice();
+    driverDesc.Renderer.NativeHandler = window->GetNativeHandler().Handle;
+    driverDesc.Renderer.Width = initialWidth;
+    driverDesc.Renderer.Height = initialHeight;
+    driverDesc.Renderer.BackBufferCount = 3;
+    driverDesc.Renderer.FlightFrameCount = 2;
+    driverDesc.Renderer.Format = render::TextureFormat::BGRA8_UNORM;
+    driverDesc.Renderer.PresentMode = render::PresentMode::FIFO;
+    auto driverOpt = RuntimeDriver::Create(std::move(driverDesc), &reason);
+    ASSERT_TRUE(driverOpt.HasValue()) << reason;
+    auto driver = driverOpt.Release();
+
+    RenderAssetRegistry& assets = driver->Renderer().Assets();
+    const MeshHandle meshHandle = assets.RegisterMesh(CreateQuadMeshResource());
+    ASSERT_TRUE(meshHandle.IsValid());
+
+    TextureInitDesc textureDesc{};
+    textureDesc.DebugName = "runtime_driver_texture";
+    textureDesc.Desc.Dim = render::TextureDimension::Dim2D;
+    textureDesc.Desc.Width = 2;
+    textureDesc.Desc.Height = 2;
+    textureDesc.Desc.DepthOrArraySize = 1;
+    textureDesc.Desc.MipLevels = 1;
+    textureDesc.Desc.SampleCount = 1;
+    textureDesc.Desc.Format = render::TextureFormat::RGBA8_UNORM;
+    textureDesc.Desc.Memory = render::MemoryType::Device;
+    textureDesc.Desc.Usage = render::TextureUse::Resource;
+    const TextureHandle textureHandle = assets.RegisterTexture2D(
+        textureDesc,
+        CreateSolidTextureBytes(2, 2, {180, 96, 32, 255}));
+    ASSERT_TRUE(textureHandle.IsValid());
+
+    const SamplerHandle samplerHandle = assets.RegisterSampler(CreateLinearClampSamplerDesc());
+    ASSERT_TRUE(samplerHandle.IsValid());
+
+    const MaterialHandle materialHandle = assets.RegisterForwardOpaqueMaterial(ForwardOpaqueMaterialDesc{
+        .Albedo = textureHandle,
+        .Sampler = samplerHandle,
+        .Tint = Eigen::Vector4f{1.0f, 1.0f, 1.0f, 1.0f},
+        .DebugName = "runtime_driver_material",
+    });
+    ASSERT_TRUE(materialHandle.IsValid());
+
+    driver->Renderer().SetCaptureEnabled(true);
+    PublishDriverSnapshot(
+        *driver,
+        BuildQuadSnapshot(
+            initialWidth,
+            initialHeight,
+            meshHandle,
+            materialHandle));
+
+    auto pixel = WaitForCapturedPixel(
+        driver->Renderer(),
+        window.get(),
+        initialWidth / 2,
+        initialHeight / 2,
+        &reason);
+    ASSERT_TRUE(pixel.has_value()) << reason;
+    EXPECT_NE(pixel.value(), 0xFF000000u);
+
+    window->SetSize(static_cast<int>(kResizedWidth), static_cast<int>(kResizedHeight));
+    DispatchWindowFrames(window.get(), 32);
+    auto resizedSize = window->GetSize();
+    if (resizedSize.X <= 0 || resizedSize.Y <= 0) {
+        resizedSize = WindowVec2i{
+            static_cast<int32_t>(kResizedWidth),
+            static_cast<int32_t>(kResizedHeight),
+        };
+    }
+    driver->Renderer().Resize(static_cast<uint32_t>(resizedSize.X), static_cast<uint32_t>(resizedSize.Y));
+    PublishDriverSnapshot(
+        *driver,
+        BuildQuadSnapshot(
+            static_cast<uint32_t>(resizedSize.X),
+            static_cast<uint32_t>(resizedSize.Y),
+            meshHandle,
+            materialHandle));
+
+    pixel = WaitForCapturedPixel(
+        driver->Renderer(),
+        window.get(),
+        static_cast<uint32_t>(resizedSize.X / 2),
+        static_cast<uint32_t>(resizedSize.Y / 2),
+        &reason);
+    ASSERT_TRUE(pixel.has_value()) << reason;
+    EXPECT_NE(pixel.value(), 0xFF000000u);
+
+    const auto errors = ctx.GetCapturedErrors();
+    EXPECT_TRUE(errors.empty()) << ctx.JoinCapturedErrors();
+
+    driver->Destroy();
     window->Destroy();
 }
 
@@ -250,4 +398,12 @@ TEST(RendererRuntimeTest, SmokeAndResize_D3D12) {
 
 TEST(RendererRuntimeTest, SmokeAndResize_Vulkan) {
     RunRuntimeScenario(runtime::test::TestBackend::Vulkan);
+}
+
+TEST(RendererRuntimeDriverTest, SmokeAndResize_D3D12) {
+    RunRuntimeDriverScenario(runtime::test::TestBackend::D3D12);
+}
+
+TEST(RendererRuntimeDriverTest, SmokeAndResize_Vulkan) {
+    RunRuntimeDriverScenario(runtime::test::TestBackend::Vulkan);
 }

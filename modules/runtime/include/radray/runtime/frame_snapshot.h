@@ -10,6 +10,8 @@
 
 namespace radray::runtime {
 
+struct FrameSnapshotSlot;
+
 struct FrameSnapshotHeader {
     uint64_t FrameId{0};
     uint64_t SimulationTick{0};
@@ -86,6 +88,8 @@ class FrameSnapshotBuilder {
 public:
     void Reset(uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds = 0.0) noexcept;
 
+    void ResetFromSlot(FrameSnapshotSlot& slot, uint64_t frameId, uint64_t simulationTick, double cpuTimeSeconds = 0.0) noexcept;
+
     CameraRenderData& AddCamera();
 
     VisibleMeshBatch& AddMeshBatch();
@@ -95,9 +99,13 @@ public:
     FrameSnapshot Finalize(Nullable<string*> reason = nullptr) noexcept;
 
 private:
+    FrameSnapshot& Snapshot() noexcept;
+    const FrameSnapshot& Snapshot() const noexcept;
+    void AttachSnapshot(FrameSnapshot* snapshot) noexcept;
     bool Validate(string* reason) const noexcept;
 
-    FrameSnapshot _snapshot{};
+    FrameSnapshot _ownedSnapshot{};
+    FrameSnapshot* _snapshot{&_ownedSnapshot};
 };
 
 }  // namespace radray::runtime
