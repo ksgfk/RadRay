@@ -148,6 +148,22 @@ function(radray_compile_flag_cpp20 target)
     endif()
 endfunction()
 
+function(radray_default_compile_flags target)
+    if (WIN32)
+        target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    if (MSVC)
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(${target} PRIVATE /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus /W4 /wd4324)
+    endif()
+    target_compile_definitions(${target} PRIVATE
+        $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
+        $<$<PLATFORM_ID:Darwin>:RADRAY_PLATFORM_MACOS>
+        $<$<PLATFORM_ID:iOS>:RADRAY_PLATFORM_IOS>
+        $<$<OR:$<PLATFORM_ID:Darwin>,$<PLATFORM_ID:iOS>>:RADRAY_PLATFORM_APPLE>
+        $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>)
+endfunction()
+
 function(radray_optimize_flags_library target)
     radray_compile_flag_auto_simd(${target})
     radray_compile_flag_lto(${target})

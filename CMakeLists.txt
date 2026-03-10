@@ -6,19 +6,6 @@ endif()
 
 project(RadRay)
 
-# 这里设置区分 macOS 和 iOS
-set(RADRAY_PLATFORM_MACOS OFF)
-set(RADRAY_PLATFORM_IOS OFF)
-set(RADRAY_PLATFORM_APPLE OFF)
-if (APPLE)
-    set(RADRAY_PLATFORM_APPLE ON)
-    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        set(RADRAY_PLATFORM_IOS ON)
-    else()
-        set(RADRAY_PLATFORM_MACOS ON)
-    endif()
-endif()
-
 include(cmake/Utility.cmake)
 
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
@@ -75,9 +62,9 @@ cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADR
 # 加载 manifest
 if (WIN32)
     set(RADRAY_SDKVAR_PLATFORM "windows")
-elseif (RADRAY_PLATFORM_MACOS)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(RADRAY_SDKVAR_PLATFORM "macos")
-elseif (RADRAY_PLATFORM_IOS)
+elseif (IOS)
     set(RADRAY_SDKVAR_PLATFORM "ios")
 elseif (UNIX)
     set(RADRAY_SDKVAR_PLATFORM "linux")

@@ -14,25 +14,9 @@ target_link_libraries(radraycore PRIVATE
     xxHash::xxhash
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
 target_compile_definitions(radraycore PUBLIC
-    $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>
-    $<$<PLATFORM_ID:Darwin>:RADRAY_PLATFORM_MACOS>
-    $<$<PLATFORM_ID:iOS>:RADRAY_PLATFORM_IOS>
-    $<$<BOOL:${RADRAY_PLATFORM_APPLE}>:RADRAY_PLATFORM_APPLE>
-    $<$<NOT:$<CONFIG:Release>>:RADRAY_IS_DEBUG>
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
-if (WIN32)
-    target_compile_definitions(radraycore PRIVATE UNICODE _UNICODE)
-endif()
-if (MSVC)
-    target_compile_definitions(radraycore PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-if (MSVC)
-    target_compile_options(radraycore PUBLIC /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus)
-    target_compile_options(radraycore PUBLIC /wd4324)
-endif()
-target_compile_options(radraycore PRIVATE
-    $<$<BOOL:${MSVC}>:/W4>)
+radray_default_compile_flags(radraycore)
 radray_optimize_flags_library(radraycore)
 radray_set_build_path(radraycore)
 
