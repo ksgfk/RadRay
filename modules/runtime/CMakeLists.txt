@@ -17,6 +17,6 @@ target_compile_options(radrayruntime PRIVATE
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
 
-# if (RADRAY_BUILD_TESTS)
-#     add_subdirectory(tests)
-# endif()
+if (RADRAY_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
