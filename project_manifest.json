@@ -118,7 +118,8 @@
         {
             "Name": "stdexec",
             "Type": "git",
-            "Git": "https://github.com/NVIDIA/stdexec.git"
+            "Git": "https://github.com/NVIDIA/stdexec.git",
+            "Tag": "gtc-2026"
         },
         {
             "Name": "googletest",

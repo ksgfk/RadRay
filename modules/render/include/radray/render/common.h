@@ -16,7 +16,7 @@
 
 namespace radray::render {
 
-enum class RenderBackend {
+enum class RenderBackend : int32_t {
     D3D12,
     Vulkan,
     Metal,
@@ -24,7 +24,7 @@ enum class RenderBackend {
     MAX_COUNT
 };
 
-enum class TextureFormat {
+enum class TextureFormat : int32_t {
     UNKNOWN,
 
     R8_SINT,
@@ -85,7 +85,7 @@ enum class TextureFormat {
     D32_FLOAT_S8_UINT,
 };
 
-enum class TextureDimension {
+enum class TextureDimension : int32_t {
     UNKNOWN,
     Dim1D,
     Dim2D,
@@ -122,25 +122,25 @@ enum class ShaderStage : uint32_t {
     RayTracing = RayGen | Miss | ClosestHit | AnyHit | Intersection | Callable
 };
 
-enum class ShaderBlobCategory {
+enum class ShaderBlobCategory : int32_t {
     DXIL,
     SPIRV,
     MSL,
     METALLIB
 };
 
-enum class AddressMode {
+enum class AddressMode : int32_t {
     ClampToEdge,
     Repeat,
     Mirror
 };
 
-enum class FilterMode {
+enum class FilterMode : int32_t {
     Nearest,
     Linear
 };
 
-enum class CompareFunction {
+enum class CompareFunction : int32_t {
     Never,
     Less,
     Equal,
@@ -151,12 +151,12 @@ enum class CompareFunction {
     Always
 };
 
-enum class VertexStepMode {
+enum class VertexStepMode : int32_t {
     Vertex,
     Instance
 };
 
-enum class VertexFormat {
+enum class VertexFormat : int32_t {
     UNKNOWN,
 
     UINT8X2,
@@ -191,7 +191,7 @@ enum class VertexFormat {
     FLOAT32X4,
 };
 
-enum class PrimitiveTopology {
+enum class PrimitiveTopology : int32_t {
     PointList,
     LineList,
     LineStrip,
@@ -199,29 +199,29 @@ enum class PrimitiveTopology {
     TriangleStrip
 };
 
-enum class IndexFormat {
+enum class IndexFormat : int32_t {
     UINT16,
     UINT32
 };
 
-enum class FrontFace {
+enum class FrontFace : int32_t {
     CCW,
     CW
 };
 
-enum class CullMode {
+enum class CullMode : int32_t {
     Front,
     Back,
     None
 };
 
-enum class PolygonMode {
+enum class PolygonMode : int32_t {
     Fill,
     Line,
     Point
 };
 
-enum class StencilOperation {
+enum class StencilOperation : int32_t {
     Keep,
     Zero,
     Replace,
@@ -232,7 +232,7 @@ enum class StencilOperation {
     DecrementWrap
 };
 
-enum class BlendFactor {
+enum class BlendFactor : int32_t {
     Zero,
     One,
     Src,
@@ -252,7 +252,7 @@ enum class BlendFactor {
     OneMinusSrc1Alpha
 };
 
-enum class BlendOperation {
+enum class BlendOperation : int32_t {
     Add,
     Subtract,
     ReverseSubtract,
@@ -355,24 +355,24 @@ enum class ResourceHint : uint32_t {
     External = Dedicated << 1,
 };
 
-enum class LoadAction {
+enum class LoadAction : int32_t {
     DontCare,
     Load,
     Clear
 };
 
-enum class StoreAction {
+enum class StoreAction : int32_t {
     Store,
     Discard
 };
 
-enum class MemoryType {
+enum class MemoryType : int32_t {
     Device,
     Upload,
     ReadBack,
 };
 
-enum class ResourceBindType {
+enum class ResourceBindType : int32_t {
     UNKNOWN,
     CBuffer,
     Buffer,
@@ -385,25 +385,25 @@ enum class ResourceBindType {
     AccelerationStructure
 };
 
-enum class PresentMode {
+enum class PresentMode : int32_t {
     FIFO,
     Mailbox,
     Immediate
 };
 
-enum class BindlessSlotType {
+enum class BindlessSlotType : int32_t {
     Multiple,
     BufferOnly,
     Texture2DOnly,
     Texture3DOnly
 };
 
-enum class AccelerationStructureType {
+enum class AccelerationStructureType : int32_t {
     BottomLevel,
     TopLevel
 };
 
-enum class AccelerationStructureBuildMode {
+enum class AccelerationStructureBuildMode : int32_t {
     Build,
     Update
 };
@@ -423,7 +423,7 @@ enum class ShaderBindingTableEntryType : uint8_t {
     Callable
 };
 
-enum class BindingParameterKind {
+enum class BindingParameterKind : int32_t {
     UNKNOWN,
     Resource,
     Sampler,

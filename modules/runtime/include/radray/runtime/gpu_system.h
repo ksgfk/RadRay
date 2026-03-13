@@ -1,38 +1,134 @@
 #pragma once
 
+#include <optional>
+
 #include <radray/types.h>
 #include <radray/nullable.h>
+#include <radray/render/common.h>
 
 namespace radray {
 
 class GpuRuntime;
-class GpuSubmissionContext;
+class GpuSubmitContext;
+class GpuPresentSurface;
+class GpuTask;
 
-class GpuSubmissionContext {
+struct GpuRuntimeDescriptor {
+    render::RenderBackend Backend{render::RenderBackend::D3D12};
+    bool EnableDebugValidation{false};
+};
+
+// ---------------------------------------------------------------------------
+// GpuPresentSurfaceDescriptor
+// 注意：这里只保留平台原生窗口句柄，不直接依赖 window 模块类型。
+// 调用方必须保证句柄在 surface 生命周期内持续有效。
+// ---------------------------------------------------------------------------
+struct GpuPresentSurfaceDescriptor {
+    const void* NativeWindowHandle{nullptr};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t BackBufferCount{3};
+    uint32_t FlightFrameCount{2};
+    render::TextureFormat Format{render::TextureFormat::BGRA8_UNORM};
+    render::PresentMode PresentMode{render::PresentMode::FIFO};
+};
+
+// ---------------------------------------------------------------------------
+// GpuPresentSurface
+// 管理 swapchain / present surface。对象由 GpuRuntime 创建并拥有底层 GPU 对象。
+// surface 自身可长期存在；Acquire/Present 语义附着在某个 GpuSubmitContext 上。
+// 也就是说，present 不是独立提交，而是“当前提交批次”的一部分。
+// ---------------------------------------------------------------------------
+class GpuPresentSurface {
 public:
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+
+    uint32_t GetWidth() const noexcept;
+    uint32_t GetHeight() const noexcept;
+    render::TextureFormat GetFormat() const noexcept;
+
+    // 阻塞直到拿到可用 back buffer，或 surface 进入不可恢复状态。
+    // Acquire 的结果挂入 ctx，作为本次提交批次的 present 输入。
+    bool Acquire(GpuSubmitContext& ctx) noexcept;
+
+    // 非阻塞尝试获取。若当前没有可用帧槽，则立即失败。
+    // 成功时同样把 acquire 结果挂入 ctx，而不是立即触发 present。
+    bool TryAcquire(GpuSubmitContext& ctx) noexcept;
+
+    // 向 ctx 注册“本次提交完成后需要 present 此 surface”的意图。
+    // 真正的 Present 发生在 runtime->Submit(ctx) 执行该批次之后。
+    void Present(GpuSubmitContext& ctx) noexcept;
+
 private:
-    GpuRuntime* _service{nullptr};
+    GpuRuntime* _runtime{nullptr};
 
     friend class GpuRuntime;
 };
 
-class GpuPresentSurface {
+// ---------------------------------------------------------------------------
+// GpuTask
+// 表示一次已经提交到 GPU 队列上的执行批次。
+// 它不是 command buffer，也不是资源；它是一个通用的“任务 / 依赖令牌”概念。
+//
+// 语义约束：
+// - 一个 GpuTask 对应一次 GpuRuntime::Submit(ctx)
+// - 一个 GpuTask 只对应一个队列上的一次提交
+// - 一个 GpuTask 表示“该提交批次执行完成”，不额外承诺 scanout / 显示完成
+// ---------------------------------------------------------------------------
+class GpuTask {
 public:
+    bool IsValid() const noexcept;
+
+    bool IsCompleted() const noexcept;
+
+    void Wait() noexcept;
+
+private:
+    friend class GpuRuntime;
 };
 
-class GpuPresentImage {
+// ---------------------------------------------------------------------------
+// GpuSubmitContext
+// 表示一次 GPU 提交批次的 CPU 侧构建上下文。
+//
+// 语义约束：
+// - 一个 GpuSubmitContext 只对应一次 Submit()
+// - 一个 GpuSubmitContext 只绑定一个具体队列
+// - 一个 GpuSubmitContext 可以聚合多条命令录制结果，统一提交到该队列
+// - GpuSubmitContext 本身不是 command buffer，而是“提交批次”
+// - Submit() 后该对象即被消费，不能复用
+// ---------------------------------------------------------------------------
+class GpuSubmitContext {
 public:
+private:
+    GpuRuntime* _runtime{nullptr};
+
+    friend class GpuRuntime;
+    friend class GpuPresentSurface;
 };
 
+// ---------------------------------------------------------------------------
+// GpuRuntime
+// 负责创建提交上下文、surface，以及把一次提交批次转换成一个 GpuTask。
+// ---------------------------------------------------------------------------
 class GpuRuntime {
 public:
     bool IsValid() const noexcept;
 
     void Destroy() noexcept;
 
-    unique_ptr<GpuSubmissionContext> BeginSubmission() noexcept;
+    Nullable<unique_ptr<GpuPresentSurface>> CreatePresentSurface(const GpuPresentSurfaceDescriptor& desc) noexcept;
 
-    void Submit(unique_ptr<GpuSubmissionContext>&& frame) noexcept;
+    // 为指定队列开始构建一次新的提交批次。
+    // 返回的 ctx 语义上绑定该队列，后续 Submit(ctx) 也只会提交到该队列。
+    Nullable<unique_ptr<GpuSubmitContext>> BeginSubmission(render::QueueType type) noexcept;
+
+    // 提交并消费 ctx。
+    // 返回的 GpuTask 表示“这整个提交批次”的执行状态，而不是某条单独命令的状态。
+    GpuTask Submit(unique_ptr<GpuSubmitContext> ctx) noexcept;
+
+    static Nullable<unique_ptr<GpuRuntime>> Create(const GpuRuntimeDescriptor& desc) noexcept;
 };
 
 }  // namespace radray
