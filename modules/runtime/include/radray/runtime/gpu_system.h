@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <limits>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -31,6 +32,50 @@ struct GpuPresentSurfaceDescriptor {
     uint32_t FlightFrameCount{2};
     render::TextureFormat Format{render::TextureFormat::BGRA8_UNORM};
     render::PresentMode PresentMode{render::PresentMode::FIFO};
+};
+
+struct GpuResourceCreationInfo {
+    // Runtime 层分配的稳定资源标识。
+    // - 由 GpuRuntime 在创建资源时生成
+    // - 调用方不应自行构造或修改
+    // - 生命周期语义由 runtime 决定；当资源失效后，该 Handle 也随之失效
+    uint64_t Handle;
+
+    // 后端 RHI 层对象的穿透指针。
+    // - 该指针不转移所有权，只是一个 borrowed handle
+    // - 具体指向什么对象由后端自行定义，例如某个 render 后端里的 Buffer/Texture 实现对象
+    // - 其生命周期与 Handle 一致；当资源失效后，该指针也随之失效
+    // - 调用方不应假设不同后端下它具有统一的具体类型
+    void* NativeHandle;
+
+    constexpr auto IsValid() const noexcept { return Handle != std::numeric_limits<uint64_t>::max(); }
+
+    constexpr void Invalidate() noexcept {
+        Handle = std::numeric_limits<uint64_t>::max();
+        NativeHandle = nullptr;
+    }
+
+    constexpr static GpuResourceCreationInfo Invalid() noexcept {
+        return {std::numeric_limits<uint64_t>::max(), nullptr};
+    }
+};
+
+struct GpuBufferCreationInfo : public GpuResourceCreationInfo {
+    size_t ElementStride;
+    size_t SizeInBytes;
+
+    constexpr static GpuBufferCreationInfo Invalid() noexcept {
+        return {GpuResourceCreationInfo::Invalid(), 0, 0};
+    }
+};
+
+class GpuBufferView {
+public:
+private:
+    uint64_t _handle;
+    void* _nativeHandle;
+    size_t _offset;
+    size_t _sizeInBytes;
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +146,8 @@ private:
 // ---------------------------------------------------------------------------
 class GpuSubmitContext {
 public:
+    GpuBufferView CreateTempBuffer(uint64_t sizeInBytes) noexcept;
+
 private:
     GpuRuntime* _runtime{nullptr};
 
@@ -119,6 +166,8 @@ public:
     void Destroy() noexcept;
 
     Nullable<unique_ptr<GpuPresentSurface>> CreatePresentSurface(const GpuPresentSurfaceDescriptor& desc) noexcept;
+
+    GpuBufferCreationInfo CreateBuffer(const render::BufferDescriptor& desc) noexcept;
 
     // 为指定队列开始构建一次新的提交批次。
     // 返回的 ctx 语义上绑定该队列，后续 Submit(ctx) 也只会提交到该队列。
