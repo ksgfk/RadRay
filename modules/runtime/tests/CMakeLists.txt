@@ -1,1 +1,1 @@
-# radray_add_test(test_render_service SOURCES test_render_service.cpp LINK_LIBS radraycore radrayruntime)
+radray_add_test(test_gpu_present_surface SOURCES test_gpu_present_surface.cpp LINK_LIBS radraycore radrayruntime radraywindow)

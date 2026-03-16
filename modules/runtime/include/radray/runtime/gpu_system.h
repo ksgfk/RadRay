@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <optional>
 #include <limits>
 
@@ -14,9 +15,22 @@ class GpuSubmitContext;
 class GpuPresentSurface;
 class GpuTask;
 
+// ---------------------------------------------------------------------------
+// GpuSurfaceStatus
+// surface 操作状态，用于 Acquire 返回值中。
+// ---------------------------------------------------------------------------
+enum class GpuSurfaceStatus : uint8_t {
+    Success,     // 正常
+    Suboptimal,  // 成功但尺寸不匹配，建议 Resize
+    OutOfDate,   // 必须 Resize 后才能继续
+    Lost,        // 不可恢复，需 Destroy 重建
+};
+
 struct GpuRuntimeDescriptor {
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     bool EnableDebugValidation{false};
+    render::RenderLogCallback LogCallback{nullptr};
+    void* LogUserData{nullptr};
 };
 
 // ---------------------------------------------------------------------------
@@ -34,7 +48,7 @@ struct GpuPresentSurfaceDescriptor {
     render::PresentMode PresentMode{render::PresentMode::FIFO};
 };
 
-struct GpuResourceCreationInfo {
+struct GpuResourceHandle {
     // Runtime 层分配的稳定资源标识。
     // - 由 GpuRuntime 在创建资源时生成
     // - 调用方不应自行构造或修改
@@ -55,27 +69,13 @@ struct GpuResourceCreationInfo {
         NativeHandle = nullptr;
     }
 
-    constexpr static GpuResourceCreationInfo Invalid() noexcept {
-        return {std::numeric_limits<uint64_t>::max(), nullptr};
-    }
+    constexpr static GpuResourceHandle Invalid() noexcept { return {std::numeric_limits<uint64_t>::max(), nullptr}; }
 };
 
-struct GpuBufferCreationInfo : public GpuResourceCreationInfo {
-    size_t ElementStride;
-    size_t SizeInBytes;
-
-    constexpr static GpuBufferCreationInfo Invalid() noexcept {
-        return {GpuResourceCreationInfo::Invalid(), 0, 0};
-    }
-};
-
-class GpuBufferView {
-public:
-private:
-    uint64_t _handle;
-    void* _nativeHandle;
-    size_t _offset;
-    size_t _sizeInBytes;
+struct GpuSurfaceAcquireResult {
+    GpuResourceHandle BackBuffer;  // 本帧 render target
+    uint32_t FrameIndex;           // flight frame 槽位 [0, FlightFrameCount)
+    GpuSurfaceStatus Status;       // 状态反馈
 };
 
 // ---------------------------------------------------------------------------
@@ -86,29 +86,45 @@ private:
 // ---------------------------------------------------------------------------
 class GpuPresentSurface {
 public:
+    ~GpuPresentSurface() noexcept;
+
     bool IsValid() const noexcept;
     void Destroy() noexcept;
+
+    // 重建 swapchain。用于窗口大小变化或运行时切换 present mode / format。
+    // 内部会同步等待所有 in-flight frame 完成，调用方无需手动 Wait。
+    // 未指定的 format / presentMode 保持当前值不变。
+    // 返回 false 表示重建失败（例如 surface 已 Lost）。
+    bool Reconfigure(
+        uint32_t width,
+        uint32_t height,
+        std::optional<render::TextureFormat> format = std::nullopt,
+        std::optional<render::PresentMode> presentMode = std::nullopt) noexcept;
 
     uint32_t GetWidth() const noexcept;
     uint32_t GetHeight() const noexcept;
     render::TextureFormat GetFormat() const noexcept;
-
-    // 阻塞直到拿到可用 back buffer，或 surface 进入不可恢复状态。
-    // Acquire 的结果挂入 ctx，作为本次提交批次的 present 输入。
-    bool Acquire(GpuSubmitContext& ctx) noexcept;
-
-    // 非阻塞尝试获取。若当前没有可用帧槽，则立即失败。
-    // 成功时同样把 acquire 结果挂入 ctx，而不是立即触发 present。
-    bool TryAcquire(GpuSubmitContext& ctx) noexcept;
-
-    // 向 ctx 注册“本次提交完成后需要 present 此 surface”的意图。
-    // 真正的 Present 发生在 runtime->Submit(ctx) 执行该批次之后。
-    void Present(GpuSubmitContext& ctx) noexcept;
+    render::PresentMode GetPresentMode() const noexcept;
 
 private:
     GpuRuntime* _runtime{nullptr};
+    const void* _nativeWindowHandle{nullptr};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _backBufferCount{0};
+    uint32_t _flightFrameCount{0};
+    render::TextureFormat _format{render::TextureFormat::BGRA8_UNORM};
+    render::PresentMode _presentMode{render::PresentMode::FIFO};
+    unique_ptr<render::SwapChain> _swapchain;
+    render::CommandQueue* _presentQueue{nullptr};
+    uint64_t _frameNumber{0};
+    vector<render::TextureState> _backBufferStates;
+    unique_ptr<render::Fence> _fence;
+    uint64_t _submitCount{0};
+    vector<uint64_t> _slotTargetValues;
 
     friend class GpuRuntime;
+    friend class GpuSubmitContext;
 };
 
 // ---------------------------------------------------------------------------
@@ -130,6 +146,9 @@ public:
     void Wait() noexcept;
 
 private:
+    render::Fence* _fence{nullptr};
+    uint64_t _targetValue{0};
+    unique_ptr<render::CommandBuffer> _cmdBuffer;
     friend class GpuRuntime;
 };
 
@@ -141,18 +160,36 @@ private:
 // - 一个 GpuSubmitContext 只对应一次 Submit()
 // - 一个 GpuSubmitContext 只绑定一个具体队列
 // - 一个 GpuSubmitContext 可以聚合多条命令录制结果，统一提交到该队列
-// - GpuSubmitContext 本身不是 command buffer，而是“提交批次”
+// - GpuSubmitContext 本身不是 command buffer，而是”提交批次”
 // - Submit() 后该对象即被消费，不能复用
+// - 未提交即析构是安全的，不会泄漏 GPU 资源（例如 TryAcquire 失败后直接丢弃 ctx）
 // ---------------------------------------------------------------------------
 class GpuSubmitContext {
 public:
-    GpuBufferView CreateTempBuffer(uint64_t sizeInBytes) noexcept;
+    ~GpuSubmitContext() noexcept = default;
+
+    // 阻塞直到拿到可用 back buffer，或 surface 进入不可恢复状态。
+    GpuSurfaceAcquireResult Acquire(GpuPresentSurface& surface) noexcept;
+
+    // 向 ctx 注册"本次提交完成后需要 present 此 surface"的意图。
+    // backBuffer 必须是本次 Acquire 返回的 BackBuffer handle。
+    void Present(GpuPresentSurface& surface, GpuResourceHandle backBuffer) noexcept;
 
 private:
     GpuRuntime* _runtime{nullptr};
+    bool _queueBound{false};
+    render::QueueType _queueType{render::QueueType::Direct};
+    render::CommandQueue* _queue{nullptr};
+    GpuPresentSurface* _acquiredSurface{nullptr};
+    GpuResourceHandle _acquiredBackBuffer{GpuResourceHandle::Invalid()};
+    bool _shouldPresent{false};
+    uint32_t _frameSlotIndex{0};
+    render::SwapChainSyncObject* _waitToDraw{nullptr};
+    render::SwapChainSyncObject* _readyToPresent{nullptr};
+    unique_ptr<render::CommandBuffer> _cmdBuffer;
+    bool _consumed{false};
 
     friend class GpuRuntime;
-    friend class GpuPresentSurface;
 };
 
 // ---------------------------------------------------------------------------
@@ -161,23 +198,31 @@ private:
 // ---------------------------------------------------------------------------
 class GpuRuntime {
 public:
+    ~GpuRuntime() noexcept;
+
     bool IsValid() const noexcept;
 
     void Destroy() noexcept;
 
     Nullable<unique_ptr<GpuPresentSurface>> CreatePresentSurface(const GpuPresentSurfaceDescriptor& desc) noexcept;
 
-    GpuBufferCreationInfo CreateBuffer(const render::BufferDescriptor& desc) noexcept;
-
-    // 为指定队列开始构建一次新的提交批次。
-    // 返回的 ctx 语义上绑定该队列，后续 Submit(ctx) 也只会提交到该队列。
-    Nullable<unique_ptr<GpuSubmitContext>> BeginSubmission(render::QueueType type) noexcept;
+    // 开始构建一次新的提交批次。队列类型在 Acquire 时延迟绑定。
+    Nullable<unique_ptr<GpuSubmitContext>> BeginSubmit() noexcept;
 
     // 提交并消费 ctx。
-    // 返回的 GpuTask 表示“这整个提交批次”的执行状态，而不是某条单独命令的状态。
+    // 返回的 GpuTask 表示”这整个提交批次”的执行状态，持有 cmd buffer 直到完成。
     GpuTask Submit(unique_ptr<GpuSubmitContext> ctx) noexcept;
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const GpuRuntimeDescriptor& desc) noexcept;
+
+private:
+    render::RenderBackend _backend{render::RenderBackend::D3D12};
+    shared_ptr<render::Device> _device;
+    unique_ptr<render::InstanceVulkan> _vkInstance;
+    std::atomic<uint64_t> _nextHandleId{0};
+
+    friend class GpuPresentSurface;
+    friend class GpuSubmitContext;
 };
 
 }  // namespace radray
