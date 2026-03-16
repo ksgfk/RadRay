@@ -163,6 +163,8 @@ void RunPresentLoop(
 
         if (acquired.has_value()) {
             auto& result = acquired.value();
+            EXPECT_TRUE(result.Command.IsValid());
+            EXPECT_NE(result.Command.NativeHandle, nullptr);
 
             // RHI Acquire always returns Success; detect size mismatch ourselves
             auto winSize = window.GetSize();
@@ -189,7 +191,11 @@ void RunPresentLoop(
                     return;
             }
 
-            ctx->Present(surface, result.BackBuffer);
+            ctx->EndCommand(result.Command);
+            if (!ctx->Present(surface, result.BackBuffer)) {
+                FAIL() << "Present rejected at frame " << i;
+                return;
+            }
         }
         // Non-blocking: nullopt simply means no frame available, skip present
 
@@ -231,7 +237,10 @@ void RunRenderLoop(
             return;
         }
 
-        ctx->Present(surface, result.BackBuffer);
+        EXPECT_TRUE(result.Command.IsValid());
+        EXPECT_NE(result.Command.NativeHandle, nullptr);
+        ctx->EndCommand(result.Command);
+        ASSERT_TRUE(ctx->Present(surface, result.BackBuffer)) << "Present rejected at frame " << i;
         GpuTask task = runtime.Submit(std::move(ctx));
         task.Wait();
     }
@@ -266,7 +275,10 @@ void RunPresentLoopDroppingTasks(
             return;
         }
 
-        ctx->Present(surface, result.BackBuffer);
+        EXPECT_TRUE(result.Command.IsValid());
+        EXPECT_NE(result.Command.NativeHandle, nullptr);
+        ctx->EndCommand(result.Command);
+        ASSERT_TRUE(ctx->Present(surface, result.BackBuffer)) << "Present rejected at frame " << i;
         runtime.Submit(std::move(ctx));
         if (processRuntimeEachFrame) {
             runtime.ProcessSubmits();
@@ -444,6 +456,150 @@ TEST_P(GpuPresentSurfaceTest, ProcessSubmits) {
     ASSERT_TRUE(ok) << "Reconfigure after ProcessSubmits failed";
 
     RunPresentLoop(*runtime_, *surface_, *window_, kShortFrameCount, true);
+}
+
+TEST_P(GpuPresentSurfaceTest, PureCommandSubmit) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto cmd = ctx->BeginCommand(QueueType::Direct);
+    ASSERT_TRUE(cmd.IsValid()) << "BeginCommand returned invalid handle";
+    ASSERT_NE(cmd.NativeHandle, nullptr);
+
+    ctx->EndCommand(cmd);
+
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Pure command Submit returned invalid task";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, SubmitRejectsUnclosedCommand) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto cmd = ctx->BeginCommand(QueueType::Direct);
+    ASSERT_TRUE(cmd.IsValid()) << "BeginCommand returned invalid handle";
+
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    EXPECT_FALSE(task.IsValid());
+}
+
+TEST_P(GpuPresentSurfaceTest, BeginCommandRejectsQueueMismatchAfterAcquire) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto acquired = ctx->Acquire(*surface_);
+    ASSERT_NE(acquired.Status, GpuSurfaceStatus::Lost) << "Acquire returned Lost";
+    ASSERT_TRUE(acquired.Command.IsValid()) << "Acquire command handle is invalid";
+    ctx->EndCommand(acquired.Command);
+
+    auto badCmd = ctx->BeginCommand(QueueType::Compute);
+    EXPECT_FALSE(badCmd.IsValid());
+
+    ASSERT_TRUE(ctx->Present(*surface_, acquired.BackBuffer));
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit after queue mismatch validation failed";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, BeginCommandRejectsWhileAnotherCommandIsOpen) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto first = ctx->BeginCommand(QueueType::Direct);
+    ASSERT_TRUE(first.IsValid()) << "BeginCommand returned invalid handle";
+
+    auto second = ctx->BeginCommand(QueueType::Direct);
+    EXPECT_FALSE(second.IsValid());
+
+    ctx->EndCommand(first);
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit after open-command validation failed";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, SecondAcquireRejected) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto first = ctx->Acquire(*surface_);
+    ASSERT_NE(first.Status, GpuSurfaceStatus::Lost) << "First Acquire returned Lost";
+    ASSERT_TRUE(first.Command.IsValid()) << "Acquire command handle is invalid";
+
+    auto second = ctx->Acquire(*surface_);
+    EXPECT_EQ(second.Status, GpuSurfaceStatus::Lost);
+    EXPECT_FALSE(second.BackBuffer.IsValid());
+    EXPECT_FALSE(second.Command.IsValid());
+
+    ctx->EndCommand(first.Command);
+    ASSERT_TRUE(ctx->Present(*surface_, first.BackBuffer));
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit after second Acquire validation failed";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, SecondPresentRejected) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto acquired = ctx->Acquire(*surface_);
+    ASSERT_NE(acquired.Status, GpuSurfaceStatus::Lost) << "Acquire returned Lost";
+    ASSERT_TRUE(acquired.Command.IsValid()) << "Acquire command handle is invalid";
+    ctx->EndCommand(acquired.Command);
+
+    EXPECT_TRUE(ctx->Present(*surface_, acquired.BackBuffer));
+    EXPECT_FALSE(ctx->Present(*surface_, acquired.BackBuffer));
+
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit after second Present validation failed";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, PresentRejectsMismatchedBackBuffer) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto acquired = ctx->Acquire(*surface_);
+    ASSERT_NE(acquired.Status, GpuSurfaceStatus::Lost) << "Acquire returned Lost";
+    ASSERT_TRUE(acquired.Command.IsValid()) << "Acquire command handle is invalid";
+    ctx->EndCommand(acquired.Command);
+
+    GpuResourceHandle wrongBackBuffer{acquired.BackBuffer.Handle + 1, acquired.BackBuffer.NativeHandle};
+    EXPECT_FALSE(ctx->Present(*surface_, wrongBackBuffer));
+
+    ASSERT_TRUE(ctx->Present(*surface_, acquired.BackBuffer));
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit after mismatched Present validation failed";
+    task.Wait();
+}
+
+TEST_P(GpuPresentSurfaceTest, SingleSurfaceMultiCommandSubmit) {
+    auto ctxOpt = runtime_->BeginSubmit();
+    ASSERT_TRUE(ctxOpt.HasValue()) << "BeginSubmit returned null";
+    auto ctx = ctxOpt.Release();
+
+    auto acquired = ctx->Acquire(*surface_);
+    ASSERT_NE(acquired.Status, GpuSurfaceStatus::Lost) << "Acquire returned Lost";
+    ASSERT_TRUE(acquired.Command.IsValid()) << "Acquire command handle is invalid";
+    ctx->EndCommand(acquired.Command);
+
+    auto extra = ctx->BeginCommand(QueueType::Direct);
+    ASSERT_TRUE(extra.IsValid()) << "Second command handle is invalid";
+    ASSERT_NE(extra.NativeHandle, nullptr);
+
+    ctx->EndCommand(extra);
+    ASSERT_TRUE(ctx->Present(*surface_, acquired.BackBuffer));
+
+    GpuTask task = runtime_->Submit(std::move(ctx));
+    ASSERT_TRUE(task.IsValid()) << "Submit with multiple commands returned invalid task";
+    task.Wait();
 }
 
 }  // namespace

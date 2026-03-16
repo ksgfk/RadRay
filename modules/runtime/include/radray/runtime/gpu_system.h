@@ -3,6 +3,7 @@
 #include <atomic>
 #include <optional>
 #include <limits>
+#include <variant>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -49,15 +50,15 @@ struct GpuPresentSurfaceDescriptor {
 };
 
 struct GpuResourceHandle {
-    // Runtime 层分配的稳定资源标识。
+    // Runtime 层分配的稳定对象标识。
     // - 由 GpuRuntime 在创建资源时生成
     // - 调用方不应自行构造或修改
-    // - 生命周期语义由 runtime 决定；当资源失效后，该 Handle 也随之失效
+    // - 生命周期语义由 runtime 决定；当对象失效后，该 Handle 也随之失效
     uint64_t Handle;
 
     // 后端 RHI 层对象的穿透指针。
     // - 该指针不转移所有权，只是一个 borrowed handle
-    // - 具体指向什么对象由后端自行定义，例如某个 render 后端里的 Buffer/Texture 实现对象
+    // - 具体指向什么对象由后端自行定义，例如某个 render 后端里的 Buffer/Texture/CommandBuffer 实现对象
     // - 其生命周期与 Handle 一致；当资源失效后，该指针也随之失效
     // - 调用方不应假设不同后端下它具有统一的具体类型
     void* NativeHandle;
@@ -74,6 +75,7 @@ struct GpuResourceHandle {
 
 struct GpuSurfaceAcquireResult {
     GpuResourceHandle BackBuffer;  // 本帧 render target
+    GpuResourceHandle Command;     // 本次 Acquire 自动打开的 command buffer
     uint32_t FrameIndex;           // flight frame 槽位 [0, FlightFrameCount)
     GpuSurfaceStatus Status;       // 状态反馈
 };
@@ -177,24 +179,61 @@ public:
     ~GpuSubmitContext() noexcept = default;
 
     // 阻塞直到拿到可用 back buffer，或 surface 进入不可恢复状态。
+    // Acquire 会在 surface 绑定的队列上自动创建并 Begin 一个 command buffer，
+    // 其 handle 会通过返回值中的 Command 暴露给调用方。
+    // 同一个 ctx 在任意时刻最多只能有一条处于 open 状态的 command。
     GpuSurfaceAcquireResult Acquire(GpuPresentSurface& surface) noexcept;
+
+    // 显式创建并 Begin 一个新的 command buffer。第一个成功的 Acquire / BeginCommand
+    // 会绑定整个 ctx 的队列，后续命令必须使用同一个队列。
+    // 调用前要求当前没有其他 open command。
+    GpuResourceHandle BeginCommand(render::QueueType queueType) noexcept;
+
+    // 显式结束一个由 Acquire / BeginCommand 创建的 command buffer。
+    void EndCommand(GpuResourceHandle cmd) noexcept;
 
     // 向 ctx 注册"本次提交完成后需要 present 此 surface"的意图。
     // backBuffer 必须是本次 Acquire 返回的 BackBuffer handle。
-    void Present(GpuPresentSurface& surface, GpuResourceHandle backBuffer) noexcept;
+    // 返回 false 表示该 Present 请求被拒绝。
+    bool Present(GpuPresentSurface& surface, GpuResourceHandle backBuffer) noexcept;
 
 private:
+    struct SurfaceLease {
+        GpuPresentSurface* Surface{nullptr};
+        GpuResourceHandle BackBuffer{GpuResourceHandle::Invalid()};
+        uint32_t FrameSlotIndex{0};
+        uint32_t BackBufferIndex{0};
+        render::SwapChainSyncObject* WaitToDraw{nullptr};
+        render::SwapChainSyncObject* ReadyToPresent{nullptr};
+    };
+
+    struct OpenCommand {
+        GpuResourceHandle Handle{GpuResourceHandle::Invalid()};
+        render::CommandBuffer* Buffer{nullptr};
+    };
+
+    struct CommandOp {
+        render::CommandBuffer* Buffer{nullptr};
+    };
+
+    struct PresentOp {};
+
+    using Op = std::variant<CommandOp, PresentOp>;
+
+    GpuResourceHandle CreateCommandInternal() noexcept;
+    bool IsSurfaceQueueCompatible(const GpuPresentSurface& surface) const noexcept;
+    render::Fence* ResolveSubmitFence() noexcept;
+    render::CommandBuffer* AppendPresentBarrierCommand() noexcept;
+
     GpuRuntime* _runtime{nullptr};
-    bool _queueBound{false};
     render::QueueType _queueType{render::QueueType::Direct};
     render::CommandQueue* _queue{nullptr};
-    GpuPresentSurface* _acquiredSurface{nullptr};
-    GpuResourceHandle _acquiredBackBuffer{GpuResourceHandle::Invalid()};
-    bool _shouldPresent{false};
-    uint32_t _frameSlotIndex{0};
-    render::SwapChainSyncObject* _waitToDraw{nullptr};
-    render::SwapChainSyncObject* _readyToPresent{nullptr};
-    unique_ptr<render::CommandBuffer> _cmdBuffer;
+    vector<unique_ptr<render::CommandBuffer>> _commands;
+    vector<Op> _ops;
+    std::optional<SurfaceLease> _surfaceLease;
+    std::optional<OpenCommand> _openCommand;
+    unique_ptr<render::Fence> _submitFence;
+    bool _hasPresent{false};
     bool _consumed{false};
 
     friend class GpuRuntime;
@@ -215,7 +254,7 @@ public:
 
     Nullable<unique_ptr<GpuPresentSurface>> CreatePresentSurface(const GpuPresentSurfaceDescriptor& desc) noexcept;
 
-    // 开始构建一次新的提交批次。队列类型在 Acquire 时延迟绑定。
+    // 开始构建一次新的提交批次。队列类型在 Acquire / BeginCommand 时延迟绑定。
     Nullable<unique_ptr<GpuSubmitContext>> BeginSubmit() noexcept;
 
     // 提交并消费 ctx。
