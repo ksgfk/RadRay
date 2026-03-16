@@ -136,9 +136,17 @@ private:
 // - 一个 GpuTask 对应一次 GpuRuntime::Submit(ctx)
 // - 一个 GpuTask 只对应一个队列上的一次提交
 // - 一个 GpuTask 表示“该提交批次执行完成”，不额外承诺 scanout / 显示完成
+// - 提交期间所需的 command buffer / ctx 保活由 GpuRuntime 负责，不由 GpuTask 持有
 // ---------------------------------------------------------------------------
 class GpuTask {
 public:
+    GpuTask() noexcept = default;
+    GpuTask(const GpuTask&) = delete;
+    GpuTask& operator=(const GpuTask&) = delete;
+    GpuTask(GpuTask&&) noexcept = default;
+    GpuTask& operator=(GpuTask&&) noexcept = default;
+    ~GpuTask() noexcept = default;
+
     bool IsValid() const noexcept;
 
     bool IsCompleted() const noexcept;
@@ -146,9 +154,9 @@ public:
     void Wait() noexcept;
 
 private:
+    GpuRuntime* _runtime{nullptr};
     render::Fence* _fence{nullptr};
     uint64_t _targetValue{0};
-    unique_ptr<render::CommandBuffer> _cmdBuffer;
     friend class GpuRuntime;
 };
 
@@ -195,6 +203,7 @@ private:
 // ---------------------------------------------------------------------------
 // GpuRuntime
 // 负责创建提交上下文、surface，以及把一次提交批次转换成一个 GpuTask。
+// 对于已经 Submit 的 ctx，GpuRuntime 会在 GPU 完成前继续持有，避免提交资源过早释放。
 // ---------------------------------------------------------------------------
 class GpuRuntime {
 public:
@@ -210,19 +219,32 @@ public:
     Nullable<unique_ptr<GpuSubmitContext>> BeginSubmit() noexcept;
 
     // 提交并消费 ctx。
-    // 返回的 GpuTask 表示”这整个提交批次”的执行状态，持有 cmd buffer 直到完成。
+    // 返回的 GpuTask 表示”这整个提交批次”的执行状态。
+    // 提交后的 ctx 及其关联 GPU 资源由 GpuRuntime 内部保活，直到该提交完成。
     GpuTask Submit(unique_ptr<GpuSubmitContext> ctx) noexcept;
+
+    // 非阻塞处理已提交批次的生命周期管理。
+    // 会回收 fence 已完成的 in-flight submit，并释放 runtime 持有的 ctx / cmd buffer 等资源。
+    void ProcessSubmits() noexcept;
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const GpuRuntimeDescriptor& desc) noexcept;
 
 private:
+    struct InFlightSubmit {
+        render::Fence* Fence{nullptr};
+        uint64_t TargetValue{0};
+        unique_ptr<GpuSubmitContext> Context;
+    };
+
     render::RenderBackend _backend{render::RenderBackend::D3D12};
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
     std::atomic<uint64_t> _nextHandleId{0};
+    vector<InFlightSubmit> _inFlightSubmissions;
 
     friend class GpuPresentSurface;
     friend class GpuSubmitContext;
+    friend class GpuTask;
 };
 
 }  // namespace radray

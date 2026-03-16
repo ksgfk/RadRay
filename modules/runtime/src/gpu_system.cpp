@@ -1,5 +1,7 @@
 #include <radray/runtime/gpu_system.h>
 
+#include <algorithm>
+
 #include <radray/logger.h>
 
 namespace radray {
@@ -17,14 +19,13 @@ bool GpuTask::IsCompleted() const noexcept {
 }
 
 void GpuTask::Wait() noexcept {
-    if (_fence) {
-        // Fast path: target already completed, no need to block.
-        if (_fence->GetCompletedValue() >= _targetValue) {
-            return;
-        }
+    if (_fence && _fence->GetCompletedValue() < _targetValue) {
         // Slow path: Fence::Wait() waits for the latest signaled value,
         // which is >= _targetValue, so our target will be done when it returns.
         _fence->Wait();
+    }
+    if (_runtime) {
+        _runtime->ProcessSubmits();
     }
 }
 
@@ -46,6 +47,9 @@ void GpuPresentSurface::Destroy() noexcept {
     }
     if (_presentQueue) {
         _presentQueue->Wait();
+    }
+    if (_runtime) {
+        _runtime->ProcessSubmits();
     }
     _swapchain.reset();
     _fence.reset();
@@ -100,6 +104,14 @@ GpuSurfaceAcquireResult GpuSubmitContext::Acquire(GpuPresentSurface& surface) no
     }
 
     uint32_t slotIndex = static_cast<uint32_t>(surface._frameNumber % surface._flightFrameCount);
+    const uint64_t slotTargetValue = surface._slotTargetValues[slotIndex];
+    if (slotTargetValue != 0 && surface._fence && surface._fence->GetCompletedValue() < slotTargetValue) {
+        // Reuse of a flight slot must wait until the previous submission bound to
+        // that slot has retired, otherwise backends like Vulkan may reuse
+        // acquire/present sync primitives while they are still pending.
+        surface._fence->Wait();
+        _runtime->ProcessSubmits();
+    }
 
     render::AcquireResult acq = surface._swapchain->AcquireNext();
     if (!acq.BackBuffer.HasValue()) {
@@ -149,6 +161,9 @@ bool GpuPresentSurface::Reconfigure(
     }
     if (_presentQueue) {
         _presentQueue->Wait();
+    }
+    if (_runtime) {
+        _runtime->ProcessSubmits();
     }
 
     // Must destroy old swapchain before creating new one (same HWND constraint).
@@ -209,6 +224,14 @@ bool GpuRuntime::IsValid() const noexcept {
     return _device != nullptr;
 }
 
+void GpuRuntime::ProcessSubmits() noexcept {
+    std::erase_if(
+        _inFlightSubmissions,
+        [](const InFlightSubmit& submit) noexcept {
+            return submit.Fence == nullptr || submit.Fence->GetCompletedValue() >= submit.TargetValue;
+        });
+}
+
 void GpuRuntime::Destroy() noexcept {
     if (!_device) {
         return;
@@ -219,6 +242,7 @@ void GpuRuntime::Destroy() noexcept {
             q.Get()->Wait();
         }
     }
+    _inFlightSubmissions.clear();
     _device->Destroy();
     _device.reset();
     if (_vkInstance) {
@@ -344,12 +368,15 @@ Nullable<unique_ptr<GpuPresentSurface>> GpuRuntime::CreatePresentSurface(const G
 }
 
 Nullable<unique_ptr<GpuSubmitContext>> GpuRuntime::BeginSubmit() noexcept {
+    this->ProcessSubmits();
     auto ctx = make_unique<GpuSubmitContext>();
     ctx->_runtime = this;
     return ctx;
 }
 
 GpuTask GpuRuntime::Submit(unique_ptr<GpuSubmitContext> ctx) noexcept {
+    this->ProcessSubmits();
+
     GpuTask task{};
 
     if (!ctx || ctx->_consumed) {
@@ -395,8 +422,13 @@ GpuTask GpuRuntime::Submit(unique_ptr<GpuSubmitContext> ctx) noexcept {
         ++surface->_frameNumber;
 
         task._fence = fence;
+        task._runtime = this;
         task._targetValue = surface->_submitCount;
-        task._cmdBuffer = std::move(ctx->_cmdBuffer);
+        InFlightSubmit submit{};
+        submit.Fence = fence;
+        submit.TargetValue = task._targetValue;
+        submit.Context = std::move(ctx);
+        _inFlightSubmissions.push_back(std::move(submit));
     } else {
         // No surface acquired — pure compute/copy path (not yet implemented).
         // Return an empty (invalid) task.

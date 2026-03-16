@@ -1,6 +1,8 @@
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -22,6 +24,34 @@ constexpr uint32_t kResizedWidth = 800;
 constexpr uint32_t kResizedHeight = 450;
 constexpr uint32_t kShortFrameCount = 16;
 constexpr uint32_t kLongFrameCount = 32;
+
+struct ValidationLogMonitor {
+    void Record(LogLevel level, std::string_view message) {
+        if (level < LogLevel::Err) {
+            return;
+        }
+
+        std::lock_guard lock(Mutex);
+        ErrorMessages.emplace_back(message);
+    }
+
+    void ExpectNoErrors() {
+        std::lock_guard lock(Mutex);
+        if (ErrorMessages.empty()) {
+            return;
+        }
+
+        std::ostringstream oss;
+        for (const auto& message : ErrorMessages) {
+            oss << message << '\n';
+        }
+        ADD_FAILURE() << "Backend validation logged Err/Critical messages:\n" << oss.str();
+        ErrorMessages.clear();
+    }
+
+    std::mutex Mutex;
+    std::vector<std::string> ErrorMessages;
+};
 
 // ---------------------------------------------------------------------------
 // Helper: create a platform native window
@@ -56,18 +86,22 @@ Nullable<unique_ptr<NativeWindow>> CreateTestWindow(uint32_t width, uint32_t hei
 #endif
 }
 
-void ValidationLogCallback(LogLevel level, std::string_view message, void* /*userData*/) noexcept {
+void ValidationLogCallback(LogLevel level, std::string_view message, void* userData) noexcept {
     Log({}, level, message);
+    if (auto* monitor = static_cast<ValidationLogMonitor*>(userData)) {
+        monitor->Record(level, message);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helper: create a GpuRuntime for a given backend
 // ---------------------------------------------------------------------------
-Nullable<unique_ptr<GpuRuntime>> CreateRuntime(RenderBackend backend) noexcept {
+Nullable<unique_ptr<GpuRuntime>> CreateRuntime(RenderBackend backend, ValidationLogMonitor& validationMonitor) noexcept {
     GpuRuntimeDescriptor desc{};
     desc.Backend = backend;
     desc.EnableDebugValidation = true;
     desc.LogCallback = ValidationLogCallback;
+    desc.LogUserData = &validationMonitor;
     return GpuRuntime::Create(desc);
 }
 
@@ -204,6 +238,43 @@ void RunRenderLoop(
 }
 
 // ---------------------------------------------------------------------------
+// RunPresentLoopDroppingTasks
+//   提交后立即丢弃 GpuTask，验证提交资源由 runtime 内部保活。
+// ---------------------------------------------------------------------------
+void RunPresentLoopDroppingTasks(
+    GpuRuntime& runtime,
+    GpuPresentSurface& surface,
+    NativeWindow& window,
+    uint32_t frameCount,
+    bool processRuntimeEachFrame = false) {
+    for (uint32_t i = 0; i < frameCount; ++i) {
+        window.DispatchEvents();
+        if (window.ShouldClose()) {
+            break;
+        }
+
+        auto ctxOpt = runtime.BeginSubmit();
+        if (!ctxOpt.HasValue()) {
+            FAIL() << "BeginSubmit returned null at frame " << i;
+            return;
+        }
+        auto ctx = ctxOpt.Release();
+
+        auto result = ctx->Acquire(surface);
+        if (result.Status == GpuSurfaceStatus::Lost) {
+            FAIL() << "Acquire returned Lost at frame " << i;
+            return;
+        }
+
+        ctx->Present(surface, result.BackBuffer);
+        runtime.Submit(std::move(ctx));
+        if (processRuntimeEachFrame) {
+            runtime.ProcessSubmits();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parameterized test fixture
 // ---------------------------------------------------------------------------
 enum class TestBackend { D3D12, Vulkan };
@@ -221,7 +292,7 @@ protected:
                                     ? RenderBackend::D3D12
                                     : RenderBackend::Vulkan;
 
-        auto runtimeOpt = CreateRuntime(backend);
+        auto runtimeOpt = CreateRuntime(backend, validationMonitor_);
         if (!runtimeOpt.HasValue()) {
             GTEST_SKIP() << "Cannot create GpuRuntime for backend.";
         }
@@ -247,11 +318,13 @@ protected:
             window_->Destroy();
             window_.reset();
         }
+        validationMonitor_.ExpectNoErrors();
     }
 
     unique_ptr<NativeWindow> window_;
     unique_ptr<GpuRuntime> runtime_;
     unique_ptr<GpuPresentSurface> surface_;
+    ValidationLogMonitor validationMonitor_;
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -339,6 +412,38 @@ TEST_P(GpuPresentSurfaceTest, ReconfigureOnSuboptimal) {
     auto size = window_->GetSize();
     EXPECT_EQ(surface_->GetWidth(), static_cast<uint32_t>(size.X));
     EXPECT_EQ(surface_->GetHeight(), static_cast<uint32_t>(size.Y));
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeOwnsSubmittedContexts: drop GpuTask immediately and keep rendering.
+// ---------------------------------------------------------------------------
+TEST_P(GpuPresentSurfaceTest, RuntimeOwnsSubmittedContexts) {
+    RunPresentLoopDroppingTasks(*runtime_, *surface_, *window_, kShortFrameCount);
+
+    auto size = window_->GetSize();
+    bool ok = surface_->Reconfigure(
+        static_cast<uint32_t>(size.X),
+        static_cast<uint32_t>(size.Y));
+    ASSERT_TRUE(ok) << "Reconfigure after dropping GpuTask failed";
+
+    RunPresentLoop(*runtime_, *surface_, *window_, kShortFrameCount, true);
+}
+
+// ---------------------------------------------------------------------------
+// ProcessSubmits: exposed non-blocking maintenance hook for submitted ctx.
+// ---------------------------------------------------------------------------
+TEST_P(GpuPresentSurfaceTest, ProcessSubmits) {
+    RunPresentLoopDroppingTasks(*runtime_, *surface_, *window_, kShortFrameCount, true);
+
+    runtime_->ProcessSubmits();
+
+    auto size = window_->GetSize();
+    bool ok = surface_->Reconfigure(
+        static_cast<uint32_t>(size.X),
+        static_cast<uint32_t>(size.Y));
+    ASSERT_TRUE(ok) << "Reconfigure after ProcessSubmits failed";
+
+    RunPresentLoop(*runtime_, *surface_, *window_, kShortFrameCount, true);
 }
 
 }  // namespace
