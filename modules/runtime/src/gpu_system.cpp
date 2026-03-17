@@ -1,32 +1,77 @@
 #include <radray/runtime/gpu_system.h>
 
 #include <algorithm>
-
-#include <radray/logger.h>
+#include <array>
+#include <utility>
 
 namespace radray {
+namespace {
+
+bool IsCompletionPointCompleted(const GpuCompletionPoint& point) noexcept {
+    return point.Fence != nullptr && point.Fence->GetCompletedValue() >= point.TargetValue;
+}
+
+bool IsCompletionStateValid(const shared_ptr<GpuCompletionState>& completion) noexcept {
+    return completion != nullptr && !completion->Points.empty();
+}
+
+bool IsCompletionStateCompleted(const shared_ptr<GpuCompletionState>& completion) noexcept {
+    return IsCompletionStateValid(completion) &&
+           std::all_of(completion->Points.begin(), completion->Points.end(), IsCompletionPointCompleted);
+}
+
+void WaitCompletionState(const shared_ptr<GpuCompletionState>& completion) noexcept {
+    if (!IsCompletionStateValid(completion)) {
+        return;
+    }
+
+    for (const auto& point : completion->Points) {
+        if (point.Fence != nullptr && !IsCompletionPointCompleted(point)) {
+            point.Fence->Wait();
+        }
+    }
+}
+
+shared_ptr<GpuCompletionState> MakeCompletionState() {
+    return std::make_shared<GpuCompletionState>();
+}
+
+}  // namespace
 
 // ===========================================================================
 // GpuTask
 // ===========================================================================
 
 bool GpuTask::IsValid() const noexcept {
-    return _fence != nullptr;
+    return IsCompletionStateValid(_completion);
 }
 
 bool GpuTask::IsCompleted() const noexcept {
-    return _fence == nullptr || _fence->GetCompletedValue() >= _targetValue;
+    return IsCompletionStateCompleted(_completion);
 }
 
 void GpuTask::Wait() noexcept {
-    if (_fence && _fence->GetCompletedValue() < _targetValue) {
-        // Slow path: Fence::Wait() waits for the latest signaled value,
-        // which is >= _targetValue, so our target will be done when it returns.
-        _fence->Wait();
-    }
-    if (_runtime) {
-        _runtime->ProcessSubmits();
-    }
+    WaitCompletionState(_completion);
+}
+
+// ===========================================================================
+// GpuSurfaceLease
+// ===========================================================================
+
+bool GpuSurfaceLease::IsValid() const noexcept {
+    return _surface != nullptr && _backBuffer != nullptr;
+}
+
+GpuPresentSurface* GpuSurfaceLease::GetSurface() const noexcept {
+    return _surface;
+}
+
+uint32_t GpuSurfaceLease::GetFrameSlotIndex() const noexcept {
+    return _frameSlotIndex;
+}
+
+render::Texture* GpuSurfaceLease::GetBackBufferTexture() const noexcept {
+    return _backBuffer;
 }
 
 // ===========================================================================
@@ -38,280 +83,7 @@ GpuPresentSurface::~GpuPresentSurface() noexcept {
 }
 
 bool GpuPresentSurface::IsValid() const noexcept {
-    return _swapchain != nullptr;
-}
-
-void GpuPresentSurface::Destroy() noexcept {
-    if (_fence) {
-        _fence->Wait();
-    }
-    if (_presentQueue) {
-        _presentQueue->Wait();
-    }
-    if (_runtime) {
-        _runtime->ProcessSubmits();
-    }
-    _swapchain.reset();
-    _fence.reset();
-    _slotTargetValues.clear();
-    _backBufferStates.clear();
-    _submitCount = 0;
-    _presentQueue = nullptr;
-    _runtime = nullptr;
-}
-
-uint32_t GpuPresentSurface::GetWidth() const noexcept {
-    return _width;
-}
-
-uint32_t GpuPresentSurface::GetHeight() const noexcept {
-    return _height;
-}
-
-render::TextureFormat GpuPresentSurface::GetFormat() const noexcept {
-    return _format;
-}
-
-render::PresentMode GpuPresentSurface::GetPresentMode() const noexcept {
-    return _presentMode;
-}
-
-// ===========================================================================
-// GpuSubmitContext
-// ===========================================================================
-
-GpuResourceHandle GpuSubmitContext::CreateCommandInternal() noexcept {
-    if (_queue == nullptr) {
-        RADRAY_ERR_LOG("GpuSubmitContext::CreateCommandInternal requires a bound queue");
-        return GpuResourceHandle::Invalid();
-    }
-
-    auto cmdOpt = _runtime->_device->CreateCommandBuffer(_queue);
-    if (!cmdOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::CreateCommandInternal CreateCommandBuffer failed");
-        return GpuResourceHandle::Invalid();
-    }
-
-    auto cmd = cmdOpt.Release();
-    auto* nativeCmd = cmd.get();
-    nativeCmd->Begin();
-    _commands.push_back(std::move(cmd));
-
-    GpuResourceHandle handle{
-        _runtime->_nextHandleId.fetch_add(1, std::memory_order_relaxed),
-        nativeCmd,
-    };
-    _openCommand = OpenCommand{handle, nativeCmd};
-    return handle;
-}
-
-bool GpuSubmitContext::IsSurfaceQueueCompatible(const GpuPresentSurface& surface) const noexcept {
-    if (_queue == nullptr) {
-        return true;
-    }
-    return _queueType == render::QueueType::Direct && _queue == surface._presentQueue;
-}
-
-render::Fence* GpuSubmitContext::ResolveSubmitFence() noexcept {
-    if (_surfaceLease.has_value()) {
-        if (_surfaceLease->Surface == nullptr || _surfaceLease->Surface->_fence == nullptr) {
-            RADRAY_ERR_LOG("GpuSubmitContext::ResolveSubmitFence surface fence is invalid");
-            return nullptr;
-        }
-        return _surfaceLease->Surface->_fence.get();
-    }
-    if (_submitFence) {
-        return _submitFence.get();
-    }
-
-    auto fenceOpt = _runtime->_device->CreateFence();
-    if (!fenceOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::ResolveSubmitFence CreateFence failed");
-        return nullptr;
-    }
-    _submitFence = fenceOpt.Release();
-    return _submitFence.get();
-}
-
-render::CommandBuffer* GpuSubmitContext::AppendPresentBarrierCommand() noexcept {
-    if (!_surfaceLease.has_value()) {
-        return nullptr;
-    }
-
-    auto& lease = _surfaceLease.value();
-    auto* surface = lease.Surface;
-    if (surface == nullptr) {
-        return nullptr;
-    }
-
-    const render::TextureState before = surface->_backBufferStates[lease.BackBufferIndex];
-    if (before == render::TextureState::Present) {
-        return nullptr;
-    }
-    if (lease.BackBuffer.NativeHandle == nullptr) {
-        RADRAY_ERR_LOG("GpuSubmitContext::AppendPresentBarrierCommand backBuffer native handle is invalid");
-        return nullptr;
-    }
-
-    auto cmdOpt = _runtime->_device->CreateCommandBuffer(_queue);
-    if (!cmdOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::AppendPresentBarrierCommand CreateCommandBuffer failed");
-        return nullptr;
-    }
-
-    auto cmd = cmdOpt.Release();
-    auto* nativeCmd = cmd.get();
-    nativeCmd->Begin();
-    render::BarrierTextureDescriptor barrier{};
-    barrier.Target = static_cast<render::Texture*>(lease.BackBuffer.NativeHandle);
-    barrier.Before = before;
-    barrier.After = render::TextureState::Present;
-    render::ResourceBarrierDescriptor desc = barrier;
-    nativeCmd->ResourceBarrier(std::span{&desc, 1});
-    nativeCmd->End();
-    _commands.push_back(std::move(cmd));
-    return nativeCmd;
-}
-
-GpuSurfaceAcquireResult GpuSubmitContext::Acquire(GpuPresentSurface& surface) noexcept {
-    if (!surface._swapchain) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire called on invalid surface");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-    if (!IsSurfaceQueueCompatible(surface)) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire requires a Direct queue context");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-    if (_surfaceLease.has_value()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire called but a surface is already acquired");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-    if (_hasPresent) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire called after Present");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-    if (_openCommand.has_value()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire called while another command is open");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-
-    if (_queue == nullptr) {
-        _queue = surface._presentQueue;
-        _queueType = render::QueueType::Direct;
-        if (_queue == nullptr) {
-            RADRAY_ERR_LOG("GpuSubmitContext::Acquire surface present queue is invalid");
-            return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-        }
-    }
-
-    uint32_t slotIndex = static_cast<uint32_t>(surface._frameNumber % surface._flightFrameCount);
-    const uint64_t slotTargetValue = surface._slotTargetValues[slotIndex];
-    if (slotTargetValue != 0 && surface._fence && surface._fence->GetCompletedValue() < slotTargetValue) {
-        // Reuse of a flight slot must wait until the previous submission bound to
-        // that slot has retired, otherwise backends like Vulkan may reuse
-        // acquire/present sync primitives while they are still pending.
-        surface._fence->Wait();
-        _runtime->ProcessSubmits();
-    }
-
-    render::AcquireResult acq = surface._swapchain->AcquireNext();
-    if (!acq.BackBuffer.HasValue()) {
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-
-    auto command = CreateCommandInternal();
-    if (!command.IsValid()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Acquire failed to create command");
-        return {GpuResourceHandle::Invalid(), GpuResourceHandle::Invalid(), 0, GpuSurfaceStatus::Lost};
-    }
-
-    const uint32_t backBufferIndex = surface._swapchain->GetCurrentBackBufferIndex();
-    GpuResourceHandle backBuffer{
-        _runtime->_nextHandleId.fetch_add(1, std::memory_order_relaxed),
-        acq.BackBuffer.Get(),
-    };
-
-    SurfaceLease lease{};
-    lease.Surface = &surface;
-    lease.BackBuffer = backBuffer;
-    lease.FrameSlotIndex = slotIndex;
-    lease.BackBufferIndex = backBufferIndex;
-    lease.WaitToDraw = acq.WaitToDraw;
-    lease.ReadyToPresent = acq.ReadyToPresent;
-    _surfaceLease = lease;
-    return {backBuffer, command, slotIndex, GpuSurfaceStatus::Success};
-}
-
-GpuResourceHandle GpuSubmitContext::BeginCommand(render::QueueType queueType) noexcept {
-    if (_hasPresent) {
-        RADRAY_ERR_LOG("GpuSubmitContext::BeginCommand called after Present");
-        return GpuResourceHandle::Invalid();
-    }
-    if (_openCommand.has_value()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::BeginCommand called while another command is open");
-        return GpuResourceHandle::Invalid();
-    }
-
-    if (_queue == nullptr) {
-        auto queue = _runtime->_device->GetCommandQueue(queueType, 0);
-        if (!queue.HasValue()) {
-            RADRAY_ERR_LOG("GpuSubmitContext::BeginCommand GetCommandQueue failed");
-            return GpuResourceHandle::Invalid();
-        }
-        _queue = queue.Get();
-        _queueType = queueType;
-    } else if (_queueType != queueType) {
-        RADRAY_ERR_LOG("GpuSubmitContext::BeginCommand called with mismatched queue type");
-        return GpuResourceHandle::Invalid();
-    }
-
-    auto command = CreateCommandInternal();
-    if (!command.IsValid()) {
-        return GpuResourceHandle::Invalid();
-    }
-
-    return command;
-}
-
-void GpuSubmitContext::EndCommand(GpuResourceHandle cmd) noexcept {
-    if (!_openCommand.has_value() || !_openCommand->Handle.IsValid() || !_openCommand->Buffer) {
-        RADRAY_ERR_LOG("GpuSubmitContext::EndCommand called without an open command");
-        return;
-    }
-    if (_openCommand->Handle.Handle != cmd.Handle) {
-        RADRAY_ERR_LOG("GpuSubmitContext::EndCommand called with a non-current command handle");
-        return;
-    }
-
-    _openCommand->Buffer->End();
-    _ops.push_back(CommandOp{_openCommand->Buffer});
-    _openCommand.reset();
-}
-
-bool GpuSubmitContext::Present(GpuPresentSurface& surface, GpuResourceHandle backBuffer) noexcept {
-    if (!backBuffer.IsValid()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Present called with invalid backBuffer handle");
-        return false;
-    }
-    if (_openCommand.has_value()) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Present called while a command is still open");
-        return false;
-    }
-    if (_hasPresent) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Present called more than once");
-        return false;
-    }
-    if (!_surfaceLease.has_value() || &surface != _surfaceLease->Surface) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Present called with mismatched surface");
-        return false;
-    }
-    if (backBuffer.Handle != _surfaceLease->BackBuffer.Handle) {
-        RADRAY_ERR_LOG("GpuSubmitContext::Present called with mismatched backBuffer handle");
-        return false;
-    }
-    _hasPresent = true;
-    _ops.push_back(PresentOp{});
-    return true;
+    return _runtime != nullptr && _swapchain != nullptr && _swapchain->IsValid();
 }
 
 bool GpuPresentSurface::Reconfigure(
@@ -319,60 +91,325 @@ bool GpuPresentSurface::Reconfigure(
     uint32_t height,
     std::optional<render::TextureFormat> format,
     std::optional<render::PresentMode> presentMode) noexcept {
-    if (_fence) {
-        _fence->Wait();
-    }
-    if (_presentQueue) {
-        _presentQueue->Wait();
-    }
-    if (_runtime) {
-        _runtime->ProcessSubmits();
+    if (_runtime == nullptr || _runtime->_device == nullptr || _swapchain == nullptr) {
+        return false;
     }
 
-    // Must destroy old swapchain before creating new one (same HWND constraint).
-    _swapchain.reset();
-    _fence.reset();
-    _slotTargetValues.clear();
-    _submitCount = 0;
-
-    _width = width;
-    _height = height;
+    auto desc = _swapchain->GetDesc();
+    desc.Width = width;
+    desc.Height = height;
     if (format.has_value()) {
-        _format = format.value();
+        desc.Format = format.value();
     }
     if (presentMode.has_value()) {
-        _presentMode = presentMode.value();
+        desc.PresentMode = presentMode.value();
     }
 
-    render::SwapChainDescriptor scDesc{};
-    scDesc.PresentQueue = _presentQueue;
-    scDesc.NativeHandler = _nativeWindowHandle;
-    scDesc.Width = _width;
-    scDesc.Height = _height;
-    scDesc.BackBufferCount = _backBufferCount;
-    scDesc.FlightFrameCount = _flightFrameCount;
-    scDesc.Format = _format;
-    scDesc.PresentMode = _presentMode;
-
-    auto scOpt = _runtime->_device->CreateSwapChain(scDesc);
-    if (!scOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuPresentSurface::Reconfigure CreateSwapChain failed");
+    auto swapchainOpt = _runtime->_device->CreateSwapChain(desc);
+    if (!swapchainOpt.HasValue()) {
         return false;
     }
-    _swapchain = scOpt.Release();
 
-    auto fenceOpt = _runtime->_device->CreateFence();
-    if (!fenceOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuPresentSurface::Reconfigure CreateFence failed");
-        _swapchain.reset();
-        return false;
-    }
-    _fence = fenceOpt.Release();
-
-    _slotTargetValues.assign(_flightFrameCount, 0);
-    _frameNumber = 0;
-    _backBufferStates.assign(_backBufferCount, render::TextureState::Undefined);
+    _swapchain = swapchainOpt.Release();
+    _slotRetireStates.clear();
+    _slotRetireStates.resize(desc.FlightFrameCount);
     return true;
+}
+
+uint32_t GpuPresentSurface::GetWidth() const noexcept {
+    return _swapchain != nullptr ? _swapchain->GetDesc().Width : 0;
+}
+
+uint32_t GpuPresentSurface::GetHeight() const noexcept {
+    return _swapchain != nullptr ? _swapchain->GetDesc().Height : 0;
+}
+
+render::TextureFormat GpuPresentSurface::GetFormat() const noexcept {
+    return _swapchain != nullptr ? _swapchain->GetDesc().Format : render::TextureFormat::UNKNOWN;
+}
+
+render::PresentMode GpuPresentSurface::GetPresentMode() const noexcept {
+    return _swapchain != nullptr ? _swapchain->GetDesc().PresentMode : render::PresentMode::FIFO;
+}
+
+void GpuPresentSurface::Destroy() noexcept {
+    if (_swapchain != nullptr) {
+        _swapchain->Destroy();
+        _swapchain.reset();
+    }
+    _slotRetireStates.clear();
+    _frameNumber = 0;
+    _runtime = nullptr;
+}
+
+// ===========================================================================
+// GpuFrameContext
+// ===========================================================================
+
+GpuSurfaceAcquireResult GpuFrameContext::AcquireSurface(GpuPresentSurface& surface) noexcept {
+    GpuSurfaceAcquireResult result{};
+    if (_runtime == nullptr || !surface.IsValid()) {
+        return result;
+    }
+
+    auto acquire = surface._swapchain->AcquireNext();
+    if (!acquire.BackBuffer.HasValue()) {
+        result.Status = GpuSurfaceAcquireStatus::Unavailable;
+        return result;
+    }
+
+    const uint32_t slotIndex = surface._swapchain->GetCurrentBackBufferIndex();
+    if (slotIndex < surface._slotRetireStates.size() && surface._slotRetireStates[slotIndex] != nullptr) {
+        WaitCompletionState(surface._slotRetireStates[slotIndex]);
+    }
+
+    auto lease = std::make_unique<GpuSurfaceLease>();
+    lease->_surface = &surface;
+    lease->_backBuffer = acquire.BackBuffer.Get();
+    lease->_waitToDraw = acquire.WaitToDraw;
+    lease->_readyToPresent = acquire.ReadyToPresent;
+    lease->_frameSlotIndex = slotIndex;
+
+    result.Status = GpuSurfaceAcquireStatus::Success;
+    result.Lease = lease.get();
+    _surfaceLeases.push_back(std::move(lease));
+    return result;
+}
+
+GpuSurfaceAcquireResult GpuFrameContext::TryAcquireSurface(GpuPresentSurface& surface) noexcept {
+    GpuSurfaceAcquireResult result{};
+    if (_runtime == nullptr || !surface.IsValid()) {
+        return result;
+    }
+
+    auto acquire = surface._swapchain->AcquireNext();
+    if (!acquire.BackBuffer.HasValue()) {
+        result.Status = GpuSurfaceAcquireStatus::Unavailable;
+        return result;
+    }
+
+    const uint32_t slotIndex = surface._swapchain->GetCurrentBackBufferIndex();
+    if (slotIndex < surface._slotRetireStates.size() &&
+        surface._slotRetireStates[slotIndex] != nullptr &&
+        !IsCompletionStateCompleted(surface._slotRetireStates[slotIndex])) {
+        result.Status = GpuSurfaceAcquireStatus::Unavailable;
+        return result;
+    }
+
+    auto lease = std::make_unique<GpuSurfaceLease>();
+    lease->_surface = &surface;
+    lease->_backBuffer = acquire.BackBuffer.Get();
+    lease->_waitToDraw = acquire.WaitToDraw;
+    lease->_readyToPresent = acquire.ReadyToPresent;
+    lease->_frameSlotIndex = slotIndex;
+
+    result.Status = GpuSurfaceAcquireStatus::Success;
+    result.Lease = lease.get();
+    _surfaceLeases.push_back(std::move(lease));
+    return result;
+}
+
+bool GpuFrameContext::Present(GpuSurfaceLease& lease) noexcept {
+    if (!lease.IsValid() || lease._presentRequested) {
+        return false;
+    }
+    const bool ownedByFrame = std::any_of(
+        _surfaceLeases.begin(),
+        _surfaceLeases.end(),
+        [&lease](const unique_ptr<GpuSurfaceLease>& owned) {
+            return owned.get() == &lease;
+        });
+    if (!ownedByFrame) {
+        return false;
+    }
+
+    lease._presentRequested = true;
+    return true;
+}
+
+bool GpuFrameContext::WaitFor(const GpuTask& task) noexcept {
+    if (!task.IsValid()) {
+        return false;
+    }
+    _dependencies.push_back(task._completion);
+    return true;
+}
+
+bool GpuFrameContext::AddGraphicsCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultComputeCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+    _defaultGraphicsCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuFrameContext::AddComputeCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultGraphicsCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+    _defaultComputeCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuFrameContext::AddCopyCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultGraphicsCmds.empty() || !_defaultComputeCmds.empty()) {
+        return false;
+    }
+    _defaultCopyCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuFrameContext::SetSubmissionPlan(vector<GpuQueueSubmitStep> steps) noexcept {
+    if (!_defaultGraphicsCmds.empty() || !_defaultComputeCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+
+    for (const auto& step : steps) {
+        if (std::any_of(step.CommandBuffers.begin(), step.CommandBuffers.end(), [](const auto& cmd) { return cmd == nullptr; })) {
+            return false;
+        }
+    }
+
+    _submissionPlan = std::move(steps);
+    return true;
+}
+
+bool GpuFrameContext::IsEmpty() const noexcept {
+    return _surfaceLeases.empty() &&
+           _defaultGraphicsCmds.empty() &&
+           _defaultComputeCmds.empty() &&
+           _defaultCopyCmds.empty() &&
+           _submissionPlan.empty();
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuFrameContext::CreateGraphicsCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Direct);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuFrameContext::CreateComputeCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Compute);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuFrameContext::CreateCopyCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Copy);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
+}
+
+// ===========================================================================
+// GpuAsyncContext
+// ===========================================================================
+
+bool GpuAsyncContext::WaitFor(const GpuTask& task) noexcept {
+    if (!task.IsValid()) {
+        return false;
+    }
+    _dependencies.push_back(task._completion);
+    return true;
+}
+
+bool GpuAsyncContext::AddGraphicsCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultComputeCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+    _defaultGraphicsCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuAsyncContext::AddComputeCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultGraphicsCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+    _defaultComputeCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuAsyncContext::AddCopyCommandBuffer(unique_ptr<render::CommandBuffer> cmd) noexcept {
+    if (cmd == nullptr || !_submissionPlan.empty() || !_defaultGraphicsCmds.empty() || !_defaultComputeCmds.empty()) {
+        return false;
+    }
+    _defaultCopyCmds.push_back(std::move(cmd));
+    return true;
+}
+
+bool GpuAsyncContext::SetSubmissionPlan(vector<GpuQueueSubmitStep> steps) noexcept {
+    if (!_defaultGraphicsCmds.empty() || !_defaultComputeCmds.empty() || !_defaultCopyCmds.empty()) {
+        return false;
+    }
+
+    for (const auto& step : steps) {
+        if (std::any_of(step.CommandBuffers.begin(), step.CommandBuffers.end(), [](const auto& cmd) { return cmd == nullptr; })) {
+            return false;
+        }
+    }
+
+    _submissionPlan = std::move(steps);
+    return true;
+}
+
+bool GpuAsyncContext::IsEmpty() const noexcept {
+    return _defaultGraphicsCmds.empty() &&
+           _defaultComputeCmds.empty() &&
+           _defaultCopyCmds.empty() &&
+           _submissionPlan.empty();
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuAsyncContext::CreateGraphicsCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Direct);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuAsyncContext::CreateComputeCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Compute);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
+}
+
+Nullable<unique_ptr<render::CommandBuffer>> GpuAsyncContext::CreateCopyCommandBuffer() noexcept {
+    if (_runtime == nullptr || _runtime->_device == nullptr) {
+        return nullptr;
+    }
+
+    auto queueOpt = _runtime->_device->GetCommandQueue(render::QueueType::Copy);
+    if (!queueOpt.HasValue()) {
+        return nullptr;
+    }
+    return _runtime->_device->CreateCommandBuffer(queueOpt.Get());
 }
 
 // ===========================================================================
@@ -383,257 +420,469 @@ GpuRuntime::~GpuRuntime() noexcept {
     Destroy();
 }
 
+Nullable<unique_ptr<GpuRuntime>> GpuRuntime::Create(const GpuRuntimeDescriptor& desc) noexcept {
+    auto runtime = std::make_unique<GpuRuntime>();
+    runtime->_backend = desc.Backend;
+
+    render::DeviceDescriptor deviceDesc{};
+    if (desc.Backend == render::RenderBackend::Vulkan) {
+        render::VulkanInstanceDescriptor instanceDesc{};
+        instanceDesc.EngineName = "RadRay";
+        instanceDesc.AppName = "RadRay";
+        instanceDesc.IsEnableDebugLayer = desc.EnableDebugValidation;
+        instanceDesc.IsEnableGpuBasedValid = desc.EnableDebugValidation;
+        instanceDesc.LogCallback = desc.LogCallback;
+        instanceDesc.LogUserData = desc.LogUserData;
+
+        auto instanceOpt = render::CreateVulkanInstance(instanceDesc);
+        if (!instanceOpt.HasValue()) {
+            return nullptr;
+        }
+        runtime->_vkInstance = instanceOpt.Release();
+
+        std::array<render::VulkanCommandQueueDescriptor, 3> queues{
+            render::VulkanCommandQueueDescriptor{render::QueueType::Direct, 1},
+            render::VulkanCommandQueueDescriptor{render::QueueType::Compute, 1},
+            render::VulkanCommandQueueDescriptor{render::QueueType::Copy, 1},
+        };
+        render::VulkanDeviceDescriptor vkDesc{};
+        vkDesc.Queues = queues;
+        deviceDesc = vkDesc;
+    } else if (desc.Backend == render::RenderBackend::D3D12) {
+        render::D3D12DeviceDescriptor d3d12Desc{};
+        d3d12Desc.IsEnableDebugLayer = desc.EnableDebugValidation;
+        d3d12Desc.IsEnableGpuBasedValid = desc.EnableDebugValidation;
+        d3d12Desc.LogCallback = desc.LogCallback;
+        d3d12Desc.LogUserData = desc.LogUserData;
+        deviceDesc = d3d12Desc;
+    } else {
+        render::MetalDeviceDescriptor metalDesc{};
+        deviceDesc = metalDesc;
+    }
+
+    auto deviceOpt = render::CreateDevice(deviceDesc);
+    if (!deviceOpt.HasValue()) {
+        if (runtime->_vkInstance != nullptr) {
+            render::DestroyVulkanInstance(std::move(runtime->_vkInstance));
+        }
+        return nullptr;
+    }
+    runtime->_device = deviceOpt.Release();
+
+    auto graphicsFenceOpt = runtime->_device->CreateFence();
+    auto computeFenceOpt = runtime->_device->CreateFence();
+    auto copyFenceOpt = runtime->_device->CreateFence();
+    if (!graphicsFenceOpt.HasValue() || !computeFenceOpt.HasValue() || !copyFenceOpt.HasValue()) {
+        runtime->Destroy();
+        return nullptr;
+    }
+
+    runtime->_graphicsFence = graphicsFenceOpt.Release();
+    runtime->_computeFence = computeFenceOpt.Release();
+    runtime->_copyFence = copyFenceOpt.Release();
+    return runtime;
+}
+
 bool GpuRuntime::IsValid() const noexcept {
     return _device != nullptr;
 }
 
-void GpuRuntime::ProcessSubmits() noexcept {
-    std::erase_if(
-        _inFlightSubmissions,
-        [](const InFlightSubmit& submit) noexcept {
-            return submit.Fence == nullptr || submit.Fence->GetCompletedValue() >= submit.TargetValue;
-        });
-}
-
 void GpuRuntime::Destroy() noexcept {
-    if (!_device) {
-        return;
+    _inFlightTasks.clear();
+
+    _graphicsFence.reset();
+    _computeFence.reset();
+    _copyFence.reset();
+    _graphicsNextValue = 1;
+    _computeNextValue = 1;
+    _copyNextValue = 1;
+
+    if (_device != nullptr) {
+        _device->Destroy();
+        _device.reset();
     }
-    for (int i = 0; i < static_cast<int>(render::QueueType::MAX_COUNT); ++i) {
-        auto q = _device->GetCommandQueue(static_cast<render::QueueType>(i), 0);
-        if (q.HasValue()) {
-            q.Get()->Wait();
-        }
-    }
-    _inFlightSubmissions.clear();
-    _device->Destroy();
-    _device.reset();
-    if (_vkInstance) {
+
+    if (_vkInstance != nullptr) {
         render::DestroyVulkanInstance(std::move(_vkInstance));
     }
 }
 
-Nullable<unique_ptr<GpuRuntime>> GpuRuntime::Create(const GpuRuntimeDescriptor& desc) noexcept {
-    auto runtime = make_unique<GpuRuntime>();
-    runtime->_backend = desc.Backend;
-
-    switch (desc.Backend) {
-        case render::RenderBackend::D3D12: {
-#if defined(RADRAY_ENABLE_D3D12) && defined(_WIN32)
-            render::D3D12DeviceDescriptor d3d12Desc{};
-            d3d12Desc.IsEnableDebugLayer = desc.EnableDebugValidation;
-            d3d12Desc.IsEnableGpuBasedValid = desc.EnableDebugValidation;
-            d3d12Desc.LogCallback = desc.LogCallback;
-            d3d12Desc.LogUserData = desc.LogUserData;
-            auto deviceOpt = render::CreateDevice(d3d12Desc);
-            if (!deviceOpt.HasValue()) {
-                RADRAY_ERR_LOG("GpuRuntime::Create CreateDevice(D3D12) failed");
-                return nullptr;
-            }
-            runtime->_device = deviceOpt.Release();
-#else
-            RADRAY_ERR_LOG("GpuRuntime::Create D3D12 backend not available");
-            return nullptr;
-#endif
-            break;
-        }
-        case render::RenderBackend::Vulkan: {
-#if defined(RADRAY_ENABLE_VULKAN)
-            render::VulkanInstanceDescriptor insDesc{};
-            insDesc.AppName = "RadRay";
-            insDesc.AppVersion = 1;
-            insDesc.EngineName = "RadRay";
-            insDesc.EngineVersion = 1;
-            insDesc.IsEnableDebugLayer = desc.EnableDebugValidation;
-            insDesc.IsEnableGpuBasedValid = desc.EnableDebugValidation;
-            insDesc.LogCallback = desc.LogCallback;
-            insDesc.LogUserData = desc.LogUserData;
-            auto insOpt = render::CreateVulkanInstance(insDesc);
-            if (!insOpt.HasValue()) {
-                RADRAY_ERR_LOG("GpuRuntime::Create CreateVulkanInstance failed");
-                return nullptr;
-            }
-            runtime->_vkInstance = insOpt.Release();
-
-            render::VulkanCommandQueueDescriptor queueDesc{};
-            queueDesc.Type = render::QueueType::Direct;
-            queueDesc.Count = 1;
-            render::VulkanDeviceDescriptor vkDevDesc{};
-            vkDevDesc.Queues = std::span{&queueDesc, 1};
-            auto deviceOpt = render::CreateDevice(vkDevDesc);
-            if (!deviceOpt.HasValue()) {
-                RADRAY_ERR_LOG("GpuRuntime::Create CreateDevice(Vulkan) failed");
-                render::DestroyVulkanInstance(std::move(runtime->_vkInstance));
-                return nullptr;
-            }
-            runtime->_device = deviceOpt.Release();
-#else
-            RADRAY_ERR_LOG("GpuRuntime::Create Vulkan backend not available");
-            return nullptr;
-#endif
-            break;
-        }
-        default: {
-            RADRAY_ERR_LOG("GpuRuntime::Create unsupported backend");
-            return nullptr;
-        }
-    }
-
-    return runtime;
-}
-
-Nullable<unique_ptr<GpuPresentSurface>> GpuRuntime::CreatePresentSurface(const GpuPresentSurfaceDescriptor& desc) noexcept {
-    auto queue = _device->GetCommandQueue(render::QueueType::Direct, 0);
-    if (!queue.HasValue()) {
-        RADRAY_ERR_LOG("GpuRuntime::CreatePresentSurface GetCommandQueue(Direct) failed");
+Nullable<unique_ptr<GpuPresentSurface>> GpuRuntime::CreatePresentSurface(
+    const GpuPresentSurfaceDescriptor& desc) noexcept {
+    if (_device == nullptr) {
         return nullptr;
     }
 
-    render::SwapChainDescriptor scDesc{};
-    scDesc.PresentQueue = queue.Get();
-    scDesc.NativeHandler = desc.NativeWindowHandle;
-    scDesc.Width = desc.Width;
-    scDesc.Height = desc.Height;
-    scDesc.BackBufferCount = desc.BackBufferCount;
-    scDesc.FlightFrameCount = desc.FlightFrameCount;
-    scDesc.Format = desc.Format;
-    scDesc.PresentMode = desc.PresentMode;
-
-    auto scOpt = _device->CreateSwapChain(scDesc);
-    if (!scOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuRuntime::CreatePresentSurface CreateSwapChain failed");
+    auto presentQueueOpt = _device->GetCommandQueue(render::QueueType::Direct);
+    if (!presentQueueOpt.HasValue()) {
         return nullptr;
     }
 
-    auto surface = make_unique<GpuPresentSurface>();
+    render::SwapChainDescriptor swapchainDesc{};
+    swapchainDesc.PresentQueue = presentQueueOpt.Get();
+    swapchainDesc.NativeHandler = desc.NativeWindowHandle;
+    swapchainDesc.Width = desc.Width;
+    swapchainDesc.Height = desc.Height;
+    swapchainDesc.BackBufferCount = desc.BackBufferCount;
+    swapchainDesc.FlightFrameCount = desc.FlightFrameCount;
+    swapchainDesc.Format = desc.Format;
+    swapchainDesc.PresentMode = desc.PresentMode;
+
+    auto swapchainOpt = _device->CreateSwapChain(swapchainDesc);
+    if (!swapchainOpt.HasValue()) {
+        return nullptr;
+    }
+
+    auto surface = std::make_unique<GpuPresentSurface>();
     surface->_runtime = this;
-    surface->_nativeWindowHandle = desc.NativeWindowHandle;
-    surface->_width = desc.Width;
-    surface->_height = desc.Height;
-    surface->_backBufferCount = desc.BackBufferCount;
-    surface->_flightFrameCount = desc.FlightFrameCount;
-    surface->_format = desc.Format;
-    surface->_presentMode = desc.PresentMode;
-    surface->_swapchain = scOpt.Release();
-    surface->_presentQueue = queue.Get();
-
-    // Single shared fence
-    auto fenceOpt = _device->CreateFence();
-    if (!fenceOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuRuntime::CreatePresentSurface CreateFence failed");
-        return nullptr;
-    }
-    surface->_fence = fenceOpt.Release();
-
-    surface->_slotTargetValues.assign(desc.FlightFrameCount, 0);
-    surface->_backBufferStates.assign(desc.BackBufferCount, render::TextureState::Undefined);
+    surface->_swapchain = swapchainOpt.Release();
+    surface->_slotRetireStates.resize(desc.FlightFrameCount);
     return surface;
 }
 
-Nullable<unique_ptr<GpuSubmitContext>> GpuRuntime::BeginSubmit() noexcept {
-    this->ProcessSubmits();
-    auto ctx = make_unique<GpuSubmitContext>();
-    ctx->_runtime = this;
-    return ctx;
+Nullable<unique_ptr<GpuFrameContext>> GpuRuntime::BeginFrame() noexcept {
+    if (_device == nullptr) {
+        return nullptr;
+    }
+
+    auto frame = std::make_unique<GpuFrameContext>();
+    frame->_runtime = this;
+    return frame;
 }
 
-GpuTask GpuRuntime::Submit(unique_ptr<GpuSubmitContext> ctx) noexcept {
-    this->ProcessSubmits();
-
-    GpuTask task{};
-
-    if (!ctx || ctx->_consumed) {
-        return task;
-    }
-    ctx->_consumed = true;
-
-    if (ctx->_queue == nullptr) {
-        RADRAY_ERR_LOG("GpuRuntime::Submit called on a context without a bound queue");
-        return task;
-    }
-    if (ctx->_openCommand.has_value()) {
-        RADRAY_ERR_LOG("GpuRuntime::Submit called with unclosed commands");
-        return task;
-    }
-    if (ctx->_ops.empty()) {
-        RADRAY_ERR_LOG("GpuRuntime::Submit called on a context without commands");
-        return task;
+Nullable<unique_ptr<GpuAsyncContext>> GpuRuntime::BeginAsync() noexcept {
+    if (_device == nullptr) {
+        return nullptr;
     }
 
-    auto* fence = ctx->ResolveSubmitFence();
-    if (fence == nullptr) {
-        return task;
+    auto asyncContext = std::make_unique<GpuAsyncContext>();
+    asyncContext->_runtime = this;
+    return asyncContext;
+}
+
+GpuTask GpuRuntime::Submit(unique_ptr<GpuFrameContext> frame) noexcept {
+    if (frame == nullptr || frame->_runtime != this) {
+        return {};
     }
 
-    vector<render::CommandBuffer*> submitCommands;
-    submitCommands.reserve(ctx->_commands.size() + 1);
+    auto getQueue = [this](render::QueueType type) -> Nullable<render::CommandQueue*> {
+        return _device != nullptr ? _device->GetCommandQueue(type) : nullptr;
+    };
+    auto getFence = [this](render::QueueType type) -> shared_ptr<render::Fence> {
+        switch (type) {
+            case render::QueueType::Direct: return _graphicsFence;
+            case render::QueueType::Compute: return _computeFence;
+            case render::QueueType::Copy: return _copyFence;
+            case render::QueueType::MAX_COUNT: return nullptr;
+        }
+        return nullptr;
+    };
+    auto getNextValue = [this](render::QueueType type) -> uint64_t* {
+        switch (type) {
+            case render::QueueType::Direct: return &_graphicsNextValue;
+            case render::QueueType::Compute: return &_computeNextValue;
+            case render::QueueType::Copy: return &_copyNextValue;
+            case render::QueueType::MAX_COUNT: return nullptr;
+        }
+        return nullptr;
+    };
 
-    bool sawPresent = false;
-    for (const auto& op : ctx->_ops) {
-        if (const auto* cmdOp = std::get_if<GpuSubmitContext::CommandOp>(&op)) {
-            if (cmdOp->Buffer == nullptr) {
-                RADRAY_ERR_LOG("GpuRuntime::Submit encountered an invalid recorded command");
-                return task;
+    auto hasPresentWork = [&]() {
+        return std::any_of(
+            frame->_surfaceLeases.begin(),
+            frame->_surfaceLeases.end(),
+            [](const unique_ptr<GpuSurfaceLease>& lease) {
+                return lease != nullptr && lease->_presentRequested;
+            });
+    };
+
+    vector<GpuQueueSubmitStep> plan{};
+    if (!frame->_submissionPlan.empty()) {
+        plan = std::move(frame->_submissionPlan);
+    } else {
+        if (!frame->_defaultGraphicsCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Direct;
+            step.CommandBuffers = std::move(frame->_defaultGraphicsCmds);
+            plan.push_back(std::move(step));
+        }
+        if (!frame->_defaultComputeCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Compute;
+            step.CommandBuffers = std::move(frame->_defaultComputeCmds);
+            plan.push_back(std::move(step));
+        }
+        if (!frame->_defaultCopyCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Copy;
+            step.CommandBuffers = std::move(frame->_defaultCopyCmds);
+            plan.push_back(std::move(step));
+        }
+    }
+
+    size_t presentStepIndex = plan.size();
+    if (hasPresentWork()) {
+        for (size_t i = 0; i < plan.size(); ++i) {
+            if (plan[i].Queue == render::QueueType::Direct) {
+                presentStepIndex = i;
+                break;
             }
-            submitCommands.push_back(cmdOp->Buffer);
+        }
+
+        if (presentStepIndex == plan.size()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Direct;
+            plan.push_back(std::move(step));
+            presentStepIndex = plan.size() - 1;
+        }
+    }
+
+    if (plan.empty()) {
+        return {};
+    }
+
+    auto completion = MakeCompletionState();
+    vector<GpuCompletionPoint> stepCompletions{};
+    stepCompletions.reserve(plan.size());
+
+    for (size_t i = 0; i < plan.size(); ++i) {
+        auto queueOpt = getQueue(plan[i].Queue);
+        auto fence = getFence(plan[i].Queue);
+        auto* nextValue = getNextValue(plan[i].Queue);
+        if (!queueOpt.HasValue() || fence == nullptr || nextValue == nullptr) {
+            return {};
+        }
+
+        vector<render::CommandBuffer*> rawCmdBuffers{};
+        rawCmdBuffers.reserve(plan[i].CommandBuffers.size());
+        for (const auto& cmd : plan[i].CommandBuffers) {
+            if (cmd == nullptr) {
+                return {};
+            }
+            rawCmdBuffers.push_back(cmd.get());
+        }
+
+        vector<render::Fence*> waitFences{};
+        vector<uint64_t> waitValues{};
+        for (const auto& dependency : frame->_dependencies) {
+            if (dependency == nullptr) {
+                continue;
+            }
+            for (const auto& point : dependency->Points) {
+                if (point.Fence != nullptr) {
+                    waitFences.push_back(point.Fence.get());
+                    waitValues.push_back(point.TargetValue);
+                }
+            }
+        }
+        for (uint32_t waitStepIndex : plan[i].WaitStepIndices) {
+            if (waitStepIndex >= stepCompletions.size()) {
+                return {};
+            }
+            waitFences.push_back(stepCompletions[waitStepIndex].Fence.get());
+            waitValues.push_back(stepCompletions[waitStepIndex].TargetValue);
+        }
+
+        vector<render::SwapChainSyncObject*> waitToExecute{};
+        vector<render::SwapChainSyncObject*> readyToPresent{};
+        if (i == presentStepIndex) {
+            for (const auto& lease : frame->_surfaceLeases) {
+                if (lease == nullptr || !lease->_presentRequested) {
+                    continue;
+                }
+                if (lease->_waitToDraw != nullptr) {
+                    waitToExecute.push_back(lease->_waitToDraw);
+                }
+                if (lease->_readyToPresent != nullptr) {
+                    readyToPresent.push_back(lease->_readyToPresent);
+                }
+            }
+        }
+
+        uint64_t signalValue = (*nextValue)++;
+        render::Fence* signalFence = fence.get();
+        render::CommandQueueSubmitDescriptor desc{};
+        desc.CmdBuffers = rawCmdBuffers;
+        desc.SignalFences = std::span<render::Fence*>(&signalFence, 1);
+        desc.SignalValues = std::span<uint64_t>(&signalValue, 1);
+        desc.WaitFences = waitFences;
+        desc.WaitValues = waitValues;
+        desc.WaitToExecute = waitToExecute;
+        desc.ReadyToPresent = readyToPresent;
+        queueOpt.Get()->Submit(desc);
+
+        GpuCompletionPoint point{fence, signalValue};
+        completion->Points.push_back(point);
+        stepCompletions.push_back(point);
+    }
+
+    for (const auto& lease : frame->_surfaceLeases) {
+        if (lease == nullptr || !lease->_presentRequested || lease->_surface == nullptr || lease->_surface->_swapchain == nullptr) {
             continue;
         }
 
-        if (!ctx->_surfaceLease.has_value()) {
-            RADRAY_ERR_LOG("GpuRuntime::Submit encountered Present without an acquired surface");
-            return task;
+        lease->_surface->_swapchain->Present(lease->_readyToPresent);
+        if (lease->_frameSlotIndex >= lease->_surface->_slotRetireStates.size()) {
+            lease->_surface->_slotRetireStates.resize(lease->_frameSlotIndex + 1);
         }
-        if (sawPresent) {
-            RADRAY_ERR_LOG("GpuRuntime::Submit encountered multiple Present ops");
-            return task;
-        }
-
-        sawPresent = true;
-        if (auto* barrierCmd = ctx->AppendPresentBarrierCommand()) {
-            submitCommands.push_back(barrierCmd);
-        }
+        lease->_surface->_slotRetireStates[lease->_frameSlotIndex] = completion;
+        ++lease->_surface->_frameNumber;
     }
 
-    if (submitCommands.empty()) {
-        RADRAY_ERR_LOG("GpuRuntime::Submit compiled an empty command list");
-        return task;
+    GpuTask task{};
+    if (IsCompletionStateValid(completion)) {
+        task._runtime = this;
+        task._completion = completion;
+    }
+    if (!task.IsValid()) {
+        return {};
     }
 
-    render::CommandQueueSubmitDescriptor submitDesc{};
-    submitDesc.CmdBuffers = std::span<render::CommandBuffer*>{submitCommands};
-    submitDesc.SignalFence = fence;
-    if (ctx->_surfaceLease.has_value()) {
-        submitDesc.WaitToExecute = ctx->_surfaceLease->WaitToDraw;
-        submitDesc.ReadyToPresent = ctx->_surfaceLease->ReadyToPresent;
-    }
-    ctx->_queue->Submit(submitDesc);
-
-    uint64_t targetValue = 1;
-    if (ctx->_surfaceLease.has_value()) {
-        auto& lease = ctx->_surfaceLease.value();
-        auto* surface = lease.Surface;
-        if (ctx->_hasPresent) {
-            surface->_swapchain->Present(lease.ReadyToPresent);
-        }
-
-        surface->_backBufferStates[lease.BackBufferIndex] = render::TextureState::Present;
-        ++surface->_submitCount;
-        surface->_slotTargetValues[lease.FrameSlotIndex] = surface->_submitCount;
-        ++surface->_frameNumber;
-        targetValue = surface->_submitCount;
-    }
-
-    task._fence = fence;
-    task._runtime = this;
-    task._targetValue = targetValue;
-
-    InFlightSubmit submit{};
-    submit.Fence = fence;
-    submit.TargetValue = targetValue;
-    submit.Context = std::move(ctx);
-    _inFlightSubmissions.push_back(std::move(submit));
-
+    frame->_consumed = true;
+    _inFlightTasks.push_back(InFlightTask{
+        .Completion = completion,
+        .Frame = std::move(frame),
+        .Async = nullptr,
+    });
     return task;
+}
+
+GpuTask GpuRuntime::Submit(unique_ptr<GpuAsyncContext> asyncContext) noexcept {
+    if (asyncContext == nullptr || asyncContext->_runtime != this) {
+        return {};
+    }
+
+    auto getQueue = [this](render::QueueType type) -> Nullable<render::CommandQueue*> {
+        return _device != nullptr ? _device->GetCommandQueue(type) : nullptr;
+    };
+    auto getFence = [this](render::QueueType type) -> shared_ptr<render::Fence> {
+        switch (type) {
+            case render::QueueType::Direct: return _graphicsFence;
+            case render::QueueType::Compute: return _computeFence;
+            case render::QueueType::Copy: return _copyFence;
+            case render::QueueType::MAX_COUNT: return nullptr;
+        }
+        return nullptr;
+    };
+    auto getNextValue = [this](render::QueueType type) -> uint64_t* {
+        switch (type) {
+            case render::QueueType::Direct: return &_graphicsNextValue;
+            case render::QueueType::Compute: return &_computeNextValue;
+            case render::QueueType::Copy: return &_copyNextValue;
+            case render::QueueType::MAX_COUNT: return nullptr;
+        }
+        return nullptr;
+    };
+
+    vector<GpuQueueSubmitStep> plan{};
+    if (!asyncContext->_submissionPlan.empty()) {
+        plan = std::move(asyncContext->_submissionPlan);
+    } else {
+        if (!asyncContext->_defaultGraphicsCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Direct;
+            step.CommandBuffers = std::move(asyncContext->_defaultGraphicsCmds);
+            plan.push_back(std::move(step));
+        }
+        if (!asyncContext->_defaultComputeCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Compute;
+            step.CommandBuffers = std::move(asyncContext->_defaultComputeCmds);
+            plan.push_back(std::move(step));
+        }
+        if (!asyncContext->_defaultCopyCmds.empty()) {
+            GpuQueueSubmitStep step{};
+            step.Queue = render::QueueType::Copy;
+            step.CommandBuffers = std::move(asyncContext->_defaultCopyCmds);
+            plan.push_back(std::move(step));
+        }
+    }
+
+    if (plan.empty()) {
+        return {};
+    }
+
+    auto completion = MakeCompletionState();
+    vector<GpuCompletionPoint> stepCompletions{};
+    stepCompletions.reserve(plan.size());
+
+    for (size_t i = 0; i < plan.size(); ++i) {
+        auto queueOpt = getQueue(plan[i].Queue);
+        auto fence = getFence(plan[i].Queue);
+        auto* nextValue = getNextValue(plan[i].Queue);
+        if (!queueOpt.HasValue() || fence == nullptr || nextValue == nullptr) {
+            return {};
+        }
+
+        vector<render::CommandBuffer*> rawCmdBuffers{};
+        rawCmdBuffers.reserve(plan[i].CommandBuffers.size());
+        for (const auto& cmd : plan[i].CommandBuffers) {
+            if (cmd == nullptr) {
+                return {};
+            }
+            rawCmdBuffers.push_back(cmd.get());
+        }
+
+        vector<render::Fence*> waitFences{};
+        vector<uint64_t> waitValues{};
+        for (const auto& dependency : asyncContext->_dependencies) {
+            if (dependency == nullptr) {
+                continue;
+            }
+            for (const auto& point : dependency->Points) {
+                if (point.Fence != nullptr) {
+                    waitFences.push_back(point.Fence.get());
+                    waitValues.push_back(point.TargetValue);
+                }
+            }
+        }
+        for (uint32_t waitStepIndex : plan[i].WaitStepIndices) {
+            if (waitStepIndex >= stepCompletions.size()) {
+                return {};
+            }
+            waitFences.push_back(stepCompletions[waitStepIndex].Fence.get());
+            waitValues.push_back(stepCompletions[waitStepIndex].TargetValue);
+        }
+
+        uint64_t signalValue = (*nextValue)++;
+        render::Fence* signalFence = fence.get();
+        render::CommandQueueSubmitDescriptor desc{};
+        desc.CmdBuffers = rawCmdBuffers;
+        desc.SignalFences = std::span<render::Fence*>(&signalFence, 1);
+        desc.SignalValues = std::span<uint64_t>(&signalValue, 1);
+        desc.WaitFences = waitFences;
+        desc.WaitValues = waitValues;
+        queueOpt.Get()->Submit(desc);
+
+        GpuCompletionPoint point{fence, signalValue};
+        completion->Points.push_back(point);
+        stepCompletions.push_back(point);
+    }
+
+    GpuTask task{};
+    if (IsCompletionStateValid(completion)) {
+        task._runtime = this;
+        task._completion = completion;
+    }
+    if (!task.IsValid()) {
+        return {};
+    }
+
+    asyncContext->_consumed = true;
+    _inFlightTasks.push_back(InFlightTask{
+        .Completion = completion,
+        .Frame = nullptr,
+        .Async = std::move(asyncContext),
+    });
+    return task;
+}
+
+void GpuRuntime::ProcessTasks() noexcept {
+    std::erase_if(
+        _inFlightTasks,
+        [](const InFlightTask& task) {
+            return IsCompletionStateCompleted(task.Completion);
+        });
 }
 
 }  // namespace radray

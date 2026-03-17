@@ -2732,6 +2732,12 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
+        auto* f = CastD3D12Object(desc.WaitFences[i]);
+        uint64_t waitValue = desc.WaitValues[i];
+        _queue->Wait(f->_fence.Get(), waitValue);
+    }
+
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
     for (auto& i : desc.CmdBuffers) {
@@ -2741,10 +2747,16 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (!submits.empty()) {
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
     }
-    if (desc.SignalFence.HasValue()) {
-        auto f = CastD3D12Object(desc.SignalFence.Get());
-        _queue->Signal(f->_fence.Get(), f->_fenceValue++);
+
+    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
+        auto* f = CastD3D12Object(desc.SignalFences[i]);
+        uint64_t signalValue = desc.SignalValues[i];
+        _queue->Signal(f->_fence.Get(), signalValue);
+        if (signalValue + 1 > f->_fenceValue) {
+            f->_fenceValue = signalValue + 1;
+        }
     }
+
     _device->TryDrainValidationMessages();
 }
 
@@ -3584,7 +3596,10 @@ SwapChainD3D12::SwapChainD3D12(
     : _device(device),
       _presentQueue(CastD3D12Object(desc.PresentQueue)),
       _swapchain(std::move(swapchain)),
-      _mode(desc.PresentMode) {}
+      _nativeHandler(desc.NativeHandler),
+      _mode(desc.PresentMode),
+      _flightFrameCount(desc.FlightFrameCount),
+      _reqFormat(desc.Format) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
@@ -3661,6 +3676,20 @@ uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
+}
+
+SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    _swapchain->GetDesc1(&desc);
+    return SwapChainDescriptor{
+        _presentQueue,
+        _nativeHandler,
+        desc.Width,
+        desc.Height,
+        desc.BufferCount,
+        _flightFrameCount,
+        _reqFormat,
+        _mode};
 }
 
 BufferD3D12::BufferD3D12(

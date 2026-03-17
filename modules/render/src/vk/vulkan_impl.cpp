@@ -828,7 +828,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed: {}", vr);
         return nullptr;
     }
-    auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain);
+    auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain, desc);
     vector<VkImage> swapchainImages;
     if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, _ftb.vkGetSwapchainImagesKHR, _device, swapchain);
         vr != VK_SUCCESS) {
@@ -3131,8 +3131,8 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkPipelineStageFlags> waitStages;
     bool useTimelineSubmit = false;
 
-    if (desc.WaitToExecute != nullptr) {
-        auto* waitSync = CastVkObject(desc.WaitToExecute);
+    for (auto* syncObj : desc.WaitToExecute) {
+        auto* waitSync = CastVkObject(syncObj);
         if (waitSync == nullptr || !waitSync->IsValid()) {
             RADRAY_ABORT("invalid swapchain wait sync object");
         }
@@ -3150,8 +3150,30 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         waitStages.emplace_back(waitStageMask);
         waitValues.emplace_back(0);
     }
-    if (desc.ReadyToPresent != nullptr) {
-        auto* signalSync = CastVkObject(desc.ReadyToPresent);
+
+    for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
+        auto* fenceObj = CastVkObject(desc.WaitFences[i]);
+        uint64_t waitValue = desc.WaitValues[i];
+        std::visit(
+            [&](auto& fence) noexcept {
+                using T = std::decay_t<decltype(fence)>;
+                if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
+                    if (fence == nullptr || !fence->IsValid()) {
+                        RADRAY_ABORT("invalid timeline fence for GPU wait");
+                    }
+                    useTimelineSubmit = true;
+                    waitSemaphores.emplace_back(fence->_semaphore);
+                    waitValues.emplace_back(waitValue);
+                    waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+                } else {
+                    RADRAY_ABORT("GPU-side fence wait requires a timeline semaphore fence");
+                }
+            },
+            fenceObj->_fence);
+    }
+
+    for (auto* syncObj : desc.ReadyToPresent) {
+        auto* signalSync = CastVkObject(syncObj);
         if (signalSync == nullptr || !signalSync->IsValid()) {
             RADRAY_ABORT("invalid swapchain signal sync object");
         }
@@ -3160,8 +3182,9 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
 
     VkFence submitFence = VK_NULL_HANDLE;
-    if (desc.SignalFence.HasValue()) {
-        auto* fenceObj = CastVkObject(desc.SignalFence.Get());
+    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
+        auto* fenceObj = CastVkObject(desc.SignalFences[i]);
+        uint64_t signalValue = desc.SignalValues[i];
         std::visit(
             [&](auto& fence) noexcept {
                 using T = std::decay_t<decltype(fence)>;
@@ -3172,9 +3195,11 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
                         RADRAY_ABORT("invalid timeline fence");
                     }
                     useTimelineSubmit = true;
-                    uint64_t signalValue = fenceObj->_fenceValue++;
                     signalSemaphores.emplace_back(fence->_semaphore);
                     signalValues.emplace_back(signalValue);
+                    if (signalValue + 1 > fenceObj->_fenceValue) {
+                        fenceObj->_fenceValue = signalValue + 1;
+                    }
                 } else {
                     if (fence == nullptr || !fence->IsValid()) {
                         RADRAY_ABORT("invalid legacy fence");
@@ -4551,11 +4576,18 @@ SwapChainVulkan::SwapChainVulkan(
     DeviceVulkan* device,
     QueueVulkan* queue,
     unique_ptr<SurfaceVulkan> surface,
-    VkSwapchainKHR swapchain) noexcept
+    VkSwapchainKHR swapchain,
+    const SwapChainDescriptor& desc) noexcept
     : _device(device),
       _queue(queue),
       _surface(std::move(surface)),
-      _swapchain(swapchain) {}
+      _swapchain(swapchain),
+      _nativeHandler(desc.NativeHandler),
+      _width(desc.Width),
+      _height(desc.Height),
+      _flightFrameCount(desc.FlightFrameCount),
+      _reqFormat(desc.Format),
+      _mode(desc.PresentMode) {}
 
 SwapChainVulkan::~SwapChainVulkan() noexcept {
     this->DestroyImpl();
@@ -4677,6 +4709,18 @@ uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
 
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
+}
+
+SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
+    return SwapChainDescriptor{
+        _queue,
+        _nativeHandler,
+        _width,
+        _height,
+        static_cast<uint32_t>(_frames.size()),
+        _flightFrameCount,
+        _reqFormat,
+        _mode};
 }
 
 BufferVulkan::BufferVulkan(

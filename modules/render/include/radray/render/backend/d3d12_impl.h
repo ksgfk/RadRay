@@ -582,6 +582,8 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
+    SwapChainDescriptor GetDesc() const noexcept override;
+
 public:
     class Frame {
     public:
@@ -593,7 +595,10 @@ public:
     ComPtr<IDXGISwapChain3> _swapchain;
     HANDLE _frameLatencyEvent{nullptr};
     vector<Frame> _frames;
-    PresentMode _mode;
+    const void* _nativeHandler{nullptr};
+    PresentMode _mode{PresentMode::FIFO};
+    uint32_t _flightFrameCount{0};
+    TextureFormat _reqFormat{TextureFormat::UNKNOWN};
 };
 
 class BufferD3D12 final : public Buffer {

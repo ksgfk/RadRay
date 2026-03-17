@@ -1,1 +1,20 @@
-radray_add_test(test_gpu_present_surface SOURCES test_gpu_present_surface.cpp LINK_LIBS radraycore radrayruntime radraywindow)
+radray_add_test(
+    test_gpu_runtime_core
+    SOURCES
+        test_gpu_runtime_core.cpp
+    LINK_LIBS
+        radraycore
+        radrayrender
+        radrayruntime)
+
+if (RADRAY_BUILD_WINDOW)
+    radray_add_test(
+        test_gpu_runtime_smoke
+        SOURCES
+            test_gpu_runtime_smoke.cpp
+        LINK_LIBS
+            radraycore
+            radrayrender
+            radrayruntime
+            radraywindow)
+endif()

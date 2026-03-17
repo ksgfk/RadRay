@@ -620,7 +620,8 @@ public:
         DeviceVulkan* device,
         QueueVulkan* queue,
         unique_ptr<SurfaceVulkan> surface,
-        VkSwapchainKHR swapchain) noexcept;
+        VkSwapchainKHR swapchain,
+        const SwapChainDescriptor& desc) noexcept;
 
     ~SwapChainVulkan() noexcept;
 
@@ -638,6 +639,8 @@ public:
 
     uint32_t GetBackBufferCount() const noexcept override;
 
+    SwapChainDescriptor GetDesc() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -650,6 +653,7 @@ public:
     QueueVulkan* _queue;
     unique_ptr<SurfaceVulkan> _surface;
     VkSwapchainKHR _swapchain;
+    const void* _nativeHandler;
     vector<Frame> _frames;
     vector<unique_ptr<SwapChainSyncObjectVulkan>> _acquireSemaphores;
     vector<unique_ptr<SwapChainSyncObjectVulkan>> _renderFinishSemaphores;
@@ -657,6 +661,11 @@ public:
     vector<uint8_t> _acquireFenceShouldWait;
     uint32_t _nextSemaphoreSlot{0};
     uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _flightFrameCount{0};
+    TextureFormat _reqFormat{TextureFormat::UNKNOWN};
+    PresentMode _mode{PresentMode::FIFO};
 };
 
 class BufferVulkan final : public Buffer {

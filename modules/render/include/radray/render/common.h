@@ -642,9 +642,18 @@ struct SamplerDescriptor {
 
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
-    Nullable<Fence*> SignalFence{nullptr};
-    SwapChainSyncObject* WaitToExecute{nullptr};
-    SwapChainSyncObject* ReadyToPresent{nullptr};
+
+    // Fence 信号 — Fences 和 Values 长度必须一致
+    std::span<Fence*> SignalFences{};
+    std::span<uint64_t> SignalValues{};
+
+    // GPU 侧 fence 等待 — Fences 和 Values 长度必须一致
+    std::span<Fence*> WaitFences{};
+    std::span<uint64_t> WaitValues{};
+
+    // Swapchain 同步 — 支持多 surface
+    std::span<SwapChainSyncObject*> WaitToExecute{};
+    std::span<SwapChainSyncObject*> ReadyToPresent{};
 };
 
 struct AcquireResult {
@@ -1401,6 +1410,8 @@ public:
     virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
+
+    virtual SwapChainDescriptor GetDesc() const noexcept = 0;
 };
 
 class Resource : public RenderBase, public IDebugName {

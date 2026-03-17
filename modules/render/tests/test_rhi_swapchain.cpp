@@ -380,16 +380,19 @@ bool RenderFrames(
         cmd->End();
 
         CommandBuffer* submitCmds[] = {cmd};
+        Fence* signalFences[] = {fence};
+        expectedCompletedValues[slot]++;
+        uint64_t signalValues[] = {expectedCompletedValues[slot]};
         CommandQueueSubmitDescriptor submitDesc{};
         submitDesc.CmdBuffers = submitCmds;
-        submitDesc.SignalFence = fence;
-        submitDesc.WaitToExecute = waitToDrawSync;
-        submitDesc.ReadyToPresent = readyToPresentSync;
+        submitDesc.SignalFences = signalFences;
+        submitDesc.SignalValues = signalValues;
+        submitDesc.WaitToExecute = std::span{&waitToDrawSync, 1};
+        submitDesc.ReadyToPresent = std::span{&readyToPresentSync, 1};
         queue->Submit(submitDesc);
         runtime.Swapchain->Present(readyToPresentSync);
 
         runtime.BackBufferStates[backBufferIndex] = TextureState::Present;
-        expectedCompletedValues[slot]++;
     }
     return true;
 }
