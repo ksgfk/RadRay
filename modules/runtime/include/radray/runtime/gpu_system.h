@@ -263,6 +263,31 @@ private:
         unique_ptr<GpuAsyncContext> Async;
     };
 
+    render::CommandQueue* GetQueueForType(render::QueueType type) const noexcept;
+    shared_ptr<render::Fence>& GetFenceForQueue(render::QueueType queueType) noexcept;
+    uint64_t& GetNextValueForQueue(render::QueueType queueType) noexcept;
+
+    static void CollectDependencyWaits(
+        const vector<shared_ptr<GpuCompletionState>>& dependencies,
+        vector<render::Fence*>& outWaitFences,
+        vector<uint64_t>& outWaitValues) noexcept;
+
+    static void CollectSwapChainSync(
+        const vector<unique_ptr<GpuSurfaceLease>>& surfaceLeases,
+        vector<render::SwapChainSyncObject*>& outWaitToExecute,
+        vector<render::SwapChainSyncObject*>& outReadyToPresent) noexcept;
+
+    shared_ptr<GpuCompletionState> ExecuteSubmissionPlan(
+        vector<GpuQueueSubmitStep>& steps,
+        const vector<shared_ptr<GpuCompletionState>>& dependencies,
+        const vector<unique_ptr<GpuSurfaceLease>>* surfaceLeases) noexcept;
+
+    shared_ptr<GpuCompletionState> ExecuteHelperPath(
+        render::QueueType queueType,
+        vector<unique_ptr<render::CommandBuffer>>& cmds,
+        const vector<shared_ptr<GpuCompletionState>>& dependencies,
+        const vector<unique_ptr<GpuSurfaceLease>>* surfaceLeases) noexcept;
+
     render::RenderBackend _backend{render::RenderBackend::D3D12};
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
