@@ -724,7 +724,7 @@ static_assert(std::is_convertible_v<std::unique_ptr<GpuFrameContext>, std::uniqu
 
 }  // namespace
 
-TEST(GpuRuntimeSmoke, DISABLED_AcquirePresentSwapChain_D3D12) {
+TEST(GpuRuntimeSmoke, AcquirePresentSwapChain_D3D12) {
     const ScenarioResult result = RunGpuRuntimeSwapChainSmoke(TestBackend::D3D12);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -734,7 +734,7 @@ TEST(GpuRuntimeSmoke, DISABLED_AcquirePresentSwapChain_D3D12) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_AcquirePresentSwapChain_Vulkan) {
+TEST(GpuRuntimeSmoke, AcquirePresentSwapChain_Vulkan) {
     const ScenarioResult result = RunGpuRuntimeSwapChainSmoke(TestBackend::Vulkan);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -744,7 +744,7 @@ TEST(GpuRuntimeSmoke, DISABLED_AcquirePresentSwapChain_Vulkan) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_BeginFrameBlocksWhenGpuBusy_D3D12) {
+TEST(GpuRuntimeSmoke, BeginFrameBlocksWhenGpuBusy_D3D12) {
     const ScenarioResult result = RunBeginFrameBlocksWhenGpuBusySmoke(TestBackend::D3D12);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -754,7 +754,7 @@ TEST(GpuRuntimeSmoke, DISABLED_BeginFrameBlocksWhenGpuBusy_D3D12) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_BeginFrameBlocksWhenGpuBusy_Vulkan) {
+TEST(GpuRuntimeSmoke, BeginFrameBlocksWhenGpuBusy_Vulkan) {
     const ScenarioResult result = RunBeginFrameBlocksWhenGpuBusySmoke(TestBackend::Vulkan);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -764,7 +764,7 @@ TEST(GpuRuntimeSmoke, DISABLED_BeginFrameBlocksWhenGpuBusy_Vulkan) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_TryBeginFrameDoesNotBlockWhenGpuBusy_D3D12) {
+TEST(GpuRuntimeSmoke, TryBeginFrameDoesNotBlockWhenGpuBusy_D3D12) {
     const ScenarioResult result = RunTryBeginFrameNonBlockingWhenGpuBusySmoke(TestBackend::D3D12);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -774,7 +774,7 @@ TEST(GpuRuntimeSmoke, DISABLED_TryBeginFrameDoesNotBlockWhenGpuBusy_D3D12) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_TryBeginFrameDoesNotBlockWhenGpuBusy_Vulkan) {
+TEST(GpuRuntimeSmoke, TryBeginFrameDoesNotBlockWhenGpuBusy_Vulkan) {
     const ScenarioResult result = RunTryBeginFrameNonBlockingWhenGpuBusySmoke(TestBackend::Vulkan);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -784,7 +784,7 @@ TEST(GpuRuntimeSmoke, DISABLED_TryBeginFrameDoesNotBlockWhenGpuBusy_Vulkan) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_WorkerThreadSchedulesRuntime_D3D12) {
+TEST(GpuRuntimeSmoke, WorkerThreadSchedulesRuntime_D3D12) {
     const ScenarioResult result = RunGpuRuntimeScheduledOnWorkerThreadSmoke(TestBackend::D3D12);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -794,7 +794,7 @@ TEST(GpuRuntimeSmoke, DISABLED_WorkerThreadSchedulesRuntime_D3D12) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_WorkerThreadSchedulesRuntime_Vulkan) {
+TEST(GpuRuntimeSmoke, WorkerThreadSchedulesRuntime_Vulkan) {
     const ScenarioResult result = RunGpuRuntimeScheduledOnWorkerThreadSmoke(TestBackend::Vulkan);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -804,7 +804,7 @@ TEST(GpuRuntimeSmoke, DISABLED_WorkerThreadSchedulesRuntime_Vulkan) {
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_MainThreadThenWorkerThreadSchedulesRuntime_D3D12) {
+TEST(GpuRuntimeSmoke, MainThreadThenWorkerThreadSchedulesRuntime_D3D12) {
     const ScenarioResult result = RunMainThreadThenWorkerThreadSchedulingSmoke(TestBackend::D3D12);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;
@@ -814,7 +814,7 @@ TEST(GpuRuntimeSmoke, DISABLED_MainThreadThenWorkerThreadSchedulesRuntime_D3D12)
     }
 }
 
-TEST(GpuRuntimeSmoke, DISABLED_MainThreadThenWorkerThreadSchedulesRuntime_Vulkan) {
+TEST(GpuRuntimeSmoke, MainThreadThenWorkerThreadSchedulesRuntime_Vulkan) {
     const ScenarioResult result = RunMainThreadThenWorkerThreadSchedulingSmoke(TestBackend::Vulkan);
     if (result.TestStatus == ScenarioResult::Status::Skipped) {
         GTEST_SKIP() << result.Message;

@@ -101,7 +101,7 @@
             "Name": "DirectX-Headers",
             "Type": "git",
             "Git": "https://github.com/microsoft/DirectX-Headers.git",
-            "Tag": "v1.619.0"
+            "Tag": "v1.619.1"
         },
         {
             "Name": "D3D12MemoryAllocator",
