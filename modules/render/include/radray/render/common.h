@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <variant>
 #include <optional>
 #include <span>
@@ -430,6 +431,12 @@ enum class BindingParameterKind : int32_t {
     PushConstant
 };
 
+enum class SwapChainAcquireStatus : int32_t {
+    Success,
+    Unavailable,
+    Error
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -660,6 +667,9 @@ struct AcquireResult {
     Nullable<Texture*> BackBuffer{nullptr};
     SwapChainSyncObject* WaitToDraw{nullptr};
     SwapChainSyncObject* ReadyToPresent{nullptr};
+    int64_t NativeStatusCode{0};
+    SwapChainAcquireStatus Status{SwapChainAcquireStatus::Error};
+    uint32_t BackBufferIndex{std::numeric_limits<uint32_t>::max()};
 };
 
 struct BarrierBufferDescriptor {

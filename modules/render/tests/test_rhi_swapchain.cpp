@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -319,13 +320,32 @@ bool RenderFrames(
         Texture* backBuffer = nullptr;
         SwapChainSyncObject* waitToDrawSync = nullptr;
         SwapChainSyncObject* readyToPresentSync = nullptr;
+        uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
         for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
             auto acquired = runtime.Swapchain->AcquireNext();
-            if (acquired.BackBuffer.HasValue()) {
+            if (acquired.Status == SwapChainAcquireStatus::Success) {
+                if (!acquired.BackBuffer.HasValue()) {
+                    reason = "AcquireNext returned Success without back buffer";
+                    return false;
+                }
                 backBuffer = acquired.BackBuffer.Get();
+                backBufferIndex = acquired.BackBufferIndex;
                 waitToDrawSync = acquired.WaitToDraw;
                 readyToPresentSync = acquired.ReadyToPresent;
+                auto currentBackBuffer = runtime.Swapchain->GetCurrentBackBuffer();
+                if (!currentBackBuffer.HasValue()) {
+                    reason = "GetCurrentBackBuffer returned null after successful acquire";
+                    return false;
+                }
+                EXPECT_EQ(currentBackBuffer.Get(), acquired.BackBuffer.Get());
+                EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), acquired.BackBufferIndex);
                 break;
+            }
+            EXPECT_FALSE(runtime.Swapchain->GetCurrentBackBuffer().HasValue());
+            EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), std::numeric_limits<uint32_t>::max());
+            if (acquired.Status == SwapChainAcquireStatus::Error) {
+                reason = fmt::format("AcquireNext failed with error status {}", acquired.NativeStatusCode);
+                return false;
             }
             window->DispatchEvents();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -335,7 +355,6 @@ bool RenderFrames(
             return false;
         }
 
-        const uint32_t backBufferIndex = runtime.Swapchain->GetCurrentBackBufferIndex();
         if (backBufferIndex >= runtime.BackBufferStates.size()) {
             reason = fmt::format("invalid back buffer index {}", backBufferIndex);
             return false;
@@ -387,8 +406,12 @@ bool RenderFrames(
         submitDesc.CmdBuffers = submitCmds;
         submitDesc.SignalFences = signalFences;
         submitDesc.SignalValues = signalValues;
-        submitDesc.WaitToExecute = std::span{&waitToDrawSync, 1};
-        submitDesc.ReadyToPresent = std::span{&readyToPresentSync, 1};
+        if (waitToDrawSync != nullptr) {
+            submitDesc.WaitToExecute = std::span{&waitToDrawSync, 1};
+        }
+        if (readyToPresentSync != nullptr) {
+            submitDesc.ReadyToPresent = std::span{&readyToPresentSync, 1};
+        }
         queue->Submit(submitDesc);
         runtime.Swapchain->Present(readyToPresentSync);
 

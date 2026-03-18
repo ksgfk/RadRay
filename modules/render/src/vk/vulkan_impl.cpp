@@ -4617,6 +4617,8 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 }
 
 AcquireResult SwapChainVulkan::AcquireNext() noexcept {
+    AcquireResult result{};
+    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
     auto* semaphore = _acquireSemaphores[slot].get();
     auto* fence = _acquireFences[slot].get();
@@ -4624,17 +4626,18 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
-            return {};
+            result.NativeStatusCode = vr;
+            return result;
         }
         if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
             vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
-            return {};
+            result.NativeStatusCode = vr;
+            return result;
         }
         _acquireFenceShouldWait[slot] = 0;
     }
 
-    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     auto vr = _device->_ftb.vkAcquireNextImageKHR(
         _device->_device,
         _swapchain,
@@ -4646,8 +4649,10 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         _acquireFenceShouldWait[slot] = 1;
         _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
         Frame& imageFrame = _frames[_currentTextureIndex];
-        AcquireResult result{};
+        result.Status = SwapChainAcquireStatus::Success;
+        result.NativeStatusCode = vr;
         result.BackBuffer = imageFrame.image.get();
+        result.BackBufferIndex = _currentTextureIndex;
         result.WaitToDraw = CastVkObject(_acquireSemaphores[slot].get());
         result.ReadyToPresent = CastVkObject(_renderFinishSemaphores[slot].get());
         if (vr == VK_SUBOPTIMAL_KHR) {
@@ -4658,13 +4663,16 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
     if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {
         // 在这些故障情况下，Fence 不能保证 signal
         _acquireFenceShouldWait[slot] = 0;
+        result.Status = SwapChainAcquireStatus::Unavailable;
+        result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
-        return {};
+        return result;
     }
 
     _acquireFenceShouldWait[slot] = 0;
+    result.NativeStatusCode = vr;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
-    return {};
+    return result;
 }
 
 void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {

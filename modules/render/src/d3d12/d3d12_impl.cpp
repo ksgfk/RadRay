@@ -3603,6 +3603,7 @@ SwapChainD3D12::SwapChainD3D12(
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
+    _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
@@ -3616,6 +3617,7 @@ bool SwapChainD3D12::IsValid() const noexcept {
 
 void SwapChainD3D12::Destroy() noexcept {
     _frames.clear();
+    _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
@@ -3624,10 +3626,26 @@ void SwapChainD3D12::Destroy() noexcept {
 }
 
 AcquireResult SwapChainD3D12::AcquireNext() noexcept {
-    ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
-    auto curr = _swapchain->GetCurrentBackBufferIndex();
     AcquireResult result{};
+    if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
+        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
+        return result;
+    }
+
+    DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
+    if (waitResult != WAIT_OBJECT_0) {
+        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
+        result.Status = SwapChainAcquireStatus::Error;
+        result.NativeStatusCode = static_cast<int64_t>(waitResult);
+        return result;
+    }
+
+    const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
+    _currentBackBufferIndex = curr;
+    result.Status = SwapChainAcquireStatus::Success;
+    result.NativeStatusCode = 0;
     result.BackBuffer = _frames[curr].image.get();
+    result.BackBufferIndex = curr;
     return result;
 }
 
@@ -3666,12 +3684,14 @@ void SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
 }
 
 Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
-    UINT curr = _swapchain->GetCurrentBackBufferIndex();
-    return _frames[curr].image.get();
+    if (_currentBackBufferIndex >= _frames.size()) {
+        return nullptr;
+    }
+    return _frames[_currentBackBufferIndex].image.get();
 }
 
 uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
-    return _swapchain->GetCurrentBackBufferIndex();
+    return _currentBackBufferIndex;
 }
 
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {

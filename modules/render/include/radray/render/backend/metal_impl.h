@@ -225,9 +225,9 @@ public:
 
     void Destroy() noexcept override;
 
-    Nullable<Texture*> AcquireNext() noexcept override;
+    AcquireResult AcquireNext() noexcept override;
 
-    void Present(std::span<Semaphore*> waitSemaphores) noexcept override;
+    void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 
@@ -244,7 +244,8 @@ public:
     NSMutableArray<id<CAMetalDrawable>>* _drawables{nil};
     dispatch_semaphore_t _imageAcquiredSemaphore{nil};
     vector<unique_ptr<TextureMetal>> _backBufferTextures;
-    uint32_t _currentIndex{0};
+    uint32_t _currentIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t _nextIndex{0};
 };
 
 class BufferMetal final : public Buffer {
