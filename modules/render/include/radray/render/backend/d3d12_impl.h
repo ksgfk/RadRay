@@ -597,7 +597,6 @@ public:
     vector<Frame> _frames;
     const void* _nativeHandler{nullptr};
     PresentMode _mode{PresentMode::FIFO};
-    uint32_t _flightFrameCount{0};
     uint32_t _currentBackBufferIndex{std::numeric_limits<uint32_t>::max()};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
 };

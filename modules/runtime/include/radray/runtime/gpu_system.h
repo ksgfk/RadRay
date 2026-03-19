@@ -1,9 +1,9 @@
 #pragma once
 
 #include <array>
-#include <mutex>
 #include <optional>
 #include <limits>
+#include <stdexcept>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -35,6 +35,11 @@ class GpuTask;
 class GpuSurface;
 class GpuFrameContext;
 class GpuAsyncContext;
+
+class GpuSystemException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 struct GpuResourceHandle {
     // Runtime 层分配的稳定对象标识。
@@ -74,16 +79,13 @@ public:
     void Wait();
 
 private:
-    friend class GpuAsyncContext;
-    friend class GpuRuntime;
-
-    GpuRuntime* _runtime{nullptr};
-    GpuResourceHandle _fence;
-    uint64_t _signalValue{0};
 };
 
 class GpuSurface {
 public:
+    GpuSurface(
+        GpuRuntime* runtime,
+        unique_ptr<render::SwapChain> swapchain) noexcept;
     ~GpuSurface() noexcept;
 
     bool IsValid() const;
@@ -95,27 +97,17 @@ public:
     render::PresentMode GetPresentMode() const;
 
 private:
-    friend class GpuRuntime;
-
-    struct PendingFrame {
-        render::Fence* Fence{nullptr};
-        uint64_t SignalValue{0};
+    class Frame {
+    public:
+        uint64_t _fenceValue{0};
     };
-
-    GpuSurface(
-        GpuRuntime* runtime,
-        unique_ptr<render::SwapChain> swapchain,
-        const render::SwapChainDescriptor& desc,
-        uint32_t queueSlot) noexcept;
 
     GpuRuntime* _runtime{nullptr};
     unique_ptr<render::SwapChain> _swapchain;
-    render::SwapChainDescriptor _desc{};
-    uint32_t _queueSlot{0};
-    vector<GpuResourceHandle> _backBuffers;
-    vector<render::TextureState> _backBufferStates;
-    deque<PendingFrame> _inFlightFrames;
-    mutable std::mutex _mutex;
+    vector<Frame> _frameSlots;
+    size_t _nextFrameSlotIndex{0};
+
+    friend class GpuRuntime;
 };
 
 class GpuAsyncContext {
@@ -127,17 +119,6 @@ public:
     bool DependsOn(const GpuTask& task);
 
 private:
-    friend class GpuRuntime;
-    friend class GpuFrameContext;
-
-    GpuAsyncContext(GpuRuntime* runtime, render::QueueType type, uint32_t queueSlot) noexcept;
-
-    GpuRuntime* _runtime{nullptr};
-    render::QueueType _queueType{render::QueueType::Direct};
-    uint32_t _queueSlot{0};
-    vector<render::Fence*> _waitFences;
-    vector<uint64_t> _waitValues;
-    bool _isFrameContext{false};
 };
 
 class GpuFrameContext : public GpuAsyncContext {
@@ -148,38 +129,30 @@ public:
     uint32_t GetBackBufferIndex() const;
 
 private:
-    friend class GpuRuntime;
-
-    GpuFrameContext(
-        GpuRuntime* runtime,
-        GpuSurface* surface,
-        uint32_t queueSlot,
-        GpuResourceHandle backBuffer,
-        uint32_t backBufferIndex,
-        render::SwapChainSyncObject* waitToDraw,
-        render::SwapChainSyncObject* readyToPresent,
-        unique_ptr<render::CommandBuffer> internalCmdBuffer) noexcept;
-
-    GpuSurface* _surface{nullptr};
-    GpuResourceHandle _backBuffer;
-    uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
-    render::SwapChainSyncObject* _waitToDraw{nullptr};
-    render::SwapChainSyncObject* _readyToPresent{nullptr};
-    unique_ptr<render::CommandBuffer> _internalCmdBuffer;
 };
 
 class GpuRuntime {
 public:
+    GpuRuntime(
+        shared_ptr<render::Device> device,
+        unique_ptr<render::InstanceVulkan> vkInstance) noexcept;
     GpuRuntime(const GpuRuntime&) noexcept = delete;
     GpuRuntime& operator=(const GpuRuntime&) noexcept = delete;
-    GpuRuntime(GpuRuntime&&) noexcept = delete;
-    GpuRuntime& operator=(GpuRuntime&&) noexcept = delete;
+    GpuRuntime(GpuRuntime&&) noexcept = default;
+    GpuRuntime& operator=(GpuRuntime&&) noexcept = default;
     ~GpuRuntime() noexcept;
 
     bool IsValid() const;
-    void Destroy();
+    void Destroy() noexcept;
 
-    unique_ptr<GpuSurface> CreateSurface(const render::SwapChainDescriptor& desc, uint32_t queueSlot = 0);
+    unique_ptr<GpuSurface> CreateSurface(
+        const void* nativeHandler,
+        uint32_t width, uint32_t height,
+        uint32_t backBufferCount,
+        uint32_t flightFrameCount,
+        render::TextureFormat format,
+        render::PresentMode presentMode,
+        uint32_t queueSlot = 0);
 
     unique_ptr<GpuFrameContext> BeginFrame(GpuSurface* surface);
     Nullable<unique_ptr<GpuFrameContext>> TryBeginFrame(GpuSurface* surface);
@@ -189,48 +162,15 @@ public:
 
     void ProcessTasks();
 
-    static Nullable<unique_ptr<GpuRuntime>> Create(const render::DeviceDescriptor& desc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
+    static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
+    static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
 
 private:
-    friend class GpuTask;
-    friend class GpuSurface;
-
-    struct QueueState {
-        struct PendingSubmission {
-            uint64_t SignalValue{0};
-            unique_ptr<render::CommandBuffer> InternalCommandBuffer;
-        };
-
-        render::CommandQueue* Queue{nullptr};
-        unique_ptr<render::Fence> Fence;
-        GpuResourceHandle FenceHandle;
-        uint64_t NextSignalValue{1};
-        uint64_t LastWaitedSignalValue{0};
-        deque<PendingSubmission> PendingSubmissions;
-        std::mutex Mutex;
-    };
-
-    struct ResourceRegistryEntry {
-        void* NativeHandle{nullptr};
-    };
-
-    GpuRuntime(shared_ptr<render::Device> device, unique_ptr<render::InstanceVulkan> vkInstance) noexcept;
-
-    QueueState& EnsureQueueState(render::QueueType type, uint32_t queueSlot);
-    GpuResourceHandle RegisterHandle(void* nativeHandle);
-    void UnregisterHandle(GpuResourceHandle handle) noexcept;
-    void OnTaskWaited(render::Fence* fence, uint64_t signalValue) noexcept;
-    void RetireCompletedFrames(GpuSurface* surface) noexcept;
-    GpuResourceHandle EnsureBackBufferHandle(GpuSurface* surface, uint32_t backBufferIndex, render::Texture* backBuffer);
-    unique_ptr<GpuFrameContext> CreateFrameContext(GpuSurface* surface, const render::AcquireResult& acquired);
+    render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
 
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
-    std::array<vector<unique_ptr<QueueState>>, static_cast<size_t>(render::QueueType::MAX_COUNT)> _queues;
-    unordered_map<uint64_t, ResourceRegistryEntry> _resourceRegistry;
-    unordered_set<GpuSurface*> _surfaces;
-    uint64_t _nextResourceHandle{1};
-    mutable std::mutex _mutex;
+    std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
 };
 
 }  // namespace radray

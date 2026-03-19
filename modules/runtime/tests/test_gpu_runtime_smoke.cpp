@@ -171,7 +171,7 @@ Nullable<unique_ptr<GpuRuntime>> CreateRuntimeForBackend(TestBackend backend, Rh
             deviceDesc.IsEnableGpuBasedValid = true;
             deviceDesc.LogCallback = &RhiLogCollector::Callback;
             deviceDesc.LogUserData = logs;
-            return GpuRuntime::Create(render::DeviceDescriptor{deviceDesc}, std::nullopt);
+            return GpuRuntime::Create(deviceDesc);
 #else
             static_cast<void>(logs);
             return nullptr;
@@ -189,17 +189,14 @@ Nullable<unique_ptr<GpuRuntime>> CreateRuntimeForBackend(TestBackend backend, Rh
             instanceDesc.LogCallback = &RhiLogCollector::Callback;
             instanceDesc.LogUserData = logs;
 
-            render::VulkanCommandQueueDescriptor queueDescs[] = {
-                {
-                    .Type = render::QueueType::Direct,
-                    .Count = 1,
-                }};
+            render::VulkanCommandQueueDescriptor queueDescs[] = {{
+                .Type = render::QueueType::Direct,
+                .Count = 1,
+            }};
             render::VulkanDeviceDescriptor deviceDesc{};
             deviceDesc.PhysicalDeviceIndex = std::nullopt;
             deviceDesc.Queues = std::span{queueDescs};
-            return GpuRuntime::Create(
-                render::DeviceDescriptor{deviceDesc},
-                std::optional<render::VulkanInstanceDescriptor>{instanceDesc});
+            return GpuRuntime::Create(deviceDesc, instanceDesc);
 #else
             static_cast<void>(logs);
             return nullptr;
@@ -241,7 +238,6 @@ render::SwapChainDescriptor BuildSurfaceDescriptor(const SurfaceInputs& inputs) 
     surfaceDesc.Width = static_cast<uint32_t>(inputs.Size.X);
     surfaceDesc.Height = static_cast<uint32_t>(inputs.Size.Y);
     surfaceDesc.BackBufferCount = kBackBufferCount;
-    surfaceDesc.FlightFrameCount = kFrameInFlightCount;
     surfaceDesc.Format = render::TextureFormat::BGRA8_UNORM;
     surfaceDesc.PresentMode = render::PresentMode::FIFO;
     return surfaceDesc;
@@ -291,7 +287,15 @@ ScenarioResult InitializeRuntimeSurface(
     }
 
     setup.SurfaceDesc = BuildSurfaceDescriptor(inputs);
-    setup.Surface = setup.Runtime->CreateSurface(setup.SurfaceDesc, 0);
+    setup.Surface = setup.Runtime->CreateSurface(
+        setup.SurfaceDesc.NativeHandler,
+        setup.SurfaceDesc.Width,
+        setup.SurfaceDesc.Height,
+        setup.SurfaceDesc.BackBufferCount,
+        kFrameInFlightCount,
+        setup.SurfaceDesc.Format,
+        setup.SurfaceDesc.PresentMode,
+        0);
     if (setup.Surface == nullptr) {
         return Skipped("GpuRuntime::CreateSurface is not implemented yet.");
     }
@@ -563,9 +567,8 @@ ScenarioResult RunBeginFrameBlocksWhenGpuBusySmoke(TestBackend backend) {
         return fillResult;
     }
 
-    std::packaged_task<ScenarioResult()> workerTask([
-                                                      runtime = setup.Runtime.get(),
-                                                      surface = setup.Surface.get()]() mutable {
+    std::packaged_task<ScenarioResult()> workerTask([runtime = setup.Runtime.get(),
+                                                     surface = setup.Surface.get()]() mutable {
         return SubmitFrameAndWait(runtime, runtime->BeginFrame(surface));
     });
     auto future = workerTask.get_future();
@@ -686,10 +689,9 @@ ScenarioResult RunMainThreadThenWorkerThreadSchedulingSmoke(TestBackend backend)
         return frameValidation;
     }
 
-    std::packaged_task<ScenarioResult()> workerTask([
-                                                      runtime = std::move(setup.Runtime),
-                                                      surface = std::move(setup.Surface),
-                                                      mainThreadFrame = std::move(mainThreadFrame)]() mutable {
+    std::packaged_task<ScenarioResult()> workerTask([runtime = std::move(setup.Runtime),
+                                                     surface = std::move(setup.Surface),
+                                                     mainThreadFrame = std::move(mainThreadFrame)]() mutable {
         const ScenarioResult submitMainFrameResult = SubmitFrameAndWait(runtime.get(), std::move(mainThreadFrame));
         if (!IsPassed(submitMainFrameResult)) {
             return submitMainFrameResult;

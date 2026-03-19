@@ -4585,7 +4585,6 @@ SwapChainVulkan::SwapChainVulkan(
       _nativeHandler(desc.NativeHandler),
       _width(desc.Width),
       _height(desc.Height),
-      _flightFrameCount(desc.FlightFrameCount),
       _reqFormat(desc.Format),
       _mode(desc.PresentMode) {}
 
@@ -4726,7 +4725,6 @@ SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
         _width,
         _height,
         static_cast<uint32_t>(_frames.size()),
-        _flightFrameCount,
         _reqFormat,
         _mode};
 }

@@ -663,7 +663,6 @@ public:
     uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};
     uint32_t _width{0};
     uint32_t _height{0};
-    uint32_t _flightFrameCount{0};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
     PresentMode _mode{PresentMode::FIFO};
 };

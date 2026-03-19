@@ -1137,11 +1137,6 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    if (HRESULT hr = swapchain->SetMaximumFrameLatency(desc.FlightFrameCount);
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
     auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
     result->_frames.reserve(scDesc.BufferCount);
     result->_frameLatencyEvent = swapchain->GetFrameLatencyWaitableObject();
@@ -3598,7 +3593,6 @@ SwapChainD3D12::SwapChainD3D12(
       _swapchain(std::move(swapchain)),
       _nativeHandler(desc.NativeHandler),
       _mode(desc.PresentMode),
-      _flightFrameCount(desc.FlightFrameCount),
       _reqFormat(desc.Format) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
@@ -3707,7 +3701,6 @@ SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
         desc.Width,
         desc.Height,
         desc.BufferCount,
-        _flightFrameCount,
         _reqFormat,
         _mode};
 }

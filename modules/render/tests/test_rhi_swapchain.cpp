@@ -228,7 +228,6 @@ bool CreateSwapChainRuntime(
         scDesc.Width = width;
         scDesc.Height = height;
         scDesc.BackBufferCount = kBackBufferCount;
-        scDesc.FlightFrameCount = kInFlightFrameCount;
         scDesc.Format = format;
         scDesc.PresentMode = PresentMode::FIFO;
         auto swapchainOpt = device->CreateSwapChain(scDesc);
