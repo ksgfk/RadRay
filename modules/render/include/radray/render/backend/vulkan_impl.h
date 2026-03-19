@@ -531,9 +531,6 @@ public:
     FenceVulkan(
         DeviceVulkan* device,
         unique_ptr<TimelineSemaphoreVulkan> timelineSemaphore) noexcept;
-    FenceVulkan(
-        DeviceVulkan* device,
-        unique_ptr<LegacyFenceVulkan> legacyFence) noexcept;
 
     ~FenceVulkan() noexcept override;
 
@@ -545,15 +542,18 @@ public:
 
     uint64_t GetCompletedValue() const noexcept override;
 
+    uint64_t GetLastSignaledValue() const noexcept override;
+
     void Wait() noexcept override;
+
+    void Wait(uint64_t value) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
-    std::variant<std::monostate, unique_ptr<TimelineSemaphoreVulkan>, unique_ptr<LegacyFenceVulkan>> _fence;
+    unique_ptr<TimelineSemaphoreVulkan> _fence;
     uint64_t _fenceValue{0};
-    bool _legacyPendingSubmit{false};
 };
 
 class TimelineSemaphoreVulkan final : public RenderBase {
@@ -629,7 +629,7 @@ public:
 
     void Destroy() noexcept override;
 
-    AcquireResult AcquireNext() noexcept override;
+    AcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
     void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 

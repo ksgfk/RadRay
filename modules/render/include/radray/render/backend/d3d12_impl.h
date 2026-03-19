@@ -400,9 +400,13 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    uint64_t GetCompletedValue() const noexcept override;
+
+    uint64_t GetLastSignaledValue() const noexcept override;
+
     void Wait() noexcept override;
 
-    uint64_t GetCompletedValue() const noexcept override;
+    void Wait(uint64_t value) noexcept override;
 
 public:
     ComPtr<ID3D12Fence> _fence;
@@ -572,7 +576,7 @@ public:
 
     void Destroy() noexcept override;
 
-    AcquireResult AcquireNext() noexcept override;
+    AcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
     void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 

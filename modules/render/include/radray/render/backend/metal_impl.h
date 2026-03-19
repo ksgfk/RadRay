@@ -225,7 +225,7 @@ public:
 
     void Destroy() noexcept override;
 
-    AcquireResult AcquireNext() noexcept override;
+    AcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
     void Present(SwapChainSyncObject* waitToPresent) noexcept override;
 

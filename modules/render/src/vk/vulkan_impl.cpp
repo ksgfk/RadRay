@@ -671,10 +671,7 @@ Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
             result = make_unique<FenceVulkan>(this, timeline.Release());
         }
     } else {
-        auto legacy = this->CreateLegacyFence(0);
-        if (legacy.HasValue()) {
-            result = make_unique<FenceVulkan>(this, legacy.Release());
-        }
+        RADRAY_ABORT("vulkan unsupport timelineSemaphore");
     }
     return result;
 }
@@ -3154,22 +3151,10 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* fenceObj = CastVkObject(desc.WaitFences[i]);
         uint64_t waitValue = desc.WaitValues[i];
-        std::visit(
-            [&](auto& fence) noexcept {
-                using T = std::decay_t<decltype(fence)>;
-                if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
-                    if (fence == nullptr || !fence->IsValid()) {
-                        RADRAY_ABORT("invalid timeline fence for GPU wait");
-                    }
-                    useTimelineSubmit = true;
-                    waitSemaphores.emplace_back(fence->_semaphore);
-                    waitValues.emplace_back(waitValue);
-                    waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-                } else {
-                    RADRAY_ABORT("GPU-side fence wait requires a timeline semaphore fence");
-                }
-            },
-            fenceObj->_fence);
+        useTimelineSubmit = true;
+        waitSemaphores.emplace_back(fenceObj->_fence->_semaphore);
+        waitValues.emplace_back(waitValue);
+        waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     }
 
     for (auto* syncObj : desc.ReadyToPresent) {
@@ -3185,44 +3170,12 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
         auto* fenceObj = CastVkObject(desc.SignalFences[i]);
         uint64_t signalValue = desc.SignalValues[i];
-        std::visit(
-            [&](auto& fence) noexcept {
-                using T = std::decay_t<decltype(fence)>;
-                if constexpr (std::is_same_v<T, std::monostate>) {
-                    RADRAY_ABORT("invalid fence: monostate");
-                } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
-                    if (fence == nullptr || !fence->IsValid()) {
-                        RADRAY_ABORT("invalid timeline fence");
-                    }
-                    useTimelineSubmit = true;
-                    signalSemaphores.emplace_back(fence->_semaphore);
-                    signalValues.emplace_back(signalValue);
-                    if (signalValue + 1 > fenceObj->_fenceValue) {
-                        fenceObj->_fenceValue = signalValue + 1;
-                    }
-                } else {
-                    if (fence == nullptr || !fence->IsValid()) {
-                        RADRAY_ABORT("invalid legacy fence");
-                    }
-                    if (fenceObj->_legacyPendingSubmit) {
-                        VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, fence->_fence);
-                        if (status == VK_SUCCESS) {
-                            if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
-                                vr != VK_SUCCESS) {
-                                RADRAY_ABORT("vkResetFences failed: {}", vr);
-                            }
-                        } else if (status == VK_NOT_READY) {
-                            RADRAY_ABORT("legacy fence is still pending, explicit Wait is required before re-submit");
-                        } else {
-                            RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
-                        }
-                    }
-                    submitFence = fence->_fence;
-                    fenceObj->_fenceValue++;
-                    fenceObj->_legacyPendingSubmit = true;
-                }
-            },
-            fenceObj->_fence);
+        useTimelineSubmit = true;
+        signalSemaphores.emplace_back(fenceObj->_fence->_semaphore);
+        signalValues.emplace_back(signalValue);
+        if (signalValue + 1 > fenceObj->_fenceValue) {
+            fenceObj->_fenceValue = signalValue + 1;
+        }
     }
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -4375,34 +4328,17 @@ FenceVulkan::FenceVulkan(
       _fence(std::move(timelineSemaphore)),
       _fenceValue(1) {}
 
-FenceVulkan::FenceVulkan(
-    DeviceVulkan* device,
-    unique_ptr<LegacyFenceVulkan> legacyFence) noexcept
-    : _device(device),
-      _fence(std::move(legacyFence)),
-      _fenceValue(1) {}
-
 FenceVulkan::~FenceVulkan() noexcept {
     this->DestroyImpl();
 }
 
 void FenceVulkan::DestroyImpl() noexcept {
-    _fence = std::monostate{};
+    _fence.reset();
     _fenceValue = 0;
-    _legacyPendingSubmit = false;
 }
 
 bool FenceVulkan::IsValid() const noexcept {
-    return std::visit(
-        [](const auto& fence) noexcept {
-            using T = std::decay_t<decltype(fence)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-                return false;
-            } else {
-                return fence != nullptr && fence->IsValid();
-            }
-        },
-        _fence);
+    return _fence != nullptr && _fence->IsValid();
 }
 
 void FenceVulkan::Destroy() noexcept {
@@ -4410,96 +4346,52 @@ void FenceVulkan::Destroy() noexcept {
 }
 
 void FenceVulkan::SetDebugName(std::string_view name) noexcept {
-    std::visit(
-        [&](const auto& fence) noexcept {
-            using T = std::decay_t<decltype(fence)>;
-            if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
-                if (fence) {
-                    _device->SetObjectName(fmt::format("FenceTimeline_{}", name), fence->_semaphore);
-                }
-            } else if constexpr (std::is_same_v<T, unique_ptr<LegacyFenceVulkan>>) {
-                if (fence) {
-                    _device->SetObjectName(fmt::format("FenceLegacy_{}", name), fence->_fence);
-                }
-            }
-        },
-        _fence);
+    _device->SetObjectName(fmt::format("FenceTimeline_{}", name), _fence->_semaphore);
 }
 
 uint64_t FenceVulkan::GetCompletedValue() const noexcept {
-    return std::visit(
-        [&](const auto& fence) noexcept -> uint64_t {
-            using T = std::decay_t<decltype(fence)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-                return 0;
-            } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
-                if (fence == nullptr || !fence->IsValid()) {
-                    return 0;
-                }
-                return fence->GetCompletedValue();
-            } else {
-                if (_fenceValue == 0) {
-                    return 0;
-                }
-                uint64_t signaledValue = _fenceValue - 1;
-                if (fence == nullptr || !fence->IsValid()) {
-                    return signaledValue;
-                }
-                if (!_legacyPendingSubmit) {
-                    return signaledValue;
-                }
-                VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, fence->_fence);
-                if (status == VK_SUCCESS) {
-                    return signaledValue;
-                }
-                if (status == VK_NOT_READY) {
-                    return signaledValue == 0 ? 0 : signaledValue - 1;
-                }
-                RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
-                return 0;
-            }
-        },
-        _fence);
+    return _fence->GetCompletedValue();
+}
+
+uint64_t FenceVulkan::GetLastSignaledValue() const noexcept {
+    return _fenceValue - 1;
 }
 
 void FenceVulkan::Wait() noexcept {
-    std::visit(
-        [&](auto& fence) noexcept {
-            using T = std::decay_t<decltype(fence)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-                return;
-            } else if constexpr (std::is_same_v<T, unique_ptr<TimelineSemaphoreVulkan>>) {
-                if (fence == nullptr || !fence->IsValid()) {
-                    RADRAY_ABORT("invalid timeline fence");
-                }
-                if (_fenceValue <= 1) {
-                    return;
-                }
-                uint64_t waitValue = _fenceValue - 1;
-                VkSemaphore waitSemaphore = fence->_semaphore;
-                VkSemaphoreWaitInfo waitInfo{};
-                waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-                waitInfo.pNext = nullptr;
-                waitInfo.flags = 0;
-                waitInfo.semaphoreCount = 1;
-                waitInfo.pSemaphores = &waitSemaphore;
-                waitInfo.pValues = &waitValue;
-                if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
-                    vr != VK_SUCCESS) {
-                    RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
-                }
-            } else {
-                if (fence == nullptr || !fence->IsValid()) {
-                    RADRAY_ABORT("invalid legacy fence");
-                }
-                if (!_legacyPendingSubmit) {
-                    return;
-                }
-                fence->Wait();
-                _legacyPendingSubmit = false;
-            }
-        },
-        _fence);
+    uint64_t completedValue = _fence->GetCompletedValue();
+    uint64_t signaledValue = _fenceValue - 1;
+    if (completedValue < signaledValue) {
+        VkSemaphore waitSemaphore = _fence->_semaphore;
+        VkSemaphoreWaitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        waitInfo.pNext = nullptr;
+        waitInfo.flags = 0;
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &waitSemaphore;
+        waitInfo.pValues = &signaledValue;
+        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
+        }
+    }
+}
+
+void FenceVulkan::Wait(uint64_t value) noexcept {
+    uint64_t completedValue = _fence->GetCompletedValue();
+    if (completedValue < value) {
+        VkSemaphore waitSemaphore = _fence->_semaphore;
+        VkSemaphoreWaitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        waitInfo.pNext = nullptr;
+        waitInfo.flags = 0;
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &waitSemaphore;
+        waitInfo.pValues = &value;
+        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
+        }
+    }
 }
 
 TimelineSemaphoreVulkan::TimelineSemaphoreVulkan(
@@ -4615,15 +4507,27 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-AcquireResult SwapChainVulkan::AcquireNext() noexcept {
+AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     AcquireResult result{};
     _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
     auto* semaphore = _acquireSemaphores[slot].get();
     auto* fence = _acquireFences[slot].get();
+    uint64_t nanoTimeout;
+    if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
+        nanoTimeout = std::numeric_limits<uint64_t>::max();
+    } else if (timeoutMs > std::numeric_limits<uint64_t>::max() / (1000ull * 1000ull)) {
+        nanoTimeout = std::numeric_limits<uint64_t>::max();
+    } else {
+        nanoTimeout = timeoutMs * 1000ull * 1000ull;
+    }
     if (_acquireFenceShouldWait[slot] != 0) {
-        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, UINT64_MAX);
-            vr != VK_SUCCESS) {
+        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, nanoTimeout);
+            vr == VK_TIMEOUT) {
+            result.Status = SwapChainAcquireStatus::RetryLater;
+            result.NativeStatusCode = vr;
+            return result;
+        } else if (vr != VK_SUCCESS) {
             RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
             result.NativeStatusCode = vr;
             return result;
@@ -4640,11 +4544,11 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
     auto vr = _device->_ftb.vkAcquireNextImageKHR(
         _device->_device,
         _swapchain,
-        UINT64_MAX,
+        nanoTimeout,
         semaphore->_semaphore->_semaphore,
         fence->_fence,
         &_currentTextureIndex);
-    if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
+    if (vr == VK_SUCCESS) {
         _acquireFenceShouldWait[slot] = 1;
         _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
         Frame& imageFrame = _frames[_currentTextureIndex];
@@ -4654,15 +4558,19 @@ AcquireResult SwapChainVulkan::AcquireNext() noexcept {
         result.BackBufferIndex = _currentTextureIndex;
         result.WaitToDraw = CastVkObject(_acquireSemaphores[slot].get());
         result.ReadyToPresent = CastVkObject(_renderFinishSemaphores[slot].get());
-        if (vr == VK_SUBOPTIMAL_KHR) {
-            RADRAY_WARN_LOG("vkAcquireNextImageKHR returned suboptimal swapchain");
-        }
         return result;
     }
-    if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_TIMEOUT || vr == VK_NOT_READY) {
+    if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
         // 在这些故障情况下，Fence 不能保证 signal
         _acquireFenceShouldWait[slot] = 0;
-        result.Status = SwapChainAcquireStatus::Unavailable;
+        result.Status = SwapChainAcquireStatus::RetryLater;
+        result.NativeStatusCode = vr;
+        return result;
+    }
+    if (vr == VK_SUBOPTIMAL_KHR || vr == VK_ERROR_OUT_OF_DATE_KHR) {
+        // 在这些故障情况下，Fence 不能保证 signal
+        _acquireFenceShouldWait[slot] = 0;
+        result.Status = SwapChainAcquireStatus::RequireRecreate;
         result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return result;

@@ -1,6 +1,9 @@
 #include <radray/runtime/gpu_system.h>
 
 #include <radray/logger.h>
+#ifdef RADRAY_ENABLE_D3D12
+#include <radray/render/backend/d3d12_impl.h>
+#endif
 
 namespace radray {
 
@@ -17,9 +20,11 @@ void GpuTask::Wait() {
 
 GpuSurface::GpuSurface(
     GpuRuntime* runtime,
-    unique_ptr<render::SwapChain> swapchain) noexcept
+    unique_ptr<render::SwapChain> swapchain,
+    uint32_t queueSlot) noexcept
     : _runtime(runtime),
-      _swapchain(std::move(swapchain)) {}
+      _swapchain(std::move(swapchain)),
+      _queueSlot(queueSlot) {}
 
 GpuSurface::~GpuSurface() noexcept {
     this->Destroy();
@@ -61,6 +66,18 @@ bool GpuAsyncContext::DependsOn(const GpuTask& task) {
     return false;
 }
 
+GpuFrameContext::GpuFrameContext(
+    GpuRuntime* runtime,
+    GpuSurface* surface,
+    size_t frameSlotIndex,
+    render::Texture* backBuffer,
+    uint32_t backBufferIndex) noexcept
+    : _runtime(runtime),
+      _surface(surface),
+      _frameSlotIndex(frameSlotIndex),
+      _backBuffer(backBuffer),
+      _backBufferIndex(backBufferIndex) {}
+
 GpuFrameContext::~GpuFrameContext() noexcept {
 }
 
@@ -69,7 +86,7 @@ GpuResourceHandle GpuFrameContext::GetBackBuffer() const {
 }
 
 uint32_t GpuFrameContext::GetBackBufferIndex() const {
-    throw std::runtime_error("Not implemented.");
+    return _backBufferIndex;
 }
 
 GpuRuntime::GpuRuntime(
@@ -98,6 +115,9 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
     render::TextureFormat format,
     render::PresentMode presentMode,
     uint32_t queueSlot) {
+    if (flightFrameCount == 0) {
+        throw GpuSystemException("flightFrameCount must be > 0");
+    }
     auto queueOpt = _device->GetCommandQueue(render::QueueType::Direct, queueSlot);
     if (!queueOpt.HasValue()) {
         throw GpuSystemException("Device::GetCommandQueue failed");
@@ -115,7 +135,7 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
     if (!swapchainOpt.HasValue()) {
         throw GpuSystemException("Device::CreateSwapChain failed");
     }
-    auto result = make_unique<GpuSurface>(this, swapchainOpt.Release());
+    auto result = make_unique<GpuSurface>(this, swapchainOpt.Release(), queueSlot);
     result->_frameSlots.reserve(flightFrameCount);
     for (uint32_t i = 0; i < flightFrameCount; i++) {
         result->_frameSlots.emplace_back();
@@ -123,12 +143,22 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
     return result;
 }
 
-unique_ptr<GpuFrameContext> GpuRuntime::BeginFrame(GpuSurface* surface) {
-    return nullptr;
+GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
+    auto fence = this->GetQueueFence(render::QueueType::Direct, surface->_queueSlot);
+    const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
+    auto& nowFrame = surface->_frameSlots[frameSlotIndex];
+    fence->Wait(nowFrame._fenceValue);
+    return this->AcquireSwapChain(surface, std::numeric_limits<uint64_t>::max());
 }
 
-Nullable<unique_ptr<GpuFrameContext>> GpuRuntime::TryBeginFrame(GpuSurface* surface) {
-    return nullptr;
+GpuRuntime::BeginFrameResult GpuRuntime::TryBeginFrame(GpuSurface* surface) {
+    auto fence = this->GetQueueFence(render::QueueType::Direct, surface->_queueSlot);
+    const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
+    auto& nowFrame = surface->_frameSlots[frameSlotIndex];
+    if (fence->GetCompletedValue() < nowFrame._fenceValue) {
+        return {nullptr, render::SwapChainAcquireStatus::RetryLater};
+    }
+    return this->AcquireSwapChain(surface, 0);
 }
 
 unique_ptr<GpuAsyncContext> GpuRuntime::BeginAsync(render::QueueType type, uint32_t queueSlot) {
@@ -143,6 +173,17 @@ void GpuRuntime::ProcessTasks() {
 }
 
 render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
+#ifdef RADRAY_ENABLE_D3D12
+    if (_device->GetBackend() == render::RenderBackend::D3D12) {
+        auto deviceD3D12 = render::d3d12::CastD3D12Object(_device.get());
+        auto queueD3D12Opt = deviceD3D12->GetCommandQueue(type, slot);
+        if (!queueD3D12Opt.HasValue()) {
+            throw GpuSystemException("Device::GetCommandQueue failed");
+        }
+        auto queueD3D12 = render::d3d12::CastD3D12Object(queueD3D12Opt.Get());
+        return queueD3D12->_fence.get();
+    }
+#endif
     auto& fences = _queueFences[(size_t)type];
     if (fences.size() <= slot) {
         fences.reserve(slot + 1);
@@ -159,6 +200,32 @@ render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) 
         fence = fenceOpt.Release();
     }
     return fence.get();
+}
+
+GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs) {
+    const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
+    const auto acqResult = surface->_swapchain->AcquireNext(timeoutMs);
+    switch (acqResult.Status) {
+        case render::SwapChainAcquireStatus::Success: {
+            auto context = make_unique<GpuFrameContext>(
+                this,
+                surface,
+                frameSlotIndex,
+                acqResult.BackBuffer.Get(),
+                acqResult.BackBufferIndex);
+            context->_waitToDraw = acqResult.WaitToDraw;
+            context->_readyToPresent = acqResult.ReadyToPresent;
+            surface->_nextFrameSlotIndex = (frameSlotIndex + 1) % surface->_frameSlots.size();
+            return {std::move(context), render::SwapChainAcquireStatus::Success};
+        }
+        case render::SwapChainAcquireStatus::RetryLater:
+        case render::SwapChainAcquireStatus::RequireRecreate:
+            return {nullptr, acqResult.Status};
+        case render::SwapChainAcquireStatus::Error:
+        default: {
+            throw GpuSystemException("SwapChain::AcquireNext failed");
+        }
+    }
 }
 
 Nullable<unique_ptr<GpuRuntime>> GpuRuntime::Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc) {

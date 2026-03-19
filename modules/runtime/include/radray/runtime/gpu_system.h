@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <optional>
 #include <limits>
 #include <stdexcept>
 
@@ -22,9 +21,10 @@
 // - GpuResourceHandle 故意保持无类型：它表示 runtime 稳定资源标识，并提供到底层对象的
 //   interop 穿透能力，但不在该层统一资源具体类型。
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
-// - 错误处理目前统一通过异常向上传播；所有 GPU 相关错误都视为致命且不可恢复，
-//   调用方应在最外层记录错误并终止程序。
-// - TryBeginFrame 是非阻塞探测接口：当当前没有可获取帧时返回空；致命错误仍通过异常报告。
+// - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
+//   BeginFrameResult::Status 返回；真正的 GPU 致命错误仍通过异常报告。
+// - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
+// - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
 // - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
 //
 
@@ -85,7 +85,8 @@ class GpuSurface {
 public:
     GpuSurface(
         GpuRuntime* runtime,
-        unique_ptr<render::SwapChain> swapchain) noexcept;
+        unique_ptr<render::SwapChain> swapchain,
+        uint32_t queueSlot) noexcept;
     ~GpuSurface() noexcept;
 
     bool IsValid() const;
@@ -106,6 +107,7 @@ private:
     unique_ptr<render::SwapChain> _swapchain;
     vector<Frame> _frameSlots;
     size_t _nextFrameSlotIndex{0};
+    uint32_t _queueSlot{0};
 
     friend class GpuRuntime;
 };
@@ -123,16 +125,36 @@ private:
 
 class GpuFrameContext : public GpuAsyncContext {
 public:
+    GpuFrameContext(
+        GpuRuntime* runtime,
+        GpuSurface* surface,
+        size_t frameSlotIndex,
+        render::Texture* backBuffer,
+        uint32_t backBufferIndex) noexcept;
     ~GpuFrameContext() noexcept override;
 
     GpuResourceHandle GetBackBuffer() const;
     uint32_t GetBackBufferIndex() const;
 
 private:
+    GpuRuntime* _runtime{nullptr};
+    GpuSurface* _surface{nullptr};
+    size_t _frameSlotIndex{std::numeric_limits<size_t>::max()};
+    render::Texture* _backBuffer{nullptr};
+    Nullable<render::SwapChainSyncObject*> _waitToDraw{nullptr};
+    Nullable<render::SwapChainSyncObject*> _readyToPresent{nullptr};
+    uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
+
+    friend class GpuRuntime;
 };
 
 class GpuRuntime {
 public:
+    struct BeginFrameResult {
+        Nullable<unique_ptr<GpuFrameContext>> Context;
+        render::SwapChainAcquireStatus Status{render::SwapChainAcquireStatus::Error};
+    };
+
     GpuRuntime(
         shared_ptr<render::Device> device,
         unique_ptr<render::InstanceVulkan> vkInstance) noexcept;
@@ -154,8 +176,8 @@ public:
         render::PresentMode presentMode,
         uint32_t queueSlot = 0);
 
-    unique_ptr<GpuFrameContext> BeginFrame(GpuSurface* surface);
-    Nullable<unique_ptr<GpuFrameContext>> TryBeginFrame(GpuSurface* surface);
+    BeginFrameResult BeginFrame(GpuSurface* surface);
+    BeginFrameResult TryBeginFrame(GpuSurface* surface);
     unique_ptr<GpuAsyncContext> BeginAsync(render::QueueType type, uint32_t queueSlot = 0);
 
     GpuTask Submit(unique_ptr<GpuAsyncContext> context);
@@ -167,6 +189,7 @@ public:
 
 private:
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
+    GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
 
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;

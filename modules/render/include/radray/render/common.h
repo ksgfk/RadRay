@@ -432,9 +432,10 @@ enum class BindingParameterKind : int32_t {
 };
 
 enum class SwapChainAcquireStatus : int32_t {
+    Error,
     Success,
-    Unavailable,
-    Error
+    RetryLater,
+    RequireRecreate
 };
 
 enum class RenderObjectTag : uint32_t {
@@ -1394,7 +1395,11 @@ public:
 
     virtual uint64_t GetCompletedValue() const noexcept = 0;
 
+    virtual uint64_t GetLastSignaledValue() const noexcept = 0;
+
     virtual void Wait() noexcept = 0;
+
+    virtual void Wait(uint64_t value) noexcept = 0;
 };
 
 class SwapChainSyncObject : public RenderBase {
@@ -1410,7 +1415,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual AcquireResult AcquireNext() noexcept = 0;
+    virtual AcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
 
     virtual void Present(SwapChainSyncObject* waitToPresent) noexcept = 0;
 

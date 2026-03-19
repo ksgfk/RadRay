@@ -2789,8 +2789,20 @@ void FenceD3D12::Wait() noexcept {
     }
 }
 
+void FenceD3D12::Wait(uint64_t value) noexcept {
+    UINT64 completedValue = _fence->GetCompletedValue();
+    if (completedValue < value) {
+        _fence->SetEventOnCompletion(value, _event.Get());
+        ::WaitForSingleObject(_event.Get(), INFINITE);
+    }
+}
+
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     return _fence->GetCompletedValue();
+}
+
+uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
+    return _fenceValue - 1;
 }
 
 CmdListD3D12::CmdListD3D12(
@@ -3619,28 +3631,40 @@ void SwapChainD3D12::Destroy() noexcept {
     }
 }
 
-AcquireResult SwapChainD3D12::AcquireNext() noexcept {
+AcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     AcquireResult result{};
     if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
         _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         return result;
     }
-
-    DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, INFINITE, true);
-    if (waitResult != WAIT_OBJECT_0) {
+    DWORD milliseconds;
+    if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
+        milliseconds = INFINITE;
+    } else if (timeoutMs > static_cast<uint64_t>(INFINITE) - 1) {
+        milliseconds = INFINITE - 1;
+    } else {
+        milliseconds = static_cast<DWORD>(timeoutMs);
+    }
+    const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
+    if (waitResult == WAIT_OBJECT_0) {
+        const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
+        _currentBackBufferIndex = curr;
+        result.Status = SwapChainAcquireStatus::Success;
+        result.NativeStatusCode = 0;
+        result.BackBuffer = _frames[curr].image.get();
+        result.BackBufferIndex = curr;
+        return result;
+    } else if (waitResult == WAIT_TIMEOUT) {
+        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
+        result.Status = SwapChainAcquireStatus::RetryLater;
+        result.NativeStatusCode = static_cast<int64_t>(waitResult);
+        return result;
+    } else {
         _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         result.Status = SwapChainAcquireStatus::Error;
         result.NativeStatusCode = static_cast<int64_t>(waitResult);
         return result;
     }
-
-    const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
-    _currentBackBufferIndex = curr;
-    result.Status = SwapChainAcquireStatus::Success;
-    result.NativeStatusCode = 0;
-    result.BackBuffer = _frames[curr].image.get();
-    result.BackBufferIndex = curr;
-    return result;
 }
 
 void SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {

@@ -29,6 +29,7 @@ constexpr uint32_t kResizedHeight = 450;
 constexpr uint32_t kBackBufferCount = 3;
 constexpr uint32_t kInFlightFrameCount = 2;
 constexpr uint32_t kSmokeFrameCount = 64;
+constexpr uint32_t kPollAcquireFrameCount = 8;
 constexpr uint32_t kPreResizeFrameCount = 16;
 constexpr uint32_t kPostResizeFrameCount = 32;
 constexpr uint32_t kAcquireRetryMax = 120;
@@ -293,6 +294,7 @@ bool RenderFrames(
     std::vector<uint64_t>& expectedCompletedValues,
     uint64_t frameStart,
     uint32_t frameCount,
+    bool usePollAcquire,
     std::unordered_set<uint32_t>& seenBackBufferIndices,
     std::string& reason) {
     for (uint32_t i = 0; i < frameCount; ++i) {
@@ -320,7 +322,39 @@ bool RenderFrames(
         SwapChainSyncObject* waitToDrawSync = nullptr;
         SwapChainSyncObject* readyToPresentSync = nullptr;
         uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
+        if (usePollAcquire) {
+            const auto pollAcquire = runtime.Swapchain->AcquireNext(0);
+            EXPECT_TRUE(
+                pollAcquire.Status == SwapChainAcquireStatus::Success ||
+                pollAcquire.Status == SwapChainAcquireStatus::RetryLater ||
+                pollAcquire.Status == SwapChainAcquireStatus::RequireRecreate)
+                << "AcquireNext(0) returned invalid status " << static_cast<int32_t>(pollAcquire.Status);
+            if (pollAcquire.Status == SwapChainAcquireStatus::Error) {
+                reason = fmt::format("AcquireNext(0) failed with error status {}", pollAcquire.NativeStatusCode);
+                return false;
+            }
+            if (pollAcquire.Status == SwapChainAcquireStatus::Success) {
+                if (!pollAcquire.BackBuffer.HasValue()) {
+                    reason = "AcquireNext(0) returned Success without back buffer";
+                    return false;
+                }
+                backBuffer = pollAcquire.BackBuffer.Get();
+                backBufferIndex = pollAcquire.BackBufferIndex;
+                waitToDrawSync = pollAcquire.WaitToDraw;
+                readyToPresentSync = pollAcquire.ReadyToPresent;
+                auto currentBackBuffer = runtime.Swapchain->GetCurrentBackBuffer();
+                if (!currentBackBuffer.HasValue()) {
+                    reason = "GetCurrentBackBuffer returned null after successful AcquireNext(0)";
+                    return false;
+                }
+                EXPECT_EQ(currentBackBuffer.Get(), pollAcquire.BackBuffer.Get());
+                EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), pollAcquire.BackBufferIndex);
+            }
+        }
         for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
+            if (backBuffer != nullptr) {
+                break;
+            }
             auto acquired = runtime.Swapchain->AcquireNext();
             if (acquired.Status == SwapChainAcquireStatus::Success) {
                 if (!acquired.BackBuffer.HasValue()) {
@@ -342,6 +376,10 @@ bool RenderFrames(
             }
             EXPECT_FALSE(runtime.Swapchain->GetCurrentBackBuffer().HasValue());
             EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), std::numeric_limits<uint32_t>::max());
+            if (acquired.Status == SwapChainAcquireStatus::RequireRecreate) {
+                reason = "AcquireNext requested swapchain recreation";
+                return false;
+            }
             if (acquired.Status == SwapChainAcquireStatus::Error) {
                 reason = fmt::format("AcquireNext failed with error status {}", acquired.NativeStatusCode);
                 return false;
@@ -419,7 +457,7 @@ bool RenderFrames(
     return true;
 }
 
-void RunSwapChainScenario(RenderBackend backend, bool withResize) {
+void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire = false) {
     auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
     if (!windowOpt.HasValue()) {
         GTEST_SKIP() << "Cannot create native window for this platform.";
@@ -488,7 +526,8 @@ void RunSwapChainScenario(RenderBackend backend, bool withResize) {
             fences,
             expectedCompletedValues,
             0,
-            withResize ? kPreResizeFrameCount : kSmokeFrameCount,
+            usePollAcquire ? kPollAcquireFrameCount : (withResize ? kPreResizeFrameCount : kSmokeFrameCount),
+            usePollAcquire,
             seenBackBufferIndices,
             reason)) {
         FAIL() << reason;
@@ -535,6 +574,7 @@ void RunSwapChainScenario(RenderBackend backend, bool withResize) {
                 expectedCompletedValues,
                 kPreResizeFrameCount,
                 kPostResizeFrameCount,
+                false,
                 seenBackBufferIndices,
                 reason)) {
             FAIL() << reason;
@@ -568,6 +608,14 @@ TEST(RHISwapchain, Smoke_D3D12) {
 
 TEST(RHISwapchain, Smoke_Vulkan) {
     RunSwapChainScenario(RenderBackend::Vulkan, false);
+}
+
+TEST(RHISwapchain, PollAcquire_D3D12) {
+    RunSwapChainScenario(RenderBackend::D3D12, false, true);
+}
+
+TEST(RHISwapchain, PollAcquire_Vulkan) {
+    RunSwapChainScenario(RenderBackend::Vulkan, false, true);
 }
 
 TEST(RHISwapchain, RecreateAfterResize_D3D12) {
