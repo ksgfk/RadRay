@@ -401,9 +401,16 @@ bool SubmitMinimalFrame(
         cmd->End();
 
         state.SeenBackBufferIndices.emplace(backBufferIndex);
-        auto task = runtime.Submit(std::move(frameContext));
-        if (!task.IsValid()) {
-            reason = "GpuRuntime::Submit returned an invalid task.";
+        auto submit = runtime.SubmitFrame(std::move(frameContext));
+        if (!submit.Task.IsValid()) {
+            reason = "GpuRuntime::SubmitFrame returned an invalid task.";
+            return false;
+        }
+        if (submit.Present.Status != SwapChainStatus::Success) {
+            reason = fmt::format(
+                "GpuRuntime::SubmitFrame present failed with status {} native {}.",
+                static_cast<int32_t>(submit.Present.Status),
+                submit.Present.NativeStatusCode);
             return false;
         }
 
@@ -443,24 +450,24 @@ bool TryRenderOneFrame(
         }
 
         switch (result.Status) {
-            case SwapChainAcquireStatus::Success: {
+            case SwapChainStatus::Success: {
                 if (!result.Context.HasValue()) {
                     reason = "TryBeginFrame returned Success without a frame context.";
                     return false;
                 }
                 return SubmitMinimalFrame(runtime, state, result.Context.Release(), reason);
             }
-            case SwapChainAcquireStatus::RetryLater: {
+            case SwapChainStatus::RetryLater: {
                 onRetry();
                 runtime.ProcessTasks();
                 std::this_thread::sleep_for(1ms);
                 break;
             }
-            case SwapChainAcquireStatus::RequireRecreate: {
+            case SwapChainStatus::RequireRecreate: {
                 reason = "TryBeginFrame requested swapchain recreation unexpectedly.";
                 return false;
             }
-            case SwapChainAcquireStatus::Error:
+            case SwapChainStatus::Error:
             default: {
                 reason = fmt::format("TryBeginFrame returned unexpected status {}", static_cast<int32_t>(result.Status));
                 return false;
@@ -646,6 +653,8 @@ bool RunFramesOnDedicatedRenderThread(
 }
 
 bool ForceSyncAndDrain(GpuRuntime& runtime, GpuSurface* surface, std::string& reason) {
+    // 测试辅助：强制等待 present queue drain。它不是 GpuTask 语义的一部分，
+    // 仅用于在测试里收束底层队列与 runtime pendings。
     if (surface == nullptr || surface->_swapchain == nullptr) {
         reason = "Surface or swapchain is null during force sync.";
         return false;
@@ -717,6 +726,78 @@ TEST_P(GpuRuntimeSmokeTest, SingleThreadAcquirePresentWorks) {
         << reason;
     ASSERT_GE(state.SeenBackBufferIndices.size(), 2u)
         << "Swapchain did not rotate back buffers as expected.";
+
+    DestroySurfaceState(state);
+    runtime.reset();
+
+    ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+        << reason;
+}
+
+TEST_P(GpuRuntimeSmokeTest, GpuTaskWaitRequiresProcessTasksToDrainFrame) {
+    LogCollector logs{};
+    ScopedGlobalLogCallback logScope{&logs};
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    SurfaceState state{};
+    if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    SurfaceOptions options{};
+    options.WidthHint = kInitialWidth;
+    options.HeightHint = kInitialHeight;
+    ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+        << reason;
+
+    auto begin = runtime->BeginFrame(state.Surface.get());
+    ASSERT_EQ(begin.Status, SwapChainStatus::Success)
+        << "BeginFrame failed with status " << static_cast<int32_t>(begin.Status);
+    ASSERT_TRUE(begin.Context.HasValue())
+        << "BeginFrame returned Success without a frame context.";
+
+    auto frameContext = begin.Context.Release();
+    ASSERT_NE(frameContext, nullptr);
+    const uint32_t backBufferIndex = frameContext->GetBackBufferIndex();
+    ASSERT_LT(backBufferIndex, state.BackBufferStates.size());
+    auto* backBuffer = frameContext->GetBackBuffer();
+    ASSERT_NE(backBuffer, nullptr);
+
+    auto* cmd = frameContext->CreateCommandBuffer();
+    ASSERT_NE(cmd, nullptr);
+    cmd->Begin();
+    if (state.BackBufferStates[backBufferIndex] != TextureState::Present) {
+        ResourceBarrierDescriptor toPresent = BarrierTextureDescriptor{
+            .Target = backBuffer,
+            .Before = state.BackBufferStates[backBufferIndex],
+            .After = TextureState::Present,
+        };
+        cmd->ResourceBarrier(std::span{&toPresent, 1});
+    }
+    cmd->End();
+
+    auto submit = runtime->SubmitFrame(std::move(frameContext));
+    ASSERT_TRUE(submit.Task.IsValid())
+        << "SubmitFrame returned an invalid task.";
+    ASSERT_EQ(submit.Present.Status, SwapChainStatus::Success)
+        << "SubmitFrame present failed with status " << static_cast<int32_t>(submit.Present.Status)
+        << " native " << submit.Present.NativeStatusCode;
+
+    state.BackBufferStates[backBufferIndex] = TextureState::Present;
+
+    submit.Task.Wait();
+    ASSERT_EQ(runtime->_pendings.size(), 1u)
+        << "GpuTask::Wait should not retire runtime pendings by itself.";
+
+    runtime->ProcessTasks();
+    ASSERT_TRUE(runtime->_pendings.empty())
+        << "ProcessTasks should retire pendings after the submission has completed.";
+
+    ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
+        << reason;
 
     DestroySurfaceState(state);
     runtime.reset();

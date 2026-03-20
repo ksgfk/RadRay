@@ -4562,12 +4562,12 @@ void SwapChainVulkan::DestroyImpl() noexcept {
     _surface.reset();
 }
 
-AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
-    AcquireResult result{};
+SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
+    SwapChainAcquireResult result{};
     RADRAY_ASSERT(!_outstandingAcquire.IsValid());
     if (_outstandingAcquire.IsValid()) {
         RADRAY_ERR_LOG("vkAcquireNextImageKHR called before Present");
-        result.Status = SwapChainAcquireStatus::Error;
+        result.Status = SwapChainStatus::Error;
         result.NativeStatusCode = -1;
         return result;
     }
@@ -4576,14 +4576,14 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     auto waitToDrawOpt = this->AcquireSyncObjectFromPool();
     if (!waitToDrawOpt.HasValue()) {
         RADRAY_ERR_LOG("vk acquire failed: cannot allocate wait semaphore");
-        result.Status = SwapChainAcquireStatus::Error;
+        result.Status = SwapChainStatus::Error;
         return result;
     }
     auto readyToPresentOpt = this->AcquireSyncObjectFromPool();
     if (!readyToPresentOpt.HasValue()) {
         RADRAY_ERR_LOG("vk acquire failed: cannot allocate present semaphore");
         this->RecycleSyncObject(waitToDrawOpt.Release());
-        result.Status = SwapChainAcquireStatus::Error;
+        result.Status = SwapChainStatus::Error;
         return result;
     }
     auto cleanupFenceOpt = this->AcquireFenceFromPool();
@@ -4591,7 +4591,7 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
         RADRAY_ERR_LOG("vk acquire failed: cannot allocate cleanup fence");
         this->RecycleSyncObject(waitToDrawOpt.Release());
         this->RecycleSyncObject(readyToPresentOpt.Release());
-        result.Status = SwapChainAcquireStatus::Error;
+        result.Status = SwapChainStatus::Error;
         return result;
     }
 
@@ -4625,7 +4625,7 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
         _outstandingAcquire.imageIndex = imageIndex;
         _outstandingAcquire.waitToDraw = imageFrame.acquireSyncObject.get();
         _outstandingAcquire.readyToPresent = std::move(readyToPresent);
-        result.Status = SwapChainAcquireStatus::Success;
+        result.Status = SwapChainStatus::Success;
         result.NativeStatusCode = vr;
         result.BackBuffer = imageFrame.image.get();
         result.BackBufferIndex = imageIndex;
@@ -4637,7 +4637,7 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
         this->RecycleSyncObject(std::move(waitToDraw));
         this->RecycleSyncObject(std::move(readyToPresent));
         this->RecycleFence(std::move(cleanupFence));
-        result.Status = SwapChainAcquireStatus::RetryLater;
+        result.Status = SwapChainStatus::RetryLater;
         result.NativeStatusCode = vr;
         return result;
     }
@@ -4645,7 +4645,7 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
         this->RecycleSyncObject(std::move(waitToDraw));
         this->RecycleSyncObject(std::move(readyToPresent));
         this->RecycleFence(std::move(cleanupFence));
-        result.Status = SwapChainAcquireStatus::RequireRecreate;
+        result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return result;
@@ -4655,21 +4655,26 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     this->RecycleSyncObject(std::move(readyToPresent));
     this->RecycleFence(std::move(cleanupFence));
     result.NativeStatusCode = vr;
-    result.Status = SwapChainAcquireStatus::Error;
+    result.Status = SwapChainStatus::Error;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
     return result;
 }
 
-void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
+SwapChainPresentResult SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
+    SwapChainPresentResult result{};
     RADRAY_ASSERT(_outstandingAcquire.IsValid());
     if (!_outstandingAcquire.IsValid()) {
         RADRAY_WARN_LOG("vkQueuePresentKHR skipped: no acquired back buffer");
-        return;
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = -1;
+        return result;
     }
     RADRAY_ASSERT(waitToPresent == _outstandingAcquire.readyToPresent.get());
     if (waitToPresent != _outstandingAcquire.readyToPresent.get()) {
         RADRAY_ERR_LOG("vkQueuePresentKHR skipped: mismatched present sync object");
-        return;
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = -1;
+        return result;
     }
 
     auto* waitSync = CastVkObject(waitToPresent);
@@ -4693,9 +4698,15 @@ void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
     this->CleanupPresentHistory();
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         RADRAY_WARN_LOG("vkQueuePresentKHR: {}", presentResult);
+        result.Status = SwapChainStatus::RequireRecreate;
     } else if (presentResult != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkQueuePresentKHR failed: {}", presentResult);
+        result.Status = SwapChainStatus::Error;
+    } else {
+        result.Status = SwapChainStatus::Success;
     }
+    result.NativeStatusCode = presentResult;
+    return result;
 }
 
 Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {

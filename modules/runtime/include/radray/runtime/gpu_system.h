@@ -14,19 +14,32 @@
 //   并定义“GPU 提交批次(batch)”与“帧(frame)”这两个上层概念。
 // - 本层不试图完整封装底层 RHI 的命令系统；命令记录可开放高层 GPU 命令，
 //   但提交语义由 runtime 统一定义。
-// - GpuRuntime::Submit 表示提交一个 batch。一个 batch 对应一次 runtime 定义的提交，
-//   并以单个 fence/semaphore 完成令牌进行同步；返回的 GpuTask 表示该 batch 的完成状态。
+// - GpuRuntime::SubmitAsync / SubmitFrame 表示提交一个 batch。一个 batch 对应一次 runtime
+//   定义的提交，并以单个 fence/semaphore 完成令牌进行同步；返回的 GpuTask 仅表示该 batch
+//   对应的 queue submission 完成，不表示 present 已结束。
 // - 与 swapchain/surface 关联的帧命令由 runtime 封装；frame 的 acquire/present 生命周期
 //   不直接作为底层 RHI primitive 暴露给外部模块。
 // - GpuResourceHandle 故意保持无类型：它表示 runtime 稳定资源标识，并提供到底层对象的
 //   interop 穿透能力，但不在该层统一资源具体类型。
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
 // - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
-//   BeginFrameResult::Status 返回；真正的 GPU 致命错误仍通过异常报告。
+//   BeginFrameResult::Status 返回；SubmitFrame 的 present 结果通过 SubmitFrameResult::Present
+//   返回；真正的 GPU 致命错误仍通过异常报告。
 // - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
 // - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
 // - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
 // - DependsOn 用于表示当前异步上下文依赖于某个 GPU 任务完成，没有 CPU 同步语义
+// - 生命周期约定：
+//   - GpuRuntime 是本层所有对象的根所有者。GpuTask / GpuSurface / GpuAsyncContext /
+//     GpuFrameContext 以及由它们暴露的 borrowed/native handle 都不得长于 GpuRuntime。
+//   - GpuSurface 必须长于从它 Acquire 成功得到的 GpuFrameContext，以及该 frame 对应的
+//     runtime 内部 in-flight 提交；在相关提交 drain 完成前销毁或重建该 surface 属于未定义行为。
+//   - BeginFrame / TryBeginFrame 一旦成功返回 GpuFrameContext，调用方必须且只能将该 context
+//     交给同一个 GpuRuntime::SubmitFrame 一次；丢弃、不提交、重复提交、跨 runtime 提交都属于未定义行为。
+//   - 当前 API 不提供 CancelFrame / AbandonFrame；成功 acquire 的 frame 没有合法放弃路径。
+//   - 在销毁或重建 GpuSurface / GpuRuntime 前，调用方必须先确保相关 GpuTask 已完成，并调用
+//     ProcessTasks() 回收 runtime 持有的 pending contexts，使 frame/context 完成 drain；
+//     这不表示底层 present 生命周期已被纳入 GpuTask。
 //
 
 namespace radray {
@@ -68,6 +81,10 @@ struct GpuResourceHandle {
 
 class GpuTask {
 public:
+    // GpuTask 仅表示一次 runtime submission 的 queue/GPU 完成令牌。
+    // - 对普通异步提交：表示该 batch 已执行完成；
+    // - 对 frame 提交：表示该 frame 的命令提交已执行完成；
+    // - 它不表示 swapchain present 已结束。
     GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept;
     GpuTask(const GpuTask&) noexcept = delete;
     GpuTask& operator=(const GpuTask&) noexcept = delete;
@@ -89,6 +106,10 @@ private:
 
 class GpuSurface {
 public:
+    // Surface 封装与某个 present queue 绑定的 swapchain 及其 frame slots。
+    // 调用方负责保证：
+    // - 它长于所有从该 surface 成功 acquire 出来的 frame；
+    // - 在销毁/重建前，相关 in-flight 提交已经完成并被 ProcessTasks() 回收。
     GpuSurface(
         GpuRuntime* runtime,
         unique_ptr<render::SwapChain> swapchain,
@@ -139,6 +160,8 @@ public:
 
     bool IsEmpty() const;
 
+    // 记录 GPU 侧依赖关系，不做 CPU 同步。
+    // task 必须来自同一个 GpuRuntime；跨 runtime 依赖没有定义。
     bool DependsOn(const GpuTask& task);
     render::CommandBuffer* CreateCommandBuffer();
 
@@ -160,6 +183,10 @@ private:
 
 class GpuFrameContext : public GpuAsyncContext {
 public:
+    // GpuFrameContext 表示一次成功 acquire 的 frame。
+    // - 它借用所属 GpuSurface 的 frame/swapchain 状态；
+    // - 调用方必须记录命令后将其交给同一个 GpuRuntime::SubmitFrame 一次；
+    // - 当前没有合法的取消/放弃路径。
     GpuFrameContext(
         GpuRuntime* runtime,
         GpuSurface* surface,
@@ -187,7 +214,12 @@ class GpuRuntime {
 public:
     struct BeginFrameResult {
         Nullable<unique_ptr<GpuFrameContext>> Context;
-        render::SwapChainAcquireStatus Status{render::SwapChainAcquireStatus::Error};
+        render::SwapChainStatus Status{render::SwapChainStatus::Error};
+    };
+
+    struct SubmitFrameResult {
+        GpuTask Task;
+        render::SwapChainPresentResult Present;
     };
 
     GpuRuntime(
@@ -211,18 +243,39 @@ public:
         render::PresentMode presentMode,
         uint32_t queueSlot = 0);
 
+    // 成功时返回 one-shot 的 GpuFrameContext。
+    // 该 context 必须且只能提交一次；调用方不得丢弃或复用它。
     BeginFrameResult BeginFrame(GpuSurface* surface);
+
+    // 非阻塞版本。若返回 Success，则约束与 BeginFrame 相同。
     BeginFrameResult TryBeginFrame(GpuSurface* surface);
+
     unique_ptr<GpuAsyncContext> BeginAsync(render::QueueType type, uint32_t queueSlot = 0);
 
-    GpuTask Submit(unique_ptr<GpuAsyncContext> context);
+    // 提交一个普通异步 batch，并接管 context 的生命周期。
+    // 返回的 GpuTask 仅表示该提交对应的 queue 完成。
+    GpuTask SubmitAsync(unique_ptr<GpuAsyncContext> context);
 
+    // 提交一个 frame batch，并继续完成 present 流程。
+    // 返回的 GpuTask 仅表示该 frame 的命令提交已执行完成；
+    // SubmitFrameResult::Present 单独表示 present 的结果。
+    SubmitFrameResult SubmitFrame(unique_ptr<GpuFrameContext> context);
+
+    // 回收已完成的 pending 提交持有的内部资源/contexts。
+    // 若调用方等待了 GpuTask 并准备销毁或重建相关 surface/runtime，必须先调用本函数完成
+    // frame/context drain；本函数不表示底层 present 生命周期已完成。
     void ProcessTasks();
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
 
 private:
+    class SubmittedBatch {
+    public:
+        render::Fence* Fence{nullptr};
+        uint64_t SignalValue{0};
+    };
+
     class Pending {
     public:
         Pending(
@@ -244,6 +297,10 @@ private:
     };
 
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
+    SubmittedBatch SubmitContext(
+        GpuAsyncContext* context,
+        Nullable<render::SwapChainSyncObject*> waitToExecute,
+        Nullable<render::SwapChainSyncObject*> readyToPresent);
     GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
 
     shared_ptr<render::Device> _device;

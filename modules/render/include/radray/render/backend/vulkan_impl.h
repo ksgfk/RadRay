@@ -631,9 +631,9 @@ public:
 
     void Destroy() noexcept override;
 
-    AcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
+    SwapChainAcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
-    void Present(SwapChainSyncObject* waitToPresent) noexcept override;
+    SwapChainPresentResult Present(SwapChainSyncObject* waitToPresent) noexcept override;
 
     Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
 

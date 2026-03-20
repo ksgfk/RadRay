@@ -193,7 +193,7 @@ GpuRuntime::BeginFrameResult GpuRuntime::TryBeginFrame(GpuSurface* surface) {
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
     auto& nowFrame = surface->_frameSlots[frameSlotIndex];
     if (fence->GetCompletedValue() < nowFrame._fenceValue) {
-        return {nullptr, render::SwapChainAcquireStatus::RetryLater};
+        return {nullptr, render::SwapChainStatus::RetryLater};
     }
     return this->AcquireSwapChain(surface, 0);
 }
@@ -207,7 +207,13 @@ unique_ptr<GpuAsyncContext> GpuRuntime::BeginAsync(render::QueueType type, uint3
     return make_unique<GpuAsyncContext>(this, queue, queueSlot);
 }
 
-GpuTask GpuRuntime::Submit(unique_ptr<GpuAsyncContext> context) {
+GpuRuntime::SubmittedBatch GpuRuntime::SubmitContext(
+    GpuAsyncContext* context,
+    Nullable<render::SwapChainSyncObject*> waitToExecute,
+    Nullable<render::SwapChainSyncObject*> readyToPresent) {
+    if (context == nullptr) {
+        throw GpuSystemException("GpuRuntime cannot submit empty context");
+    }
     if (context->IsEmpty()) {
         throw GpuSystemException("GpuRuntime cannot submit empty context");
     }
@@ -230,40 +236,52 @@ GpuTask GpuRuntime::Submit(unique_ptr<GpuAsyncContext> context) {
     submitDesc.WaitFences = context->_waitFences;
     submitDesc.WaitValues = context->_waitValues;
 
-    render::SwapChainSyncObject* waitToExecute[] = {nullptr};
-    render::SwapChainSyncObject* readyToPresent[] = {nullptr};
-    GpuFrameContext* frame = nullptr;
-    if (context->GetType() == GpuAsyncContext::Kind::Frame) {
-        frame = static_cast<GpuFrameContext*>(context.get());
-        if (frame->_waitToDraw != nullptr) {
-            waitToExecute[0] = frame->_waitToDraw.Get();
-            submitDesc.WaitToExecute = waitToExecute;
-        }
-        if (frame->_readyToPresent != nullptr) {
-            readyToPresent[0] = frame->_readyToPresent.Get();
-            submitDesc.ReadyToPresent = readyToPresent;
-        }
+    render::SwapChainSyncObject* swapChainWait[] = {nullptr};
+    render::SwapChainSyncObject* swapChainPresent[] = {nullptr};
+    if (waitToExecute != nullptr) {
+        swapChainWait[0] = waitToExecute.Get();
+        submitDesc.WaitToExecute = swapChainWait;
+    }
+    if (readyToPresent != nullptr) {
+        swapChainPresent[0] = readyToPresent.Get();
+        submitDesc.ReadyToPresent = swapChainPresent;
     }
 
     context->_queue->Submit(submitDesc);
-    if (frame != nullptr) {
-        frame->_surface->_swapchain->Present(frame->_readyToPresent.Get());
-        frame->_surface->_frameSlots[frame->_frameSlotIndex]._fenceValue = signalValue;
-    }
+    return SubmittedBatch{fence, signalValue};
+}
 
-    _pendings.emplace_back(std::move(context), fence, signalValue);
-    return GpuTask{this, fence, signalValue};
+GpuTask GpuRuntime::SubmitAsync(unique_ptr<GpuAsyncContext> context) {
+    if (context == nullptr) {
+        throw GpuSystemException("GpuRuntime cannot submit empty context");
+    }
+    if (context->GetType() != GpuAsyncContext::Kind::Async) {
+        throw GpuSystemException("GpuRuntime::SubmitAsync only accepts async contexts");
+    }
+    const auto submitted = this->SubmitContext(context.get(), nullptr, nullptr);
+    _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
+    return GpuTask{this, submitted.Fence, submitted.SignalValue};
+}
+
+GpuRuntime::SubmitFrameResult GpuRuntime::SubmitFrame(unique_ptr<GpuFrameContext> context) {
+    if (context == nullptr) {
+        throw GpuSystemException("GpuRuntime cannot submit empty frame context");
+    }
+    if (context->GetType() != GpuAsyncContext::Kind::Frame) {
+        throw GpuSystemException("GpuRuntime::SubmitFrame only accepts frame contexts");
+    }
+    const auto submitted = this->SubmitContext(context.get(), context->_waitToDraw, context->_readyToPresent);
+    GpuTask task{this, submitted.Fence, submitted.SignalValue};
+    const auto present = context->_surface->_swapchain->Present(context->_readyToPresent.Get());
+    context->_surface->_frameSlots[context->_frameSlotIndex]._fenceValue = submitted.SignalValue;
+    _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
+    return {std::move(task), present};
 }
 
 void GpuRuntime::ProcessTasks() {
-    for (size_t i = 0; i < _pendings.size();) {
-        auto& pending = _pendings[i];
-        if (pending._fence != nullptr && pending._fence->GetCompletedValue() >= pending._signalValue) {
-            _pendings.erase(_pendings.begin() + static_cast<ptrdiff_t>(i));
-        } else {
-            ++i;
-        }
-    }
+    std::erase_if(_pendings, [](const Pending& pending) {
+        return pending._fence != nullptr && pending._fence->GetCompletedValue() >= pending._signalValue;
+    });
 }
 
 render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
@@ -300,7 +318,7 @@ GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, u
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
     const auto acqResult = surface->_swapchain->AcquireNext(timeoutMs);
     switch (acqResult.Status) {
-        case render::SwapChainAcquireStatus::Success: {
+        case render::SwapChainStatus::Success: {
             auto context = make_unique<GpuFrameContext>(
                 this,
                 surface,
@@ -311,12 +329,12 @@ GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, u
             context->_waitToDraw = acqResult.WaitToDraw;
             context->_readyToPresent = acqResult.ReadyToPresent;
             surface->_nextFrameSlotIndex = (frameSlotIndex + 1) % surface->_frameSlots.size();
-            return {std::move(context), render::SwapChainAcquireStatus::Success};
+            return {std::move(context), render::SwapChainStatus::Success};
         }
-        case render::SwapChainAcquireStatus::RetryLater:
-        case render::SwapChainAcquireStatus::RequireRecreate:
+        case render::SwapChainStatus::RetryLater:
+        case render::SwapChainStatus::RequireRecreate:
             return {nullptr, acqResult.Status};
-        case render::SwapChainAcquireStatus::Error:
+        case render::SwapChainStatus::Error:
         default: {
             throw GpuSystemException("SwapChain::AcquireNext failed");
         }

@@ -347,22 +347,22 @@ void DestroyVulkanSwapChainContext(VulkanSwapChainContext& context) noexcept {
 bool AcquireSwapChainImage(
     SwapChain* swapchain,
     NativeWindow* window,
-    AcquireResult& acquired,
+    SwapChainAcquireResult& acquired,
     std::string& reason) {
     for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
         acquired = swapchain->AcquireNext();
-        if (acquired.Status == SwapChainAcquireStatus::Success) {
+        if (acquired.Status == SwapChainStatus::Success) {
             if (!acquired.BackBuffer.HasValue()) {
                 reason = "AcquireNext returned Success without back buffer";
                 return false;
             }
             return true;
         }
-        if (acquired.Status == SwapChainAcquireStatus::RequireRecreate) {
+        if (acquired.Status == SwapChainStatus::RequireRecreate) {
             reason = "AcquireNext requested swapchain recreation";
             return false;
         }
-        if (acquired.Status == SwapChainAcquireStatus::Error) {
+        if (acquired.Status == SwapChainStatus::Error) {
             reason = fmt::format("AcquireNext failed with error status {}", acquired.NativeStatusCode);
             return false;
         }
@@ -416,15 +416,15 @@ bool RenderFrames(
         if (usePollAcquire) {
             const auto pollAcquire = runtime.Swapchain->AcquireNext(0);
             EXPECT_TRUE(
-                pollAcquire.Status == SwapChainAcquireStatus::Success ||
-                pollAcquire.Status == SwapChainAcquireStatus::RetryLater ||
-                pollAcquire.Status == SwapChainAcquireStatus::RequireRecreate)
+                pollAcquire.Status == SwapChainStatus::Success ||
+                pollAcquire.Status == SwapChainStatus::RetryLater ||
+                pollAcquire.Status == SwapChainStatus::RequireRecreate)
                 << "AcquireNext(0) returned invalid status " << static_cast<int32_t>(pollAcquire.Status);
-            if (pollAcquire.Status == SwapChainAcquireStatus::Error) {
+            if (pollAcquire.Status == SwapChainStatus::Error) {
                 reason = fmt::format("AcquireNext(0) failed with error status {}", pollAcquire.NativeStatusCode);
                 return false;
             }
-            if (pollAcquire.Status == SwapChainAcquireStatus::Success) {
+            if (pollAcquire.Status == SwapChainStatus::Success) {
                 if (!pollAcquire.BackBuffer.HasValue()) {
                     reason = "AcquireNext(0) returned Success without back buffer";
                     return false;
@@ -447,7 +447,7 @@ bool RenderFrames(
                 break;
             }
             auto acquired = runtime.Swapchain->AcquireNext();
-            if (acquired.Status == SwapChainAcquireStatus::Success) {
+            if (acquired.Status == SwapChainStatus::Success) {
                 if (!acquired.BackBuffer.HasValue()) {
                     reason = "AcquireNext returned Success without back buffer";
                     return false;
@@ -467,11 +467,11 @@ bool RenderFrames(
             }
             EXPECT_FALSE(runtime.Swapchain->GetCurrentBackBuffer().HasValue());
             EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), std::numeric_limits<uint32_t>::max());
-            if (acquired.Status == SwapChainAcquireStatus::RequireRecreate) {
+            if (acquired.Status == SwapChainStatus::RequireRecreate) {
                 reason = "AcquireNext requested swapchain recreation";
                 return false;
             }
-            if (acquired.Status == SwapChainAcquireStatus::Error) {
+            if (acquired.Status == SwapChainStatus::Error) {
                 reason = fmt::format("AcquireNext failed with error status {}", acquired.NativeStatusCode);
                 return false;
             }
@@ -541,7 +541,14 @@ bool RenderFrames(
             submitDesc.ReadyToPresent = std::span{&readyToPresentSync, 1};
         }
         queue->Submit(submitDesc);
-        runtime.Swapchain->Present(readyToPresentSync);
+        const auto presentResult = runtime.Swapchain->Present(readyToPresentSync);
+        if (presentResult.Status != SwapChainStatus::Success) {
+            reason = fmt::format(
+                "Present failed with status {} native {}",
+                static_cast<int32_t>(presentResult.Status),
+                presentResult.NativeStatusCode);
+            return false;
+        }
 
         runtime.BackBufferStates[backBufferIndex] = TextureState::Present;
     }
@@ -743,7 +750,7 @@ TEST(RHISwapchain, VulkanAcquireWithoutPresentDies) {
             if (!CreateVulkanSwapChainContext(context, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
-            AcquireResult acquired{};
+            SwapChainAcquireResult acquired{};
             if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
@@ -767,7 +774,7 @@ TEST(RHISwapchain, VulkanPresentWithWrongSyncDies) {
             if (!CreateVulkanSwapChainContext(context, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
-            AcquireResult acquired{};
+            SwapChainAcquireResult acquired{};
             if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }

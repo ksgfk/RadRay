@@ -431,7 +431,7 @@ enum class BindingParameterKind : int32_t {
     PushConstant
 };
 
-enum class SwapChainAcquireStatus : int32_t {
+enum class SwapChainStatus : int32_t {
     Error,
     Success,
     RetryLater,
@@ -663,13 +663,18 @@ struct CommandQueueSubmitDescriptor {
     std::span<SwapChainSyncObject*> ReadyToPresent{};
 };
 
-struct AcquireResult {
+struct SwapChainAcquireResult {
     Nullable<Texture*> BackBuffer{nullptr};
     SwapChainSyncObject* WaitToDraw{nullptr};
     SwapChainSyncObject* ReadyToPresent{nullptr};
     int64_t NativeStatusCode{0};
-    SwapChainAcquireStatus Status{SwapChainAcquireStatus::Error};
+    SwapChainStatus Status{SwapChainStatus::Error};
     uint32_t BackBufferIndex{std::numeric_limits<uint32_t>::max()};
+};
+
+struct SwapChainPresentResult {
+    int64_t NativeStatusCode{0};
+    SwapChainStatus Status{SwapChainStatus::Error};
 };
 
 struct BarrierBufferDescriptor {
@@ -1417,9 +1422,9 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
 
-    virtual AcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
+    virtual SwapChainAcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
 
-    virtual void Present(SwapChainSyncObject* waitToPresent) noexcept = 0;
+    virtual SwapChainPresentResult Present(SwapChainSyncObject* waitToPresent) noexcept = 0;
 
     virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
 

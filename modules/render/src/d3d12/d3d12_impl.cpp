@@ -3645,8 +3645,8 @@ void SwapChainD3D12::Destroy() noexcept {
     }
 }
 
-AcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
-    AcquireResult result{};
+SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
+    SwapChainAcquireResult result{};
     if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
         _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         return result;
@@ -3663,26 +3663,32 @@ AcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     if (waitResult == WAIT_OBJECT_0) {
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
         _currentBackBufferIndex = curr;
-        result.Status = SwapChainAcquireStatus::Success;
+        result.Status = SwapChainStatus::Success;
         result.NativeStatusCode = 0;
         result.BackBuffer = _frames[curr].image.get();
         result.BackBufferIndex = curr;
         return result;
     } else if (waitResult == WAIT_TIMEOUT) {
         _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
-        result.Status = SwapChainAcquireStatus::RetryLater;
+        result.Status = SwapChainStatus::RetryLater;
         result.NativeStatusCode = static_cast<int64_t>(waitResult);
         return result;
     } else {
         _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
-        result.Status = SwapChainAcquireStatus::Error;
+        result.Status = SwapChainStatus::Error;
         result.NativeStatusCode = static_cast<int64_t>(waitResult);
         return result;
     }
 }
 
-void SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
+SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
     (void)waitToPresent;
+    SwapChainPresentResult result{};
+    if (_swapchain == nullptr) {
+        result.NativeStatusCode = static_cast<int64_t>(E_POINTER);
+        result.Status = SwapChainStatus::Error;
+        return result;
+    }
     UINT syncInterval = 0;
     UINT presentFlags = 0;
     switch (_mode) {
@@ -3705,14 +3711,29 @@ void SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
             break;
         }
     }
-    if (HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
-        FAILED(hr)) {
-        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-            RADRAY_WARN_LOG("IDXGISwapChain::Present DXGI_ERROR_WAS_STILL_DRAWING");
-            return;
-        }
-        RADRAY_ABORT("IDXGISwapChain::Present failed: {} {}", GetErrorName(hr), hr);
+    const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+    result.NativeStatusCode = static_cast<int64_t>(hr);
+    if (SUCCEEDED(hr)) {
+        result.Status = SwapChainStatus::Success;
+        return result;
     }
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        RADRAY_WARN_LOG("IDXGISwapChain::Present DXGI_ERROR_WAS_STILL_DRAWING");
+        result.Status = SwapChainStatus::RetryLater;
+        return result;
+    }
+    if (hr == DXGI_ERROR_DEVICE_REMOVED ||
+        hr == DXGI_ERROR_DEVICE_RESET ||
+        hr == DXGI_ERROR_ACCESS_LOST ||
+        hr == DXGI_ERROR_ACCESS_DENIED ||
+        hr == DXGI_ERROR_INVALID_CALL) {
+        RADRAY_WARN_LOG("IDXGISwapChain::Present requires recreate: {} {}", GetErrorName(hr), hr);
+        result.Status = SwapChainStatus::RequireRecreate;
+        return result;
+    }
+    RADRAY_ERR_LOG("IDXGISwapChain::Present failed: {} {}", GetErrorName(hr), hr);
+    result.Status = SwapChainStatus::Error;
+    return result;
 }
 
 Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
