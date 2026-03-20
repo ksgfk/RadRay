@@ -237,6 +237,8 @@ public:
 
     void Wait() noexcept override;
 
+    QueueType GetQueueType() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -643,10 +645,43 @@ public:
 
 public:
     void DestroyImpl() noexcept;
+    void CleanupPresentHistory() noexcept;
+    void AssociateFenceWithPresentHistory(uint32_t imageIndex, unique_ptr<LegacyFenceVulkan> cleanupFence) noexcept;
+    Nullable<unique_ptr<SwapChainSyncObjectVulkan>> AcquireSyncObjectFromPool() noexcept;
+    Nullable<unique_ptr<LegacyFenceVulkan>> AcquireFenceFromPool() noexcept;
+    void RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> syncObject) noexcept;
+    void RecycleFence(unique_ptr<LegacyFenceVulkan> fence) noexcept;
 
     class Frame {
     public:
         unique_ptr<ImageVulkan> image;
+        unique_ptr<SwapChainSyncObjectVulkan> acquireSyncObject;
+    };
+
+    class OutstandingAcquire {
+    public:
+        uint32_t imageIndex{std::numeric_limits<uint32_t>::max()};
+        SwapChainSyncObjectVulkan* waitToDraw{nullptr};
+        unique_ptr<SwapChainSyncObjectVulkan> readyToPresent;
+
+        bool IsValid() const noexcept {
+            return imageIndex != std::numeric_limits<uint32_t>::max() &&
+                   waitToDraw != nullptr &&
+                   readyToPresent != nullptr;
+        }
+
+        void Reset() noexcept {
+            imageIndex = std::numeric_limits<uint32_t>::max();
+            waitToDraw = nullptr;
+            readyToPresent.reset();
+        }
+    };
+
+    class PresentHistoryEntry {
+    public:
+        uint32_t imageIndex{std::numeric_limits<uint32_t>::max()};
+        unique_ptr<SwapChainSyncObjectVulkan> presentSyncObject;
+        unique_ptr<LegacyFenceVulkan> cleanupFence;
     };
 
     DeviceVulkan* _device;
@@ -655,12 +690,10 @@ public:
     VkSwapchainKHR _swapchain;
     const void* _nativeHandler;
     vector<Frame> _frames;
-    vector<unique_ptr<SwapChainSyncObjectVulkan>> _acquireSemaphores;
-    vector<unique_ptr<SwapChainSyncObjectVulkan>> _renderFinishSemaphores;
-    vector<unique_ptr<LegacyFenceVulkan>> _acquireFences;
-    vector<uint8_t> _acquireFenceShouldWait;
-    uint32_t _nextSemaphoreSlot{0};
-    uint32_t _currentTextureIndex{std::numeric_limits<uint32_t>::max()};
+    vector<unique_ptr<SwapChainSyncObjectVulkan>> _recycledSyncObjects;
+    vector<unique_ptr<LegacyFenceVulkan>> _recycledFences;
+    vector<PresentHistoryEntry> _presentHistory;
+    OutstandingAcquire _outstandingAcquire{};
     uint32_t _width{0};
     uint32_t _height{0};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};

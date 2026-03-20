@@ -377,6 +377,8 @@ public:
 
     void Wait() noexcept override;
 
+    QueueType GetQueueType() const noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;

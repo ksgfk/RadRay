@@ -1290,6 +1290,8 @@ public:
     virtual void Submit(const CommandQueueSubmitDescriptor& desc) noexcept = 0;
 
     virtual void Wait() noexcept = 0;
+
+    virtual QueueType GetQueueType() const noexcept = 0;
 };
 
 class CommandBuffer : public RenderBase, IDebugName {

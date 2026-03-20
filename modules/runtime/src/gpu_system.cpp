@@ -7,15 +7,23 @@
 
 namespace radray {
 
+GpuTask::GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept
+    : _runtime(runtime),
+      _fence(fence),
+      _signalValue(signalValue) {}
+
 bool GpuTask::IsValid() const {
-    return false;
+    return _fence != nullptr && _signalValue != 0;
 }
 
 bool GpuTask::IsCompleted() const {
-    return false;
+    return !this->IsValid() || _fence->GetCompletedValue() >= _signalValue;
 }
 
 void GpuTask::Wait() {
+    if (this->IsValid()) {
+        _fence->Wait(_signalValue);
+    }
 }
 
 GpuSurface::GpuSurface(
@@ -58,12 +66,34 @@ render::PresentMode GpuSurface::GetPresentMode() const {
 GpuAsyncContext::~GpuAsyncContext() noexcept {
 }
 
+GpuAsyncContext::GpuAsyncContext(
+    GpuRuntime* runtime,
+    render::CommandQueue* queue,
+    uint32_t queueSlot) noexcept
+    : _runtime(runtime),
+      _queue(queue),
+      _queueSlot(queueSlot) {}
+
 bool GpuAsyncContext::IsEmpty() const {
-    return false;
+    return _cmdBuffers.empty();
 }
 
 bool GpuAsyncContext::DependsOn(const GpuTask& task) {
-    return false;
+    if (!task.IsValid()) {
+        return false;
+    }
+    _waitFences.emplace_back(task._fence);
+    _waitValues.emplace_back(task._signalValue);
+    return true;
+}
+
+render::CommandBuffer* GpuAsyncContext::CreateCommandBuffer() {
+    auto cmdBufferOpt = _runtime->_device->CreateCommandBuffer(_queue);
+    if (!cmdBufferOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateCommandBuffer failed");
+    }
+    auto& cmdBuffer = _cmdBuffers.emplace_back(cmdBufferOpt.Release());
+    return cmdBuffer.get();
 }
 
 GpuFrameContext::GpuFrameContext(
@@ -72,7 +102,7 @@ GpuFrameContext::GpuFrameContext(
     size_t frameSlotIndex,
     render::Texture* backBuffer,
     uint32_t backBufferIndex) noexcept
-    : _runtime(runtime),
+    : GpuAsyncContext(runtime, surface->_swapchain->GetDesc().PresentQueue, surface->_queueSlot),
       _surface(surface),
       _frameSlotIndex(frameSlotIndex),
       _backBuffer(backBuffer),
@@ -81,8 +111,8 @@ GpuFrameContext::GpuFrameContext(
 GpuFrameContext::~GpuFrameContext() noexcept {
 }
 
-GpuResourceHandle GpuFrameContext::GetBackBuffer() const {
-    throw std::runtime_error("Not implemented.");
+render::Texture* GpuFrameContext::GetBackBuffer() const {
+    return _backBuffer;
 }
 
 uint32_t GpuFrameContext::GetBackBufferIndex() const {
@@ -96,6 +126,7 @@ GpuRuntime::GpuRuntime(
       _vkInstance(std::move(vkInstance)) {}
 
 GpuRuntime::~GpuRuntime() noexcept {
+    this->Destroy();
 }
 
 bool GpuRuntime::IsValid() const {
@@ -103,8 +134,14 @@ bool GpuRuntime::IsValid() const {
 }
 
 void GpuRuntime::Destroy() noexcept {
+    _pendings.clear();
+    for (auto& fences : _queueFences) {
+        fences.clear();
+    }
     _device.reset();
-    _vkInstance.reset();
+    if (_vkInstance != nullptr) {
+        render::DestroyVulkanInstance(std::move(_vkInstance));
+    }
 }
 
 unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
@@ -162,14 +199,71 @@ GpuRuntime::BeginFrameResult GpuRuntime::TryBeginFrame(GpuSurface* surface) {
 }
 
 unique_ptr<GpuAsyncContext> GpuRuntime::BeginAsync(render::QueueType type, uint32_t queueSlot) {
-    return nullptr;
+    auto queueOpt = _device->GetCommandQueue(type, queueSlot);
+    if (!queueOpt.HasValue()) {
+        throw GpuSystemException("Device::GetCommandQueue failed");
+    }
+    auto queue = queueOpt.Get();
+    return make_unique<GpuAsyncContext>(this, queue, queueSlot);
 }
 
 GpuTask GpuRuntime::Submit(unique_ptr<GpuAsyncContext> context) {
-    throw std::runtime_error("Not implemented.");
+    if (context->IsEmpty()) {
+        throw GpuSystemException("GpuRuntime cannot submit empty context");
+    }
+
+    vector<render::CommandBuffer*> submitCmds;
+    submitCmds.reserve(context->_cmdBuffers.size());
+    for (const auto& cmdBuffer : context->_cmdBuffers) {
+        submitCmds.emplace_back(cmdBuffer.get());
+    }
+
+    auto* fence = this->GetQueueFence(context->_queue->GetQueueType(), context->_queueSlot);
+    const uint64_t signalValue = fence->GetLastSignaledValue() + 1;
+    render::Fence* signalFences[] = {fence};
+    uint64_t signalValues[] = {signalValue};
+
+    render::CommandQueueSubmitDescriptor submitDesc{};
+    submitDesc.CmdBuffers = submitCmds;
+    submitDesc.SignalFences = signalFences;
+    submitDesc.SignalValues = signalValues;
+    submitDesc.WaitFences = context->_waitFences;
+    submitDesc.WaitValues = context->_waitValues;
+
+    render::SwapChainSyncObject* waitToExecute[] = {nullptr};
+    render::SwapChainSyncObject* readyToPresent[] = {nullptr};
+    GpuFrameContext* frame = nullptr;
+    if (context->GetType() == GpuAsyncContext::Kind::Frame) {
+        frame = static_cast<GpuFrameContext*>(context.get());
+        if (frame->_waitToDraw != nullptr) {
+            waitToExecute[0] = frame->_waitToDraw.Get();
+            submitDesc.WaitToExecute = waitToExecute;
+        }
+        if (frame->_readyToPresent != nullptr) {
+            readyToPresent[0] = frame->_readyToPresent.Get();
+            submitDesc.ReadyToPresent = readyToPresent;
+        }
+    }
+
+    context->_queue->Submit(submitDesc);
+    if (frame != nullptr) {
+        frame->_surface->_swapchain->Present(frame->_readyToPresent.Get());
+        frame->_surface->_frameSlots[frame->_frameSlotIndex]._fenceValue = signalValue;
+    }
+
+    _pendings.emplace_back(std::move(context), fence, signalValue);
+    return GpuTask{this, fence, signalValue};
 }
 
 void GpuRuntime::ProcessTasks() {
+    for (size_t i = 0; i < _pendings.size();) {
+        auto& pending = _pendings[i];
+        if (pending._fence != nullptr && pending._fence->GetCompletedValue() >= pending._signalValue) {
+            _pendings.erase(_pendings.begin() + static_cast<ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
 }
 
 render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
@@ -213,6 +307,7 @@ GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, u
                 frameSlotIndex,
                 acqResult.BackBuffer.Get(),
                 acqResult.BackBufferIndex);
+            context->_type = GpuAsyncContext::Kind::Frame;
             context->_waitToDraw = acqResult.WaitToDraw;
             context->_readyToPresent = acqResult.ReadyToPresent;
             surface->_nextFrameSlotIndex = (frameSlotIndex + 1) % surface->_frameSlots.size();

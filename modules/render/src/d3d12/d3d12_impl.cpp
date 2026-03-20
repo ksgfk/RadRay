@@ -2761,6 +2761,20 @@ void CmdQueueD3D12::Wait() noexcept {
     _device->TryDrainValidationMessages();
 }
 
+QueueType CmdQueueD3D12::GetQueueType() const noexcept {
+    switch (_type) {
+        case D3D12_COMMAND_LIST_TYPE_DIRECT:
+            return QueueType::Direct;
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+            return QueueType::Compute;
+        case D3D12_COMMAND_LIST_TYPE_COPY:
+            return QueueType::Copy;
+        default:
+            RADRAY_ABORT("invalid D3D12 command list type: {}", _type);
+            return QueueType::Direct;
+    }
+}
+
 FenceD3D12::FenceD3D12(
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept

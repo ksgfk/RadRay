@@ -26,6 +26,7 @@
 // - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
 // - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
 // - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
+// - DependsOn 用于表示当前异步上下文依赖于某个 GPU 任务完成，没有 CPU 同步语义
 //
 
 namespace radray {
@@ -67,7 +68,7 @@ struct GpuResourceHandle {
 
 class GpuTask {
 public:
-    GpuTask(GpuRuntime* runtime, GpuResourceHandle fence, uint64_t signalValue) noexcept;
+    GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept;
     GpuTask(const GpuTask&) noexcept = delete;
     GpuTask& operator=(const GpuTask&) noexcept = delete;
     GpuTask(GpuTask&&) noexcept = default;
@@ -79,6 +80,11 @@ public:
     void Wait();
 
 private:
+    GpuRuntime* _runtime{nullptr};
+    render::Fence* _fence{nullptr};
+    uint64_t _signalValue{0};
+
+    friend class GpuAsyncContext;
 };
 
 class GpuSurface {
@@ -110,17 +116,46 @@ private:
     uint32_t _queueSlot{0};
 
     friend class GpuRuntime;
+    friend class GpuAsyncContext;
+    friend class GpuFrameContext;
 };
 
 class GpuAsyncContext {
 public:
+    enum class Kind {
+        Async,
+        Frame
+    };
+
+    GpuAsyncContext(
+        GpuRuntime* runtime,
+        render::CommandQueue* _queue,
+        uint32_t queueSlot) noexcept;
+    GpuAsyncContext(const GpuAsyncContext&) noexcept = delete;
+    GpuAsyncContext& operator=(const GpuAsyncContext&) noexcept = delete;
+    GpuAsyncContext(GpuAsyncContext&&) noexcept = delete;
+    GpuAsyncContext& operator=(GpuAsyncContext&&) noexcept = delete;
     virtual ~GpuAsyncContext() noexcept;
 
     bool IsEmpty() const;
-    /** GPU 侧等待语义, CPU 不会做 wait */
+
     bool DependsOn(const GpuTask& task);
+    render::CommandBuffer* CreateCommandBuffer();
+
+    constexpr Kind GetType() const { return _type; }
+
+protected:
+    GpuRuntime* _runtime{nullptr};
+    render::CommandQueue* _queue{nullptr};
+    vector<unique_ptr<render::CommandBuffer>> _cmdBuffers;
 
 private:
+    vector<render::Fence*> _waitFences;
+    vector<uint64_t> _waitValues;
+    uint32_t _queueSlot{0};
+    Kind _type{Kind::Async};
+
+    friend class GpuRuntime;
 };
 
 class GpuFrameContext : public GpuAsyncContext {
@@ -131,13 +166,13 @@ public:
         size_t frameSlotIndex,
         render::Texture* backBuffer,
         uint32_t backBufferIndex) noexcept;
+
     ~GpuFrameContext() noexcept override;
 
-    GpuResourceHandle GetBackBuffer() const;
+    render::Texture* GetBackBuffer() const;
     uint32_t GetBackBufferIndex() const;
 
 private:
-    GpuRuntime* _runtime{nullptr};
     GpuSurface* _surface{nullptr};
     size_t _frameSlotIndex{std::numeric_limits<size_t>::max()};
     render::Texture* _backBuffer{nullptr};
@@ -188,12 +223,36 @@ public:
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
 
 private:
+    class Pending {
+    public:
+        Pending(
+            unique_ptr<GpuAsyncContext> context,
+            render::Fence* fence,
+            uint64_t signalValue) noexcept
+            : _context(std::move(context)),
+              _fence(fence),
+              _signalValue(signalValue) {}
+        Pending(const Pending&) noexcept = delete;
+        Pending& operator=(const Pending&) noexcept = delete;
+        Pending(Pending&&) noexcept = default;
+        Pending& operator=(Pending&&) noexcept = default;
+
+    public:
+        unique_ptr<GpuAsyncContext> _context;
+        render::Fence* _fence{nullptr};
+        uint64_t _signalValue{0};
+    };
+
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
     GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
 
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
     std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
+    vector<Pending> _pendings;
+
+    friend class GpuAsyncContext;
+    friend class GpuFrameContext;
 };
 
 }  // namespace radray

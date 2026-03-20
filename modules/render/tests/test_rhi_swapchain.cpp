@@ -29,6 +29,7 @@ constexpr uint32_t kResizedHeight = 450;
 constexpr uint32_t kBackBufferCount = 3;
 constexpr uint32_t kInFlightFrameCount = 2;
 constexpr uint32_t kSmokeFrameCount = 64;
+constexpr uint32_t kStressFrameCount = 192;
 constexpr uint32_t kPollAcquireFrameCount = 8;
 constexpr uint32_t kPreResizeFrameCount = 16;
 constexpr uint32_t kPostResizeFrameCount = 32;
@@ -92,6 +93,15 @@ struct SwapChainRuntime {
     std::vector<TextureState> BackBufferStates{};
     std::vector<unique_ptr<TextureView>> Rtvs{};
     std::vector<Texture*> RtvTargets{};
+};
+
+struct VulkanSwapChainContext {
+    unique_ptr<NativeWindow> Window{};
+    LogCollector Logs{};
+    ScopedVulkanInstance VkInstance{};
+    shared_ptr<Device> Device{};
+    CommandQueue* Queue{nullptr};
+    SwapChainRuntime Runtime{};
 };
 
 std::string JoinErrors(const std::vector<std::string>& errors, size_t maxCount = 8) {
@@ -284,6 +294,87 @@ bool EnsureBackBufferRtv(
     return true;
 }
 
+bool CreateVulkanSwapChainContext(VulkanSwapChainContext& context, std::string& reason) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
+    if (!windowOpt.HasValue()) {
+        reason = "Cannot create native window for this platform.";
+        return false;
+    }
+    context.Window = windowOpt.Release();
+    if (!CreateDeviceForBackend(RenderBackend::Vulkan, &context.Logs, context.VkInstance, context.Device, reason)) {
+        return false;
+    }
+    auto queueOpt = context.Device->GetCommandQueue(QueueType::Direct, 0);
+    if (!queueOpt.HasValue()) {
+        reason = "Cannot get direct queue from device.";
+        return false;
+    }
+    context.Queue = queueOpt.Get();
+    const auto size = context.Window->GetSize();
+    if (size.X <= 0 || size.Y <= 0) {
+        reason = "Window size is invalid before swapchain creation.";
+        return false;
+    }
+    return CreateSwapChainRuntime(
+        context.Device.get(),
+        context.Queue,
+        context.Window->GetNativeHandler(),
+        static_cast<uint32_t>(size.X),
+        static_cast<uint32_t>(size.Y),
+        context.Runtime,
+        reason);
+#else
+    RADRAY_UNUSED(context);
+    reason = "Vulkan backend is not enabled for this build";
+    return false;
+#endif
+}
+
+void DestroyVulkanSwapChainContext(VulkanSwapChainContext& context) noexcept {
+    if (context.Queue != nullptr) {
+        context.Queue->Wait();
+    }
+    context.Runtime.Swapchain.reset();
+    if (context.Window != nullptr) {
+        context.Window->Destroy();
+    }
+    context.Device.reset();
+    context.VkInstance.Reset();
+    context.Queue = nullptr;
+}
+
+bool AcquireSwapChainImage(
+    SwapChain* swapchain,
+    NativeWindow* window,
+    AcquireResult& acquired,
+    std::string& reason) {
+    for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
+        acquired = swapchain->AcquireNext();
+        if (acquired.Status == SwapChainAcquireStatus::Success) {
+            if (!acquired.BackBuffer.HasValue()) {
+                reason = "AcquireNext returned Success without back buffer";
+                return false;
+            }
+            return true;
+        }
+        if (acquired.Status == SwapChainAcquireStatus::RequireRecreate) {
+            reason = "AcquireNext requested swapchain recreation";
+            return false;
+        }
+        if (acquired.Status == SwapChainAcquireStatus::Error) {
+            reason = fmt::format("AcquireNext failed with error status {}", acquired.NativeStatusCode);
+            return false;
+        }
+        if (window != nullptr) {
+            window->DispatchEvents();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    reason = "AcquireNext failed after retries";
+    return false;
+}
+
 bool RenderFrames(
     Device* device,
     NativeWindow* window,
@@ -457,7 +548,13 @@ bool RenderFrames(
     return true;
 }
 
+void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount);
+
 void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire = false) {
+    RunSwapChainScenario(backend, withResize, usePollAcquire, kSmokeFrameCount);
+}
+
+void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount) {
     auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
     if (!windowOpt.HasValue()) {
         GTEST_SKIP() << "Cannot create native window for this platform.";
@@ -526,7 +623,7 @@ void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAc
             fences,
             expectedCompletedValues,
             0,
-            usePollAcquire ? kPollAcquireFrameCount : (withResize ? kPreResizeFrameCount : kSmokeFrameCount),
+            usePollAcquire ? kPollAcquireFrameCount : (withResize ? kPreResizeFrameCount : steadyFrameCount),
             usePollAcquire,
             seenBackBufferIndices,
             reason)) {
@@ -610,6 +707,10 @@ TEST(RHISwapchain, Smoke_Vulkan) {
     RunSwapChainScenario(RenderBackend::Vulkan, false);
 }
 
+TEST(RHISwapchain, Stress_Vulkan) {
+    RunSwapChainScenario(RenderBackend::Vulkan, false, false, kStressFrameCount);
+}
+
 TEST(RHISwapchain, PollAcquire_D3D12) {
     RunSwapChainScenario(RenderBackend::D3D12, false, true);
 }
@@ -625,3 +726,53 @@ TEST(RHISwapchain, RecreateAfterResize_D3D12) {
 TEST(RHISwapchain, RecreateAfterResize_Vulkan) {
     RunSwapChainScenario(RenderBackend::Vulkan, true);
 }
+
+#if defined(RADRAY_ENABLE_VULKAN) && !defined(NDEBUG)
+TEST(RHISwapchain, VulkanAcquireWithoutPresentDies) {
+    VulkanSwapChainContext probe{};
+    std::string reason;
+    if (!CreateVulkanSwapChainContext(probe, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    DestroyVulkanSwapChainContext(probe);
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            VulkanSwapChainContext context{};
+            std::string localReason;
+            if (!CreateVulkanSwapChainContext(context, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            AcquireResult acquired{};
+            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            context.Runtime.Swapchain->AcquireNext(0);
+        },
+        "");
+}
+
+TEST(RHISwapchain, VulkanPresentWithWrongSyncDies) {
+    VulkanSwapChainContext probe{};
+    std::string reason;
+    if (!CreateVulkanSwapChainContext(probe, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    DestroyVulkanSwapChainContext(probe);
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            VulkanSwapChainContext context{};
+            std::string localReason;
+            if (!CreateVulkanSwapChainContext(context, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            AcquireResult acquired{};
+            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            context.Runtime.Swapchain->Present(acquired.WaitToDraw);
+        },
+        "");
+}
+#endif

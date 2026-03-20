@@ -851,30 +851,6 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         f.image->_hints = ResourceHint::External;
         f.image->_isSwapchainImage = true;
     }
-    const uint32_t frameCount = static_cast<uint32_t>(result->_frames.size());
-    result->_acquireSemaphores.reserve(frameCount);
-    result->_renderFinishSemaphores.reserve(frameCount);
-    result->_acquireFences.reserve(frameCount);
-    result->_acquireFenceShouldWait.reserve(frameCount);
-    for (uint32_t i = 0; i < frameCount; i++) {
-        auto acquireSem = this->CreateLegacySemaphore(0);
-        if (!acquireSem) {
-            return nullptr;
-        }
-        auto renderFinishSem = this->CreateLegacySemaphore(0);
-        if (!renderFinishSem) {
-            return nullptr;
-        }
-        auto acquireFence = this->CreateLegacyFence(VK_FENCE_CREATE_SIGNALED_BIT);
-        if (!acquireFence) {
-            return nullptr;
-        }
-        result->_acquireSemaphores.emplace_back(make_unique<SwapChainSyncObjectVulkan>(acquireSem.Release()));
-        result->_renderFinishSemaphores.emplace_back(make_unique<SwapChainSyncObjectVulkan>(renderFinishSem.Release()));
-        result->_acquireFences.emplace_back(acquireFence.Release());
-        // 创建 signaled fence，使用时 wait+reset
-        result->_acquireFenceShouldWait.emplace_back(1);
-    }
     return result;
 }
 
@@ -3212,6 +3188,10 @@ void QueueVulkan::Wait() noexcept {
     }
 }
 
+QueueType QueueVulkan::GetQueueType() const noexcept {
+    return _type;
+}
+
 void QueueVulkan::DestroyImpl() noexcept {
     if (_queue != VK_NULL_HANDLE) {
         _queue = VK_NULL_HANDLE;
@@ -4492,14 +4472,89 @@ void SwapChainVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+Nullable<unique_ptr<SwapChainSyncObjectVulkan>> SwapChainVulkan::AcquireSyncObjectFromPool() noexcept {
+    if (!_recycledSyncObjects.empty()) {
+        auto result = std::move(_recycledSyncObjects.back());
+        _recycledSyncObjects.pop_back();
+        return result;
+    }
+    auto semaphoreOpt = _device->CreateLegacySemaphore(0);
+    if (!semaphoreOpt.HasValue()) {
+        return nullptr;
+    }
+    return make_unique<SwapChainSyncObjectVulkan>(semaphoreOpt.Release());
+}
+
+Nullable<unique_ptr<LegacyFenceVulkan>> SwapChainVulkan::AcquireFenceFromPool() noexcept {
+    if (!_recycledFences.empty()) {
+        auto result = std::move(_recycledFences.back());
+        _recycledFences.pop_back();
+        return result;
+    }
+    return _device->CreateLegacyFence(0);
+}
+
+void SwapChainVulkan::RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> syncObject) noexcept {
+    if (syncObject != nullptr) {
+        _recycledSyncObjects.emplace_back(std::move(syncObject));
+    }
+}
+
+void SwapChainVulkan::RecycleFence(unique_ptr<LegacyFenceVulkan> fence) noexcept {
+    if (fence == nullptr) {
+        return;
+    }
+    if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
+        vr != VK_SUCCESS) {
+        RADRAY_ABORT("vkResetFences failed: {}", vr);
+    }
+    _recycledFences.emplace_back(std::move(fence));
+}
+
+void SwapChainVulkan::CleanupPresentHistory() noexcept {
+    for (size_t i = 0; i < _presentHistory.size();) {
+        auto& history = _presentHistory[i];
+        if (history.cleanupFence == nullptr) {
+            ++i;
+            continue;
+        }
+        const auto result = _device->_ftb.vkGetFenceStatus(_device->_device, history.cleanupFence->_fence);
+        if (result == VK_NOT_READY) {
+            ++i;
+            continue;
+        }
+        if (result != VK_SUCCESS) {
+            RADRAY_ABORT("vkGetFenceStatus failed: {}", result);
+        }
+        auto presentSyncObject = std::move(history.presentSyncObject);
+        auto cleanupFence = std::move(history.cleanupFence);
+        _presentHistory.erase(_presentHistory.begin() + i);
+        this->RecycleSyncObject(std::move(presentSyncObject));
+        this->RecycleFence(std::move(cleanupFence));
+    }
+}
+
+void SwapChainVulkan::AssociateFenceWithPresentHistory(uint32_t imageIndex, unique_ptr<LegacyFenceVulkan> cleanupFence) noexcept {
+    for (size_t i = _presentHistory.size(); i > 0; --i) {
+        auto& history = _presentHistory[i - 1];
+        if (history.imageIndex == imageIndex && history.cleanupFence == nullptr) {
+            history.cleanupFence = std::move(cleanupFence);
+            return;
+        }
+    }
+    _presentHistory.emplace_back(PresentHistoryEntry{
+        imageIndex,
+        nullptr,
+        std::move(cleanupFence)});
+}
+
 void SwapChainVulkan::DestroyImpl() noexcept {
+    RADRAY_ASSERT(!_outstandingAcquire.IsValid());
+    _outstandingAcquire.Reset();
+    _presentHistory.clear();
+    _recycledSyncObjects.clear();
+    _recycledFences.clear();
     _frames.clear();
-    _acquireSemaphores.clear();
-    _renderFinishSemaphores.clear();
-    _acquireFences.clear();
-    _acquireFenceShouldWait.clear();
-    _nextSemaphoreSlot = 0;
-    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
     if (_swapchain != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
         _swapchain = VK_NULL_HANDLE;
@@ -4509,10 +4564,41 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 
 AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     AcquireResult result{};
-    _currentTextureIndex = std::numeric_limits<uint32_t>::max();
-    const uint32_t slot = _nextSemaphoreSlot % static_cast<uint32_t>(_acquireSemaphores.size());
-    auto* semaphore = _acquireSemaphores[slot].get();
-    auto* fence = _acquireFences[slot].get();
+    RADRAY_ASSERT(!_outstandingAcquire.IsValid());
+    if (_outstandingAcquire.IsValid()) {
+        RADRAY_ERR_LOG("vkAcquireNextImageKHR called before Present");
+        result.Status = SwapChainAcquireStatus::Error;
+        result.NativeStatusCode = -1;
+        return result;
+    }
+    this->CleanupPresentHistory();
+
+    auto waitToDrawOpt = this->AcquireSyncObjectFromPool();
+    if (!waitToDrawOpt.HasValue()) {
+        RADRAY_ERR_LOG("vk acquire failed: cannot allocate wait semaphore");
+        result.Status = SwapChainAcquireStatus::Error;
+        return result;
+    }
+    auto readyToPresentOpt = this->AcquireSyncObjectFromPool();
+    if (!readyToPresentOpt.HasValue()) {
+        RADRAY_ERR_LOG("vk acquire failed: cannot allocate present semaphore");
+        this->RecycleSyncObject(waitToDrawOpt.Release());
+        result.Status = SwapChainAcquireStatus::Error;
+        return result;
+    }
+    auto cleanupFenceOpt = this->AcquireFenceFromPool();
+    if (!cleanupFenceOpt.HasValue()) {
+        RADRAY_ERR_LOG("vk acquire failed: cannot allocate cleanup fence");
+        this->RecycleSyncObject(waitToDrawOpt.Release());
+        this->RecycleSyncObject(readyToPresentOpt.Release());
+        result.Status = SwapChainAcquireStatus::Error;
+        return result;
+    }
+
+    auto waitToDraw = waitToDrawOpt.Release();
+    auto readyToPresent = readyToPresentOpt.Release();
+    auto cleanupFence = cleanupFenceOpt.Release();
+
     uint64_t nanoTimeout;
     if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
         nanoTimeout = std::numeric_limits<uint64_t>::max();
@@ -4521,89 +4607,90 @@ AcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     } else {
         nanoTimeout = timeoutMs * 1000ull * 1000ull;
     }
-    if (_acquireFenceShouldWait[slot] != 0) {
-        if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &fence->_fence, VK_TRUE, nanoTimeout);
-            vr == VK_TIMEOUT) {
-            result.Status = SwapChainAcquireStatus::RetryLater;
-            result.NativeStatusCode = vr;
-            return result;
-        } else if (vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("vkWaitForFences failed: {}", vr);
-            result.NativeStatusCode = vr;
-            return result;
-        }
-        if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &fence->_fence);
-            vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("vkResetFences failed: {}", vr);
-            result.NativeStatusCode = vr;
-            return result;
-        }
-        _acquireFenceShouldWait[slot] = 0;
-    }
-
+    uint32_t imageIndex = std::numeric_limits<uint32_t>::max();
     auto vr = _device->_ftb.vkAcquireNextImageKHR(
         _device->_device,
         _swapchain,
         nanoTimeout,
-        semaphore->_semaphore->_semaphore,
-        fence->_fence,
-        &_currentTextureIndex);
+        waitToDraw->_semaphore->_semaphore,
+        cleanupFence->_fence,
+        &imageIndex);
     if (vr == VK_SUCCESS) {
-        _acquireFenceShouldWait[slot] = 1;
-        _nextSemaphoreSlot = (slot + 1) % static_cast<uint32_t>(_acquireSemaphores.size());
-        Frame& imageFrame = _frames[_currentTextureIndex];
+        Frame& imageFrame = _frames[imageIndex];
+        this->AssociateFenceWithPresentHistory(imageIndex, std::move(cleanupFence));
+        if (imageFrame.acquireSyncObject != nullptr) {
+            this->RecycleSyncObject(std::move(imageFrame.acquireSyncObject));
+        }
+        imageFrame.acquireSyncObject = std::move(waitToDraw);
+        _outstandingAcquire.imageIndex = imageIndex;
+        _outstandingAcquire.waitToDraw = imageFrame.acquireSyncObject.get();
+        _outstandingAcquire.readyToPresent = std::move(readyToPresent);
         result.Status = SwapChainAcquireStatus::Success;
         result.NativeStatusCode = vr;
         result.BackBuffer = imageFrame.image.get();
-        result.BackBufferIndex = _currentTextureIndex;
-        result.WaitToDraw = CastVkObject(_acquireSemaphores[slot].get());
-        result.ReadyToPresent = CastVkObject(_renderFinishSemaphores[slot].get());
+        result.BackBufferIndex = imageIndex;
+        result.WaitToDraw = _outstandingAcquire.waitToDraw;
+        result.ReadyToPresent = _outstandingAcquire.readyToPresent.get();
         return result;
     }
     if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
-        // 在这些故障情况下，Fence 不能保证 signal
-        _acquireFenceShouldWait[slot] = 0;
+        this->RecycleSyncObject(std::move(waitToDraw));
+        this->RecycleSyncObject(std::move(readyToPresent));
+        this->RecycleFence(std::move(cleanupFence));
         result.Status = SwapChainAcquireStatus::RetryLater;
         result.NativeStatusCode = vr;
         return result;
     }
     if (vr == VK_SUBOPTIMAL_KHR || vr == VK_ERROR_OUT_OF_DATE_KHR) {
-        // 在这些故障情况下，Fence 不能保证 signal
-        _acquireFenceShouldWait[slot] = 0;
+        this->RecycleSyncObject(std::move(waitToDraw));
+        this->RecycleSyncObject(std::move(readyToPresent));
+        this->RecycleFence(std::move(cleanupFence));
         result.Status = SwapChainAcquireStatus::RequireRecreate;
         result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return result;
     }
 
-    _acquireFenceShouldWait[slot] = 0;
+    this->RecycleSyncObject(std::move(waitToDraw));
+    this->RecycleSyncObject(std::move(readyToPresent));
+    this->RecycleFence(std::move(cleanupFence));
     result.NativeStatusCode = vr;
+    result.Status = SwapChainAcquireStatus::Error;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
     return result;
 }
 
 void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
-    if (_currentTextureIndex >= _frames.size()) {
+    RADRAY_ASSERT(_outstandingAcquire.IsValid());
+    if (!_outstandingAcquire.IsValid()) {
         RADRAY_WARN_LOG("vkQueuePresentKHR skipped: no acquired back buffer");
         return;
     }
-
-    VkSemaphore waitSem = VK_NULL_HANDLE;
-    if (waitToPresent != nullptr) {
-        auto* waitSync = CastVkObject(waitToPresent);
-        waitSem = waitSync->_semaphore->_semaphore;
+    RADRAY_ASSERT(waitToPresent == _outstandingAcquire.readyToPresent.get());
+    if (waitToPresent != _outstandingAcquire.readyToPresent.get()) {
+        RADRAY_ERR_LOG("vkQueuePresentKHR skipped: mismatched present sync object");
+        return;
     }
+
+    auto* waitSync = CastVkObject(waitToPresent);
+    const VkSemaphore waitSem = waitSync->_semaphore->_semaphore;
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.pNext = nullptr;
-    presentInfo.waitSemaphoreCount = waitSem == VK_NULL_HANDLE ? 0u : 1u;
-    presentInfo.pWaitSemaphores = waitSem == VK_NULL_HANDLE ? nullptr : &waitSem;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &waitSem;
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &_swapchain;
-    presentInfo.pImageIndices = &_currentTextureIndex;
+    presentInfo.pImageIndices = &_outstandingAcquire.imageIndex;
     presentInfo.pResults = nullptr;
     auto presentResult = _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    _presentHistory.emplace_back(PresentHistoryEntry{
+        _outstandingAcquire.imageIndex,
+        std::move(_outstandingAcquire.readyToPresent),
+        nullptr});
+    _outstandingAcquire.Reset();
+    this->CleanupPresentHistory();
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         RADRAY_WARN_LOG("vkQueuePresentKHR: {}", presentResult);
     } else if (presentResult != VK_SUCCESS) {
@@ -4612,14 +4699,14 @@ void SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
 }
 
 Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
-    if (_currentTextureIndex >= _frames.size()) {
+    if (!_outstandingAcquire.IsValid()) {
         return nullptr;
     }
-    return _frames[_currentTextureIndex].image.get();
+    return _frames[_outstandingAcquire.imageIndex].image.get();
 }
 
 uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
-    return _currentTextureIndex;
+    return _outstandingAcquire.IsValid() ? _outstandingAcquire.imageIndex : std::numeric_limits<uint32_t>::max();
 }
 
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
