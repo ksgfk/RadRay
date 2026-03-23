@@ -48,7 +48,8 @@
 //     这不表示底层 present 生命周期已被纳入 GpuTask。
 //   - 通过 GpuAsyncContext 创建的 transient 资源在 context 未提交即析构时可直接失效；
 //     若 context 已被 SubmitAsync / SubmitFrame / AbandonFrame 接管，则其生命周期至少持续到
-//     对应 pending 提交被 ProcessTasks() drain 完成。本轮仅定义该语义，不提供真实实现。
+//     对应 pending 提交被 ProcessTasks() drain 完成。当前实现通过 context-local registry
+//     与 runtime pending drain 共同保证该语义。
 //
 
 namespace radray {
@@ -58,6 +59,7 @@ class GpuTask;
 class GpuSurface;
 class GpuFrameContext;
 class GpuAsyncContext;
+class GpuResourceRegistry;
 
 class GpuSystemException : public std::runtime_error {
 public:
@@ -124,6 +126,7 @@ private:
     uint64_t _signalValue{0};
 
     friend class GpuAsyncContext;
+    friend class GpuRuntime;
 };
 
 class GpuSurface {
@@ -206,6 +209,7 @@ private:
     vector<uint64_t> _waitValues;
     uint32_t _queueSlot{0};
     Kind _type{Kind::Async};
+    unique_ptr<GpuResourceRegistry> _resourceRegistry;
 
     friend class GpuRuntime;
 };
@@ -286,7 +290,9 @@ public:
     GpuTextureHandle CreateTexture(const render::TextureDescriptor& desc);
     GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc);
     GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
+    // 逻辑上立即销毁 handle，对象物理释放延迟到后续 ProcessTasks() 调度。
     void DestroyResource(GpuResourceHandle handle);
+    // 与 DestroyResource 相同，但额外要求对应 task 完成后才允许 ProcessTasks() 真正释放对象。
     void DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task);
 
     // 成功时返回 one-shot 的 GpuFrameContext。
@@ -328,6 +334,13 @@ private:
         uint64_t SignalValue{0};
     };
 
+    class ResourceRetirement {
+    public:
+        GpuResourceHandle Handle{};
+        vector<render::Fence*> Fences{};
+        vector<uint64_t> Values{};
+    };
+
     class Pending {
     public:
         Pending(
@@ -350,6 +363,9 @@ private:
 
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
     SubmittedBatch SubmitContext(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
+    void CaptureAllQueueFenceSnapshots(ResourceRetirement& retirement);
+    bool IsRetirementReady(const ResourceRetirement& retirement) const;
+    void ProcessPendingResourceRetirements();
 #ifdef RADRAY_IS_DEBUG
     void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
 #endif
@@ -359,7 +375,10 @@ private:
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
     std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
+    std::array<set<uint32_t>, (size_t)render::QueueType::MAX_COUNT> _knownQueueSlots;
     vector<Pending> _pendings;
+    unique_ptr<GpuResourceRegistry> _resourceRegistry;
+    vector<ResourceRetirement> _resourceRetirements;
 
     friend class GpuAsyncContext;
     friend class GpuFrameContext;
