@@ -34,6 +34,9 @@ constexpr uint32_t kPollAcquireFrameCount = 8;
 constexpr uint32_t kPreResizeFrameCount = 16;
 constexpr uint32_t kPostResizeFrameCount = 32;
 constexpr uint32_t kAcquireRetryMax = 120;
+constexpr std::array<PresentMode, 2> kD3D12NonFifoPresentModes = {
+    PresentMode::Mailbox,
+    PresentMode::Immediate};
 
 class LogCollector {
 public:
@@ -222,6 +225,7 @@ bool CreateSwapChainRuntime(
     const WindowNativeHandler& nativeHandler,
     uint32_t width,
     uint32_t height,
+    PresentMode presentMode,
     SwapChainRuntime& runtime,
     std::string& reason) {
     if (nativeHandler.Handle == nullptr) {
@@ -240,7 +244,7 @@ bool CreateSwapChainRuntime(
         scDesc.Height = height;
         scDesc.BackBufferCount = kBackBufferCount;
         scDesc.Format = format;
-        scDesc.PresentMode = PresentMode::FIFO;
+        scDesc.PresentMode = presentMode;
         auto swapchainOpt = device->CreateSwapChain(scDesc);
         if (!swapchainOpt.HasValue()) {
             continue;
@@ -322,6 +326,7 @@ bool CreateVulkanSwapChainContext(VulkanSwapChainContext& context, std::string& 
         context.Window->GetNativeHandler(),
         static_cast<uint32_t>(size.X),
         static_cast<uint32_t>(size.Y),
+        PresentMode::FIFO,
         context.Runtime,
         reason);
 #else
@@ -542,6 +547,10 @@ bool RenderFrames(
         }
         queue->Submit(submitDesc);
         const auto presentResult = runtime.Swapchain->Present(readyToPresentSync);
+        if (presentResult.Status == SwapChainStatus::RetryLater) {
+            reason = "Present unexpectedly returned RetryLater";
+            return false;
+        }
         if (presentResult.Status != SwapChainStatus::Success) {
             reason = fmt::format(
                 "Present failed with status {} native {}",
@@ -555,13 +564,17 @@ bool RenderFrames(
     return true;
 }
 
-void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount);
+void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount, PresentMode presentMode);
 
 void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire = false) {
-    RunSwapChainScenario(backend, withResize, usePollAcquire, kSmokeFrameCount);
+    RunSwapChainScenario(backend, withResize, usePollAcquire, kSmokeFrameCount, PresentMode::FIFO);
 }
 
 void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount) {
+    RunSwapChainScenario(backend, withResize, usePollAcquire, steadyFrameCount, PresentMode::FIFO);
+}
+
+void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAcquire, uint32_t steadyFrameCount, PresentMode presentMode) {
     auto windowOpt = CreateTestWindow(kInitialWidth, kInitialHeight);
     if (!windowOpt.HasValue()) {
         GTEST_SKIP() << "Cannot create native window for this platform.";
@@ -613,6 +626,7 @@ void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAc
             window->GetNativeHandler(),
             static_cast<uint32_t>(initialSize.X),
             static_cast<uint32_t>(initialSize.Y),
+            presentMode,
             runtime,
             reason)) {
         GTEST_SKIP() << reason;
@@ -663,6 +677,7 @@ void RunSwapChainScenario(RenderBackend backend, bool withResize, bool usePollAc
                 window->GetNativeHandler(),
                 static_cast<uint32_t>(resizedSize.X),
                 static_cast<uint32_t>(resizedSize.Y),
+                presentMode,
                 runtime,
                 reason)) {
             FAIL() << reason;
@@ -724,6 +739,13 @@ TEST(RHISwapchain, PollAcquire_D3D12) {
 
 TEST(RHISwapchain, PollAcquire_Vulkan) {
     RunSwapChainScenario(RenderBackend::Vulkan, false, true);
+}
+
+TEST(RHISwapchain, NonFifoPresentModes_D3D12) {
+    for (const auto presentMode : kD3D12NonFifoPresentModes) {
+        SCOPED_TRACE(static_cast<int32_t>(presentMode));
+        RunSwapChainScenario(RenderBackend::D3D12, false, false, kSmokeFrameCount, presentMode);
+    }
 }
 
 TEST(RHISwapchain, RecreateAfterResize_D3D12) {

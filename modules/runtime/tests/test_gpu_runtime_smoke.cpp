@@ -18,7 +18,9 @@
 #include <radray/logger.h>
 #include <radray/render/common.h>
 #define private public
+#define protected public
 #include <radray/runtime/gpu_system.h>
+#undef protected
 #undef private
 #include <radray/window/native_window.h>
 
@@ -44,6 +46,10 @@ constexpr uint32_t kPreResizeFrameCount = 10;
 constexpr uint32_t kPostResizeFrameCount = 12;
 constexpr uint32_t kAcquireRetryMax = 240;
 constexpr uint32_t kResizePumpCount = 32;
+constexpr uint32_t kNonFifoFrameCount = 8;
+constexpr std::array<PresentMode, 2> kD3D12NonFifoPresentModes = {
+    PresentMode::Mailbox,
+    PresentMode::Immediate};
 
 constexpr std::array<TextureFormat, 2> kFallbackFormats = {
     TextureFormat::BGRA8_UNORM,
@@ -406,6 +412,10 @@ bool SubmitMinimalFrame(
             reason = "GpuRuntime::SubmitFrame returned an invalid task.";
             return false;
         }
+        if (submit.Present.Status == SwapChainStatus::RetryLater) {
+            reason = "GpuRuntime::SubmitFrame present unexpectedly returned RetryLater.";
+            return false;
+        }
         if (submit.Present.Status != SwapChainStatus::Success) {
             reason = fmt::format(
                 "GpuRuntime::SubmitFrame present failed with status {} native {}.",
@@ -699,6 +709,62 @@ void PumpForResize(SurfaceState& state) {
     }
 }
 
+#ifdef RADRAY_IS_DEBUG
+GpuTask SubmitNoOpAsync(GpuRuntime& runtime) {
+    auto context = runtime.BeginAsync(QueueType::Direct);
+    auto* cmd = context->CreateCommandBuffer();
+    if (cmd == nullptr) {
+        RADRAY_ABORT("SubmitNoOpAsync: CreateCommandBuffer returned null");
+    }
+    cmd->Begin();
+    cmd->End();
+    auto task = runtime.SubmitAsync(std::move(context));
+    if (!task.IsValid()) {
+        RADRAY_ABORT("SubmitNoOpAsync: SubmitAsync returned an invalid task");
+    }
+    return task;
+}
+
+bool ProbeRuntimeCreation(RenderBackend backend, std::string& reason) {
+    LogCollector logs{};
+    unique_ptr<GpuRuntime> runtime{};
+    return CreateRuntimeForBackend(backend, &logs, runtime, reason);
+}
+
+bool ProbeSurfaceCreation(RenderBackend backend, std::string& reason) {
+    LogCollector logs{};
+    unique_ptr<GpuRuntime> runtime{};
+    if (!CreateRuntimeForBackend(backend, &logs, runtime, reason)) {
+        return false;
+    }
+
+    SurfaceState state{};
+    if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+        DestroySurfaceState(state);
+        return false;
+    }
+
+    SurfaceOptions options{};
+    options.WidthHint = kInitialWidth;
+    options.HeightHint = kInitialHeight;
+    const bool created = CreateSurfaceForWindow(
+        *runtime,
+        state,
+        &logs,
+        std::span<const TextureFormat>{kFallbackFormats},
+        options,
+        reason);
+    DestroySurfaceState(state);
+    return created;
+}
+#endif
+
+void SkipUnlessD3D12Backend(RenderBackend backend) {
+    if (backend != RenderBackend::D3D12) {
+        GTEST_SKIP() << "This test only applies to the D3D12 backend.";
+    }
+}
+
 class GpuRuntimeSmokeTest : public ::testing::TestWithParam<RenderBackend> {};
 
 TEST_P(GpuRuntimeSmokeTest, SingleThreadAcquirePresentWorks) {
@@ -796,6 +862,62 @@ TEST_P(GpuRuntimeSmokeTest, GpuTaskWaitRequiresProcessTasksToDrainFrame) {
     ASSERT_TRUE(runtime->_pendings.empty())
         << "ProcessTasks should retire pendings after the submission has completed.";
 
+    ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
+        << reason;
+
+    DestroySurfaceState(state);
+    runtime.reset();
+
+    ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+        << reason;
+}
+
+TEST_P(GpuRuntimeSmokeTest, AbandonFrameRetiresAcquireWithoutPoisoningSurface) {
+    LogCollector logs{};
+    ScopedGlobalLogCallback logScope{&logs};
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    SurfaceState state{};
+    if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    SurfaceOptions options{};
+    options.WidthHint = kInitialWidth;
+    options.HeightHint = kInitialHeight;
+    ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+        << reason;
+
+    auto begin = runtime->BeginFrame(state.Surface.get());
+    ASSERT_EQ(begin.Status, SwapChainStatus::Success)
+        << "BeginFrame failed with status " << static_cast<int32_t>(begin.Status);
+    ASSERT_TRUE(begin.Context.HasValue())
+        << "BeginFrame returned Success without a frame context.";
+
+    auto frameContext = begin.Context.Release();
+    ASSERT_NE(frameContext, nullptr);
+    auto* cmd = frameContext->CreateCommandBuffer();
+    ASSERT_NE(cmd, nullptr);
+    cmd->Begin();
+    cmd->End();
+
+    auto abandon = runtime->AbandonFrame(std::move(frameContext));
+    ASSERT_TRUE(abandon.Task.IsValid())
+        << "AbandonFrame returned an invalid task.";
+    ASSERT_EQ(abandon.Present.Status, SwapChainStatus::Success)
+        << "AbandonFrame present failed with status " << static_cast<int32_t>(abandon.Present.Status)
+        << " native " << abandon.Present.NativeStatusCode;
+
+    abandon.Task.Wait();
+    runtime->ProcessTasks();
+    ASSERT_TRUE(runtime->_pendings.empty())
+        << "ProcessTasks should retire the abandoned frame after its submission completes.";
+
+    ASSERT_TRUE(RunFramesSingleThread(*runtime, state, 1, reason))
+        << reason;
     ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
         << reason;
 
@@ -983,6 +1105,279 @@ TEST_P(GpuRuntimeSmokeTest, RecreateSwapchainAfterResizeWithQueueWait) {
     ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
         << reason;
 }
+
+TEST_P(GpuRuntimeSmokeTest, NonFifoPresentModesDoNotReturnRetryLaterOnSubmitFrame) {
+    SkipUnlessD3D12Backend(GetParam());
+
+    for (const auto presentMode : kD3D12NonFifoPresentModes) {
+        SCOPED_TRACE(fmt::format("PresentMode={}", static_cast<int32_t>(presentMode)));
+
+        LogCollector logs{};
+        ScopedGlobalLogCallback logScope{&logs};
+        unique_ptr<GpuRuntime> runtime{};
+        std::string reason{};
+        if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+            GTEST_SKIP() << reason;
+        }
+
+        SurfaceState state{};
+        if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+            GTEST_SKIP() << reason;
+        }
+        SurfaceOptions options{};
+        options.WidthHint = kInitialWidth;
+        options.HeightHint = kInitialHeight;
+        options.PresentModeValue = presentMode;
+        ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+            << reason;
+
+        ASSERT_TRUE(RunFramesSingleThread(*runtime, state, kNonFifoFrameCount, reason))
+            << reason;
+        ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
+            << reason;
+
+        DestroySurfaceState(state);
+        runtime.reset();
+
+        ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+            << reason;
+    }
+}
+
+TEST_P(GpuRuntimeSmokeTest, NonFifoPresentModesDoNotReturnRetryLaterOnAbandonFrame) {
+    SkipUnlessD3D12Backend(GetParam());
+
+    for (const auto presentMode : kD3D12NonFifoPresentModes) {
+        SCOPED_TRACE(fmt::format("PresentMode={}", static_cast<int32_t>(presentMode)));
+
+        LogCollector logs{};
+        ScopedGlobalLogCallback logScope{&logs};
+        unique_ptr<GpuRuntime> runtime{};
+        std::string reason{};
+        if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+            GTEST_SKIP() << reason;
+        }
+
+        SurfaceState state{};
+        if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+            GTEST_SKIP() << reason;
+        }
+        SurfaceOptions options{};
+        options.WidthHint = kInitialWidth;
+        options.HeightHint = kInitialHeight;
+        options.PresentModeValue = presentMode;
+        ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+            << reason;
+
+        auto begin = runtime->BeginFrame(state.Surface.get());
+        ASSERT_EQ(begin.Status, SwapChainStatus::Success)
+            << "BeginFrame failed with status " << static_cast<int32_t>(begin.Status);
+        ASSERT_TRUE(begin.Context.HasValue())
+            << "BeginFrame returned Success without a frame context.";
+
+        auto frameContext = begin.Context.Release();
+        ASSERT_NE(frameContext, nullptr);
+        auto* cmd = frameContext->CreateCommandBuffer();
+        ASSERT_NE(cmd, nullptr);
+        cmd->Begin();
+        cmd->End();
+
+        auto abandon = runtime->AbandonFrame(std::move(frameContext));
+        ASSERT_TRUE(abandon.Task.IsValid())
+            << "AbandonFrame returned an invalid task.";
+        ASSERT_NE(abandon.Present.Status, SwapChainStatus::RetryLater)
+            << "AbandonFrame present unexpectedly returned RetryLater.";
+        ASSERT_EQ(abandon.Present.Status, SwapChainStatus::Success)
+            << "AbandonFrame present failed with status " << static_cast<int32_t>(abandon.Present.Status)
+            << " native " << abandon.Present.NativeStatusCode;
+
+        abandon.Task.Wait();
+        runtime->ProcessTasks();
+        ASSERT_TRUE(runtime->_pendings.empty())
+            << "ProcessTasks should retire the abandoned frame after its submission completes.";
+
+        ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
+            << reason;
+
+        DestroySurfaceState(state);
+        runtime.reset();
+
+        ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+            << reason;
+    }
+}
+
+#ifdef RADRAY_IS_DEBUG
+TEST_P(GpuRuntimeSmokeTest, DroppingAcquiredFrameWithoutSubmitOrAbandonDies) {
+    const RenderBackend backend = GetParam();
+    std::string reason{};
+    if (!ProbeRuntimeCreation(backend, reason) || !ProbeSurfaceCreation(backend, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            LogCollector logs{};
+            unique_ptr<GpuRuntime> runtime{};
+            std::string localReason{};
+            if (!CreateRuntimeForBackend(backend, &logs, runtime, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            SurfaceState state{};
+            if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            SurfaceOptions options{};
+            options.WidthHint = kInitialWidth;
+            options.HeightHint = kInitialHeight;
+            if (!CreateSurfaceForWindow(
+                    *runtime,
+                    state,
+                    &logs,
+                    std::span<const TextureFormat>{kFallbackFormats},
+                    options,
+                    localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            auto begin = runtime->BeginFrame(state.Surface.get());
+            if (begin.Status != SwapChainStatus::Success) {
+                RADRAY_ABORT(
+                    "DroppingAcquiredFrameWithoutSubmitOrAbandonDies: BeginFrame failed with status {}",
+                    static_cast<int32_t>(begin.Status));
+            }
+            if (!begin.Context.HasValue()) {
+                RADRAY_ABORT("DroppingAcquiredFrameWithoutSubmitOrAbandonDies: BeginFrame returned no frame context");
+            }
+
+            auto frameContext = begin.Context.Release();
+            if (frameContext == nullptr) {
+                RADRAY_ABORT("DroppingAcquiredFrameWithoutSubmitOrAbandonDies: frame context is null");
+            }
+            frameContext.reset();
+        },
+        "");
+}
+
+TEST_P(GpuRuntimeSmokeTest, DependsOnRejectsForeignGpuTaskInDebug) {
+    const RenderBackend backend = GetParam();
+    std::string reason{};
+    if (!ProbeRuntimeCreation(backend, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            LogCollector logs{};
+            unique_ptr<GpuRuntime> runtime{};
+            std::string localReason{};
+            if (!CreateRuntimeForBackend(backend, &logs, runtime, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            GpuRuntime foreignRuntime(shared_ptr<Device>{}, unique_ptr<InstanceVulkan>{});
+            auto submitted = SubmitNoOpAsync(*runtime);
+            submitted._runtime = &foreignRuntime;
+            auto waiter = runtime->BeginAsync(QueueType::Direct);
+            waiter->DependsOn(submitted);
+        },
+        "");
+}
+
+TEST_P(GpuRuntimeSmokeTest, SubmitAsyncRejectsForeignContextInDebug) {
+    const RenderBackend backend = GetParam();
+    std::string reason{};
+    if (!ProbeRuntimeCreation(backend, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            LogCollector logs{};
+            unique_ptr<GpuRuntime> runtime{};
+            std::string localReason{};
+            if (!CreateRuntimeForBackend(backend, &logs, runtime, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            GpuRuntime foreignRuntime(shared_ptr<Device>{}, unique_ptr<InstanceVulkan>{});
+            auto context = runtime->BeginAsync(QueueType::Direct);
+            auto* cmd = context->CreateCommandBuffer();
+            if (cmd == nullptr) {
+                RADRAY_ABORT("SubmitAsyncRejectsForeignContextInDebug: CreateCommandBuffer returned null");
+            }
+            cmd->Begin();
+            cmd->End();
+            context->_runtime = &foreignRuntime;
+            runtime->SubmitAsync(std::move(context));
+        },
+        "");
+}
+
+TEST_P(GpuRuntimeSmokeTest, SubmitFrameRejectsForeignFrameContextInDebug) {
+    const RenderBackend backend = GetParam();
+    std::string reason{};
+    if (!ProbeRuntimeCreation(backend, reason) || !ProbeSurfaceCreation(backend, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            LogCollector logs{};
+            unique_ptr<GpuRuntime> runtime{};
+            std::string localReason{};
+            if (!CreateRuntimeForBackend(backend, &logs, runtime, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            SurfaceState state{};
+            if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            SurfaceOptions options{};
+            options.WidthHint = kInitialWidth;
+            options.HeightHint = kInitialHeight;
+            if (!CreateSurfaceForWindow(
+                    *runtime,
+                    state,
+                    &logs,
+                    std::span<const TextureFormat>{kFallbackFormats},
+                    options,
+                    localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+
+            GpuRuntime foreignRuntime(shared_ptr<Device>{}, unique_ptr<InstanceVulkan>{});
+            auto begin = runtime->BeginFrame(state.Surface.get());
+            if (begin.Status != SwapChainStatus::Success) {
+                RADRAY_ABORT(
+                    "SubmitFrameRejectsForeignFrameContextInDebug: BeginFrame failed with status {}",
+                    static_cast<int32_t>(begin.Status));
+            }
+            if (!begin.Context.HasValue()) {
+                RADRAY_ABORT("SubmitFrameRejectsForeignFrameContextInDebug: BeginFrame returned no frame context");
+            }
+
+            auto frameContext = begin.Context.Release();
+            if (frameContext == nullptr) {
+                RADRAY_ABORT("SubmitFrameRejectsForeignFrameContextInDebug: frame context is null");
+            }
+
+            auto* cmd = frameContext->CreateCommandBuffer();
+            if (cmd == nullptr) {
+                RADRAY_ABORT("SubmitFrameRejectsForeignFrameContextInDebug: CreateCommandBuffer returned null");
+            }
+            cmd->Begin();
+            cmd->End();
+            frameContext->_surface->_runtime = &foreignRuntime;
+            runtime->SubmitFrame(std::move(frameContext));
+        },
+        "");
+}
+#endif
 
 INSTANTIATE_TEST_SUITE_P(
     RenderBackends,

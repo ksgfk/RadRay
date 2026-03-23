@@ -1137,6 +1137,12 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
+    if (desc.PresentMode != PresentMode::FIFO) {
+        if (HRESULT hr = swapchain->SetMaximumFrameLatency(1); FAILED(hr)) {
+            RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency(1) failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    }
     auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
     result->_frames.reserve(scDesc.BufferCount);
     result->_frameLatencyEvent = swapchain->GetFrameLatencyWaitableObject();
@@ -3699,15 +3705,12 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresen
         }
         case PresentMode::Mailbox: {
             syncInterval = 0;
-            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+            presentFlags = 0;
             break;
         }
         case PresentMode::Immediate: {
             syncInterval = 0;
-            presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
-            if (_device->_isAllowTearing) {
-                presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
-            }
+            presentFlags = _device->_isAllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
             break;
         }
     }
@@ -3717,11 +3720,6 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresen
         result.Status = SwapChainStatus::Success;
         return result;
     }
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        RADRAY_WARN_LOG("IDXGISwapChain::Present DXGI_ERROR_WAS_STILL_DRAWING");
-        result.Status = SwapChainStatus::RetryLater;
-        return result;
-    }
     if (hr == DXGI_ERROR_DEVICE_REMOVED ||
         hr == DXGI_ERROR_DEVICE_RESET ||
         hr == DXGI_ERROR_ACCESS_LOST ||
@@ -3729,6 +3727,11 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresen
         hr == DXGI_ERROR_INVALID_CALL) {
         RADRAY_WARN_LOG("IDXGISwapChain::Present requires recreate: {} {}", GetErrorName(hr), hr);
         result.Status = SwapChainStatus::RequireRecreate;
+        return result;
+    }
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        RADRAY_ERR_LOG("IDXGISwapChain::Present returned unexpected DXGI_ERROR_WAS_STILL_DRAWING");
+        result.Status = SwapChainStatus::Error;
         return result;
     }
     RADRAY_ERR_LOG("IDXGISwapChain::Present failed: {} {}", GetErrorName(hr), hr);

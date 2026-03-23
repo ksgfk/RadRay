@@ -24,7 +24,7 @@
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
 // - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
 //   BeginFrameResult::Status 返回；SubmitFrame 的 present 结果通过 SubmitFrameResult::Present
-//   返回；真正的 GPU 致命错误仍通过异常报告。
+//   返回（当前有效状态约束为 Success / RequireRecreate / Error）；真正的 GPU 致命错误仍通过异常报告。
 // - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
 // - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
 // - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
@@ -35,8 +35,9 @@
 //   - GpuSurface 必须长于从它 Acquire 成功得到的 GpuFrameContext，以及该 frame 对应的
 //     runtime 内部 in-flight 提交；在相关提交 drain 完成前销毁或重建该 surface 属于未定义行为。
 //   - BeginFrame / TryBeginFrame 一旦成功返回 GpuFrameContext，调用方必须且只能将该 context
-//     交给同一个 GpuRuntime::SubmitFrame 一次；丢弃、不提交、重复提交、跨 runtime 提交都属于未定义行为。
-//   - 当前 API 不提供 CancelFrame / AbandonFrame；成功 acquire 的 frame 没有合法放弃路径。
+//     交给同一个 GpuRuntime::SubmitFrame 或 GpuRuntime::AbandonFrame 一次；丢弃、不提交、重复提交、
+//     跨 runtime 提交都属于未定义行为。
+//   - AbandonFrame 会丢弃当前 frame 上已记录但尚未提交的用户命令，仅负责把 acquire/present 生命周期合法收口。
 //   - 在销毁或重建 GpuSurface / GpuRuntime 前，调用方必须先确保相关 GpuTask 已完成，并调用
 //     ProcessTasks() 回收 runtime 持有的 pending contexts，使 frame/context 完成 drain；
 //     这不表示底层 present 生命周期已被纳入 GpuTask。
@@ -162,6 +163,7 @@ public:
 
     // 记录 GPU 侧依赖关系，不做 CPU 同步。
     // task 必须来自同一个 GpuRuntime；跨 runtime 依赖没有定义。
+    // 调试构建会主动捕获这类误用。
     bool DependsOn(const GpuTask& task);
     render::CommandBuffer* CreateCommandBuffer();
 
@@ -185,8 +187,8 @@ class GpuFrameContext : public GpuAsyncContext {
 public:
     // GpuFrameContext 表示一次成功 acquire 的 frame。
     // - 它借用所属 GpuSurface 的 frame/swapchain 状态；
-    // - 调用方必须记录命令后将其交给同一个 GpuRuntime::SubmitFrame 一次；
-    // - 当前没有合法的取消/放弃路径。
+    // - 调用方必须且只能将其交给同一个 GpuRuntime::SubmitFrame 或 GpuRuntime::AbandonFrame 一次；
+    // - AbandonFrame 会丢弃当前 frame 上已记录但尚未提交的用户命令，仅负责退休 acquire/present 生命周期。
     GpuFrameContext(
         GpuRuntime* runtime,
         GpuSurface* surface,
@@ -200,12 +202,23 @@ public:
     uint32_t GetBackBufferIndex() const;
 
 private:
+#ifdef RADRAY_IS_DEBUG
+    enum class ConsumeState {
+        Acquired,
+        Submitted,
+        Abandoned
+    };
+#endif
+
     GpuSurface* _surface{nullptr};
     size_t _frameSlotIndex{std::numeric_limits<size_t>::max()};
     render::Texture* _backBuffer{nullptr};
     Nullable<render::SwapChainSyncObject*> _waitToDraw{nullptr};
     Nullable<render::SwapChainSyncObject*> _readyToPresent{nullptr};
     uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
+#ifdef RADRAY_IS_DEBUG
+    ConsumeState _consumeState{ConsumeState::Acquired};
+#endif
 
     friend class GpuRuntime;
 };
@@ -244,7 +257,7 @@ public:
         uint32_t queueSlot = 0);
 
     // 成功时返回 one-shot 的 GpuFrameContext。
-    // 该 context 必须且只能提交一次；调用方不得丢弃或复用它。
+    // 该 context 必须且只能被 SubmitFrame 或 AbandonFrame 消费一次；调用方不得丢弃或复用它。
     BeginFrameResult BeginFrame(GpuSurface* surface);
 
     // 非阻塞版本。若返回 Success，则约束与 BeginFrame 相同。
@@ -258,8 +271,14 @@ public:
 
     // 提交一个 frame batch，并继续完成 present 流程。
     // 返回的 GpuTask 仅表示该 frame 的命令提交已执行完成；
-    // SubmitFrameResult::Present 单独表示 present 的结果。
+    // SubmitFrameResult::Present 单独表示 present 的结果（当前有效状态约束为 Success / RequireRecreate / Error）。
     SubmitFrameResult SubmitFrame(unique_ptr<GpuFrameContext> context);
+
+    // 放弃当前 frame，丢弃用户已记录但尚未提交的 frame 命令，并以 no-op submit + present
+    // 合法退休 acquire/present 生命周期。
+    // 返回值与 SubmitFrame 对称：Task 表示这次 no-op frame submission 的 queue/GPU 完成，
+    // Present 单独表示 present 的结果（当前有效状态约束为 Success / RequireRecreate / Error）。
+    SubmitFrameResult AbandonFrame(unique_ptr<GpuFrameContext> context);
 
     // 回收已完成的 pending 提交持有的内部资源/contexts。
     // 若调用方等待了 GpuTask 并准备销毁或重建相关 surface/runtime，必须先调用本函数完成
@@ -301,6 +320,14 @@ private:
         GpuAsyncContext* context,
         Nullable<render::SwapChainSyncObject*> waitToExecute,
         Nullable<render::SwapChainSyncObject*> readyToPresent);
+#ifdef RADRAY_IS_DEBUG
+    void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
+#endif
+#ifdef RADRAY_IS_DEBUG
+    SubmitFrameResult FinalizeFrame(unique_ptr<GpuFrameContext> context, const char* apiName);
+#else
+    SubmitFrameResult FinalizeFrame(unique_ptr<GpuFrameContext> context);
+#endif
     GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
 
     shared_ptr<render::Device> _device;

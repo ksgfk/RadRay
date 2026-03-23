@@ -6,14 +6,7 @@ target_include_directories(radrayruntime PUBLIC include)
 target_link_libraries(radrayruntime PUBLIC
     radraycore
     radrayrender)
-if (WIN32)
-    target_compile_definitions(radrayruntime PRIVATE UNICODE _UNICODE)
-endif()
-if (MSVC)
-    target_compile_definitions(radrayruntime PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-target_compile_options(radrayruntime PRIVATE
-    $<$<BOOL:${MSVC}>:/W4>)
+radray_default_compile_flags(radrayruntime)
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
 

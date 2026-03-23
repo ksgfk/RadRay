@@ -7,6 +7,27 @@
 
 namespace radray {
 
+#ifdef RADRAY_IS_DEBUG
+namespace {
+
+void _RequireSameRuntimeDebug(
+    const char* apiName,
+    const char* objectName,
+    const GpuRuntime* expectedRuntime,
+    const GpuRuntime* actualRuntime) {
+    if (expectedRuntime != actualRuntime) {
+        RADRAY_ABORT(
+            "{} requires {} from the same GpuRuntime. expected runtime={}, actual runtime={}",
+            apiName,
+            objectName,
+            static_cast<const void*>(expectedRuntime),
+            static_cast<const void*>(actualRuntime));
+    }
+}
+
+}  // namespace
+#endif
+
 GpuTask::GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept
     : _runtime(runtime),
       _fence(fence),
@@ -63,8 +84,7 @@ render::PresentMode GpuSurface::GetPresentMode() const {
     throw std::runtime_error("Not implemented.");
 }
 
-GpuAsyncContext::~GpuAsyncContext() noexcept {
-}
+GpuAsyncContext::~GpuAsyncContext() noexcept = default;
 
 GpuAsyncContext::GpuAsyncContext(
     GpuRuntime* runtime,
@@ -82,6 +102,9 @@ bool GpuAsyncContext::DependsOn(const GpuTask& task) {
     if (!task.IsValid()) {
         return false;
     }
+#ifdef RADRAY_IS_DEBUG
+    _RequireSameRuntimeDebug("GpuAsyncContext::DependsOn", "GpuTask", _runtime, task._runtime);
+#endif
     _waitFences.emplace_back(task._fence);
     _waitValues.emplace_back(task._signalValue);
     return true;
@@ -108,8 +131,19 @@ GpuFrameContext::GpuFrameContext(
       _backBuffer(backBuffer),
       _backBufferIndex(backBufferIndex) {}
 
+#ifdef RADRAY_IS_DEBUG
 GpuFrameContext::~GpuFrameContext() noexcept {
+    if (_consumeState == ConsumeState::Acquired) {
+        RADRAY_ABORT(
+            "GpuFrameContext was destroyed without SubmitFrame or AbandonFrame. runtime={}, surface={}, frameSlotIndex={}",
+            static_cast<void*>(_runtime),
+            static_cast<void*>(_surface),
+            _frameSlotIndex);
+    }
 }
+#else
+GpuFrameContext::~GpuFrameContext() noexcept = default;
+#endif
 
 render::Texture* GpuFrameContext::GetBackBuffer() const {
     return _backBuffer;
@@ -211,9 +245,6 @@ GpuRuntime::SubmittedBatch GpuRuntime::SubmitContext(
     GpuAsyncContext* context,
     Nullable<render::SwapChainSyncObject*> waitToExecute,
     Nullable<render::SwapChainSyncObject*> readyToPresent) {
-    if (context == nullptr) {
-        throw GpuSystemException("GpuRuntime cannot submit empty context");
-    }
     if (context->IsEmpty()) {
         throw GpuSystemException("GpuRuntime cannot submit empty context");
     }
@@ -251,31 +282,85 @@ GpuRuntime::SubmittedBatch GpuRuntime::SubmitContext(
     return SubmittedBatch{fence, signalValue};
 }
 
-GpuTask GpuRuntime::SubmitAsync(unique_ptr<GpuAsyncContext> context) {
+#ifdef RADRAY_IS_DEBUG
+void GpuRuntime::ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const {
     if (context == nullptr) {
-        throw GpuSystemException("GpuRuntime cannot submit empty context");
+        throw GpuSystemException("GpuRuntime cannot submit empty frame context");
     }
+    if (context->GetType() != GpuAsyncContext::Kind::Frame) {
+        throw GpuSystemException("GpuRuntime frame submission only accepts frame contexts");
+    }
+    _RequireSameRuntimeDebug(apiName, "GpuFrameContext", this, context->_runtime);
+    _RequireSameRuntimeDebug(
+        apiName,
+        "GpuFrameContext surface",
+        this,
+        context->_surface != nullptr ? context->_surface->_runtime : nullptr);
+}
+#endif
+
+#ifdef RADRAY_IS_DEBUG
+GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameContext> context, const char* apiName) {
+#else
+GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameContext> context) {
+#endif
+#ifdef RADRAY_IS_DEBUG
+    this->ValidateFrameContextForConsume(apiName, context.get());
+#endif
+    auto* surface = context->_surface;
+    const size_t frameSlotIndex = context->_frameSlotIndex;
+    const auto submitted = this->SubmitContext(context.get(), context->_waitToDraw, context->_readyToPresent);
+    GpuTask task{this, submitted.Fence, submitted.SignalValue};
+    const auto present = surface->_swapchain->Present(context->_readyToPresent.Get());
+    surface->_frameSlots[frameSlotIndex]._fenceValue = submitted.SignalValue;
+    _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
+    return {std::move(task), present};
+}
+
+GpuTask GpuRuntime::SubmitAsync(unique_ptr<GpuAsyncContext> context) {
     if (context->GetType() != GpuAsyncContext::Kind::Async) {
         throw GpuSystemException("GpuRuntime::SubmitAsync only accepts async contexts");
     }
+#ifdef RADRAY_IS_DEBUG
+    _RequireSameRuntimeDebug("GpuRuntime::SubmitAsync", "GpuAsyncContext", this, context->_runtime);
+#endif
     const auto submitted = this->SubmitContext(context.get(), nullptr, nullptr);
     _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
     return GpuTask{this, submitted.Fence, submitted.SignalValue};
 }
 
 GpuRuntime::SubmitFrameResult GpuRuntime::SubmitFrame(unique_ptr<GpuFrameContext> context) {
-    if (context == nullptr) {
-        throw GpuSystemException("GpuRuntime cannot submit empty frame context");
+#ifdef RADRAY_IS_DEBUG
+    context->_consumeState = GpuFrameContext::ConsumeState::Submitted;
+#endif
+    return this->FinalizeFrame(std::move(context), "GpuRuntime::SubmitFrame");
+}
+
+GpuRuntime::SubmitFrameResult GpuRuntime::AbandonFrame(unique_ptr<GpuFrameContext> context) {
+#ifdef RADRAY_IS_DEBUG
+    context->_consumeState = GpuFrameContext::ConsumeState::Abandoned;
+#endif
+
+#ifdef RADRAY_IS_DEBUG
+    this->ValidateFrameContextForConsume("GpuRuntime::AbandonFrame", context.get());
+#endif
+    context->_cmdBuffers.clear();
+    context->_waitFences.clear();
+    context->_waitValues.clear();
+
+    auto* cmd = context->CreateCommandBuffer();
+    cmd->Begin();
+    if (context->_backBuffer != nullptr) {
+        render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
+            .Target = context->_backBuffer,
+            .Before = render::TextureState::Undefined,
+            .After = render::TextureState::Present,
+        };
+        cmd->ResourceBarrier(std::span{&toPresent, 1});
     }
-    if (context->GetType() != GpuAsyncContext::Kind::Frame) {
-        throw GpuSystemException("GpuRuntime::SubmitFrame only accepts frame contexts");
-    }
-    const auto submitted = this->SubmitContext(context.get(), context->_waitToDraw, context->_readyToPresent);
-    GpuTask task{this, submitted.Fence, submitted.SignalValue};
-    const auto present = context->_surface->_swapchain->Present(context->_readyToPresent.Get());
-    context->_surface->_frameSlots[context->_frameSlotIndex]._fenceValue = submitted.SignalValue;
-    _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
-    return {std::move(task), present};
+    cmd->End();
+
+    return this->FinalizeFrame(std::move(context), "GpuRuntime::AbandonFrame");
 }
 
 void GpuRuntime::ProcessTasks() {
