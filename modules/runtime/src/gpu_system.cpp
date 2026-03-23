@@ -1,6 +1,8 @@
 #include <radray/runtime/gpu_system.h>
 
 #include <algorithm>
+#include <type_traits>
+#include <variant>
 
 #include <radray/logger.h>
 #ifdef RADRAY_ENABLE_D3D12
@@ -10,27 +12,6 @@
 namespace radray {
 
 namespace {
-
-enum class GpuRegistryResourceKind {
-    Unknown,
-    Buffer,
-    Texture,
-    TextureView,
-    Sampler
-};
-
-enum class GpuRegistryResourceState {
-    Alive,
-    PendingDestroy
-};
-
-template <typename THandle>
-THandle _MakeResourceHandle(uint64_t handleId, void* nativeHandle) {
-    THandle result{};
-    result.Handle = handleId;
-    result.NativeHandle = nativeHandle;
-    return result;
-}
 
 #ifdef RADRAY_IS_DEBUG
 void _RequireSameRuntimeDebug(
@@ -53,6 +34,19 @@ void _RequireSameRuntimeDebug(
 
 class GpuResourceRegistry {
 public:
+    enum class Kind {
+        Unknown,
+        Buffer,
+        Texture,
+        TextureView,
+        Sampler
+    };
+
+    enum class State {
+        Alive,
+        PendingDestroy
+    };
+
     struct TextureParentRef {
         GpuResourceRegistry* Registry{nullptr};
         GpuTextureHandle Handle{};
@@ -72,27 +66,76 @@ public:
 
     bool Contains(const GpuResourceHandle& handle) const noexcept;
     bool IsPendingDestroy(const GpuResourceHandle& handle) const noexcept;
-    GpuRegistryResourceKind GetKind(const GpuResourceHandle& handle) const noexcept;
+    Kind GetKind(const GpuResourceHandle& handle) const noexcept;
     void MarkPendingDestroy(const GpuResourceHandle& handle);
 
     void AddTextureChildViewRef(const GpuTextureHandle& handle);
     void ReleaseTextureChildViewRef(const GpuTextureHandle& handle) noexcept;
 
+    bool TryDestroyImmediately(const GpuResourceHandle& handle) noexcept;
     bool TryRetire(const GpuResourceHandle& handle) noexcept;
     void Clear() noexcept;
 
 private:
-    struct ResourceRecord {
-        GpuRegistryResourceKind Kind{GpuRegistryResourceKind::Unknown};
-        GpuRegistryResourceState State{GpuRegistryResourceState::Alive};
-        uint64_t HandleId{std::numeric_limits<uint64_t>::max()};
-        void* NativeHandle{nullptr};
+    struct BufferRecord {
         unique_ptr<render::Buffer> Buffer{};
+    };
+
+    struct TextureRecord {
         unique_ptr<render::Texture> Texture{};
-        unique_ptr<render::TextureView> TextureView{};
-        unique_ptr<render::Sampler> Sampler{};
-        TextureParentRef ParentTexture{};
         uint32_t ChildViewCount{0};
+    };
+
+    struct TextureViewRecord {
+        unique_ptr<render::TextureView> TextureView{};
+        TextureParentRef ParentTexture{};
+    };
+
+    struct SamplerRecord {
+        unique_ptr<render::Sampler> Sampler{};
+    };
+
+    class ResourceRecord {
+    public:
+        using Payload = std::variant<BufferRecord, TextureRecord, TextureViewRecord, SamplerRecord>;
+
+        Payload Data;
+        void* NativeHandle{nullptr};
+        State State{State::Alive};
+
+        explicit ResourceRecord(BufferRecord bufferRecord) noexcept
+            : Data(std::move(bufferRecord)),
+              NativeHandle(std::get<BufferRecord>(Data).Buffer.get()) {}
+
+        explicit ResourceRecord(TextureRecord textureRecord) noexcept
+            : Data(std::move(textureRecord)),
+              NativeHandle(std::get<TextureRecord>(Data).Texture.get()) {}
+
+        explicit ResourceRecord(TextureViewRecord textureViewRecord) noexcept
+            : Data(std::move(textureViewRecord)),
+              NativeHandle(std::get<TextureViewRecord>(Data).TextureView.get()) {}
+
+        explicit ResourceRecord(SamplerRecord samplerRecord) noexcept
+            : Data(std::move(samplerRecord)),
+              NativeHandle(std::get<SamplerRecord>(Data).Sampler.get()) {}
+
+        Kind GetKind() const noexcept {
+            return std::visit(
+                [](const auto& record) noexcept {
+                    using Record = std::decay_t<decltype(record)>;
+                    if constexpr (std::is_same_v<Record, BufferRecord>) {
+                        return Kind::Buffer;
+                    } else if constexpr (std::is_same_v<Record, TextureRecord>) {
+                        return Kind::Texture;
+                    } else if constexpr (std::is_same_v<Record, TextureViewRecord>) {
+                        return Kind::TextureView;
+                    } else {
+                        static_assert(std::is_same_v<Record, SamplerRecord>);
+                        return Kind::Sampler;
+                    }
+                },
+                Data);
+        }
     };
 
     const ResourceRecord* FindRecord(const GpuResourceHandle& handle) const noexcept;
@@ -164,14 +207,8 @@ GpuBufferHandle GpuResourceRegistry::CreateBuffer(const render::BufferDescriptor
     auto* native = buffer.get();
     const uint64_t handleId = _nextHandle++;
 
-    ResourceRecord record{};
-    record.Kind = GpuRegistryResourceKind::Buffer;
-    record.State = GpuRegistryResourceState::Alive;
-    record.HandleId = handleId;
-    record.NativeHandle = native;
-    record.Buffer = std::move(buffer);
-    _records.emplace(handleId, std::move(record));
-    return _MakeResourceHandle<GpuBufferHandle>(handleId, native);
+    _records.emplace(handleId, ResourceRecord{BufferRecord{std::move(buffer)}});
+    return {handleId, native};
 }
 
 GpuTextureHandle GpuResourceRegistry::CreateTexture(const render::TextureDescriptor& desc) {
@@ -187,14 +224,8 @@ GpuTextureHandle GpuResourceRegistry::CreateTexture(const render::TextureDescrip
     auto* native = texture.get();
     const uint64_t handleId = _nextHandle++;
 
-    ResourceRecord record{};
-    record.Kind = GpuRegistryResourceKind::Texture;
-    record.State = GpuRegistryResourceState::Alive;
-    record.HandleId = handleId;
-    record.NativeHandle = native;
-    record.Texture = std::move(texture);
-    _records.emplace(handleId, std::move(record));
-    return _MakeResourceHandle<GpuTextureHandle>(handleId, native);
+    _records.emplace(handleId, ResourceRecord{TextureRecord{std::move(texture)}});
+    return {handleId, native};
 }
 
 GpuTextureViewHandle GpuResourceRegistry::CreateTextureView(const GpuTextureViewDescriptor& desc, const TextureParentRef& parent) {
@@ -221,16 +252,14 @@ GpuTextureViewHandle GpuResourceRegistry::CreateTextureView(const GpuTextureView
     auto* native = textureView.get();
     const uint64_t handleId = _nextHandle++;
 
-    ResourceRecord record{};
-    record.Kind = GpuRegistryResourceKind::TextureView;
-    record.State = GpuRegistryResourceState::Alive;
-    record.HandleId = handleId;
-    record.NativeHandle = native;
-    record.TextureView = std::move(textureView);
-    record.ParentTexture = parent;
-    _records.emplace(handleId, std::move(record));
+    _records.emplace(
+        handleId,
+        ResourceRecord{TextureViewRecord{
+            .TextureView = std::move(textureView),
+            .ParentTexture = parent,
+        }});
     parent.Registry->AddTextureChildViewRef(parent.Handle);
-    return _MakeResourceHandle<GpuTextureViewHandle>(handleId, native);
+    return {handleId, native};
 }
 
 GpuSamplerHandle GpuResourceRegistry::CreateSampler(const render::SamplerDescriptor& desc) {
@@ -246,30 +275,26 @@ GpuSamplerHandle GpuResourceRegistry::CreateSampler(const render::SamplerDescrip
     auto* native = sampler.get();
     const uint64_t handleId = _nextHandle++;
 
-    ResourceRecord record{};
-    record.Kind = GpuRegistryResourceKind::Sampler;
-    record.State = GpuRegistryResourceState::Alive;
-    record.HandleId = handleId;
-    record.NativeHandle = native;
-    record.Sampler = std::move(sampler);
-    _records.emplace(handleId, std::move(record));
-    return _MakeResourceHandle<GpuSamplerHandle>(handleId, native);
+    _records.emplace(handleId, ResourceRecord{SamplerRecord{std::move(sampler)}});
+    return {handleId, native};
 }
 
 render::Texture* GpuResourceRegistry::FindAliveTexture(const GpuTextureHandle& handle) noexcept {
     auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->Kind != GpuRegistryResourceKind::Texture || record->State != GpuRegistryResourceState::Alive) {
+    if (record == nullptr || record->State != State::Alive) {
         return nullptr;
     }
-    return record->Texture.get();
+    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
+    return textureRecord != nullptr ? textureRecord->Texture.get() : nullptr;
 }
 
 const render::Texture* GpuResourceRegistry::FindAliveTexture(const GpuTextureHandle& handle) const noexcept {
     const auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->Kind != GpuRegistryResourceKind::Texture || record->State != GpuRegistryResourceState::Alive) {
+    if (record == nullptr || record->State != State::Alive) {
         return nullptr;
     }
-    return record->Texture.get();
+    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
+    return textureRecord != nullptr ? textureRecord->Texture.get() : nullptr;
 }
 
 bool GpuResourceRegistry::Contains(const GpuResourceHandle& handle) const noexcept {
@@ -278,12 +303,12 @@ bool GpuResourceRegistry::Contains(const GpuResourceHandle& handle) const noexce
 
 bool GpuResourceRegistry::IsPendingDestroy(const GpuResourceHandle& handle) const noexcept {
     const auto* record = this->FindRecord(handle);
-    return record != nullptr && record->State == GpuRegistryResourceState::PendingDestroy;
+    return record != nullptr && record->State == State::PendingDestroy;
 }
 
-GpuRegistryResourceKind GpuResourceRegistry::GetKind(const GpuResourceHandle& handle) const noexcept {
+GpuResourceRegistry::Kind GpuResourceRegistry::GetKind(const GpuResourceHandle& handle) const noexcept {
     const auto* record = this->FindRecord(handle);
-    return record != nullptr ? record->Kind : GpuRegistryResourceKind::Unknown;
+    return record != nullptr ? record->GetKind() : Kind::Unknown;
 }
 
 void GpuResourceRegistry::MarkPendingDestroy(const GpuResourceHandle& handle) {
@@ -291,24 +316,26 @@ void GpuResourceRegistry::MarkPendingDestroy(const GpuResourceHandle& handle) {
     if (record == nullptr) {
         throw GpuSystemException("GpuResourceRegistry cannot mark an unknown handle as pending destroy");
     }
-    record->State = GpuRegistryResourceState::PendingDestroy;
+    record->State = State::PendingDestroy;
 }
 
 void GpuResourceRegistry::AddTextureChildViewRef(const GpuTextureHandle& handle) {
     auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->Kind != GpuRegistryResourceKind::Texture) {
+    auto* textureRecord = record != nullptr ? std::get_if<TextureRecord>(&record->Data) : nullptr;
+    if (textureRecord == nullptr) {
         throw GpuSystemException("GpuResourceRegistry cannot add a texture view ref to a non-texture handle");
     }
-    ++record->ChildViewCount;
+    ++textureRecord->ChildViewCount;
 }
 
 void GpuResourceRegistry::ReleaseTextureChildViewRef(const GpuTextureHandle& handle) noexcept {
     auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->Kind != GpuRegistryResourceKind::Texture) {
+    auto* textureRecord = record != nullptr ? std::get_if<TextureRecord>(&record->Data) : nullptr;
+    if (textureRecord == nullptr) {
         return;
     }
-    if (record->ChildViewCount > 0) {
-        --record->ChildViewCount;
+    if (textureRecord->ChildViewCount > 0) {
+        --textureRecord->ChildViewCount;
     }
 }
 
@@ -317,15 +344,32 @@ bool GpuResourceRegistry::TryRetire(const GpuResourceHandle& handle) noexcept {
     if (record == nullptr) {
         return true;
     }
-    if (record->State != GpuRegistryResourceState::PendingDestroy) {
+    if (record->State != State::PendingDestroy) {
         return false;
     }
-    if (record->Kind == GpuRegistryResourceKind::Texture && record->ChildViewCount != 0) {
+    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
+    if (textureRecord != nullptr && textureRecord->ChildViewCount != 0) {
         return false;
     }
 
-    const uint64_t handleId = record->HandleId;
-    this->EraseRecord(handleId);
+    this->EraseRecord(handle.Handle);
+    return true;
+}
+
+bool GpuResourceRegistry::TryDestroyImmediately(const GpuResourceHandle& handle) noexcept {
+    auto* record = this->FindRecord(handle);
+    if (record == nullptr) {
+        return false;
+    }
+    if (record->State != State::Alive) {
+        return false;
+    }
+    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
+    if (textureRecord != nullptr && textureRecord->ChildViewCount != 0) {
+        return false;
+    }
+
+    this->EraseRecord(handle.Handle);
     return true;
 }
 
@@ -336,7 +380,7 @@ void GpuResourceRegistry::Clear() noexcept {
     otherHandles.reserve(_records.size());
 
     for (const auto& [handleId, record] : _records) {
-        if (record.Kind == GpuRegistryResourceKind::TextureView) {
+        if (std::holds_alternative<TextureViewRecord>(record.Data)) {
             textureViewHandles.emplace_back(handleId);
         } else {
             otherHandles.emplace_back(handleId);
@@ -389,11 +433,19 @@ void GpuResourceRegistry::EraseRecord(uint64_t handleId) noexcept {
     ResourceRecord record = std::move(it->second);
     _records.erase(it);
 
-    if (record.Kind == GpuRegistryResourceKind::TextureView &&
-        record.ParentTexture.Registry != nullptr &&
-        record.ParentTexture.Handle.IsValid()) {
-        record.ParentTexture.Registry->ReleaseTextureChildViewRef(record.ParentTexture.Handle);
-    }
+    std::visit(
+        [](const auto& resourceRecord) noexcept {
+            using Record = std::decay_t<decltype(resourceRecord)>;
+            if constexpr (std::is_same_v<Record, TextureViewRecord>) {
+                const auto& textureViewRecord = resourceRecord;
+                if (textureViewRecord.ParentTexture.Registry != nullptr &&
+                    textureViewRecord.ParentTexture.Handle.IsValid()) {
+                    textureViewRecord.ParentTexture.Registry->ReleaseTextureChildViewRef(
+                        textureViewRecord.ParentTexture.Handle);
+                }
+            }
+        },
+        record.Data);
 }
 
 uint32_t GpuSurface::GetWidth() const {
@@ -434,8 +486,8 @@ GpuAsyncContext::GpuAsyncContext(
       _queue(queue),
       _queueSlot(queueSlot),
       _resourceRegistry(runtime != nullptr && runtime->_device != nullptr
-            ? make_unique<GpuResourceRegistry>(runtime->_device.get())
-            : nullptr) {}
+                            ? make_unique<GpuResourceRegistry>(runtime->_device.get())
+                            : nullptr) {}
 
 bool GpuAsyncContext::IsEmpty() const {
     return _cmdBuffers.empty();
@@ -552,9 +604,6 @@ void GpuRuntime::Destroy() noexcept {
     _pendings.clear();
     _resourceRetirements.clear();
     _resourceRegistry.reset();
-    for (auto& knownSlots : _knownQueueSlots) {
-        knownSlots.clear();
-    }
     for (auto& fences : _queueFences) {
         fences.clear();
     }
@@ -638,63 +687,25 @@ GpuSamplerHandle GpuRuntime::CreateSampler(const render::SamplerDescriptor& desc
     return _resourceRegistry->CreateSampler(desc);
 }
 
-void GpuRuntime::CaptureAllQueueFenceSnapshots(ResourceRetirement& retirement) {
-    for (size_t typeIndex = 0; typeIndex < (size_t)render::QueueType::MAX_COUNT; ++typeIndex) {
-        const auto type = static_cast<render::QueueType>(typeIndex);
-        for (uint32_t slot : _knownQueueSlots[typeIndex]) {
-            auto* fence = this->GetQueueFence(type, slot);
-            if (fence == nullptr) {
-                continue;
-            }
-            const uint64_t signalValue = fence->GetLastSignaledValue();
-            if (signalValue == 0) {
-                continue;
-            }
-            retirement.Fences.emplace_back(fence);
-            retirement.Values.emplace_back(signalValue);
-        }
-    }
-}
-
 bool GpuRuntime::IsRetirementReady(const ResourceRetirement& retirement) const {
-    if (retirement.Fences.size() != retirement.Values.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < retirement.Fences.size(); ++i) {
-        auto* fence = retirement.Fences[i];
-        if (fence == nullptr) {
-            return false;
-        }
-        if (fence->GetCompletedValue() < retirement.Values[i]) {
-            return false;
-        }
-    }
-    return true;
+    return retirement.Fence != nullptr &&
+           retirement.SignalValue != 0 &&
+           retirement.Fence->GetCompletedValue() >= retirement.SignalValue;
 }
 
-void GpuRuntime::DestroyResource(GpuResourceHandle handle) {
+void GpuRuntime::DestroyResourceImmediate(GpuResourceHandle handle) {
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
     }
     if (!_resourceRegistry->Contains(handle)) {
-        throw GpuSystemException("GpuRuntime::DestroyResource requires a live persistent resource handle");
+        throw GpuSystemException("GpuRuntime::DestroyResourceImmediate requires a live persistent resource handle");
     }
     if (_resourceRegistry->IsPendingDestroy(handle)) {
-#ifdef RADRAY_IS_DEBUG
-        RADRAY_ABORT(
-            "GpuRuntime::DestroyResource called twice for resource handle {} native={}",
-            handle.Handle,
-            handle.NativeHandle);
-#else
-        return;
-#endif
+        throw GpuSystemException("GpuRuntime::DestroyResourceImmediate cannot destroy a resource already pending destroy");
     }
-
-    _resourceRegistry->MarkPendingDestroy(handle);
-    ResourceRetirement retirement{};
-    retirement.Handle = handle;
-    this->CaptureAllQueueFenceSnapshots(retirement);
-    _resourceRetirements.emplace_back(std::move(retirement));
+    if (!_resourceRegistry->TryDestroyImmediately(handle)) {
+        throw GpuSystemException("GpuRuntime::DestroyResourceImmediate requires a resource with no live dependent texture views");
+    }
 }
 
 void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task) {
@@ -724,8 +735,8 @@ void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& t
     _resourceRegistry->MarkPendingDestroy(handle);
     ResourceRetirement retirement{};
     retirement.Handle = handle;
-    retirement.Fences.emplace_back(task._fence);
-    retirement.Values.emplace_back(task._signalValue);
+    retirement.Fence = task._fence;
+    retirement.SignalValue = task._signalValue;
     _resourceRetirements.emplace_back(std::move(retirement));
 }
 
@@ -894,12 +905,12 @@ void GpuRuntime::ProcessPendingResourceRetirements() {
             }
 
             const auto kind = _resourceRegistry->GetKind(it->Handle);
-            if (kind == GpuRegistryResourceKind::Unknown) {
+            if (kind == GpuResourceRegistry::Kind::Unknown) {
                 it = _resourceRetirements.erase(it);
                 continue;
             }
 
-            const bool isTexture = kind == GpuRegistryResourceKind::Texture;
+            const bool isTexture = kind == GpuResourceRegistry::Kind::Texture;
             if (texturesOnly != isTexture) {
                 ++it;
                 continue;
@@ -924,9 +935,20 @@ void GpuRuntime::ProcessTasks() {
     this->ProcessPendingResourceRetirements();
 }
 
-render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
-    _knownQueueSlots[(size_t)type].insert(slot);
+void GpuRuntime::Wait(render::QueueType type, uint32_t queueSlot) {
+    if (_device == nullptr) {
+        throw GpuSystemException("GpuRuntime::Wait requires a valid runtime");
+    }
+    auto queueOpt = _device->GetCommandQueue(type, queueSlot);
+    if (!queueOpt.HasValue()) {
+        throw GpuSystemException("Device::GetCommandQueue failed");
+    }
+    auto queue = queueOpt.Get();
+    queue->Wait();
+    this->ProcessTasks();
+}
 
+render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
 #ifdef RADRAY_ENABLE_D3D12
     if (_device->GetBackend() == render::RenderBackend::D3D12) {
         auto deviceD3D12 = render::d3d12::CastD3D12Object(_device.get());

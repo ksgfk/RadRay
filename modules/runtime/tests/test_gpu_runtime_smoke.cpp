@@ -663,27 +663,31 @@ bool RunFramesOnDedicatedRenderThread(
 }
 
 bool ForceSyncAndDrain(GpuRuntime& runtime, GpuSurface* surface, std::string& reason) {
-    // 测试辅助：强制等待 present queue drain。它不是 GpuTask 语义的一部分，
-    // 仅用于在测试里收束底层队列与 runtime pendings。
+    // 测试辅助：通过 runtime 的公开 Wait 接口等待 surface 关联的 present queue slot，
+    // 并借由 Wait 内部的 ProcessTasks() 收口该 queue 上已完成的 runtime pendings。
     if (surface == nullptr || surface->_swapchain == nullptr) {
         reason = "Surface or swapchain is null during force sync.";
         return false;
     }
-
     auto* queue = surface->_swapchain->GetDesc().PresentQueue;
     if (queue == nullptr) {
         reason = "Present queue is null during force sync.";
         return false;
     }
 
-    queue->Wait();
-    runtime.ProcessTasks();
-    if (!runtime._pendings.empty()) {
-        runtime.ProcessTasks();
+    try {
+        runtime.Wait(queue->GetQueueType(), surface->_queueSlot);
+    } catch (const std::exception& ex) {
+        reason = fmt::format("GpuRuntime::Wait threw: {}", ex.what());
+        return false;
+    } catch (...) {
+        reason = "GpuRuntime::Wait threw an unknown exception.";
+        return false;
     }
+
     if (!runtime._pendings.empty()) {
         reason = fmt::format(
-            "GpuRuntime still has {} pending submissions after queue wait.",
+            "GpuRuntime still has {} pending submissions after GpuRuntime::Wait.",
             runtime._pendings.size());
         return false;
     }
@@ -862,6 +866,81 @@ TEST_P(GpuRuntimeSmokeTest, GpuTaskWaitRequiresProcessTasksToDrainFrame) {
     ASSERT_TRUE(runtime->_pendings.empty())
         << "ProcessTasks should retire pendings after the submission has completed.";
 
+    ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
+        << reason;
+
+    DestroySurfaceState(state);
+    runtime.reset();
+
+    ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+        << reason;
+}
+
+TEST_P(GpuRuntimeSmokeTest, WaitDrainsFrameAndKeepsSurfaceUsable) {
+    LogCollector logs{};
+    ScopedGlobalLogCallback logScope{&logs};
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    SurfaceState state{};
+    if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    SurfaceOptions options{};
+    options.WidthHint = kInitialWidth;
+    options.HeightHint = kInitialHeight;
+    ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+        << reason;
+
+    auto begin = runtime->BeginFrame(state.Surface.get());
+    ASSERT_EQ(begin.Status, SwapChainStatus::Success)
+        << "BeginFrame failed with status " << static_cast<int32_t>(begin.Status);
+    ASSERT_TRUE(begin.Context.HasValue())
+        << "BeginFrame returned Success without a frame context.";
+
+    auto frameContext = begin.Context.Release();
+    ASSERT_NE(frameContext, nullptr);
+    const uint32_t backBufferIndex = frameContext->GetBackBufferIndex();
+    ASSERT_LT(backBufferIndex, state.BackBufferStates.size());
+    auto* backBuffer = frameContext->GetBackBuffer();
+    ASSERT_NE(backBuffer, nullptr);
+
+    auto* cmd = frameContext->CreateCommandBuffer();
+    ASSERT_NE(cmd, nullptr);
+    cmd->Begin();
+    if (state.BackBufferStates[backBufferIndex] != TextureState::Present) {
+        ResourceBarrierDescriptor toPresent = BarrierTextureDescriptor{
+            .Target = backBuffer,
+            .Before = state.BackBufferStates[backBufferIndex],
+            .After = TextureState::Present,
+        };
+        cmd->ResourceBarrier(std::span{&toPresent, 1});
+    }
+    cmd->End();
+
+    auto submit = runtime->SubmitFrame(std::move(frameContext));
+    ASSERT_TRUE(submit.Task.IsValid())
+        << "SubmitFrame returned an invalid task.";
+    ASSERT_EQ(submit.Present.Status, SwapChainStatus::Success)
+        << "SubmitFrame present failed with status " << static_cast<int32_t>(submit.Present.Status)
+        << " native " << submit.Present.NativeStatusCode;
+
+    state.BackBufferStates[backBufferIndex] = TextureState::Present;
+
+    ASSERT_EQ(runtime->_pendings.size(), 1u)
+        << "SubmitFrame should leave one runtime pending before GpuRuntime::Wait drains it.";
+
+    auto* presentQueue = state.Surface->_swapchain->GetDesc().PresentQueue;
+    ASSERT_NE(presentQueue, nullptr);
+    runtime->Wait(presentQueue->GetQueueType(), state.Surface->_queueSlot);
+    ASSERT_TRUE(runtime->_pendings.empty())
+        << "GpuRuntime::Wait should drain completed runtime pendings on the waited queue.";
+
+    ASSERT_TRUE(RunFramesSingleThread(*runtime, state, 1, reason))
+        << reason;
     ASSERT_TRUE(ForceSyncAndDrain(*runtime, state.Surface.get(), reason))
         << reason;
 

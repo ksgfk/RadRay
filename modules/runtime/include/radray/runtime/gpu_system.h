@@ -21,31 +21,61 @@
 //   不直接作为底层 RHI primitive 暴露给外部模块。
 // - GpuResourceHandle 故意保持无类型：它表示 runtime 稳定资源标识，并提供到底层对象的
 //   interop 穿透能力，但不在该层统一资源具体类型。
-// - runtime 当前不负责 GPU 资源状态追踪；资源状态/barrier 由更上层负责。
-// - 资源销毁入口统一为 DestroyResource / DestroyResourceAfter，不按资源类型拆分 public API。
+//   其中 Handle 是由 GpuRuntime 创建资源时分配的稳定 opaque id，调用方不应自行构造或修改；
+//   NativeHandle 是后端对象的 borrowed interop 指针，不转移所有权，也不保证跨后端统一具体类型。
+// - runtime 当前不负责 GPU 资源状态/usage 追踪；资源状态/barrier 以及
+//   DestroyResourceImmediate 的 last-use 正确性由更上层负责。
+// - 资源销毁入口统一为 DestroyResourceImmediate / DestroyResourceAfter，不按资源类型拆分 public API。
+//   DestroyResourceImmediate 立即物理销毁资源，要求当前不存在仍会访问它的 in-flight GPU work；
+//   对 texture 还要求不存在仍存活的从属 view。DestroyResourceAfter 则把物理释放延迟到
+//   指定 GpuTask 完成后由 ProcessTasks() 调度执行，且对 texture 仍受从属 view 生命周期约束。
 // - GpuAsyncContext 可暴露临时资源创建入口；其语义是“从属于该 context 的提交生命周期”，
 //   而不是简单绑定到 C++ 对象析构时刻。
-// - GpuResourceHandle::NativeHandle 保持 void* 作为后端 interop 穿透指针；本层不统一其具体承载类型。
+// - DependsOn 只记录 GPU 侧依赖，不做 CPU 同步；依赖任务必须来自同一个 GpuRuntime。
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
 // - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
 //   BeginFrameResult::Status 返回；SubmitFrame 的 present 结果通过 SubmitFrameResult::Present
 //   返回（当前有效状态约束为 Success / RequireRecreate / Error）；真正的 GPU 致命错误仍通过异常报告。
+// - release 构建以低开销为第一目标：运行时不额外承担昂贵的一致性/所有权校验成本；
+//   跨 runtime、frame one-shot 消费、对象归属等强约束检查主要放在 debug 构建中主动捕获。
+//   因此调用方必须遵守本文档里的生命周期与归属约定；违反约定在 release 下属于未定义行为。
 // - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
 // - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
 // - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
-// - DependsOn 用于表示当前异步上下文依赖于某个 GPU 任务完成，没有 CPU 同步语义
+// - GpuTask 仅表示一次 runtime submission 的 queue/GPU 完成令牌：对普通异步提交表示该 batch
+//   已执行完成，对 frame 提交表示该 frame 的命令提交已执行完成，但都不表示 swapchain present
+//   已结束；它借用 source runtime/fence 的生命周期。
+// - SubmitAsync 接管 GpuAsyncContext 生命周期并提交一个普通异步 batch；返回的 GpuTask 仅表示
+//   对应 queue submission 完成。
+// - SubmitFrame 提交一个 frame batch 并推进 present；返回的 GpuTask 只表示该 frame 命令提交完成，
+//   present 结果单独通过 SubmitFrameResult::Present 表示。
+// - AbandonFrame 用于处理空 frame：它会丢弃当前 frame 上已记录但未提交的用户命令，并通过
+//   no-op submit + present 合法收口 acquire/present 生命周期；返回值语义与 SubmitFrame 对称。
+// - ProcessTasks 只回收 runtime 已知的已完成 pending submission 持有的内部资源与 context，
+//   不等待底层 present 生命周期。
+// - Wait 是对指定 queue slot 的底层 queue wait 的薄封装，并会在返回前调用一次 ProcessTasks()；
+//   它不等价于整个 runtime 空闲，也不替调用方追踪其他 queue slot、未提交 context 或外部 handle 生命周期。
 // - 生命周期约定：
 //   - GpuRuntime 是本层所有对象的根所有者。GpuTask / GpuSurface / GpuAsyncContext /
 //     GpuFrameContext 以及由它们暴露的 borrowed/native handle 都不得长于 GpuRuntime。
+//   - GpuSurface 封装与某个 present queue 绑定的 swapchain 及其 frame slots。
 //   - GpuSurface 必须长于从它 Acquire 成功得到的 GpuFrameContext，以及该 frame 对应的
 //     runtime 内部 in-flight 提交；在相关提交 drain 完成前销毁或重建该 surface 属于未定义行为。
+//   - GpuSurface::Destroy()/析构只是立即释放持有的底层 swapchain，不等待 queue/present，
+//     也不回收 runtime pending。
 //   - BeginFrame / TryBeginFrame 一旦成功返回 GpuFrameContext，调用方必须且只能将该 context
-//     交给同一个 GpuRuntime::SubmitFrame 或 GpuRuntime::AbandonFrame 一次；丢弃、不提交、重复提交、
-//     跨 runtime 提交都属于未定义行为。
+//     交给同一个 GpuRuntime 消费一次；丢弃、不提交、重复提交、跨 runtime 提交都属于未定义行为。
+//   - 对非空 frame（最终存在至少一个可提交命令缓冲）必须调用 SubmitFrame。
+//   - 对空 frame（最终没有任何可提交用户命令）必须调用 AbandonFrame；不得把空 frame 交给 SubmitFrame。
 //   - AbandonFrame 会丢弃当前 frame 上已记录但尚未提交的用户命令，仅负责把 acquire/present 生命周期合法收口。
-//   - 在销毁或重建 GpuSurface / GpuRuntime 前，调用方必须先确保相关 GpuTask 已完成，并调用
-//     ProcessTasks() 回收 runtime 持有的 pending contexts，使 frame/context 完成 drain；
-//     这不表示底层 present 生命周期已被纳入 GpuTask。
+//   - Destroy()/析构不是同步点，不会自动等待 queue idle、present 完成或 pending drain。
+//   - 在销毁或重建 GpuSurface 前，调用方必须先确保不存在尚未被 SubmitFrame/AbandonFrame 消费的
+//     GpuFrameContext，并且该 surface 相关的 in-flight submission/present 已由外部正确收口
+//     （例如显式等待相关 queue slot）；否则属于未定义行为。
+//   - GpuRuntime::Destroy()/析构会立即释放 runtime 持有的 device/fence/registry/pending 容器，
+//     本身不是同步点。
+//   - 在销毁 GpuRuntime 前，调用方必须先确保所有派生对象都已停止使用，相关 GpuTask 已完成，
+//     并调用 ProcessTasks() 回收 runtime 持有的 pending contexts；否则属于未定义行为。
 //   - 通过 GpuAsyncContext 创建的 transient 资源在 context 未提交即析构时可直接失效；
 //     若 context 已被 SubmitAsync / SubmitFrame / AbandonFrame 接管，则其生命周期至少持续到
 //     对应 pending 提交被 ProcessTasks() drain 完成。当前实现通过 context-local registry
@@ -67,17 +97,8 @@ public:
 };
 
 struct GpuResourceHandle {
-    // Runtime 层分配的稳定对象标识。
-    // - 由 GpuRuntime 在创建资源时生成
-    // - 调用方不应自行构造或修改
-    // - 生命周期语义由 runtime 决定；当对象失效后，该 Handle 也随之失效
     uint64_t Handle{std::numeric_limits<uint64_t>::max()};
 
-    // 后端 RHI 层对象的穿透指针。
-    // - 该指针不转移所有权，只是一个 borrowed handle
-    // - 具体指向什么对象由后端自行定义，例如某个 render 后端里的 Buffer/Texture/CommandBuffer 实现对象
-    // - 其生命周期与 Handle 一致；当资源失效后，该指针也随之失效
-    // - 调用方不应假设不同后端下它具有统一的具体类型
     void* NativeHandle{nullptr};
 
     constexpr auto IsValid() const { return Handle != std::numeric_limits<uint64_t>::max(); }
@@ -105,10 +126,6 @@ struct GpuTextureViewDescriptor {
 
 class GpuTask {
 public:
-    // GpuTask 仅表示一次 runtime submission 的 queue/GPU 完成令牌。
-    // - 对普通异步提交：表示该 batch 已执行完成；
-    // - 对 frame 提交：表示该 frame 的命令提交已执行完成；
-    // - 它不表示 swapchain present 已结束。
     GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept;
     GpuTask(const GpuTask&) noexcept = delete;
     GpuTask& operator=(const GpuTask&) noexcept = delete;
@@ -131,10 +148,6 @@ private:
 
 class GpuSurface {
 public:
-    // Surface 封装与某个 present queue 绑定的 swapchain 及其 frame slots。
-    // 调用方负责保证：
-    // - 它长于所有从该 surface 成功 acquire 出来的 frame；
-    // - 在销毁/重建前，相关 in-flight 提交已经完成并被 ProcessTasks() 回收。
     GpuSurface(
         GpuRuntime* runtime,
         unique_ptr<render::SwapChain> swapchain,
@@ -185,14 +198,8 @@ public:
 
     bool IsEmpty() const;
 
-    // 记录 GPU 侧依赖关系，不做 CPU 同步。
-    // task 必须来自同一个 GpuRuntime；跨 runtime 依赖没有定义。
-    // 调试构建会主动捕获这类误用。
     bool DependsOn(const GpuTask& task);
     render::CommandBuffer* CreateCommandBuffer();
-    // transient 资源由当前 context 所有。
-    // - 若 context 未提交即析构，可直接失效；
-    // - 若 context 已被 runtime 接管提交，则其生命周期至少持续到对应 pending drain 完成。
     GpuBufferHandle CreateTransientBuffer(const render::BufferDescriptor& desc);
     GpuTextureHandle CreateTransientTexture(const render::TextureDescriptor& desc);
     GpuTextureViewHandle CreateTransientTextureView(const GpuTextureViewDescriptor& desc);
@@ -216,10 +223,6 @@ private:
 
 class GpuFrameContext : public GpuAsyncContext {
 public:
-    // GpuFrameContext 表示一次成功 acquire 的 frame。
-    // - 它借用所属 GpuSurface 的 frame/swapchain 状态；
-    // - 调用方必须且只能将其交给同一个 GpuRuntime::SubmitFrame 或 GpuRuntime::AbandonFrame 一次；
-    // - AbandonFrame 会丢弃当前 frame 上已记录但尚未提交的用户命令，仅负责退休 acquire/present 生命周期。
     GpuFrameContext(
         GpuRuntime* runtime,
         GpuSurface* surface,
@@ -276,6 +279,7 @@ public:
     ~GpuRuntime() noexcept;
 
     bool IsValid() const;
+
     void Destroy() noexcept;
 
     unique_ptr<GpuSurface> CreateSurface(
@@ -286,45 +290,37 @@ public:
         render::TextureFormat format,
         render::PresentMode presentMode,
         uint32_t queueSlot = 0);
+
     GpuBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
+
     GpuTextureHandle CreateTexture(const render::TextureDescriptor& desc);
+
     GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc);
+
     GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
-    // 逻辑上立即销毁 handle，对象物理释放延迟到后续 ProcessTasks() 调度。
-    void DestroyResource(GpuResourceHandle handle);
-    // 与 DestroyResource 相同，但额外要求对应 task 完成后才允许 ProcessTasks() 真正释放对象。
+
+    void DestroyResourceImmediate(GpuResourceHandle handle);
+
     void DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task);
 
-    // 成功时返回 one-shot 的 GpuFrameContext。
-    // 该 context 必须且只能被 SubmitFrame 或 AbandonFrame 消费一次；调用方不得丢弃或复用它。
     BeginFrameResult BeginFrame(GpuSurface* surface);
 
-    // 非阻塞版本。若返回 Success，则约束与 BeginFrame 相同。
     BeginFrameResult TryBeginFrame(GpuSurface* surface);
 
     unique_ptr<GpuAsyncContext> BeginAsync(render::QueueType type, uint32_t queueSlot = 0);
 
-    // 提交一个普通异步 batch，并接管 context 的生命周期。
-    // 返回的 GpuTask 仅表示该提交对应的 queue 完成。
     GpuTask SubmitAsync(unique_ptr<GpuAsyncContext> context);
 
-    // 提交一个 frame batch，并继续完成 present 流程。
-    // 返回的 GpuTask 仅表示该 frame 的命令提交已执行完成；
-    // SubmitFrameResult::Present 单独表示 present 的结果（当前有效状态约束为 Success / RequireRecreate / Error）。
     SubmitFrameResult SubmitFrame(unique_ptr<GpuFrameContext> context);
 
-    // 放弃当前 frame，丢弃用户已记录但尚未提交的 frame 命令，并以 no-op submit + present
-    // 合法退休 acquire/present 生命周期。
-    // 返回值与 SubmitFrame 对称：Task 表示这次 no-op frame submission 的 queue/GPU 完成，
-    // Present 单独表示 present 的结果（当前有效状态约束为 Success / RequireRecreate / Error）。
     SubmitFrameResult AbandonFrame(unique_ptr<GpuFrameContext> context);
 
-    // 回收已完成的 pending 提交持有的内部资源/contexts。
-    // 若调用方等待了 GpuTask 并准备销毁或重建相关 surface/runtime，必须先调用本函数完成
-    // frame/context drain；本函数不表示底层 present 生命周期已完成。
     void ProcessTasks();
 
+    void Wait(render::QueueType type, uint32_t queueSlot = 0);
+
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
+
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
 
 private:
@@ -337,8 +333,8 @@ private:
     class ResourceRetirement {
     public:
         GpuResourceHandle Handle{};
-        vector<render::Fence*> Fences{};
-        vector<uint64_t> Values{};
+        render::Fence* Fence{nullptr};
+        uint64_t SignalValue{0};
     };
 
     class Pending {
@@ -363,7 +359,6 @@ private:
 
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
     SubmittedBatch SubmitContext(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
-    void CaptureAllQueueFenceSnapshots(ResourceRetirement& retirement);
     bool IsRetirementReady(const ResourceRetirement& retirement) const;
     void ProcessPendingResourceRetirements();
 #ifdef RADRAY_IS_DEBUG
@@ -375,7 +370,6 @@ private:
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
     std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
-    std::array<set<uint32_t>, (size_t)render::QueueType::MAX_COUNT> _knownQueueSlots;
     vector<Pending> _pendings;
     unique_ptr<GpuResourceRegistry> _resourceRegistry;
     vector<ResourceRetirement> _resourceRetirements;
