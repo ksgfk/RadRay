@@ -70,10 +70,6 @@ static VkDescriptorType BufferViewUsageToDescriptorType(BufferViewUsage usage) n
     Unreachable();
 }
 
-static bool IsTexelDescriptorType(VkDescriptorType type) noexcept {
-    return type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
-}
-
 constexpr uint32_t kBindlessDescriptorCapacityVulkan = 262144;
 
 static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceView* view) noexcept {
@@ -81,20 +77,15 @@ static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceVi
         return std::nullopt;
     }
     const auto tag = view->GetTag();
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        const auto* bufferView = static_cast<SimulateBufferViewVulkan*>(view);
-        switch (bufferView->_desc.Usage) {
-            case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
-            case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
-            default: return std::nullopt;
-        }
-    }
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         const auto* textureView = static_cast<ImageViewVulkan*>(view);
         if (textureView->_mdesc.Usage == TextureViewUsage::UnorderedAccess) {
             return ResourceBindType::RWTexture;
         }
         return ResourceBindType::Texture;
+    }
+    if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
+        return ResourceBindType::AccelerationStructure;
     }
     return std::nullopt;
 }
@@ -261,9 +252,11 @@ static bool _BindDescriptorSetVulkan(
         return false;
     }
     if (!set->IsFullyWritten()) {
-        for (const auto& param : boundPipeLayout->GetDescriptorSetLayout(setIndex)) {
-            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", param.Name);
-            break;
+        const auto params = boundPipeLayout->GetDescriptorSetLayout(setIndex);
+        if (!params.empty()) {
+            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", params.front().Name);
+        } else {
+            RADRAY_ERR_LOG("descriptor set is not fully written");
         }
         return false;
     }
@@ -294,8 +287,8 @@ static bool _BindlessArrayMatchesVulkan(
             static_cast<uint32_t>(array->_slotType));
         return false;
     }
-    for (size_t i = 0; i < array->_slotResourceTypes.size(); ++i) {
-        const ResourceBindType slotType = array->_slotResourceTypes[i];
+    for (size_t i = 0; i < array->_slots.size(); ++i) {
+        const ResourceBindType slotType = array->_slots[i].ResourceType;
         if (slotType == ResourceBindType::UNKNOWN) {
             continue;
         }
@@ -344,25 +337,10 @@ static bool _UpdateBindlessDescriptorSetVulkan(
     writeDesc.descriptorCount = 1;
     writeDesc.descriptorType = descriptorType;
 
-    VkDescriptorBufferInfo bufInfo{};
     VkDescriptorImageInfo imgInfo{};
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
     const auto tag = view->GetTag();
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        auto* bufferView = static_cast<SimulateBufferViewVulkan*>(view);
-        const VkDescriptorType requiredType = BufferViewUsageToDescriptorType(bufferView->_desc.Usage);
-        if (requiredType != descriptorType || IsTexelDescriptorType(requiredType)) {
-            RADRAY_ERR_LOG(
-                "descriptor type mismatch for bindless buffer view. expected={}, actual={}",
-                requiredType,
-                descriptorType);
-            return false;
-        }
-        bufInfo.buffer = bufferView->_buffer->_buffer;
-        bufInfo.offset = bufferView->_desc.Range.Offset;
-        bufInfo.range = bufferView->_desc.Range.Size;
-        writeDesc.pBufferInfo = &bufInfo;
-    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+    if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto* textureView = static_cast<ImageViewVulkan*>(view);
         if (descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
             RADRAY_ERR_LOG("descriptor type mismatch for bindless texture view");
@@ -391,6 +369,122 @@ static bool _UpdateBindlessDescriptorSetVulkan(
     }
 
     device->_ftb.vkUpdateDescriptorSets(device->_device, 1, &writeDesc, 0, nullptr);
+    return true;
+}
+
+static bool _WriteBufferBindingDescriptorVulkan(
+    DeviceVulkan* device,
+    VkDescriptorSet set,
+    uint32_t bindingIndex,
+    VkDescriptorType descriptorType,
+    uint32_t arrayIndex,
+    const BufferBindingDescriptor& desc,
+    unordered_map<uint64_t, unique_ptr<BufferViewVulkan>>* ownedTexelViews) noexcept {
+    if (device == nullptr || set == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BufferBindingDescriptor.Target is null");
+        return false;
+    }
+    const auto requiredType = BufferViewUsageToDescriptorType(desc.Usage);
+    if (requiredType != descriptorType) {
+        RADRAY_ERR_LOG(
+            "descriptor type mismatch for buffer binding. expected={}, actual={}",
+            requiredType,
+            descriptorType);
+        return false;
+    }
+
+    auto* buffer = CastVkObject(desc.Target);
+    VkWriteDescriptorSet writeDesc{};
+    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDesc.pNext = nullptr;
+    writeDesc.dstSet = set;
+    writeDesc.dstBinding = bindingIndex;
+    writeDesc.dstArrayElement = arrayIndex;
+    writeDesc.descriptorCount = 1;
+    writeDesc.descriptorType = descriptorType;
+    writeDesc.pBufferInfo = nullptr;
+    writeDesc.pImageInfo = nullptr;
+    writeDesc.pTexelBufferView = nullptr;
+
+    VkDescriptorBufferInfo bufInfo{};
+    VkBufferView texelViewHandle = VK_NULL_HANDLE;
+    unique_ptr<BufferViewVulkan> ownedTexelView{};
+
+    switch (desc.Usage) {
+        case BufferViewUsage::CBuffer: {
+            const uint64_t align = std::max<uint64_t>(1, device->_detail.CBufferAlignment);
+            if (desc.Range.Offset % align != 0) {
+                RADRAY_ERR_LOG("vk uniform buffer binding offset must align to CBuffer alignment");
+                return false;
+            }
+            bufInfo.buffer = buffer->_buffer;
+            bufInfo.offset = desc.Range.Offset;
+            bufInfo.range = desc.Range.Size;
+            writeDesc.pBufferInfo = &bufInfo;
+            break;
+        }
+        case BufferViewUsage::ReadOnlyStorage:
+        case BufferViewUsage::ReadWriteStorage: {
+            if (desc.Stride == 0) {
+                RADRAY_ERR_LOG("vk structured buffer binding stride must be non-zero");
+                return false;
+            }
+            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                RADRAY_ERR_LOG("vk structured buffer binding offset/size must align to stride");
+                return false;
+            }
+            bufInfo.buffer = buffer->_buffer;
+            bufInfo.offset = desc.Range.Offset;
+            bufInfo.range = desc.Range.Size;
+            writeDesc.pBufferInfo = &bufInfo;
+            break;
+        }
+        case BufferViewUsage::TexelReadOnly:
+        case BufferViewUsage::TexelReadWrite: {
+            if (ownedTexelViews == nullptr) {
+                RADRAY_ERR_LOG("vk bindless arrays do not support texel buffer descriptors in this revision");
+                return false;
+            }
+            const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+            if (bpp == 0) {
+                RADRAY_ERR_LOG("vk texel buffer binding format must not be UNKNOWN");
+                return false;
+            }
+            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                RADRAY_ERR_LOG("vk texel buffer binding offset/size must align to format bytes");
+                return false;
+            }
+            VkBufferViewCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+            info.pNext = nullptr;
+            info.flags = 0;
+            info.buffer = buffer->_buffer;
+            info.format = MapType(desc.Format);
+            info.offset = desc.Range.Offset;
+            info.range = desc.Range.Size;
+            auto texelViewOpt = device->CreateBufferView(info);
+            if (!texelViewOpt) {
+                return false;
+            }
+            ownedTexelView = texelViewOpt.Release();
+            texelViewHandle = ownedTexelView->_bufferView;
+            writeDesc.pTexelBufferView = &texelViewHandle;
+            break;
+        }
+    }
+
+    device->_ftb.vkUpdateDescriptorSets(device->_device, 1, &writeDesc, 0, nullptr);
+    if (ownedTexelViews != nullptr) {
+        const uint64_t descriptorKey = (static_cast<uint64_t>(bindingIndex) << 32u) | static_cast<uint64_t>(arrayIndex);
+        if (ownedTexelView) {
+            (*ownedTexelViews)[descriptorKey] = std::move(ownedTexelView);
+        } else {
+            ownedTexelViews->erase(descriptorKey);
+        }
+    }
     return true;
 }
 
@@ -425,18 +519,39 @@ static std::optional<VkDescriptorSet> _PrepareBindlessDescriptorSetVulkan(
     }
     if (it->Dirty) {
         for (uint32_t slot = 0; slot < array->_size; ++slot) {
-            auto view = array->_slotViews[slot];
-            if (view == nullptr) {
-                continue;
-            }
-            if (!_UpdateBindlessDescriptorSetVulkan(
-                    device,
-                    it->Allocation.Set,
-                    it->BindingIndex,
-                    it->DescriptorType,
-                    slot,
-                    view.Get())) {
-                return std::nullopt;
+            const auto& slotState = array->_slots[slot];
+            switch (slotState.Kind) {
+                case BindlessArrayVulkan::SlotKind::None:
+                    continue;
+                case BindlessArrayVulkan::SlotKind::Buffer:
+                    if (!_WriteBufferBindingDescriptorVulkan(
+                            device,
+                            it->Allocation.Set,
+                            it->BindingIndex,
+                            it->DescriptorType,
+                            slot,
+                            slotState.BufferDesc,
+                            nullptr)) {
+                        return std::nullopt;
+                    }
+                    break;
+                case BindlessArrayVulkan::SlotKind::Texture2D:
+                case BindlessArrayVulkan::SlotKind::Texture3D: {
+                    auto view = slotState.Texture;
+                    if (view == nullptr) {
+                        continue;
+                    }
+                    if (!_UpdateBindlessDescriptorSetVulkan(
+                            device,
+                            it->Allocation.Set,
+                            it->BindingIndex,
+                            it->DescriptorType,
+                            slot,
+                            view.Get())) {
+                        return std::nullopt;
+                    }
+                    break;
+                }
             }
         }
         it->Dirty = false;
@@ -976,40 +1091,6 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
-    return result;
-}
-
-Nullable<unique_ptr<BufferView>> DeviceVulkan::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
-    if (desc.Target == nullptr) {
-        RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
-        return nullptr;
-    }
-    auto buf = CastVkObject(desc.Target);
-    if (desc.Usage == BufferViewUsage::CBuffer) {
-        const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
-        if (desc.Range.Offset % align != 0) {
-            RADRAY_ERR_LOG("vk uniform buffer view offset must align to CBuffer alignment");
-            return nullptr;
-        }
-    }
-    unique_ptr<BufferViewVulkan> texelView;
-    if (desc.Usage == BufferViewUsage::TexelReadOnly || desc.Usage == BufferViewUsage::TexelReadWrite) {
-        VkBufferViewCreateInfo info{};
-        info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
-        info.pNext = nullptr;
-        info.flags = 0;
-        info.buffer = buf->_buffer;
-        info.format = MapType(desc.Format);
-        info.offset = desc.Range.Offset;
-        info.range = desc.Range.Size;
-        auto bv = this->CreateBufferView(info);
-        if (!bv) {
-            return nullptr;
-        }
-        texelView = bv.Release();
-    }
-    auto result = make_unique<SimulateBufferViewVulkan>(this, buf, desc);
-    result->_texelView = std::move(texelView);
     return result;
 }
 
@@ -4844,38 +4925,6 @@ void BufferViewVulkan::DestroyImpl() noexcept {
     }
 }
 
-SimulateBufferViewVulkan::SimulateBufferViewVulkan(
-    DeviceVulkan* device,
-    BufferVulkan* buffer,
-    const BufferViewDescriptor& desc) noexcept
-    : _device(device),
-      _buffer(buffer),
-      _desc(desc) {}
-
-SimulateBufferViewVulkan::~SimulateBufferViewVulkan() noexcept {
-    this->DestroyImpl();
-}
-
-bool SimulateBufferViewVulkan::IsValid() const noexcept {
-    return _buffer != nullptr;
-}
-
-void SimulateBufferViewVulkan::Destroy() noexcept {
-    this->DestroyImpl();
-}
-
-void SimulateBufferViewVulkan::SetDebugName(std::string_view name) noexcept {
-    if (_texelView) {
-        _device->SetObjectName(name, _texelView->_bufferView);
-    }
-}
-
-void SimulateBufferViewVulkan::DestroyImpl() noexcept {
-    _texelView.reset();
-    _desc = {};
-    _buffer = nullptr;
-}
-
 ImageVulkan::ImageVulkan(
     DeviceVulkan* device,
     VkImage image,
@@ -5568,6 +5617,7 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
         _allocator->Destroy(_allocation);
         _allocation = DescriptorSetAllocatorVulkan::Allocation::Invalid();
     }
+    _ownedTexelBufferViews.clear();
     _resourceWritten.clear();
     _samplerWritten.clear();
     _setIndex = DescriptorSetIndex{};
@@ -5609,7 +5659,64 @@ bool DescriptorSetVulkan::WriteResource(BindingParameterId id, ResourceView* vie
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
         return false;
     }
+    auto bindType = _GetResourceViewBindTypeVulkan(view);
+    if (!bindType.has_value() || bindType.value() != info->Type) {
+        RADRAY_ERR_LOG(
+            "resource type mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            info->Type,
+            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+        return false;
+    }
     if (!SetResource(info->BindingIndex, arrayIndex, view)) {
+        return false;
+    }
+    const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
+    if (writtenIndex >= _resourceWritten.size()) {
+        RADRAY_ERR_LOG("internal error: resource written-state index {} is out of range", writtenIndex);
+        return false;
+    }
+    _resourceWritten[writtenIndex] = 1;
+    return true;
+}
+
+bool DescriptorSetVulkan::WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
+    if (!this->IsValid()) {
+        RADRAY_ERR_LOG("descriptor set is invalid");
+        return false;
+    }
+    auto infoOpt = _rootSig->FindParameterInfo(id);
+    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
+        return false;
+    }
+    const auto* info = infoOpt.Get();
+    if (info->Kind != BindingParameterKind::Resource) {
+        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
+        return false;
+    }
+    if (info->SetIndex != _setIndex) {
+        RADRAY_ERR_LOG(
+            "binding parameter id {} belongs to descriptor set {}, not {}",
+            id.Value,
+            info->SetIndex.Value,
+            _setIndex.Value);
+        return false;
+    }
+    if (arrayIndex >= info->DescriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+        return false;
+    }
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    if (bindType != info->Type) {
+        RADRAY_ERR_LOG(
+            "buffer binding type mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            info->Type,
+            bindType);
+        return false;
+    }
+    if (!SetBufferResource(info->BindingIndex, arrayIndex, desc)) {
         return false;
     }
     const uint32_t writtenIndex = info->DescriptorWriteOffset + arrayIndex;
@@ -5679,16 +5786,7 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
     }
     auto tag = view->GetTag();
     ResourceBindType requiredBindType = ResourceBindType::UNKNOWN;
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        auto bv = static_cast<SimulateBufferViewVulkan*>(view);
-        switch (bv->_desc.Usage) {
-            case BufferViewUsage::CBuffer: requiredBindType = ResourceBindType::CBuffer; break;
-            case BufferViewUsage::ReadOnlyStorage: requiredBindType = ResourceBindType::Buffer; break;
-            case BufferViewUsage::ReadWriteStorage: requiredBindType = ResourceBindType::RWBuffer; break;
-            case BufferViewUsage::TexelReadOnly: requiredBindType = ResourceBindType::TexelBuffer; break;
-            case BufferViewUsage::TexelReadWrite: requiredBindType = ResourceBindType::RWTexelBuffer; break;
-        }
-    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+    if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
         requiredBindType = tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess ? ResourceBindType::RWTexture : ResourceBindType::Texture;
     } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
@@ -5723,32 +5821,9 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
     writeDesc.pBufferInfo = nullptr;
     writeDesc.pImageInfo = nullptr;
     writeDesc.pTexelBufferView = nullptr;
-    VkDescriptorBufferInfo bufInfo{};
     VkDescriptorImageInfo imgInfo{};
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        auto bv = static_cast<SimulateBufferViewVulkan*>(view);
-        VkDescriptorType requiredType = BufferViewUsageToDescriptorType(bv->_desc.Usage);
-        if (requiredType != writeDesc.descriptorType) {
-            RADRAY_ERR_LOG(
-                "descriptor type mismatch for buffer view usage. expected={}, actual={}",
-                requiredType,
-                writeDesc.descriptorType);
-            return false;
-        }
-        if (IsTexelDescriptorType(writeDesc.descriptorType)) {
-            if (!bv->_texelView) {
-                RADRAY_ERR_LOG("texel buffer requires texel descriptor type with valid VkBufferView");
-                return false;
-            }
-            writeDesc.pTexelBufferView = &bv->_texelView->_bufferView;
-        } else {
-            bufInfo.buffer = bv->_buffer->_buffer;
-            bufInfo.offset = bv->_desc.Range.Offset;
-            bufInfo.range = bv->_desc.Range.Size;
-            writeDesc.pBufferInfo = &bufInfo;
-        }
-    } else if (tag.HasFlag(RenderObjectTag::TextureView)) {
+    if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
         if ((tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
             (tv->_mdesc.Usage != TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
@@ -5777,6 +5852,37 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
         0,
         nullptr);
     return true;
+}
+
+bool DescriptorSetVulkan::SetBufferResource(uint32_t slot, uint32_t arrayIndex, const BufferBindingDescriptor& desc) noexcept {
+    if (!_layout || !_allocation.IsValid()) {
+        RADRAY_ERR_LOG("vk invalid descriptor set");
+        return false;
+    }
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    const DescriptorSetLayoutBindingVulkanContainer* binding = nullptr;
+    for (const auto& e : _layout->_bindings) {
+        if (e.slot == slot && e.bindType == bindType) {
+            binding = &e;
+            break;
+        }
+    }
+    if (binding == nullptr) {
+        RADRAY_ERR_LOG("vk no matching descriptor binding for slot={} type={}", slot, bindType);
+        return false;
+    }
+    if (arrayIndex >= binding->descriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->descriptorCount, arrayIndex);
+        return false;
+    }
+    return _WriteBufferBindingDescriptorVulkan(
+        _device,
+        _allocation.Set,
+        binding->binding,
+        binding->descriptorType,
+        arrayIndex,
+        desc,
+        &_ownedTexelBufferViews);
 }
 
 bool DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept {
@@ -6040,8 +6146,7 @@ BindlessArrayVulkan::BindlessArrayVulkan(
       _desc(desc),
       _size(desc.Size),
       _slotType(desc.SlotType),
-      _slotResourceTypes(desc.Size, ResourceBindType::UNKNOWN),
-      _slotViews(desc.Size, nullptr) {}
+      _slots(desc.Size) {}
 
 BindlessArrayVulkan::~BindlessArrayVulkan() noexcept {
     this->DestroyImpl();
@@ -6069,8 +6174,7 @@ void BindlessArrayVulkan::DestroyImpl() noexcept {
         }
     }
     _cachedSets.clear();
-    _slotResourceTypes.clear();
-    _slotViews.clear();
+    _slots.clear();
     _desc = {};
     _size = 0;
     _slotType = BindlessSlotType::Multiple;
@@ -6078,7 +6182,7 @@ void BindlessArrayVulkan::DestroyImpl() noexcept {
     _device = nullptr;
 }
 
-void BindlessArrayVulkan::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
+void BindlessArrayVulkan::SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept {
     if (_slotType != BindlessSlotType::BufferOnly) {
         RADRAY_ERR_LOG("vk bindless array does not support buffer slots");
         return;
@@ -6087,21 +6191,31 @@ void BindlessArrayVulkan::SetBuffer(uint32_t slot, BufferView* bufView) noexcept
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
-    if (!bufView) {
-        RADRAY_ERR_LOG("vk bindless array buffer view is null");
-        return;
-    }
-    auto bindType = _GetResourceViewBindTypeVulkan(bufView);
-    if (!bindType.has_value() ||
-        (bindType.value() != ResourceBindType::Buffer &&
-         bindType.value() != ResourceBindType::RWBuffer)) {
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    if (bindType != ResourceBindType::Buffer &&
+        bindType != ResourceBindType::RWBuffer) {
         RADRAY_ERR_LOG(
-            "vk bindless array does not support buffer view type {}",
-            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+            "vk bindless array does not support buffer binding type {}",
+            bindType);
         return;
     }
-    _slotResourceTypes[slot] = bindType.value();
-    _slotViews[slot] = bufView;
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("vk bindless array buffer target is null");
+        return;
+    }
+    if (desc.Stride == 0) {
+        RADRAY_ERR_LOG("vk bindless array structured buffer stride must be non-zero");
+        return;
+    }
+    if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+        RADRAY_ERR_LOG("vk bindless array structured buffer offset/size must align to stride");
+        return;
+    }
+    auto& slotState = _slots[slot];
+    slotState.Kind = SlotKind::Buffer;
+    slotState.ResourceType = bindType;
+    slotState.BufferDesc = desc;
+    slotState.Texture = nullptr;
     for (auto& cached : _cachedSets) {
         cached.Dirty = true;
     }
@@ -6134,8 +6248,11 @@ void BindlessArrayVulkan::SetTexture(uint32_t slot, TextureView* texView, Sample
             bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
         return;
     }
-    _slotResourceTypes[slot] = bindType.value();
-    _slotViews[slot] = texView;
+    auto& slotState = _slots[slot];
+    slotState.Kind = SlotKind::Texture2D;
+    slotState.ResourceType = bindType.value();
+    slotState.BufferDesc = {};
+    slotState.Texture = texView;
     for (auto& cached : _cachedSets) {
         cached.Dirty = true;
     }

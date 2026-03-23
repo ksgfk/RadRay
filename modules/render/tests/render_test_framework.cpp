@@ -288,29 +288,6 @@ Nullable<unique_ptr<Buffer>> ComputeTestContext::CreateBuffer(const BufferDescri
     return bufferOpt;
 }
 
-Nullable<unique_ptr<BufferView>> ComputeTestContext::CreateBufferView(
-    const BufferViewDescriptor& desc,
-    string* reason) noexcept {
-    if (_device == nullptr) {
-        _StoreReason(reason, "device is not initialized");
-        return nullptr;
-    }
-    auto viewOpt = _device->CreateBufferView(desc);
-    if (!viewOpt.HasValue()) {
-        _StoreReason(
-            reason,
-            fmt::format(
-                "CreateBufferView failed on {} (offset={}, size={}, stride={}, usage={})",
-                this->GetBackendName(),
-                desc.Range.Offset,
-                desc.Range.Size,
-                desc.Stride,
-                desc.Usage));
-        return nullptr;
-    }
-    return viewOpt;
-}
-
 Nullable<unique_ptr<Texture>> ComputeTestContext::CreateTexture(
     const TextureDescriptor& desc,
     string* reason) noexcept {

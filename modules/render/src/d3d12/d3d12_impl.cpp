@@ -92,17 +92,6 @@ static std::optional<ResourceBindType> _GetResourceViewBindType(ResourceView* vi
         return std::nullopt;
     }
     const auto tag = view->GetTag();
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        const auto* bufferView = static_cast<BufferViewD3D12*>(view);
-        switch (bufferView->_desc.Usage) {
-            case BufferViewUsage::CBuffer: return ResourceBindType::CBuffer;
-            case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
-            case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
-            case BufferViewUsage::TexelReadOnly: return ResourceBindType::TexelBuffer;
-            case BufferViewUsage::TexelReadWrite: return ResourceBindType::RWTexelBuffer;
-        }
-        Unreachable();
-    }
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         const auto* textureView = static_cast<TextureViewD3D12*>(view);
         if (textureView->_desc.Usage == TextureViewUsage::UnorderedAccess) {
@@ -124,10 +113,6 @@ static bool _CopyResourceViewToGpuHeap(
         return false;
     }
     const auto tag = view->GetTag();
-    if (tag.HasFlag(RenderObjectTag::BufferView)) {
-        static_cast<BufferViewD3D12*>(view)->_heapView.CopyTo(0, 1, dstHeap, dstIndex);
-        return true;
-    }
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         static_cast<TextureViewD3D12*>(view)->_heapView.CopyTo(0, 1, dstHeap, dstIndex);
         return true;
@@ -137,6 +122,110 @@ static bool _CopyResourceViewToGpuHeap(
         return true;
     }
     return false;
+}
+
+static bool _WriteBufferBindingDescriptorD3D12(
+    const BufferBindingDescriptor& desc,
+    GpuDescriptorHeapViewRAII& dstHeap,
+    uint32_t dstIndex) noexcept {
+    if (desc.Target == nullptr) {
+        RADRAY_ERR_LOG("BufferBindingDescriptor.Target is null");
+        return false;
+    }
+    if (!dstHeap.IsValid()) {
+        RADRAY_ERR_LOG("d3d12 destination descriptor heap is invalid");
+        return false;
+    }
+    auto* buffer = CastD3D12Object(desc.Target);
+    auto* heap = dstHeap.GetHeap();
+    const auto heapIndex = dstHeap.GetStart() + dstIndex;
+    switch (desc.Usage) {
+        case BufferViewUsage::CBuffer: {
+            if (desc.Range.Offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+                RADRAY_ERR_LOG("d3d12 constant buffer binding offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+                return false;
+            }
+            const uint64_t alignedSize = Align(desc.Range.Size, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
+            D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+            cbvDesc.BufferLocation = buffer->_gpuAddr + desc.Range.Offset;
+            cbvDesc.SizeInBytes = static_cast<UINT>(alignedSize);
+            heap->Create(cbvDesc, heapIndex);
+            return true;
+        }
+        case BufferViewUsage::ReadOnlyStorage:
+        case BufferViewUsage::TexelReadOnly: {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = MapType(desc.Format);
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            if (desc.Usage == BufferViewUsage::TexelReadOnly) {
+                const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+                if (bpp == 0) {
+                    RADRAY_ERR_LOG("d3d12 texel buffer binding format must not be UNKNOWN");
+                    return false;
+                }
+                if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                    RADRAY_ERR_LOG("d3d12 texel buffer binding offset/size must align to format bytes");
+                    return false;
+                }
+                srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
+                srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+                srvDesc.Buffer.StructureByteStride = 0;
+            } else {
+                if (desc.Stride == 0) {
+                    RADRAY_ERR_LOG("d3d12 structured buffer binding stride must be non-zero");
+                    return false;
+                }
+                if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                    RADRAY_ERR_LOG("d3d12 structured buffer binding offset/size must align to stride");
+                    return false;
+                }
+                srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
+                srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+                srvDesc.Buffer.StructureByteStride = desc.Stride;
+            }
+            srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+            heap->Create(buffer->_buf.Get(), srvDesc, heapIndex);
+            return true;
+        }
+        case BufferViewUsage::ReadWriteStorage:
+        case BufferViewUsage::TexelReadWrite: {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = MapType(desc.Format);
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            if (desc.Usage == BufferViewUsage::TexelReadWrite) {
+                const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
+                if (bpp == 0) {
+                    RADRAY_ERR_LOG("d3d12 texel buffer binding format must not be UNKNOWN");
+                    return false;
+                }
+                if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                    RADRAY_ERR_LOG("d3d12 texel buffer binding offset/size must align to format bytes");
+                    return false;
+                }
+                uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
+                uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+                uavDesc.Buffer.StructureByteStride = 0;
+            } else {
+                if (desc.Stride == 0) {
+                    RADRAY_ERR_LOG("d3d12 structured buffer binding stride must be non-zero");
+                    return false;
+                }
+                if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                    RADRAY_ERR_LOG("d3d12 structured buffer binding offset/size must align to stride");
+                    return false;
+                }
+                uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
+                uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+                uavDesc.Buffer.StructureByteStride = desc.Stride;
+            }
+            uavDesc.Buffer.CounterOffsetInBytes = 0;
+            uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+            heap->Create(buffer->_buf.Get(), uavDesc, heapIndex);
+            return true;
+        }
+    }
+    Unreachable();
 }
 
 struct _StaticSamplerSelectionD3D12 {
@@ -1265,107 +1354,6 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
     result->_reqSize = logicalSize;
-    return result;
-}
-
-Nullable<unique_ptr<BufferView>> DeviceD3D12::CreateBufferView(const BufferViewDescriptor& desc) noexcept {
-    if (desc.Target == nullptr) {
-        RADRAY_ERR_LOG("BufferViewDescriptor.Target is null");
-        return nullptr;
-    }
-    auto buf = CastD3D12Object(desc.Target);
-    CpuDescriptorAllocator* heap = _cpuResAlloc.get();
-    CpuDescriptorHeapViewRAII heapView{};
-    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
-
-    if (desc.Usage == BufferViewUsage::CBuffer) {
-        if (desc.Range.Offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
-            RADRAY_ERR_LOG("d3d12 constant buffer view offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-            return nullptr;
-        }
-        uint64_t alignedSize = Align(desc.Range.Size, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
-        auto heapViewOpt = heap->Allocate(1);
-        if (!heapViewOpt.has_value()) {
-            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
-            return nullptr;
-        }
-        heapView = {heap, heapViewOpt.value()};
-        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-        cbvDesc.BufferLocation = buf->_gpuAddr + desc.Range.Offset;
-        cbvDesc.SizeInBytes = static_cast<UINT>(alignedSize);
-        heapView.GetHeap()->Create(cbvDesc, heapView.GetStart());
-        dxgiFormat = DXGI_FORMAT_UNKNOWN;
-    } else if (desc.Usage == BufferViewUsage::ReadOnlyStorage || desc.Usage == BufferViewUsage::TexelReadOnly) {
-        auto heapViewOpt = heap->Allocate(1);
-        if (!heapViewOpt.has_value()) {
-            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate SRV descriptor");
-            return nullptr;
-        }
-        heapView = {heap, heapViewOpt.value()};
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = MapType(desc.Format);
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (desc.Usage == BufferViewUsage::TexelReadOnly) {
-            const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
-            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
-                RADRAY_ERR_LOG("d3d12 texel buffer view offset/size must align to format bytes");
-                return nullptr;
-            }
-            srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
-            srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
-            srvDesc.Buffer.StructureByteStride = 0;
-        } else {
-            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
-                RADRAY_ERR_LOG("d3d12 structured buffer view offset/size must align to stride");
-                return nullptr;
-            }
-            srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
-            srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
-            srvDesc.Buffer.StructureByteStride = desc.Stride;
-        }
-        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        heapView.GetHeap()->Create(buf->_buf.Get(), srvDesc, heapView.GetStart());
-        dxgiFormat = srvDesc.Format;
-    } else if (desc.Usage == BufferViewUsage::ReadWriteStorage || desc.Usage == BufferViewUsage::TexelReadWrite) {
-        auto heapViewOpt = heap->Allocate(1);
-        if (!heapViewOpt.has_value()) {
-            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate UAV descriptor");
-            return nullptr;
-        }
-        heapView = {heap, heapViewOpt.value()};
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-        uavDesc.Format = MapType(desc.Format);
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        if (desc.Usage == BufferViewUsage::TexelReadWrite) {
-            const auto bpp = GetTextureFormatBytesPerPixel(desc.Format);
-            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
-                RADRAY_ERR_LOG("d3d12 texel buffer view offset/size must align to format bytes");
-                return nullptr;
-            }
-            uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
-            uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
-            uavDesc.Buffer.StructureByteStride = 0;
-        } else {
-            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
-                RADRAY_ERR_LOG("d3d12 structured buffer view offset/size must align to stride");
-                return nullptr;
-            }
-            uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
-            uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
-            uavDesc.Buffer.StructureByteStride = desc.Stride;
-        }
-        uavDesc.Buffer.CounterOffsetInBytes = 0;
-        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-        heapView.GetHeap()->Create(buf->_buf.Get(), uavDesc, heapView.GetStart());
-        dxgiFormat = uavDesc.Format;
-    } else {
-        RADRAY_ERR_LOG("invalid buffer view type");
-        return nullptr;
-    }
-    auto result = make_unique<BufferViewD3D12>(this, buf, std::move(heapView));
-    result->_desc = desc;
-    result->_rawFormat = dxgiFormat;
     return result;
 }
 
@@ -3815,26 +3803,6 @@ BufferDescriptor BufferD3D12::GetDesc() const noexcept {
         _hints};
 }
 
-BufferViewD3D12::BufferViewD3D12(
-    DeviceD3D12* device,
-    BufferD3D12* buffer,
-    CpuDescriptorHeapViewRAII heapView) noexcept
-    : _device(device),
-      _buffer(buffer),
-      _heapView(std::move(heapView)) {}
-
-bool BufferViewD3D12::IsValid() const noexcept {
-    return _heapView.IsValid();
-}
-
-void BufferViewD3D12::Destroy() noexcept {
-    _heapView.Destroy();
-}
-
-void BufferViewD3D12::SetDebugName(std::string_view name) noexcept {
-    RADRAY_UNUSED(name);
-}
-
 TextureD3D12::TextureD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12Resource> tex,
@@ -4317,6 +4285,59 @@ bool DescriptorSetD3D12::WriteResource(BindingParameterId id, ResourceView* view
     return true;
 }
 
+bool DescriptorSetD3D12::WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
+    if (!this->IsValid()) {
+        RADRAY_ERR_LOG("descriptor set is invalid");
+        return false;
+    }
+    auto infoOpt = _rootSig->FindParameterInfo(id);
+    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
+        return false;
+    }
+    const auto* info = infoOpt.Get();
+    if (info->Kind != BindingParameterKind::Resource) {
+        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
+        return false;
+    }
+    if (info->SetIndex != _setIndex) {
+        RADRAY_ERR_LOG(
+            "binding parameter id {} belongs to descriptor set {}, not {}",
+            id.Value,
+            info->SetIndex.Value,
+            _setIndex.Value);
+        return false;
+    }
+    if (arrayIndex >= info->DescriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+        return false;
+    }
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    if (bindType != info->Type) {
+        RADRAY_ERR_LOG(
+            "buffer binding type mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            info->Type,
+            bindType);
+        return false;
+    }
+    if (!_resHeapView.IsValid()) {
+        RADRAY_ERR_LOG("descriptor set has no resource descriptor heap slice");
+        return false;
+    }
+    const uint32_t heapIndex = info->DescriptorHeapOffset + arrayIndex;
+    if (!_WriteBufferBindingDescriptorD3D12(desc, _resHeapView, heapIndex)) {
+        RADRAY_ERR_LOG("failed to write buffer descriptor for binding parameter id {}", id.Value);
+        return false;
+    }
+    if (heapIndex >= _resourceWritten.size()) {
+        RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", heapIndex);
+        return false;
+    }
+    _resourceWritten[heapIndex] = 1;
+    return true;
+}
+
 bool DescriptorSetD3D12::WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
     if (!this->IsValid()) {
         RADRAY_ERR_LOG("descriptor set is invalid");
@@ -4417,7 +4438,6 @@ BindlessArrayD3D12::BindlessArrayD3D12(
       _samplerHeap(std::move(samplerHeap)),
       _slotKinds(desc.Size, SlotKind::None),
       _slotResourceTypes(desc.Size, ResourceBindType::UNKNOWN),
-      _slotViews(desc.Size, nullptr),
       _size(desc.Size),
       _slotType(desc.SlotType) {}
 
@@ -4430,7 +4450,6 @@ void BindlessArrayD3D12::Destroy() noexcept {
     _samplerHeap.Destroy();
     _slotKinds.clear();
     _slotResourceTypes.clear();
-    _slotViews.clear();
     _desc = {};
     _size = 0;
     _slotType = BindlessSlotType::Multiple;
@@ -4441,7 +4460,7 @@ void BindlessArrayD3D12::SetDebugName(std::string_view name) noexcept {
     _name = string(name);
 }
 
-void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept {
+void BindlessArrayD3D12::SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept {
     if (_slotType != BindlessSlotType::BufferOnly) {
         RADRAY_ERR_LOG("d3d12 bindless array does not support buffer slots");
         return;
@@ -4450,24 +4469,19 @@ void BindlessArrayD3D12::SetBuffer(uint32_t slot, BufferView* bufView) noexcept 
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "slot", _size, slot);
         return;
     }
-    if (bufView == nullptr) {
-        RADRAY_ERR_LOG("d3d12 bindless array buffer view is null");
-        return;
-    }
-    auto bindType = _GetResourceViewBindType(bufView);
-    if (!bindType.has_value() ||
-        (bindType.value() != ResourceBindType::Buffer &&
-         bindType.value() != ResourceBindType::RWBuffer)) {
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    if (bindType != ResourceBindType::Buffer &&
+        bindType != ResourceBindType::RWBuffer) {
         RADRAY_ERR_LOG(
-            "d3d12 bindless array does not support buffer view type {}",
-            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+            "d3d12 bindless array does not support buffer binding type {}",
+            bindType);
         return;
     }
-    auto bufferView = CastD3D12Object(bufView);
-    bufferView->_heapView.CopyTo(0, 1, _resHeap, slot);
+    if (!_WriteBufferBindingDescriptorD3D12(desc, _resHeap, slot)) {
+        return;
+    }
     _slotKinds[slot] = SlotKind::Buffer;
-    _slotResourceTypes[slot] = bindType.value();
-    _slotViews[slot] = bufView;
+    _slotResourceTypes[slot] = bindType;
 }
 
 void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept {
@@ -4500,7 +4514,6 @@ void BindlessArrayD3D12::SetTexture(uint32_t slot, TextureView* texView, Sampler
     textureView->_heapView.CopyTo(0, 1, _resHeap, slot);
     _slotKinds[slot] = SlotKind::Texture2D;
     _slotResourceTypes[slot] = bindType.value();
-    _slotViews[slot] = texView;
 }
 
 }  // namespace radray::render::d3d12

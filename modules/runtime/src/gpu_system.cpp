@@ -119,6 +119,21 @@ render::CommandBuffer* GpuAsyncContext::CreateCommandBuffer() {
     return cmdBuffer.get();
 }
 
+GpuBufferHandle GpuAsyncContext::CreateTransientBuffer(const render::BufferDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+GpuTextureHandle GpuAsyncContext::CreateTransientTexture(const render::TextureDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+GpuTextureViewHandle GpuAsyncContext::CreateTransientTextureView(const GpuTextureViewDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
 GpuFrameContext::GpuFrameContext(
     GpuRuntime* runtime,
     GpuSurface* surface,
@@ -214,6 +229,37 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
     return result;
 }
 
+GpuBufferHandle GpuRuntime::CreateBuffer(const render::BufferDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+GpuTextureHandle GpuRuntime::CreateTexture(const render::TextureDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+GpuTextureViewHandle GpuRuntime::CreateTextureView(const GpuTextureViewDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+GpuSamplerHandle GpuRuntime::CreateSampler(const render::SamplerDescriptor& desc) {
+    RADRAY_UNUSED(desc);
+    throw std::runtime_error("Not implemented.");
+}
+
+void GpuRuntime::DestroyResource(GpuResourceHandle handle) {
+    RADRAY_UNUSED(handle);
+    throw std::runtime_error("Not implemented.");
+}
+
+void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task) {
+    RADRAY_UNUSED(handle);
+    RADRAY_UNUSED(task);
+    throw std::runtime_error("Not implemented.");
+}
+
 GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
     auto fence = this->GetQueueFence(render::QueueType::Direct, surface->_queueSlot);
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
@@ -299,13 +345,9 @@ void GpuRuntime::ValidateFrameContextForConsume(const char* apiName, const GpuFr
 }
 #endif
 
-#ifdef RADRAY_IS_DEBUG
-GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameContext> context, const char* apiName) {
-#else
 GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameContext> context) {
-#endif
 #ifdef RADRAY_IS_DEBUG
-    this->ValidateFrameContextForConsume(apiName, context.get());
+    this->ValidateFrameContextForConsume("GpuRuntime::FinalizeFrame", context.get());
 #endif
     auto* surface = context->_surface;
     const size_t frameSlotIndex = context->_frameSlotIndex;
@@ -330,10 +372,8 @@ GpuTask GpuRuntime::SubmitAsync(unique_ptr<GpuAsyncContext> context) {
 }
 
 GpuRuntime::SubmitFrameResult GpuRuntime::SubmitFrame(unique_ptr<GpuFrameContext> context) {
-#ifdef RADRAY_IS_DEBUG
     context->_consumeState = GpuFrameContext::ConsumeState::Submitted;
-#endif
-    return this->FinalizeFrame(std::move(context), "GpuRuntime::SubmitFrame");
+    return this->FinalizeFrame(std::move(context));
 }
 
 GpuRuntime::SubmitFrameResult GpuRuntime::AbandonFrame(unique_ptr<GpuFrameContext> context) {
@@ -360,7 +400,7 @@ GpuRuntime::SubmitFrameResult GpuRuntime::AbandonFrame(unique_ptr<GpuFrameContex
     }
     cmd->End();
 
-    return this->FinalizeFrame(std::move(context), "GpuRuntime::AbandonFrame");
+    return this->FinalizeFrame(std::move(context));
 }
 
 void GpuRuntime::ProcessTasks() {

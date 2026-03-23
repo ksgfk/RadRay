@@ -114,6 +114,17 @@ public:
     bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept override {
         LastResourceId = id;
         LastResourceView = view;
+        LastBufferBinding.reset();
+        LastResourceKind = LastWrittenResourceKind::View;
+        LastResourceArrayIndex = arrayIndex;
+        return true;
+    }
+
+    bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override {
+        LastResourceId = id;
+        LastResourceView = nullptr;
+        LastBufferBinding = desc;
+        LastResourceKind = LastWrittenResourceKind::Buffer;
         LastResourceArrayIndex = arrayIndex;
         return true;
     }
@@ -127,6 +138,13 @@ public:
 
     std::optional<BindingParameterId> LastResourceId{};
     ResourceView* LastResourceView{nullptr};
+    enum class LastWrittenResourceKind : uint8_t {
+        None,
+        View,
+        Buffer
+    };
+    LastWrittenResourceKind LastResourceKind{LastWrittenResourceKind::None};
+    std::optional<BufferBindingDescriptor> LastBufferBinding{};
     uint32_t LastResourceArrayIndex{0};
 
     std::optional<BindingParameterId> LastSamplerId{};
@@ -215,6 +233,7 @@ TEST(DescriptorSetTest, NameHelpersResolveThroughRootSignatureLayout) {
     EXPECT_TRUE(descriptorSet.WriteResource("Tex", &texView, 2));
     ASSERT_TRUE(descriptorSet.LastResourceId.has_value());
     EXPECT_EQ(descriptorSet.LastResourceId.value(), BindingParameterId{0});
+    EXPECT_EQ(descriptorSet.LastResourceKind, FakeDescriptorSet::LastWrittenResourceKind::View);
     EXPECT_EQ(descriptorSet.LastResourceView, &texView);
     EXPECT_EQ(descriptorSet.LastResourceArrayIndex, 2u);
 
@@ -225,6 +244,20 @@ TEST(DescriptorSetTest, NameHelpersResolveThroughRootSignatureLayout) {
     EXPECT_EQ(descriptorSet.LastSamplerArrayIndex, 1u);
 
     EXPECT_FALSE(descriptorSet.WriteResource("Missing", &texView));
+    BufferBindingDescriptor bufferDesc{};
+    bufferDesc.Target = reinterpret_cast<Buffer*>(0x1);
+    bufferDesc.Range = BufferRange{16, 32};
+    bufferDesc.Stride = 16;
+    bufferDesc.Usage = BufferViewUsage::ReadOnlyStorage;
+    EXPECT_TRUE(descriptorSet.WriteResource(BindingParameterId{0}, bufferDesc, 3));
+    ASSERT_TRUE(descriptorSet.LastResourceId.has_value());
+    EXPECT_EQ(descriptorSet.LastResourceKind, FakeDescriptorSet::LastWrittenResourceKind::Buffer);
+    ASSERT_TRUE(descriptorSet.LastBufferBinding.has_value());
+    EXPECT_EQ(descriptorSet.LastBufferBinding->Target, bufferDesc.Target);
+    EXPECT_EQ(descriptorSet.LastBufferBinding->Range.Offset, bufferDesc.Range.Offset);
+    EXPECT_EQ(descriptorSet.LastBufferBinding->Range.Size, bufferDesc.Range.Size);
+    EXPECT_EQ(descriptorSet.LastBufferBinding->Stride, bufferDesc.Stride);
+    EXPECT_EQ(descriptorSet.LastBufferBinding->Usage, bufferDesc.Usage);
     EXPECT_FALSE(descriptorSet.WriteSampler("Missing", &sampler));
 }
 

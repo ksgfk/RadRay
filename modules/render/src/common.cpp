@@ -17,6 +17,82 @@
 
 namespace radray::render {
 
+bool RootSignature::HasBindlessSet(DescriptorSetIndex set) const noexcept {
+    return FindBindlessSet(set).HasValue();
+}
+
+Nullable<const BindlessSetLayout*> RootSignature::FindBindlessSet(DescriptorSetIndex set) const noexcept {
+    for (const auto& bindlessSet : GetBindlessSetLayouts()) {
+        if (bindlessSet.Set == set) {
+            return &bindlessSet;
+        }
+    }
+    return nullptr;
+}
+
+Nullable<const StaticSamplerLayout*> RootSignature::FindStaticSampler(BindingParameterId id) const noexcept {
+    for (const auto& staticSampler : GetStaticSamplerLayouts()) {
+        if (staticSampler.Id == id) {
+            return &staticSampler;
+        }
+    }
+    return nullptr;
+}
+
+Nullable<const StaticSamplerLayout*> RootSignature::FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept {
+    for (const auto& staticSampler : GetStaticSamplerLayouts()) {
+        if (staticSampler.Set == set && staticSampler.Binding == binding) {
+            return &staticSampler;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<BindingParameterId> RootSignature::FindParameterId(std::string_view name) const noexcept {
+    return GetBindingLayout().FindParameterId(name);
+}
+
+Nullable<const BindingParameterLayout*> RootSignature::FindParameter(BindingParameterId id) const noexcept {
+    return GetBindingLayout().FindParameter(id);
+}
+
+Nullable<const PushConstantRange*> RootSignature::FindPushConstantRange(BindingParameterId id) const noexcept {
+    for (const auto& range : GetPushConstantRanges()) {
+        if (range.Id == id) {
+            return &range;
+        }
+    }
+    return nullptr;
+}
+
+bool DescriptorSet::WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
+    auto idOpt = ResolveParameterId(name);
+    if (!idOpt.has_value()) {
+        return false;
+    }
+    return this->WriteResource(idOpt.value(), view, arrayIndex);
+}
+
+bool DescriptorSet::WriteResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
+    auto idOpt = ResolveParameterId(name);
+    if (!idOpt.has_value()) {
+        return false;
+    }
+    return this->WriteResource(idOpt.value(), desc, arrayIndex);
+}
+
+bool DescriptorSet::WriteSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex) noexcept {
+    auto idOpt = ResolveParameterId(name);
+    if (!idOpt.has_value()) {
+        return false;
+    }
+    return this->WriteSampler(idOpt.value(), sampler, arrayIndex);
+}
+
+std::optional<BindingParameterId> DescriptorSet::ResolveParameterId(std::string_view name) const noexcept {
+    return this->GetRootSignature()->FindParameterId(name);
+}
+
 Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc) {
     return std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {
@@ -486,7 +562,6 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::AccelerationStructure: return "AccelerationStructure";
         case RenderObjectTag::ShaderBindingTable: return "ShaderBindingTable";
         case RenderObjectTag::ResourceView: return "ResourceView";
-        case RenderObjectTag::BufferView: return "BufferView";
         case RenderObjectTag::TextureView: return "TextureView";
         case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";
         case RenderObjectTag::DescriptorSet: return "DescriptorSet";

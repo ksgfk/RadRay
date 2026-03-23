@@ -102,8 +102,6 @@ public:
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc, string* reason) noexcept;
 
-    Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc, string* reason) noexcept;
-
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc, string* reason) noexcept;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc, string* reason) noexcept;

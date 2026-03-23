@@ -53,6 +53,16 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 )";
 
+constexpr std::string_view kTexelBufferShader = R"(
+[[vk::binding(0, 0)]] Buffer<uint> gInput : register(t0, space0);
+[[vk::binding(1, 0)]] RWBuffer<uint> gOut : register(u1, space0);
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    gOut[0] = gInput[0] + 7;
+}
+)";
+
 constexpr std::string_view kBindlessBufferShader = R"(
 struct SelectData {
     uint Slot;
@@ -140,16 +150,6 @@ protected:
     unique_ptr<Buffer> CreateBufferOrNull(const BufferDescriptor& desc, std::string_view label) {
         string reason{};
         auto opt = _ctx.CreateBuffer(desc, &reason);
-        if (!opt.HasValue()) {
-            ADD_FAILURE() << fmt::format("{} failed on {}: {}", label, _ctx.GetBackendName(), reason);
-            return nullptr;
-        }
-        return opt.Release();
-    }
-
-    unique_ptr<BufferView> CreateBufferViewOrNull(const BufferViewDescriptor& desc, std::string_view label) {
-        string reason{};
-        auto opt = _ctx.CreateBufferView(desc, &reason);
         if (!opt.HasValue()) {
             ADD_FAILURE() << fmt::format("{} failed on {}: {}", label, _ctx.GetBackendName(), reason);
             return nullptr;
@@ -286,28 +286,24 @@ TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
     ASSERT_TRUE(_ctx.UploadBufferData(scaleBuffer.get(), paddedScale, BufferState::CBuffer, &reason))
         << fmt::format("Upload scale buffer failed on {}: {}", _ctx.GetBackendName(), reason);
 
-    BufferViewDescriptor scaleViewDesc{};
+    BufferBindingDescriptor scaleViewDesc{};
     scaleViewDesc.Target = scaleBuffer.get();
     scaleViewDesc.Range = BufferRange{0, cbufferSize};
     scaleViewDesc.Usage = BufferViewUsage::CBuffer;
-    auto scaleView = this->CreateBufferViewOrNull(scaleViewDesc, "Create scale CBV");
-    ASSERT_NE(scaleView, nullptr);
 
-    BufferViewDescriptor outputViewDesc{};
+    BufferBindingDescriptor outputViewDesc{};
     outputViewDesc.Target = outputBuffer.get();
     outputViewDesc.Range = BufferRange{0, outputSize};
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
-    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create output UAV");
-    ASSERT_NE(outputView, nullptr);
 
     auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gScale", scaleView.get()));
+    ASSERT_TRUE(set0->WriteResource("gScale", scaleViewDesc));
 
     auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputView.get()));
+    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
 
     auto pushIdOpt = program.RootSignatureObject->FindParameterId("gPush");
     ASSERT_TRUE(pushIdOpt.has_value());
@@ -369,6 +365,110 @@ TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
 
     EXPECT_EQ(actual, expected)
         << fmt::format("Unexpected compute output on {}", _ctx.GetBackendName());
+    this->ExpectNoCapturedErrors();
+}
+
+TEST_P(ComputeBindingRuntimeTest, DescriptorSetTexelBufferBindingWorks) {
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kTexelBufferShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    constexpr uint32_t kInputValue = 35;
+    constexpr uint32_t kExpectedValue = kInputValue + 7;
+    constexpr uint64_t kBufferSize = sizeof(uint32_t);
+
+    BufferDescriptor inputBufferDesc{};
+    inputBufferDesc.Size = kBufferSize;
+    inputBufferDesc.Memory = MemoryType::Device;
+    inputBufferDesc.Usage = BufferUse::CopyDestination | BufferUse::Resource;
+    auto inputBuffer = this->CreateBufferOrNull(inputBufferDesc, "Create texel input buffer");
+    ASSERT_NE(inputBuffer, nullptr);
+
+    vector<byte> inputBytes(kBufferSize, byte{0});
+    std::memcpy(inputBytes.data(), &kInputValue, sizeof(kInputValue));
+    ASSERT_TRUE(_ctx.UploadBufferData(inputBuffer.get(), inputBytes, BufferState::ShaderRead, &reason))
+        << fmt::format("Upload texel input failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    BufferBindingDescriptor inputViewDesc{};
+    inputViewDesc.Target = inputBuffer.get();
+    inputViewDesc.Range = BufferRange{0, kBufferSize};
+    inputViewDesc.Format = TextureFormat::R32_UINT;
+    inputViewDesc.Usage = BufferViewUsage::TexelReadOnly;
+
+    BufferDescriptor outputBufferDesc{};
+    outputBufferDesc.Size = kBufferSize;
+    outputBufferDesc.Memory = MemoryType::Device;
+    outputBufferDesc.Usage = BufferUse::CopySource | BufferUse::UnorderedAccess;
+    auto outputBuffer = this->CreateBufferOrNull(outputBufferDesc, "Create texel output buffer");
+    ASSERT_NE(outputBuffer, nullptr);
+
+    BufferBindingDescriptor outputViewDesc{};
+    outputViewDesc.Target = outputBuffer.get();
+    outputViewDesc.Range = BufferRange{0, kBufferSize};
+    outputViewDesc.Format = TextureFormat::R32_UINT;
+    outputViewDesc.Usage = BufferViewUsage::TexelReadWrite;
+
+    BufferDescriptor readbackBufferDesc{};
+    readbackBufferDesc.Size = kBufferSize;
+    readbackBufferDesc.Memory = MemoryType::ReadBack;
+    readbackBufferDesc.Usage = BufferUse::CopyDestination | BufferUse::MapRead;
+    auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create texel readback buffer");
+    ASSERT_NE(readbackBuffer, nullptr);
+
+    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    ASSERT_NE(set0, nullptr);
+    ASSERT_TRUE(set0->WriteResource("gInput", inputViewDesc));
+    ASSERT_TRUE(set0->WriteResource("gOut", outputViewDesc));
+
+    auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
+    ASSERT_TRUE(cmdOpt.HasValue())
+        << fmt::format("CreateCommandBuffer failed on {}: {}", _ctx.GetBackendName(), reason);
+    auto cmd = cmdOpt.Release();
+
+    _ctx.ClearCapturedErrors();
+    cmd->Begin();
+    ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::Common,
+        .After = BufferState::UnorderedAccess,
+    };
+    cmd->ResourceBarrier(std::span{&toUav, 1});
+
+    auto encoderOpt = cmd->BeginComputePass();
+    ASSERT_TRUE(encoderOpt.HasValue())
+        << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
+    auto encoder = encoderOpt.Release();
+    encoder->BindRootSignature(program.RootSignatureObject.get());
+    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
+    encoder->Dispatch(1, 1, 1);
+    cmd->EndComputePass(std::move(encoder));
+
+    vector<ResourceBarrierDescriptor> preCopy{};
+    preCopy.push_back(BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::UnorderedAccess,
+        .After = BufferState::CopySource,
+    });
+    _ctx.AppendReadbackPreCopyBarrier(preCopy, readbackBuffer.get());
+    cmd->ResourceBarrier(preCopy);
+    cmd->CopyBufferToBuffer(readbackBuffer.get(), 0, outputBuffer.get(), 0, kBufferSize);
+    vector<ResourceBarrierDescriptor> postCopy{};
+    _ctx.AppendReadbackPostCopyBarrier(postCopy, readbackBuffer.get());
+    if (!postCopy.empty()) {
+        cmd->ResourceBarrier(postCopy);
+    }
+    cmd->End();
+
+    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason))
+        << fmt::format("SubmitAndWait failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    vector<uint32_t> actual = this->ReadBufferVectorOrEmpty<uint32_t>(readbackBuffer.get(), 1);
+    ASSERT_EQ(actual.size(), 1u);
+    EXPECT_EQ(actual[0], kExpectedValue)
+        << fmt::format("Unexpected texel buffer result on {}", _ctx.GetBackendName());
     this->ExpectNoCapturedErrors();
 }
 
@@ -439,13 +539,11 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create readback buffer");
     ASSERT_NE(readbackBuffer, nullptr);
 
-    BufferViewDescriptor outputViewDesc{};
+    BufferBindingDescriptor outputViewDesc{};
     outputViewDesc.Target = outputBuffer.get();
     outputViewDesc.Range = BufferRange{0, kOutputSize};
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
-    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create output UAV");
-    ASSERT_NE(outputView, nullptr);
 
     auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
     ASSERT_NE(set0, nullptr);
@@ -454,7 +552,7 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
 
     auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputView.get()));
+    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -588,13 +686,11 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
     auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create static sampler readback buffer");
     ASSERT_NE(readbackBuffer, nullptr);
 
-    BufferViewDescriptor outputViewDesc{};
+    BufferBindingDescriptor outputViewDesc{};
     outputViewDesc.Target = outputBuffer.get();
     outputViewDesc.Range = BufferRange{0, kOutputSize};
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
-    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create static sampler output UAV");
-    ASSERT_NE(outputView, nullptr);
 
     auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
     ASSERT_NE(set0, nullptr);
@@ -607,7 +703,7 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
 
     auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputView.get()));
+    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -710,7 +806,7 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
     constexpr uint32_t kValue1 = 29;
     const uint64_t cbufferSize = this->GetCBufferSize(sizeof(SelectDataCpu));
 
-    auto makeInputBuffer = [&](uint32_t value, std::string_view label) -> std::pair<unique_ptr<Buffer>, unique_ptr<BufferView>> {
+    auto makeInputBuffer = [&](uint32_t value, std::string_view label) -> std::pair<unique_ptr<Buffer>, BufferBindingDescriptor> {
         BufferDescriptor bufferDesc{};
         bufferDesc.Size = sizeof(uint32_t);
         bufferDesc.Memory = MemoryType::Device;
@@ -726,22 +822,18 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
         EXPECT_TRUE(_ctx.UploadBufferData(buffer.get(), bytes, BufferState::ShaderRead, &reason))
             << fmt::format("Upload {} failed on {}: {}", label, _ctx.GetBackendName(), reason);
 
-        BufferViewDescriptor viewDesc{};
+        BufferBindingDescriptor viewDesc{};
         viewDesc.Target = buffer.get();
         viewDesc.Range = BufferRange{0, sizeof(uint32_t)};
         viewDesc.Stride = sizeof(uint32_t);
         viewDesc.Usage = BufferViewUsage::ReadOnlyStorage;
-        auto view = this->CreateBufferViewOrNull(viewDesc, fmt::format("Create {}", label));
-        EXPECT_NE(view, nullptr);
-        return {std::move(buffer), std::move(view)};
+        return {std::move(buffer), viewDesc};
     };
 
     auto [inputBuffer0, inputView0] = makeInputBuffer(kValue0, "input view 0");
     ASSERT_NE(inputBuffer0, nullptr);
-    ASSERT_NE(inputView0, nullptr);
     auto [inputBuffer1, inputView1] = makeInputBuffer(kValue1, "input view 1");
     ASSERT_NE(inputBuffer1, nullptr);
-    ASSERT_NE(inputView1, nullptr);
 
     BufferDescriptor selectBufferDesc{};
     selectBufferDesc.Size = cbufferSize;
@@ -756,12 +848,10 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
     ASSERT_TRUE(_ctx.UploadBufferData(selectBuffer.get(), paddedSelect, BufferState::CBuffer, &reason))
         << fmt::format("Upload select buffer failed on {}: {}", _ctx.GetBackendName(), reason);
 
-    BufferViewDescriptor selectViewDesc{};
+    BufferBindingDescriptor selectViewDesc{};
     selectViewDesc.Target = selectBuffer.get();
     selectViewDesc.Range = BufferRange{0, cbufferSize};
     selectViewDesc.Usage = BufferViewUsage::CBuffer;
-    auto selectView = this->CreateBufferViewOrNull(selectViewDesc, "Create select CBV");
-    ASSERT_NE(selectView, nullptr);
 
     constexpr uint64_t kOutputSize = sizeof(uint32_t);
     BufferDescriptor outputBufferDesc{};
@@ -778,29 +868,27 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
     auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create bindless readback buffer");
     ASSERT_NE(readbackBuffer, nullptr);
 
-    BufferViewDescriptor outputViewDesc{};
+    BufferBindingDescriptor outputViewDesc{};
     outputViewDesc.Target = outputBuffer.get();
     outputViewDesc.Range = BufferRange{0, kOutputSize};
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
-    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create bindless output UAV");
-    ASSERT_NE(outputView, nullptr);
 
     BindlessArrayDescriptor bindlessDesc{};
     bindlessDesc.Size = 2;
     bindlessDesc.SlotType = BindlessSlotType::BufferOnly;
     auto bindless = this->CreateBindlessArrayOrNull(bindlessDesc);
     ASSERT_NE(bindless, nullptr);
-    bindless->SetBuffer(0, inputView0.get());
-    bindless->SetBuffer(1, inputView1.get());
+    bindless->SetBuffer(0, inputView0);
+    bindless->SetBuffer(1, inputView1);
 
     auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gSelect", selectView.get()));
+    ASSERT_TRUE(set1->WriteResource("gSelect", selectViewDesc));
 
     auto set2 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{2});
     ASSERT_NE(set2, nullptr);
-    ASSERT_TRUE(set2->WriteResource("gOut", outputView.get()));
+    ASSERT_TRUE(set2->WriteResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -947,12 +1035,10 @@ TEST_P(ComputeBindingRuntimeTest, BindlessTextureAndSamplerWorks) {
     ASSERT_TRUE(_ctx.UploadBufferData(sampleBuffer.get(), paddedSample, BufferState::CBuffer, &reason))
         << fmt::format("Upload sample buffer failed on {}: {}", _ctx.GetBackendName(), reason);
 
-    BufferViewDescriptor sampleViewDesc{};
+    BufferBindingDescriptor sampleViewDesc{};
     sampleViewDesc.Target = sampleBuffer.get();
     sampleViewDesc.Range = BufferRange{0, cbufferSize};
     sampleViewDesc.Usage = BufferViewUsage::CBuffer;
-    auto sampleView = this->CreateBufferViewOrNull(sampleViewDesc, "Create sample CBV");
-    ASSERT_NE(sampleView, nullptr);
 
     constexpr uint64_t kOutputSize = sizeof(uint32_t);
     BufferDescriptor outputBufferDesc{};
@@ -969,13 +1055,11 @@ TEST_P(ComputeBindingRuntimeTest, BindlessTextureAndSamplerWorks) {
     auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create bindless texture readback buffer");
     ASSERT_NE(readbackBuffer, nullptr);
 
-    BufferViewDescriptor outputViewDesc{};
+    BufferBindingDescriptor outputViewDesc{};
     outputViewDesc.Target = outputBuffer.get();
     outputViewDesc.Range = BufferRange{0, kOutputSize};
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
-    auto outputView = this->CreateBufferViewOrNull(outputViewDesc, "Create bindless texture output UAV");
-    ASSERT_NE(outputView, nullptr);
 
     BindlessArrayDescriptor bindlessDesc{};
     bindlessDesc.Size = 2;
@@ -987,12 +1071,12 @@ TEST_P(ComputeBindingRuntimeTest, BindlessTextureAndSamplerWorks) {
 
     auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gSample", sampleView.get()));
+    ASSERT_TRUE(set1->WriteResource("gSample", sampleViewDesc));
     ASSERT_TRUE(set1->WriteSampler("gSamp", sampler.get()));
 
     auto set2 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{2});
     ASSERT_NE(set2, nullptr);
-    ASSERT_TRUE(set2->WriteResource("gOut", outputView.get()));
+    ASSERT_TRUE(set2->WriteResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -1141,16 +1225,14 @@ TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenSetIndexMismatch) {
     ASSERT_TRUE(_ctx.WriteHostVisibleBuffer(scaleBuffer.get(), paddedScale, &reason))
         << fmt::format("Write scale buffer failed on {}: {}", _ctx.GetBackendName(), reason);
 
-    BufferViewDescriptor scaleViewDesc{};
+    BufferBindingDescriptor scaleViewDesc{};
     scaleViewDesc.Target = scaleBuffer.get();
     scaleViewDesc.Range = BufferRange{0, cbufferSize};
     scaleViewDesc.Usage = BufferViewUsage::CBuffer;
-    auto scaleView = this->CreateBufferViewOrNull(scaleViewDesc, "Create scale CBV");
-    ASSERT_NE(scaleView, nullptr);
 
     auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gScale", scaleView.get()));
+    ASSERT_TRUE(set0->WriteResource("gScale", scaleViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())

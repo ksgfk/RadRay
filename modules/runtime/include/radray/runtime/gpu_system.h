@@ -21,6 +21,11 @@
 //   不直接作为底层 RHI primitive 暴露给外部模块。
 // - GpuResourceHandle 故意保持无类型：它表示 runtime 稳定资源标识，并提供到底层对象的
 //   interop 穿透能力，但不在该层统一资源具体类型。
+// - runtime 当前不负责 GPU 资源状态追踪；资源状态/barrier 由更上层负责。
+// - 资源销毁入口统一为 DestroyResource / DestroyResourceAfter，不按资源类型拆分 public API。
+// - GpuAsyncContext 可暴露临时资源创建入口；其语义是“从属于该 context 的提交生命周期”，
+//   而不是简单绑定到 C++ 对象析构时刻。
+// - GpuResourceHandle::NativeHandle 保持 void* 作为后端 interop 穿透指针；本层不统一其具体承载类型。
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
 // - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
 //   BeginFrameResult::Status 返回；SubmitFrame 的 present 结果通过 SubmitFrameResult::Present
@@ -41,6 +46,9 @@
 //   - 在销毁或重建 GpuSurface / GpuRuntime 前，调用方必须先确保相关 GpuTask 已完成，并调用
 //     ProcessTasks() 回收 runtime 持有的 pending contexts，使 frame/context 完成 drain；
 //     这不表示底层 present 生命周期已被纳入 GpuTask。
+//   - 通过 GpuAsyncContext 创建的 transient 资源在 context 未提交即析构时可直接失效；
+//     若 context 已被 SubmitAsync / SubmitFrame / AbandonFrame 接管，则其生命周期至少持续到
+//     对应 pending 提交被 ProcessTasks() drain 完成。本轮仅定义该语义，不提供真实实现。
 //
 
 namespace radray {
@@ -78,6 +86,19 @@ struct GpuResourceHandle {
     }
 
     constexpr static GpuResourceHandle Invalid() { return {std::numeric_limits<uint64_t>::max(), nullptr}; }
+};
+
+struct GpuBufferHandle : GpuResourceHandle {};
+struct GpuTextureHandle : GpuResourceHandle {};
+struct GpuTextureViewHandle : GpuResourceHandle {};
+struct GpuSamplerHandle : GpuResourceHandle {};
+
+struct GpuTextureViewDescriptor {
+    GpuTextureHandle Target{};
+    render::TextureDimension Dim{render::TextureDimension::UNKNOWN};
+    render::TextureFormat Format{render::TextureFormat::UNKNOWN};
+    render::SubresourceRange Range{};
+    render::TextureViewUsages Usage{render::TextureViewUsage::UNKNOWN};
 };
 
 class GpuTask {
@@ -166,6 +187,12 @@ public:
     // 调试构建会主动捕获这类误用。
     bool DependsOn(const GpuTask& task);
     render::CommandBuffer* CreateCommandBuffer();
+    // transient 资源由当前 context 所有。
+    // - 若 context 未提交即析构，可直接失效；
+    // - 若 context 已被 runtime 接管提交，则其生命周期至少持续到对应 pending drain 完成。
+    GpuBufferHandle CreateTransientBuffer(const render::BufferDescriptor& desc);
+    GpuTextureHandle CreateTransientTexture(const render::TextureDescriptor& desc);
+    GpuTextureViewHandle CreateTransientTextureView(const GpuTextureViewDescriptor& desc);
 
     constexpr Kind GetType() const { return _type; }
 
@@ -255,6 +282,12 @@ public:
         render::TextureFormat format,
         render::PresentMode presentMode,
         uint32_t queueSlot = 0);
+    GpuBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
+    GpuTextureHandle CreateTexture(const render::TextureDescriptor& desc);
+    GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc);
+    GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
+    void DestroyResource(GpuResourceHandle handle);
+    void DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task);
 
     // 成功时返回 one-shot 的 GpuFrameContext。
     // 该 context 必须且只能被 SubmitFrame 或 AbandonFrame 消费一次；调用方不得丢弃或复用它。
@@ -316,18 +349,11 @@ private:
     };
 
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
-    SubmittedBatch SubmitContext(
-        GpuAsyncContext* context,
-        Nullable<render::SwapChainSyncObject*> waitToExecute,
-        Nullable<render::SwapChainSyncObject*> readyToPresent);
+    SubmittedBatch SubmitContext(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
 #ifdef RADRAY_IS_DEBUG
     void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
 #endif
-#ifdef RADRAY_IS_DEBUG
-    SubmitFrameResult FinalizeFrame(unique_ptr<GpuFrameContext> context, const char* apiName);
-#else
     SubmitFrameResult FinalizeFrame(unique_ptr<GpuFrameContext> context);
-#endif
     GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
 
     shared_ptr<render::Device> _device;

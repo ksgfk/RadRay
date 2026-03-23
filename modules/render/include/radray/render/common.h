@@ -457,10 +457,9 @@ enum class RenderObjectTag : uint32_t {
     Buffer = Resource | (Resource << 1),
     Texture = Resource | (Resource << 2),
     ResourceView = Resource << 3,
-    BufferView = ResourceView | (ResourceView << 1),
-    TextureView = ResourceView | (ResourceView << 2),
-    AccelerationStructureView = ResourceView | (ResourceView << 3),
-    DescriptorSet = ResourceView << 4,
+    TextureView = ResourceView | (ResourceView << 1),
+    AccelerationStructureView = ResourceView | (ResourceView << 2),
+    DescriptorSet = ResourceView << 3,
     Sampler = DescriptorSet << 1,
     BindlessArray = Sampler << 1,
     RayTracingCmdEncoder = BindlessArray << 1,
@@ -528,7 +527,6 @@ class SwapChainSyncObject;
 class Resource;
 class ResourceView;
 class Buffer;
-class BufferView;
 class Texture;
 class TextureView;
 class AccelerationStructureView;
@@ -778,7 +776,7 @@ struct BufferRange {
     uint64_t Size{0};
 };
 
-struct BufferViewDescriptor {
+struct BufferBindingDescriptor {
     Buffer* Target{nullptr};
     BufferRange Range{};
     uint32_t Stride{0};
@@ -1257,8 +1255,6 @@ public:
 
     virtual Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept = 0;
-
     virtual Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
@@ -1458,13 +1454,6 @@ public:
     virtual BufferDescriptor GetDesc() const noexcept = 0;
 };
 
-class BufferView : public ResourceView {
-public:
-    virtual ~BufferView() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BufferView; }
-};
-
 class Texture : public Resource {
 public:
     virtual ~Texture() noexcept = default;
@@ -1521,53 +1510,19 @@ public:
 
     virtual std::span<const PushConstantRange> GetPushConstantRanges() const noexcept = 0;
 
-    bool HasBindlessSet(DescriptorSetIndex set) const noexcept {
-        return FindBindlessSet(set).HasValue();
-    }
+    bool HasBindlessSet(DescriptorSetIndex set) const noexcept;
 
-    Nullable<const BindlessSetLayout*> FindBindlessSet(DescriptorSetIndex set) const noexcept {
-        for (const auto& bindlessSet : GetBindlessSetLayouts()) {
-            if (bindlessSet.Set == set) {
-                return &bindlessSet;
-            }
-        }
-        return nullptr;
-    }
+    Nullable<const BindlessSetLayout*> FindBindlessSet(DescriptorSetIndex set) const noexcept;
 
-    Nullable<const StaticSamplerLayout*> FindStaticSampler(BindingParameterId id) const noexcept {
-        for (const auto& staticSampler : GetStaticSamplerLayouts()) {
-            if (staticSampler.Id == id) {
-                return &staticSampler;
-            }
-        }
-        return nullptr;
-    }
+    Nullable<const StaticSamplerLayout*> FindStaticSampler(BindingParameterId id) const noexcept;
 
-    Nullable<const StaticSamplerLayout*> FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept {
-        for (const auto& staticSampler : GetStaticSamplerLayouts()) {
-            if (staticSampler.Set == set && staticSampler.Binding == binding) {
-                return &staticSampler;
-            }
-        }
-        return nullptr;
-    }
+    Nullable<const StaticSamplerLayout*> FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept;
 
-    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept {
-        return GetBindingLayout().FindParameterId(name);
-    }
+    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept;
 
-    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept {
-        return GetBindingLayout().FindParameter(id);
-    }
+    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept;
 
-    Nullable<const PushConstantRange*> FindPushConstantRange(BindingParameterId id) const noexcept {
-        for (const auto& range : GetPushConstantRanges()) {
-            if (range.Id == id) {
-                return &range;
-            }
-        }
-        return nullptr;
-    }
+    Nullable<const PushConstantRange*> FindPushConstantRange(BindingParameterId id) const noexcept;
 };
 
 class PipelineState : public RenderBase, public IDebugName {
@@ -1634,28 +1589,18 @@ public:
 
     virtual bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
 
+    virtual bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
+
     virtual bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
 
-    bool WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex = 0) noexcept {
-        auto idOpt = ResolveParameterId(name);
-        if (!idOpt.has_value()) {
-            return false;
-        }
-        return this->WriteResource(idOpt.value(), view, arrayIndex);
-    }
+    bool WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex = 0) noexcept;
 
-    bool WriteSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex = 0) noexcept {
-        auto idOpt = ResolveParameterId(name);
-        if (!idOpt.has_value()) {
-            return false;
-        }
-        return this->WriteSampler(idOpt.value(), sampler, arrayIndex);
-    }
+    bool WriteResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept;
+
+    bool WriteSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex = 0) noexcept;
 
 private:
-    std::optional<BindingParameterId> ResolveParameterId(std::string_view name) const noexcept {
-        return this->GetRootSignature()->FindParameterId(name);
-    }
+    std::optional<BindingParameterId> ResolveParameterId(std::string_view name) const noexcept;
 };
 
 class Sampler : public RenderBase, public IDebugName {
@@ -1671,7 +1616,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindlessArray; }
 
-    virtual void SetBuffer(uint32_t slot, BufferView* bufView) noexcept = 0;
+    virtual void SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept = 0;
 
     virtual void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept = 0;
 };
@@ -1702,6 +1647,16 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+constexpr ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept {
+    switch (usage) {
+        case BufferViewUsage::CBuffer: return ResourceBindType::CBuffer;
+        case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
+        case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
+        case BufferViewUsage::TexelReadOnly: return ResourceBindType::TexelBuffer;
+        case BufferViewUsage::TexelReadWrite: return ResourceBindType::RWTexelBuffer;
+    }
+    return ResourceBindType::UNKNOWN;
+}
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

@@ -31,7 +31,6 @@ class SwapChainVulkan;
 class SwapChainSyncObjectVulkan;
 class BufferVulkan;
 class BufferViewVulkan;
-class SimulateBufferViewVulkan;
 class ImageVulkan;
 class ImageViewVulkan;
 class DescriptorSetLayoutVulkan;
@@ -143,8 +142,6 @@ public:
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
-
-    Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
@@ -759,30 +756,6 @@ public:
     VkBufferViewCreateInfo _rawInfo;
 };
 
-class SimulateBufferViewVulkan final : public BufferView {
-public:
-    SimulateBufferViewVulkan(
-        DeviceVulkan* device,
-        BufferVulkan* buffer,
-        const BufferViewDescriptor& desc) noexcept;
-
-    ~SimulateBufferViewVulkan() noexcept override;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    BufferVulkan* _buffer;
-    BufferViewDescriptor _desc;
-    unique_ptr<BufferViewVulkan> _texelView;
-};
-
 class ImageVulkan final : public Texture {
 public:
     ImageVulkan(
@@ -1247,9 +1220,13 @@ public:
 
     bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept override;
 
+    bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept override;
+
     bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept override;
 
     bool SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept;
+
+    bool SetBufferResource(uint32_t slot, uint32_t arrayIndex, const BufferBindingDescriptor& desc) noexcept;
 
     bool SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept;
 
@@ -1266,6 +1243,7 @@ public:
     DescriptorSetAllocatorVulkan::Allocation _allocation;
     vector<uint8_t> _resourceWritten{};
     vector<uint8_t> _samplerWritten{};
+    unordered_map<uint64_t, unique_ptr<BufferViewVulkan>> _ownedTexelBufferViews{};
     string _name{};
 };
 
@@ -1292,6 +1270,20 @@ public:
 
 class BindlessArrayVulkan final : public BindlessArray {
 public:
+    enum class SlotKind : uint8_t {
+        None,
+        Buffer,
+        Texture2D,
+        Texture3D
+    };
+
+    struct SlotState {
+        SlotKind Kind{SlotKind::None};
+        ResourceBindType ResourceType{ResourceBindType::UNKNOWN};
+        BufferBindingDescriptor BufferDesc{};
+        Nullable<TextureView*> Texture{nullptr};
+    };
+
     struct CachedDescriptorSet {
         DescriptorSetLayoutVulkan* Layout{nullptr};
         DescriptorSetAllocatorVulkan::Allocation Allocation{};
@@ -1312,7 +1304,7 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
+    void SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept override;
 
     void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept override;
 
@@ -1323,8 +1315,7 @@ public:
     BindlessArrayDescriptor _desc{};
     uint32_t _size;
     BindlessSlotType _slotType;
-    vector<ResourceBindType> _slotResourceTypes{};
-    vector<Nullable<ResourceView*>> _slotViews{};
+    vector<SlotState> _slots{};
     vector<CachedDescriptorSet> _cachedSets{};
     string _name;
 };

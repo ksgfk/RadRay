@@ -23,7 +23,6 @@ class CmdListD3D12;
 class CmdRenderPassD3D12;
 class SwapChainD3D12;
 class BufferD3D12;
-class BufferViewD3D12;
 class TextureD3D12;
 class TextureViewD3D12;
 class RootSigD3D12;
@@ -303,8 +302,6 @@ public:
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
-
-    Nullable<unique_ptr<BufferView>> CreateBufferView(const BufferViewDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
@@ -638,28 +635,6 @@ public:
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
-};
-
-class BufferViewD3D12 final : public BufferView {
-public:
-    BufferViewD3D12(
-        DeviceD3D12* device,
-        BufferD3D12* buffer,
-        CpuDescriptorHeapViewRAII heapView) noexcept;
-    ~BufferViewD3D12() noexcept override = default;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-public:
-    DeviceD3D12* _device;
-    BufferD3D12* _buffer;
-    CpuDescriptorHeapViewRAII _heapView;
-    BufferViewDescriptor _desc;
-    DXGI_FORMAT _rawFormat;
 };
 
 class TextureD3D12 final : public Texture {
@@ -1023,6 +998,8 @@ public:
 
     bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept override;
 
+    bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept override;
+
     bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept override;
 
     bool IsFullyWritten() const noexcept;
@@ -1072,7 +1049,7 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    void SetBuffer(uint32_t slot, BufferView* bufView) noexcept override;
+    void SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept override;
 
     void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept override;
 
@@ -1090,7 +1067,6 @@ public:
     GpuDescriptorHeapViewRAII _samplerHeap;
     vector<SlotKind> _slotKinds{};
     vector<ResourceBindType> _slotResourceTypes{};
-    vector<Nullable<ResourceView*>> _slotViews{};
     uint32_t _size;
     BindlessSlotType _slotType{BindlessSlotType::Multiple};
     string _name;
@@ -1108,7 +1084,6 @@ constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<R
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<SamplerD3D12*>(v); }
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
-constexpr auto CastD3D12Object(BufferView* v) noexcept { return static_cast<BufferViewD3D12*>(v); }
 constexpr auto CastD3D12Object(GraphicsPipelineState* v) noexcept { return static_cast<GraphicsPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(ComputePipelineState* v) noexcept { return static_cast<ComputePsoD3D12*>(v); }
 constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return static_cast<AccelerationStructureD3D12*>(v); }
