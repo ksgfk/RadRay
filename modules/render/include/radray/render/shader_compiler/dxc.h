@@ -28,10 +28,6 @@ public:
     bool EnableUnbounded{};
 };
 
-// bool IsHlslShaderBufferEqual(const HlslShaderDesc& l, const HlslShaderBufferDesc& lcb, const HlslShaderDesc& r, const HlslShaderBufferDesc& rcb) noexcept;
-// bool IsHlslTypeEqual(const HlslShaderDesc& l, size_t lType, const HlslShaderDesc& r, size_t rType) noexcept;
-// std::optional<HlslShaderDesc> MergeHlslShaderDesc(std::span<const HlslShaderDesc*> descs) noexcept;
-
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_DXC

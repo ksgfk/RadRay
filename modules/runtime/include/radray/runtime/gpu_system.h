@@ -335,6 +335,8 @@ private:
         GpuResourceHandle Handle{};
         render::Fence* Fence{nullptr};
         uint64_t SignalValue{0};
+
+        bool IsReady() const noexcept;
     };
 
     class Pending {
@@ -359,8 +361,6 @@ private:
 
     render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
     SubmittedBatch SubmitContext(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
-    bool IsRetirementReady(const ResourceRetirement& retirement) const;
-    void ProcessPendingResourceRetirements();
 #ifdef RADRAY_IS_DEBUG
     void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
 #endif
