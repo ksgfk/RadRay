@@ -71,7 +71,7 @@
             "Name": "freetype",
             "Type": "git",
             "Git": "https://github.com/freetype/freetype.git",
-            "Tag": "VER-2-14-2"
+            "Tag": "VER-2-14-3"
         },
         {
             "Name": "Vulkan-Headers",
