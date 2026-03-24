@@ -17,6 +17,31 @@
 
 namespace radray::render {
 
+BindingLayout::BindingLayout(vector<BindingParameterLayout> parameters) noexcept
+    : _parameters(std::move(parameters)) {}
+
+std::span<const BindingParameterLayout> BindingLayout::GetParameters() const noexcept {
+    return _parameters;
+}
+
+std::optional<BindingParameterId> BindingLayout::FindParameterId(std::string_view name) const noexcept {
+    for (const auto& parameter : _parameters) {
+        if (parameter.Name == name) {
+            return parameter.Id;
+        }
+    }
+    return std::nullopt;
+}
+
+Nullable<const BindingParameterLayout*> BindingLayout::FindParameter(BindingParameterId id) const noexcept {
+    for (const auto& parameter : _parameters) {
+        if (parameter.Id == id) {
+            return &parameter;
+        }
+    }
+    return nullptr;
+}
+
 bool RootSignature::HasBindlessSet(DescriptorSetIndex set) const noexcept {
     return FindBindlessSet(set).HasValue();
 }
@@ -287,6 +312,17 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
         case TextureFormat::UNKNOWN: return 0;
     }
     Unreachable();
+}
+
+ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept {
+    switch (usage) {
+        case BufferViewUsage::CBuffer: return ResourceBindType::CBuffer;
+        case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
+        case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
+        case BufferViewUsage::TexelReadOnly: return ResourceBindType::TexelBuffer;
+        case BufferViewUsage::TexelReadWrite: return ResourceBindType::RWTexelBuffer;
+    }
+    return ResourceBindType::UNKNOWN;
 }
 
 std::string_view format_as(RenderBackend v) noexcept {

@@ -647,16 +647,10 @@ struct SamplerDescriptor {
 
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
-
-    // Fence 信号 — Fences 和 Values 长度必须一致
     std::span<Fence*> SignalFences{};
     std::span<uint64_t> SignalValues{};
-
-    // GPU 侧 fence 等待 — Fences 和 Values 长度必须一致
     std::span<Fence*> WaitFences{};
     std::span<uint64_t> WaitValues{};
-
-    // Swapchain 同步 — 支持多 surface
     std::span<SwapChainSyncObject*> WaitToExecute{};
     std::span<SwapChainSyncObject*> ReadyToPresent{};
 };
@@ -844,31 +838,13 @@ struct BindingParameterLayout {
 class BindingLayout {
 public:
     BindingLayout() noexcept = default;
+    explicit BindingLayout(vector<BindingParameterLayout> parameters) noexcept;
 
-    explicit BindingLayout(vector<BindingParameterLayout> parameters) noexcept
-        : _parameters(std::move(parameters)) {}
+    std::span<const BindingParameterLayout> GetParameters() const noexcept;
 
-    std::span<const BindingParameterLayout> GetParameters() const noexcept {
-        return _parameters;
-    }
+    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept;
 
-    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept {
-        for (const auto& parameter : _parameters) {
-            if (parameter.Name == name) {
-                return parameter.Id;
-            }
-        }
-        return std::nullopt;
-    }
-
-    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept {
-        for (const auto& parameter : _parameters) {
-            if (parameter.Id == id) {
-                return &parameter;
-            }
-        }
-        return nullptr;
-    }
+    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept;
 
 private:
     vector<BindingParameterLayout> _parameters{};
@@ -1647,16 +1623,7 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
-constexpr ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept {
-    switch (usage) {
-        case BufferViewUsage::CBuffer: return ResourceBindType::CBuffer;
-        case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
-        case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
-        case BufferViewUsage::TexelReadOnly: return ResourceBindType::TexelBuffer;
-        case BufferViewUsage::TexelReadWrite: return ResourceBindType::RWTexelBuffer;
-    }
-    return ResourceBindType::UNKNOWN;
-}
+ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

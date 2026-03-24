@@ -4,6 +4,8 @@
 
 本文档不是在重复 [render-graph-report.md](render-graph-report.md) 的调研结论，而是在那份报告的优先级排序基础上，结合三套引擎源码细读结果，给出一版适合 RadRay 的公开 API 草案。
 
+针对 “shader 资源槽位如何接进 render graph、哪些边界信息应继续由 graph API 声明” 这个更窄的问题，另见 [render-graph-shader-binding-v1.md](render-graph-shader-binding-v1.md)。
+
 本次再次直接检查的源码重点如下：
 
 - UE5 `RenderGraphBuilder.h` / `RenderGraphDefinitions.h` / `RenderGraphPass.h` / `RenderGraphResources.h` / `RenderGraphValidation.h` / `RenderGraphBuilder.cpp` / `RenderGraphValidation.cpp`
