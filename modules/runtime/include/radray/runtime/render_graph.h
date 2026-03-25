@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <span>
+#include <variant>
 #include <string_view>
 #include <type_traits>
 
@@ -9,6 +10,9 @@
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {
+
+// public API
+// ------------------------------------------------------------------------------
 
 struct RGHandle {
     uint32_t Id{0};
@@ -116,49 +120,20 @@ using RGTextureAccesses = EnumFlags<RGTextureAccess>;
 using RGBufferAccesses = EnumFlags<RGBufferAccess>;
 using RGPassFlags = EnumFlags<RGPassFlag>;
 
-struct RGTextureSubresourceRange {
-    static constexpr uint32_t All = std::numeric_limits<uint32_t>::max();
-
-    uint32_t BaseArrayLayer{0};
-    uint32_t ArrayLayerCount{All};
-    uint32_t BaseMipLevel{0};
-    uint32_t MipLevelCount{All};
-    RGTextureAspects Aspects{};
-
-    static constexpr RGTextureSubresourceRange AllSub() noexcept {
-        return RGTextureSubresourceRange{};
-    }
-
-    constexpr render::SubresourceRange NativeRange() const noexcept {
-        return render::SubresourceRange{
-            BaseArrayLayer,
-            ArrayLayerCount,
-            BaseMipLevel,
-            MipLevelCount,
-        };
-    }
-};
-
 struct RGBufferSlice {
     static constexpr uint64_t All = std::numeric_limits<uint64_t>::max();
 
     uint64_t Offset{0};
     uint64_t Size{All};
 
-    static constexpr RGBufferSlice Whole() noexcept {
-        return RGBufferSlice{};
-    }
+    static constexpr RGBufferSlice Whole() noexcept { return RGBufferSlice{}; }
 
-    constexpr render::BufferRange NativeRange() const noexcept {
-        return render::BufferRange{
-            Offset,
-            Size,
-        };
-    }
+    constexpr render::BufferRange NativeRange() const noexcept { return render::BufferRange{Offset, Size}; }
 };
 
 struct RGTextureBindingView {
-    RGTextureSubresourceRange Range{RGTextureSubresourceRange::AllSub()};
+    render::SubresourceRange Range{render::SubresourceRange::AllSub()};
+    RGTextureAspects Aspects{};
 };
 
 struct RGBufferBindingView {
@@ -410,27 +385,75 @@ public:
     void SetExecute(ExecuteFn&& fn);
 };
 
+// internal api
+// ------------------------------------------------------------------------------
+
+enum class RGResourceOrigin {
+    Imported,
+    Graph,
+    Transient,
+};
+
+class RGResource {
+public:
+    class BufferRecord {
+    public:
+        render::BufferDescriptor Desc{};
+        GpuBufferHandle ImportedHandle{};
+        render::BufferState ImportedInitialState{render::BufferState::UNKNOWN};
+        RGBufferBindingView ImportedInitialView{};
+        RGBufferUseDesc FinalUse{};
+        RGBufferBindingView FinalView{};
+        GpuBufferHandle ExtractedHandle{};
+        RGBufferBindingView ExtractedView{};
+        RGBufferUseDesc ExtractedFinalUse{};
+    };
+
+    class TextureRecord {
+    public:
+        render::TextureDescriptor Desc{};
+        GpuTextureHandle ImportedHandle{};
+        GpuTextureViewHandle ImportedDefaultView{};
+        render::TextureState ImportedInitialState{render::TextureState::UNKNOWN};
+        RGTextureBindingView ImportedInitialView{};
+        RGTextureUseDesc FinalUse{};
+        RGTextureBindingView FinalView{};
+        GpuTextureHandle ExtractedHandle{};
+        RGTextureBindingView ExtractedView{};
+        RGTextureUseDesc ExtractedFinalUse{};
+    };
+
+    string Name;
+    uint32_t Id;
+    RGResourceOrigin Origin;
+    RGPassHandle FirstUsePass{RGPassHandle::Invalid()};
+    RGPassHandle LastUsePass{RGPassHandle::Invalid()};
+    std::variant<BufferRecord, TextureRecord> Data;
+    bool ForceNonTransient{false};
+    bool IsExtracted{false};
+};
+
+class RGPass {
+public:
+    string Name;
+    uint32_t Id;
+    RGPassFlags Flags;
+};
+
 class RenderGraph {
 public:
-    void Reset() noexcept;
-
     RGTextureHandle ImportTexture(std::string_view name, const RGImportedTextureDesc& desc);
     RGBufferHandle ImportBuffer(std::string_view name, const RGImportedBufferDesc& desc);
 
     RGTextureHandle CreateTexture(std::string_view name, const RGTextureDesc& desc);
     RGBufferHandle CreateBuffer(std::string_view name, const RGBufferDesc& desc);
+    void SetTextureExport(RGTextureHandle handle, const RGTextureBindingView& view, const RGTextureUseDesc& finalState);
+    void SetBufferExport(RGBufferHandle handle, const RGBufferBindingView& view, const RGBufferUseDesc& finalState);
+    GpuTextureHandle GetExtractedTexture(RGTextureHandle handle) const;
+    GpuBufferHandle GetExtractedBuffer(RGBufferHandle handle) const;
 
-    void ExtractTexture(RGTextureHandle handle, GpuTextureHandle* outTexture, const RGTextureBindingView& view, render::TextureState finalState);
-    void ExtractBuffer(RGBufferHandle handle, GpuBufferHandle* outBuffer, const RGBufferBindingView& view, render::BufferState finalState);
-
-    void SetTextureAccessFinal(RGTextureHandle handle, const RGTextureBindingView& view, render::TextureState access);
-    void SetBufferAccessFinal(RGBufferHandle handle, const RGBufferBindingView& view, render::BufferState access);
-
-    void UseExternalAccessMode(RGTextureHandle handle, const RGTextureBindingView& view, render::TextureState readOnlyAccess);
-    void UseExternalAccessMode(RGBufferHandle handle, const RGBufferBindingView& view, render::BufferState readOnlyAccess);
-
-    void UseInternalAccessMode(RGTextureHandle handle);
-    void UseInternalAccessMode(RGBufferHandle handle);
+    void SetTextureAccessFinal(RGTextureHandle handle, const RGTextureBindingView& view, const RGTextureUseDesc& finalState);
+    void SetBufferAccessFinal(RGBufferHandle handle, const RGBufferBindingView& view, const RGBufferUseDesc& finalState);
 
     template <typename PassData, typename SetupFn>
     RGPassHandle AddRasterPass(
@@ -466,6 +489,13 @@ public:
 
     bool Compile(Nullable<string*> reason = nullptr);
     bool Execute(GpuAsyncContext& context, Nullable<string*> reason = nullptr);
+
+private:
+    uint32_t GetNextResHandleId() const noexcept;
+    uint32_t GetNextPassHandleId() const noexcept;
+
+    vector<RGResource> _resources;
+    vector<RGPass> _passes;
 };
 
 }  // namespace radray
