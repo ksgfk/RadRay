@@ -10,6 +10,7 @@
 - Compile `cmake --build build_debug --parallel 24`
 ## Coding Style & Naming Conventions
 - Language baseline: C++20 (`CMAKE_CXX_STANDARD 20`), C11 for C sources.
+- STL 容器优先使用`radray`命名空间下的, 例如`string`/`vector`/`unordered_map`, 详情看 `radray/types.h` 头文件
 - 接口的可空指针使用 `Nullable<T>`, 裸指针代表不可空
 - DEBUG模式用宏`RADRAY_IS_DEBUG`
 ## Test
