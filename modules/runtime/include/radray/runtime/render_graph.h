@@ -1,835 +1,151 @@
 #pragma once
 
-#include <compare>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <optional>
-#include <stdexcept>
-#include <string_view>
-#include <type_traits>
-#include <variant>
+#include <numeric>
 
-#include <radray/enum_flags.h>
 #include <radray/types.h>
+#include <radray/enum_flags.h>
+#include <radray/render/common.h>
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {
 
-class RenderGraph;
-class RGCompiledGraph;
-class RGPassContext;
-class RGGraphicsPassContext;
-class RGComputePassContext;
-class RGRayTracingPassContext;
-class RGGraphicsPassBuilder;
-class RGComputePassBuilder;
-class RGCopyPassBuilder;
-class RGRayTracingPassBuilder;
-
-enum class RGResourceKind : uint8_t {
-    Buffer,
-    Texture,
-    AccelerationStructure
+enum class RDGNodeTag {
+    UNKNOWN = 0x0,
+    Resource = 0x1,
+    Buffer = Resource | (Resource << 1),
+    Texture = Resource | (Resource << 2),
+    Pass = Resource << 3,
 };
 
-enum class RGPassKind : uint8_t {
-    Graphics,
-    Compute,
-    Copy,
-    RayTracing
+enum class RDGExecutionStage {
+    None,
+    // TODO:
 };
 
-enum class RGUseKind : uint8_t {
-    VertexBufferRead,
-    IndexBufferRead,
-    IndirectBufferRead,
-    ConstantBufferRead,
-    StorageBufferRead,
-    StorageBufferReadWrite,
-    SampledTextureRead,
-    StorageTextureRead,
-    StorageTextureReadWrite,
-    ColorAttachmentWrite,
-    DepthStencilAttachmentWrite,
-    AccelerationStructureRead,
-    AccelerationStructureBuild,
-    BuildScratchBuffer,
-    ShaderTableRead,
-    CopyBufferRead,
-    CopyBufferWrite,
-    CopyTextureRead,
-    CopyTextureWrite
+enum class RDGMemoryAccess {
+    UNKNOWN,
+    // TODO:
 };
 
-class RenderGraphException : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
+enum class RDGTextureLayout {
+    UNKNOWN,
+    // TODO:
 };
 
-struct RGNodeId {
-    uint32_t Value{std::numeric_limits<uint32_t>::max()};
-
-    constexpr bool IsValid() const noexcept {
-        return Value != std::numeric_limits<uint32_t>::max();
-    }
-
-    constexpr operator uint32_t() const noexcept { return Value; }
-
-    constexpr static RGNodeId Invalid() noexcept {
-        return {};
-    }
-
-    friend auto operator<=>(const RGNodeId& lhs, const RGNodeId& rhs) noexcept = default;
-};
-
-struct RGResourceHandle {
-    RGNodeId Node{};
-
-    constexpr bool IsValid() const noexcept { return Node.IsValid(); }
-    constexpr operator RGNodeId() const noexcept { return Node; }
-
-    constexpr static RGResourceHandle Invalid() noexcept {
-        return {};
-    }
-
-    friend auto operator<=>(const RGResourceHandle& lhs, const RGResourceHandle& rhs) noexcept = default;
-};
-
-struct RGPassHandle {
-    RGNodeId Node{};
-
-    constexpr bool IsValid() const noexcept { return Node.IsValid(); }
-    constexpr operator RGNodeId() const noexcept { return Node; }
-
-    constexpr static RGPassHandle Invalid() noexcept {
-        return {};
-    }
-
-    friend auto operator<=>(const RGPassHandle& lhs, const RGPassHandle& rhs) noexcept = default;
-};
-
-enum class RGPassFlag : uint32_t {
-    None = 0x0,
-    SideEffect = 0x1,
-    NoCull = SideEffect << 1
+enum class RDGResourceOwnership {
+    UNKNOWN,
+    External,
+    Internal,
+    Transient
 };
 
 template <>
-struct is_flags<RGPassFlag> : public std::true_type {};
+struct is_flags<RDGNodeTag> : public std::true_type {};
 
-using RGPassFlags = EnumFlags<RGPassFlag>;
+using RDGNodeTags = EnumFlags<RDGNodeTag>;
 
-constexpr render::BufferRange RGWholeBufferRange() noexcept {
-    return {0, std::numeric_limits<uint64_t>::max()};
-}
-
-constexpr render::SubresourceRange RGWholeSubresourceRange() noexcept {
-    return render::SubresourceRange::AllSub();
-}
-
-struct RGBufferDesc {
-    uint64_t Size{0};
-    render::MemoryType Memory{render::MemoryType::Device};
-    render::ResourceHints Hints{render::ResourceHint::None};
+struct RDGNodeHandle {
+    uint64_t Id{std::numeric_limits<uint64_t>::max()};
 };
 
-struct RGTextureDesc {
-    render::TextureDimension Dim{render::TextureDimension::UNKNOWN};
-    uint32_t Width{0};
-    uint32_t Height{0};
-    uint32_t DepthOrArraySize{0};
-    uint32_t MipLevels{0};
-    uint32_t SampleCount{0};
-    render::TextureFormat Format{render::TextureFormat::UNKNOWN};
-    render::MemoryType Memory{render::MemoryType::Device};
-    render::ResourceHints Hints{render::ResourceHint::None};
-};
+struct RDGResourceHandle : public RDGNodeHandle {};
+struct RDGBufferHandle : public RDGResourceHandle {};
+struct RDGTextureHandle : public RDGResourceHandle {};
+struct RDGPassHandle : public RDGNodeHandle {};
 
-struct RGAccelerationStructureDesc {
-    render::AccelerationStructureType Type{render::AccelerationStructureType::BottomLevel};
-    uint32_t MaxGeometryCount{0};
-    uint32_t MaxInstanceCount{0};
-    render::AccelerationStructureBuildFlags Flags{render::AccelerationStructureBuildFlag::None};
-};
+class RDGEdge;
 
-struct RGExternalBufferState {
-    render::QueueType Queue{render::QueueType::Direct};
-    render::BufferStates State{render::BufferState::Common};
-    render::BufferRange Range{RGWholeBufferRange()};
-};
-
-struct RGExternalTextureState {
-    render::QueueType Queue{render::QueueType::Direct};
-    render::TextureStates State{render::TextureState::Common};
-    render::SubresourceRange Range{RGWholeSubresourceRange()};
-};
-
-struct RGExternalAccelerationStructureState {
-    render::QueueType Queue{render::QueueType::Direct};
-    render::BufferStates State{render::BufferState::AccelerationStructureRead};
-};
-
-struct RGImportedBufferDesc {
-    GpuResourceHandle External{};
-    RGBufferDesc Desc{};
-    RGExternalBufferState InitialState{};
-};
-
-struct RGImportedTextureDesc {
-    GpuResourceHandle External{};
-    RGTextureDesc Desc{};
-    RGExternalTextureState InitialState{};
-};
-
-struct RGImportedAccelerationStructureDesc {
-    GpuResourceHandle External{};
-    RGAccelerationStructureDesc Desc{};
-    RGExternalAccelerationStructureState InitialState{};
-};
-
-struct RGResourceOptions {
-    bool AllowTransientAliasing{true};
-};
-
-struct RGBufferShaderAccessDesc {
-    render::BufferRange Range{RGWholeBufferRange()};
-    render::ShaderStages ShaderStages{render::ShaderStage::UNKNOWN};
-};
-
-struct RGTextureShaderAccessDesc {
-    render::SubresourceRange Range{RGWholeSubresourceRange()};
-    render::ShaderStages ShaderStages{render::ShaderStage::UNKNOWN};
-};
-
-struct RGTextureViewDesc {
-    render::TextureDimension Dim{render::TextureDimension::UNKNOWN};
-    render::TextureFormat Format{render::TextureFormat::UNKNOWN};
-    render::SubresourceRange Range{RGWholeSubresourceRange()};
-    render::TextureViewUsages Usage{render::TextureViewUsage::UNKNOWN};
-};
-
-struct RGColorAttachmentInfo {
-    render::LoadAction Load{render::LoadAction::Clear};
-    render::StoreAction Store{render::StoreAction::Store};
-    render::ColorClearValue ClearValue{};
-};
-
-struct RGDepthStencilAttachmentInfo {
-    render::LoadAction DepthLoad{render::LoadAction::Clear};
-    render::StoreAction DepthStore{render::StoreAction::Store};
-    render::LoadAction StencilLoad{render::LoadAction::DontCare};
-    render::StoreAction StencilStore{render::StoreAction::Discard};
-    render::DepthStencilClearValue ClearValue{1.0f, 0};
-};
-
-struct RGColorAttachmentDesc {
-    uint32_t Slot{0};
-    render::SubresourceRange Range{RGWholeSubresourceRange()};
-    RGColorAttachmentInfo Attachment{};
-};
-
-struct RGDepthStencilAttachmentDesc {
-    render::SubresourceRange Range{RGWholeSubresourceRange()};
-    RGDepthStencilAttachmentInfo Attachment{};
-    bool ReadOnlyDepth{false};
-    bool ReadOnlyStencil{false};
-};
-
-struct RGAccelerationStructureBuildDesc {
-    RGResourceHandle ScratchBuffer{};
-    render::BufferRange ScratchRange{RGWholeBufferRange()};
-    render::AccelerationStructureBuildMode Mode{render::AccelerationStructureBuildMode::Build};
-};
-
-using RGResourceDescData = std::variant<RGBufferDesc, RGTextureDesc, RGAccelerationStructureDesc>;
-using RGExternalStateData = std::variant<std::monostate, RGExternalBufferState, RGExternalTextureState, RGExternalAccelerationStructureState>;
-using RGExportStateData = std::variant<RGExternalBufferState, RGExternalTextureState, RGExternalAccelerationStructureState>;
-using RGUseData = std::variant<
-    std::monostate,
-    render::BufferRange,
-    render::SubresourceRange,
-    RGBufferShaderAccessDesc,
-    RGTextureShaderAccessDesc,
-    RGColorAttachmentDesc,
-    RGDepthStencilAttachmentDesc,
-    RGAccelerationStructureBuildDesc>;
-
-struct RGResourceRecord {
-    RGResourceHandle Handle{};
-    string Name{};
-    RGResourceKind Kind{RGResourceKind::Buffer};
-    bool Imported{false};
-    GpuResourceHandle External{};
-    RGResourceOptions Options{};
-    RGResourceDescData Desc{};
-    RGExternalStateData InitialState{};
-};
-
-struct RGPassRecord {
-    RGPassHandle Handle{};
-    string Name{};
-    RGPassKind Kind{RGPassKind::Graphics};
-    render::QueueType Queue{render::QueueType::Direct};
-    RGPassFlags Flags{};
-};
-
-struct RGUseRecord {
-    RGPassHandle Pass{};
-    RGResourceHandle Resource{};
-    RGUseKind Kind{RGUseKind::VertexBufferRead};
-    string Name{};
-    RGUseData Data{};
-};
-
-struct RGExportRecord {
-    RGResourceHandle Resource{};
-    RGResourceKind ExpectedKind{RGResourceKind::Buffer};
-    RGExportStateData State{};
-};
-
-using RGGraphicsPassExecuteCallback = std::function<void(RGGraphicsPassContext&)>;
-using RGComputePassExecuteCallback = std::function<void(RGComputePassContext&)>;
-using RGRayTracingPassExecuteCallback = std::function<void(RGRayTracingPassContext&)>;
-
-struct RGPassOptionsBase {
-    RGPassFlags Flags{};
-};
-
-struct RGGraphicsPassOptions : RGPassOptionsBase {
-    RGGraphicsPassExecuteCallback Execute{};
-};
-
-struct RGComputePassOptions : RGPassOptionsBase {
-    render::QueueType Queue{render::QueueType::Compute};
-    RGComputePassExecuteCallback Execute{};
-};
-
-struct RGCopyPassOptions : RGPassOptionsBase {
-    render::QueueType Queue{render::QueueType::Copy};
-};
-
-struct RGRayTracingPassOptions : RGPassOptionsBase {
-    RGRayTracingPassExecuteCallback Execute{};
-};
-
-enum class RGValidationSeverity : uint8_t {
-    Warning,
-    Error
-};
-
-enum class RGValidationIssueCode : uint8_t {
-    MissingResource,
-    MissingPass,
-    MissingImportedExternalHandle,
-    DuplicateExport,
-    InvalidResourceUseForKind,
-    InvalidPassUseForKind,
-    InvalidExportForKind,
-    InvalidBuildScratchBuffer,
-    CyclicDependency
-};
-
-struct RGValidationIssue {
-    RGValidationSeverity Severity{RGValidationSeverity::Error};
-    RGValidationIssueCode Code{RGValidationIssueCode::MissingResource};
-    string Message{};
-    std::optional<RGResourceHandle> Resource{};
-    std::optional<RGPassHandle> Pass{};
-};
-
-struct RGValidationResult {
-    vector<RGValidationIssue> Issues{};
-
-    bool IsValid() const noexcept;
-};
-
-struct RGExecutionEnvironment {
-    render::Device* Device{nullptr};
-    render::CommandBuffer* CommandBuffer{nullptr};
-    Nullable<GpuFrameContext*> FrameContext{nullptr};
-};
-
-enum class RGCompiledDependencyKind : uint8_t {
-    ReadAfterWrite,
-    WriteAfterRead,
-    WriteAfterWrite
-};
-
-struct RGCompiledResourceLifetime {
-    std::optional<uint32_t> FirstPassOrder{};
-    std::optional<uint32_t> LastPassOrder{};
-    std::optional<RGPassHandle> LastWriter{};
-};
-
-struct RGCompiledResourceRecord {
-    RGResourceHandle Handle{};
-    string Name{};
-    RGResourceKind Kind{RGResourceKind::Buffer};
-    bool Imported{false};
-    bool Exported{false};
-    RGResourceOptions Options{};
-    RGResourceDescData Desc{};
-    RGExternalStateData InitialState{};
-    RGCompiledResourceLifetime Lifetime{};
-};
-
-struct RGCompiledPassRecord {
-    RGPassHandle Handle{};
-    string Name{};
-    RGPassKind Kind{RGPassKind::Graphics};
-    render::QueueType Queue{render::QueueType::Direct};
-    RGPassFlags Flags{};
-    uint32_t Order{0};
-};
-
-struct RGCompiledUseRecord {
-    RGPassHandle Pass{};
-    RGResourceHandle Resource{};
-    RGUseKind Kind{RGUseKind::VertexBufferRead};
-    string Name{};
-    RGUseData Data{};
-    uint32_t InputVersion{0};
-    std::optional<uint32_t> OutputVersion{};
-};
-
-struct RGCompiledExportRecord {
-    RGResourceHandle Resource{};
-    RGResourceKind ExpectedKind{RGResourceKind::Buffer};
-    RGExportStateData State{};
-    uint32_t Version{0};
-};
-
-struct RGCompiledEdge {
-    RGPassHandle FromPass{};
-    RGPassHandle ToPass{};
-    RGResourceHandle Resource{};
-    RGUseKind FromUse{RGUseKind::VertexBufferRead};
-    RGUseKind ToUse{RGUseKind::VertexBufferRead};
-    RGCompiledDependencyKind Kind{RGCompiledDependencyKind::ReadAfterWrite};
-};
-
-struct RGCompiledResourceVersion {
-    RGResourceHandle Resource{};
-    uint32_t Version{0};
-    std::optional<RGPassHandle> ProducerPass{};
-    std::optional<RGUseKind> ProducerUse{};
-    vector<RGPassHandle> ConsumerPasses{};
-};
-
-class RGCompiledGraph {
+class RDGNode {
 public:
-    vector<RGCompiledResourceRecord> Resources{};
-    vector<RGCompiledPassRecord> Passes{};
-    vector<RGCompiledUseRecord> Uses{};
-    vector<RGCompiledExportRecord> Exports{};
-    vector<RGCompiledEdge> Dependencies{};
-    vector<RGPassHandle> PassOrder{};
-    vector<RGCompiledResourceVersion> ResourceVersions{};
+    virtual ~RDGNode() noexcept = default;
 
-    bool IsEmpty() const noexcept;
-    string ToGraphviz() const;
+    virtual RDGNodeTags GetTag() const noexcept = 0;
 
-    const RGCompiledResourceRecord* FindResource(RGResourceHandle handle) const noexcept;
-    const RGCompiledPassRecord* FindPass(RGPassHandle handle) const noexcept;
-};
-
-struct RGCompileResult {
-    std::optional<RGCompiledGraph> Graph{};
-    vector<RGValidationIssue> Diagnostics{};
-
-    bool Succeeded() const noexcept;
-};
-
-class RGPassContext {
 public:
-    RenderGraph& GetGraph() const noexcept;
-    const RGCompiledGraph& GetCompiledGraph() const noexcept;
-    RGPassHandle GetPass() const noexcept;
-    const RGExecutionEnvironment& GetEnvironment() const noexcept;
-    render::Device& GetDevice() const noexcept;
-    render::CommandBuffer& GetCommandBuffer() const noexcept;
-    Nullable<GpuFrameContext*> GetFrameContext() const noexcept;
-
-    render::Buffer* ResolveBuffer(RGResourceHandle buffer) const noexcept;
-    render::Texture* ResolveTexture(RGResourceHandle texture) const noexcept;
-    render::TextureView* ResolveTextureView(
-        RGResourceHandle texture,
-        const RGTextureViewDesc& desc) const noexcept;
-    render::AccelerationStructure* ResolveAccelerationStructure(
-        RGResourceHandle accelerationStructure) const noexcept;
-    render::AccelerationStructureView* ResolveAccelerationStructureView(
-        RGResourceHandle accelerationStructure) const noexcept;
-
-protected:
-    RGPassContext(
-        RenderGraph* graph,
-        const RGCompiledGraph* compiledGraph,
-        const RGExecutionEnvironment* environment,
-        RGPassHandle pass) noexcept;
-
-    RenderGraph* _graph{nullptr};
-    const RGCompiledGraph* _compiledGraph{nullptr};
-    const RGExecutionEnvironment* _environment{nullptr};
-    RGPassHandle _pass{};
-
-    friend class RenderGraph;
+    string _name;
+    uint64_t _id;
+    vector<RDGEdge*> _outEdges;
 };
 
-class RGGraphicsPassContext : public RGPassContext {
+class RDGResourceNode : public RDGNode {
 public:
-    render::GraphicsCommandEncoder& GetEncoder() const noexcept;
+    virtual ~RDGResourceNode() noexcept = default;
 
-private:
-    RGGraphicsPassContext(
-        RenderGraph* graph,
-        const RGCompiledGraph* compiledGraph,
-        const RGExecutionEnvironment* environment,
-        RGPassHandle pass,
-        render::GraphicsCommandEncoder* encoder) noexcept;
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Resource; }
 
-    render::GraphicsCommandEncoder* _encoder{nullptr};
-
-    friend class RenderGraph;
+public:
+    RDGResourceOwnership _ownership;
 };
 
-class RGComputePassContext : public RGPassContext {
+class RDGBufferNode final : public RDGResourceNode {
 public:
-    render::ComputeCommandEncoder& GetEncoder() const noexcept;
+    virtual ~RDGBufferNode() noexcept = default;
 
-private:
-    RGComputePassContext(
-        RenderGraph* graph,
-        const RGCompiledGraph* compiledGraph,
-        const RGExecutionEnvironment* environment,
-        RGPassHandle pass,
-        render::ComputeCommandEncoder* encoder) noexcept;
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Buffer; }
 
-    render::ComputeCommandEncoder* _encoder{nullptr};
-
-    friend class RenderGraph;
+public:
+    uint64_t _size{0};
 };
 
-class RGRayTracingPassContext : public RGPassContext {
+class RDGTextureNode final : public RDGResourceNode {
 public:
-    render::RayTracingCommandEncoder& GetEncoder() const noexcept;
+    virtual ~RDGTextureNode() noexcept = default;
 
-private:
-    RGRayTracingPassContext(
-        RenderGraph* graph,
-        const RGCompiledGraph* compiledGraph,
-        const RGExecutionEnvironment* environment,
-        RGPassHandle pass,
-        render::RayTracingCommandEncoder* encoder) noexcept;
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Texture; }
 
-    render::RayTracingCommandEncoder* _encoder{nullptr};
-
-    friend class RenderGraph;
+public:
+    render::TextureDimension _dim{render::TextureDimension::UNKNOWN};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _depthOrArraySize{0};
+    uint32_t _mipLevels{0};
+    uint32_t _sampleCount{0};
+    render::TextureFormat _format{render::TextureFormat::UNKNOWN};
 };
 
-class RGGraphicsPassBuilder {
+class RDGPassNode : public RDGNode {
 public:
-    RGPassHandle GetHandle() const noexcept { return _pass; }
+    virtual ~RDGPassNode() noexcept = default;
 
-    RGGraphicsPassBuilder& ReadVertexBuffer(
-        RGResourceHandle buffer,
-        render::BufferRange range = RGWholeBufferRange(),
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadIndexBuffer(
-        RGResourceHandle buffer,
-        render::BufferRange range = RGWholeBufferRange(),
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadIndirectBuffer(
-        RGResourceHandle buffer,
-        render::BufferRange range = RGWholeBufferRange(),
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadConstantBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadWriteStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadSampledTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& ReadWriteStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& BindColorAttachment(
-        RGResourceHandle texture,
-        const RGColorAttachmentDesc& desc = {},
-        std::string_view name = {});
-
-    RGGraphicsPassBuilder& BindDepthStencilAttachment(
-        RGResourceHandle texture,
-        const RGDepthStencilAttachmentDesc& desc = {},
-        std::string_view name = {});
-
-private:
-    RGGraphicsPassBuilder(RenderGraph* graph, RGPassHandle pass) noexcept;
-
-    RenderGraph* _graph{nullptr};
-    RGPassHandle _pass{};
-
-    friend class RenderGraph;
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Pass; }
 };
 
-class RGComputePassBuilder {
+class RDGEdge {
 public:
-    RGPassHandle GetHandle() const noexcept { return _pass; }
-
-    RGComputePassBuilder& ReadConstantBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadWriteStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadSampledTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadWriteStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGComputePassBuilder& ReadAccelerationStructure(
-        RGResourceHandle accelerationStructure,
-        std::string_view name = {});
-
-private:
-    RGComputePassBuilder(RenderGraph* graph, RGPassHandle pass) noexcept;
-
-    RenderGraph* _graph{nullptr};
-    RGPassHandle _pass{};
-
-    friend class RenderGraph;
-};
-
-class RGRayTracingPassBuilder {
-public:
-    RGPassHandle GetHandle() const noexcept { return _pass; }
-
-    RGRayTracingPassBuilder& ReadShaderTableBuffer(
-        RGResourceHandle buffer,
-        render::BufferRange range = RGWholeBufferRange(),
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadConstantBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadWriteStorageBuffer(
-        RGResourceHandle buffer,
-        const RGBufferShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadSampledTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadWriteStorageTexture(
-        RGResourceHandle texture,
-        const RGTextureShaderAccessDesc& desc = {},
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& ReadAccelerationStructure(
-        RGResourceHandle accelerationStructure,
-        std::string_view name = {});
-
-    RGRayTracingPassBuilder& BuildAccelerationStructure(
-        RGResourceHandle accelerationStructure,
-        const RGAccelerationStructureBuildDesc& desc,
-        std::string_view name = {});
-
-private:
-    RGRayTracingPassBuilder(RenderGraph* graph, RGPassHandle pass) noexcept;
-
-    RenderGraph* _graph{nullptr};
-    RGPassHandle _pass{};
-
-    friend class RenderGraph;
-};
-
-class RGCopyPassBuilder {
-public:
-    RGPassHandle GetHandle() const noexcept { return _pass; }
-
-    RGCopyPassBuilder& Copy(
-        RGResourceHandle src,
-        render::BufferRange srcRange,
-        RGResourceHandle dst,
-        render::BufferRange dstRange = RGWholeBufferRange(),
-        std::string_view name = {});
-
-    RGCopyPassBuilder& CopyBufferToTexture(
-        RGResourceHandle src,
-        render::BufferRange srcRange,
-        RGResourceHandle dst,
-        render::SubresourceRange dstRange = RGWholeSubresourceRange(),
-        std::string_view name = {});
-
-    RGCopyPassBuilder& CopyTextureToBuffer(
-        RGResourceHandle src,
-        render::SubresourceRange srcRange,
-        RGResourceHandle dst,
-        render::BufferRange dstRange = RGWholeBufferRange(),
-        std::string_view name = {});
-
-private:
-    RGCopyPassBuilder(RenderGraph* graph, RGPassHandle pass) noexcept;
-
-    RenderGraph* _graph{nullptr};
-    RGPassHandle _pass{};
-
-    friend class RenderGraph;
+    RDGNode* _from;
+    RDGNode* _to;
+    RDGExecutionStage _stage;
+    RDGMemoryAccess _access;
+    render::BufferRange _bufferRange;
+    RDGTextureLayout _textureLayout;
+    render::SubresourceRange _textureRange;
 };
 
 class RenderGraph {
 public:
-    RenderGraph();
-    ~RenderGraph();
-    RenderGraph(const RenderGraph&) = delete;
-    RenderGraph(RenderGraph&&) noexcept;
-    RenderGraph& operator=(const RenderGraph&) = delete;
-    RenderGraph& operator=(RenderGraph&&) noexcept;
+    RDGBufferHandle AddBuffer(uint64_t size, std::string_view name);
+    RDGTextureHandle AddTexture(
+        render::TextureDimension dim,
+        uint32_t width, uint32_t height,
+        uint32_t depthOrArraySize, uint32_t mipLevels,
+        uint32_t sampleCount,
+        render::TextureFormat format,
+        std::string_view name);
 
-    RGResourceHandle AddBuffer(
-        std::string_view name,
-        const RGBufferDesc& desc,
-        RGResourceOptions options = {});
+    RDGBufferHandle ImportBuffer(GpuBufferHandle buffer, std::string_view name);
+    RDGTextureHandle ImportTexture(GpuTextureHandle texture, std::string_view name);
 
-    RGResourceHandle AddTexture(
-        std::string_view name,
-        const RGTextureDesc& desc,
-        RGResourceOptions options = {});
+    void ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
+    void ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
 
-    RGResourceHandle AddAccelerationStructure(
-        std::string_view name,
-        const RGAccelerationStructureDesc& desc,
-        RGResourceOptions options = {});
+    RDGPassHandle AddPass(std::string_view name);
 
-    RGResourceHandle ImportBuffer(
-        std::string_view name,
-        const RGImportedBufferDesc& desc,
-        RGResourceOptions options = {});
+    void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
+    void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
 
-    RGResourceHandle ImportTexture(
-        std::string_view name,
-        const RGImportedTextureDesc& desc,
-        RGResourceOptions options = {});
-
-    RGResourceHandle ImportAccelerationStructure(
-        std::string_view name,
-        const RGImportedAccelerationStructureDesc& desc,
-        RGResourceOptions options = {});
-
-    void ExportBuffer(
-        RGResourceHandle buffer,
-        const RGExternalBufferState& finalState);
-
-    void ExportTexture(
-        RGResourceHandle texture,
-        const RGExternalTextureState& finalState);
-
-    void ExportAccelerationStructure(
-        RGResourceHandle accelerationStructure,
-        const RGExternalAccelerationStructureState& finalState);
-
-    RGGraphicsPassBuilder AddGraphicsPass(
-        std::string_view name,
-        RGGraphicsPassOptions options = {});
-
-    RGComputePassBuilder AddComputePass(
-        std::string_view name,
-        RGComputePassOptions options = {});
-
-    RGCopyPassBuilder AddCopyPass(
-        std::string_view name,
-        RGCopyPassOptions options = {});
-
-    RGRayTracingPassBuilder AddRayTracingPass(
-        std::string_view name,
-        RGRayTracingPassOptions options = {});
-
-    RGValidationResult Validate() const;
-    string ToGraphviz() const;
-
-    RGCompileResult Compile() const;
-    void Execute(
-        const RGCompiledGraph& compiledGraph,
-        const RGExecutionEnvironment& environment);
-
-private:
-    void AppendUseRecord(
-        RGPassHandle pass,
-        RGResourceHandle resource,
-        RGUseKind kind,
-        string name,
-        RGUseData data);
-
-    const RGResourceRecord* FindResource(RGResourceHandle handle) const noexcept;
-    const RGPassRecord* FindPass(RGPassHandle handle) const noexcept;
-
-    vector<RGResourceRecord> _resources{};
-    vector<RGPassRecord> _passes{};
-    vector<RGUseRecord> _uses{};
-    vector<RGExportRecord> _exports{};
-    uint32_t _nextResourceId{0};
-    uint32_t _nextPassId{0};
-
-    friend class RGGraphicsPassBuilder;
-    friend class RGComputePassBuilder;
-    friend class RGCopyPassBuilder;
-    friend class RGRayTracingPassBuilder;
+    GpuRuntime* _gpu{nullptr};
+    vector<unique_ptr<RDGNode>> _nodes;
+    vector<unique_ptr<RDGEdge>> _edges;
 };
 
 }  // namespace radray
