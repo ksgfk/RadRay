@@ -1,7 +1,9 @@
 #include <radray/runtime/render_graph.h>
 
+#include <algorithm>
 #include <array>
 #include <iterator>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -233,7 +235,21 @@ string ResourceDisplayName(const RGResourceRecord& record) {
     return fmt::format("{}#{}", ResourceKindName(record.Kind), record.Handle.Node.Value);
 }
 
+string ResourceDisplayName(const RGCompiledResourceRecord& record) {
+    if (!record.Name.empty()) {
+        return record.Name;
+    }
+    return fmt::format("{}#{}", ResourceKindName(record.Kind), record.Handle.Node.Value);
+}
+
 string PassDisplayName(const RGPassRecord& record) {
+    if (!record.Name.empty()) {
+        return record.Name;
+    }
+    return fmt::format("{}Pass#{}", PassKindName(record.Kind), record.Handle.Node.Value);
+}
+
+string PassDisplayName(const RGCompiledPassRecord& record) {
     if (!record.Name.empty()) {
         return record.Name;
     }
@@ -291,6 +307,15 @@ string FormatUseLabel(const RGUseRecord& record) {
     return label;
 }
 
+string FormatUseLabel(const RGCompiledUseRecord& record) {
+    string label{};
+    AppendLabelLine(label, UseKindName(record.Kind));
+    if (!record.Name.empty()) {
+        AppendLabelLine(label, record.Name);
+    }
+    return label;
+}
+
 string PassNodeId(RGPassHandle handle) {
     return fmt::format("pass_{}", handle.Node.Value);
 }
@@ -300,6 +325,10 @@ string ResourceVersionNodeId(RGResourceHandle handle, uint32_t version) {
 }
 
 string ResourceVersionDisplayName(const RGResourceRecord& record, uint32_t version) {
+    return fmt::format("{}@v{}", ResourceDisplayName(record), version);
+}
+
+string ResourceVersionDisplayName(const RGCompiledResourceRecord& record, uint32_t version) {
     return fmt::format("{}@v{}", ResourceDisplayName(record), version);
 }
 
@@ -320,6 +349,20 @@ string ResourceColor(RGResourceHandle handle) {
     return string{kPalette[handle.Node.Value % kPalette.size()]};
 }
 
+RGValidationIssue MakeIssue(
+    RGValidationIssueCode code,
+    string message,
+    std::optional<RGResourceHandle> resource,
+    std::optional<RGPassHandle> pass,
+    RGValidationSeverity severity = RGValidationSeverity::Error) {
+    return RGValidationIssue{
+        .Severity = severity,
+        .Code = code,
+        .Message = std::move(message),
+        .Resource = resource,
+        .Pass = pass};
+}
+
 void AddIssue(
     RGValidationResult& result,
     RGValidationIssueCode code,
@@ -327,13 +370,64 @@ void AddIssue(
     std::optional<RGResourceHandle> resource,
     std::optional<RGPassHandle> pass,
     RGValidationSeverity severity = RGValidationSeverity::Error) {
-    result.Issues.push_back(RGValidationIssue{
-        .Severity = severity,
-        .Code = code,
-        .Message = std::move(message),
-        .Resource = resource,
-        .Pass = pass});
+    result.Issues.push_back(MakeIssue(code, std::move(message), resource, pass, severity));
 }
+
+bool IsPassKeepAlive(const RGPassRecord& pass) noexcept {
+    return pass.Flags.HasFlag(RGPassFlag::SideEffect) || pass.Flags.HasFlag(RGPassFlag::NoCull);
+}
+
+RGCompiledDependencyKind DependencyKindFor(RGUseKind fromUse, RGUseKind toUse) noexcept {
+    if (IsReadUse(toUse)) {
+        return RGCompiledDependencyKind::ReadAfterWrite;
+    }
+    if (IsReadUse(fromUse)) {
+        return RGCompiledDependencyKind::WriteAfterRead;
+    }
+    return RGCompiledDependencyKind::WriteAfterWrite;
+}
+
+struct RGAnalyzedUseRecord {
+    const RGUseRecord* Record{nullptr};
+    uint32_t InputVersion{0};
+    std::optional<uint32_t> OutputVersion{};
+    bool Reads{false};
+    bool Writes{false};
+};
+
+struct RGAnalyzedResourceVersion {
+    std::optional<RGPassHandle> ProducerPass{};
+    std::optional<RGUseKind> ProducerUse{};
+    std::optional<size_t> ProducerUseIndex{};
+    vector<RGPassHandle> ConsumerPasses{};
+    vector<RGUseKind> ConsumerUses{};
+    vector<size_t> ConsumerUseIndices{};
+};
+
+struct RGCompileAnalysis {
+    vector<RGAnalyzedUseRecord> Uses{};
+    vector<vector<size_t>> PassUses{};
+    vector<vector<RGAnalyzedResourceVersion>> ResourceVersions{};
+    vector<uint32_t> FinalVersions{};
+};
+
+struct RGDependencyKey {
+    RGPassHandle FromPass{};
+    RGPassHandle ToPass{};
+    RGResourceHandle Resource{};
+    RGUseKind FromUse{RGUseKind::VertexBufferRead};
+    RGUseKind ToUse{RGUseKind::VertexBufferRead};
+    RGCompiledDependencyKind Kind{RGCompiledDependencyKind::ReadAfterWrite};
+
+    friend auto operator<=>(const RGDependencyKey&, const RGDependencyKey&) noexcept = default;
+};
+
+struct RGPassPair {
+    RGPassHandle FromPass{};
+    RGPassHandle ToPass{};
+
+    friend auto operator<=>(const RGPassPair&, const RGPassPair&) noexcept = default;
+};
 
 }  // namespace
 
@@ -344,6 +438,44 @@ bool RGValidationResult::IsValid() const noexcept {
         }
     }
     return true;
+}
+
+bool RGCompiledGraph::IsEmpty() const noexcept {
+    return Resources.empty() &&
+        Passes.empty() &&
+        Uses.empty() &&
+        Exports.empty() &&
+        Dependencies.empty() &&
+        PassOrder.empty() &&
+        ResourceVersions.empty();
+}
+
+const RGCompiledResourceRecord* RGCompiledGraph::FindResource(RGResourceHandle handle) const noexcept {
+    if (!handle.IsValid()) {
+        return nullptr;
+    }
+    for (const auto& resource : Resources) {
+        if (resource.Handle == handle) {
+            return &resource;
+        }
+    }
+    return nullptr;
+}
+
+const RGCompiledPassRecord* RGCompiledGraph::FindPass(RGPassHandle handle) const noexcept {
+    if (!handle.IsValid()) {
+        return nullptr;
+    }
+    for (const auto& pass : Passes) {
+        if (pass.Handle == handle) {
+            return &pass;
+        }
+    }
+    return nullptr;
+}
+
+bool RGCompileResult::Succeeded() const noexcept {
+    return Graph.has_value();
 }
 
 RGPassContext::RGPassContext(
@@ -972,8 +1104,541 @@ string RenderGraph::ToGraphviz() const {
     return string{buffer.data(), buffer.size()};
 }
 
-RGCompiledGraph RenderGraph::Compile() const {
-    return {};
+string RGCompiledGraph::ToGraphviz() const {
+    fmt::memory_buffer buffer{};
+    fmt::format_to(std::back_inserter(buffer), "digraph RGCompiledGraph {{\n");
+    fmt::format_to(std::back_inserter(buffer), "  rankdir=LR;\n");
+    fmt::format_to(std::back_inserter(buffer), "  node [fontname=\"Segoe UI\"];\n");
+
+    for (const auto& pass : Passes) {
+        string label{};
+        AppendLabelLine(label, fmt::format("{} Pass", PassKindName(pass.Kind)));
+        AppendLabelLine(label, PassDisplayName(pass));
+        AppendLabelLine(label, fmt::format("queue={}", pass.Queue));
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  {} [shape=box, style=\"rounded,filled\", fillcolor=\"#bde0fe\", color=\"#5b7c99\", label=\"{}\"];\n",
+            PassNodeId(pass.Handle),
+            label);
+    }
+
+    for (size_t exportIndex = 0; exportIndex < Exports.size(); ++exportIndex) {
+        const auto& exportRecord = Exports[exportIndex];
+        const auto exportNodeId = fmt::format("export_{}", exportIndex);
+        string label{};
+        AppendLabelLine(label, fmt::format("Export {}", ResourceKindName(exportRecord.ExpectedKind)));
+        if (const auto* resource = FindResource(exportRecord.Resource)) {
+            AppendLabelLine(label, ResourceDisplayName(*resource));
+        }
+        std::visit(
+            [&](const auto& state) {
+                AppendLabelLine(label, FormatExportState(state));
+            },
+            exportRecord.State);
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  {} [shape=diamond, style=\"filled\", fillcolor=\"#f1f3f5\", color=\"#6c757d\", label=\"{}\"];\n",
+            exportNodeId,
+            label);
+    }
+
+    for (const auto& version : ResourceVersions) {
+        const auto* resource = FindResource(version.Resource);
+        if (resource == nullptr) {
+            continue;
+        }
+        string label{};
+        AppendLabelLine(label, fmt::format("{} Resource", ResourceKindName(resource->Kind)));
+        AppendLabelLine(label, ResourceVersionDisplayName(*resource, version.Version));
+        AppendLabelLine(label, resource->Imported ? "imported" : "local");
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  {} [shape=ellipse, style=\"filled\", fillcolor=\"{}\", color=\"#495057\", label=\"{}\"];\n",
+            ResourceVersionNodeId(version.Resource, version.Version),
+            ResourceColor(version.Resource),
+            label);
+    }
+
+    auto emitEdge = [&](std::string_view src, std::string_view dst, const string& label) {
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "  {} -> {} [label=\"{}\"];\n",
+            src,
+            dst,
+            label);
+    };
+
+    for (const auto& use : Uses) {
+        const auto passNodeId = PassNodeId(use.Pass);
+        const auto label = FormatUseLabel(use);
+        if (IsReadUse(use.Kind) || IsReadWriteUse(use.Kind)) {
+            emitEdge(ResourceVersionNodeId(use.Resource, use.InputVersion), passNodeId, label);
+        }
+        if (use.OutputVersion.has_value()) {
+            emitEdge(passNodeId, ResourceVersionNodeId(use.Resource, *use.OutputVersion), label);
+        }
+    }
+
+    for (size_t exportIndex = 0; exportIndex < Exports.size(); ++exportIndex) {
+        const auto& exportRecord = Exports[exportIndex];
+        emitEdge(
+            ResourceVersionNodeId(exportRecord.Resource, exportRecord.Version),
+            fmt::format("export_{}", exportIndex),
+            EscapeGraphviz("Export"));
+    }
+
+    fmt::format_to(std::back_inserter(buffer), "}}\n");
+    return string{buffer.data(), buffer.size()};
+}
+
+RGCompileResult RenderGraph::Compile() const {
+    RGCompileResult result{};
+    const auto validation = Validate();
+    result.Diagnostics = validation.Issues;
+    if (!validation.IsValid()) {
+        return result;
+    }
+
+    RGCompileAnalysis analysis{};
+    analysis.Uses.resize(_uses.size());
+    analysis.PassUses.resize(_passes.size());
+    analysis.ResourceVersions.resize(_resources.size());
+    analysis.FinalVersions.assign(_resources.size(), 0);
+
+    for (size_t resourceIndex = 0; resourceIndex < _resources.size(); ++resourceIndex) {
+        analysis.ResourceVersions[resourceIndex].push_back(RGAnalyzedResourceVersion{});
+    }
+
+    for (size_t useIndex = 0; useIndex < _uses.size(); ++useIndex) {
+        const auto& use = _uses[useIndex];
+        const auto passIndex = static_cast<size_t>(use.Pass.Node.Value);
+        const auto resourceIndex = static_cast<size_t>(use.Resource.Node.Value);
+        analysis.PassUses[passIndex].push_back(useIndex);
+
+        auto& analyzedUse = analysis.Uses[useIndex];
+        analyzedUse.Record = &use;
+        analyzedUse.Reads = IsReadUse(use.Kind) || IsReadWriteUse(use.Kind);
+        analyzedUse.Writes = IsWriteUse(use.Kind) || IsReadWriteUse(use.Kind);
+        analyzedUse.InputVersion = analysis.FinalVersions[resourceIndex];
+
+        auto& versions = analysis.ResourceVersions[resourceIndex];
+        auto& inputVersion = versions[analyzedUse.InputVersion];
+        if (analyzedUse.Reads) {
+            inputVersion.ConsumerPasses.push_back(use.Pass);
+            inputVersion.ConsumerUses.push_back(use.Kind);
+            inputVersion.ConsumerUseIndices.push_back(useIndex);
+        }
+
+        if (analyzedUse.Writes) {
+            const auto outputVersion = static_cast<uint32_t>(versions.size());
+            analyzedUse.OutputVersion = outputVersion;
+            versions.push_back(RGAnalyzedResourceVersion{
+                .ProducerPass = use.Pass,
+                .ProducerUse = use.Kind,
+                .ProducerUseIndex = useIndex});
+            analysis.FinalVersions[resourceIndex] = outputVersion;
+        }
+    }
+
+    vector<bool> livePasses(_passes.size(), false);
+    vector<bool> liveResources(_resources.size(), false);
+    vector<bool> liveUses(_uses.size(), false);
+    vector<vector<bool>> liveVersions{};
+    liveVersions.reserve(_resources.size());
+    for (const auto& versions : analysis.ResourceVersions) {
+        liveVersions.push_back(vector<bool>(versions.size(), false));
+    }
+
+    deque<RGPassHandle> passWork{};
+    deque<std::pair<RGResourceHandle, uint32_t>> versionWork{};
+
+    const auto markPassLive = [&](RGPassHandle pass) {
+        const auto passIndex = static_cast<size_t>(pass.Node.Value);
+        if (livePasses[passIndex]) {
+            return;
+        }
+        livePasses[passIndex] = true;
+        passWork.push_back(pass);
+    };
+
+    const auto markVersionLive = [&](RGResourceHandle resource, uint32_t version) {
+        const auto resourceIndex = static_cast<size_t>(resource.Node.Value);
+        if (liveVersions[resourceIndex][version]) {
+            return;
+        }
+        liveVersions[resourceIndex][version] = true;
+        liveResources[resourceIndex] = true;
+        versionWork.emplace_back(resource, version);
+    };
+
+    for (const auto& exportRecord : _exports) {
+        const auto resourceIndex = static_cast<size_t>(exportRecord.Resource.Node.Value);
+        markVersionLive(exportRecord.Resource, analysis.FinalVersions[resourceIndex]);
+    }
+
+    for (const auto& pass : _passes) {
+        if (IsPassKeepAlive(pass)) {
+            markPassLive(pass.Handle);
+        }
+    }
+
+    while (!passWork.empty() || !versionWork.empty()) {
+        while (!passWork.empty()) {
+            const auto pass = passWork.front();
+            passWork.pop_front();
+            const auto passIndex = static_cast<size_t>(pass.Node.Value);
+            for (const auto useIndex : analysis.PassUses[passIndex]) {
+                liveUses[useIndex] = true;
+                const auto& use = _uses[useIndex];
+                const auto resourceIndex = static_cast<size_t>(use.Resource.Node.Value);
+                liveResources[resourceIndex] = true;
+
+                const auto& analyzedUse = analysis.Uses[useIndex];
+                if (analyzedUse.Reads) {
+                    markVersionLive(use.Resource, analyzedUse.InputVersion);
+                }
+                if (analyzedUse.OutputVersion.has_value()) {
+                    markVersionLive(use.Resource, *analyzedUse.OutputVersion);
+                }
+            }
+        }
+
+        while (!versionWork.empty()) {
+            const auto [resource, version] = versionWork.front();
+            versionWork.pop_front();
+            const auto resourceIndex = static_cast<size_t>(resource.Node.Value);
+            const auto& analyzedVersion = analysis.ResourceVersions[resourceIndex][version];
+            if (analyzedVersion.ProducerPass.has_value()) {
+                markPassLive(*analyzedVersion.ProducerPass);
+            }
+        }
+    }
+
+    vector<RGCompiledEdge> dependencies{};
+    set<RGDependencyKey> dependencyKeys{};
+    const auto appendDependency = [&](RGPassHandle fromPass,
+                                      RGPassHandle toPass,
+                                      RGResourceHandle resource,
+                                      RGUseKind fromUse,
+                                      RGUseKind toUse) {
+        if (fromPass == toPass) {
+            return;
+        }
+        const auto fromIndex = static_cast<size_t>(fromPass.Node.Value);
+        const auto toIndex = static_cast<size_t>(toPass.Node.Value);
+        if (!livePasses[fromIndex] || !livePasses[toIndex]) {
+            return;
+        }
+        const auto kind = DependencyKindFor(fromUse, toUse);
+        const RGDependencyKey key{
+            .FromPass = fromPass,
+            .ToPass = toPass,
+            .Resource = resource,
+            .FromUse = fromUse,
+            .ToUse = toUse,
+            .Kind = kind};
+        if (!dependencyKeys.insert(key).second) {
+            return;
+        }
+        dependencies.push_back(RGCompiledEdge{
+            .FromPass = fromPass,
+            .ToPass = toPass,
+            .Resource = resource,
+            .FromUse = fromUse,
+            .ToUse = toUse,
+            .Kind = kind});
+    };
+
+    for (size_t useIndex = 0; useIndex < _uses.size(); ++useIndex) {
+        if (!liveUses[useIndex]) {
+            continue;
+        }
+
+        const auto& use = _uses[useIndex];
+        const auto& analyzedUse = analysis.Uses[useIndex];
+        const auto resourceIndex = static_cast<size_t>(use.Resource.Node.Value);
+        const auto& inputVersion = analysis.ResourceVersions[resourceIndex][analyzedUse.InputVersion];
+
+        if (analyzedUse.Reads && inputVersion.ProducerPass.has_value() && inputVersion.ProducerUse.has_value()) {
+            appendDependency(*inputVersion.ProducerPass, use.Pass, use.Resource, *inputVersion.ProducerUse, use.Kind);
+        }
+
+        if (analyzedUse.Writes) {
+            if (inputVersion.ProducerPass.has_value() && inputVersion.ProducerUse.has_value()) {
+                appendDependency(*inputVersion.ProducerPass, use.Pass, use.Resource, *inputVersion.ProducerUse, use.Kind);
+            }
+
+            for (size_t consumerIndex = 0; consumerIndex < inputVersion.ConsumerPasses.size(); ++consumerIndex) {
+                appendDependency(
+                    inputVersion.ConsumerPasses[consumerIndex],
+                    use.Pass,
+                    use.Resource,
+                    inputVersion.ConsumerUses[consumerIndex],
+                    use.Kind);
+            }
+        }
+    }
+
+    std::sort(
+        dependencies.begin(),
+        dependencies.end(),
+        [](const RGCompiledEdge& lhs, const RGCompiledEdge& rhs) {
+            return std::tie(
+                       lhs.FromPass.Node.Value,
+                       lhs.ToPass.Node.Value,
+                       lhs.Resource.Node.Value,
+                       lhs.Kind,
+                       lhs.FromUse,
+                       lhs.ToUse) <
+                std::tie(
+                       rhs.FromPass.Node.Value,
+                       rhs.ToPass.Node.Value,
+                       rhs.Resource.Node.Value,
+                       rhs.Kind,
+                       rhs.FromUse,
+                       rhs.ToUse);
+        });
+
+    set<RGPassPair> dependencyPairs{};
+    vector<vector<RGPassHandle>> outgoing(_passes.size());
+    vector<uint32_t> indegree(_passes.size(), 0);
+    for (const auto& dependency : dependencies) {
+        const RGPassPair pair{.FromPass = dependency.FromPass, .ToPass = dependency.ToPass};
+        if (!dependencyPairs.insert(pair).second) {
+            continue;
+        }
+        const auto fromIndex = static_cast<size_t>(dependency.FromPass.Node.Value);
+        const auto toIndex = static_cast<size_t>(dependency.ToPass.Node.Value);
+        outgoing[fromIndex].push_back(dependency.ToPass);
+        ++indegree[toIndex];
+    }
+
+    vector<RGPassHandle> passOrder{};
+    passOrder.reserve(_passes.size());
+    vector<bool> scheduled(_passes.size(), false);
+    size_t livePassCount = 0;
+    for (bool live : livePasses) {
+        if (live) {
+            ++livePassCount;
+        }
+    }
+
+    while (passOrder.size() < livePassCount) {
+        const RGPassRecord* nextPass = nullptr;
+        for (const auto& pass : _passes) {
+            const auto passIndex = static_cast<size_t>(pass.Handle.Node.Value);
+            if (!livePasses[passIndex] || scheduled[passIndex] || indegree[passIndex] != 0) {
+                continue;
+            }
+            nextPass = &pass;
+            break;
+        }
+
+        if (nextPass == nullptr) {
+            string cycleMessage{"Cyclic dependency detected among live render graph passes."};
+            for (const auto& pass : _passes) {
+                const auto passIndex = static_cast<size_t>(pass.Handle.Node.Value);
+                if (!livePasses[passIndex] || scheduled[passIndex]) {
+                    continue;
+                }
+                cycleMessage += "\n";
+                cycleMessage += PassDisplayName(pass);
+            }
+            result.Diagnostics.push_back(MakeIssue(
+                RGValidationIssueCode::CyclicDependency,
+                cycleMessage,
+                std::nullopt,
+                std::nullopt));
+            return result;
+        }
+
+        const auto passIndex = static_cast<size_t>(nextPass->Handle.Node.Value);
+        scheduled[passIndex] = true;
+        passOrder.push_back(nextPass->Handle);
+        for (const auto toPass : outgoing[passIndex]) {
+            const auto toIndex = static_cast<size_t>(toPass.Node.Value);
+            --indegree[toIndex];
+        }
+    }
+
+    vector<std::optional<uint32_t>> passOrders(_passes.size());
+    for (uint32_t order = 0; order < passOrder.size(); ++order) {
+        passOrders[static_cast<size_t>(passOrder[order].Node.Value)] = order;
+    }
+
+    result.Graph.emplace();
+    auto& compiledGraph = *result.Graph;
+    compiledGraph.PassOrder = passOrder;
+    compiledGraph.Dependencies = dependencies;
+
+    vector<vector<std::optional<uint32_t>>> versionRemaps(_resources.size());
+    for (size_t resourceIndex = 0; resourceIndex < _resources.size(); ++resourceIndex) {
+        if (!liveResources[resourceIndex]) {
+            continue;
+        }
+
+        const auto& resource = _resources[resourceIndex];
+        const auto& rawVersions = analysis.ResourceVersions[resourceIndex];
+        vector<bool> keepVersions(rawVersions.size(), false);
+        keepVersions[0] = true;
+
+        for (size_t useIndex = 0; useIndex < _uses.size(); ++useIndex) {
+            if (!liveUses[useIndex] || _uses[useIndex].Resource != resource.Handle) {
+                continue;
+            }
+
+            const auto& analyzedUse = analysis.Uses[useIndex];
+            if (analyzedUse.Reads) {
+                keepVersions[analyzedUse.InputVersion] = true;
+            }
+            if (analyzedUse.OutputVersion.has_value()) {
+                keepVersions[*analyzedUse.OutputVersion] = true;
+            }
+        }
+
+        for (const auto& exportRecord : _exports) {
+            if (exportRecord.Resource == resource.Handle) {
+                keepVersions[analysis.FinalVersions[resourceIndex]] = true;
+            }
+        }
+
+        auto& remap = versionRemaps[resourceIndex];
+        remap.resize(rawVersions.size());
+        for (uint32_t oldVersion = 0, nextVersion = 0; oldVersion < rawVersions.size(); ++oldVersion) {
+            if (!keepVersions[oldVersion]) {
+                continue;
+            }
+            remap[oldVersion] = nextVersion;
+            const auto& rawVersion = rawVersions[oldVersion];
+
+            vector<RGPassHandle> consumers{};
+            for (size_t consumerIndex = 0; consumerIndex < rawVersion.ConsumerPasses.size(); ++consumerIndex) {
+                const auto pass = rawVersion.ConsumerPasses[consumerIndex];
+                const auto passIndex = static_cast<size_t>(pass.Node.Value);
+                if (!livePasses[passIndex]) {
+                    continue;
+                }
+                if (std::find(consumers.begin(), consumers.end(), pass) != consumers.end()) {
+                    continue;
+                }
+                consumers.push_back(pass);
+            }
+
+            compiledGraph.ResourceVersions.push_back(RGCompiledResourceVersion{
+                .Resource = resource.Handle,
+                .Version = nextVersion,
+                .ProducerPass = rawVersion.ProducerPass,
+                .ProducerUse = rawVersion.ProducerUse,
+                .ConsumerPasses = std::move(consumers)});
+            ++nextVersion;
+        }
+    }
+
+    for (const auto& passHandle : passOrder) {
+        const auto& pass = _passes[static_cast<size_t>(passHandle.Node.Value)];
+        compiledGraph.Passes.push_back(RGCompiledPassRecord{
+            .Handle = pass.Handle,
+            .Name = pass.Name,
+            .Kind = pass.Kind,
+            .Queue = pass.Queue,
+            .Flags = pass.Flags,
+            .Order = *passOrders[static_cast<size_t>(pass.Handle.Node.Value)]});
+    }
+
+    for (size_t resourceIndex = 0; resourceIndex < _resources.size(); ++resourceIndex) {
+        if (!liveResources[resourceIndex]) {
+            continue;
+        }
+
+        const auto& resource = _resources[resourceIndex];
+        RGCompiledResourceLifetime lifetime{};
+        bool exported = false;
+        for (const auto& exportRecord : _exports) {
+            if (exportRecord.Resource == resource.Handle) {
+                exported = true;
+                break;
+            }
+        }
+
+        for (size_t useIndex = 0; useIndex < _uses.size(); ++useIndex) {
+            if (!liveUses[useIndex] || _uses[useIndex].Resource != resource.Handle) {
+                continue;
+            }
+
+            const auto passOrderIndex = *passOrders[static_cast<size_t>(_uses[useIndex].Pass.Node.Value)];
+            if (!lifetime.FirstPassOrder.has_value() || passOrderIndex < *lifetime.FirstPassOrder) {
+                lifetime.FirstPassOrder = passOrderIndex;
+            }
+            if (!lifetime.LastPassOrder.has_value() || passOrderIndex > *lifetime.LastPassOrder) {
+                lifetime.LastPassOrder = passOrderIndex;
+            }
+            if ((IsWriteUse(_uses[useIndex].Kind) || IsReadWriteUse(_uses[useIndex].Kind)) &&
+                (!lifetime.LastWriter.has_value() ||
+                 passOrderIndex >= *passOrders[static_cast<size_t>(lifetime.LastWriter->Node.Value)])) {
+                lifetime.LastWriter = _uses[useIndex].Pass;
+            }
+        }
+
+        compiledGraph.Resources.push_back(RGCompiledResourceRecord{
+            .Handle = resource.Handle,
+            .Name = resource.Name,
+            .Kind = resource.Kind,
+            .Imported = resource.Imported,
+            .Exported = exported,
+            .Options = resource.Options,
+            .Desc = resource.Desc,
+            .InitialState = resource.InitialState,
+            .Lifetime = lifetime});
+    }
+
+    for (size_t useIndex = 0; useIndex < _uses.size(); ++useIndex) {
+        if (!liveUses[useIndex]) {
+            continue;
+        }
+
+        const auto& use = _uses[useIndex];
+        const auto& analyzedUse = analysis.Uses[useIndex];
+        const auto resourceIndex = static_cast<size_t>(use.Resource.Node.Value);
+        const auto& remap = versionRemaps[resourceIndex];
+
+        uint32_t inputVersion = 0;
+        if (analyzedUse.Reads) {
+            inputVersion = *remap[analyzedUse.InputVersion];
+        } else {
+            for (int64_t version = analyzedUse.InputVersion; version >= 0; --version) {
+                if (remap[static_cast<size_t>(version)].has_value()) {
+                    inputVersion = *remap[static_cast<size_t>(version)];
+                    break;
+                }
+            }
+        }
+
+        std::optional<uint32_t> outputVersion{};
+        if (analyzedUse.OutputVersion.has_value()) {
+            outputVersion = *remap[*analyzedUse.OutputVersion];
+        }
+
+        compiledGraph.Uses.push_back(RGCompiledUseRecord{
+            .Pass = use.Pass,
+            .Resource = use.Resource,
+            .Kind = use.Kind,
+            .Name = use.Name,
+            .Data = use.Data,
+            .InputVersion = inputVersion,
+            .OutputVersion = outputVersion});
+    }
+
+    for (const auto& exportRecord : _exports) {
+        const auto resourceIndex = static_cast<size_t>(exportRecord.Resource.Node.Value);
+        const auto version = *versionRemaps[resourceIndex][analysis.FinalVersions[resourceIndex]];
+        compiledGraph.Exports.push_back(RGCompiledExportRecord{
+            .Resource = exportRecord.Resource,
+            .ExpectedKind = exportRecord.ExpectedKind,
+            .State = exportRecord.State,
+            .Version = version});
+    }
+
+    return result;
 }
 
 void RenderGraph::Execute(

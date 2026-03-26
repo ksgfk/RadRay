@@ -326,7 +326,8 @@ enum class RGValidationIssueCode : uint8_t {
     InvalidResourceUseForKind,
     InvalidPassUseForKind,
     InvalidExportForKind,
-    InvalidBuildScratchBuffer
+    InvalidBuildScratchBuffer,
+    CyclicDependency
 };
 
 struct RGValidationIssue {
@@ -349,7 +350,96 @@ struct RGExecutionEnvironment {
     Nullable<GpuFrameContext*> FrameContext{nullptr};
 };
 
-class RGCompiledGraph {};
+enum class RGCompiledDependencyKind : uint8_t {
+    ReadAfterWrite,
+    WriteAfterRead,
+    WriteAfterWrite
+};
+
+struct RGCompiledResourceLifetime {
+    std::optional<uint32_t> FirstPassOrder{};
+    std::optional<uint32_t> LastPassOrder{};
+    std::optional<RGPassHandle> LastWriter{};
+};
+
+struct RGCompiledResourceRecord {
+    RGResourceHandle Handle{};
+    string Name{};
+    RGResourceKind Kind{RGResourceKind::Buffer};
+    bool Imported{false};
+    bool Exported{false};
+    RGResourceOptions Options{};
+    RGResourceDescData Desc{};
+    RGExternalStateData InitialState{};
+    RGCompiledResourceLifetime Lifetime{};
+};
+
+struct RGCompiledPassRecord {
+    RGPassHandle Handle{};
+    string Name{};
+    RGPassKind Kind{RGPassKind::Graphics};
+    render::QueueType Queue{render::QueueType::Direct};
+    RGPassFlags Flags{};
+    uint32_t Order{0};
+};
+
+struct RGCompiledUseRecord {
+    RGPassHandle Pass{};
+    RGResourceHandle Resource{};
+    RGUseKind Kind{RGUseKind::VertexBufferRead};
+    string Name{};
+    RGUseData Data{};
+    uint32_t InputVersion{0};
+    std::optional<uint32_t> OutputVersion{};
+};
+
+struct RGCompiledExportRecord {
+    RGResourceHandle Resource{};
+    RGResourceKind ExpectedKind{RGResourceKind::Buffer};
+    RGExportStateData State{};
+    uint32_t Version{0};
+};
+
+struct RGCompiledEdge {
+    RGPassHandle FromPass{};
+    RGPassHandle ToPass{};
+    RGResourceHandle Resource{};
+    RGUseKind FromUse{RGUseKind::VertexBufferRead};
+    RGUseKind ToUse{RGUseKind::VertexBufferRead};
+    RGCompiledDependencyKind Kind{RGCompiledDependencyKind::ReadAfterWrite};
+};
+
+struct RGCompiledResourceVersion {
+    RGResourceHandle Resource{};
+    uint32_t Version{0};
+    std::optional<RGPassHandle> ProducerPass{};
+    std::optional<RGUseKind> ProducerUse{};
+    vector<RGPassHandle> ConsumerPasses{};
+};
+
+class RGCompiledGraph {
+public:
+    vector<RGCompiledResourceRecord> Resources{};
+    vector<RGCompiledPassRecord> Passes{};
+    vector<RGCompiledUseRecord> Uses{};
+    vector<RGCompiledExportRecord> Exports{};
+    vector<RGCompiledEdge> Dependencies{};
+    vector<RGPassHandle> PassOrder{};
+    vector<RGCompiledResourceVersion> ResourceVersions{};
+
+    bool IsEmpty() const noexcept;
+    string ToGraphviz() const;
+
+    const RGCompiledResourceRecord* FindResource(RGResourceHandle handle) const noexcept;
+    const RGCompiledPassRecord* FindPass(RGPassHandle handle) const noexcept;
+};
+
+struct RGCompileResult {
+    std::optional<RGCompiledGraph> Graph{};
+    vector<RGValidationIssue> Diagnostics{};
+
+    bool Succeeded() const noexcept;
+};
 
 class RGPassContext {
 public:
@@ -713,7 +803,7 @@ public:
     RGValidationResult Validate() const;
     string ToGraphviz() const;
 
-    RGCompiledGraph Compile() const;
+    RGCompileResult Compile() const;
     void Execute(
         const RGCompiledGraph& compiledGraph,
         const RGExecutionEnvironment& environment);

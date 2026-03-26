@@ -37,8 +37,8 @@ RGAccelerationStructureDesc MakeAccelerationStructureDesc() {
     return desc;
 }
 
-bool HasIssue(const RGValidationResult& result, RGValidationIssueCode code) {
-    for (const auto& issue : result.Issues) {
+bool HasIssue(const vector<RGValidationIssue>& issues, RGValidationIssueCode code) {
+    for (const auto& issue : issues) {
         if (issue.Code == code) {
             return true;
         }
@@ -46,14 +46,26 @@ bool HasIssue(const RGValidationResult& result, RGValidationIssueCode code) {
     return false;
 }
 
-size_t CountIssues(const RGValidationResult& result, RGValidationIssueCode code) {
+bool HasIssue(const RGValidationResult& result, RGValidationIssueCode code) {
+    return HasIssue(result.Issues, code);
+}
+
+bool HasIssue(const RGCompileResult& result, RGValidationIssueCode code) {
+    return HasIssue(result.Diagnostics, code);
+}
+
+size_t CountIssues(const vector<RGValidationIssue>& issues, RGValidationIssueCode code) {
     size_t count = 0;
-    for (const auto& issue : result.Issues) {
+    for (const auto& issue : issues) {
         if (issue.Code == code) {
             ++count;
         }
     }
     return count;
+}
+
+size_t CountIssues(const RGValidationResult& result, RGValidationIssueCode code) {
+    return CountIssues(result.Issues, code);
 }
 
 }  // namespace
@@ -345,12 +357,256 @@ TEST(RenderGraph, ComplexFrameGraphScenarioValidatesAndExportsGraphviz) {
     EXPECT_NE(dot.find("ColorAttachmentWrite"), string::npos);
     EXPECT_NE(dot.find("StorageTextureReadWrite"), string::npos);
     EXPECT_NE(dot.find("Export Texture"), string::npos);
+
+    const auto compile = graph.Compile();
+    ASSERT_TRUE(compile.Succeeded());
+    ASSERT_TRUE(compile.Graph.has_value());
+
+    const auto& compiled = *compile.Graph;
+    EXPECT_EQ(compiled.Passes.size(), 13u);
+    EXPECT_EQ(compiled.PassOrder.size(), 13u);
+    EXPECT_EQ(compiled.Resources.size(), 21u);
+    EXPECT_EQ(compiled.Exports.size(), 1u);
+    EXPECT_EQ(compiled.FindPass(earlyZ.GetHandle()), nullptr);
+    EXPECT_EQ(compiled.FindPass(gbuffer.GetHandle()), &compiled.Passes[0]);
+    EXPECT_EQ(compiled.FindPass(tonemap.GetHandle()), &compiled.Passes[12]);
+    EXPECT_EQ(compiled.PassOrder.front(), gbuffer.GetHandle());
+    EXPECT_EQ(compiled.PassOrder.back(), tonemap.GetHandle());
+    EXPECT_NE(compiled.FindResource(finalColor), nullptr);
+    EXPECT_NE(compiled.FindResource(hiz), nullptr);
+    EXPECT_NE(compiled.FindResource(exposureHistogram), nullptr);
+    EXPECT_NE(compiled.FindResource(sceneConstants), nullptr);
+    EXPECT_NE(compiled.FindResource(instanceData), nullptr);
+
+    const auto* finalColorRecord = compiled.FindResource(finalColor);
+    ASSERT_NE(finalColorRecord, nullptr);
+    EXPECT_TRUE(finalColorRecord->Exported);
+    ASSERT_TRUE(finalColorRecord->Lifetime.FirstPassOrder.has_value());
+    ASSERT_TRUE(finalColorRecord->Lifetime.LastPassOrder.has_value());
+    ASSERT_TRUE(finalColorRecord->Lifetime.LastWriter.has_value());
+    EXPECT_EQ(*finalColorRecord->Lifetime.FirstPassOrder, 12u);
+    EXPECT_EQ(*finalColorRecord->Lifetime.LastPassOrder, 12u);
+    EXPECT_EQ(*finalColorRecord->Lifetime.LastWriter, tonemap.GetHandle());
+
+    const auto compiledDot1 = compiled.ToGraphviz();
+    const auto compiledDot2 = compiled.ToGraphviz();
+    EXPECT_EQ(compiledDot1, compiledDot2);
+    EXPECT_NE(compiledDot1.find("digraph RGCompiledGraph"), string::npos);
+    EXPECT_EQ(compiledDot1.find("early-z"), string::npos);
+    EXPECT_NE(compiledDot1.find("gbuffer"), string::npos);
+    EXPECT_NE(compiledDot1.find("tonemap"), string::npos);
+    EXPECT_NE(compiledDot1.find("scene-hiz"), string::npos);
+    EXPECT_NE(compiledDot1.find("hdr-lighting"), string::npos);
+    EXPECT_NE(compiledDot1.find("final-color@v1"), string::npos);
+    EXPECT_NE(compiledDot1.find("Export Texture"), string::npos);
 }
 
-TEST(RenderGraph, CompileIsNoOpAndExecuteThrowsNotImplemented) {
+TEST(RenderGraph, CompileProducesStablePassOrderAndCompiledGraphviz) {
     RenderGraph graph{};
-    const auto compiled = graph.Compile();
+
+    const auto history = graph.AddTexture("history", MakeTextureDesc());
+
+    auto writeA = graph.AddComputePass("write-a");
+    writeA.ReadWriteStorageTexture(history, {}, "history-a");
+
+    auto writeB = graph.AddComputePass("write-b");
+    writeB.ReadSampledTexture(history, {}, "history-read");
+    writeB.ReadWriteStorageTexture(history, {}, "history-b");
+
+    graph.ExportTexture(history, {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Present,
+        .Range = RGWholeSubresourceRange()});
+
+    const auto compile1 = graph.Compile();
+    const auto compile2 = graph.Compile();
+
+    ASSERT_TRUE(compile1.Succeeded());
+    ASSERT_TRUE(compile2.Succeeded());
+    ASSERT_TRUE(compile1.Graph.has_value());
+    ASSERT_TRUE(compile2.Graph.has_value());
+
+    const auto& compiled1 = *compile1.Graph;
+    const auto& compiled2 = *compile2.Graph;
+
+    ASSERT_EQ(compiled1.Passes.size(), 2u);
+    ASSERT_EQ(compiled1.PassOrder.size(), 2u);
+    EXPECT_EQ(compiled1.Passes[0].Handle, writeA.GetHandle());
+    EXPECT_EQ(compiled1.Passes[1].Handle, writeB.GetHandle());
+    EXPECT_EQ(compiled1.PassOrder[0], writeA.GetHandle());
+    EXPECT_EQ(compiled1.PassOrder[1], writeB.GetHandle());
+
+    const auto dot1 = compiled1.ToGraphviz();
+    const auto dot2 = compiled2.ToGraphviz();
+    EXPECT_EQ(dot1, dot2);
+    EXPECT_NE(dot1.find("digraph RGCompiledGraph"), string::npos);
+    EXPECT_NE(dot1.find("history@v0"), string::npos);
+    EXPECT_NE(dot1.find("history@v1"), string::npos);
+    EXPECT_NE(dot1.find("history@v2"), string::npos);
+    EXPECT_NE(dot1.find("write-a"), string::npos);
+    EXPECT_NE(dot1.find("write-b"), string::npos);
+    EXPECT_NE(dot1.find("res_0_v0 -> pass_0"), string::npos);
+    EXPECT_NE(dot1.find("pass_1 -> res_0_v2"), string::npos);
+}
+
+TEST(RenderGraph, CompileCullsUnusedPassesButKeepsKeepAlivePasses) {
+    RenderGraph graph{};
+
+    const auto liveTexture = graph.AddTexture("live-texture", MakeTextureDesc());
+    const auto deadTexture = graph.AddTexture("dead-texture", MakeTextureDesc());
+    const auto sideTexture = graph.AddTexture("side-texture", MakeTextureDesc());
+
+    auto livePass = graph.AddComputePass("live-pass");
+    livePass.ReadWriteStorageTexture(liveTexture, {}, "live-out");
+
+    auto deadPass = graph.AddComputePass("dead-pass");
+    deadPass.ReadWriteStorageTexture(deadTexture, {}, "dead-out");
+
+    RGComputePassOptions sideEffectOptions{};
+    sideEffectOptions.Flags = RGPassFlag::SideEffect;
+    auto sideEffectPass = graph.AddComputePass("side-effect-pass", sideEffectOptions);
+    sideEffectPass.ReadWriteStorageTexture(sideTexture, {}, "side-out");
+
+    RGComputePassOptions noCullOptions{};
+    noCullOptions.Flags = RGPassFlag::NoCull;
+    auto noCullPass = graph.AddComputePass("no-cull-pass", noCullOptions);
+    noCullPass.ReadSampledTexture(liveTexture, {}, "observe-live");
+
+    graph.ExportTexture(liveTexture, {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Present,
+        .Range = RGWholeSubresourceRange()});
+
+    const auto rawDot = graph.ToGraphviz();
+    const auto compile = graph.Compile();
+
+    ASSERT_TRUE(compile.Succeeded());
+    ASSERT_TRUE(compile.Graph.has_value());
+
+    const auto& compiled = *compile.Graph;
+    EXPECT_EQ(compiled.Passes.size(), 3u);
+    EXPECT_NE(compiled.FindPass(livePass.GetHandle()), nullptr);
+    EXPECT_NE(compiled.FindPass(sideEffectPass.GetHandle()), nullptr);
+    EXPECT_NE(compiled.FindPass(noCullPass.GetHandle()), nullptr);
+    EXPECT_EQ(compiled.FindPass(deadPass.GetHandle()), nullptr);
+    EXPECT_NE(compiled.FindResource(liveTexture), nullptr);
+    EXPECT_NE(compiled.FindResource(sideTexture), nullptr);
+    EXPECT_EQ(compiled.FindResource(deadTexture), nullptr);
+
+    const auto compiledDot = compiled.ToGraphviz();
+    EXPECT_NE(rawDot.find("dead-pass"), string::npos);
+    EXPECT_NE(rawDot.find("dead-texture"), string::npos);
+    EXPECT_EQ(compiledDot.find("dead-pass"), string::npos);
+    EXPECT_EQ(compiledDot.find("dead-texture"), string::npos);
+    EXPECT_NE(compiledDot.find("side-effect-pass"), string::npos);
+    EXPECT_NE(compiledDot.find("no-cull-pass"), string::npos);
+}
+
+TEST(RenderGraph, CompileCapturesResourceLifetimeAndImportExportFlags) {
+    RenderGraph graph{};
+
+    RGImportedTextureDesc imported{};
+    imported.External = {1, nullptr};
+    imported.Desc = MakeTextureDesc();
+    imported.InitialState = {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Common,
+        .Range = RGWholeSubresourceRange()};
+
+    const auto history = graph.ImportTexture("history-imported", imported);
+    const auto intermediate = graph.AddTexture("intermediate", MakeTextureDesc());
+    const auto finalColor = graph.AddTexture("final-color", MakeTextureDesc());
+
+    auto first = graph.AddComputePass("first");
+    first.ReadSampledTexture(history, {}, "history");
+    first.ReadWriteStorageTexture(intermediate, {}, "intermediate");
+
+    auto second = graph.AddGraphicsPass("second");
+    second.ReadSampledTexture(intermediate, {}, "intermediate");
+    second.BindColorAttachment(finalColor, {.Slot = 0}, "final");
+
+    graph.ExportTexture(finalColor, {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Present,
+        .Range = RGWholeSubresourceRange()});
+
+    const auto compile = graph.Compile();
+    ASSERT_TRUE(compile.Succeeded());
+    ASSERT_TRUE(compile.Graph.has_value());
+
+    const auto& compiled = *compile.Graph;
+    const auto* historyRecord = compiled.FindResource(history);
+    const auto* intermediateRecord = compiled.FindResource(intermediate);
+    const auto* finalRecord = compiled.FindResource(finalColor);
+
+    ASSERT_NE(historyRecord, nullptr);
+    ASSERT_NE(intermediateRecord, nullptr);
+    ASSERT_NE(finalRecord, nullptr);
+
+    EXPECT_TRUE(historyRecord->Imported);
+    EXPECT_FALSE(historyRecord->Exported);
+    ASSERT_TRUE(historyRecord->Lifetime.FirstPassOrder.has_value());
+    ASSERT_TRUE(historyRecord->Lifetime.LastPassOrder.has_value());
+    EXPECT_EQ(*historyRecord->Lifetime.FirstPassOrder, 0u);
+    EXPECT_EQ(*historyRecord->Lifetime.LastPassOrder, 0u);
+    EXPECT_FALSE(historyRecord->Lifetime.LastWriter.has_value());
+
+    EXPECT_FALSE(intermediateRecord->Imported);
+    EXPECT_FALSE(intermediateRecord->Exported);
+    ASSERT_TRUE(intermediateRecord->Lifetime.FirstPassOrder.has_value());
+    ASSERT_TRUE(intermediateRecord->Lifetime.LastPassOrder.has_value());
+    ASSERT_TRUE(intermediateRecord->Lifetime.LastWriter.has_value());
+    EXPECT_EQ(*intermediateRecord->Lifetime.FirstPassOrder, 0u);
+    EXPECT_EQ(*intermediateRecord->Lifetime.LastPassOrder, 1u);
+    EXPECT_EQ(*intermediateRecord->Lifetime.LastWriter, first.GetHandle());
+
+    EXPECT_FALSE(finalRecord->Imported);
+    EXPECT_TRUE(finalRecord->Exported);
+    ASSERT_TRUE(finalRecord->Lifetime.FirstPassOrder.has_value());
+    ASSERT_TRUE(finalRecord->Lifetime.LastPassOrder.has_value());
+    ASSERT_TRUE(finalRecord->Lifetime.LastWriter.has_value());
+    EXPECT_EQ(*finalRecord->Lifetime.FirstPassOrder, 1u);
+    EXPECT_EQ(*finalRecord->Lifetime.LastPassOrder, 1u);
+    EXPECT_EQ(*finalRecord->Lifetime.LastWriter, second.GetHandle());
+}
+
+TEST(RenderGraph, CompileDetectsCyclicDependenciesFromInterleavedPassUses) {
+    RenderGraph graph{};
+
+    const auto textureX = graph.AddTexture("texture-x", MakeTextureDesc());
+    const auto textureY = graph.AddTexture("texture-y", MakeTextureDesc());
+
+    auto passA = graph.AddComputePass("pass-a");
+    passA.ReadSampledTexture(textureY, {}, "a-read-y");
+
+    auto passB = graph.AddComputePass("pass-b");
+    passB.ReadSampledTexture(textureX, {}, "b-read-x");
+    passB.ReadWriteStorageTexture(textureY, {}, "b-write-y");
+
+    passA.ReadWriteStorageTexture(textureX, {}, "a-write-x");
+
+    graph.ExportTexture(textureX, {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Present,
+        .Range = RGWholeSubresourceRange()});
+    graph.ExportTexture(textureY, {
+        .Queue = QueueType::Direct,
+        .State = TextureState::Common,
+        .Range = RGWholeSubresourceRange()});
+
+    const auto compile = graph.Compile();
+    EXPECT_FALSE(compile.Succeeded());
+    EXPECT_FALSE(compile.Graph.has_value());
+    EXPECT_TRUE(HasIssue(compile, RGValidationIssueCode::CyclicDependency));
+}
+
+TEST(RenderGraph, CompileReturnsAnalysisResultAndExecuteStillThrowsNotImplemented) {
+    RenderGraph graph{};
+    const auto compile = graph.Compile();
+
+    ASSERT_TRUE(compile.Succeeded());
+    ASSERT_TRUE(compile.Graph.has_value());
 
     RGExecutionEnvironment environment{};
-    EXPECT_THROW(graph.Execute(compiled, environment), RenderGraphException);
+    EXPECT_THROW(graph.Execute(*compile.Graph, environment), RenderGraphException);
 }
