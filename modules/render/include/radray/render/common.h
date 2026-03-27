@@ -768,6 +768,10 @@ struct BindlessArrayDescriptor {
 struct BufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
+
+    static constexpr uint64_t All() noexcept {
+        return std::numeric_limits<uint64_t>::max();
+    }
 };
 
 struct BufferBindingDescriptor {

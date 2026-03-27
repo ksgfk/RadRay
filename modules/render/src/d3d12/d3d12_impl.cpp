@@ -124,6 +124,21 @@ static bool _CopyResourceViewToGpuHeap(
     return false;
 }
 
+static bool _ResolveBufferBindingRangeSizeD3D12(const BufferBindingDescriptor& desc, uint64_t& rangeSize) noexcept {
+    const uint64_t bufferSize = desc.Target->GetDesc().Size;
+    if (desc.Range.Offset > bufferSize) {
+        RADRAY_ERR_LOG(
+            "d3d12 buffer binding offset out of range. offset={}, bufferSize={}",
+            desc.Range.Offset,
+            bufferSize);
+        return false;
+    }
+    rangeSize = desc.Range.Size == BufferRange::All()
+                    ? bufferSize - desc.Range.Offset
+                    : desc.Range.Size;
+    return true;
+}
+
 static bool _WriteBufferBindingDescriptorD3D12(
     const BufferBindingDescriptor& desc,
     GpuDescriptorHeapViewRAII& dstHeap,
@@ -136,6 +151,10 @@ static bool _WriteBufferBindingDescriptorD3D12(
         RADRAY_ERR_LOG("d3d12 destination descriptor heap is invalid");
         return false;
     }
+    uint64_t rangeSize = 0;
+    if (!_ResolveBufferBindingRangeSizeD3D12(desc, rangeSize)) {
+        return false;
+    }
     auto* buffer = CastD3D12Object(desc.Target);
     auto* heap = dstHeap.GetHeap();
     const auto heapIndex = dstHeap.GetStart() + dstIndex;
@@ -145,7 +164,7 @@ static bool _WriteBufferBindingDescriptorD3D12(
                 RADRAY_ERR_LOG("d3d12 constant buffer binding offset must be {}-byte aligned", D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
                 return false;
             }
-            const uint64_t alignedSize = Align(desc.Range.Size, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
+            const uint64_t alignedSize = Align(rangeSize, uint64_t(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));
             D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
             cbvDesc.BufferLocation = buffer->_gpuAddr + desc.Range.Offset;
             cbvDesc.SizeInBytes = static_cast<UINT>(alignedSize);
@@ -164,24 +183,24 @@ static bool _WriteBufferBindingDescriptorD3D12(
                     RADRAY_ERR_LOG("d3d12 texel buffer binding format must not be UNKNOWN");
                     return false;
                 }
-                if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                if (desc.Range.Offset % bpp != 0 || rangeSize % bpp != 0) {
                     RADRAY_ERR_LOG("d3d12 texel buffer binding offset/size must align to format bytes");
                     return false;
                 }
                 srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
-                srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+                srvDesc.Buffer.NumElements = static_cast<UINT>(rangeSize / bpp);
                 srvDesc.Buffer.StructureByteStride = 0;
             } else {
                 if (desc.Stride == 0) {
                     RADRAY_ERR_LOG("d3d12 structured buffer binding stride must be non-zero");
                     return false;
                 }
-                if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                if (desc.Range.Offset % desc.Stride != 0 || rangeSize % desc.Stride != 0) {
                     RADRAY_ERR_LOG("d3d12 structured buffer binding offset/size must align to stride");
                     return false;
                 }
                 srvDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
-                srvDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+                srvDesc.Buffer.NumElements = static_cast<UINT>(rangeSize / desc.Stride);
                 srvDesc.Buffer.StructureByteStride = desc.Stride;
             }
             srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
@@ -199,24 +218,24 @@ static bool _WriteBufferBindingDescriptorD3D12(
                     RADRAY_ERR_LOG("d3d12 texel buffer binding format must not be UNKNOWN");
                     return false;
                 }
-                if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+                if (desc.Range.Offset % bpp != 0 || rangeSize % bpp != 0) {
                     RADRAY_ERR_LOG("d3d12 texel buffer binding offset/size must align to format bytes");
                     return false;
                 }
                 uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / bpp);
-                uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / bpp);
+                uavDesc.Buffer.NumElements = static_cast<UINT>(rangeSize / bpp);
                 uavDesc.Buffer.StructureByteStride = 0;
             } else {
                 if (desc.Stride == 0) {
                     RADRAY_ERR_LOG("d3d12 structured buffer binding stride must be non-zero");
                     return false;
                 }
-                if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+                if (desc.Range.Offset % desc.Stride != 0 || rangeSize % desc.Stride != 0) {
                     RADRAY_ERR_LOG("d3d12 structured buffer binding offset/size must align to stride");
                     return false;
                 }
                 uavDesc.Buffer.FirstElement = static_cast<UINT>(desc.Range.Offset / desc.Stride);
-                uavDesc.Buffer.NumElements = static_cast<UINT>(desc.Range.Size / desc.Stride);
+                uavDesc.Buffer.NumElements = static_cast<UINT>(rangeSize / desc.Stride);
                 uavDesc.Buffer.StructureByteStride = desc.Stride;
             }
             uavDesc.Buffer.CounterOffsetInBytes = 0;

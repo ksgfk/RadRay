@@ -70,6 +70,21 @@ static VkDescriptorType BufferViewUsageToDescriptorType(BufferViewUsage usage) n
     Unreachable();
 }
 
+static bool _ResolveBufferBindingRangeSizeVulkan(const BufferBindingDescriptor& desc, uint64_t& rangeSize) noexcept {
+    const uint64_t bufferSize = desc.Target->GetDesc().Size;
+    if (desc.Range.Offset > bufferSize) {
+        RADRAY_ERR_LOG(
+            "vk buffer binding offset out of range. offset={}, bufferSize={}",
+            desc.Range.Offset,
+            bufferSize);
+        return false;
+    }
+    rangeSize = desc.Range.Size == BufferRange::All()
+                    ? bufferSize - desc.Range.Offset
+                    : desc.Range.Size;
+    return true;
+}
+
 constexpr uint32_t kBindlessDescriptorCapacityVulkan = 262144;
 
 static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceView* view) noexcept {
@@ -395,6 +410,10 @@ static bool _WriteBufferBindingDescriptorVulkan(
             descriptorType);
         return false;
     }
+    uint64_t rangeSize = 0;
+    if (!_ResolveBufferBindingRangeSizeVulkan(desc, rangeSize)) {
+        return false;
+    }
 
     auto* buffer = CastVkObject(desc.Target);
     VkWriteDescriptorSet writeDesc{};
@@ -422,7 +441,7 @@ static bool _WriteBufferBindingDescriptorVulkan(
             }
             bufInfo.buffer = buffer->_buffer;
             bufInfo.offset = desc.Range.Offset;
-            bufInfo.range = desc.Range.Size;
+            bufInfo.range = rangeSize;
             writeDesc.pBufferInfo = &bufInfo;
             break;
         }
@@ -432,13 +451,13 @@ static bool _WriteBufferBindingDescriptorVulkan(
                 RADRAY_ERR_LOG("vk structured buffer binding stride must be non-zero");
                 return false;
             }
-            if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+            if (desc.Range.Offset % desc.Stride != 0 || rangeSize % desc.Stride != 0) {
                 RADRAY_ERR_LOG("vk structured buffer binding offset/size must align to stride");
                 return false;
             }
             bufInfo.buffer = buffer->_buffer;
             bufInfo.offset = desc.Range.Offset;
-            bufInfo.range = desc.Range.Size;
+            bufInfo.range = rangeSize;
             writeDesc.pBufferInfo = &bufInfo;
             break;
         }
@@ -453,7 +472,7 @@ static bool _WriteBufferBindingDescriptorVulkan(
                 RADRAY_ERR_LOG("vk texel buffer binding format must not be UNKNOWN");
                 return false;
             }
-            if (desc.Range.Offset % bpp != 0 || desc.Range.Size % bpp != 0) {
+            if (desc.Range.Offset % bpp != 0 || rangeSize % bpp != 0) {
                 RADRAY_ERR_LOG("vk texel buffer binding offset/size must align to format bytes");
                 return false;
             }
@@ -464,7 +483,7 @@ static bool _WriteBufferBindingDescriptorVulkan(
             info.buffer = buffer->_buffer;
             info.format = MapType(desc.Format);
             info.offset = desc.Range.Offset;
-            info.range = desc.Range.Size;
+            info.range = rangeSize;
             auto texelViewOpt = device->CreateBufferView(info);
             if (!texelViewOpt) {
                 return false;
@@ -6203,11 +6222,15 @@ void BindlessArrayVulkan::SetBuffer(uint32_t slot, const BufferBindingDescriptor
         RADRAY_ERR_LOG("vk bindless array buffer target is null");
         return;
     }
+    uint64_t rangeSize = 0;
+    if (!_ResolveBufferBindingRangeSizeVulkan(desc, rangeSize)) {
+        return;
+    }
     if (desc.Stride == 0) {
         RADRAY_ERR_LOG("vk bindless array structured buffer stride must be non-zero");
         return;
     }
-    if (desc.Range.Offset % desc.Stride != 0 || desc.Range.Size % desc.Stride != 0) {
+    if (desc.Range.Offset % desc.Stride != 0 || rangeSize % desc.Stride != 0) {
         RADRAY_ERR_LOG("vk bindless array structured buffer offset/size must align to stride");
         return;
     }
