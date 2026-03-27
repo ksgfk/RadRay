@@ -772,6 +772,10 @@ struct BufferRange {
     static constexpr uint64_t All() noexcept {
         return std::numeric_limits<uint64_t>::max();
     }
+
+    static constexpr BufferRange AllRange() noexcept {
+        return BufferRange{0, BufferRange::All()};
+    }
 };
 
 struct BufferBindingDescriptor {

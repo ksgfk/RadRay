@@ -1,6 +1,7 @@
 #pragma once
 
 #include <numeric>
+#include <optional>
 
 #include <radray/types.h>
 #include <radray/enum_flags.h>
@@ -84,6 +85,23 @@ using RDGNodeTags = EnumFlags<RDGNodeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
+// --------------------------- Internal ---------------------------
+
+struct RDGBufferState {
+    RDGExecutionStage Stage{RDGExecutionStage::NONE};
+    RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+    render::BufferRange Range{};
+};
+
+struct RDGTextureState {
+    RDGExecutionStage Stage{RDGExecutionStage::NONE};
+    RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+    RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
+    render::SubresourceRange Range{};
+};
+
+// ----------------------------------------------------------------
+
 struct RDGNodeHandle {
     uint64_t Id{std::numeric_limits<uint64_t>::max()};
 };
@@ -95,44 +113,68 @@ struct RDGPassHandle : public RDGNodeHandle {};
 
 class RDGNode {
 public:
+    RDGNode(uint64_t id, std::string_view name) noexcept
+        : _name(name),
+          _id(id) {}
     virtual ~RDGNode() noexcept = default;
 
     virtual RDGNodeTags GetTag() const noexcept = 0;
 
+    bool IsPassNode() const noexcept {
+        return this->GetTag().HasFlag(RDGNodeTag::Pass);
+    }
+
+    bool IsBufferNode() const noexcept {
+        return this->GetTag().HasFlag(RDGNodeTag::Buffer);
+    }
+
+    bool IsTextureNode() const noexcept {
+        return this->GetTag().HasFlag(RDGNodeTag::Texture);
+    }
+
 public:
     string _name;
-    uint64_t _id;
+    uint64_t _id{std::numeric_limits<uint64_t>::max()};
     vector<RDGEdge*> _inEdges;
     vector<RDGEdge*> _outEdges;
 };
 
 class RDGResourceNode : public RDGNode {
 public:
+    RDGResourceNode(uint64_t id, std::string_view name, RDGResourceOwnership ownership) noexcept
+        : RDGNode(id, name),
+          _ownership(ownership) {}
     virtual ~RDGResourceNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Resource; }
 
 public:
-    RDGResourceOwnership _ownership;
+    RDGResourceOwnership _ownership{RDGResourceOwnership::UNKNOWN};
 };
 
 class RDGBufferNode final : public RDGResourceNode {
 public:
+    using RDGResourceNode::RDGResourceNode;
     virtual ~RDGBufferNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Buffer; }
 
 public:
     uint64_t _size{0};
+    GpuBufferHandle _backingHandle{};
+    std::optional<RDGBufferState> _importedState{};
+    std::optional<RDGBufferState> _exportedState{};
 };
 
 class RDGTextureNode final : public RDGResourceNode {
 public:
+    using RDGResourceNode::RDGResourceNode;
     virtual ~RDGTextureNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Texture; }
 
 public:
+    GpuTextureHandle _backingHandle{};
     render::TextureDimension _dim{render::TextureDimension::UNKNOWN};
     uint32_t _width{0};
     uint32_t _height{0};
@@ -140,34 +182,49 @@ public:
     uint32_t _mipLevels{0};
     uint32_t _sampleCount{0};
     render::TextureFormat _format{render::TextureFormat::UNKNOWN};
+    std::optional<RDGTextureState> _importedState{};
+    std::optional<RDGTextureState> _exportedState{};
 };
 
 class RDGPassNode : public RDGNode {
 public:
+    RDGPassNode(uint64_t id, std::string_view name, render::QueueType type) noexcept
+        : RDGNode(id, name),
+          _type(type) {}
     virtual ~RDGPassNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Pass; }
 
 public:
-    render::QueueType _type;
+    render::QueueType _type{render::QueueType::Direct};
 };
 
 class RDGEdge {
 public:
-    RDGEdge() noexcept = default;
+    RDGEdge(
+        RDGNode* from,
+        RDGNode* to,
+        RDGExecutionStage stage,
+        RDGMemoryAccess access) noexcept
+        : _from(from),
+          _to(to),
+          _stage(stage),
+          _access(access) {}
 
 public:
-    RDGNode* _from;
-    RDGNode* _to;
-    RDGExecutionStage _stage;
-    RDGMemoryAccess _access;
+    RDGNode* _from{nullptr};
+    RDGNode* _to{nullptr};
+    RDGExecutionStage _stage{RDGExecutionStage::NONE};
+    RDGMemoryAccess _access{RDGMemoryAccess::NONE};
     render::BufferRange _bufferRange;
-    RDGTextureLayout _textureLayout;
+    RDGTextureLayout _textureLayout{RDGTextureLayout::UNKNOWN};
     render::SubresourceRange _textureRange;
 };
 
 class RDGRasterPassBuilder {
 public:
+    explicit RDGRasterPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
+
     RDGPassHandle Build();
 
     RDGRasterPassBuilder& UseColorAttachment(
@@ -200,6 +257,8 @@ public:
 
 class RDGComputePassBuilder {
 public:
+    explicit RDGComputePassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
+
     RDGPassHandle Build();
 
     RDGComputePassBuilder& UseCBuffer(RDGBufferHandle buffer, render::BufferRange range);
@@ -215,6 +274,8 @@ public:
 
 class RDGCopyPassBuilder {
 public:
+    explicit RDGCopyPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
+
     RDGPassHandle Build();
 
     RDGCopyPassBuilder& CopyBufferToBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGBufferHandle src, uint64_t srcOffset, uint64_t size);
@@ -247,6 +308,13 @@ public:
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+
+private:
+    RDGNode* _ResolveNode(RDGNodeHandle handle);
+    RDGBufferNode* _ResolveBufferNode(RDGBufferHandle handle);
+    RDGTextureNode* _ResolveTextureNode(RDGTextureHandle handle);
+    void _ValidatePassResourceLink(RDGNode* from, RDGNode* to);
+    RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
 
 public:
     GpuRuntime* _gpu{nullptr};
