@@ -1,5 +1,6 @@
 #include <string_view>
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <radray/render/common.h>
@@ -265,6 +266,9 @@ TEST(RenderGraphTest, ExportGraphviz_ComplexDependencyGraphProducesCompactDot) {
     ASSERT_TRUE(validation.first) << validation.second;
 
     const auto dot = graph.ExportGraphviz();
+    const auto compiled = graph.Compile();
+    const auto compiledDot = graph.ExportCompiledGraphviz(compiled);
+    const auto executionDot = graph.ExportExecutionGraphviz(compiled);
 
     ExpectContains(dot, "digraph RenderGraph");
     ExpectContains(dot, "rankdir=LR");
@@ -314,12 +318,160 @@ TEST(RenderGraphTest, ExportGraphviz_ComplexDependencyGraphProducesCompactDot) {
     ExpectNotContains(dot, "layout=");
     ExpectNotContains(dot, "range={");
 
-    ExpectContains(dot, string("node_") + std::to_string(uploadPass.Id));
-    ExpectContains(dot, string("node_") + std::to_string(presentTexture.Id));
-    ExpectContains(dot, string("node_") + std::to_string(sceneBuffer.Id) + " -> node_" + std::to_string(uploadPass.Id));
-    ExpectContains(dot, string("node_") + std::to_string(gbufferPass.Id) + " -> node_" + std::to_string(gbufferColor.Id));
-    ExpectContains(dot, string("node_") + std::to_string(lightingTexture.Id) + " -> node_" + std::to_string(copyReadbackPass.Id));
-    ExpectContains(dot, string("node_") + std::to_string(postFxPass.Id) + " -> node_" + std::to_string(presentTexture.Id));
+    ExpectContains(dot, fmt::format("node_{}", uploadPass.Id));
+    ExpectContains(dot, fmt::format("node_{}", presentTexture.Id));
+    ExpectContains(dot, fmt::format("node_{} -> node_{}", sceneBuffer.Id, uploadPass.Id));
+    ExpectContains(dot, fmt::format("node_{} -> node_{}", gbufferPass.Id, gbufferColor.Id));
+    ExpectContains(dot, fmt::format("node_{} -> node_{}", lightingTexture.Id, copyReadbackPass.Id));
+    ExpectContains(dot, fmt::format("node_{} -> node_{}", postFxPass.Id, presentTexture.Id));
+
+    ExpectContains(compiledDot, "digraph CompiledRenderGraph");
+    ExpectContains(compiledDot, "UploadPass\\norder=0\\nqueue=Copy");
+    ExpectContains(compiledDot, "GBufferPass\\norder=1\\nqueue=Direct");
+    ExpectContains(compiledDot, "LightCullingPass\\norder=2\\nqueue=Compute");
+    ExpectContains(compiledDot, "LightingPass\\norder=3\\nqueue=Direct");
+    ExpectContains(compiledDot, "PostFXPass\\norder=4\\nqueue=Direct");
+    ExpectContains(compiledDot, "CopyReadbackPass\\norder=5\\nqueue=Copy");
+
+    ExpectContains(compiledDot, "SceneCB\\nversion=0");
+    ExpectContains(compiledDot, "LightListBuffer\\nversion=0");
+    ExpectContains(compiledDot, "LightListBuffer\\nversion=1");
+    ExpectContains(compiledDot, "LightListBuffer\\nversion=2");
+    ExpectContains(compiledDot, "ReadbackBuffer\\nversion=1");
+    ExpectContains(compiledDot, "GBufferColor\\nversion=1");
+    ExpectContains(compiledDot, "SceneDepth\\nversion=1");
+    ExpectContains(compiledDot, "LightingTarget\\nversion=1");
+    ExpectContains(compiledDot, "Swapchain\\nOutput(Target)\\nversion=1");
+    ExpectContains(compiledDot, "Blue \\\"Noise\\\"\\\\Cache\\nversion=0");
+
+    ExpectContains(compiledDot, fmt::format("resource_{}_v0 -> node_{}", sceneBuffer.Id, uploadPass.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v0 -> node_{}", sceneBuffer.Id, gbufferPass.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v1", uploadPass.Id, lightListBuffer.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v1 -> node_{}", lightListBuffer.Id, lightCullingPass.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v2", lightCullingPass.Id, lightListBuffer.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v2 -> node_{}", lightListBuffer.Id, lightingPass.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v1", gbufferPass.Id, gbufferColor.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v1 -> node_{}", gbufferColor.Id, lightCullingPass.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v1 -> node_{}", gbufferColor.Id, lightingPass.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v1", lightingPass.Id, lightingTexture.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v1 -> node_{}", lightingTexture.Id, postFxPass.Id));
+    ExpectContains(compiledDot, fmt::format("resource_{}_v1 -> node_{}", lightingTexture.Id, copyReadbackPass.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v1", postFxPass.Id, presentTexture.Id));
+    ExpectContains(compiledDot, fmt::format("node_{} -> resource_{}_v1", copyReadbackPass.Id, readbackBuffer.Id));
+
+    ExpectContains(executionDot, "digraph CompiledExecutionGraph");
+    ExpectContains(executionDot, "Direct Queue");
+    ExpectContains(executionDot, "Compute Queue");
+    ExpectContains(executionDot, "Copy Queue");
+
+    ExpectContains(executionDot, "UploadPass\\norder=0\\nlevel=0\\nqueue=Copy");
+    ExpectContains(executionDot, "GBufferPass\\norder=1\\nlevel=0\\nqueue=Direct");
+    ExpectContains(executionDot, "LightCullingPass\\norder=2\\nlevel=1\\nqueue=Compute");
+    ExpectContains(executionDot, "LightingPass\\norder=3\\nlevel=2\\nqueue=Direct");
+    ExpectContains(executionDot, "PostFXPass\\norder=4\\nlevel=3\\nqueue=Direct");
+    ExpectContains(executionDot, "CopyReadbackPass\\norder=5\\nlevel=3\\nqueue=Copy");
+
+    ExpectContains(executionDot, "sync before LightCullingPass");
+    ExpectContains(executionDot, "sync before LightingPass");
+    ExpectContains(executionDot, "sync before PostFXPass");
+    ExpectContains(executionDot, "sync before CopyReadbackPass");
+    ExpectContains(executionDot, "sync after PostFXPass");
+    ExpectContains(executionDot, "sync after CopyReadbackPass");
+
+    ExpectContains(executionDot, "LightListBuffer: [Copy] [TransferWrite] -> [ComputeShader] [ShaderRead]");
+    ExpectContains(executionDot, "GBufferColor: [ColorOutput] [ColorAttachmentWrite] ColorAttachment -> [ComputeShader] [ShaderRead] ShaderReadOnly");
+    ExpectContains(executionDot, "SceneDepth: [DepthStencil] [DepthStencilWrite] DepthStencilAttachment -> [ComputeShader] [ShaderRead] DepthStencilReadOnly");
+    ExpectContains(executionDot, "LightingTarget: [ColorOutput] [ColorAttachmentWrite] ColorAttachment -> [PixelShader] [ShaderRead] ShaderReadOnly");
+    ExpectContains(executionDot, "LightingTarget: [PixelShader] [ShaderRead] ShaderReadOnly -> [Copy] [TransferRead] TransferSource");
+    ExpectContains(executionDot, "Swapchain\\nOutput(Target): [Copy] [TransferWrite] TransferDestination -> [Present] Present");
+    ExpectContains(executionDot, "ReadbackBuffer: [Copy] [TransferWrite] -> [Host] [HostRead]");
+
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", uploadPass.Id, copyReadbackPass.Id));
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", uploadPass.Id, lightCullingPass.Id));
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", gbufferPass.Id, lightCullingPass.Id));
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", lightCullingPass.Id, lightingPass.Id));
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", lightingPass.Id, postFxPass.Id));
+    ExpectContains(executionDot, fmt::format("exec_pass_{} -> exec_sync_before_{}", lightingPass.Id, copyReadbackPass.Id));
+}
+
+TEST(RenderGraphTest, ExportCompiledGraphviz_MarksResourceVersionsAcrossWrites) {
+    RenderGraph graph{};
+
+    const auto historyBuffer = graph.AddBuffer(4096, "HistoryBuffer");
+    const auto lightingTexture = graph.AddTexture(
+        TextureDimension::Dim2D,
+        1280,
+        720,
+        1,
+        1,
+        1,
+        TextureFormat::RGBA16_FLOAT,
+        "LightingTarget");
+
+    const auto uploadPass = graph.AddPass("UploadPass");
+    const auto accumulatePass = graph.AddPass("AccumulatePass");
+    const auto presentPass = graph.AddPass("PresentPass");
+
+    static_cast<RDGPassNode*>(graph._nodes[accumulatePass.Id].get())->_type = QueueType::Compute;
+
+    const auto colorRange = SubresourceRange{0, 1, 0, 1};
+    graph.Link(uploadPass, historyBuffer, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, BufferRange{0, 1024});
+    graph.Link(historyBuffer, accumulatePass, RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderRead, BufferRange{0, 1024});
+    graph.Link(accumulatePass, historyBuffer, RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderWrite, BufferRange{0, 1024});
+    graph.Link(
+        accumulatePass,
+        lightingTexture,
+        RDGExecutionStage::ColorOutput,
+        RDGMemoryAccess::ColorAttachmentWrite,
+        RDGTextureLayout::ColorAttachment,
+        colorRange);
+    graph.Link(historyBuffer, presentPass, RDGExecutionStage::PixelShader, RDGMemoryAccess::ShaderRead, BufferRange{0, 1024});
+    graph.Link(
+        lightingTexture,
+        presentPass,
+        RDGExecutionStage::PixelShader,
+        RDGMemoryAccess::ShaderRead,
+        RDGTextureLayout::ShaderReadOnly,
+        colorRange);
+
+    const auto validation = graph.Validate();
+    ASSERT_TRUE(validation.first) << validation.second;
+
+    const auto compiled = graph.Compile();
+    const auto dot = graph.ExportCompiledGraphviz(compiled);
+
+    ExpectContains(dot, "digraph CompiledRenderGraph");
+    ExpectContains(dot, "UploadPass");
+    ExpectContains(dot, "AccumulatePass");
+    ExpectContains(dot, "PresentPass");
+    ExpectContains(dot, "queue=Compute");
+    ExpectContains(dot, "order=0");
+    ExpectContains(dot, "order=1");
+    ExpectContains(dot, "order=2");
+
+    ExpectContains(dot, "HistoryBuffer\\nversion=0");
+    ExpectContains(dot, "HistoryBuffer\\nversion=1");
+    ExpectContains(dot, "HistoryBuffer\\nversion=2");
+    ExpectContains(dot, "LightingTarget\\nversion=0");
+    ExpectContains(dot, "LightingTarget\\nversion=1");
+
+    ExpectContains(dot, fmt::format("resource_{}_v0 -> node_{}", historyBuffer.Id, uploadPass.Id));
+    ExpectContains(dot, fmt::format("node_{} -> resource_{}_v1", uploadPass.Id, historyBuffer.Id));
+    ExpectContains(dot, fmt::format("resource_{}_v1 -> node_{}", historyBuffer.Id, accumulatePass.Id));
+    ExpectContains(dot, fmt::format("node_{} -> resource_{}_v2", accumulatePass.Id, historyBuffer.Id));
+    ExpectContains(dot, fmt::format("resource_{}_v2 -> node_{}", historyBuffer.Id, presentPass.Id));
+    ExpectContains(dot, fmt::format("resource_{}_v0 -> node_{}", lightingTexture.Id, accumulatePass.Id));
+    ExpectContains(dot, fmt::format("node_{} -> resource_{}_v1", accumulatePass.Id, lightingTexture.Id));
+    ExpectContains(dot, fmt::format("resource_{}_v1 -> node_{}", lightingTexture.Id, presentPass.Id));
+
+    ExpectContains(dot, "[Copy]");
+    ExpectContains(dot, "[TransferWrite]");
+    ExpectContains(dot, "[ComputeShader]");
+    ExpectContains(dot, "[ShaderWrite]");
+    ExpectContains(dot, "[ColorOutput]");
+    ExpectContains(dot, "[ColorAttachmentWrite]");
+    ExpectContains(dot, "[PixelShader]");
+    ExpectContains(dot, "[ShaderRead]");
 }
 
 TEST(RenderGraphTest, RasterPassBuilderBuildsEdgesAndStoresAttachmentMetadata) {

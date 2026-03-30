@@ -92,7 +92,7 @@ using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 struct RDGNodeHandle {
     uint64_t Id{std::numeric_limits<uint64_t>::max()};
 
-    [[nodiscard]] bool IsValid() const noexcept {
+    bool IsValid() const noexcept {
         return Id != std::numeric_limits<uint64_t>::max();
     }
 };
@@ -135,11 +135,8 @@ struct RDGDepthStencilAttachmentInfo {
     render::StoreAction StencilStore{render::StoreAction::Store};
     std::optional<render::DepthStencilClearValue> ClearValue{};
 
-    [[nodiscard]] bool HasWriteAccess() const noexcept {
-        return DepthLoad == render::LoadAction::Clear ||
-               StencilLoad == render::LoadAction::Clear ||
-               DepthStore == render::StoreAction::Store ||
-               StencilStore == render::StoreAction::Store;
+    bool HasWriteAccess() const noexcept {
+        return DepthLoad == render::LoadAction::Clear || StencilLoad == render::LoadAction::Clear || DepthStore == render::StoreAction::Store || StencilStore == render::StoreAction::Store;
     }
 };
 
@@ -423,6 +420,7 @@ public:
 
 class RenderGraph {
 public:
+    // ---------------- Core ----------------
     // RDG 创建的资源
     RDGBufferHandle AddBuffer(uint64_t size, std::string_view name);
     RDGTextureHandle AddTexture(
@@ -443,9 +441,13 @@ public:
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
-    [[nodiscard]] string ExportGraphviz() const;
-    [[nodiscard]] RDGCompileResult Compile() const;
+    RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
+
+    // ---------------- helper ----------------
+    string ExportGraphviz() const;
+    string ExportCompiledGraphviz(const RDGCompileResult& compiled) const;
+    string ExportExecutionGraphviz(const RDGCompileResult& compiled) const;
 
 public:
     RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);

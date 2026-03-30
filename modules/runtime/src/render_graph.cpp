@@ -16,6 +16,40 @@ struct DotNodeStyle {
     std::string_view FillColor;
 };
 
+struct DotQueueStyle {
+    std::string_view ClusterColor;
+    std::string_view PassFillColor;
+    std::string_view SyncFillColor;
+};
+
+struct BufferPassUsage {
+    RDGPassHandle Pass{};
+    uint64_t FirstEdgeIndex{std::numeric_limits<uint64_t>::max()};
+    uint64_t LastEdgeIndex{0};
+    bool HasWrite{false};
+    RDGBufferState FirstState{};
+    RDGBufferState LastState{};
+};
+
+struct TexturePassUsage {
+    RDGPassHandle Pass{};
+    uint64_t FirstEdgeIndex{std::numeric_limits<uint64_t>::max()};
+    uint64_t LastEdgeIndex{0};
+    bool HasWrite{false};
+    RDGTextureState FirstState{};
+    RDGTextureState LastState{};
+};
+
+struct CompiledBufferResource {
+    const RDGBufferNode* Node{nullptr};
+    vector<BufferPassUsage> PassUsages;
+};
+
+struct CompiledTextureResource {
+    const RDGTextureNode* Node{nullptr};
+    vector<TexturePassUsage> PassUsages;
+};
+
 void AppendLine(fmt::memory_buffer& output, std::string_view line) {
     fmt::format_to(std::back_inserter(output), "{}\n", line);
 }
@@ -47,6 +81,16 @@ DotNodeStyle GetNodeStyle(const RDGNode& node) noexcept {
         return DotNodeStyle{"hexagon", "#FEF3C7"};
     }
     return DotNodeStyle{"diamond", "#E5E7EB"};
+}
+
+DotQueueStyle GetExecutionQueueStyle(render::QueueType queue) noexcept {
+    switch (queue) {
+        case render::QueueType::Direct: return DotQueueStyle{"#93C5FD", "#DBEAFE", "#EFF6FF"};
+        case render::QueueType::Compute: return DotQueueStyle{"#86EFAC", "#DCFCE7", "#F0FDF4"};
+        case render::QueueType::Copy: return DotQueueStyle{"#FCD34D", "#FEF3C7", "#FFFBEB"};
+        case render::QueueType::MAX_COUNT: return DotQueueStyle{"#D1D5DB", "#E5E7EB", "#F3F4F6"};
+    }
+    return DotQueueStyle{"#D1D5DB", "#E5E7EB", "#F3F4F6"};
 }
 
 void AppendNodeLabel(fmt::memory_buffer& output, const RDGNode& node) {
@@ -82,6 +126,392 @@ void AppendNullEndpointNode(fmt::memory_buffer& output, size_t edgeIndex, std::s
     fmt::format_to(std::back_inserter(output), "null\\nedge={}\\n", edgeIndex);
     AppendDotEscaped(output, endpoint);
     fmt::format_to(std::back_inserter(output), "\"];\n");
+}
+
+unordered_map<const RDGEdge*, uint64_t> BuildEdgeIndexByPtr(const vector<unique_ptr<RDGEdge>>& edges) {
+    unordered_map<const RDGEdge*, uint64_t> edgeIndexByPtr{};
+    edgeIndexByPtr.reserve(edges.size());
+    for (uint64_t i = 0; i < edges.size(); ++i) {
+        edgeIndexByPtr.emplace(edges[i].get(), i);
+    }
+    return edgeIndexByPtr;
+}
+
+vector<BufferPassUsage> CollectBufferPassUsages(
+    const RDGBufferNode& bufferNode,
+    const unordered_map<const RDGEdge*, uint64_t>& edgeIndexByPtr) {
+    unordered_map<uint64_t, uint32_t> usageIndexByPass{};
+    usageIndexByPass.reserve(bufferNode._inEdges.size() + bufferNode._outEdges.size());
+    vector<BufferPassUsage> passUsages{};
+    passUsages.reserve(bufferNode._inEdges.size() + bufferNode._outEdges.size());
+
+    for (auto* edge : bufferNode._inEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Pass));
+        RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Buffer));
+        const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
+        const uint64_t passId = edge->_from->_id;
+        auto it = usageIndexByPass.find(passId);
+        if (it == usageIndexByPass.end()) {
+            usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
+            passUsages.emplace_back(BufferPassUsage{
+                .Pass = RDGPassHandle{passId},
+                .FirstEdgeIndex = edgeIndex,
+                .LastEdgeIndex = edgeIndex,
+                .HasWrite = true,
+                .FirstState = RDGBufferState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Range = edge->_bufferRange,
+                },
+                .LastState = RDGBufferState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Range = edge->_bufferRange,
+                },
+            });
+            continue;
+        }
+
+        auto& usage = passUsages[it->second];
+        if (edgeIndex < usage.FirstEdgeIndex) {
+            usage.FirstEdgeIndex = edgeIndex;
+            usage.FirstState = RDGBufferState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Range = edge->_bufferRange,
+            };
+        }
+        if (edgeIndex > usage.LastEdgeIndex) {
+            usage.LastEdgeIndex = edgeIndex;
+            usage.LastState = RDGBufferState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Range = edge->_bufferRange,
+            };
+        }
+        usage.HasWrite = true;
+    }
+
+    for (auto* edge : bufferNode._outEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Buffer));
+        RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Pass));
+        const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
+        const uint64_t passId = edge->_to->_id;
+        auto it = usageIndexByPass.find(passId);
+        if (it == usageIndexByPass.end()) {
+            usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
+            passUsages.emplace_back(BufferPassUsage{
+                .Pass = RDGPassHandle{passId},
+                .FirstEdgeIndex = edgeIndex,
+                .LastEdgeIndex = edgeIndex,
+                .HasWrite = false,
+                .FirstState = RDGBufferState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Range = edge->_bufferRange,
+                },
+                .LastState = RDGBufferState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Range = edge->_bufferRange,
+                },
+            });
+            continue;
+        }
+
+        auto& usage = passUsages[it->second];
+        if (edgeIndex < usage.FirstEdgeIndex) {
+            usage.FirstEdgeIndex = edgeIndex;
+            usage.FirstState = RDGBufferState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Range = edge->_bufferRange,
+            };
+        }
+        if (edgeIndex > usage.LastEdgeIndex) {
+            usage.LastEdgeIndex = edgeIndex;
+            usage.LastState = RDGBufferState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Range = edge->_bufferRange,
+            };
+        }
+    }
+
+    std::sort(passUsages.begin(), passUsages.end(), [](const BufferPassUsage& lhs, const BufferPassUsage& rhs) {
+        return lhs.Pass.Id < rhs.Pass.Id;
+    });
+    return passUsages;
+}
+
+vector<TexturePassUsage> CollectTexturePassUsages(
+    const RDGTextureNode& textureNode,
+    const unordered_map<const RDGEdge*, uint64_t>& edgeIndexByPtr) {
+    unordered_map<uint64_t, uint32_t> usageIndexByPass{};
+    usageIndexByPass.reserve(textureNode._inEdges.size() + textureNode._outEdges.size());
+    vector<TexturePassUsage> passUsages{};
+    passUsages.reserve(textureNode._inEdges.size() + textureNode._outEdges.size());
+
+    for (auto* edge : textureNode._inEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Pass));
+        RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Texture));
+        const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
+        const uint64_t passId = edge->_from->_id;
+        auto it = usageIndexByPass.find(passId);
+        if (it == usageIndexByPass.end()) {
+            usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
+            passUsages.emplace_back(TexturePassUsage{
+                .Pass = RDGPassHandle{passId},
+                .FirstEdgeIndex = edgeIndex,
+                .LastEdgeIndex = edgeIndex,
+                .HasWrite = true,
+                .FirstState = RDGTextureState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Layout = edge->_textureLayout,
+                    .Range = edge->_textureRange,
+                },
+                .LastState = RDGTextureState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Layout = edge->_textureLayout,
+                    .Range = edge->_textureRange,
+                },
+            });
+            continue;
+        }
+
+        auto& usage = passUsages[it->second];
+        if (edgeIndex < usage.FirstEdgeIndex) {
+            usage.FirstEdgeIndex = edgeIndex;
+            usage.FirstState = RDGTextureState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Layout = edge->_textureLayout,
+                .Range = edge->_textureRange,
+            };
+        }
+        if (edgeIndex > usage.LastEdgeIndex) {
+            usage.LastEdgeIndex = edgeIndex;
+            usage.LastState = RDGTextureState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Layout = edge->_textureLayout,
+                .Range = edge->_textureRange,
+            };
+        }
+        usage.HasWrite = true;
+    }
+
+    for (auto* edge : textureNode._outEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Texture));
+        RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Pass));
+        const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
+        const uint64_t passId = edge->_to->_id;
+        auto it = usageIndexByPass.find(passId);
+        if (it == usageIndexByPass.end()) {
+            usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
+            passUsages.emplace_back(TexturePassUsage{
+                .Pass = RDGPassHandle{passId},
+                .FirstEdgeIndex = edgeIndex,
+                .LastEdgeIndex = edgeIndex,
+                .HasWrite = false,
+                .FirstState = RDGTextureState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Layout = edge->_textureLayout,
+                    .Range = edge->_textureRange,
+                },
+                .LastState = RDGTextureState{
+                    .Stage = edge->_stage,
+                    .Access = edge->_access,
+                    .Layout = edge->_textureLayout,
+                    .Range = edge->_textureRange,
+                },
+            });
+            continue;
+        }
+
+        auto& usage = passUsages[it->second];
+        if (edgeIndex < usage.FirstEdgeIndex) {
+            usage.FirstEdgeIndex = edgeIndex;
+            usage.FirstState = RDGTextureState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Layout = edge->_textureLayout,
+                .Range = edge->_textureRange,
+            };
+        }
+        if (edgeIndex > usage.LastEdgeIndex) {
+            usage.LastEdgeIndex = edgeIndex;
+            usage.LastState = RDGTextureState{
+                .Stage = edge->_stage,
+                .Access = edge->_access,
+                .Layout = edge->_textureLayout,
+                .Range = edge->_textureRange,
+            };
+        }
+    }
+
+    std::sort(passUsages.begin(), passUsages.end(), [](const TexturePassUsage& lhs, const TexturePassUsage& rhs) {
+        return lhs.Pass.Id < rhs.Pass.Id;
+    });
+    return passUsages;
+}
+
+vector<CompiledBufferResource> CollectCompiledBufferResources(
+    const vector<unique_ptr<RDGNode>>& nodes,
+    const unordered_map<const RDGEdge*, uint64_t>& edgeIndexByPtr) {
+    vector<CompiledBufferResource> compiledBuffers{};
+    compiledBuffers.reserve(nodes.size());
+    for (const auto& nodeHolder : nodes) {
+        auto* node = nodeHolder.get();
+        if (node == nullptr || !node->GetTag().HasFlag(RDGNodeTag::Buffer)) {
+            continue;
+        }
+
+        auto* bufferNode = static_cast<RDGBufferNode*>(node);
+        compiledBuffers.emplace_back(CompiledBufferResource{
+            .Node = bufferNode,
+            .PassUsages = CollectBufferPassUsages(*bufferNode, edgeIndexByPtr),
+        });
+    }
+    return compiledBuffers;
+}
+
+vector<CompiledTextureResource> CollectCompiledTextureResources(
+    const vector<unique_ptr<RDGNode>>& nodes,
+    const unordered_map<const RDGEdge*, uint64_t>& edgeIndexByPtr) {
+    vector<CompiledTextureResource> compiledTextures{};
+    compiledTextures.reserve(nodes.size());
+    for (const auto& nodeHolder : nodes) {
+        auto* node = nodeHolder.get();
+        if (node == nullptr || !node->GetTag().HasFlag(RDGNodeTag::Texture)) {
+            continue;
+        }
+
+        auto* textureNode = static_cast<RDGTextureNode*>(node);
+        compiledTextures.emplace_back(CompiledTextureResource{
+            .Node = textureNode,
+            .PassUsages = CollectTexturePassUsages(*textureNode, edgeIndexByPtr),
+        });
+    }
+    return compiledTextures;
+}
+
+void AppendCompiledPassLabel(fmt::memory_buffer& output, const RDGPassNode& passNode, uint32_t passOrderIndex) {
+    AppendDotEscaped(output, passNode._name);
+    fmt::format_to(
+        std::back_inserter(output),
+        "\\norder={}\\nqueue={}",
+        passOrderIndex,
+        render::format_as(passNode._type));
+}
+
+void AppendCompiledResourceVersionNodeId(fmt::memory_buffer& output, uint64_t resourceId, uint32_t version) {
+    fmt::format_to(std::back_inserter(output), "resource_{}_v{}", resourceId, version);
+}
+
+void AppendCompiledResourceVersionLabel(fmt::memory_buffer& output, const RDGNode& resourceNode, uint32_t version) {
+    AppendDotEscaped(output, resourceNode._name);
+    fmt::format_to(std::back_inserter(output), "\\nversion={}", version);
+}
+
+void AppendExecutionPassNodeId(fmt::memory_buffer& output, uint64_t passId) {
+    fmt::format_to(std::back_inserter(output), "exec_pass_{}", passId);
+}
+
+void AppendExecutionSyncNodeId(fmt::memory_buffer& output, uint64_t passId, std::string_view phase) {
+    fmt::format_to(std::back_inserter(output), "exec_sync_{}_{}", phase, passId);
+}
+
+void AppendCompiledStateLabel(fmt::memory_buffer& output, const RDGBufferState& state) {
+    fmt::format_to(std::back_inserter(output), "{}", RDGExecutionStages{state.Stage});
+    if (state.Access != RDGMemoryAccess::NONE) {
+        fmt::format_to(std::back_inserter(output), "\\n{}", RDGMemoryAccesses{state.Access});
+    }
+}
+
+void AppendCompiledStateLabel(fmt::memory_buffer& output, const RDGTextureState& state) {
+    fmt::format_to(std::back_inserter(output), "{}", RDGExecutionStages{state.Stage});
+    if (state.Access != RDGMemoryAccess::NONE) {
+        fmt::format_to(std::back_inserter(output), "\\n{}", RDGMemoryAccesses{state.Access});
+    }
+}
+
+void AppendExecutionStateSummary(fmt::memory_buffer& output, const RDGBufferState& state) {
+    fmt::format_to(std::back_inserter(output), "{}", RDGExecutionStages{state.Stage});
+    if (state.Access != RDGMemoryAccess::NONE) {
+        fmt::format_to(std::back_inserter(output), " {}", RDGMemoryAccesses{state.Access});
+    }
+}
+
+void AppendExecutionStateSummary(fmt::memory_buffer& output, const RDGTextureState& state) {
+    fmt::format_to(std::back_inserter(output), "{}", RDGExecutionStages{state.Stage});
+    if (state.Access != RDGMemoryAccess::NONE) {
+        fmt::format_to(std::back_inserter(output), " {}", RDGMemoryAccesses{state.Access});
+    }
+    fmt::format_to(std::back_inserter(output), " {}", format_as(state.Layout));
+}
+
+void AppendExecutionBarrierLine(fmt::memory_buffer& output, const RenderGraph& graph, const RDGCompiledBarrier& barrier) {
+    if (std::holds_alternative<RDGCompiledBufferBarrier>(barrier)) {
+        const auto& bufferBarrier = std::get<RDGCompiledBufferBarrier>(barrier);
+        RADRAY_ASSERT(bufferBarrier.Buffer.Id < graph._nodes.size());
+        auto* resourceNode = graph._nodes[bufferBarrier.Buffer.Id].get();
+        RADRAY_ASSERT(resourceNode != nullptr && resourceNode->GetTag().HasFlag(RDGNodeTag::Buffer));
+        AppendDotEscaped(output, resourceNode->_name);
+        fmt::format_to(std::back_inserter(output), ": ");
+        AppendExecutionStateSummary(output, bufferBarrier.Before);
+        fmt::format_to(std::back_inserter(output), " -> ");
+        AppendExecutionStateSummary(output, bufferBarrier.After);
+        return;
+    }
+
+    const auto& textureBarrier = std::get<RDGCompiledTextureBarrier>(barrier);
+    RADRAY_ASSERT(textureBarrier.Texture.Id < graph._nodes.size());
+    auto* resourceNode = graph._nodes[textureBarrier.Texture.Id].get();
+    RADRAY_ASSERT(resourceNode != nullptr && resourceNode->GetTag().HasFlag(RDGNodeTag::Texture));
+    AppendDotEscaped(output, resourceNode->_name);
+    fmt::format_to(std::back_inserter(output), ": ");
+    AppendExecutionStateSummary(output, textureBarrier.Before);
+    fmt::format_to(std::back_inserter(output), " -> ");
+    AppendExecutionStateSummary(output, textureBarrier.After);
+}
+
+void AppendExecutionBarrierLabel(
+    fmt::memory_buffer& output,
+    const RenderGraph& graph,
+    std::string_view phase,
+    const RDGPassNode& passNode,
+    const vector<RDGCompiledBarrier>& barriers) {
+    fmt::format_to(std::back_inserter(output), "sync ");
+    AppendDotEscaped(output, phase);
+    fmt::format_to(std::back_inserter(output), " ");
+    AppendDotEscaped(output, passNode._name);
+    for (const auto& barrier : barriers) {
+        fmt::format_to(std::back_inserter(output), "\\n");
+        AppendExecutionBarrierLine(output, graph, barrier);
+    }
+}
+
+void AppendExecutionDependencyLabel(
+    fmt::memory_buffer& output,
+    const RenderGraph& graph,
+    const vector<uint64_t>& resourceIds) {
+    for (size_t i = 0; i < resourceIds.size(); ++i) {
+        if (i != 0) {
+            fmt::format_to(std::back_inserter(output), "\\n");
+        }
+        RADRAY_ASSERT(resourceIds[i] < graph._nodes.size());
+        auto* resourceNode = graph._nodes[resourceIds[i]].get();
+        RADRAY_ASSERT(resourceNode != nullptr && resourceNode->GetTag().HasFlag(RDGNodeTag::Resource));
+        AppendDotEscaped(output, resourceNode->_name);
+    }
 }
 
 }  // namespace
@@ -556,26 +986,6 @@ void RenderGraph::Link(
 }
 
 RDGCompileResult RenderGraph::Compile() const {
-    // 单个资源在单个 pass 内可能被多次使用，这里只记录首尾 usage，
-    // 既能推导“进入 pass 前要切到什么状态”，也能得到“pass 结束后资源停在哪个状态”。
-    struct BufferPassUsage {
-        RDGPassHandle Pass{};
-        uint64_t FirstEdgeIndex{std::numeric_limits<uint64_t>::max()};
-        uint64_t LastEdgeIndex{0};
-        bool HasWrite{false};
-        RDGBufferState FirstState{};
-        RDGBufferState LastState{};
-    };
-
-    struct TexturePassUsage {
-        RDGPassHandle Pass{};
-        uint64_t FirstEdgeIndex{std::numeric_limits<uint64_t>::max()};
-        uint64_t LastEdgeIndex{0};
-        bool HasWrite{false};
-        RDGTextureState FirstState{};
-        RDGTextureState LastState{};
-    };
-
     RDGCompileResult result{};
 
     // 编译阶段只在 RDG 抽象层比较状态，不下沉到 render backend barrier。
@@ -597,11 +1007,7 @@ RDGCompileResult RenderGraph::Compile() const {
     const uint64_t dependencyKeyStride = _nodes.size() + 1;
 
     // 先给每条 edge 一个稳定序号，后面用它还原“同一个 pass 内谁先谁后”的声明顺序。
-    unordered_map<const RDGEdge*, uint64_t> edgeIndexByPtr{};
-    edgeIndexByPtr.reserve(_edges.size());
-    for (uint64_t i = 0; i < _edges.size(); ++i) {
-        edgeIndexByPtr.emplace(_edges[i].get(), i);
-    }
+    const auto edgeIndexByPtr = BuildEdgeIndexByPtr(_edges);
 
     // 收集所有 pass，并建立 pass id -> 邻接表索引的映射，后面推 DAG 和拓扑排序都靠它。
     vector<RDGPassHandle> passHandles{};
@@ -650,324 +1056,70 @@ RDGCompileResult RenderGraph::Compile() const {
         indegree[afterIt->second] += 1;
     };
 
-    struct CompiledBufferResource {
-        const RDGBufferNode* Node{nullptr};
-        vector<BufferPassUsage> PassUsages;
-    };
+    const auto compiledBuffers = CollectCompiledBufferResources(_nodes, edgeIndexByPtr);
+    const auto compiledTextures = CollectCompiledTextureResources(_nodes, edgeIndexByPtr);
 
-    struct CompiledTextureResource {
-        const RDGTextureNode* Node{nullptr};
-        vector<TexturePassUsage> PassUsages;
-    };
+    // 第一阶段：按资源汇总 usage，并基于单资源 hazard 推导 pass 依赖。
+    // 规则是保守的：写后所有读/写都依赖这个写；写也依赖之前未截断的所有读。
+    for (const auto& compiledBuffer : compiledBuffers) {
+        RDGPassHandle lastWriter{};
+        bool hasLastWriter = false;
+        vector<RDGPassHandle> activeReaders{};
+        unordered_set<uint64_t> activeReaderIds{};
+        activeReaderIds.reserve(compiledBuffer.PassUsages.size());
+        for (const auto& usage : compiledBuffer.PassUsages) {
+            if (hasLastWriter && lastWriter.Id != usage.Pass.Id) {
+                addDependency(lastWriter, usage.Pass, RDGResourceHandle{compiledBuffer.Node->_id});
+            }
+            if (!usage.HasWrite) {
+                if (activeReaderIds.emplace(usage.Pass.Id).second) {
+                    activeReaders.emplace_back(usage.Pass);
+                }
+                continue;
+            }
 
-    vector<CompiledBufferResource> compiledBuffers{};
-    vector<CompiledTextureResource> compiledTextures{};
-    compiledBuffers.reserve(_nodes.size());
-    compiledTextures.reserve(_nodes.size());
+            for (const auto& reader : activeReaders) {
+                if (reader.Id == usage.Pass.Id) {
+                    continue;
+                }
+                addDependency(reader, usage.Pass, RDGResourceHandle{compiledBuffer.Node->_id});
+            }
 
-    // 第一阶段：按资源汇总 usage。
-    // 每个资源都会得到一个按 pass 分组的 usage 列表，后面依赖和状态推进都从这里出发。
-    for (const auto& nodeHolder : _nodes) {
-        auto* node = nodeHolder.get();
-        if (node == nullptr) {
-            continue;
+            activeReaders.clear();
+            activeReaderIds.clear();
+            lastWriter = usage.Pass;
+            hasLastWriter = true;
         }
+    }
 
-        if (node->GetTag().HasFlag(RDGNodeTag::Buffer)) {
-            // Buffer 的 outEdges 是“资源被 pass 读取”，inEdges 是“pass 写回资源”。
-            // 这里把同一个 pass 的多条边折叠成一个 usage，保留首尾状态和是否写入。
-            auto* bufferNode = static_cast<RDGBufferNode*>(node);
-            unordered_map<uint64_t, uint32_t> usageIndexByPass{};
-            usageIndexByPass.reserve(bufferNode->_inEdges.size() + bufferNode->_outEdges.size());
-            vector<BufferPassUsage> passUsages{};
-            passUsages.reserve(bufferNode->_inEdges.size() + bufferNode->_outEdges.size());
-
-            for (auto* edge : bufferNode->_inEdges) {
-                RADRAY_ASSERT(edge != nullptr);
-                RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Pass));
-                RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Buffer));
-                const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
-                const uint64_t passId = edge->_from->_id;
-                auto it = usageIndexByPass.find(passId);
-                if (it == usageIndexByPass.end()) {
-                    usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
-                    passUsages.emplace_back(BufferPassUsage{
-                        .Pass = RDGPassHandle{passId},
-                        .FirstEdgeIndex = edgeIndex,
-                        .LastEdgeIndex = edgeIndex,
-                        .HasWrite = true,
-                        .FirstState = RDGBufferState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Range = edge->_bufferRange,
-                        },
-                        .LastState = RDGBufferState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Range = edge->_bufferRange,
-                        },
-                    });
-                    continue;
+    for (const auto& compiledTexture : compiledTextures) {
+        RDGPassHandle lastWriter{};
+        bool hasLastWriter = false;
+        vector<RDGPassHandle> activeReaders{};
+        unordered_set<uint64_t> activeReaderIds{};
+        activeReaderIds.reserve(compiledTexture.PassUsages.size());
+        for (const auto& usage : compiledTexture.PassUsages) {
+            if (hasLastWriter && lastWriter.Id != usage.Pass.Id) {
+                addDependency(lastWriter, usage.Pass, RDGResourceHandle{compiledTexture.Node->_id});
+            }
+            if (!usage.HasWrite) {
+                if (activeReaderIds.emplace(usage.Pass.Id).second) {
+                    activeReaders.emplace_back(usage.Pass);
                 }
-
-                auto& usage = passUsages[it->second];
-                if (edgeIndex < usage.FirstEdgeIndex) {
-                    usage.FirstEdgeIndex = edgeIndex;
-                    usage.FirstState = RDGBufferState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Range = edge->_bufferRange,
-                    };
-                }
-                if (edgeIndex > usage.LastEdgeIndex) {
-                    usage.LastEdgeIndex = edgeIndex;
-                    usage.LastState = RDGBufferState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Range = edge->_bufferRange,
-                    };
-                }
-                usage.HasWrite = true;
+                continue;
             }
 
-            for (auto* edge : bufferNode->_outEdges) {
-                RADRAY_ASSERT(edge != nullptr);
-                RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Buffer));
-                RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Pass));
-                const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
-                const uint64_t passId = edge->_to->_id;
-                auto it = usageIndexByPass.find(passId);
-                if (it == usageIndexByPass.end()) {
-                    usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
-                    passUsages.emplace_back(BufferPassUsage{
-                        .Pass = RDGPassHandle{passId},
-                        .FirstEdgeIndex = edgeIndex,
-                        .LastEdgeIndex = edgeIndex,
-                        .HasWrite = false,
-                        .FirstState = RDGBufferState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Range = edge->_bufferRange,
-                        },
-                        .LastState = RDGBufferState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Range = edge->_bufferRange,
-                        },
-                    });
+            for (const auto& reader : activeReaders) {
+                if (reader.Id == usage.Pass.Id) {
                     continue;
                 }
-
-                auto& usage = passUsages[it->second];
-                if (edgeIndex < usage.FirstEdgeIndex) {
-                    usage.FirstEdgeIndex = edgeIndex;
-                    usage.FirstState = RDGBufferState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Range = edge->_bufferRange,
-                    };
-                }
-                if (edgeIndex > usage.LastEdgeIndex) {
-                    usage.LastEdgeIndex = edgeIndex;
-                    usage.LastState = RDGBufferState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Range = edge->_bufferRange,
-                    };
-                }
+                addDependency(reader, usage.Pass, RDGResourceHandle{compiledTexture.Node->_id});
             }
 
-            std::sort(passUsages.begin(), passUsages.end(), [](const BufferPassUsage& lhs, const BufferPassUsage& rhs) {
-                return lhs.Pass.Id < rhs.Pass.Id;
-            });
-
-            // 第二阶段的一部分：基于单资源 usage 推导 pass 依赖。
-            // 规则是保守的：写后所有读/写都依赖这个写；写也依赖之前未截断的所有读。
-            RDGPassHandle lastWriter{};
-            bool hasLastWriter = false;
-            vector<RDGPassHandle> activeReaders{};
-            unordered_set<uint64_t> activeReaderIds{};
-            activeReaderIds.reserve(passUsages.size());
-            for (const auto& usage : passUsages) {
-                if (hasLastWriter && lastWriter.Id != usage.Pass.Id) {
-                    addDependency(lastWriter, usage.Pass, RDGResourceHandle{bufferNode->_id});
-                }
-                if (!usage.HasWrite) {
-                    if (activeReaderIds.emplace(usage.Pass.Id).second) {
-                        activeReaders.emplace_back(usage.Pass);
-                    }
-                    continue;
-                }
-
-                for (const auto& reader : activeReaders) {
-                    if (reader.Id == usage.Pass.Id) {
-                        continue;
-                    }
-                    addDependency(reader, usage.Pass, RDGResourceHandle{bufferNode->_id});
-                }
-
-                activeReaders.clear();
-                activeReaderIds.clear();
-                lastWriter = usage.Pass;
-                hasLastWriter = true;
-            }
-
-            compiledBuffers.emplace_back(CompiledBufferResource{
-                .Node = bufferNode,
-                .PassUsages = std::move(passUsages),
-            });
-            continue;
-        }
-
-        if (node->GetTag().HasFlag(RDGNodeTag::Texture)) {
-            // Texture 和 Buffer 走同一套路，只是状态里多了 layout / subresource range。
-            auto* textureNode = static_cast<RDGTextureNode*>(node);
-            unordered_map<uint64_t, uint32_t> usageIndexByPass{};
-            usageIndexByPass.reserve(textureNode->_inEdges.size() + textureNode->_outEdges.size());
-            vector<TexturePassUsage> passUsages{};
-            passUsages.reserve(textureNode->_inEdges.size() + textureNode->_outEdges.size());
-
-            for (auto* edge : textureNode->_inEdges) {
-                RADRAY_ASSERT(edge != nullptr);
-                RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Pass));
-                RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Texture));
-                const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
-                const uint64_t passId = edge->_from->_id;
-                auto it = usageIndexByPass.find(passId);
-                if (it == usageIndexByPass.end()) {
-                    usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
-                    passUsages.emplace_back(TexturePassUsage{
-                        .Pass = RDGPassHandle{passId},
-                        .FirstEdgeIndex = edgeIndex,
-                        .LastEdgeIndex = edgeIndex,
-                        .HasWrite = true,
-                        .FirstState = RDGTextureState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Layout = edge->_textureLayout,
-                            .Range = edge->_textureRange,
-                        },
-                        .LastState = RDGTextureState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Layout = edge->_textureLayout,
-                            .Range = edge->_textureRange,
-                        },
-                    });
-                    continue;
-                }
-
-                auto& usage = passUsages[it->second];
-                if (edgeIndex < usage.FirstEdgeIndex) {
-                    usage.FirstEdgeIndex = edgeIndex;
-                    usage.FirstState = RDGTextureState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Layout = edge->_textureLayout,
-                        .Range = edge->_textureRange,
-                    };
-                }
-                if (edgeIndex > usage.LastEdgeIndex) {
-                    usage.LastEdgeIndex = edgeIndex;
-                    usage.LastState = RDGTextureState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Layout = edge->_textureLayout,
-                        .Range = edge->_textureRange,
-                    };
-                }
-                usage.HasWrite = true;
-            }
-
-            for (auto* edge : textureNode->_outEdges) {
-                RADRAY_ASSERT(edge != nullptr);
-                RADRAY_ASSERT(edge->_from != nullptr && edge->_from->GetTag().HasFlag(RDGNodeTag::Texture));
-                RADRAY_ASSERT(edge->_to != nullptr && edge->_to->GetTag().HasFlag(RDGNodeTag::Pass));
-                const uint64_t edgeIndex = edgeIndexByPtr.at(edge);
-                const uint64_t passId = edge->_to->_id;
-                auto it = usageIndexByPass.find(passId);
-                if (it == usageIndexByPass.end()) {
-                    usageIndexByPass.emplace(passId, static_cast<uint32_t>(passUsages.size()));
-                    passUsages.emplace_back(TexturePassUsage{
-                        .Pass = RDGPassHandle{passId},
-                        .FirstEdgeIndex = edgeIndex,
-                        .LastEdgeIndex = edgeIndex,
-                        .HasWrite = false,
-                        .FirstState = RDGTextureState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Layout = edge->_textureLayout,
-                            .Range = edge->_textureRange,
-                        },
-                        .LastState = RDGTextureState{
-                            .Stage = edge->_stage,
-                            .Access = edge->_access,
-                            .Layout = edge->_textureLayout,
-                            .Range = edge->_textureRange,
-                        },
-                    });
-                    continue;
-                }
-
-                auto& usage = passUsages[it->second];
-                if (edgeIndex < usage.FirstEdgeIndex) {
-                    usage.FirstEdgeIndex = edgeIndex;
-                    usage.FirstState = RDGTextureState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Layout = edge->_textureLayout,
-                        .Range = edge->_textureRange,
-                    };
-                }
-                if (edgeIndex > usage.LastEdgeIndex) {
-                    usage.LastEdgeIndex = edgeIndex;
-                    usage.LastState = RDGTextureState{
-                        .Stage = edge->_stage,
-                        .Access = edge->_access,
-                        .Layout = edge->_textureLayout,
-                        .Range = edge->_textureRange,
-                    };
-                }
-            }
-
-            std::sort(passUsages.begin(), passUsages.end(), [](const TexturePassUsage& lhs, const TexturePassUsage& rhs) {
-                return lhs.Pass.Id < rhs.Pass.Id;
-            });
-
-            // 纹理依赖也按同样的保守 hazard 规则建立。
-            RDGPassHandle lastWriter{};
-            bool hasLastWriter = false;
-            vector<RDGPassHandle> activeReaders{};
-            unordered_set<uint64_t> activeReaderIds{};
-            activeReaderIds.reserve(passUsages.size());
-            for (const auto& usage : passUsages) {
-                if (hasLastWriter && lastWriter.Id != usage.Pass.Id) {
-                    addDependency(lastWriter, usage.Pass, RDGResourceHandle{textureNode->_id});
-                }
-                if (!usage.HasWrite) {
-                    if (activeReaderIds.emplace(usage.Pass.Id).second) {
-                        activeReaders.emplace_back(usage.Pass);
-                    }
-                    continue;
-                }
-
-                for (const auto& reader : activeReaders) {
-                    if (reader.Id == usage.Pass.Id) {
-                        continue;
-                    }
-                    addDependency(reader, usage.Pass, RDGResourceHandle{textureNode->_id});
-                }
-
-                activeReaders.clear();
-                activeReaderIds.clear();
-                lastWriter = usage.Pass;
-                hasLastWriter = true;
-            }
-
-            compiledTextures.emplace_back(CompiledTextureResource{
-                .Node = textureNode,
-                .PassUsages = std::move(passUsages),
-            });
+            activeReaders.clear();
+            activeReaderIds.clear();
+            lastWriter = usage.Pass;
+            hasLastWriter = true;
         }
     }
 
@@ -1228,6 +1380,376 @@ string RenderGraph::ExportGraphviz() const {
         fmt::format_to(std::back_inserter(dot), " [label=\"");
         AppendEdgeLabel(dot, *edge);
         fmt::format_to(std::back_inserter(dot), "\", color=\"#64748B\"];\n");
+    }
+
+    AppendLine(dot, "}");
+    return fmt::to_string(dot);
+}
+
+string RenderGraph::ExportCompiledGraphviz(const RDGCompileResult& compiled) const {
+    fmt::memory_buffer dot{};
+
+    unordered_map<uint64_t, uint32_t> passOrderIndexById{};
+    passOrderIndexById.reserve(compiled.PassOrder.size());
+    for (uint32_t i = 0; i < compiled.PassOrder.size(); ++i) {
+        passOrderIndexById.emplace(compiled.PassOrder[i].Id, i);
+    }
+
+    const auto edgeIndexByPtr = BuildEdgeIndexByPtr(_edges);
+    auto compiledBuffers = CollectCompiledBufferResources(_nodes, edgeIndexByPtr);
+    auto compiledTextures = CollectCompiledTextureResources(_nodes, edgeIndexByPtr);
+    for (auto& compiledBuffer : compiledBuffers) {
+        std::sort(compiledBuffer.PassUsages.begin(), compiledBuffer.PassUsages.end(), [&](const BufferPassUsage& lhs, const BufferPassUsage& rhs) {
+            return passOrderIndexById.at(lhs.Pass.Id) < passOrderIndexById.at(rhs.Pass.Id);
+        });
+    }
+    for (auto& compiledTexture : compiledTextures) {
+        std::sort(compiledTexture.PassUsages.begin(), compiledTexture.PassUsages.end(), [&](const TexturePassUsage& lhs, const TexturePassUsage& rhs) {
+            return passOrderIndexById.at(lhs.Pass.Id) < passOrderIndexById.at(rhs.Pass.Id);
+        });
+    }
+
+    AppendLine(dot, "digraph CompiledRenderGraph {");
+    AppendLine(dot, "  rankdir=LR;");
+    AppendLine(dot, "  graph [fontname=\"Consolas\"];");
+    AppendLine(dot, "  node [fontname=\"Consolas\"];");
+    AppendLine(dot, "  edge [fontname=\"Consolas\"];");
+
+    for (uint32_t i = 0; i < compiled.PassOrder.size(); ++i) {
+        const auto passHandle = compiled.PassOrder[i];
+        RADRAY_ASSERT(passHandle.Id < _nodes.size());
+        const auto* node = _nodes[passHandle.Id].get();
+        RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
+        const auto& passNode = static_cast<const RDGPassNode&>(*node);
+        const auto style = GetNodeStyle(passNode);
+        fmt::format_to(std::back_inserter(dot), "  ");
+        AppendNodeId(dot, passHandle.Id);
+        fmt::format_to(
+            std::back_inserter(dot),
+            " [shape={}, style=filled, fillcolor=\"{}\", label=\"",
+            style.Shape,
+            style.FillColor);
+        AppendCompiledPassLabel(dot, passNode, i);
+        fmt::format_to(std::back_inserter(dot), "\"];\n");
+    }
+
+    const auto appendResourceVersions = [&](const RDGNode& resourceNode, const auto& passUsages) {
+        uint32_t versionCount = 0;
+        for (const auto& usage : passUsages) {
+            if (usage.HasWrite) {
+                versionCount += 1;
+            }
+        }
+
+        const auto style = GetNodeStyle(resourceNode);
+        for (uint32_t version = 0; version <= versionCount; ++version) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendCompiledResourceVersionNodeId(dot, resourceNode._id, version);
+            fmt::format_to(
+                std::back_inserter(dot),
+                " [shape={}, style=filled, fillcolor=\"{}\", label=\"",
+                style.Shape,
+                style.FillColor);
+            AppendCompiledResourceVersionLabel(dot, resourceNode, version);
+            fmt::format_to(std::back_inserter(dot), "\"];\n");
+        }
+    };
+
+    for (const auto& compiledBuffer : compiledBuffers) {
+        appendResourceVersions(*compiledBuffer.Node, compiledBuffer.PassUsages);
+    }
+    for (const auto& compiledTexture : compiledTextures) {
+        appendResourceVersions(*compiledTexture.Node, compiledTexture.PassUsages);
+    }
+
+    for (const auto& compiledBuffer : compiledBuffers) {
+        uint32_t currentVersion = 0;
+        for (const auto& usage : compiledBuffer.PassUsages) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendCompiledResourceVersionNodeId(dot, compiledBuffer.Node->_id, currentVersion);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendNodeId(dot, usage.Pass.Id);
+            fmt::format_to(std::back_inserter(dot), " [label=\"");
+            AppendCompiledStateLabel(dot, usage.FirstState);
+            fmt::format_to(std::back_inserter(dot), "\", color=\"#64748B\"];\n");
+
+            if (!usage.HasWrite) {
+                continue;
+            }
+
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendNodeId(dot, usage.Pass.Id);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendCompiledResourceVersionNodeId(dot, compiledBuffer.Node->_id, currentVersion + 1);
+            fmt::format_to(std::back_inserter(dot), " [label=\"");
+            AppendCompiledStateLabel(dot, usage.LastState);
+            fmt::format_to(std::back_inserter(dot), "\", color=\"#64748B\"];\n");
+            currentVersion += 1;
+        }
+    }
+
+    for (const auto& compiledTexture : compiledTextures) {
+        uint32_t currentVersion = 0;
+        for (const auto& usage : compiledTexture.PassUsages) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendCompiledResourceVersionNodeId(dot, compiledTexture.Node->_id, currentVersion);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendNodeId(dot, usage.Pass.Id);
+            fmt::format_to(std::back_inserter(dot), " [label=\"");
+            AppendCompiledStateLabel(dot, usage.FirstState);
+            fmt::format_to(std::back_inserter(dot), "\", color=\"#64748B\"];\n");
+
+            if (!usage.HasWrite) {
+                continue;
+            }
+
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendNodeId(dot, usage.Pass.Id);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendCompiledResourceVersionNodeId(dot, compiledTexture.Node->_id, currentVersion + 1);
+            fmt::format_to(std::back_inserter(dot), " [label=\"");
+            AppendCompiledStateLabel(dot, usage.LastState);
+            fmt::format_to(std::back_inserter(dot), "\", color=\"#64748B\"];\n");
+            currentVersion += 1;
+        }
+    }
+
+    AppendLine(dot, "}");
+    return fmt::to_string(dot);
+}
+
+string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) const {
+    fmt::memory_buffer dot{};
+
+    unordered_map<uint64_t, uint32_t> compiledPassIndexById{};
+    compiledPassIndexById.reserve(compiled.Passes.size());
+    for (uint32_t i = 0; i < compiled.Passes.size(); ++i) {
+        compiledPassIndexById.emplace(compiled.Passes[i].Pass.Id, i);
+    }
+
+    unordered_map<uint64_t, uint32_t> passLevelById{};
+    passLevelById.reserve(compiled.Passes.size());
+    uint32_t maxLevel = 0;
+    for (const auto& compiledPass : compiled.Passes) {
+        uint32_t level = 0;
+        for (const auto& predecessor : compiledPass.Predecessors) {
+            level = std::max(level, passLevelById.at(predecessor.Id) + 1);
+        }
+        passLevelById.emplace(compiledPass.Pass.Id, level);
+        maxLevel = std::max(maxLevel, level);
+    }
+
+    vector<vector<uint64_t>> passIdsByLevel(maxLevel + 1);
+    vector<uint64_t> directPassIds{};
+    vector<uint64_t> computePassIds{};
+    vector<uint64_t> copyPassIds{};
+    directPassIds.reserve(compiled.PassOrder.size());
+    computePassIds.reserve(compiled.PassOrder.size());
+    copyPassIds.reserve(compiled.PassOrder.size());
+    for (const auto& passHandle : compiled.PassOrder) {
+        passIdsByLevel[passLevelById.at(passHandle.Id)].emplace_back(passHandle.Id);
+
+        RADRAY_ASSERT(passHandle.Id < _nodes.size());
+        auto* node = _nodes[passHandle.Id].get();
+        RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
+        const auto* passNode = static_cast<const RDGPassNode*>(node);
+        switch (passNode->_type) {
+            case render::QueueType::Direct: directPassIds.emplace_back(passHandle.Id); break;
+            case render::QueueType::Compute: computePassIds.emplace_back(passHandle.Id); break;
+            case render::QueueType::Copy: copyPassIds.emplace_back(passHandle.Id); break;
+            case render::QueueType::MAX_COUNT: break;
+        }
+    }
+
+    const uint64_t dependencyKeyStride = _nodes.size() + 1;
+    unordered_map<uint64_t, vector<uint64_t>> dependencyResourceIdsByKey{};
+    dependencyResourceIdsByKey.reserve(compiled.Dependencies.size());
+    for (const auto& dependency : compiled.Dependencies) {
+        const uint64_t key = dependency.Before.Id * dependencyKeyStride + dependency.After.Id;
+        auto& resourceIds = dependencyResourceIdsByKey[key];
+        bool found = false;
+        for (const auto resourceId : resourceIds) {
+            if (resourceId == dependency.Resource.Id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            resourceIds.emplace_back(dependency.Resource.Id);
+        }
+    }
+
+    const auto appendExecutionHeadNodeId = [&](fmt::memory_buffer& output, uint64_t passId) {
+        const auto& compiledPass = compiled.Passes[compiledPassIndexById.at(passId)];
+        if (!compiledPass.BarriersBefore.empty()) {
+            AppendExecutionSyncNodeId(output, passId, "before");
+            return;
+        }
+        AppendExecutionPassNodeId(output, passId);
+    };
+    const auto appendExecutionTailNodeId = [&](fmt::memory_buffer& output, uint64_t passId) {
+        const auto& compiledPass = compiled.Passes[compiledPassIndexById.at(passId)];
+        if (!compiledPass.BarriersAfter.empty()) {
+            AppendExecutionSyncNodeId(output, passId, "after");
+            return;
+        }
+        AppendExecutionPassNodeId(output, passId);
+    };
+
+    AppendLine(dot, "digraph CompiledExecutionGraph {");
+    AppendLine(dot, "  rankdir=LR;");
+    AppendLine(dot, "  newrank=true;");
+    AppendLine(dot, "  compound=true;");
+    AppendLine(dot, "  graph [fontname=\"Consolas\"];");
+    AppendLine(dot, "  node [fontname=\"Consolas\"];");
+    AppendLine(dot, "  edge [fontname=\"Consolas\"];");
+
+    const auto appendQueueCluster = [&](render::QueueType queue, const vector<uint64_t>& passIds) {
+        if (passIds.empty()) {
+            return;
+        }
+
+        const auto queueName = render::format_as(queue);
+        const auto style = GetExecutionQueueStyle(queue);
+        fmt::format_to(std::back_inserter(dot), "  subgraph cluster_exec_{} {{\n", queueName);
+        fmt::format_to(std::back_inserter(dot), "    label=\"{} Queue\";\n", queueName);
+        fmt::format_to(std::back_inserter(dot), "    color=\"{}\";\n", style.ClusterColor);
+        AppendLine(dot, "    style=rounded;");
+
+        for (const auto passId : passIds) {
+            const auto& compiledPass = compiled.Passes[compiledPassIndexById.at(passId)];
+            RADRAY_ASSERT(passId < _nodes.size());
+            auto* node = _nodes[passId].get();
+            RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
+            const auto& passNode = static_cast<const RDGPassNode&>(*node);
+            const auto passOrderIndex = compiledPassIndexById.at(passId);
+            const auto passLevel = passLevelById.at(passId);
+
+            if (!compiledPass.BarriersBefore.empty()) {
+                fmt::format_to(std::back_inserter(dot), "    ");
+                AppendExecutionSyncNodeId(dot, passId, "before");
+                fmt::format_to(
+                    std::back_inserter(dot),
+                    " [shape=note, style=filled, fillcolor=\"{}\", label=\"",
+                    style.SyncFillColor);
+                AppendExecutionBarrierLabel(dot, *this, "before", passNode, compiledPass.BarriersBefore);
+                fmt::format_to(std::back_inserter(dot), "\"];\n");
+            }
+
+            fmt::format_to(std::back_inserter(dot), "    ");
+            AppendExecutionPassNodeId(dot, passId);
+            fmt::format_to(
+                std::back_inserter(dot),
+                " [shape=box, style=\"rounded,filled\", fillcolor=\"{}\", label=\"",
+                style.PassFillColor);
+            AppendDotEscaped(dot, passNode._name);
+            fmt::format_to(
+                std::back_inserter(dot),
+                "\\norder={}\\nlevel={}\\nqueue={}",
+                passOrderIndex,
+                passLevel,
+                queueName);
+            fmt::format_to(std::back_inserter(dot), "\"];\n");
+
+            if (!compiledPass.BarriersAfter.empty()) {
+                fmt::format_to(std::back_inserter(dot), "    ");
+                AppendExecutionSyncNodeId(dot, passId, "after");
+                fmt::format_to(
+                    std::back_inserter(dot),
+                    " [shape=note, style=filled, fillcolor=\"{}\", label=\"",
+                    style.SyncFillColor);
+                AppendExecutionBarrierLabel(dot, *this, "after", passNode, compiledPass.BarriersAfter);
+                fmt::format_to(std::back_inserter(dot), "\"];\n");
+            }
+        }
+
+        AppendLine(dot, "  }");
+    };
+
+    appendQueueCluster(render::QueueType::Direct, directPassIds);
+    appendQueueCluster(render::QueueType::Compute, computePassIds);
+    appendQueueCluster(render::QueueType::Copy, copyPassIds);
+
+    for (const auto& compiledPass : compiled.Passes) {
+        const auto passId = compiledPass.Pass.Id;
+        if (!compiledPass.BarriersBefore.empty()) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendExecutionSyncNodeId(dot, passId, "before");
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendExecutionPassNodeId(dot, passId);
+            fmt::format_to(std::back_inserter(dot), " [color=\"#475569\", penwidth=1.5];\n");
+        }
+        if (!compiledPass.BarriersAfter.empty()) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            AppendExecutionPassNodeId(dot, passId);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            AppendExecutionSyncNodeId(dot, passId, "after");
+            fmt::format_to(std::back_inserter(dot), " [color=\"#475569\", penwidth=1.5];\n");
+        }
+    }
+
+    const auto appendQueueEdges = [&](render::QueueType queue, const vector<uint64_t>& passIds) {
+        if (passIds.size() < 2) {
+            return;
+        }
+
+        const auto style = GetExecutionQueueStyle(queue);
+        for (size_t i = 1; i < passIds.size(); ++i) {
+            fmt::format_to(std::back_inserter(dot), "  ");
+            appendExecutionTailNodeId(dot, passIds[i - 1]);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            appendExecutionHeadNodeId(dot, passIds[i]);
+            fmt::format_to(
+                std::back_inserter(dot),
+                " [color=\"{}\", penwidth=2.0];\n",
+                style.ClusterColor);
+        }
+    };
+
+    appendQueueEdges(render::QueueType::Direct, directPassIds);
+    appendQueueEdges(render::QueueType::Compute, computePassIds);
+    appendQueueEdges(render::QueueType::Copy, copyPassIds);
+
+    for (const auto& compiledPass : compiled.Passes) {
+        RADRAY_ASSERT(compiledPass.Pass.Id < _nodes.size());
+        auto* node = _nodes[compiledPass.Pass.Id].get();
+        RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
+        const auto* passNode = static_cast<const RDGPassNode*>(node);
+
+        for (const auto& predecessor : compiledPass.Predecessors) {
+            RADRAY_ASSERT(predecessor.Id < _nodes.size());
+            auto* predecessorNodeBase = _nodes[predecessor.Id].get();
+            RADRAY_ASSERT(predecessorNodeBase != nullptr && predecessorNodeBase->GetTag().HasFlag(RDGNodeTag::Pass));
+            const auto* predecessorNode = static_cast<const RDGPassNode*>(predecessorNodeBase);
+            if (predecessorNode->_type == passNode->_type) {
+                continue;
+            }
+
+            const uint64_t key = predecessor.Id * dependencyKeyStride + compiledPass.Pass.Id;
+            fmt::format_to(std::back_inserter(dot), "  ");
+            appendExecutionTailNodeId(dot, predecessor.Id);
+            fmt::format_to(std::back_inserter(dot), " -> ");
+            appendExecutionHeadNodeId(dot, compiledPass.Pass.Id);
+            fmt::format_to(std::back_inserter(dot), " [style=dashed, color=\"#64748B\", label=\"");
+            const auto it = dependencyResourceIdsByKey.find(key);
+            if (it != dependencyResourceIdsByKey.end()) {
+                AppendExecutionDependencyLabel(dot, *this, it->second);
+            }
+            fmt::format_to(std::back_inserter(dot), "\"];\n");
+        }
+    }
+
+    for (const auto& passIds : passIdsByLevel) {
+        if (passIds.empty()) {
+            continue;
+        }
+
+        fmt::format_to(std::back_inserter(dot), "  {{ rank=same; ");
+        for (const auto passId : passIds) {
+            AppendExecutionPassNodeId(dot, passId);
+            fmt::format_to(std::back_inserter(dot), "; ");
+        }
+        fmt::format_to(std::back_inserter(dot), "}}\n");
     }
 
     AppendLine(dot, "}");
