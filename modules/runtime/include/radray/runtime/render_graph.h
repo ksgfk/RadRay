@@ -209,6 +209,12 @@ struct RDGCompileResult {
     vector<RDGCompiledResourceLifetime> Lifetimes;
 };
 
+struct RDGExecuteResult {
+    unordered_map<uint64_t, GpuBufferHandle> ExportedBuffers{};
+    unordered_map<uint64_t, GpuTextureHandle> ExportedTextures{};
+    GpuTask Task{nullptr, nullptr, 0};
+};
+
 // ----------------------------------------------------------------
 
 class RDGNode {
@@ -438,6 +444,7 @@ public:
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
+    RDGExecuteResult Execute(GpuRuntime& runtime) const;
 
     // ---------------- helper ----------------
     string ExportGraphviz() const;

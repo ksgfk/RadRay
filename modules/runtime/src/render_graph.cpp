@@ -2,6 +2,16 @@
 
 #include <algorithm>
 
+#ifdef RADRAY_ENABLE_D3D12
+#include <radray/render/backend/d3d12_helper.h>
+#include <radray/render/backend/d3d12_impl.h>
+#endif
+
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_helper.h>
+#include <radray/render/backend/vulkan_impl.h>
+#endif
+
 #include <fmt/format.h>
 
 #include <radray/logger.h>
@@ -522,6 +532,776 @@ void AppendExecutionDependencyLabel(
         auto* resourceNode = graph._nodes[resourceIds[i]].get();
         RADRAY_ASSERT(resourceNode != nullptr && resourceNode->GetTag().HasFlag(RDGNodeTag::Resource));
         AppendDotEscaped(output, resourceNode->_name);
+    }
+}
+
+class PersistentResourceCleanup {
+public:
+    explicit PersistentResourceCleanup(GpuRuntime* runtime) noexcept
+        : _runtime(runtime) {}
+
+    ~PersistentResourceCleanup() noexcept {
+        if (!_enabled || _runtime == nullptr) {
+            return;
+        }
+        for (auto it = _handles.rbegin(); it != _handles.rend(); ++it) {
+            if (!it->IsValid()) {
+                continue;
+            }
+            try {
+                _runtime->DestroyResourceImmediate(*it);
+            } catch (...) {
+            }
+        }
+    }
+
+    void Track(GpuResourceHandle handle) {
+        _handles.emplace_back(handle);
+    }
+
+    void Release() noexcept {
+        _enabled = false;
+    }
+
+private:
+    GpuRuntime* _runtime{nullptr};
+    vector<GpuResourceHandle> _handles{};
+    bool _enabled{true};
+};
+
+const RDGBufferNode& GetBufferNode(const RenderGraph& graph, RDGBufferHandle handle) {
+    RADRAY_ASSERT(handle.IsValid());
+    RADRAY_ASSERT(handle.Id < graph._nodes.size());
+    auto* node = graph._nodes[handle.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Buffer));
+    return static_cast<const RDGBufferNode&>(*node);
+}
+
+const RDGTextureNode& GetTextureNode(const RenderGraph& graph, RDGTextureHandle handle) {
+    RADRAY_ASSERT(handle.IsValid());
+    RADRAY_ASSERT(handle.Id < graph._nodes.size());
+    auto* node = graph._nodes[handle.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Texture));
+    return static_cast<const RDGTextureNode&>(*node);
+}
+
+const RDGPassNode& GetPassNode(const RenderGraph& graph, RDGPassHandle handle) {
+    RADRAY_ASSERT(handle.IsValid());
+    RADRAY_ASSERT(handle.Id < graph._nodes.size());
+    auto* node = graph._nodes[handle.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
+    return static_cast<const RDGPassNode&>(*node);
+}
+
+render::Buffer* ResolveBufferHandle(GpuBufferHandle handle) {
+    RADRAY_ASSERT(handle.IsValid() && handle.NativeHandle != nullptr);
+    auto* buffer = static_cast<render::Buffer*>(handle.NativeHandle);
+    RADRAY_ASSERT(buffer != nullptr);
+    return buffer;
+}
+
+render::Texture* ResolveTextureHandle(GpuTextureHandle handle) {
+    RADRAY_ASSERT(handle.IsValid() && handle.NativeHandle != nullptr);
+    auto* texture = static_cast<render::Texture*>(handle.NativeHandle);
+    RADRAY_ASSERT(texture != nullptr);
+    return texture;
+}
+
+GpuBufferHandle LookupBufferHandle(
+    const unordered_map<uint64_t, GpuBufferHandle>& handles,
+    RDGBufferHandle handle) {
+    const auto it = handles.find(handle.Id);
+    if (it == handles.end()) {
+        RADRAY_ABORT("RenderGraph::Execute missing resolved buffer handle for node {}", handle.Id);
+    }
+    return it->second;
+}
+
+GpuTextureHandle LookupTextureHandle(
+    const unordered_map<uint64_t, GpuTextureHandle>& handles,
+    RDGTextureHandle handle) {
+    const auto it = handles.find(handle.Id);
+    if (it == handles.end()) {
+        RADRAY_ABORT("RenderGraph::Execute missing resolved texture handle for node {}", handle.Id);
+    }
+    return it->second;
+}
+
+RDGMemoryAccesses CollectBufferAccessFlags(const RDGBufferNode& node) {
+    RDGMemoryAccesses accesses{};
+    if (node._importedState.has_value()) {
+        accesses |= node._importedState->Access;
+    }
+    if (node._exportedState.has_value()) {
+        accesses |= node._exportedState->Access;
+    }
+    for (const auto* edge : node._inEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        accesses |= edge->_access;
+    }
+    for (const auto* edge : node._outEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        accesses |= edge->_access;
+    }
+    return accesses;
+}
+
+void AccumulateBufferUsageFlags(render::BufferUses& usage, RDGMemoryAccess access) {
+    const RDGMemoryAccesses accesses{access};
+    if (accesses.HasFlag(RDGMemoryAccess::TransferRead)) {
+        usage |= render::BufferUse::CopySource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::TransferWrite)) {
+        usage |= render::BufferUse::CopyDestination;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::VertexRead)) {
+        usage |= render::BufferUse::Vertex;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::IndexRead)) {
+        usage |= render::BufferUse::Index;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ConstantRead)) {
+        usage |= render::BufferUse::CBuffer;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderRead)) {
+        usage |= render::BufferUse::Resource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderWrite)) {
+        usage |= render::BufferUse::UnorderedAccess;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::IndirectRead)) {
+        usage |= render::BufferUse::Indirect;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::HostRead)) {
+        usage |= render::BufferUse::MapRead;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::HostWrite)) {
+        usage |= render::BufferUse::MapWrite;
+    }
+}
+
+void AccumulateTextureUsageFlags(render::TextureUses& usage, RDGMemoryAccess access) {
+    const RDGMemoryAccesses accesses{access};
+    if (accesses.HasFlag(RDGMemoryAccess::TransferRead)) {
+        usage |= render::TextureUse::CopySource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::TransferWrite)) {
+        usage |= render::TextureUse::CopyDestination;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderRead)) {
+        usage |= render::TextureUse::Resource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ColorAttachmentRead) ||
+        accesses.HasFlag(RDGMemoryAccess::ColorAttachmentWrite)) {
+        usage |= render::TextureUse::RenderTarget;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::DepthStencilRead)) {
+        usage |= render::TextureUse::DepthStencilRead;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::DepthStencilWrite)) {
+        usage |= render::TextureUse::DepthStencilWrite;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderWrite)) {
+        usage |= render::TextureUse::UnorderedAccess;
+    }
+}
+
+render::BufferUses CollectBufferUsageFlags(const RDGBufferNode& node) {
+    render::BufferUses usage{};
+    if (node._importedState.has_value()) {
+        AccumulateBufferUsageFlags(usage, node._importedState->Access);
+    }
+    if (node._exportedState.has_value()) {
+        AccumulateBufferUsageFlags(usage, node._exportedState->Access);
+    }
+    for (const auto* edge : node._inEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        AccumulateBufferUsageFlags(usage, edge->_access);
+    }
+    for (const auto* edge : node._outEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        AccumulateBufferUsageFlags(usage, edge->_access);
+    }
+    return usage;
+}
+
+render::TextureUses CollectTextureUsageFlags(const RDGTextureNode& node) {
+    render::TextureUses usage{};
+    if (node._importedState.has_value()) {
+        AccumulateTextureUsageFlags(usage, node._importedState->Access);
+    }
+    if (node._exportedState.has_value()) {
+        AccumulateTextureUsageFlags(usage, node._exportedState->Access);
+    }
+    for (const auto* edge : node._inEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        AccumulateTextureUsageFlags(usage, edge->_access);
+    }
+    for (const auto* edge : node._outEdges) {
+        RADRAY_ASSERT(edge != nullptr);
+        AccumulateTextureUsageFlags(usage, edge->_access);
+    }
+    return usage;
+}
+
+render::MemoryType InferBufferMemoryType(const RDGBufferNode& node) {
+    const auto usage = CollectBufferUsageFlags(node);
+    const auto accesses = CollectBufferAccessFlags(node);
+    if (node._exportedState.has_value() && node._exportedState->Access == RDGMemoryAccess::HostRead) {
+        constexpr uint32_t readBackCompatibleMask =
+            static_cast<uint32_t>(render::BufferUse::MapRead) |
+            static_cast<uint32_t>(render::BufferUse::CopyDestination);
+        if ((usage.value() & ~readBackCompatibleMask) == 0) {
+            return render::MemoryType::ReadBack;
+        }
+    }
+    const bool hasHostWrite = accesses.HasFlag(RDGMemoryAccess::HostWrite);
+    const bool hasGpuWrite =
+        accesses.HasFlag(RDGMemoryAccess::TransferWrite) ||
+        accesses.HasFlag(RDGMemoryAccess::ShaderWrite);
+    if (hasHostWrite && !hasGpuWrite) {
+        return render::MemoryType::Upload;
+    }
+    return render::MemoryType::Device;
+}
+
+render::MemoryType InferTextureMemoryType(const RDGTextureNode&) {
+    return render::MemoryType::Device;
+}
+
+render::BufferDescriptor BuildBufferDescriptor(const RDGBufferNode& node) {
+    auto usage = CollectBufferUsageFlags(node);
+    const auto memory = InferBufferMemoryType(node);
+    if (usage == render::BufferUse::UNKNOWN) {
+        if (memory == render::MemoryType::ReadBack) {
+            usage |= render::BufferUse::MapRead;
+        } else if (memory == render::MemoryType::Upload) {
+            usage |= render::BufferUse::MapWrite;
+        } else {
+            usage = render::BufferUse::CopySource | render::BufferUse::CopyDestination;
+        }
+    }
+    return render::BufferDescriptor{
+        .Size = node._size,
+        .Memory = memory,
+        .Usage = usage,
+        .Hints = render::ResourceHint::None,
+    };
+}
+
+render::TextureDescriptor BuildTextureDescriptor(const RDGTextureNode& node) {
+    auto usage = CollectTextureUsageFlags(node);
+    if (usage == render::TextureUse::UNKNOWN) {
+        usage = render::TextureUse::CopySource | render::TextureUse::CopyDestination;
+    }
+    return render::TextureDescriptor{
+        .Dim = node._dim,
+        .Width = node._width,
+        .Height = node._height,
+        .DepthOrArraySize = node._depthOrArraySize,
+        .MipLevels = node._mipLevels,
+        .SampleCount = node._sampleCount,
+        .Format = node._format,
+        .Memory = InferTextureMemoryType(node),
+        .Usage = usage,
+        .Hints = render::ResourceHint::None,
+    };
+}
+
+render::BufferStates MapRDGBufferStateToRenderState(const RDGBufferState& state) {
+    const RDGMemoryAccesses accesses{state.Access};
+    render::BufferStates mapped{};
+    if (accesses.HasFlag(RDGMemoryAccess::TransferRead)) {
+        mapped |= render::BufferState::CopySource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::TransferWrite)) {
+        mapped |= render::BufferState::CopyDestination;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::VertexRead)) {
+        mapped |= render::BufferState::Vertex;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::IndexRead)) {
+        mapped |= render::BufferState::Index;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ConstantRead)) {
+        mapped |= render::BufferState::CBuffer;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderWrite)) {
+        mapped |= render::BufferState::UnorderedAccess;
+    } else if (accesses.HasFlag(RDGMemoryAccess::ShaderRead)) {
+        mapped |= render::BufferState::ShaderRead;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::IndirectRead)) {
+        mapped |= render::BufferState::Indirect;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::HostRead)) {
+        mapped |= render::BufferState::HostRead;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::HostWrite)) {
+        mapped |= render::BufferState::HostWrite;
+    }
+    if (mapped == render::BufferState::UNKNOWN) {
+        return render::BufferState::Common;
+    }
+    return mapped;
+}
+
+render::TextureStates MapRDGTextureStateToRenderState(const RDGTextureState& state) {
+    const RDGMemoryAccesses accesses{state.Access};
+    render::TextureStates mapped{};
+    switch (state.Layout) {
+        case RDGTextureLayout::Undefined:
+            return render::TextureState::Undefined;
+        case RDGTextureLayout::Present:
+            return render::TextureState::Present;
+        case RDGTextureLayout::TransferSource:
+            mapped |= render::TextureState::CopySource;
+            break;
+        case RDGTextureLayout::TransferDestination:
+            mapped |= render::TextureState::CopyDestination;
+            break;
+        case RDGTextureLayout::ShaderReadOnly:
+            mapped |= render::TextureState::ShaderRead;
+            break;
+        case RDGTextureLayout::ColorAttachment:
+            mapped |= render::TextureState::RenderTarget;
+            break;
+        case RDGTextureLayout::DepthStencilReadOnly:
+            mapped |= render::TextureState::DepthRead;
+            break;
+        case RDGTextureLayout::DepthStencilAttachment:
+            mapped |= render::TextureState::DepthWrite;
+            break;
+        case RDGTextureLayout::General:
+            if (accesses.HasFlag(RDGMemoryAccess::ShaderWrite)) {
+                mapped |= render::TextureState::UnorderedAccess;
+            } else if (accesses.HasFlag(RDGMemoryAccess::ShaderRead)) {
+                mapped |= render::TextureState::ShaderRead;
+            } else {
+                mapped |= render::TextureState::Common;
+            }
+            break;
+        case RDGTextureLayout::UNKNOWN:
+            break;
+    }
+    if (mapped != render::TextureState::UNKNOWN) {
+        return mapped;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::TransferRead)) {
+        mapped |= render::TextureState::CopySource;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::TransferWrite)) {
+        mapped |= render::TextureState::CopyDestination;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ColorAttachmentRead) ||
+        accesses.HasFlag(RDGMemoryAccess::ColorAttachmentWrite)) {
+        mapped |= render::TextureState::RenderTarget;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::DepthStencilWrite)) {
+        mapped |= render::TextureState::DepthWrite;
+    } else if (accesses.HasFlag(RDGMemoryAccess::DepthStencilRead)) {
+        mapped |= render::TextureState::DepthRead;
+    }
+    if (accesses.HasFlag(RDGMemoryAccess::ShaderWrite)) {
+        mapped |= render::TextureState::UnorderedAccess;
+    } else if (accesses.HasFlag(RDGMemoryAccess::ShaderRead)) {
+        mapped |= render::TextureState::ShaderRead;
+    }
+    if (mapped == render::TextureState::UNKNOWN) {
+        return render::TextureState::Common;
+    }
+    return mapped;
+}
+
+uint32_t GetTextureArrayLayerCount(const render::TextureDescriptor& desc) {
+    switch (desc.Dim) {
+        case render::TextureDimension::Dim1DArray:
+        case render::TextureDimension::Dim2DArray:
+        case render::TextureDimension::Cube:
+        case render::TextureDimension::CubeArray:
+            return desc.DepthOrArraySize;
+        default:
+            return 1;
+    }
+}
+
+render::SubresourceRange ResolveTextureRange(
+    const render::TextureDescriptor& desc,
+    render::SubresourceRange range) {
+    const uint32_t layerCount = GetTextureArrayLayerCount(desc);
+    if (range.ArrayLayerCount == render::SubresourceRange::All) {
+        range.ArrayLayerCount = layerCount - range.BaseArrayLayer;
+    }
+    if (range.MipLevelCount == render::SubresourceRange::All) {
+        range.MipLevelCount = desc.MipLevels - range.BaseMipLevel;
+    }
+    return range;
+}
+
+bool IsWholeTextureRange(const render::TextureDescriptor& desc, render::SubresourceRange range) {
+    range = ResolveTextureRange(desc, range);
+    return range.BaseArrayLayer == 0 &&
+           range.BaseMipLevel == 0 &&
+           range.ArrayLayerCount == GetTextureArrayLayerCount(desc) &&
+           range.MipLevelCount == desc.MipLevels;
+}
+
+bool IsSameTextureRange(render::SubresourceRange lhs, render::SubresourceRange rhs) {
+    return lhs.BaseArrayLayer == rhs.BaseArrayLayer &&
+           lhs.ArrayLayerCount == rhs.ArrayLayerCount &&
+           lhs.BaseMipLevel == rhs.BaseMipLevel &&
+           lhs.MipLevelCount == rhs.MipLevelCount;
+}
+
+render::SubresourceRange ChooseTextureBarrierRange(
+    const RDGTextureState& before,
+    const RDGTextureState& after) {
+    if (IsSameTextureRange(before.Range, after.Range)) {
+        return after.Range;
+    }
+    return render::SubresourceRange::AllSub();
+}
+
+GpuTextureViewDescriptor BuildTextureViewDescForColorAttachment(
+    GpuTextureHandle texture,
+    const render::TextureDescriptor& textureDesc,
+    const RDGColorAttachmentInfo& attachment) {
+    return GpuTextureViewDescriptor{
+        .Target = texture,
+        .Dim = textureDesc.Dim,
+        .Format = textureDesc.Format,
+        .Range = attachment.Range,
+        .Usage = render::TextureViewUsage::RenderTarget,
+    };
+}
+
+GpuTextureViewDescriptor BuildTextureViewDescForDepthStencilAttachment(
+    GpuTextureHandle texture,
+    const render::TextureDescriptor& textureDesc,
+    const RDGDepthStencilAttachmentInfo& attachment) {
+    return GpuTextureViewDescriptor{
+        .Target = texture,
+        .Dim = textureDesc.Dim,
+        .Format = textureDesc.Format,
+        .Range = attachment.Range,
+        .Usage = attachment.HasWriteAccess()
+                     ? render::TextureViewUsage::DepthWrite
+                     : render::TextureViewUsage::DepthRead,
+    };
+}
+
+struct PassAttachmentViews {
+    vector<render::ColorAttachment> ColorAttachments{};
+    std::optional<render::DepthStencilAttachment> DepthStencilAttachment{};
+};
+
+PassAttachmentViews CreateAttachmentViewsForPass(
+    GpuAsyncContext& context,
+    const RDGGraphicsPassNode& passNode,
+    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    auto colorInfos = passNode._colorAttachments;
+    std::sort(colorInfos.begin(), colorInfos.end(), [](const RDGColorAttachmentInfo& lhs, const RDGColorAttachmentInfo& rhs) {
+        return lhs.Slot < rhs.Slot;
+    });
+
+    PassAttachmentViews attachments{};
+    attachments.ColorAttachments.reserve(colorInfos.size());
+    for (const auto& colorInfo : colorInfos) {
+        const auto textureHandle = LookupTextureHandle(textureHandles, colorInfo.Texture);
+        const auto textureDesc = ResolveTextureHandle(textureHandle)->GetDesc();
+        const auto viewHandle = context.CreateTransientTextureView(
+            BuildTextureViewDescForColorAttachment(textureHandle, textureDesc, colorInfo));
+        attachments.ColorAttachments.emplace_back(render::ColorAttachment{
+            .Target = static_cast<render::TextureView*>(viewHandle.NativeHandle),
+            .Load = colorInfo.Load,
+            .Store = colorInfo.Store,
+            .ClearValue = colorInfo.ClearValue.value_or(render::ColorClearValue{}),
+        });
+    }
+
+    if (passNode._depthStencilAttachment.has_value()) {
+        const auto& depthInfo = passNode._depthStencilAttachment.value();
+        const auto textureHandle = LookupTextureHandle(textureHandles, depthInfo.Texture);
+        const auto textureDesc = ResolveTextureHandle(textureHandle)->GetDesc();
+        const auto viewHandle = context.CreateTransientTextureView(
+            BuildTextureViewDescForDepthStencilAttachment(textureHandle, textureDesc, depthInfo));
+        attachments.DepthStencilAttachment = render::DepthStencilAttachment{
+            .Target = static_cast<render::TextureView*>(viewHandle.NativeHandle),
+            .DepthLoad = depthInfo.DepthLoad,
+            .DepthStore = depthInfo.DepthStore,
+            .StencilLoad = depthInfo.StencilLoad,
+            .StencilStore = depthInfo.StencilStore,
+            .ClearValue = depthInfo.ClearValue.value_or(render::DepthStencilClearValue{}),
+        };
+    }
+
+    return attachments;
+}
+
+#ifdef RADRAY_ENABLE_VULKAN
+VkPipelineStageFlags MapRDGExecutionStageToVkPipelineStage(RDGExecutionStage stage, bool isSrc) {
+    const RDGExecutionStages stages{stage};
+    VkPipelineStageFlags mapped = 0;
+    if (stages.HasFlag(RDGExecutionStage::VertexInput)) {
+        mapped |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::VertexShader)) {
+        mapped |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::PixelShader)) {
+        mapped |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::DepthStencil)) {
+        mapped |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::ColorOutput)) {
+        mapped |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::Indirect)) {
+        mapped |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::ComputeShader)) {
+        mapped |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::Copy)) {
+        mapped |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::Host)) {
+        mapped |= VK_PIPELINE_STAGE_HOST_BIT;
+    }
+    if (stages.HasFlag(RDGExecutionStage::Present)) {
+        mapped |= isSrc
+                      ? (VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                      : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+    if (mapped == 0 && stage == RDGExecutionStage::NONE && isSrc) {
+        mapped = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    }
+    return mapped;
+}
+
+VkPipelineStageFlags MapRDGBufferStateToVkPipelineStage(const RDGBufferState& state, bool isSrc) {
+    const auto mapped = MapRDGExecutionStageToVkPipelineStage(state.Stage, isSrc);
+    if (mapped != 0) {
+        return mapped;
+    }
+    return render::vulkan::BufferStateToPipelineStageFlags(MapRDGBufferStateToRenderState(state));
+}
+
+VkPipelineStageFlags MapRDGTextureStateToVkPipelineStage(const RDGTextureState& state, bool isSrc) {
+    const auto mapped = MapRDGExecutionStageToVkPipelineStage(state.Stage, isSrc);
+    if (mapped != 0) {
+        return mapped;
+    }
+    return render::vulkan::TextureStateToPipelineStageFlags(MapRDGTextureStateToRenderState(state), isSrc);
+}
+#endif
+
+void EmitBackendBarrier(
+    render::RenderBackend backend,
+    render::CommandBuffer* cmd,
+    const RDGCompiledBufferBarrier& barrier,
+    const unordered_map<uint64_t, GpuBufferHandle>& bufferHandles) {
+    const auto bufferHandle = LookupBufferHandle(bufferHandles, barrier.Buffer);
+    auto* buffer = ResolveBufferHandle(bufferHandle);
+    const auto beforeState = MapRDGBufferStateToRenderState(barrier.Before);
+    const auto afterState = MapRDGBufferStateToRenderState(barrier.After);
+    switch (backend) {
+#ifdef RADRAY_ENABLE_D3D12
+        case render::RenderBackend::D3D12: {
+            auto* cmdD3D12 = render::d3d12::CastD3D12Object(cmd);
+            auto* bufferD3D12 = render::d3d12::CastD3D12Object(buffer);
+            D3D12_RESOURCE_BARRIER raw{};
+            if (beforeState == render::BufferState::UnorderedAccess &&
+                afterState == render::BufferState::UnorderedAccess) {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = bufferD3D12->_buf.Get();
+            } else {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = bufferD3D12->_buf.Get();
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                raw.Transition.StateBefore = render::d3d12::MapType(beforeState);
+                raw.Transition.StateAfter = render::d3d12::MapType(afterState);
+                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                    return;
+                }
+            }
+            cmdD3D12->_cmdList->ResourceBarrier(1, &raw);
+            return;
+        }
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+        case render::RenderBackend::Vulkan: {
+            auto* cmdVk = render::vulkan::CastVkObject(cmd);
+            auto* bufferVk = render::vulkan::CastVkObject(buffer);
+            VkBufferMemoryBarrier raw{};
+            raw.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            raw.pNext = nullptr;
+            raw.srcAccessMask = render::vulkan::BufferStateToAccessFlags(beforeState);
+            raw.dstAccessMask = render::vulkan::BufferStateToAccessFlags(afterState);
+            raw.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            raw.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            raw.buffer = bufferVk->_buffer;
+            raw.offset = 0;
+            raw.size = bufferVk->_reqSize;
+            const auto srcStageMask = MapRDGBufferStateToVkPipelineStage(barrier.Before, true);
+            const auto dstStageMask = MapRDGBufferStateToVkPipelineStage(barrier.After, false);
+            cmdVk->_device->_ftb.vkCmdPipelineBarrier(
+                cmdVk->_cmdBuffer,
+                srcStageMask,
+                dstStageMask,
+                0,
+                0,
+                nullptr,
+                1,
+                &raw,
+                0,
+                nullptr);
+            return;
+        }
+#endif
+        default:
+            RADRAY_ABORT("RenderGraph::Execute backend {} is not supported", backend);
+    }
+}
+
+void EmitBackendBarrier(
+    render::RenderBackend backend,
+    render::CommandBuffer* cmd,
+    const RDGCompiledTextureBarrier& barrier,
+    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    const auto textureHandle = LookupTextureHandle(textureHandles, barrier.Texture);
+    auto* texture = ResolveTextureHandle(textureHandle);
+    const auto textureDesc = texture->GetDesc();
+    const auto beforeState = MapRDGTextureStateToRenderState(barrier.Before);
+    const auto afterState = MapRDGTextureStateToRenderState(barrier.After);
+    const auto barrierRange = ChooseTextureBarrierRange(barrier.Before, barrier.After);
+    switch (backend) {
+#ifdef RADRAY_ENABLE_D3D12
+        case render::RenderBackend::D3D12: {
+            auto* cmdD3D12 = render::d3d12::CastD3D12Object(cmd);
+            auto* textureD3D12 = render::d3d12::CastD3D12Object(texture);
+            if (beforeState == render::TextureState::UnorderedAccess &&
+                afterState == render::TextureState::UnorderedAccess) {
+                D3D12_RESOURCE_BARRIER raw{};
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = textureD3D12->_tex.Get();
+                cmdD3D12->_cmdList->ResourceBarrier(1, &raw);
+                return;
+            }
+
+            const auto stateBefore = render::d3d12::MapType(beforeState);
+            const auto stateAfter = render::d3d12::MapType(afterState);
+            if (stateBefore == D3D12_RESOURCE_STATE_COMMON &&
+                stateAfter == D3D12_RESOURCE_STATE_COMMON &&
+                (beforeState == render::TextureState::Present || afterState == render::TextureState::Present)) {
+                return;
+            }
+            if (stateBefore == stateAfter) {
+                return;
+            }
+
+            if (IsWholeTextureRange(textureDesc, barrierRange)) {
+                D3D12_RESOURCE_BARRIER raw{};
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = textureD3D12->_tex.Get();
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                raw.Transition.StateBefore = stateBefore;
+                raw.Transition.StateAfter = stateAfter;
+                cmdD3D12->_cmdList->ResourceBarrier(1, &raw);
+                return;
+            }
+
+            const auto resolvedRange = ResolveTextureRange(textureDesc, barrierRange);
+            const uint32_t arrayLayerCount = GetTextureArrayLayerCount(textureDesc);
+            vector<D3D12_RESOURCE_BARRIER> rawBarriers{};
+            rawBarriers.reserve(static_cast<size_t>(resolvedRange.ArrayLayerCount) * resolvedRange.MipLevelCount);
+            for (uint32_t arrayLayer = 0; arrayLayer < resolvedRange.ArrayLayerCount; ++arrayLayer) {
+                for (uint32_t mip = 0; mip < resolvedRange.MipLevelCount; ++mip) {
+                    auto& raw = rawBarriers.emplace_back(D3D12_RESOURCE_BARRIER{});
+                    raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                    raw.Transition.pResource = textureD3D12->_tex.Get();
+                    raw.Transition.Subresource = D3D12CalcSubresource(
+                        resolvedRange.BaseMipLevel + mip,
+                        resolvedRange.BaseArrayLayer + arrayLayer,
+                        0,
+                        textureDesc.MipLevels,
+                        arrayLayerCount);
+                    raw.Transition.StateBefore = stateBefore;
+                    raw.Transition.StateAfter = stateAfter;
+                }
+            }
+            if (!rawBarriers.empty()) {
+                cmdD3D12->_cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
+            }
+            return;
+        }
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+        case render::RenderBackend::Vulkan: {
+            auto* cmdVk = render::vulkan::CastVkObject(cmd);
+            auto* textureVk = render::vulkan::CastVkObject(texture);
+            VkImageMemoryBarrier raw{};
+            raw.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            raw.pNext = nullptr;
+            raw.srcAccessMask = render::vulkan::TextureStateToAccessFlags(beforeState);
+            raw.dstAccessMask = render::vulkan::TextureStateToAccessFlags(afterState);
+            raw.oldLayout = render::vulkan::TextureStateToLayout(beforeState);
+            raw.newLayout = render::vulkan::TextureStateToLayout(afterState);
+            raw.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            raw.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            raw.image = textureVk->_image;
+            raw.subresourceRange.aspectMask = render::vulkan::ImageFormatToAspectFlags(textureVk->_rawFormat);
+            if (IsWholeTextureRange(textureDesc, barrierRange)) {
+                raw.subresourceRange.baseMipLevel = 0;
+                raw.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+                raw.subresourceRange.baseArrayLayer = 0;
+                raw.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+            } else {
+                const auto resolvedRange = ResolveTextureRange(textureDesc, barrierRange);
+                raw.subresourceRange.baseMipLevel = resolvedRange.BaseMipLevel;
+                raw.subresourceRange.levelCount = resolvedRange.MipLevelCount;
+                raw.subresourceRange.baseArrayLayer = resolvedRange.BaseArrayLayer;
+                raw.subresourceRange.layerCount = resolvedRange.ArrayLayerCount;
+            }
+            const auto srcStageMask = MapRDGTextureStateToVkPipelineStage(barrier.Before, true);
+            const auto dstStageMask = MapRDGTextureStateToVkPipelineStage(barrier.After, false);
+            cmdVk->_device->_ftb.vkCmdPipelineBarrier(
+                cmdVk->_cmdBuffer,
+                srcStageMask,
+                dstStageMask,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &raw);
+            return;
+        }
+#endif
+        default:
+            RADRAY_ABORT("RenderGraph::Execute backend {} is not supported", backend);
+    }
+}
+
+void EmitBackendBarriers(
+    render::RenderBackend backend,
+    render::CommandBuffer* cmd,
+    const vector<RDGCompiledBarrier>& barriers,
+    const unordered_map<uint64_t, GpuBufferHandle>& bufferHandles,
+    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    for (const auto& barrier : barriers) {
+        if (std::holds_alternative<RDGCompiledBufferBarrier>(barrier)) {
+            EmitBackendBarrier(backend, cmd, std::get<RDGCompiledBufferBarrier>(barrier), bufferHandles);
+        } else {
+            EmitBackendBarrier(backend, cmd, std::get<RDGCompiledTextureBarrier>(barrier), textureHandles);
+        }
     }
 }
 
@@ -1347,6 +2127,178 @@ RDGCompileResult RenderGraph::Compile() const {
         }
     }
 
+    return result;
+}
+
+RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime) const {
+    const auto [isValid, errorMessage] = this->Validate();
+    if (!isValid) {
+        RADRAY_ABORT("RenderGraph::Execute validation failed: {}", errorMessage);
+    }
+
+    const auto compiled = this->Compile();
+    if (compiled.PassOrder.empty()) {
+        return {};
+    }
+    if (runtime._device == nullptr) {
+        throw GpuSystemException("RenderGraph::Execute requires a valid GpuRuntime");
+    }
+
+    const auto backend = runtime._device->GetBackend();
+    PersistentResourceCleanup cleanup{&runtime};
+    auto context = runtime.BeginAsync(render::QueueType::Direct);
+
+    unordered_map<uint64_t, GpuBufferHandle> bufferHandles{};
+    unordered_map<uint64_t, GpuTextureHandle> textureHandles{};
+    bufferHandles.reserve(_nodes.size());
+    textureHandles.reserve(_nodes.size());
+
+    vector<GpuResourceHandle> transientLikePersistentResources{};
+    transientLikePersistentResources.reserve(_nodes.size());
+
+    for (const auto& nodeHolder : _nodes) {
+        auto* node = nodeHolder.get();
+        RADRAY_ASSERT(node != nullptr);
+
+        if (node->GetTag().HasFlag(RDGNodeTag::Buffer)) {
+            RDGBufferHandle bufferHandle{};
+            bufferHandle.Id = node->_id;
+            const auto& bufferNode = GetBufferNode(*this, bufferHandle);
+            if (bufferNode._ownership == RDGResourceOwnership::External) {
+                bufferHandles.emplace(bufferNode._id, bufferNode._backingHandle);
+                continue;
+            }
+
+            const auto handle = runtime.CreateBuffer(BuildBufferDescriptor(bufferNode));
+            bufferHandles.emplace(bufferNode._id, handle);
+            cleanup.Track(handle);
+            if (!bufferNode._exportedState.has_value()) {
+                transientLikePersistentResources.emplace_back(handle);
+            }
+            continue;
+        }
+
+        if (node->GetTag().HasFlag(RDGNodeTag::Texture)) {
+            RDGTextureHandle textureHandle{};
+            textureHandle.Id = node->_id;
+            const auto& textureNode = GetTextureNode(*this, textureHandle);
+            if (textureNode._ownership == RDGResourceOwnership::External) {
+                textureHandles.emplace(textureNode._id, textureNode._backingHandle);
+                continue;
+            }
+
+            const auto handle = runtime.CreateTexture(BuildTextureDescriptor(textureNode));
+            textureHandles.emplace(textureNode._id, handle);
+            cleanup.Track(handle);
+            if (!textureNode._exportedState.has_value()) {
+                transientLikePersistentResources.emplace_back(handle);
+            }
+        }
+    }
+
+    auto* cmd = context->CreateCommandBuffer();
+    cmd->Begin();
+
+    for (const auto& compiledPass : compiled.Passes) {
+        EmitBackendBarriers(backend, cmd, compiledPass.BarriersBefore, bufferHandles, textureHandles);
+
+        const auto& passNode = GetPassNode(*this, compiledPass.Pass);
+        switch (NormalizePassQueueTag(passNode.GetTag())) {
+            case RDGNodeTag::GraphicsPass: {
+                const auto& graphicsPassNode = static_cast<const RDGGraphicsPassNode&>(passNode);
+                auto attachments = CreateAttachmentViewsForPass(*context, graphicsPassNode, textureHandles);
+                render::RenderPassDescriptor passDesc{};
+                passDesc.ColorAttachments = std::span<const render::ColorAttachment>(attachments.ColorAttachments);
+                passDesc.DepthStencilAttachment = attachments.DepthStencilAttachment;
+                passDesc.Name = passNode._name;
+                auto encoderOpt = cmd->BeginRenderPass(passDesc);
+                if (!encoderOpt.HasValue()) {
+                    RADRAY_ABORT("RenderGraph::Execute BeginRenderPass failed for pass '{}'", passNode._name);
+                }
+                cmd->EndRenderPass(encoderOpt.Release());
+                break;
+            }
+            case RDGNodeTag::ComputePass: {
+                auto encoderOpt = cmd->BeginComputePass();
+                if (!encoderOpt.HasValue()) {
+                    RADRAY_ABORT("RenderGraph::Execute BeginComputePass failed for pass '{}'", passNode._name);
+                }
+                cmd->EndComputePass(encoderOpt.Release());
+                break;
+            }
+            case RDGNodeTag::CopyPass: {
+                const auto& copyPassNode = static_cast<const RDGCopyPassNode&>(passNode);
+                for (const auto& op : copyPassNode._ops) {
+                    if (std::holds_alternative<RDGCopyBufferToBufferInfo>(op)) {
+                        const auto& info = std::get<RDGCopyBufferToBufferInfo>(op);
+                        cmd->CopyBufferToBuffer(
+                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Dst)),
+                            info.DstOffset,
+                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Src)),
+                            info.SrcOffset,
+                            info.Size);
+                    } else if (std::holds_alternative<RDGCopyBufferToTextureInfo>(op)) {
+                        const auto& info = std::get<RDGCopyBufferToTextureInfo>(op);
+                        cmd->CopyBufferToTexture(
+                            ResolveTextureHandle(LookupTextureHandle(textureHandles, info.Dst)),
+                            info.DstRange,
+                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Src)),
+                            info.SrcOffset);
+                    } else {
+                        const auto& info = std::get<RDGCopyTextureToBufferInfo>(op);
+                        cmd->CopyTextureToBuffer(
+                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Dst)),
+                            info.DstOffset,
+                            ResolveTextureHandle(LookupTextureHandle(textureHandles, info.Src)),
+                            info.SrcRange);
+                    }
+                }
+                break;
+            }
+            default:
+                RADRAY_ABORT(
+                    "RenderGraph::Execute encountered unsupported pass tag {} on pass '{}'",
+                    passNode.GetTag(),
+                    passNode._name);
+        }
+
+        EmitBackendBarriers(backend, cmd, compiledPass.BarriersAfter, bufferHandles, textureHandles);
+    }
+
+    cmd->End();
+
+    auto task = runtime.SubmitAsync(std::move(context));
+    cleanup.Release();
+    for (const auto& handle : transientLikePersistentResources) {
+        runtime.DestroyResourceAfter(handle, task);
+    }
+
+    RDGExecuteResult result{};
+    for (const auto& nodeHolder : _nodes) {
+        auto* node = nodeHolder.get();
+        RADRAY_ASSERT(node != nullptr);
+
+        if (node->GetTag().HasFlag(RDGNodeTag::Buffer)) {
+            RDGBufferHandle bufferHandle{};
+            bufferHandle.Id = node->_id;
+            const auto& bufferNode = GetBufferNode(*this, bufferHandle);
+            if (bufferNode._exportedState.has_value()) {
+                result.ExportedBuffers.emplace(bufferNode._id, LookupBufferHandle(bufferHandles, bufferHandle));
+            }
+            continue;
+        }
+
+        if (node->GetTag().HasFlag(RDGNodeTag::Texture)) {
+            RDGTextureHandle textureHandle{};
+            textureHandle.Id = node->_id;
+            const auto& textureNode = GetTextureNode(*this, textureHandle);
+            if (textureNode._exportedState.has_value()) {
+                result.ExportedTextures.emplace(textureNode._id, LookupTextureHandle(textureHandles, textureHandle));
+            }
+        }
+    }
+
+    result.Task = std::move(task);
     return result;
 }
 

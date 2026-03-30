@@ -90,6 +90,7 @@ class GpuSurface;
 class GpuFrameContext;
 class GpuAsyncContext;
 class GpuResourceRegistry;
+class RenderGraph;
 
 class GpuSystemException : public std::runtime_error {
 public:
@@ -376,6 +377,7 @@ private:
 
     friend class GpuAsyncContext;
     friend class GpuFrameContext;
+    friend class RenderGraph;
 };
 
 }  // namespace radray
