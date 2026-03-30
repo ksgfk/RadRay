@@ -35,13 +35,13 @@ void AppendNodeId(fmt::memory_buffer& output, uint64_t id) {
 }
 
 DotNodeStyle GetNodeStyle(const RDGNode& node) noexcept {
-    if (node.IsPassNode()) {
+    if (node.GetTag().HasFlag(RDGNodeTag::Pass)) {
         return DotNodeStyle{"box", "#DBEAFE"};
     }
-    if (node.IsBufferNode()) {
+    if (node.GetTag().HasFlag(RDGNodeTag::Buffer)) {
         return DotNodeStyle{"ellipse", "#DCFCE7"};
     }
-    if (node.IsTextureNode()) {
+    if (node.GetTag().HasFlag(RDGNodeTag::Texture)) {
         return DotNodeStyle{"hexagon", "#FEF3C7"};
     }
     return DotNodeStyle{"diamond", "#E5E7EB"};
@@ -50,7 +50,7 @@ DotNodeStyle GetNodeStyle(const RDGNode& node) noexcept {
 void AppendNodeLabel(fmt::memory_buffer& output, const RDGNode& node) {
     AppendDotEscaped(output, node._name);
 
-    if (node.IsPassNode()) {
+    if (node.GetTag().HasFlag(RDGNodeTag::Pass)) {
         const auto& passNode = static_cast<const RDGPassNode&>(node);
         fmt::format_to(std::back_inserter(output), "\\nqueue={}", render::format_as(passNode._type));
     }
@@ -173,7 +173,7 @@ void RenderGraph::ExportBuffer(
     RDGMemoryAccess access,
     render::BufferRange bufferRange) {
     auto* baseNode = _nodes[nodeHandle.Id].get();
-    RADRAY_ASSERT(baseNode->IsBufferNode());
+    RADRAY_ASSERT(baseNode->GetTag().HasFlag(RDGNodeTag::Buffer));
     auto* node = static_cast<RDGBufferNode*>(baseNode);
     node->_exportCount += 1;
     node->_exportedState = RDGBufferState{
@@ -190,7 +190,7 @@ void RenderGraph::ExportTexture(
     RDGTextureLayout layout,
     render::SubresourceRange textureRange) {
     auto* baseNode = _nodes[nodeHandle.Id].get();
-    RADRAY_ASSERT(baseNode->IsTextureNode());
+    RADRAY_ASSERT(baseNode->GetTag().HasFlag(RDGNodeTag::Texture));
     auto* node = static_cast<RDGTextureNode*>(baseNode);
     node->_exportCount += 1;
     node->_exportedState = RDGTextureState{
@@ -215,11 +215,11 @@ RDGPassHandle RDGRasterPassBuilder::_EnsurePass() {
         return _pass;
     }
 
-    _pass = _graph->AddPass(fmt::format("RasterPass{}", _graph->_nodes.size()));
-    RADRAY_ASSERT(_pass.Id < _graph->_nodes.size());
-    auto* node = _graph->_nodes[_pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->IsPassNode());
-    static_cast<RDGPassNode*>(node)->_type = render::QueueType::Direct;
+    const uint64_t id = _graph->_nodes.size();
+    auto node = make_unique<RDGGraphicsPassNode>(id, fmt::format("RasterPass{}", id), render::QueueType::Direct);
+    auto* raw = node.get();
+    _graph->_nodes.emplace_back(std::move(node));
+    _pass = RDGPassHandle{raw->_id};
     return _pass;
 }
 
@@ -272,8 +272,8 @@ RDGRasterPassBuilder& RDGRasterPassBuilder::UseColorAttachment(
     const auto pass = this->Build();
     RADRAY_ASSERT(pass.IsValid() && pass.Id < _graph->_nodes.size());
     auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->IsPassNode());
-    auto* passNode = static_cast<RDGPassNode*>(node);
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::GraphicsPass));
+    auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
     passNode->_colorAttachments.emplace_back(RDGColorAttachmentInfo{
         .Slot = slot,
         .Texture = texture,
@@ -297,8 +297,8 @@ RDGRasterPassBuilder& RDGRasterPassBuilder::UseDepthStencilAttachment(
     const auto pass = this->Build();
     RADRAY_ASSERT(pass.IsValid() && pass.Id < _graph->_nodes.size());
     auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->IsPassNode());
-    auto* passNode = static_cast<RDGPassNode*>(node);
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::GraphicsPass));
+    auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
     RADRAY_ASSERT(!passNode->_depthStencilAttachment.has_value());
     passNode->_depthStencilAttachment = RDGDepthStencilAttachmentInfo{
         .Texture = texture,
@@ -396,11 +396,11 @@ RDGPassHandle RDGComputePassBuilder::_EnsurePass() {
         return _pass;
     }
 
-    _pass = _graph->AddPass(fmt::format("ComputePass{}", _graph->_nodes.size()));
-    RADRAY_ASSERT(_pass.Id < _graph->_nodes.size());
-    auto* node = _graph->_nodes[_pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->IsPassNode());
-    static_cast<RDGPassNode*>(node)->_type = render::QueueType::Compute;
+    const uint64_t id = _graph->_nodes.size();
+    auto node = make_unique<RDGComputePassNode>(id, fmt::format("ComputePass{}", id), render::QueueType::Compute);
+    auto* raw = node.get();
+    _graph->_nodes.emplace_back(std::move(node));
+    _pass = RDGPassHandle{raw->_id};
     return _pass;
 }
 
@@ -439,11 +439,11 @@ RDGPassHandle RDGCopyPassBuilder::_EnsurePass() {
         return _pass;
     }
 
-    _pass = _graph->AddPass(fmt::format("CopyPass{}", _graph->_nodes.size()));
-    RADRAY_ASSERT(_pass.Id < _graph->_nodes.size());
-    auto* node = _graph->_nodes[_pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->IsPassNode());
-    static_cast<RDGPassNode*>(node)->_type = render::QueueType::Copy;
+    const uint64_t id = _graph->_nodes.size();
+    auto node = make_unique<RDGCopyPassNode>(id, fmt::format("CopyPass{}", id), render::QueueType::Copy);
+    auto* raw = node.get();
+    _graph->_nodes.emplace_back(std::move(node));
+    _pass = RDGPassHandle{raw->_id};
     return _pass;
 }
 
@@ -458,6 +458,16 @@ RDGCopyPassBuilder& RDGCopyPassBuilder::CopyBufferToBuffer(
     uint64_t srcOffset,
     uint64_t size) {
     const auto pass = this->Build();
+    auto* node = _graph->_nodes[pass.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
+    auto* passNode = static_cast<RDGCopyPassNode*>(node);
+    passNode->_ops.emplace_back(RDGCopyBufferToBufferInfo{
+        .Dst = dst,
+        .DstOffset = dstOffset,
+        .Src = src,
+        .SrcOffset = srcOffset,
+        .Size = size,
+    });
     _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, render::BufferRange{srcOffset, size});
     _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, render::BufferRange{dstOffset, size});
     return *this;
@@ -469,6 +479,15 @@ RDGCopyPassBuilder& RDGCopyPassBuilder::CopyBufferToTexture(
     RDGBufferHandle src,
     uint64_t srcOffset) {
     const auto pass = this->Build();
+    auto* node = _graph->_nodes[pass.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
+    auto* passNode = static_cast<RDGCopyPassNode*>(node);
+    passNode->_ops.emplace_back(RDGCopyBufferToTextureInfo{
+        .Dst = dst,
+        .DstRange = dstRange,
+        .Src = src,
+        .SrcOffset = srcOffset,
+    });
     _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, render::BufferRange{srcOffset, render::BufferRange::All()});
     _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, RDGTextureLayout::TransferDestination, dstRange);
     return *this;
@@ -480,6 +499,15 @@ RDGCopyPassBuilder& RDGCopyPassBuilder::CopyTextureToBuffer(
     RDGTextureHandle src,
     render::SubresourceRange srcRange) {
     const auto pass = this->Build();
+    auto* node = _graph->_nodes[pass.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
+    auto* passNode = static_cast<RDGCopyPassNode*>(node);
+    passNode->_ops.emplace_back(RDGCopyTextureToBufferInfo{
+        .Dst = dst,
+        .DstOffset = dstOffset,
+        .Src = src,
+        .SrcRange = srcRange,
+    });
     _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, RDGTextureLayout::TransferSource, srcRange);
     _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, render::BufferRange{dstOffset, render::BufferRange::All()});
     return *this;
@@ -582,8 +610,8 @@ std::pair<bool, string> RenderGraph::Validate() const {
             return {false, fmt::format("{}: node id mismatch", i)};
         }
 
-        if (node->IsPassNode()) {
-            const auto* passNode = static_cast<RDGPassNode*>(node);
+        if (node->GetTag().HasFlag(RDGNodeTag::GraphicsPass)) {
+            const auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
             unordered_set<uint32_t> colorSlots{};
             for (const auto& attachment : passNode->_colorAttachments) {
                 if (!colorSlots.emplace(attachment.Slot).second) {
@@ -593,7 +621,7 @@ std::pair<bool, string> RenderGraph::Validate() const {
                     return {false, fmt::format("pass node '{}' references invalid color attachment handle {}", node->_name, attachment.Texture.Id)};
                 }
                 auto* textureNode = _nodes[attachment.Texture.Id].get();
-                if (textureNode == nullptr || !textureNode->IsTextureNode()) {
+                if (textureNode == nullptr || !textureNode->GetTag().HasFlag(RDGNodeTag::Texture)) {
                     return {false, fmt::format("pass node '{}' color attachment slot {} is not a texture node", node->_name, attachment.Slot)};
                 }
             }
@@ -603,13 +631,13 @@ std::pair<bool, string> RenderGraph::Validate() const {
                     return {false, fmt::format("pass node '{}' references invalid depth-stencil attachment handle {}", node->_name, attachment.Texture.Id)};
                 }
                 auto* textureNode = _nodes[attachment.Texture.Id].get();
-                if (textureNode == nullptr || !textureNode->IsTextureNode()) {
+                if (textureNode == nullptr || !textureNode->GetTag().HasFlag(RDGNodeTag::Texture)) {
                     return {false, fmt::format("pass node '{}' depth-stencil attachment is not a texture node", node->_name)};
                 }
             }
         }
 
-        if (node->IsBufferNode()) {
+        if (node->GetTag().HasFlag(RDGNodeTag::Buffer)) {
             auto* bufferNode = static_cast<RDGBufferNode*>(node);
             if (bufferNode->_ownership == RDGResourceOwnership::External && !bufferNode->_backingHandle.IsValid()) {
                 return {false, fmt::format("external buffer node '{}' has invalid backing handle", node->_name)};
@@ -622,7 +650,7 @@ std::pair<bool, string> RenderGraph::Validate() const {
             }
         }
 
-        if (node->IsTextureNode()) {
+        if (node->GetTag().HasFlag(RDGNodeTag::Texture)) {
             auto* textureNode = static_cast<RDGTextureNode*>(node);
             if (textureNode->_ownership == RDGResourceOwnership::External && !textureNode->_backingHandle.IsValid()) {
                 return {false, fmt::format("external texture node '{}' has invalid backing handle", node->_name)};
@@ -645,8 +673,8 @@ std::pair<bool, string> RenderGraph::Validate() const {
             return {false, fmt::format("{}: edge has null endpoint", i)};
         }
 
-        const bool fromPass = edge->_from->IsPassNode();
-        const bool toPass = edge->_to->IsPassNode();
+        const bool fromPass = edge->_from->GetTag().HasFlag(RDGNodeTag::Pass);
+        const bool toPass = edge->_to->GetTag().HasFlag(RDGNodeTag::Pass);
         if (fromPass == toPass) {
             return {false, fmt::format(
                                "invalid edge '{}' -> '{}': only pass-resource links are allowed",
@@ -655,7 +683,8 @@ std::pair<bool, string> RenderGraph::Validate() const {
         }
 
         auto* resource = fromPass ? edge->_to : edge->_from;
-        if (!resource->IsBufferNode() && !resource->IsTextureNode()) {
+        if (!resource->GetTag().HasFlag(RDGNodeTag::Buffer) &&
+            !resource->GetTag().HasFlag(RDGNodeTag::Texture)) {
             return {false, fmt::format(
                                "edge '{}' -> '{}' is bound to a non-resource node",
                                edge->_from->_name,

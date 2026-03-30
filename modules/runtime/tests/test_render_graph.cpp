@@ -384,7 +384,7 @@ TEST(RenderGraphTest, RasterPassBuilderBuildsEdgesAndStoresAttachmentMetadata) {
     const auto validation = graph.Validate();
     ASSERT_TRUE(validation.first) << validation.second;
 
-    auto* passNode = static_cast<RDGPassNode*>(graph._nodes[pass.Id].get());
+    auto* passNode = static_cast<RDGGraphicsPassNode*>(graph._nodes[pass.Id].get());
     ASSERT_NE(passNode, nullptr);
     EXPECT_EQ(passNode->_type, QueueType::Direct);
     ASSERT_EQ(passNode->_colorAttachments.size(), 1u);

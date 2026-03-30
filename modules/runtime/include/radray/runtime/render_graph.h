@@ -2,6 +2,7 @@
 
 #include <numeric>
 #include <optional>
+#include <variant>
 
 #include <radray/types.h>
 #include <radray/enum_flags.h>
@@ -20,6 +21,9 @@ enum class RDGNodeTag : uint32_t {
     Buffer = Resource | (Resource << 1),
     Texture = Resource | (Resource << 2),
     Pass = Resource << 3,
+    GraphicsPass = Pass | (Pass << 1),
+    ComputePass = Pass | (Pass << 2),
+    CopyPass = Pass | (Pass << 3),
 };
 
 enum class RDGExecutionStage : uint32_t {
@@ -139,6 +143,33 @@ struct RDGDepthStencilAttachmentInfo {
     }
 };
 
+struct RDGCopyBufferToBufferInfo {
+    RDGBufferHandle Dst{};
+    uint64_t DstOffset{0};
+    RDGBufferHandle Src{};
+    uint64_t SrcOffset{0};
+    uint64_t Size{0};
+};
+
+struct RDGCopyBufferToTextureInfo {
+    RDGTextureHandle Dst{};
+    render::SubresourceRange DstRange{};
+    RDGBufferHandle Src{};
+    uint64_t SrcOffset{0};
+};
+
+struct RDGCopyTextureToBufferInfo {
+    RDGBufferHandle Dst{};
+    uint64_t DstOffset{0};
+    RDGTextureHandle Src{};
+    render::SubresourceRange SrcRange{};
+};
+
+using RDGCopyPassOp = std::variant<
+    RDGCopyBufferToBufferInfo,
+    RDGCopyBufferToTextureInfo,
+    RDGCopyTextureToBufferInfo>;
+
 // ----------------------------------------------------------------
 
 class RDGNode {
@@ -149,18 +180,6 @@ public:
     virtual ~RDGNode() noexcept = default;
 
     virtual RDGNodeTags GetTag() const noexcept = 0;
-
-    bool IsPassNode() const noexcept {
-        return this->GetTag().HasFlag(RDGNodeTag::Pass);
-    }
-
-    bool IsBufferNode() const noexcept {
-        return this->GetTag().HasFlag(RDGNodeTag::Buffer);
-    }
-
-    bool IsTextureNode() const noexcept {
-        return this->GetTag().HasFlag(RDGNodeTag::Texture);
-    }
 
 public:
     string _name;
@@ -228,8 +247,37 @@ public:
 
 public:
     render::QueueType _type{render::QueueType::Direct};
+};
+
+class RDGGraphicsPassNode final : public RDGPassNode {
+public:
+    using RDGPassNode::RDGPassNode;
+    virtual ~RDGGraphicsPassNode() noexcept = default;
+
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::GraphicsPass; }
+
+public:
     vector<RDGColorAttachmentInfo> _colorAttachments;
     std::optional<RDGDepthStencilAttachmentInfo> _depthStencilAttachment{};
+};
+
+class RDGComputePassNode final : public RDGPassNode {
+public:
+    using RDGPassNode::RDGPassNode;
+    virtual ~RDGComputePassNode() noexcept = default;
+
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::ComputePass; }
+};
+
+class RDGCopyPassNode final : public RDGPassNode {
+public:
+    using RDGPassNode::RDGPassNode;
+    virtual ~RDGCopyPassNode() noexcept = default;
+
+    RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::CopyPass; }
+
+public:
+    vector<RDGCopyPassOp> _ops;
 };
 
 class RDGEdge {
