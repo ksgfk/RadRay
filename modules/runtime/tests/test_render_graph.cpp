@@ -415,8 +415,8 @@ TEST(RenderGraphTest, RasterPassBuilderBuildsEdgesAndStoresAttachmentMetadata) {
     EXPECT_NE(
         FindTextureEdge(
             graph,
-            pass,
             depthTexture,
+            pass,
             RDGExecutionStage::DepthStencil,
             RDGMemoryAccess::DepthStencilRead,
             RDGTextureLayout::DepthStencilReadOnly,

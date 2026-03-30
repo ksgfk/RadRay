@@ -170,6 +170,48 @@ using RDGCopyPassOp = std::variant<
     RDGCopyBufferToTextureInfo,
     RDGCopyTextureToBufferInfo>;
 
+struct RDGPassDependency {
+    RDGPassHandle Before{};
+    RDGPassHandle After{};
+    RDGResourceHandle Resource{};
+};
+
+struct RDGCompiledBufferBarrier {
+    RDGBufferHandle Buffer{};
+    RDGBufferState Before{};
+    RDGBufferState After{};
+};
+
+struct RDGCompiledTextureBarrier {
+    RDGTextureHandle Texture{};
+    RDGTextureState Before{};
+    RDGTextureState After{};
+};
+
+using RDGCompiledBarrier = std::variant<
+    RDGCompiledBufferBarrier,
+    RDGCompiledTextureBarrier>;
+
+struct RDGCompiledPass {
+    RDGPassHandle Pass{};
+    vector<RDGPassHandle> Predecessors;
+    vector<RDGCompiledBarrier> BarriersBefore;
+    vector<RDGCompiledBarrier> BarriersAfter;
+};
+
+struct RDGCompiledResourceLifetime {
+    RDGResourceHandle Resource{};
+    std::optional<uint32_t> FirstPassIndex{};
+    std::optional<uint32_t> LastPassIndex{};
+};
+
+struct RDGCompileResult {
+    vector<RDGPassHandle> PassOrder;
+    vector<RDGPassDependency> Dependencies;
+    vector<RDGCompiledPass> Passes;
+    vector<RDGCompiledResourceLifetime> Lifetimes;
+};
+
 // ----------------------------------------------------------------
 
 class RDGNode {
@@ -402,6 +444,7 @@ public:
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     [[nodiscard]] string ExportGraphviz() const;
+    [[nodiscard]] RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
 
 public:
