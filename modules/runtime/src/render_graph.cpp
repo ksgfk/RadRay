@@ -83,22 +83,33 @@ DotNodeStyle GetNodeStyle(const RDGNode& node) noexcept {
     return DotNodeStyle{"diamond", "#E5E7EB"};
 }
 
-DotQueueStyle GetExecutionQueueStyle(render::QueueType queue) noexcept {
-    switch (queue) {
-        case render::QueueType::Direct: return DotQueueStyle{"#93C5FD", "#DBEAFE", "#EFF6FF"};
-        case render::QueueType::Compute: return DotQueueStyle{"#86EFAC", "#DCFCE7", "#F0FDF4"};
-        case render::QueueType::Copy: return DotQueueStyle{"#FCD34D", "#FEF3C7", "#FFFBEB"};
-        case render::QueueType::MAX_COUNT: return DotQueueStyle{"#D1D5DB", "#E5E7EB", "#F3F4F6"};
+RDGNodeTag NormalizePassQueueTag(RDGNodeTags tag) noexcept {
+    if (tag.HasFlag(RDGNodeTag::CopyPass)) {
+        return RDGNodeTag::CopyPass;
     }
-    return DotQueueStyle{"#D1D5DB", "#E5E7EB", "#F3F4F6"};
+    if (tag.HasFlag(RDGNodeTag::ComputePass)) {
+        return RDGNodeTag::ComputePass;
+    }
+    if (tag.HasFlag(RDGNodeTag::GraphicsPass)) {
+        return RDGNodeTag::GraphicsPass;
+    }
+    return RDGNodeTag::UNKNOWN;
+}
+
+DotQueueStyle GetExecutionQueueStyle(RDGNodeTags tag) noexcept {
+    switch (NormalizePassQueueTag(tag)) {
+        case RDGNodeTag::GraphicsPass: return DotQueueStyle{"#93C5FD", "#DBEAFE", "#EFF6FF"};
+        case RDGNodeTag::ComputePass: return DotQueueStyle{"#86EFAC", "#DCFCE7", "#F0FDF4"};
+        case RDGNodeTag::CopyPass: return DotQueueStyle{"#FCD34D", "#FEF3C7", "#FFFBEB"};
+        default: return DotQueueStyle{"#D1D5DB", "#E5E7EB", "#F3F4F6"};
+    }
 }
 
 void AppendNodeLabel(fmt::memory_buffer& output, const RDGNode& node) {
     AppendDotEscaped(output, node._name);
 
     if (node.GetTag().HasFlag(RDGNodeTag::Pass)) {
-        const auto& passNode = static_cast<const RDGPassNode&>(node);
-        fmt::format_to(std::back_inserter(output), "\\nqueue={}", render::format_as(passNode._type));
+        fmt::format_to(std::back_inserter(output), "\\nqueue={}", NormalizePassQueueTag(node.GetTag()));
     }
 }
 
@@ -409,7 +420,7 @@ void AppendCompiledPassLabel(fmt::memory_buffer& output, const RDGPassNode& pass
         std::back_inserter(output),
         "\\norder={}\\nqueue={}",
         passOrderIndex,
-        render::format_as(passNode._type));
+        NormalizePassQueueTag(passNode.GetTag()));
 }
 
 void AppendCompiledResourceVersionNodeId(fmt::memory_buffer& output, uint64_t resourceId, uint32_t version) {
@@ -633,9 +644,23 @@ void RenderGraph::ExportTexture(
     };
 }
 
-RDGPassHandle RenderGraph::AddPass(std::string_view name) {
+RDGPassHandle RenderGraph::AddPass(std::string_view name, RDGNodeTag tag) {
     const uint64_t id = _nodes.size();
-    auto node = make_unique<RDGPassNode>(id, name, render::QueueType::Direct);
+    unique_ptr<RDGPassNode> node{};
+    switch (NormalizePassQueueTag(tag)) {
+        case RDGNodeTag::GraphicsPass:
+            node = make_unique<RDGGraphicsPassNode>(id, name);
+            break;
+        case RDGNodeTag::ComputePass:
+            node = make_unique<RDGComputePassNode>(id, name);
+            break;
+        case RDGNodeTag::CopyPass:
+            node = make_unique<RDGCopyPassNode>(id, name);
+            break;
+        default:
+            node = make_unique<RDGGraphicsPassNode>(id, name);
+            break;
+    }
     auto* raw = node.get();
     _nodes.emplace_back(std::move(node));
     return RDGPassHandle{raw->_id};
@@ -648,7 +673,7 @@ RDGPassHandle RDGRasterPassBuilder::_EnsurePass() {
     }
 
     const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGGraphicsPassNode>(id, fmt::format("RasterPass{}", id), render::QueueType::Direct);
+    auto node = make_unique<RDGGraphicsPassNode>(id, fmt::format("RasterPass{}", id));
     auto* raw = node.get();
     _graph->_nodes.emplace_back(std::move(node));
     _pass = RDGPassHandle{raw->_id};
@@ -843,7 +868,7 @@ RDGPassHandle RDGComputePassBuilder::_EnsurePass() {
     }
 
     const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGComputePassNode>(id, fmt::format("ComputePass{}", id), render::QueueType::Compute);
+    auto node = make_unique<RDGComputePassNode>(id, fmt::format("ComputePass{}", id));
     auto* raw = node.get();
     _graph->_nodes.emplace_back(std::move(node));
     _pass = RDGPassHandle{raw->_id};
@@ -886,7 +911,7 @@ RDGPassHandle RDGCopyPassBuilder::_EnsurePass() {
     }
 
     const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGCopyPassNode>(id, fmt::format("CopyPass{}", id), render::QueueType::Copy);
+    auto node = make_unique<RDGCopyPassNode>(id, fmt::format("CopyPass{}", id));
     auto* raw = node.get();
     _graph->_nodes.emplace_back(std::move(node));
     _pass = RDGPassHandle{raw->_id};
@@ -1553,11 +1578,11 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
         auto* node = _nodes[passHandle.Id].get();
         RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass));
         const auto* passNode = static_cast<const RDGPassNode*>(node);
-        switch (passNode->_type) {
-            case render::QueueType::Direct: directPassIds.emplace_back(passHandle.Id); break;
-            case render::QueueType::Compute: computePassIds.emplace_back(passHandle.Id); break;
-            case render::QueueType::Copy: copyPassIds.emplace_back(passHandle.Id); break;
-            case render::QueueType::MAX_COUNT: break;
+        switch (NormalizePassQueueTag(passNode->GetTag())) {
+            case RDGNodeTag::GraphicsPass: directPassIds.emplace_back(passHandle.Id); break;
+            case RDGNodeTag::ComputePass: computePassIds.emplace_back(passHandle.Id); break;
+            case RDGNodeTag::CopyPass: copyPassIds.emplace_back(passHandle.Id); break;
+            default: directPassIds.emplace_back(passHandle.Id); break;
         }
     }
 
@@ -1604,13 +1629,13 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
     AppendLine(dot, "  node [fontname=\"Consolas\"];");
     AppendLine(dot, "  edge [fontname=\"Consolas\"];");
 
-    const auto appendQueueCluster = [&](render::QueueType queue, const vector<uint64_t>& passIds) {
+    const auto appendQueueCluster = [&](RDGNodeTag queueTag, const vector<uint64_t>& passIds) {
         if (passIds.empty()) {
             return;
         }
 
-        const auto queueName = render::format_as(queue);
-        const auto style = GetExecutionQueueStyle(queue);
+        const auto queueName = queueTag;
+        const auto style = GetExecutionQueueStyle(queueTag);
         fmt::format_to(std::back_inserter(dot), "  subgraph cluster_exec_{} {{\n", queueName);
         fmt::format_to(std::back_inserter(dot), "    label=\"{} Queue\";\n", queueName);
         fmt::format_to(std::back_inserter(dot), "    color=\"{}\";\n", style.ClusterColor);
@@ -1666,9 +1691,9 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
         AppendLine(dot, "  }");
     };
 
-    appendQueueCluster(render::QueueType::Direct, directPassIds);
-    appendQueueCluster(render::QueueType::Compute, computePassIds);
-    appendQueueCluster(render::QueueType::Copy, copyPassIds);
+    appendQueueCluster(RDGNodeTag::GraphicsPass, directPassIds);
+    appendQueueCluster(RDGNodeTag::ComputePass, computePassIds);
+    appendQueueCluster(RDGNodeTag::CopyPass, copyPassIds);
 
     for (const auto& compiledPass : compiled.Passes) {
         const auto passId = compiledPass.Pass.Id;
@@ -1688,12 +1713,12 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
         }
     }
 
-    const auto appendQueueEdges = [&](render::QueueType queue, const vector<uint64_t>& passIds) {
+    const auto appendQueueEdges = [&](RDGNodeTag queueTag, const vector<uint64_t>& passIds) {
         if (passIds.size() < 2) {
             return;
         }
 
-        const auto style = GetExecutionQueueStyle(queue);
+        const auto style = GetExecutionQueueStyle(queueTag);
         for (size_t i = 1; i < passIds.size(); ++i) {
             fmt::format_to(std::back_inserter(dot), "  ");
             appendExecutionTailNodeId(dot, passIds[i - 1]);
@@ -1706,9 +1731,9 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
         }
     };
 
-    appendQueueEdges(render::QueueType::Direct, directPassIds);
-    appendQueueEdges(render::QueueType::Compute, computePassIds);
-    appendQueueEdges(render::QueueType::Copy, copyPassIds);
+    appendQueueEdges(RDGNodeTag::GraphicsPass, directPassIds);
+    appendQueueEdges(RDGNodeTag::ComputePass, computePassIds);
+    appendQueueEdges(RDGNodeTag::CopyPass, copyPassIds);
 
     for (const auto& compiledPass : compiled.Passes) {
         RADRAY_ASSERT(compiledPass.Pass.Id < _nodes.size());
@@ -1721,7 +1746,7 @@ string RenderGraph::ExportExecutionGraphviz(const RDGCompileResult& compiled) co
             auto* predecessorNodeBase = _nodes[predecessor.Id].get();
             RADRAY_ASSERT(predecessorNodeBase != nullptr && predecessorNodeBase->GetTag().HasFlag(RDGNodeTag::Pass));
             const auto* predecessorNode = static_cast<const RDGPassNode*>(predecessorNodeBase);
-            if (predecessorNode->_type == passNode->_type) {
+            if (NormalizePassQueueTag(predecessorNode->GetTag()) == NormalizePassQueueTag(passNode->GetTag())) {
                 continue;
             }
 
@@ -1849,6 +1874,50 @@ std::pair<bool, string> RenderGraph::Validate() const {
     }
 
     return {true, {}};
+}
+
+std::string_view format_as(RDGNodeTag v) noexcept {
+    using underlying_t = std::underlying_type_t<RDGNodeTag>;
+
+    const auto raw = static_cast<underlying_t>(v);
+    const auto resourceBit = static_cast<underlying_t>(RDGNodeTag::Resource);
+    const auto bufferValue = static_cast<underlying_t>(RDGNodeTag::Buffer);
+    const auto bufferBit = bufferValue & ~resourceBit;
+    const auto textureValue = static_cast<underlying_t>(RDGNodeTag::Texture);
+    const auto textureBit = textureValue & ~resourceBit;
+    const auto passBit = static_cast<underlying_t>(RDGNodeTag::Pass);
+    const auto graphicsValue = static_cast<underlying_t>(RDGNodeTag::GraphicsPass);
+    const auto graphicsBit = graphicsValue & ~passBit;
+    const auto computeValue = static_cast<underlying_t>(RDGNodeTag::ComputePass);
+    const auto computeBit = computeValue & ~passBit;
+    const auto copyValue = static_cast<underlying_t>(RDGNodeTag::CopyPass);
+    const auto copyBit = copyValue & ~passBit;
+
+    if (raw == static_cast<underlying_t>(RDGNodeTag::UNKNOWN)) {
+        return "UNKNOWN";
+    }
+    if (raw == resourceBit) {
+        return "Resource";
+    }
+    if (raw == bufferValue || raw == bufferBit) {
+        return "Buffer";
+    }
+    if (raw == textureValue || raw == textureBit) {
+        return "Texture";
+    }
+    if (raw == passBit) {
+        return "Pass";
+    }
+    if (raw == graphicsValue || raw == graphicsBit) {
+        return "Direct";
+    }
+    if (raw == computeValue || raw == computeBit) {
+        return "Compute";
+    }
+    if (raw == copyValue || raw == copyBit) {
+        return "Copy";
+    }
+    return "UNKNOWN";
 }
 
 std::string_view format_as(RDGExecutionStage v) noexcept {

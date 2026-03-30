@@ -277,15 +277,10 @@ public:
 
 class RDGPassNode : public RDGNode {
 public:
-    RDGPassNode(uint64_t id, std::string_view name, render::QueueType type) noexcept
-        : RDGNode(id, name),
-          _type(type) {}
+    using RDGNode::RDGNode;
     virtual ~RDGPassNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Pass; }
-
-public:
-    render::QueueType _type{render::QueueType::Direct};
 };
 
 class RDGGraphicsPassNode final : public RDGPassNode {
@@ -437,7 +432,7 @@ public:
     void ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     // TODO: pass 应该还有其他数据
-    RDGPassHandle AddPass(std::string_view name);
+    RDGPassHandle AddPass(std::string_view name, RDGNodeTag tag = RDGNodeTag::GraphicsPass);
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
@@ -457,6 +452,7 @@ public:
     vector<unique_ptr<RDGEdge>> _edges;
 };
 
+std::string_view format_as(RDGNodeTag v) noexcept;
 std::string_view format_as(RDGExecutionStage v) noexcept;
 std::string_view format_as(RDGMemoryAccess v) noexcept;
 std::string_view format_as(RDGTextureLayout v) noexcept;

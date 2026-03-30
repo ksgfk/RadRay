@@ -146,16 +146,12 @@ TEST(RenderGraphTest, ExportGraphviz_ComplexDependencyGraphProducesCompactDot) {
         SubresourceRange{0, 1, 0, 1},
         "Swapchain\nOutput(Target)");
 
-    const auto uploadPass = graph.AddPass("UploadPass");
-    const auto gbufferPass = graph.AddPass("GBufferPass");
-    const auto lightCullingPass = graph.AddPass("LightCullingPass");
-    const auto lightingPass = graph.AddPass("LightingPass");
-    const auto postFxPass = graph.AddPass("PostFXPass");
-    const auto copyReadbackPass = graph.AddPass("CopyReadbackPass");
-
-    static_cast<RDGPassNode*>(graph._nodes[uploadPass.Id].get())->_type = QueueType::Copy;
-    static_cast<RDGPassNode*>(graph._nodes[lightCullingPass.Id].get())->_type = QueueType::Compute;
-    static_cast<RDGPassNode*>(graph._nodes[copyReadbackPass.Id].get())->_type = QueueType::Copy;
+    const auto uploadPass = graph.AddPass("UploadPass", RDGNodeTag::CopyPass);
+    const auto gbufferPass = graph.AddPass("GBufferPass", RDGNodeTag::GraphicsPass);
+    const auto lightCullingPass = graph.AddPass("LightCullingPass", RDGNodeTag::ComputePass);
+    const auto lightingPass = graph.AddPass("LightingPass", RDGNodeTag::GraphicsPass);
+    const auto postFxPass = graph.AddPass("PostFXPass", RDGNodeTag::GraphicsPass);
+    const auto copyReadbackPass = graph.AddPass("CopyReadbackPass", RDGNodeTag::CopyPass);
 
     graph.Link(sceneBuffer, uploadPass, RDGExecutionStage::Host, RDGMemoryAccess::HostWrite, BufferRange{0, 512});
     graph.Link(uploadPass, lightListBuffer, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, BufferRange{128, 2048});
@@ -408,11 +404,9 @@ TEST(RenderGraphTest, ExportCompiledGraphviz_MarksResourceVersionsAcrossWrites) 
         TextureFormat::RGBA16_FLOAT,
         "LightingTarget");
 
-    const auto uploadPass = graph.AddPass("UploadPass");
-    const auto accumulatePass = graph.AddPass("AccumulatePass");
-    const auto presentPass = graph.AddPass("PresentPass");
-
-    static_cast<RDGPassNode*>(graph._nodes[accumulatePass.Id].get())->_type = QueueType::Compute;
+    const auto uploadPass = graph.AddPass("UploadPass", RDGNodeTag::CopyPass);
+    const auto accumulatePass = graph.AddPass("AccumulatePass", RDGNodeTag::ComputePass);
+    const auto presentPass = graph.AddPass("PresentPass", RDGNodeTag::GraphicsPass);
 
     const auto colorRange = SubresourceRange{0, 1, 0, 1};
     graph.Link(uploadPass, historyBuffer, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, BufferRange{0, 1024});
@@ -538,7 +532,7 @@ TEST(RenderGraphTest, RasterPassBuilderBuildsEdgesAndStoresAttachmentMetadata) {
 
     auto* passNode = static_cast<RDGGraphicsPassNode*>(graph._nodes[pass.Id].get());
     ASSERT_NE(passNode, nullptr);
-    EXPECT_EQ(passNode->_type, QueueType::Direct);
+    EXPECT_EQ(passNode->GetTag(), RDGNodeTag::GraphicsPass);
     ASSERT_EQ(passNode->_colorAttachments.size(), 1u);
     EXPECT_EQ(passNode->_colorAttachments[0].Slot, 0u);
     EXPECT_EQ(passNode->_colorAttachments[0].Texture.Id, lightingTexture.Id);
@@ -677,7 +671,7 @@ TEST(RenderGraphTest, ComputeAndCopyBuildersMapResourceUsageToExpectedEdges) {
 
     auto* computePassNode = static_cast<RDGPassNode*>(graph._nodes[computePass.Id].get());
     ASSERT_NE(computePassNode, nullptr);
-    EXPECT_EQ(computePassNode->_type, QueueType::Compute);
+    EXPECT_EQ(computePassNode->GetTag(), RDGNodeTag::ComputePass);
     EXPECT_NE(
         FindBufferEdge(
             graph,
@@ -738,7 +732,7 @@ TEST(RenderGraphTest, ComputeAndCopyBuildersMapResourceUsageToExpectedEdges) {
 
     auto* copyPassNode = static_cast<RDGPassNode*>(graph._nodes[copyPass.Id].get());
     ASSERT_NE(copyPassNode, nullptr);
-    EXPECT_EQ(copyPassNode->_type, QueueType::Copy);
+    EXPECT_EQ(copyPassNode->GetTag(), RDGNodeTag::CopyPass);
     EXPECT_NE(
         FindBufferEdge(
             graph,
