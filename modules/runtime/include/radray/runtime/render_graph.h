@@ -85,6 +85,19 @@ using RDGNodeTags = EnumFlags<RDGNodeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
+struct RDGNodeHandle {
+    uint64_t Id{std::numeric_limits<uint64_t>::max()};
+
+    [[nodiscard]] bool IsValid() const noexcept {
+        return Id != std::numeric_limits<uint64_t>::max();
+    }
+};
+
+struct RDGResourceHandle : public RDGNodeHandle {};
+struct RDGBufferHandle : public RDGResourceHandle {};
+struct RDGTextureHandle : public RDGResourceHandle {};
+struct RDGPassHandle : public RDGNodeHandle {};
+
 // --------------------------- Internal ---------------------------
 
 struct RDGBufferState {
@@ -100,16 +113,33 @@ struct RDGTextureState {
     render::SubresourceRange Range{};
 };
 
-// ----------------------------------------------------------------
-
-struct RDGNodeHandle {
-    uint64_t Id{std::numeric_limits<uint64_t>::max()};
+struct RDGColorAttachmentInfo {
+    uint32_t Slot{0};
+    RDGTextureHandle Texture{};
+    render::SubresourceRange Range{};
+    render::LoadAction Load{render::LoadAction::DontCare};
+    render::StoreAction Store{render::StoreAction::Store};
+    std::optional<render::ColorClearValue> ClearValue{};
 };
 
-struct RDGResourceHandle : public RDGNodeHandle {};
-struct RDGBufferHandle : public RDGResourceHandle {};
-struct RDGTextureHandle : public RDGResourceHandle {};
-struct RDGPassHandle : public RDGNodeHandle {};
+struct RDGDepthStencilAttachmentInfo {
+    RDGTextureHandle Texture{};
+    render::SubresourceRange Range{};
+    render::LoadAction DepthLoad{render::LoadAction::DontCare};
+    render::StoreAction DepthStore{render::StoreAction::Store};
+    render::LoadAction StencilLoad{render::LoadAction::DontCare};
+    render::StoreAction StencilStore{render::StoreAction::Store};
+    std::optional<render::DepthStencilClearValue> ClearValue{};
+
+    [[nodiscard]] bool HasWriteAccess() const noexcept {
+        return DepthLoad == render::LoadAction::Clear ||
+               StencilLoad == render::LoadAction::Clear ||
+               DepthStore == render::StoreAction::Store ||
+               StencilStore == render::StoreAction::Store;
+    }
+};
+
+// ----------------------------------------------------------------
 
 class RDGNode {
 public:
@@ -150,6 +180,7 @@ public:
 
 public:
     RDGResourceOwnership _ownership{RDGResourceOwnership::UNKNOWN};
+    uint32_t _exportCount{0};
 };
 
 class RDGBufferNode final : public RDGResourceNode {
@@ -197,6 +228,8 @@ public:
 
 public:
     render::QueueType _type{render::QueueType::Direct};
+    vector<RDGColorAttachmentInfo> _colorAttachments;
+    std::optional<RDGDepthStencilAttachmentInfo> _depthStencilAttachment{};
 };
 
 class RDGEdge {
@@ -252,7 +285,13 @@ public:
     RDGRasterPassBuilder& UseRWTexture(RDGTextureHandle texture, render::ShaderStages stages, render::SubresourceRange range);
 
 public:
+    RDGPassHandle _EnsurePass();
+    void _ValidateShaderStages(render::ShaderStages stages) const;
+    void _LinkBufferStages(RDGBufferHandle buffer, render::ShaderStages stages, RDGMemoryAccess access, render::BufferRange range);
+    void _LinkTextureStages(RDGTextureHandle texture, render::ShaderStages stages, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange range);
+
     RenderGraph* _graph{nullptr};
+    RDGPassHandle _pass{};
 };
 
 class RDGComputePassBuilder {
@@ -269,7 +308,10 @@ public:
     RDGComputePassBuilder& UseRWTexture(RDGTextureHandle texture, render::SubresourceRange range);
 
 public:
+    RDGPassHandle _EnsurePass();
+
     RenderGraph* _graph{nullptr};
+    RDGPassHandle _pass{};
 };
 
 class RDGCopyPassBuilder {
@@ -283,7 +325,10 @@ public:
     RDGCopyPassBuilder& CopyTextureToBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGTextureHandle src, render::SubresourceRange srcRange);
 
 public:
+    RDGPassHandle _EnsurePass();
+
     RenderGraph* _graph{nullptr};
+    RDGPassHandle _pass{};
 };
 
 class RenderGraph {
@@ -308,18 +353,20 @@ public:
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
-
-private:
-    RDGNode* _ResolveNode(RDGNodeHandle handle);
-    RDGBufferNode* _ResolveBufferNode(RDGBufferHandle handle);
-    RDGTextureNode* _ResolveTextureNode(RDGTextureHandle handle);
-    void _ValidatePassResourceLink(RDGNode* from, RDGNode* to);
-    RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
+    [[nodiscard]] string ExportGraphviz() const;
+    std::pair<bool, string> Validate() const;
 
 public:
+    RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
+
     GpuRuntime* _gpu{nullptr};
     vector<unique_ptr<RDGNode>> _nodes;
     vector<unique_ptr<RDGEdge>> _edges;
 };
+
+std::string_view format_as(RDGExecutionStage v) noexcept;
+std::string_view format_as(RDGMemoryAccess v) noexcept;
+std::string_view format_as(RDGTextureLayout v) noexcept;
+std::string_view format_as(RDGResourceOwnership v) noexcept;
 
 }  // namespace radray
