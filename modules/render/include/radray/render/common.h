@@ -477,11 +477,21 @@ namespace radray {
 template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
 template <>
+struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
+
+template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
 template <>
+struct is_compound_enum_flags<render::ColorWrite> : public std::true_type {};
+
+template <>
 struct is_flags<render::ResourceHint> : public std::true_type {};
+
 template <>
 struct is_flags<render::RenderObjectTag> : public std::true_type {};
+template <>
+struct is_compound_enum_flags<render::RenderObjectTag> : public std::true_type {};
+
 template <>
 struct is_flags<render::BufferUse> : public std::true_type {};
 template <>

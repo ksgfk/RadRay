@@ -604,8 +604,8 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
         case RenderObjectTag::BindlessArray: return "BindlessArray";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(PresentMode v) noexcept {
@@ -631,8 +631,8 @@ std::string_view format_as(ShaderStage v) noexcept {
         case ShaderStage::Callable: return "Callable";
         case ShaderStage::Graphics: return "Graphics";
         case ShaderStage::RayTracing: return "RayTracing";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(BindlessSlotType v) noexcept {

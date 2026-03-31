@@ -81,6 +81,9 @@ enum class RDGResourceOwnership {
 template <>
 struct is_flags<RDGNodeTag> : public std::true_type {};
 template <>
+struct is_compound_enum_flags<RDGNodeTag> : std::true_type {};
+
+template <>
 struct is_flags<RDGExecutionStage> : public std::true_type {};
 template <>
 struct is_flags<RDGMemoryAccess> : public std::true_type {};
@@ -444,7 +447,7 @@ public:
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
-    RDGExecuteResult Execute(GpuRuntime& runtime) const;
+    RDGExecuteResult Execute(GpuRuntime& runtime, const RDGCompileResult& compiled) const;
 
     // ---------------- helper ----------------
     string ExportGraphviz() const;

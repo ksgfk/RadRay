@@ -2130,19 +2130,19 @@ RDGCompileResult RenderGraph::Compile() const {
     return result;
 }
 
-RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime) const {
-    const auto [isValid, errorMessage] = this->Validate();
-    if (!isValid) {
-        RADRAY_ABORT("RenderGraph::Execute validation failed: {}", errorMessage);
-    }
+RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResult& compiled) const {
+    // const auto [isValid, errorMessage] = this->Validate();
+    // if (!isValid) {
+    //     RADRAY_ABORT("RenderGraph::Execute validation failed: {}", errorMessage);
+    // }
 
-    const auto compiled = this->Compile();
-    if (compiled.PassOrder.empty()) {
-        return {};
-    }
-    if (runtime._device == nullptr) {
-        throw GpuSystemException("RenderGraph::Execute requires a valid GpuRuntime");
-    }
+    // const auto compiled = this->Compile();
+    // if (compiled.PassOrder.empty()) {
+    //     return {};
+    // }
+    // if (runtime._device == nullptr) {
+    //     throw GpuSystemException("RenderGraph::Execute requires a valid GpuRuntime");
+    // }
 
     const auto backend = runtime._device->GetBackend();
     PersistentResourceCleanup cleanup{&runtime};
@@ -2829,47 +2829,17 @@ std::pair<bool, string> RenderGraph::Validate() const {
 }
 
 std::string_view format_as(RDGNodeTag v) noexcept {
-    using underlying_t = std::underlying_type_t<RDGNodeTag>;
-
-    const auto raw = static_cast<underlying_t>(v);
-    const auto resourceBit = static_cast<underlying_t>(RDGNodeTag::Resource);
-    const auto bufferValue = static_cast<underlying_t>(RDGNodeTag::Buffer);
-    const auto bufferBit = bufferValue & ~resourceBit;
-    const auto textureValue = static_cast<underlying_t>(RDGNodeTag::Texture);
-    const auto textureBit = textureValue & ~resourceBit;
-    const auto passBit = static_cast<underlying_t>(RDGNodeTag::Pass);
-    const auto graphicsValue = static_cast<underlying_t>(RDGNodeTag::GraphicsPass);
-    const auto graphicsBit = graphicsValue & ~passBit;
-    const auto computeValue = static_cast<underlying_t>(RDGNodeTag::ComputePass);
-    const auto computeBit = computeValue & ~passBit;
-    const auto copyValue = static_cast<underlying_t>(RDGNodeTag::CopyPass);
-    const auto copyBit = copyValue & ~passBit;
-
-    if (raw == static_cast<underlying_t>(RDGNodeTag::UNKNOWN)) {
-        return "UNKNOWN";
+    switch (v) {
+        case RDGNodeTag::UNKNOWN: return "UNKNOWN";
+        case RDGNodeTag::Resource: return "Resource";
+        case RDGNodeTag::Buffer: return "Buffer";
+        case RDGNodeTag::Texture: return "Texture";
+        case RDGNodeTag::Pass: return "Pass";
+        case RDGNodeTag::GraphicsPass: return "Direct";
+        case RDGNodeTag::ComputePass: return "Compute";
+        case RDGNodeTag::CopyPass: return "Copy";
+        default: return "UNKNOWN";
     }
-    if (raw == resourceBit) {
-        return "Resource";
-    }
-    if (raw == bufferValue || raw == bufferBit) {
-        return "Buffer";
-    }
-    if (raw == textureValue || raw == textureBit) {
-        return "Texture";
-    }
-    if (raw == passBit) {
-        return "Pass";
-    }
-    if (raw == graphicsValue || raw == graphicsBit) {
-        return "Direct";
-    }
-    if (raw == computeValue || raw == computeBit) {
-        return "Compute";
-    }
-    if (raw == copyValue || raw == copyBit) {
-        return "Copy";
-    }
-    return "UNKNOWN";
 }
 
 std::string_view format_as(RDGExecutionStage v) noexcept {
@@ -2885,8 +2855,8 @@ std::string_view format_as(RDGExecutionStage v) noexcept {
         case RDGExecutionStage::Copy: return "Copy";
         case RDGExecutionStage::Host: return "Host";
         case RDGExecutionStage::Present: return "Present";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(RDGMemoryAccess v) noexcept {
@@ -2906,8 +2876,8 @@ std::string_view format_as(RDGMemoryAccess v) noexcept {
         case RDGMemoryAccess::HostRead: return "HostRead";
         case RDGMemoryAccess::HostWrite: return "HostWrite";
         case RDGMemoryAccess::IndirectRead: return "IndirectRead";
+        default: return "UNKNOWN";
     }
-    Unreachable();
 }
 
 std::string_view format_as(RDGTextureLayout v) noexcept {

@@ -14,6 +14,9 @@ namespace radray {
 template <class T>
 struct is_flags : public std::false_type {};
 
+template <class T>
+struct is_compound_enum_flags : public std::false_type {};
+
 template <typename T>
 concept is_enum_flags = ::std::is_enum_v<T> && ::radray::is_flags<T>::value;
 
@@ -139,13 +142,23 @@ public:
         auto remaining = static_cast<unsigned_t>(this->value());
         bool first = true;
         while (remaining != 0) {
-            auto bit = remaining & (~remaining + 1);
-            remaining &= ~bit;
-            if (!first) {
-                fmt::format_to(std::back_inserter(buffer), " | ");
+            if constexpr (is_compound_enum_flags<T>::value) {
+                auto name = format_as(static_cast<T>(remaining));
+                if (!first) {
+                    fmt::format_to(std::back_inserter(buffer), " | ");
+                }
+                fmt::format_to(std::back_inserter(buffer), "{}", name);
+                break;
+            } else {
+                auto bit = remaining & (~remaining + 1);
+                remaining &= ~bit;
+                auto bitName = format_as(static_cast<T>(bit));
+                if (!first) {
+                    fmt::format_to(std::back_inserter(buffer), " | ");
+                }
+                fmt::format_to(std::back_inserter(buffer), "{}", bitName);
+                first = false;
             }
-            fmt::format_to(std::back_inserter(buffer), "{}", static_cast<T>(bit));
-            first = false;
         }
         fmt::format_to(std::back_inserter(buffer), "]");
         return string{buffer.data(), buffer.size()};

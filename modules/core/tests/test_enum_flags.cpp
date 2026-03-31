@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <fmt/format.h>
 #include <radray/enum_flags.h>
 
 enum class TestFlags : uint32_t {
@@ -9,9 +10,42 @@ enum class TestFlags : uint32_t {
     D = 1 << 3,
 };
 
+std::string_view format_as(TestFlags v) noexcept {
+    switch (v) {
+        case TestFlags::A: return "A";
+        case TestFlags::B: return "B";
+        case TestFlags::C: return "C";
+        case TestFlags::D: return "D";
+        default: return "UNKNOWN";
+    }
+}
+
 namespace radray {
 template <>
 struct is_flags<TestFlags> : std::true_type {};
+}  // namespace radray
+
+enum class CompoundFlags : uint32_t {
+    None = 0,
+    Base = 1 << 0,
+    A = Base | (Base << 1),
+    B = Base | (Base << 2),
+};
+
+std::string_view format_as(CompoundFlags v) noexcept {
+    switch (v) {
+        case CompoundFlags::A: return "A";
+        case CompoundFlags::B: return "B";
+        case CompoundFlags::Base: return "Base";
+        default: return "UNKNOWN";
+    }
+}
+
+namespace radray {
+template <>
+struct is_flags<CompoundFlags> : std::true_type {};
+template <>
+struct is_compound_enum_flags<CompoundFlags> : std::true_type {};
 }  // namespace radray
 
 TEST(EnumFlagsTest, BasicConstructionAndEvaluation) {
@@ -73,4 +107,17 @@ TEST(EnumFlagsTest, EqualityAndInequality) {
 
     EXPECT_TRUE(flag1 == (TestFlags::A | TestFlags::B));
     EXPECT_TRUE((TestFlags::A | TestFlags::B) == flag1);
+}
+
+TEST(EnumFlagsTest, FormatByNameBitwise) {
+    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<TestFlags>(TestFlags::A)), "[A]");
+    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B), "[A | B]");
+    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B | TestFlags::C), "[A | B | C]");
+}
+
+TEST(EnumFlagsTest, FormatByNameCompound) {
+    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::A)), "[A]");
+    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::A | CompoundFlags::B)), "[UNKNOWN]");
+    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::Base)), "[Base]");
+    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::None)), "[]");
 }
