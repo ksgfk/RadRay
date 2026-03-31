@@ -2,6 +2,7 @@
 
 #include <numeric>
 #include <optional>
+#include <type_traits>
 #include <variant>
 
 #include <radray/types.h>
@@ -24,20 +25,27 @@ struct RDGBufferHandle : public RDGResourceHandle {};
 struct RDGTextureHandle : public RDGResourceHandle {};
 struct RDGPassHandle : public RDGNodeHandle {};
 
-}  // namespace radray
-
-template <>
-struct std::hash<radray::RDGNodeHandle> {
-    inline std::size_t operator()(const radray::RDGNodeHandle& h) const noexcept {
+template <typename T>
+struct RDGHandleHash {
+    static_assert(std::is_base_of_v<RDGNodeHandle, T>);
+    inline std::size_t operator()(const T& h) const noexcept {
         return std::hash<uint64_t>{}(h.Id);
     }
 };
+
+}  // namespace radray
+
+template <typename T>
+requires std::is_base_of_v<radray::RDGNodeHandle, T>
+struct std::hash<T> : public radray::RDGHandleHash<T> {};
 
 namespace radray {
 
 class RenderGraph;
 class RDGNode;
 class RDGEdge;
+class IRDGRasterPass;
+class IRDGComputePass;
 
 enum class RDGNodeTag : uint32_t {
     UNKNOWN = 0x0,
@@ -301,11 +309,12 @@ public:
 class RDGGraphicsPassNode final : public RDGPassNode {
 public:
     using RDGPassNode::RDGPassNode;
-    virtual ~RDGGraphicsPassNode() noexcept = default;
+    virtual ~RDGGraphicsPassNode() noexcept;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::GraphicsPass; }
 
 public:
+    unique_ptr<IRDGRasterPass> _impl{};
     vector<RDGColorAttachmentInfo> _colorAttachments;
     std::optional<RDGDepthStencilAttachmentInfo> _depthStencilAttachment{};
 };
@@ -313,9 +322,12 @@ public:
 class RDGComputePassNode final : public RDGPassNode {
 public:
     using RDGPassNode::RDGPassNode;
-    virtual ~RDGComputePassNode() noexcept = default;
+    virtual ~RDGComputePassNode() noexcept;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::ComputePass; }
+
+public:
+    unique_ptr<IRDGComputePass> _impl{};
 };
 
 class RDGCopyPassNode final : public RDGPassNode {
@@ -353,7 +365,27 @@ public:
 
 class RDGRasterPassBuilder {
 public:
+    struct PendingBufferUse {
+        RDGBufferHandle Buffer{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        render::BufferRange Range{};
+        bool Write{false};
+    };
+
+    struct PendingTextureUse {
+        RDGTextureHandle Texture{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
+        render::SubresourceRange Range{};
+        bool Write{false};
+    };
+
     explicit RDGRasterPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
+    RDGRasterPassBuilder(RenderGraph* graph, RDGPassHandle pass) noexcept
+        : _graph(graph),
+          _pass(pass) {}
 
     RDGPassHandle Build();
 
@@ -389,11 +421,35 @@ public:
 
     RenderGraph* _graph{nullptr};
     RDGPassHandle _pass{};
+    vector<RDGColorAttachmentInfo> _pendingColorAttachments{};
+    std::optional<RDGDepthStencilAttachmentInfo> _pendingDepthStencilAttachment{};
+    vector<PendingBufferUse> _pendingBufferUses{};
+    vector<PendingTextureUse> _pendingTextureUses{};
 };
 
 class RDGComputePassBuilder {
 public:
+    struct PendingBufferUse {
+        RDGBufferHandle Buffer{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        render::BufferRange Range{};
+        bool Write{false};
+    };
+
+    struct PendingTextureUse {
+        RDGTextureHandle Texture{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
+        render::SubresourceRange Range{};
+        bool Write{false};
+    };
+
     explicit RDGComputePassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
+    RDGComputePassBuilder(RenderGraph* graph, RDGPassHandle pass) noexcept
+        : _graph(graph),
+          _pass(pass) {}
 
     RDGPassHandle Build();
 
@@ -409,10 +465,29 @@ public:
 
     RenderGraph* _graph{nullptr};
     RDGPassHandle _pass{};
+    vector<PendingBufferUse> _pendingBufferUses{};
+    vector<PendingTextureUse> _pendingTextureUses{};
 };
 
 class RDGCopyPassBuilder {
 public:
+    struct PendingBufferUse {
+        RDGBufferHandle Buffer{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        render::BufferRange Range{};
+        bool Write{false};
+    };
+
+    struct PendingTextureUse {
+        RDGTextureHandle Texture{};
+        RDGExecutionStage Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
+        render::SubresourceRange Range{};
+        bool Write{false};
+    };
+
     explicit RDGCopyPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
 
     RDGPassHandle Build();
@@ -426,6 +501,35 @@ public:
 
     RenderGraph* _graph{nullptr};
     RDGPassHandle _pass{};
+    vector<RDGCopyPassOp> _pendingOps{};
+    vector<PendingBufferUse> _pendingBufferUses{};
+    vector<PendingTextureUse> _pendingTextureUses{};
+};
+
+class RDGExecuteContext {
+public:
+    GpuBufferHandle GetBuffer(RDGBufferHandle handle) const;
+    GpuTextureHandle GetTexture(RDGTextureHandle handle) const;
+    render::Buffer* ResolveBuffer(RDGBufferHandle handle) const;
+    render::Texture* ResolveTexture(RDGTextureHandle handle) const;
+
+    GpuRuntime* Runtime{nullptr};
+    unordered_map<RDGBufferHandle, GpuBufferHandle> _bufferHandles;
+    unordered_map<RDGTextureHandle, GpuTextureHandle> _textureHandles;
+};
+
+class IRDGRasterPass {
+public:
+    virtual ~IRDGRasterPass() noexcept = default;
+    virtual void Setup(RDGRasterPassBuilder& builder) = 0;
+    virtual void Execute(render::GraphicsCommandEncoder* encoder, RDGExecuteContext* context, GpuAsyncContext* asyncCtx) = 0;
+};
+
+class IRDGComputePass {
+public:
+    virtual ~IRDGComputePass() noexcept = default;
+    virtual void Setup(RDGComputePassBuilder& builder) = 0;
+    virtual void Execute(render::ComputeCommandEncoder* encoder, RDGExecuteContext* context, GpuAsyncContext* asyncCtx) = 0;
 };
 
 class RenderGraph {
@@ -447,6 +551,8 @@ public:
     void ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     // Pass
+    RDGPassHandle AddRasterPass(std::string_view name, unique_ptr<IRDGRasterPass> pass);
+    RDGPassHandle AddComputePass(std::string_view name, unique_ptr<IRDGComputePass> pass);
     RDGPassHandle AddPass(RDGNodeTag tag, std::string_view name);
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
@@ -454,7 +560,7 @@ public:
 
     RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
-    RDGExecuteResult Execute(GpuRuntime& runtime, const RDGCompileResult& compiled) const;
+    RDGExecuteResult Execute(GpuRuntime* runtime, const RDGCompileResult& compiled) const;
 
     // ---------------- helper ----------------
     string ExportGraphviz() const;

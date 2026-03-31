@@ -19,6 +19,9 @@
 
 namespace radray {
 
+RDGGraphicsPassNode::~RDGGraphicsPassNode() noexcept = default;
+RDGComputePassNode::~RDGComputePassNode() noexcept = default;
+
 namespace {
 
 struct BufferPassUsage {
@@ -397,9 +400,9 @@ render::Texture* ResolveTextureHandle(GpuTextureHandle handle) {
 }
 
 GpuBufferHandle LookupBufferHandle(
-    const unordered_map<uint64_t, GpuBufferHandle>& handles,
+    const unordered_map<RDGBufferHandle, GpuBufferHandle>& handles,
     RDGBufferHandle handle) {
-    const auto it = handles.find(handle.Id);
+    const auto it = handles.find(handle);
     if (it == handles.end()) {
         RADRAY_ABORT("RenderGraph::Execute missing resolved buffer handle for node {}", handle.Id);
     }
@@ -407,9 +410,9 @@ GpuBufferHandle LookupBufferHandle(
 }
 
 GpuTextureHandle LookupTextureHandle(
-    const unordered_map<uint64_t, GpuTextureHandle>& handles,
+    const unordered_map<RDGTextureHandle, GpuTextureHandle>& handles,
     RDGTextureHandle handle) {
-    const auto it = handles.find(handle.Id);
+    const auto it = handles.find(handle);
     if (it == handles.end()) {
         RADRAY_ABORT("RenderGraph::Execute missing resolved texture handle for node {}", handle.Id);
     }
@@ -787,7 +790,7 @@ struct PassAttachmentViews {
 PassAttachmentViews CreateAttachmentViewsForPass(
     GpuAsyncContext& context,
     const RDGGraphicsPassNode& passNode,
-    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    const unordered_map<RDGTextureHandle, GpuTextureHandle>& textureHandles) {
     auto colorInfos = passNode._colorAttachments;
     std::sort(colorInfos.begin(), colorInfos.end(), [](const RDGColorAttachmentInfo& lhs, const RDGColorAttachmentInfo& rhs) {
         return lhs.Slot < rhs.Slot;
@@ -890,7 +893,7 @@ void EmitBackendBarrier(
     render::RenderBackend backend,
     render::CommandBuffer* cmd,
     const RDGCompiledBufferBarrier& barrier,
-    const unordered_map<uint64_t, GpuBufferHandle>& bufferHandles) {
+    const unordered_map<RDGBufferHandle, GpuBufferHandle>& bufferHandles) {
     const auto bufferHandle = LookupBufferHandle(bufferHandles, barrier.Buffer);
     auto* buffer = ResolveBufferHandle(bufferHandle);
     const auto beforeState = MapRDGBufferStateToRenderState(barrier.Before);
@@ -960,7 +963,7 @@ void EmitBackendBarrier(
     render::RenderBackend backend,
     render::CommandBuffer* cmd,
     const RDGCompiledTextureBarrier& barrier,
-    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    const unordered_map<RDGTextureHandle, GpuTextureHandle>& textureHandles) {
     const auto textureHandle = LookupTextureHandle(textureHandles, barrier.Texture);
     auto* texture = ResolveTextureHandle(textureHandle);
     const auto textureDesc = texture->GetDesc();
@@ -1083,8 +1086,8 @@ void EmitBackendBarriers(
     render::RenderBackend backend,
     render::CommandBuffer* cmd,
     const vector<RDGCompiledBarrier>& barriers,
-    const unordered_map<uint64_t, GpuBufferHandle>& bufferHandles,
-    const unordered_map<uint64_t, GpuTextureHandle>& textureHandles) {
+    const unordered_map<RDGBufferHandle, GpuBufferHandle>& bufferHandles,
+    const unordered_map<RDGTextureHandle, GpuTextureHandle>& textureHandles) {
     for (const auto& barrier : barriers) {
         if (std::holds_alternative<RDGCompiledBufferBarrier>(barrier)) {
             EmitBackendBarrier(backend, cmd, std::get<RDGCompiledBufferBarrier>(barrier), bufferHandles);
@@ -1095,6 +1098,22 @@ void EmitBackendBarriers(
 }
 
 }  // namespace
+
+GpuBufferHandle RDGExecuteContext::GetBuffer(RDGBufferHandle handle) const {
+    return LookupBufferHandle(_bufferHandles, handle);
+}
+
+GpuTextureHandle RDGExecuteContext::GetTexture(RDGTextureHandle handle) const {
+    return LookupTextureHandle(_textureHandles, handle);
+}
+
+render::Buffer* RDGExecuteContext::ResolveBuffer(RDGBufferHandle handle) const {
+    return ResolveBufferHandle(GetBuffer(handle));
+}
+
+render::Texture* RDGExecuteContext::ResolveTexture(RDGTextureHandle handle) const {
+    return ResolveTextureHandle(GetTexture(handle));
+}
 
 RDGEdge* RenderGraph::_CreateEdge(
     RDGNode* from,
@@ -1213,6 +1232,38 @@ void RenderGraph::ExportTexture(
     };
 }
 
+RDGPassHandle RenderGraph::AddRasterPass(std::string_view name, unique_ptr<IRDGRasterPass> pass) {
+    if (pass == nullptr) {
+        RADRAY_ABORT("RenderGraph::AddRasterPass received null pass");
+    }
+
+    const auto handle = AddPass(RDGNodeTag::GraphicsPass, name);
+    auto* node = _nodes[handle.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::GraphicsPass));
+    auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
+    passNode->_impl = std::move(pass);
+
+    RDGRasterPassBuilder builder{this, handle};
+    passNode->_impl->Setup(builder);
+    return builder.Build();
+}
+
+RDGPassHandle RenderGraph::AddComputePass(std::string_view name, unique_ptr<IRDGComputePass> pass) {
+    if (pass == nullptr) {
+        RADRAY_ABORT("RenderGraph::AddComputePass received null pass");
+    }
+
+    const auto handle = AddPass(RDGNodeTag::ComputePass, name);
+    auto* node = _nodes[handle.Id].get();
+    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::ComputePass));
+    auto* passNode = static_cast<RDGComputePassNode*>(node);
+    passNode->_impl = std::move(pass);
+
+    RDGComputePassBuilder builder{this, handle};
+    passNode->_impl->Setup(builder);
+    return builder.Build();
+}
+
 RDGPassHandle RenderGraph::AddPass(RDGNodeTag tag, std::string_view name) {
     const uint64_t id = _nodes.size();
     unique_ptr<RDGPassNode> node{};
@@ -1233,324 +1284,6 @@ RDGPassHandle RenderGraph::AddPass(RDGNodeTag tag, std::string_view name) {
     auto* raw = node.get();
     _nodes.emplace_back(std::move(node));
     return RDGPassHandle{raw->_id};
-}
-
-RDGPassHandle RDGRasterPassBuilder::_EnsurePass() {
-    RADRAY_ASSERT(_graph != nullptr);
-    if (_pass.IsValid()) {
-        return _pass;
-    }
-
-    const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGGraphicsPassNode>(id, fmt::format("RasterPass{}", id));
-    auto* raw = node.get();
-    _graph->_nodes.emplace_back(std::move(node));
-    _pass = RDGPassHandle{raw->_id};
-    return _pass;
-}
-
-void RDGRasterPassBuilder::_ValidateShaderStages(render::ShaderStages stages) const {
-    RADRAY_ASSERT((stages & ~render::ShaderStage::Graphics) == render::ShaderStage::UNKNOWN);
-}
-
-void RDGRasterPassBuilder::_LinkBufferStages(
-    RDGBufferHandle buffer,
-    render::ShaderStages stages,
-    RDGMemoryAccess access,
-    render::BufferRange range) {
-    _ValidateShaderStages(stages);
-    const auto pass = _EnsurePass();
-    if (stages.HasFlag(render::ShaderStage::Vertex)) {
-        _graph->Link(buffer, pass, RDGExecutionStage::VertexShader, access, range);
-    }
-    if (stages.HasFlag(render::ShaderStage::Pixel)) {
-        _graph->Link(buffer, pass, RDGExecutionStage::PixelShader, access, range);
-    }
-}
-
-void RDGRasterPassBuilder::_LinkTextureStages(
-    RDGTextureHandle texture,
-    render::ShaderStages stages,
-    RDGMemoryAccess access,
-    RDGTextureLayout layout,
-    render::SubresourceRange range) {
-    _ValidateShaderStages(stages);
-    const auto pass = _EnsurePass();
-    if (stages.HasFlag(render::ShaderStage::Vertex)) {
-        _graph->Link(texture, pass, RDGExecutionStage::VertexShader, access, layout, range);
-    }
-    if (stages.HasFlag(render::ShaderStage::Pixel)) {
-        _graph->Link(texture, pass, RDGExecutionStage::PixelShader, access, layout, range);
-    }
-}
-
-RDGPassHandle RDGRasterPassBuilder::Build() {
-    return _EnsurePass();
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseColorAttachment(
-    uint32_t slot,
-    RDGTextureHandle texture,
-    render::SubresourceRange range,
-    render::LoadAction load,
-    render::StoreAction store,
-    std::optional<render::ColorClearValue> clearValue) {
-    const auto pass = this->Build();
-    RADRAY_ASSERT(pass.IsValid() && pass.Id < _graph->_nodes.size());
-    auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::GraphicsPass));
-    auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
-    passNode->_colorAttachments.emplace_back(RDGColorAttachmentInfo{
-        .Slot = slot,
-        .Texture = texture,
-        .Range = range,
-        .Load = load,
-        .Store = store,
-        .ClearValue = std::move(clearValue),
-    });
-    RDGMemoryAccess access = RDGMemoryAccess::ColorAttachmentWrite;
-    if (load == render::LoadAction::Load) {
-        access = RDGMemoryAccess::ColorAttachmentRead | RDGMemoryAccess::ColorAttachmentWrite;
-    }
-    _graph->Link(pass, texture, RDGExecutionStage::ColorOutput, access, RDGTextureLayout::ColorAttachment, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseDepthStencilAttachment(
-    RDGTextureHandle texture,
-    render::SubresourceRange range,
-    render::LoadAction depthLoad,
-    render::StoreAction depthStore,
-    render::LoadAction stencilLoad,
-    render::StoreAction stencilStore,
-    std::optional<render::DepthStencilClearValue> clearValue) {
-    const auto pass = this->Build();
-    RADRAY_ASSERT(pass.IsValid() && pass.Id < _graph->_nodes.size());
-    auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::GraphicsPass));
-    auto* passNode = static_cast<RDGGraphicsPassNode*>(node);
-    RADRAY_ASSERT(!passNode->_depthStencilAttachment.has_value());
-    passNode->_depthStencilAttachment = RDGDepthStencilAttachmentInfo{
-        .Texture = texture,
-        .Range = range,
-        .DepthLoad = depthLoad,
-        .DepthStore = depthStore,
-        .StencilLoad = stencilLoad,
-        .StencilStore = stencilStore,
-        .ClearValue = std::move(clearValue),
-    };
-
-    const bool isWrite = passNode->_depthStencilAttachment->HasWriteAccess();
-    if (isWrite) {
-        _graph->Link(
-            pass,
-            texture,
-            RDGExecutionStage::DepthStencil,
-            RDGMemoryAccess::DepthStencilWrite,
-            RDGTextureLayout::DepthStencilAttachment,
-            range);
-    } else {
-        _graph->Link(
-            texture,
-            pass,
-            RDGExecutionStage::DepthStencil,
-            RDGMemoryAccess::DepthStencilRead,
-            RDGTextureLayout::DepthStencilReadOnly,
-            range);
-    }
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseVertexBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(buffer, this->Build(), RDGExecutionStage::VertexInput, RDGMemoryAccess::VertexRead, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseIndexBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(buffer, this->Build(), RDGExecutionStage::VertexInput, RDGMemoryAccess::IndexRead, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseIndirectBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(buffer, this->Build(), RDGExecutionStage::Indirect, RDGMemoryAccess::IndirectRead, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseCBuffer(
-    RDGBufferHandle buffer,
-    render::ShaderStages stages,
-    render::BufferRange range) {
-    _LinkBufferStages(buffer, stages, RDGMemoryAccess::ConstantRead, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseBuffer(
-    RDGBufferHandle buffer,
-    render::ShaderStages stages,
-    render::BufferRange range) {
-    _LinkBufferStages(buffer, stages, RDGMemoryAccess::ShaderRead, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseRWBuffer(
-    RDGBufferHandle buffer,
-    render::ShaderStages stages,
-    render::BufferRange range) {
-    const auto pass = this->Build();
-    _ValidateShaderStages(stages);
-    if (stages.HasFlag(render::ShaderStage::Vertex)) {
-        _graph->Link(pass, buffer, RDGExecutionStage::VertexShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, range);
-    }
-    if (stages.HasFlag(render::ShaderStage::Pixel)) {
-        _graph->Link(pass, buffer, RDGExecutionStage::PixelShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, range);
-    }
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseTexture(
-    RDGTextureHandle texture,
-    render::ShaderStages stages,
-    render::SubresourceRange range) {
-    _LinkTextureStages(texture, stages, RDGMemoryAccess::ShaderRead, RDGTextureLayout::ShaderReadOnly, range);
-    return *this;
-}
-
-RDGRasterPassBuilder& RDGRasterPassBuilder::UseRWTexture(
-    RDGTextureHandle texture,
-    render::ShaderStages stages,
-    render::SubresourceRange range) {
-    const auto pass = this->Build();
-    _ValidateShaderStages(stages);
-    if (stages.HasFlag(render::ShaderStage::Vertex)) {
-        _graph->Link(pass, texture, RDGExecutionStage::VertexShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, RDGTextureLayout::General, range);
-    }
-    if (stages.HasFlag(render::ShaderStage::Pixel)) {
-        _graph->Link(pass, texture, RDGExecutionStage::PixelShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, RDGTextureLayout::General, range);
-    }
-    return *this;
-}
-
-RDGPassHandle RDGComputePassBuilder::_EnsurePass() {
-    RADRAY_ASSERT(_graph != nullptr);
-    if (_pass.IsValid()) {
-        return _pass;
-    }
-
-    const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGComputePassNode>(id, fmt::format("ComputePass{}", id));
-    auto* raw = node.get();
-    _graph->_nodes.emplace_back(std::move(node));
-    _pass = RDGPassHandle{raw->_id};
-    return _pass;
-}
-
-RDGPassHandle RDGComputePassBuilder::Build() {
-    return _EnsurePass();
-}
-
-RDGComputePassBuilder& RDGComputePassBuilder::UseCBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(buffer, this->Build(), RDGExecutionStage::ComputeShader, RDGMemoryAccess::ConstantRead, range);
-    return *this;
-}
-
-RDGComputePassBuilder& RDGComputePassBuilder::UseBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(buffer, this->Build(), RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderRead, range);
-    return *this;
-}
-
-RDGComputePassBuilder& RDGComputePassBuilder::UseRWBuffer(RDGBufferHandle buffer, render::BufferRange range) {
-    _graph->Link(this->Build(), buffer, RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, range);
-    return *this;
-}
-
-RDGComputePassBuilder& RDGComputePassBuilder::UseTexture(RDGTextureHandle texture, render::SubresourceRange range) {
-    _graph->Link(texture, this->Build(), RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderRead, RDGTextureLayout::ShaderReadOnly, range);
-    return *this;
-}
-
-RDGComputePassBuilder& RDGComputePassBuilder::UseRWTexture(RDGTextureHandle texture, render::SubresourceRange range) {
-    _graph->Link(this->Build(), texture, RDGExecutionStage::ComputeShader, RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite, RDGTextureLayout::General, range);
-    return *this;
-}
-
-RDGPassHandle RDGCopyPassBuilder::_EnsurePass() {
-    RADRAY_ASSERT(_graph != nullptr);
-    if (_pass.IsValid()) {
-        return _pass;
-    }
-
-    const uint64_t id = _graph->_nodes.size();
-    auto node = make_unique<RDGCopyPassNode>(id, fmt::format("CopyPass{}", id));
-    auto* raw = node.get();
-    _graph->_nodes.emplace_back(std::move(node));
-    _pass = RDGPassHandle{raw->_id};
-    return _pass;
-}
-
-RDGPassHandle RDGCopyPassBuilder::Build() {
-    return _EnsurePass();
-}
-
-RDGCopyPassBuilder& RDGCopyPassBuilder::CopyBufferToBuffer(
-    RDGBufferHandle dst,
-    uint64_t dstOffset,
-    RDGBufferHandle src,
-    uint64_t srcOffset,
-    uint64_t size) {
-    const auto pass = this->Build();
-    auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
-    auto* passNode = static_cast<RDGCopyPassNode*>(node);
-    passNode->_ops.emplace_back(RDGCopyBufferToBufferInfo{
-        .Dst = dst,
-        .DstOffset = dstOffset,
-        .Src = src,
-        .SrcOffset = srcOffset,
-        .Size = size,
-    });
-    _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, render::BufferRange{srcOffset, size});
-    _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, render::BufferRange{dstOffset, size});
-    return *this;
-}
-
-RDGCopyPassBuilder& RDGCopyPassBuilder::CopyBufferToTexture(
-    RDGTextureHandle dst,
-    render::SubresourceRange dstRange,
-    RDGBufferHandle src,
-    uint64_t srcOffset) {
-    const auto pass = this->Build();
-    auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
-    auto* passNode = static_cast<RDGCopyPassNode*>(node);
-    passNode->_ops.emplace_back(RDGCopyBufferToTextureInfo{
-        .Dst = dst,
-        .DstRange = dstRange,
-        .Src = src,
-        .SrcOffset = srcOffset,
-    });
-    _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, render::BufferRange{srcOffset, render::BufferRange::All()});
-    _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, RDGTextureLayout::TransferDestination, dstRange);
-    return *this;
-}
-
-RDGCopyPassBuilder& RDGCopyPassBuilder::CopyTextureToBuffer(
-    RDGBufferHandle dst,
-    uint64_t dstOffset,
-    RDGTextureHandle src,
-    render::SubresourceRange srcRange) {
-    const auto pass = this->Build();
-    auto* node = _graph->_nodes[pass.Id].get();
-    RADRAY_ASSERT(node != nullptr && node->GetTag().HasFlag(RDGNodeTag::CopyPass));
-    auto* passNode = static_cast<RDGCopyPassNode*>(node);
-    passNode->_ops.emplace_back(RDGCopyTextureToBufferInfo{
-        .Dst = dst,
-        .DstOffset = dstOffset,
-        .Src = src,
-        .SrcRange = srcRange,
-    });
-    _graph->Link(src, pass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, RDGTextureLayout::TransferSource, srcRange);
-    _graph->Link(pass, dst, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, render::BufferRange{dstOffset, render::BufferRange::All()});
-    return *this;
 }
 
 void RenderGraph::Link(
@@ -1919,15 +1652,15 @@ RDGCompileResult RenderGraph::Compile() const {
     return result;
 }
 
-RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResult& compiled) const {
-    const auto backend = runtime._device->GetBackend();
-    PersistentResourceCleanup cleanup{&runtime};
-    auto context = runtime.BeginAsync(render::QueueType::Direct);
+RDGExecuteResult RenderGraph::Execute(GpuRuntime* runtime, const RDGCompileResult& compiled) const {
+    const auto backend = runtime->_device->GetBackend();
+    PersistentResourceCleanup cleanup{runtime};
+    auto asyncCtx = runtime->BeginAsync(render::QueueType::Direct);
 
-    unordered_map<uint64_t, GpuBufferHandle> bufferHandles{};
-    unordered_map<uint64_t, GpuTextureHandle> textureHandles{};
-    bufferHandles.reserve(_nodes.size());
-    textureHandles.reserve(_nodes.size());
+    auto executeContext = make_unique<RDGExecuteContext>();
+    executeContext->Runtime = runtime;
+    executeContext->_bufferHandles.reserve(_nodes.size());
+    executeContext->_textureHandles.reserve(_nodes.size());
 
     vector<GpuResourceHandle> transientLikePersistentResources{};
     transientLikePersistentResources.reserve(_nodes.size());
@@ -1941,12 +1674,12 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
             bufferHandle.Id = node->_id;
             const auto& bufferNode = GetBufferNode(*this, bufferHandle);
             if (bufferNode._ownership == RDGResourceOwnership::External) {
-                bufferHandles.emplace(bufferNode._id, bufferNode._backingHandle);
+                executeContext->_bufferHandles.emplace(bufferHandle, bufferNode._backingHandle);
                 continue;
             }
 
-            const auto handle = runtime.CreateBuffer(BuildBufferDescriptor(bufferNode));
-            bufferHandles.emplace(bufferNode._id, handle);
+            const auto handle = runtime->CreateBuffer(BuildBufferDescriptor(bufferNode));
+            executeContext->_bufferHandles.emplace(bufferHandle, handle);
             cleanup.Track(handle);
             if (!bufferNode._exportedState.has_value()) {
                 transientLikePersistentResources.emplace_back(handle);
@@ -1959,12 +1692,12 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
             textureHandle.Id = node->_id;
             const auto& textureNode = GetTextureNode(*this, textureHandle);
             if (textureNode._ownership == RDGResourceOwnership::External) {
-                textureHandles.emplace(textureNode._id, textureNode._backingHandle);
+                executeContext->_textureHandles.emplace(textureHandle, textureNode._backingHandle);
                 continue;
             }
 
-            const auto handle = runtime.CreateTexture(BuildTextureDescriptor(textureNode));
-            textureHandles.emplace(textureNode._id, handle);
+            const auto handle = runtime->CreateTexture(BuildTextureDescriptor(textureNode));
+            executeContext->_textureHandles.emplace(textureHandle, handle);
             cleanup.Track(handle);
             if (!textureNode._exportedState.has_value()) {
                 transientLikePersistentResources.emplace_back(handle);
@@ -1972,17 +1705,17 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
         }
     }
 
-    auto* cmd = context->CreateCommandBuffer();
+    auto* cmd = asyncCtx->CreateCommandBuffer();
     cmd->Begin();
 
     for (const auto& compiledPass : compiled.Passes) {
-        EmitBackendBarriers(backend, cmd, compiledPass.BarriersBefore, bufferHandles, textureHandles);
+        EmitBackendBarriers(backend, cmd, compiledPass.BarriersBefore, executeContext->_bufferHandles, executeContext->_textureHandles);
 
         const auto& passNode = GetPassNode(*this, compiledPass.Pass);
         switch (passNode.GetTag()) {
             case RDGNodeTag::GraphicsPass: {
                 const auto& graphicsPassNode = static_cast<const RDGGraphicsPassNode&>(passNode);
-                auto attachments = CreateAttachmentViewsForPass(*context, graphicsPassNode, textureHandles);
+                auto attachments = CreateAttachmentViewsForPass(*asyncCtx, graphicsPassNode, executeContext->_textureHandles);
                 render::RenderPassDescriptor passDesc{};
                 passDesc.ColorAttachments = std::span<const render::ColorAttachment>(attachments.ColorAttachments);
                 passDesc.DepthStencilAttachment = attachments.DepthStencilAttachment;
@@ -1991,7 +1724,11 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
                 if (!encoderOpt.HasValue()) {
                     RADRAY_ABORT("RenderGraph::Execute BeginRenderPass failed for pass '{}'", passNode._name);
                 }
-                cmd->EndRenderPass(encoderOpt.Release());
+                auto encoder = encoderOpt.Release();
+                if (graphicsPassNode._impl != nullptr) {
+                    graphicsPassNode._impl->Execute(encoder.get(), executeContext.get(), asyncCtx.get());
+                }
+                cmd->EndRenderPass(std::move(encoder));
                 break;
             }
             case RDGNodeTag::ComputePass: {
@@ -1999,7 +1736,12 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
                 if (!encoderOpt.HasValue()) {
                     RADRAY_ABORT("RenderGraph::Execute BeginComputePass failed for pass '{}'", passNode._name);
                 }
-                cmd->EndComputePass(encoderOpt.Release());
+                auto encoder = encoderOpt.Release();
+                const auto& computePassNode = static_cast<const RDGComputePassNode&>(passNode);
+                if (computePassNode._impl != nullptr) {
+                    computePassNode._impl->Execute(encoder.get(), executeContext.get(), asyncCtx.get());
+                }
+                cmd->EndComputePass(std::move(encoder));
                 break;
             }
             case RDGNodeTag::CopyPass: {
@@ -2008,24 +1750,24 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
                     if (std::holds_alternative<RDGCopyBufferToBufferInfo>(op)) {
                         const auto& info = std::get<RDGCopyBufferToBufferInfo>(op);
                         cmd->CopyBufferToBuffer(
-                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Dst)),
+                            ResolveBufferHandle(LookupBufferHandle(executeContext->_bufferHandles, info.Dst)),
                             info.DstOffset,
-                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Src)),
+                            ResolveBufferHandle(LookupBufferHandle(executeContext->_bufferHandles, info.Src)),
                             info.SrcOffset,
                             info.Size);
                     } else if (std::holds_alternative<RDGCopyBufferToTextureInfo>(op)) {
                         const auto& info = std::get<RDGCopyBufferToTextureInfo>(op);
                         cmd->CopyBufferToTexture(
-                            ResolveTextureHandle(LookupTextureHandle(textureHandles, info.Dst)),
+                            ResolveTextureHandle(LookupTextureHandle(executeContext->_textureHandles, info.Dst)),
                             info.DstRange,
-                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Src)),
+                            ResolveBufferHandle(LookupBufferHandle(executeContext->_bufferHandles, info.Src)),
                             info.SrcOffset);
                     } else {
                         const auto& info = std::get<RDGCopyTextureToBufferInfo>(op);
                         cmd->CopyTextureToBuffer(
-                            ResolveBufferHandle(LookupBufferHandle(bufferHandles, info.Dst)),
+                            ResolveBufferHandle(LookupBufferHandle(executeContext->_bufferHandles, info.Dst)),
                             info.DstOffset,
-                            ResolveTextureHandle(LookupTextureHandle(textureHandles, info.Src)),
+                            ResolveTextureHandle(LookupTextureHandle(executeContext->_textureHandles, info.Src)),
                             info.SrcRange);
                     }
                 }
@@ -2038,15 +1780,15 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
                     passNode._name);
         }
 
-        EmitBackendBarriers(backend, cmd, compiledPass.BarriersAfter, bufferHandles, textureHandles);
+        EmitBackendBarriers(backend, cmd, compiledPass.BarriersAfter, executeContext->_bufferHandles, executeContext->_textureHandles);
     }
 
     cmd->End();
 
-    auto task = runtime.SubmitAsync(std::move(context));
+    auto task = runtime->SubmitAsync(std::move(asyncCtx));
     cleanup.Release();
     for (const auto& handle : transientLikePersistentResources) {
-        runtime.DestroyResourceAfter(handle, task);
+        runtime->DestroyResourceAfter(handle, task);
     }
 
     RDGExecuteResult result{};
@@ -2059,7 +1801,7 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
             bufferHandle.Id = node->_id;
             const auto& bufferNode = GetBufferNode(*this, bufferHandle);
             if (bufferNode._exportedState.has_value()) {
-                result.ExportedBuffers.emplace(RDGNodeHandle{bufferNode._id}, LookupBufferHandle(bufferHandles, bufferHandle));
+                result.ExportedBuffers.emplace(RDGNodeHandle{bufferNode._id}, LookupBufferHandle(executeContext->_bufferHandles, bufferHandle));
             }
             continue;
         }
@@ -2069,7 +1811,7 @@ RDGExecuteResult RenderGraph::Execute(GpuRuntime& runtime, const RDGCompileResul
             textureHandle.Id = node->_id;
             const auto& textureNode = GetTextureNode(*this, textureHandle);
             if (textureNode._exportedState.has_value()) {
-                result.ExportedTextures.emplace(RDGNodeHandle{textureNode._id}, LookupTextureHandle(textureHandles, textureHandle));
+                result.ExportedTextures.emplace(RDGNodeHandle{textureNode._id}, LookupTextureHandle(executeContext->_textureHandles, textureHandle));
             }
         }
     }
