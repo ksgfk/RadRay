@@ -11,6 +11,30 @@
 
 namespace radray {
 
+struct RDGNodeHandle {
+    uint64_t Id{std::numeric_limits<uint64_t>::max()};
+
+    constexpr bool IsValid() const noexcept { return Id != std::numeric_limits<uint64_t>::max(); }
+
+    constexpr auto operator<=>(const RDGNodeHandle&) const noexcept = default;
+};
+
+struct RDGResourceHandle : public RDGNodeHandle {};
+struct RDGBufferHandle : public RDGResourceHandle {};
+struct RDGTextureHandle : public RDGResourceHandle {};
+struct RDGPassHandle : public RDGNodeHandle {};
+
+}  // namespace radray
+
+template <>
+struct std::hash<radray::RDGNodeHandle> {
+    inline std::size_t operator()(const radray::RDGNodeHandle& h) const noexcept {
+        return std::hash<uint64_t>{}(h.Id);
+    }
+};
+
+namespace radray {
+
 class RenderGraph;
 class RDGNode;
 class RDGEdge;
@@ -92,19 +116,6 @@ using RDGNodeTags = EnumFlags<RDGNodeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
-struct RDGNodeHandle {
-    uint64_t Id{std::numeric_limits<uint64_t>::max()};
-
-    bool IsValid() const noexcept {
-        return Id != std::numeric_limits<uint64_t>::max();
-    }
-};
-
-struct RDGResourceHandle : public RDGNodeHandle {};
-struct RDGBufferHandle : public RDGResourceHandle {};
-struct RDGTextureHandle : public RDGResourceHandle {};
-struct RDGPassHandle : public RDGNodeHandle {};
-
 // --------------------------- Internal ---------------------------
 
 struct RDGBufferState {
@@ -165,10 +176,7 @@ struct RDGCopyTextureToBufferInfo {
     render::SubresourceRange SrcRange{};
 };
 
-using RDGCopyPassOp = std::variant<
-    RDGCopyBufferToBufferInfo,
-    RDGCopyBufferToTextureInfo,
-    RDGCopyTextureToBufferInfo>;
+using RDGCopyPassOp = std::variant<RDGCopyBufferToBufferInfo, RDGCopyBufferToTextureInfo, RDGCopyTextureToBufferInfo>;
 
 struct RDGPassDependency {
     RDGPassHandle Before{};
@@ -188,9 +196,7 @@ struct RDGCompiledTextureBarrier {
     RDGTextureState After{};
 };
 
-using RDGCompiledBarrier = std::variant<
-    RDGCompiledBufferBarrier,
-    RDGCompiledTextureBarrier>;
+using RDGCompiledBarrier = std::variant<RDGCompiledBufferBarrier, RDGCompiledTextureBarrier>;
 
 struct RDGCompiledPass {
     RDGPassHandle Pass{};
@@ -213,8 +219,8 @@ struct RDGCompileResult {
 };
 
 struct RDGExecuteResult {
-    unordered_map<uint64_t, GpuBufferHandle> ExportedBuffers{};
-    unordered_map<uint64_t, GpuTextureHandle> ExportedTextures{};
+    unordered_map<RDGNodeHandle, GpuBufferHandle> ExportedBuffers{};
+    unordered_map<RDGNodeHandle, GpuTextureHandle> ExportedTextures{};
     GpuTask Task{nullptr, nullptr, 0};
 };
 
@@ -440,11 +446,12 @@ public:
     // 最终要导出的资源
     void ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
-    // TODO: pass 应该还有其他数据
-    RDGPassHandle AddPass(std::string_view name, RDGNodeTag tag = RDGNodeTag::GraphicsPass);
+    // Pass
+    RDGPassHandle AddPass(RDGNodeTag tag, std::string_view name);
     // 图连接
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
     void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+
     RDGCompileResult Compile() const;
     std::pair<bool, string> Validate() const;
     RDGExecuteResult Execute(GpuRuntime& runtime, const RDGCompileResult& compiled) const;
@@ -457,7 +464,6 @@ public:
 public:
     RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
 
-    GpuRuntime* _gpu{nullptr};
     vector<unique_ptr<RDGNode>> _nodes;
     vector<unique_ptr<RDGEdge>> _edges;
 };

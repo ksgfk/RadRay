@@ -24,11 +24,13 @@ GpuTextureHandle MakeTextureHandle(uint64_t handleValue) {
 }
 
 void ExpectContains(const string& actual, std::string_view expected) {
-    EXPECT_NE(actual.find(expected), string::npos) << "missing substring: " << expected << "\nDOT:\n" << actual;
+    EXPECT_NE(actual.find(expected), string::npos) << "missing substring: " << expected << "\nDOT:\n"
+                                                   << actual;
 }
 
 void ExpectNotContains(const string& actual, std::string_view expected) {
-    EXPECT_EQ(actual.find(expected), string::npos) << "unexpected substring: " << expected << "\nDOT:\n" << actual;
+    EXPECT_EQ(actual.find(expected), string::npos) << "unexpected substring: " << expected << "\nDOT:\n"
+                                                   << actual;
 }
 
 bool IsBufferRangeEqual(const BufferRange& lhs, const BufferRange& rhs) {
@@ -37,9 +39,9 @@ bool IsBufferRangeEqual(const BufferRange& lhs, const BufferRange& rhs) {
 
 bool IsSubresourceRangeEqual(const SubresourceRange& lhs, const SubresourceRange& rhs) {
     return lhs.BaseArrayLayer == rhs.BaseArrayLayer &&
-        lhs.ArrayLayerCount == rhs.ArrayLayerCount &&
-        lhs.BaseMipLevel == rhs.BaseMipLevel &&
-        lhs.MipLevelCount == rhs.MipLevelCount;
+           lhs.ArrayLayerCount == rhs.ArrayLayerCount &&
+           lhs.BaseMipLevel == rhs.BaseMipLevel &&
+           lhs.MipLevelCount == rhs.MipLevelCount;
 }
 
 const RDGEdge* FindBufferEdge(
@@ -146,12 +148,12 @@ TEST(RenderGraphTest, ExportGraphviz_ComplexDependencyGraphProducesCompactDot) {
         SubresourceRange{0, 1, 0, 1},
         "Swapchain\nOutput(Target)");
 
-    const auto uploadPass = graph.AddPass("UploadPass", RDGNodeTag::CopyPass);
-    const auto gbufferPass = graph.AddPass("GBufferPass", RDGNodeTag::GraphicsPass);
-    const auto lightCullingPass = graph.AddPass("LightCullingPass", RDGNodeTag::ComputePass);
-    const auto lightingPass = graph.AddPass("LightingPass", RDGNodeTag::GraphicsPass);
-    const auto postFxPass = graph.AddPass("PostFXPass", RDGNodeTag::GraphicsPass);
-    const auto copyReadbackPass = graph.AddPass("CopyReadbackPass", RDGNodeTag::CopyPass);
+    const auto uploadPass = graph.AddPass(RDGNodeTag::CopyPass, "UploadPass");
+    const auto gbufferPass = graph.AddPass(RDGNodeTag::GraphicsPass, "GBufferPass");
+    const auto lightCullingPass = graph.AddPass(RDGNodeTag::ComputePass, "LightCullingPass");
+    const auto lightingPass = graph.AddPass(RDGNodeTag::GraphicsPass, "LightingPass");
+    const auto postFxPass = graph.AddPass(RDGNodeTag::GraphicsPass, "PostFXPass");
+    const auto copyReadbackPass = graph.AddPass(RDGNodeTag::CopyPass, "CopyReadbackPass");
 
     graph.Link(sceneBuffer, uploadPass, RDGExecutionStage::Host, RDGMemoryAccess::HostWrite, BufferRange{0, 512});
     graph.Link(uploadPass, lightListBuffer, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, BufferRange{128, 2048});
@@ -404,9 +406,9 @@ TEST(RenderGraphTest, ExportCompiledGraphviz_MarksResourceVersionsAcrossWrites) 
         TextureFormat::RGBA16_FLOAT,
         "LightingTarget");
 
-    const auto uploadPass = graph.AddPass("UploadPass", RDGNodeTag::CopyPass);
-    const auto accumulatePass = graph.AddPass("AccumulatePass", RDGNodeTag::ComputePass);
-    const auto presentPass = graph.AddPass("PresentPass", RDGNodeTag::GraphicsPass);
+    const auto uploadPass = graph.AddPass(RDGNodeTag::CopyPass, "UploadPass");
+    const auto accumulatePass = graph.AddPass(RDGNodeTag::ComputePass, "AccumulatePass");
+    const auto presentPass = graph.AddPass(RDGNodeTag::GraphicsPass, "PresentPass");
 
     const auto colorRange = SubresourceRange{0, 1, 0, 1};
     graph.Link(uploadPass, historyBuffer, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, BufferRange{0, 1024});
@@ -516,14 +518,14 @@ TEST(RenderGraphTest, RasterPassBuilderBuildsEdgesAndStoresAttachmentMetadata) {
     const auto depthRange = SubresourceRange{0, 1, 0, 1};
     const auto colorClear = ColorClearValue{{0.1f, 0.2f, 0.3f, 1.0f}};
     const auto pass = builder
-        .UseColorAttachment(0, lightingTexture, colorRange, LoadAction::Clear, StoreAction::Store, colorClear)
-        .UseDepthStencilAttachment(depthTexture, depthRange, LoadAction::Load, StoreAction::Discard, LoadAction::Load, StoreAction::Discard, std::nullopt)
-        .UseVertexBuffer(vertexBuffer, BufferRange{0, 1024})
-        .UseCBuffer(sceneCBuffer, ShaderStage::Graphics, BufferRange{0, 256})
-        .UseTexture(blueNoiseTexture, ShaderStage::Pixel, colorRange)
-        .UseRWBuffer(storageBuffer, ShaderStage::Pixel, BufferRange{128, 256})
-        .UseRWTexture(historyTexture, ShaderStage::Pixel, colorRange)
-        .Build();
+                          .UseColorAttachment(0, lightingTexture, colorRange, LoadAction::Clear, StoreAction::Store, colorClear)
+                          .UseDepthStencilAttachment(depthTexture, depthRange, LoadAction::Load, StoreAction::Discard, LoadAction::Load, StoreAction::Discard, std::nullopt)
+                          .UseVertexBuffer(vertexBuffer, BufferRange{0, 1024})
+                          .UseCBuffer(sceneCBuffer, ShaderStage::Graphics, BufferRange{0, 256})
+                          .UseTexture(blueNoiseTexture, ShaderStage::Pixel, colorRange)
+                          .UseRWBuffer(storageBuffer, ShaderStage::Pixel, BufferRange{128, 256})
+                          .UseRWTexture(historyTexture, ShaderStage::Pixel, colorRange)
+                          .Build();
 
     EXPECT_EQ(builder.Build().Id, pass.Id);
 
@@ -660,12 +662,12 @@ TEST(RenderGraphTest, ComputeAndCopyBuildersMapResourceUsageToExpectedEdges) {
     RDGComputePassBuilder computeBuilder{&graph};
     const auto computeRange = SubresourceRange{0, 1, 0, 1};
     const auto computePass = computeBuilder
-        .UseCBuffer(inputBuffer, BufferRange{0, 256})
-        .UseBuffer(inputBuffer, BufferRange{256, 512})
-        .UseRWBuffer(outputBuffer, BufferRange{0, 1024})
-        .UseTexture(inputTexture, computeRange)
-        .UseRWTexture(outputTexture, computeRange)
-        .Build();
+                                 .UseCBuffer(inputBuffer, BufferRange{0, 256})
+                                 .UseBuffer(inputBuffer, BufferRange{256, 512})
+                                 .UseRWBuffer(outputBuffer, BufferRange{0, 1024})
+                                 .UseTexture(inputTexture, computeRange)
+                                 .UseRWTexture(outputTexture, computeRange)
+                                 .Build();
 
     EXPECT_EQ(computeBuilder.Build().Id, computePass.Id);
 
@@ -723,10 +725,10 @@ TEST(RenderGraphTest, ComputeAndCopyBuildersMapResourceUsageToExpectedEdges) {
     RDGCopyPassBuilder copyBuilder{&graph};
     const auto copyRange = SubresourceRange{0, 1, 0, 1};
     const auto copyPass = copyBuilder
-        .CopyBufferToBuffer(outputBuffer, 128, inputBuffer, 64, 512)
-        .CopyBufferToTexture(outputTexture, copyRange, stagingBuffer, 256)
-        .CopyTextureToBuffer(stagingBuffer, 1024, inputTexture, copyRange)
-        .Build();
+                              .CopyBufferToBuffer(outputBuffer, 128, inputBuffer, 64, 512)
+                              .CopyBufferToTexture(outputTexture, copyRange, stagingBuffer, 256)
+                              .CopyTextureToBuffer(stagingBuffer, 1024, inputTexture, copyRange)
+                              .Build();
 
     EXPECT_EQ(copyBuilder.Build().Id, copyPass.Id);
 
