@@ -1,8 +1,85 @@
 #include <radray/runtime/render_graph.h>
 
+#include <iterator>
+
 #include <radray/utility.h>
 
 namespace radray {
+
+namespace {
+
+void AppendGraphvizEscapedText(fmt::memory_buffer& buffer, std::string_view text) {
+    auto out = std::back_inserter(buffer);
+    size_t chunkBegin = 0;
+    for (size_t index = 0; index < text.size(); ++index) {
+        std::string_view replacement{};
+        switch (text[index]) {
+            case '\\': replacement = "\\\\"; break;
+            case '"': replacement = "\\\""; break;
+            case '\n': replacement = "\\n"; break;
+            case '\r': replacement = ""; break;
+            default: break;
+        }
+        if (replacement.data() == nullptr) {
+            continue;
+        }
+        if (index > chunkBegin) {
+            fmt::format_to(out, "{}", std::string_view{text.data() + chunkBegin, index - chunkBegin});
+        }
+        if (!replacement.empty()) {
+            fmt::format_to(out, "{}", replacement);
+        }
+        chunkBegin = index + 1;
+    }
+    if (chunkBegin < text.size()) {
+        fmt::format_to(out, "{}", std::string_view{text.data() + chunkBegin, text.size() - chunkBegin});
+    }
+}
+
+void AppendImportExportNode(
+    fmt::memory_buffer& buffer,
+    uint64_t id,
+    std::string_view suffix,
+    std::string_view kind,
+    RDGResourceOwnership ownership) {
+    fmt::format_to(
+        std::back_inserter(buffer),
+        "    n{}_{} [shape=oval, style=dashed, label=\"kind: {}\\nownership: {}\"];\n",
+        id,
+        suffix,
+        kind,
+        ownership);
+}
+
+void AppendImportExportEdge(
+    fmt::memory_buffer& buffer,
+    uint64_t id,
+    std::string_view suffix,
+    bool fromResource,
+    RDGExecutionStages stage,
+    RDGMemoryAccesses access) {
+    if (fromResource) {
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "    n{} -> n{}_{} [label=\"stage: {}\\naccess: {}\"];\n",
+            id,
+            id,
+            suffix,
+            stage,
+            access);
+    } else {
+        fmt::format_to(
+            std::back_inserter(buffer),
+            "    n{}_{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n",
+            id,
+            suffix,
+            id,
+            stage,
+            access);
+    }
+}
+
+}  // namespace
 
 bool RDGColorAttachmentRecord::HasWriteAccess() const noexcept {
     return Load == render::LoadAction::Clear || Store == render::StoreAction::Store;
@@ -67,7 +144,7 @@ RDGTextureHandle RenderGraph::AddTexture(
     return RDGTextureHandle{raw->_id};
 }
 
-RDGBufferHandle RenderGraph::ImportBuffer(GpuBufferHandle buffer, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange, std::string_view name) {
+RDGBufferHandle RenderGraph::ImportBuffer(GpuBufferHandle buffer, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange, std::string_view name) {
     const uint64_t id = _nodes.size();
     auto node = make_unique<RDGBufferNode>(id, name, RDGResourceOwnership::External);
     node->_importBuffer = buffer;
@@ -77,7 +154,7 @@ RDGBufferHandle RenderGraph::ImportBuffer(GpuBufferHandle buffer, RDGExecutionSt
     return RDGBufferHandle{raw->_id};
 }
 
-RDGTextureHandle RenderGraph::ImportTexture(GpuTextureHandle texture, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange, std::string_view name) {
+RDGTextureHandle RenderGraph::ImportTexture(GpuTextureHandle texture, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange, std::string_view name) {
     const uint64_t id = _nodes.size();
     auto node = make_unique<RDGTextureNode>(id, name, RDGResourceOwnership::External);
     node->_importTexture = texture;
@@ -87,14 +164,14 @@ RDGTextureHandle RenderGraph::ImportTexture(GpuTextureHandle texture, RDGExecuti
     return RDGTextureHandle{raw->_id};
 }
 
-void RenderGraph::ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange) {
+void RenderGraph::ExportBuffer(RDGBufferHandle node, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange) {
     auto base = _nodes[node.Id].get();
     RADRAY_ASSERT(base->GetTag().HasFlag(RDGNodeTag::Buffer));
     auto bufferNode = static_cast<RDGBufferNode*>(base);
     bufferNode->_exportState = RDGBufferState{stage, access, bufferRange};
 }
 
-void RenderGraph::ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange) {
+void RenderGraph::ExportTexture(RDGTextureHandle node, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange) {
     auto base = _nodes[node.Id].get();
     RADRAY_ASSERT(base->GetTag().HasFlag(RDGNodeTag::Texture));
     auto textureNode = static_cast<RDGTextureNode*>(base);
@@ -133,7 +210,7 @@ RDGPassHandle RenderGraph::AddCopyPass(std::string_view name) {
     return RDGPassHandle{raw->_id};
 }
 
-RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange) {
+RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange) {
     auto* from = _nodes[from_.Id].get();
     auto* to = _nodes[to_.Id].get();
     auto* edge = this->CreateEdge(from, to, stage, access);
@@ -141,7 +218,7 @@ RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionS
     return edge;
 }
 
-RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange) {
+RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange) {
     auto* from = _nodes[from_.Id].get();
     auto* to = _nodes[to_.Id].get();
     auto* edge = this->CreateEdge(from, to, stage, access);
@@ -150,7 +227,7 @@ RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionS
     return edge;
 }
 
-RDGEdge* RenderGraph::CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access) {
+RDGEdge* RenderGraph::CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStages stage, RDGMemoryAccesses access) {
     auto edge = make_unique<RDGEdge>(from, to, stage, access);
     auto* raw = edge.get();
     _edges.emplace_back(std::move(edge));
@@ -170,8 +247,31 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
 }
 
 string RenderGraph::ExportGraphviz() const {
-    // TODO:
-    return "";
+    fmt::memory_buffer buffer;
+    auto out = std::back_inserter(buffer);
+    fmt::format_to(out, "digraph RenderGraph {{\n");
+    fmt::format_to(out, "    rankdir=LR;\n");
+    fmt::format_to(out, "    node [shape=box];\n");
+    for (const auto& node : _nodes) {
+        fmt::format_to(out, "    n{} [label=\"id: {}\\nname: ", node->_id, node->_id);
+        AppendGraphvizEscapedText(buffer, node->_name);
+        node->AppendGraphvizNodeLabel(buffer);
+        fmt::format_to(out, "\\ntag: {}\"];\n", node->GetTag());
+    }
+    for (const auto& edge : _edges) {
+        fmt::format_to(
+            out,
+            "    n{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n",
+            edge->_from->_id,
+            edge->_to->_id,
+            edge->_stage,
+            edge->_access);
+    }
+    for (const auto& node : _nodes) {
+        node->AppendGraphvizExtraStatements(buffer);
+    }
+    fmt::format_to(out, "}}\n");
+    return fmt::to_string(buffer);
 }
 
 RDGNode* RenderGraph::Resolve(RDGNodeHandle handle) const {
@@ -185,6 +285,51 @@ RDGExecutionStages RenderGraph::ShaderStagesToExecStages(render::ShaderStages st
     if (stages.HasFlag(render::ShaderStage::Pixel)) executionStages |= RDGExecutionStage::PixelShader;
     return executionStages;
 }
+
+void RDGResourceNode::AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const {
+    fmt::format_to(
+        std::back_inserter(buffer),
+        "\\nkind: Resource\\nownership: {}",
+        _ownership);
+}
+
+void RDGResourceNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
+    (void)buffer;
+}
+
+void RDGBufferNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
+    if (_importState.has_value()) {
+        AppendImportExportNode(buffer, _id, "import", "Import", _ownership);
+        AppendImportExportEdge(buffer, _id, "import", false, _importState->Stage, _importState->Access);
+    }
+    if (_exportState.has_value()) {
+        AppendImportExportNode(buffer, _id, "export", "Export", _ownership);
+        AppendImportExportEdge(buffer, _id, "export", true, _exportState->Stage, _exportState->Access);
+    }
+}
+
+void RDGTextureNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
+    if (_importState.has_value()) {
+        AppendImportExportNode(buffer, _id, "import", "Import", _ownership);
+        AppendImportExportEdge(buffer, _id, "import", false, _importState->Stage, _importState->Access);
+    }
+    if (_exportState.has_value()) {
+        AppendImportExportNode(buffer, _id, "export", "Export", _ownership);
+        AppendImportExportEdge(buffer, _id, "export", true, _exportState->Stage, _exportState->Access);
+    }
+}
+
+void RDGPassNode::AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const {
+    fmt::format_to(std::back_inserter(buffer), "\\nkind: Pass");
+}
+
+void RDGPassNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
+    (void)buffer;
+}
+
+RDGGraphicsPassNode::~RDGGraphicsPassNode() noexcept = default;
+
+RDGComputePassNode::~RDGComputePassNode() noexcept = default;
 
 void IRDGRasterPass::Builder::Build(RenderGraph* graph, RDGGraphicsPassNode* node) {
     for (auto& attachment : _colorAttachments) {

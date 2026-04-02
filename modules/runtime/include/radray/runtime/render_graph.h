@@ -5,6 +5,8 @@
 #include <type_traits>
 #include <variant>
 
+#include <fmt/format.h>
+
 #include <radray/types.h>
 #include <radray/enum_flags.h>
 #include <radray/render/common.h>
@@ -208,6 +210,8 @@ public:
     virtual ~RDGNode() noexcept = default;
 
     virtual RDGNodeTags GetTag() const noexcept = 0;
+    virtual void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const = 0;
+    virtual void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const = 0;
 
     RDGNodeHandle GetHandle() const noexcept { return RDGNodeHandle{_id}; }
 
@@ -226,6 +230,8 @@ public:
     virtual ~RDGResourceNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Resource; }
+    void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const override;
+    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     RDGResourceOwnership _ownership{RDGResourceOwnership::UNKNOWN};
@@ -237,6 +243,7 @@ public:
     virtual ~RDGBufferNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Buffer; }
+    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     uint64_t _size{0};
@@ -253,6 +260,7 @@ public:
     virtual ~RDGTextureNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Texture; }
+    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     render::TextureDimension _dim{render::TextureDimension::UNKNOWN};
@@ -275,6 +283,8 @@ public:
     virtual ~RDGPassNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Pass; }
+    void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const override;
+    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 };
 
 class RDGGraphicsPassNode final : public RDGPassNode {
@@ -317,8 +327,8 @@ public:
     RDGEdge(
         RDGNode* from,
         RDGNode* to,
-        RDGExecutionStage stage,
-        RDGMemoryAccess access) noexcept
+        RDGExecutionStages stage,
+        RDGMemoryAccesses access) noexcept
         : _from(from),
           _to(to),
           _stage(stage),
@@ -327,8 +337,8 @@ public:
 public:
     RDGNode* _from{nullptr};
     RDGNode* _to{nullptr};
-    RDGExecutionStage _stage{RDGExecutionStage::NONE};
-    RDGMemoryAccess _access{RDGMemoryAccess::NONE};
+    RDGExecutionStages _stage{RDGExecutionStage::NONE};
+    RDGMemoryAccesses _access{RDGMemoryAccess::NONE};
     render::BufferRange _bufferRange;
     RDGTextureLayout _textureLayout{RDGTextureLayout::UNKNOWN};
     render::SubresourceRange _textureRange;
@@ -441,19 +451,19 @@ public:
         render::TextureUses usage,
         std::string_view name);
     // 导入外部资源
-    RDGBufferHandle ImportBuffer(GpuBufferHandle buffer, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange, std::string_view name);
-    RDGTextureHandle ImportTexture(GpuTextureHandle texture, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange, std::string_view name);
+    RDGBufferHandle ImportBuffer(GpuBufferHandle buffer, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange, std::string_view name);
+    RDGTextureHandle ImportTexture(GpuTextureHandle texture, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange, std::string_view name);
     // 最终要导出的资源
-    void ExportBuffer(RDGBufferHandle node, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
-    void ExportTexture(RDGTextureHandle node, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+    void ExportBuffer(RDGBufferHandle node, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange);
+    void ExportTexture(RDGTextureHandle node, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange);
     // Pass
     RDGPassHandle AddRasterPass(std::string_view name, unique_ptr<IRDGRasterPass> pass);
     RDGPassHandle AddComputePass(std::string_view name, unique_ptr<IRDGComputePass> pass);
     RDGPassHandle AddCopyPass(std::string_view name);
     // 图连接
-    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
-    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
-    RDGEdge* CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
+    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange);
+    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+    RDGEdge* CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStages stage, RDGMemoryAccesses access);
 
     ValidateResult Validate() const;
     CompileResult Compile() const;
