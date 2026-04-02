@@ -122,13 +122,28 @@ public:
         return *this;
     }
 
+    constexpr EnumFlags& operator|=(T v) noexcept {
+        _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) | static_cast<std::underlying_type_t<T>>(v));
+        return *this;
+    }
+
     constexpr EnumFlags& operator&=(EnumFlags v) noexcept {
         _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) & static_cast<std::underlying_type_t<T>>(v._value));
         return *this;
     }
 
+    constexpr EnumFlags& operator&=(T v) noexcept {
+        _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) & static_cast<std::underlying_type_t<T>>(v));
+        return *this;
+    }
+
     constexpr EnumFlags& operator^=(EnumFlags v) noexcept {
         _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) ^ static_cast<std::underlying_type_t<T>>(v._value));
+        return *this;
+    }
+
+    constexpr EnumFlags& operator^=(T v) noexcept {
+        _value = static_cast<T>(static_cast<std::underlying_type_t<T>>(_value) ^ static_cast<std::underlying_type_t<T>>(v));
         return *this;
     }
 

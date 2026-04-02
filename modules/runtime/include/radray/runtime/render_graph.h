@@ -18,6 +18,8 @@ struct RDGNodeHandle {
     constexpr bool IsValid() const noexcept { return Id != std::numeric_limits<uint64_t>::max(); }
 
     constexpr auto operator<=>(const RDGNodeHandle&) const noexcept = default;
+
+    constexpr static RDGNodeHandle Invalid() { return {std::numeric_limits<uint64_t>::max()}; }
 };
 
 struct RDGResourceHandle : public RDGNodeHandle {};
@@ -26,8 +28,8 @@ struct RDGTextureHandle : public RDGResourceHandle {};
 struct RDGPassHandle : public RDGNodeHandle {};
 
 template <typename T>
+requires std::is_base_of_v<radray::RDGNodeHandle, T>
 struct RDGHandleHash {
-    static_assert(std::is_base_of_v<RDGNodeHandle, T>);
     inline std::size_t operator()(const T& h) const noexcept {
         return std::hash<uint64_t>{}(h.Id);
     }
@@ -124,31 +126,35 @@ using RDGNodeTags = EnumFlags<RDGNodeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
-// --------------------------- Internal ---------------------------
-
 struct RDGBufferState {
-    RDGExecutionStage Stage{RDGExecutionStage::NONE};
-    RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+    RDGExecutionStages Stage{RDGExecutionStage::NONE};
+    RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
     render::BufferRange Range{};
+
+    bool HasWrite() const noexcept;
 };
 
 struct RDGTextureState {
-    RDGExecutionStage Stage{RDGExecutionStage::NONE};
-    RDGMemoryAccess Access{RDGMemoryAccess::NONE};
+    RDGExecutionStages Stage{RDGExecutionStage::NONE};
+    RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
     RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
     render::SubresourceRange Range{};
+
+    bool HasWrite() const noexcept;
 };
 
-struct RDGColorAttachmentInfo {
-    uint32_t Slot{0};
+struct RDGColorAttachmentRecord {
     RDGTextureHandle Texture{};
+    uint32_t Slot{0};
     render::SubresourceRange Range{};
     render::LoadAction Load{render::LoadAction::DontCare};
     render::StoreAction Store{render::StoreAction::Store};
     std::optional<render::ColorClearValue> ClearValue{};
+
+    bool HasWriteAccess() const noexcept;
 };
 
-struct RDGDepthStencilAttachmentInfo {
+struct RDGDepthStencilAttachmentRecord {
     RDGTextureHandle Texture{};
     render::SubresourceRange Range{};
     render::LoadAction DepthLoad{render::LoadAction::DontCare};
@@ -157,12 +163,20 @@ struct RDGDepthStencilAttachmentInfo {
     render::StoreAction StencilStore{render::StoreAction::Store};
     std::optional<render::DepthStencilClearValue> ClearValue{};
 
-    bool HasWriteAccess() const noexcept {
-        return DepthLoad == render::LoadAction::Clear || StencilLoad == render::LoadAction::Clear || DepthStore == render::StoreAction::Store || StencilStore == render::StoreAction::Store;
-    }
+    bool HasWriteAccess() const noexcept;
 };
 
-struct RDGCopyBufferToBufferInfo {
+struct RDGBufferRecord {
+    RDGBufferHandle Buffer{};
+    RDGBufferState State{};
+};
+
+struct RDGTextureRecord {
+    RDGTextureHandle Texture{};
+    RDGTextureState State{};
+};
+
+struct RDGCopyBufferToBufferRecord {
     RDGBufferHandle Dst{};
     uint64_t DstOffset{0};
     RDGBufferHandle Src{};
@@ -170,69 +184,21 @@ struct RDGCopyBufferToBufferInfo {
     uint64_t Size{0};
 };
 
-struct RDGCopyBufferToTextureInfo {
+struct RDGCopyBufferToTextureRecord {
     RDGTextureHandle Dst{};
     render::SubresourceRange DstRange{};
     RDGBufferHandle Src{};
     uint64_t SrcOffset{0};
 };
 
-struct RDGCopyTextureToBufferInfo {
+struct RDGCopyTextureToBufferRecord {
     RDGBufferHandle Dst{};
     uint64_t DstOffset{0};
     RDGTextureHandle Src{};
     render::SubresourceRange SrcRange{};
 };
 
-using RDGCopyPassOp = std::variant<RDGCopyBufferToBufferInfo, RDGCopyBufferToTextureInfo, RDGCopyTextureToBufferInfo>;
-
-struct RDGPassDependency {
-    RDGPassHandle Before{};
-    RDGPassHandle After{};
-    RDGResourceHandle Resource{};
-};
-
-struct RDGCompiledBufferBarrier {
-    RDGBufferHandle Buffer{};
-    RDGBufferState Before{};
-    RDGBufferState After{};
-};
-
-struct RDGCompiledTextureBarrier {
-    RDGTextureHandle Texture{};
-    RDGTextureState Before{};
-    RDGTextureState After{};
-};
-
-using RDGCompiledBarrier = std::variant<RDGCompiledBufferBarrier, RDGCompiledTextureBarrier>;
-
-struct RDGCompiledPass {
-    RDGPassHandle Pass{};
-    vector<RDGPassHandle> Predecessors;
-    vector<RDGCompiledBarrier> BarriersBefore;
-    vector<RDGCompiledBarrier> BarriersAfter;
-};
-
-struct RDGCompiledResourceLifetime {
-    RDGResourceHandle Resource{};
-    std::optional<uint32_t> FirstPassIndex{};
-    std::optional<uint32_t> LastPassIndex{};
-};
-
-struct RDGCompileResult {
-    vector<RDGPassHandle> PassOrder;
-    vector<RDGPassDependency> Dependencies;
-    vector<RDGCompiledPass> Passes;
-    vector<RDGCompiledResourceLifetime> Lifetimes;
-};
-
-struct RDGExecuteResult {
-    unordered_map<RDGNodeHandle, GpuBufferHandle> ExportedBuffers{};
-    unordered_map<RDGNodeHandle, GpuTextureHandle> ExportedTextures{};
-    GpuTask Task{nullptr, nullptr, 0};
-};
-
-// ----------------------------------------------------------------
+using RDGCopyRecord = std::variant<RDGCopyBufferToBufferRecord, RDGCopyBufferToTextureRecord, RDGCopyTextureToBufferRecord>;
 
 class RDGNode {
 public:
@@ -242,6 +208,8 @@ public:
     virtual ~RDGNode() noexcept = default;
 
     virtual RDGNodeTags GetTag() const noexcept = 0;
+
+    RDGNodeHandle GetHandle() const noexcept { return RDGNodeHandle{_id}; }
 
 public:
     string _name;
@@ -261,7 +229,6 @@ public:
 
 public:
     RDGResourceOwnership _ownership{RDGResourceOwnership::UNKNOWN};
-    uint32_t _exportCount{0};
 };
 
 class RDGBufferNode final : public RDGResourceNode {
@@ -273,9 +240,11 @@ public:
 
 public:
     uint64_t _size{0};
-    GpuBufferHandle _backingHandle{};
-    std::optional<RDGBufferState> _importedState{};
-    std::optional<RDGBufferState> _exportedState{};
+    render::MemoryType _memory{render::MemoryType::Device};
+    render::BufferUses _usage{render::BufferUse::UNKNOWN};
+    GpuBufferHandle _importBuffer{GpuBufferHandle::Invalid()};
+    std::optional<RDGBufferState> _importState;
+    std::optional<RDGBufferState> _exportState;
 };
 
 class RDGTextureNode final : public RDGResourceNode {
@@ -286,7 +255,6 @@ public:
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Texture; }
 
 public:
-    GpuTextureHandle _backingHandle{};
     render::TextureDimension _dim{render::TextureDimension::UNKNOWN};
     uint32_t _width{0};
     uint32_t _height{0};
@@ -294,8 +262,11 @@ public:
     uint32_t _mipLevels{0};
     uint32_t _sampleCount{0};
     render::TextureFormat _format{render::TextureFormat::UNKNOWN};
-    std::optional<RDGTextureState> _importedState{};
-    std::optional<RDGTextureState> _exportedState{};
+    render::MemoryType _memory{render::MemoryType::Device};
+    render::TextureUses _usage{render::TextureUse::UNKNOWN};
+    GpuTextureHandle _importTexture{GpuTextureHandle::Invalid()};
+    std::optional<RDGTextureState> _importState;
+    std::optional<RDGTextureState> _exportState;
 };
 
 class RDGPassNode : public RDGNode {
@@ -315,8 +286,8 @@ public:
 
 public:
     unique_ptr<IRDGRasterPass> _impl{};
-    vector<RDGColorAttachmentInfo> _colorAttachments;
-    std::optional<RDGDepthStencilAttachmentInfo> _depthStencilAttachment{};
+    vector<RDGColorAttachmentRecord> _colorAttachments;
+    std::optional<RDGDepthStencilAttachmentRecord> _depthStencilAttachment;
 };
 
 class RDGComputePassNode final : public RDGPassNode {
@@ -338,7 +309,7 @@ public:
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::CopyPass; }
 
 public:
-    vector<RDGCopyPassOp> _ops;
+    vector<RDGCopyRecord> _copys;
 };
 
 class RDGEdge {
@@ -363,186 +334,111 @@ public:
     render::SubresourceRange _textureRange;
 };
 
-class RDGRasterPassBuilder {
+class IRDGRasterPass {
 public:
-    struct PendingBufferUse {
-        RDGBufferHandle Buffer{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        render::BufferRange Range{};
-        bool Write{false};
+    class Builder {
+    public:
+        void Build(RenderGraph* graph, RDGGraphicsPassNode* node);
+
+        Builder& UseColorAttachment(
+            uint32_t slot,
+            RDGTextureHandle texture,
+            render::SubresourceRange range,
+            render::LoadAction load,
+            render::StoreAction store,
+            std::optional<render::ColorClearValue> clearValue);
+        Builder& UseDepthStencilAttachment(
+            RDGTextureHandle texture,
+            render::SubresourceRange range,
+            render::LoadAction depthLoad, render::StoreAction depthStore,
+            render::LoadAction stencilLoad, render::StoreAction stencilStore,
+            std::optional<render::DepthStencilClearValue> clearValue);
+
+        Builder& UseVertexBuffer(RDGBufferHandle buffer, render::BufferRange range);
+        Builder& UseIndexBuffer(RDGBufferHandle buffer, render::BufferRange range);
+        Builder& UseIndirectBuffer(RDGBufferHandle buffer, render::BufferRange range);
+        Builder& UseCBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
+        Builder& UseBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
+        Builder& UseRWBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
+
+        Builder& UseTexture(RDGTextureHandle texture, render::ShaderStages stages, render::SubresourceRange range);
+        Builder& UseRWTexture(RDGTextureHandle texture, render::ShaderStages stages, render::SubresourceRange range);
+
+    public:
+        vector<RDGBufferRecord> _buffers{};
+        vector<RDGTextureRecord> _textures{};
+        vector<RDGColorAttachmentRecord> _colorAttachments{};
+        std::optional<RDGDepthStencilAttachmentRecord> _depthStencilAttachment{};
     };
 
-    struct PendingTextureUse {
-        RDGTextureHandle Texture{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
-        render::SubresourceRange Range{};
-        bool Write{false};
-    };
-
-    explicit RDGRasterPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
-    RDGRasterPassBuilder(RenderGraph* graph, RDGPassHandle pass) noexcept
-        : _graph(graph),
-          _pass(pass) {}
-
-    RDGPassHandle Build();
-
-    RDGRasterPassBuilder& UseColorAttachment(
-        uint32_t slot,
-        RDGTextureHandle texture,
-        render::SubresourceRange range,
-        render::LoadAction load,
-        render::StoreAction store,
-        std::optional<render::ColorClearValue> clearValue);
-    RDGRasterPassBuilder& UseDepthStencilAttachment(
-        RDGTextureHandle texture,
-        render::SubresourceRange range,
-        render::LoadAction depthLoad, render::StoreAction depthStore,
-        render::LoadAction stencilLoad, render::StoreAction stencilStore,
-        std::optional<render::DepthStencilClearValue> clearValue);
-
-    RDGRasterPassBuilder& UseVertexBuffer(RDGBufferHandle buffer, render::BufferRange range);
-    RDGRasterPassBuilder& UseIndexBuffer(RDGBufferHandle buffer, render::BufferRange range);
-    RDGRasterPassBuilder& UseIndirectBuffer(RDGBufferHandle buffer, render::BufferRange range);
-    RDGRasterPassBuilder& UseCBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
-    RDGRasterPassBuilder& UseBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
-    RDGRasterPassBuilder& UseRWBuffer(RDGBufferHandle buffer, render::ShaderStages stages, render::BufferRange range);
-
-    RDGRasterPassBuilder& UseTexture(RDGTextureHandle texture, render::ShaderStages stages, render::SubresourceRange range);
-    RDGRasterPassBuilder& UseRWTexture(RDGTextureHandle texture, render::ShaderStages stages, render::SubresourceRange range);
-
-public:
-    RDGPassHandle _EnsurePass();
-    void _ValidateShaderStages(render::ShaderStages stages) const;
-    void _LinkBufferStages(RDGBufferHandle buffer, render::ShaderStages stages, RDGMemoryAccess access, render::BufferRange range);
-    void _LinkTextureStages(RDGTextureHandle texture, render::ShaderStages stages, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange range);
-
-    RenderGraph* _graph{nullptr};
-    RDGPassHandle _pass{};
-    vector<RDGColorAttachmentInfo> _pendingColorAttachments{};
-    std::optional<RDGDepthStencilAttachmentInfo> _pendingDepthStencilAttachment{};
-    vector<PendingBufferUse> _pendingBufferUses{};
-    vector<PendingTextureUse> _pendingTextureUses{};
+    virtual ~IRDGRasterPass() noexcept = default;
+    virtual void Setup(Builder& builder) = 0;
+    virtual void Execute(render::GraphicsCommandEncoder* encoder, GpuAsyncContext* context) = 0;
 };
 
-class RDGComputePassBuilder {
+class IRDGComputePass {
 public:
-    struct PendingBufferUse {
-        RDGBufferHandle Buffer{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        render::BufferRange Range{};
-        bool Write{false};
+    class Builder {
+    public:
+        void Build(RenderGraph* graph, RDGComputePassNode* node);
+
+        Builder& UseCBuffer(RDGBufferHandle buffer, render::BufferRange range);
+        Builder& UseBuffer(RDGBufferHandle buffer, render::BufferRange range);
+        Builder& UseRWBuffer(RDGBufferHandle buffer, render::BufferRange range);
+
+        Builder& UseTexture(RDGTextureHandle texture, render::SubresourceRange range);
+        Builder& UseRWTexture(RDGTextureHandle texture, render::SubresourceRange range);
+
+    public:
+        vector<RDGBufferRecord> _buffers{};
+        vector<RDGTextureRecord> _textures{};
     };
 
-    struct PendingTextureUse {
-        RDGTextureHandle Texture{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
-        render::SubresourceRange Range{};
-        bool Write{false};
-    };
-
-    explicit RDGComputePassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
-    RDGComputePassBuilder(RenderGraph* graph, RDGPassHandle pass) noexcept
-        : _graph(graph),
-          _pass(pass) {}
-
-    RDGPassHandle Build();
-
-    RDGComputePassBuilder& UseCBuffer(RDGBufferHandle buffer, render::BufferRange range);
-    RDGComputePassBuilder& UseBuffer(RDGBufferHandle buffer, render::BufferRange range);
-    RDGComputePassBuilder& UseRWBuffer(RDGBufferHandle buffer, render::BufferRange range);
-
-    RDGComputePassBuilder& UseTexture(RDGTextureHandle texture, render::SubresourceRange range);
-    RDGComputePassBuilder& UseRWTexture(RDGTextureHandle texture, render::SubresourceRange range);
-
-public:
-    RDGPassHandle _EnsurePass();
-
-    RenderGraph* _graph{nullptr};
-    RDGPassHandle _pass{};
-    vector<PendingBufferUse> _pendingBufferUses{};
-    vector<PendingTextureUse> _pendingTextureUses{};
+    virtual ~IRDGComputePass() noexcept = default;
+    virtual void Setup(Builder& builder) = 0;
+    virtual void Execute(render::ComputeCommandEncoder* encoder, GpuAsyncContext* context) = 0;
 };
 
 class RDGCopyPassBuilder {
 public:
-    struct PendingBufferUse {
-        RDGBufferHandle Buffer{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        render::BufferRange Range{};
-        bool Write{false};
-    };
+    RDGPassHandle Build(RenderGraph* graph);
 
-    struct PendingTextureUse {
-        RDGTextureHandle Texture{};
-        RDGExecutionStage Stage{RDGExecutionStage::NONE};
-        RDGMemoryAccess Access{RDGMemoryAccess::NONE};
-        RDGTextureLayout Layout{RDGTextureLayout::UNKNOWN};
-        render::SubresourceRange Range{};
-        bool Write{false};
-    };
-
-    explicit RDGCopyPassBuilder(RenderGraph* graph) noexcept : _graph(graph) {}
-
-    RDGPassHandle Build();
-
+    RDGCopyPassBuilder& SetName(std::string_view name);
     RDGCopyPassBuilder& CopyBufferToBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGBufferHandle src, uint64_t srcOffset, uint64_t size);
     RDGCopyPassBuilder& CopyBufferToTexture(RDGTextureHandle dst, render::SubresourceRange dstRange, RDGBufferHandle src, uint64_t srcOffset);
     RDGCopyPassBuilder& CopyTextureToBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGTextureHandle src, render::SubresourceRange srcRange);
 
 public:
-    RDGPassHandle _EnsurePass();
-
-    RenderGraph* _graph{nullptr};
-    RDGPassHandle _pass{};
-    vector<RDGCopyPassOp> _pendingOps{};
-    vector<PendingBufferUse> _pendingBufferUses{};
-    vector<PendingTextureUse> _pendingTextureUses{};
-};
-
-class RDGExecuteContext {
-public:
-    GpuBufferHandle GetBuffer(RDGBufferHandle handle) const;
-    GpuTextureHandle GetTexture(RDGTextureHandle handle) const;
-    render::Buffer* ResolveBuffer(RDGBufferHandle handle) const;
-    render::Texture* ResolveTexture(RDGTextureHandle handle) const;
-
-    GpuRuntime* Runtime{nullptr};
-    unordered_map<RDGBufferHandle, GpuBufferHandle> _bufferHandles;
-    unordered_map<RDGTextureHandle, GpuTextureHandle> _textureHandles;
-};
-
-class IRDGRasterPass {
-public:
-    virtual ~IRDGRasterPass() noexcept = default;
-    virtual void Setup(RDGRasterPassBuilder& builder) = 0;
-    virtual void Execute(render::GraphicsCommandEncoder* encoder, RDGExecuteContext* context, GpuAsyncContext* asyncCtx) = 0;
-};
-
-class IRDGComputePass {
-public:
-    virtual ~IRDGComputePass() noexcept = default;
-    virtual void Setup(RDGComputePassBuilder& builder) = 0;
-    virtual void Execute(render::ComputeCommandEncoder* encoder, RDGExecuteContext* context, GpuAsyncContext* asyncCtx) = 0;
+    string _name;
+    vector<RDGCopyRecord> _copys;
+    vector<RDGBufferRecord> _buffers{};
+    vector<RDGTextureRecord> _textures{};
 };
 
 class RenderGraph {
 public:
+    struct ValidateResult {
+        bool IsValid;
+        string Message;
+    };
+
+    class CompileResult {
+    public:
+        string ExportCompiledGraphviz() const;
+        string ExportExecutionGraphviz() const;
+    };
+
     // ---------------- Core ----------------
     // RDG 创建的资源
-    RDGBufferHandle AddBuffer(uint64_t size, std::string_view name);
+    RDGBufferHandle AddBuffer(uint64_t size, render::MemoryType memory, render::BufferUses usage, std::string_view name);
     RDGTextureHandle AddTexture(
         render::TextureDimension dim,
         uint32_t width, uint32_t height,
         uint32_t depthOrArraySize, uint32_t mipLevels,
         uint32_t sampleCount,
         render::TextureFormat format,
+        render::MemoryType memory,
+        render::TextureUses usage,
         std::string_view name);
     // 导入外部资源
     RDGBufferHandle ImportBuffer(GpuBufferHandle buffer, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange, std::string_view name);
@@ -553,23 +449,21 @@ public:
     // Pass
     RDGPassHandle AddRasterPass(std::string_view name, unique_ptr<IRDGRasterPass> pass);
     RDGPassHandle AddComputePass(std::string_view name, unique_ptr<IRDGComputePass> pass);
-    RDGPassHandle AddPass(RDGNodeTag tag, std::string_view name);
+    RDGPassHandle AddCopyPass(std::string_view name);
     // 图连接
-    void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
-    void Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, render::BufferRange bufferRange);
+    RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStage stage, RDGMemoryAccess access, RDGTextureLayout layout, render::SubresourceRange textureRange);
+    RDGEdge* CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
 
-    RDGCompileResult Compile() const;
-    std::pair<bool, string> Validate() const;
-    RDGExecuteResult Execute(GpuRuntime* runtime, const RDGCompileResult& compiled) const;
-
-    // ---------------- helper ----------------
+    ValidateResult Validate() const;
+    CompileResult Compile() const;
     string ExportGraphviz() const;
-    string ExportCompiledGraphviz(const RDGCompileResult& compiled) const;
-    string ExportExecutionGraphviz(const RDGCompileResult& compiled) const;
+
+    RDGNode* Resolve(RDGNodeHandle handle) const;
+
+    static RDGExecutionStages ShaderStagesToExecStages(render::ShaderStages stages) noexcept;
 
 public:
-    RDGEdge* _CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStage stage, RDGMemoryAccess access);
-
     vector<unique_ptr<RDGNode>> _nodes;
     vector<unique_ptr<RDGEdge>> _edges;
 };
