@@ -5,8 +5,6 @@
 #include <type_traits>
 #include <variant>
 
-#include <fmt/format.h>
-
 #include <radray/types.h>
 #include <radray/enum_flags.h>
 #include <radray/render/common.h>
@@ -210,8 +208,6 @@ public:
     virtual ~RDGNode() noexcept = default;
 
     virtual RDGNodeTags GetTag() const noexcept = 0;
-    virtual void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const = 0;
-    virtual void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const = 0;
 
     RDGNodeHandle GetHandle() const noexcept { return RDGNodeHandle{_id}; }
 
@@ -230,8 +226,6 @@ public:
     virtual ~RDGResourceNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Resource; }
-    void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const override;
-    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     RDGResourceOwnership _ownership{RDGResourceOwnership::UNKNOWN};
@@ -243,7 +237,6 @@ public:
     virtual ~RDGBufferNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Buffer; }
-    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     uint64_t _size{0};
@@ -260,7 +253,6 @@ public:
     virtual ~RDGTextureNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Texture; }
-    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 
 public:
     render::TextureDimension _dim{render::TextureDimension::UNKNOWN};
@@ -283,8 +275,6 @@ public:
     virtual ~RDGPassNode() noexcept = default;
 
     RDGNodeTags GetTag() const noexcept override { return RDGNodeTag::Pass; }
-    void AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const override;
-    void AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const override;
 };
 
 class RDGGraphicsPassNode final : public RDGPassNode {

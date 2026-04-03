@@ -2,13 +2,15 @@
 
 #include <iterator>
 
+#include <fmt/format.h>
+
 #include <radray/utility.h>
 
 namespace radray {
 
 namespace {
 
-void AppendGraphvizEscapedText(fmt::memory_buffer& buffer, std::string_view text) {
+void _AppendGraphvizEscapedText(fmt::memory_buffer& buffer, std::string_view text) {
     auto out = std::back_inserter(buffer);
     size_t chunkBegin = 0;
     for (size_t index = 0; index < text.size(); ++index) {
@@ -36,47 +38,135 @@ void AppendGraphvizEscapedText(fmt::memory_buffer& buffer, std::string_view text
     }
 }
 
-void AppendImportExportNode(
-    fmt::memory_buffer& buffer,
-    uint64_t id,
-    std::string_view suffix,
-    std::string_view kind,
-    RDGResourceOwnership ownership) {
-    fmt::format_to(
-        std::back_inserter(buffer),
-        "    n{}_{} [shape=oval, style=dashed, label=\"kind: {}\\nownership: {}\"];\n",
-        id,
-        suffix,
-        kind,
-        ownership);
+template <typename T>
+struct FormatGraphviz;
+
+template <>
+struct FormatGraphviz<RDGResourceNode> {
+    static void AppendNodeAttributes(fmt::memory_buffer& buffer, const RDGResourceNode& node) {
+        (void)buffer;
+        (void)node;
+    }
+
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGResourceNode& node) {
+        fmt::format_to(std::back_inserter(buffer), "\\nkind: Resource\\nownership: {}", node._ownership);
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGResourceNode& node) {
+        (void)buffer;
+        (void)node;
+    }
+};
+
+template <typename TState>
+void _AppendResourceImportExportStatements(fmt::memory_buffer& buffer, const RDGResourceNode& node, const std::optional<TState>& importState, const std::optional<TState>& exportState) {
+    if (importState.has_value()) {
+        auto out = std::back_inserter(buffer);
+        fmt::format_to(out, "    n{}_import [shape=oval, style=dashed, label=\"kind: Import\\nownership: {}\"];\n", node._id, node._ownership);
+        fmt::format_to(out, "    n{}_import -> n{} [label=\"stage: {}\\naccess: {}\"];\n", node._id, node._id, importState->Stage, importState->Access);
+    }
+    if (exportState.has_value()) {
+        auto out = std::back_inserter(buffer);
+        fmt::format_to(out, "    n{}_export [shape=oval, style=dashed, label=\"kind: Export\\nownership: {}\"];\n", node._id, node._ownership);
+        fmt::format_to(out, "    n{} -> n{}_export [label=\"stage: {}\\naccess: {}\"];\n", node._id, node._id, exportState->Stage, exportState->Access);
+    }
 }
 
-void AppendImportExportEdge(
-    fmt::memory_buffer& buffer,
-    uint64_t id,
-    std::string_view suffix,
-    bool fromResource,
-    RDGExecutionStages stage,
-    RDGMemoryAccesses access) {
-    if (fromResource) {
-        fmt::format_to(
-            std::back_inserter(buffer),
-            "    n{} -> n{}_{} [label=\"stage: {}\\naccess: {}\"];\n",
-            id,
-            id,
-            suffix,
-            stage,
-            access);
-    } else {
-        fmt::format_to(
-            std::back_inserter(buffer),
-            "    n{}_{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n",
-            id,
-            suffix,
-            id,
-            stage,
-            access);
+template <>
+struct FormatGraphviz<RDGBufferNode> : FormatGraphviz<RDGResourceNode> {
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGBufferNode& node) {
+        FormatGraphviz<RDGResourceNode>::AppendNodeLabel(buffer, node);
     }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGBufferNode& node) {
+        _AppendResourceImportExportStatements(buffer, node, node._importState, node._exportState);
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGTextureNode> : FormatGraphviz<RDGResourceNode> {
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGTextureNode& node) {
+        FormatGraphviz<RDGResourceNode>::AppendNodeLabel(buffer, node);
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGTextureNode& node) {
+        _AppendResourceImportExportStatements(buffer, node, node._importState, node._exportState);
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGPassNode> {
+    static void AppendNodeAttributes(fmt::memory_buffer& buffer, const RDGPassNode& node) {
+        (void)node;
+        fmt::format_to(std::back_inserter(buffer), "shape=ellipse, ");
+    }
+
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGPassNode& node) {
+        (void)node;
+        fmt::format_to(std::back_inserter(buffer), "\\nkind: Pass");
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGPassNode& node) {
+        (void)buffer;
+        (void)node;
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGGraphicsPassNode> : FormatGraphviz<RDGPassNode> {
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGGraphicsPassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendNodeLabel(buffer, node);
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGGraphicsPassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendExtraStatements(buffer, node);
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGComputePassNode> : FormatGraphviz<RDGPassNode> {
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGComputePassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendNodeLabel(buffer, node);
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGComputePassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendExtraStatements(buffer, node);
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGCopyPassNode> : FormatGraphviz<RDGPassNode> {
+    static void AppendNodeLabel(fmt::memory_buffer& buffer, const RDGCopyPassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendNodeLabel(buffer, node);
+    }
+
+    static void AppendExtraStatements(fmt::memory_buffer& buffer, const RDGCopyPassNode& node) {
+        FormatGraphviz<RDGPassNode>::AppendExtraStatements(buffer, node);
+    }
+};
+
+template <typename Visitor>
+decltype(auto) VisitGraphvizNode(const RDGNode& node, Visitor&& visitor) {
+    switch (static_cast<RDGNodeTag>(node.GetTag())) {
+        case RDGNodeTag::Resource:
+            return visitor(static_cast<const RDGResourceNode&>(node));
+        case RDGNodeTag::Buffer:
+            return visitor(static_cast<const RDGBufferNode&>(node));
+        case RDGNodeTag::Texture:
+            return visitor(static_cast<const RDGTextureNode&>(node));
+        case RDGNodeTag::Pass:
+            return visitor(static_cast<const RDGPassNode&>(node));
+        case RDGNodeTag::GraphicsPass:
+            return visitor(static_cast<const RDGGraphicsPassNode&>(node));
+        case RDGNodeTag::ComputePass:
+            return visitor(static_cast<const RDGComputePassNode&>(node));
+        case RDGNodeTag::CopyPass:
+            return visitor(static_cast<const RDGCopyPassNode&>(node));
+        case RDGNodeTag::UNKNOWN:
+        default:
+            break;
+    }
+    Unreachable();
 }
 
 }  // namespace
@@ -184,9 +274,9 @@ RDGPassHandle RenderGraph::AddRasterPass(std::string_view name, unique_ptr<IRDGR
     node->_impl = std::move(pass);
     IRDGRasterPass::Builder builder{};
     node->_impl->Setup(builder);
-    builder.Build(this, node.get());
     auto raw = node.get();
     _nodes.emplace_back(std::move(node));
+    builder.Build(this, raw);
     return RDGPassHandle{raw->_id};
 }
 
@@ -196,9 +286,9 @@ RDGPassHandle RenderGraph::AddComputePass(std::string_view name, unique_ptr<IRDG
     node->_impl = std::move(pass);
     IRDGComputePass::Builder builder{};
     node->_impl->Setup(builder);
-    builder.Build(this, node.get());
     auto raw = node.get();
     _nodes.emplace_back(std::move(node));
+    builder.Build(this, raw);
     return RDGPassHandle{raw->_id};
 }
 
@@ -253,22 +343,27 @@ string RenderGraph::ExportGraphviz() const {
     fmt::format_to(out, "    rankdir=LR;\n");
     fmt::format_to(out, "    node [shape=box];\n");
     for (const auto& node : _nodes) {
-        fmt::format_to(out, "    n{} [label=\"id: {}\\nname: ", node->_id, node->_id);
-        AppendGraphvizEscapedText(buffer, node->_name);
-        node->AppendGraphvizNodeLabel(buffer);
+        fmt::format_to(out, "    n{} [", node->_id);
+        VisitGraphvizNode(*node, [&buffer](const auto& typedNode) {
+            using NodeType = std::remove_cvref_t<decltype(typedNode)>;
+            FormatGraphviz<NodeType>::AppendNodeAttributes(buffer, typedNode);
+        });
+        fmt::format_to(out, "label=\"id: {}\\nname: ", node->_id);
+        _AppendGraphvizEscapedText(buffer, node->_name);
+        VisitGraphvizNode(*node, [&buffer](const auto& typedNode) {
+            using NodeType = std::remove_cvref_t<decltype(typedNode)>;
+            FormatGraphviz<NodeType>::AppendNodeLabel(buffer, typedNode);
+        });
         fmt::format_to(out, "\\ntag: {}\"];\n", node->GetTag());
     }
     for (const auto& edge : _edges) {
-        fmt::format_to(
-            out,
-            "    n{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n",
-            edge->_from->_id,
-            edge->_to->_id,
-            edge->_stage,
-            edge->_access);
+        fmt::format_to(out, "    n{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n", edge->_from->_id, edge->_to->_id, edge->_stage, edge->_access);
     }
     for (const auto& node : _nodes) {
-        node->AppendGraphvizExtraStatements(buffer);
+        VisitGraphvizNode(*node, [&buffer](const auto& typedNode) {
+            using NodeType = std::remove_cvref_t<decltype(typedNode)>;
+            FormatGraphviz<NodeType>::AppendExtraStatements(buffer, typedNode);
+        });
     }
     fmt::format_to(out, "}}\n");
     return fmt::to_string(buffer);
@@ -284,47 +379,6 @@ RDGExecutionStages RenderGraph::ShaderStagesToExecStages(render::ShaderStages st
     if (stages.HasFlag(render::ShaderStage::Vertex)) executionStages |= RDGExecutionStage::VertexShader;
     if (stages.HasFlag(render::ShaderStage::Pixel)) executionStages |= RDGExecutionStage::PixelShader;
     return executionStages;
-}
-
-void RDGResourceNode::AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const {
-    fmt::format_to(
-        std::back_inserter(buffer),
-        "\\nkind: Resource\\nownership: {}",
-        _ownership);
-}
-
-void RDGResourceNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
-    (void)buffer;
-}
-
-void RDGBufferNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
-    if (_importState.has_value()) {
-        AppendImportExportNode(buffer, _id, "import", "Import", _ownership);
-        AppendImportExportEdge(buffer, _id, "import", false, _importState->Stage, _importState->Access);
-    }
-    if (_exportState.has_value()) {
-        AppendImportExportNode(buffer, _id, "export", "Export", _ownership);
-        AppendImportExportEdge(buffer, _id, "export", true, _exportState->Stage, _exportState->Access);
-    }
-}
-
-void RDGTextureNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
-    if (_importState.has_value()) {
-        AppendImportExportNode(buffer, _id, "import", "Import", _ownership);
-        AppendImportExportEdge(buffer, _id, "import", false, _importState->Stage, _importState->Access);
-    }
-    if (_exportState.has_value()) {
-        AppendImportExportNode(buffer, _id, "export", "Export", _ownership);
-        AppendImportExportEdge(buffer, _id, "export", true, _exportState->Stage, _exportState->Access);
-    }
-}
-
-void RDGPassNode::AppendGraphvizNodeLabel(fmt::memory_buffer& buffer) const {
-    fmt::format_to(std::back_inserter(buffer), "\\nkind: Pass");
-}
-
-void RDGPassNode::AppendGraphvizExtraStatements(fmt::memory_buffer& buffer) const {
-    (void)buffer;
 }
 
 RDGGraphicsPassNode::~RDGGraphicsPassNode() noexcept = default;
