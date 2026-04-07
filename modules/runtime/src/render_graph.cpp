@@ -1,6 +1,8 @@
 #include <radray/runtime/render_graph.h>
 
+#include <algorithm>
 #include <iterator>
+#include <optional>
 
 #include <fmt/format.h>
 
@@ -208,6 +210,289 @@ decltype(auto) VisitGraphvizEdge(const RDGEdge& edge, Visitor&& visitor) {
     Unreachable();
 }
 
+struct NormalizedBufferRange {
+    uint64_t Offset{0};
+    uint64_t Size{0};
+    bool IsWholeResource{false};
+};
+
+struct NormalizedTextureRange {
+    uint32_t BaseArrayLayer{0};
+    uint32_t ArrayLayerCount{0};
+    uint32_t BaseMipLevel{0};
+    uint32_t MipLevelCount{0};
+    bool IsWholeResource{false};
+};
+
+bool _IsResourceNode(const RDGNode* node) noexcept {
+    return node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Resource);
+}
+
+bool _IsPassNode(const RDGNode* node) noexcept {
+    return node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Pass);
+}
+
+bool _IsBufferNode(const RDGNode* node) noexcept {
+    return node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Buffer);
+}
+
+bool _IsTextureNode(const RDGNode* node) noexcept {
+    return node != nullptr && node->GetTag().HasFlag(RDGNodeTag::Texture);
+}
+
+bool _IsDefaultBufferRange(const render::BufferRange& range) noexcept {
+    return range.Offset == 0 && range.Size == 0;
+}
+
+bool _IsDefaultTextureRange(const render::SubresourceRange& range) noexcept {
+    return range.BaseArrayLayer == 0 &&
+           range.ArrayLayerCount == 0 &&
+           range.BaseMipLevel == 0 &&
+           range.MipLevelCount == 0;
+}
+
+bool _IsReadAccessFlag(RDGMemoryAccess access) noexcept {
+    switch (access) {
+        case RDGMemoryAccess::VertexRead:
+        case RDGMemoryAccess::IndexRead:
+        case RDGMemoryAccess::ConstantRead:
+        case RDGMemoryAccess::ShaderRead:
+        case RDGMemoryAccess::ColorAttachmentRead:
+        case RDGMemoryAccess::DepthStencilRead:
+        case RDGMemoryAccess::TransferRead:
+        case RDGMemoryAccess::HostRead:
+        case RDGMemoryAccess::IndirectRead:
+            return true;
+        case RDGMemoryAccess::NONE:
+        case RDGMemoryAccess::ShaderWrite:
+        case RDGMemoryAccess::ColorAttachmentWrite:
+        case RDGMemoryAccess::DepthStencilWrite:
+        case RDGMemoryAccess::TransferWrite:
+        case RDGMemoryAccess::HostWrite:
+            return false;
+    }
+    Unreachable();
+}
+
+bool _IsWriteAccessFlag(RDGMemoryAccess access) noexcept {
+    switch (access) {
+        case RDGMemoryAccess::ShaderWrite:
+        case RDGMemoryAccess::ColorAttachmentWrite:
+        case RDGMemoryAccess::DepthStencilWrite:
+        case RDGMemoryAccess::TransferWrite:
+        case RDGMemoryAccess::HostWrite:
+            return true;
+        case RDGMemoryAccess::NONE:
+        case RDGMemoryAccess::VertexRead:
+        case RDGMemoryAccess::IndexRead:
+        case RDGMemoryAccess::ConstantRead:
+        case RDGMemoryAccess::ShaderRead:
+        case RDGMemoryAccess::ColorAttachmentRead:
+        case RDGMemoryAccess::DepthStencilRead:
+        case RDGMemoryAccess::TransferRead:
+        case RDGMemoryAccess::HostRead:
+        case RDGMemoryAccess::IndirectRead:
+            return false;
+    }
+    Unreachable();
+}
+
+bool _HasReadAccess(RDGMemoryAccesses access) noexcept {
+    return access.HasFlag(RDGMemoryAccess::VertexRead) ||
+           access.HasFlag(RDGMemoryAccess::IndexRead) ||
+           access.HasFlag(RDGMemoryAccess::ConstantRead) ||
+           access.HasFlag(RDGMemoryAccess::ShaderRead) ||
+           access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) ||
+           access.HasFlag(RDGMemoryAccess::DepthStencilRead) ||
+           access.HasFlag(RDGMemoryAccess::TransferRead) ||
+           access.HasFlag(RDGMemoryAccess::HostRead) ||
+           access.HasFlag(RDGMemoryAccess::IndirectRead);
+}
+
+bool _HasWriteAccess(RDGMemoryAccesses access) noexcept {
+    return access.HasFlag(RDGMemoryAccess::ShaderWrite) ||
+           access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) ||
+           access.HasFlag(RDGMemoryAccess::DepthStencilWrite) ||
+           access.HasFlag(RDGMemoryAccess::TransferWrite) ||
+           access.HasFlag(RDGMemoryAccess::HostWrite);
+}
+
+bool _IsReadOnlyAccess(RDGMemoryAccesses access) noexcept {
+    return _HasReadAccess(access) && !_HasWriteAccess(access);
+}
+
+RDGMemoryAccesses _AllowedAccessesForStage(RDGExecutionStage stage) noexcept {
+    switch (stage) {
+        case RDGExecutionStage::NONE: return RDGMemoryAccess::NONE;
+        case RDGExecutionStage::VertexInput: return RDGMemoryAccess::VertexRead | RDGMemoryAccess::IndexRead;
+        case RDGExecutionStage::VertexShader: return RDGMemoryAccess::ConstantRead | RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite;
+        case RDGExecutionStage::PixelShader: return RDGMemoryAccess::ConstantRead | RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite;
+        case RDGExecutionStage::DepthStencil: return RDGMemoryAccess::DepthStencilRead | RDGMemoryAccess::DepthStencilWrite;
+        case RDGExecutionStage::ColorOutput: return RDGMemoryAccess::ColorAttachmentRead | RDGMemoryAccess::ColorAttachmentWrite;
+        case RDGExecutionStage::Indirect: return RDGMemoryAccess::IndirectRead;
+        case RDGExecutionStage::ComputeShader: return RDGMemoryAccess::ConstantRead | RDGMemoryAccess::ShaderRead | RDGMemoryAccess::ShaderWrite;
+        case RDGExecutionStage::Copy: return RDGMemoryAccess::TransferRead | RDGMemoryAccess::TransferWrite;
+        case RDGExecutionStage::Host: return RDGMemoryAccess::HostRead | RDGMemoryAccess::HostWrite;
+        case RDGExecutionStage::Present: return RDGMemoryAccess::HostRead;
+    }
+    Unreachable();
+}
+
+RDGMemoryAccesses _AllowedAccessesForStages(RDGExecutionStages stages) noexcept {
+    RDGMemoryAccesses allowed{RDGMemoryAccess::NONE};
+    if (stages.HasFlag(RDGExecutionStage::VertexInput)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::VertexInput);
+    if (stages.HasFlag(RDGExecutionStage::VertexShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::VertexShader);
+    if (stages.HasFlag(RDGExecutionStage::PixelShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::PixelShader);
+    if (stages.HasFlag(RDGExecutionStage::DepthStencil)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::DepthStencil);
+    if (stages.HasFlag(RDGExecutionStage::ColorOutput)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::ColorOutput);
+    if (stages.HasFlag(RDGExecutionStage::Indirect)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Indirect);
+    if (stages.HasFlag(RDGExecutionStage::ComputeShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::ComputeShader);
+    if (stages.HasFlag(RDGExecutionStage::Copy)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Copy);
+    if (stages.HasFlag(RDGExecutionStage::Host)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Host);
+    if (stages.HasFlag(RDGExecutionStage::Present)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Present);
+    return allowed;
+}
+
+const RDGResourceNode* _GetResourceNode(const RDGResourceDependencyEdge& edge) noexcept {
+    if (_IsResourceNode(edge._from)) return static_cast<const RDGResourceNode*>(edge._from);
+    if (_IsResourceNode(edge._to)) return static_cast<const RDGResourceNode*>(edge._to);
+    return nullptr;
+}
+
+const RDGPassNode* _GetPassNode(const RDGResourceDependencyEdge& edge) noexcept {
+    if (_IsPassNode(edge._from)) return static_cast<const RDGPassNode*>(edge._from);
+    if (_IsPassNode(edge._to)) return static_cast<const RDGPassNode*>(edge._to);
+    return nullptr;
+}
+
+bool _NormalizeBufferRange(const render::BufferRange& range, std::optional<uint64_t> totalSize, NormalizedBufferRange* normalized) noexcept {
+    if (normalized == nullptr) return false;
+    if (range.Size == 0) return false;
+    if (!totalSize.has_value()) {
+        normalized->Offset = range.Offset;
+        normalized->Size = range.Size == render::BufferRange::All() ? 0 : range.Size;
+        normalized->IsWholeResource = range.Size == render::BufferRange::All();
+        return true;
+    }
+    if (range.Offset > *totalSize) return false;
+    const uint64_t size = range.Size == render::BufferRange::All() ? (*totalSize - range.Offset) : range.Size;
+    if (size == 0) return false;
+    if (range.Offset > *totalSize - size) return false;
+    normalized->Offset = range.Offset;
+    normalized->Size = size;
+    normalized->IsWholeResource = range.Offset == 0 && size == *totalSize;
+    return true;
+}
+
+bool _NormalizeTextureRange(const render::SubresourceRange& range, std::optional<uint32_t> arrayCount, std::optional<uint32_t> mipCount, NormalizedTextureRange* normalized) noexcept {
+    if (normalized == nullptr) return false;
+    if (range.ArrayLayerCount == 0 || range.MipLevelCount == 0) return false;
+    const bool wholeLayers = range.ArrayLayerCount == render::SubresourceRange::All;
+    const bool wholeMips = range.MipLevelCount == render::SubresourceRange::All;
+    if (!arrayCount.has_value() || !mipCount.has_value()) {
+        normalized->BaseArrayLayer = range.BaseArrayLayer;
+        normalized->ArrayLayerCount = wholeLayers ? 0 : range.ArrayLayerCount;
+        normalized->BaseMipLevel = range.BaseMipLevel;
+        normalized->MipLevelCount = wholeMips ? 0 : range.MipLevelCount;
+        normalized->IsWholeResource = wholeLayers || wholeMips;
+        return true;
+    }
+    if (range.BaseArrayLayer >= *arrayCount || range.BaseMipLevel >= *mipCount) return false;
+    const uint32_t normalizedArrayCount = wholeLayers ? (*arrayCount - range.BaseArrayLayer) : range.ArrayLayerCount;
+    const uint32_t normalizedMipCount = wholeMips ? (*mipCount - range.BaseMipLevel) : range.MipLevelCount;
+    if (normalizedArrayCount == 0 || normalizedMipCount == 0) return false;
+    if (range.BaseArrayLayer > *arrayCount - normalizedArrayCount) return false;
+    if (range.BaseMipLevel > *mipCount - normalizedMipCount) return false;
+    normalized->BaseArrayLayer = range.BaseArrayLayer;
+    normalized->ArrayLayerCount = normalizedArrayCount;
+    normalized->BaseMipLevel = range.BaseMipLevel;
+    normalized->MipLevelCount = normalizedMipCount;
+    normalized->IsWholeResource = range.BaseArrayLayer == 0 &&
+                                  normalizedArrayCount == *arrayCount &&
+                                  range.BaseMipLevel == 0 &&
+                                  normalizedMipCount == *mipCount;
+    return true;
+}
+
+bool _BufferRangesOverlap(const NormalizedBufferRange& lhs, const NormalizedBufferRange& rhs) noexcept {
+    if (lhs.IsWholeResource || rhs.IsWholeResource) return true;
+    return lhs.Offset < rhs.Offset + rhs.Size && rhs.Offset < lhs.Offset + lhs.Size;
+}
+
+bool _TextureRangesOverlap(const NormalizedTextureRange& lhs, const NormalizedTextureRange& rhs) noexcept {
+    if (lhs.IsWholeResource || rhs.IsWholeResource) return true;
+    const bool layerOverlap = lhs.BaseArrayLayer < rhs.BaseArrayLayer + rhs.ArrayLayerCount &&
+                              rhs.BaseArrayLayer < lhs.BaseArrayLayer + lhs.ArrayLayerCount;
+    const bool mipOverlap = lhs.BaseMipLevel < rhs.BaseMipLevel + rhs.MipLevelCount &&
+                            rhs.BaseMipLevel < lhs.BaseMipLevel + lhs.MipLevelCount;
+    return layerOverlap && mipOverlap;
+}
+
+bool _AreLayoutsCompatible(RDGTextureLayout lhs, RDGTextureLayout rhs) noexcept {
+    return lhs == rhs || lhs == RDGTextureLayout::General || rhs == RDGTextureLayout::General;
+}
+
+bool _IsTextureLayoutCompatibleWithAccess(RDGTextureLayout layout, RDGMemoryAccesses access) noexcept {
+    switch (layout) {
+        case RDGTextureLayout::UNKNOWN:
+        case RDGTextureLayout::Undefined:
+            return false;
+        case RDGTextureLayout::General:
+            return true;
+        case RDGTextureLayout::ShaderReadOnly:
+            return !_HasWriteAccess(access) &&
+                   !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite);
+        case RDGTextureLayout::ColorAttachment:
+            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   (_HasReadAccess(access) || _HasWriteAccess(access)) &&
+                   !(access & ~(RDGMemoryAccess::ColorAttachmentRead | RDGMemoryAccess::ColorAttachmentWrite));
+        case RDGTextureLayout::DepthStencilReadOnly:
+            return access == RDGMemoryAccess::DepthStencilRead;
+        case RDGTextureLayout::DepthStencilAttachment:
+            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   (_HasReadAccess(access) || _HasWriteAccess(access)) &&
+                   !(access & ~(RDGMemoryAccess::DepthStencilRead | RDGMemoryAccess::DepthStencilWrite));
+        case RDGTextureLayout::TransferSource:
+            return access == RDGMemoryAccess::TransferRead;
+        case RDGTextureLayout::TransferDestination:
+            return access == RDGMemoryAccess::TransferWrite;
+        case RDGTextureLayout::Present:
+            return !_HasWriteAccess(access);
+    }
+    Unreachable();
+}
+
 }  // namespace
 
 bool RDGColorAttachmentRecord::HasWriteAccess() const noexcept {
@@ -384,8 +669,845 @@ RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionS
 }
 
 RenderGraph::ValidateResult RenderGraph::Validate() const {
-    // TODO:
-    return {false, ""};
+    auto fail = [](string message) -> ValidateResult {
+        return ValidateResult{false, std::move(message)};
+    };
+    auto formatNode = [](const RDGNode* node) -> string {
+        if (node == nullptr) return "<null node>";
+        return fmt::format("node {} '{}'", node->_id, node->_name);
+    };
+    auto formatEdge = [&](const RDGEdge* edge) -> string {
+        if (edge == nullptr) return "<null edge>";
+        return fmt::format("{} -> {}", formatNode(edge->_from), formatNode(edge->_to));
+    };
+    auto tryResolveNode = [&](RDGNodeHandle handle) -> const RDGNode* {
+        if (!handle.IsValid() || handle.Id >= _nodes.size()) return nullptr;
+        return _nodes[handle.Id].get();
+    };
+
+    unordered_set<const RDGNode*> nodeSet{};
+    nodeSet.reserve(_nodes.size());
+    for (const auto& node : _nodes) {
+        if (node) {
+            nodeSet.emplace(node.get());
+        }
+    }
+
+    unordered_set<const RDGEdge*> edgeSet{};
+    edgeSet.reserve(_edges.size());
+    for (const auto& edge : _edges) {
+        if (edge) {
+            edgeSet.emplace(edge.get());
+        }
+    }
+
+    for (size_t index = 0; index < _nodes.size(); ++index) {
+        const auto& node = _nodes[index];
+        if (!node) {
+            return fail(fmt::format("render graph validate failed: node slot {} is null", index));
+        }
+        if (!node->GetHandle().IsValid() || node->_id >= _nodes.size()) {
+            return fail(fmt::format("render graph validate failed: {} has invalid handle/id", formatNode(node.get())));
+        }
+        if (node->_id != index) {
+            return fail(fmt::format("render graph validate failed: {} id/index mismatch, expected {}", formatNode(node.get()), index));
+        }
+        if (node->GetTag() == RDGNodeTag::UNKNOWN) {
+            return fail(fmt::format("render graph validate failed: {} has UNKNOWN tag", formatNode(node.get())));
+        }
+        if (_IsResourceNode(node.get()) && !_IsBufferNode(node.get()) && !_IsTextureNode(node.get())) {
+            return fail(fmt::format("render graph validate failed: {} resource tag is not concrete", formatNode(node.get())));
+        }
+        if (_IsPassNode(node.get()) &&
+            node->GetTag() != RDGNodeTag::GraphicsPass &&
+            node->GetTag() != RDGNodeTag::ComputePass &&
+            node->GetTag() != RDGNodeTag::CopyPass) {
+            return fail(fmt::format("render graph validate failed: {} pass tag is not concrete", formatNode(node.get())));
+        }
+    }
+
+    vector<uint32_t> indegree(_nodes.size(), 0);
+    vector<vector<uint64_t>> adjacency(_nodes.size());
+    vector<vector<uint64_t>> resourceOnlyAdjacency(_nodes.size());
+    vector<uint32_t> resourceDependencyEdgeCount(_nodes.size(), 0);
+    vector<uint32_t> passWriteEdgeCount(_nodes.size(), 0);
+    vector<bool> resourceHasWriteSource(_nodes.size(), false);
+    vector<const RDGResourceDependencyEdge*> resourceEdges{};
+    vector<const RDGPassDependencyEdge*> passEdges{};
+    unordered_set<string> resourceEdgeKeys{};
+    unordered_set<string> passDependencyKeys{};
+
+    for (const auto& edgeHolder : _edges) {
+        if (!edgeHolder) {
+            return fail("render graph validate failed: edge container has null entry");
+        }
+        const RDGEdge* edge = edgeHolder.get();
+        if (edge->_from == nullptr || edge->_to == nullptr) {
+            return fail(fmt::format("render graph validate failed: edge {} has null endpoint", formatEdge(edge)));
+        }
+        if (!nodeSet.contains(edge->_from) || !nodeSet.contains(edge->_to)) {
+            return fail(fmt::format("render graph validate failed: edge {} references node outside graph", formatEdge(edge)));
+        }
+        if (edge->_from == edge->_to) {
+            return fail(fmt::format("render graph validate failed: self loop on {}", formatNode(edge->_from)));
+        }
+        if (edge->GetTag() == RDGEdgeTag::UNKNOWN) {
+            return fail(fmt::format("render graph validate failed: edge {} has UNKNOWN tag", formatEdge(edge)));
+        }
+        if (std::find(edge->_from->_outEdges.begin(), edge->_from->_outEdges.end(), edge) == edge->_from->_outEdges.end()) {
+            return fail(fmt::format("render graph validate failed: edge {} missing from source out-edges", formatEdge(edge)));
+        }
+        if (std::find(edge->_to->_inEdges.begin(), edge->_to->_inEdges.end(), edge) == edge->_to->_inEdges.end()) {
+            return fail(fmt::format("render graph validate failed: edge {} missing from target in-edges", formatEdge(edge)));
+        }
+
+        adjacency[edge->_from->_id].emplace_back(edge->_to->_id);
+        ++indegree[edge->_to->_id];
+
+        if (edge->GetTag() == RDGEdgeTag::ResourceDependency) {
+            auto* resourceEdge = static_cast<const RDGResourceDependencyEdge*>(edge);
+            resourceEdges.emplace_back(resourceEdge);
+            resourceOnlyAdjacency[edge->_from->_id].emplace_back(edge->_to->_id);
+            ++resourceDependencyEdgeCount[edge->_from->_id];
+            ++resourceDependencyEdgeCount[edge->_to->_id];
+
+            if (!(_IsResourceNode(edge->_from) ^ _IsResourceNode(edge->_to))) {
+                return fail(fmt::format("render graph validate failed: resource dependency edge {} must connect one resource and one pass", formatEdge(edge)));
+            }
+            if (resourceEdge->_stage == RDGExecutionStage::NONE) {
+                return fail(fmt::format("render graph validate failed: resource dependency edge {} has NONE stage", formatEdge(edge)));
+            }
+            if (resourceEdge->_access == RDGMemoryAccess::NONE) {
+                return fail(fmt::format("render graph validate failed: resource dependency edge {} has NONE access", formatEdge(edge)));
+            }
+
+            const RDGResourceNode* resourceNode = _GetResourceNode(*resourceEdge);
+            const RDGPassNode* passNode = _GetPassNode(*resourceEdge);
+            if (resourceNode == nullptr || passNode == nullptr) {
+                return fail(fmt::format("render graph validate failed: resource dependency edge {} cannot resolve typed endpoints", formatEdge(edge)));
+            }
+
+            if (_IsReadOnlyAccess(resourceEdge->_access)) {
+                if (!(edge->_from == resourceNode && edge->_to == passNode)) {
+                    return fail(fmt::format("render graph validate failed: read-only edge {} must point Resource -> Pass", formatEdge(edge)));
+                }
+            } else if (_HasWriteAccess(resourceEdge->_access)) {
+                if (!(edge->_from == passNode && edge->_to == resourceNode)) {
+                    return fail(fmt::format("render graph validate failed: write edge {} must point Pass -> Resource", formatEdge(edge)));
+                }
+                ++passWriteEdgeCount[passNode->_id];
+                resourceHasWriteSource[resourceNode->_id] = true;
+            }
+
+            if (_IsBufferNode(resourceNode)) {
+                if (_IsDefaultBufferRange(resourceEdge->_bufferRange)) {
+                    return fail(fmt::format("render graph validate failed: buffer edge {} has default buffer range", formatEdge(edge)));
+                }
+                if (resourceEdge->_textureLayout != RDGTextureLayout::UNKNOWN || !_IsDefaultTextureRange(resourceEdge->_textureRange)) {
+                    return fail(fmt::format("render graph validate failed: buffer edge {} carries texture state", formatEdge(edge)));
+                }
+            } else if (_IsTextureNode(resourceNode)) {
+                if (resourceEdge->_textureLayout == RDGTextureLayout::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture edge {} has UNKNOWN layout", formatEdge(edge)));
+                }
+                if (_IsDefaultTextureRange(resourceEdge->_textureRange)) {
+                    return fail(fmt::format("render graph validate failed: texture edge {} has default subresource range", formatEdge(edge)));
+                }
+                if (!_IsDefaultBufferRange(resourceEdge->_bufferRange)) {
+                    return fail(fmt::format("render graph validate failed: texture edge {} carries buffer range", formatEdge(edge)));
+                }
+            }
+
+            const string duplicateKey = fmt::format(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                edge->_from->_id,
+                edge->_to->_id,
+                resourceEdge->_stage.value(),
+                resourceEdge->_access.value(),
+                resourceEdge->_bufferRange.Offset,
+                resourceEdge->_bufferRange.Size,
+                static_cast<int32_t>(resourceEdge->_textureLayout),
+                resourceEdge->_textureRange.BaseArrayLayer,
+                resourceEdge->_textureRange.ArrayLayerCount,
+                resourceEdge->_textureRange.BaseMipLevel,
+                resourceEdge->_textureRange.MipLevelCount);
+            if (!resourceEdgeKeys.emplace(duplicateKey).second) {
+                return fail(fmt::format("render graph validate failed: duplicate resource dependency edge {}", formatEdge(edge)));
+            }
+        } else if (edge->GetTag() == RDGEdgeTag::PassDependency) {
+            auto* passEdge = static_cast<const RDGPassDependencyEdge*>(edge);
+            passEdges.emplace_back(passEdge);
+            if (!_IsPassNode(edge->_from) || !_IsPassNode(edge->_to)) {
+                return fail(fmt::format("render graph validate failed: pass dependency edge {} must connect two passes", formatEdge(edge)));
+            }
+            const string duplicateKey = fmt::format("{}:{}", edge->_from->_id, edge->_to->_id);
+            if (!passDependencyKeys.emplace(duplicateKey).second) {
+                return fail(fmt::format("render graph validate failed: duplicate pass dependency edge {}", formatEdge(edge)));
+            }
+        }
+    }
+
+    for (const auto& node : _nodes) {
+        for (RDGEdge* edge : node->_inEdges) {
+            if (edge == nullptr || !edgeSet.contains(edge)) {
+                return fail(fmt::format("render graph validate failed: {} has in-edge not owned by graph", formatNode(node.get())));
+            }
+            if (edge->_to != node.get()) {
+                return fail(fmt::format("render graph validate failed: {} has in-edge with mismatched destination", formatNode(node.get())));
+            }
+        }
+        for (RDGEdge* edge : node->_outEdges) {
+            if (edge == nullptr || !edgeSet.contains(edge)) {
+                return fail(fmt::format("render graph validate failed: {} has out-edge not owned by graph", formatNode(node.get())));
+            }
+            if (edge->_from != node.get()) {
+                return fail(fmt::format("render graph validate failed: {} has out-edge with mismatched source", formatNode(node.get())));
+            }
+        }
+    }
+
+    vector<uint64_t> topoOrder{};
+    topoOrder.reserve(_nodes.size());
+    vector<uint32_t> pendingIndegree = indegree;
+    vector<uint64_t> ready{};
+    ready.reserve(_nodes.size());
+    for (uint64_t nodeId = 0; nodeId < _nodes.size(); ++nodeId) {
+        if (pendingIndegree[nodeId] == 0) {
+            ready.emplace_back(nodeId);
+        }
+    }
+    for (size_t cursor = 0; cursor < ready.size(); ++cursor) {
+        const uint64_t nodeId = ready[cursor];
+        topoOrder.emplace_back(nodeId);
+        for (uint64_t next : adjacency[nodeId]) {
+            --pendingIndegree[next];
+            if (pendingIndegree[next] == 0) {
+                ready.emplace_back(next);
+            }
+        }
+    }
+    if (topoOrder.size() != _nodes.size()) {
+        return fail("render graph validate failed: graph contains a cycle");
+    }
+
+    vector<bool> reachable(_nodes.size(), false);
+    vector<uint64_t> visitQueue{};
+    visitQueue.reserve(_nodes.size());
+    for (const auto& node : _nodes) {
+        if (!_IsResourceNode(node.get())) {
+            continue;
+        }
+        const auto* resourceNode = static_cast<const RDGResourceNode*>(node.get());
+        if (resourceNode->_ownership == RDGResourceOwnership::External || node->_inEdges.empty()) {
+            if (!reachable[node->_id]) {
+                reachable[node->_id] = true;
+                visitQueue.emplace_back(node->_id);
+            }
+        }
+    }
+    for (size_t cursor = 0; cursor < visitQueue.size(); ++cursor) {
+        for (uint64_t next : adjacency[visitQueue[cursor]]) {
+            if (!reachable[next]) {
+                reachable[next] = true;
+                visitQueue.emplace_back(next);
+            }
+        }
+    }
+    for (const auto& node : _nodes) {
+        if (_IsPassNode(node.get()) && !reachable[node->_id]) {
+            return fail(fmt::format("render graph validate failed: {} is not reachable from any import/root resource", formatNode(node.get())));
+        }
+        if (_IsPassNode(node.get()) && resourceDependencyEdgeCount[node->_id] == 0) {
+            return fail(fmt::format("render graph validate failed: {} has no resource dependency edge", formatNode(node.get())));
+        }
+        if (_IsResourceNode(node.get()) && resourceDependencyEdgeCount[node->_id] == 0) {
+            if (_IsTextureNode(node.get())) {
+                const auto* textureNode = static_cast<const RDGTextureNode*>(node.get());
+                if (textureNode->_importState.has_value() &&
+                    textureNode->_exportState.has_value() &&
+                    textureNode->_importState->Layout != textureNode->_exportState->Layout) {
+                    return fail(fmt::format("render graph validate failed: imported/exported texture {} changes layout without any pass usage", formatNode(node.get())));
+                }
+            }
+            return fail(fmt::format("render graph validate failed: {} is not referenced by any pass", formatNode(node.get())));
+        }
+    }
+
+    vector<const RDGPassNode*> passNodes{};
+    passNodes.reserve(_nodes.size());
+    unordered_map<uint64_t, uint32_t> passIndexByNodeId{};
+    for (const auto& node : _nodes) {
+        if (_IsPassNode(node.get())) {
+            passIndexByNodeId.emplace(node->_id, static_cast<uint32_t>(passNodes.size()));
+            passNodes.emplace_back(static_cast<const RDGPassNode*>(node.get()));
+        }
+    }
+
+    auto buildPassReachability = [&](const vector<vector<uint64_t>>& adj) {
+        vector<vector<uint8_t>> result(passNodes.size(), vector<uint8_t>(passNodes.size(), 0));
+        vector<uint8_t> visited(_nodes.size(), 0);
+        vector<uint64_t> queue{};
+        queue.reserve(_nodes.size());
+        for (uint32_t passIndex = 0; passIndex < passNodes.size(); ++passIndex) {
+            std::fill(visited.begin(), visited.end(), uint8_t{0});
+            queue.clear();
+            visited[passNodes[passIndex]->_id] = 1;
+            queue.emplace_back(passNodes[passIndex]->_id);
+            for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+                const uint64_t nodeId = queue[cursor];
+                for (uint64_t next : adj[nodeId]) {
+                    if (visited[next]) {
+                        continue;
+                    }
+                    visited[next] = 1;
+                    queue.emplace_back(next);
+                    if (_IsPassNode(_nodes[next].get())) {
+                        result[passIndex][passIndexByNodeId[next]] = 1;
+                    }
+                }
+            }
+        }
+        return result;
+    };
+
+    const auto fullPassReachability = buildPassReachability(adjacency);
+    const auto resourceOnlyPassReachability = buildPassReachability(resourceOnlyAdjacency);
+    auto buildPassReachabilitySkippingNode = [&](uint64_t skippedNodeId) {
+        vector<vector<uint8_t>> result(passNodes.size(), vector<uint8_t>(passNodes.size(), 0));
+        vector<uint8_t> visited(_nodes.size(), 0);
+        vector<uint64_t> queue{};
+        queue.reserve(_nodes.size());
+        for (uint32_t passIndex = 0; passIndex < passNodes.size(); ++passIndex) {
+            std::fill(visited.begin(), visited.end(), uint8_t{0});
+            queue.clear();
+            if (passNodes[passIndex]->_id == skippedNodeId) {
+                continue;
+            }
+            visited[passNodes[passIndex]->_id] = 1;
+            queue.emplace_back(passNodes[passIndex]->_id);
+            for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+                const uint64_t nodeId = queue[cursor];
+                for (uint64_t next : adjacency[nodeId]) {
+                    if (next == skippedNodeId || visited[next]) {
+                        continue;
+                    }
+                    visited[next] = 1;
+                    queue.emplace_back(next);
+                    if (_IsPassNode(_nodes[next].get())) {
+                        result[passIndex][passIndexByNodeId[next]] = 1;
+                    }
+                }
+            }
+        }
+        return result;
+    };
+
+    struct UsageRecord {
+        const RDGPassNode* Pass{nullptr};
+        const RDGResourceDependencyEdge* Edge{nullptr};
+        bool IsWrite{false};
+        bool IsTexture{false};
+        NormalizedBufferRange BufferRange{};
+        NormalizedTextureRange TextureRange{};
+    };
+
+    unordered_map<uint64_t, vector<UsageRecord>> usagesByResource{};
+    usagesByResource.reserve(_nodes.size());
+
+    for (const auto& resourceEdge : resourceEdges) {
+        const RDGResourceNode* resourceNode = _GetResourceNode(*resourceEdge);
+        const RDGPassNode* passNode = _GetPassNode(*resourceEdge);
+        const RDGMemoryAccesses allowedAccess = _AllowedAccessesForStages(resourceEdge->_stage);
+        if (!allowedAccess.HasFlag(resourceEdge->_access)) {
+            return fail(fmt::format(
+                "render graph validate failed: resource edge {} uses access {} incompatible with stage {}",
+                formatEdge(resourceEdge),
+                resourceEdge->_access,
+                resourceEdge->_stage));
+        }
+
+        UsageRecord usage{};
+        usage.Pass = passNode;
+        usage.Edge = resourceEdge;
+        usage.IsWrite = _HasWriteAccess(resourceEdge->_access);
+        usage.IsTexture = _IsTextureNode(resourceNode);
+
+        if (_IsBufferNode(resourceNode)) {
+            const auto* bufferNode = static_cast<const RDGBufferNode*>(resourceNode);
+            std::optional<uint64_t> totalSize{};
+            if (bufferNode->_ownership != RDGResourceOwnership::External && bufferNode->_size > 0) {
+                totalSize = bufferNode->_size;
+            }
+            if (!_NormalizeBufferRange(resourceEdge->_bufferRange, totalSize, &usage.BufferRange)) {
+                return fail(fmt::format("render graph validate failed: buffer edge {} range is invalid", formatEdge(resourceEdge)));
+            }
+        } else {
+            const auto* textureNode = static_cast<const RDGTextureNode*>(resourceNode);
+            std::optional<uint32_t> arrayCount{};
+            std::optional<uint32_t> mipCount{};
+            if (textureNode->_ownership != RDGResourceOwnership::External &&
+                textureNode->_depthOrArraySize > 0 &&
+                textureNode->_mipLevels > 0) {
+                arrayCount = textureNode->_depthOrArraySize;
+                mipCount = textureNode->_mipLevels;
+            }
+            if (!_NormalizeTextureRange(resourceEdge->_textureRange, arrayCount, mipCount, &usage.TextureRange)) {
+                return fail(fmt::format("render graph validate failed: texture edge {} subresource range is invalid", formatEdge(resourceEdge)));
+            }
+            if (!_IsTextureLayoutCompatibleWithAccess(resourceEdge->_textureLayout, resourceEdge->_access)) {
+                return fail(fmt::format(
+                    "render graph validate failed: texture edge {} layout {} is incompatible with access {}",
+                    formatEdge(resourceEdge),
+                    resourceEdge->_textureLayout,
+                    resourceEdge->_access));
+            }
+            if (textureNode->_format != render::TextureFormat::UNKNOWN &&
+                render::IsDepthStencilFormat(textureNode->_format) &&
+                resourceEdge->_textureLayout != RDGTextureLayout::DepthStencilAttachment &&
+                resourceEdge->_textureLayout != RDGTextureLayout::DepthStencilReadOnly &&
+                resourceEdge->_textureLayout != RDGTextureLayout::General) {
+                return fail(fmt::format(
+                    "render graph validate failed: depth texture edge {} uses illegal layout {}",
+                    formatEdge(resourceEdge),
+                    resourceEdge->_textureLayout));
+            }
+        }
+
+        usagesByResource[resourceNode->_id].emplace_back(usage);
+    }
+
+    for (const auto& node : _nodes) {
+        if (!_IsResourceNode(node.get())) {
+            continue;
+        }
+        const auto* resourceNode = static_cast<const RDGResourceNode*>(node.get());
+        if (resourceNode->_ownership == RDGResourceOwnership::UNKNOWN) {
+            return fail(fmt::format("render graph validate failed: {} has UNKNOWN ownership", formatNode(node.get())));
+        }
+
+        if (_IsBufferNode(node.get())) {
+            const auto* bufferNode = static_cast<const RDGBufferNode*>(node.get());
+            if (bufferNode->_ownership == RDGResourceOwnership::External) {
+                if (!bufferNode->_importState.has_value()) {
+                    return fail(fmt::format("render graph validate failed: external buffer {} has no import state", formatNode(node.get())));
+                }
+                if (!bufferNode->_importBuffer.IsValid()) {
+                    return fail(fmt::format("render graph validate failed: external buffer {} has invalid import handle", formatNode(node.get())));
+                }
+            } else {
+                if (bufferNode->_importState.has_value() || bufferNode->_importBuffer.IsValid()) {
+                    return fail(fmt::format("render graph validate failed: internal/transient buffer {} must not carry import state", formatNode(node.get())));
+                }
+                if (bufferNode->_size == 0) {
+                    return fail(fmt::format("render graph validate failed: buffer {} size must be > 0", formatNode(node.get())));
+                }
+                if (bufferNode->_usage == render::BufferUse::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: buffer {} usage is UNKNOWN", formatNode(node.get())));
+                }
+            }
+
+            if (bufferNode->_importState.has_value()) {
+                if (bufferNode->_importState->Stage == RDGExecutionStage::NONE || bufferNode->_importState->Access == RDGMemoryAccess::NONE) {
+                    return fail(fmt::format("render graph validate failed: buffer import state on {} is incomplete", formatNode(node.get())));
+                }
+                if (!_AllowedAccessesForStages(bufferNode->_importState->Stage).HasFlag(bufferNode->_importState->Access)) {
+                    return fail(fmt::format("render graph validate failed: buffer import state on {} has incompatible stage/access", formatNode(node.get())));
+                }
+            }
+            if (bufferNode->_exportState.has_value()) {
+                if (bufferNode->_exportState->Stage == RDGExecutionStage::NONE || bufferNode->_exportState->Access == RDGMemoryAccess::NONE) {
+                    return fail(fmt::format("render graph validate failed: buffer export state on {} is incomplete", formatNode(node.get())));
+                }
+                if (!_AllowedAccessesForStages(bufferNode->_exportState->Stage).HasFlag(bufferNode->_exportState->Access)) {
+                    return fail(fmt::format("render graph validate failed: buffer export state on {} has incompatible stage/access", formatNode(node.get())));
+                }
+                if (bufferNode->_ownership != RDGResourceOwnership::External && !resourceHasWriteSource[node->_id]) {
+                    return fail(fmt::format("render graph validate failed: exported buffer {} has no pass write source", formatNode(node.get())));
+                }
+            }
+        } else if (_IsTextureNode(node.get())) {
+            const auto* textureNode = static_cast<const RDGTextureNode*>(node.get());
+            if (textureNode->_ownership == RDGResourceOwnership::External) {
+                if (!textureNode->_importState.has_value()) {
+                    return fail(fmt::format("render graph validate failed: external texture {} has no import state", formatNode(node.get())));
+                }
+                if (!textureNode->_importTexture.IsValid()) {
+                    return fail(fmt::format("render graph validate failed: external texture {} has invalid import handle", formatNode(node.get())));
+                }
+            } else {
+                if (textureNode->_importState.has_value() || textureNode->_importTexture.IsValid()) {
+                    return fail(fmt::format("render graph validate failed: internal/transient texture {} must not carry import state", formatNode(node.get())));
+                }
+                if (textureNode->_dim == render::TextureDimension::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture {} dimension is UNKNOWN", formatNode(node.get())));
+                }
+                if (textureNode->_width == 0 ||
+                    textureNode->_height == 0 ||
+                    textureNode->_depthOrArraySize == 0 ||
+                    textureNode->_mipLevels == 0 ||
+                    textureNode->_sampleCount == 0) {
+                    return fail(fmt::format("render graph validate failed: texture {} has invalid extent/mip/sample values", formatNode(node.get())));
+                }
+                if (textureNode->_format == render::TextureFormat::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture {} format is UNKNOWN", formatNode(node.get())));
+                }
+                if (textureNode->_usage == render::TextureUse::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture {} usage is UNKNOWN", formatNode(node.get())));
+                }
+            }
+
+            if (textureNode->_importState.has_value()) {
+                if (textureNode->_importState->Stage == RDGExecutionStage::NONE || textureNode->_importState->Access == RDGMemoryAccess::NONE) {
+                    return fail(fmt::format("render graph validate failed: texture import state on {} is incomplete", formatNode(node.get())));
+                }
+                if (textureNode->_importState->Layout == RDGTextureLayout::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture import state on {} has UNKNOWN layout", formatNode(node.get())));
+                }
+                if (!_AllowedAccessesForStages(textureNode->_importState->Stage).HasFlag(textureNode->_importState->Access)) {
+                    return fail(fmt::format("render graph validate failed: texture import state on {} has incompatible stage/access", formatNode(node.get())));
+                }
+                if (!_IsTextureLayoutCompatibleWithAccess(textureNode->_importState->Layout, textureNode->_importState->Access)) {
+                    return fail(fmt::format("render graph validate failed: texture import state on {} has incompatible layout/access", formatNode(node.get())));
+                }
+            }
+            if (textureNode->_exportState.has_value()) {
+                if (textureNode->_exportState->Stage == RDGExecutionStage::NONE || textureNode->_exportState->Access == RDGMemoryAccess::NONE) {
+                    return fail(fmt::format("render graph validate failed: texture export state on {} is incomplete", formatNode(node.get())));
+                }
+                if (textureNode->_exportState->Layout == RDGTextureLayout::UNKNOWN) {
+                    return fail(fmt::format("render graph validate failed: texture export state on {} has UNKNOWN layout", formatNode(node.get())));
+                }
+                if (!_AllowedAccessesForStages(textureNode->_exportState->Stage).HasFlag(textureNode->_exportState->Access)) {
+                    return fail(fmt::format("render graph validate failed: texture export state on {} has incompatible stage/access", formatNode(node.get())));
+                }
+                if (!_IsTextureLayoutCompatibleWithAccess(textureNode->_exportState->Layout, textureNode->_exportState->Access)) {
+                    return fail(fmt::format("render graph validate failed: texture export state on {} has incompatible layout/access", formatNode(node.get())));
+                }
+                if (textureNode->_ownership != RDGResourceOwnership::External && !resourceHasWriteSource[node->_id]) {
+                    return fail(fmt::format("render graph validate failed: exported texture {} has no pass write source", formatNode(node.get())));
+                }
+            }
+            if (textureNode->_importState.has_value() && textureNode->_exportState.has_value() && resourceDependencyEdgeCount[node->_id] == 0) {
+                if (textureNode->_importState->Layout != textureNode->_exportState->Layout) {
+                    return fail(fmt::format("render graph validate failed: imported/exported texture {} changes layout without any pass usage", formatNode(node.get())));
+                }
+            }
+        }
+    }
+
+    const RDGExecutionStages graphicsStages =
+        RDGExecutionStage::VertexInput |
+        RDGExecutionStage::VertexShader |
+        RDGExecutionStage::PixelShader |
+        RDGExecutionStage::DepthStencil |
+        RDGExecutionStage::ColorOutput |
+        RDGExecutionStage::Indirect;
+
+    for (const auto& node : _nodes) {
+        if (!_IsPassNode(node.get())) {
+            continue;
+        }
+        if (passWriteEdgeCount[node->_id] == 0) {
+            return fail(fmt::format("render graph validate failed: {} has no resource write output", formatNode(node.get())));
+        }
+
+        vector<const RDGResourceDependencyEdge*> passResourceEdges{};
+        vector<const RDGResourceDependencyEdge*> passTextureEdges{};
+        passResourceEdges.reserve(node->_inEdges.size() + node->_outEdges.size());
+        passTextureEdges.reserve(node->_inEdges.size() + node->_outEdges.size());
+
+        auto collectPassEdge = [&](RDGEdge* edge) -> std::optional<ValidateResult> {
+            if (edge == nullptr || edge->GetTag() != RDGEdgeTag::ResourceDependency) {
+                return std::nullopt;
+            }
+            auto* resourceEdge = static_cast<const RDGResourceDependencyEdge*>(edge);
+            if (_GetPassNode(*resourceEdge) != node.get()) {
+                return fail(fmt::format("render graph validate failed: pass edge {} is registered on the wrong pass", formatEdge(resourceEdge)));
+            }
+            passResourceEdges.emplace_back(resourceEdge);
+            if (_IsTextureNode(_GetResourceNode(*resourceEdge))) {
+                passTextureEdges.emplace_back(resourceEdge);
+            }
+            return std::nullopt;
+        };
+
+        for (RDGEdge* edge : node->_inEdges) {
+            if (auto result = collectPassEdge(edge); result.has_value()) {
+                return std::move(result).value();
+            }
+        }
+        for (RDGEdge* edge : node->_outEdges) {
+            if (auto result = collectPassEdge(edge); result.has_value()) {
+                return std::move(result).value();
+            }
+        }
+
+        if (node->GetTag() == RDGNodeTag::GraphicsPass) {
+            const auto* graphicsPass = static_cast<const RDGGraphicsPassNode*>(node.get());
+            if (graphicsPass->_impl == nullptr) {
+                return fail(fmt::format("render graph validate failed: graphics pass {} has null implementation", formatNode(node.get())));
+            }
+
+            vector<uint32_t> slots{};
+            slots.reserve(graphicsPass->_colorAttachments.size());
+            unordered_set<uint64_t> attachmentTextures{};
+            attachmentTextures.reserve(graphicsPass->_colorAttachments.size());
+            for (const auto& attachment : graphicsPass->_colorAttachments) {
+                const RDGNode* attachmentNode = tryResolveNode(attachment.Texture);
+                if (attachmentNode == nullptr || !_IsTextureNode(attachmentNode)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} has invalid color attachment handle {}", formatNode(node.get()), attachment.Texture.Id));
+                }
+                const auto* textureNode = static_cast<const RDGTextureNode*>(attachmentNode);
+                if (textureNode->_format != render::TextureFormat::UNKNOWN && render::IsDepthStencilFormat(textureNode->_format)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} uses depth format texture as color attachment", formatNode(node.get())));
+                }
+                if (attachment.Load == render::LoadAction::Clear && !attachment.ClearValue.has_value()) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} color attachment slot {} clears without clear value", formatNode(node.get()), attachment.Slot));
+                }
+                slots.emplace_back(attachment.Slot);
+                attachmentTextures.emplace(textureNode->_id);
+            }
+            std::sort(slots.begin(), slots.end());
+            for (size_t slotIndex = 0; slotIndex < slots.size(); ++slotIndex) {
+                if (slotIndex > 0 && slots[slotIndex] == slots[slotIndex - 1]) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} has duplicate color attachment slot {}", formatNode(node.get()), slots[slotIndex]));
+                }
+                if (slots[slotIndex] != slotIndex) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} color attachment slots are not contiguous from 0", formatNode(node.get())));
+                }
+            }
+
+            if (graphicsPass->_depthStencilAttachment.has_value()) {
+                const auto& attachment = graphicsPass->_depthStencilAttachment.value();
+                const RDGNode* attachmentNode = tryResolveNode(attachment.Texture);
+                if (attachmentNode == nullptr || !_IsTextureNode(attachmentNode)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} has invalid depth-stencil attachment handle {}", formatNode(node.get()), attachment.Texture.Id));
+                }
+                const auto* textureNode = static_cast<const RDGTextureNode*>(attachmentNode);
+                if (textureNode->_format != render::TextureFormat::UNKNOWN && !render::IsDepthStencilFormat(textureNode->_format)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} depth-stencil attachment must use depth format", formatNode(node.get())));
+                }
+                if (attachmentTextures.contains(textureNode->_id)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} uses same texture as color and depth-stencil attachment", formatNode(node.get())));
+                }
+                if ((attachment.DepthLoad == render::LoadAction::Clear || attachment.StencilLoad == render::LoadAction::Clear) &&
+                    !attachment.ClearValue.has_value()) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} depth-stencil attachment clears without clear value", formatNode(node.get())));
+                }
+            }
+
+            for (const auto* resourceEdge : passResourceEdges) {
+                if (!graphicsStages.HasFlag(resourceEdge->_stage)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} uses non-graphics stage {}", formatNode(node.get()), resourceEdge->_stage));
+                }
+            }
+        } else if (node->GetTag() == RDGNodeTag::ComputePass) {
+            const auto* computePass = static_cast<const RDGComputePassNode*>(node.get());
+            if (computePass->_impl == nullptr) {
+                return fail(fmt::format("render graph validate failed: compute pass {} has null implementation", formatNode(node.get())));
+            }
+            for (const auto* resourceEdge : passResourceEdges) {
+                if (resourceEdge->_stage != RDGExecutionStage::ComputeShader) {
+                    return fail(fmt::format("render graph validate failed: compute pass {} uses stage {}", formatNode(node.get()), resourceEdge->_stage));
+                }
+                if (resourceEdge->_access.HasFlag(RDGMemoryAccess::VertexRead) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::IndexRead) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::DepthStencilRead) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::DepthStencilWrite) ||
+                    resourceEdge->_access.HasFlag(RDGMemoryAccess::IndirectRead)) {
+                    return fail(fmt::format("render graph validate failed: compute pass {} uses graphics-only access {}", formatNode(node.get()), resourceEdge->_access));
+                }
+            }
+        } else if (node->GetTag() == RDGNodeTag::CopyPass) {
+            const auto* copyPass = static_cast<const RDGCopyPassNode*>(node.get());
+            if (copyPass->_copys.empty()) {
+                return fail(fmt::format("render graph validate failed: copy pass {} has no copy record", formatNode(node.get())));
+            }
+            for (const auto* resourceEdge : passResourceEdges) {
+                if (resourceEdge->_stage != RDGExecutionStage::Copy) {
+                    return fail(fmt::format("render graph validate failed: copy pass {} uses stage {}", formatNode(node.get()), resourceEdge->_stage));
+                }
+                if (!(resourceEdge->_access == RDGMemoryAccess::TransferRead || resourceEdge->_access == RDGMemoryAccess::TransferWrite)) {
+                    return fail(fmt::format("render graph validate failed: copy pass {} uses non-transfer access {}", formatNode(node.get()), resourceEdge->_access));
+                }
+            }
+            for (const auto& copyRecord : copyPass->_copys) {
+                if (const auto* bufferToBuffer = std::get_if<RDGCopyBufferToBufferRecord>(&copyRecord)) {
+                    const RDGNode* dst = tryResolveNode(bufferToBuffer->Dst);
+                    const RDGNode* src = tryResolveNode(bufferToBuffer->Src);
+                    if (dst == nullptr || !_IsBufferNode(dst) || src == nullptr || !_IsBufferNode(src)) {
+                        return fail(fmt::format("render graph validate failed: copy pass {} has invalid buffer-to-buffer record", formatNode(node.get())));
+                    }
+                    if (bufferToBuffer->Size == 0) {
+                        return fail(fmt::format("render graph validate failed: copy pass {} has zero-sized buffer copy", formatNode(node.get())));
+                    }
+                    if (bufferToBuffer->Dst == bufferToBuffer->Src &&
+                        bufferToBuffer->DstOffset < bufferToBuffer->SrcOffset + bufferToBuffer->Size &&
+                        bufferToBuffer->SrcOffset < bufferToBuffer->DstOffset + bufferToBuffer->Size) {
+                        return fail(fmt::format("render graph validate failed: copy pass {} copies overlapping ranges within the same buffer", formatNode(node.get())));
+                    }
+                } else if (const auto* bufferToTexture = std::get_if<RDGCopyBufferToTextureRecord>(&copyRecord)) {
+                    const RDGNode* dst = tryResolveNode(bufferToTexture->Dst);
+                    const RDGNode* src = tryResolveNode(bufferToTexture->Src);
+                    if (dst == nullptr || !_IsTextureNode(dst) || src == nullptr || !_IsBufferNode(src)) {
+                        return fail(fmt::format("render graph validate failed: copy pass {} has invalid buffer-to-texture record", formatNode(node.get())));
+                    }
+                } else if (const auto* textureToBuffer = std::get_if<RDGCopyTextureToBufferRecord>(&copyRecord)) {
+                    const RDGNode* dst = tryResolveNode(textureToBuffer->Dst);
+                    const RDGNode* src = tryResolveNode(textureToBuffer->Src);
+                    if (dst == nullptr || !_IsBufferNode(dst) || src == nullptr || !_IsTextureNode(src)) {
+                        return fail(fmt::format("render graph validate failed: copy pass {} has invalid texture-to-buffer record", formatNode(node.get())));
+                    }
+                }
+            }
+        }
+
+        for (size_t i = 0; i < passTextureEdges.size(); ++i) {
+            const auto* lhsResource = static_cast<const RDGTextureNode*>(_GetResourceNode(*passTextureEdges[i]));
+            std::optional<uint32_t> arrayCount{};
+            std::optional<uint32_t> mipCount{};
+            if (lhsResource->_ownership != RDGResourceOwnership::External &&
+                lhsResource->_depthOrArraySize > 0 &&
+                lhsResource->_mipLevels > 0) {
+                arrayCount = lhsResource->_depthOrArraySize;
+                mipCount = lhsResource->_mipLevels;
+            }
+            NormalizedTextureRange lhsRange{};
+            if (!_NormalizeTextureRange(passTextureEdges[i]->_textureRange, arrayCount, mipCount, &lhsRange)) {
+                return fail(fmt::format("render graph validate failed: {} has invalid texture range while checking layout consistency", formatNode(node.get())));
+            }
+            for (size_t j = i + 1; j < passTextureEdges.size(); ++j) {
+                const auto* rhsResource = static_cast<const RDGTextureNode*>(_GetResourceNode(*passTextureEdges[j]));
+                if (lhsResource->_id != rhsResource->_id) {
+                    continue;
+                }
+                NormalizedTextureRange rhsRange{};
+                if (!_NormalizeTextureRange(passTextureEdges[j]->_textureRange, arrayCount, mipCount, &rhsRange)) {
+                    return fail(fmt::format("render graph validate failed: {} has invalid texture range while checking layout consistency", formatNode(node.get())));
+                }
+                if (_TextureRangesOverlap(lhsRange, rhsRange) &&
+                    !_AreLayoutsCompatible(passTextureEdges[i]->_textureLayout, passTextureEdges[j]->_textureLayout)) {
+                    return fail(fmt::format("render graph validate failed: {} uses conflicting layouts on the same texture subresource", formatNode(node.get())));
+                }
+            }
+        }
+    }
+
+    for (const auto& [resourceId, usages] : usagesByResource) {
+        const auto* resourceNode = static_cast<const RDGResourceNode*>(_nodes[resourceId].get());
+        const auto passReachabilitySkippingResource = buildPassReachabilitySkippingNode(resourceId);
+        auto hasExternalPassOrder = [&](const RDGPassNode* before, const RDGPassNode* after) {
+            return passReachabilitySkippingResource[passIndexByNodeId[before->_id]][passIndexByNodeId[after->_id]] != 0;
+        };
+        auto usagesOverlap = [](const UsageRecord& lhs, const UsageRecord& rhs) {
+            return lhs.IsTexture
+                ? _TextureRangesOverlap(lhs.TextureRange, rhs.TextureRange)
+                : _BufferRangesOverlap(lhs.BufferRange, rhs.BufferRange);
+        };
+        auto overlappingWriteCountFor = [&](size_t usageIndex) {
+            size_t count = 0;
+            for (size_t writerIndex = 0; writerIndex < usages.size(); ++writerIndex) {
+                if (!usages[writerIndex].IsWrite) {
+                    continue;
+                }
+                if (!usagesOverlap(usages[usageIndex], usages[writerIndex])) {
+                    continue;
+                }
+                ++count;
+            }
+            return count;
+        };
+
+        for (size_t i = 0; i < usages.size(); ++i) {
+            const uint32_t lhsPassIndex = passIndexByNodeId[usages[i].Pass->_id];
+            if (!usages[i].IsWrite && resourceNode->_ownership != RDGResourceOwnership::External) {
+                bool hasWriter = false;
+                for (size_t writerIndex = 0; writerIndex < usages.size(); ++writerIndex) {
+                    if (!usages[writerIndex].IsWrite || usages[writerIndex].Pass->_id == usages[i].Pass->_id) {
+                        continue;
+                    }
+                    const bool overlap = usagesOverlap(usages[i], usages[writerIndex]);
+                    if (overlap && fullPassReachability[passIndexByNodeId[usages[writerIndex].Pass->_id]][lhsPassIndex]) {
+                        hasWriter = true;
+                        break;
+                    }
+                }
+                if (!hasWriter) {
+                    return fail(fmt::format("render graph validate failed: {} is read by {} without an earlier write source", formatNode(resourceNode), formatNode(usages[i].Pass)));
+                }
+            }
+        }
+
+        for (size_t i = 0; i < usages.size(); ++i) {
+            if (usages[i].IsWrite) {
+                continue;
+            }
+            for (size_t j = i + 1; j < usages.size(); ++j) {
+                if (!usages[j].IsWrite || usages[i].Pass->_id == usages[j].Pass->_id) {
+                    continue;
+                }
+                if (!usagesOverlap(usages[i], usages[j])) {
+                    continue;
+                }
+                const bool useExternalOrder = overlappingWriteCountFor(i) > 1;
+                const bool rhsBeforeLhs = useExternalOrder
+                    ? hasExternalPassOrder(usages[j].Pass, usages[i].Pass)
+                    : fullPassReachability[passIndexByNodeId[usages[j].Pass->_id]][passIndexByNodeId[usages[i].Pass->_id]] != 0;
+                if (!rhsBeforeLhs) {
+                    return fail(fmt::format("render graph validate failed: {} is overwritten by {} before read on {}", formatNode(resourceNode), formatNode(usages[j].Pass), formatNode(usages[i].Pass)));
+                }
+            }
+        }
+
+        for (size_t i = 0; i < usages.size(); ++i) {
+            const uint32_t lhsPassIndex = passIndexByNodeId[usages[i].Pass->_id];
+            for (size_t j = i + 1; j < usages.size(); ++j) {
+                if (usages[i].Pass->_id == usages[j].Pass->_id) {
+                    continue;
+                }
+                const bool overlap = usagesOverlap(usages[i], usages[j]);
+                if (!overlap || (!usages[i].IsWrite && !usages[j].IsWrite)) {
+                    continue;
+                }
+
+                const uint32_t rhsPassIndex = passIndexByNodeId[usages[j].Pass->_id];
+                if (usages[i].IsWrite && usages[j].IsWrite) {
+                    const bool lhsBeforeRhs = fullPassReachability[lhsPassIndex][rhsPassIndex] != 0;
+                    const bool rhsBeforeLhs = fullPassReachability[rhsPassIndex][lhsPassIndex] != 0;
+                    if (!lhsBeforeRhs && !rhsBeforeLhs) {
+                        return fail(fmt::format("render graph validate failed: {} has unordered overlapping writes from {} and {}", formatNode(resourceNode), formatNode(usages[i].Pass), formatNode(usages[j].Pass)));
+                    }
+                } else if (usages[i].IsWrite) {
+                    const bool useExternalOrder = overlappingWriteCountFor(j) > 1;
+                    const bool lhsBeforeRhs = useExternalOrder
+                        ? hasExternalPassOrder(usages[i].Pass, usages[j].Pass)
+                        : fullPassReachability[lhsPassIndex][rhsPassIndex] != 0;
+                    if (!lhsBeforeRhs) {
+                        return fail(fmt::format("render graph validate failed: {} is read by {} before write from {}", formatNode(resourceNode), formatNode(usages[j].Pass), formatNode(usages[i].Pass)));
+                    }
+                }
+            }
+        }
+    }
+
+    string warningMessage{};
+    for (const auto* passEdge : passEdges) {
+        const uint32_t beforeIndex = passIndexByNodeId[passEdge->_from->_id];
+        const uint32_t afterIndex = passIndexByNodeId[passEdge->_to->_id];
+        if (resourceOnlyPassReachability[afterIndex][beforeIndex]) {
+            return fail(fmt::format("render graph validate failed: pass dependency {} contradicts resource-derived order", formatEdge(passEdge)));
+        }
+        if (resourceOnlyPassReachability[beforeIndex][afterIndex]) {
+            if (!warningMessage.empty()) {
+                warningMessage += '\n';
+            }
+            warningMessage += fmt::format("render graph validate warning: pass dependency {} is redundant", formatEdge(passEdge));
+        }
+    }
+
+    return {true, std::move(warningMessage)};
 }
 
 RenderGraph::CompileResult RenderGraph::Compile() const {
