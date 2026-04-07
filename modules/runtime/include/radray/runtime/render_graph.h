@@ -60,6 +60,12 @@ enum class RDGNodeTag : uint32_t {
     CopyPass = Pass | (Pass << 3),
 };
 
+enum class RDGEdgeTag : uint32_t {
+    UNKNOWN = 0x0,
+    ResourceDependency = 0x1,
+    PassDependency = ResourceDependency << 1,
+};
+
 enum class RDGExecutionStage : uint32_t {
     NONE = 0x0,
     VertexInput = 0x1,
@@ -118,11 +124,17 @@ template <>
 struct is_compound_enum_flags<RDGNodeTag> : std::true_type {};
 
 template <>
+struct is_flags<RDGEdgeTag> : public std::true_type {};
+template <>
+struct is_compound_enum_flags<RDGEdgeTag> : std::true_type {};
+
+template <>
 struct is_flags<RDGExecutionStage> : public std::true_type {};
 template <>
 struct is_flags<RDGMemoryAccess> : public std::true_type {};
 
 using RDGNodeTags = EnumFlags<RDGNodeTag>;
+using RDGEdgeTags = EnumFlags<RDGEdgeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
@@ -316,22 +328,48 @@ class RDGEdge {
 public:
     RDGEdge(
         RDGNode* from,
-        RDGNode* to,
-        RDGExecutionStages stage,
-        RDGMemoryAccesses access) noexcept
+        RDGNode* to) noexcept
         : _from(from),
-          _to(to),
-          _stage(stage),
-          _access(access) {}
+          _to(to) {}
+
+    virtual ~RDGEdge() noexcept = default;
+
+    virtual RDGEdgeTags GetTag() const noexcept = 0;
 
 public:
     RDGNode* _from{nullptr};
     RDGNode* _to{nullptr};
+};
+
+class RDGResourceDependencyEdge final : public RDGEdge {
+public:
+    RDGResourceDependencyEdge(
+        RDGNode* from,
+        RDGNode* to,
+        RDGExecutionStages stage,
+        RDGMemoryAccesses access) noexcept
+        : RDGEdge(from, to),
+          _stage(stage),
+          _access(access) {}
+
+    RDGEdgeTags GetTag() const noexcept override { return RDGEdgeTag::ResourceDependency; }
+
+public:
     RDGExecutionStages _stage{RDGExecutionStage::NONE};
     RDGMemoryAccesses _access{RDGMemoryAccess::NONE};
     render::BufferRange _bufferRange;
     RDGTextureLayout _textureLayout{RDGTextureLayout::UNKNOWN};
     render::SubresourceRange _textureRange;
+};
+
+class RDGPassDependencyEdge final : public RDGEdge {
+public:
+    RDGPassDependencyEdge(
+        RDGNode* from,
+        RDGNode* to) noexcept
+        : RDGEdge(from, to) {}
+
+    RDGEdgeTags GetTag() const noexcept override { return RDGEdgeTag::PassDependency; }
 };
 
 class IRDGRasterPass {
@@ -453,7 +491,7 @@ public:
     // 图连接
     RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange);
     RDGEdge* Link(RDGNodeHandle from, RDGNodeHandle to, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange);
-    RDGEdge* CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStages stage, RDGMemoryAccesses access);
+    void AddPassDependency(RDGPassHandle before, RDGPassHandle after);
 
     ValidateResult Validate() const;
     CompileResult Compile() const;
@@ -469,6 +507,7 @@ public:
 };
 
 std::string_view format_as(RDGNodeTag v) noexcept;
+std::string_view format_as(RDGEdgeTag v) noexcept;
 std::string_view format_as(RDGExecutionStage v) noexcept;
 std::string_view format_as(RDGMemoryAccess v) noexcept;
 std::string_view format_as(RDGTextureLayout v) noexcept;

@@ -169,6 +169,45 @@ decltype(auto) VisitGraphvizNode(const RDGNode& node, Visitor&& visitor) {
     Unreachable();
 }
 
+template <>
+struct FormatGraphviz<RDGResourceDependencyEdge> {
+    static void AppendEdgeAttributes(fmt::memory_buffer& buffer, const RDGResourceDependencyEdge& edge) {
+        (void)buffer;
+        (void)edge;
+    }
+
+    static void AppendEdgeLabel(fmt::memory_buffer& buffer, const RDGResourceDependencyEdge& edge) {
+        fmt::format_to(std::back_inserter(buffer), "label=\"stage: {}\\naccess: {}\"", edge._stage, edge._access);
+    }
+};
+
+template <>
+struct FormatGraphviz<RDGPassDependencyEdge> {
+    static void AppendEdgeAttributes(fmt::memory_buffer& buffer, const RDGPassDependencyEdge& edge) {
+        (void)edge;
+        fmt::format_to(std::back_inserter(buffer), "style=dashed, ");
+    }
+
+    static void AppendEdgeLabel(fmt::memory_buffer& buffer, const RDGPassDependencyEdge& edge) {
+        (void)edge;
+        fmt::format_to(std::back_inserter(buffer), "label=\"kind: PassDependency\"");
+    }
+};
+
+template <typename Visitor>
+decltype(auto) VisitGraphvizEdge(const RDGEdge& edge, Visitor&& visitor) {
+    switch (static_cast<RDGEdgeTag>(edge.GetTag())) {
+        case RDGEdgeTag::ResourceDependency:
+            return visitor(static_cast<const RDGResourceDependencyEdge&>(edge));
+        case RDGEdgeTag::PassDependency:
+            return visitor(static_cast<const RDGPassDependencyEdge&>(edge));
+        case RDGEdgeTag::UNKNOWN:
+        default:
+            break;
+    }
+    Unreachable();
+}
+
 }  // namespace
 
 bool RDGColorAttachmentRecord::HasWriteAccess() const noexcept {
@@ -300,25 +339,43 @@ RDGPassHandle RenderGraph::AddCopyPass(std::string_view name) {
     return RDGPassHandle{raw->_id};
 }
 
+void RenderGraph::AddPassDependency(RDGPassHandle before, RDGPassHandle after) {
+    RADRAY_ASSERT(before.IsValid() && after.IsValid());
+    auto* from = Resolve(before);
+    auto* to = Resolve(after);
+    RADRAY_ASSERT(from->GetTag().HasFlag(RDGNodeTag::Pass));
+    RADRAY_ASSERT(to->GetTag().HasFlag(RDGNodeTag::Pass));
+    auto edge = make_unique<RDGPassDependencyEdge>(from, to);
+    auto* raw = edge.get();
+    _edges.emplace_back(std::move(edge));
+    from->_outEdges.emplace_back(raw);
+    to->_inEdges.emplace_back(raw);
+}
+
 RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange) {
     auto* from = _nodes[from_.Id].get();
     auto* to = _nodes[to_.Id].get();
-    auto* edge = this->CreateEdge(from, to, stage, access);
+    RADRAY_ASSERT(
+        (from->GetTag().HasFlag(RDGNodeTag::Pass) && to->GetTag().HasFlag(RDGNodeTag::Resource)) ||
+        (from->GetTag().HasFlag(RDGNodeTag::Resource) && to->GetTag().HasFlag(RDGNodeTag::Pass)));
+    auto edge = make_unique<RDGResourceDependencyEdge>(from, to, stage, access);
     edge->_bufferRange = bufferRange;
-    return edge;
+    auto* raw = edge.get();
+    _edges.emplace_back(std::move(edge));
+    from->_outEdges.emplace_back(raw);
+    to->_inEdges.emplace_back(raw);
+    return raw;
 }
 
 RDGEdge* RenderGraph::Link(RDGNodeHandle from_, RDGNodeHandle to_, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange) {
     auto* from = _nodes[from_.Id].get();
     auto* to = _nodes[to_.Id].get();
-    auto* edge = this->CreateEdge(from, to, stage, access);
+    RADRAY_ASSERT(
+        (from->GetTag().HasFlag(RDGNodeTag::Pass) && to->GetTag().HasFlag(RDGNodeTag::Resource)) ||
+        (from->GetTag().HasFlag(RDGNodeTag::Resource) && to->GetTag().HasFlag(RDGNodeTag::Pass)));
+    auto edge = make_unique<RDGResourceDependencyEdge>(from, to, stage, access);
     edge->_textureLayout = layout;
     edge->_textureRange = textureRange;
-    return edge;
-}
-
-RDGEdge* RenderGraph::CreateEdge(RDGNode* from, RDGNode* to, RDGExecutionStages stage, RDGMemoryAccesses access) {
-    auto edge = make_unique<RDGEdge>(from, to, stage, access);
     auto* raw = edge.get();
     _edges.emplace_back(std::move(edge));
     from->_outEdges.emplace_back(raw);
@@ -357,7 +414,16 @@ string RenderGraph::ExportGraphviz() const {
         fmt::format_to(out, "\\ntag: {}\"];\n", node->GetTag());
     }
     for (const auto& edge : _edges) {
-        fmt::format_to(out, "    n{} -> n{} [label=\"stage: {}\\naccess: {}\"];\n", edge->_from->_id, edge->_to->_id, edge->_stage, edge->_access);
+        fmt::format_to(out, "    n{} -> n{} [", edge->_from->_id, edge->_to->_id);
+        VisitGraphvizEdge(*edge, [&buffer](const auto& typedEdge) {
+            using EdgeType = std::remove_cvref_t<decltype(typedEdge)>;
+            FormatGraphviz<EdgeType>::AppendEdgeAttributes(buffer, typedEdge);
+        });
+        VisitGraphvizEdge(*edge, [&buffer](const auto& typedEdge) {
+            using EdgeType = std::remove_cvref_t<decltype(typedEdge)>;
+            FormatGraphviz<EdgeType>::AppendEdgeLabel(buffer, typedEdge);
+        });
+        fmt::format_to(out, "];\n");
     }
     for (const auto& node : _nodes) {
         VisitGraphvizNode(*node, [&buffer](const auto& typedNode) {
@@ -599,6 +665,15 @@ std::string_view format_as(RDGNodeTag v) noexcept {
         case RDGNodeTag::CopyPass: return "Copy";
         default: return "UNKNOWN";
     }
+}
+
+std::string_view format_as(RDGEdgeTag v) noexcept {
+    switch (v) {
+        case RDGEdgeTag::UNKNOWN: return "UNKNOWN";
+        case RDGEdgeTag::ResourceDependency: return "ResourceDependency";
+        case RDGEdgeTag::PassDependency: return "PassDependency";
+    }
+    Unreachable();
 }
 
 std::string_view format_as(RDGExecutionStage v) noexcept {
