@@ -251,7 +251,9 @@ bool _IsDefaultTextureRange(const render::SubresourceRange& range) noexcept {
            range.MipLevelCount == 0;
 }
 
-bool _IsReadAccessFlag(RDGMemoryAccess access) noexcept {
+}  // namespace
+
+bool IsReadAccessFlag(RDGMemoryAccess access) noexcept {
     switch (access) {
         case RDGMemoryAccess::VertexRead:
         case RDGMemoryAccess::IndexRead:
@@ -274,7 +276,7 @@ bool _IsReadAccessFlag(RDGMemoryAccess access) noexcept {
     Unreachable();
 }
 
-bool _IsWriteAccessFlag(RDGMemoryAccess access) noexcept {
+bool IsWriteAccessFlag(RDGMemoryAccess access) noexcept {
     switch (access) {
         case RDGMemoryAccess::ShaderWrite:
         case RDGMemoryAccess::ColorAttachmentWrite:
@@ -297,7 +299,7 @@ bool _IsWriteAccessFlag(RDGMemoryAccess access) noexcept {
     Unreachable();
 }
 
-bool _HasReadAccess(RDGMemoryAccesses access) noexcept {
+bool HasReadAccess(RDGMemoryAccesses access) noexcept {
     return access.HasFlag(RDGMemoryAccess::VertexRead) ||
            access.HasFlag(RDGMemoryAccess::IndexRead) ||
            access.HasFlag(RDGMemoryAccess::ConstantRead) ||
@@ -309,7 +311,7 @@ bool _HasReadAccess(RDGMemoryAccesses access) noexcept {
            access.HasFlag(RDGMemoryAccess::IndirectRead);
 }
 
-bool _HasWriteAccess(RDGMemoryAccesses access) noexcept {
+bool HasWriteAccess(RDGMemoryAccesses access) noexcept {
     return access.HasFlag(RDGMemoryAccess::ShaderWrite) ||
            access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) ||
            access.HasFlag(RDGMemoryAccess::DepthStencilWrite) ||
@@ -317,11 +319,11 @@ bool _HasWriteAccess(RDGMemoryAccesses access) noexcept {
            access.HasFlag(RDGMemoryAccess::HostWrite);
 }
 
-bool _IsReadOnlyAccess(RDGMemoryAccesses access) noexcept {
-    return _HasReadAccess(access) && !_HasWriteAccess(access);
+bool IsReadOnlyAccess(RDGMemoryAccesses access) noexcept {
+    return HasReadAccess(access) && !HasWriteAccess(access);
 }
 
-RDGMemoryAccesses _AllowedAccessesForStage(RDGExecutionStage stage) noexcept {
+RDGMemoryAccesses AllowedAccessesForStage(RDGExecutionStage stage) noexcept {
     switch (stage) {
         case RDGExecutionStage::NONE: return RDGMemoryAccess::NONE;
         case RDGExecutionStage::VertexInput: return RDGMemoryAccess::VertexRead | RDGMemoryAccess::IndexRead;
@@ -338,20 +340,87 @@ RDGMemoryAccesses _AllowedAccessesForStage(RDGExecutionStage stage) noexcept {
     Unreachable();
 }
 
-RDGMemoryAccesses _AllowedAccessesForStages(RDGExecutionStages stages) noexcept {
+RDGMemoryAccesses AllowedAccessesForStages(RDGExecutionStages stages) noexcept {
     RDGMemoryAccesses allowed{RDGMemoryAccess::NONE};
-    if (stages.HasFlag(RDGExecutionStage::VertexInput)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::VertexInput);
-    if (stages.HasFlag(RDGExecutionStage::VertexShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::VertexShader);
-    if (stages.HasFlag(RDGExecutionStage::PixelShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::PixelShader);
-    if (stages.HasFlag(RDGExecutionStage::DepthStencil)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::DepthStencil);
-    if (stages.HasFlag(RDGExecutionStage::ColorOutput)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::ColorOutput);
-    if (stages.HasFlag(RDGExecutionStage::Indirect)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Indirect);
-    if (stages.HasFlag(RDGExecutionStage::ComputeShader)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::ComputeShader);
-    if (stages.HasFlag(RDGExecutionStage::Copy)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Copy);
-    if (stages.HasFlag(RDGExecutionStage::Host)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Host);
-    if (stages.HasFlag(RDGExecutionStage::Present)) allowed |= _AllowedAccessesForStage(RDGExecutionStage::Present);
+    if (stages.HasFlag(RDGExecutionStage::VertexInput)) allowed |= AllowedAccessesForStage(RDGExecutionStage::VertexInput);
+    if (stages.HasFlag(RDGExecutionStage::VertexShader)) allowed |= AllowedAccessesForStage(RDGExecutionStage::VertexShader);
+    if (stages.HasFlag(RDGExecutionStage::PixelShader)) allowed |= AllowedAccessesForStage(RDGExecutionStage::PixelShader);
+    if (stages.HasFlag(RDGExecutionStage::DepthStencil)) allowed |= AllowedAccessesForStage(RDGExecutionStage::DepthStencil);
+    if (stages.HasFlag(RDGExecutionStage::ColorOutput)) allowed |= AllowedAccessesForStage(RDGExecutionStage::ColorOutput);
+    if (stages.HasFlag(RDGExecutionStage::Indirect)) allowed |= AllowedAccessesForStage(RDGExecutionStage::Indirect);
+    if (stages.HasFlag(RDGExecutionStage::ComputeShader)) allowed |= AllowedAccessesForStage(RDGExecutionStage::ComputeShader);
+    if (stages.HasFlag(RDGExecutionStage::Copy)) allowed |= AllowedAccessesForStage(RDGExecutionStage::Copy);
+    if (stages.HasFlag(RDGExecutionStage::Host)) allowed |= AllowedAccessesForStage(RDGExecutionStage::Host);
+    if (stages.HasFlag(RDGExecutionStage::Present)) allowed |= AllowedAccessesForStage(RDGExecutionStage::Present);
     return allowed;
 }
+
+bool AreLayoutsCompatible(RDGTextureLayout lhs, RDGTextureLayout rhs) noexcept {
+    return lhs == rhs || lhs == RDGTextureLayout::General || rhs == RDGTextureLayout::General;
+}
+
+bool IsTextureLayoutCompatibleWithAccess(RDGTextureLayout layout, RDGMemoryAccesses access) noexcept {
+    switch (layout) {
+        case RDGTextureLayout::UNKNOWN:
+        case RDGTextureLayout::Undefined:
+            return false;
+        case RDGTextureLayout::General:
+            return true;
+        case RDGTextureLayout::ShaderReadOnly:
+            return !HasWriteAccess(access) &&
+                   !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite);
+        case RDGTextureLayout::ColorAttachment:
+            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
+                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   (HasReadAccess(access) || HasWriteAccess(access)) &&
+                   !(access & ~(RDGMemoryAccess::ColorAttachmentRead | RDGMemoryAccess::ColorAttachmentWrite));
+        case RDGTextureLayout::DepthStencilReadOnly:
+            return access == RDGMemoryAccess::DepthStencilRead;
+        case RDGTextureLayout::DepthStencilAttachment:
+            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
+                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
+                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
+                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
+                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
+                   (HasReadAccess(access) || HasWriteAccess(access)) &&
+                   !(access & ~(RDGMemoryAccess::DepthStencilRead | RDGMemoryAccess::DepthStencilWrite));
+        case RDGTextureLayout::TransferSource:
+            return access == RDGMemoryAccess::TransferRead;
+        case RDGTextureLayout::TransferDestination:
+            return access == RDGMemoryAccess::TransferWrite;
+        case RDGTextureLayout::Present:
+            return !HasWriteAccess(access);
+    }
+    Unreachable();
+}
+
+namespace {
 
 const RDGResourceNode* _GetResourceNode(const RDGResourceDependencyEdge& edge) noexcept {
     if (_IsResourceNode(edge._from)) return static_cast<const RDGResourceNode*>(edge._from);
@@ -426,71 +495,6 @@ bool _TextureRangesOverlap(const NormalizedTextureRange& lhs, const NormalizedTe
     const bool mipOverlap = lhs.BaseMipLevel < rhs.BaseMipLevel + rhs.MipLevelCount &&
                             rhs.BaseMipLevel < lhs.BaseMipLevel + lhs.MipLevelCount;
     return layerOverlap && mipOverlap;
-}
-
-bool _AreLayoutsCompatible(RDGTextureLayout lhs, RDGTextureLayout rhs) noexcept {
-    return lhs == rhs || lhs == RDGTextureLayout::General || rhs == RDGTextureLayout::General;
-}
-
-bool _IsTextureLayoutCompatibleWithAccess(RDGTextureLayout layout, RDGMemoryAccesses access) noexcept {
-    switch (layout) {
-        case RDGTextureLayout::UNKNOWN:
-        case RDGTextureLayout::Undefined:
-            return false;
-        case RDGTextureLayout::General:
-            return true;
-        case RDGTextureLayout::ShaderReadOnly:
-            return !_HasWriteAccess(access) &&
-                   !access.HasFlag(RDGMemoryAccess::VertexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
-                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
-                   !access.HasFlag(RDGMemoryAccess::HostWrite);
-        case RDGTextureLayout::ColorAttachment:
-            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::DepthStencilRead) &&
-                   !access.HasFlag(RDGMemoryAccess::DepthStencilWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
-                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
-                   (_HasReadAccess(access) || _HasWriteAccess(access)) &&
-                   !(access & ~(RDGMemoryAccess::ColorAttachmentRead | RDGMemoryAccess::ColorAttachmentWrite));
-        case RDGTextureLayout::DepthStencilReadOnly:
-            return access == RDGMemoryAccess::DepthStencilRead;
-        case RDGTextureLayout::DepthStencilAttachment:
-            return !access.HasFlag(RDGMemoryAccess::VertexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::IndexRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ConstantRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ShaderRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ShaderWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentRead) &&
-                   !access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferRead) &&
-                   !access.HasFlag(RDGMemoryAccess::TransferWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::HostRead) &&
-                   !access.HasFlag(RDGMemoryAccess::HostWrite) &&
-                   !access.HasFlag(RDGMemoryAccess::IndirectRead) &&
-                   (_HasReadAccess(access) || _HasWriteAccess(access)) &&
-                   !(access & ~(RDGMemoryAccess::DepthStencilRead | RDGMemoryAccess::DepthStencilWrite));
-        case RDGTextureLayout::TransferSource:
-            return access == RDGMemoryAccess::TransferRead;
-        case RDGTextureLayout::TransferDestination:
-            return access == RDGMemoryAccess::TransferWrite;
-        case RDGTextureLayout::Present:
-            return !_HasWriteAccess(access);
-    }
-    Unreachable();
 }
 
 }  // namespace
@@ -787,11 +791,11 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 return fail(fmt::format("render graph validate failed: resource dependency edge {} cannot resolve typed endpoints", formatEdge(edge)));
             }
 
-            if (_IsReadOnlyAccess(resourceEdge->_access)) {
+            if (IsReadOnlyAccess(resourceEdge->_access)) {
                 if (!(edge->_from == resourceNode && edge->_to == passNode)) {
                     return fail(fmt::format("render graph validate failed: read-only edge {} must point Resource -> Pass", formatEdge(edge)));
                 }
-            } else if (_HasWriteAccess(resourceEdge->_access)) {
+            } else if (HasWriteAccess(resourceEdge->_access)) {
                 if (!(edge->_from == passNode && edge->_to == resourceNode)) {
                     return fail(fmt::format("render graph validate failed: write edge {} must point Pass -> Resource", formatEdge(edge)));
                 }
@@ -1017,7 +1021,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
     for (const auto& resourceEdge : resourceEdges) {
         const RDGResourceNode* resourceNode = _GetResourceNode(*resourceEdge);
         const RDGPassNode* passNode = _GetPassNode(*resourceEdge);
-        const RDGMemoryAccesses allowedAccess = _AllowedAccessesForStages(resourceEdge->_stage);
+        const RDGMemoryAccesses allowedAccess = AllowedAccessesForStages(resourceEdge->_stage);
         if (!allowedAccess.HasFlag(resourceEdge->_access)) {
             return fail(fmt::format(
                 "render graph validate failed: resource edge {} uses access {} incompatible with stage {}",
@@ -1029,7 +1033,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
         UsageRecord usage{};
         usage.Pass = passNode;
         usage.Edge = resourceEdge;
-        usage.IsWrite = _HasWriteAccess(resourceEdge->_access);
+        usage.IsWrite = HasWriteAccess(resourceEdge->_access);
         usage.IsTexture = _IsTextureNode(resourceNode);
 
         if (_IsBufferNode(resourceNode)) {
@@ -1054,7 +1058,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
             if (!_NormalizeTextureRange(resourceEdge->_textureRange, arrayCount, mipCount, &usage.TextureRange)) {
                 return fail(fmt::format("render graph validate failed: texture edge {} subresource range is invalid", formatEdge(resourceEdge)));
             }
-            if (!_IsTextureLayoutCompatibleWithAccess(resourceEdge->_textureLayout, resourceEdge->_access)) {
+            if (!IsTextureLayoutCompatibleWithAccess(resourceEdge->_textureLayout, resourceEdge->_access)) {
                 return fail(fmt::format(
                     "render graph validate failed: texture edge {} layout {} is incompatible with access {}",
                     formatEdge(resourceEdge),
@@ -1110,7 +1114,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 if (bufferNode->_importState->Stage == RDGExecutionStage::NONE || bufferNode->_importState->Access == RDGMemoryAccess::NONE) {
                     return fail(fmt::format("render graph validate failed: buffer import state on {} is incomplete", formatNode(node.get())));
                 }
-                if (!_AllowedAccessesForStages(bufferNode->_importState->Stage).HasFlag(bufferNode->_importState->Access)) {
+                if (!AllowedAccessesForStages(bufferNode->_importState->Stage).HasFlag(bufferNode->_importState->Access)) {
                     return fail(fmt::format("render graph validate failed: buffer import state on {} has incompatible stage/access", formatNode(node.get())));
                 }
             }
@@ -1118,7 +1122,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 if (bufferNode->_exportState->Stage == RDGExecutionStage::NONE || bufferNode->_exportState->Access == RDGMemoryAccess::NONE) {
                     return fail(fmt::format("render graph validate failed: buffer export state on {} is incomplete", formatNode(node.get())));
                 }
-                if (!_AllowedAccessesForStages(bufferNode->_exportState->Stage).HasFlag(bufferNode->_exportState->Access)) {
+                if (!AllowedAccessesForStages(bufferNode->_exportState->Stage).HasFlag(bufferNode->_exportState->Access)) {
                     return fail(fmt::format("render graph validate failed: buffer export state on {} has incompatible stage/access", formatNode(node.get())));
                 }
                 if (bufferNode->_ownership != RDGResourceOwnership::External && !resourceHasWriteSource[node->_id]) {
@@ -1163,10 +1167,10 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 if (textureNode->_importState->Layout == RDGTextureLayout::UNKNOWN) {
                     return fail(fmt::format("render graph validate failed: texture import state on {} has UNKNOWN layout", formatNode(node.get())));
                 }
-                if (!_AllowedAccessesForStages(textureNode->_importState->Stage).HasFlag(textureNode->_importState->Access)) {
+                if (!AllowedAccessesForStages(textureNode->_importState->Stage).HasFlag(textureNode->_importState->Access)) {
                     return fail(fmt::format("render graph validate failed: texture import state on {} has incompatible stage/access", formatNode(node.get())));
                 }
-                if (!_IsTextureLayoutCompatibleWithAccess(textureNode->_importState->Layout, textureNode->_importState->Access)) {
+                if (!IsTextureLayoutCompatibleWithAccess(textureNode->_importState->Layout, textureNode->_importState->Access)) {
                     return fail(fmt::format("render graph validate failed: texture import state on {} has incompatible layout/access", formatNode(node.get())));
                 }
             }
@@ -1177,10 +1181,10 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 if (textureNode->_exportState->Layout == RDGTextureLayout::UNKNOWN) {
                     return fail(fmt::format("render graph validate failed: texture export state on {} has UNKNOWN layout", formatNode(node.get())));
                 }
-                if (!_AllowedAccessesForStages(textureNode->_exportState->Stage).HasFlag(textureNode->_exportState->Access)) {
+                if (!AllowedAccessesForStages(textureNode->_exportState->Stage).HasFlag(textureNode->_exportState->Access)) {
                     return fail(fmt::format("render graph validate failed: texture export state on {} has incompatible stage/access", formatNode(node.get())));
                 }
-                if (!_IsTextureLayoutCompatibleWithAccess(textureNode->_exportState->Layout, textureNode->_exportState->Access)) {
+                if (!IsTextureLayoutCompatibleWithAccess(textureNode->_exportState->Layout, textureNode->_exportState->Access)) {
                     return fail(fmt::format("render graph validate failed: texture export state on {} has incompatible layout/access", formatNode(node.get())));
                 }
                 if (textureNode->_ownership != RDGResourceOwnership::External && !resourceHasWriteSource[node->_id]) {
@@ -1388,7 +1392,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                     return fail(fmt::format("render graph validate failed: {} has invalid texture range while checking layout consistency", formatNode(node.get())));
                 }
                 if (_TextureRangesOverlap(lhsRange, rhsRange) &&
-                    !_AreLayoutsCompatible(passTextureEdges[i]->_textureLayout, passTextureEdges[j]->_textureLayout)) {
+                    !AreLayoutsCompatible(passTextureEdges[i]->_textureLayout, passTextureEdges[j]->_textureLayout)) {
                     return fail(fmt::format("render graph validate failed: {} uses conflicting layouts on the same texture subresource", formatNode(node.get())));
                 }
             }
@@ -1403,8 +1407,8 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
         };
         auto usagesOverlap = [](const UsageRecord& lhs, const UsageRecord& rhs) {
             return lhs.IsTexture
-                ? _TextureRangesOverlap(lhs.TextureRange, rhs.TextureRange)
-                : _BufferRangesOverlap(lhs.BufferRange, rhs.BufferRange);
+                       ? _TextureRangesOverlap(lhs.TextureRange, rhs.TextureRange)
+                       : _BufferRangesOverlap(lhs.BufferRange, rhs.BufferRange);
         };
         auto overlappingWriteCountFor = [&](size_t usageIndex) {
             size_t count = 0;
@@ -1453,8 +1457,8 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 }
                 const bool useExternalOrder = overlappingWriteCountFor(i) > 1;
                 const bool rhsBeforeLhs = useExternalOrder
-                    ? hasExternalPassOrder(usages[j].Pass, usages[i].Pass)
-                    : fullPassReachability[passIndexByNodeId[usages[j].Pass->_id]][passIndexByNodeId[usages[i].Pass->_id]] != 0;
+                                              ? hasExternalPassOrder(usages[j].Pass, usages[i].Pass)
+                                              : fullPassReachability[passIndexByNodeId[usages[j].Pass->_id]][passIndexByNodeId[usages[i].Pass->_id]] != 0;
                 if (!rhsBeforeLhs) {
                     return fail(fmt::format("render graph validate failed: {} is overwritten by {} before read on {}", formatNode(resourceNode), formatNode(usages[j].Pass), formatNode(usages[i].Pass)));
                 }
@@ -1482,8 +1486,8 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                 } else if (usages[i].IsWrite) {
                     const bool useExternalOrder = overlappingWriteCountFor(j) > 1;
                     const bool lhsBeforeRhs = useExternalOrder
-                        ? hasExternalPassOrder(usages[i].Pass, usages[j].Pass)
-                        : fullPassReachability[lhsPassIndex][rhsPassIndex] != 0;
+                                                  ? hasExternalPassOrder(usages[i].Pass, usages[j].Pass)
+                                                  : fullPassReachability[lhsPassIndex][rhsPassIndex] != 0;
                     if (!lhsBeforeRhs) {
                         return fail(fmt::format("render graph validate failed: {} is read by {} before write from {}", formatNode(resourceNode), formatNode(usages[j].Pass), formatNode(usages[i].Pass)));
                     }

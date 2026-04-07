@@ -138,6 +138,16 @@ using RDGEdgeTags = EnumFlags<RDGEdgeTag>;
 using RDGExecutionStages = EnumFlags<RDGExecutionStage>;
 using RDGMemoryAccesses = EnumFlags<RDGMemoryAccess>;
 
+bool IsReadAccessFlag(RDGMemoryAccess access) noexcept;
+bool IsWriteAccessFlag(RDGMemoryAccess access) noexcept;
+bool HasReadAccess(RDGMemoryAccesses access) noexcept;
+bool HasWriteAccess(RDGMemoryAccesses access) noexcept;
+bool IsReadOnlyAccess(RDGMemoryAccesses access) noexcept;
+RDGMemoryAccesses AllowedAccessesForStage(RDGExecutionStage stage) noexcept;
+RDGMemoryAccesses AllowedAccessesForStages(RDGExecutionStages stages) noexcept;
+bool AreLayoutsCompatible(RDGTextureLayout lhs, RDGTextureLayout rhs) noexcept;
+bool IsTextureLayoutCompatibleWithAccess(RDGTextureLayout layout, RDGMemoryAccesses access) noexcept;
+
 struct RDGBufferState {
     RDGExecutionStages Stage{RDGExecutionStage::NONE};
     RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
