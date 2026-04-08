@@ -351,4 +351,21 @@ TEST(RenderGraphTest, ExportGraphvizHandlesComplexMixedPassGraph) {
     auto c = graph.Compile();
 }
 
+TEST(RenderGraphTest, CompileSkipsIsolatedPassesAndResources) {
+    RenderGraph graph{};
+    const auto allBuffer = BufferRange::AllRange();
+
+    const auto input = graph.AddBuffer(64, MemoryType::Device, BufferUse::CopySource, "input");
+    const auto output = graph.AddBuffer(64, MemoryType::Device, BufferUse::CopyDestination, "output");
+    graph.AddBuffer(16, MemoryType::Device, BufferUse::Common, "unused");
+
+    const auto copyPass = graph.AddCopyPass("copy");
+    graph.Link(input, copyPass, RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, allBuffer);
+    graph.Link(copyPass, output, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer);
+
+    graph.AddCopyPass("isolated-pass");
+
+    auto c = graph.Compile();
+}
+
 }  // namespace

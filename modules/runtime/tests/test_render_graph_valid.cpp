@@ -552,17 +552,16 @@ TEST(RenderGraphValidateTest, Requirement_5_2_PassMustBeReachableFromRootResourc
     ExpectValidateFailContains(graph, "is not reachable from any import/root resource");
 }
 
-TEST(RenderGraphValidateTest, Requirement_5_3_PassMustHaveResourceDependency) {
-    auto graphData = MakeValidBufferCopyGraph();
-    const auto emptyPass = graphData.Graph.AddCopyPass("empty-pass");
-    graphData.Graph.AddPassDependency(graphData.Pass, emptyPass);
-    ExpectValidateFailContains(graphData.Graph, "has no resource dependency edge");
+TEST(RenderGraphValidateTest, Requirement_5_3_IsolatedPassIsAllowed) {
+    RenderGraph graph{};
+    graph.AddCopyPass("isolated-pass");
+    ExpectValidateOk(graph);
 }
 
-TEST(RenderGraphValidateTest, Requirement_5_4_ResourceMustBeReferencedByPass) {
-    auto graphData = MakeValidBufferCopyGraph();
-    graphData.Graph.AddBuffer(16, MemoryType::Device, BufferUse::Common, "unused-buffer");
-    ExpectValidateFailContains(graphData.Graph, "is not referenced by any pass");
+TEST(RenderGraphValidateTest, Requirement_5_4_IsolatedResourceIsAllowed) {
+    RenderGraph graph{};
+    graph.AddBuffer(16, MemoryType::Device, BufferUse::Common, "unused-buffer");
+    ExpectValidateOk(graph);
 }
 
 TEST(RenderGraphValidateTest, Requirement_6_1_1_ResourceOwnershipMustNotBeUnknown) {

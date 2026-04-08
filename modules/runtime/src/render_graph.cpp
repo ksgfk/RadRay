@@ -955,22 +955,8 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
         }
     }
     for (const auto& node : _nodes) {
-        if (_IsPassNode(node.get()) && !reachable[node->_id]) {
+        if (_IsPassNode(node.get()) && resourceDependencyEdgeCount[node->_id] > 0 && !reachable[node->_id]) {
             return fail(fmt::format("render graph validate failed: {} is not reachable from any import/root resource", formatNode(node.get())));
-        }
-        if (_IsPassNode(node.get()) && resourceDependencyEdgeCount[node->_id] == 0) {
-            return fail(fmt::format("render graph validate failed: {} has no resource dependency edge", formatNode(node.get())));
-        }
-        if (_IsResourceNode(node.get()) && resourceDependencyEdgeCount[node->_id] == 0) {
-            if (_IsTextureNode(node.get())) {
-                const auto* textureNode = static_cast<const RDGTextureNode*>(node.get());
-                if (textureNode->_importState.has_value() &&
-                    textureNode->_exportState.has_value() &&
-                    textureNode->_importState->Layout != textureNode->_exportState->Layout) {
-                    return fail(fmt::format("render graph validate failed: imported/exported texture {} changes layout without any pass usage", formatNode(node.get())));
-                }
-            }
-            return fail(fmt::format("render graph validate failed: {} is not referenced by any pass", formatNode(node.get())));
         }
     }
 
@@ -1245,6 +1231,9 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
 
     for (const auto& node : _nodes) {
         if (!_IsPassNode(node.get())) {
+            continue;
+        }
+        if (resourceDependencyEdgeCount[node->_id] == 0) {
             continue;
         }
         if (passWriteEdgeCount[node->_id] == 0) {
@@ -1550,9 +1539,15 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
 }
 
 RenderGraph::CompileResult RenderGraph::Compile() const {
+    auto getResourceNode = [](const RDGResourceDependencyEdge& edge) -> const RDGResourceNode& {
+        const auto* resourceNode = _GetResourceNode(edge);
+        RADRAY_ASSERT(resourceNode != nullptr);
+        return *resourceNode;
+    };
+
+    // 阶段 1: 对整图做拓扑排序
     vector<RDGNode*> topo{};
     {
-        // 对整图 Kahn's algorithm 拓扑排序
         vector<uint32_t> indegree(_nodes.size(), 0);
         vector<vector<uint64_t>> adjacency(_nodes.size());
         for (const auto& edge : _edges) {
@@ -1578,17 +1573,37 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
             }
         }
     }
+    // 阶段 2: 从拓扑序中过滤出实际参与资源依赖的 Pass 执行序列
     vector<RDGPassNode*> passes{};
     {
         for (RDGNode* node : topo) {
-            if (_IsPassNode(node)) {
-                passes.emplace_back(static_cast<RDGPassNode*>(node));
+            if (!_IsPassNode(node)) {
+                continue;
+            }
+            auto* pass = static_cast<RDGPassNode*>(node);
+            bool hasResourceDependency = false;
+            for (RDGEdge* edge : pass->_inEdges) {
+                if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    hasResourceDependency = true;
+                    break;
+                }
+            }
+            if (!hasResourceDependency) {
+                for (RDGEdge* edge : pass->_outEdges) {
+                    if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                        hasResourceDependency = true;
+                        break;
+                    }
+                }
+            }
+            if (hasResourceDependency) {
+                passes.emplace_back(pass);
             }
         }
     }
+    // 阶段 3: 追踪资源状态并计算 Pass 前置 Barrier
     vector<CompileResult::BarrierBatch> passPreBarriers{};
     {
-        // 追踪资源状态, 计算 Barrier
         using BufferBarrier = CompileResult::BufferBarrier;
         using TextureBarrier = CompileResult::TextureBarrier;
         using BarrierBatch = CompileResult::BarrierBatch;
@@ -1718,8 +1733,7 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
         for (uint32_t passIndex = 0; passIndex < passes.size(); passIndex++) {
             auto& batch = passPreBarriers[passIndex];
             auto processResourceEdge = [&](const RDGResourceDependencyEdge* resourceEdge) {
-                const auto* resourceNode = _GetResourceNode(*resourceEdge);
-                VisitResource(*resourceNode, [&](const auto& typedResourceNode) {
+                VisitResource(getResourceNode(*resourceEdge), [&](const auto& typedResourceNode) {
                     using ResourceNodeType = std::remove_cvref_t<decltype(typedResourceNode)>;
                     if constexpr (std::is_same_v<ResourceNodeType, RDGBufferNode>) {
                         auto& tracker = bufferTrackers[typedResourceNode._id];
@@ -1860,22 +1874,61 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
                     }
                 });
             };
-
             for (RDGEdge* edge : passes[passIndex]->_inEdges) {
-                if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
-                    continue;
+                if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
                 }
-                processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
             }
             for (RDGEdge* edge : passes[passIndex]->_outEdges) {
-                if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
-                    continue;
+                if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
                 }
-                processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
             }
         }
-
-        (void)passPreBarriers;
+    }
+    // 阶段 4: 分析 Internal / Transient 资源生命周期
+    vector<CompileResult::ResourceLifetime> lifetimes{};
+    {
+        vector<std::optional<uint32_t>> firstUsePassIndices(_nodes.size());
+        vector<uint32_t> lastUsePassIndices(_nodes.size(), 0);
+        for (uint32_t passIndex = 0; passIndex < passes.size(); ++passIndex) {
+            auto markResourceLifetime = [&](const RDGResourceDependencyEdge* resourceEdge) {
+                const auto& resourceNode = getResourceNode(*resourceEdge);
+                if (resourceNode._ownership != RDGResourceOwnership::Internal && resourceNode._ownership != RDGResourceOwnership::Transient) {
+                    return;
+                }
+                auto& firstUsePassIndex = firstUsePassIndices[resourceNode._id];
+                if (!firstUsePassIndex.has_value()) {
+                    firstUsePassIndex = passIndex;
+                }
+                lastUsePassIndices[resourceNode._id] = passIndex;
+            };
+            for (RDGEdge* edge : passes[passIndex]->_inEdges) {
+                if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    markResourceLifetime(static_cast<const RDGResourceDependencyEdge*>(edge));
+                }
+            }
+            for (RDGEdge* edge : passes[passIndex]->_outEdges) {
+                if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    markResourceLifetime(static_cast<const RDGResourceDependencyEdge*>(edge));
+                }
+            }
+        }
+        lifetimes.reserve(_nodes.size());
+        for (const auto& node : _nodes) {
+            if (!_IsResourceNode(node.get())) {
+                continue;
+            }
+            const auto* resourceNode = static_cast<const RDGResourceNode*>(node.get());
+            if (resourceNode->_ownership != RDGResourceOwnership::Internal && resourceNode->_ownership != RDGResourceOwnership::Transient) {
+                continue;
+            }
+            const auto& firstUsePassIndex = firstUsePassIndices[resourceNode->_id];
+            if (!firstUsePassIndex.has_value()) {
+                continue;
+            }
+            lifetimes.emplace_back(CompileResult::ResourceLifetime{RDGResourceHandle{resourceNode->_id}, *firstUsePassIndex, lastUsePassIndices[resourceNode->_id]});
+        }
     }
 
     return {};

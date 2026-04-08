@@ -497,6 +497,12 @@ public:
             vector<TextureBarrier> TextureBarriers{};
         };
 
+        struct ResourceLifetime {
+            RDGResourceHandle Resource{};
+            uint32_t FirstPassIndex{0};
+            uint32_t LastPassIndex{0};
+        };
+
         string ExportCompiledGraphviz() const;
         string ExportExecutionGraphviz() const;
     };
@@ -528,6 +534,7 @@ public:
     void AddPassDependency(RDGPassHandle before, RDGPassHandle after);
 
     ValidateResult Validate() const;
+    // 隐含图一定能通过Validate的假设, 否则是未定义行为
     CompileResult Compile() const;
     string ExportGraphviz() const;
 
@@ -596,9 +603,9 @@ std::string_view format_as(RDGResourceOwnership v) noexcept;
 | # | 检查项 | 说明 |
 |---|---|---|
 | 5.1 | **无环（DAG）** | 整图（包含两种边）不能存在有向环。拓扑排序检测 |
-| 5.2 | **Pass 可达性** | 从 Import 资源（或无入边的资源）出发，图中所有 Pass 都应可达 |
-| 5.3 | **无孤立 Pass** | 每个 Pass 至少有一条 `ResourceDependencyEdge`（入或出）；纯 `PassDependencyEdge` 连接但没有任何资源交互的 Pass 无法执行有意义的工作 |
-| 5.4 | **无孤立 Resource** | 每个 Resource 至少有一条 `ResourceDependencyEdge`（被至少一个 Pass 引用） |
+| 5.2 | **参与资源依赖的 Pass 可达** | 从 Import 资源（或无入边的资源）出发，所有存在 `ResourceDependencyEdge` 的 Pass 都应可达；纯孤立 Pass 留给 Compile 阶段裁剪 |
+| 5.3 | **允许孤立 Pass** | 没有任何 `ResourceDependencyEdge` 的 Pass 允许存在；它们不参与合法性上的执行校验，留给 Compile 阶段裁剪 |
+| 5.4 | **允许孤立 Resource** | 没有任何 `ResourceDependencyEdge` 的 Resource 允许存在；未被引用的资源留给 Compile 阶段裁剪 |
 
 ## 6. Resource 节点校验
 
@@ -632,7 +639,7 @@ std::string_view format_as(RDGResourceOwnership v) noexcept;
 ### 7.1 通用
 | # | 检查项 | 说明 |
 |---|---|---|
-| 7.1.1 | **Pass 至少有一个写输出** | 每个 Pass 至少有一条出边（`ResourceDependencyEdge` 方向 Pass→Resource，含写 Access），否则 Pass 无副作用 |
+| 7.1.1 | **参与资源依赖的 Pass 至少有一个写输出** | 对存在 `ResourceDependencyEdge` 的 Pass，至少有一条出边（`ResourceDependencyEdge` 方向 Pass→Resource，含写 Access），否则 Pass 无副作用 |
 
 ### 7.2 GraphicsPass
 | # | 检查项 | 说明 |
