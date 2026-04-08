@@ -347,6 +347,8 @@ TEST(RenderGraphTest, ExportGraphvizHandlesComplexMixedPassGraph) {
     ExpectContains(dot, "stage: [ColorOutput]\\naccess: [ColorAttachmentWrite]");
     ExpectContains(dot, "stage: [DepthStencil]\\naccess: [DepthStencilWrite]");
     ExpectContains(dot, "stage: [ComputeShader]\\naccess: [ShaderRead | ShaderWrite]");
+
+    auto c = graph.Compile();
 }
 
 }  // namespace

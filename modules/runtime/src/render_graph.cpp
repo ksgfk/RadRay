@@ -210,6 +210,25 @@ decltype(auto) VisitGraphvizEdge(const RDGEdge& edge, Visitor&& visitor) {
     Unreachable();
 }
 
+template <typename Visitor>
+decltype(auto) VisitResource(const RDGResourceNode& node, Visitor&& visitor) {
+    switch (static_cast<RDGNodeTag>(node.GetTag())) {
+        case RDGNodeTag::Buffer:
+            return visitor(static_cast<const RDGBufferNode&>(node));
+        case RDGNodeTag::Texture:
+            return visitor(static_cast<const RDGTextureNode&>(node));
+        case RDGNodeTag::UNKNOWN:
+        case RDGNodeTag::Resource:
+        case RDGNodeTag::Pass:
+        case RDGNodeTag::GraphicsPass:
+        case RDGNodeTag::ComputePass:
+        case RDGNodeTag::CopyPass:
+        default:
+            break;
+    }
+    Unreachable();
+}
+
 struct NormalizedBufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
@@ -565,6 +584,12 @@ RDGTextureHandle RenderGraph::AddTexture(
 RDGBufferHandle RenderGraph::ImportBuffer(GpuBufferHandle buffer, RDGExecutionStages stage, RDGMemoryAccesses access, render::BufferRange bufferRange, std::string_view name) {
     const uint64_t id = _nodes.size();
     auto node = make_unique<RDGBufferNode>(id, name, RDGResourceOwnership::External);
+    auto* importedBuffer = static_cast<render::Buffer*>(buffer.NativeHandle);
+    RADRAY_ASSERT(importedBuffer != nullptr);
+    const render::BufferDescriptor desc = importedBuffer->GetDesc();
+    node->_size = desc.Size;
+    node->_memory = desc.Memory;
+    node->_usage = desc.Usage;
     node->_importBuffer = buffer;
     node->_importState = RDGBufferState{stage, access, bufferRange};
     auto raw = node.get();
@@ -575,6 +600,18 @@ RDGBufferHandle RenderGraph::ImportBuffer(GpuBufferHandle buffer, RDGExecutionSt
 RDGTextureHandle RenderGraph::ImportTexture(GpuTextureHandle texture, RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout, render::SubresourceRange textureRange, std::string_view name) {
     const uint64_t id = _nodes.size();
     auto node = make_unique<RDGTextureNode>(id, name, RDGResourceOwnership::External);
+    auto* importedTexture = static_cast<render::Texture*>(texture.NativeHandle);
+    RADRAY_ASSERT(importedTexture != nullptr);
+    const render::TextureDescriptor desc = importedTexture->GetDesc();
+    node->_dim = desc.Dim;
+    node->_width = desc.Width;
+    node->_height = desc.Height;
+    node->_depthOrArraySize = desc.DepthOrArraySize;
+    node->_mipLevels = desc.MipLevels;
+    node->_sampleCount = desc.SampleCount;
+    node->_format = desc.Format;
+    node->_memory = desc.Memory;
+    node->_usage = desc.Usage;
     node->_importTexture = texture;
     node->_importState = RDGTextureState{stage, access, layout, textureRange};
     auto raw = node.get();
@@ -1039,7 +1076,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
         if (_IsBufferNode(resourceNode)) {
             const auto* bufferNode = static_cast<const RDGBufferNode*>(resourceNode);
             std::optional<uint64_t> totalSize{};
-            if (bufferNode->_ownership != RDGResourceOwnership::External && bufferNode->_size > 0) {
+            if (bufferNode->_size > 0) {
                 totalSize = bufferNode->_size;
             }
             if (!_NormalizeBufferRange(resourceEdge->_bufferRange, totalSize, &usage.BufferRange)) {
@@ -1049,8 +1086,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
             const auto* textureNode = static_cast<const RDGTextureNode*>(resourceNode);
             std::optional<uint32_t> arrayCount{};
             std::optional<uint32_t> mipCount{};
-            if (textureNode->_ownership != RDGResourceOwnership::External &&
-                textureNode->_depthOrArraySize > 0 &&
+            if (textureNode->_depthOrArraySize > 0 &&
                 textureNode->_mipLevels > 0) {
                 arrayCount = textureNode->_depthOrArraySize;
                 mipCount = textureNode->_mipLevels;
@@ -1372,8 +1408,7 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
             const auto* lhsResource = static_cast<const RDGTextureNode*>(_GetResourceNode(*passTextureEdges[i]));
             std::optional<uint32_t> arrayCount{};
             std::optional<uint32_t> mipCount{};
-            if (lhsResource->_ownership != RDGResourceOwnership::External &&
-                lhsResource->_depthOrArraySize > 0 &&
+            if (lhsResource->_depthOrArraySize > 0 &&
                 lhsResource->_mipLevels > 0) {
                 arrayCount = lhsResource->_depthOrArraySize;
                 mipCount = lhsResource->_mipLevels;
@@ -1515,7 +1550,334 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
 }
 
 RenderGraph::CompileResult RenderGraph::Compile() const {
-    // TODO:
+    vector<RDGNode*> topo{};
+    {
+        // 对整图 Kahn's algorithm 拓扑排序
+        vector<uint32_t> indegree(_nodes.size(), 0);
+        vector<vector<uint64_t>> adjacency(_nodes.size());
+        for (const auto& edge : _edges) {
+            adjacency[edge->_from->_id].emplace_back(edge->_to->_id);
+            ++indegree[edge->_to->_id];
+        }
+        topo.reserve(_nodes.size());
+        vector<uint64_t> ready{};
+        ready.reserve(_nodes.size());
+        for (uint64_t nodeId = 0; nodeId < _nodes.size(); nodeId++) {
+            if (indegree[nodeId] == 0) {
+                ready.emplace_back(nodeId);
+            }
+        }
+        for (size_t cursor = 0; cursor < ready.size(); cursor++) {
+            uint64_t nodeId = ready[cursor];
+            topo.emplace_back(_nodes[nodeId].get());
+            for (uint64_t next : adjacency[nodeId]) {
+                --indegree[next];
+                if (indegree[next] == 0) {
+                    ready.emplace_back(next);
+                }
+            }
+        }
+    }
+    vector<RDGPassNode*> passes{};
+    {
+        for (RDGNode* node : topo) {
+            if (_IsPassNode(node)) {
+                passes.emplace_back(static_cast<RDGPassNode*>(node));
+            }
+        }
+    }
+    vector<CompileResult::BarrierBatch> passPreBarriers{};
+    {
+        // 追踪资源状态, 计算 Barrier
+        using BufferBarrier = CompileResult::BufferBarrier;
+        using TextureBarrier = CompileResult::TextureBarrier;
+        using BarrierBatch = CompileResult::BarrierBatch;
+
+        struct BufferStateValue {
+            RDGExecutionStages Stage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
+        };
+
+        struct BufferStateSlice {
+            render::BufferRange Range{};
+            NormalizedBufferRange NormalizedRange{};
+            BufferStateValue State{};
+        };
+
+        struct BufferTracker {
+            // Buffer 以“默认整资源状态 + 局部覆盖切片”表示，避免为全资源访问维护稠密表。
+            BufferStateValue DefaultState{};
+            vector<BufferStateSlice> Slices{};
+        };
+
+        struct TextureStateValue {
+            RDGExecutionStages Stage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
+            RDGTextureLayout Layout{RDGTextureLayout::Undefined};
+        };
+
+        struct TextureTracker {
+            bool UsePerSubresource{false};
+            uint32_t ArrayCount{0};
+            uint32_t MipCount{0};
+            TextureStateValue WholeState{};
+            // Texture 只在已知 array/mip 规模时做逐 subresource 跟踪，否则退化为整资源状态。
+            vector<TextureStateValue> Cells{};
+        };
+
+        auto isSameBufferState = [](const BufferStateValue& lhs, const BufferStateValue& rhs) noexcept {
+            return lhs.Stage == rhs.Stage && lhs.Access == rhs.Access;
+        };
+        auto isSameTextureState = [](const TextureStateValue& lhs, const TextureStateValue& rhs) noexcept {
+            return lhs.Stage == rhs.Stage && lhs.Access == rhs.Access && lhs.Layout == rhs.Layout;
+        };
+        auto makeBufferState = [](RDGExecutionStages stage, RDGMemoryAccesses access) noexcept {
+            return BufferStateValue{stage, access};
+        };
+        auto makeTextureState = [](RDGExecutionStages stage, RDGMemoryAccesses access, RDGTextureLayout layout) noexcept {
+            return TextureStateValue{stage, access, layout};
+        };
+        auto getBufferTotalSize = [](const RDGBufferNode* bufferNode) -> std::optional<uint64_t> {
+            if (bufferNode->_size == 0) {
+                return {};
+            }
+            return bufferNode->_size;
+        };
+        auto normalizeBufferRange = [&](const RDGBufferNode* bufferNode, const render::BufferRange& range) {
+            NormalizedBufferRange normalized{};
+            (void)_NormalizeBufferRange(range, getBufferTotalSize(bufferNode), &normalized);
+            return normalized;
+        };
+        auto normalizeTextureRange = [&](const RDGTextureNode* textureNode, const render::SubresourceRange& range) {
+            std::optional<uint32_t> arrayCount{};
+            std::optional<uint32_t> mipCount{};
+            if (textureNode->_depthOrArraySize > 0 && textureNode->_mipLevels > 0) {
+                arrayCount = textureNode->_depthOrArraySize;
+                mipCount = textureNode->_mipLevels;
+            }
+            NormalizedTextureRange normalized{};
+            (void)_NormalizeTextureRange(range, arrayCount, mipCount, &normalized);
+            return normalized;
+        };
+
+        passPreBarriers.resize(passes.size());
+
+        vector<BufferTracker> bufferTrackers(_nodes.size());
+        vector<TextureTracker> textureTrackers(_nodes.size());
+
+        auto appendBufferBarrier = [&](BarrierBatch& batch, RDGBufferHandle buffer, const BufferStateValue& srcState, const BufferStateValue& dstState, render::BufferRange range) {
+            batch.BufferBarriers.emplace_back(BufferBarrier{buffer, srcState.Stage, srcState.Access, dstState.Stage, dstState.Access, range});
+        };
+        auto appendTextureBarrier = [&](BarrierBatch& batch, RDGTextureHandle texture, const TextureStateValue& srcState, const TextureStateValue& dstState, render::SubresourceRange range) {
+            batch.TextureBarriers.emplace_back(TextureBarrier{texture, srcState.Stage, srcState.Access, srcState.Layout, dstState.Stage, dstState.Access, dstState.Layout, range});
+        };
+
+        // 用 import state 初始化当前状态表，后续 barrier 都相对这份“编译时已知状态”推进。
+        for (const auto& node : _nodes) {
+            if (!_IsResourceNode(node.get())) {
+                continue;
+            }
+            VisitResource(*static_cast<const RDGResourceNode*>(node.get()), [&](const auto& resourceNode) {
+                using ResourceNodeType = std::remove_cvref_t<decltype(resourceNode)>;
+                if constexpr (std::is_same_v<ResourceNodeType, RDGBufferNode>) {
+                    auto& tracker = bufferTrackers[resourceNode._id];
+                    if (resourceNode._ownership == RDGResourceOwnership::External) {
+                        const BufferStateValue importState = makeBufferState(resourceNode._importState->Stage, resourceNode._importState->Access);
+                        const auto normalizedImportRange = normalizeBufferRange(&resourceNode, resourceNode._importState->Range);
+                        if (normalizedImportRange.IsWholeResource) {
+                            tracker.DefaultState = importState;
+                        } else {
+                            tracker.Slices.emplace_back(BufferStateSlice{resourceNode._importState->Range, normalizedImportRange, importState});
+                        }
+                    }
+                } else if constexpr (std::is_same_v<ResourceNodeType, RDGTextureNode>) {
+                    auto& tracker = textureTrackers[resourceNode._id];
+                    if (resourceNode._depthOrArraySize > 0 && resourceNode._mipLevels > 0) {
+                        tracker.UsePerSubresource = true;
+                        tracker.ArrayCount = resourceNode._depthOrArraySize;
+                        tracker.MipCount = resourceNode._mipLevels;
+                        tracker.Cells.resize(size_t{tracker.ArrayCount} * size_t{tracker.MipCount}, tracker.WholeState);
+                    }
+                    if (resourceNode._ownership == RDGResourceOwnership::External) {
+                        const TextureStateValue importState = makeTextureState(resourceNode._importState->Stage, resourceNode._importState->Access, resourceNode._importState->Layout);
+                        if (tracker.UsePerSubresource) {
+                            const auto normalizedImportRange = normalizeTextureRange(&resourceNode, resourceNode._importState->Range);
+                            for (uint32_t layer = normalizedImportRange.BaseArrayLayer; layer < normalizedImportRange.BaseArrayLayer + normalizedImportRange.ArrayLayerCount; ++layer) {
+                                for (uint32_t mip = normalizedImportRange.BaseMipLevel; mip < normalizedImportRange.BaseMipLevel + normalizedImportRange.MipLevelCount; ++mip) {
+                                    tracker.Cells[size_t{layer} * tracker.MipCount + mip] = importState;
+                                }
+                            }
+                        } else {
+                            tracker.WholeState = importState;
+                        }
+                    }
+                }
+            });
+        }
+
+        for (uint32_t passIndex = 0; passIndex < passes.size(); passIndex++) {
+            auto& batch = passPreBarriers[passIndex];
+            auto processResourceEdge = [&](const RDGResourceDependencyEdge* resourceEdge) {
+                const auto* resourceNode = _GetResourceNode(*resourceEdge);
+                VisitResource(*resourceNode, [&](const auto& typedResourceNode) {
+                    using ResourceNodeType = std::remove_cvref_t<decltype(typedResourceNode)>;
+                    if constexpr (std::is_same_v<ResourceNodeType, RDGBufferNode>) {
+                        auto& tracker = bufferTrackers[typedResourceNode._id];
+                        const auto requiredRange = normalizeBufferRange(&typedResourceNode, resourceEdge->_bufferRange);
+                        const BufferStateValue requiredState = makeBufferState(resourceEdge->_stage, resourceEdge->_access);
+                        vector<const BufferStateSlice*> overlappingSlices{};
+                        overlappingSlices.reserve(tracker.Slices.size());
+                        for (const auto& slice : tracker.Slices) {
+                            if (_BufferRangesOverlap(slice.NormalizedRange, requiredRange)) {
+                                overlappingSlices.emplace_back(&slice);
+                            }
+                        }
+                        std::sort(overlappingSlices.begin(), overlappingSlices.end(), [](const BufferStateSlice* lhs, const BufferStateSlice* rhs) {
+                            return lhs->NormalizedRange.Offset < rhs->NormalizedRange.Offset;
+                        });
+                        if (requiredRange.IsWholeResource) {
+                            // 整资源访问会覆盖所有局部切片，处理完之后可以直接回退成纯 DefaultState。
+                            uint64_t currentOffset = resourceEdge->_bufferRange.Offset;
+                            const auto totalSize = getBufferTotalSize(&typedResourceNode);
+                            for (const BufferStateSlice* slice : overlappingSlices) {
+                                const uint64_t sliceStart = slice->NormalizedRange.Offset;
+                                const uint64_t sliceEnd = slice->NormalizedRange.Offset + slice->NormalizedRange.Size;
+                                if (sliceEnd <= currentOffset) {
+                                    continue;
+                                }
+                                if (currentOffset < sliceStart && !isSameBufferState(tracker.DefaultState, requiredState)) {
+                                    appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, tracker.DefaultState, requiredState, render::BufferRange{currentOffset, sliceStart - currentOffset});
+                                }
+                                const uint64_t overlapStart = std::max(currentOffset, sliceStart);
+                                if (overlapStart < sliceEnd && !isSameBufferState(slice->State, requiredState)) {
+                                    appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, slice->State, requiredState, render::BufferRange{overlapStart, sliceEnd - overlapStart});
+                                }
+                                currentOffset = std::max(currentOffset, sliceEnd);
+                            }
+                            if (!isSameBufferState(tracker.DefaultState, requiredState)) {
+                                if (totalSize.has_value()) {
+                                    if (currentOffset < *totalSize) {
+                                        appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, tracker.DefaultState, requiredState, render::BufferRange{currentOffset, *totalSize - currentOffset});
+                                    }
+                                } else {
+                                    appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, tracker.DefaultState, requiredState, render::BufferRange{currentOffset, render::BufferRange::All()});
+                                }
+                            }
+                            tracker.DefaultState = requiredState;
+                            tracker.Slices.clear();
+                        } else {
+                            const uint64_t requestStart = requiredRange.Offset;
+                            const uint64_t requestEnd = requiredRange.Offset + requiredRange.Size;
+                            uint64_t currentOffset = requestStart;
+                            for (const BufferStateSlice* slice : overlappingSlices) {
+                                const uint64_t sliceStart = slice->NormalizedRange.Offset;
+                                const uint64_t sliceEnd = slice->NormalizedRange.Offset + slice->NormalizedRange.Size;
+                                const uint64_t overlapStart = std::max(requestStart, sliceStart);
+                                const uint64_t overlapEnd = std::min(requestEnd, sliceEnd);
+                                if (overlapEnd <= overlapStart) {
+                                    continue;
+                                }
+                                if (currentOffset < overlapStart && !isSameBufferState(tracker.DefaultState, requiredState)) {
+                                    appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, tracker.DefaultState, requiredState, render::BufferRange{currentOffset, overlapStart - currentOffset});
+                                }
+                                if (!isSameBufferState(slice->State, requiredState)) {
+                                    appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, slice->State, requiredState, render::BufferRange{overlapStart, overlapEnd - overlapStart});
+                                }
+                                currentOffset = overlapEnd;
+                            }
+                            if (currentOffset < requestEnd && !isSameBufferState(tracker.DefaultState, requiredState)) {
+                                appendBufferBarrier(batch, RDGBufferHandle{typedResourceNode._id}, tracker.DefaultState, requiredState, render::BufferRange{currentOffset, requestEnd - currentOffset});
+                            }
+                            // 只改写访问区间：保留两侧旧切片，在中间插入新状态，再做一次相邻同态合并。
+                            vector<BufferStateSlice> nextSlices{};
+                            nextSlices.reserve(tracker.Slices.size() + 1);
+                            for (const auto& slice : tracker.Slices) {
+                                const uint64_t sliceStart = slice.NormalizedRange.Offset;
+                                const uint64_t sliceEnd = slice.NormalizedRange.Offset + slice.NormalizedRange.Size;
+                                if (sliceEnd <= requestStart || sliceStart >= requestEnd) {
+                                    nextSlices.emplace_back(slice);
+                                    continue;
+                                }
+                                if (sliceStart < requestStart) {
+                                    BufferStateSlice leftSlice{};
+                                    leftSlice.Range = render::BufferRange{sliceStart, requestStart - sliceStart};
+                                    leftSlice.NormalizedRange = normalizeBufferRange(&typedResourceNode, leftSlice.Range);
+                                    leftSlice.State = slice.State;
+                                    nextSlices.emplace_back(std::move(leftSlice));
+                                }
+                                if (sliceEnd > requestEnd) {
+                                    BufferStateSlice rightSlice{};
+                                    rightSlice.Range = render::BufferRange{requestEnd, sliceEnd - requestEnd};
+                                    rightSlice.NormalizedRange = normalizeBufferRange(&typedResourceNode, rightSlice.Range);
+                                    rightSlice.State = slice.State;
+                                    nextSlices.emplace_back(std::move(rightSlice));
+                                }
+                            }
+                            if (!isSameBufferState(tracker.DefaultState, requiredState)) {
+                                nextSlices.emplace_back(BufferStateSlice{
+                                    resourceEdge->_bufferRange,
+                                    requiredRange,
+                                    requiredState});
+                            }
+                            std::sort(nextSlices.begin(), nextSlices.end(), [](const BufferStateSlice& lhs, const BufferStateSlice& rhs) {
+                                return lhs.NormalizedRange.Offset < rhs.NormalizedRange.Offset;
+                            });
+                            vector<BufferStateSlice> mergedSlices{};
+                            mergedSlices.reserve(nextSlices.size());
+                            for (const auto& slice : nextSlices) {
+                                if (!mergedSlices.empty() &&
+                                    isSameBufferState(mergedSlices.back().State, slice.State) &&
+                                    mergedSlices.back().NormalizedRange.Offset + mergedSlices.back().NormalizedRange.Size == slice.NormalizedRange.Offset) {
+                                    mergedSlices.back().Range.Size += slice.Range.Size;
+                                    mergedSlices.back().NormalizedRange.Size += slice.NormalizedRange.Size;
+                                    continue;
+                                }
+                                mergedSlices.emplace_back(slice);
+                            }
+                            tracker.Slices = std::move(mergedSlices);
+                        }
+                    } else if constexpr (std::is_same_v<ResourceNodeType, RDGTextureNode>) {
+                        auto& tracker = textureTrackers[typedResourceNode._id];
+                        const TextureStateValue requiredState = makeTextureState(resourceEdge->_stage, resourceEdge->_access, resourceEdge->_textureLayout);
+                        if (tracker.UsePerSubresource) {
+                            // Texture 的 barrier 精度直接落到单个 subresource，避免整张纹理被无谓串行化。
+                            const auto requiredRange = normalizeTextureRange(&typedResourceNode, resourceEdge->_textureRange);
+                            for (uint32_t layer = requiredRange.BaseArrayLayer; layer < requiredRange.BaseArrayLayer + requiredRange.ArrayLayerCount; ++layer) {
+                                for (uint32_t mip = requiredRange.BaseMipLevel; mip < requiredRange.BaseMipLevel + requiredRange.MipLevelCount; ++mip) {
+                                    auto& currentState = tracker.Cells[size_t{layer} * tracker.MipCount + mip];
+                                    if (!isSameTextureState(currentState, requiredState)) {
+                                        appendTextureBarrier(batch, RDGTextureHandle{typedResourceNode._id}, currentState, requiredState, render::SubresourceRange{layer, 1, mip, 1});
+                                    }
+                                    currentState = requiredState;
+                                }
+                            }
+                        } else {
+                            if (!isSameTextureState(tracker.WholeState, requiredState)) {
+                                appendTextureBarrier(batch, RDGTextureHandle{typedResourceNode._id}, tracker.WholeState, requiredState, resourceEdge->_textureRange);
+                            }
+                            tracker.WholeState = requiredState;
+                        }
+                    }
+                });
+            };
+
+            for (RDGEdge* edge : passes[passIndex]->_inEdges) {
+                if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    continue;
+                }
+                processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
+            }
+            for (RDGEdge* edge : passes[passIndex]->_outEdges) {
+                if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                    continue;
+                }
+                processResourceEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
+            }
+        }
+
+        (void)passPreBarriers;
+    }
+
     return {};
 }
 

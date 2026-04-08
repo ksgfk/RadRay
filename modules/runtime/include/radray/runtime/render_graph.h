@@ -472,6 +472,31 @@ public:
 
     class CompileResult {
     public:
+        struct BufferBarrier {
+            RDGBufferHandle Buffer{};
+            RDGExecutionStages SrcStage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses SrcAccess{RDGMemoryAccess::NONE};
+            RDGExecutionStages DstStage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses DstAccess{RDGMemoryAccess::NONE};
+            render::BufferRange Range{};
+        };
+
+        struct TextureBarrier {
+            RDGTextureHandle Texture{};
+            RDGExecutionStages SrcStage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses SrcAccess{RDGMemoryAccess::NONE};
+            RDGTextureLayout SrcLayout{RDGTextureLayout::Undefined};
+            RDGExecutionStages DstStage{RDGExecutionStage::NONE};
+            RDGMemoryAccesses DstAccess{RDGMemoryAccess::NONE};
+            RDGTextureLayout DstLayout{RDGTextureLayout::Undefined};
+            render::SubresourceRange Range{};
+        };
+
+        struct BarrierBatch {
+            vector<BufferBarrier> BufferBarriers{};
+            vector<TextureBarrier> TextureBarriers{};
+        };
+
         string ExportCompiledGraphviz() const;
         string ExportExecutionGraphviz() const;
     };
