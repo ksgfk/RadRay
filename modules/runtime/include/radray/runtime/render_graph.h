@@ -498,13 +498,28 @@ public:
         };
 
         struct ResourceLifetime {
-            RDGResourceHandle Resource{};
-            uint32_t FirstPassIndex{0};
-            uint32_t LastPassIndex{0};
+            static constexpr uint32_t InvalidPassIndex = std::numeric_limits<uint32_t>::max();
+
+            uint32_t FirstPassIndex{InvalidPassIndex};
+            uint32_t LastPassIndex{InvalidPassIndex};
+
+            constexpr bool IsValid() const noexcept { return FirstPassIndex != InvalidPassIndex; }
+        };
+
+        struct CompiledPass {
+            RDGPassNode* Node{nullptr};
+            uint32_t ExecutionIndex{0};
+            BarrierBatch PreBarriers{};
         };
 
         string ExportCompiledGraphviz() const;
         string ExportExecutionGraphviz() const;
+
+    public:
+        vector<CompiledPass> _passes{};
+        BarrierBatch _epilogueBarriers{};
+        // 直接按节点 id 索引: Pass / External / 未使用资源保持无效项。
+        vector<ResourceLifetime> _lifetimes{};
     };
 
     // RDG 创建的资源
