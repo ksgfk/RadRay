@@ -1,7 +1,10 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 
 #include <gtest/gtest.h>
 
@@ -42,14 +45,94 @@ void ExpectValidateFailContainsOneOf(const RenderGraph& graph, std::initializer_
 }
 
 GpuBufferHandle MakeValidGpuBufferHandle(uint64_t handle = 1) {
+    class FakeBuffer final : public Buffer {
+    public:
+        explicit FakeBuffer(BufferDescriptor desc) noexcept
+            : _desc(desc) {}
+
+        bool IsValid() const noexcept override { return !_destroyed; }
+
+        void Destroy() noexcept override { _destroyed = true; }
+
+        void SetDebugName(std::string_view name) noexcept override { _debugName = std::string(name); }
+
+        void* Map(uint64_t offset, uint64_t size) noexcept override {
+            (void)offset;
+            (void)size;
+            return nullptr;
+        }
+
+        void Unmap(uint64_t offset, uint64_t size) noexcept override {
+            (void)offset;
+            (void)size;
+        }
+
+        BufferDescriptor GetDesc() const noexcept override { return _desc; }
+
+    private:
+        BufferDescriptor _desc{};
+        std::string _debugName{};
+        bool _destroyed{false};
+    };
+
+    static std::unordered_map<uint64_t, std::unique_ptr<FakeBuffer>> buffers{};
+    auto& buffer = buffers[handle];
+    if (!buffer) {
+        buffer = std::make_unique<FakeBuffer>(BufferDescriptor{
+            .Size = 4096,
+            .Memory = MemoryType::Upload,
+            .Usage = BufferUse::CopySource | BufferUse::CopyDestination | BufferUse::Vertex | BufferUse::Index |
+                     BufferUse::CBuffer | BufferUse::Resource | BufferUse::UnorderedAccess | BufferUse::Indirect,
+        });
+    }
+
     GpuBufferHandle result{};
     result.Handle = handle;
+    result.NativeHandle = buffer.get();
     return result;
 }
 
 GpuTextureHandle MakeValidGpuTextureHandle(uint64_t handle = 1) {
+    class FakeTexture final : public Texture {
+    public:
+        explicit FakeTexture(TextureDescriptor desc) noexcept
+            : _desc(desc) {}
+
+        bool IsValid() const noexcept override { return !_destroyed; }
+
+        void Destroy() noexcept override { _destroyed = true; }
+
+        void SetDebugName(std::string_view name) noexcept override { _debugName = std::string(name); }
+
+        TextureDescriptor GetDesc() const noexcept override { return _desc; }
+
+    private:
+        TextureDescriptor _desc{};
+        std::string _debugName{};
+        bool _destroyed{false};
+    };
+
+    static std::unordered_map<uint64_t, std::unique_ptr<FakeTexture>> textures{};
+    auto& texture = textures[handle];
+    if (!texture) {
+        texture = std::make_unique<FakeTexture>(TextureDescriptor{
+            .Dim = TextureDimension::Dim2D,
+            .Width = 16,
+            .Height = 16,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .SampleCount = 1,
+            .Format = TextureFormat::RGBA8_UNORM,
+            .Memory = MemoryType::Device,
+            .Usage = TextureUse::CopySource | TextureUse::CopyDestination | TextureUse::Resource |
+                     TextureUse::RenderTarget | TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite |
+                     TextureUse::UnorderedAccess,
+        });
+    }
+
     GpuTextureHandle result{};
     result.Handle = handle;
+    result.NativeHandle = texture.get();
     return result;
 }
 
@@ -696,7 +779,18 @@ TEST(RenderGraphValidateTest, Requirement_7_2_5_ColorAttachmentMustNotUseDepthFo
 
 TEST(RenderGraphValidateTest, Requirement_7_2_6_DepthAttachmentMustUseDepthFormatTexture) {
     auto graphData = MakeValidGraphicsGraph();
-    GetGraphicsPassNode(graphData.Graph, graphData.Pass)->_depthStencilAttachment->Texture = graphData.ColorTexture;
+    const auto wrongDepthTexture = graphData.Graph.AddTexture(
+        TextureDimension::Dim2D,
+        4,
+        4,
+        1,
+        1,
+        1,
+        TextureFormat::RGBA8_UNORM,
+        MemoryType::Device,
+        TextureUse::RenderTarget | TextureUse::Resource,
+        "wrong-depth-texture");
+    GetGraphicsPassNode(graphData.Graph, graphData.Pass)->_depthStencilAttachment->Texture = wrongDepthTexture;
     ExpectValidateFailContains(graphData.Graph, "depth-stencil attachment must use depth format");
 }
 

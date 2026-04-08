@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <fmt/format.h>
 
@@ -532,6 +534,171 @@ bool _TextureRangesOverlap(const NormalizedTextureRange& lhs, const NormalizedTe
     const bool mipOverlap = lhs.BaseMipLevel < rhs.BaseMipLevel + rhs.MipLevelCount &&
                             rhs.BaseMipLevel < lhs.BaseMipLevel + lhs.MipLevelCount;
     return layerOverlap && mipOverlap;
+}
+
+struct CompiledGraphvizPassResourceUsage {
+    const RDGResourceNode* Resource{nullptr};
+    vector<const RDGResourceDependencyEdge*> InputEdges{};
+    vector<const RDGResourceDependencyEdge*> OutputEdges{};
+};
+
+uint64_t _GraphvizSplitMix64(uint64_t value) noexcept {
+    value += 0x9E3779B97F4A7C15ull;
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ull;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBull;
+    return value ^ (value >> 31);
+}
+
+uint8_t _GraphvizFloatToByte(float value) noexcept {
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    return static_cast<uint8_t>(clamped * 255.0f + 0.5f);
+}
+
+string _GetStableCompiledGraphvizColor(uint64_t resourceId) {
+    const uint64_t hash = _GraphvizSplitMix64(resourceId + 1);
+    const float hue = static_cast<float>(hash % 360ull) / 60.0f;
+    const float saturation = 0.42f + static_cast<float>((hash >> 8) & 0xFFull) / 255.0f * 0.18f;
+    const float value = 0.88f + static_cast<float>((hash >> 16) & 0x3Full) / 255.0f * 0.08f;
+    const int sector = static_cast<int>(hue) % 6;
+    const float fraction = hue - static_cast<float>(static_cast<int>(hue));
+    const float p = value * (1.0f - saturation);
+    const float q = value * (1.0f - saturation * fraction);
+    const float t = value * (1.0f - saturation * (1.0f - fraction));
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    switch (sector) {
+        case 0:
+            r = value, g = t, b = p;
+            break;
+        case 1:
+            r = q, g = value, b = p;
+            break;
+        case 2:
+            r = p, g = value, b = t;
+            break;
+        case 3:
+            r = p, g = q, b = value;
+            break;
+        case 4:
+            r = t, g = p, b = value;
+            break;
+        case 5:
+        default:
+            r = value, g = p, b = q;
+            break;
+    }
+
+    return fmt::format("#{:02X}{:02X}{:02X}", _GraphvizFloatToByte(r), _GraphvizFloatToByte(g), _GraphvizFloatToByte(b));
+}
+
+string _GetCompiledGraphvizVersionNodeId(uint64_t resourceId, uint32_t version) {
+    return fmt::format("r{}v{}", resourceId, version);
+}
+
+string _GetCompiledGraphvizImportNodeId(uint64_t resourceId) {
+    return fmt::format("r{}_import", resourceId);
+}
+
+string _GetCompiledGraphvizExportNodeId(uint64_t resourceId) {
+    return fmt::format("r{}_export", resourceId);
+}
+
+string _GetCompiledGraphvizPassNodeId(uint32_t executionIndex) {
+    return fmt::format("p{}", executionIndex);
+}
+
+void _AppendCompiledGraphvizBufferRange(fmt::memory_buffer& buffer, const render::BufferRange& range) {
+    auto out = std::back_inserter(buffer);
+    if (range.Offset == 0 && range.Size == render::BufferRange::All()) {
+        fmt::format_to(out, "range: All");
+        return;
+    }
+    if (range.Size == render::BufferRange::All()) {
+        fmt::format_to(out, "range: offset={} size=All", range.Offset);
+        return;
+    }
+    fmt::format_to(out, "range: offset={} size={}", range.Offset, range.Size);
+}
+
+void _AppendCompiledGraphvizTextureRange(fmt::memory_buffer& buffer, const render::SubresourceRange& range) {
+    auto out = std::back_inserter(buffer);
+    fmt::format_to(out, "range: layers {}+", range.BaseArrayLayer);
+    if (range.ArrayLayerCount == render::SubresourceRange::All) {
+        fmt::format_to(out, "All");
+    } else {
+        fmt::format_to(out, "{}", range.ArrayLayerCount);
+    }
+    fmt::format_to(out, " mips {}+", range.BaseMipLevel);
+    if (range.MipLevelCount == render::SubresourceRange::All) {
+        fmt::format_to(out, "All");
+    } else {
+        fmt::format_to(out, "{}", range.MipLevelCount);
+    }
+}
+
+void _AppendCompiledGraphvizUsageEntry(fmt::memory_buffer& buffer, const RDGResourceDependencyEdge& edge) {
+    auto out = std::back_inserter(buffer);
+    fmt::format_to(out, "stage: {}\\naccess: {}", edge._stage, edge._access);
+    VisitResource(*_GetResourceNode(edge), [&](const auto& resource) {
+        using T = std::remove_cvref_t<decltype(resource)>;
+        if constexpr (std::is_same_v<T, RDGBufferNode>) {
+            fmt::format_to(out, "\\n");
+            _AppendCompiledGraphvizBufferRange(buffer, edge._bufferRange);
+        } else if constexpr (std::is_same_v<T, RDGTextureNode>) {
+            fmt::format_to(out, "\\nlayout: {}\\n", edge._textureLayout);
+            _AppendCompiledGraphvizTextureRange(buffer, edge._textureRange);
+        }
+    });
+}
+
+void _AppendCompiledGraphvizUsageList(fmt::memory_buffer& buffer, const vector<const RDGResourceDependencyEdge*>& edges) {
+    for (size_t i = 0; i < edges.size(); ++i) {
+        if (i != 0) {
+            fmt::format_to(std::back_inserter(buffer), "\\n\\n");
+        }
+        _AppendCompiledGraphvizUsageEntry(buffer, *edges[i]);
+    }
+}
+
+vector<CompiledGraphvizPassResourceUsage> _CollectCompiledPassResourceUsages(const RDGPassNode& pass) {
+    vector<CompiledGraphvizPassResourceUsage> usages{};
+    unordered_map<uint64_t, size_t> usageIndices{};
+
+    auto appendEdge = [&](const RDGResourceDependencyEdge* edge) {
+        const auto* resource = _GetResourceNode(*edge);
+        if (resource == nullptr) {
+            return;
+        }
+
+        auto [it, inserted] = usageIndices.try_emplace(resource->_id, usages.size());
+        if (inserted) {
+            usages.emplace_back();
+            usages.back().Resource = resource;
+        }
+        auto& usage = usages[it->second];
+        const bool passWritesResource = edge->_from == &pass;
+
+        if (!passWritesResource || HasReadAccess(edge->_access)) {
+            usage.InputEdges.emplace_back(edge);
+        }
+        if (passWritesResource && HasWriteAccess(edge->_access)) {
+            usage.OutputEdges.emplace_back(edge);
+        }
+    };
+
+    for (RDGEdge* edge : pass._inEdges) {
+        if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+            appendEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
+        }
+    }
+    for (RDGEdge* edge : pass._outEdges) {
+        if (edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+            appendEdge(static_cast<const RDGResourceDependencyEdge*>(edge));
+        }
+    }
+
+    return usages;
 }
 
 }  // namespace
@@ -1331,11 +1498,11 @@ RenderGraph::ValidateResult RenderGraph::Validate() const {
                     return fail(fmt::format("render graph validate failed: graphics pass {} has invalid depth-stencil attachment handle {}", formatNode(node.get()), attachment.Texture.Id));
                 }
                 const auto* textureNode = static_cast<const RDGTextureNode*>(attachmentNode);
-                if (textureNode->_format != render::TextureFormat::UNKNOWN && !render::IsDepthStencilFormat(textureNode->_format)) {
-                    return fail(fmt::format("render graph validate failed: graphics pass {} depth-stencil attachment must use depth format", formatNode(node.get())));
-                }
                 if (attachmentTextures.contains(textureNode->_id)) {
                     return fail(fmt::format("render graph validate failed: graphics pass {} uses same texture as color and depth-stencil attachment", formatNode(node.get())));
+                }
+                if (textureNode->_format != render::TextureFormat::UNKNOWN && !render::IsDepthStencilFormat(textureNode->_format)) {
+                    return fail(fmt::format("render graph validate failed: graphics pass {} depth-stencil attachment must use depth format", formatNode(node.get())));
                 }
                 if ((attachment.DepthLoad == render::LoadAction::Clear || attachment.StencilLoad == render::LoadAction::Clear) &&
                     !attachment.ClearValue.has_value()) {
@@ -2318,6 +2485,168 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
     result._epilogueBarriers = std::move(epilogueBarriers);
     result._lifetimes = std::move(lifetimes);
     return result;
+}
+
+string RenderGraph::CompileResult::ExportCompiledGraphviz() const {
+    fmt::memory_buffer buffer;
+    auto out = std::back_inserter(buffer);
+    fmt::format_to(out, "digraph CompiledRenderGraph {{\n");
+    fmt::format_to(out, "    rankdir=LR;\n");
+    fmt::format_to(out, "    node [shape=box];\n");
+
+    vector<string> nodeStatements{};
+    vector<string> edgeStatements{};
+    unordered_map<uint64_t, uint32_t> currentVersions{};
+    unordered_set<string> emittedVersionNodes{};
+    unordered_set<uint64_t> seenResourceIds{};
+    vector<const RDGResourceNode*> resourcesInOrder{};
+
+    auto appendStatement = [](vector<string>& statements, fmt::memory_buffer& statementBuffer) {
+        statements.emplace_back(fmt::to_string(statementBuffer));
+    };
+
+    auto ensureResourceTracked = [&](const RDGResourceNode* resource) {
+        if (resource == nullptr) {
+            return;
+        }
+        if (seenResourceIds.emplace(resource->_id).second) {
+            resourcesInOrder.emplace_back(resource);
+            currentVersions.emplace(resource->_id, 0);
+        }
+    };
+
+    auto emitVersionNode = [&](const RDGResourceNode* resource, uint32_t version) {
+        ensureResourceTracked(resource);
+        const auto nodeId = _GetCompiledGraphvizVersionNodeId(resource->_id, version);
+        if (!emittedVersionNodes.emplace(nodeId).second) {
+            return;
+        }
+
+        fmt::memory_buffer statement;
+        auto statementOut = std::back_inserter(statement);
+        fmt::format_to(statementOut,
+                       "    {} [shape=box, style=\"filled,rounded\", fillcolor=\"{}\", label=\"name: ",
+                       nodeId,
+                       _GetStableCompiledGraphvizColor(resource->_id));
+        _AppendGraphvizEscapedText(statement, resource->_name);
+        fmt::format_to(statementOut, "#{}\\nownership: {}\\ntag: {}\"];\n", version, resource->_ownership, resource->GetTag());
+        appendStatement(nodeStatements, statement);
+    };
+
+    for (const auto& compiledPass : _passes) {
+        const auto* passNode = compiledPass.Node;
+        RADRAY_ASSERT(passNode != nullptr);
+        const auto passNodeId = _GetCompiledGraphvizPassNodeId(compiledPass.ExecutionIndex);
+
+        fmt::memory_buffer passStatement;
+        auto passOut = std::back_inserter(passStatement);
+        fmt::format_to(passOut, "    {} [shape=ellipse, style=filled, fillcolor=\"#E8E8E8\", label=\"exec: {}\\nname: ",
+                       passNodeId, compiledPass.ExecutionIndex);
+        _AppendGraphvizEscapedText(passStatement, passNode->_name);
+        fmt::format_to(passOut, "\\nkind: Pass\\ntag: {}\"];\n", passNode->GetTag());
+        appendStatement(nodeStatements, passStatement);
+
+        if (compiledPass.ExecutionIndex > 0) {
+            edgeStatements.emplace_back(fmt::format("    {} -> {} [style=dashed, color=\"#9A9A9A\"];\n",
+                                                    _GetCompiledGraphvizPassNodeId(compiledPass.ExecutionIndex - 1),
+                                                    passNodeId));
+        }
+
+        auto usages = _CollectCompiledPassResourceUsages(*passNode);
+        for (const auto& usage : usages) {
+            ensureResourceTracked(usage.Resource);
+            emitVersionNode(usage.Resource, 0);
+
+            const uint32_t currentVersion = currentVersions[usage.Resource->_id];
+            const auto currentVersionNodeId = _GetCompiledGraphvizVersionNodeId(usage.Resource->_id, currentVersion);
+
+            if (!usage.InputEdges.empty()) {
+                fmt::memory_buffer edgeStatement;
+                fmt::format_to(std::back_inserter(edgeStatement), "    {} -> {} [label=\"", currentVersionNodeId, passNodeId);
+                _AppendCompiledGraphvizUsageList(edgeStatement, usage.InputEdges);
+                fmt::format_to(std::back_inserter(edgeStatement), "\"];\n");
+                appendStatement(edgeStatements, edgeStatement);
+            }
+
+            if (!usage.OutputEdges.empty()) {
+                const uint32_t nextVersion = currentVersion + 1;
+                emitVersionNode(usage.Resource, nextVersion);
+
+                fmt::memory_buffer edgeStatement;
+                fmt::format_to(std::back_inserter(edgeStatement), "    {} -> {} [label=\"", passNodeId,
+                               _GetCompiledGraphvizVersionNodeId(usage.Resource->_id, nextVersion));
+                _AppendCompiledGraphvizUsageList(edgeStatement, usage.OutputEdges);
+                fmt::format_to(std::back_inserter(edgeStatement), "\"];\n");
+                appendStatement(edgeStatements, edgeStatement);
+
+                currentVersions[usage.Resource->_id] = nextVersion;
+            }
+        }
+    }
+
+    for (const auto* resource : resourcesInOrder) {
+        emitVersionNode(resource, 0);
+        VisitResource(*resource, [&](const auto& typedResource) {
+            using T = std::remove_cvref_t<decltype(typedResource)>;
+
+            if (typedResource._importState.has_value()) {
+                fmt::memory_buffer nodeStatement;
+                fmt::format_to(std::back_inserter(nodeStatement),
+                               "    {} [shape=oval, style=dashed, label=\"kind: Import\\nownership: {}\"];\n",
+                               _GetCompiledGraphvizImportNodeId(resource->_id),
+                               resource->_ownership);
+                appendStatement(nodeStatements, nodeStatement);
+
+                fmt::memory_buffer edgeStatement;
+                fmt::format_to(std::back_inserter(edgeStatement), "    {} -> {} [label=\"",
+                               _GetCompiledGraphvizImportNodeId(resource->_id),
+                               _GetCompiledGraphvizVersionNodeId(resource->_id, 0));
+                fmt::format_to(std::back_inserter(edgeStatement), "stage: {}\\naccess: {}", typedResource._importState->Stage, typedResource._importState->Access);
+                if constexpr (std::is_same_v<T, RDGBufferNode>) {
+                    fmt::format_to(std::back_inserter(edgeStatement), "\\n");
+                    _AppendCompiledGraphvizBufferRange(edgeStatement, typedResource._importState->Range);
+                } else if constexpr (std::is_same_v<T, RDGTextureNode>) {
+                    fmt::format_to(std::back_inserter(edgeStatement), "\\nlayout: {}\\n", typedResource._importState->Layout);
+                    _AppendCompiledGraphvizTextureRange(edgeStatement, typedResource._importState->Range);
+                }
+                fmt::format_to(std::back_inserter(edgeStatement), "\"];\n");
+                appendStatement(edgeStatements, edgeStatement);
+            }
+
+            if (typedResource._exportState.has_value()) {
+                fmt::memory_buffer nodeStatement;
+                fmt::format_to(std::back_inserter(nodeStatement),
+                               "    {} [shape=oval, style=dashed, label=\"kind: Export\\nownership: {}\"];\n",
+                               _GetCompiledGraphvizExportNodeId(resource->_id),
+                               resource->_ownership);
+                appendStatement(nodeStatements, nodeStatement);
+
+                fmt::memory_buffer edgeStatement;
+                fmt::format_to(std::back_inserter(edgeStatement), "    {} -> {} [label=\"",
+                               _GetCompiledGraphvizVersionNodeId(resource->_id, currentVersions[resource->_id]),
+                               _GetCompiledGraphvizExportNodeId(resource->_id));
+                fmt::format_to(std::back_inserter(edgeStatement), "stage: {}\\naccess: {}", typedResource._exportState->Stage, typedResource._exportState->Access);
+                if constexpr (std::is_same_v<T, RDGBufferNode>) {
+                    fmt::format_to(std::back_inserter(edgeStatement), "\\n");
+                    _AppendCompiledGraphvizBufferRange(edgeStatement, typedResource._exportState->Range);
+                } else if constexpr (std::is_same_v<T, RDGTextureNode>) {
+                    fmt::format_to(std::back_inserter(edgeStatement), "\\nlayout: {}\\n", typedResource._exportState->Layout);
+                    _AppendCompiledGraphvizTextureRange(edgeStatement, typedResource._exportState->Range);
+                }
+                fmt::format_to(std::back_inserter(edgeStatement), "\"];\n");
+                appendStatement(edgeStatements, edgeStatement);
+            }
+        });
+    }
+
+    for (const auto& statement : nodeStatements) {
+        fmt::format_to(out, "{}", statement);
+    }
+    for (const auto& statement : edgeStatements) {
+        fmt::format_to(out, "{}", statement);
+    }
+    fmt::format_to(out, "}}\n");
+    return fmt::to_string(buffer);
 }
 
 string RenderGraph::ExportGraphviz() const {
