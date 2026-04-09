@@ -513,7 +513,7 @@ public:
         };
 
         string ExportCompiledGraphviz() const;
-        string ExportExecutionGraphviz() const;
+        string ExportExecutionPlantUml() const;
 
     public:
         vector<CompiledPass> _passes{};

@@ -173,6 +173,32 @@ private:
     RDGBufferHandle _buffer{};
 };
 
+class MergeBuffersComputePass final : public IRDGComputePass {
+public:
+    MergeBuffersComputePass(RDGBufferHandle lhs, RDGBufferHandle rhs, RDGBufferHandle dst) noexcept
+        : _lhs(lhs),
+          _rhs(rhs),
+          _dst(dst) {}
+
+    void Setup(Builder& builder) override {
+        const auto allBuffer = BufferRange::AllRange();
+        builder
+            .UseBuffer(_lhs, allBuffer)
+            .UseBuffer(_rhs, allBuffer)
+            .UseRWBuffer(_dst, allBuffer);
+    }
+
+    void Execute(ComputeCommandEncoder* encoder, GpuAsyncContext* context) override {
+        (void)encoder;
+        (void)context;
+    }
+
+private:
+    RDGBufferHandle _lhs{};
+    RDGBufferHandle _rhs{};
+    RDGBufferHandle _dst{};
+};
+
 class FakeBuffer final : public Buffer {
 public:
     explicit FakeBuffer(BufferDescriptor desc) noexcept
@@ -1059,6 +1085,181 @@ TEST(RenderGraphTest, ExportCompiledGraphvizHandlesReadWriteImportExportAndEscap
     ExpectContains(dot, "r0v1 -> r0_export [label=\"stage: [Host]\\naccess: [HostRead]\\nrange: All\"]");
 }
 
+TEST(RenderGraphTest, ExportExecutionPlantUmlShowsParallelLevelsForBranchAndMerge) {
+    RenderGraph graph{};
+    const auto allBuffer = BufferRange::AllRange();
+
+    FakeBuffer inputABacking(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::CopySource,
+    });
+    FakeBuffer inputBBacking(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::CopySource,
+    });
+    FakeBuffer mergedBacking(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Device,
+        .Usage = BufferUse::Resource | BufferUse::UnorderedAccess,
+    });
+
+    const auto inputA = graph.ImportBuffer(
+        MakeGpuBufferHandle(&inputABacking),
+        RDGExecutionStage::Host,
+        RDGMemoryAccess::HostWrite,
+        allBuffer,
+        "input-a");
+    const auto inputB = graph.ImportBuffer(
+        MakeGpuBufferHandle(&inputBBacking),
+        RDGExecutionStage::Host,
+        RDGMemoryAccess::HostWrite,
+        allBuffer,
+        "input-b");
+    const auto branchA = graph.AddBuffer(
+        64,
+        MemoryType::Device,
+        BufferUse::CopyDestination | BufferUse::Resource,
+        "branch-a");
+    const auto branchB = graph.AddBuffer(
+        64,
+        MemoryType::Device,
+        BufferUse::CopyDestination | BufferUse::Resource,
+        "branch-b");
+    const auto merged = graph.ImportBuffer(
+        MakeGpuBufferHandle(&mergedBacking),
+        RDGExecutionStage::Host,
+        RDGMemoryAccess::HostWrite,
+        allBuffer,
+        "merged");
+
+    RDGCopyPassBuilder copyA{};
+    copyA
+        .SetName("copy-a")
+        .CopyBufferToBuffer(branchA, 0, inputA, 0, 64);
+    copyA._buffers.emplace_back(inputA, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, allBuffer});
+    copyA._buffers.emplace_back(branchA, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer});
+    copyA.Build(&graph);
+
+    RDGCopyPassBuilder copyB{};
+    copyB
+        .SetName("copy-b")
+        .CopyBufferToBuffer(branchB, 0, inputB, 0, 64);
+    copyB._buffers.emplace_back(inputB, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, allBuffer});
+    copyB._buffers.emplace_back(branchB, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer});
+    copyB.Build(&graph);
+
+    graph.AddComputePass("merge", make_unique<MergeBuffersComputePass>(branchA, branchB, merged));
+    graph.ExportBuffer(merged, RDGExecutionStage::Host, RDGMemoryAccess::HostRead, allBuffer);
+
+    const auto uml = graph.Compile().ExportExecutionPlantUml();
+
+    ExpectContains(uml, "@startuml");
+    ExpectContains(uml, "scale 1 as 120 pixels");
+    ExpectContains(uml, "concise \"P0\" as pass_lane_0");
+    ExpectContains(uml, "concise \"P1\" as pass_lane_1");
+    ExpectContains(uml, "legend bottom");
+    ExpectContains(uml, "P0 = Pass Lane 0");
+    ExpectContains(uml, "P1 = Pass Lane 1");
+    ExpectContains(uml, "@1");
+    ExpectContains(uml, "pass_lane_0 is \"copy-");
+    ExpectContains(uml, "pass_lane_1 is \"copy-");
+    ExpectContains(uml, "\\n[Copy]\\nE0");
+    ExpectContains(uml, "\\n[Copy]\\nE1");
+    ExpectContains(uml, "@2");
+    ExpectContains(uml, "pass_lane_0 is \"merge\\n[Compute]\\nE2");
+}
+
+TEST(RenderGraphTest, ExportExecutionPlantUmlShowsImportExportMarkersAndEscapedNames) {
+    RenderGraph graph{};
+    const auto allBuffer = BufferRange::AllRange();
+    FakeBuffer rwBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Device,
+        .Usage = BufferUse::Resource | BufferUse::UnorderedAccess,
+    });
+
+    const auto buffer = graph.ImportBuffer(
+        MakeGpuBufferHandle(&rwBuffer),
+        RDGExecutionStage::Host,
+        RDGMemoryAccess::HostWrite,
+        allBuffer,
+        "buffer \"quoted\"\nnext");
+    graph.AddComputePass("rw-pass", make_unique<RWBufferComputePass>(buffer));
+    graph.ExportBuffer(buffer, RDGExecutionStage::Host, RDGMemoryAccess::HostRead, allBuffer);
+
+    const auto uml = graph.Compile().ExportExecutionPlantUml();
+
+    ExpectContains(uml, "concise \"buffer \\\"quoted\\\"\\nnext\" as resource_0");
+    ExpectContains(uml, "buffer \\\"quoted\\\"\\nnext: id=0 tag=Buffer ownership=External import=yes export=yes life=E0-E0");
+    ExpectContains(uml, "resource_0 is \"Imp\"");
+    ExpectContains(uml, "resource_0 is \"RW\"");
+    ExpectContains(uml, "resource_0 is \"Exp\"");
+}
+
+TEST(RenderGraphTest, ExportExecutionPlantUmlShowsResourceLifetimeBands) {
+    RenderGraph graph{};
+    const auto allBuffer = BufferRange::AllRange();
+    FakeBuffer inputBacking(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::CopySource,
+    });
+
+    const auto input = graph.ImportBuffer(
+        MakeGpuBufferHandle(&inputBacking),
+        RDGExecutionStage::Host,
+        RDGMemoryAccess::HostWrite,
+        allBuffer,
+        "input");
+    const auto tempBuffer = graph.AddBuffer(
+        64,
+        MemoryType::Device,
+        BufferUse::CopyDestination | BufferUse::CopySource,
+        "temp-buffer");
+    const auto readbackBuffer = graph.AddBuffer(
+        64,
+        MemoryType::ReadBack,
+        BufferUse::CopyDestination,
+        "readback-buffer");
+
+    RDGCopyPassBuilder writeTemp{};
+    writeTemp
+        .SetName("write-temp")
+        .CopyBufferToBuffer(tempBuffer, 0, input, 0, 64);
+    writeTemp._buffers.emplace_back(input, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, allBuffer});
+    writeTemp._buffers.emplace_back(tempBuffer, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer});
+    writeTemp.Build(&graph);
+
+    RDGCopyPassBuilder consumeTemp{};
+    consumeTemp
+        .SetName("consume-temp")
+        .CopyBufferToBuffer(readbackBuffer, 0, tempBuffer, 0, 64);
+    consumeTemp._buffers.emplace_back(tempBuffer, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferRead, allBuffer});
+    consumeTemp._buffers.emplace_back(readbackBuffer, RDGBufferState{RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer});
+    consumeTemp.Build(&graph);
+
+    graph.ExportBuffer(readbackBuffer, RDGExecutionStage::Host, RDGMemoryAccess::HostRead, allBuffer);
+
+    const auto uml = graph.Compile().ExportExecutionPlantUml();
+
+    ExpectContains(uml, "concise \"temp-buffer\" as resource_1");
+    ExpectContains(uml, "temp-buffer: id=1 tag=Buffer ownership=Internal import=no export=no life=E0-E1");
+    ExpectContains(uml, "resource_1 is \"W\"");
+    ExpectContains(uml, "resource_1 is \"R\"");
+}
+
+TEST(RenderGraphTest, ExportExecutionPlantUmlHandlesEmptyCompileResult) {
+    RenderGraph graph{};
+
+    const auto uml = graph.Compile().ExportExecutionPlantUml();
+
+    ExpectContains(uml, "@startuml");
+    ExpectContains(uml, "@enduml");
+    ExpectContains(uml, "No compiled passes");
+}
+
 TEST(RenderGraphTest, ExportCompiledGraphvizHandlesLargeModernFrameGraph) {
     RenderGraph graph{};
     const auto allBuffer = BufferRange::AllRange();
@@ -1470,6 +1671,8 @@ TEST(RenderGraphTest, ExportCompiledGraphvizHandlesLargeModernFrameGraph) {
     ExpectContains(graphviz, "digraph RenderGraph");
     const auto compiled = graph.Compile();
     const auto dot = compiled.ExportCompiledGraphviz();
+    const auto ex = compiled.ExportExecutionPlantUml();
+    ExpectContains(ex, "@startuml");
 
     EXPECT_GE(compiled._passes.size(), 10u);
     ExpectContains(dot, "digraph CompiledRenderGraph {");

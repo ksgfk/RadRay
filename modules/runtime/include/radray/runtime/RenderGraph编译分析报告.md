@@ -602,7 +602,7 @@ public:
     vector<ResourceAllocation> Allocations;
 
     string ExportCompiledGraphviz() const;
-    string ExportExecutionGraphviz() const;
+    string ExportExecutionPlantUml() const;
 };
 ```
 

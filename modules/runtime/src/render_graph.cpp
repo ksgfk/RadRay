@@ -42,6 +42,34 @@ void _AppendGraphvizEscapedText(fmt::memory_buffer& buffer, std::string_view tex
     }
 }
 
+void _AppendPlantUmlEscapedText(fmt::memory_buffer& buffer, std::string_view text) {
+    auto out = std::back_inserter(buffer);
+    size_t chunkBegin = 0;
+    for (size_t index = 0; index < text.size(); ++index) {
+        std::string_view replacement{};
+        switch (text[index]) {
+            case '\\': replacement = "\\\\"; break;
+            case '"': replacement = "\\\""; break;
+            case '\n': replacement = "\\n"; break;
+            case '\r': replacement = ""; break;
+            default: break;
+        }
+        if (replacement.data() == nullptr) {
+            continue;
+        }
+        if (index > chunkBegin) {
+            fmt::format_to(out, "{}", std::string_view{text.data() + chunkBegin, index - chunkBegin});
+        }
+        if (!replacement.empty()) {
+            fmt::format_to(out, "{}", replacement);
+        }
+        chunkBegin = index + 1;
+    }
+    if (chunkBegin < text.size()) {
+        fmt::format_to(out, "{}", std::string_view{text.data() + chunkBegin, text.size() - chunkBegin});
+    }
+}
+
 template <typename T>
 struct FormatGraphviz;
 
@@ -2646,6 +2674,355 @@ string RenderGraph::CompileResult::ExportCompiledGraphviz() const {
         fmt::format_to(out, "{}", statement);
     }
     fmt::format_to(out, "}}\n");
+    return fmt::to_string(buffer);
+}
+
+string RenderGraph::CompileResult::ExportExecutionPlantUml() const {
+    fmt::memory_buffer buffer;
+    auto out = std::back_inserter(buffer);
+    fmt::format_to(out, "@startuml\n");
+    fmt::format_to(out, "scale 1 as 120 pixels\n");
+
+    if (_passes.empty()) {
+        fmt::format_to(out, "concise \"Execution\" as execution\n");
+        fmt::format_to(out, "@0\n");
+        fmt::format_to(out, "execution is \"No compiled passes\"\n");
+        fmt::format_to(out, "@enduml\n");
+        return fmt::to_string(buffer);
+    }
+
+    const uint32_t passCount = static_cast<uint32_t>(_passes.size());
+    unordered_map<uint64_t, uint32_t> passIndexByNodeId{};
+    passIndexByNodeId.reserve(_passes.size());
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        RADRAY_ASSERT(_passes[passIndex].Node != nullptr);
+        passIndexByNodeId.emplace(_passes[passIndex].Node->_id, passIndex);
+    }
+
+    vector<vector<uint8_t>> passReachability(passCount, vector<uint8_t>(passCount, uint8_t{0}));
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        unordered_set<uint64_t> visited{};
+        vector<const RDGNode*> queue{};
+        visited.reserve(passCount * 2);
+        queue.reserve(passCount * 2);
+        visited.emplace(_passes[passIndex].Node->_id);
+        queue.emplace_back(_passes[passIndex].Node);
+
+        for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
+            const RDGNode* node = queue[cursor];
+            for (const RDGEdge* edge : node->_outEdges) {
+                const RDGNode* next = edge->_to;
+                if (!visited.emplace(next->_id).second) {
+                    continue;
+                }
+                queue.emplace_back(next);
+                if (const auto it = passIndexByNodeId.find(next->_id); it != passIndexByNodeId.end() && it->second != passIndex) {
+                    passReachability[passIndex][it->second] = 1;
+                }
+            }
+        }
+    }
+
+    vector<vector<uint8_t>> directPassDependencies(passCount, vector<uint8_t>(passCount, uint8_t{0}));
+    for (uint32_t fromPassIndex = 0; fromPassIndex < passCount; ++fromPassIndex) {
+        for (uint32_t toPassIndex = 0; toPassIndex < passCount; ++toPassIndex) {
+            if (fromPassIndex == toPassIndex || passReachability[fromPassIndex][toPassIndex] == 0) {
+                continue;
+            }
+
+            bool isTransitive = false;
+            for (uint32_t middlePassIndex = 0; middlePassIndex < passCount; ++middlePassIndex) {
+                if (middlePassIndex == fromPassIndex || middlePassIndex == toPassIndex) {
+                    continue;
+                }
+                if (passReachability[fromPassIndex][middlePassIndex] != 0 &&
+                    passReachability[middlePassIndex][toPassIndex] != 0) {
+                    isTransitive = true;
+                    break;
+                }
+            }
+            if (!isTransitive) {
+                directPassDependencies[fromPassIndex][toPassIndex] = 1;
+            }
+        }
+    }
+
+    vector<uint32_t> parallelLevels(passCount, 0);
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        for (uint32_t predPassIndex = 0; predPassIndex < passCount; ++predPassIndex) {
+            if (directPassDependencies[predPassIndex][passIndex] == 0) {
+                continue;
+            }
+            parallelLevels[passIndex] = std::max(parallelLevels[passIndex], parallelLevels[predPassIndex] + 1);
+        }
+    }
+
+    uint32_t maxParallelLevel = 0;
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        maxParallelLevel = std::max(maxParallelLevel, parallelLevels[passIndex]);
+    }
+
+    vector<vector<uint32_t>> passesByLevel(maxParallelLevel + 1);
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        passesByLevel[parallelLevels[passIndex]].emplace_back(passIndex);
+    }
+    uint32_t laneCount = 0;
+    vector<uint32_t> passLaneIndices(passCount, 0);
+    for (auto& passIndices : passesByLevel) {
+        std::sort(passIndices.begin(), passIndices.end(), [&](uint32_t lhs, uint32_t rhs) {
+            return _passes[lhs].ExecutionIndex < _passes[rhs].ExecutionIndex;
+        });
+        laneCount = std::max(laneCount, static_cast<uint32_t>(passIndices.size()));
+        for (uint32_t laneIndex = 0; laneIndex < static_cast<uint32_t>(passIndices.size()); ++laneIndex) {
+            passLaneIndices[passIndices[laneIndex]] = laneIndex;
+        }
+    }
+
+    const uint32_t prologueTick = 0;
+    const uint32_t epilogueTick = maxParallelLevel + 2;
+
+    vector<vector<std::optional<uint32_t>>> passIndexByTickAndLane(epilogueTick + 1, vector<std::optional<uint32_t>>(laneCount));
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        const uint32_t tick = parallelLevels[passIndex] + 1;
+        passIndexByTickAndLane[tick][passLaneIndices[passIndex]] = passIndex;
+    }
+
+    struct ResourceTickUsage {
+        bool HasRead{false};
+        bool HasWrite{false};
+    };
+    struct ResourceTimeline {
+        const RDGResourceNode* Node{nullptr};
+        uint32_t FirstPassIndex{ResourceLifetime::InvalidPassIndex};
+        uint32_t LastPassIndex{ResourceLifetime::InvalidPassIndex};
+        uint32_t DerivedFirstPassIndex{ResourceLifetime::InvalidPassIndex};
+        uint32_t DerivedLastPassIndex{ResourceLifetime::InvalidPassIndex};
+        vector<ResourceTickUsage> UsageByTick{};
+        bool HasImport{false};
+        bool HasExport{false};
+    };
+
+    vector<ResourceTimeline> resources{};
+    unordered_map<uint64_t, size_t> resourceIndices{};
+    auto ensureResourceTimeline = [&](const RDGResourceNode* resource) -> ResourceTimeline& {
+        RADRAY_ASSERT(resource != nullptr);
+        auto [it, inserted] = resourceIndices.try_emplace(resource->_id, resources.size());
+        if (inserted) {
+            resources.emplace_back();
+            resources.back().Node = resource;
+            resources.back().UsageByTick.resize(epilogueTick + 1);
+        }
+        return resources[it->second];
+    };
+
+    for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+        const auto* passNode = _passes[passIndex].Node;
+        const uint32_t tick = parallelLevels[passIndex] + 1;
+        auto collectEdgeUsage = [&](const RDGEdge* edge) {
+            if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+                return;
+            }
+
+            const auto* resourceEdge = static_cast<const RDGResourceDependencyEdge*>(edge);
+            const auto* resourceNode = _GetResourceNode(*resourceEdge);
+            if (resourceNode == nullptr) {
+                return;
+            }
+
+            auto& resourceTimeline = ensureResourceTimeline(resourceNode);
+            const bool passWritesResource = edge->_from == passNode;
+            if (!passWritesResource || HasReadAccess(resourceEdge->_access)) {
+                resourceTimeline.UsageByTick[tick].HasRead = true;
+            }
+            if (passWritesResource && HasWriteAccess(resourceEdge->_access)) {
+                resourceTimeline.UsageByTick[tick].HasWrite = true;
+            }
+            if (resourceTimeline.DerivedFirstPassIndex == ResourceLifetime::InvalidPassIndex) {
+                resourceTimeline.DerivedFirstPassIndex = passIndex;
+            }
+            resourceTimeline.DerivedLastPassIndex = passIndex;
+        };
+
+        for (const RDGEdge* edge : passNode->_inEdges) {
+            collectEdgeUsage(edge);
+        }
+        for (const RDGEdge* edge : passNode->_outEdges) {
+            collectEdgeUsage(edge);
+        }
+    }
+
+    for (auto& resourceTimeline : resources) {
+        VisitResource(*resourceTimeline.Node, [&](const auto& typedResource) {
+            resourceTimeline.HasImport = typedResource._importState.has_value();
+            resourceTimeline.HasExport = typedResource._exportState.has_value();
+        });
+
+        if ((resourceTimeline.Node->_ownership == RDGResourceOwnership::Internal ||
+             resourceTimeline.Node->_ownership == RDGResourceOwnership::Transient) &&
+            resourceTimeline.Node->_id < _lifetimes.size() &&
+            _lifetimes[resourceTimeline.Node->_id].IsValid()) {
+            resourceTimeline.FirstPassIndex = _lifetimes[resourceTimeline.Node->_id].FirstPassIndex;
+            resourceTimeline.LastPassIndex = _lifetimes[resourceTimeline.Node->_id].LastPassIndex;
+        } else {
+            resourceTimeline.FirstPassIndex = resourceTimeline.DerivedFirstPassIndex;
+            resourceTimeline.LastPassIndex = resourceTimeline.DerivedLastPassIndex;
+        }
+
+        if (resourceTimeline.FirstPassIndex == ResourceLifetime::InvalidPassIndex) {
+            resourceTimeline.FirstPassIndex = resourceTimeline.DerivedFirstPassIndex;
+            resourceTimeline.LastPassIndex = resourceTimeline.DerivedLastPassIndex;
+        }
+    }
+
+    std::sort(resources.begin(), resources.end(), [](const ResourceTimeline& lhs, const ResourceTimeline& rhs) {
+        if (lhs.FirstPassIndex != rhs.FirstPassIndex) {
+            return lhs.FirstPassIndex < rhs.FirstPassIndex;
+        }
+        if (lhs.LastPassIndex != rhs.LastPassIndex) {
+            return lhs.LastPassIndex < rhs.LastPassIndex;
+        }
+        if (lhs.Node->_name != rhs.Node->_name) {
+            return lhs.Node->_name < rhs.Node->_name;
+        }
+        return lhs.Node->_id < rhs.Node->_id;
+    });
+
+    for (uint32_t laneIndex = 0; laneIndex < laneCount; ++laneIndex) {
+        fmt::format_to(out, "concise \"P{}\" as pass_lane_{}\n", laneIndex, laneIndex);
+    }
+    for (const auto& resourceTimeline : resources) {
+        fmt::format_to(out, "concise \"");
+        _AppendPlantUmlEscapedText(buffer, resourceTimeline.Node->_name);
+        fmt::format_to(out, "\" as resource_{}\n", resourceTimeline.Node->_id);
+    }
+
+    fmt::format_to(out, "legend bottom\n");
+    fmt::format_to(out, "Imp = import\n");
+    fmt::format_to(out, "R = read\n");
+    fmt::format_to(out, "W = write\n");
+    fmt::format_to(out, "RW = read+write\n");
+    fmt::format_to(out, "Alive = lifetime\n");
+    fmt::format_to(out, "Exp = export\n");
+    fmt::format_to(out, "\n");
+    for (uint32_t laneIndex = 0; laneIndex < laneCount; ++laneIndex) {
+        fmt::format_to(out, "P{} = Pass Lane {}\n", laneIndex, laneIndex);
+    }
+    if (laneCount != 0) {
+        fmt::format_to(out, "\n");
+    }
+    vector<const ResourceTimeline*> legendResources{};
+    legendResources.reserve(resources.size());
+    for (const auto& resourceTimeline : resources) {
+        legendResources.emplace_back(&resourceTimeline);
+    }
+    std::sort(legendResources.begin(), legendResources.end(), [](const ResourceTimeline* lhs, const ResourceTimeline* rhs) {
+        if (lhs->Node->_name != rhs->Node->_name) {
+            return lhs->Node->_name < rhs->Node->_name;
+        }
+        return lhs->Node->_id < rhs->Node->_id;
+    });
+
+    for (const ResourceTimeline* resourceTimeline : legendResources) {
+        _AppendPlantUmlEscapedText(buffer, resourceTimeline->Node->_name);
+        fmt::format_to(out, ": id={} tag={} ownership={}",
+                       resourceTimeline->Node->_id,
+                       format_as(static_cast<RDGNodeTag>(resourceTimeline->Node->GetTag())),
+                       format_as(resourceTimeline->Node->_ownership));
+        fmt::format_to(out,
+                       " import={} export={}",
+                       resourceTimeline->HasImport ? "yes" : "no",
+                       resourceTimeline->HasExport ? "yes" : "no");
+        if (resourceTimeline->FirstPassIndex != ResourceLifetime::InvalidPassIndex &&
+            resourceTimeline->LastPassIndex != ResourceLifetime::InvalidPassIndex) {
+            fmt::format_to(out,
+                           " life=E{}-E{}",
+                           _passes[resourceTimeline->FirstPassIndex].ExecutionIndex,
+                           _passes[resourceTimeline->LastPassIndex].ExecutionIndex);
+        } else {
+            fmt::format_to(out, " life=-");
+        }
+        fmt::format_to(out, "\n");
+    }
+    fmt::format_to(out, "endlegend\n");
+
+    auto appendQuotedPlantUmlText = [&](std::string_view text) {
+        fmt::format_to(out, "\"");
+        _AppendPlantUmlEscapedText(buffer, text);
+        fmt::format_to(out, "\"");
+    };
+
+    auto appendHiddenOrQuotedPlantUmlText = [&](std::string_view text) {
+        if (text == "{hidden}") {
+            fmt::format_to(out, "{{hidden}}");
+            return;
+        }
+        appendQuotedPlantUmlText(text);
+    };
+
+    for (uint32_t tick = prologueTick; tick <= epilogueTick; ++tick) {
+        fmt::format_to(out, "@{}\n", tick);
+
+        for (uint32_t laneIndex = 0; laneIndex < laneCount; ++laneIndex) {
+            fmt::format_to(out, "pass_lane_{} is ", laneIndex);
+            if (tick == epilogueTick || !passIndexByTickAndLane[tick][laneIndex].has_value()) {
+                fmt::format_to(out, "{{hidden}}\n");
+                continue;
+            }
+
+            const auto& compiledPass = _passes[*passIndexByTickAndLane[tick][laneIndex]];
+            const auto* passNode = compiledPass.Node;
+            fmt::memory_buffer labelBuffer;
+            fmt::format_to(std::back_inserter(labelBuffer), "");
+            _AppendPlantUmlEscapedText(labelBuffer, passNode->_name);
+            fmt::format_to(std::back_inserter(labelBuffer),
+                           "\\n[{}]\\nE{}\\nbuf={} tex={}",
+                           format_as(static_cast<RDGNodeTag>(passNode->GetTag())),
+                           compiledPass.ExecutionIndex,
+                           compiledPass.PreBarriers.BufferBarriers.size(),
+                           compiledPass.PreBarriers.TextureBarriers.size());
+            fmt::format_to(out, "\"{}\"\n", fmt::to_string(labelBuffer));
+        }
+
+        for (const auto& resourceTimeline : resources) {
+            fmt::format_to(out, "resource_{} is ", resourceTimeline.Node->_id);
+            if (tick == prologueTick) {
+                appendHiddenOrQuotedPlantUmlText(resourceTimeline.HasImport ? "Imp" : "{hidden}");
+                fmt::format_to(out, "\n");
+                continue;
+            }
+            if (tick == epilogueTick) {
+                appendHiddenOrQuotedPlantUmlText(resourceTimeline.HasExport ? "Exp" : "{hidden}");
+                fmt::format_to(out, "\n");
+                continue;
+            }
+
+            if (resourceTimeline.FirstPassIndex == ResourceLifetime::InvalidPassIndex ||
+                resourceTimeline.LastPassIndex == ResourceLifetime::InvalidPassIndex) {
+                fmt::format_to(out, "{{hidden}}\n");
+                continue;
+            }
+
+            const uint32_t firstTick = parallelLevels[resourceTimeline.FirstPassIndex] + 1;
+            const uint32_t lastTick = parallelLevels[resourceTimeline.LastPassIndex] + 1;
+            if (tick < firstTick || tick > lastTick) {
+                fmt::format_to(out, "{{hidden}}\n");
+                continue;
+            }
+
+            const auto& usage = resourceTimeline.UsageByTick[tick];
+            if (usage.HasRead && usage.HasWrite) {
+                fmt::format_to(out, "\"RW\"\n");
+            } else if (usage.HasWrite) {
+                fmt::format_to(out, "\"W\"\n");
+            } else if (usage.HasRead) {
+                fmt::format_to(out, "\"R\"\n");
+            } else {
+                fmt::format_to(out, "\"Alive\"\n");
+            }
+        }
+    }
+
+    fmt::format_to(out, "@enduml\n");
     return fmt::to_string(buffer);
 }
 
