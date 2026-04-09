@@ -10,6 +10,13 @@
 
 #include <radray/utility.h>
 
+#ifdef RADRAY_ENABLE_D3D12
+#include <radray/render/backend/d3d12_impl.h>
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_impl.h>
+#endif
+
 namespace radray {
 
 namespace {
@@ -727,6 +734,278 @@ vector<CompiledGraphvizPassResourceUsage> _CollectCompiledPassResourceUsages(con
     }
 
     return usages;
+}
+
+bool _IsWholeTextureRange(const render::SubresourceRange& range, const RDGTextureNode& texNode) noexcept {
+    if (range.BaseArrayLayer == 0 && range.BaseMipLevel == 0 &&
+        (range.ArrayLayerCount == render::SubresourceRange::All || range.ArrayLayerCount == texNode._depthOrArraySize) &&
+        (range.MipLevelCount == render::SubresourceRange::All || range.MipLevelCount == texNode._mipLevels)) {
+        return true;
+    }
+    return false;
+}
+
+#ifdef RADRAY_ENABLE_D3D12
+
+D3D12_RESOURCE_STATES _RDGAccessToD3D12States(RDGMemoryAccesses access) noexcept {
+    D3D12_RESOURCE_STATES result = static_cast<D3D12_RESOURCE_STATES>(0);
+    if (access.HasFlag(RDGMemoryAccess::VertexRead)) result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    if (access.HasFlag(RDGMemoryAccess::IndexRead)) result |= D3D12_RESOURCE_STATE_INDEX_BUFFER;
+    if (access.HasFlag(RDGMemoryAccess::ConstantRead)) result |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    if (access.HasFlag(RDGMemoryAccess::ShaderRead)) result |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (access.HasFlag(RDGMemoryAccess::ShaderWrite)) result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    if (access.HasFlag(RDGMemoryAccess::ColorAttachmentRead)) result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    if (access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite)) result |= D3D12_RESOURCE_STATE_RENDER_TARGET;
+    if (access.HasFlag(RDGMemoryAccess::DepthStencilRead)) result |= D3D12_RESOURCE_STATE_DEPTH_READ;
+    if (access.HasFlag(RDGMemoryAccess::DepthStencilWrite)) result |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    if (access.HasFlag(RDGMemoryAccess::TransferRead)) result |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (access.HasFlag(RDGMemoryAccess::TransferWrite)) result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    if (access.HasFlag(RDGMemoryAccess::HostRead)) result |= D3D12_RESOURCE_STATE_GENERIC_READ;
+    if (access.HasFlag(RDGMemoryAccess::HostWrite)) result |= D3D12_RESOURCE_STATE_COPY_DEST;
+    if (access.HasFlag(RDGMemoryAccess::IndirectRead)) result |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    if (result == static_cast<D3D12_RESOURCE_STATES>(0)) result = D3D12_RESOURCE_STATE_COMMON;
+    return result;
+}
+
+D3D12_RESOURCE_STATES _RDGLayoutToD3D12States(RDGTextureLayout layout) noexcept {
+    switch (layout) {
+        case RDGTextureLayout::UNKNOWN: return D3D12_RESOURCE_STATE_COMMON;
+        case RDGTextureLayout::Undefined: return D3D12_RESOURCE_STATE_COMMON;
+        case RDGTextureLayout::General: return D3D12_RESOURCE_STATE_COMMON;
+        case RDGTextureLayout::ShaderReadOnly: return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        case RDGTextureLayout::ColorAttachment: return D3D12_RESOURCE_STATE_RENDER_TARGET;
+        case RDGTextureLayout::DepthStencilReadOnly: return D3D12_RESOURCE_STATE_DEPTH_READ;
+        case RDGTextureLayout::DepthStencilAttachment: return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        case RDGTextureLayout::TransferSource: return D3D12_RESOURCE_STATE_COPY_SOURCE;
+        case RDGTextureLayout::TransferDestination: return D3D12_RESOURCE_STATE_COPY_DEST;
+        case RDGTextureLayout::Present: return D3D12_RESOURCE_STATE_PRESENT;
+    }
+    Unreachable();
+}
+
+void _LowerBarrierBatchD3D12(
+    render::CommandBuffer* cmd,
+    const RenderGraph& graph,
+    const RenderGraph::CompileResult::BarrierBatch& batch) {
+    if (batch.BufferBarriers.empty() && batch.TextureBarriers.empty()) return;
+
+    auto* cmdList = render::d3d12::CastD3D12Object(cmd)->_cmdList.Get();
+
+    vector<D3D12_RESOURCE_BARRIER> rawBarriers{};
+    rawBarriers.reserve(batch.BufferBarriers.size() + batch.TextureBarriers.size());
+
+    for (const auto& bb : batch.BufferBarriers) {
+        auto* bufNode = static_cast<const RDGBufferNode*>(graph.Resolve(RDGNodeHandle{bb.Buffer.Id}));
+        auto* buf = render::d3d12::CastD3D12Object(static_cast<render::Buffer*>(bufNode->_importBuffer.NativeHandle));
+        auto before = _RDGAccessToD3D12States(bb.SrcAccess);
+        auto after = _RDGAccessToD3D12States(bb.DstAccess);
+        D3D12_RESOURCE_BARRIER raw{};
+        if (before == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && after == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.UAV.pResource = buf->_buf.Get();
+        } else {
+            if (before == after) continue;
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.Transition.pResource = buf->_buf.Get();
+            raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            raw.Transition.StateBefore = before;
+            raw.Transition.StateAfter = after;
+        }
+        rawBarriers.push_back(raw);
+    }
+
+    for (const auto& tb : batch.TextureBarriers) {
+        auto* texNode = static_cast<const RDGTextureNode*>(graph.Resolve(RDGNodeHandle{tb.Texture.Id}));
+        auto* tex = render::d3d12::CastD3D12Object(static_cast<render::Texture*>(texNode->_importTexture.NativeHandle));
+        auto before = _RDGLayoutToD3D12States(tb.SrcLayout);
+        auto after = _RDGLayoutToD3D12States(tb.DstLayout);
+        D3D12_RESOURCE_BARRIER raw{};
+        if (before == D3D12_RESOURCE_STATE_UNORDERED_ACCESS && after == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.UAV.pResource = tex->_tex.Get();
+        } else {
+            if (before == D3D12_RESOURCE_STATE_COMMON && after == D3D12_RESOURCE_STATE_COMMON) {
+                if (tb.SrcLayout == RDGTextureLayout::Present || tb.DstLayout == RDGTextureLayout::Present) {
+                    continue;
+                }
+            }
+            if (before == after) continue;
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            raw.Transition.pResource = tex->_tex.Get();
+            bool isSubresource = !_IsWholeTextureRange(tb.Range, *texNode);
+            if (isSubresource) {
+                raw.Transition.Subresource = D3D12CalcSubresource(
+                    tb.Range.BaseMipLevel,
+                    tb.Range.BaseArrayLayer,
+                    0,
+                    tex->_rawDesc.MipLevels,
+                    tex->_rawDesc.DepthOrArraySize);
+            } else {
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            }
+            raw.Transition.StateBefore = before;
+            raw.Transition.StateAfter = after;
+        }
+        rawBarriers.push_back(raw);
+    }
+
+    if (!rawBarriers.empty()) {
+        cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
+    }
+}
+
+#endif  // RADRAY_ENABLE_D3D12
+
+#ifdef RADRAY_ENABLE_VULKAN
+
+VkAccessFlags _RDGAccessToVkAccessFlags(RDGMemoryAccesses access) noexcept {
+    VkAccessFlags result = 0;
+    if (access.HasFlag(RDGMemoryAccess::VertexRead)) result |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::IndexRead)) result |= VK_ACCESS_INDEX_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::ConstantRead)) result |= VK_ACCESS_UNIFORM_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::ShaderRead)) result |= VK_ACCESS_SHADER_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::ShaderWrite)) result |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    if (access.HasFlag(RDGMemoryAccess::ColorAttachmentRead)) result |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::ColorAttachmentWrite)) result |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    if (access.HasFlag(RDGMemoryAccess::DepthStencilRead)) result |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::DepthStencilWrite)) result |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (access.HasFlag(RDGMemoryAccess::TransferRead)) result |= VK_ACCESS_TRANSFER_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::TransferWrite)) result |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    if (access.HasFlag(RDGMemoryAccess::HostRead)) result |= VK_ACCESS_HOST_READ_BIT;
+    if (access.HasFlag(RDGMemoryAccess::HostWrite)) result |= VK_ACCESS_HOST_WRITE_BIT;
+    if (access.HasFlag(RDGMemoryAccess::IndirectRead)) result |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    return result;
+}
+
+VkPipelineStageFlags _RDGStagesToVkPipelineStages(RDGExecutionStages stages) noexcept {
+    VkPipelineStageFlags result = 0;
+    if (stages.HasFlag(RDGExecutionStage::VertexInput)) result |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    if (stages.HasFlag(RDGExecutionStage::VertexShader)) result |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    if (stages.HasFlag(RDGExecutionStage::PixelShader)) result |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (stages.HasFlag(RDGExecutionStage::DepthStencil)) result |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    if (stages.HasFlag(RDGExecutionStage::ColorOutput)) result |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (stages.HasFlag(RDGExecutionStage::Indirect)) result |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (stages.HasFlag(RDGExecutionStage::ComputeShader)) result |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (stages.HasFlag(RDGExecutionStage::Copy)) result |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (stages.HasFlag(RDGExecutionStage::Host)) result |= VK_PIPELINE_STAGE_HOST_BIT;
+    if (stages.HasFlag(RDGExecutionStage::Present)) result |= VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    if (result == 0) result = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    return result;
+}
+
+VkImageLayout _RDGLayoutToVkImageLayout(RDGTextureLayout layout) noexcept {
+    switch (layout) {
+        case RDGTextureLayout::UNKNOWN: return VK_IMAGE_LAYOUT_UNDEFINED;
+        case RDGTextureLayout::Undefined: return VK_IMAGE_LAYOUT_UNDEFINED;
+        case RDGTextureLayout::General: return VK_IMAGE_LAYOUT_GENERAL;
+        case RDGTextureLayout::ShaderReadOnly: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        case RDGTextureLayout::ColorAttachment: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        case RDGTextureLayout::DepthStencilReadOnly: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        case RDGTextureLayout::DepthStencilAttachment: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case RDGTextureLayout::TransferSource: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        case RDGTextureLayout::TransferDestination: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        case RDGTextureLayout::Present: return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
+    Unreachable();
+}
+
+void _LowerBarrierBatchVulkan(
+    render::CommandBuffer* cmd,
+    const RenderGraph& graph,
+    const RenderGraph::CompileResult::BarrierBatch& batch) {
+    if (batch.BufferBarriers.empty() && batch.TextureBarriers.empty()) return;
+
+    auto* cmdVk = render::vulkan::CastVkObject(cmd);
+    auto* device = cmdVk->_device;
+
+    VkPipelineStageFlags srcStageMask = 0;
+    VkPipelineStageFlags dstStageMask = 0;
+    vector<VkBufferMemoryBarrier> bufferBarriers{};
+    vector<VkImageMemoryBarrier> imageBarriers{};
+    bufferBarriers.reserve(batch.BufferBarriers.size());
+    imageBarriers.reserve(batch.TextureBarriers.size());
+
+    for (const auto& bb : batch.BufferBarriers) {
+        auto* bufNode = static_cast<const RDGBufferNode*>(graph.Resolve(RDGNodeHandle{bb.Buffer.Id}));
+        auto* buf = render::vulkan::CastVkObject(static_cast<render::Buffer*>(bufNode->_importBuffer.NativeHandle));
+        auto& barrier = bufferBarriers.emplace_back();
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.pNext = nullptr;
+        barrier.srcAccessMask = _RDGAccessToVkAccessFlags(bb.SrcAccess);
+        barrier.dstAccessMask = _RDGAccessToVkAccessFlags(bb.DstAccess);
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buf->_buffer;
+        barrier.offset = 0;
+        barrier.size = buf->_reqSize;
+        srcStageMask |= _RDGStagesToVkPipelineStages(bb.SrcStage);
+        dstStageMask |= _RDGStagesToVkPipelineStages(bb.DstStage);
+    }
+
+    for (const auto& tb : batch.TextureBarriers) {
+        auto* texNode = static_cast<const RDGTextureNode*>(graph.Resolve(RDGNodeHandle{tb.Texture.Id}));
+        auto* tex = render::vulkan::CastVkObject(static_cast<render::Texture*>(texNode->_importTexture.NativeHandle));
+        auto& barrier = imageBarriers.emplace_back();
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.pNext = nullptr;
+        barrier.srcAccessMask = _RDGAccessToVkAccessFlags(tb.SrcAccess);
+        barrier.dstAccessMask = _RDGAccessToVkAccessFlags(tb.DstAccess);
+        barrier.oldLayout = _RDGLayoutToVkImageLayout(tb.SrcLayout);
+        barrier.newLayout = _RDGLayoutToVkImageLayout(tb.DstLayout);
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = tex->_image;
+        barrier.subresourceRange.aspectMask = render::vulkan::ImageFormatToAspectFlags(tex->_rawFormat);
+        bool isSubresource = !_IsWholeTextureRange(tb.Range, *texNode);
+        barrier.subresourceRange.baseMipLevel = isSubresource ? tb.Range.BaseMipLevel : 0;
+        barrier.subresourceRange.levelCount = isSubresource ? tb.Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
+        barrier.subresourceRange.baseArrayLayer = isSubresource ? tb.Range.BaseArrayLayer : 0;
+        barrier.subresourceRange.layerCount = isSubresource ? tb.Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+        auto srcStage = _RDGStagesToVkPipelineStages(tb.SrcStage);
+        auto dstStage = _RDGStagesToVkPipelineStages(tb.DstStage);
+        if (tex->_isSwapchainImage && tb.SrcLayout == RDGTextureLayout::Undefined) {
+            srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        }
+        srcStageMask |= srcStage;
+        dstStageMask |= dstStage;
+    }
+
+    device->_ftb.vkCmdPipelineBarrier(
+        cmdVk->_cmdBuffer,
+        srcStageMask,
+        dstStageMask,
+        0,
+        0, nullptr,
+        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.empty() ? nullptr : bufferBarriers.data(),
+        static_cast<uint32_t>(imageBarriers.size()), imageBarriers.empty() ? nullptr : imageBarriers.data());
+}
+
+#endif  // RADRAY_ENABLE_VULKAN
+
+void _EmitBarriers(
+    render::RenderBackend backend,
+    render::CommandBuffer* cmd,
+    const RenderGraph& graph,
+    const RenderGraph::CompileResult::BarrierBatch& batch) {
+    switch (backend) {
+#ifdef RADRAY_ENABLE_D3D12
+        case render::RenderBackend::D3D12:
+            _LowerBarrierBatchD3D12(cmd, graph, batch);
+            return;
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+        case render::RenderBackend::Vulkan:
+            _LowerBarrierBatchVulkan(cmd, graph, batch);
+            return;
+#endif
+        default:
+            break;
+    }
+    Unreachable();
 }
 
 }  // namespace
@@ -2513,6 +2792,151 @@ RenderGraph::CompileResult RenderGraph::Compile() const {
     result._epilogueBarriers = std::move(epilogueBarriers);
     result._lifetimes = std::move(lifetimes);
     return result;
+}
+
+void RenderGraph::Execute(const CompileResult& compiled, GpuAsyncContext* context) {
+    auto backend = context->_runtime->GetDevice()->GetBackend();
+
+    // 分配 Internal/Transient 资源
+    for (auto& nodePtr : _nodes) {
+        auto* node = nodePtr.get();
+        auto id = node->_id;
+        if (id >= compiled._lifetimes.size() || !compiled._lifetimes[id].IsValid()) continue;
+
+        auto tag = node->GetTag();
+        if (tag.HasFlag(RDGNodeTag::Buffer)) {
+            auto* bufNode = static_cast<RDGBufferNode*>(node);
+            if (bufNode->_ownership == RDGResourceOwnership::Internal ||
+                bufNode->_ownership == RDGResourceOwnership::Transient) {
+                bufNode->_importBuffer = context->CreateTransientBuffer(
+                    render::BufferDescriptor{bufNode->_size, bufNode->_memory, bufNode->_usage});
+            }
+        } else if (tag.HasFlag(RDGNodeTag::Texture)) {
+            auto* texNode = static_cast<RDGTextureNode*>(node);
+            if (texNode->_ownership == RDGResourceOwnership::Internal ||
+                texNode->_ownership == RDGResourceOwnership::Transient) {
+                texNode->_importTexture = context->CreateTransientTexture(
+                    render::TextureDescriptor{
+                        texNode->_dim,
+                        texNode->_width, texNode->_height,
+                        texNode->_depthOrArraySize,
+                        texNode->_mipLevels,
+                        texNode->_sampleCount,
+                        texNode->_format,
+                        texNode->_memory,
+                        texNode->_usage});
+            }
+        }
+    }
+
+    auto* cmd = context->CreateCommandBuffer();
+    cmd->Begin();
+
+    for (const auto& pass : compiled._passes) {
+        _EmitBarriers(backend, cmd, *this, pass.PreBarriers);
+
+        auto* node = pass.Node;
+        auto tag = node->GetTag();
+
+        if (tag.HasFlag(RDGNodeTag::GraphicsPass)) {
+            auto* gfxPass = static_cast<RDGGraphicsPassNode*>(node);
+
+            vector<render::ColorAttachment> colorAttachments;
+            vector<GpuTextureViewHandle> colorViews;
+            colorAttachments.reserve(gfxPass->_colorAttachments.size());
+            colorViews.reserve(gfxPass->_colorAttachments.size());
+
+            for (const auto& ca : gfxPass->_colorAttachments) {
+                auto* texNode = static_cast<const RDGTextureNode*>(Resolve(RDGNodeHandle{ca.Texture.Id}));
+                auto viewHandle = context->CreateTransientTextureView(GpuTextureViewDescriptor{
+                    texNode->_importTexture,
+                    texNode->_dim,
+                    texNode->_format,
+                    ca.Range,
+                    render::TextureViewUsage::RenderTarget});
+                colorViews.emplace_back(viewHandle);
+                render::ColorAttachment rhi{};
+                rhi.Target = static_cast<render::TextureView*>(viewHandle.NativeHandle);
+                rhi.Load = ca.Load;
+                rhi.Store = ca.Store;
+                if (ca.ClearValue.has_value()) rhi.ClearValue = *ca.ClearValue;
+                colorAttachments.emplace_back(rhi);
+            }
+
+            std::optional<render::DepthStencilAttachment> dsAttachment;
+            GpuTextureViewHandle dsView;
+            if (gfxPass->_depthStencilAttachment.has_value()) {
+                const auto& ds = *gfxPass->_depthStencilAttachment;
+                auto* texNode = static_cast<const RDGTextureNode*>(Resolve(RDGNodeHandle{ds.Texture.Id}));
+                auto usage = ds.HasWriteAccess()
+                                 ? render::TextureViewUsage::DepthWrite
+                                 : render::TextureViewUsage::DepthRead;
+                dsView = context->CreateTransientTextureView(GpuTextureViewDescriptor{
+                    texNode->_importTexture,
+                    texNode->_dim,
+                    texNode->_format,
+                    ds.Range,
+                    usage});
+                render::DepthStencilAttachment rhi{};
+                rhi.Target = static_cast<render::TextureView*>(dsView.NativeHandle);
+                rhi.DepthLoad = ds.DepthLoad;
+                rhi.DepthStore = ds.DepthStore;
+                rhi.StencilLoad = ds.StencilLoad;
+                rhi.StencilStore = ds.StencilStore;
+                if (ds.ClearValue.has_value()) rhi.ClearValue = *ds.ClearValue;
+                dsAttachment = rhi;
+            }
+
+            render::RenderPassDescriptor rpDesc{};
+            rpDesc.ColorAttachments = colorAttachments;
+            rpDesc.DepthStencilAttachment = dsAttachment;
+            rpDesc.Name = node->_name;
+
+            auto encoder = cmd->BeginRenderPass(rpDesc);
+            gfxPass->_impl->Execute(encoder.Get(), context);
+            cmd->EndRenderPass(encoder.Release());
+
+        } else if (tag.HasFlag(RDGNodeTag::ComputePass)) {
+            auto* compPass = static_cast<RDGComputePassNode*>(node);
+            auto encoder = cmd->BeginComputePass();
+            compPass->_impl->Execute(encoder.Get(), context);
+            cmd->EndComputePass(encoder.Release());
+
+        } else if (tag.HasFlag(RDGNodeTag::CopyPass)) {
+            auto* copyPass = static_cast<RDGCopyPassNode*>(node);
+            for (const auto& copyOp : copyPass->_copys) {
+                std::visit(
+                    [&](const auto& op) {
+                        using T = std::decay_t<decltype(op)>;
+                        if constexpr (std::is_same_v<T, RDGCopyBufferToBufferRecord>) {
+                            auto* dstNode = static_cast<const RDGBufferNode*>(Resolve(RDGNodeHandle{op.Dst.Id}));
+                            auto* srcNode = static_cast<const RDGBufferNode*>(Resolve(RDGNodeHandle{op.Src.Id}));
+                            cmd->CopyBufferToBuffer(
+                                static_cast<render::Buffer*>(dstNode->_importBuffer.NativeHandle), op.DstOffset,
+                                static_cast<render::Buffer*>(srcNode->_importBuffer.NativeHandle), op.SrcOffset,
+                                op.Size);
+                        } else if constexpr (std::is_same_v<T, RDGCopyBufferToTextureRecord>) {
+                            auto* dstNode = static_cast<const RDGTextureNode*>(Resolve(RDGNodeHandle{op.Dst.Id}));
+                            auto* srcNode = static_cast<const RDGBufferNode*>(Resolve(RDGNodeHandle{op.Src.Id}));
+                            cmd->CopyBufferToTexture(
+                                static_cast<render::Texture*>(dstNode->_importTexture.NativeHandle), op.DstRange,
+                                static_cast<render::Buffer*>(srcNode->_importBuffer.NativeHandle), op.SrcOffset);
+                        } else if constexpr (std::is_same_v<T, RDGCopyTextureToBufferRecord>) {
+                            auto* dstNode = static_cast<const RDGBufferNode*>(Resolve(RDGNodeHandle{op.Dst.Id}));
+                            auto* srcNode = static_cast<const RDGTextureNode*>(Resolve(RDGNodeHandle{op.Src.Id}));
+                            cmd->CopyTextureToBuffer(
+                                static_cast<render::Buffer*>(dstNode->_importBuffer.NativeHandle), op.DstOffset,
+                                static_cast<render::Texture*>(srcNode->_importTexture.NativeHandle), op.SrcRange);
+                        }
+                    },
+                    copyOp);
+            }
+        }
+    }
+
+    _EmitBarriers(backend, cmd, *this, compiled._epilogueBarriers);
+
+    cmd->End();
 }
 
 string RenderGraph::CompileResult::ExportCompiledGraphviz() const {

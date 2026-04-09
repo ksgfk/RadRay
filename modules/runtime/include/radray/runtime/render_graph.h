@@ -551,6 +551,8 @@ public:
     ValidateResult Validate() const;
     // 隐含图一定能通过Validate的假设, 否则是未定义行为
     CompileResult Compile() const;
+    void Execute(const CompileResult& compiled, GpuAsyncContext* context);
+
     string ExportGraphviz() const;
 
     RDGNode* Resolve(RDGNodeHandle handle) const;

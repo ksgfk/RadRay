@@ -220,6 +220,7 @@ private:
     unique_ptr<GpuResourceRegistry> _resourceRegistry;
 
     friend class GpuRuntime;
+    friend class RenderGraph;
 };
 
 class GpuFrameContext : public GpuAsyncContext {
@@ -282,6 +283,8 @@ public:
     bool IsValid() const;
 
     void Destroy() noexcept;
+
+    render::Device* GetDevice() const;
 
     unique_ptr<GpuSurface> CreateSurface(
         const void* nativeHandler,

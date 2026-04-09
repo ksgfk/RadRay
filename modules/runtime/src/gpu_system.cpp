@@ -616,6 +616,10 @@ bool GpuRuntime::IsValid() const {
     return _device != nullptr;
 }
 
+render::Device* GpuRuntime::GetDevice() const {
+    return _device.get();
+}
+
 void GpuRuntime::Destroy() noexcept {
     _pendings.clear();
     _resourceRetirements.clear();
