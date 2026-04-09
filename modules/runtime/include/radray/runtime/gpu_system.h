@@ -138,13 +138,10 @@ public:
     bool IsCompleted() const;
     void Wait();
 
-private:
+public:
     GpuRuntime* _runtime{nullptr};
     render::Fence* _fence{nullptr};
     uint64_t _signalValue{0};
-
-    friend class GpuAsyncContext;
-    friend class GpuRuntime;
 };
 
 class GpuSurface {
@@ -163,7 +160,7 @@ public:
     render::TextureFormat GetFormat() const;
     render::PresentMode GetPresentMode() const;
 
-private:
+public:
     class Frame {
     public:
         uint64_t _fenceValue{0};
@@ -174,10 +171,6 @@ private:
     vector<Frame> _frameSlots;
     size_t _nextFrameSlotIndex{0};
     uint32_t _queueSlot{0};
-
-    friend class GpuRuntime;
-    friend class GpuAsyncContext;
-    friend class GpuFrameContext;
 };
 
 class GpuAsyncContext {
@@ -207,20 +200,17 @@ public:
 
     constexpr Kind GetType() const { return _type; }
 
-protected:
+public:
     GpuRuntime* _runtime{nullptr};
     render::CommandQueue* _queue{nullptr};
     vector<unique_ptr<render::CommandBuffer>> _cmdBuffers;
 
-private:
+public:
     vector<render::Fence*> _waitFences;
     vector<uint64_t> _waitValues;
     uint32_t _queueSlot{0};
     Kind _type{Kind::Async};
     unique_ptr<GpuResourceRegistry> _resourceRegistry;
-
-    friend class GpuRuntime;
-    friend class RenderGraph;
 };
 
 class GpuFrameContext : public GpuAsyncContext {
@@ -237,7 +227,7 @@ public:
     render::Texture* GetBackBuffer() const;
     uint32_t GetBackBufferIndex() const;
 
-private:
+public:
 #ifdef RADRAY_IS_DEBUG
     enum class ConsumeState {
         Acquired,
@@ -255,8 +245,6 @@ private:
 #ifdef RADRAY_IS_DEBUG
     ConsumeState _consumeState{ConsumeState::Acquired};
 #endif
-
-    friend class GpuRuntime;
 };
 
 class GpuRuntime {
@@ -327,7 +315,7 @@ public:
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
 
-private:
+public:
     class SubmittedBatch {
     public:
         render::Fence* Fence{nullptr};
@@ -377,10 +365,6 @@ private:
     vector<Pending> _pendings;
     unique_ptr<GpuResourceRegistry> _resourceRegistry;
     vector<ResourceRetirement> _resourceRetirements;
-
-    friend class GpuAsyncContext;
-    friend class GpuFrameContext;
-    friend class RenderGraph;
 };
 
 }  // namespace radray

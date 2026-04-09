@@ -736,6 +736,27 @@ vector<CompiledGraphvizPassResourceUsage> _CollectCompiledPassResourceUsages(con
     return usages;
 }
 
+template <typename Fn>
+void _ForEachPassBufferDependencyEdge(const RDGPassNode& pass, Fn&& fn) {
+    auto visitEdge = [&](const RDGEdge* edge) {
+        if (!edge->GetTag().HasFlag(RDGEdgeTag::ResourceDependency)) {
+            return;
+        }
+        const auto* resourceEdge = static_cast<const RDGResourceDependencyEdge*>(edge);
+        if (!_IsBufferNode(_GetResourceNode(*resourceEdge))) {
+            return;
+        }
+        fn(*resourceEdge);
+    };
+
+    for (const RDGEdge* edge : pass._inEdges) {
+        visitEdge(edge);
+    }
+    for (const RDGEdge* edge : pass._outEdges) {
+        visitEdge(edge);
+    }
+}
+
 bool _IsWholeTextureRange(const render::SubresourceRange& range, const RDGTextureNode& texNode) noexcept {
     if (range.BaseArrayLayer == 0 && range.BaseMipLevel == 0 &&
         (range.ArrayLayerCount == render::SubresourceRange::All || range.ArrayLayerCount == texNode._depthOrArraySize) &&
@@ -940,8 +961,8 @@ void _LowerBarrierBatchVulkan(
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.buffer = buf->_buffer;
-        barrier.offset = 0;
-        barrier.size = buf->_reqSize;
+        barrier.offset = bb.Range.Offset;
+        barrier.size = bb.Range.Size == render::BufferRange::All() ? VK_WHOLE_SIZE : bb.Range.Size;
         srcStageMask |= _RDGStagesToVkPipelineStages(bb.SrcStage);
         dstStageMask |= _RDGStagesToVkPipelineStages(bb.DstStage);
     }
@@ -985,6 +1006,101 @@ void _LowerBarrierBatchVulkan(
 }
 
 #endif  // RADRAY_ENABLE_VULKAN
+
+struct RuntimeBufferBarrierPlan {
+    vector<RenderGraph::CompileResult::BarrierBatch> PassPreBarriers{};
+    RenderGraph::CompileResult::BarrierBatch EpilogueBarriers{};
+};
+
+RuntimeBufferBarrierPlan _BuildWholeResourceRuntimeBufferBarrierPlan(
+    const RenderGraph& graph,
+    const RenderGraph::CompileResult& compiled) {
+    using BufferBarrier = RenderGraph::CompileResult::BufferBarrier;
+    using BarrierBatch = RenderGraph::CompileResult::BarrierBatch;
+
+    struct BufferStateValue {
+        RDGExecutionStages Stage{RDGExecutionStage::NONE};
+        RDGMemoryAccesses Access{RDGMemoryAccess::NONE};
+    };
+    struct BufferTracker {
+        BufferStateValue State{};
+    };
+
+    auto isSameBufferState = [](const BufferStateValue& a, const BufferStateValue& b) noexcept {
+        return a.Stage == b.Stage && a.Access == b.Access;
+    };
+    auto makeBufferState = [](RDGExecutionStages stage, RDGMemoryAccesses access) noexcept -> BufferStateValue {
+        return {stage, access};
+    };
+    auto appendBufferBarrier = [](BarrierBatch& batch, RDGBufferHandle buf, const BufferStateValue& src, const BufferStateValue& dst) {
+        batch.BufferBarriers.emplace_back(BufferBarrier{buf, src.Stage, src.Access, dst.Stage, dst.Access, render::BufferRange::AllRange()});
+    };
+    auto emitWholeBufferBarrier = [&](BarrierBatch& batch, RDGBufferHandle handle, BufferTracker& tracker, const BufferStateValue& requiredState) {
+        const bool requiredIsReadOnly = IsReadOnlyAccess(requiredState.Access);
+        BufferStateValue effectiveState = requiredState;
+        if (!isSameBufferState(tracker.State, requiredState)) {
+            if (requiredIsReadOnly && IsReadOnlyAccess(tracker.State.Access)) {
+                effectiveState.Stage |= tracker.State.Stage;
+                effectiveState.Access |= tracker.State.Access;
+            } else {
+                appendBufferBarrier(batch, handle, tracker.State, requiredState);
+            }
+        }
+        tracker.State = effectiveState;
+    };
+
+    RuntimeBufferBarrierPlan plan{};
+    plan.PassPreBarriers.resize(compiled._passes.size());
+
+    vector<BufferTracker> trackers(compiled._lifetimes.size());
+    for (uint64_t nodeId = 0; nodeId < compiled._lifetimes.size(); ++nodeId) {
+        auto* node = graph.Resolve(RDGNodeHandle{nodeId});
+        if (!_IsBufferNode(node)) {
+            continue;
+        }
+
+        const auto* bufNode = static_cast<const RDGBufferNode*>(node);
+        if (bufNode->_ownership != RDGResourceOwnership::External || !bufNode->_importState.has_value()) {
+            continue;
+        }
+
+        trackers[nodeId].State = makeBufferState(bufNode->_importState->Stage, bufNode->_importState->Access);
+    }
+
+    for (uint32_t passIndex = 0; passIndex < compiled._passes.size(); ++passIndex) {
+        auto& batch = plan.PassPreBarriers[passIndex];
+        const auto* passNode = compiled._passes[passIndex].Node;
+        _ForEachPassBufferDependencyEdge(*passNode, [&](const RDGResourceDependencyEdge& edge) {
+            const auto* bufNode = static_cast<const RDGBufferNode*>(_GetResourceNode(edge));
+            auto& tracker = trackers[bufNode->_id];
+            emitWholeBufferBarrier(
+                batch,
+                RDGBufferHandle{bufNode->_id},
+                tracker,
+                makeBufferState(edge._stage, edge._access));
+        });
+    }
+
+    for (uint64_t nodeId = 0; nodeId < compiled._lifetimes.size(); ++nodeId) {
+        auto* node = graph.Resolve(RDGNodeHandle{nodeId});
+        if (!_IsBufferNode(node)) {
+            continue;
+        }
+
+        const auto* bufNode = static_cast<const RDGBufferNode*>(node);
+        if (!bufNode->_exportState.has_value()) {
+            continue;
+        }
+
+        emitWholeBufferBarrier(
+            plan.EpilogueBarriers,
+            RDGBufferHandle{bufNode->_id},
+            trackers[nodeId],
+            makeBufferState(bufNode->_exportState->Stage, bufNode->_exportState->Access));
+    }
+
+    return plan;
+}
 
 void _EmitBarriers(
     render::RenderBackend backend,
@@ -2829,11 +2945,26 @@ void RenderGraph::Execute(const CompileResult& compiled, GpuAsyncContext* contex
         }
     }
 
+    std::optional<RuntimeBufferBarrierPlan> runtimeWholeBufferBarriers{};
+#ifdef RADRAY_ENABLE_D3D12
+    if (backend == render::RenderBackend::D3D12) {
+        runtimeWholeBufferBarriers = _BuildWholeResourceRuntimeBufferBarrierPlan(*this, compiled);
+    }
+#endif
+
     auto* cmd = context->CreateCommandBuffer();
     cmd->Begin();
 
-    for (const auto& pass : compiled._passes) {
-        _EmitBarriers(backend, cmd, *this, pass.PreBarriers);
+    for (uint32_t passIndex = 0; passIndex < compiled._passes.size(); ++passIndex) {
+        const auto& pass = compiled._passes[passIndex];
+        if (runtimeWholeBufferBarriers.has_value()) {
+            CompileResult::BarrierBatch barrierBatch{};
+            barrierBatch.BufferBarriers = runtimeWholeBufferBarriers->PassPreBarriers[passIndex].BufferBarriers;
+            barrierBatch.TextureBarriers = pass.PreBarriers.TextureBarriers;
+            _EmitBarriers(backend, cmd, *this, barrierBatch);
+        } else {
+            _EmitBarriers(backend, cmd, *this, pass.PreBarriers);
+        }
 
         auto* node = pass.Node;
         auto tag = node->GetTag();
@@ -2934,7 +3065,14 @@ void RenderGraph::Execute(const CompileResult& compiled, GpuAsyncContext* contex
         }
     }
 
-    _EmitBarriers(backend, cmd, *this, compiled._epilogueBarriers);
+    if (runtimeWholeBufferBarriers.has_value()) {
+        CompileResult::BarrierBatch barrierBatch{};
+        barrierBatch.BufferBarriers = runtimeWholeBufferBarriers->EpilogueBarriers.BufferBarriers;
+        barrierBatch.TextureBarriers = compiled._epilogueBarriers.TextureBarriers;
+        _EmitBarriers(backend, cmd, *this, barrierBatch);
+    } else {
+        _EmitBarriers(backend, cmd, *this, compiled._epilogueBarriers);
+    }
 
     cmd->End();
 }

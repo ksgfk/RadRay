@@ -10,11 +10,7 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#define private public
-#define protected public
 #include <radray/runtime/gpu_system.h>
-#undef protected
-#undef private
 #include <radray/runtime/render_graph.h>
 #include <radray/window/native_window.h>
 
@@ -403,6 +399,78 @@ bool MapReadbackBytes(GpuBufferHandle handle, uint64_t size, vector<byte>& outBy
     outBytes.resize(static_cast<size_t>(size));
     std::memcpy(outBytes.data(), mapped, static_cast<size_t>(size));
     buffer->Unmap(0, size);
+    return true;
+}
+
+bool UploadBytesToDeviceBuffer(
+    GpuRuntime& runtime,
+    GpuBufferHandle dstHandle,
+    std::span<const byte> bytes,
+    BufferState finalState,
+    string& reason) {
+    auto* dst = static_cast<Buffer*>(dstHandle.NativeHandle);
+    if (dst == nullptr) {
+        reason = "Device buffer native handle is null.";
+        return false;
+    }
+
+    const auto uploadHandle = runtime.CreateBuffer(BufferDescriptor{
+        .Size = bytes.size(),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+    });
+    if (!uploadHandle.IsValid()) {
+        reason = "Failed to create upload buffer.";
+        return false;
+    }
+    if (!WriteUploadBuffer(uploadHandle, bytes, reason)) {
+        return false;
+    }
+
+    auto context = runtime.BeginAsync(QueueType::Direct);
+    if (context == nullptr) {
+        reason = "GpuRuntime::BeginAsync returned null.";
+        return false;
+    }
+
+    auto* upload = static_cast<Buffer*>(uploadHandle.NativeHandle);
+    auto* cmd = context->CreateCommandBuffer();
+    cmd->Begin();
+
+    vector<ResourceBarrierDescriptor> preCopy{};
+    if (runtime.GetDevice()->GetBackend() == RenderBackend::Vulkan) {
+        preCopy.emplace_back(BarrierBufferDescriptor{
+            .Target = upload,
+            .Before = BufferState::HostWrite,
+            .After = BufferState::CopySource,
+        });
+    }
+    preCopy.emplace_back(BarrierBufferDescriptor{
+        .Target = dst,
+        .Before = BufferState::Common,
+        .After = BufferState::CopyDestination,
+    });
+    cmd->ResourceBarrier(preCopy);
+    cmd->CopyBufferToBuffer(dst, 0, upload, 0, bytes.size());
+
+    if (finalState != BufferState::CopyDestination) {
+        ResourceBarrierDescriptor postCopy = BarrierBufferDescriptor{
+            .Target = dst,
+            .Before = BufferState::CopyDestination,
+            .After = finalState,
+        };
+        cmd->ResourceBarrier(std::span{&postCopy, 1});
+    }
+
+    cmd->End();
+
+    auto task = runtime.SubmitAsync(std::move(context));
+    if (!task.IsValid()) {
+        reason = "GpuRuntime::SubmitAsync returned invalid task.";
+        return false;
+    }
+    task.Wait();
+    runtime.ProcessTasks();
     return true;
 }
 
@@ -891,6 +959,285 @@ TEST_P(RenderGraphSmokeTest, AsyncMultiCopyPassWithOffsetsProducesExpectedReadba
     ASSERT_TRUE(MapReadbackBytes(readbackBuffer, expected.size(), actual, _reason))
         << _reason;
     EXPECT_EQ(actual, expected);
+}
+
+TEST_P(RenderGraphSmokeTest, AsyncMultiPassSegmentedBufferWritesProduceExpectedReadbacks) {
+    SCOPED_TRACE(fmt::format("Backend={}", BackendTestName(GetParam())));
+
+    vector<byte> firstChunk(32);
+    vector<byte> secondChunk(32);
+    for (size_t i = 0; i < firstChunk.size(); ++i) {
+        firstChunk[i] = byte{static_cast<uint8_t>(0x21 + i)};
+        secondChunk[i] = byte{static_cast<uint8_t>(0xb1 + i)};
+    }
+
+    const auto uploadBufferA = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = firstChunk.size(),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+    });
+    const auto uploadBufferB = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = secondChunk.size(),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+    });
+    const auto readbackBufferA = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = firstChunk.size(),
+        .Memory = MemoryType::ReadBack,
+        .Usage = BufferUse::MapRead | BufferUse::CopyDestination,
+    });
+    const auto readbackBufferB = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = secondChunk.size(),
+        .Memory = MemoryType::ReadBack,
+        .Usage = BufferUse::MapRead | BufferUse::CopyDestination,
+    });
+
+    ASSERT_TRUE(uploadBufferA.IsValid());
+    ASSERT_TRUE(uploadBufferB.IsValid());
+    ASSERT_TRUE(readbackBufferA.IsValid());
+    ASSERT_TRUE(readbackBufferB.IsValid());
+    ASSERT_TRUE(WriteUploadBuffer(uploadBufferA, firstChunk, _reason))
+        << _reason;
+    ASSERT_TRUE(WriteUploadBuffer(uploadBufferB, secondChunk, _reason))
+        << _reason;
+
+    const auto allBuffer = BufferRange::AllRange();
+    const BufferRange uploadRange{0, firstChunk.size()};
+    const BufferRange firstRange{0, firstChunk.size()};
+    const BufferRange secondRange{firstChunk.size(), secondChunk.size()};
+
+    RenderGraph graph{};
+    const auto uploadA = graph.ImportBuffer(
+        uploadBufferA,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        allBuffer,
+        "segment-upload-a");
+    const auto uploadB = graph.ImportBuffer(
+        uploadBufferB,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        allBuffer,
+        "segment-upload-b");
+    const auto deviceBuffer = graph.AddBuffer(
+        firstChunk.size() + secondChunk.size(),
+        MemoryType::Device,
+        BufferUse::CopySource | BufferUse::CopyDestination,
+        "segment-device-buffer");
+    const auto readbackA = graph.ImportBuffer(
+        readbackBufferA,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer,
+        "segment-readback-a");
+    const auto readbackB = graph.ImportBuffer(
+        readbackBufferB,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer,
+        "segment-readback-b");
+
+    RDGCopyPassBuilder writeFirstBuilder{};
+    writeFirstBuilder
+        .SetName("write-first-segment")
+        .CopyBufferToBuffer(deviceBuffer, 0, uploadA, 0, firstChunk.size());
+    writeFirstBuilder._buffers.emplace_back(uploadA, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        uploadRange});
+    writeFirstBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        firstRange});
+    const auto writeFirstPass = writeFirstBuilder.Build(&graph);
+
+    RDGCopyPassBuilder writeSecondBuilder{};
+    writeSecondBuilder
+        .SetName("write-second-segment")
+        .CopyBufferToBuffer(deviceBuffer, firstChunk.size(), uploadB, 0, secondChunk.size());
+    writeSecondBuilder._buffers.emplace_back(uploadB, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        uploadRange});
+    writeSecondBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        secondRange});
+    const auto writeSecondPass = writeSecondBuilder.Build(&graph);
+
+    RDGCopyPassBuilder readFirstBuilder{};
+    readFirstBuilder
+        .SetName("read-first-segment")
+        .CopyBufferToBuffer(readbackA, 0, deviceBuffer, 0, firstChunk.size());
+    readFirstBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        firstRange});
+    readFirstBuilder._buffers.emplace_back(readbackA, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer});
+    const auto readFirstPass = readFirstBuilder.Build(&graph);
+
+    RDGCopyPassBuilder readSecondBuilder{};
+    readSecondBuilder
+        .SetName("read-second-segment")
+        .CopyBufferToBuffer(readbackB, 0, deviceBuffer, firstChunk.size(), secondChunk.size());
+    readSecondBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        secondRange});
+    readSecondBuilder._buffers.emplace_back(readbackB, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer});
+    const auto readSecondPass = readSecondBuilder.Build(&graph);
+
+    graph.AddPassDependency(writeFirstPass, writeSecondPass);
+    graph.AddPassDependency(writeSecondPass, readFirstPass);
+    graph.AddPassDependency(readFirstPass, readSecondPass);
+    graph.ExportBuffer(readbackA, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer);
+    graph.ExportBuffer(readbackB, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer);
+
+    const auto validate = graph.Validate();
+    ASSERT_TRUE(validate.IsValid)
+        << validate.Message;
+
+    const auto compiled = graph.Compile();
+    ASSERT_EQ(compiled._passes.size(), 4u);
+
+    auto context = _runtime->BeginAsync(QueueType::Direct);
+    ASSERT_NE(context, nullptr);
+    graph.Execute(compiled, context.get());
+
+    auto task = _runtime->SubmitAsync(std::move(context));
+    ASSERT_TRUE(task.IsValid());
+    task.Wait();
+    _runtime->ProcessTasks();
+
+    vector<byte> actualFirst{};
+    vector<byte> actualSecond{};
+    ASSERT_TRUE(MapReadbackBytes(readbackBufferA, firstChunk.size(), actualFirst, _reason))
+        << _reason;
+    ASSERT_TRUE(MapReadbackBytes(readbackBufferB, secondChunk.size(), actualSecond, _reason))
+        << _reason;
+    EXPECT_EQ(actualFirst, firstChunk);
+    EXPECT_EQ(actualSecond, secondChunk);
+}
+
+TEST_P(RenderGraphSmokeTest, AsyncSegmentedWriteBetweenReadsPreservesEarlierRange) {
+    SCOPED_TRACE(fmt::format("Backend={}", BackendTestName(GetParam())));
+
+    vector<byte> secondChunk(32);
+    vector<byte> initialData(64);
+    for (size_t i = 0; i < secondChunk.size(); ++i) {
+        secondChunk[i] = byte{static_cast<uint8_t>(0xc0 + i)};
+    }
+    for (size_t i = 0; i < initialData.size(); ++i) {
+        initialData[i] = byte{static_cast<uint8_t>(0x30 + i)};
+    }
+    vector<byte> expectedFirstHalf(initialData.begin(), initialData.begin() + 32);
+
+    const auto deviceBufferHandle = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = initialData.size(),
+        .Memory = MemoryType::Device,
+        .Usage = BufferUse::CopySource | BufferUse::CopyDestination,
+    });
+    const auto secondUploadBuffer = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = secondChunk.size(),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+    });
+    const auto readbackBuffer = _runtime->CreateBuffer(BufferDescriptor{
+        .Size = expectedFirstHalf.size(),
+        .Memory = MemoryType::ReadBack,
+        .Usage = BufferUse::MapRead | BufferUse::CopyDestination,
+    });
+
+    ASSERT_TRUE(deviceBufferHandle.IsValid());
+    ASSERT_TRUE(secondUploadBuffer.IsValid());
+    ASSERT_TRUE(readbackBuffer.IsValid());
+    ASSERT_TRUE(UploadBytesToDeviceBuffer(*_runtime, deviceBufferHandle, initialData, BufferState::CopySource, _reason))
+        << _reason;
+    ASSERT_TRUE(WriteUploadBuffer(secondUploadBuffer, secondChunk, _reason))
+        << _reason;
+
+    const auto allBuffer = BufferRange::AllRange();
+    const BufferRange partialUploadRange{0, secondChunk.size()};
+    const BufferRange firstRange{0, expectedFirstHalf.size()};
+    const BufferRange secondRange{expectedFirstHalf.size(), secondChunk.size()};
+
+    RenderGraph graph{};
+    const auto deviceBuffer = graph.ImportBuffer(
+        deviceBufferHandle,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        firstRange,
+        "fallback-device-buffer");
+    const auto secondUpload = graph.ImportBuffer(
+        secondUploadBuffer,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        allBuffer,
+        "fallback-second-upload");
+    const auto readback = graph.ImportBuffer(
+        readbackBuffer,
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer,
+        "fallback-readback");
+
+    RDGCopyPassBuilder lateWriteBuilder{};
+    lateWriteBuilder
+        .SetName("write-second-half-after-import")
+        .CopyBufferToBuffer(deviceBuffer, expectedFirstHalf.size(), secondUpload, 0, secondChunk.size());
+    lateWriteBuilder._buffers.emplace_back(secondUpload, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        partialUploadRange});
+    lateWriteBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        secondRange});
+    const auto lateWritePass = lateWriteBuilder.Build(&graph);
+
+    RDGCopyPassBuilder readBuilder{};
+    readBuilder
+        .SetName("read-first-half-after-late-write")
+        .CopyBufferToBuffer(readback, 0, deviceBuffer, 0, expectedFirstHalf.size());
+    readBuilder._buffers.emplace_back(deviceBuffer, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferRead,
+        firstRange});
+    readBuilder._buffers.emplace_back(readback, RDGBufferState{
+        RDGExecutionStage::Copy,
+        RDGMemoryAccess::TransferWrite,
+        allBuffer});
+    const auto readPass = readBuilder.Build(&graph);
+
+    graph.AddPassDependency(lateWritePass, readPass);
+    graph.ExportBuffer(readback, RDGExecutionStage::Copy, RDGMemoryAccess::TransferWrite, allBuffer);
+
+    const auto validate = graph.Validate();
+    ASSERT_TRUE(validate.IsValid)
+        << validate.Message;
+
+    const auto compiled = graph.Compile();
+    ASSERT_EQ(compiled._passes.size(), 2u);
+
+    auto context = _runtime->BeginAsync(QueueType::Direct);
+    ASSERT_NE(context, nullptr);
+    graph.Execute(compiled, context.get());
+
+    auto task = _runtime->SubmitAsync(std::move(context));
+    ASSERT_TRUE(task.IsValid());
+    task.Wait();
+    _runtime->ProcessTasks();
+
+    vector<byte> actual{};
+    ASSERT_TRUE(MapReadbackBytes(readbackBuffer, expectedFirstHalf.size(), actual, _reason))
+        << _reason;
+    EXPECT_EQ(actual, expectedFirstHalf);
 }
 
 TEST_P(RenderGraphSmokeTest, AsyncBufferToTextureToReadbackProducesExpectedPixel) {
