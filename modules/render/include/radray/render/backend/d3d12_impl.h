@@ -577,11 +577,7 @@ public:
 
     SwapChainAcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
-    SwapChainPresentResult Present(SwapChainSyncObject* waitToPresent) noexcept override;
-
-    Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
-
-    uint32_t GetCurrentBackBufferIndex() const noexcept override;
+    SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override;
 
     uint32_t GetBackBufferCount() const noexcept override;
 
@@ -600,7 +596,10 @@ public:
     vector<Frame> _frames;
     const void* _nativeHandler{nullptr};
     PresentMode _mode{PresentMode::FIFO};
-    uint32_t _currentBackBufferIndex{std::numeric_limits<uint32_t>::max()};
+    bool _hasOutstandingFrame{false};
+    uint64_t _outstandingFrameToken{0};
+    uint32_t _outstandingBackBufferIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t _flightFrameCount{1};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
 };
 

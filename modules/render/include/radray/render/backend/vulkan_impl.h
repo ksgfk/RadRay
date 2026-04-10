@@ -630,11 +630,7 @@ public:
 
     SwapChainAcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
-    SwapChainPresentResult Present(SwapChainSyncObject* waitToPresent) noexcept override;
-
-    Nullable<Texture*> GetCurrentBackBuffer() const noexcept override;
-
-    uint32_t GetCurrentBackBufferIndex() const noexcept override;
+    SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override;
 
     uint32_t GetBackBufferCount() const noexcept override;
 
@@ -691,8 +687,10 @@ public:
     vector<unique_ptr<LegacyFenceVulkan>> _recycledFences;
     vector<PresentHistoryEntry> _presentHistory;
     OutstandingAcquire _outstandingAcquire{};
+    uint64_t _outstandingFrameToken{0};
     uint32_t _width{0};
     uint32_t _height{0};
+    uint32_t _flightFrameCount{1};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
     PresentMode _mode{PresentMode::FIFO};
 };

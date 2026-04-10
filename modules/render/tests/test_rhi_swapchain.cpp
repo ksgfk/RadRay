@@ -245,6 +245,7 @@ bool CreateSwapChainRuntime(
         scDesc.BackBufferCount = kBackBufferCount;
         scDesc.Format = format;
         scDesc.PresentMode = presentMode;
+        scDesc.FlightFrameCount = kInFlightFrameCount;
         auto swapchainOpt = device->CreateSwapChain(scDesc);
         if (!swapchainOpt.HasValue()) {
             continue;
@@ -352,15 +353,16 @@ void DestroyVulkanSwapChainContext(VulkanSwapChainContext& context) noexcept {
 bool AcquireSwapChainImage(
     SwapChain* swapchain,
     NativeWindow* window,
-    SwapChainAcquireResult& acquired,
+    SwapChainFrame& frame,
     std::string& reason) {
     for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
-        acquired = swapchain->AcquireNext();
+        auto acquired = swapchain->AcquireNext();
         if (acquired.Status == SwapChainStatus::Success) {
-            if (!acquired.BackBuffer.HasValue()) {
-                reason = "AcquireNext returned Success without back buffer";
+            if (!acquired.Frame.has_value() || !acquired.Frame->IsValid()) {
+                reason = "AcquireNext returned Success without valid frame";
                 return false;
             }
+            frame = std::move(acquired.Frame.value());
             return true;
         }
         if (acquired.Status == SwapChainStatus::RequireRecreate) {
@@ -418,8 +420,9 @@ bool RenderFrames(
         SwapChainSyncObject* waitToDrawSync = nullptr;
         SwapChainSyncObject* readyToPresentSync = nullptr;
         uint32_t backBufferIndex = std::numeric_limits<uint32_t>::max();
+        std::optional<SwapChainFrame> currentFrame;
         if (usePollAcquire) {
-            const auto pollAcquire = runtime.Swapchain->AcquireNext(0);
+            auto pollAcquire = runtime.Swapchain->AcquireNext(0);
             EXPECT_TRUE(
                 pollAcquire.Status == SwapChainStatus::Success ||
                 pollAcquire.Status == SwapChainStatus::RetryLater ||
@@ -430,21 +433,15 @@ bool RenderFrames(
                 return false;
             }
             if (pollAcquire.Status == SwapChainStatus::Success) {
-                if (!pollAcquire.BackBuffer.HasValue()) {
-                    reason = "AcquireNext(0) returned Success without back buffer";
+                if (!pollAcquire.Frame.has_value() || !pollAcquire.Frame->IsValid()) {
+                    reason = "AcquireNext(0) returned Success without valid frame";
                     return false;
                 }
-                backBuffer = pollAcquire.BackBuffer.Get();
-                backBufferIndex = pollAcquire.BackBufferIndex;
-                waitToDrawSync = pollAcquire.WaitToDraw;
-                readyToPresentSync = pollAcquire.ReadyToPresent;
-                auto currentBackBuffer = runtime.Swapchain->GetCurrentBackBuffer();
-                if (!currentBackBuffer.HasValue()) {
-                    reason = "GetCurrentBackBuffer returned null after successful AcquireNext(0)";
-                    return false;
-                }
-                EXPECT_EQ(currentBackBuffer.Get(), pollAcquire.BackBuffer.Get());
-                EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), pollAcquire.BackBufferIndex);
+                backBuffer = pollAcquire.Frame->GetBackBuffer();
+                backBufferIndex = pollAcquire.Frame->GetBackBufferIndex();
+                waitToDrawSync = pollAcquire.Frame->GetWaitToDraw();
+                readyToPresentSync = pollAcquire.Frame->GetReadyToPresent();
+                currentFrame = std::move(pollAcquire.Frame.value());
             }
         }
         for (uint32_t retry = 0; retry < kAcquireRetryMax; ++retry) {
@@ -453,25 +450,17 @@ bool RenderFrames(
             }
             auto acquired = runtime.Swapchain->AcquireNext();
             if (acquired.Status == SwapChainStatus::Success) {
-                if (!acquired.BackBuffer.HasValue()) {
-                    reason = "AcquireNext returned Success without back buffer";
+                if (!acquired.Frame.has_value() || !acquired.Frame->IsValid()) {
+                    reason = "AcquireNext returned Success without valid frame";
                     return false;
                 }
-                backBuffer = acquired.BackBuffer.Get();
-                backBufferIndex = acquired.BackBufferIndex;
-                waitToDrawSync = acquired.WaitToDraw;
-                readyToPresentSync = acquired.ReadyToPresent;
-                auto currentBackBuffer = runtime.Swapchain->GetCurrentBackBuffer();
-                if (!currentBackBuffer.HasValue()) {
-                    reason = "GetCurrentBackBuffer returned null after successful acquire";
-                    return false;
-                }
-                EXPECT_EQ(currentBackBuffer.Get(), acquired.BackBuffer.Get());
-                EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), acquired.BackBufferIndex);
+                backBuffer = acquired.Frame->GetBackBuffer();
+                backBufferIndex = acquired.Frame->GetBackBufferIndex();
+                waitToDrawSync = acquired.Frame->GetWaitToDraw();
+                readyToPresentSync = acquired.Frame->GetReadyToPresent();
+                currentFrame = std::move(acquired.Frame.value());
                 break;
             }
-            EXPECT_FALSE(runtime.Swapchain->GetCurrentBackBuffer().HasValue());
-            EXPECT_EQ(runtime.Swapchain->GetCurrentBackBufferIndex(), std::numeric_limits<uint32_t>::max());
             if (acquired.Status == SwapChainStatus::RequireRecreate) {
                 reason = "AcquireNext requested swapchain recreation";
                 return false;
@@ -546,7 +535,8 @@ bool RenderFrames(
             submitDesc.ReadyToPresent = std::span{&readyToPresentSync, 1};
         }
         queue->Submit(submitDesc);
-        const auto presentResult = runtime.Swapchain->Present(readyToPresentSync);
+        RADRAY_ASSERT(currentFrame.has_value());
+        const auto presentResult = runtime.Swapchain->Present(std::move(currentFrame.value()));
         if (presentResult.Status == SwapChainStatus::RetryLater) {
             reason = "Present unexpectedly returned RetryLater";
             return false;
@@ -757,7 +747,7 @@ TEST(RHISwapchain, RecreateAfterResize_Vulkan) {
 }
 
 #if defined(RADRAY_ENABLE_VULKAN) && !defined(NDEBUG)
-TEST(RHISwapchain, VulkanAcquireWithoutPresentDies) {
+TEST(RHISwapchain, AcquireWithoutPresentDies) {
     VulkanSwapChainContext probe{};
     std::string reason;
     if (!CreateVulkanSwapChainContext(probe, reason)) {
@@ -772,8 +762,8 @@ TEST(RHISwapchain, VulkanAcquireWithoutPresentDies) {
             if (!CreateVulkanSwapChainContext(context, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
-            SwapChainAcquireResult acquired{};
-            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
+            SwapChainFrame frame{};
+            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), frame, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
             context.Runtime.Swapchain->AcquireNext(0);
@@ -781,7 +771,7 @@ TEST(RHISwapchain, VulkanAcquireWithoutPresentDies) {
         "");
 }
 
-TEST(RHISwapchain, VulkanPresentWithWrongSyncDies) {
+TEST(RHISwapchain, PresentForeignFrameDies) {
     VulkanSwapChainContext probe{};
     std::string reason;
     if (!CreateVulkanSwapChainContext(probe, reason)) {
@@ -796,11 +786,40 @@ TEST(RHISwapchain, VulkanPresentWithWrongSyncDies) {
             if (!CreateVulkanSwapChainContext(context, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
-            SwapChainAcquireResult acquired{};
-            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), acquired, localReason)) {
+            SwapChainFrame frame{};
+            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), frame, localReason)) {
                 RADRAY_ABORT("{}", localReason);
             }
-            context.Runtime.Swapchain->Present(acquired.WaitToDraw);
+            // Present with an empty (foreign) frame
+            SwapChainFrame emptyFrame{};
+            context.Runtime.Swapchain->Present(std::move(emptyFrame));
+        },
+        "");
+}
+
+TEST(RHISwapchain, PresentConsumedFrameDies) {
+    VulkanSwapChainContext probe{};
+    std::string reason;
+    if (!CreateVulkanSwapChainContext(probe, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    DestroyVulkanSwapChainContext(probe);
+
+    EXPECT_DEATH_IF_SUPPORTED(
+        {
+            VulkanSwapChainContext context{};
+            std::string localReason;
+            if (!CreateVulkanSwapChainContext(context, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            SwapChainFrame frame{};
+            if (!AcquireSwapChainImage(context.Runtime.Swapchain.get(), context.Window.get(), frame, localReason)) {
+                RADRAY_ABORT("{}", localReason);
+            }
+            // First present consumes the frame
+            context.Runtime.Swapchain->Present(std::move(frame));
+            // Second present with already-consumed frame should die
+            context.Runtime.Swapchain->Present(std::move(frame));
         },
         "");
 }

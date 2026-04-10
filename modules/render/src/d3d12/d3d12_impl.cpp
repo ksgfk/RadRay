@@ -1245,13 +1245,19 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    if (desc.PresentMode != PresentMode::FIFO) {
-        if (HRESULT hr = swapchain->SetMaximumFrameLatency(1); FAILED(hr)) {
-            RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency(1) failed: {} {}", GetErrorName(hr), hr);
-            return nullptr;
-        }
+    uint32_t effectiveFlightFrameCount = radray::Clamp(desc.FlightFrameCount, 1u, scDesc.BufferCount);
+    if (effectiveFlightFrameCount != desc.FlightFrameCount) {
+        RADRAY_WARN_LOG(
+            "D3D12 FlightFrameCount {} clamped to {} (BackBufferCount={})",
+            desc.FlightFrameCount, effectiveFlightFrameCount, scDesc.BufferCount);
     }
-    auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
+    if (HRESULT hr = swapchain->SetMaximumFrameLatency(effectiveFlightFrameCount); FAILED(hr)) {
+        RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency({}) failed: {} {}", effectiveFlightFrameCount, GetErrorName(hr), hr);
+        return nullptr;
+    }
+    SwapChainDescriptor effectiveDesc = desc;
+    effectiveDesc.FlightFrameCount = effectiveFlightFrameCount;
+    auto result = make_unique<SwapChainD3D12>(this, swapchain, effectiveDesc);
     result->_frames.reserve(scDesc.BufferCount);
     result->_frameLatencyEvent = swapchain->GetFrameLatencyWaitableObject();
     for (size_t i = 0; i < scDesc.BufferCount; i++) {
@@ -3632,11 +3638,13 @@ SwapChainD3D12::SwapChainD3D12(
       _swapchain(std::move(swapchain)),
       _nativeHandler(desc.NativeHandler),
       _mode(desc.PresentMode),
+      _flightFrameCount(desc.FlightFrameCount),
       _reqFormat(desc.Format) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
-    _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
+    _hasOutstandingFrame = false;
+    _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
@@ -3650,7 +3658,8 @@ bool SwapChainD3D12::IsValid() const noexcept {
 
 void SwapChainD3D12::Destroy() noexcept {
     _frames.clear();
-    _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
+    _hasOutstandingFrame = false;
+    _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
@@ -3660,8 +3669,14 @@ void SwapChainD3D12::Destroy() noexcept {
 
 SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
+    RADRAY_ASSERT(!_hasOutstandingFrame);
+    if (_hasOutstandingFrame) {
+        RADRAY_ERR_LOG("IDXGISwapChain::AcquireNext called before Present");
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = -1;
+        return result;
+    }
     if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
-        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         return result;
     }
     DWORD milliseconds;
@@ -3675,28 +3690,46 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
     if (waitResult == WAIT_OBJECT_0) {
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
-        _currentBackBufferIndex = curr;
+        _hasOutstandingFrame = true;
+        _outstandingBackBufferIndex = curr;
+        ++_outstandingFrameToken;
+        SwapChainFrame frame = MakeFrame(
+            this,
+            _outstandingFrameToken,
+            _frames[curr].image.get(),
+            curr,
+            nullptr,
+            nullptr);
         result.Status = SwapChainStatus::Success;
         result.NativeStatusCode = 0;
-        result.BackBuffer = _frames[curr].image.get();
-        result.BackBufferIndex = curr;
+        result.Frame = std::move(frame);
         return result;
     } else if (waitResult == WAIT_TIMEOUT) {
-        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         result.Status = SwapChainStatus::RetryLater;
         result.NativeStatusCode = static_cast<int64_t>(waitResult);
         return result;
     } else {
-        _currentBackBufferIndex = std::numeric_limits<uint32_t>::max();
         result.Status = SwapChainStatus::Error;
         result.NativeStatusCode = static_cast<int64_t>(waitResult);
         return result;
     }
 }
 
-SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresent) noexcept {
-    (void)waitToPresent;
+SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept {
     SwapChainPresentResult result{};
+    RADRAY_ASSERT(frame.IsValid());
+    RADRAY_ASSERT(ValidateFrame(frame, this, _outstandingFrameToken));
+    RADRAY_ASSERT(_hasOutstandingFrame);
+    if (!ValidateFrame(frame, this, _outstandingFrameToken) || !_hasOutstandingFrame) {
+        RADRAY_ERR_LOG("IDXGISwapChain::Present skipped: invalid or foreign SwapChainFrame");
+        InvalidateFrame(frame);
+        result.NativeStatusCode = static_cast<int64_t>(E_INVALIDARG);
+        result.Status = SwapChainStatus::Error;
+        return result;
+    }
+    InvalidateFrame(frame);
+    _hasOutstandingFrame = false;
+    _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     if (_swapchain == nullptr) {
         result.NativeStatusCode = static_cast<int64_t>(E_POINTER);
         result.Status = SwapChainStatus::Error;
@@ -3707,7 +3740,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresen
     switch (_mode) {
         case PresentMode::FIFO: {
             syncInterval = 1;
-            presentFlags = 0;  // FIFO 使用阻塞 present，保证 VSync 语义
+            presentFlags = 0;
             break;
         }
         case PresentMode::Mailbox: {
@@ -3746,17 +3779,6 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainSyncObject* waitToPresen
     return result;
 }
 
-Nullable<Texture*> SwapChainD3D12::GetCurrentBackBuffer() const noexcept {
-    if (_currentBackBufferIndex >= _frames.size()) {
-        return nullptr;
-    }
-    return _frames[_currentBackBufferIndex].image.get();
-}
-
-uint32_t SwapChainD3D12::GetCurrentBackBufferIndex() const noexcept {
-    return _currentBackBufferIndex;
-}
-
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
 }
@@ -3764,14 +3786,16 @@ uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
 SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
     DXGI_SWAP_CHAIN_DESC1 desc;
     _swapchain->GetDesc1(&desc);
-    return SwapChainDescriptor{
-        _presentQueue,
-        _nativeHandler,
-        desc.Width,
-        desc.Height,
-        desc.BufferCount,
-        _reqFormat,
-        _mode};
+    SwapChainDescriptor result{};
+    result.PresentQueue = _presentQueue;
+    result.NativeHandler = _nativeHandler;
+    result.Width = desc.Width;
+    result.Height = desc.Height;
+    result.BackBufferCount = desc.BufferCount;
+    result.Format = _reqFormat;
+    result.PresentMode = _mode;
+    result.FlightFrameCount = _flightFrameCount;
+    return result;
 }
 
 BufferD3D12::BufferD3D12(

@@ -534,6 +534,7 @@ class RayTracingCommandEncoder;
 class Fence;
 class SwapChain;
 class SwapChainSyncObject;
+class SwapChainFrame;
 class Resource;
 class ResourceView;
 class Buffer;
@@ -637,6 +638,7 @@ public:
     uint32_t BackBufferCount{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
     PresentMode PresentMode{PresentMode::FIFO};
+    uint32_t FlightFrameCount{1};
 };
 
 struct SamplerDescriptor {
@@ -665,13 +667,47 @@ struct CommandQueueSubmitDescriptor {
     std::span<SwapChainSyncObject*> ReadyToPresent{};
 };
 
+class SwapChainFrame {
+public:
+    SwapChainFrame() noexcept = default;
+    ~SwapChainFrame() noexcept = default;
+
+    SwapChainFrame(const SwapChainFrame&) = delete;
+    SwapChainFrame& operator=(const SwapChainFrame&) = delete;
+
+    SwapChainFrame(SwapChainFrame&& other) noexcept;
+    SwapChainFrame& operator=(SwapChainFrame&& other) noexcept;
+
+    Texture* GetBackBuffer() const noexcept;
+    uint32_t GetBackBufferIndex() const noexcept;
+    SwapChainSyncObject* GetWaitToDraw() const noexcept;
+    SwapChainSyncObject* GetReadyToPresent() const noexcept;
+    bool IsValid() const noexcept;
+
+    friend constexpr void swap(SwapChainFrame& a, SwapChainFrame& b) noexcept {
+        std::swap(a._owner, b._owner);
+        std::swap(a._token, b._token);
+        std::swap(a._backBuffer, b._backBuffer);
+        std::swap(a._backBufferIndex, b._backBufferIndex);
+        std::swap(a._waitToDraw, b._waitToDraw);
+        std::swap(a._readyToPresent, b._readyToPresent);
+    }
+
+private:
+    SwapChain* _owner{nullptr};
+    uint64_t _token{0};
+    Texture* _backBuffer{nullptr};
+    uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
+    SwapChainSyncObject* _waitToDraw{nullptr};
+    SwapChainSyncObject* _readyToPresent{nullptr};
+
+    friend class SwapChain;
+};
+
 struct SwapChainAcquireResult {
-    Nullable<Texture*> BackBuffer{nullptr};
-    SwapChainSyncObject* WaitToDraw{nullptr};
-    SwapChainSyncObject* ReadyToPresent{nullptr};
-    int64_t NativeStatusCode{0};
     SwapChainStatus Status{SwapChainStatus::Error};
-    uint32_t BackBufferIndex{std::numeric_limits<uint32_t>::max()};
+    int64_t NativeStatusCode{0};
+    std::optional<SwapChainFrame> Frame{};
 };
 
 struct SwapChainPresentResult {
@@ -1414,15 +1450,24 @@ public:
 
     virtual SwapChainAcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
 
-    virtual SwapChainPresentResult Present(SwapChainSyncObject* waitToPresent) noexcept = 0;
-
-    virtual Nullable<Texture*> GetCurrentBackBuffer() const noexcept = 0;
-
-    virtual uint32_t GetCurrentBackBufferIndex() const noexcept = 0;
+    virtual SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
 
     virtual SwapChainDescriptor GetDesc() const noexcept = 0;
+
+protected:
+    static SwapChainFrame MakeFrame(
+        SwapChain* owner,
+        uint64_t token,
+        Texture* backBuffer,
+        uint32_t backBufferIndex,
+        SwapChainSyncObject* waitToDraw,
+        SwapChainSyncObject* readyToPresent) noexcept;
+
+    static bool ValidateFrame(const SwapChainFrame& frame, const SwapChain* expectedOwner, uint64_t expectedToken) noexcept;
+
+    static void InvalidateFrame(SwapChainFrame& frame) noexcept;
 };
 
 class Resource : public RenderBase, public IDebugName {

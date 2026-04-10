@@ -9,6 +9,10 @@
 #include <cstring>
 #include <type_traits>
 
+#if defined(_WIN32)
+#include <excpt.h>
+#endif
+
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 namespace radray {
 VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nsView, const VkAllocationCallbacks* allocator) noexcept;
@@ -18,6 +22,101 @@ VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nsView, const Vk
 namespace radray::render::vulkan {
 
 static Nullable<InstanceVulkanImpl*> g_vkInstance = nullptr;
+
+static bool _TryCreateVkInstance(
+    const VkInstanceCreateInfo* createInfo,
+    const VkAllocationCallbacks* allocator,
+    VkInstance* instance,
+    VkResult& result,
+    uint32_t& exceptionCode) noexcept {
+#if defined(_WIN32)
+    exceptionCode = 0;
+    __try {
+        result = vkCreateInstance(createInfo, allocator, instance);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionCode = static_cast<uint32_t>(GetExceptionCode());
+        result = VK_ERROR_UNKNOWN;
+        if (instance != nullptr) {
+            *instance = VK_NULL_HANDLE;
+        }
+        return false;
+    }
+#else
+    exceptionCode = 0;
+    result = vkCreateInstance(createInfo, allocator, instance);
+    return true;
+#endif
+}
+
+static bool _TryCreateVkDebugUtilsMessenger(
+    VkInstance instance,
+    const VkDebugUtilsMessengerCreateInfoEXT* createInfo,
+    const VkAllocationCallbacks* allocator,
+    VkDebugUtilsMessengerEXT* messenger,
+    VkResult& result,
+    uint32_t& exceptionCode) noexcept {
+#if defined(_WIN32)
+    exceptionCode = 0;
+    __try {
+        result = vkCreateDebugUtilsMessengerEXT(instance, createInfo, allocator, messenger);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionCode = static_cast<uint32_t>(GetExceptionCode());
+        result = VK_ERROR_UNKNOWN;
+        if (messenger != nullptr) {
+            *messenger = VK_NULL_HANDLE;
+        }
+        return false;
+    }
+#else
+    exceptionCode = 0;
+    result = vkCreateDebugUtilsMessengerEXT(instance, createInfo, allocator, messenger);
+    return true;
+#endif
+}
+
+static VkResult _EnumeratePhysicalDevicesSafe(
+    VkInstance instance,
+    uint32_t* count,
+    VkPhysicalDevice* physicalDevices) noexcept {
+#if defined(_WIN32)
+    __try {
+        return vkEnumeratePhysicalDevices(instance, count, physicalDevices);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return VK_ERROR_UNKNOWN;
+    }
+#else
+    return vkEnumeratePhysicalDevices(instance, count, physicalDevices);
+#endif
+}
+
+static bool _TryCreateVkDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo* createInfo,
+    const VkAllocationCallbacks* allocator,
+    VkDevice* device,
+    VkResult& result,
+    uint32_t& exceptionCode) noexcept {
+#if defined(_WIN32)
+    exceptionCode = 0;
+    __try {
+        result = vkCreateDevice(physicalDevice, createInfo, allocator, device);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionCode = static_cast<uint32_t>(GetExceptionCode());
+        result = VK_ERROR_UNKNOWN;
+        if (device != nullptr) {
+            *device = VK_NULL_HANDLE;
+        }
+        return false;
+    }
+#else
+    exceptionCode = 0;
+    result = vkCreateDevice(physicalDevice, createInfo, allocator, device);
+    return true;
+#endif
+}
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -959,6 +1058,16 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed: {}", vr);
         return nullptr;
     }
+    {
+        uint32_t effectiveBackBufferCount = desc.BackBufferCount;
+        uint32_t clampedFlight = radray::Clamp(desc.FlightFrameCount, 1u, effectiveBackBufferCount);
+        if (clampedFlight != desc.FlightFrameCount) {
+            RADRAY_WARN_LOG(
+                "vk FlightFrameCount {} clamped to {} (effectiveBackBufferCount={})",
+                desc.FlightFrameCount, clampedFlight, effectiveBackBufferCount);
+        }
+        desc.FlightFrameCount = clampedFlight;
+    }
     auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain, desc);
     vector<VkImage> swapchainImages;
     if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, _ftb.vkGetSwapchainImagesKHR, _device, swapchain);
@@ -984,6 +1093,16 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         f.image->_usage = TextureUse::RenderTarget | TextureUse::Resource | TextureUse::CopySource;
         f.image->_hints = ResourceHint::External;
         f.image->_isSwapchainImage = true;
+    }
+    {
+        uint32_t actualBackBufferCount = static_cast<uint32_t>(swapchainImages.size());
+        uint32_t reclamp = radray::Clamp(result->_flightFrameCount, 1u, actualBackBufferCount);
+        if (reclamp != result->_flightFrameCount) {
+            RADRAY_WARN_LOG(
+                "vk FlightFrameCount re-clamped from {} to {} (actual back buffer count={})",
+                result->_flightFrameCount, reclamp, actualBackBufferCount);
+            result->_flightFrameCount = reclamp;
+        }
     }
     return result;
 }
@@ -2600,8 +2719,9 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     validFeature.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
     validFeature.pNext = nullptr;
     if (isValidFeatureExtEnable) {
-        validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
-        validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+        // Extra validation features are unstable on some Windows driver/SDK setups
+        // and can crash before device creation. Keep the validation layer enabled,
+        // but avoid opting into these non-essential feature toggles by default.
         if (desc.IsEnableGpuBasedValid) {  // vk 1.4.321.0 开这两个校验层内存会持续增长 :) :) :)
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
             validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT);
@@ -2660,10 +2780,22 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
         VK_API_VERSION_1_0};
     VkInstance instance = VK_NULL_HANDLE;
     VkResult lastResult = VK_ERROR_UNKNOWN;
+    uint32_t lastExceptionCode = 0;
     for (uint32_t apiVersion : apiVersionsToTry) {
         appInfo.apiVersion = apiVersion;
-        if (auto vr = vkCreateInstance(&createInfo, allocCbPtr, &instance);
-            vr == VK_SUCCESS) {
+        VkResult vr = VK_ERROR_UNKNOWN;
+        uint32_t exceptionCode = 0;
+        if (!_TryCreateVkInstance(&createInfo, allocCbPtr, &instance, vr, exceptionCode)) {
+            lastExceptionCode = exceptionCode;
+            RADRAY_WARN_LOG(
+                "vkCreateInstance with api version {}.{}.{} raised SEH 0x{:08X}",
+                VK_VERSION_MAJOR(apiVersion),
+                VK_VERSION_MINOR(apiVersion),
+                VK_VERSION_PATCH(apiVersion),
+                exceptionCode);
+            continue;
+        }
+        if (vr == VK_SUCCESS) {
             break;
         } else {
             lastResult = vr;
@@ -2671,6 +2803,9 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
         }
     }
     if (instance == VK_NULL_HANDLE) {
+        if (lastExceptionCode != 0) {
+            RADRAY_ERR_LOG("vkCreateInstance raised structured exception 0x{:08X}", lastExceptionCode);
+        }
         RADRAY_ERR_LOG("vkCreateInstance failed: {}", lastResult);
         return nullptr;
     }
@@ -2685,12 +2820,17 @@ Nullable<unique_ptr<InstanceVulkanImpl>> CreateVulkanInstanceImpl(const VulkanIn
     if (hasDebugUtilsExt) {
         debugCreateInfo.pUserData = result.get();
         if (vkCreateDebugUtilsMessengerEXT != nullptr) {
-            if (const auto vr = vkCreateDebugUtilsMessengerEXT(
+            VkResult vr = VK_ERROR_UNKNOWN;
+            uint32_t exceptionCode = 0;
+            if (!_TryCreateVkDebugUtilsMessenger(
                     instance,
                     &debugCreateInfo,
                     result->GetAllocationCallbacks(),
-                    &result->_debugMessenger);
-                vr != VK_SUCCESS) {
+                    &result->_debugMessenger,
+                    vr,
+                    exceptionCode)) {
+                RADRAY_WARN_LOG("vkCreateDebugUtilsMessengerEXT raised SEH 0x{:08X}", exceptionCode);
+            } else if (vr != VK_SUCCESS) {
                 RADRAY_WARN_LOG("vkCreateDebugUtilsMessengerEXT failed: {}", vr);
             }
         } else {
@@ -2722,7 +2862,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     VkInstance instance = g_vkInstance->_instance;
     vector<VkPhysicalDevice> physicalDevices;
-    if (EnumerateVectorFromVkFunc(physicalDevices, vkEnumeratePhysicalDevices, instance) != VK_SUCCESS) {
+    if (EnumerateVectorFromVkFunc(physicalDevices, _EnumeratePhysicalDevicesSafe, instance) != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkEnumeratePhysicalDevices failed");
         return nullptr;
     }
@@ -2993,9 +3133,20 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
 
     VkDevice device = VK_NULL_HANDLE;
-    if (VkResult vr = vkCreateDevice(selectPhyDevice.device, &deviceInfo, g_vkInstance->GetAllocationCallbacks(), &device);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDevice failed: {}", vr);
+    VkResult deviceCreateResult = VK_ERROR_UNKNOWN;
+    uint32_t exceptionCode = 0;
+    if (!_TryCreateVkDevice(
+            selectPhyDevice.device,
+            &deviceInfo,
+            g_vkInstance->GetAllocationCallbacks(),
+            &device,
+            deviceCreateResult,
+            exceptionCode)) {
+        RADRAY_ERR_LOG("vkCreateDevice raised structured exception 0x{:08X}", exceptionCode);
+        return nullptr;
+    }
+    if (deviceCreateResult != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDevice failed: {}", deviceCreateResult);
         return nullptr;
     }
     auto deviceR = make_shared<DeviceVulkan>(
@@ -4557,6 +4708,7 @@ SwapChainVulkan::SwapChainVulkan(
       _nativeHandler(desc.NativeHandler),
       _width(desc.Width),
       _height(desc.Height),
+      _flightFrameCount(desc.FlightFrameCount),
       _reqFormat(desc.Format),
       _mode(desc.PresentMode) {}
 
@@ -4725,12 +4877,17 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         _outstandingAcquire.imageIndex = imageIndex;
         _outstandingAcquire.waitToDraw = imageFrame.acquireSyncObject.get();
         _outstandingAcquire.readyToPresent = std::move(readyToPresent);
+        ++_outstandingFrameToken;
+        SwapChainFrame frame = MakeFrame(
+            this,
+            _outstandingFrameToken,
+            imageFrame.image.get(),
+            imageIndex,
+            _outstandingAcquire.waitToDraw,
+            _outstandingAcquire.readyToPresent.get());
         result.Status = SwapChainStatus::Success;
         result.NativeStatusCode = vr;
-        result.BackBuffer = imageFrame.image.get();
-        result.BackBufferIndex = imageIndex;
-        result.WaitToDraw = _outstandingAcquire.waitToDraw;
-        result.ReadyToPresent = _outstandingAcquire.readyToPresent.get();
+        result.Frame = std::move(frame);
         return result;
     }
     if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
@@ -4760,25 +4917,21 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
     return result;
 }
 
-SwapChainPresentResult SwapChainVulkan::Present(SwapChainSyncObject* waitToPresent) noexcept {
+SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame&& frame) noexcept {
     SwapChainPresentResult result{};
+    RADRAY_ASSERT(frame.IsValid());
+    RADRAY_ASSERT(ValidateFrame(frame, this, _outstandingFrameToken));
     RADRAY_ASSERT(_outstandingAcquire.IsValid());
-    if (!_outstandingAcquire.IsValid()) {
-        RADRAY_WARN_LOG("vkQueuePresentKHR skipped: no acquired back buffer");
-        result.Status = SwapChainStatus::Error;
-        result.NativeStatusCode = -1;
-        return result;
-    }
-    RADRAY_ASSERT(waitToPresent == _outstandingAcquire.readyToPresent.get());
-    if (waitToPresent != _outstandingAcquire.readyToPresent.get()) {
-        RADRAY_ERR_LOG("vkQueuePresentKHR skipped: mismatched present sync object");
+    if (!ValidateFrame(frame, this, _outstandingFrameToken) || !_outstandingAcquire.IsValid()) {
+        RADRAY_ERR_LOG("vkQueuePresentKHR skipped: invalid or foreign SwapChainFrame");
+        InvalidateFrame(frame);
         result.Status = SwapChainStatus::Error;
         result.NativeStatusCode = -1;
         return result;
     }
 
-    auto* waitSync = CastVkObject(waitToPresent);
-    const VkSemaphore waitSem = waitSync->_semaphore->_semaphore;
+    auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent.get()));
+    const VkSemaphore waitSem = readyToPresentSync->_semaphore->_semaphore;
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -4795,6 +4948,7 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainSyncObject* waitToPrese
         std::move(_outstandingAcquire.readyToPresent),
         nullptr});
     _outstandingAcquire.Reset();
+    InvalidateFrame(frame);
     this->CleanupPresentHistory();
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         RADRAY_WARN_LOG("vkQueuePresentKHR: {}", presentResult);
@@ -4809,30 +4963,21 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainSyncObject* waitToPrese
     return result;
 }
 
-Nullable<Texture*> SwapChainVulkan::GetCurrentBackBuffer() const noexcept {
-    if (!_outstandingAcquire.IsValid()) {
-        return nullptr;
-    }
-    return _frames[_outstandingAcquire.imageIndex].image.get();
-}
-
-uint32_t SwapChainVulkan::GetCurrentBackBufferIndex() const noexcept {
-    return _outstandingAcquire.IsValid() ? _outstandingAcquire.imageIndex : std::numeric_limits<uint32_t>::max();
-}
-
 uint32_t SwapChainVulkan::GetBackBufferCount() const noexcept {
     return static_cast<uint32_t>(_frames.size());
 }
 
 SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
-    return SwapChainDescriptor{
-        _queue,
-        _nativeHandler,
-        _width,
-        _height,
-        static_cast<uint32_t>(_frames.size()),
-        _reqFormat,
-        _mode};
+    SwapChainDescriptor desc{};
+    desc.PresentQueue = _queue;
+    desc.NativeHandler = _nativeHandler;
+    desc.Width = _width;
+    desc.Height = _height;
+    desc.BackBufferCount = static_cast<uint32_t>(_frames.size());
+    desc.Format = _reqFormat;
+    desc.PresentMode = _mode;
+    desc.FlightFrameCount = _flightFrameCount;
+    return desc;
 }
 
 BufferVulkan::BufferVulkan(

@@ -865,7 +865,9 @@ GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameConte
     const size_t frameSlotIndex = context->_frameSlotIndex;
     const auto submitted = this->SubmitContext(context.get(), context->_waitToDraw, context->_readyToPresent);
     GpuTask task{this, submitted.Fence, submitted.SignalValue};
-    const auto present = surface->_swapchain->Present(context->_readyToPresent.Get());
+    RADRAY_ASSERT(context->_acquiredFrame.has_value());
+    const auto present = surface->_swapchain->Present(std::move(context->_acquiredFrame.value()));
+    context->_acquiredFrame.reset();
     surface->_frameSlots[frameSlotIndex]._fenceValue = submitted.SignalValue;
     _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
     return {std::move(task), present};
@@ -997,18 +999,20 @@ render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) 
 
 GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs) {
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
-    const auto acqResult = surface->_swapchain->AcquireNext(timeoutMs);
+    auto acqResult = surface->_swapchain->AcquireNext(timeoutMs);
     switch (acqResult.Status) {
         case render::SwapChainStatus::Success: {
+            auto& frame = acqResult.Frame.value();
             auto context = make_unique<GpuFrameContext>(
                 this,
                 surface,
                 frameSlotIndex,
-                acqResult.BackBuffer.Get(),
-                acqResult.BackBufferIndex);
+                frame.GetBackBuffer(),
+                frame.GetBackBufferIndex());
             context->_type = GpuAsyncContext::Kind::Frame;
-            context->_waitToDraw = acqResult.WaitToDraw;
-            context->_readyToPresent = acqResult.ReadyToPresent;
+            context->_waitToDraw = frame.GetWaitToDraw();
+            context->_readyToPresent = frame.GetReadyToPresent();
+            context->_acquiredFrame = std::move(frame);
             surface->_nextFrameSlotIndex = (frameSlotIndex + 1) % surface->_frameSlots.size();
             return {std::move(context), render::SwapChainStatus::Success};
         }

@@ -17,6 +17,47 @@
 
 namespace radray::render {
 
+SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
+    swap(*this, other);
+}
+
+SwapChainFrame& SwapChainFrame::operator=(SwapChainFrame&& other) noexcept {
+    SwapChainFrame tmp{std::move(other)};
+    swap(*this, tmp);
+    return *this;
+}
+
+Texture* SwapChainFrame::GetBackBuffer() const noexcept { return _backBuffer; }
+uint32_t SwapChainFrame::GetBackBufferIndex() const noexcept { return _backBufferIndex; }
+SwapChainSyncObject* SwapChainFrame::GetWaitToDraw() const noexcept { return _waitToDraw; }
+SwapChainSyncObject* SwapChainFrame::GetReadyToPresent() const noexcept { return _readyToPresent; }
+bool SwapChainFrame::IsValid() const noexcept { return _owner != nullptr; }
+
+SwapChainFrame SwapChain::MakeFrame(
+    SwapChain* owner,
+    uint64_t token,
+    Texture* backBuffer,
+    uint32_t backBufferIndex,
+    SwapChainSyncObject* waitToDraw,
+    SwapChainSyncObject* readyToPresent) noexcept {
+    SwapChainFrame f{};
+    f._owner = owner;
+    f._token = token;
+    f._backBuffer = backBuffer;
+    f._backBufferIndex = backBufferIndex;
+    f._waitToDraw = waitToDraw;
+    f._readyToPresent = readyToPresent;
+    return f;
+}
+
+bool SwapChain::ValidateFrame(const SwapChainFrame& frame, const SwapChain* expectedOwner, uint64_t expectedToken) noexcept {
+    return frame.IsValid() && frame._owner == expectedOwner && frame._token == expectedToken;
+}
+
+void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
+    frame = SwapChainFrame{};
+}
+
 BindingLayout::BindingLayout(vector<BindingParameterLayout> parameters) noexcept
     : _parameters(std::move(parameters)) {}
 

@@ -1148,6 +1148,77 @@ std::vector<RenderBackend> GetEnabledBackends() noexcept {
     return backends;
 }
 
+const std::string* GetBackendSkipReason(RenderBackend backend) noexcept {
+    struct BackendProbeState {
+        std::once_flag Once{};
+        bool Available{false};
+        std::string Reason{};
+    };
+
+    static BackendProbeState d3d12State{};
+    static BackendProbeState vulkanState{};
+
+    auto probeD3D12 = []() {
+        D3D12DeviceDescriptor desc{};
+        desc.AdapterIndex = std::nullopt;
+#ifdef RADRAY_IS_DEBUG
+        desc.IsEnableDebugLayer = true;
+        desc.IsEnableGpuBasedValid = true;
+#endif
+        auto runtimeOpt = GpuRuntime::Create(desc);
+        return runtimeOpt.HasValue();
+    };
+
+    auto probeVulkan = []() {
+        VulkanInstanceDescriptor instanceDesc{};
+        instanceDesc.AppName = "ApplicationSmokeProbe";
+        instanceDesc.AppVersion = 1;
+        instanceDesc.EngineName = "RadRay";
+        instanceDesc.EngineVersion = 1;
+#ifdef RADRAY_IS_DEBUG
+        instanceDesc.IsEnableDebugLayer = true;
+#endif
+
+        VulkanCommandQueueDescriptor queueDesc{};
+        queueDesc.Type = QueueType::Direct;
+        queueDesc.Count = 1;
+
+        VulkanDeviceDescriptor deviceDesc{};
+        deviceDesc.PhysicalDeviceIndex = std::nullopt;
+        deviceDesc.Queues = std::span{&queueDesc, 1};
+
+        auto runtimeOpt = GpuRuntime::Create(deviceDesc, instanceDesc);
+        return runtimeOpt.HasValue();
+    };
+
+    switch (backend) {
+#if defined(RADRAY_ENABLE_D3D12) && defined(_WIN32)
+        case RenderBackend::D3D12:
+            std::call_once(d3d12State.Once, [&]() {
+                d3d12State.Available = probeD3D12();
+                if (!d3d12State.Available) {
+                    d3d12State.Reason = "GpuRuntime::Create(D3D12) failed";
+                }
+            });
+            return d3d12State.Available ? nullptr : &d3d12State.Reason;
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+        case RenderBackend::Vulkan:
+            std::call_once(vulkanState.Once, [&]() {
+                vulkanState.Available = probeVulkan();
+                if (!vulkanState.Available) {
+                    vulkanState.Reason = "GpuRuntime::Create(Vulkan) failed";
+                }
+            });
+            return vulkanState.Available ? nullptr : &vulkanState.Reason;
+#endif
+        default: {
+            static const std::string unsupported = "Backend is not enabled for this build";
+            return &unsupported;
+        }
+    }
+}
+
 std::string_view BackendName(RenderBackend backend) noexcept {
     switch (backend) {
         case RenderBackend::D3D12: return "D3D12";
@@ -1250,7 +1321,14 @@ AppConfig MakeTwoSurfaceConfig(NativeWindow* primaryWindow, NativeWindow* second
     return config;
 }
 
-class ApplicationSmokeTest : public ::testing::TestWithParam<AppTestParam> {};
+class ApplicationSmokeTest : public ::testing::TestWithParam<AppTestParam> {
+protected:
+    void SetUp() override {
+        if (const auto* reason = GetBackendSkipReason(GetParam().Backend); reason != nullptr) {
+            GTEST_SKIP() << *reason;
+        }
+    }
+};
 
 TEST_P(ApplicationSmokeTest, SingleSurfaceStillWorks) {
     const auto param = GetParam();

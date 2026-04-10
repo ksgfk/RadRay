@@ -242,6 +242,7 @@ public:
     Nullable<render::SwapChainSyncObject*> _waitToDraw{nullptr};
     Nullable<render::SwapChainSyncObject*> _readyToPresent{nullptr};
     uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
+    std::optional<render::SwapChainFrame> _acquiredFrame{};
 #ifdef RADRAY_IS_DEBUG
     ConsumeState _consumeState{ConsumeState::Acquired};
 #endif
