@@ -484,6 +484,15 @@ render::PresentMode GpuSurface::GetPresentMode() const {
     return _swapchain->GetDesc().PresentMode;
 }
 
+uint32_t GpuSurface::GetFlightFrameCount() const {
+#ifdef RADRAY_IS_DEBUG
+    if (_swapchain == nullptr) {
+        throw GpuSystemException("GpuSurface::GetFlightFrameCount requires a valid surface");
+    }
+#endif
+    return _swapchain->GetDesc().FlightFrameCount;
+}
+
 GpuAsyncContext::~GpuAsyncContext() noexcept = default;
 
 GpuAsyncContext::GpuAsyncContext(
@@ -649,21 +658,23 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
         throw GpuSystemException("Device::GetCommandQueue failed");
     }
     auto queue = queueOpt.Get();
-    render::SwapChainDescriptor desc{
-        queue,
-        nativeHandler,
-        width,
-        height,
-        backBufferCount,
-        format,
-        presentMode};
+    render::SwapChainDescriptor desc{};
+    desc.PresentQueue = queue;
+    desc.NativeHandler = nativeHandler;
+    desc.Width = width;
+    desc.Height = height;
+    desc.BackBufferCount = backBufferCount;
+    desc.Format = format;
+    desc.PresentMode = presentMode;
+    desc.FlightFrameCount = flightFrameCount;
     auto swapchainOpt = _device->CreateSwapChain(desc);
     if (!swapchainOpt.HasValue()) {
         throw GpuSystemException("Device::CreateSwapChain failed");
     }
     auto result = make_unique<GpuSurface>(this, swapchainOpt.Release(), queueSlot);
-    result->_frameSlots.reserve(flightFrameCount);
-    for (uint32_t i = 0; i < flightFrameCount; i++) {
+    const uint32_t actualFlightFrameCount = result->GetFlightFrameCount();
+    result->_frameSlots.reserve(actualFlightFrameCount);
+    for (uint32_t i = 0; i < actualFlightFrameCount; i++) {
         result->_frameSlots.emplace_back();
     }
     return result;

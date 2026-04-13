@@ -159,6 +159,7 @@ public:
     uint32_t GetHeight() const;
     render::TextureFormat GetFormat() const;
     render::PresentMode GetPresentMode() const;
+    uint32_t GetFlightFrameCount() const;
 
 public:
     class Frame {

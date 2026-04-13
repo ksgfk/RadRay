@@ -315,6 +315,14 @@ bool CreateSurfaceForWindow(
                 const uint32_t actualBackBufferCount = surface->_swapchain->GetBackBufferCount();
                 if (actualBackBufferCount == 0) {
                     lastFailure = "Surface back buffer count is zero.";
+                } else if (const uint32_t actualFlightFrameCount = surface->GetFlightFrameCount();
+                           actualFlightFrameCount != std::min(options.FlightFrameCount, actualBackBufferCount)) {
+                    lastFailure = fmt::format(
+                        "Surface flight frame count {} does not match expected {} (requested={}, backBuffers={}).",
+                        actualFlightFrameCount,
+                        std::min(options.FlightFrameCount, actualBackBufferCount),
+                        options.FlightFrameCount,
+                        actualBackBufferCount);
                 } else {
                     state.Surface = std::move(surface);
                     state.Format = format;
@@ -796,6 +804,37 @@ TEST_P(GpuRuntimeSmokeTest, SingleThreadAcquirePresentWorks) {
         << reason;
     ASSERT_GE(state.SeenBackBufferIndices.size(), 2u)
         << "Swapchain did not rotate back buffers as expected.";
+
+    DestroySurfaceState(state);
+    runtime.reset();
+
+    ASSERT_TRUE(ExpectNoCapturedErrors(logs, reason))
+        << reason;
+}
+
+TEST_P(GpuRuntimeSmokeTest, SurfaceReportsActualFlightFrameCount) {
+    LogCollector logs{};
+    ScopedGlobalLogCallback logScope{&logs};
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), &logs, runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    SurfaceState state{};
+    if (!CreateWindowForSurface(kInitialWidth, kInitialHeight, state, reason)) {
+        GTEST_SKIP() << reason;
+    }
+    SurfaceOptions options{};
+    options.WidthHint = kInitialWidth;
+    options.HeightHint = kInitialHeight;
+    options.BackBufferCount = 2;
+    options.FlightFrameCount = 4;
+    ASSERT_TRUE(CreateSurfaceForWindow(*runtime, state, &logs, std::span<const TextureFormat>{kFallbackFormats}, options, reason))
+        << reason;
+
+    ASSERT_NE(state.Surface, nullptr);
+    EXPECT_EQ(state.Surface->GetFlightFrameCount(), 2u);
 
     DestroySurfaceState(state);
     runtime.reset();
