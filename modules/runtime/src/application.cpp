@@ -20,6 +20,14 @@ int32_t Application::Run(int argc, char* argv[]) {
         if (_exitRequested) {
             break;
         }
+        {
+            std::unique_lock<std::mutex> l{_gpuMutex, std::defer_lock};
+            if (_multiThreaded) {
+                l.lock();
+            }
+            _gpu->ProcessTasks();
+        }
+        this->HandleSurfaceChanges();
     }
 
     return 0;
@@ -65,13 +73,73 @@ AppWindowHandle Application::CreateWindow(const NativeWindowCreateDescriptor& wi
     AppWindow appWindow{};
     appWindow._window = std::move(window);
     appWindow._surface = std::move(surface);
+    if (appWindow._surface != nullptr && appWindow._surface->IsValid()) {
+        appWindow._flightTasks.resize(appWindow._surface->GetFlightFrameCount());
+    }
     appWindow._isPrimary = isPrimary;
-    return _windows.Emplace(std::move(appWindow));
+    auto handle = _windows.Emplace(std::move(appWindow));
+    _windows.Get(handle)._selfHandle = handle;
+    return handle;
 }
 
 void Application::DispatchAllWindowEvents() {
     for (auto& i : _windows.Values()) {
         i._window->DispatchEvents();
+    }
+}
+
+void Application::HandleSurfaceChanges() {
+    RADRAY_ASSERT(_gpu && _gpu->IsValid());
+    std::unique_lock<std::mutex> gpuLock{_gpuMutex, std::defer_lock};
+    if (_multiThreaded) {
+        gpuLock.lock();
+    }
+    for (auto& window : _windows.Values()) {
+        if (!window._pendingResize) {
+            continue;
+        }
+        if (window._window == nullptr || !window._window->IsValid()) {
+            throw AppException(fmt::format("Application::HandleSurfaceChanges window {} is invalid", window._selfHandle));
+        }
+        if (window._surface == nullptr || !window._surface->IsValid()) {
+            throw AppException(fmt::format("Application::HandleSurfaceChanges surface for window {} is invalid", window._selfHandle));
+        }
+        if (window._window->IsMinimized()) {
+            continue;
+        }
+        const auto size = window._window->GetSize();
+        if (size.X <= 0 || size.Y <= 0) {
+            continue;
+        }
+        const auto nativeHandler = window._window->GetNativeHandler();
+        if (nativeHandler.Handle == nullptr) {
+            throw AppException(fmt::format("Application::HandleSurfaceChanges window {} native handle is null", window._selfHandle));
+        }
+        auto& oldSurface = window._surface;
+        const auto swapchainDesc = oldSurface->_swapchain->GetDesc();
+        if (swapchainDesc.PresentQueue == nullptr) {
+            throw AppException(fmt::format("Application::HandleSurfaceChanges surface for window {} has no present queue", window._selfHandle));
+        }
+        _gpu->Wait(swapchainDesc.PresentQueue->GetQueueType(), oldSurface->_queueSlot);
+        GpuSurfaceDescriptor recreateDesc{};
+        recreateDesc.NativeHandler = nativeHandler.Handle;
+        recreateDesc.Width = static_cast<uint32_t>(size.X);
+        recreateDesc.Height = static_cast<uint32_t>(size.Y);
+        recreateDesc.BackBufferCount = swapchainDesc.BackBufferCount;
+        recreateDesc.FlightFrameCount = swapchainDesc.FlightFrameCount;
+        recreateDesc.Format = swapchainDesc.Format;
+        recreateDesc.PresentMode = swapchainDesc.PresentMode;
+        recreateDesc.QueueSlot = oldSurface->_queueSlot;
+        oldSurface.reset();
+        auto recreatedSurface = _gpu->CreateSurface(recreateDesc);
+        if (recreatedSurface == nullptr || !recreatedSurface->IsValid()) {
+            throw AppException(fmt::format("Application::HandleSurfaceChanges failed to recreate surface for window {}", window._selfHandle));
+        }
+        window._surface = std::move(recreatedSurface);
+        window._flightTasks.clear();
+        window._flightTasks.resize(window._surface->GetFlightFrameCount());
+        window._nextFreeTaskSlot = 0;
+        window._pendingResize = false;
     }
 }
 

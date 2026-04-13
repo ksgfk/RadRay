@@ -2,6 +2,7 @@
 
 #include <span>
 #include <atomic>
+#include <mutex>
 #include <stdexcept>
 
 #include <radray/sparse_set.h>
@@ -20,11 +21,13 @@ using AppWindowHandle = SparseSetHandle;
 class AppWindow {
 public:
 public:
+    AppWindowHandle _selfHandle;
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
     vector<std::optional<GpuTask>> _flightTasks;
     uint32_t _nextFreeTaskSlot{0};
     bool _isPrimary{false};
+    bool _pendingResize{false};
 };
 
 class Application {
@@ -55,10 +58,12 @@ protected:
 
     AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary);
     void DispatchAllWindowEvents();
+    void HandleSurfaceChanges();
 
 protected:
     SparseSet<AppWindow> _windows;
     unique_ptr<GpuRuntime> _gpu;
+    std::mutex _gpuMutex;
     std::atomic_bool _exitRequested{false};
     bool _multiThreaded{false};
     bool _allowFrameDrop{false};
