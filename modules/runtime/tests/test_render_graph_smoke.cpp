@@ -263,15 +263,15 @@ bool CreateSurfaceForWindow(
         const auto format = kFallbackFormats[i];
         const size_t errorBaseline = logs != nullptr ? logs->GetErrorCount() : 0;
         try {
-            auto surface = runtime.CreateSurface(
-                nativeHandler.Handle,
-                surfaceWidth,
-                surfaceHeight,
-                kBackBufferCount,
-                kFlightFrameCount,
-                format,
-                PresentMode::FIFO,
-                0);
+            GpuSurfaceDescriptor surfaceDesc{};
+            surfaceDesc.NativeHandler = nativeHandler.Handle;
+            surfaceDesc.Width = surfaceWidth;
+            surfaceDesc.Height = surfaceHeight;
+            surfaceDesc.BackBufferCount = kBackBufferCount;
+            surfaceDesc.FlightFrameCount = kFlightFrameCount;
+            surfaceDesc.Format = format;
+            surfaceDesc.PresentMode = PresentMode::FIFO;
+            auto surface = runtime.CreateSurface(surfaceDesc);
             if (surface != nullptr && surface->IsValid()) {
                 const uint32_t actualBackBufferCount = surface->_swapchain->GetBackBufferCount();
                 if (actualBackBufferCount == 0) {

@@ -41,7 +41,7 @@
 //   因此调用方必须遵守本文档里的生命周期与归属约定；违反约定在 release 下属于未定义行为。
 // - BeginFrame 当前只报告 RequireRecreate，不在 runtime 内自动重建 surface/swapchain。
 // - TryBeginFrame 是非阻塞接口：当 frame slot 或 swapchain 当前不可用时返回 RetryLater。
-// - CreateSurface / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
+// - GpuSurfaceDescriptor::QueueSlot / BeginAsync 的 slot 参数表示 queue 槽位(queue slot)。
 // - GpuTask 仅表示一次 runtime submission 的 queue/GPU 完成令牌：对普通异步提交表示该 batch
 //   已执行完成，对 frame 提交表示该 frame 的命令提交已执行完成，但都不表示 swapchain present
 //   已结束；它借用 source runtime/fence 的生命周期。
@@ -123,6 +123,17 @@ struct GpuTextureViewDescriptor {
     render::TextureFormat Format{render::TextureFormat::UNKNOWN};
     render::SubresourceRange Range{};
     render::TextureViewUsages Usage{render::TextureViewUsage::UNKNOWN};
+};
+
+struct GpuSurfaceDescriptor {
+    const void* NativeHandler{nullptr};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t BackBufferCount{0};
+    uint32_t FlightFrameCount{1};
+    render::TextureFormat Format{render::TextureFormat::UNKNOWN};
+    render::PresentMode PresentMode{render::PresentMode::FIFO};
+    uint32_t QueueSlot{0};
 };
 
 class GpuTask {
@@ -276,14 +287,7 @@ public:
 
     render::Device* GetDevice() const;
 
-    unique_ptr<GpuSurface> CreateSurface(
-        const void* nativeHandler,
-        uint32_t width, uint32_t height,
-        uint32_t backBufferCount,
-        uint32_t flightFrameCount,
-        render::TextureFormat format,
-        render::PresentMode presentMode,
-        uint32_t queueSlot = 0);
+    unique_ptr<GpuSurface> CreateSurface(const GpuSurfaceDescriptor& desc);
 
     GpuBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
 

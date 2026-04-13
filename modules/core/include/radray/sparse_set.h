@@ -243,7 +243,6 @@ template <class CharT>
 struct fmt::formatter<radray::SparseSetHandle, CharT> : fmt::formatter<radray::string, CharT> {
     template <class FormatContext>
     auto format(const radray::SparseSetHandle& val, FormatContext& ctx) const {
-        return formatter<radray::string, CharT>::format(
-            fmt::format("SparseSetHandle{{Index={}, Generation={}}}", val.Index, val.Generation), ctx);
+        return fmt::format_to(ctx.out(), "SparseSetHandle{{Index={}, Generation={}}}", val.Index, val.Generation);
     }
 };

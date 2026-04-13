@@ -642,36 +642,29 @@ void GpuRuntime::Destroy() noexcept {
     }
 }
 
-unique_ptr<GpuSurface> GpuRuntime::CreateSurface(
-    const void* nativeHandler,
-    uint32_t width, uint32_t height,
-    uint32_t backBufferCount,
-    uint32_t flightFrameCount,
-    render::TextureFormat format,
-    render::PresentMode presentMode,
-    uint32_t queueSlot) {
-    if (flightFrameCount == 0) {
+unique_ptr<GpuSurface> GpuRuntime::CreateSurface(const GpuSurfaceDescriptor& desc) {
+    if (desc.FlightFrameCount == 0) {
         throw GpuSystemException("flightFrameCount must be > 0");
     }
-    auto queueOpt = _device->GetCommandQueue(render::QueueType::Direct, queueSlot);
+    auto queueOpt = _device->GetCommandQueue(render::QueueType::Direct, desc.QueueSlot);
     if (!queueOpt.HasValue()) {
         throw GpuSystemException("Device::GetCommandQueue failed");
     }
     auto queue = queueOpt.Get();
-    render::SwapChainDescriptor desc{};
-    desc.PresentQueue = queue;
-    desc.NativeHandler = nativeHandler;
-    desc.Width = width;
-    desc.Height = height;
-    desc.BackBufferCount = backBufferCount;
-    desc.Format = format;
-    desc.PresentMode = presentMode;
-    desc.FlightFrameCount = flightFrameCount;
-    auto swapchainOpt = _device->CreateSwapChain(desc);
+    render::SwapChainDescriptor swapChainDesc{};
+    swapChainDesc.PresentQueue = queue;
+    swapChainDesc.NativeHandler = desc.NativeHandler;
+    swapChainDesc.Width = desc.Width;
+    swapChainDesc.Height = desc.Height;
+    swapChainDesc.BackBufferCount = desc.BackBufferCount;
+    swapChainDesc.Format = desc.Format;
+    swapChainDesc.PresentMode = desc.PresentMode;
+    swapChainDesc.FlightFrameCount = desc.FlightFrameCount;
+    auto swapchainOpt = _device->CreateSwapChain(swapChainDesc);
     if (!swapchainOpt.HasValue()) {
         throw GpuSystemException("Device::CreateSwapChain failed");
     }
-    auto result = make_unique<GpuSurface>(this, swapchainOpt.Release(), queueSlot);
+    auto result = make_unique<GpuSurface>(this, swapchainOpt.Release(), desc.QueueSlot);
     const uint32_t actualFlightFrameCount = result->GetFlightFrameCount();
     result->_frameSlots.reserve(actualFlightFrameCount);
     for (uint32_t i = 0; i < actualFlightFrameCount; i++) {

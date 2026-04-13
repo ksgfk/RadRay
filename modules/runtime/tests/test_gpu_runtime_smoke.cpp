@@ -300,15 +300,16 @@ bool CreateSurfaceForWindow(
         const TextureFormat format = formats[i];
         const size_t errorBaseline = logs != nullptr ? logs->GetErrorCount() : 0;
         try {
-            auto surface = runtime.CreateSurface(
-                nativeHandler.Handle,
-                width,
-                height,
-                options.BackBufferCount,
-                options.FlightFrameCount,
-                format,
-                options.PresentModeValue,
-                options.QueueSlot);
+            GpuSurfaceDescriptor surfaceDesc{};
+            surfaceDesc.NativeHandler = nativeHandler.Handle;
+            surfaceDesc.Width = width;
+            surfaceDesc.Height = height;
+            surfaceDesc.BackBufferCount = options.BackBufferCount;
+            surfaceDesc.FlightFrameCount = options.FlightFrameCount;
+            surfaceDesc.Format = format;
+            surfaceDesc.PresentMode = options.PresentModeValue;
+            surfaceDesc.QueueSlot = options.QueueSlot;
+            auto surface = runtime.CreateSurface(surfaceDesc);
             if (surface == nullptr || !surface->IsValid()) {
                 lastFailure = fmt::format("Created invalid surface for format {}", format);
             } else {
