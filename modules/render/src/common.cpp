@@ -686,4 +686,14 @@ std::string_view format_as(BindlessSlotType v) noexcept {
     Unreachable();
 }
 
+std::string_view format_as(SwapChainStatus v) noexcept {
+    switch (v) {
+        case SwapChainStatus::Error: return "Error";
+        case SwapChainStatus::Success: return "Success";
+        case SwapChainStatus::RetryLater: return "RetryLater";
+        case SwapChainStatus::RequireRecreate: return "RequireRecreate";
+    }
+    Unreachable();
+}
+
 }  // namespace radray::render

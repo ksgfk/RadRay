@@ -1708,5 +1708,6 @@ std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
 std::string_view format_as(ShaderStage v) noexcept;
 std::string_view format_as(BindlessSlotType v) noexcept;
+std::string_view format_as(SwapChainStatus v) noexcept;
 
 }  // namespace radray::render

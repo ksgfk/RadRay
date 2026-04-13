@@ -65,7 +65,7 @@
             "Name": "libpng",
             "Type": "git",
             "Git": "https://github.com/pnggroup/libpng.git",
-            "Tag": "v1.6.55"
+            "Tag": "v1.6.57"
         },
         {
             "Name": "freetype",

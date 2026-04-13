@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 
 #include <radray/sparse_set.h>
 #include <radray/render/common.h>
@@ -20,14 +21,34 @@ using AppWindowHandle = SparseSetHandle;
 
 class AppWindow {
 public:
+    AppWindow() noexcept = default;
+    AppWindow(const AppWindow&) = delete;
+    AppWindow& operator=(const AppWindow&) = delete;
+    AppWindow(AppWindow&& other) noexcept;
+    AppWindow& operator=(AppWindow&& other) noexcept;
+    ~AppWindow() noexcept;
+
+    friend void swap(AppWindow& a, AppWindow& b) noexcept;
+
 public:
+    enum class FlightState {
+        Free,
+        Queued,
+        Submitted
+    };
+
+    class FlightData {
+    public:
+        std::optional<GpuTask> _task{};
+        FlightState _state{FlightState::Free};
+    };
+
     AppWindowHandle _selfHandle;
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
-    vector<std::optional<GpuTask>> _flightTasks;
-    uint32_t _nextFreeTaskSlot{0};
+    vector<FlightData> _flightTasks;
     bool _isPrimary{false};
-    bool _pendingResize{false};
+    bool _pendingRecreate{false};
 };
 
 class Application {
@@ -55,10 +76,18 @@ protected:
     virtual void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t flightIndex) = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
+    void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);
 
     AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary);
     void DispatchAllWindowEvents();
+    void CheckWindowStates();
     void HandleSurfaceChanges();
+    bool CanRenderWindow(AppWindowHandle window) const;
+    void HandlePresentResult(AppWindow& window, const render::SwapChainPresentResult& presentResult);
+    void WaitAllFlightTasks();
+    void WaitAllSurfaceQueues();
+
+    void ScheduleFramesSingleThreaded();
 
 protected:
     SparseSet<AppWindow> _windows;

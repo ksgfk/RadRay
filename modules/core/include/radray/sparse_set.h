@@ -22,6 +22,18 @@ struct SparseSetHandle {
     constexpr auto operator<=>(const SparseSetHandle&) const noexcept = default;
 };
 
+}  // namespace radray
+
+template <class CharT>
+struct fmt::formatter<radray::SparseSetHandle, CharT> : fmt::formatter<radray::string, CharT> {
+    template <class FormatContext>
+    auto format(const radray::SparseSetHandle& val, FormatContext& ctx) const {
+        return fmt::format_to(ctx.out(), "SparseSetHandle{{Index={}, Generation={}}}", val.Index, val.Generation);
+    }
+};
+
+namespace radray {
+
 template <typename T>
 concept SparseSetElement = std::move_constructible<T> && std::assignable_from<T&, T>;
 
@@ -238,11 +250,3 @@ private:
 };
 
 }  // namespace radray
-
-template <class CharT>
-struct fmt::formatter<radray::SparseSetHandle, CharT> : fmt::formatter<radray::string, CharT> {
-    template <class FormatContext>
-    auto format(const radray::SparseSetHandle& val, FormatContext& ctx) const {
-        return fmt::format_to(ctx.out(), "SparseSetHandle{{Index={}, Generation={}}}", val.Index, val.Generation);
-    }
-};
