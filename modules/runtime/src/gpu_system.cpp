@@ -561,19 +561,27 @@ GpuTextureViewHandle GpuAsyncContext::CreateTransientTextureView(const GpuTextur
         parent.Registry = _resourceRegistry.get();
         parent.Handle = desc.Target;
         parent.Texture = localTexture;
-    } else if (_runtime != nullptr &&
-               _runtime->_resourceRegistry != nullptr &&
-               _runtime->_resourceRegistry->FindAliveTexture(desc.Target) != nullptr) {
-        parent.Registry = _runtime->_resourceRegistry.get();
-        parent.Handle = desc.Target;
-        parent.Texture = _runtime->_resourceRegistry->FindAliveTexture(desc.Target);
-#ifdef RADRAY_IS_DEBUG
-    } else {
-        throw GpuSystemException("GpuAsyncContext::CreateTransientTextureView requires a live texture from the same context or runtime");
-#endif
+        return _resourceRegistry->CreateTextureView(desc, parent);
     }
 
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+        if (_runtime->_resourceRegistry != nullptr) {
+            auto* persistentTexture = _runtime->_resourceRegistry->FindAliveTexture(desc.Target);
+            if (persistentTexture != nullptr) {
+                parent.Registry = _runtime->_resourceRegistry.get();
+                parent.Handle = desc.Target;
+                parent.Texture = persistentTexture;
+                return _resourceRegistry->CreateTextureView(desc, parent);
+            }
+        }
+    }
+
+#ifdef RADRAY_IS_DEBUG
+    throw GpuSystemException("GpuAsyncContext::CreateTransientTextureView requires a live texture from the same context or runtime");
+#else
     return _resourceRegistry->CreateTextureView(desc, parent);
+#endif
 }
 
 GpuFrameContext::GpuFrameContext(
@@ -622,14 +630,17 @@ GpuRuntime::~GpuRuntime() noexcept {
 }
 
 bool GpuRuntime::IsValid() const {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     return _device != nullptr;
 }
 
 render::Device* GpuRuntime::GetDevice() const {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     return _device.get();
 }
 
 void GpuRuntime::Destroy() noexcept {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     _pendings.clear();
     _resourceRetirements.clear();
     _resourceRegistry.reset();
@@ -643,8 +654,12 @@ void GpuRuntime::Destroy() noexcept {
 }
 
 unique_ptr<GpuSurface> GpuRuntime::CreateSurface(const GpuSurfaceDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (desc.FlightFrameCount == 0) {
         throw GpuSystemException("flightFrameCount must be > 0");
+    }
+    if (_device == nullptr) {
+        throw GpuSystemException("GpuRuntime::CreateSurface requires a valid runtime");
     }
     auto queueOpt = _device->GetCommandQueue(render::QueueType::Direct, desc.QueueSlot);
     if (!queueOpt.HasValue()) {
@@ -674,6 +689,7 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(const GpuSurfaceDescriptor& des
 }
 
 GpuBufferHandle GpuRuntime::CreateBuffer(const render::BufferDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
     }
@@ -681,6 +697,7 @@ GpuBufferHandle GpuRuntime::CreateBuffer(const render::BufferDescriptor& desc) {
 }
 
 GpuTextureHandle GpuRuntime::CreateTexture(const render::TextureDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
     }
@@ -688,6 +705,7 @@ GpuTextureHandle GpuRuntime::CreateTexture(const render::TextureDescriptor& desc
 }
 
 GpuTextureViewHandle GpuRuntime::CreateTextureView(const GpuTextureViewDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
     }
@@ -705,6 +723,7 @@ GpuTextureViewHandle GpuRuntime::CreateTextureView(const GpuTextureViewDescripto
 }
 
 GpuSamplerHandle GpuRuntime::CreateSampler(const render::SamplerDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
     }
@@ -712,6 +731,7 @@ GpuSamplerHandle GpuRuntime::CreateSampler(const render::SamplerDescriptor& desc
 }
 
 void GpuRuntime::DestroyResourceImmediate(GpuResourceHandle handle) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
@@ -731,6 +751,7 @@ void GpuRuntime::DestroyResourceImmediate(GpuResourceHandle handle) {
 }
 
 void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     if (_resourceRegistry == nullptr) {
         throw GpuSystemException("GpuRuntime has no persistent resource registry");
@@ -765,34 +786,40 @@ void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& t
 }
 
 GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     if (surface == nullptr || !surface->IsValid()) {
         throw GpuSystemException("GpuRuntime::BeginFrame requires a valid surface");
     }
 #endif
-    auto* fence = this->GetQueueFence(render::QueueType::Direct, surface->_queueSlot);
+    auto* fence = this->GetQueueFenceUnlocked(render::QueueType::Direct, surface->_queueSlot);
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
     auto& nowFrame = surface->_frameSlots[frameSlotIndex];
     fence->Wait(nowFrame._fenceValue);
-    return this->AcquireSwapChain(surface, std::numeric_limits<uint64_t>::max());
+    return this->AcquireSwapChainUnlocked(surface, std::numeric_limits<uint64_t>::max());
 }
 
 GpuRuntime::BeginFrameResult GpuRuntime::TryBeginFrame(GpuSurface* surface) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     if (surface == nullptr || !surface->IsValid()) {
         throw GpuSystemException("GpuRuntime::TryBeginFrame requires a valid surface");
     }
 #endif
-    auto* fence = this->GetQueueFence(render::QueueType::Direct, surface->_queueSlot);
+    auto* fence = this->GetQueueFenceUnlocked(render::QueueType::Direct, surface->_queueSlot);
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
     auto& nowFrame = surface->_frameSlots[frameSlotIndex];
     if (fence->GetCompletedValue() < nowFrame._fenceValue) {
         return {nullptr, render::SwapChainStatus::RetryLater};
     }
-    return this->AcquireSwapChain(surface, 0);
+    return this->AcquireSwapChainUnlocked(surface, 0);
 }
 
 unique_ptr<GpuAsyncContext> GpuRuntime::BeginAsync(render::QueueType type, uint32_t queueSlot) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    if (_device == nullptr) {
+        throw GpuSystemException("GpuRuntime::BeginAsync requires a valid runtime");
+    }
     auto queueOpt = _device->GetCommandQueue(type, queueSlot);
     if (!queueOpt.HasValue()) {
         throw GpuSystemException("Device::GetCommandQueue failed");
@@ -801,7 +828,7 @@ unique_ptr<GpuAsyncContext> GpuRuntime::BeginAsync(render::QueueType type, uint3
     return make_unique<GpuAsyncContext>(this, queue, queueSlot);
 }
 
-GpuRuntime::SubmittedBatch GpuRuntime::SubmitContext(
+GpuRuntime::SubmittedBatch GpuRuntime::SubmitContextUnlocked(
     GpuAsyncContext* context,
     Nullable<render::SwapChainSyncObject*> waitToExecute,
     Nullable<render::SwapChainSyncObject*> readyToPresent) {
@@ -817,7 +844,7 @@ GpuRuntime::SubmittedBatch GpuRuntime::SubmitContext(
         submitCmds.emplace_back(cmdBuffer.get());
     }
 
-    auto* fence = this->GetQueueFence(context->_queue->GetQueueType(), context->_queueSlot);
+    auto* fence = this->GetQueueFenceUnlocked(context->_queue->GetQueueType(), context->_queueSlot);
     const uint64_t signalValue = fence->GetLastSignaledValue() + 1;
     render::Fence* signalFences[] = {fence};
     uint64_t signalValues[] = {signalValue};
@@ -861,13 +888,13 @@ void GpuRuntime::ValidateFrameContextForConsume(const char* apiName, const GpuFr
 }
 #endif
 
-GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameContext> context) {
+GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrameUnlocked(unique_ptr<GpuFrameContext> context) {
 #ifdef RADRAY_IS_DEBUG
     this->ValidateFrameContextForConsume("GpuRuntime::FinalizeFrame", context.get());
 #endif
     auto* surface = context->_surface;
     const size_t frameSlotIndex = context->_frameSlotIndex;
-    const auto submitted = this->SubmitContext(context.get(), context->_waitToDraw, context->_readyToPresent);
+    const auto submitted = this->SubmitContextUnlocked(context.get(), context->_waitToDraw, context->_readyToPresent);
     GpuTask task{this, submitted.Fence, submitted.SignalValue};
     RADRAY_ASSERT(context->_acquiredFrame.has_value());
     const auto present = surface->_swapchain->Present(std::move(context->_acquiredFrame.value()));
@@ -878,26 +905,29 @@ GpuRuntime::SubmitFrameResult GpuRuntime::FinalizeFrame(unique_ptr<GpuFrameConte
 }
 
 GpuTask GpuRuntime::SubmitAsync(unique_ptr<GpuAsyncContext> context) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     if (context->GetType() != GpuAsyncContext::Kind::Async) {
         throw GpuSystemException("GpuRuntime::SubmitAsync only accepts async contexts");
     }
     _RequireSameRuntimeDebug("GpuRuntime::SubmitAsync", "GpuAsyncContext", this, context->_runtime);
 #endif
-    const auto submitted = this->SubmitContext(context.get(), nullptr, nullptr);
+    const auto submitted = this->SubmitContextUnlocked(context.get(), nullptr, nullptr);
     _pendings.emplace_back(std::move(context), submitted.Fence, submitted.SignalValue);
     return GpuTask{this, submitted.Fence, submitted.SignalValue};
 }
 
 GpuRuntime::SubmitFrameResult GpuRuntime::SubmitFrame(unique_ptr<GpuFrameContext> context) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     this->ValidateFrameContextForConsume("GpuRuntime::SubmitFrame", context.get());
     context->_consumeState = GpuFrameContext::ConsumeState::Submitted;
 #endif
-    return this->FinalizeFrame(std::move(context));
+    return this->FinalizeFrameUnlocked(std::move(context));
 }
 
 GpuRuntime::SubmitFrameResult GpuRuntime::AbandonFrame(unique_ptr<GpuFrameContext> context) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
     this->ValidateFrameContextForConsume("GpuRuntime::AbandonFrame", context.get());
     context->_consumeState = GpuFrameContext::ConsumeState::Abandoned;
@@ -918,10 +948,15 @@ GpuRuntime::SubmitFrameResult GpuRuntime::AbandonFrame(unique_ptr<GpuFrameContex
     }
     cmd->End();
 
-    return this->FinalizeFrame(std::move(context));
+    return this->FinalizeFrameUnlocked(std::move(context));
 }
 
 void GpuRuntime::ProcessTasks() {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    this->ProcessTasksUnlocked();
+}
+
+void GpuRuntime::ProcessTasksUnlocked() {
     std::erase_if(_pendings, [](const Pending& pending) {
         return pending._fence != nullptr && pending._fence->GetCompletedValue() >= pending._signalValue;
     });
@@ -959,6 +994,7 @@ void GpuRuntime::ProcessTasks() {
 }
 
 void GpuRuntime::Wait(render::QueueType type, uint32_t queueSlot) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
     if (_device == nullptr) {
         throw GpuSystemException("GpuRuntime::Wait requires a valid runtime");
     }
@@ -968,10 +1004,13 @@ void GpuRuntime::Wait(render::QueueType type, uint32_t queueSlot) {
     }
     auto queue = queueOpt.Get();
     queue->Wait();
-    this->ProcessTasks();
+    this->ProcessTasksUnlocked();
 }
 
-render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) {
+render::Fence* GpuRuntime::GetQueueFenceUnlocked(render::QueueType type, uint32_t slot) {
+    if (_device == nullptr) {
+        throw GpuSystemException("GpuRuntime has no device");
+    }
 #ifdef RADRAY_ENABLE_D3D12
     if (_device->GetBackend() == render::RenderBackend::D3D12) {
         auto deviceD3D12 = render::d3d12::CastD3D12Object(_device.get());
@@ -1001,7 +1040,7 @@ render::Fence* GpuRuntime::GetQueueFence(render::QueueType type, uint32_t slot) 
     return fence.get();
 }
 
-GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs) {
+GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChainUnlocked(GpuSurface* surface, uint64_t timeoutMs) {
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
     auto acqResult = surface->_swapchain->AcquireNext(timeoutMs);
     switch (acqResult.Status) {

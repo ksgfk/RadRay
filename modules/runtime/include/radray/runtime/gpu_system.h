@@ -2,6 +2,7 @@
 
 #include <array>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 
 #include <radray/types.h>
@@ -55,6 +56,12 @@
 //   不等待底层 present 生命周期。
 // - Wait 是对指定 queue slot 的底层 queue wait 的薄封装，并会在返回前调用一次 ProcessTasks()；
 //   它不等价于整个 runtime 空闲，也不替调用方追踪其他 queue slot、未提交 context 或外部 handle 生命周期。
+// - 线程安全约定：
+//   - 同一个 GpuRuntime 实例的公开成员函数可被多个线程并发调用；实现会串行化 runtime 内部共享状态。
+//   - GpuTask::IsValid / IsCompleted / Wait 在其 source runtime 仍存活时可跨线程调用。
+//   - GpuSurface / GpuAsyncContext / GpuFrameContext 不是通用线程安全对象；同一对象的直接并发访问由调用方负责同步。
+//   - 以 "_" 开头的成员，以及通过 GetDevice()/NativeHandle 等 escape hatch 获得的 borrowed 对象，
+//     不纳入本层线程安全保证，仅作为内部/测试 seam 使用。
 // - 生命周期约定：
 //   - GpuRuntime 是本层所有对象的根所有者。GpuTask / GpuSurface / GpuAsyncContext /
 //     GpuFrameContext 以及由它们暴露的 borrowed/native handle 都不得长于 GpuRuntime。
@@ -277,8 +284,8 @@ public:
         unique_ptr<render::InstanceVulkan> vkInstance) noexcept;
     GpuRuntime(const GpuRuntime&) noexcept = delete;
     GpuRuntime& operator=(const GpuRuntime&) noexcept = delete;
-    GpuRuntime(GpuRuntime&&) noexcept = default;
-    GpuRuntime& operator=(GpuRuntime&&) noexcept = default;
+    GpuRuntime(GpuRuntime&&) noexcept = delete;
+    GpuRuntime& operator=(GpuRuntime&&) noexcept = delete;
     ~GpuRuntime() noexcept;
 
     bool IsValid() const;
@@ -357,14 +364,16 @@ public:
         uint64_t _signalValue{0};
     };
 
-    render::Fence* GetQueueFence(render::QueueType type, uint32_t slot);
-    SubmittedBatch SubmitContext(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
+    render::Fence* GetQueueFenceUnlocked(render::QueueType type, uint32_t slot);
+    SubmittedBatch SubmitContextUnlocked(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
 #ifdef RADRAY_IS_DEBUG
     void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
 #endif
-    SubmitFrameResult FinalizeFrame(unique_ptr<GpuFrameContext> context);
-    GpuRuntime::BeginFrameResult AcquireSwapChain(GpuSurface* surface, uint64_t timeoutMs);
+    SubmitFrameResult FinalizeFrameUnlocked(unique_ptr<GpuFrameContext> context);
+    GpuRuntime::BeginFrameResult AcquireSwapChainUnlocked(GpuSurface* surface, uint64_t timeoutMs);
+    void ProcessTasksUnlocked();
 
+    mutable std::mutex _runtimeMutex;
     shared_ptr<render::Device> _device;
     unique_ptr<render::InstanceVulkan> _vkInstance;
     std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
