@@ -55,7 +55,7 @@ int32_t Application::Run(int argc, char* argv[]) {
             break;
         }
         {
-            std::unique_lock<std::mutex> l{_gpuMutex, std::defer_lock};
+            std::unique_lock<std::mutex> l{_renderMutex, std::defer_lock};
             if (_multiThreaded) {
                 l.lock();
             }
@@ -164,7 +164,7 @@ void Application::CheckWindowStates() {
 
 void Application::HandleSurfaceChanges() {
     RADRAY_ASSERT(_gpu && _gpu->IsValid());
-    std::unique_lock<std::mutex> gpuLock{_gpuMutex, std::defer_lock};
+    std::unique_lock<std::mutex> gpuLock{_renderMutex, std::defer_lock};
     if (_multiThreaded) {
         gpuLock.lock();
     }
@@ -300,6 +300,24 @@ void Application::WaitAllSurfaceQueues() {
     }
 }
 
+void Application::RequestMultiThreaded(bool multiThreaded) {
+    _pendingMultiThreaded = multiThreaded;
+}
+
+void Application::ApplyPendingThreadMode() {
+    if (_pendingMultiThreaded == _multiThreaded) {
+        return;
+    }
+    if (_pendingMultiThreaded) {
+    } else {
+        _renderCommandQueue.WaitWrite(StopRenderThreadCommand{});
+        _renderThread.join();
+        this->WaitAllFlightTasks();
+        this->WaitAllSurfaceQueues();
+    }
+    _multiThreaded = _pendingMultiThreaded;
+}
+
 void Application::ScheduleFramesSingleThreaded() {
     for (auto& window : _windows.Values()) {
         if (!this->CanRenderWindow(window._selfHandle)) {
@@ -385,6 +403,30 @@ void Application::ScheduleFramesSingleThreaded() {
         flight._task.emplace(std::move(submit.Task));
         flight._state = AppWindow::FlightState::Submitted;
         this->HandlePresentResult(window, submit.Present);
+    }
+}
+
+void Application::ScheduleFramesMultiThreaded() {
+    for (auto& window : _windows.Values()) {
+        if (!this->CanRenderWindow(window._selfHandle)) {
+            continue;
+        }
+
+        RADRAY_ASSERT(window._surface != nullptr && window._surface->IsValid());
+        RADRAY_ASSERT(window._surface->_nextFrameSlotIndex < window._flightTasks.size());
+
+        const auto flightIndex = static_cast<uint32_t>(window._surface->_nextFrameSlotIndex);
+        auto& flight = window._flightTasks[flightIndex];
+
+        switch (flight._state) {
+            case AppWindow::FlightState::Free:
+                break;
+            case AppWindow::FlightState::Queued:
+                if (_allowFrameDrop) {
+                    continue;
+                }
+            case AppWindow::FlightState::Submitted: break;
+        }
     }
 }
 

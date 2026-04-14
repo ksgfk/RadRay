@@ -1,12 +1,15 @@
 #pragma once
 
+#include <variant>
 #include <span>
 #include <atomic>
 #include <mutex>
+#include <thread>
 #include <stdexcept>
 #include <utility>
 
 #include <radray/sparse_set.h>
+#include <radray/channel.h>
 #include <radray/render/common.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/gpu_system.h>
@@ -16,6 +19,10 @@ namespace radray {
 class AppException : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+struct StopRenderThreadCommand {};
+
+using RenderThreadCommand = std::variant<StopRenderThreadCommand>;
 
 using AppWindowHandle = SparseSetHandle;
 
@@ -87,13 +94,19 @@ protected:
     void WaitAllFlightTasks();
     void WaitAllSurfaceQueues();
 
+    void RequestMultiThreaded(bool multiThreaded);
+    void ApplyPendingThreadMode();
     void ScheduleFramesSingleThreaded();
+    void ScheduleFramesMultiThreaded();
 
 protected:
     SparseSet<AppWindow> _windows;
     unique_ptr<GpuRuntime> _gpu;
-    std::mutex _gpuMutex;
+    std::mutex _renderMutex;
+    std::thread _renderThread;
+    UnboundedChannel<RenderThreadCommand> _renderCommandQueue;
     std::atomic_bool _exitRequested{false};
+    bool _pendingMultiThreaded{false};
     bool _multiThreaded{false};
     bool _allowFrameDrop{false};
 };
