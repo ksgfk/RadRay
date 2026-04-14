@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <variant>
 #include <span>
 #include <atomic>
@@ -35,25 +36,33 @@ public:
     AppWindow& operator=(AppWindow&& other) noexcept;
     ~AppWindow() noexcept;
 
+    void ResetRenderMailboxes() noexcept;
+    std::optional<uint32_t> GetPublishedRenderMailboxSlot() const noexcept;
+    void RestoreRenderMailbox(uint32_t mailboxSlot) noexcept;
+    void ReleaseRenderMailbox(uint32_t mailboxSlot) noexcept;
+
     friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
 public:
-    enum class FlightState {
+    enum class RenderMailboxState {
         Free,
-        Queued,
-        Submitted
+        Published,
+        InRender
     };
 
-    class FlightData {
+    class RenderMailboxData {
     public:
-        std::optional<GpuTask> _task{};
-        FlightState _state{FlightState::Free};
+        uint64_t _generation{0};
+        RenderMailboxState _state{RenderMailboxState::Free};
     };
 
-    AppWindowHandle _selfHandle;
+    AppWindowHandle _selfHandle{};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
-    vector<FlightData> _flightTasks;
+    vector<std::optional<GpuTask>> _flightTasks;
+    vector<RenderMailboxData> _renderMailboxes;
+    std::optional<uint32_t> _latestPublishedMailboxSlot{};
+    uint64_t _latestPublishedGeneration{0};
     bool _isPrimary{false};
     bool _pendingRecreate{false};
 };
@@ -77,15 +86,15 @@ protected:
     virtual void OnShutdown();
     /** 游戏逻辑帧调度 */
     virtual void OnUpdate() = 0;
-    /** 主线程通知可以安全的为渲染准备数据 */
-    virtual void OnPrepareRender(AppWindowHandle window, uint32_t flightIndex) = 0;
-    /** 录制渲染命令 */
-    virtual void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t flightIndex) = 0;
+    /** 主线程通知可以安全地准备 mailbox slot 对应的最新渲染快照 */
+    virtual void OnPrepareRender(AppWindowHandle window, uint32_t mailboxSlot) = 0;
+    /** 录制渲染命令，并消费指定 mailbox slot 中的渲染快照 */
+    virtual void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);
 
-    AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary);
+    AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
     void DispatchAllWindowEvents();
     void CheckWindowStates();
     void HandleSurfaceChanges();
