@@ -38,8 +38,11 @@ public:
 
     void ResetRenderMailboxes() noexcept;
     std::optional<uint32_t> GetPublishedRenderMailboxSlot() const noexcept;
+    std::optional<uint32_t> GetPrepareRenderMailboxSlot() const noexcept;
+    void PublishPreparedRenderMailbox(uint32_t mailboxSlot) noexcept;
     void RestoreRenderMailbox(uint32_t mailboxSlot) noexcept;
     void ReleaseRenderMailbox(uint32_t mailboxSlot) noexcept;
+    void CollectCompletedFlightTasks() noexcept;
 
     friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
@@ -56,10 +59,15 @@ public:
         RenderMailboxState _state{RenderMailboxState::Free};
     };
 
+    struct FlightSlotData {
+        std::optional<GpuTask> _task;
+        std::optional<uint32_t> _mailboxSlot;
+    };
+
     AppWindowHandle _selfHandle{};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
-    vector<std::optional<GpuTask>> _flightTasks;
+    vector<FlightSlotData> _flightSlots;
     vector<RenderMailboxData> _renderMailboxes;
     std::optional<uint32_t> _latestPublishedMailboxSlot{};
     uint64_t _latestPublishedGeneration{0};
@@ -88,7 +96,7 @@ protected:
     virtual void OnUpdate() = 0;
     /** 主线程通知可以安全地准备 mailbox slot 对应的最新渲染快照 */
     virtual void OnPrepareRender(AppWindowHandle window, uint32_t mailboxSlot) = 0;
-    /** 录制渲染命令，并消费指定 mailbox slot 中的渲染快照 */
+    /** 录制渲染命令，并消费指定 mailbox slot 中的渲染快照, mailbox slot 会一直保留到对应的 flight task 完成后才重新变为 Free */
     virtual void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
