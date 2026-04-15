@@ -53,20 +53,20 @@ private:
 
 TEST(ApplicationMailboxTest, UsesFreeSlotBeforeReplacingPublishedLatestAndRetainsInFlightSlots) {
     AppWindow window{};
-    window._renderMailboxes.resize(3);
-    window._flightSlots.resize(2);
-    window.ResetRenderMailboxes();
+    window._mailboxes.resize(3);
+    window._flights.resize(2);
+    window.ResetMailboxes();
 
     const auto prepareAndPublish = [&window](uint32_t expectedSlot) -> uint32_t {
-        const auto mailboxSlot = window.GetPrepareRenderMailboxSlot();
+        const auto mailboxSlot = window.GetPrepareMailboxSlot();
         EXPECT_TRUE(mailboxSlot.has_value());
         if (!mailboxSlot.has_value()) {
             return expectedSlot;
         }
         EXPECT_EQ(*mailboxSlot, expectedSlot);
-        window.PublishPreparedRenderMailbox(*mailboxSlot);
+        window.PublishPreparedMailbox(*mailboxSlot);
 
-        const auto latestPublished = window.GetPublishedRenderMailboxSlot();
+        const auto latestPublished = window.GetPublishedMailboxSlot();
         EXPECT_TRUE(latestPublished.has_value());
         if (latestPublished.has_value()) {
             EXPECT_EQ(*latestPublished, *mailboxSlot);
@@ -78,53 +78,53 @@ TEST(ApplicationMailboxTest, UsesFreeSlotBeforeReplacingPublishedLatestAndRetain
     FakeFence fence1{};
 
     const uint32_t slot0 = prepareAndPublish(0);
-    window._renderMailboxes[slot0]._state = AppWindow::RenderMailboxState::InRender;
+    window._mailboxes[slot0]._state = AppWindow::MailboxState::InRender;
     fence0.Signal(1);
-    window._flightSlots[0]._task.emplace(nullptr, &fence0, 1);
-    window._flightSlots[0]._mailboxSlot = slot0;
+    window._flights[0]._task.emplace(nullptr, &fence0, 1);
+    window._flights[0]._mailboxSlot = slot0;
 
     const uint32_t slot1 = prepareAndPublish(1);
-    window._renderMailboxes[slot1]._state = AppWindow::RenderMailboxState::InRender;
+    window._mailboxes[slot1]._state = AppWindow::MailboxState::InRender;
     fence1.Signal(1);
-    window._flightSlots[1]._task.emplace(nullptr, &fence1, 1);
-    window._flightSlots[1]._mailboxSlot = slot1;
+    window._flights[1]._task.emplace(nullptr, &fence1, 1);
+    window._flights[1]._mailboxSlot = slot1;
 
     const uint32_t slot2 = prepareAndPublish(2);
     EXPECT_EQ(slot2, 2u);
-    EXPECT_EQ(window._renderMailboxes[slot0]._state, AppWindow::RenderMailboxState::InRender);
-    EXPECT_EQ(window._renderMailboxes[slot1]._state, AppWindow::RenderMailboxState::InRender);
-    EXPECT_EQ(window._renderMailboxes[slot2]._state, AppWindow::RenderMailboxState::Published);
+    EXPECT_EQ(window._mailboxes[slot0]._state, AppWindow::MailboxState::InRender);
+    EXPECT_EQ(window._mailboxes[slot1]._state, AppWindow::MailboxState::InRender);
+    EXPECT_EQ(window._mailboxes[slot2]._state, AppWindow::MailboxState::Published);
 
-    const auto overwritePublished = window.GetPrepareRenderMailboxSlot();
+    const auto overwritePublished = window.GetPrepareMailboxSlot();
     ASSERT_TRUE(overwritePublished.has_value());
     EXPECT_EQ(*overwritePublished, slot2);
-    window.PublishPreparedRenderMailbox(*overwritePublished);
-    EXPECT_EQ(window._renderMailboxes[slot2]._state, AppWindow::RenderMailboxState::Published);
+    window.PublishPreparedMailbox(*overwritePublished);
+    EXPECT_EQ(window._mailboxes[slot2]._state, AppWindow::MailboxState::Published);
 
     fence0.Complete(1);
     window.CollectCompletedFlightTasks();
-    EXPECT_FALSE(window._flightSlots[0]._task.has_value());
-    EXPECT_FALSE(window._flightSlots[0]._mailboxSlot.has_value());
-    EXPECT_EQ(window._renderMailboxes[slot0]._state, AppWindow::RenderMailboxState::Free);
-    EXPECT_TRUE(window._flightSlots[1]._task.has_value());
-    EXPECT_TRUE(window._flightSlots[1]._mailboxSlot.has_value());
-    EXPECT_EQ(window._renderMailboxes[slot1]._state, AppWindow::RenderMailboxState::InRender);
+    EXPECT_FALSE(window._flights[0]._task.has_value());
+    EXPECT_FALSE(window._flights[0]._mailboxSlot.has_value());
+    EXPECT_EQ(window._mailboxes[slot0]._state, AppWindow::MailboxState::Free);
+    EXPECT_TRUE(window._flights[1]._task.has_value());
+    EXPECT_TRUE(window._flights[1]._mailboxSlot.has_value());
+    EXPECT_EQ(window._mailboxes[slot1]._state, AppWindow::MailboxState::InRender);
 
-    const auto latestBeforePublish = window.GetPublishedRenderMailboxSlot();
+    const auto latestBeforePublish = window.GetPublishedMailboxSlot();
     ASSERT_TRUE(latestBeforePublish.has_value());
     EXPECT_EQ(*latestBeforePublish, slot2);
 
-    const auto reuseFreedSlot = window.GetPrepareRenderMailboxSlot();
+    const auto reuseFreedSlot = window.GetPrepareMailboxSlot();
     ASSERT_TRUE(reuseFreedSlot.has_value());
     EXPECT_EQ(*reuseFreedSlot, slot0);
-    window.PublishPreparedRenderMailbox(*reuseFreedSlot);
+    window.PublishPreparedMailbox(*reuseFreedSlot);
 
-    const auto latestAfterPublish = window.GetPublishedRenderMailboxSlot();
+    const auto latestAfterPublish = window.GetPublishedMailboxSlot();
     ASSERT_TRUE(latestAfterPublish.has_value());
     EXPECT_EQ(*latestAfterPublish, slot0);
-    EXPECT_EQ(window._renderMailboxes[slot0]._state, AppWindow::RenderMailboxState::Published);
-    EXPECT_EQ(window._renderMailboxes[slot2]._state, AppWindow::RenderMailboxState::Free);
-    EXPECT_EQ(window._renderMailboxes[slot1]._state, AppWindow::RenderMailboxState::InRender);
+    EXPECT_EQ(window._mailboxes[slot0]._state, AppWindow::MailboxState::Published);
+    EXPECT_EQ(window._mailboxes[slot2]._state, AppWindow::MailboxState::Free);
+    EXPECT_EQ(window._mailboxes[slot1]._state, AppWindow::MailboxState::InRender);
 }
 
 }  // namespace

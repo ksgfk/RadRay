@@ -7,66 +7,77 @@
 
 namespace radray {
 
-void AppWindow::ResetRenderMailboxes() noexcept {
-    for (auto& mailbox : _renderMailboxes) {
+void AppWindow::ResetMailboxes() noexcept {
+    for (auto& mailbox : _mailboxes) {
         mailbox = {};
     }
     _latestPublishedMailboxSlot.reset();
     _latestPublishedGeneration = 0;
 }
 
-std::optional<uint32_t> AppWindow::GetPublishedRenderMailboxSlot() const noexcept {
+std::optional<uint32_t> AppWindow::GetPublishedMailboxSlot() const noexcept {
     if (!_latestPublishedMailboxSlot.has_value()) {
         return std::nullopt;
     }
 
     const uint32_t mailboxSlot = *_latestPublishedMailboxSlot;
-    if (mailboxSlot >= _renderMailboxes.size()) {
+    if (mailboxSlot >= _mailboxes.size()) {
         return std::nullopt;
     }
 
-    if (_renderMailboxes[mailboxSlot]._state != RenderMailboxState::Published) {
+    if (_mailboxes[mailboxSlot]._state != MailboxState::Published) {
         return std::nullopt;
     }
 
     return mailboxSlot;
 }
 
-std::optional<uint32_t> AppWindow::GetPrepareRenderMailboxSlot() const noexcept {
-    for (uint32_t i = 0; i < _renderMailboxes.size(); ++i) {
-        if (_renderMailboxes[i]._state == RenderMailboxState::Free) {
+std::optional<uint32_t> AppWindow::GetPrepareMailboxSlot() const noexcept {
+    for (uint32_t i = 0; i < _mailboxes.size(); ++i) {
+        if (_mailboxes[i]._state == MailboxState::Free) {
             return i;
         }
     }
-    return this->GetPublishedRenderMailboxSlot();
+    return this->GetPublishedMailboxSlot();
 }
 
-void AppWindow::PublishPreparedRenderMailbox(uint32_t mailboxSlot) noexcept {
-    RADRAY_ASSERT(mailboxSlot < _renderMailboxes.size());
+void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
+    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
 
-    const auto supersededMailboxSlot = this->GetPublishedRenderMailboxSlot();
-    auto& mailbox = _renderMailboxes[mailboxSlot];
+    const auto supersededMailboxSlot = this->GetPublishedMailboxSlot();
+    auto& mailbox = _mailboxes[mailboxSlot];
+    RADRAY_ASSERT(mailbox._state != MailboxState::InRender);
+
     const uint64_t nextGeneration = _latestPublishedGeneration + 1;
-    mailbox._state = RenderMailboxState::Published;
+    mailbox._state = MailboxState::Published;
     mailbox._generation = nextGeneration;
     _latestPublishedMailboxSlot = mailboxSlot;
     _latestPublishedGeneration = nextGeneration;
 
+    // 被新版本替代的旧槽位可以在这里释放，因为只有 Published 槽位会被覆盖
+    // 一旦槽位提交渲染，它的状态会变更为 InRender，并一直保留到对应 flight 完成
     if (supersededMailboxSlot.has_value() && *supersededMailboxSlot != mailboxSlot) {
-        this->ReleaseRenderMailbox(*supersededMailboxSlot);
+        this->ReleaseMailbox(*supersededMailboxSlot);
     }
 }
 
-void AppWindow::RestoreRenderMailbox(uint32_t mailboxSlot) noexcept {
-    auto& mailbox = _renderMailboxes[mailboxSlot];
-    mailbox._state = RenderMailboxState::Published;
+void AppWindow::RestoreMailbox(uint32_t mailboxSlot) noexcept {
+    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
+    auto& mailbox = _mailboxes[mailboxSlot];
+    RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
+    RADRAY_ASSERT(mailbox._generation != 0);
+
+    mailbox._state = MailboxState::Published;
     _latestPublishedMailboxSlot = mailboxSlot;
     _latestPublishedGeneration = mailbox._generation;
 }
 
-void AppWindow::ReleaseRenderMailbox(uint32_t mailboxSlot) noexcept {
-    auto& mailbox = _renderMailboxes[mailboxSlot];
-    mailbox._state = RenderMailboxState::Free;
+void AppWindow::ReleaseMailbox(uint32_t mailboxSlot) noexcept {
+    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
+    auto& mailbox = _mailboxes[mailboxSlot];
+    RADRAY_ASSERT(mailbox._state != MailboxState::Free);
+
+    mailbox._state = MailboxState::Free;
     mailbox._generation = 0;
     if (_latestPublishedMailboxSlot == mailboxSlot) {
         _latestPublishedMailboxSlot.reset();
@@ -74,9 +85,9 @@ void AppWindow::ReleaseRenderMailbox(uint32_t mailboxSlot) noexcept {
 }
 
 void AppWindow::CollectCompletedFlightTasks() noexcept {
-    for (size_t i = 0; i < _flightSlots.size(); ++i) {
-        auto& task = _flightSlots[i]._task;
-        auto& mailboxSlot = _flightSlots[i]._mailboxSlot;
+    for (auto& i : _flights) {
+        auto& task = i._task;
+        auto& mailboxSlot = i._mailboxSlot;
         if (!task.has_value()) {
             RADRAY_ASSERT(!mailboxSlot.has_value());
             continue;
@@ -86,7 +97,7 @@ void AppWindow::CollectCompletedFlightTasks() noexcept {
         }
         RADRAY_ASSERT(mailboxSlot.has_value());
         if (mailboxSlot.has_value()) {
-            this->ReleaseRenderMailbox(*mailboxSlot);
+            this->ReleaseMailbox(*mailboxSlot);
             mailboxSlot.reset();
         }
         task.reset();
@@ -97,8 +108,8 @@ AppWindow::AppWindow(AppWindow&& other) noexcept
     : _selfHandle(std::exchange(other._selfHandle, {})),
       _window(std::move(other._window)),
       _surface(std::move(other._surface)),
-      _flightSlots(std::move(other._flightSlots)),
-      _renderMailboxes(std::move(other._renderMailboxes)),
+      _flights(std::move(other._flights)),
+      _mailboxes(std::move(other._mailboxes)),
       _latestPublishedMailboxSlot(std::exchange(other._latestPublishedMailboxSlot, std::nullopt)),
       _latestPublishedGeneration(std::exchange(other._latestPublishedGeneration, 0)),
       _isPrimary(std::exchange(other._isPrimary, false)),
@@ -113,8 +124,8 @@ AppWindow& AppWindow::operator=(AppWindow&& other) noexcept {
 }
 
 AppWindow::~AppWindow() noexcept {
-    _flightSlots.clear();
-    _renderMailboxes.clear();
+    _flights.clear();
+    _mailboxes.clear();
     _surface.reset();
     _window.reset();
 }
@@ -124,8 +135,8 @@ void swap(AppWindow& a, AppWindow& b) noexcept {
     swap(a._selfHandle, b._selfHandle);
     swap(a._window, b._window);
     swap(a._surface, b._surface);
-    swap(a._flightSlots, b._flightSlots);
-    swap(a._renderMailboxes, b._renderMailboxes);
+    swap(a._flights, b._flights);
+    swap(a._mailboxes, b._mailboxes);
     swap(a._latestPublishedMailboxSlot, b._latestPublishedMailboxSlot);
     swap(a._latestPublishedGeneration, b._latestPublishedGeneration);
     swap(a._isPrimary, b._isPrimary);
@@ -222,10 +233,10 @@ AppWindowHandle Application::CreateWindow(
     appWindow._window = std::move(window);
     appWindow._surface = std::move(surface);
     if (appWindow._surface != nullptr && appWindow._surface->IsValid()) {
-        appWindow._flightSlots.resize(appWindow._surface->GetFlightFrameCount());
+        appWindow._flights.resize(appWindow._surface->GetFlightFrameCount());
     }
-    appWindow._renderMailboxes.resize(mailboxCount);
-    appWindow.ResetRenderMailboxes();
+    appWindow._mailboxes.resize(mailboxCount);
+    appWindow.ResetMailboxes();
     appWindow._isPrimary = isPrimary;
     auto handle = _windows.Emplace(std::move(appWindow));
     _windows.Get(handle)._selfHandle = handle;
@@ -312,9 +323,9 @@ void Application::HandleSurfaceChanges() {
             throw AppException(fmt::format("Application::HandleSurfaceChanges failed to recreate surface for window {}", window._selfHandle));
         }
         window._surface = std::move(recreatedSurface);
-        window._flightSlots.clear();
-        window._flightSlots.resize(window._surface->GetFlightFrameCount());
-        window.ResetRenderMailboxes();
+        window._flights.clear();
+        window._flights.resize(window._surface->GetFlightFrameCount());
+        window.ResetMailboxes();
         window._pendingRecreate = false;
     }
 }
@@ -343,7 +354,7 @@ bool Application::CanRenderWindow(AppWindowHandle window) const {
     if (size.X <= 0 || size.Y <= 0) {
         return false;
     }
-    if (appWindow->_flightSlots.empty()) {
+    if (appWindow->_flights.empty()) {
         return false;
     }
     return true;
@@ -369,7 +380,7 @@ void Application::HandlePresentResult(AppWindow& window, const render::SwapChain
 
 void Application::WaitAllFlightTasks() {
     for (auto& window : _windows.Values()) {
-        for (auto& slot : window._flightSlots) {
+        for (auto& slot : window._flights) {
             if (!slot._task.has_value()) {
                 continue;
             }
@@ -421,18 +432,19 @@ void Application::ApplyPendingThreadMode() {
 
 void Application::ScheduleFramesSingleThreaded() {
     for (auto& window : _windows.Values()) {
+        window.CollectCompletedFlightTasks();
+    }
+    for (auto& window : _windows.Values()) {
         if (!this->CanRenderWindow(window._selfHandle)) {
             continue;
         }
 
-        window.CollectCompletedFlightTasks();
-
-        const auto mailboxSlot = window.GetPrepareRenderMailboxSlot();
+        const auto mailboxSlot = window.GetPrepareMailboxSlot();
         if (!mailboxSlot.has_value()) {
             continue;
         }
         this->OnPrepareRender(window._selfHandle, *mailboxSlot);
-        window.PublishPreparedRenderMailbox(*mailboxSlot);
+        window.PublishPreparedMailbox(*mailboxSlot);
     }
 
     for (auto& window : _windows.Values()) {
@@ -440,18 +452,16 @@ void Application::ScheduleFramesSingleThreaded() {
             continue;
         }
 
-        window.CollectCompletedFlightTasks();
-
         RADRAY_ASSERT(window._surface != nullptr && window._surface->IsValid());
-        RADRAY_ASSERT(window._surface->_nextFrameSlotIndex < window._flightSlots.size());
+        RADRAY_ASSERT(window._surface->_nextFrameSlotIndex < window._flights.size());
 
-        const auto mailboxSlot = window.GetPublishedRenderMailboxSlot();
+        const auto mailboxSlot = window.GetPublishedMailboxSlot();
         if (!mailboxSlot.has_value()) {
             continue;
         }
 
         const auto flightSlot = static_cast<uint32_t>(window._surface->_nextFrameSlotIndex);
-        auto& flightData = window._flightSlots[flightSlot];
+        auto& flightData = window._flights[flightSlot];
         auto& flight = flightData._task;
         if (flight.has_value()) {
             if (_allowFrameDrop) {
@@ -462,14 +472,16 @@ void Application::ScheduleFramesSingleThreaded() {
                 flight->Wait();
                 _gpu->ProcessTasks();
             }
-            window.CollectCompletedFlightTasks();
-            if (flight.has_value()) {
-                continue;
-            }
+            RADRAY_ASSERT(flight->IsCompleted());
+            RADRAY_ASSERT(flightData._mailboxSlot.has_value());
+            // 当前 flight slot 已知完成，直接定点回收，不再整窗扫描。
+            window.ReleaseMailbox(*flightData._mailboxSlot);
+            flightData._mailboxSlot.reset();
+            flight.reset();
         }
 
-        auto& mailbox = window._renderMailboxes[*mailboxSlot];
-        mailbox._state = AppWindow::RenderMailboxState::InRender;
+        auto& mailbox = window._mailboxes[*mailboxSlot];
+        mailbox._state = AppWindow::MailboxState::InRender;
 
         GpuRuntime::BeginFrameResult begin{};
         if (_allowFrameDrop) {
@@ -482,15 +494,15 @@ void Application::ScheduleFramesSingleThreaded() {
             case render::SwapChainStatus::Success:
                 break;
             case render::SwapChainStatus::RetryLater:
-                window.RestoreRenderMailbox(*mailboxSlot);
+                window.RestoreMailbox(*mailboxSlot);
                 continue;
             case render::SwapChainStatus::RequireRecreate:
-                window.RestoreRenderMailbox(*mailboxSlot);
+                window.RestoreMailbox(*mailboxSlot);
                 window._pendingRecreate = true;
                 continue;
             case render::SwapChainStatus::Error:
             default:
-                window.RestoreRenderMailbox(*mailboxSlot);
+                window.RestoreMailbox(*mailboxSlot);
                 throw AppException(fmt::format(
                     "Application::ScheduleFramesSingleThreaded window {} begin frame failed with status {}",
                     window._selfHandle,
@@ -512,7 +524,7 @@ void Application::ScheduleFramesSingleThreaded() {
         }
 
         if (renderError != nullptr) [[unlikely]] {
-            window.ReleaseRenderMailbox(*mailboxSlot);
+            window.ReleaseMailbox(*mailboxSlot);
             auto abandon = _gpu->AbandonFrame(std::move(frameContext));
             this->HandlePresentResult(window, abandon.Present);
             if (abandon.Task.IsValid()) {
