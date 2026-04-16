@@ -539,4 +539,75 @@ TEST(ApplicationMailboxTest, CpuWaitsWhenAllFlightsBusy) {
     // 结论：!allowFrameDrop 下 ring 指定的 flight 被 Wait + 定点回收, 然后继续提交
 }
 
+// Queued 状态: Published → Queued → InRender 正常流; BeginFrame 失败时 Queued → Published 回退
+//
+// 验证点:
+// 1. Queued 槽位不会被 GetPrepareMailboxSlot / GetPublishedMailboxSlot 返回
+// 2. PublishPreparedMailbox 不会替代 Queued 槽位
+// 3. RestoreMailbox 把 Queued 恢复为 Published
+// 4. ReleaseMailbox 可以释放 Queued 槽位
+TEST(ApplicationMailboxTest, QueuedState_ProtectsSlotFromMainThread) {
+    AppWindow window{};
+    window._mailboxes.resize(3);
+    window._flights.resize(2);
+    window.ResetMailboxes();
+
+    // --- Publish slot 0 ---
+    {
+        auto slot = window.GetPrepareMailboxSlot();
+        ASSERT_TRUE(slot.has_value());
+        EXPECT_EQ(*slot, 0u);
+        window.PublishPreparedMailbox(*slot);
+    }
+    EXPECT_EQ(window._mailboxes[0]._state, AppWindow::MailboxState::Published);
+
+    // --- 模拟渲染线程认领: Published → Queued ---
+    const uint64_t gen0 = window._mailboxes[0]._generation;
+    window._mailboxes[0]._state = AppWindow::MailboxState::Queued;
+
+    // Queued 槽位不应被 GetPublishedMailboxSlot 返回
+    EXPECT_FALSE(window.GetPublishedMailboxSlot().has_value());
+
+    // GetPrepareMailboxSlot 应该跳过 Queued, 返回 Free 槽位
+    {
+        auto slot = window.GetPrepareMailboxSlot();
+        ASSERT_TRUE(slot.has_value());
+        EXPECT_EQ(*slot, 1u);  // slot 1 is Free
+    }
+
+    // 主线程 publish slot 1, 不会替代 Queued 的 slot 0
+    {
+        auto slot = window.GetPrepareMailboxSlot();
+        ASSERT_TRUE(slot.has_value());
+        window.PublishPreparedMailbox(*slot);
+    }
+    // slot 0 仍然是 Queued, 没被释放
+    EXPECT_EQ(window._mailboxes[0]._state, AppWindow::MailboxState::Queued);
+    EXPECT_EQ(window._mailboxes[0]._generation, gen0);
+    EXPECT_EQ(window._mailboxes[1]._state, AppWindow::MailboxState::Published);
+
+    // --- 模拟 BeginFrame 失败: Queued → Published (RestoreMailbox) ---
+    window.RestoreMailbox(0);
+    EXPECT_EQ(window._mailboxes[0]._state, AppWindow::MailboxState::Published);
+    EXPECT_EQ(window._mailboxes[0]._generation, gen0);
+    // 恢复后 GetPublishedMailboxSlot 返回 slot 0 (generation 更早, 但 _latestPublished 指向它)
+    EXPECT_TRUE(window.GetPublishedMailboxSlot().has_value());
+    EXPECT_EQ(*window.GetPublishedMailboxSlot(), 0u);
+
+    // --- 重新走正常流: Published → Queued → InRender ---
+    window._mailboxes[0]._state = AppWindow::MailboxState::Queued;
+    // BeginFrame 成功
+    window._mailboxes[0]._state = AppWindow::MailboxState::InRender;
+    EXPECT_EQ(window._mailboxes[0]._state, AppWindow::MailboxState::InRender);
+
+    // --- ReleaseMailbox 可以释放 Queued 槽位 ---
+    // 先恢复一个 Queued 来测试
+    window._mailboxes[2]._state = AppWindow::MailboxState::Published;
+    window._mailboxes[2]._generation = 99;
+    window._mailboxes[2]._state = AppWindow::MailboxState::Queued;
+    window.ReleaseMailbox(2);
+    EXPECT_EQ(window._mailboxes[2]._state, AppWindow::MailboxState::Free);
+    EXPECT_EQ(window._mailboxes[2]._generation, 0u);
+}
+
 }  // namespace

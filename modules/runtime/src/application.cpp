@@ -46,7 +46,7 @@ void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
 
     const auto supersededMailboxSlot = this->GetPublishedMailboxSlot();
     auto& mailbox = _mailboxes[mailboxSlot];
-    RADRAY_ASSERT(mailbox._state != MailboxState::InRender);
+    RADRAY_ASSERT(mailbox._state == MailboxState::Free || mailbox._state == MailboxState::Published);
 
     const uint64_t nextGeneration = _latestPublishedGeneration + 1;
     mailbox._state = MailboxState::Published;
@@ -64,7 +64,7 @@ void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
 void AppWindow::RestoreMailbox(uint32_t mailboxSlot) noexcept {
     RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
     auto& mailbox = _mailboxes[mailboxSlot];
-    RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
+    RADRAY_ASSERT(mailbox._state == MailboxState::Queued);
     RADRAY_ASSERT(mailbox._generation != 0);
 
     mailbox._state = MailboxState::Published;
@@ -481,7 +481,7 @@ void Application::ScheduleFramesSingleThreaded() {
         }
 
         auto& mailbox = window._mailboxes[*mailboxSlot];
-        mailbox._state = AppWindow::MailboxState::InRender;
+        mailbox._state = AppWindow::MailboxState::Queued;
 
         GpuRuntime::BeginFrameResult begin{};
         if (_allowFrameDrop) {
@@ -492,6 +492,7 @@ void Application::ScheduleFramesSingleThreaded() {
 
         switch (begin.Status) {
             case render::SwapChainStatus::Success:
+                mailbox._state = AppWindow::MailboxState::InRender;
                 break;
             case render::SwapChainStatus::RetryLater:
                 window.RestoreMailbox(*mailboxSlot);

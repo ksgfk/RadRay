@@ -43,9 +43,9 @@ public:
     /** mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 GetPrepareMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用 */
     std::optional<uint32_t> GetPublishedMailboxSlot() const noexcept;
     std::optional<uint32_t> GetPrepareMailboxSlot() const noexcept;
-    /** Publish 会把准备完成的槽位切换成当前最新可读快照；允许传入 Free 槽位，或当前被覆盖的 Published 槽位，但绝不能传入已经进入 InRender 的槽位 */
+    /** Publish 会把准备完成的槽位切换成当前最新可读快照；允许传入 Free 槽位，或当前被覆盖的 Published 槽位，但绝不能传入 Queued 或 InRender 的槽位 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** Restore 只用于槽位刚被临时标记为 InRender，但 BeginFrame 在提交前失败的路径，此时要把这份最新快照恢复为 Published */
+    /** Restore 只用于槽位刚被标记为 Queued，但 BeginFrame 在提交前失败的路径，此时要把这份最新快照恢复为 Published */
     void RestoreMailbox(uint32_t mailboxSlot) noexcept;
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
@@ -58,6 +58,8 @@ public:
         Free,
         /** 快照已经提交，渲染阶段现在可以选 */
         Published,
+        /** 快照已经交给渲染线程，但还没形成 flight task */
+        Queued,
         /** 快照已经被渲染/GPU 真正占用，不能动 */
         InRender
     };
