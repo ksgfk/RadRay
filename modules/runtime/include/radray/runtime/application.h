@@ -21,15 +21,15 @@ class AppException : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-struct StopRenderThreadCommand {};
+// struct StopRenderThreadCommand {};
 
-using RenderThreadCommand = std::variant<StopRenderThreadCommand>;
+// using RenderThreadCommand = std::variant<StopRenderThreadCommand>;
 
 using AppWindowHandle = SparseSetHandle;
 
 /**
  * mailbox 优先拿 Free 槽位；如果没有空槽位，允许覆盖 Published 但尚未进入 InRender 的最新快照
- * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 GetPrepareMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用
+ * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 ReserveMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用
  */
 class AppWindow {
 public:
@@ -43,12 +43,14 @@ public:
     void ResetMailboxes() noexcept;
     /** 最新已发布的 mailbox 槽位 */
     std::optional<uint32_t> GetPublishedMailboxSlot() const noexcept;
-    /** 可用于准备渲染的 mailbox 槽位, 优先寻找 Free 槽, 找不到则使用 Published 槽 */
-    std::optional<uint32_t> GetPrepareMailboxSlot() const noexcept;
-    /** Publish 会把准备完成的槽位切换成当前最新可读快照；允许传入 Free 槽位，或当前被覆盖的 Published 槽位，但绝不能传入 Queued 或 InRender 的槽位 */
+    /** 预留一个 mailbox 槽位并立刻标记为 Preparing；优先使用 Free，找不到则覆盖当前 Published */
+    std::optional<uint32_t> ReserveMailboxSlot() noexcept;
+    /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** Restore 只用于槽位刚被标记为 Queued，但 BeginFrame 在提交前失败的路径，此时要把这份最新快照恢复为 Published */
+    /** 单线程回退：Queued 槽位在 BeginFrame 提交前失败时，直接恢复为 Published */
     void RestoreMailbox(uint32_t mailboxSlot) noexcept;
+    /** 多线程回退：若 Queued 槽位已经落后于更新 generation，则直接释放，否则恢复为 Published */
+    void RestoreOrReleaseMailbox(uint32_t mailboxSlot) noexcept;
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
 
@@ -61,6 +63,8 @@ public:
 public:
     enum class MailboxState {
         Free,
+        /** Step 1.2: 主线程正在准备渲染快照，渲染阶段不可见 */
+        Preparing,
         /** 快照已经提交，渲染阶段现在可以选 */
         Published,
         /** 快照已经交给渲染线程，但还没形成 flight task */
@@ -125,6 +129,7 @@ protected:
     void WaitAllFlightTasks();
     void WaitAllSurfaceQueues();
 
+    void RenderThreadFunc();
     void RequestMultiThreaded(bool multiThreaded);
     void ApplyPendingThreadMode();
     void ScheduleFramesSingleThreaded();
@@ -135,7 +140,8 @@ protected:
     unique_ptr<GpuRuntime> _gpu;
     std::mutex _renderMutex;
     std::thread _renderThread;
-    UnboundedChannel<RenderThreadCommand> _renderCommandQueue;
+    // UnboundedChannel<RenderThreadCommand> _renderCommandQueue;
+    std::atomic_bool _stopRenderThread{false};
     std::atomic_bool _exitRequested{false};
     bool _pendingMultiThreaded{false};
     bool _multiThreaded{false};

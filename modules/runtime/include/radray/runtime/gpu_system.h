@@ -322,6 +322,8 @@ public:
 
     void ProcessTasks();
 
+    void ProcessTasksUnlocked();
+
     void Wait(render::QueueType type, uint32_t queueSlot = 0);
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
@@ -371,7 +373,6 @@ public:
 #endif
     SubmitFrameResult FinalizeFrameUnlocked(unique_ptr<GpuFrameContext> context);
     GpuRuntime::BeginFrameResult AcquireSwapChainUnlocked(GpuSurface* surface, uint64_t timeoutMs);
-    void ProcessTasksUnlocked();
 
     mutable std::mutex _runtimeMutex;
     shared_ptr<render::Device> _device;

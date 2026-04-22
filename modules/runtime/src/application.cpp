@@ -32,13 +32,22 @@ std::optional<uint32_t> AppWindow::GetPublishedMailboxSlot() const noexcept {
     return mailboxSlot;
 }
 
-std::optional<uint32_t> AppWindow::GetPrepareMailboxSlot() const noexcept {
+std::optional<uint32_t> AppWindow::ReserveMailboxSlot() noexcept {
+    // 预留成功时要立刻把槽位置为 Preparing，避免后续阶段把它当作可消费快照。
     for (uint32_t i = 0; i < _mailboxes.size(); ++i) {
         if (_mailboxes[i]._state == MailboxState::Free) {
+            _mailboxes[i]._state = MailboxState::Preparing;
             return i;
         }
     }
-    return this->GetPublishedMailboxSlot();
+
+    const auto mailboxSlot = this->GetPublishedMailboxSlot();
+    if (!mailboxSlot.has_value()) {
+        return std::nullopt;
+    }
+
+    _mailboxes[*mailboxSlot]._state = MailboxState::Preparing;
+    return mailboxSlot;
 }
 
 void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
@@ -46,7 +55,7 @@ void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
 
     const auto supersededMailboxSlot = this->GetPublishedMailboxSlot();
     auto& mailbox = _mailboxes[mailboxSlot];
-    RADRAY_ASSERT(mailbox._state == MailboxState::Free || mailbox._state == MailboxState::Published);
+    RADRAY_ASSERT(mailbox._state == MailboxState::Preparing);
 
     const uint64_t nextGeneration = _latestPublishedGeneration + 1;
     mailbox._state = MailboxState::Published;
@@ -70,6 +79,23 @@ void AppWindow::RestoreMailbox(uint32_t mailboxSlot) noexcept {
     mailbox._state = MailboxState::Published;
     _latestPublishedMailboxSlot = mailboxSlot;
     _latestPublishedGeneration = mailbox._generation;
+}
+
+void AppWindow::RestoreOrReleaseMailbox(uint32_t mailboxSlot) noexcept {
+    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
+    auto& mailbox = _mailboxes[mailboxSlot];
+    RADRAY_ASSERT(mailbox._state == MailboxState::Queued);
+    RADRAY_ASSERT(mailbox._generation != 0);
+
+    if (mailbox._generation >= _latestPublishedGeneration) {
+        mailbox._state = MailboxState::Published;
+        _latestPublishedMailboxSlot = mailboxSlot;
+        _latestPublishedGeneration = mailbox._generation;
+        return;
+    }
+
+    mailbox._state = MailboxState::Free;
+    mailbox._generation = 0;
 }
 
 void AppWindow::ReleaseMailbox(uint32_t mailboxSlot) noexcept {
@@ -187,6 +213,7 @@ int32_t Application::Run(int argc, char* argv[]) {
     RADRAY_ASSERT(std::ranges::any_of(_windows.Values(), [](const auto& w) { return w._isPrimary; }));
 
     while (!_exitRequested) {
+        this->ApplyPendingThreadMode();
         this->DispatchAllWindowEvents();
         this->CheckWindowStates();
         if (_exitRequested) {
@@ -196,10 +223,10 @@ int32_t Application::Run(int argc, char* argv[]) {
         if (_exitRequested) {
             break;
         }
-        {
-            std::unique_lock<std::mutex> l{_renderMutex, std::defer_lock};
-            if (_multiThreaded) l.lock();
+        if (_multiThreaded) {
             _gpu->ProcessTasks();
+        } else {
+            _gpu->ProcessTasksUnlocked();
         }
         this->HandleSurfaceChanges();
         if (!_multiThreaded) {
@@ -315,6 +342,7 @@ void Application::HandleSurfaceChanges() {
     if (_multiThreaded) {
         gpuLock.lock();
     }
+
     for (auto& window : _windows.Values()) {
         if (!window._pendingRecreate) {
             continue;
@@ -382,6 +410,14 @@ void Application::WaitAllSurfaceQueues() {
     }
 }
 
+void Application::RenderThreadFunc() {
+    while (true) {
+        if (_stopRenderThread) {
+            break;
+        }
+    }
+}
+
 void Application::RequestMultiThreaded(bool multiThreaded) {
     _pendingMultiThreaded = multiThreaded;
 }
@@ -391,8 +427,12 @@ void Application::ApplyPendingThreadMode() {
         return;
     }
     if (_pendingMultiThreaded) {
+        this->WaitAllFlightTasks();
+        this->WaitAllSurfaceQueues();
+        RADRAY_ASSERT(!_renderThread.joinable());
+        _renderThread = std::thread(&Application::RenderThreadFunc, this);
     } else {
-        _renderCommandQueue.WaitWrite(StopRenderThreadCommand{});
+        _stopRenderThread = true;
         if (_renderThread.joinable()) {
             _renderThread.join();
         }
@@ -411,7 +451,7 @@ void Application::ScheduleFramesSingleThreaded() {
             continue;
         }
 
-        const auto mailboxSlot = window.GetPrepareMailboxSlot();
+        const auto mailboxSlot = window.ReserveMailboxSlot();
         if (!mailboxSlot.has_value()) {
             continue;
         }
