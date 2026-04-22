@@ -29,6 +29,7 @@ using AppWindowHandle = SparseSetHandle;
 
 /**
  * mailbox 优先拿 Free 槽位；如果没有空槽位，允许覆盖 Published 但尚未进入 InRender 的最新快照
+ * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 GetPrepareMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用
  */
 class AppWindow {
 public:
@@ -40,8 +41,9 @@ public:
     ~AppWindow() noexcept;
 
     void ResetMailboxes() noexcept;
-    /** mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 GetPrepareMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用 */
+    /** 最新已发布的 mailbox 槽位 */
     std::optional<uint32_t> GetPublishedMailboxSlot() const noexcept;
+    /** 可用于准备渲染的 mailbox 槽位, 优先寻找 Free 槽, 找不到则使用 Published 槽 */
     std::optional<uint32_t> GetPrepareMailboxSlot() const noexcept;
     /** Publish 会把准备完成的槽位切换成当前最新可读快照；允许传入 Free 槽位，或当前被覆盖的 Published 槽位，但绝不能传入 Queued 或 InRender 的槽位 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
@@ -49,7 +51,10 @@ public:
     void RestoreMailbox(uint32_t mailboxSlot) noexcept;
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
+
     void CollectCompletedFlightTasks() noexcept;
+    bool CanRender() const noexcept;
+    void HandlePresentResult(const render::SwapChainPresentResult& presentResult);
 
     friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
@@ -72,7 +77,7 @@ public:
 
     struct FlightData {
         std::optional<GpuTask> _task;
-        std::optional<uint32_t> _mailboxSlot;
+        uint32_t _mailboxSlot;
     };
 
     AppWindowHandle _selfHandle{};
@@ -117,8 +122,6 @@ protected:
     void DispatchAllWindowEvents();
     void CheckWindowStates();
     void HandleSurfaceChanges();
-    bool CanRenderWindow(AppWindowHandle window) const;
-    void HandlePresentResult(AppWindow& window, const render::SwapChainPresentResult& presentResult);
     void WaitAllFlightTasks();
     void WaitAllSurfaceQueues();
 

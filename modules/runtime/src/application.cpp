@@ -86,21 +86,59 @@ void AppWindow::ReleaseMailbox(uint32_t mailboxSlot) noexcept {
 
 void AppWindow::CollectCompletedFlightTasks() noexcept {
     for (auto& i : _flights) {
-        auto& task = i._task;
-        auto& mailboxSlot = i._mailboxSlot;
-        if (!task.has_value()) {
-            RADRAY_ASSERT(!mailboxSlot.has_value());
+        if (!i._task.has_value()) {
             continue;
         }
-        if (!task->IsCompleted()) {
+        if (!i._task->IsCompleted()) {
             continue;
         }
-        RADRAY_ASSERT(mailboxSlot.has_value());
-        if (mailboxSlot.has_value()) {
-            this->ReleaseMailbox(*mailboxSlot);
-            mailboxSlot.reset();
-        }
-        task.reset();
+        this->ReleaseMailbox(i._mailboxSlot);
+        i._mailboxSlot = 0;
+        i._task.reset();
+    }
+}
+
+bool AppWindow::CanRender() const noexcept {
+    if (!_window->IsValid()) {
+        return false;
+    }
+    if (!_surface->IsValid()) {
+        return false;
+    }
+    if (_window->ShouldClose()) {
+        return false;
+    }
+    if (_window->IsMinimized()) {
+        return false;
+    }
+    if (_pendingRecreate) {
+        return false;
+    }
+    const auto size = _window->GetSize();
+    if (size.X <= 0 || size.Y <= 0) {
+        return false;
+    }
+    if (_flights.empty()) {
+        return false;
+    }
+    return true;
+}
+
+void AppWindow::HandlePresentResult(const render::SwapChainPresentResult& presentResult) {
+    switch (presentResult.Status) {
+        case render::SwapChainStatus::Success:
+            break;
+        case render::SwapChainStatus::RequireRecreate:
+            _pendingRecreate = true;
+            break;
+        case render::SwapChainStatus::RetryLater:
+        case render::SwapChainStatus::Error:
+        default:
+            throw AppException(fmt::format(
+                "AppWindow::HandlePresentResult window {} present failed with status {} native {}",
+                _selfHandle,
+                presentResult.Status,
+                presentResult.NativeStatusCode));
     }
 }
 
@@ -160,9 +198,7 @@ int32_t Application::Run(int argc, char* argv[]) {
         }
         {
             std::unique_lock<std::mutex> l{_renderMutex, std::defer_lock};
-            if (_multiThreaded) {
-                l.lock();
-            }
+            if (_multiThreaded) l.lock();
             _gpu->ProcessTasks();
         }
         this->HandleSurfaceChanges();
@@ -251,9 +287,7 @@ void Application::DispatchAllWindowEvents() {
 
 void Application::CheckWindowStates() {
     for (auto& window : _windows.Values()) {
-        if (window._window == nullptr || !window._window->IsValid()) {
-            continue;
-        }
+        RADRAY_ASSERT(window._window->IsValid());
         if (window._window->ShouldClose()) {
             if (window._isPrimary) {
                 _exitRequested = true;
@@ -285,12 +319,6 @@ void Application::HandleSurfaceChanges() {
         if (!window._pendingRecreate) {
             continue;
         }
-        if (window._window == nullptr || !window._window->IsValid()) {
-            throw AppException(fmt::format("Application::HandleSurfaceChanges window {} is invalid", window._selfHandle));
-        }
-        if (window._surface == nullptr || !window._surface->IsValid()) {
-            throw AppException(fmt::format("Application::HandleSurfaceChanges surface for window {} is invalid", window._selfHandle));
-        }
         if (window._window->IsMinimized()) {
             continue;
         }
@@ -299,14 +327,8 @@ void Application::HandleSurfaceChanges() {
             continue;
         }
         const auto nativeHandler = window._window->GetNativeHandler();
-        if (nativeHandler.Handle == nullptr) {
-            throw AppException(fmt::format("Application::HandleSurfaceChanges window {} native handle is null", window._selfHandle));
-        }
         auto& oldSurface = window._surface;
         const auto swapchainDesc = oldSurface->_swapchain->GetDesc();
-        if (swapchainDesc.PresentQueue == nullptr) {
-            throw AppException(fmt::format("Application::HandleSurfaceChanges surface for window {} has no present queue", window._selfHandle));
-        }
         _gpu->Wait(swapchainDesc.PresentQueue->GetQueueType(), oldSurface->_queueSlot);
         GpuSurfaceDescriptor recreateDesc{};
         recreateDesc.NativeHandler = nativeHandler.Handle;
@@ -319,62 +341,12 @@ void Application::HandleSurfaceChanges() {
         recreateDesc.QueueSlot = oldSurface->_queueSlot;
         oldSurface.reset();
         auto recreatedSurface = _gpu->CreateSurface(recreateDesc);
-        if (recreatedSurface == nullptr || !recreatedSurface->IsValid()) {
-            throw AppException(fmt::format("Application::HandleSurfaceChanges failed to recreate surface for window {}", window._selfHandle));
-        }
+        RADRAY_ASSERT(recreatedSurface->IsValid());
         window._surface = std::move(recreatedSurface);
         window._flights.clear();
         window._flights.resize(window._surface->GetFlightFrameCount());
         window.ResetMailboxes();
         window._pendingRecreate = false;
-    }
-}
-
-bool Application::CanRenderWindow(AppWindowHandle window) const {
-    const auto* appWindow = _windows.TryGet(window);
-    if (appWindow == nullptr) {
-        return false;
-    }
-    if (appWindow->_window == nullptr || !appWindow->_window->IsValid()) {
-        return false;
-    }
-    if (appWindow->_surface == nullptr || !appWindow->_surface->IsValid()) {
-        return false;
-    }
-    if (appWindow->_window->ShouldClose()) {
-        return false;
-    }
-    if (appWindow->_window->IsMinimized()) {
-        return false;
-    }
-    if (appWindow->_pendingRecreate) {
-        return false;
-    }
-    const auto size = appWindow->_window->GetSize();
-    if (size.X <= 0 || size.Y <= 0) {
-        return false;
-    }
-    if (appWindow->_flights.empty()) {
-        return false;
-    }
-    return true;
-}
-
-void Application::HandlePresentResult(AppWindow& window, const render::SwapChainPresentResult& presentResult) {
-    switch (presentResult.Status) {
-        case render::SwapChainStatus::Success:
-            break;
-        case render::SwapChainStatus::RequireRecreate:
-            window._pendingRecreate = true;
-            break;
-        case render::SwapChainStatus::RetryLater:
-        case render::SwapChainStatus::Error:
-        default:
-            throw AppException(fmt::format(
-                "Application::HandlePresentResult window {} present failed with status {} native {}",
-                window._selfHandle,
-                presentResult.Status,
-                presentResult.NativeStatusCode));
     }
 }
 
@@ -435,7 +407,7 @@ void Application::ScheduleFramesSingleThreaded() {
         window.CollectCompletedFlightTasks();
     }
     for (auto& window : _windows.Values()) {
-        if (!this->CanRenderWindow(window._selfHandle)) {
+        if (!window.CanRender()) {
             continue;
         }
 
@@ -448,7 +420,7 @@ void Application::ScheduleFramesSingleThreaded() {
     }
 
     for (auto& window : _windows.Values()) {
-        if (!this->CanRenderWindow(window._selfHandle)) {
+        if (!window.CanRender()) {
             continue;
         }
 
@@ -473,10 +445,8 @@ void Application::ScheduleFramesSingleThreaded() {
                 _gpu->ProcessTasks();
             }
             RADRAY_ASSERT(flight->IsCompleted());
-            RADRAY_ASSERT(flightData._mailboxSlot.has_value());
             // 当前 flight slot 已知完成，直接定点回收，不再整窗扫描。
-            window.ReleaseMailbox(*flightData._mailboxSlot);
-            flightData._mailboxSlot.reset();
+            window.ReleaseMailbox(flightData._mailboxSlot);
             flight.reset();
         }
 
@@ -527,7 +497,7 @@ void Application::ScheduleFramesSingleThreaded() {
         if (renderError != nullptr) [[unlikely]] {
             window.ReleaseMailbox(*mailboxSlot);
             auto abandon = _gpu->AbandonFrame(std::move(frameContext));
-            this->HandlePresentResult(window, abandon.Present);
+            window.HandlePresentResult(abandon.Present);
             if (abandon.Task.IsValid()) {
                 abandon.Task.Wait();
                 _gpu->ProcessTasks();
@@ -540,7 +510,7 @@ void Application::ScheduleFramesSingleThreaded() {
                           : _gpu->SubmitFrame(std::move(frameContext));
         flight.emplace(std::move(submit.Task));
         flightData._mailboxSlot = *mailboxSlot;
-        this->HandlePresentResult(window, submit.Present);
+        window.HandlePresentResult(submit.Present);
     }
 }
 
