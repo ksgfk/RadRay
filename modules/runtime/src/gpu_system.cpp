@@ -179,12 +179,20 @@ GpuSurface::~GpuSurface() noexcept {
 }
 
 bool GpuSurface::IsValid() const {
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+        return _swapchain != nullptr;
+    }
     return _swapchain != nullptr;
 }
 
 void GpuSurface::Destroy() {
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+        _swapchain.reset();
+        return;
+    }
     _swapchain.reset();
-    _runtime = nullptr;
 }
 
 GpuResourceRegistry::GpuResourceRegistry(render::Device* device) noexcept
@@ -448,49 +456,58 @@ void GpuResourceRegistry::EraseRecord(uint64_t handleId) noexcept {
         record.Data);
 }
 
-uint32_t GpuSurface::GetWidth() const {
+render::SwapChainDescriptor GpuSurface::GetDesc() const {
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+#ifdef RADRAY_IS_DEBUG
+        if (_swapchain == nullptr) {
+            throw GpuSystemException("GpuSurface::GetDesc requires a valid surface");
+        }
+#endif
+        return _swapchain->GetDesc();
+    }
 #ifdef RADRAY_IS_DEBUG
     if (_swapchain == nullptr) {
-        throw GpuSystemException("GpuSurface::GetWidth requires a valid surface");
+        throw GpuSystemException("GpuSurface::GetDesc requires a valid surface");
     }
 #endif
-    return _swapchain->GetDesc().Width;
+    return _swapchain->GetDesc();
+}
+
+uint32_t GpuSurface::GetQueueSlot() const {
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+        return _queueSlot;
+    }
+    return _queueSlot;
+}
+
+size_t GpuSurface::GetNextFrameSlotIndex() const {
+    if (_runtime != nullptr) {
+        std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+        return _nextFrameSlotIndex;
+    }
+    return _nextFrameSlotIndex;
+}
+
+uint32_t GpuSurface::GetWidth() const {
+    return this->GetDesc().Width;
 }
 
 uint32_t GpuSurface::GetHeight() const {
-#ifdef RADRAY_IS_DEBUG
-    if (_swapchain == nullptr) {
-        throw GpuSystemException("GpuSurface::GetHeight requires a valid surface");
-    }
-#endif
-    return _swapchain->GetDesc().Height;
+    return this->GetDesc().Height;
 }
 
 render::TextureFormat GpuSurface::GetFormat() const {
-#ifdef RADRAY_IS_DEBUG
-    if (_swapchain == nullptr) {
-        throw GpuSystemException("GpuSurface::GetFormat requires a valid surface");
-    }
-#endif
-    return _swapchain->GetDesc().Format;
+    return this->GetDesc().Format;
 }
 
 render::PresentMode GpuSurface::GetPresentMode() const {
-#ifdef RADRAY_IS_DEBUG
-    if (_swapchain == nullptr) {
-        throw GpuSystemException("GpuSurface::GetPresentMode requires a valid surface");
-    }
-#endif
-    return _swapchain->GetDesc().PresentMode;
+    return this->GetDesc().PresentMode;
 }
 
 uint32_t GpuSurface::GetFlightFrameCount() const {
-#ifdef RADRAY_IS_DEBUG
-    if (_swapchain == nullptr) {
-        throw GpuSystemException("GpuSurface::GetFlightFrameCount requires a valid surface");
-    }
-#endif
-    return _swapchain->GetDesc().FlightFrameCount;
+    return this->GetDesc().FlightFrameCount;
 }
 
 GpuAsyncContext::~GpuAsyncContext() noexcept = default;
@@ -680,7 +697,7 @@ unique_ptr<GpuSurface> GpuRuntime::CreateSurface(const GpuSurfaceDescriptor& des
         throw GpuSystemException("Device::CreateSwapChain failed");
     }
     auto result = make_unique<GpuSurface>(this, swapchainOpt.Release(), desc.QueueSlot);
-    const uint32_t actualFlightFrameCount = result->GetFlightFrameCount();
+    const uint32_t actualFlightFrameCount = result->_swapchain->GetDesc().FlightFrameCount;
     result->_frameSlots.reserve(actualFlightFrameCount);
     for (uint32_t i = 0; i < actualFlightFrameCount; i++) {
         result->_frameSlots.emplace_back();
@@ -788,9 +805,10 @@ void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& t
 GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
     std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
-    if (surface == nullptr || !surface->IsValid()) {
+    if (surface == nullptr || surface->_swapchain == nullptr) {
         throw GpuSystemException("GpuRuntime::BeginFrame requires a valid surface");
     }
+    _RequireSameRuntimeDebug("GpuRuntime::BeginFrame", "GpuSurface", this, surface->_runtime);
 #endif
     auto* fence = this->GetQueueFenceUnlocked(render::QueueType::Direct, surface->_queueSlot);
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
@@ -802,9 +820,10 @@ GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
 GpuRuntime::BeginFrameResult GpuRuntime::TryBeginFrame(GpuSurface* surface) {
     std::lock_guard<std::mutex> lock{_runtimeMutex};
 #ifdef RADRAY_IS_DEBUG
-    if (surface == nullptr || !surface->IsValid()) {
+    if (surface == nullptr || surface->_swapchain == nullptr) {
         throw GpuSystemException("GpuRuntime::TryBeginFrame requires a valid surface");
     }
+    _RequireSameRuntimeDebug("GpuRuntime::TryBeginFrame", "GpuSurface", this, surface->_runtime);
 #endif
     auto* fence = this->GetQueueFenceUnlocked(render::QueueType::Direct, surface->_queueSlot);
     const size_t frameSlotIndex = surface->_nextFrameSlotIndex;
@@ -880,6 +899,9 @@ void GpuRuntime::ValidateFrameContextForConsume(const char* apiName, const GpuFr
         throw GpuSystemException("GpuRuntime frame submission only accepts frame contexts");
     }
     _RequireSameRuntimeDebug(apiName, "GpuFrameContext", this, context->_runtime);
+    if (context->_surface == nullptr || context->_surface->_swapchain == nullptr) {
+        throw GpuSystemException("GpuRuntime frame submission requires a valid GpuSurface");
+    }
     _RequireSameRuntimeDebug(
         apiName,
         "GpuFrameContext surface",

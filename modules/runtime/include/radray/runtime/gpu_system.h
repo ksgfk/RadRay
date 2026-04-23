@@ -59,7 +59,10 @@
 // - 线程安全约定：
 //   - 同一个 GpuRuntime 实例的公开成员函数可被多个线程并发调用；实现会串行化 runtime 内部共享状态。
 //   - GpuTask::IsValid / IsCompleted / Wait 在其 source runtime 仍存活时可跨线程调用。
-//   - GpuSurface / GpuAsyncContext / GpuFrameContext 不是通用线程安全对象；同一对象的直接并发访问由调用方负责同步。
+//   - GpuSurface 的公开查询和 Destroy 会通过 source runtime 串行化；surface frame lifecycle
+//     状态只保证在 GpuRuntime::BeginFrame/TryBeginFrame/SubmitFrame/AbandonFrame 路径内安全推进。
+//   - GpuAsyncContext / GpuFrameContext 是单所有者命令构建对象，不提供线程安全保证；transient
+//     resource registry 也不额外加锁。
 //   - 以 "_" 开头的成员，以及通过 GetDevice()/NativeHandle 等 escape hatch 获得的 borrowed 对象，
 //     不纳入本层线程安全保证，仅作为内部/测试 seam 使用。
 // - 生命周期约定：
@@ -173,6 +176,9 @@ public:
     bool IsValid() const;
     void Destroy();
 
+    render::SwapChainDescriptor GetDesc() const;
+    uint32_t GetQueueSlot() const;
+    size_t GetNextFrameSlotIndex() const;
     uint32_t GetWidth() const;
     uint32_t GetHeight() const;
     render::TextureFormat GetFormat() const;

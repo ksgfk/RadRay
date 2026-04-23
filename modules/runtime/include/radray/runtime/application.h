@@ -4,6 +4,7 @@
 #include <variant>
 #include <span>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <stdexcept>
@@ -73,6 +74,13 @@ public:
         InRender
     };
 
+    enum class FlightState {
+        Free,
+        Preparing,
+        Queued,
+        InRender
+    };
+
     class MailboxData {
     public:
         uint64_t _generation{0};
@@ -81,7 +89,8 @@ public:
 
     struct FlightData {
         std::optional<GpuTask> _task;
-        uint32_t _mailboxSlot;
+        uint32_t _mailboxSlot{0};
+        FlightState _state{FlightState::Free};
     };
 
     AppWindowHandle _selfHandle{};
@@ -93,6 +102,12 @@ public:
     uint64_t _latestPublishedGeneration{0};
     bool _isPrimary{false};
     bool _pendingRecreate{false};
+};
+
+struct RenderFramePayload {
+    AppWindowHandle Window{};
+    uint32_t FlightSlot{0};
+    uint32_t MailboxSlot{0};
 };
 
 class Application {
@@ -129,19 +144,30 @@ protected:
     void WaitAllFlightTasks();
     void WaitAllSurfaceQueues();
 
-    void RenderThreadFunc();
-    void RequestMultiThreaded(bool multiThreaded);
-    void ApplyPendingThreadMode();
     void ScheduleFramesSingleThreaded();
     void ScheduleFramesMultiThreaded();
+
+    void RenderThreadFunc();
+    void PauseRenderThread();
+    void ResumeRenderThread();
+    void StopRenderThread();
+    void RequestMultiThreaded(bool multiThreaded);
+    void ApplyPendingThreadMode();
+    /** 把还没被渲染线程消费的 channel payload 全部取出来并丢弃，同时回滚它们占用的状态 */
+    void DrainRenderPayloadQueue() noexcept;
 
 protected:
     SparseSet<AppWindow> _windows;
     unique_ptr<GpuRuntime> _gpu;
-    std::mutex _renderMutex;
+    std::mutex _renderResourceMutex;
+    std::mutex _renderWakeMutex;
+    std::condition_variable _renderWakeCV;
+    std::condition_variable _pauseAckCV;
     std::thread _renderThread;
-    // UnboundedChannel<RenderThreadCommand> _renderCommandQueue;
-    std::atomic_bool _stopRenderThread{false};
+    unique_ptr<BoundedChannel<RenderFramePayload>> _renderPayloadQueue;
+    bool _renderPauseRequested{false};
+    bool _renderPaused{false};
+    bool _renderStopRequested{false};
     std::atomic_bool _exitRequested{false};
     bool _pendingMultiThreaded{false};
     bool _multiThreaded{false};
