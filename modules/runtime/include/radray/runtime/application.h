@@ -1,7 +1,6 @@
 #pragma once
 
 #include <optional>
-#include <variant>
 #include <span>
 #include <atomic>
 #include <condition_variable>
@@ -11,7 +10,6 @@
 #include <utility>
 
 #include <radray/sparse_set.h>
-#include <radray/channel.h>
 #include <radray/render/common.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/gpu_system.h>
@@ -22,10 +20,6 @@ class AppException : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-// struct StopRenderThreadCommand {};
-
-// using RenderThreadCommand = std::variant<StopRenderThreadCommand>;
-
 using AppWindowHandle = SparseSetHandle;
 
 /**
@@ -34,6 +28,16 @@ using AppWindowHandle = SparseSetHandle;
  */
 class AppWindow {
 public:
+    struct RenderPayload {
+        uint32_t FlightSlot{0};
+        uint32_t MailboxSlot{0};
+    };
+
+    enum class RenderPayloadRollbackMode {
+        RestoreMailbox,
+        RestoreOrReleaseMailbox
+    };
+
     AppWindow() noexcept = default;
     AppWindow(const AppWindow&) = delete;
     AppWindow& operator=(const AppWindow&) = delete;
@@ -55,16 +59,37 @@ public:
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
 
+    bool CollectCompletedFlightTask(uint32_t flightSlot) noexcept;
     void CollectCompletedFlightTasks() noexcept;
     bool CanRender() const noexcept;
     void HandlePresentResult(const render::SwapChainPresentResult& presentResult);
+
+    void InitializeRenderThreadState();
+    void ResetRenderPayloadQueue();
+    void CompleteRenderPayloadQueue() noexcept;
+    void DestroyRenderThreadState() noexcept;
+    bool HasQueuedRenderPayload() const noexcept;
+    std::optional<RenderPayload> TryReadRenderPayload() noexcept;
+    std::optional<uint32_t> TryPrepareRenderMailbox() noexcept;
+    void CancelPreparedRenderMailbox(uint32_t mailboxSlot) noexcept;
+    void PublishPreparedRenderMailbox(uint32_t mailboxSlot) noexcept;
+    std::optional<RenderPayload> TryQueuePublishedRenderPayload() noexcept;
+    GpuSurface* TryAcquireQueuedRenderPayload(RenderPayload payload) noexcept;
+    void RestoreQueuedRenderPayload(RenderPayload payload, bool requireRecreate, RenderPayloadRollbackMode rollbackMode) noexcept;
+    void MarkRenderPayloadInRender(RenderPayload payload) noexcept;
+    void ReleaseInRenderPayload(RenderPayload payload, const render::SwapChainPresentResult& presentResult);
+    void StoreSubmittedRenderPayload(RenderPayload payload, GpuTask&& task, const render::SwapChainPresentResult& presentResult);
+    void DrainRenderPayloadQueue() noexcept;
+    bool RefreshWindowState();
+    bool CanRecreateSurface() const;
+    void ReplaceSurface(unique_ptr<GpuSurface> surface, uint32_t flightFrameCount, unique_ptr<GpuSurface>& oldSurfaceToDestroy);
 
     friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
 public:
     enum class MailboxState {
         Free,
-        /** Step 1.2: 主线程正在准备渲染快照，渲染阶段不可见 */
+        /** 主线程正在准备渲染快照，渲染阶段不可见 */
         Preparing,
         /** 快照已经提交，渲染阶段现在可以选 */
         Published,
@@ -93,6 +118,13 @@ public:
         FlightState _state{FlightState::Free};
     };
 
+    struct RenderThreadState {
+        mutable std::mutex Mutex;
+        deque<RenderPayload> Queue;
+        size_t QueueCapacity{0};
+        bool Completed{false};
+    };
+
     AppWindowHandle _selfHandle{};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
@@ -100,14 +132,9 @@ public:
     vector<MailboxData> _mailboxes;
     std::optional<uint32_t> _latestPublishedMailboxSlot{};
     uint64_t _latestPublishedGeneration{0};
+    unique_ptr<RenderThreadState> _renderThreadState;
     bool _isPrimary{false};
     bool _pendingRecreate{false};
-};
-
-struct RenderFramePayload {
-    AppWindowHandle Window{};
-    uint32_t FlightSlot{0};
-    uint32_t MailboxSlot{0};
 };
 
 class Application {
@@ -148,23 +175,26 @@ protected:
     void ScheduleFramesMultiThreaded();
 
     void RenderThreadFunc();
+    void PrepareRenderMailboxes();
+    std::optional<AppWindow::RenderPayload> TrySchedulePublishedRenderPayload(AppWindow& window);
+    void ExecuteRenderPayload(
+        AppWindow& window,
+        AppWindow::RenderPayload payload,
+        AppWindow::RenderPayloadRollbackMode rollbackMode);
     void PauseRenderThread();
     void ResumeRenderThread();
     void StopRenderThread();
     void RequestMultiThreaded(bool multiThreaded);
     void ApplyPendingThreadMode();
-    /** 把还没被渲染线程消费的 channel payload 全部取出来并丢弃，同时回滚它们占用的状态 */
-    void DrainRenderPayloadQueue() noexcept;
+    bool HasQueuedRenderPayload() const noexcept;
 
 protected:
     SparseSet<AppWindow> _windows;
     unique_ptr<GpuRuntime> _gpu;
-    std::mutex _renderResourceMutex;
     std::mutex _renderWakeMutex;
     std::condition_variable _renderWakeCV;
     std::condition_variable _pauseAckCV;
     std::thread _renderThread;
-    unique_ptr<BoundedChannel<RenderFramePayload>> _renderPayloadQueue;
     bool _renderPauseRequested{false};
     bool _renderPaused{false};
     bool _renderStopRequested{false};
