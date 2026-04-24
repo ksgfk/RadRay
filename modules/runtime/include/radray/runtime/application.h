@@ -23,19 +23,17 @@ class AppException : public std::runtime_error {
 using AppWindowHandle = SparseSetHandle;
 
 /**
+ * flight slot 和 swapchain 的 flight frame count 对齐，用来保证同一个 swapchain frame slot 不会被重复使用
+ * mailbox 解决的是“主线程准备渲染数据”和“渲染阶段消费渲染数据”的解耦问题
  * mailbox 优先拿 Free 槽位；如果没有空槽位，允许覆盖 Published 但尚未进入 InRender 的最新快照
  * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 ReserveMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用
  */
 class AppWindow {
 public:
-    struct RenderPayload {
+    struct RenderRequest {
         uint32_t FlightSlot{0};
         uint32_t MailboxSlot{0};
-    };
-
-    enum class RenderPayloadRollbackMode {
-        RestoreMailbox,
-        RestoreOrReleaseMailbox
+        uint64_t Generation{0};
     };
 
     AppWindow() noexcept = default;
@@ -45,44 +43,24 @@ public:
     AppWindow& operator=(AppWindow&& other) noexcept;
     ~AppWindow() noexcept;
 
+    /** 重置所有 mailbox 状态, 会等待所有任务完成 */
     void ResetMailboxes() noexcept;
     /** 最新已发布的 mailbox 槽位 */
     std::optional<uint32_t> GetPublishedMailboxSlot() const noexcept;
     /** 预留一个 mailbox 槽位并立刻标记为 Preparing；优先使用 Free，找不到则覆盖当前 Published */
-    std::optional<uint32_t> ReserveMailboxSlot() noexcept;
+    std::optional<uint32_t> AllocMailboxSlot() noexcept;
     /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** 单线程回退：Queued 槽位在 BeginFrame 提交前失败时，直接恢复为 Published */
-    void RestoreMailbox(uint32_t mailboxSlot) noexcept;
-    /** 多线程回退：若 Queued 槽位已经落后于更新 generation，则直接释放，否则恢复为 Published */
+    /** 若 Queued 槽位已经落后于更新 generation 直接释放，否则恢复为 Published */
     void RestoreOrReleaseMailbox(uint32_t mailboxSlot) noexcept;
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
 
-    bool CollectCompletedFlightTask(uint32_t flightSlot) noexcept;
-    void CollectCompletedFlightTasks() noexcept;
-    bool CanRender() const noexcept;
-    void HandlePresentResult(const render::SwapChainPresentResult& presentResult);
+    /** 处理已完成的 flight slot */
+    void CollectCompletedFlightSlots() noexcept;
 
-    void InitializeRenderThreadState();
-    void ResetRenderPayloadQueue();
-    void CompleteRenderPayloadQueue() noexcept;
-    void DestroyRenderThreadState() noexcept;
-    bool HasQueuedRenderPayload() const noexcept;
-    std::optional<RenderPayload> TryReadRenderPayload() noexcept;
-    std::optional<uint32_t> TryPrepareRenderMailbox() noexcept;
-    void CancelPreparedRenderMailbox(uint32_t mailboxSlot) noexcept;
-    void PublishPreparedRenderMailbox(uint32_t mailboxSlot) noexcept;
-    std::optional<RenderPayload> TryQueuePublishedRenderPayload() noexcept;
-    GpuSurface* TryAcquireQueuedRenderPayload(RenderPayload payload) noexcept;
-    void RestoreQueuedRenderPayload(RenderPayload payload, bool requireRecreate, RenderPayloadRollbackMode rollbackMode) noexcept;
-    void MarkRenderPayloadInRender(RenderPayload payload) noexcept;
-    void ReleaseInRenderPayload(RenderPayload payload, const render::SwapChainPresentResult& presentResult);
-    void StoreSubmittedRenderPayload(RenderPayload payload, GpuTask&& task, const render::SwapChainPresentResult& presentResult);
-    void DrainRenderPayloadQueue() noexcept;
-    bool RefreshWindowState();
-    bool CanRecreateSurface() const;
-    void ReplaceSurface(unique_ptr<GpuSurface> surface, uint32_t flightFrameCount, unique_ptr<GpuSurface>& oldSurfaceToDestroy);
+    /** 当前 window 是否可渲染 */
+    bool CanRender() const noexcept;
 
     friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
@@ -101,8 +79,11 @@ public:
 
     enum class FlightState {
         Free,
+        /** 渲染线程正在准备渲染任务 */
         Preparing,
+        /** 渲染任务已排队等待执行 */
         Queued,
+        /** 渲染任务正在执行 */
         InRender
     };
 
@@ -118,11 +99,11 @@ public:
         FlightState _state{FlightState::Free};
     };
 
-    struct RenderThreadState {
-        mutable std::mutex Mutex;
-        deque<RenderPayload> Queue;
-        size_t QueueCapacity{0};
-        bool Completed{false};
+    struct RenderDataChannel {
+        mutable std::mutex _mutex;
+        deque<RenderRequest> _queue;
+        size_t _queueCapacity{0};
+        bool _completed{false};
     };
 
     AppWindowHandle _selfHandle{};
@@ -130,9 +111,8 @@ public:
     unique_ptr<GpuSurface> _surface;
     vector<FlightData> _flights;
     vector<MailboxData> _mailboxes;
-    std::optional<uint32_t> _latestPublishedMailboxSlot{};
-    uint64_t _latestPublishedGeneration{0};
-    unique_ptr<RenderThreadState> _renderThreadState;
+    std::optional<RenderRequest> _latestRequest;
+    Nullable<std::unique_ptr<RenderDataChannel>> _channel;
     bool _isPrimary{false};
     bool _pendingRecreate{false};
 };
@@ -165,28 +145,23 @@ protected:
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);
 
     AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
-    void DispatchAllWindowEvents();
+    void DispatchWindowEvents();
+    /** 刷新窗口状态, 例如是否需要重建交换链, 是否请求退出应用 */
     void CheckWindowStates();
-    void HandleSurfaceChanges();
-    void WaitAllFlightTasks();
-    void WaitAllSurfaceQueues();
+    /** 处理窗口状态更改, 例如重建交换链 */
+    void HandleWindowChanges();
+    /** 等待窗口关联的 cmd queue 完成 */
+    void WaitWindowTasks();
 
     void ScheduleFramesSingleThreaded();
     void ScheduleFramesMultiThreaded();
 
-    void RenderThreadFunc();
-    void PrepareRenderMailboxes();
-    std::optional<AppWindow::RenderPayload> TrySchedulePublishedRenderPayload(AppWindow& window);
-    void ExecuteRenderPayload(
-        AppWindow& window,
-        AppWindow::RenderPayload payload,
-        AppWindow::RenderPayloadRollbackMode rollbackMode);
+    void RenderThreadImpl();
     void PauseRenderThread();
     void ResumeRenderThread();
     void StopRenderThread();
     void RequestMultiThreaded(bool multiThreaded);
     void ApplyPendingThreadMode();
-    bool HasQueuedRenderPayload() const noexcept;
 
 protected:
     SparseSet<AppWindow> _windows;
@@ -195,10 +170,10 @@ protected:
     std::condition_variable _renderWakeCV;
     std::condition_variable _pauseAckCV;
     std::thread _renderThread;
+    std::atomic_bool _exitRequested{false};
     bool _renderPauseRequested{false};
     bool _renderPaused{false};
     bool _renderStopRequested{false};
-    std::atomic_bool _exitRequested{false};
     bool _pendingMultiThreaded{false};
     bool _multiThreaded{false};
     bool _allowFrameDrop{false};

@@ -19,6 +19,15 @@ using namespace radray::render;
 
 namespace {
 
+#ifdef RADRAY_IS_DEBUG
+#define EXPECT_GPU_GUARD_ASSERT(statement) \
+    EXPECT_DEATH_IF_SUPPORTED({ statement; }, "")
+#else
+#define EXPECT_GPU_GUARD_ASSERT(statement) \
+    do {                                  \
+    } while (false)
+#endif
+
 std::string_view BackendTestName(RenderBackend backend) noexcept {
     switch (backend) {
         case RenderBackend::D3D12: return "D3D12";
@@ -219,7 +228,7 @@ TEST_P(GpuRuntimeResourceTest, PersistentResourcesCreateValidHandles) {
     GpuBufferHandle invalidHandle{};
     invalidHandle.Handle = 42;
     invalidHandle.NativeHandle = reinterpret_cast<void*>(1);
-    EXPECT_THROW(runtime->DestroyResourceImmediate(invalidHandle), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(invalidHandle));
 }
 
 TEST_P(GpuRuntimeResourceTest, RuntimeTextureViewRejectsTransientTextureTarget) {
@@ -231,7 +240,7 @@ TEST_P(GpuRuntimeResourceTest, RuntimeTextureViewRejectsTransientTextureTarget) 
 
     auto context = runtime->BeginAsync(QueueType::Direct);
     const auto transientTexture = context->CreateTransientTexture(MakeTextureDesc());
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(transientTexture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(transientTexture)));
 }
 
 TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateRetiresPersistentResourceWithoutProcessTasks) {
@@ -245,11 +254,11 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateRetiresPersistentResource
     runtime->DestroyResourceImmediate(texture);
 
     EXPECT_TRUE(runtime->_resourceRetirements.empty());
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(texture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 
     auto context = runtime->BeginAsync(QueueType::Direct);
-    EXPECT_THROW(context->CreateTransientTextureView(MakeTextureViewDesc(texture)), GpuSystemException);
-    EXPECT_THROW(runtime->DestroyResourceImmediate(texture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(context->CreateTransientTextureView(MakeTextureViewDesc(texture)));
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
 }
 
 TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterWaitsForTaskAndProcessTasks) {
@@ -292,11 +301,11 @@ TEST_P(GpuRuntimeResourceTest, TransientViewScopeRulesAndImmediateDestroyRejects
 
     EXPECT_TRUE(localView.IsValid());
     EXPECT_TRUE(persistentView.IsValid());
-    EXPECT_THROW(contextB->CreateTransientTextureView(MakeTextureViewDesc(transientTexture)), GpuSystemException);
-    EXPECT_THROW(runtime->DestroyResourceImmediate(transientTexture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(contextB->CreateTransientTextureView(MakeTextureViewDesc(transientTexture)));
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(transientTexture));
 
     auto task = SubmitNoOpAsync(*runtime);
-    EXPECT_THROW(runtime->DestroyResourceAfter(transientTexture, task), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceAfter(transientTexture, task));
     task.Wait();
     runtime->ProcessTasks();
 }
@@ -313,12 +322,12 @@ TEST_P(GpuRuntimeResourceTest, UnsubmittedTransientViewBlocksImmediatePersistent
     const auto transientView = context->CreateTransientTextureView(MakeTextureViewDesc(texture));
     ASSERT_TRUE(transientView.IsValid());
 
-    EXPECT_THROW(runtime->DestroyResourceImmediate(texture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
     EXPECT_TRUE(runtime->_resourceRetirements.empty());
 
     context.reset();
     runtime->DestroyResourceImmediate(texture);
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(texture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 }
 
 TEST_P(GpuRuntimeResourceTest, SubmittedTransientViewBlocksImmediatePersistentTextureDestroyUntilProcessTasksDrainsContext) {
@@ -338,7 +347,7 @@ TEST_P(GpuRuntimeResourceTest, SubmittedTransientViewBlocksImmediatePersistentTe
     cmd->End();
     auto task = runtime->SubmitAsync(std::move(context));
 
-    EXPECT_THROW(runtime->DestroyResourceImmediate(texture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
     task.Wait();
 
     EXPECT_TRUE(runtime->_resourceRetirements.empty());
@@ -347,7 +356,7 @@ TEST_P(GpuRuntimeResourceTest, SubmittedTransientViewBlocksImmediatePersistentTe
     runtime->ProcessTasks();
     EXPECT_TRUE(runtime->_pendings.empty());
     runtime->DestroyResourceImmediate(texture);
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(texture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 }
 
 TEST_P(GpuRuntimeResourceTest, PersistentTextureImmediateDestroyRejectsLivePersistentViews) {
@@ -360,15 +369,15 @@ TEST_P(GpuRuntimeResourceTest, PersistentTextureImmediateDestroyRejectsLivePersi
     const auto texture = runtime->CreateTexture(MakeTextureDesc());
     const auto view = runtime->CreateTextureView(MakeTextureViewDesc(texture));
 
-    EXPECT_THROW(runtime->DestroyResourceImmediate(texture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
     EXPECT_TRUE(runtime->_resourceRetirements.empty());
 
     runtime->DestroyResourceImmediate(view);
     runtime->DestroyResourceImmediate(texture);
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(texture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 }
 
-TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateTwiceThrows) {
+TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateTwiceDiesInDebug) {
     unique_ptr<GpuRuntime> runtime{};
     std::string reason{};
     if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
@@ -377,7 +386,7 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateTwiceThrows) {
 
     const auto texture = runtime->CreateTexture(MakeTextureDesc());
     runtime->DestroyResourceImmediate(texture);
-    EXPECT_THROW(runtime->DestroyResourceImmediate(texture), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
 }
 
 TEST_P(GpuRuntimeResourceTest, ConcurrentAsyncSubmitWaitAndProcessTasksDrainPendings) {
@@ -623,7 +632,7 @@ TEST_P(GpuRuntimeResourceTest, TransientPersistentTextureViewsSurviveInterleaved
     ASSERT_TRUE(DrainRuntime(*runtime, reason)) << reason;
 
     runtime->DestroyResourceImmediate(persistentTexture);
-    EXPECT_THROW(runtime->CreateTextureView(MakeTextureViewDesc(persistentTexture)), GpuSystemException);
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(persistentTexture)));
 }
 
 #ifdef RADRAY_IS_DEBUG
@@ -657,5 +666,7 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<RenderBackend>& info) {
         return std::string{BackendTestName(info.param)};
     });
+
+#undef EXPECT_GPU_GUARD_ASSERT
 
 }  // namespace

@@ -34,9 +34,12 @@
 //   而不是简单绑定到 C++ 对象析构时刻。
 // - DependsOn 只记录 GPU 侧依赖，不做 CPU 同步；依赖任务必须来自同一个 GpuRuntime。
 // - 这里的“异步”仅指 CPU 与 GPU 执行异步；CPU 侧公开 API 的调用语义保持同步。
-// - 错误处理以“状态 + 异常”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
+// - 错误处理以“状态 + 异常 + assert”混合方式向上传播：BeginFrame 的非致命 acquire 结果通过
 //   BeginFrameResult::Status 返回；SubmitFrame 的 present 结果通过 SubmitFrameResult::Present
-//   返回（当前有效状态约束为 Success / RequireRecreate / Error）；真正的 GPU 致命错误仍通过异常报告。
+//   返回（当前有效状态约束为 Success / RequireRecreate / Error）；真正的 GPU/后端致命错误仍通过
+//   GpuSystemException 报告，语义上基本不可恢复，调用方不应在原 runtime/device 上 catch 后继续执行。
+//   调用方违反本层 API 契约（无效对象、跨 runtime、重复消费、错误资源归属等）主要通过
+//   RADRAY_ASSERT 在 debug 构建中捕获，release 下属于未定义行为。
 // - release 构建以低开销为第一目标：运行时不额外承担昂贵的一致性/所有权校验成本；
 //   跨 runtime、frame one-shot 消费、对象归属等强约束检查主要放在 debug 构建中主动捕获。
 //   因此调用方必须遵守本文档里的生命周期与归属约定；违反约定在 release 下属于未定义行为。
@@ -253,13 +256,11 @@ public:
     uint32_t GetBackBufferIndex() const;
 
 public:
-#ifdef RADRAY_IS_DEBUG
     enum class ConsumeState {
         Acquired,
         Submitted,
         Abandoned
     };
-#endif
 
     GpuSurface* _surface{nullptr};
     size_t _frameSlotIndex{std::numeric_limits<size_t>::max()};
@@ -268,9 +269,7 @@ public:
     Nullable<render::SwapChainSyncObject*> _readyToPresent{nullptr};
     uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
     std::optional<render::SwapChainFrame> _acquiredFrame{};
-#ifdef RADRAY_IS_DEBUG
     ConsumeState _consumeState{ConsumeState::Acquired};
-#endif
 };
 
 class GpuRuntime {
@@ -374,9 +373,7 @@ public:
 
     render::Fence* GetQueueFenceUnlocked(render::QueueType type, uint32_t slot);
     SubmittedBatch SubmitContextUnlocked(GpuAsyncContext* context, Nullable<render::SwapChainSyncObject*> waitToExecute, Nullable<render::SwapChainSyncObject*> readyToPresent);
-#ifdef RADRAY_IS_DEBUG
-    void ValidateFrameContextForConsume(const char* apiName, const GpuFrameContext* context) const;
-#endif
+    void ValidateFrameContextForConsume(const GpuFrameContext* context) const;
     SubmitFrameResult FinalizeFrameUnlocked(unique_ptr<GpuFrameContext> context);
     GpuRuntime::BeginFrameResult AcquireSwapChainUnlocked(GpuSurface* surface, uint64_t timeoutMs);
 
