@@ -12,26 +12,50 @@ AppWindow::~AppWindow() noexcept {
 void AppWindow::ResetMailboxes() noexcept {
     {
         std::unique_lock<std::mutex> lock{_stateMutex, std::defer_lock};
-        if (_app->_multiThreaded) lock.lock();
+        std::unique_lock<std::mutex> channelLock{_channel._mutex, std::defer_lock};
+        if (_app->_multiThreaded) {
+            std::lock(lock, channelLock);
+        }
+
+        for (const RenderRequest& request : _channel._queue) {
+            RADRAY_ASSERT(request.FlightSlot < _flights.size());
+            RADRAY_ASSERT(request.MailboxSlot < _mailboxes.size());
+
+            FlightData& flight = _flights[request.FlightSlot];
+            RADRAY_ASSERT(flight._state == FlightState::Queued);
+            RADRAY_ASSERT(flight._mailboxSlot == request.MailboxSlot);
+            RADRAY_ASSERT(flight._mailboxGeneration == request.Generation);
+
+            MailboxData& mailbox = _mailboxes[request.MailboxSlot];
+            RADRAY_ASSERT(mailbox._state == MailboxState::Queued);
+            RADRAY_ASSERT(mailbox._generation == request.Generation);
+
+            mailbox._state = MailboxState::Free;
+            flight._mailboxSlot = 0;
+            flight._mailboxGeneration = 0;
+            flight._state = FlightState::Free;
+        }
+        _channel._queue.clear();
 
         for (FlightData& flight : _flights) {
+            RADRAY_ASSERT(flight._state != FlightState::Queued);
+            RADRAY_ASSERT(flight._state != FlightState::Preparing);
             if (flight._state == FlightState::InRender) {
+                RADRAY_ASSERT(flight._mailboxSlot < _mailboxes.size());
+                MailboxData& mailbox = _mailboxes[flight._mailboxSlot];
+                RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
+                RADRAY_ASSERT(mailbox._generation == flight._mailboxGeneration);
                 flight._task.Wait();
                 flight._task = {};
             }
             flight._mailboxSlot = 0;
+            flight._mailboxGeneration = 0;
             flight._state = FlightState::Free;
         }
         for (MailboxData& mailbox : _mailboxes) {
             mailbox._state = MailboxState::Free;
         }
         _latestPublished.reset();
-    }
-
-    {
-        std::unique_lock<std::mutex> lock{_channel._mutex, std::defer_lock};
-        if (_app->_multiThreaded) lock.lock();
-        _channel._queue.clear();
     }
 }
 
@@ -87,19 +111,31 @@ void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
     _latestPublished = MailboxSnapshot{mailboxSlot, MailboxState::Published, _mailboxes[mailboxSlot]._generation};
 }
 
-void AppWindow::ReleaseMailbox(uint32_t mailboxSlot) noexcept {
+void AppWindow::ReleaseMailbox(RenderRequest request) noexcept {
     std::unique_lock<std::mutex> lock{_stateMutex, std::defer_lock};
     if (_app->_multiThreaded) lock.lock();
 
-    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
-    MailboxData& mailbox = _mailboxes[mailboxSlot];
-    if (mailbox._state == MailboxState::Free) {
-        return;
+    RADRAY_ASSERT(request.FlightSlot < _flights.size());
+    RADRAY_ASSERT(request.MailboxSlot < _mailboxes.size());
+
+    FlightData& flight = _flights[request.FlightSlot];
+    RADRAY_ASSERT(flight._state == FlightState::Queued || flight._state == FlightState::Preparing || flight._state == FlightState::InRender);
+    RADRAY_ASSERT(flight._mailboxSlot == request.MailboxSlot);
+    RADRAY_ASSERT(flight._mailboxGeneration == request.Generation);
+    if (flight._state == FlightState::InRender) {
+        RADRAY_ASSERT(flight._task.IsCompleted());
+        flight._task = {};
     }
+
+    MailboxData& mailbox = _mailboxes[request.MailboxSlot];
+    RADRAY_ASSERT(mailbox._state == MailboxState::Queued || mailbox._state == MailboxState::InRender);
+    RADRAY_ASSERT(mailbox._generation == request.Generation);
+    RADRAY_ASSERT(!_latestPublished.has_value() || _latestPublished->Slot != request.MailboxSlot);
+
     mailbox._state = MailboxState::Free;
-    if (_latestPublished.has_value() && _latestPublished->Slot == mailboxSlot) {
-        _latestPublished.reset();
-    }
+    flight._mailboxSlot = 0;
+    flight._mailboxGeneration = 0;
+    flight._state = FlightState::Free;
 }
 
 void AppWindow::CollectCompletedFlightSlots() noexcept {
@@ -110,18 +146,16 @@ void AppWindow::CollectCompletedFlightSlots() noexcept {
         if (flight._state != FlightState::InRender || !flight._task.IsCompleted()) {
             continue;
         }
-        if (flight._state != FlightState::Free) {
-            RADRAY_ASSERT(flight._mailboxSlot < _mailboxes.size());
-            MailboxData& mailbox = _mailboxes[flight._mailboxSlot];
-            if (mailbox._state != MailboxState::Free) {
-                mailbox._state = MailboxState::Free;
-            }
-            if (_latestPublished.has_value() && _latestPublished->Slot == flight._mailboxSlot) {
-                _latestPublished.reset();
-            }
-        }
+        RADRAY_ASSERT(flight._mailboxSlot < _mailboxes.size());
+        MailboxData& mailbox = _mailboxes[flight._mailboxSlot];
+        RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
+        RADRAY_ASSERT(mailbox._generation == flight._mailboxGeneration);
+        RADRAY_ASSERT(!_latestPublished.has_value() || _latestPublished->Slot != flight._mailboxSlot);
+
+        mailbox._state = MailboxState::Free;
         flight._task = {};
         flight._mailboxSlot = 0;
+        flight._mailboxGeneration = 0;
         flight._state = FlightState::Free;
     }
 }

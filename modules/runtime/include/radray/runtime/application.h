@@ -34,7 +34,7 @@ struct AppWindowHandle {
 /**
  * flight slot 和 swapchain 的 flight frame count 对齐，用来保证同一个 swapchain frame slot 不会被重复使用
  * mailbox 解决的是“主线程准备渲染数据”和“渲染阶段消费渲染数据”的解耦问题
- * mailbox 优先拿 Free 槽位；如果没有空槽位，允许覆盖 Published 但尚未进入 InRender 的最新快照
+ * mailbox 优先覆盖 Published 但尚未进入 InRender 的最新快照
  * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 由 AllocMailboxSlot() 分配的槽位，不能当任意外部输入使用
  */
 class AppWindow {
@@ -58,8 +58,8 @@ public:
     std::optional<uint32_t> AllocMailboxSlot() noexcept;
     /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
-    void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
+    /** Release 用于 request 不再占用 mailbox 时，使槽位重新失效并回到 Free */
+    void ReleaseMailbox(RenderRequest request) noexcept;
     /** 尝试将最新发布的渲染请求加入队列 */
     std::optional<RenderRequest> TryQueueLatestPublished() noexcept;
     /** 开始录制渲染任务 */
@@ -104,8 +104,9 @@ public:
 
     class FlightData {
     public:
-        uint32_t _mailboxSlot{0};
         FlightState _state{FlightState::Free};
+        uint32_t _mailboxSlot{0};
+        uint64_t _mailboxGeneration{0};
         GpuTask _task;
     };
 
