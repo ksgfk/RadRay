@@ -1,7 +1,6 @@
 #pragma once
 
 #include <optional>
-#include <span>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -9,60 +8,70 @@
 #include <stdexcept>
 #include <utility>
 
-#include <radray/sparse_set.h>
 #include <radray/render/common.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {
 
+class Application;
+
 class AppException : public std::runtime_error {
+public:
     using std::runtime_error::runtime_error;
 };
 
-using AppWindowHandle = SparseSetHandle;
+struct AppWindowHandle {
+    uint64_t Id{std::numeric_limits<uint64_t>::max()};
+
+    constexpr bool IsValid() const { return Id != std::numeric_limits<uint64_t>::max(); }
+
+    constexpr void Invalidate() { Id = std::numeric_limits<uint64_t>::max(); }
+
+    constexpr static AppWindowHandle Invalid() { return {std::numeric_limits<uint64_t>::max()}; }
+};
 
 /**
  * flight slot 和 swapchain 的 flight frame count 对齐，用来保证同一个 swapchain frame slot 不会被重复使用
  * mailbox 解决的是“主线程准备渲染数据”和“渲染阶段消费渲染数据”的解耦问题
  * mailbox 优先拿 Free 槽位；如果没有空槽位，允许覆盖 Published 但尚未进入 InRender 的最新快照
- * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 之前由 ReserveMailboxSlot()/GetPublishedMailboxSlot() 返回过的槽位，不能当任意外部输入使用
+ * mailboxSlot 是 runtime 内部分配并回传的令牌，只能传入当前 window 由 AllocMailboxSlot() 分配的槽位，不能当任意外部输入使用
  */
 class AppWindow {
 public:
     struct RenderRequest {
-        uint32_t FlightSlot{0};
-        uint32_t MailboxSlot{0};
-        uint64_t Generation{0};
+        uint32_t FlightSlot;
+        uint32_t MailboxSlot;
+        uint64_t Generation;
     };
 
     AppWindow() noexcept = default;
     AppWindow(const AppWindow&) = delete;
     AppWindow& operator=(const AppWindow&) = delete;
-    AppWindow(AppWindow&& other) noexcept;
-    AppWindow& operator=(AppWindow&& other) noexcept;
+    AppWindow(AppWindow&& other) = delete;
+    AppWindow& operator=(AppWindow&& other) = delete;
     ~AppWindow() noexcept;
 
     /** 重置所有 mailbox 状态, 会等待所有任务完成 */
     void ResetMailboxes() noexcept;
-    /** 最新已发布的 mailbox 槽位 */
-    std::optional<uint32_t> GetPublishedMailboxSlot() const noexcept;
-    /** 预留一个 mailbox 槽位并立刻标记为 Preparing；优先使用 Free，找不到则覆盖当前 Published */
+    /** 预留一个 mailbox 槽位并立刻标记为 Preparing；优先覆盖最新 Published，找不到则使用 Free 槽位 */
     std::optional<uint32_t> AllocMailboxSlot() noexcept;
     /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** 若 Queued 槽位已经落后于更新 generation 直接释放，否则恢复为 Published */
-    void RestoreOrReleaseMailbox(uint32_t mailboxSlot) noexcept;
     /** Release 用于在槽位被新版本替代，或持有它的 in-flight render 完成后，使槽位重新失效并回到 Free */
     void ReleaseMailbox(uint32_t mailboxSlot) noexcept;
+    /** 尝试将最新发布的渲染请求加入队列 */
+    std::optional<RenderRequest> TryQueueLatestPublished() noexcept;
+    /** 开始录制渲染任务 */
+    void BeginPrepareRenderTask(RenderRequest request) noexcept;
+    /** 录制渲染任务完成, 已提交到 GPU */
+    void EndPrepareRenderTask(RenderRequest request, GpuTask task) noexcept;
 
     /** 处理已完成的 flight slot */
     void CollectCompletedFlightSlots() noexcept;
 
     /** 当前 window 是否可渲染 */
     bool CanRender() const noexcept;
-
-    friend void swap(AppWindow& a, AppWindow& b) noexcept;
 
 public:
     enum class MailboxState {
@@ -79,10 +88,10 @@ public:
 
     enum class FlightState {
         Free,
+        /** 渲染任务已排队等待执行, 也就是 MailboxState::Queued */
+        Queued,
         /** 渲染线程正在准备渲染任务 */
         Preparing,
-        /** 渲染任务已排队等待执行 */
-        Queued,
         /** 渲染任务正在执行 */
         InRender
     };
@@ -93,26 +102,37 @@ public:
         MailboxState _state{MailboxState::Free};
     };
 
-    struct FlightData {
-        std::optional<GpuTask> _task;
+    class FlightData {
+    public:
         uint32_t _mailboxSlot{0};
         FlightState _state{FlightState::Free};
+        GpuTask _task;
     };
 
-    struct RenderDataChannel {
+    struct MailboxSnapshot {
+        uint32_t Slot;
+        MailboxState State;
+        uint64_t Generation;
+    };
+
+    class RenderDataChannel {
+    public:
         mutable std::mutex _mutex;
         deque<RenderRequest> _queue;
         size_t _queueCapacity{0};
         bool _completed{false};
     };
 
+    Application* _app{nullptr};
     AppWindowHandle _selfHandle{};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
     vector<FlightData> _flights;
     vector<MailboxData> _mailboxes;
-    std::optional<RenderRequest> _latestRequest;
-    Nullable<std::unique_ptr<RenderDataChannel>> _channel;
+    /** 最近一次已发布但尚未被渲染线程消费的渲染请求 */
+    std::optional<MailboxSnapshot> _latestPublished;
+    mutable std::mutex _stateMutex;
+    RenderDataChannel _channel;
     bool _isPrimary{false};
     bool _pendingRecreate{false};
 };
@@ -129,7 +149,7 @@ public:
 
     int32_t Run(int argc, char* argv[]);
 
-protected:
+public:
     /** Run 启动后初始化 app 系统, 应该在函数中准备好 GpuRuntime, 和至少一个窗口 */
     virtual void OnInitialize() = 0;
     /** Run 结束前清理, 默认会将 GpuRuntime 和窗口清理 */
@@ -163,8 +183,9 @@ protected:
     void RequestMultiThreaded(bool multiThreaded);
     void ApplyPendingThreadMode();
 
-protected:
-    SparseSet<AppWindow> _windows;
+public:
+    vector<unique_ptr<AppWindow>> _windows;
+    uint64_t _windowIdCounter{0};
     unique_ptr<GpuRuntime> _gpu;
     std::mutex _renderWakeMutex;
     std::condition_variable _renderWakeCV;

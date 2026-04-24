@@ -151,6 +151,7 @@ struct GpuSurfaceDescriptor {
 
 class GpuTask {
 public:
+    GpuTask() noexcept = default;
     GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept;
     GpuTask(const GpuTask&) noexcept = delete;
     GpuTask& operator=(const GpuTask&) noexcept = delete;
