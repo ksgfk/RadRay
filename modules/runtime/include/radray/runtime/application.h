@@ -52,18 +52,17 @@ public:
     AppWindow& operator=(AppWindow&& other) = delete;
     ~AppWindow() noexcept;
 
-    /** 重置所有 mailbox 状态, 会等待所有任务完成 */
     void ResetMailboxes() noexcept;
     /** 预留一个 mailbox 槽位并立刻标记为 Preparing；优先覆盖最新 Published，找不到则使用 Free 槽位 */
     std::optional<uint32_t> AllocMailboxSlot() noexcept;
     /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
-    /** Release 用于 request 不再占用 mailbox 时，使槽位重新失效并回到 Free */
+    /** Release 用于已 claim 的 request 不再占用 mailbox 时，使槽位重新失效并回到 Free */
     void ReleaseMailbox(RenderRequest request) noexcept;
     /** 尝试将最新发布的渲染请求加入队列 */
     std::optional<RenderRequest> TryQueueLatestPublished() noexcept;
-    /** 开始录制渲染任务 */
-    void BeginPrepareRenderTask(RenderRequest request) noexcept;
+    /** 尝试取出队列中的渲染请求, 并原子切换到正在准备渲染任务 */
+    std::optional<RenderRequest> TryClaimQueuedRenderRequest() noexcept;
     /** 录制渲染任务完成, 已提交到 GPU */
     void EndPrepareRenderTask(RenderRequest request, GpuTask task) noexcept;
 
