@@ -52,12 +52,16 @@ cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_B
 cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUILD_RENDER AND APPLE" OFF)
 cmake_dependent_option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_SPVCROSS "Enable SPIR-V Cross support" ON "RADRAY_BUILD_RENDER" OFF)
-cmake_dependent_option(RADRAY_ENABLE_IMGUI "Enable Dear ImGui support" ON "RADRAY_BUILD_RENDER" OFF)
-cmake_dependent_option(RADRAY_DISABLE_IMGUI_DEMO "Enable Dear ImGui demo window" OFF "RADRAY_ENABLE_IMGUI" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 cmake_dependent_option(RADRAY_ENABLE_FREETYPE "Enable FreeType support" ON "RADRAY_ENABLE_ZLIB AND RADRAY_ENABLE_LIBPNG" OFF)
+cmake_dependent_option(RADRAY_ENABLE_IMGUI "Enable Dear ImGui support" ON "RADRAY_BUILD_RENDER AND RADRAY_ENABLE_FREETYPE" OFF)
+cmake_dependent_option(RADRAY_DISABLE_IMGUI_DEMO "Disable Dear ImGui demo window" OFF "RADRAY_ENABLE_IMGUI" OFF)
+if (NOT RADRAY_ENABLE_FREETYPE)
+    set(RADRAY_ENABLE_IMGUI OFF CACHE BOOL "Enable Dear ImGui support" FORCE)
+    set(RADRAY_ENABLE_IMGUI OFF)
+endif()
 
 # 加载 manifest
 if (WIN32)
