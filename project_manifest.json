@@ -53,7 +53,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v2.2.7"
+            "Tag": "v3.3.1"
         },
         {
             "Name": "zlib",
@@ -65,7 +65,7 @@
             "Name": "libpng",
             "Type": "git",
             "Git": "https://github.com/pnggroup/libpng.git",
-            "Tag": "v1.6.57"
+            "Tag": "v1.6.58"
         },
         {
             "Name": "freetype",
@@ -113,7 +113,7 @@
             "Name": "imgui",
             "Type": "git",
             "Git": "https://github.com/ocornut/imgui.git",
-            "Tag": "v1.92.6"
+            "Tag": "v1.92.7"
         },
         {
             "Name": "stdexec",

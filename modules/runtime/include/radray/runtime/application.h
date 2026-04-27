@@ -3,6 +3,7 @@
 #include <optional>
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <stdexcept>
@@ -74,6 +75,10 @@ public:
     std::optional<RenderRequest> TryClaimQueuedRenderRequest() noexcept;
     /** 录制渲染任务完成, 已提交到 GPU */
     void EndPrepareRenderTask(RenderRequest request, GpuTask task) noexcept;
+    void AbandonClaimedFrame(
+        GpuRuntime* gpu,
+        GpuRuntime::BeginFrameResult& begin,
+        RenderRequest request) noexcept;
 
     /** 处理已完成的 flight slot */
     void CollectCompletedFlightSlots() noexcept;
@@ -179,8 +184,8 @@ public:
  * - TryQueueLatestPublished() 已经把 queued request 绑定到当前 surface frame slot。
  * - BeginFrame()/TryBeginFrame() 只能在确认同一个 window 已经存在 queued request 后调用。
  * - 渲染阶段允许先 BeginFrame()/TryBeginFrame()，再 TryClaimQueuedRenderRequest()，以避免 acquire 失败后已经持有 mailbox。
- * - acquire 成功后必须立即 claim 同一个 window 的 queued request；request.FlightSlot 必须等于
- *   GpuFrameContext::_frameSlotIndex，否则是调度错误，必须用 AbandonFrame() 收口已 acquire 的 context。
+ * - acquire 成功后必须立即 claim 同一个 window 的 queued request；claim 为空或 request.FlightSlot 不等于
+ *   GpuFrameContext::_frameSlotIndex 都是调度错误，通过 RADRAY_ASSERT 在 debug 阶段暴露。
  * - _allowFrameDrop=false 时使用 BeginFrame()，不会因为 RetryLater 丢弃 queued request。
  * - _allowFrameDrop=true 时使用 TryBeginFrame()；RetryLater 表示 acquire 侧暂不可用，可以 claim 后
  *   ReleaseMailbox() 丢弃队首 request，从而允许后续最新快照覆盖旧帧。
@@ -189,7 +194,11 @@ public:
  * - RequireRecreate 可由渲染阶段发现，但只能在 AppWindow::_stateMutex 保护下设置 _pendingRecreate。
  * - surface 重建只由主线程在 HandleWindowChanges() 中进入 safe point 后执行。
  *
- * 当前 Application 帧循环假设回调和 GPU 路径不抛异常；异常安全和跨线程异常交还不在本轮约定范围内。
+ * 异常处理约定：
+ * - 任意回调或 GPU 路径异常传播到 Application 层后都视为致命错误。
+ * - 主线程异常由 Run() 捕获；渲染线程异常会交还给 Run()，请求停止所有 frame 调度。
+ * - 如果异常发生在 acquire 成功之后，Application 会先尝试 AbandonFrame() 收口 frame 生命周期。
+ * - Run() 会停止渲染线程、等待 window queue、调用 OnShutdown()，并返回非 0。
  */
 class Application {
 public:
@@ -206,8 +215,8 @@ public:
 public:
     /** Run 启动后初始化 app 系统, 应该在函数中准备好 GpuRuntime, 和至少一个窗口 */
     virtual void OnInitialize() = 0;
-    /** Run 结束前清理, 默认会将 GpuRuntime 和窗口清理 */
-    virtual void OnShutdown();
+    /** Run 结束前清理, 默认会将 GpuRuntime 和窗口清理；清理函数不允许抛异常 */
+    virtual void OnShutdown() noexcept;
     /** 游戏逻辑帧调度, 主线程调度；可以请求创建窗口、切换线程模式和调度资源生命周期 */
     virtual void OnUpdate() = 0;
     /** 主线程通知可以安全地准备 mailbox slot 对应的最新渲染快照；只写入该 mailbox slot 的 CPU 渲染数据 */
@@ -231,7 +240,7 @@ public:
     /** 处理窗口状态更改, 例如重建交换链, 如果发生重建, 会暂停渲染线程进入 safe point, 主线程调度 */
     void HandleWindowChanges();
     /** 等待窗口关联的 cmd queue 完成, 主线程调度 */
-    void WaitWindowTasks();
+    void WaitWindowTasks() noexcept;
 
     /** 主线程直接执行 prepare、acquire、render、submit、present 全流程 */
     void ScheduleFramesSingleThreaded();
@@ -244,11 +253,15 @@ public:
     /** 解除 PauseRenderThread() 设置的暂停请求 */
     void ResumeRenderThread();
     /** 关闭各 window channel，唤醒渲染线程，并等待渲染线程退出；不中断正在执行的 OnRender() */
-    void StopRenderThread();
+    void StopRenderThread() noexcept;
     /** 主线程请求切换线程模式；实际切换延迟到 ApplyPendingThreadMode() 的 safe point */
     void RequestMultiThreaded(bool multiThreaded);
     /** 在 safe point 切换多线程模式, 只能在主线程调用 */
     void ApplyPendingThreadMode();
+
+    void RequestFatalExit(std::exception_ptr exception) noexcept;
+    std::exception_ptr GetFatalException() noexcept;
+    void ShutdownAfterRun() noexcept;
 
 public:
     /** 主线程拥有 window 列表；多线程模式下修改前必须进入 safe point */
@@ -264,6 +277,9 @@ public:
     std::condition_variable _pauseAckCV;
     std::thread _renderThread;
     std::atomic_bool _exitRequested{false};
+    std::atomic_bool _fatalExitRequested{false};
+    std::mutex _fatalExceptionMutex;
+    std::exception_ptr _fatalException{nullptr};
     bool _renderPauseRequested{false};
     bool _renderPaused{false};
     bool _renderStopRequested{false};

@@ -1,12 +1,33 @@
 #include <radray/runtime/application.h>
 
 #include <chrono>
+#include <exception>
+#include <string_view>
 #include <variant>
 
 #include <radray/logger.h>
 #include <radray/utility.h>
 
 namespace radray {
+
+namespace {
+
+void LogException(std::string_view message, std::exception_ptr exception) noexcept {
+    if (exception == nullptr) {
+        RADRAY_ERR_LOG("{}: unknown exception", message);
+        return;
+    }
+
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception& ex) {
+        RADRAY_ERR_LOG("{}: {}", message, ex.what());
+    } catch (...) {
+        RADRAY_ERR_LOG("{}: unknown exception", message);
+    }
+}
+
+}  // namespace
 
 AppWindow::~AppWindow() noexcept {
     this->ResetMailboxes();
@@ -225,6 +246,35 @@ void AppWindow::EndPrepareRenderTask(RenderRequest request, GpuTask task) noexce
     flight._state = FlightState::InRender;
 }
 
+void AppWindow::AbandonClaimedFrame(
+    GpuRuntime* gpu,
+    GpuRuntime::BeginFrameResult& begin,
+    RenderRequest request) noexcept {
+    if (gpu == nullptr || begin.Context == nullptr) {
+        this->ReleaseMailbox(request);
+        return;
+    }
+
+    try {
+        auto abandon = gpu->AbandonFrame(begin.Context.Release());
+        this->EndPrepareRenderTask(request, std::move(abandon.Task));
+        if (abandon.Present.Status == render::SwapChainStatus::RequireRecreate) {
+            std::unique_lock<std::mutex> stateLock{_stateMutex, std::defer_lock};
+            if (_app != nullptr && _app->_multiThreaded) {
+                stateLock.lock();
+            }
+            _pendingRecreate = true;
+        } else if (abandon.Present.Status != render::SwapChainStatus::Success) {
+            RADRAY_ERR_LOG("AbandonFrame failed with present status {}", abandon.Present.Status);
+        }
+        return;
+    } catch (...) {
+        LogException("AbandonFrame failed", std::current_exception());
+    }
+
+    this->ReleaseMailbox(request);
+}
+
 void AppWindow::CollectCompletedFlightSlots() noexcept {
     std::unique_lock<std::mutex> lock{_stateMutex, std::defer_lock};
     if (_app->_multiThreaded) lock.lock();
@@ -265,9 +315,48 @@ bool AppWindow::CanRender() const noexcept {
            !_mailboxes.empty();
 }
 
-void Application::OnShutdown() {
+void Application::OnShutdown() noexcept {
     _windows.clear();
     _gpu.reset();
+}
+
+void Application::RequestFatalExit(std::exception_ptr exception) noexcept {
+    _fatalExitRequested = true;
+    _exitRequested = true;
+
+    try {
+        std::lock_guard<std::mutex> exceptionLock{_fatalExceptionMutex};
+        if (_fatalException == nullptr) {
+            _fatalException = exception;
+        }
+    } catch (...) {
+    }
+
+    try {
+        std::lock_guard<std::mutex> wakeLock{_renderWakeMutex};
+        if (_renderThread.joinable()) {
+            _renderStopRequested = true;
+            _renderPauseRequested = false;
+        }
+    } catch (...) {
+    }
+    _renderWakeCV.notify_all();
+    _pauseAckCV.notify_all();
+}
+
+std::exception_ptr Application::GetFatalException() noexcept {
+    try {
+        std::lock_guard<std::mutex> exceptionLock{_fatalExceptionMutex};
+        return _fatalException;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void Application::ShutdownAfterRun() noexcept {
+    this->StopRenderThread();
+    this->WaitWindowTasks();
+    this->OnShutdown();
 }
 
 int32_t Application::Run(int argc, char* argv[]) {
@@ -310,21 +399,16 @@ int32_t Application::Run(int argc, char* argv[]) {
             }
         }
 
-        this->StopRenderThread();
-        this->WaitWindowTasks();
-        this->OnShutdown();
-        return 0;
-    } catch (const std::exception& ex) {
-        RADRAY_ERR_LOG("Application::Run failed: {}", ex.what());
-        this->StopRenderThread();
-        this->WaitWindowTasks();
-        this->OnShutdown();
-        return -1;
+        if (_fatalExitRequested.load()) {
+            LogException("Application::Run failed", this->GetFatalException());
+        }
+        this->ShutdownAfterRun();
+        return !_fatalExitRequested.load() ? 0 : -1;
     } catch (...) {
-        RADRAY_ERR_LOG("Application::Run failed with unknown exception");
-        this->StopRenderThread();
-        this->WaitWindowTasks();
-        this->OnShutdown();
+        const std::exception_ptr exception = std::current_exception();
+        this->RequestFatalExit(exception);
+        LogException("Application::Run failed", exception);
+        this->ShutdownAfterRun();
         return -1;
     }
 }
@@ -496,6 +580,9 @@ void Application::HandleWindowChanges() {
     }
 
     this->WaitWindowTasks();
+    if (_exitRequested.load()) {
+        return;
+    }
 
     for (const auto& window : _windows) {
         if (window == nullptr || window->_window == nullptr || window->_surface == nullptr) {
@@ -558,22 +645,28 @@ void Application::HandleWindowChanges() {
     }
 }
 
-void Application::WaitWindowTasks() {
-    if (_gpu == nullptr) {
-        return;
-    }
+void Application::WaitWindowTasks() noexcept {
+    try {
+        if (_gpu == nullptr) {
+            return;
+        }
 
-    for (const auto& window : _windows) {
-        if (window == nullptr || window->_surface == nullptr || !window->_surface->IsValid()) {
-            continue;
+        for (const auto& window : _windows) {
+            if (window == nullptr || window->_surface == nullptr || !window->_surface->IsValid()) {
+                continue;
+            }
+            _gpu->Wait(render::QueueType::Direct, window->_surface->GetQueueSlot());
         }
-        _gpu->Wait(render::QueueType::Direct, window->_surface->GetQueueSlot());
-    }
-    _gpu->ProcessTasks();
-    for (const auto& window : _windows) {
-        if (window != nullptr) {
-            window->CollectCompletedFlightSlots();
+        _gpu->ProcessTasks();
+        for (const auto& window : _windows) {
+            if (window != nullptr) {
+                window->CollectCompletedFlightSlots();
+            }
         }
+    } catch (...) {
+        const std::exception_ptr exception = std::current_exception();
+        LogException("Application::WaitWindowTasks failed", exception);
+        this->RequestFatalExit(exception);
     }
 }
 
@@ -633,9 +726,8 @@ void Application::ScheduleFramesSingleThreaded() {
 
         if (begin.Status == render::SwapChainStatus::RetryLater) {
             auto dropped = window->TryClaimQueuedRenderRequest();
-            if (dropped.has_value()) {
-                window->ReleaseMailbox(*dropped);
-            }
+            RADRAY_ASSERT(dropped.has_value());
+            window->ReleaseMailbox(*dropped);
             continue;
         }
         if (begin.Status == render::SwapChainStatus::RequireRecreate) {
@@ -647,35 +739,29 @@ void Application::ScheduleFramesSingleThreaded() {
         }
 
         auto request = window->TryClaimQueuedRenderRequest();
-        if (!request.has_value()) {
-            auto abandon = _gpu->AbandonFrame(begin.Context.Release());
-            RADRAY_UNUSED(abandon);
-            continue;
-        }
-
-        if (begin.Context->_frameSlotIndex != request->FlightSlot) {
-            auto abandon = _gpu->AbandonFrame(begin.Context.Release());
-            window->ReleaseMailbox(*request);
-            RADRAY_UNUSED(abandon);
-            RADRAY_ASSERT(false);
-            continue;
-        }
-
-        this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
+        RADRAY_ASSERT(request.has_value());
+        RADRAY_ASSERT(begin.Context->_frameSlotIndex == request->FlightSlot);
 
         GpuRuntime::SubmitFrameResult submit{};
-        if (begin.Context->IsEmpty()) {
-            submit = _gpu->AbandonFrame(begin.Context.Release());
-        } else {
-            submit = _gpu->SubmitFrame(begin.Context.Release());
+        try {
+            this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
+
+            if (begin.Context->IsEmpty()) {
+                submit = _gpu->AbandonFrame(begin.Context.Release());
+            } else {
+                submit = _gpu->SubmitFrame(begin.Context.Release());
+            }
+        } catch (...) {
+            window->AbandonClaimedFrame(_gpu.get(), begin, *request);
+            throw;
         }
 
+        window->EndPrepareRenderTask(*request, std::move(submit.Task));
         if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
             window->_pendingRecreate = true;
         } else if (submit.Present.Status != render::SwapChainStatus::Success) {
             throw AppException(fmt::format("Present failed with status {}", submit.Present.Status));
         }
-        window->EndPrepareRenderTask(*request, std::move(submit.Task));
     }
 }
 
@@ -713,139 +799,134 @@ void Application::ScheduleFramesMultiThreaded() {
 }
 
 void Application::RenderThreadImpl() {
-    for (;;) {
-        {
-            std::unique_lock<std::mutex> wakeLock{_renderWakeMutex};
-            if (_renderPauseRequested && !_renderStopRequested) {
-                _renderPaused = true;
-                _pauseAckCV.notify_all();
-                _renderWakeCV.wait(wakeLock, [this] {
-                    return _renderStopRequested || !_renderPauseRequested;
-                });
-                _renderPaused = false;
-                _pauseAckCV.notify_all();
-            }
-            if (_renderStopRequested) {
-                break;
-            }
-            _renderWakeCV.wait(wakeLock, [this] {
-                if (_renderStopRequested || _renderPauseRequested) {
-                    return true;
-                }
-                for (const auto& window : _windows) {
-                    if (window == nullptr) {
-                        continue;
-                    }
-                    std::lock_guard<std::mutex> channelLock{window->_channel._mutex};
-                    if (!window->_channel._queue.empty()) {
-                        return true;
-                    }
-                }
-                return false;
-            });
-            if (_renderStopRequested) {
-                break;
-            }
-            if (_renderPauseRequested) {
-                continue;
-            }
-        }
-
-        bool didWork = false;
-        for (const auto& window : _windows) {
+    try {
+        for (;;) {
             {
-                std::lock_guard<std::mutex> wakeLock{_renderWakeMutex};
-                if (_renderStopRequested || _renderPauseRequested) {
+                std::unique_lock<std::mutex> wakeLock{_renderWakeMutex};
+                if (_renderPauseRequested && !_renderStopRequested) {
+                    _renderPaused = true;
+                    _pauseAckCV.notify_all();
+                    _renderWakeCV.wait(wakeLock, [this] {
+                        return _renderStopRequested || !_renderPauseRequested;
+                    });
+                    _renderPaused = false;
+                    _pauseAckCV.notify_all();
+                }
+                if (_renderStopRequested) {
                     break;
                 }
-            }
-
-            if (window == nullptr) {
-                continue;
-            }
-
-            GpuSurface* surface = nullptr;
-            {
-                std::lock_guard<std::mutex> stateLock{window->_stateMutex};
-                if (window->_pendingRecreate || window->_surface == nullptr || !window->_surface->IsValid()) {
+                _renderWakeCV.wait(wakeLock, [this] {
+                    if (_renderStopRequested || _renderPauseRequested) {
+                        return true;
+                    }
+                    for (const auto& window : _windows) {
+                        if (window == nullptr) {
+                            continue;
+                        }
+                        std::lock_guard<std::mutex> channelLock{window->_channel._mutex};
+                        if (!window->_channel._queue.empty()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+                if (_renderStopRequested) {
+                    break;
+                }
+                if (_renderPauseRequested) {
                     continue;
                 }
-                surface = window->_surface.get();
             }
 
-            bool hasQueuedRequest = false;
-            {
-                std::lock_guard<std::mutex> channelLock{window->_channel._mutex};
-                hasQueuedRequest = !window->_channel._queue.empty();
-            }
-            if (!hasQueuedRequest) {
-                continue;
-            }
+            bool didWork = false;
+            for (const auto& window : _windows) {
+                {
+                    std::lock_guard<std::mutex> wakeLock{_renderWakeMutex};
+                    if (_renderStopRequested || _renderPauseRequested) {
+                        break;
+                    }
+                }
 
-            GpuRuntime::BeginFrameResult begin{};
-            if (_allowFrameDrop) {
-                begin = _gpu->TryBeginFrame(surface);
-            } else {
-                begin = _gpu->BeginFrame(surface);
-            }
+                if (window == nullptr) {
+                    continue;
+                }
 
-            if (begin.Status == render::SwapChainStatus::RetryLater) {
-                auto dropped = window->TryClaimQueuedRenderRequest();
-                if (dropped.has_value()) {
+                GpuSurface* surface = nullptr;
+                {
+                    std::lock_guard<std::mutex> stateLock{window->_stateMutex};
+                    if (window->_pendingRecreate || window->_surface == nullptr || !window->_surface->IsValid()) {
+                        continue;
+                    }
+                    surface = window->_surface.get();
+                }
+
+                bool hasQueuedRequest = false;
+                {
+                    std::lock_guard<std::mutex> channelLock{window->_channel._mutex};
+                    hasQueuedRequest = !window->_channel._queue.empty();
+                }
+                if (!hasQueuedRequest) {
+                    continue;
+                }
+
+                GpuRuntime::BeginFrameResult begin{};
+                if (_allowFrameDrop) {
+                    begin = _gpu->TryBeginFrame(surface);
+                } else {
+                    begin = _gpu->BeginFrame(surface);
+                }
+
+                if (begin.Status == render::SwapChainStatus::RetryLater) {
+                    auto dropped = window->TryClaimQueuedRenderRequest();
+                    RADRAY_ASSERT(dropped.has_value());
                     window->ReleaseMailbox(*dropped);
                     didWork = true;
+                    continue;
                 }
-                continue;
-            }
-            if (begin.Status == render::SwapChainStatus::RequireRecreate) {
-                std::lock_guard<std::mutex> stateLock{window->_stateMutex};
-                window->_pendingRecreate = true;
-                continue;
-            }
-            if (begin.Status != render::SwapChainStatus::Success || begin.Context == nullptr) {
-                throw AppException(fmt::format("BeginFrame failed with status {}", begin.Status));
-            }
+                if (begin.Status == render::SwapChainStatus::RequireRecreate) {
+                    std::lock_guard<std::mutex> stateLock{window->_stateMutex};
+                    window->_pendingRecreate = true;
+                    continue;
+                }
+                if (begin.Status != render::SwapChainStatus::Success || begin.Context == nullptr) {
+                    throw AppException(fmt::format("BeginFrame failed with status {}", begin.Status));
+                }
 
-            auto request = window->TryClaimQueuedRenderRequest();
-            if (!request.has_value()) {
-                auto abandon = _gpu->AbandonFrame(begin.Context.Release());
-                RADRAY_UNUSED(abandon);
+                auto request = window->TryClaimQueuedRenderRequest();
+                RADRAY_ASSERT(request.has_value());
+                RADRAY_ASSERT(begin.Context->_frameSlotIndex == request->FlightSlot);
+
+                GpuRuntime::SubmitFrameResult submit{};
+                try {
+                    this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
+
+                    if (begin.Context->IsEmpty()) {
+                        submit = _gpu->AbandonFrame(begin.Context.Release());
+                    } else {
+                        submit = _gpu->SubmitFrame(begin.Context.Release());
+                    }
+                } catch (...) {
+                    window->AbandonClaimedFrame(_gpu.get(), begin, *request);
+                    throw;
+                }
+
+                window->EndPrepareRenderTask(*request, std::move(submit.Task));
+                if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
+                    std::lock_guard<std::mutex> stateLock{window->_stateMutex};
+                    window->_pendingRecreate = true;
+                } else if (submit.Present.Status != render::SwapChainStatus::Success) {
+                    throw AppException(fmt::format("Present failed with status {}", submit.Present.Status));
+                }
                 didWork = true;
-                continue;
             }
 
-            if (begin.Context->_frameSlotIndex != request->FlightSlot) {
-                auto abandon = _gpu->AbandonFrame(begin.Context.Release());
-                window->ReleaseMailbox(*request);
-                RADRAY_UNUSED(abandon);
-                RADRAY_ASSERT(false);
-                didWork = true;
-                continue;
+            if (!didWork) {
+                std::unique_lock<std::mutex> wakeLock{_renderWakeMutex};
+                _renderWakeCV.wait_for(wakeLock, std::chrono::milliseconds{1});
             }
-
-            this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
-
-            GpuRuntime::SubmitFrameResult submit{};
-            if (begin.Context->IsEmpty()) {
-                submit = _gpu->AbandonFrame(begin.Context.Release());
-            } else {
-                submit = _gpu->SubmitFrame(begin.Context.Release());
-            }
-
-            if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
-                std::lock_guard<std::mutex> stateLock{window->_stateMutex};
-                window->_pendingRecreate = true;
-            } else if (submit.Present.Status != render::SwapChainStatus::Success) {
-                throw AppException(fmt::format("Present failed with status {}", submit.Present.Status));
-            }
-            window->EndPrepareRenderTask(*request, std::move(submit.Task));
-            didWork = true;
         }
-
-        if (!didWork) {
-            std::unique_lock<std::mutex> wakeLock{_renderWakeMutex};
-            _renderWakeCV.wait_for(wakeLock, std::chrono::milliseconds{1});
-        }
+    } catch (...) {
+        this->RequestFatalExit(std::current_exception());
     }
 
     {
@@ -876,39 +957,65 @@ void Application::ResumeRenderThread() {
     _renderWakeCV.notify_all();
 }
 
-void Application::StopRenderThread() {
+void Application::StopRenderThread() noexcept {
     if (!_renderThread.joinable()) {
         return;
     }
 
     for (const auto& window : _windows) {
         if (window != nullptr) {
-            window->_channel.Stop();
+            try {
+                window->_channel.Stop();
+            } catch (...) {
+                const std::exception_ptr exception = std::current_exception();
+                LogException("Application::StopRenderThread failed to stop render channel", exception);
+                this->RequestFatalExit(exception);
+            }
         }
     }
 
-    {
+    try {
         std::lock_guard<std::mutex> wakeLock{_renderWakeMutex};
         _renderStopRequested = true;
         _renderPauseRequested = false;
+    } catch (...) {
+        const std::exception_ptr exception = std::current_exception();
+        LogException("Application::StopRenderThread failed to request stop", exception);
+        this->RequestFatalExit(exception);
     }
     _renderWakeCV.notify_all();
-    _renderThread.join();
+    try {
+        _renderThread.join();
+    } catch (...) {
+        const std::exception_ptr exception = std::current_exception();
+        LogException("Application::StopRenderThread failed to join render thread", exception);
+        this->RequestFatalExit(exception);
+    }
 
     for (const auto& window : _windows) {
         if (window == nullptr) {
             continue;
         }
-        while (auto request = window->TryClaimQueuedRenderRequest()) {
-            window->ReleaseMailbox(*request);
+        try {
+            while (auto request = window->TryClaimQueuedRenderRequest()) {
+                window->ReleaseMailbox(*request);
+            }
+        } catch (...) {
+            const std::exception_ptr exception = std::current_exception();
+            LogException("Application::StopRenderThread failed to release queued render requests", exception);
+            this->RequestFatalExit(exception);
         }
     }
 
-    {
+    try {
         std::lock_guard<std::mutex> wakeLock{_renderWakeMutex};
         _renderStopRequested = false;
         _renderPauseRequested = false;
         _renderPaused = false;
+    } catch (...) {
+        const std::exception_ptr exception = std::current_exception();
+        LogException("Application::StopRenderThread failed to reset render thread state", exception);
+        this->RequestFatalExit(exception);
     }
 }
 

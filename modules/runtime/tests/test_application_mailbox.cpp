@@ -1,4 +1,5 @@
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -12,10 +13,50 @@ namespace {
 class MockApplication final : public Application {
 public:
     void OnInitialize() override {}
-    void OnShutdown() override {}
+    void OnShutdown() noexcept override {}
     void OnUpdate() override {}
     void OnPrepareRender(AppWindowHandle, uint32_t) override {}
     void OnRender(AppWindowHandle, GpuFrameContext*, uint32_t) override {}
+};
+
+enum class ThrowSite {
+    Initialize,
+    Update
+};
+
+class ThrowingApplication final : public Application {
+public:
+    explicit ThrowingApplication(ThrowSite throwSite) noexcept
+        : _throwSite(throwSite) {}
+
+    void OnInitialize() override {
+        InitializeCalled = true;
+        if (_throwSite == ThrowSite::Initialize) {
+            throw std::runtime_error("initialize failed");
+        }
+    }
+
+    void OnShutdown() noexcept override {
+        ShutdownCalled = true;
+    }
+
+    void OnUpdate() override {
+        UpdateCalled = true;
+        if (_throwSite == ThrowSite::Update) {
+            throw std::runtime_error("update failed");
+        }
+        _exitRequested = true;
+    }
+
+    void OnPrepareRender(AppWindowHandle, uint32_t) override {}
+    void OnRender(AppWindowHandle, GpuFrameContext*, uint32_t) override {}
+
+    bool InitializeCalled{false};
+    bool UpdateCalled{false};
+    bool ShutdownCalled{false};
+
+private:
+    ThrowSite _throwSite{ThrowSite::Initialize};
 };
 
 class FakeFence final : public render::Fence {
@@ -114,6 +155,24 @@ protected:
     MockApplication App;
     AppWindow Window;
 };
+
+TEST(ApplicationExceptionTest, RunReturnsNonZeroAndShutsDownWhenInitializeThrows) {
+    ThrowingApplication app{ThrowSite::Initialize};
+
+    EXPECT_NE(app.Run(0, nullptr), 0);
+    EXPECT_TRUE(app.InitializeCalled);
+    EXPECT_FALSE(app.UpdateCalled);
+    EXPECT_TRUE(app.ShutdownCalled);
+}
+
+TEST(ApplicationExceptionTest, RunReturnsNonZeroAndShutsDownWhenUpdateThrows) {
+    ThrowingApplication app{ThrowSite::Update};
+
+    EXPECT_NE(app.Run(0, nullptr), 0);
+    EXPECT_TRUE(app.InitializeCalled);
+    EXPECT_TRUE(app.UpdateCalled);
+    EXPECT_TRUE(app.ShutdownCalled);
+}
 
 TEST_F(AppWindowMailboxTest, PublishReplacesOlderLatestAndAllocReusesLatest) {
     auto slot0 = Window.AllocMailboxSlot();

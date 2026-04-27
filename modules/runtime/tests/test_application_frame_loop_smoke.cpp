@@ -296,7 +296,7 @@ public:
         this->RequestMultiThreaded(StartsMultiThreaded());
     }
 
-    void OnShutdown() override {
+    void OnShutdown() noexcept override {
         {
             std::lock_guard<std::mutex> lock{_renderDataMutex};
             _seenBackBufferCount.store(_backBuffers.SeenBackBufferIndices.size());
