@@ -4,6 +4,8 @@
 #include <radray/text_encoding.h>
 #include <radray/logger.h>
 
+#include <algorithm>
+
 // make windows happy :)
 #ifdef DELETE
 #undef DELETE
@@ -21,7 +23,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
         auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
         if (window) {
             for (auto& proc : window->_extraWndProcs) {
-                LRESULT r = proc(hWnd, uMsg, wParam, lParam);
+                LRESULT r = proc.Proc(hWnd, uMsg, wParam, lParam);
                 if (r) {
                     return r;
                 }
@@ -93,6 +95,14 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             if (window) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wParam);
                 window->_eventMouseWheel(delta);
+            }
+            return 0;
+        }
+        case WM_CHAR:
+        case WM_SYSCHAR: {
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window && wParam > 0) {
+                window->_eventTextInput(static_cast<uint32_t>(wParam));
             }
             return 0;
         }
@@ -282,10 +292,14 @@ Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescr
     }
     win->_windowedStyle = style;
     win->_windowedExStyle = exStyle;
-    win->_extraWndProcs = {desc.ExtraWndProcs.begin(), desc.ExtraWndProcs.end()};
+    for (const auto& proc : desc.ExtraWndProcs) {
+        win->AddWin32MsgProc(proc);
+    }
 
-    ::ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
-    ::UpdateWindow(hwnd);
+    if (desc.StartVisible) {
+        ::ShowWindow(hwnd, desc.StartMaximized ? SW_MAXIMIZE : SW_SHOW);
+        ::UpdateWindow(hwnd);
+    }
 
     if (desc.Fullscreen) {
         win->EnterFullscreen();
@@ -332,13 +346,26 @@ WindowNativeHandler Win32Window::GetNativeHandler() const noexcept {
 }
 
 WindowVec2i Win32Window::GetSize() const noexcept {
+    if (!_hwnd) return WindowVec2i{0, 0};
     RECT rc;
     ::GetClientRect(_hwnd, &rc);
     return WindowVec2i{rc.right - rc.left, rc.bottom - rc.top};
 }
 
+WindowVec2i Win32Window::GetPosition() const noexcept {
+    if (!_hwnd) return WindowVec2i{0, 0};
+    POINT pos{0, 0};
+    ::ClientToScreen(_hwnd, &pos);
+    return WindowVec2i{pos.x, pos.y};
+}
+
 bool Win32Window::IsMinimized() const noexcept {
     return ::IsIconic(_hwnd) != 0;
+}
+
+bool Win32Window::IsFocused() const noexcept {
+    if (!_hwnd) return false;
+    return ::GetForegroundWindow() == _hwnd;
 }
 
 void Win32Window::SetSize(int width, int height) noexcept {
@@ -355,6 +382,96 @@ void Win32Window::SetSize(int width, int height) noexcept {
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     ::SetWindowPos(_hwnd, nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+}
+
+void Win32Window::SetPosition(int x, int y) noexcept {
+    if (!_hwnd) return;
+    if (_isFullscreen) {
+        RADRAY_ERR_LOG("cannot set position when in fullscreen mode");
+        return;
+    }
+    RECT rc{x, y, x, y};
+    DWORD style = ::GetWindowLong(_hwnd, GWL_STYLE);
+    DWORD exStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
+    ::AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    ::SetWindowPos(_hwnd, nullptr, rc.left, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+}
+
+void Win32Window::SetTitle(std::string_view title) noexcept {
+    if (!_hwnd) return;
+    auto wideTitle = text_encoding::ToWideChar(title);
+    if (!wideTitle.has_value()) {
+        RADRAY_ERR_LOG("failed to convert window title to UTF-16");
+        return;
+    }
+    ::DefWindowProcW(_hwnd, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(wideTitle->c_str()));
+}
+
+void Win32Window::Show() noexcept {
+    if (!_hwnd) return;
+    ::ShowWindow(_hwnd, SW_SHOWNA);
+    ::UpdateWindow(_hwnd);
+}
+
+void Win32Window::Focus() noexcept {
+    if (!_hwnd) return;
+    ::BringWindowToTop(_hwnd);
+    ::SetForegroundWindow(_hwnd);
+    ::SetFocus(_hwnd);
+}
+
+void Win32Window::SetAlpha(float alpha) noexcept {
+    if (!_hwnd) return;
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    if (alpha < 1.0f) {
+        const DWORD exStyle = static_cast<DWORD>(::GetWindowLong(_hwnd, GWL_EXSTYLE)) | WS_EX_LAYERED;
+        ::SetWindowLong(_hwnd, GWL_EXSTYLE, static_cast<LONG>(exStyle));
+        ::SetLayeredWindowAttributes(_hwnd, 0, static_cast<BYTE>(255.0f * alpha), LWA_ALPHA);
+    } else {
+        const DWORD exStyle = static_cast<DWORD>(::GetWindowLong(_hwnd, GWL_EXSTYLE)) & ~WS_EX_LAYERED;
+        ::SetWindowLong(_hwnd, GWL_EXSTYLE, static_cast<LONG>(exStyle));
+    }
+}
+
+float Win32Window::GetDpiScale() const noexcept {
+    if (!_hwnd) return 1.0f;
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    if (HMODULE user32 = ::GetModuleHandleW(L"user32.dll")) {
+        auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(::GetProcAddress(user32, "GetDpiForWindow"));
+        if (getDpiForWindow != nullptr) {
+            const UINT dpi = getDpiForWindow(_hwnd);
+            return dpi > 0 ? static_cast<float>(dpi) / 96.0f : 1.0f;
+        }
+    }
+
+    HDC dc = ::GetDC(_hwnd);
+    if (dc == nullptr) return 1.0f;
+    const int dpi = ::GetDeviceCaps(dc, LOGPIXELSX);
+    ::ReleaseDC(_hwnd, dc);
+    return dpi > 0 ? static_cast<float>(dpi) / 96.0f : 1.0f;
+}
+
+Win32MsgProcHandle Win32Window::AddWin32MsgProc(std::function<Win32MsgProc> proc) noexcept {
+    if (!proc) return Win32MsgProcHandle::Invalid();
+    Win32MsgProcHandle handle{_nextExtraWndProcId++};
+    try {
+        _extraWndProcs.emplace_back(Win32MsgProcEntry{handle, std::move(proc)});
+    } catch (...) {
+        RADRAY_ERR_LOG("failed to add Win32 message proc");
+        return Win32MsgProcHandle::Invalid();
+    }
+    return handle;
+}
+
+void Win32Window::RemoveWin32MsgProc(Win32MsgProcHandle handle) noexcept {
+    if (!handle.IsValid()) return;
+    auto it = std::remove_if(
+        _extraWndProcs.begin(),
+        _extraWndProcs.end(),
+        [handle](const Win32MsgProcEntry& entry) {
+            return entry.Handle.Id == handle.Id;
+        });
+    _extraWndProcs.erase(it, _extraWndProcs.end());
 }
 
 sigslot::signal<int, int>& Win32Window::EventResized() noexcept {
@@ -375,6 +492,10 @@ sigslot::signal<KeyCode, Action>& Win32Window::EventKeyboard() noexcept {
 
 sigslot::signal<int>& Win32Window::EventMouseWheel() noexcept {
     return _eventMouseWheel;
+}
+
+sigslot::signal<uint32_t>& Win32Window::EventTextInput() noexcept {
+    return _eventTextInput;
 }
 
 bool Win32Window::EnterFullscreen() {

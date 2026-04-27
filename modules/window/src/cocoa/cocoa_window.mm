@@ -2,6 +2,8 @@
 
 #include <radray/logger.h>
 
+#include <algorithm>
+
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Carbon/Carbon.h>
@@ -248,6 +250,10 @@ static MouseButton MapCocoaNSButtonToMouseButton(NSInteger buttonNumber) noexcep
     radray::KeyCode code = radray::MapCocoaKeyToKeyCode([event keyCode]);
     radray::Action action = [event isARepeat] ? radray::Action::REPEATED : radray::Action::PRESSED;
     _owner->_eventKeyboard(code, action);
+    NSString* chars = [event characters];
+    for (NSUInteger i = 0; i < [chars length]; ++i) {
+        _owner->_eventTextInput((uint32_t)[chars characterAtIndex:i]);
+    }
 }
 
 - (void)keyUp:(NSEvent*)event {
@@ -355,8 +361,10 @@ Nullable<unique_ptr<NativeWindow>> CreateCocoaWindow(const CocoaWindowCreateDesc
         [window toggleFullScreen:nil];
     }
 
-    [window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
+    if (desc.StartVisible) {
+        [window makeKeyAndOrderFront:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    }
 
     return win;
 }
@@ -417,9 +425,21 @@ WindowVec2i CocoaWindow::GetSize() const noexcept {
     return WindowVec2i{(int32_t)backing.width, (int32_t)backing.height};
 }
 
+WindowVec2i CocoaWindow::GetPosition() const noexcept {
+    if (!_nsWindow || !_nsView) return WindowVec2i{0, 0};
+    NSRect content = [_nsWindow contentRectForFrameRect:[_nsWindow frame]];
+    NSSize backing = [_nsView convertSizeToBacking:NSMakeSize(1, 1)];
+    return WindowVec2i{(int32_t)(content.origin.x * backing.width), (int32_t)(content.origin.y * backing.height)};
+}
+
 bool CocoaWindow::IsMinimized() const noexcept {
     if (!_nsWindow) return false;
     return [_nsWindow isMiniaturized];
+}
+
+bool CocoaWindow::IsFocused() const noexcept {
+    if (!_nsWindow) return false;
+    return [_nsWindow isKeyWindow];
 }
 
 void CocoaWindow::SetSize(int width, int height) noexcept {
@@ -430,10 +450,60 @@ void CocoaWindow::SetSize(int width, int height) noexcept {
     [_nsWindow setContentSize:NSMakeSize(w, h)];
 }
 
+void CocoaWindow::SetPosition(int x, int y) noexcept {
+    if (!_nsWindow || !_nsView) return;
+    NSSize backing = [_nsView convertSizeToBacking:NSMakeSize(1, 1)];
+    NSRect frame = [_nsWindow frame];
+    NSRect content = [_nsWindow contentRectForFrameRect:frame];
+    CGFloat contentX = x / backing.width;
+    CGFloat contentY = y / backing.height;
+    NSPoint frameOrigin = NSMakePoint(
+        contentX + (frame.origin.x - content.origin.x),
+        contentY + (frame.origin.y - content.origin.y));
+    [_nsWindow setFrameOrigin:frameOrigin];
+}
+
+void CocoaWindow::SetTitle(std::string_view title) noexcept {
+    if (!_nsWindow) return;
+    string utf8Title{title};
+    [_nsWindow setTitle:[NSString stringWithUTF8String:utf8Title.c_str()]];
+}
+
+void CocoaWindow::Show() noexcept {
+    if (!_nsWindow) return;
+    [_nsWindow orderFront:nil];
+}
+
+void CocoaWindow::Focus() noexcept {
+    if (!_nsWindow) return;
+    [_nsWindow makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+void CocoaWindow::SetAlpha(float alpha) noexcept {
+    if (!_nsWindow) return;
+    [_nsWindow setAlphaValue:std::clamp(alpha, 0.0f, 1.0f)];
+}
+
+float CocoaWindow::GetDpiScale() const noexcept {
+    if (!_nsWindow) return 1.0f;
+    return (float)[_nsWindow backingScaleFactor];
+}
+
+Win32MsgProcHandle CocoaWindow::AddWin32MsgProc(std::function<Win32MsgProc> proc) noexcept {
+    (void)proc;
+    return Win32MsgProcHandle::Invalid();
+}
+
+void CocoaWindow::RemoveWin32MsgProc(Win32MsgProcHandle handle) noexcept {
+    (void)handle;
+}
+
 sigslot::signal<int, int>& CocoaWindow::EventResized() noexcept { return _eventResized; }
 sigslot::signal<int, int>& CocoaWindow::EventResizing() noexcept { return _eventResizing; }
 sigslot::signal<int, int, MouseButton, Action>& CocoaWindow::EventTouch() noexcept { return _eventTouch; }
 sigslot::signal<KeyCode, Action>& CocoaWindow::EventKeyboard() noexcept { return _eventKeyboard; }
 sigslot::signal<int>& CocoaWindow::EventMouseWheel() noexcept { return _eventMouseWheel; }
+sigslot::signal<uint32_t>& CocoaWindow::EventTextInput() noexcept { return _eventTextInput; }
 
 }  // namespace radray

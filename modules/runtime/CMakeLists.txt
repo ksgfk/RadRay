@@ -14,6 +14,10 @@ if (RADRAY_ENABLE_IMGUI)
         "${RADRAY_IMGUI_ROOT}/imgui_tables.cpp"
         "${RADRAY_IMGUI_ROOT}/imgui_widgets.cpp"
         "${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.cpp")
+    if (WIN32)
+        list(APPEND RADRAY_RUNTIME_SRC
+            "${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp")
+    endif()
     list(APPEND RADRAY_RUNTIME_INC
         "include/radray/runtime/imgui/imgui_config.h"
         "${RADRAY_IMGUI_ROOT}/imgui.h"
@@ -22,6 +26,10 @@ if (RADRAY_ENABLE_IMGUI)
         "${RADRAY_IMGUI_ROOT}/imstb_rectpack.h"
         "${RADRAY_IMGUI_ROOT}/imstb_textedit.h"
         "${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.h")
+    if (WIN32)
+        list(APPEND RADRAY_RUNTIME_INC
+            "${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.h")
+    endif()
 endif()
 
 add_library(radrayruntime STATIC ${RADRAY_RUNTIME_SRC} ${RADRAY_RUNTIME_INC})

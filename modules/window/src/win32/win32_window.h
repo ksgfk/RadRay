@@ -39,20 +39,36 @@ public:
     bool ShouldClose() const noexcept override;
     WindowNativeHandler GetNativeHandler() const noexcept override;
     WindowVec2i GetSize() const noexcept override;
+    WindowVec2i GetPosition() const noexcept override;
     bool IsMinimized() const noexcept override;
+    bool IsFocused() const noexcept override;
 
     void SetSize(int width, int height) noexcept override;
+    void SetPosition(int x, int y) noexcept override;
+    void SetTitle(std::string_view title) noexcept override;
+    void Show() noexcept override;
+    void Focus() noexcept override;
+    void SetAlpha(float alpha) noexcept override;
+    float GetDpiScale() const noexcept override;
+    Win32MsgProcHandle AddWin32MsgProc(std::function<Win32MsgProc> proc) noexcept override;
+    void RemoveWin32MsgProc(Win32MsgProcHandle handle) noexcept override;
 
     sigslot::signal<int, int>& EventResized() noexcept override;
     sigslot::signal<int, int>& EventResizing() noexcept override;
     sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept override;
     sigslot::signal<KeyCode, Action>& EventKeyboard() noexcept override;
     sigslot::signal<int>& EventMouseWheel() noexcept override;
+    sigslot::signal<uint32_t>& EventTextInput() noexcept override;
 
     bool EnterFullscreen();
     bool ExitFullscreen();
 
 public:
+    struct Win32MsgProcEntry {
+        Win32MsgProcHandle Handle{};
+        std::function<Win32MsgProc> Proc;
+    };
+
     void DestroyImpl() noexcept;
 
     HWND _hwnd{nullptr};
@@ -60,7 +76,8 @@ public:
     std::atomic<RECT> _windowedRect{};
     DWORD _windowedStyle{0};
     DWORD _windowedExStyle{0};
-    vector<std::function<Win32MsgProc>> _extraWndProcs;
+    vector<Win32MsgProcEntry> _extraWndProcs;
+    uint64_t _nextExtraWndProcId{1};
     bool _isFullscreen{false};
     bool _inSizeMove{false};
     std::atomic_bool _closeRequested{false};
@@ -70,6 +87,7 @@ public:
     sigslot::signal<int, int, MouseButton, Action> _eventTouch;
     sigslot::signal<KeyCode, Action> _eventKeyboard;
     sigslot::signal<int> _eventMouseWheel;
+    sigslot::signal<uint32_t> _eventTextInput;
 };
 
 Nullable<unique_ptr<Win32Window>> CreateWin32Window(const Win32WindowCreateDescriptor& desc) noexcept;

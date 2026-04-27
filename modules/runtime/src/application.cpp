@@ -1,11 +1,13 @@
 #include <radray/runtime/application.h>
 
 #include <chrono>
+#include <algorithm>
 #include <exception>
 #include <string_view>
 #include <variant>
 
 #include <radray/logger.h>
+#include <radray/scope_guard.h>
 #include <radray/utility.h>
 
 namespace radray {
@@ -502,6 +504,67 @@ AppWindowHandle Application::CreateWindow(
         this->ResumeRenderThread();
     }
     return handle;
+}
+
+Nullable<AppWindow*> Application::FindWindow(AppWindowHandle handle) noexcept {
+    if (!handle.IsValid()) {
+        return nullptr;
+    }
+
+    for (const auto& window : _windows) {
+        if (window != nullptr && window->_selfHandle.Id == handle.Id) {
+            return window.get();
+        }
+    }
+    return nullptr;
+}
+
+void Application::DestroyWindow(AppWindowHandle handle) {
+    if (!handle.IsValid()) {
+        return;
+    }
+
+    auto it = std::find_if(
+        _windows.begin(),
+        _windows.end(),
+        [handle](const unique_ptr<AppWindow>& window) {
+            return window != nullptr && window->_selfHandle.Id == handle.Id;
+        });
+    if (it == _windows.end()) {
+        return;
+    }
+    if ((*it)->_isPrimary) {
+        throw AppException("DestroyWindow cannot destroy primary window");
+    }
+
+    const bool resumeRenderThread = _multiThreaded;
+    if (resumeRenderThread) {
+        this->PauseRenderThread();
+    }
+    auto resumeGuard = MakeScopeGuard([this, resumeRenderThread]() noexcept {
+        if (resumeRenderThread) {
+            this->ResumeRenderThread();
+        }
+    });
+
+    AppWindow* window = it->get();
+    if (_gpu != nullptr && window->_surface != nullptr && window->_surface->IsValid()) {
+        _gpu->Wait(render::QueueType::Direct, window->_surface->GetQueueSlot());
+        _gpu->ProcessTasks();
+    }
+
+    window->ResetMailboxes();
+    if (window->_window != nullptr) {
+        window->_window->Destroy();
+    }
+    window->_surface.reset();
+    window->_window.reset();
+    _windows.erase(it);
+
+    resumeGuard.Dismiss();
+    if (resumeRenderThread) {
+        this->ResumeRenderThread();
+    }
 }
 
 void Application::DispatchWindowEvents() {

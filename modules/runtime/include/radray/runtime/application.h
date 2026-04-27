@@ -233,6 +233,8 @@ public:
 
     /** 创建窗口只能在主线程调用；多线程运行中调用必须先进入 safe point */
     AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
+    Nullable<AppWindow*> FindWindow(AppWindowHandle handle) noexcept;
+    void DestroyWindow(AppWindowHandle handle);
     /** 分发窗口事件, 主线程调度 */
     void DispatchWindowEvents();
     /** 刷新窗口状态, 例如是否需要重建交换链, 是否请求退出应用, 主线程调度 */
