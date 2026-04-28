@@ -1,5 +1,5 @@
 file(GLOB_RECURSE RADRAY_RUNTIME_INC CONFIGURE_DEPENDS "include/*.h")
-file(GLOB_RECURSE RADRAY_RUNTIME_SRC CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB RADRAY_RUNTIME_SRC CONFIGURE_DEPENDS "src/*.cpp")
 
 if (RADRAY_ENABLE_IMGUI)
     if (NOT TARGET freetype)
@@ -16,7 +16,8 @@ if (RADRAY_ENABLE_IMGUI)
         "${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.cpp")
     if (WIN32)
         list(APPEND RADRAY_RUNTIME_SRC
-            "${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp")
+            "${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp"
+            "src/imgui/radray_imgui_win32.cpp")
     endif()
     list(APPEND RADRAY_RUNTIME_INC
         "include/radray/runtime/imgui/imgui_config.h"
@@ -42,6 +43,10 @@ if (RADRAY_ENABLE_IMGUI)
     target_include_directories(radrayruntime PUBLIC
         "${RADRAY_IMGUI_ROOT}"
         "${RADRAY_IMGUI_ROOT}/misc/freetype")
+    if (WIN32)
+        target_include_directories(radrayruntime PRIVATE
+            "${RADRAY_IMGUI_ROOT}/backends")
+    endif()
     target_link_libraries(radrayruntime PRIVATE freetype)
     target_compile_definitions(radrayruntime PUBLIC
         RADRAY_ENABLE_IMGUI

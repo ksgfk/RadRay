@@ -16,3 +16,4 @@ SDKs/
 third_party/
 
 cmake_test_discovery**
+opencode.json

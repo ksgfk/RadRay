@@ -1,35 +1,50 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include <imgui.h>
+
+#include <radray/types.h>
+#include <radray/nullable.h>
 
 namespace radray {
 
-class ImGuiSystem {
+class ImGuiSystemDescriptor {
 public:
-    static bool InitializeEnvironment() noexcept;
-    static void ShutdownEnvironment() noexcept;
 };
 
-// class ImGuiSystem {
-// public:
-//     ImGuiSystem() noexcept = default;
-//     ImGuiSystem(const ImGuiSystem&) = delete;
-//     ImGuiSystem& operator=(const ImGuiSystem&) = delete;
-//     ImGuiSystem(ImGuiSystem&&) = delete;
-//     ImGuiSystem& operator=(ImGuiSystem&&) = delete;
-//     ~ImGuiSystem() noexcept;
+class ImGuiContextRAII {
+public:
+    explicit ImGuiContextRAII(ImFontAtlas* sharedFontAtlas = nullptr);
+    ImGuiContextRAII(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII(ImGuiContextRAII&&) noexcept;
+    ImGuiContextRAII& operator=(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII& operator=(ImGuiContextRAII&&) noexcept;
+    ~ImGuiContextRAII() noexcept;
 
-//     bool Initialize(const ImGuiSystemDesc& desc) noexcept;
-//     void Shutdown() noexcept;
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+    ImGuiContext* Get() const noexcept;
 
-//     void BeginFrame(float deltaSeconds) noexcept;
-//     void EndFrame() noexcept;
+    void SetCurrent();
 
-//     bool IsInitialized() const noexcept;
-//     bool IsViewportWindow(AppWindowHandle handle) const noexcept;
+    friend constexpr void swap(ImGuiContextRAII& a, ImGuiContextRAII& b) noexcept {
+        using std::swap;
+        swap(a._ctx, b._ctx);
+    }
 
-// private:
-//     void* _backend{nullptr};
-// };
+private:
+    ImGuiContext* _ctx{nullptr};
+};
+
+class ImGuiSystem {
+public:
+    static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
+
+public:
+    unique_ptr<ImGuiContextRAII> _context;
+};
 
 }  // namespace radray
+
+#endif
