@@ -287,7 +287,7 @@ public:
             }
         }
 
-        if (!_window.IsValid()) {
+        if (_window == nullptr) {
             SetSkipReason(lastFailure);
             _exitRequested = true;
             return;
@@ -350,7 +350,7 @@ public:
         }
     }
 
-    void OnPrepareRender(AppWindowHandle window, uint32_t mailboxSlot) override {
+    void OnPrepareRender(NativeWindow* window, uint32_t mailboxSlot) override {
         if (!ValidateWindow(window)) {
             return;
         }
@@ -367,7 +367,7 @@ public:
             _prepareMode};
     }
 
-    void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t mailboxSlot) override {
+    void OnRender(NativeWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) override {
         if (!ValidateWindow(window)) {
             return;
         }
@@ -479,12 +479,14 @@ private:
         return true;
     }
 
-    bool ValidateWindow(AppWindowHandle window) {
-        if (window.Id == _window.Id) {
+    bool ValidateWindow(NativeWindow* window) {
+        if (window == _window) {
             return true;
         }
 
-        SetFailure(fmt::format("Unexpected window handle {}.", window.Id));
+        SetFailure(fmt::format(
+            "Unexpected native window pointer {}.",
+            static_cast<const void*>(window)));
         return false;
     }
 
@@ -605,7 +607,7 @@ private:
     RenderBackend _backend{RenderBackend::D3D12};
     FrameLoopScenario _scenario{FrameLoopScenario::SingleThreadOnly};
     LogCollector* _logs{nullptr};
-    AppWindowHandle _window{};
+    NativeWindow* _window{nullptr};
     TextureFormat _surfaceFormat{TextureFormat::UNKNOWN};
     std::thread::id _mainThreadId{};
     std::chrono::steady_clock::time_point _startTime{};

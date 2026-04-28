@@ -10,3 +10,5 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+namespace radray {}

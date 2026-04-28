@@ -101,4 +101,6 @@ public:
 
 Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDescriptor& desc) noexcept;
 
+std::string_view format_as(WindowHandlerTag v) noexcept;
+
 }  // namespace radray

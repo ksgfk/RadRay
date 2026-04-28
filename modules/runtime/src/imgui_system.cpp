@@ -1,6 +1,10 @@
 #include <radray/runtime/imgui_system.h>
 
+#include <radray/window/native_window.h>
+
 namespace radray {
+
+extern bool InitImGuiInternal(ImGuiContext* ctx, NativeWindow* window);
 
 ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)
     : _ctx(ImGui::CreateContext(sharedFontAtlas)) {}
@@ -37,8 +41,29 @@ void ImGuiContextRAII::SetCurrent() {
     ImGui::SetCurrentContext(_ctx);
 }
 
+ImGuiSystem::ImGuiSystem(
+    Application* app,
+    unique_ptr<ImGuiContextRAII> context)
+    : _app(app),
+      _context(std::move(context)) {}
+
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {
-    return nullptr;
+    RADRAY_ASSERT(IMGUI_CHECKVERSION());
+    auto context = make_unique<ImGuiContextRAII>();
+    context->SetCurrent();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    io.Fonts->AddFontDefault();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 0.0f;
+    style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+    if (!InitImGuiInternal(context->Get(), desc.MainWindow)) {
+        return nullptr;
+    }
+
+    return make_unique<ImGuiSystem>(desc.App, std::move(context));
 }
 
 }  // namespace radray

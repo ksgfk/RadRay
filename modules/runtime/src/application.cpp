@@ -447,7 +447,7 @@ void Application::CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, u
     _gpu = make_unique<GpuRuntime>(device.Release(), std::move(vkIns));
 }
 
-AppWindowHandle Application::CreateWindow(
+NativeWindow* Application::CreateWindow(
     const NativeWindowCreateDescriptor& windowDesc,
     const GpuSurfaceDescriptor& surfaceDesc,
     bool isPrimary,
@@ -487,7 +487,6 @@ AppWindowHandle Application::CreateWindow(
 
     auto appWindow = make_unique<AppWindow>();
     appWindow->_app = this;
-    appWindow->_selfHandle = AppWindowHandle{_windowIdCounter++};
     appWindow->_window = std::move(window);
     appWindow->_surface = std::move(surface);
     appWindow->_flights.resize(appWindow->_surface->GetFlightFrameCount());
@@ -497,38 +496,38 @@ AppWindowHandle Application::CreateWindow(
     appWindow->_isPrimary = isPrimary;
     appWindow->_pendingRecreate = false;
 
-    const AppWindowHandle handle = appWindow->_selfHandle;
+    NativeWindow* nativeWindowPtr = appWindow->_window.get();
     _windows.emplace_back(std::move(appWindow));
 
     if (resumeRenderThread) {
         this->ResumeRenderThread();
     }
-    return handle;
+    return nativeWindowPtr;
 }
 
-Nullable<AppWindow*> Application::FindWindow(AppWindowHandle handle) noexcept {
-    if (!handle.IsValid()) {
+Nullable<AppWindow*> Application::FindWindow(NativeWindow* nativeWindow) noexcept {
+    if (nativeWindow == nullptr) {
         return nullptr;
     }
 
     for (const auto& window : _windows) {
-        if (window != nullptr && window->_selfHandle.Id == handle.Id) {
+        if (window != nullptr && window->_window.get() == nativeWindow) {
             return window.get();
         }
     }
     return nullptr;
 }
 
-void Application::DestroyWindow(AppWindowHandle handle) {
-    if (!handle.IsValid()) {
+void Application::DestroyWindow(NativeWindow* nativeWindow) {
+    if (nativeWindow == nullptr) {
         return;
     }
 
     auto it = std::find_if(
         _windows.begin(),
         _windows.end(),
-        [handle](const unique_ptr<AppWindow>& window) {
-            return window != nullptr && window->_selfHandle.Id == handle.Id;
+        [nativeWindow](const unique_ptr<AppWindow>& window) {
+            return window != nullptr && window->_window.get() == nativeWindow;
         });
     if (it == _windows.end()) {
         return;
@@ -753,7 +752,7 @@ void Application::ScheduleFramesSingleThreaded() {
         if (!mailboxSlot.has_value()) {
             continue;
         }
-        this->OnPrepareRender(window->_selfHandle, *mailboxSlot);
+        this->OnPrepareRender(window->_window.get(), *mailboxSlot);
         window->PublishPreparedMailbox(*mailboxSlot);
         window->TryQueueLatestPublished();
     }
@@ -807,7 +806,7 @@ void Application::ScheduleFramesSingleThreaded() {
 
         GpuRuntime::SubmitFrameResult submit{};
         try {
-            this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
+            this->OnRender(window->_window.get(), begin.Context.Get(), request->MailboxSlot);
 
             if (begin.Context->IsEmpty()) {
                 submit = _gpu->AbandonFrame(begin.Context.Release());
@@ -849,7 +848,7 @@ void Application::ScheduleFramesMultiThreaded() {
         if (!mailboxSlot.has_value()) {
             continue;
         }
-        this->OnPrepareRender(window->_selfHandle, *mailboxSlot);
+        this->OnPrepareRender(window->_window.get(), *mailboxSlot);
         window->PublishPreparedMailbox(*mailboxSlot);
         if (window->TryQueueLatestPublished().has_value()) {
             queuedAny = true;
@@ -961,7 +960,7 @@ void Application::RenderThreadImpl() {
 
                 GpuRuntime::SubmitFrameResult submit{};
                 try {
-                    this->OnRender(window->_selfHandle, begin.Context.Get(), request->MailboxSlot);
+                    this->OnRender(window->_window.get(), begin.Context.Get(), request->MailboxSlot);
 
                     if (begin.Context->IsEmpty()) {
                         submit = _gpu->AbandonFrame(begin.Context.Release());

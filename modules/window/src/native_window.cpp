@@ -1,6 +1,7 @@
 #include <radray/window/native_window.h>
 
 #include <radray/logger.h>
+#include <radray/utility.h>
 
 #if defined(RADRAY_PLATFORM_WINDOWS)
 #include "win32/win32_window.h"
@@ -33,6 +34,15 @@ Nullable<unique_ptr<NativeWindow>> CreateNativeWindow(const NativeWindowCreateDe
             }
         },
         desc);
+}
+
+std::string_view format_as(WindowHandlerTag v) noexcept {
+    switch (v) {
+        case WindowHandlerTag::UNKNOWN: return "UNKNOWN";
+        case WindowHandlerTag::HWND: return "HWND";
+        case WindowHandlerTag::NS_VIEW: return "NS_VIEW";
+    }
+    Unreachable();
 }
 
 }  // namespace radray

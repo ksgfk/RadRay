@@ -22,16 +22,6 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-struct AppWindowHandle {
-    uint64_t Id{std::numeric_limits<uint64_t>::max()};
-
-    constexpr bool IsValid() const { return Id != std::numeric_limits<uint64_t>::max(); }
-
-    constexpr void Invalidate() { Id = std::numeric_limits<uint64_t>::max(); }
-
-    constexpr static AppWindowHandle Invalid() { return {std::numeric_limits<uint64_t>::max()}; }
-};
-
 /**
  * flight slot 和 swapchain 的 flight frame count 对齐，用来保证同一个 swapchain frame slot 不会被重复使用
  * mailbox 解决的是“主线程准备渲染数据”和“渲染阶段消费渲染数据”的解耦问题
@@ -144,7 +134,6 @@ public:
     };
 
     Application* _app{nullptr};
-    AppWindowHandle _selfHandle{};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
     vector<FlightData> _flights;
@@ -220,21 +209,21 @@ public:
     /** 游戏逻辑帧调度, 主线程调度；可以请求创建窗口、切换线程模式和调度资源生命周期 */
     virtual void OnUpdate() = 0;
     /** 主线程通知可以安全地准备 mailbox slot 对应的最新渲染快照；只写入该 mailbox slot 的 CPU 渲染数据 */
-    virtual void OnPrepareRender(AppWindowHandle window, uint32_t mailboxSlot) = 0;
+    virtual void OnPrepareRender(NativeWindow* window, uint32_t mailboxSlot) = 0;
     /**
      * 录制渲染命令，并消费指定 mailbox slot 中的渲染快照。
      * mailbox slot 会一直保留到对应的 flight task 完成后才重新变为 Free。
      * 单线程模式由主线程调用，多线程模式由渲染线程调用；实现中不要修改窗口列表、重建 surface 或切换线程模式。
      */
-    virtual void OnRender(AppWindowHandle window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
+    virtual void OnRender(NativeWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);
 
     /** 创建窗口只能在主线程调用；多线程运行中调用必须先进入 safe point */
-    AppWindowHandle CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
-    Nullable<AppWindow*> FindWindow(AppWindowHandle handle) noexcept;
-    void DestroyWindow(AppWindowHandle handle);
+    NativeWindow* CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
+    Nullable<AppWindow*> FindWindow(NativeWindow* nativeWindow) noexcept;
+    void DestroyWindow(NativeWindow* nativeWindow);
     /** 分发窗口事件, 主线程调度 */
     void DispatchWindowEvents();
     /** 刷新窗口状态, 例如是否需要重建交换链, 是否请求退出应用, 主线程调度 */
@@ -268,7 +257,6 @@ public:
 public:
     /** 主线程拥有 window 列表；多线程模式下修改前必须进入 safe point */
     vector<unique_ptr<AppWindow>> _windows;
-    uint64_t _windowIdCounter{0};
     unique_ptr<GpuRuntime> _gpu;
     /**
      * 保护 _renderPauseRequested、_renderPaused、_renderStopRequested 和渲染线程唤醒/暂停握手。

@@ -9,8 +9,13 @@
 
 namespace radray {
 
+class Application;
+class NativeWindow;
+
 class ImGuiSystemDescriptor {
 public:
+    Application* App{nullptr};
+    NativeWindow* MainWindow{nullptr};
 };
 
 class ImGuiContextRAII {
@@ -37,11 +42,22 @@ private:
     ImGuiContext* _ctx{nullptr};
 };
 
+class ImGuiRenderer {
+};
+
 class ImGuiSystem {
 public:
+    ImGuiSystem(Application* app, unique_ptr<ImGuiContextRAII> context);
+    ImGuiSystem(const ImGuiSystem&) = delete;
+    ImGuiSystem(ImGuiSystem&&) = delete;
+    ImGuiSystem& operator=(const ImGuiSystem&) = delete;
+    ImGuiSystem& operator=(ImGuiSystem&&) = delete;
+    ~ImGuiSystem() noexcept;
+
     static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
 
 public:
+    Application* _app;
     unique_ptr<ImGuiContextRAII> _context;
 };
 

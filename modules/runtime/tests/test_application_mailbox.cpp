@@ -15,8 +15,8 @@ public:
     void OnInitialize() override {}
     void OnShutdown() noexcept override {}
     void OnUpdate() override {}
-    void OnPrepareRender(AppWindowHandle, uint32_t) override {}
-    void OnRender(AppWindowHandle, GpuFrameContext*, uint32_t) override {}
+    void OnPrepareRender(NativeWindow*, uint32_t) override {}
+    void OnRender(NativeWindow*, GpuFrameContext*, uint32_t) override {}
 };
 
 enum class ThrowSite {
@@ -48,8 +48,8 @@ public:
         _exitRequested = true;
     }
 
-    void OnPrepareRender(AppWindowHandle, uint32_t) override {}
-    void OnRender(AppWindowHandle, GpuFrameContext*, uint32_t) override {}
+    void OnPrepareRender(NativeWindow*, uint32_t) override {}
+    void OnRender(NativeWindow*, GpuFrameContext*, uint32_t) override {}
 
     bool InitializeCalled{false};
     bool UpdateCalled{false};
