@@ -39,6 +39,11 @@ public:
  */
 class AppWindow {
 public:
+    enum class Kind {
+        Native,
+        BorrowedSurface
+    };
+
     struct RenderRequest {
         uint32_t FlightSlot;
         uint32_t MailboxSlot;
@@ -134,8 +139,11 @@ public:
     };
 
     Application* _app{nullptr};
+    Kind _kind{Kind::Native};
     unique_ptr<NativeWindow> _window;
     unique_ptr<GpuSurface> _surface;
+    WindowNativeHandler _borrowedNativeHandler{};
+    WindowVec2i _borrowedSize{};
     vector<FlightData> _flights;
     vector<MailboxData> _mailboxes;
     /** 最近一次已发布但尚未被渲染线程消费的渲染请求 */
@@ -144,6 +152,7 @@ public:
     RenderDataChannel _channel;
     bool _isPrimary{false};
     bool _pendingRecreate{false};
+    bool _borrowedMinimized{false};
 };
 
 /**
@@ -222,6 +231,7 @@ public:
 
     /** 创建窗口只能在主线程调用；多线程运行中调用必须先进入 safe point */
     AppWindow* CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
+    AppWindow* CreateBorrowedSurfaceWindow(WindowNativeHandler nativeHandler, WindowVec2i size, const GpuSurfaceDescriptor& surfaceDesc, uint32_t mailboxCount = 3);
     void DestroyWindow(AppWindow* appWindow);
     /** 分发窗口事件, 主线程调度 */
     void DispatchWindowEvents();

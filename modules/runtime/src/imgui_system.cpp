@@ -9,52 +9,15 @@
 #include <radray/runtime/application.h>
 #include <radray/utility.h>
 
-
 namespace radray {
 
 extern bool InitImGuiInternal(ImGuiContext* ctx, NativeWindow* window);
 extern void ShutdownImGuiInternal(ImGuiContext* ctx);
 
-struct ImGuiViewportPlatformData {
+struct ImGuiViewportRendererData {
     ImGuiViewport* Viewport{nullptr};
     AppWindow* Window{nullptr};
 };
-
-static ImGuiRenderer* GetImGuiRenderer() noexcept {
-    ImGuiContext* ctx = ImGui::GetCurrentContext();
-    if (ctx == nullptr) {
-        return nullptr;
-    }
-    return static_cast<ImGuiRenderer*>(ImGui::GetIO(ctx).BackendRendererUserData);
-}
-
-static ImGuiSystem* GetImGuiSystem() noexcept {
-    ImGuiRenderer* renderer = GetImGuiRenderer();
-    return renderer != nullptr ? renderer->_system : nullptr;
-}
-
-static ImGuiViewportPlatformData* FindViewportPlatformData(ImGuiSystem* system, ImGuiViewport* viewport) noexcept {
-    if (system == nullptr || viewport == nullptr) {
-        return nullptr;
-    }
-    auto it = std::find_if(
-        system->_viewportPlatformData.begin(),
-        system->_viewportPlatformData.end(),
-        [viewport](const unique_ptr<ImGuiViewportPlatformData>& data) {
-            return data != nullptr && data->Viewport == viewport;
-        });
-    return it != system->_viewportPlatformData.end() ? it->get() : nullptr;
-}
-
-static AppWindow* GetViewportAppWindow(ImGuiSystem* system, ImGuiViewport* viewport) noexcept {
-    if (system == nullptr || viewport == nullptr) {
-        return nullptr;
-    }
-    if (ImGuiViewportPlatformData* data = FindViewportPlatformData(system, viewport)) {
-        return data->Window;
-    }
-    return viewport == ImGui::GetMainViewport() ? system->_mainWnd : nullptr;
-}
 
 static int32_t ImGuiSizeToInt(float v) noexcept {
     return static_cast<int32_t>(std::max(v, 1.0f));
@@ -340,124 +303,84 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
     return renderer;
 }
 
-void ImGuiRenderer::PlatformCreateWindow(ImGuiViewport* viewport) {
-}
-
-void ImGuiRenderer::PlatformDestroyWindow(ImGuiViewport* viewport) {
-}
-
-void ImGuiRenderer::PlatformShowWindow(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->Show();
-    }
-}
-
-void ImGuiRenderer::PlatformSetWindowPos(ImGuiViewport* viewport, ImVec2 pos) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->SetPosition(static_cast<int32_t>(pos.x), static_cast<int32_t>(pos.y));
-    }
-}
-
-ImVec2 ImGuiRenderer::PlatformGetWindowPos(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window == nullptr || window->_window == nullptr) {
-        return ImVec2{};
-    }
-    WindowVec2i pos = window->_window->GetPosition();
-    return ImVec2(static_cast<float>(pos.X), static_cast<float>(pos.Y));
-}
-
-void ImGuiRenderer::PlatformSetWindowSize(ImGuiViewport* viewport, ImVec2 size) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->SetSize(ImGuiSizeToInt(size.x), ImGuiSizeToInt(size.y));
-    }
-}
-
-ImVec2 ImGuiRenderer::PlatformGetWindowSize(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window == nullptr || window->_window == nullptr) {
-        return ImVec2{};
-    }
-    WindowVec2i size = window->_window->GetSize();
-    return ImVec2(static_cast<float>(size.X), static_cast<float>(size.Y));
-}
-
-void ImGuiRenderer::PlatformSetWindowFocus(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->Focus();
-    }
-}
-
-bool ImGuiRenderer::PlatformGetWindowFocus(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    return window != nullptr && window->_window != nullptr && window->_window->IsFocused();
-}
-
-bool ImGuiRenderer::PlatformGetWindowMinimized(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    return window != nullptr && window->_window != nullptr && window->_window->IsMinimized();
-}
-
-void ImGuiRenderer::PlatformSetWindowTitle(ImGuiViewport* viewport, const char* title) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->SetTitle(title != nullptr ? std::string_view{title} : std::string_view{});
-    }
-}
-
-void ImGuiRenderer::PlatformSetWindowAlpha(ImGuiViewport* viewport, float alpha) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr && window->_window != nullptr) {
-        window->_window->SetAlpha(alpha);
-    }
-}
-
-float ImGuiRenderer::PlatformGetWindowDpiScale(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    return window != nullptr && window->_window != nullptr ? window->_window->GetDpiScale() : 1.0f;
-}
-
-void ImGuiRenderer::PlatformUpdateWindow(ImGuiViewport* viewport) {
-    RADRAY_UNUSED(viewport);
-}
-
 void ImGuiRenderer::CreateWindow(ImGuiViewport* viewport) {
     RADRAY_ASSERT(viewport != nullptr);
-    viewport->RendererUserData = viewport->PlatformUserData;
+    RADRAY_ASSERT(viewport->RendererUserData == nullptr);
+    RADRAY_ASSERT(viewport->PlatformHandle == nullptr);
+    ImGuiIO& io = ImGui::GetIO();
+    RADRAY_ASSERT(io.BackendRendererUserData != nullptr);
+    ImGuiRenderer* renderer = static_cast<ImGuiRenderer*>(io.BackendRendererUserData);
+    ImGuiSystem* system = renderer->_system;
+
+    WindowNativeHandler nativeHandler{};
+#ifdef RADRAY_PLATFORM_WINDOWS
+    nativeHandler.Type = WindowHandlerTag::HWND;
+    nativeHandler.Handle = viewport->PlatformHandle;
+#else
+    RADRAY_ERR_LOG("ImGui viewport borrowed surfaces are not supported on this platform");
+    return;
+#endif
+
+    RADRAY_ASSERT(renderer->_mainWnd != nullptr);
+    GpuSurface* mainSurface = renderer->_mainWnd->_surface.get();
+    RADRAY_ASSERT(mainSurface->IsValid());
+    const render::SwapChainDescriptor mainDesc = mainSurface->GetDesc();
+    const WindowVec2i size{
+        ImGuiSizeToInt(viewport->Size.x),
+        ImGuiSizeToInt(viewport->Size.y),
+    };
+
+    GpuSurfaceDescriptor surfaceDesc{};
+    surfaceDesc.NativeHandler = nativeHandler.Handle;
+    surfaceDesc.Width = static_cast<uint32_t>(size.X);
+    surfaceDesc.Height = static_cast<uint32_t>(size.Y);
+    surfaceDesc.BackBufferCount = mainDesc.BackBufferCount;
+    surfaceDesc.FlightFrameCount = mainDesc.FlightFrameCount;
+    surfaceDesc.Format = mainDesc.Format;
+    surfaceDesc.PresentMode = mainDesc.PresentMode;
+    surfaceDesc.QueueSlot = mainSurface->GetQueueSlot();
+
+    AppWindow* window = renderer->_app->CreateBorrowedSurfaceWindow(nativeHandler, size, surfaceDesc, 1);
+    window->_borrowedMinimized = (viewport->Flags & ImGuiViewportFlags_IsMinimized) != 0;
+
+    auto data = make_unique<ImGuiViewportRendererData>();
+    data->Viewport = viewport;
+    data->Window = window;
+    ImGuiViewportRendererData* rawData = data.get();
+    system->_viewportRendererData.push_back(std::move(data));
+    viewport->RendererUserData = rawData;
 }
 
 void ImGuiRenderer::DestroyWindow(ImGuiViewport* viewport) {
-    if (viewport != nullptr) {
-        viewport->RendererUserData = nullptr;
+    RADRAY_ASSERT(viewport != nullptr);
+    RADRAY_ASSERT(viewport->RendererUserData == nullptr);
+    RADRAY_ASSERT(viewport->PlatformHandle == nullptr);
+    ImGuiIO& io = ImGui::GetIO();
+    RADRAY_ASSERT(io.BackendRendererUserData != nullptr);
+    ImGuiRenderer* renderer = static_cast<ImGuiRenderer*>(io.BackendRendererUserData);
+    ImGuiSystem* system = renderer->_system;
+    RADRAY_ASSERT(viewport->RendererUserData != nullptr);
+    auto* data = static_cast<ImGuiViewportRendererData*>(viewport->RendererUserData);
+    if (system != nullptr && data != nullptr) {
+        system->_app->DestroyWindow(data->Window);
+        std::erase_if(system->_viewportRendererData, [data](const unique_ptr<ImGuiViewportRendererData>& item) {
+            return item.get() == data;
+        });
     }
+    viewport->RendererUserData = nullptr;
 }
 
 void ImGuiRenderer::SetWindowSize(ImGuiViewport* viewport, ImVec2 size) {
-    RADRAY_UNUSED(size);
-    ImGuiSystem* system = GetImGuiSystem();
-    AppWindow* window = GetViewportAppWindow(system, viewport);
-    if (window != nullptr) {
-        std::unique_lock<std::mutex> lock{window->_stateMutex, std::defer_lock};
-        if (window->_app != nullptr && window->_app->_multiThreaded) {
-            lock.lock();
-        }
-        window->_pendingRecreate = true;
+    RADRAY_ASSERT(viewport->RendererUserData != nullptr);
+    auto* data = static_cast<ImGuiViewportRendererData*>(viewport->RendererUserData);
+    AppWindow* window = data->Window;
+    std::unique_lock<std::mutex> lock{window->_stateMutex, std::defer_lock};
+    if (window->_app != nullptr && window->_app->_multiThreaded) {
+        lock.lock();
     }
+    window->_borrowedSize = WindowVec2i{ImGuiSizeToInt(size.x), ImGuiSizeToInt(size.y)};
+    window->_borrowedMinimized = (viewport->Flags & ImGuiViewportFlags_IsMinimized) != 0;
+    window->_pendingRecreate = true;
 }
 
 void ImGuiRenderer::RenderWindow(ImGuiViewport* viewport, void* renderArg) {
@@ -468,37 +391,6 @@ void ImGuiRenderer::RenderWindow(ImGuiViewport* viewport, void* renderArg) {
 void ImGuiRenderer::SwapBuffers(ImGuiViewport* viewport, void* renderArg) {
     RADRAY_UNUSED(viewport);
     RADRAY_UNUSED(renderArg);
-}
-
-static void InstallPlatformWindowBackend(ImGuiSystem* system) {
-    RADRAY_ASSERT(system != nullptr);
-    RADRAY_ASSERT(system->_mainWnd != nullptr);
-    RADRAY_ASSERT(system->_mainWnd->_window != nullptr);
-
-    ImGuiPlatformIO& platformIo = ImGui::GetPlatformIO();
-    ImGuiViewport* mainViewport = ImGui::GetMainViewport();
-    if (mainViewport->PlatformUserData != nullptr && platformIo.Platform_DestroyWindow != nullptr) {
-        platformIo.Platform_DestroyWindow(mainViewport);
-    }
-
-    WindowNativeHandler nativeHandle = system->_mainWnd->_window->GetNativeHandler();
-    mainViewport->PlatformHandle = nativeHandle.Handle;
-    mainViewport->PlatformHandleRaw = nativeHandle.Handle;
-
-    platformIo.Platform_CreateWindow = ImGuiRenderer::PlatformCreateWindow;
-    platformIo.Platform_DestroyWindow = ImGuiRenderer::PlatformDestroyWindow;
-    platformIo.Platform_ShowWindow = ImGuiRenderer::PlatformShowWindow;
-    platformIo.Platform_SetWindowPos = ImGuiRenderer::PlatformSetWindowPos;
-    platformIo.Platform_GetWindowPos = ImGuiRenderer::PlatformGetWindowPos;
-    platformIo.Platform_SetWindowSize = ImGuiRenderer::PlatformSetWindowSize;
-    platformIo.Platform_GetWindowSize = ImGuiRenderer::PlatformGetWindowSize;
-    platformIo.Platform_SetWindowFocus = ImGuiRenderer::PlatformSetWindowFocus;
-    platformIo.Platform_GetWindowFocus = ImGuiRenderer::PlatformGetWindowFocus;
-    platformIo.Platform_GetWindowMinimized = ImGuiRenderer::PlatformGetWindowMinimized;
-    platformIo.Platform_SetWindowTitle = ImGuiRenderer::PlatformSetWindowTitle;
-    platformIo.Platform_SetWindowAlpha = ImGuiRenderer::PlatformSetWindowAlpha;
-    platformIo.Platform_GetWindowDpiScale = ImGuiRenderer::PlatformGetWindowDpiScale;
-    platformIo.Platform_UpdateWindow = ImGuiRenderer::PlatformUpdateWindow;
 }
 
 ImGuiSystem::ImGuiSystem(
@@ -526,7 +418,7 @@ ImGuiSystem::~ImGuiSystem() noexcept {
         }
         _renderer->_system = nullptr;
     }
-    _viewportPlatformData.clear();
+    _viewportRendererData.clear();
 }
 
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {
@@ -575,7 +467,6 @@ Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescripto
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
     if (desc.EnableViewports) {
-        InstallPlatformWindowBackend(system.get());
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
         io.BackendFlags |= ImGuiBackendFlags_RendererHasViewports;
         ImGuiPlatformIO& platformIo = ImGui::GetPlatformIO();

@@ -29,6 +29,33 @@ void LogException(std::string_view message, std::exception_ptr exception) noexce
     }
 }
 
+WindowNativeHandler GetAppWindowNativeHandler(const AppWindow& window) noexcept {
+    if (window._kind == AppWindow::Kind::BorrowedSurface) {
+        return window._borrowedNativeHandler;
+    }
+    return window._window != nullptr ? window._window->GetNativeHandler() : WindowNativeHandler{};
+}
+
+WindowVec2i GetAppWindowSize(const AppWindow& window) noexcept {
+    if (window._kind == AppWindow::Kind::BorrowedSurface) {
+        return window._borrowedSize;
+    }
+    return window._window != nullptr ? window._window->GetSize() : WindowVec2i{};
+}
+
+bool IsAppWindowMinimized(const AppWindow& window) noexcept {
+    if (window._kind == AppWindow::Kind::BorrowedSurface) {
+        return window._borrowedMinimized;
+    }
+    return window._window != nullptr && window._window->IsMinimized();
+}
+
+bool ShouldCloseAppWindow(const AppWindow& window) noexcept {
+    return window._kind == AppWindow::Kind::Native &&
+           window._window != nullptr &&
+           window._window->ShouldClose();
+}
+
 }  // namespace
 
 AppWindow::~AppWindow() noexcept {
@@ -306,13 +333,19 @@ bool AppWindow::CanRender() const noexcept {
     if (_pendingRecreate) {
         return false;
     }
-    if (!_window->IsValid() || _window->ShouldClose() || _window->IsMinimized()) {
+    if (_surface == nullptr || !_surface->IsValid()) {
         return false;
     }
-    const WindowVec2i size = _window->GetSize();
+    if (_kind == Kind::Native) {
+        if (_window == nullptr || !_window->IsValid() || _window->ShouldClose() || _window->IsMinimized()) {
+            return false;
+        }
+    } else if (_borrowedNativeHandler.Handle == nullptr || _borrowedMinimized) {
+        return false;
+    }
+    const WindowVec2i size = GetAppWindowSize(*this);
     return size.X > 0 &&
            size.Y > 0 &&
-           _surface->IsValid() &&
            !_flights.empty() &&
            !_mailboxes.empty();
 }
@@ -487,6 +520,7 @@ AppWindow* Application::CreateWindow(
 
     auto appWindow = make_unique<AppWindow>();
     appWindow->_app = this;
+    appWindow->_kind = AppWindow::Kind::Native;
     appWindow->_window = std::move(window);
     appWindow->_surface = std::move(surface);
     appWindow->_flights.resize(appWindow->_surface->GetFlightFrameCount());
@@ -494,6 +528,65 @@ AppWindow* Application::CreateWindow(
     appWindow->_channel._queueCapacity = appWindow->_flights.size();
     appWindow->_channel._completed = false;
     appWindow->_isPrimary = isPrimary;
+    appWindow->_pendingRecreate = false;
+
+    auto& v = _windows.emplace_back(std::move(appWindow));
+
+    if (resumeRenderThread) {
+        this->ResumeRenderThread();
+    }
+    return v.get();
+}
+
+AppWindow* Application::CreateBorrowedSurfaceWindow(
+    WindowNativeHandler nativeHandler,
+    WindowVec2i size,
+    const GpuSurfaceDescriptor& surfaceDesc,
+    uint32_t mailboxCount) {
+    if (_gpu == nullptr || !_gpu->IsValid()) {
+        throw AppException("GpuRuntime is not created");
+    }
+    if (mailboxCount == 0) {
+        throw AppException("mailboxCount must be greater than zero");
+    }
+    if (nativeHandler.Type == WindowHandlerTag::UNKNOWN || nativeHandler.Handle == nullptr) {
+        throw AppException("borrowed native handler is invalid");
+    }
+    if (size.X <= 0 || size.Y <= 0) {
+        throw AppException("borrowed surface size must be greater than zero");
+    }
+
+    const bool resumeRenderThread = _multiThreaded;
+    if (resumeRenderThread) {
+        this->PauseRenderThread();
+    }
+
+    GpuSurfaceDescriptor desc = surfaceDesc;
+    desc.NativeHandler = nativeHandler.Handle;
+    if (desc.Width == 0) {
+        desc.Width = static_cast<uint32_t>(size.X);
+    }
+    if (desc.Height == 0) {
+        desc.Height = static_cast<uint32_t>(size.Y);
+    }
+
+    auto surface = _gpu->CreateSurface(desc);
+    if (surface == nullptr || !surface->IsValid()) {
+        throw AppException("GpuRuntime::CreateSurface failed");
+    }
+
+    auto appWindow = make_unique<AppWindow>();
+    appWindow->_app = this;
+    appWindow->_kind = AppWindow::Kind::BorrowedSurface;
+    appWindow->_surface = std::move(surface);
+    appWindow->_borrowedNativeHandler = nativeHandler;
+    appWindow->_borrowedSize = size;
+    appWindow->_borrowedMinimized = false;
+    appWindow->_flights.resize(appWindow->_surface->GetFlightFrameCount());
+    appWindow->_mailboxes.resize(mailboxCount);
+    appWindow->_channel._queueCapacity = appWindow->_flights.size();
+    appWindow->_channel._completed = false;
+    appWindow->_isPrimary = false;
     appWindow->_pendingRecreate = false;
 
     auto& v = _windows.emplace_back(std::move(appWindow));
@@ -539,11 +632,14 @@ void Application::DestroyWindow(AppWindow* appWindow) {
     }
 
     window->ResetMailboxes();
-    if (window->_window != nullptr) {
+    if (window->_kind == AppWindow::Kind::Native && window->_window != nullptr) {
         window->_window->Destroy();
     }
     window->_surface.reset();
     window->_window.reset();
+    window->_borrowedNativeHandler = {};
+    window->_borrowedSize = {};
+    window->_borrowedMinimized = false;
     _windows.erase(it);
 
     resumeGuard.Dismiss();
@@ -562,20 +658,20 @@ void Application::DispatchWindowEvents() {
 
 void Application::CheckWindowStates() {
     for (const auto& window : _windows) {
-        if (window == nullptr || window->_window == nullptr) {
+        if (window == nullptr) {
             continue;
         }
-        if (window->_isPrimary && window->_window->ShouldClose()) {
+        if (window->_isPrimary && ShouldCloseAppWindow(*window)) {
             _exitRequested = true;
         }
         if (window->_surface == nullptr || !window->_surface->IsValid()) {
             continue;
         }
-        if (window->_window->IsMinimized()) {
+        if (IsAppWindowMinimized(*window)) {
             continue;
         }
 
-        const WindowVec2i size = window->_window->GetSize();
+        const WindowVec2i size = GetAppWindowSize(*window);
         if (size.X <= 0 || size.Y <= 0) {
             continue;
         }
@@ -595,7 +691,7 @@ void Application::CheckWindowStates() {
 void Application::HandleWindowChanges() {
     bool hasRecreateWork = false;
     for (const auto& window : _windows) {
-        if (window == nullptr || window->_window == nullptr || window->_surface == nullptr) {
+        if (window == nullptr || window->_surface == nullptr) {
             continue;
         }
 
@@ -607,11 +703,11 @@ void Application::HandleWindowChanges() {
             }
             pending = window->_pendingRecreate;
         }
-        if (!pending || window->_window->IsMinimized()) {
+        if (!pending || IsAppWindowMinimized(*window)) {
             continue;
         }
 
-        const WindowVec2i size = window->_window->GetSize();
+        const WindowVec2i size = GetAppWindowSize(*window);
         if (size.X > 0 && size.Y > 0) {
             hasRecreateWork = true;
             break;
@@ -633,7 +729,7 @@ void Application::HandleWindowChanges() {
     }
 
     for (const auto& window : _windows) {
-        if (window == nullptr || window->_window == nullptr || window->_surface == nullptr) {
+        if (window == nullptr || window->_surface == nullptr) {
             continue;
         }
 
@@ -645,18 +741,22 @@ void Application::HandleWindowChanges() {
             }
             pending = window->_pendingRecreate;
         }
-        if (!pending || window->_window->IsMinimized()) {
+        if (!pending || IsAppWindowMinimized(*window)) {
             continue;
         }
 
-        const WindowVec2i size = window->_window->GetSize();
+        const WindowVec2i size = GetAppWindowSize(*window);
         if (size.X <= 0 || size.Y <= 0) {
+            continue;
+        }
+        WindowNativeHandler nativeHandle = GetAppWindowNativeHandler(*window);
+        if (nativeHandle.Handle == nullptr) {
             continue;
         }
 
         const auto oldDesc = window->_surface->GetDesc();
         GpuSurfaceDescriptor newDesc{};
-        newDesc.NativeHandler = window->_window->GetNativeHandler().Handle;
+        newDesc.NativeHandler = nativeHandle.Handle;
         newDesc.Width = static_cast<uint32_t>(size.X);
         newDesc.Height = static_cast<uint32_t>(size.Y);
         newDesc.BackBufferCount = oldDesc.BackBufferCount;

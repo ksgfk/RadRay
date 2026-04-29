@@ -18,7 +18,7 @@ class GpuSurface;
 class Application;
 class AppWindow;
 class ImGuiSystem;
-struct ImGuiViewportPlatformData;
+struct ImGuiViewportRendererData;
 
 class ImGuiSystemDescriptor {
 public:
@@ -62,21 +62,6 @@ public:
 
     static Nullable<unique_ptr<ImGuiRenderer>> Create(Application* app, AppWindow* mainWnd);
 
-    static void PlatformCreateWindow(ImGuiViewport* viewport);
-    static void PlatformDestroyWindow(ImGuiViewport* viewport);
-    static void PlatformShowWindow(ImGuiViewport* viewport);
-    static void PlatformSetWindowPos(ImGuiViewport* viewport, ImVec2 pos);
-    static ImVec2 PlatformGetWindowPos(ImGuiViewport* viewport);
-    static void PlatformSetWindowSize(ImGuiViewport* viewport, ImVec2 size);
-    static ImVec2 PlatformGetWindowSize(ImGuiViewport* viewport);
-    static void PlatformSetWindowFocus(ImGuiViewport* viewport);
-    static bool PlatformGetWindowFocus(ImGuiViewport* viewport);
-    static bool PlatformGetWindowMinimized(ImGuiViewport* viewport);
-    static void PlatformSetWindowTitle(ImGuiViewport* viewport, const char* title);
-    static void PlatformSetWindowAlpha(ImGuiViewport* viewport, float alpha);
-    static float PlatformGetWindowDpiScale(ImGuiViewport* viewport);
-    static void PlatformUpdateWindow(ImGuiViewport* viewport);
-
     static void CreateWindow(ImGuiViewport* viewport);
     static void DestroyWindow(ImGuiViewport* viewport);
     static void SetWindowSize(ImGuiViewport* viewport, ImVec2 size);
@@ -109,7 +94,7 @@ public:
     AppWindow* _mainWnd;
     unique_ptr<ImGuiContextRAII> _context;
     unique_ptr<ImGuiRenderer> _renderer;
-    vector<unique_ptr<ImGuiViewportPlatformData>> _viewportPlatformData;
+    vector<unique_ptr<ImGuiViewportRendererData>> _viewportRendererData;
 };
 
 std::span<const std::byte> GetImGuiHLSL() noexcept;
