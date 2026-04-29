@@ -13,12 +13,108 @@
 
 namespace radray {
 
-class GpuRuntime;
-class GpuSurface;
 class Application;
 class AppWindow;
+class GpuAsyncContext;
 class ImGuiSystem;
-struct ImGuiViewportRendererData;
+class ImGuiTextureBinding;
+
+enum class ImGuiRenderCommandKind {
+    DrawIndexed,
+    ResetRenderState
+};
+
+class ImGuiRenderCommandSnapshot {
+public:
+    ImGuiRenderCommandKind Kind{ImGuiRenderCommandKind::DrawIndexed};
+    ImVec4 ClipRect{};
+    ImTextureID TexID{ImTextureID_Invalid};
+    uint32_t ElemCount{0};
+    uint32_t IdxOffset{0};
+    uint32_t VtxOffset{0};
+};
+
+class ImGuiTextureUploadSnapshot {
+public:
+    ImGuiTextureBinding* Binding{nullptr};
+    vector<byte> Pixels;
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint64_t RowPitch{0};
+    bool IsCreate{false};
+};
+
+class ImGuiDrawListSnapshot {
+public:
+    void Clear() noexcept {
+        Vertices.clear();
+        Indices.clear();
+        Commands.clear();
+    }
+
+public:
+    vector<ImDrawVert> Vertices;
+    vector<ImDrawIdx> Indices;
+    vector<ImGuiRenderCommandSnapshot> Commands;
+};
+
+class ImGuiRenderSnapshot {
+public:
+    void Clear() noexcept {
+        Valid = false;
+        DisplayPos = ImVec2{};
+        DisplaySize = ImVec2{};
+        FramebufferScale = ImVec2{};
+        TotalIdxCount = 0;
+        TotalVtxCount = 0;
+        DrawLists.clear();
+        TextureUploads.clear();
+    }
+
+public:
+    ImVec2 DisplayPos{};
+    ImVec2 DisplaySize{};
+    ImVec2 FramebufferScale{};
+    int32_t TotalIdxCount{0};
+    int32_t TotalVtxCount{0};
+    vector<ImGuiDrawListSnapshot> DrawLists;
+    vector<ImGuiTextureUploadSnapshot> TextureUploads;
+    bool Valid{false};
+};
+
+class ImGuiUploadedDrawList {
+public:
+    render::VertexBufferView VertexBuffer{};
+    render::IndexBufferView IndexBuffer{};
+};
+
+class ImGuiUploadedRenderData {
+public:
+    void Clear() noexcept {
+        Uploaded = false;
+        DrawLists.clear();
+    }
+
+public:
+    vector<ImGuiUploadedDrawList> DrawLists;
+    bool Uploaded{false};
+};
+
+class ImGuiTextureBinding {
+public:
+    unique_ptr<render::Texture> Texture;
+    unique_ptr<render::TextureView> View;
+    unique_ptr<render::DescriptorSet> DescriptorSet;
+    render::TextureState State{render::TextureState::Undefined};
+};
+
+class ImGuiViewportRendererData {
+public:
+    ImGuiViewport* Viewport{nullptr};
+    AppWindow* Window{nullptr};
+    vector<ImGuiRenderSnapshot> Mailboxes;
+    vector<ImGuiUploadedRenderData> UploadedMailboxes;
+};
 
 class ImGuiSystemDescriptor {
 public:
@@ -76,6 +172,7 @@ public:
     unique_ptr<render::Shader> _ps{};
     unique_ptr<render::RootSignature> _rs{};
     unique_ptr<render::GraphicsPipelineState> _pso{};
+    vector<unique_ptr<ImGuiTextureBinding>> _textureBindings;
 };
 
 class ImGuiSystem {
@@ -86,6 +183,10 @@ public:
     ImGuiSystem& operator=(const ImGuiSystem&) = delete;
     ImGuiSystem& operator=(ImGuiSystem&&) = delete;
     ~ImGuiSystem() noexcept;
+
+    void PrepareRenderData(AppWindow* window, uint32_t mailboxSlot);
+    void Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContext* context, render::CommandBuffer* cmd);
+    void Render(AppWindow* window, uint32_t mailboxSlot, render::GraphicsCommandEncoder* encoder);
 
     static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
 
