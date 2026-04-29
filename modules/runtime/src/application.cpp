@@ -447,7 +447,7 @@ void Application::CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, u
     _gpu = make_unique<GpuRuntime>(device.Release(), std::move(vkIns));
 }
 
-NativeWindow* Application::CreateWindow(
+AppWindow* Application::CreateWindow(
     const NativeWindowCreateDescriptor& windowDesc,
     const GpuSurfaceDescriptor& surfaceDesc,
     bool isPrimary,
@@ -496,38 +496,24 @@ NativeWindow* Application::CreateWindow(
     appWindow->_isPrimary = isPrimary;
     appWindow->_pendingRecreate = false;
 
-    NativeWindow* nativeWindowPtr = appWindow->_window.get();
-    _windows.emplace_back(std::move(appWindow));
+    auto& v = _windows.emplace_back(std::move(appWindow));
 
     if (resumeRenderThread) {
         this->ResumeRenderThread();
     }
-    return nativeWindowPtr;
+    return v.get();
 }
 
-Nullable<AppWindow*> Application::FindWindow(NativeWindow* nativeWindow) noexcept {
-    if (nativeWindow == nullptr) {
-        return nullptr;
-    }
-
-    for (const auto& window : _windows) {
-        if (window != nullptr && window->_window.get() == nativeWindow) {
-            return window.get();
-        }
-    }
-    return nullptr;
-}
-
-void Application::DestroyWindow(NativeWindow* nativeWindow) {
-    if (nativeWindow == nullptr) {
+void Application::DestroyWindow(AppWindow* appWindow) {
+    if (appWindow == nullptr) {
         return;
     }
 
     auto it = std::find_if(
         _windows.begin(),
         _windows.end(),
-        [nativeWindow](const unique_ptr<AppWindow>& window) {
-            return window != nullptr && window->_window.get() == nativeWindow;
+        [appWindow](const unique_ptr<AppWindow>& window) {
+            return window != nullptr && window.get() == appWindow;
         });
     if (it == _windows.end()) {
         return;
@@ -752,7 +738,7 @@ void Application::ScheduleFramesSingleThreaded() {
         if (!mailboxSlot.has_value()) {
             continue;
         }
-        this->OnPrepareRender(window->_window.get(), *mailboxSlot);
+        this->OnPrepareRender(window.get(), *mailboxSlot);
         window->PublishPreparedMailbox(*mailboxSlot);
         window->TryQueueLatestPublished();
     }
@@ -806,7 +792,7 @@ void Application::ScheduleFramesSingleThreaded() {
 
         GpuRuntime::SubmitFrameResult submit{};
         try {
-            this->OnRender(window->_window.get(), begin.Context.Get(), request->MailboxSlot);
+            this->OnRender(window.get(), begin.Context.Get(), request->MailboxSlot);
 
             if (begin.Context->IsEmpty()) {
                 submit = _gpu->AbandonFrame(begin.Context.Release());
@@ -848,7 +834,7 @@ void Application::ScheduleFramesMultiThreaded() {
         if (!mailboxSlot.has_value()) {
             continue;
         }
-        this->OnPrepareRender(window->_window.get(), *mailboxSlot);
+        this->OnPrepareRender(window.get(), *mailboxSlot);
         window->PublishPreparedMailbox(*mailboxSlot);
         if (window->TryQueueLatestPublished().has_value()) {
             queuedAny = true;
@@ -960,7 +946,7 @@ void Application::RenderThreadImpl() {
 
                 GpuRuntime::SubmitFrameResult submit{};
                 try {
-                    this->OnRender(window->_window.get(), begin.Context.Get(), request->MailboxSlot);
+                    this->OnRender(window.get(), begin.Context.Get(), request->MailboxSlot);
 
                     if (begin.Context->IsEmpty()) {
                         submit = _gpu->AbandonFrame(begin.Context.Release());

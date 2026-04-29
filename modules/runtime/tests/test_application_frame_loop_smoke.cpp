@@ -350,7 +350,7 @@ public:
         }
     }
 
-    void OnPrepareRender(NativeWindow* window, uint32_t mailboxSlot) override {
+    void OnPrepareRender(AppWindow* window, uint32_t mailboxSlot) override {
         if (!ValidateWindow(window)) {
             return;
         }
@@ -367,7 +367,7 @@ public:
             _prepareMode};
     }
 
-    void OnRender(NativeWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) override {
+    void OnRender(AppWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) override {
         if (!ValidateWindow(window)) {
             return;
         }
@@ -479,7 +479,7 @@ private:
         return true;
     }
 
-    bool ValidateWindow(NativeWindow* window) {
+    bool ValidateWindow(AppWindow* window) {
         if (window == _window) {
             return true;
         }
@@ -607,7 +607,7 @@ private:
     RenderBackend _backend{RenderBackend::D3D12};
     FrameLoopScenario _scenario{FrameLoopScenario::SingleThreadOnly};
     LogCollector* _logs{nullptr};
-    NativeWindow* _window{nullptr};
+    AppWindow* _window{nullptr};
     TextureFormat _surfaceFormat{TextureFormat::UNKNOWN};
     std::thread::id _mainThreadId{};
     std::chrono::steady_clock::time_point _startTime{};

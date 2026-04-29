@@ -25,6 +25,14 @@ bool InitImGuiInternal(ImGuiContext* ctx, NativeWindow* window) {
     return ImGui_ImplWin32_Init(wnh.Handle);
 }
 
+void ShutdownImGuiInternal(ImGuiContext* ctx) {
+    if (ctx == nullptr) {
+        return;
+    }
+    ImGui::SetCurrentContext(ctx);
+    ImGui_ImplWin32_Shutdown();
+}
+
 }  // namespace radray
 
 #endif

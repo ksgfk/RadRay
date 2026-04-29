@@ -13,7 +13,8 @@ if (RADRAY_ENABLE_IMGUI)
         "${RADRAY_IMGUI_ROOT}/imgui_draw.cpp"
         "${RADRAY_IMGUI_ROOT}/imgui_tables.cpp"
         "${RADRAY_IMGUI_ROOT}/imgui_widgets.cpp"
-        "${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.cpp")
+        "${RADRAY_IMGUI_ROOT}/misc/freetype/imgui_freetype.cpp"
+        "src/imgui/radray_imgui_shader.cpp")
     if (WIN32)
         list(APPEND RADRAY_RUNTIME_SRC
             "${RADRAY_IMGUI_ROOT}/backends/imgui_impl_win32.cpp"

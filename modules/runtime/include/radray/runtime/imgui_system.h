@@ -2,20 +2,29 @@
 
 #ifdef RADRAY_ENABLE_IMGUI
 
+#include <cstddef>
+#include <span>
+
 #include <imgui.h>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
+#include <radray/render/common.h>
 
 namespace radray {
 
+class GpuRuntime;
+class GpuSurface;
 class Application;
-class NativeWindow;
+class AppWindow;
+class ImGuiSystem;
+struct ImGuiViewportPlatformData;
 
 class ImGuiSystemDescriptor {
 public:
     Application* App{nullptr};
-    NativeWindow* MainWindow{nullptr};
+    AppWindow* MainWnd{nullptr};
+    bool EnableViewports{false};
 };
 
 class ImGuiContextRAII {
@@ -43,11 +52,50 @@ private:
 };
 
 class ImGuiRenderer {
+public:
+    explicit ImGuiRenderer(Application* app, AppWindow* mainWnd);
+    ImGuiRenderer(const ImGuiRenderer&) = delete;
+    ImGuiRenderer(ImGuiRenderer&&) = delete;
+    ImGuiRenderer& operator=(const ImGuiRenderer&) = delete;
+    ImGuiRenderer& operator=(ImGuiRenderer&&) = delete;
+    ~ImGuiRenderer() noexcept;
+
+    static Nullable<unique_ptr<ImGuiRenderer>> Create(Application* app, AppWindow* mainWnd);
+
+    static void PlatformCreateWindow(ImGuiViewport* viewport);
+    static void PlatformDestroyWindow(ImGuiViewport* viewport);
+    static void PlatformShowWindow(ImGuiViewport* viewport);
+    static void PlatformSetWindowPos(ImGuiViewport* viewport, ImVec2 pos);
+    static ImVec2 PlatformGetWindowPos(ImGuiViewport* viewport);
+    static void PlatformSetWindowSize(ImGuiViewport* viewport, ImVec2 size);
+    static ImVec2 PlatformGetWindowSize(ImGuiViewport* viewport);
+    static void PlatformSetWindowFocus(ImGuiViewport* viewport);
+    static bool PlatformGetWindowFocus(ImGuiViewport* viewport);
+    static bool PlatformGetWindowMinimized(ImGuiViewport* viewport);
+    static void PlatformSetWindowTitle(ImGuiViewport* viewport, const char* title);
+    static void PlatformSetWindowAlpha(ImGuiViewport* viewport, float alpha);
+    static float PlatformGetWindowDpiScale(ImGuiViewport* viewport);
+    static void PlatformUpdateWindow(ImGuiViewport* viewport);
+
+    static void CreateWindow(ImGuiViewport* viewport);
+    static void DestroyWindow(ImGuiViewport* viewport);
+    static void SetWindowSize(ImGuiViewport* viewport, ImVec2 size);
+    static void RenderWindow(ImGuiViewport* viewport, void* renderArg);
+    static void SwapBuffers(ImGuiViewport* viewport, void* renderArg);
+
+public:
+    Application* _app{nullptr};
+    AppWindow* _mainWnd{nullptr};
+    ImGuiSystem* _system{nullptr};
+    unique_ptr<render::Shader> _vs{};
+    unique_ptr<render::Shader> _ps{};
+    unique_ptr<render::RootSignature> _rs{};
+    unique_ptr<render::GraphicsPipelineState> _pso{};
 };
 
 class ImGuiSystem {
 public:
-    ImGuiSystem(Application* app, unique_ptr<ImGuiContextRAII> context);
+    ImGuiSystem(Application* app, AppWindow* mainWnd, unique_ptr<ImGuiContextRAII> context);
     ImGuiSystem(const ImGuiSystem&) = delete;
     ImGuiSystem(ImGuiSystem&&) = delete;
     ImGuiSystem& operator=(const ImGuiSystem&) = delete;
@@ -58,8 +106,17 @@ public:
 
 public:
     Application* _app;
+    AppWindow* _mainWnd;
     unique_ptr<ImGuiContextRAII> _context;
+    unique_ptr<ImGuiRenderer> _renderer;
+    vector<unique_ptr<ImGuiViewportPlatformData>> _viewportPlatformData;
 };
+
+std::span<const std::byte> GetImGuiHLSL() noexcept;
+std::span<const std::byte> GetImGuiVertexShaderDXIL() noexcept;
+std::span<const std::byte> GetImGuiPixelShaderDXIL() noexcept;
+std::span<const std::byte> GetImGuiVertexShaderSPIRV() noexcept;
+std::span<const std::byte> GetImGuiPixelShaderSPIRV() noexcept;
 
 }  // namespace radray
 

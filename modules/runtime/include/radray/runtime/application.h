@@ -209,21 +209,20 @@ public:
     /** 游戏逻辑帧调度, 主线程调度；可以请求创建窗口、切换线程模式和调度资源生命周期 */
     virtual void OnUpdate() = 0;
     /** 主线程通知可以安全地准备 mailbox slot 对应的最新渲染快照；只写入该 mailbox slot 的 CPU 渲染数据 */
-    virtual void OnPrepareRender(NativeWindow* window, uint32_t mailboxSlot) = 0;
+    virtual void OnPrepareRender(AppWindow* window, uint32_t mailboxSlot) = 0;
     /**
      * 录制渲染命令，并消费指定 mailbox slot 中的渲染快照。
      * mailbox slot 会一直保留到对应的 flight task 完成后才重新变为 Free。
      * 单线程模式由主线程调用，多线程模式由渲染线程调用；实现中不要修改窗口列表、重建 surface 或切换线程模式。
      */
-    virtual void OnRender(NativeWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
+    virtual void OnRender(AppWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);
 
     /** 创建窗口只能在主线程调用；多线程运行中调用必须先进入 safe point */
-    NativeWindow* CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
-    Nullable<AppWindow*> FindWindow(NativeWindow* nativeWindow) noexcept;
-    void DestroyWindow(NativeWindow* nativeWindow);
+    AppWindow* CreateWindow(const NativeWindowCreateDescriptor& windowDesc, const GpuSurfaceDescriptor& surfaceDesc, bool isPrimary, uint32_t mailboxCount = 3);
+    void DestroyWindow(AppWindow* appWindow);
     /** 分发窗口事件, 主线程调度 */
     void DispatchWindowEvents();
     /** 刷新窗口状态, 例如是否需要重建交换链, 是否请求退出应用, 主线程调度 */
