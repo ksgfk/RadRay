@@ -44,7 +44,7 @@ void ExpectValidateFailContainsOneOf(const RenderGraph& graph, std::initializer_
     EXPECT_TRUE(matched) << "unexpected message: " << result.Message;
 }
 
-GpuBufferHandle MakeValidGpuBufferHandle(uint64_t handle = 1) {
+GpuBufferHandle MakeValidGpuBufferHandle(uint32_t handle = 1) {
     class FakeBuffer final : public Buffer {
     public:
         explicit FakeBuffer(BufferDescriptor desc) noexcept
@@ -75,7 +75,7 @@ GpuBufferHandle MakeValidGpuBufferHandle(uint64_t handle = 1) {
         bool _destroyed{false};
     };
 
-    static std::unordered_map<uint64_t, std::unique_ptr<FakeBuffer>> buffers{};
+    static std::unordered_map<uint32_t, std::unique_ptr<FakeBuffer>> buffers{};
     auto& buffer = buffers[handle];
     if (!buffer) {
         buffer = std::make_unique<FakeBuffer>(BufferDescriptor{
@@ -92,7 +92,7 @@ GpuBufferHandle MakeValidGpuBufferHandle(uint64_t handle = 1) {
     return result;
 }
 
-GpuTextureHandle MakeValidGpuTextureHandle(uint64_t handle = 1) {
+GpuTextureHandle MakeValidGpuTextureHandle(uint32_t handle = 1) {
     class FakeTexture final : public Texture {
     public:
         explicit FakeTexture(TextureDescriptor desc) noexcept
@@ -112,7 +112,7 @@ GpuTextureHandle MakeValidGpuTextureHandle(uint64_t handle = 1) {
         bool _destroyed{false};
     };
 
-    static std::unordered_map<uint64_t, std::unique_ptr<FakeTexture>> textures{};
+    static std::unordered_map<uint32_t, std::unique_ptr<FakeTexture>> textures{};
     auto& texture = textures[handle];
     if (!texture) {
         texture = std::make_unique<FakeTexture>(TextureDescriptor{

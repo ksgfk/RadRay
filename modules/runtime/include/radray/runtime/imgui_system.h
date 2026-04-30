@@ -92,7 +92,7 @@ class ImGuiTextureBinding {
 public:
     GpuTextureHandle Texture{};
     GpuTextureViewHandle View{};
-    unique_ptr<render::DescriptorSet> DescriptorSet;
+    GpuDescriptorSetHandle DescriptorSet{};
     render::TextureState State{render::TextureState::Undefined};
 };
 
@@ -156,10 +156,10 @@ public:
     Application* _app{nullptr};
     AppWindow* _mainWnd{nullptr};
     ImGuiSystem* _system{nullptr};
-    unique_ptr<render::Shader> _vs{};
-    unique_ptr<render::Shader> _ps{};
-    unique_ptr<render::RootSignature> _rs{};
-    unique_ptr<render::GraphicsPipelineState> _pso{};
+    GpuShaderHandle _vs{};
+    GpuShaderHandle _ps{};
+    GpuRootSignatureHandle _rs{};
+    GpuGraphicsPipelineStateHandle _pso{};
     vector<unique_ptr<ImGuiTextureBinding>> _textureBindings;
 };
 

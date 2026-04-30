@@ -86,10 +86,19 @@ ImGuiRenderer::~ImGuiRenderer() noexcept {
         RADRAY_ASSERT(_textureBindings.empty());
     }
     _textureBindings.clear();
-    _pso.reset();
-    _rs.reset();
-    _ps.reset();
-    _vs.reset();
+    if (_app != nullptr && _app->_gpu != nullptr) {
+        GpuRuntime* gpu = _app->_gpu.get();
+        auto destroyHandle = [gpu](auto& handle) noexcept {
+            if (handle.IsValid()) {
+                gpu->DestroyResourceImmediate(handle);
+                handle.Invalidate();
+            }
+        };
+        destroyHandle(_pso);
+        destroyHandle(_rs);
+        destroyHandle(_ps);
+        destroyHandle(_vs);
+    }
     _system = nullptr;
     _app = nullptr;
 }
@@ -106,7 +115,19 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
     RADRAY_ASSERT(mainSurfaceDesc.FlightFrameCount != 0);
     render::Device* device = app->_gpu->GetDevice();
     RADRAY_ASSERT(device != nullptr);
-    unique_ptr<render::Shader> vs, ps;
+    GpuRuntime* gpu = app->_gpu.get();
+    RADRAY_ASSERT(gpu != nullptr);
+    GpuShaderHandle vs{};
+    GpuShaderHandle ps{};
+    GpuRootSignatureHandle rs{};
+    GpuGraphicsPipelineStateHandle pso{};
+    auto destroyHandle = [gpu](auto& handle) noexcept {
+        if (handle.IsValid()) {
+            gpu->DestroyResourceImmediate(handle);
+            handle.Invalidate();
+        }
+    };
+    try {
     {
         render::ShaderDescriptor vsDesc{};
         render::ShaderDescriptor psDesc{};
@@ -196,20 +217,11 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
                 RADRAY_ERR_LOG("ImGuiRenderer does not support render backend {}", device->GetBackend());
                 return nullptr;
         }
-        auto vsOpt = device->CreateShader(vsDesc);
-        if (!vsOpt.HasValue()) {
-            return nullptr;
-        }
-        vs = vsOpt.Release();
-        auto psOpt = device->CreateShader(psDesc);
-        if (!psOpt.HasValue()) {
-            return nullptr;
-        }
-        ps = psOpt.Release();
+        vs = gpu->CreateShader(vsDesc);
+        ps = gpu->CreateShader(psDesc);
     }
-    unique_ptr<render::RootSignature> rs;
     {
-        render::Shader* shaders[] = {vs.get(), ps.get()};
+        GpuShaderHandle shaders[] = {vs, ps};
         render::SamplerDescriptor samplerDesc{};
         samplerDesc.AddressS = render::AddressMode::ClampToEdge;
         samplerDesc.AddressT = render::AddressMode::ClampToEdge;
@@ -230,16 +242,11 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
                 .Desc = samplerDesc,
             },
         };
-        render::RootSignatureDescriptor rsDesc{};
+        GpuRootSignatureDescriptor rsDesc{};
         rsDesc.Shaders = shaders;
         rsDesc.StaticSamplers = staticSamplers;
-        auto rsOpt = device->CreateRootSignature(rsDesc);
-        if (!rsOpt.HasValue()) {
-            return nullptr;
-        }
-        rs = rsOpt.Release();
+        rs = gpu->CreateRootSignature(rsDesc);
     }
-    unique_ptr<render::GraphicsPipelineState> pso;
     {
         const render::VertexElement vertexElements[] = {
             render::VertexElement{
@@ -297,14 +304,14 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
         multiSample.Count = 1;
         multiSample.Mask = 0xFFFFFFFF;
         multiSample.AlphaToCoverageEnable = false;
-        render::GraphicsPipelineStateDescriptor psoDesc{};
-        psoDesc.RootSig = rs.get();
-        psoDesc.VS = render::ShaderEntry{
-            .Target = vs.get(),
+        GpuGraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = rs;
+        psoDesc.VS = GpuShaderEntry{
+            .Target = vs,
             .EntryPoint = "VSMain",
         };
-        psoDesc.PS = render::ShaderEntry{
-            .Target = ps.get(),
+        psoDesc.PS = GpuShaderEntry{
+            .Target = ps,
             .EntryPoint = "PSMain",
         };
         psoDesc.VertexLayouts = vertexLayouts;
@@ -312,17 +319,21 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
         psoDesc.DepthStencil = std::nullopt;
         psoDesc.MultiSample = multiSample;
         psoDesc.ColorTargets = colorTargets;
-        auto psoOpt = device->CreateGraphicsPipelineState(psoDesc);
-        if (!psoOpt.HasValue()) {
-            return nullptr;
-        }
-        pso = psoOpt.Release();
+        pso = gpu->CreateGraphicsPipelineState(psoDesc);
+    }
+    } catch (const GpuSystemException& ex) {
+        RADRAY_ERR_LOG("ImGuiRenderer GPU resource creation failed: {}", ex.what());
+        destroyHandle(pso);
+        destroyHandle(rs);
+        destroyHandle(ps);
+        destroyHandle(vs);
+        return nullptr;
     }
     auto renderer = make_unique<ImGuiRenderer>(app, mainWnd);
-    renderer->_vs = std::move(vs);
-    renderer->_ps = std::move(ps);
-    renderer->_rs = std::move(rs);
-    renderer->_pso = std::move(pso);
+    renderer->_vs = vs;
+    renderer->_ps = ps;
+    renderer->_rs = rs;
+    renderer->_pso = pso;
     return renderer;
 }
 
@@ -466,10 +477,13 @@ void ImGuiSystem::NewFrame() {
 
 void ImGuiSystem::DestroyTextureBinding(ImGuiTextureBinding* binding) noexcept {
     RADRAY_ASSERT(binding != nullptr);
-    binding->DescriptorSet.reset();
     RADRAY_ASSERT(_app != nullptr);
     RADRAY_ASSERT(_app->_gpu != nullptr);
     GpuRuntime* gpu = _app->_gpu.get();
+    if (binding->DescriptorSet.IsValid()) {
+        gpu->DestroyResourceImmediate(binding->DescriptorSet);
+        binding->DescriptorSet.Invalidate();
+    }
     if (binding->View.IsValid()) {
         gpu->DestroyResourceImmediate(binding->View);
         binding->View.Invalidate();
@@ -607,10 +621,11 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                 auto* view = static_cast<render::TextureView*>(ownedBinding->View.NativeHandle);
                 RADRAY_ASSERT(view != nullptr);
 
-                auto descriptorSetOpt = device->CreateDescriptorSet(_renderer->_rs.get(), render::DescriptorSetIndex{1});
-                RADRAY_ASSERT(descriptorSetOpt.HasValue());
-                ownedBinding->DescriptorSet = descriptorSetOpt.Release();
-                RADRAY_ASSERT(ownedBinding->DescriptorSet->WriteResource("gTexture", view));
+                ownedBinding->DescriptorSet = _app->_gpu->CreateDescriptorSet(_renderer->_rs, render::DescriptorSetIndex{1});
+                RADRAY_ASSERT(ownedBinding->DescriptorSet.IsValid());
+                auto* descriptorSet = static_cast<render::DescriptorSet*>(ownedBinding->DescriptorSet.NativeHandle);
+                RADRAY_ASSERT(descriptorSet != nullptr);
+                RADRAY_ASSERT(descriptorSet->WriteResource("gTexture", view));
                 ownedBinding->State = render::TextureState::Undefined;
 
                 binding = ownedBinding.get();
@@ -623,7 +638,8 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                 RADRAY_ASSERT(binding->Texture.NativeHandle != nullptr);
                 RADRAY_ASSERT(binding->View.IsValid());
                 RADRAY_ASSERT(binding->View.NativeHandle != nullptr);
-                RADRAY_ASSERT(binding->DescriptorSet != nullptr);
+                RADRAY_ASSERT(binding->DescriptorSet.IsValid());
+                RADRAY_ASSERT(binding->DescriptorSet.NativeHandle != nullptr);
             }
 
             const uint32_t width = static_cast<uint32_t>(tex->Width);
@@ -933,17 +949,21 @@ void ImGuiSystem::Render(AppWindow* window, uint32_t mailboxSlot, render::Graphi
         float Translate[2];
     };
     auto bindState = [&] {
-        RADRAY_ASSERT(_renderer->_rs != nullptr);
-        RADRAY_ASSERT(_renderer->_pso != nullptr);
-        encoder->BindRootSignature(_renderer->_rs.get());
-        encoder->BindGraphicsPipelineState(_renderer->_pso.get());
+        RADRAY_ASSERT(_renderer->_rs.IsValid());
+        RADRAY_ASSERT(_renderer->_pso.IsValid());
+        auto* rootSig = static_cast<render::RootSignature*>(_renderer->_rs.NativeHandle);
+        auto* pso = static_cast<render::GraphicsPipelineState*>(_renderer->_pso.NativeHandle);
+        RADRAY_ASSERT(rootSig != nullptr);
+        RADRAY_ASSERT(pso != nullptr);
+        encoder->BindRootSignature(rootSig);
+        encoder->BindGraphicsPipelineState(pso);
         encoder->SetViewport(Viewport{0.0f, 0.0f, fbWidth, fbHeight, 0.0f, 1.0f});
         const ImGuiPushConstants push{
             {2.0f / snapshot.DisplaySize.x, -2.0f / snapshot.DisplaySize.y},
             {-1.0f - snapshot.DisplayPos.x * (2.0f / snapshot.DisplaySize.x),
              1.0f - snapshot.DisplayPos.y * (-2.0f / snapshot.DisplaySize.y)},
         };
-        auto pushId = _renderer->_rs->FindParameterId("gPush");
+        auto pushId = rootSig->FindParameterId("gPush");
         RADRAY_ASSERT(pushId.has_value());
         encoder->PushConstants(*pushId, &push, sizeof(push));
     };
@@ -1002,9 +1022,11 @@ void ImGuiSystem::Render(AppWindow* window, uint32_t mailboxSlot, render::Graphi
             RADRAY_ASSERT(drawCmd.TexID != ImTextureID_Invalid);
             auto* binding = reinterpret_cast<ImGuiTextureBinding*>(drawCmd.TexID);
             RADRAY_ASSERT(binding != nullptr);
-            RADRAY_ASSERT(binding->DescriptorSet != nullptr);
+            RADRAY_ASSERT(binding->DescriptorSet.IsValid());
+            auto* descriptorSet = static_cast<render::DescriptorSet*>(binding->DescriptorSet.NativeHandle);
+            RADRAY_ASSERT(descriptorSet != nullptr);
             RADRAY_ASSERT(binding->State == render::TextureState::ShaderRead);
-            encoder->BindDescriptorSet(render::DescriptorSetIndex{1}, binding->DescriptorSet.get());
+            encoder->BindDescriptorSet(render::DescriptorSetIndex{1}, descriptorSet);
             encoder->DrawIndexed(drawCmd.ElemCount, 1, drawCmd.IdxOffset, static_cast<int32_t>(drawCmd.VtxOffset), 0);
         }
     }

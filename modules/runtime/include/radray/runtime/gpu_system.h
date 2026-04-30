@@ -3,7 +3,10 @@
 #include <array>
 #include <limits>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -22,14 +25,14 @@
 //   不直接作为底层 RHI primitive 暴露给外部模块。
 // - GpuResourceHandle 故意保持无类型：它表示 runtime 稳定资源标识，并提供到底层对象的
 //   interop 穿透能力，但不在该层统一资源具体类型。
-//   其中 Handle 是由 GpuRuntime 创建资源时分配的稳定 opaque id，调用方不应自行构造或修改；
+//   其中 Handle/Generation 是由 GpuRuntime 创建资源时分配的稳定 opaque id，调用方不应自行构造或修改；
 //   NativeHandle 是后端对象的 borrowed interop 指针，不转移所有权，也不保证跨后端统一具体类型。
 // - runtime 当前不负责 GPU 资源状态/usage 追踪；资源状态/barrier 以及
 //   DestroyResourceImmediate 的 last-use 正确性由更上层负责。
 // - 资源销毁入口统一为 DestroyResourceImmediate / DestroyResourceAfter，不按资源类型拆分 public API。
 //   DestroyResourceImmediate 立即物理销毁资源，要求当前不存在仍会访问它的 in-flight GPU work；
-//   对 texture 还要求不存在仍存活的从属 view。DestroyResourceAfter 则把物理释放延迟到
-//   指定 GpuTask 完成后由 ProcessTasks() 调度执行，且对 texture 仍受从属 view 生命周期约束。
+//   对拥有 registry 子引用的资源还要求不存在仍存活的子对象。DestroyResourceAfter 则把物理释放延迟到
+//   指定 GpuTask 完成后由 ProcessTasks() 调度执行，且仍受 registry 子对象生命周期约束。
 // - GpuAsyncContext 可暴露临时资源创建入口；其语义是“从属于该 context 的提交生命周期”，
 //   而不是简单绑定到 C++ 对象析构时刻。
 // - DependsOn 只记录 GPU 侧依赖，不做 CPU 同步；依赖任务必须来自同一个 GpuRuntime。
@@ -111,24 +114,35 @@ public:
 };
 
 struct GpuResourceHandle {
-    uint64_t Handle{std::numeric_limits<uint64_t>::max()};
-
+    uint32_t Handle{std::numeric_limits<uint32_t>::max()};
+    uint32_t Generation{0};
     void* NativeHandle{nullptr};
 
-    constexpr auto IsValid() const { return Handle != std::numeric_limits<uint64_t>::max(); }
+    constexpr auto IsValid() const { return Handle != std::numeric_limits<uint32_t>::max(); }
 
     constexpr void Invalidate() {
-        Handle = std::numeric_limits<uint64_t>::max();
+        Handle = std::numeric_limits<uint32_t>::max();
+        Generation = 0;
         NativeHandle = nullptr;
     }
 
-    constexpr static GpuResourceHandle Invalid() { return {std::numeric_limits<uint64_t>::max(), nullptr}; }
+    constexpr static GpuResourceHandle Invalid() { return {}; }
 };
 
 struct GpuBufferHandle : GpuResourceHandle {};
 struct GpuTextureHandle : GpuResourceHandle {};
 struct GpuTextureViewHandle : GpuResourceHandle {};
 struct GpuSamplerHandle : GpuResourceHandle {};
+struct GpuShaderHandle : GpuResourceHandle {};
+struct GpuRootSignatureHandle : GpuResourceHandle {};
+struct GpuDescriptorSetHandle : GpuResourceHandle {};
+struct GpuGraphicsPipelineStateHandle : GpuResourceHandle {};
+struct GpuComputePipelineStateHandle : GpuResourceHandle {};
+struct GpuAccelerationStructureHandle : GpuResourceHandle {};
+struct GpuAccelerationStructureViewHandle : GpuResourceHandle {};
+struct GpuRayTracingPipelineStateHandle : GpuResourceHandle {};
+struct GpuShaderBindingTableHandle : GpuResourceHandle {};
+struct GpuBindlessArrayHandle : GpuResourceHandle {};
 
 struct GpuTextureViewDescriptor {
     GpuTextureHandle Target{};
@@ -136,6 +150,72 @@ struct GpuTextureViewDescriptor {
     render::TextureFormat Format{render::TextureFormat::UNKNOWN};
     render::SubresourceRange Range{};
     render::TextureViewUsages Usage{render::TextureViewUsage::UNKNOWN};
+};
+
+struct GpuAccelerationStructureViewDescriptor {
+    GpuAccelerationStructureHandle Target{};
+};
+
+struct GpuShaderEntry {
+    GpuShaderHandle Target{};
+    std::string_view EntryPoint{};
+};
+
+struct GpuRootSignatureDescriptor {
+    std::span<const GpuShaderHandle> Shaders{};
+    std::span<const render::StaticSamplerDescriptor> StaticSamplers{};
+};
+
+struct GpuDescriptorSetDescriptor {
+    GpuRootSignatureHandle RootSig{};
+    render::DescriptorSetIndex Set{};
+};
+
+struct GpuGraphicsPipelineStateDescriptor {
+    GpuRootSignatureHandle RootSig{};
+    std::optional<GpuShaderEntry> VS{};
+    std::optional<GpuShaderEntry> PS{};
+    std::span<const render::VertexBufferLayout> VertexLayouts{};
+    render::PrimitiveState Primitive{};
+    std::optional<render::DepthStencilState> DepthStencil{};
+    render::MultiSampleState MultiSample{};
+    std::span<const render::ColorTargetState> ColorTargets{};
+};
+
+struct GpuComputePipelineStateDescriptor {
+    GpuRootSignatureHandle RootSig{};
+    GpuShaderEntry CS{};
+};
+
+struct GpuRayTracingShaderEntry {
+    GpuShaderHandle Target{};
+    std::string_view EntryPoint{};
+    render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
+};
+
+struct GpuRayTracingHitGroupDescriptor {
+    std::string_view Name{};
+    std::optional<GpuRayTracingShaderEntry> ClosestHit{};
+    std::optional<GpuRayTracingShaderEntry> AnyHit{};
+    std::optional<GpuRayTracingShaderEntry> Intersection{};
+};
+
+struct GpuRayTracingPipelineStateDescriptor {
+    GpuRootSignatureHandle RootSig{};
+    std::span<const GpuRayTracingShaderEntry> ShaderEntries{};
+    std::span<const GpuRayTracingHitGroupDescriptor> HitGroups{};
+    uint32_t MaxRecursionDepth{1};
+    uint32_t MaxPayloadSize{0};
+    uint32_t MaxAttributeSize{0};
+};
+
+struct GpuShaderBindingTableDescriptor {
+    GpuRayTracingPipelineStateHandle Pipeline{};
+    uint32_t RayGenCount{1};
+    uint32_t MissCount{0};
+    uint32_t HitGroupCount{0};
+    uint32_t CallableCount{0};
+    uint32_t MaxLocalDataSize{0};
 };
 
 struct GpuSurfaceDescriptor {
@@ -153,15 +233,15 @@ class GpuTask {
 public:
     GpuTask() noexcept = default;
     GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept;
-    GpuTask(const GpuTask&) noexcept = delete;
-    GpuTask& operator=(const GpuTask&) noexcept = delete;
+    GpuTask(const GpuTask&) noexcept = default;
+    GpuTask& operator=(const GpuTask&) noexcept = default;
     GpuTask(GpuTask&&) noexcept = default;
     GpuTask& operator=(GpuTask&&) noexcept = default;
     ~GpuTask() noexcept = default;
 
     bool IsValid() const;
     bool IsCompleted() const;
-    void Wait();
+    void Wait() const;
 
 public:
     GpuRuntime* _runtime{nullptr};
@@ -309,6 +389,28 @@ public:
     GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc);
 
     GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
+
+    GpuShaderHandle CreateShader(const render::ShaderDescriptor& desc);
+
+    GpuRootSignatureHandle CreateRootSignature(const GpuRootSignatureDescriptor& desc);
+
+    GpuDescriptorSetHandle CreateDescriptorSet(const GpuDescriptorSetDescriptor& desc);
+
+    GpuDescriptorSetHandle CreateDescriptorSet(GpuRootSignatureHandle rootSig, render::DescriptorSetIndex set);
+
+    GpuGraphicsPipelineStateHandle CreateGraphicsPipelineState(const GpuGraphicsPipelineStateDescriptor& desc);
+
+    GpuComputePipelineStateHandle CreateComputePipelineState(const GpuComputePipelineStateDescriptor& desc);
+
+    GpuAccelerationStructureHandle CreateAccelerationStructure(const render::AccelerationStructureDescriptor& desc);
+
+    GpuAccelerationStructureViewHandle CreateAccelerationStructureView(const GpuAccelerationStructureViewDescriptor& desc);
+
+    GpuRayTracingPipelineStateHandle CreateRayTracingPipelineState(const GpuRayTracingPipelineStateDescriptor& desc);
+
+    GpuShaderBindingTableHandle CreateShaderBindingTable(const GpuShaderBindingTableDescriptor& desc);
+
+    GpuBindlessArrayHandle CreateBindlessArray(const render::BindlessArrayDescriptor& desc);
 
     void DestroyResourceImmediate(GpuResourceHandle handle);
 

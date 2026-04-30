@@ -1,4 +1,6 @@
 #include <atomic>
+#include <cstddef>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -13,6 +15,9 @@
 #include <radray/runtime/gpu_system.h>
 #undef protected
 #undef private
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui_system.h>
+#endif
 
 using namespace radray;
 using namespace radray::render;
@@ -156,6 +161,241 @@ SamplerDescriptor MakeSamplerDesc() {
     return desc;
 }
 
+#ifdef RADRAY_ENABLE_IMGUI
+struct ImGuiHandleProgram {
+    GpuShaderHandle VS{};
+    GpuShaderHandle PS{};
+    GpuRootSignatureHandle RootSig{};
+    GpuGraphicsPipelineStateHandle Pso{};
+};
+
+void DestroyImGuiHandleProgram(GpuRuntime& runtime, ImGuiHandleProgram& program) {
+    auto destroyHandle = [&runtime](auto& handle) {
+        if (handle.IsValid()) {
+            runtime.DestroyResourceImmediate(handle);
+            handle.Invalidate();
+        }
+    };
+    destroyHandle(program.Pso);
+    destroyHandle(program.RootSig);
+    destroyHandle(program.PS);
+    destroyHandle(program.VS);
+}
+
+bool FillImGuiShaderDescriptors(RenderBackend backend, ShaderDescriptor& vsDesc, ShaderDescriptor& psDesc, std::string& reason) {
+    vsDesc.Stages = ShaderStage::Vertex;
+    psDesc.Stages = ShaderStage::Pixel;
+    switch (backend) {
+        case RenderBackend::D3D12: {
+            HlslShaderDesc vsRefl{};
+            vsRefl.ConstantBuffers.push_back(HlslShaderBufferDesc{
+                .Name = "gPush",
+                .Variables = {},
+                .Type = HlslCBufferType::CBUFFER,
+                .Size = 16,
+                .IsViewInHlsl = true});
+            vsRefl.BoundResources.push_back(HlslInputBindDesc{
+                .Name = "gPush",
+                .Type = HlslShaderInputType::CBUFFER,
+                .BindPoint = 0,
+                .BindCount = 1,
+                .Space = 0});
+            HlslShaderDesc psRefl{};
+            psRefl.BoundResources.push_back(HlslInputBindDesc{
+                .Name = "gTexture",
+                .Type = HlslShaderInputType::TEXTURE,
+                .BindPoint = 0,
+                .BindCount = 1,
+                .ReturnType = HlslResourceReturnType::FLOAT,
+                .Dimension = HlslSRVDimension::TEXTURE2D,
+                .Space = 1,
+                .VkBinding = 0,
+                .VkSet = 1});
+            psRefl.BoundResources.push_back(HlslInputBindDesc{
+                .Name = "gSampler",
+                .Type = HlslShaderInputType::SAMPLER,
+                .BindPoint = 1,
+                .BindCount = 1,
+                .Space = 1,
+                .VkBinding = 1,
+                .VkSet = 1});
+            vsDesc.Source = GetImGuiVertexShaderDXIL();
+            vsDesc.Category = ShaderBlobCategory::DXIL;
+            vsDesc.Reflection = vsRefl;
+            psDesc.Source = GetImGuiPixelShaderDXIL();
+            psDesc.Category = ShaderBlobCategory::DXIL;
+            psDesc.Reflection = psRefl;
+            return true;
+        }
+        case RenderBackend::Vulkan: {
+            SpirvShaderDesc vsRefl{};
+            vsRefl.PushConstants.push_back(SpirvPushConstantRange{
+                .Name = "gPush",
+                .Offset = 0,
+                .Size = 16,
+            });
+            SpirvShaderDesc psRefl{};
+            psRefl.ResourceBindings.push_back(SpirvResourceBinding{
+                .Name = "gTexture",
+                .Kind = SpirvResourceKind::SeparateImage,
+                .Set = 1,
+                .Binding = 0,
+                .HlslRegister = 0,
+                .HlslSpace = 1,
+                .ArraySize = 1,
+                .ImageInfo = SpirvImageInfo{
+                    .Dim = SpirvImageDim::Dim2D,
+                },
+                .ReadOnly = true});
+            psRefl.ResourceBindings.push_back(SpirvResourceBinding{
+                .Name = "gSampler",
+                .Kind = SpirvResourceKind::SeparateSampler,
+                .Set = 1,
+                .Binding = 1,
+                .HlslRegister = 1,
+                .HlslSpace = 1,
+                .ArraySize = 1,
+                .ImageInfo = std::nullopt,
+                .ReadOnly = true});
+            vsDesc.Source = GetImGuiVertexShaderSPIRV();
+            vsDesc.Category = ShaderBlobCategory::SPIRV;
+            vsDesc.Reflection = vsRefl;
+            psDesc.Source = GetImGuiPixelShaderSPIRV();
+            psDesc.Category = ShaderBlobCategory::SPIRV;
+            psDesc.Reflection = psRefl;
+            return true;
+        }
+        default:
+            reason = "ImGui shader descriptors only cover D3D12 and Vulkan.";
+            return false;
+    }
+}
+
+bool CreateImGuiHandleProgram(GpuRuntime& runtime, ImGuiHandleProgram& program, std::string& reason) {
+    auto* device = runtime.GetDevice();
+    if (device == nullptr) {
+        reason = "Runtime device is null.";
+        return false;
+    }
+
+    try {
+        ShaderDescriptor vsDesc{};
+        ShaderDescriptor psDesc{};
+        if (!FillImGuiShaderDescriptors(device->GetBackend(), vsDesc, psDesc, reason)) {
+            return false;
+        }
+
+        program.VS = runtime.CreateShader(vsDesc);
+        program.PS = runtime.CreateShader(psDesc);
+
+        GpuShaderHandle shaders[] = {program.VS, program.PS};
+        SamplerDescriptor samplerDesc{};
+        samplerDesc.AddressS = AddressMode::ClampToEdge;
+        samplerDesc.AddressT = AddressMode::ClampToEdge;
+        samplerDesc.AddressR = AddressMode::ClampToEdge;
+        samplerDesc.MinFilter = FilterMode::Linear;
+        samplerDesc.MagFilter = FilterMode::Linear;
+        samplerDesc.MipmapFilter = FilterMode::Linear;
+        samplerDesc.LodMin = 0.0f;
+        samplerDesc.LodMax = std::numeric_limits<float>::max();
+        samplerDesc.Compare = std::nullopt;
+        samplerDesc.AnisotropyClamp = 1;
+        const StaticSamplerDescriptor staticSamplers[] = {
+            StaticSamplerDescriptor{
+                .Name = "gSampler",
+                .Set = DescriptorSetIndex{1},
+                .Binding = 1,
+                .Stages = ShaderStage::Pixel,
+                .Desc = samplerDesc,
+            },
+        };
+        GpuRootSignatureDescriptor rootDesc{};
+        rootDesc.Shaders = shaders;
+        rootDesc.StaticSamplers = staticSamplers;
+        program.RootSig = runtime.CreateRootSignature(rootDesc);
+
+        const VertexElement vertexElements[] = {
+            VertexElement{
+                .Offset = offsetof(ImDrawVert, pos),
+                .Semantic = "POSITION",
+                .SemanticIndex = 0,
+                .Format = VertexFormat::FLOAT32X2,
+                .Location = 0,
+            },
+            VertexElement{
+                .Offset = offsetof(ImDrawVert, uv),
+                .Semantic = "TEXCOORD",
+                .SemanticIndex = 0,
+                .Format = VertexFormat::FLOAT32X2,
+                .Location = 1,
+            },
+            VertexElement{
+                .Offset = offsetof(ImDrawVert, col),
+                .Semantic = "COLOR",
+                .SemanticIndex = 0,
+                .Format = VertexFormat::UNORM8X4,
+                .Location = 2,
+            },
+        };
+        const VertexBufferLayout vertexLayouts[] = {
+            VertexBufferLayout{
+                .ArrayStride = sizeof(ImDrawVert),
+                .StepMode = VertexStepMode::Vertex,
+                .Elements = vertexElements,
+            },
+        };
+        BlendState blend{};
+        blend.Color.Src = BlendFactor::SrcAlpha;
+        blend.Color.Dst = BlendFactor::OneMinusSrcAlpha;
+        blend.Color.Op = BlendOperation::Add;
+        blend.Alpha.Src = BlendFactor::One;
+        blend.Alpha.Dst = BlendFactor::OneMinusSrcAlpha;
+        blend.Alpha.Op = BlendOperation::Add;
+        const ColorTargetState colorTargets[] = {
+            ColorTargetState{
+                .Format = TextureFormat::RGBA8_UNORM,
+                .Blend = blend,
+                .WriteMask = ColorWrite::All,
+            },
+        };
+        PrimitiveState primitive{};
+        primitive.Topology = PrimitiveTopology::TriangleList;
+        primitive.FaceClockwise = FrontFace::CW;
+        primitive.Cull = CullMode::None;
+        primitive.Poly = PolygonMode::Fill;
+        primitive.StripIndexFormat = std::nullopt;
+        primitive.UnclippedDepth = false;
+        primitive.Conservative = false;
+
+        GpuGraphicsPipelineStateDescriptor psoDesc{};
+        psoDesc.RootSig = program.RootSig;
+        psoDesc.VS = GpuShaderEntry{
+            .Target = program.VS,
+            .EntryPoint = "VSMain",
+        };
+        psoDesc.PS = GpuShaderEntry{
+            .Target = program.PS,
+            .EntryPoint = "PSMain",
+        };
+        psoDesc.VertexLayouts = vertexLayouts;
+        psoDesc.Primitive = primitive;
+        psoDesc.DepthStencil = std::nullopt;
+        psoDesc.MultiSample = MultiSampleState{
+            .Count = 1,
+            .Mask = 0xFFFFFFFF,
+            .AlphaToCoverageEnable = false,
+        };
+        psoDesc.ColorTargets = colorTargets;
+        program.Pso = runtime.CreateGraphicsPipelineState(psoDesc);
+        return true;
+    } catch (const std::exception& ex) {
+        reason = ex.what();
+        DestroyImGuiHandleProgram(runtime, program);
+        return false;
+    }
+}
+#endif
+
 GpuTask SubmitNoOpAsync(GpuRuntime& runtime) {
     auto context = runtime.BeginAsync(QueueType::Direct);
     auto* cmd = context->CreateCommandBuffer();
@@ -283,6 +523,105 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterWaitsForTaskAndProcessTasks) 
     EXPECT_TRUE(runtime->_resourceRetirements.empty());
     EXPECT_TRUE(runtime->_pendings.empty());
 }
+
+TEST_P(GpuRuntimeResourceTest, GpuTaskCopyCanWaitAndDriveDelayedDestroy) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    const GpuTask task = SubmitNoOpAsync(*runtime);
+    const GpuTask copied = task;
+
+    EXPECT_TRUE(task.IsValid());
+    EXPECT_TRUE(copied.IsValid());
+    EXPECT_EQ(task._runtime, copied._runtime);
+    EXPECT_EQ(task._fence, copied._fence);
+    EXPECT_EQ(task._signalValue, copied._signalValue);
+    EXPECT_EQ(task.IsCompleted(), copied.IsCompleted());
+
+    runtime->DestroyResourceAfter(buffer, copied);
+    copied.Wait();
+    EXPECT_TRUE(task.IsCompleted());
+    EXPECT_TRUE(copied.IsCompleted());
+
+    runtime->ProcessTasks();
+    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_TRUE(runtime->_pendings.empty());
+}
+
+TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterRetiresChildBeforeParentWhenBothReady) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto texture = runtime->CreateTexture(MakeTextureDesc());
+    const auto view = runtime->CreateTextureView(MakeTextureViewDesc(texture));
+    auto task = SubmitNoOpAsync(*runtime);
+
+    runtime->DestroyResourceAfter(texture, task);
+    runtime->DestroyResourceAfter(view, task);
+
+    task.Wait();
+    runtime->ProcessTasks();
+
+    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_TRUE(runtime->_pendings.empty());
+    EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
+}
+
+#ifdef RADRAY_ENABLE_IMGUI
+TEST_P(GpuRuntimeResourceTest, RuntimeRenderObjectHandlesCreateAndDestroy) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    ImGuiHandleProgram program{};
+    ASSERT_TRUE(CreateImGuiHandleProgram(*runtime, program, reason)) << reason;
+    const auto descriptorSet = runtime->CreateDescriptorSet(program.RootSig, DescriptorSetIndex{1});
+
+    EXPECT_TRUE(program.VS.IsValid());
+    EXPECT_TRUE(program.PS.IsValid());
+    EXPECT_TRUE(program.RootSig.IsValid());
+    EXPECT_TRUE(program.Pso.IsValid());
+    EXPECT_TRUE(descriptorSet.IsValid());
+    EXPECT_NE(program.VS.NativeHandle, nullptr);
+    EXPECT_NE(program.PS.NativeHandle, nullptr);
+    EXPECT_NE(program.RootSig.NativeHandle, nullptr);
+    EXPECT_NE(program.Pso.NativeHandle, nullptr);
+    EXPECT_NE(descriptorSet.NativeHandle, nullptr);
+
+    runtime->DestroyResourceImmediate(descriptorSet);
+    DestroyImGuiHandleProgram(*runtime, program);
+}
+
+TEST_P(GpuRuntimeResourceTest, RootSignatureImmediateDestroyRejectsLiveChildren) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    ImGuiHandleProgram program{};
+    ASSERT_TRUE(CreateImGuiHandleProgram(*runtime, program, reason)) << reason;
+    const auto descriptorSet = runtime->CreateDescriptorSet(program.RootSig, DescriptorSetIndex{1});
+
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(program.RootSig));
+
+    runtime->DestroyResourceImmediate(program.Pso);
+    program.Pso.Invalidate();
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(program.RootSig));
+
+    runtime->DestroyResourceImmediate(descriptorSet);
+    DestroyImGuiHandleProgram(*runtime, program);
+}
+#endif
 
 TEST_P(GpuRuntimeResourceTest, TransientViewScopeRulesAndImmediateDestroyRejectsTransient) {
     unique_ptr<GpuRuntime> runtime{};

@@ -5,6 +5,7 @@
 #include <variant>
 
 #include <radray/logger.h>
+#include <radray/sparse_set.h>
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
 #endif
@@ -18,7 +19,17 @@ public:
         Buffer,
         Texture,
         TextureView,
-        Sampler
+        Sampler,
+        Shader,
+        RootSignature,
+        DescriptorSet,
+        GraphicsPipelineState,
+        ComputePipelineState,
+        AccelerationStructure,
+        AccelerationStructureView,
+        RayTracingPipelineState,
+        ShaderBindingTable,
+        BindlessArray
     };
 
     enum class State {
@@ -26,10 +37,10 @@ public:
         PendingDestroy
     };
 
-    struct TextureParentRef {
+    struct ParentResourceRef {
         GpuResourceRegistry* Registry{nullptr};
-        GpuTextureHandle Handle{};
-        render::Texture* Texture{nullptr};
+        GpuResourceHandle Handle{};
+        void* NativeHandle{nullptr};
     };
 
     explicit GpuResourceRegistry(render::Device* device) noexcept;
@@ -37,8 +48,18 @@ public:
 
     GpuBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
     GpuTextureHandle CreateTexture(const render::TextureDescriptor& desc);
-    GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc, const TextureParentRef& parent);
+    GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc, const ParentResourceRef& parent);
     GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
+    GpuShaderHandle CreateShader(const render::ShaderDescriptor& desc);
+    GpuRootSignatureHandle CreateRootSignature(const GpuRootSignatureDescriptor& desc);
+    GpuDescriptorSetHandle CreateDescriptorSet(const GpuDescriptorSetDescriptor& desc);
+    GpuGraphicsPipelineStateHandle CreateGraphicsPipelineState(const GpuGraphicsPipelineStateDescriptor& desc);
+    GpuComputePipelineStateHandle CreateComputePipelineState(const GpuComputePipelineStateDescriptor& desc);
+    GpuAccelerationStructureHandle CreateAccelerationStructure(const render::AccelerationStructureDescriptor& desc);
+    GpuAccelerationStructureViewHandle CreateAccelerationStructureView(const GpuAccelerationStructureViewDescriptor& desc);
+    GpuRayTracingPipelineStateHandle CreateRayTracingPipelineState(const GpuRayTracingPipelineStateDescriptor& desc);
+    GpuShaderBindingTableHandle CreateShaderBindingTable(const GpuShaderBindingTableDescriptor& desc);
+    GpuBindlessArrayHandle CreateBindlessArray(const render::BindlessArrayDescriptor& desc);
 
     render::Texture* FindAliveTexture(const GpuTextureHandle& handle) noexcept;
     const render::Texture* FindAliveTexture(const GpuTextureHandle& handle) const noexcept;
@@ -48,55 +69,110 @@ public:
     Kind GetKind(const GpuResourceHandle& handle) const noexcept;
     void MarkPendingDestroy(const GpuResourceHandle& handle);
 
-    void AddTextureChildViewRef(const GpuTextureHandle& handle);
-    void ReleaseTextureChildViewRef(const GpuTextureHandle& handle) noexcept;
+    void AddChildRef(const GpuResourceHandle& handle);
+    void ReleaseChildRef(const GpuResourceHandle& handle) noexcept;
 
     bool TryDestroyImmediately(const GpuResourceHandle& handle) noexcept;
     bool TryRetire(const GpuResourceHandle& handle) noexcept;
     void Clear() noexcept;
 
 private:
+    struct ParentRef {
+        GpuResourceRegistry* Registry{nullptr};
+        GpuResourceHandle Handle{};
+
+        ParentRef() noexcept = default;
+        ParentRef(GpuResourceRegistry* registry, GpuResourceHandle handle) noexcept
+            : Registry(registry),
+              Handle(handle) {}
+    };
+
     struct BufferRecord {
-        unique_ptr<render::Buffer> Buffer{};
+        unique_ptr<render::Buffer> Resource{};
     };
 
     struct TextureRecord {
-        unique_ptr<render::Texture> Texture{};
-        uint32_t ChildViewCount{0};
+        unique_ptr<render::Texture> Resource{};
     };
 
     struct TextureViewRecord {
-        unique_ptr<render::TextureView> TextureView{};
-        TextureParentRef ParentTexture{};
+        unique_ptr<render::TextureView> Resource{};
     };
 
     struct SamplerRecord {
-        unique_ptr<render::Sampler> Sampler{};
+        unique_ptr<render::Sampler> Resource{};
+    };
+
+    struct ShaderRecord {
+        unique_ptr<render::Shader> Resource{};
+    };
+
+    struct RootSignatureRecord {
+        unique_ptr<render::RootSignature> Resource{};
+    };
+
+    struct DescriptorSetRecord {
+        unique_ptr<render::DescriptorSet> Resource{};
+    };
+
+    struct GraphicsPipelineStateRecord {
+        unique_ptr<render::GraphicsPipelineState> Resource{};
+    };
+
+    struct ComputePipelineStateRecord {
+        unique_ptr<render::ComputePipelineState> Resource{};
+    };
+
+    struct AccelerationStructureRecord {
+        unique_ptr<render::AccelerationStructure> Resource{};
+    };
+
+    struct AccelerationStructureViewRecord {
+        unique_ptr<render::AccelerationStructureView> Resource{};
+    };
+
+    struct RayTracingPipelineStateRecord {
+        unique_ptr<render::RayTracingPipelineState> Resource{};
+    };
+
+    struct ShaderBindingTableRecord {
+        unique_ptr<render::ShaderBindingTable> Resource{};
+    };
+
+    struct BindlessArrayRecord {
+        unique_ptr<render::BindlessArray> Resource{};
     };
 
     class ResourceRecord {
     public:
-        using Payload = std::variant<BufferRecord, TextureRecord, TextureViewRecord, SamplerRecord>;
+        using Payload = std::variant<
+            BufferRecord,
+            TextureRecord,
+            TextureViewRecord,
+            SamplerRecord,
+            ShaderRecord,
+            RootSignatureRecord,
+            DescriptorSetRecord,
+            GraphicsPipelineStateRecord,
+            ComputePipelineStateRecord,
+            AccelerationStructureRecord,
+            AccelerationStructureViewRecord,
+            RayTracingPipelineStateRecord,
+            ShaderBindingTableRecord,
+            BindlessArrayRecord>;
 
         Payload Data;
+        SparseSetHandle RecordHandle{SparseSetHandle::Invalid()};
         void* NativeHandle{nullptr};
         State State{State::Alive};
+        uint32_t ChildRefCount{0};
+        vector<ParentRef> ParentRefs{};
 
-        explicit ResourceRecord(BufferRecord bufferRecord) noexcept
-            : Data(std::move(bufferRecord)),
-              NativeHandle(std::get<BufferRecord>(Data).Buffer.get()) {}
-
-        explicit ResourceRecord(TextureRecord textureRecord) noexcept
-            : Data(std::move(textureRecord)),
-              NativeHandle(std::get<TextureRecord>(Data).Texture.get()) {}
-
-        explicit ResourceRecord(TextureViewRecord textureViewRecord) noexcept
-            : Data(std::move(textureViewRecord)),
-              NativeHandle(std::get<TextureViewRecord>(Data).TextureView.get()) {}
-
-        explicit ResourceRecord(SamplerRecord samplerRecord) noexcept
-            : Data(std::move(samplerRecord)),
-              NativeHandle(std::get<SamplerRecord>(Data).Sampler.get()) {}
+        template <typename Record>
+        ResourceRecord(Record record, void* nativeHandle, vector<ParentRef> parentRefs = {}) noexcept
+            : Data(std::move(record)),
+              NativeHandle(nativeHandle),
+              ParentRefs(std::move(parentRefs)) {}
 
         Kind GetKind() const noexcept {
             return std::visit(
@@ -108,22 +184,62 @@ private:
                         return Kind::Texture;
                     } else if constexpr (std::is_same_v<Record, TextureViewRecord>) {
                         return Kind::TextureView;
-                    } else {
-                        static_assert(std::is_same_v<Record, SamplerRecord>);
+                    } else if constexpr (std::is_same_v<Record, SamplerRecord>) {
                         return Kind::Sampler;
+                    } else if constexpr (std::is_same_v<Record, ShaderRecord>) {
+                        return Kind::Shader;
+                    } else if constexpr (std::is_same_v<Record, RootSignatureRecord>) {
+                        return Kind::RootSignature;
+                    } else if constexpr (std::is_same_v<Record, DescriptorSetRecord>) {
+                        return Kind::DescriptorSet;
+                    } else if constexpr (std::is_same_v<Record, GraphicsPipelineStateRecord>) {
+                        return Kind::GraphicsPipelineState;
+                    } else if constexpr (std::is_same_v<Record, ComputePipelineStateRecord>) {
+                        return Kind::ComputePipelineState;
+                    } else if constexpr (std::is_same_v<Record, AccelerationStructureRecord>) {
+                        return Kind::AccelerationStructure;
+                    } else if constexpr (std::is_same_v<Record, AccelerationStructureViewRecord>) {
+                        return Kind::AccelerationStructureView;
+                    } else if constexpr (std::is_same_v<Record, RayTracingPipelineStateRecord>) {
+                        return Kind::RayTracingPipelineState;
+                    } else if constexpr (std::is_same_v<Record, ShaderBindingTableRecord>) {
+                        return Kind::ShaderBindingTable;
+                    } else {
+                        static_assert(std::is_same_v<Record, BindlessArrayRecord>);
+                        return Kind::BindlessArray;
                     }
                 },
                 Data);
         }
     };
 
+    static constexpr SparseSetHandle ToRecordHandle(const GpuResourceHandle& handle) noexcept {
+        return SparseSetHandle{handle.Handle, handle.Generation};
+    }
+
+    template <typename Handle, typename Record>
+    Handle AddRecord(Record resourceRecord, void* nativeHandle, vector<ParentRef> parentRefs = {});
+
+    template <typename Record, typename Native>
+    Native* FindAliveAs(const GpuResourceHandle& handle) noexcept;
+
+    template <typename Record, typename Native>
+    const Native* FindAliveAs(const GpuResourceHandle& handle) const noexcept;
+
+    render::Shader* FindAliveShader(const GpuShaderHandle& handle) noexcept;
+    render::RootSignature* FindAliveRootSignature(const GpuRootSignatureHandle& handle) noexcept;
+    render::AccelerationStructure* FindAliveAccelerationStructure(const GpuAccelerationStructureHandle& handle) noexcept;
+    render::RayTracingPipelineState* FindAliveRayTracingPipelineState(const GpuRayTracingPipelineStateHandle& handle) noexcept;
+
+    render::ShaderEntry MakeNativeShaderEntry(const GpuShaderEntry& entry, vector<ParentRef>& parentRefs);
+    render::RayTracingShaderEntry MakeNativeRayTracingShaderEntry(const GpuRayTracingShaderEntry& entry, vector<ParentRef>& parentRefs);
+
     const ResourceRecord* FindRecord(const GpuResourceHandle& handle) const noexcept;
     ResourceRecord* FindRecord(const GpuResourceHandle& handle) noexcept;
-    void EraseRecord(uint64_t handleId) noexcept;
+    void EraseRecord(const GpuResourceHandle& handle) noexcept;
 
     render::Device* _device{nullptr};
-    uint64_t _nextHandle{1};
-    unordered_map<uint64_t, ResourceRecord> _records{};
+    SparseSet<ResourceRecord> _records{};
 };
 
 GpuTask::GpuTask(GpuRuntime* runtime, render::Fence* fence, uint64_t signalValue) noexcept
@@ -139,7 +255,7 @@ bool GpuTask::IsCompleted() const {
     return !this->IsValid() || _fence->GetCompletedValue() >= _signalValue;
 }
 
-void GpuTask::Wait() {
+void GpuTask::Wait() const {
     if (this->IsValid()) {
         _fence->Wait(_signalValue);
     }
@@ -181,6 +297,39 @@ GpuResourceRegistry::~GpuResourceRegistry() noexcept {
     this->Clear();
 }
 
+template <typename Handle, typename Record>
+Handle GpuResourceRegistry::AddRecord(Record resourceRecord, void* nativeHandle, vector<ParentRef> parentRefs) {
+    RADRAY_ASSERT(nativeHandle != nullptr);
+    const SparseSetHandle recordHandle = _records.Emplace(ResourceRecord{std::move(resourceRecord), nativeHandle, std::move(parentRefs)});
+    ResourceRecord& record = _records.Get(recordHandle);
+    record.RecordHandle = recordHandle;
+    for (const ParentRef& parent : record.ParentRefs) {
+        RADRAY_ASSERT(parent.Registry != nullptr);
+        parent.Registry->AddChildRef(parent.Handle);
+    }
+    return {recordHandle.Index, recordHandle.Generation, nativeHandle};
+}
+
+template <typename Record, typename Native>
+Native* GpuResourceRegistry::FindAliveAs(const GpuResourceHandle& handle) noexcept {
+    auto* record = this->FindRecord(handle);
+    if (record == nullptr || record->State != State::Alive) {
+        return nullptr;
+    }
+    auto* typedRecord = std::get_if<Record>(&record->Data);
+    return typedRecord != nullptr ? typedRecord->Resource.get() : nullptr;
+}
+
+template <typename Record, typename Native>
+const Native* GpuResourceRegistry::FindAliveAs(const GpuResourceHandle& handle) const noexcept {
+    const auto* record = this->FindRecord(handle);
+    if (record == nullptr || record->State != State::Alive) {
+        return nullptr;
+    }
+    const auto* typedRecord = std::get_if<Record>(&record->Data);
+    return typedRecord != nullptr ? typedRecord->Resource.get() : nullptr;
+}
+
 GpuBufferHandle GpuResourceRegistry::CreateBuffer(const render::BufferDescriptor& desc) {
     RADRAY_ASSERT(_device != nullptr);
     auto bufferOpt = _device->CreateBuffer(desc);
@@ -190,10 +339,7 @@ GpuBufferHandle GpuResourceRegistry::CreateBuffer(const render::BufferDescriptor
 
     auto buffer = bufferOpt.Release();
     auto* native = buffer.get();
-    const uint64_t handleId = _nextHandle++;
-
-    _records.emplace(handleId, ResourceRecord{BufferRecord{std::move(buffer)}});
-    return {handleId, native};
+    return this->AddRecord<GpuBufferHandle>(BufferRecord{std::move(buffer)}, native);
 }
 
 GpuTextureHandle GpuResourceRegistry::CreateTexture(const render::TextureDescriptor& desc) {
@@ -205,20 +351,18 @@ GpuTextureHandle GpuResourceRegistry::CreateTexture(const render::TextureDescrip
 
     auto texture = textureOpt.Release();
     auto* native = texture.get();
-    const uint64_t handleId = _nextHandle++;
-
-    _records.emplace(handleId, ResourceRecord{TextureRecord{std::move(texture)}});
-    return {handleId, native};
+    return this->AddRecord<GpuTextureHandle>(TextureRecord{std::move(texture)}, native);
 }
 
-GpuTextureViewHandle GpuResourceRegistry::CreateTextureView(const GpuTextureViewDescriptor& desc, const TextureParentRef& parent) {
+GpuTextureViewHandle GpuResourceRegistry::CreateTextureView(const GpuTextureViewDescriptor& desc, const ParentResourceRef& parent) {
     RADRAY_ASSERT(_device != nullptr);
     RADRAY_ASSERT(parent.Registry != nullptr);
     RADRAY_ASSERT(parent.Handle.IsValid());
-    RADRAY_ASSERT(parent.Texture != nullptr);
+    auto* parentTexture = static_cast<render::Texture*>(parent.NativeHandle);
+    RADRAY_ASSERT(parentTexture != nullptr);
 
     render::TextureViewDescriptor nativeDesc{};
-    nativeDesc.Target = parent.Texture;
+    nativeDesc.Target = parentTexture;
     nativeDesc.Dim = desc.Dim;
     nativeDesc.Format = desc.Format;
     nativeDesc.Range = desc.Range;
@@ -231,16 +375,10 @@ GpuTextureViewHandle GpuResourceRegistry::CreateTextureView(const GpuTextureView
 
     auto textureView = textureViewOpt.Release();
     auto* native = textureView.get();
-    const uint64_t handleId = _nextHandle++;
-
-    _records.emplace(
-        handleId,
-        ResourceRecord{TextureViewRecord{
-            .TextureView = std::move(textureView),
-            .ParentTexture = parent,
-        }});
-    parent.Registry->AddTextureChildViewRef(parent.Handle);
-    return {handleId, native};
+    return this->AddRecord<GpuTextureViewHandle>(
+        TextureViewRecord{std::move(textureView)},
+        native,
+        vector<ParentRef>{{parent.Registry, parent.Handle}});
 }
 
 GpuSamplerHandle GpuResourceRegistry::CreateSampler(const render::SamplerDescriptor& desc) {
@@ -252,28 +390,301 @@ GpuSamplerHandle GpuResourceRegistry::CreateSampler(const render::SamplerDescrip
 
     auto sampler = samplerOpt.Release();
     auto* native = sampler.get();
-    const uint64_t handleId = _nextHandle++;
+    return this->AddRecord<GpuSamplerHandle>(SamplerRecord{std::move(sampler)}, native);
+}
 
-    _records.emplace(handleId, ResourceRecord{SamplerRecord{std::move(sampler)}});
-    return {handleId, native};
+GpuShaderHandle GpuResourceRegistry::CreateShader(const render::ShaderDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto shaderOpt = _device->CreateShader(desc);
+    if (!shaderOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateShader failed");
+    }
+
+    auto shader = shaderOpt.Release();
+    auto* native = shader.get();
+    return this->AddRecord<GpuShaderHandle>(ShaderRecord{std::move(shader)}, native);
+}
+
+GpuRootSignatureHandle GpuResourceRegistry::CreateRootSignature(const GpuRootSignatureDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+
+    vector<render::Shader*> shaders{};
+    vector<ParentRef> parentRefs{};
+    shaders.reserve(desc.Shaders.size());
+    parentRefs.reserve(desc.Shaders.size());
+    for (const GpuShaderHandle& shaderHandle : desc.Shaders) {
+        auto* shader = this->FindAliveShader(shaderHandle);
+        RADRAY_ASSERT(shader != nullptr);
+        shaders.emplace_back(shader);
+        parentRefs.emplace_back(this, shaderHandle);
+    }
+
+    render::RootSignatureDescriptor nativeDesc{};
+    nativeDesc.Shaders = std::span<render::Shader*>{shaders.data(), shaders.size()};
+    nativeDesc.StaticSamplers = desc.StaticSamplers;
+    auto rootSigOpt = _device->CreateRootSignature(nativeDesc);
+    if (!rootSigOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateRootSignature failed");
+    }
+
+    auto rootSig = rootSigOpt.Release();
+    auto* native = rootSig.get();
+    return this->AddRecord<GpuRootSignatureHandle>(
+        RootSignatureRecord{std::move(rootSig)},
+        native,
+        std::move(parentRefs));
+}
+
+GpuDescriptorSetHandle GpuResourceRegistry::CreateDescriptorSet(const GpuDescriptorSetDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* rootSig = this->FindAliveRootSignature(desc.RootSig);
+    RADRAY_ASSERT(rootSig != nullptr);
+
+    auto descriptorSetOpt = _device->CreateDescriptorSet(rootSig, desc.Set);
+    if (!descriptorSetOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateDescriptorSet failed");
+    }
+
+    auto descriptorSet = descriptorSetOpt.Release();
+    auto* native = descriptorSet.get();
+    return this->AddRecord<GpuDescriptorSetHandle>(
+        DescriptorSetRecord{std::move(descriptorSet)},
+        native,
+        vector<ParentRef>{{this, desc.RootSig}});
+}
+
+render::ShaderEntry GpuResourceRegistry::MakeNativeShaderEntry(const GpuShaderEntry& entry, vector<ParentRef>& parentRefs) {
+    auto* shader = this->FindAliveShader(entry.Target);
+    RADRAY_ASSERT(shader != nullptr);
+    parentRefs.emplace_back(this, entry.Target);
+    return render::ShaderEntry{
+        .Target = shader,
+        .EntryPoint = entry.EntryPoint,
+    };
+}
+
+GpuGraphicsPipelineStateHandle GpuResourceRegistry::CreateGraphicsPipelineState(const GpuGraphicsPipelineStateDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* rootSig = this->FindAliveRootSignature(desc.RootSig);
+    RADRAY_ASSERT(rootSig != nullptr);
+
+    vector<ParentRef> parentRefs{};
+    parentRefs.reserve(3);
+    parentRefs.emplace_back(this, desc.RootSig);
+
+    render::GraphicsPipelineStateDescriptor nativeDesc{};
+    nativeDesc.RootSig = rootSig;
+    if (desc.VS.has_value()) {
+        nativeDesc.VS = this->MakeNativeShaderEntry(*desc.VS, parentRefs);
+    }
+    if (desc.PS.has_value()) {
+        nativeDesc.PS = this->MakeNativeShaderEntry(*desc.PS, parentRefs);
+    }
+    nativeDesc.VertexLayouts = desc.VertexLayouts;
+    nativeDesc.Primitive = desc.Primitive;
+    nativeDesc.DepthStencil = desc.DepthStencil;
+    nativeDesc.MultiSample = desc.MultiSample;
+    nativeDesc.ColorTargets = desc.ColorTargets;
+
+    auto psoOpt = _device->CreateGraphicsPipelineState(nativeDesc);
+    if (!psoOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateGraphicsPipelineState failed");
+    }
+
+    auto pso = psoOpt.Release();
+    auto* native = pso.get();
+    return this->AddRecord<GpuGraphicsPipelineStateHandle>(
+        GraphicsPipelineStateRecord{std::move(pso)},
+        native,
+        std::move(parentRefs));
+}
+
+GpuComputePipelineStateHandle GpuResourceRegistry::CreateComputePipelineState(const GpuComputePipelineStateDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* rootSig = this->FindAliveRootSignature(desc.RootSig);
+    RADRAY_ASSERT(rootSig != nullptr);
+
+    vector<ParentRef> parentRefs{};
+    parentRefs.reserve(2);
+    parentRefs.emplace_back(this, desc.RootSig);
+
+    render::ComputePipelineStateDescriptor nativeDesc{};
+    nativeDesc.RootSig = rootSig;
+    nativeDesc.CS = this->MakeNativeShaderEntry(desc.CS, parentRefs);
+
+    auto psoOpt = _device->CreateComputePipelineState(nativeDesc);
+    if (!psoOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateComputePipelineState failed");
+    }
+
+    auto pso = psoOpt.Release();
+    auto* native = pso.get();
+    return this->AddRecord<GpuComputePipelineStateHandle>(
+        ComputePipelineStateRecord{std::move(pso)},
+        native,
+        std::move(parentRefs));
+}
+
+GpuAccelerationStructureHandle GpuResourceRegistry::CreateAccelerationStructure(const render::AccelerationStructureDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto asOpt = _device->CreateAccelerationStructure(desc);
+    if (!asOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateAccelerationStructure failed");
+    }
+
+    auto as = asOpt.Release();
+    auto* native = as.get();
+    return this->AddRecord<GpuAccelerationStructureHandle>(
+        AccelerationStructureRecord{std::move(as)},
+        native);
+}
+
+GpuAccelerationStructureViewHandle GpuResourceRegistry::CreateAccelerationStructureView(const GpuAccelerationStructureViewDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* as = this->FindAliveAccelerationStructure(desc.Target);
+    RADRAY_ASSERT(as != nullptr);
+
+    render::AccelerationStructureViewDescriptor nativeDesc{};
+    nativeDesc.Target = as;
+    auto viewOpt = _device->CreateAccelerationStructureView(nativeDesc);
+    if (!viewOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateAccelerationStructureView failed");
+    }
+
+    auto view = viewOpt.Release();
+    auto* native = view.get();
+    return this->AddRecord<GpuAccelerationStructureViewHandle>(
+        AccelerationStructureViewRecord{std::move(view)},
+        native,
+        vector<ParentRef>{{this, desc.Target}});
+}
+
+render::RayTracingShaderEntry GpuResourceRegistry::MakeNativeRayTracingShaderEntry(
+    const GpuRayTracingShaderEntry& entry,
+    vector<ParentRef>& parentRefs) {
+    auto* shader = this->FindAliveShader(entry.Target);
+    RADRAY_ASSERT(shader != nullptr);
+    parentRefs.emplace_back(this, entry.Target);
+    return render::RayTracingShaderEntry{
+        .Target = shader,
+        .EntryPoint = entry.EntryPoint,
+        .Stage = entry.Stage,
+    };
+}
+
+GpuRayTracingPipelineStateHandle GpuResourceRegistry::CreateRayTracingPipelineState(const GpuRayTracingPipelineStateDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* rootSig = this->FindAliveRootSignature(desc.RootSig);
+    RADRAY_ASSERT(rootSig != nullptr);
+
+    vector<ParentRef> parentRefs{};
+    parentRefs.reserve(1 + desc.ShaderEntries.size() + desc.HitGroups.size() * 3);
+    parentRefs.emplace_back(this, desc.RootSig);
+
+    vector<render::RayTracingShaderEntry> shaderEntries{};
+    shaderEntries.reserve(desc.ShaderEntries.size());
+    for (const GpuRayTracingShaderEntry& entry : desc.ShaderEntries) {
+        shaderEntries.emplace_back(this->MakeNativeRayTracingShaderEntry(entry, parentRefs));
+    }
+
+    vector<render::RayTracingHitGroupDescriptor> hitGroups{};
+    hitGroups.reserve(desc.HitGroups.size());
+    for (const GpuRayTracingHitGroupDescriptor& hitGroupDesc : desc.HitGroups) {
+        render::RayTracingHitGroupDescriptor nativeHitGroup{};
+        nativeHitGroup.Name = hitGroupDesc.Name;
+        if (hitGroupDesc.ClosestHit.has_value()) {
+            nativeHitGroup.ClosestHit = this->MakeNativeRayTracingShaderEntry(*hitGroupDesc.ClosestHit, parentRefs);
+        }
+        if (hitGroupDesc.AnyHit.has_value()) {
+            nativeHitGroup.AnyHit = this->MakeNativeRayTracingShaderEntry(*hitGroupDesc.AnyHit, parentRefs);
+        }
+        if (hitGroupDesc.Intersection.has_value()) {
+            nativeHitGroup.Intersection = this->MakeNativeRayTracingShaderEntry(*hitGroupDesc.Intersection, parentRefs);
+        }
+        hitGroups.emplace_back(nativeHitGroup);
+    }
+
+    render::RayTracingPipelineStateDescriptor nativeDesc{};
+    nativeDesc.RootSig = rootSig;
+    nativeDesc.ShaderEntries = std::span<const render::RayTracingShaderEntry>{shaderEntries.data(), shaderEntries.size()};
+    nativeDesc.HitGroups = std::span<const render::RayTracingHitGroupDescriptor>{hitGroups.data(), hitGroups.size()};
+    nativeDesc.MaxRecursionDepth = desc.MaxRecursionDepth;
+    nativeDesc.MaxPayloadSize = desc.MaxPayloadSize;
+    nativeDesc.MaxAttributeSize = desc.MaxAttributeSize;
+    auto psoOpt = _device->CreateRayTracingPipelineState(nativeDesc);
+    if (!psoOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateRayTracingPipelineState failed");
+    }
+
+    auto pso = psoOpt.Release();
+    auto* native = pso.get();
+    return this->AddRecord<GpuRayTracingPipelineStateHandle>(
+        RayTracingPipelineStateRecord{std::move(pso)},
+        native,
+        std::move(parentRefs));
+}
+
+GpuShaderBindingTableHandle GpuResourceRegistry::CreateShaderBindingTable(const GpuShaderBindingTableDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto* pipeline = this->FindAliveRayTracingPipelineState(desc.Pipeline);
+    RADRAY_ASSERT(pipeline != nullptr);
+
+    render::ShaderBindingTableDescriptor nativeDesc{};
+    nativeDesc.Pipeline = pipeline;
+    nativeDesc.RayGenCount = desc.RayGenCount;
+    nativeDesc.MissCount = desc.MissCount;
+    nativeDesc.HitGroupCount = desc.HitGroupCount;
+    nativeDesc.CallableCount = desc.CallableCount;
+    nativeDesc.MaxLocalDataSize = desc.MaxLocalDataSize;
+    auto sbtOpt = _device->CreateShaderBindingTable(nativeDesc);
+    if (!sbtOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateShaderBindingTable failed");
+    }
+
+    auto sbt = sbtOpt.Release();
+    auto* native = sbt.get();
+    return this->AddRecord<GpuShaderBindingTableHandle>(
+        ShaderBindingTableRecord{std::move(sbt)},
+        native,
+        vector<ParentRef>{{this, desc.Pipeline}});
+}
+
+GpuBindlessArrayHandle GpuResourceRegistry::CreateBindlessArray(const render::BindlessArrayDescriptor& desc) {
+    RADRAY_ASSERT(_device != nullptr);
+    auto bindlessArrayOpt = _device->CreateBindlessArray(desc);
+    if (!bindlessArrayOpt.HasValue()) {
+        throw GpuSystemException("Device::CreateBindlessArray failed");
+    }
+
+    auto bindlessArray = bindlessArrayOpt.Release();
+    auto* native = bindlessArray.get();
+    return this->AddRecord<GpuBindlessArrayHandle>(
+        BindlessArrayRecord{std::move(bindlessArray)},
+        native);
 }
 
 render::Texture* GpuResourceRegistry::FindAliveTexture(const GpuTextureHandle& handle) noexcept {
-    auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->State != State::Alive) {
-        return nullptr;
-    }
-    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
-    return textureRecord != nullptr ? textureRecord->Texture.get() : nullptr;
+    return this->FindAliveAs<TextureRecord, render::Texture>(handle);
 }
 
 const render::Texture* GpuResourceRegistry::FindAliveTexture(const GpuTextureHandle& handle) const noexcept {
-    const auto* record = this->FindRecord(handle);
-    if (record == nullptr || record->State != State::Alive) {
-        return nullptr;
-    }
-    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
-    return textureRecord != nullptr ? textureRecord->Texture.get() : nullptr;
+    return this->FindAliveAs<TextureRecord, render::Texture>(handle);
+}
+
+render::Shader* GpuResourceRegistry::FindAliveShader(const GpuShaderHandle& handle) noexcept {
+    return this->FindAliveAs<ShaderRecord, render::Shader>(handle);
+}
+
+render::RootSignature* GpuResourceRegistry::FindAliveRootSignature(const GpuRootSignatureHandle& handle) noexcept {
+    return this->FindAliveAs<RootSignatureRecord, render::RootSignature>(handle);
+}
+
+render::AccelerationStructure* GpuResourceRegistry::FindAliveAccelerationStructure(const GpuAccelerationStructureHandle& handle) noexcept {
+    return this->FindAliveAs<AccelerationStructureRecord, render::AccelerationStructure>(handle);
+}
+
+render::RayTracingPipelineState* GpuResourceRegistry::FindAliveRayTracingPipelineState(const GpuRayTracingPipelineStateHandle& handle) noexcept {
+    return this->FindAliveAs<RayTracingPipelineStateRecord, render::RayTracingPipelineState>(handle);
 }
 
 bool GpuResourceRegistry::Contains(const GpuResourceHandle& handle) const noexcept {
@@ -296,21 +707,20 @@ void GpuResourceRegistry::MarkPendingDestroy(const GpuResourceHandle& handle) {
     record->State = State::PendingDestroy;
 }
 
-void GpuResourceRegistry::AddTextureChildViewRef(const GpuTextureHandle& handle) {
+void GpuResourceRegistry::AddChildRef(const GpuResourceHandle& handle) {
     auto* record = this->FindRecord(handle);
-    auto* textureRecord = record != nullptr ? std::get_if<TextureRecord>(&record->Data) : nullptr;
-    RADRAY_ASSERT(textureRecord != nullptr);
-    ++textureRecord->ChildViewCount;
+    RADRAY_ASSERT(record != nullptr);
+    RADRAY_ASSERT(record->State == State::Alive);
+    ++record->ChildRefCount;
 }
 
-void GpuResourceRegistry::ReleaseTextureChildViewRef(const GpuTextureHandle& handle) noexcept {
+void GpuResourceRegistry::ReleaseChildRef(const GpuResourceHandle& handle) noexcept {
     auto* record = this->FindRecord(handle);
-    auto* textureRecord = record != nullptr ? std::get_if<TextureRecord>(&record->Data) : nullptr;
-    if (textureRecord == nullptr) {
+    if (record == nullptr) {
         return;
     }
-    if (textureRecord->ChildViewCount > 0) {
-        --textureRecord->ChildViewCount;
+    if (record->ChildRefCount > 0) {
+        --record->ChildRefCount;
     }
 }
 
@@ -322,12 +732,11 @@ bool GpuResourceRegistry::TryRetire(const GpuResourceHandle& handle) noexcept {
     if (record->State != State::PendingDestroy) {
         return false;
     }
-    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
-    if (textureRecord != nullptr && textureRecord->ChildViewCount != 0) {
+    if (record->ChildRefCount != 0) {
         return false;
     }
 
-    this->EraseRecord(handle.Handle);
+    this->EraseRecord(handle);
     return true;
 }
 
@@ -339,88 +748,84 @@ bool GpuResourceRegistry::TryDestroyImmediately(const GpuResourceHandle& handle)
     if (record->State != State::Alive) {
         return false;
     }
-    const auto* textureRecord = std::get_if<TextureRecord>(&record->Data);
-    if (textureRecord != nullptr && textureRecord->ChildViewCount != 0) {
+    if (record->ChildRefCount != 0) {
         return false;
     }
 
-    this->EraseRecord(handle.Handle);
+    this->EraseRecord(handle);
     return true;
 }
 
 void GpuResourceRegistry::Clear() noexcept {
-    vector<uint64_t> textureViewHandles{};
-    vector<uint64_t> otherHandles{};
-    textureViewHandles.reserve(_records.size());
-    otherHandles.reserve(_records.size());
+    while (!_records.Empty()) {
+        vector<GpuResourceHandle> readyHandles{};
+        readyHandles.reserve(_records.Count());
+        for (const auto& record : _records.Values()) {
+            if (record.ChildRefCount == 0) {
+                readyHandles.emplace_back(GpuResourceHandle{
+                    record.RecordHandle.Index,
+                    record.RecordHandle.Generation,
+                    record.NativeHandle});
+            }
+        }
 
-    for (const auto& [handleId, record] : _records) {
-        if (std::holds_alternative<TextureViewRecord>(record.Data)) {
-            textureViewHandles.emplace_back(handleId);
-        } else {
-            otherHandles.emplace_back(handleId);
+        if (readyHandles.empty()) {
+            RADRAY_ASSERT(false);
+            _records.Clear();
+            return;
+        }
+
+        for (const GpuResourceHandle& handle : readyHandles) {
+            this->EraseRecord(handle);
         }
     }
-
-    for (uint64_t handleId : textureViewHandles) {
-        this->EraseRecord(handleId);
-    }
-    for (uint64_t handleId : otherHandles) {
-        this->EraseRecord(handleId);
-    }
-    _records.clear();
 }
 
 const GpuResourceRegistry::ResourceRecord* GpuResourceRegistry::FindRecord(const GpuResourceHandle& handle) const noexcept {
     if (!handle.IsValid()) {
         return nullptr;
     }
-    const auto it = _records.find(handle.Handle);
-    if (it == _records.end()) {
+    const SparseSetHandle recordHandle = ToRecordHandle(handle);
+    const auto* record = _records.TryGet(recordHandle);
+    if (record == nullptr) {
         return nullptr;
     }
-    if (it->second.NativeHandle != handle.NativeHandle) {
+    if (record->NativeHandle != handle.NativeHandle) {
         return nullptr;
     }
-    return &it->second;
+    return record;
 }
 
 GpuResourceRegistry::ResourceRecord* GpuResourceRegistry::FindRecord(const GpuResourceHandle& handle) noexcept {
     if (!handle.IsValid()) {
         return nullptr;
     }
-    const auto it = _records.find(handle.Handle);
-    if (it == _records.end()) {
+    const SparseSetHandle recordHandle = ToRecordHandle(handle);
+    auto* record = _records.TryGet(recordHandle);
+    if (record == nullptr) {
         return nullptr;
     }
-    if (it->second.NativeHandle != handle.NativeHandle) {
+    if (record->NativeHandle != handle.NativeHandle) {
         return nullptr;
     }
-    return &it->second;
+    return record;
 }
 
-void GpuResourceRegistry::EraseRecord(uint64_t handleId) noexcept {
-    const auto it = _records.find(handleId);
-    if (it == _records.end()) {
+void GpuResourceRegistry::EraseRecord(const GpuResourceHandle& handle) noexcept {
+    const SparseSetHandle recordHandle = ToRecordHandle(handle);
+    auto* recordPtr = _records.TryGet(recordHandle);
+    if (recordPtr == nullptr || recordPtr->NativeHandle != handle.NativeHandle) {
         return;
     }
 
-    ResourceRecord record = std::move(it->second);
-    _records.erase(it);
+    ResourceRecord record = std::move(*recordPtr);
+    _records.Destroy(recordHandle);
 
-    std::visit(
-        [](const auto& resourceRecord) noexcept {
-            using Record = std::decay_t<decltype(resourceRecord)>;
-            if constexpr (std::is_same_v<Record, TextureViewRecord>) {
-                const auto& textureViewRecord = resourceRecord;
-                if (textureViewRecord.ParentTexture.Registry != nullptr &&
-                    textureViewRecord.ParentTexture.Handle.IsValid()) {
-                    textureViewRecord.ParentTexture.Registry->ReleaseTextureChildViewRef(
-                        textureViewRecord.ParentTexture.Handle);
-                }
-            }
-        },
-        record.Data);
+    for (const ParentRef& parent : record.ParentRefs) {
+        if (parent.Registry != nullptr && parent.Handle.IsValid()) {
+            parent.Registry->ReleaseChildRef(parent.Handle);
+        }
+    }
 }
 
 render::SwapChainDescriptor GpuSurface::GetDesc() const {
@@ -518,11 +923,11 @@ GpuTextureHandle GpuAsyncContext::CreateTransientTexture(const render::TextureDe
 GpuTextureViewHandle GpuAsyncContext::CreateTransientTextureView(const GpuTextureViewDescriptor& desc) {
     RADRAY_ASSERT(_resourceRegistry != nullptr);
 
-    GpuResourceRegistry::TextureParentRef parent{};
+    GpuResourceRegistry::ParentResourceRef parent{};
     if (auto* localTexture = _resourceRegistry->FindAliveTexture(desc.Target); localTexture != nullptr) {
         parent.Registry = _resourceRegistry.get();
         parent.Handle = desc.Target;
-        parent.Texture = localTexture;
+        parent.NativeHandle = localTexture;
         return _resourceRegistry->CreateTextureView(desc, parent);
     }
 
@@ -533,7 +938,7 @@ GpuTextureViewHandle GpuAsyncContext::CreateTransientTextureView(const GpuTextur
             if (persistentTexture != nullptr) {
                 parent.Registry = _runtime->_resourceRegistry.get();
                 parent.Handle = desc.Target;
-                parent.Texture = persistentTexture;
+                parent.NativeHandle = persistentTexture;
                 return _resourceRegistry->CreateTextureView(desc, parent);
             }
         }
@@ -541,7 +946,7 @@ GpuTextureViewHandle GpuAsyncContext::CreateTransientTextureView(const GpuTextur
 
     RADRAY_ASSERT(parent.Registry != nullptr);
     RADRAY_ASSERT(parent.Handle.IsValid());
-    RADRAY_ASSERT(parent.Texture != nullptr);
+    RADRAY_ASSERT(parent.NativeHandle != nullptr);
     return _resourceRegistry->CreateTextureView(desc, parent);
 }
 
@@ -654,10 +1059,10 @@ GpuTextureViewHandle GpuRuntime::CreateTextureView(const GpuTextureViewDescripto
     auto* texture = _resourceRegistry->FindAliveTexture(desc.Target);
     RADRAY_ASSERT(texture != nullptr);
 
-    GpuResourceRegistry::TextureParentRef parent{};
+    GpuResourceRegistry::ParentResourceRef parent{};
     parent.Registry = _resourceRegistry.get();
     parent.Handle = desc.Target;
-    parent.Texture = texture;
+    parent.NativeHandle = texture;
     return _resourceRegistry->CreateTextureView(desc, parent);
 }
 
@@ -665,6 +1070,73 @@ GpuSamplerHandle GpuRuntime::CreateSampler(const render::SamplerDescriptor& desc
     std::lock_guard<std::mutex> lock{_runtimeMutex};
     RADRAY_ASSERT(_resourceRegistry != nullptr);
     return _resourceRegistry->CreateSampler(desc);
+}
+
+GpuShaderHandle GpuRuntime::CreateShader(const render::ShaderDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateShader(desc);
+}
+
+GpuRootSignatureHandle GpuRuntime::CreateRootSignature(const GpuRootSignatureDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateRootSignature(desc);
+}
+
+GpuDescriptorSetHandle GpuRuntime::CreateDescriptorSet(const GpuDescriptorSetDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateDescriptorSet(desc);
+}
+
+GpuDescriptorSetHandle GpuRuntime::CreateDescriptorSet(GpuRootSignatureHandle rootSig, render::DescriptorSetIndex set) {
+    GpuDescriptorSetDescriptor desc{};
+    desc.RootSig = rootSig;
+    desc.Set = set;
+    return this->CreateDescriptorSet(desc);
+}
+
+GpuGraphicsPipelineStateHandle GpuRuntime::CreateGraphicsPipelineState(const GpuGraphicsPipelineStateDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateGraphicsPipelineState(desc);
+}
+
+GpuComputePipelineStateHandle GpuRuntime::CreateComputePipelineState(const GpuComputePipelineStateDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateComputePipelineState(desc);
+}
+
+GpuAccelerationStructureHandle GpuRuntime::CreateAccelerationStructure(const render::AccelerationStructureDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateAccelerationStructure(desc);
+}
+
+GpuAccelerationStructureViewHandle GpuRuntime::CreateAccelerationStructureView(const GpuAccelerationStructureViewDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateAccelerationStructureView(desc);
+}
+
+GpuRayTracingPipelineStateHandle GpuRuntime::CreateRayTracingPipelineState(const GpuRayTracingPipelineStateDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateRayTracingPipelineState(desc);
+}
+
+GpuShaderBindingTableHandle GpuRuntime::CreateShaderBindingTable(const GpuShaderBindingTableDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateShaderBindingTable(desc);
+}
+
+GpuBindlessArrayHandle GpuRuntime::CreateBindlessArray(const render::BindlessArrayDescriptor& desc) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    return _resourceRegistry->CreateBindlessArray(desc);
 }
 
 void GpuRuntime::DestroyResourceImmediate(GpuResourceHandle handle) {
@@ -846,32 +1318,25 @@ void GpuRuntime::ProcessTasksUnlocked() {
     if (_resourceRegistry == nullptr) {
         _resourceRetirements.clear();
     } else {
-        std::erase_if(_resourceRetirements, [this](const ResourceRetirement& retirement) {
-            if (!retirement.IsReady()) {
+        bool madeProgress = false;
+        do {
+            madeProgress = false;
+            std::erase_if(_resourceRetirements, [this, &madeProgress](const ResourceRetirement& retirement) {
+                if (!retirement.IsReady()) {
+                    return false;
+                }
+                const auto kind = _resourceRegistry->GetKind(retirement.Handle);
+                if (kind == GpuResourceRegistry::Kind::Unknown) {
+                    madeProgress = true;
+                    return true;
+                }
+                if (_resourceRegistry->TryRetire(retirement.Handle)) {
+                    madeProgress = true;
+                    return true;
+                }
                 return false;
-            }
-            const auto kind = _resourceRegistry->GetKind(retirement.Handle);
-            if (kind == GpuResourceRegistry::Kind::Unknown) {
-                return true;
-            }
-            if (kind == GpuResourceRegistry::Kind::Texture) {
-                return false;
-            }
-            return _resourceRegistry->TryRetire(retirement.Handle);
-        });
-        std::erase_if(_resourceRetirements, [this](const ResourceRetirement& retirement) {
-            if (!retirement.IsReady()) {
-                return false;
-            }
-            const auto kind = _resourceRegistry->GetKind(retirement.Handle);
-            if (kind == GpuResourceRegistry::Kind::Unknown) {
-                return true;
-            }
-            if (kind != GpuResourceRegistry::Kind::Texture) {
-                return false;
-            }
-            return _resourceRegistry->TryRetire(retirement.Handle);
-        });
+            });
+        } while (madeProgress);
     }
 }
 
