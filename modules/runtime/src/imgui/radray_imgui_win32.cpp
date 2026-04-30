@@ -33,6 +33,12 @@ void ShutdownImGuiInternal(ImGuiContext* ctx) {
     ImGui_ImplWin32_Shutdown();
 }
 
+void NewFrameImGuiInternal(ImGuiContext* ctx) {
+    RADRAY_ASSERT(ctx != nullptr);
+    ImGui::SetCurrentContext(ctx);
+    ImGui_ImplWin32_NewFrame();
+}
+
 }  // namespace radray
 
 #endif

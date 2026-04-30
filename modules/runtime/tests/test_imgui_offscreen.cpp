@@ -233,7 +233,7 @@ TEST_P(ImGuiOffscreenTest, RenderDemoWindowToOffscreenTexture) {
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     io.DeltaTime = 1.0f / 60.0f;
     io.IniFilename = nullptr;
-    ImGui::NewFrame();
+    imgui->NewFrame();
     ImGui::GetBackgroundDrawList()->AddRectFilled(
         ImVec2(32.0f, 32.0f),
         ImVec2(256.0f, 160.0f),

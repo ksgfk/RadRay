@@ -28,7 +28,6 @@
 - DEBUG mode uses macro `RADRAY_IS_DEBUG` (NOT `NDEBUG` or `_DEBUG`).
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.
 - Flag-style enums use `enum_flags.h` (`EnumFlags<T>`, `is_flags<T>`, `format_as`).
-- Format with `.clang-format` (Google-based, 4-space indent, no column limit).
 
 ## Test
 - Test sources go in `modules/<module>/tests/`.

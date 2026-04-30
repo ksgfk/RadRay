@@ -17,9 +17,27 @@ namespace radray {
 
 extern bool InitImGuiInternal(ImGuiContext* ctx, NativeWindow* window);
 extern void ShutdownImGuiInternal(ImGuiContext* ctx);
+extern void NewFrameImGuiInternal(ImGuiContext* ctx);
 
 static int32_t ImGuiSizeToInt(float v) noexcept {
     return static_cast<int32_t>(std::max(v, 1.0f));
+}
+
+void ImGuiDrawListSnapshot::Clear() noexcept {
+    Vertices.clear();
+    Indices.clear();
+    Commands.clear();
+}
+
+void ImGuiRenderSnapshot::Clear() noexcept {
+    Valid = false;
+    DisplayPos = ImVec2{};
+    DisplaySize = ImVec2{};
+    FramebufferScale = ImVec2{};
+    TotalIdxCount = 0;
+    TotalVtxCount = 0;
+    DrawLists.clear();
+    TextureUploads.clear();
 }
 
 ImGuiContextRAII::ImGuiContextRAII(ImFontAtlas* sharedFontAtlas)
@@ -62,6 +80,11 @@ ImGuiRenderer::ImGuiRenderer(Application* app, AppWindow* mainWnd)
       _mainWnd(mainWnd) {}
 
 ImGuiRenderer::~ImGuiRenderer() noexcept {
+    if (_system != nullptr) {
+        _system->DestroyTextureBindings();
+    } else {
+        RADRAY_ASSERT(_textureBindings.empty());
+    }
     _textureBindings.clear();
     _pso.reset();
     _rs.reset();
@@ -423,12 +446,47 @@ ImGuiSystem::~ImGuiSystem() noexcept {
             io.BackendFlags &= ~ImGuiBackendFlags_RendererHasTextures;
             io.BackendFlags &= ~ImGuiBackendFlags_RendererHasViewports;
         }
+        this->DestroyTextureBindings();
         _renderer->_system = nullptr;
     }
     if (_context != nullptr && _context->IsValid()) {
         ShutdownImGuiInternal(_context->Get());
     }
     _viewportRendererData.clear();
+}
+
+void ImGuiSystem::NewFrame() {
+    RADRAY_ASSERT(_context != nullptr);
+    RADRAY_ASSERT(_context->IsValid());
+
+    _context->SetCurrent();
+    NewFrameImGuiInternal(_context->Get());
+    ImGui::NewFrame();
+}
+
+void ImGuiSystem::DestroyTextureBinding(ImGuiTextureBinding* binding) noexcept {
+    RADRAY_ASSERT(binding != nullptr);
+    binding->DescriptorSet.reset();
+    RADRAY_ASSERT(_app != nullptr);
+    RADRAY_ASSERT(_app->_gpu != nullptr);
+    GpuRuntime* gpu = _app->_gpu.get();
+    if (binding->View.IsValid()) {
+        gpu->DestroyResourceImmediate(binding->View);
+        binding->View.Invalidate();
+    }
+    if (binding->Texture.IsValid()) {
+        gpu->DestroyResourceImmediate(binding->Texture);
+        binding->Texture.Invalidate();
+    }
+    binding->State = render::TextureState::Undefined;
+}
+
+void ImGuiSystem::DestroyTextureBindings() noexcept {
+    RADRAY_ASSERT(_renderer != nullptr);
+    for (const unique_ptr<ImGuiTextureBinding>& binding : _renderer->_textureBindings) {
+        this->DestroyTextureBinding(binding.get());
+    }
+    _renderer->_textureBindings.clear();
 }
 
 void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
@@ -501,8 +559,12 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                     tex->BackendUserData = nullptr;
                     tex->SetTexID(ImTextureID_Invalid);
                     tex->SetStatus(ImTextureStatus_Destroyed);
-                    std::erase_if(_renderer->_textureBindings, [binding](const unique_ptr<ImGuiTextureBinding>& item) {
-                        return item.get() == binding;
+                    std::erase_if(_renderer->_textureBindings, [this, binding](const unique_ptr<ImGuiTextureBinding>& item) {
+                        if (item.get() == binding) {
+                            this->DestroyTextureBinding(item.get());
+                            return true;
+                        }
+                        return false;
                     });
                 }
                 continue;
@@ -529,24 +591,26 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                 textureDesc.Format = render::TextureFormat::RGBA8_UNORM;
                 textureDesc.Memory = render::MemoryType::Device;
                 textureDesc.Usage = render::TextureUse::CopyDestination | render::TextureUse::Resource;
-                auto textureOpt = device->CreateTexture(textureDesc);
-                RADRAY_ASSERT(textureOpt.HasValue());
-                ownedBinding->Texture = textureOpt.Release();
+                ownedBinding->Texture = _app->_gpu->CreateTexture(textureDesc);
+                RADRAY_ASSERT(ownedBinding->Texture.IsValid());
+                auto* texture = static_cast<render::Texture*>(ownedBinding->Texture.NativeHandle);
+                RADRAY_ASSERT(texture != nullptr);
 
-                render::TextureViewDescriptor viewDesc{};
-                viewDesc.Target = ownedBinding->Texture.get();
+                GpuTextureViewDescriptor viewDesc{};
+                viewDesc.Target = ownedBinding->Texture;
                 viewDesc.Dim = render::TextureDimension::Dim2D;
                 viewDesc.Format = render::TextureFormat::RGBA8_UNORM;
                 viewDesc.Range = render::SubresourceRange{0, 1, 0, 1};
                 viewDesc.Usage = render::TextureViewUsage::Resource;
-                auto viewOpt = device->CreateTextureView(viewDesc);
-                RADRAY_ASSERT(viewOpt.HasValue());
-                ownedBinding->View = viewOpt.Release();
+                ownedBinding->View = _app->_gpu->CreateTextureView(viewDesc);
+                RADRAY_ASSERT(ownedBinding->View.IsValid());
+                auto* view = static_cast<render::TextureView*>(ownedBinding->View.NativeHandle);
+                RADRAY_ASSERT(view != nullptr);
 
                 auto descriptorSetOpt = device->CreateDescriptorSet(_renderer->_rs.get(), render::DescriptorSetIndex{1});
                 RADRAY_ASSERT(descriptorSetOpt.HasValue());
                 ownedBinding->DescriptorSet = descriptorSetOpt.Release();
-                RADRAY_ASSERT(ownedBinding->DescriptorSet->WriteResource("gTexture", ownedBinding->View.get()));
+                RADRAY_ASSERT(ownedBinding->DescriptorSet->WriteResource("gTexture", view));
                 ownedBinding->State = render::TextureState::Undefined;
 
                 binding = ownedBinding.get();
@@ -555,8 +619,10 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                 tex->SetTexID(reinterpret_cast<ImTextureID>(binding));
             } else {
                 RADRAY_ASSERT(binding != nullptr);
-                RADRAY_ASSERT(binding->Texture != nullptr);
-                RADRAY_ASSERT(binding->View != nullptr);
+                RADRAY_ASSERT(binding->Texture.IsValid());
+                RADRAY_ASSERT(binding->Texture.NativeHandle != nullptr);
+                RADRAY_ASSERT(binding->View.IsValid());
+                RADRAY_ASSERT(binding->View.NativeHandle != nullptr);
                 RADRAY_ASSERT(binding->DescriptorSet != nullptr);
             }
 
@@ -678,7 +744,9 @@ void ImGuiSystem::Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContex
     const bool needsHostWriteBarrier = device->GetBackend() == render::RenderBackend::Vulkan;
     for (const ImGuiTextureUploadSnapshot& upload : snapshot.TextureUploads) {
         RADRAY_ASSERT(upload.Binding != nullptr);
-        RADRAY_ASSERT(upload.Binding->Texture != nullptr);
+        RADRAY_ASSERT(upload.Binding->Texture.IsValid());
+        auto* texture = static_cast<render::Texture*>(upload.Binding->Texture.NativeHandle);
+        RADRAY_ASSERT(texture != nullptr);
         RADRAY_ASSERT(upload.Width > 0);
         RADRAY_ASSERT(upload.Height > 0);
         RADRAY_ASSERT(upload.RowPitch >= static_cast<uint64_t>(upload.Width) * 4);
@@ -703,14 +771,14 @@ void ImGuiSystem::Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContex
             });
         }
         barriers.emplace_back(render::BarrierTextureDescriptor{
-            .Target = upload.Binding->Texture.get(),
+            .Target = texture,
             .Before = upload.Binding->State,
             .After = render::TextureState::CopyDestination,
         });
         cmd->ResourceBarrier(barriers);
-        cmd->CopyBufferToTexture(upload.Binding->Texture.get(), render::SubresourceRange{0, 1, 0, 1}, uploadBuffer, 0);
+        cmd->CopyBufferToTexture(texture, render::SubresourceRange{0, 1, 0, 1}, uploadBuffer, 0);
         render::ResourceBarrierDescriptor afterCopy = render::BarrierTextureDescriptor{
-            .Target = upload.Binding->Texture.get(),
+            .Target = texture,
             .Before = render::TextureState::CopyDestination,
             .After = render::TextureState::ShaderRead,
         };

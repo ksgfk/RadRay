@@ -10,6 +10,7 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/render/common.h>
+#include <radray/runtime/gpu_system.h>
 
 namespace radray {
 
@@ -46,11 +47,7 @@ public:
 
 class ImGuiDrawListSnapshot {
 public:
-    void Clear() noexcept {
-        Vertices.clear();
-        Indices.clear();
-        Commands.clear();
-    }
+    void Clear() noexcept;
 
 public:
     vector<ImDrawVert> Vertices;
@@ -60,16 +57,7 @@ public:
 
 class ImGuiRenderSnapshot {
 public:
-    void Clear() noexcept {
-        Valid = false;
-        DisplayPos = ImVec2{};
-        DisplaySize = ImVec2{};
-        FramebufferScale = ImVec2{};
-        TotalIdxCount = 0;
-        TotalVtxCount = 0;
-        DrawLists.clear();
-        TextureUploads.clear();
-    }
+    void Clear() noexcept;
 
 public:
     ImVec2 DisplayPos{};
@@ -102,8 +90,8 @@ public:
 
 class ImGuiTextureBinding {
 public:
-    unique_ptr<render::Texture> Texture;
-    unique_ptr<render::TextureView> View;
+    GpuTextureHandle Texture{};
+    GpuTextureViewHandle View{};
     unique_ptr<render::DescriptorSet> DescriptorSet;
     render::TextureState State{render::TextureState::Undefined};
 };
@@ -184,6 +172,9 @@ public:
     ImGuiSystem& operator=(ImGuiSystem&&) = delete;
     ~ImGuiSystem() noexcept;
 
+    void NewFrame();
+    void DestroyTextureBinding(ImGuiTextureBinding* binding) noexcept;
+    void DestroyTextureBindings() noexcept;
     void PrepareRenderData(AppWindow* window, uint32_t mailboxSlot);
     void Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContext* context, render::CommandBuffer* cmd);
     void Render(AppWindow* window, uint32_t mailboxSlot, render::GraphicsCommandEncoder* encoder);
