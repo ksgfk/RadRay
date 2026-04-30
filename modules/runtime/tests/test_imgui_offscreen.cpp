@@ -251,11 +251,21 @@ TEST_P(ImGuiOffscreenTest, RenderDemoWindowToOffscreenTexture) {
     ImGui::TextUnformatted("RadRay ImGui offscreen smoke frame");
     ImGui::Button("Visible Button", ImVec2(140.0f, 0.0f));
     ImGui::End();
-    imgui->PrepareRenderData(window, kMailboxSlot);
+    auto mailboxSlot = window->AllocMailboxSlot();
+    ASSERT_TRUE(mailboxSlot.has_value());
+    ASSERT_EQ(*mailboxSlot, kMailboxSlot);
+    imgui->PrepareRenderData(window, *mailboxSlot);
+    window->PublishPreparedMailbox(*mailboxSlot);
+    auto queuedRequest = window->TryQueueLatestPublished();
+    ASSERT_TRUE(queuedRequest.has_value());
+    auto renderRequest = window->TryClaimQueuedRenderRequest();
+    ASSERT_TRUE(renderRequest.has_value());
+    ASSERT_EQ(renderRequest->MailboxSlot, *mailboxSlot);
+
     bool snapshotHasGeometry = false;
     if (!imgui->_viewportRendererData.empty() &&
-        imgui->_viewportRendererData[0]->Mailboxes.size() > kMailboxSlot) {
-        const ImGuiRenderSnapshot& snapshot = imgui->_viewportRendererData[0]->Mailboxes[kMailboxSlot];
+        imgui->_viewportRendererData[0]->Mailboxes.size() > renderRequest->MailboxSlot) {
+        const ImGuiRenderSnapshot& snapshot = imgui->_viewportRendererData[0]->Mailboxes[renderRequest->MailboxSlot];
         snapshotHasGeometry = snapshot.Valid && snapshot.TotalVtxCount > 0 && snapshot.TotalIdxCount > 0;
     }
 
@@ -307,7 +317,7 @@ TEST_P(ImGuiOffscreenTest, RenderDemoWindowToOffscreenTexture) {
     auto* cmd = context->CreateCommandBuffer();
     ASSERT_NE(cmd, nullptr);
     cmd->Begin();
-    imgui->Upload(window, kMailboxSlot, context.get(), cmd);
+    imgui->Upload(window, renderRequest->MailboxSlot, context.get(), cmd);
 
     ResourceBarrierDescriptor toRenderTarget = BarrierTextureDescriptor{
         .Target = targetTexture,
@@ -327,7 +337,7 @@ TEST_P(ImGuiOffscreenTest, RenderDemoWindowToOffscreenTexture) {
     auto passOpt = cmd->BeginRenderPass(passDesc);
     ASSERT_TRUE(passOpt.HasValue());
     auto pass = passOpt.Release();
-    imgui->Render(window, kMailboxSlot, pass.get());
+    imgui->Render(window, renderRequest->MailboxSlot, pass.get());
     cmd->EndRenderPass(std::move(pass));
 
 #ifdef RADRAY_ENABLE_PNG
@@ -371,8 +381,13 @@ TEST_P(ImGuiOffscreenTest, RenderDemoWindowToOffscreenTexture) {
 
     GpuTask task = app._gpu->SubmitAsync(std::move(context));
     ASSERT_TRUE(task.IsValid());
-    task.Wait();
+    GpuTask waitTask = task;
+    window->SubmitPreparedResources(*renderRequest, task);
+    imgui->OnSubmit(window, renderRequest->MailboxSlot, task);
+    window->EndPrepareRenderTask(*renderRequest, std::move(task));
+    waitTask.Wait();
     app._gpu->ProcessTasks();
+    window->CollectCompletedFlightSlots();
 
     bool hasVisiblePixel = false;
 #ifdef RADRAY_ENABLE_PNG

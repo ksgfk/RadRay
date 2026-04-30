@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <compare>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -130,6 +131,9 @@ struct GpuResourceHandle {
     }
 
     constexpr static GpuResourceHandle Invalid() { return {}; }
+
+    friend constexpr bool operator==(const GpuResourceHandle& lhs, const GpuResourceHandle& rhs) noexcept = default;
+    friend constexpr auto operator<=>(const GpuResourceHandle& lhs, const GpuResourceHandle& rhs) noexcept = default;
 };
 
 struct GpuBufferHandle : GpuResourceHandle {};
@@ -289,6 +293,9 @@ public:
     bool HasPendingDestroys() const noexcept;
     Kind GetKind(const GpuResourceHandle& handle) const noexcept;
     void MarkUsed(const GpuResourceHandle& handle, render::Fence* fence, uint64_t fenceValue);
+    void AddPreparedUse(const GpuResourceHandle& handle);
+    void ReleasePreparedUse(const GpuResourceHandle& handle) noexcept;
+    void SubmitPreparedUse(const GpuResourceHandle& handle, render::Fence* fence, uint64_t fenceValue);
     void MarkPendingDestroy(const GpuResourceHandle& handle);
     void ProcessPendingDestroys() noexcept;
 
@@ -389,12 +396,13 @@ private:
             BindlessArrayRecord>;
 
         Payload Data;
+        vector<LastUse> LastUses{};
+        vector<ParentRef> ParentRefs{};
         SparseSetHandle RecordHandle{SparseSetHandle::Invalid()};
         void* NativeHandle{nullptr};
         State State{State::Alive};
         uint32_t ChildRefCount{0};
-        vector<LastUse> LastUses{};
-        vector<ParentRef> ParentRefs{};
+        uint32_t PreparedUseCount{0};
 
         template <typename Record>
         ResourceRecord(Record record, void* nativeHandle, vector<ParentRef> parentRefs = {}) noexcept;
@@ -447,6 +455,27 @@ public:
     GpuRuntime* _runtime{nullptr};
     render::Fence* _fence{nullptr};
     uint64_t _signalValue{0};
+};
+
+class GpuPreparedResourceList {
+public:
+    GpuPreparedResourceList() noexcept = default;
+    GpuPreparedResourceList(const GpuPreparedResourceList&) = delete;
+    GpuPreparedResourceList& operator=(const GpuPreparedResourceList&) = delete;
+    GpuPreparedResourceList(GpuPreparedResourceList&& other) noexcept;
+    GpuPreparedResourceList& operator=(GpuPreparedResourceList&& other) noexcept;
+    ~GpuPreparedResourceList() noexcept = default;
+
+    void Use(GpuRuntime* runtime, GpuResourceHandle handle);
+    void Submit(const GpuTask& task);
+    void Discard() noexcept;
+    void Clear() noexcept;
+
+    bool Empty() const noexcept;
+
+private:
+    GpuRuntime* _runtime{nullptr};
+    vector<GpuResourceHandle> _handles{};
 };
 
 class GpuSurface {
@@ -643,6 +672,8 @@ public:
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
+
+    friend class GpuPreparedResourceList;
 
 public:
     class SubmittedBatch {

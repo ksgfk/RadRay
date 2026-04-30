@@ -31,8 +31,8 @@ public:
  * window 内部所有权链条：
  * - 主线程通过 AllocMailboxSlot() -> OnPrepareRender() -> PublishPreparedMailbox() 生成最新快照
  * - 主线程通过 TryQueueLatestPublished() 将最新快照绑定到当前 GpuSurface::GetNextFrameSlotIndex()
- * - 渲染阶段通过 TryClaimQueuedRenderRequest() 取得 request，并在提交成功后通过 OnSubmit() 标记资源 last-use，
- *   最终通过 EndPrepareRenderTask() 记录 GpuTask
+ * - 渲染阶段通过 TryClaimQueuedRenderRequest() 取得 request，并在提交成功后把 mailbox prepared resources
+ *   转成 task last-use，再通过 OnSubmit() 通知实现清理 CPU snapshot，最终通过 EndPrepareRenderTask() 记录 GpuTask
  * - mailbox 的 InRender 生命周期绑定到 GpuTask 完成，而不是绑定到 OnRender() 返回
  *
  * 多线程模式下，mailbox/flight/channel 状态只能通过这些成员函数访问；
@@ -63,6 +63,8 @@ public:
     std::optional<uint32_t> AllocMailboxSlot() noexcept;
     /** 只有 Preparing 槽位才能正式发布为当前最新快照 */
     void PublishPreparedMailbox(uint32_t mailboxSlot) noexcept;
+    /** 在 Prepare 阶段声明 mailbox snapshot 会引用的 persistent GPU resource */
+    void UsePreparedResource(uint32_t mailboxSlot, GpuResourceHandle handle);
     /** Release 用于已 claim 的 request 不再占用 mailbox 时，使槽位重新失效并回到 Free */
     void ReleaseMailbox(RenderRequest request) noexcept;
     /** 尝试将最新发布的渲染请求加入队列 */
@@ -71,6 +73,8 @@ public:
     std::optional<RenderRequest> TryClaimQueuedRenderRequest() noexcept;
     /** 录制渲染任务完成, 已提交到 GPU */
     void EndPrepareRenderTask(RenderRequest request, GpuTask task) noexcept;
+    /** 将 Prepare 阶段声明的资源引用转成提交 task 的 last-use */
+    void SubmitPreparedResources(RenderRequest request, const GpuTask& task);
     void AbandonClaimedFrame(
         GpuRuntime* gpu,
         GpuRuntime::BeginFrameResult& begin,
@@ -108,6 +112,7 @@ public:
     class MailboxData {
     public:
         uint64_t _generation{0};
+        GpuPreparedResourceList _preparedResources;
         MailboxState _state{MailboxState::Free};
     };
 
@@ -227,7 +232,7 @@ public:
      * 单线程模式由主线程调用，多线程模式由渲染线程调用；实现中不要修改窗口列表、重建 surface 或切换线程模式。
      */
     virtual void OnRender(AppWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
-    /** GPU 提交成功后、mailbox 进入 InRender 前调用；实现应在这里把本帧实际使用的资源标到 task。 */
+    /** GPU 提交成功后、mailbox 进入 InRender 前调用；实现可在这里清理 CPU snapshot 或发出业务通知。 */
     virtual void OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTask& task) noexcept = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);

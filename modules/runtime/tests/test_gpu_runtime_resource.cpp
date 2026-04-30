@@ -558,6 +558,125 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceDoesNotWaitForUnmarkedSubmission) 
     EXPECT_TRUE(runtime->_pendings.empty());
 }
 
+TEST_P(GpuRuntimeResourceTest, PreparedResourceDestroyWaitsUntilDiscard) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    GpuPreparedResourceList prepared{};
+    prepared.Use(runtime.get(), buffer);
+    prepared.Use(runtime.get(), buffer);
+
+    runtime->DestroyResource(buffer);
+
+    ASSERT_TRUE(runtime->IsResourceTrackedForTest(buffer));
+    ASSERT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+    ASSERT_TRUE(runtime->HasPendingResourceDestroysForTest());
+
+    runtime->ProcessTasks();
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+
+    prepared.Discard();
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(buffer));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
+}
+
+TEST_P(GpuRuntimeResourceTest, PreparedResourceSubmitBecomesLastUse) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    GpuPreparedResourceList prepared{};
+    prepared.Use(runtime.get(), buffer);
+
+    FakeFence fence{};
+    fence.Signal(1);
+    GpuTask task{runtime.get(), &fence, 1};
+
+    runtime->DestroyResource(buffer);
+    prepared.Submit(task);
+
+    ASSERT_TRUE(runtime->IsResourceTrackedForTest(buffer));
+    ASSERT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+
+    runtime->ProcessTasks();
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+
+    task.Wait();
+    runtime->ProcessTasks();
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(buffer));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
+}
+
+TEST_P(GpuRuntimeResourceTest, PreparedParentAndChildRetireChildBeforeParentAfterDiscard) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto texture = runtime->CreateTexture(MakeTextureDesc());
+    const auto view = runtime->CreateTextureView(MakeTextureViewDesc(texture));
+    GpuPreparedResourceList prepared{};
+    prepared.Use(runtime.get(), texture);
+    prepared.Use(runtime.get(), view);
+
+    runtime->DestroyResource(texture);
+    runtime->DestroyResource(view);
+
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(texture));
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(view));
+
+    prepared.Discard();
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(texture));
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(view));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
+}
+
+TEST_P(GpuRuntimeResourceTest, PreparedResourceListRejectsInvalidTransientAndForeignInputsInDebug) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    GpuPreparedResourceList prepared{};
+
+    GpuBufferHandle invalidHandle{};
+    invalidHandle.Handle = 42;
+    invalidHandle.NativeHandle = reinterpret_cast<void*>(1);
+    EXPECT_GPU_GUARD_ASSERT(prepared.Use(runtime.get(), invalidHandle));
+
+    auto context = runtime->BeginAsync(QueueType::Direct);
+    const auto transientBuffer = context->CreateTransientBuffer(MakeBufferDesc());
+    EXPECT_GPU_GUARD_ASSERT(prepared.Use(runtime.get(), transientBuffer));
+
+    unique_ptr<GpuRuntime> foreignRuntime{};
+    std::string foreignReason{};
+    if (CreateRuntimeForBackend(GetParam(), foreignRuntime, foreignReason)) {
+        const auto foreignBuffer = foreignRuntime->CreateBuffer(MakeBufferDesc());
+        EXPECT_GPU_GUARD_ASSERT(prepared.Use(runtime.get(), foreignBuffer));
+        foreignRuntime->DestroyResourceImmediate(foreignBuffer);
+    }
+
+    prepared.Use(runtime.get(), buffer);
+    FakeFence fence{};
+    fence.Signal(1);
+    GpuRuntime directForeignRuntime(shared_ptr<Device>{}, unique_ptr<InstanceVulkan>{});
+    GpuTask foreignTask{&directForeignRuntime, &fence, 1};
+    EXPECT_GPU_GUARD_ASSERT(prepared.Submit(foreignTask));
+
+    prepared.Discard();
+    runtime->DestroyResourceImmediate(buffer);
+}
+
 TEST_P(GpuRuntimeResourceTest, DestroyResourceWaitsForMarkedLastUseAndProcessTasks) {
     unique_ptr<GpuRuntime> runtime{};
     std::string reason{};

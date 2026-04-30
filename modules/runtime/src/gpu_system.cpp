@@ -90,6 +90,91 @@ void GpuTask::Wait() const {
     }
 }
 
+GpuPreparedResourceList::GpuPreparedResourceList(GpuPreparedResourceList&& other) noexcept
+    : _runtime(std::exchange(other._runtime, nullptr)),
+      _handles(std::move(other._handles)) {
+    other._handles.clear();
+}
+
+GpuPreparedResourceList& GpuPreparedResourceList::operator=(GpuPreparedResourceList&& other) noexcept {
+    if (this != &other) {
+        this->Discard();
+        _runtime = std::exchange(other._runtime, nullptr);
+        _handles = std::move(other._handles);
+        other._handles.clear();
+    }
+    return *this;
+}
+
+void GpuPreparedResourceList::Use(GpuRuntime* runtime, GpuResourceHandle handle) {
+    RADRAY_ASSERT(runtime != nullptr);
+    RADRAY_ASSERT(handle.IsValid());
+    if (_runtime == nullptr) {
+        _runtime = runtime;
+    }
+    RADRAY_ASSERT(_runtime == runtime);
+
+    if (std::find(_handles.begin(), _handles.end(), handle) != _handles.end()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock{runtime->_runtimeMutex};
+    RADRAY_ASSERT(runtime->_resourceRegistry != nullptr);
+    RADRAY_ASSERT(runtime->_resourceRegistry->Contains(handle));
+    RADRAY_ASSERT(!runtime->_resourceRegistry->IsPendingDestroy(handle));
+    _handles.emplace_back(handle);
+    runtime->_resourceRegistry->AddPreparedUse(handle);
+}
+
+void GpuPreparedResourceList::Submit(const GpuTask& task) {
+    if (_handles.empty()) {
+        _runtime = nullptr;
+        return;
+    }
+    RADRAY_ASSERT(_runtime != nullptr);
+    RADRAY_ASSERT(task.IsValid());
+    RADRAY_ASSERT(task._runtime == _runtime);
+
+    std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+    RADRAY_ASSERT(_runtime->_resourceRegistry != nullptr);
+    for (const GpuResourceHandle& handle : _handles) {
+        _runtime->_resourceRegistry->SubmitPreparedUse(handle, task._fence, task._signalValue);
+    }
+    _runtime->_resourceRegistry->ProcessPendingDestroys();
+    _handles.clear();
+    _runtime = nullptr;
+}
+
+void GpuPreparedResourceList::Discard() noexcept {
+    if (_handles.empty()) {
+        _runtime = nullptr;
+        return;
+    }
+    RADRAY_ASSERT(_runtime != nullptr);
+    if (_runtime == nullptr) {
+        _handles.clear();
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock{_runtime->_runtimeMutex};
+    if (_runtime->_resourceRegistry != nullptr) {
+        for (const GpuResourceHandle& handle : _handles) {
+            _runtime->_resourceRegistry->ReleasePreparedUse(handle);
+        }
+        _runtime->_resourceRegistry->ProcessPendingDestroys();
+    }
+    _handles.clear();
+    _runtime = nullptr;
+}
+
+void GpuPreparedResourceList::Clear() noexcept {
+    this->Discard();
+}
+
+bool GpuPreparedResourceList::Empty() const noexcept {
+    return _handles.empty();
+}
+
 GpuSurface::GpuSurface(
     GpuRuntime* runtime,
     unique_ptr<render::SwapChain> swapchain,
@@ -559,6 +644,32 @@ void GpuResourceRegistry::MarkUsed(const GpuResourceHandle& handle, render::Fenc
     });
 }
 
+void GpuResourceRegistry::AddPreparedUse(const GpuResourceHandle& handle) {
+    auto* record = this->FindRecord(handle);
+    RADRAY_ASSERT(record != nullptr);
+    RADRAY_ASSERT(record->State == State::Alive);
+    ++record->PreparedUseCount;
+}
+
+void GpuResourceRegistry::ReleasePreparedUse(const GpuResourceHandle& handle) noexcept {
+    auto* record = this->FindRecord(handle);
+    if (record == nullptr) {
+        return;
+    }
+    RADRAY_ASSERT(record->PreparedUseCount > 0);
+    if (record->PreparedUseCount > 0) {
+        --record->PreparedUseCount;
+    }
+}
+
+void GpuResourceRegistry::SubmitPreparedUse(const GpuResourceHandle& handle, render::Fence* fence, uint64_t fenceValue) {
+    auto* record = this->FindRecord(handle);
+    RADRAY_ASSERT(record != nullptr);
+    RADRAY_ASSERT(record->PreparedUseCount > 0);
+    this->MarkUsed(handle, fence, fenceValue);
+    --record->PreparedUseCount;
+}
+
 void GpuResourceRegistry::MarkPendingDestroy(const GpuResourceHandle& handle) {
     auto* record = this->FindRecord(handle);
     RADRAY_ASSERT(record != nullptr);
@@ -581,6 +692,7 @@ void GpuResourceRegistry::ProcessPendingDestroys() noexcept {
         for (const ResourceRecord& record : _records.Values()) {
             if (record.State == State::PendingDestroy &&
                 record.ChildRefCount == 0 &&
+                record.PreparedUseCount == 0 &&
                 record.LastUses.empty()) {
                 readyHandles.emplace_back(GpuResourceHandle{
                     record.RecordHandle.Index,
@@ -624,6 +736,9 @@ bool GpuResourceRegistry::TryDestroyImmediately(const GpuResourceHandle& handle)
     if (record->ChildRefCount != 0) {
         return false;
     }
+    if (record->PreparedUseCount != 0) {
+        return false;
+    }
 
     this->EraseRecord(handle);
     return true;
@@ -634,7 +749,7 @@ void GpuResourceRegistry::Clear() noexcept {
         vector<GpuResourceHandle> readyHandles{};
         readyHandles.reserve(_records.Count());
         for (const auto& record : _records.Values()) {
-            if (record.ChildRefCount == 0) {
+            if (record.ChildRefCount == 0 && record.PreparedUseCount == 0) {
                 readyHandles.emplace_back(GpuResourceHandle{
                     record.RecordHandle.Index,
                     record.RecordHandle.Generation,

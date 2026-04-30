@@ -84,6 +84,7 @@ void AppWindow::ResetMailboxes() noexcept {
         MailboxData& mailbox = _mailboxes[request.MailboxSlot];
         RADRAY_ASSERT(mailbox._state == MailboxState::Queued);
         RADRAY_ASSERT(mailbox._generation == request.Generation);
+        mailbox._preparedResources.Discard();
         mailbox._state = MailboxState::Free;
         flight._mailboxSlot = 0;
         flight._mailboxGeneration = 0;
@@ -107,6 +108,7 @@ void AppWindow::ResetMailboxes() noexcept {
         flight._state = FlightState::Free;
     }
     for (MailboxData& mailbox : _mailboxes) {
+        mailbox._preparedResources.Discard();
         mailbox._state = MailboxState::Free;
     }
     _latestPublished.reset();
@@ -138,6 +140,7 @@ std::optional<uint32_t> AppWindow::AllocMailboxSlot() noexcept {
     }
     MailboxData& mailbox = _mailboxes[*selectedSlot];
     RADRAY_ASSERT(mailbox._state == MailboxState::Free || mailbox._state == MailboxState::Published);
+    mailbox._preparedResources.Discard();
     mailbox._generation++;
     mailbox._state = MailboxState::Preparing;
     return selectedSlot;
@@ -157,11 +160,24 @@ void AppWindow::PublishPreparedMailbox(uint32_t mailboxSlot) noexcept {
             MailboxData& oldMailbox = _mailboxes[oldSnapshot.Slot];
             RADRAY_ASSERT(oldMailbox._state == MailboxState::Published);
             RADRAY_ASSERT(oldMailbox._generation == oldSnapshot.Generation);
+            oldMailbox._preparedResources.Discard();
             oldMailbox._state = MailboxState::Free;
         }
     }
     _mailboxes[mailboxSlot]._state = MailboxState::Published;
     _latestPublished = MailboxSnapshot{mailboxSlot, MailboxState::Published, _mailboxes[mailboxSlot]._generation};
+}
+
+void AppWindow::UsePreparedResource(uint32_t mailboxSlot, GpuResourceHandle handle) {
+    std::unique_lock<std::mutex> lock{_stateMutex, std::defer_lock};
+    if (_app->_multiThreaded) lock.lock();
+
+    RADRAY_ASSERT(_app != nullptr);
+    RADRAY_ASSERT(_app->_gpu != nullptr);
+    RADRAY_ASSERT(mailboxSlot < _mailboxes.size());
+    MailboxData& mailbox = _mailboxes[mailboxSlot];
+    RADRAY_ASSERT(mailbox._state == MailboxState::Preparing);
+    mailbox._preparedResources.Use(_app->_gpu.get(), handle);
 }
 
 void AppWindow::ReleaseMailbox(RenderRequest request) noexcept {
@@ -182,6 +198,7 @@ void AppWindow::ReleaseMailbox(RenderRequest request) noexcept {
     RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
     RADRAY_ASSERT(mailbox._generation == request.Generation);
     RADRAY_ASSERT(!_latestPublished.has_value() || _latestPublished->Slot != request.MailboxSlot);
+    mailbox._preparedResources.Discard();
     mailbox._state = MailboxState::Free;
     flight._mailboxSlot = 0;
     flight._mailboxGeneration = 0;
@@ -275,6 +292,24 @@ void AppWindow::EndPrepareRenderTask(RenderRequest request, GpuTask task) noexce
     flight._state = FlightState::InRender;
 }
 
+void AppWindow::SubmitPreparedResources(RenderRequest request, const GpuTask& task) {
+    std::unique_lock<std::mutex> lock{_stateMutex, std::defer_lock};
+    if (_app->_multiThreaded) lock.lock();
+
+    RADRAY_ASSERT(request.FlightSlot < _flights.size());
+    RADRAY_ASSERT(request.MailboxSlot < _mailboxes.size());
+
+    FlightData& flight = _flights[request.FlightSlot];
+    RADRAY_ASSERT(flight._state == FlightState::Preparing);
+    RADRAY_ASSERT(flight._mailboxSlot == request.MailboxSlot);
+    RADRAY_ASSERT(flight._mailboxGeneration == request.Generation);
+
+    MailboxData& mailbox = _mailboxes[request.MailboxSlot];
+    RADRAY_ASSERT(mailbox._state == MailboxState::InRender);
+    RADRAY_ASSERT(mailbox._generation == request.Generation);
+    mailbox._preparedResources.Submit(task);
+}
+
 void AppWindow::AbandonClaimedFrame(
     GpuRuntime* gpu,
     GpuRuntime::BeginFrameResult& begin,
@@ -287,6 +322,7 @@ void AppWindow::AbandonClaimedFrame(
     try {
         auto abandon = gpu->AbandonFrame(begin.Context.Release());
         RADRAY_ASSERT(_app != nullptr);
+        this->SubmitPreparedResources(request, abandon.Task);
         _app->OnSubmit(this, request.MailboxSlot, abandon.Task);
         this->EndPrepareRenderTask(request, std::move(abandon.Task));
         if (abandon.Present.Status == render::SwapChainStatus::RequireRecreate) {
@@ -906,6 +942,7 @@ void Application::ScheduleFramesSingleThreaded() {
             throw;
         }
 
+        window->SubmitPreparedResources(*request, submit.Task);
         this->OnSubmit(window.get(), request->MailboxSlot, submit.Task);
         window->EndPrepareRenderTask(*request, std::move(submit.Task));
         if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
@@ -1061,6 +1098,7 @@ void Application::RenderThreadImpl() {
                     throw;
                 }
 
+                window->SubmitPreparedResources(*request, submit.Task);
                 this->OnSubmit(window.get(), request->MailboxSlot, submit.Task);
                 window->EndPrepareRenderTask(*request, std::move(submit.Task));
                 if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {

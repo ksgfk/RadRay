@@ -23,6 +23,21 @@ static int32_t ImGuiSizeToInt(float v) noexcept {
     return static_cast<int32_t>(std::max(v, 1.0f));
 }
 
+static void UsePreparedResource(AppWindow* window, uint32_t mailboxSlot, GpuResourceHandle handle) {
+    if (handle.IsValid()) {
+        window->UsePreparedResource(mailboxSlot, handle);
+    }
+}
+
+static void UsePreparedTextureBinding(AppWindow* window, uint32_t mailboxSlot, ImGuiTextureBinding* binding) {
+    if (binding == nullptr) {
+        return;
+    }
+    UsePreparedResource(window, mailboxSlot, binding->DescriptorSet);
+    UsePreparedResource(window, mailboxSlot, binding->View);
+    UsePreparedResource(window, mailboxSlot, binding->Texture);
+}
+
 void ImGuiDrawListSnapshot::Clear() noexcept {
     Vertices.clear();
     Indices.clear();
@@ -128,213 +143,221 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
         }
     };
     try {
-    {
-        render::ShaderDescriptor vsDesc{};
-        render::ShaderDescriptor psDesc{};
-        vsDesc.Stages = render::ShaderStage::Vertex;
-        psDesc.Stages = render::ShaderStage::Pixel;
-        switch (device->GetBackend()) {
-            case render::RenderBackend::D3D12: {
-                render::HlslShaderDesc vsRefl{};
-                vsRefl.ConstantBuffers.push_back(render::HlslShaderBufferDesc{
-                    .Name = "gPush",
-                    .Variables = {},
-                    .Type = render::HlslCBufferType::CBUFFER,
-                    .Size = 16,
-                    .IsViewInHlsl = true});
-                vsRefl.BoundResources.push_back(render::HlslInputBindDesc{
-                    .Name = "gPush",
-                    .Type = render::HlslShaderInputType::CBUFFER,
-                    .BindPoint = 0,
-                    .BindCount = 1,
-                    .Space = 0});
-                render::HlslShaderDesc psRefl{};
-                psRefl.BoundResources.push_back(render::HlslInputBindDesc{
-                    .Name = "gTexture",
-                    .Type = render::HlslShaderInputType::TEXTURE,
-                    .BindPoint = 0,
-                    .BindCount = 1,
-                    .ReturnType = render::HlslResourceReturnType::FLOAT,
-                    .Dimension = render::HlslSRVDimension::TEXTURE2D,
-                    .Space = 1,
-                    .VkBinding = 0,
-                    .VkSet = 1});
-                psRefl.BoundResources.push_back(render::HlslInputBindDesc{
-                    .Name = "gSampler",
-                    .Type = render::HlslShaderInputType::SAMPLER,
-                    .BindPoint = 1,
-                    .BindCount = 1,
-                    .Space = 1,
-                    .VkBinding = 1,
-                    .VkSet = 1});
-                vsDesc.Source = GetImGuiVertexShaderDXIL();
-                vsDesc.Category = render::ShaderBlobCategory::DXIL;
-                vsDesc.Reflection = vsRefl;
-                psDesc.Source = GetImGuiPixelShaderDXIL();
-                psDesc.Category = render::ShaderBlobCategory::DXIL;
-                psDesc.Reflection = psRefl;
-                break;
+        {
+            render::ShaderDescriptor vsDesc{};
+            render::ShaderDescriptor psDesc{};
+            vsDesc.Stages = render::ShaderStage::Vertex;
+            psDesc.Stages = render::ShaderStage::Pixel;
+            switch (device->GetBackend()) {
+                case render::RenderBackend::D3D12: {
+                    render::HlslShaderDesc vsRefl{};
+                    vsRefl.ConstantBuffers.push_back(render::HlslShaderBufferDesc{
+                        .Name = "gPush",
+                        .Variables = {},
+                        .Type = render::HlslCBufferType::CBUFFER,
+                        .Size = 16,
+                        .IsViewInHlsl = true});
+                    vsRefl.BoundResources.push_back(render::HlslInputBindDesc{
+                        .Name = "gPush",
+                        .Type = render::HlslShaderInputType::CBUFFER,
+                        .BindPoint = 0,
+                        .BindCount = 1,
+                        .Space = 0});
+                    render::HlslShaderDesc psRefl{};
+                    psRefl.BoundResources.push_back(render::HlslInputBindDesc{
+                        .Name = "gTexture",
+                        .Type = render::HlslShaderInputType::TEXTURE,
+                        .BindPoint = 0,
+                        .BindCount = 1,
+                        .ReturnType = render::HlslResourceReturnType::FLOAT,
+                        .Dimension = render::HlslSRVDimension::TEXTURE2D,
+                        .Space = 1,
+                        .VkBinding = 0,
+                        .VkSet = 1});
+                    psRefl.BoundResources.push_back(render::HlslInputBindDesc{
+                        .Name = "gSampler",
+                        .Type = render::HlslShaderInputType::SAMPLER,
+                        .BindPoint = 1,
+                        .BindCount = 1,
+                        .Space = 1,
+                        .VkBinding = 1,
+                        .VkSet = 1});
+                    vsDesc.Source = GetImGuiVertexShaderDXIL();
+                    vsDesc.Category = render::ShaderBlobCategory::DXIL;
+                    vsDesc.Reflection = vsRefl;
+                    psDesc.Source = GetImGuiPixelShaderDXIL();
+                    psDesc.Category = render::ShaderBlobCategory::DXIL;
+                    psDesc.Reflection = psRefl;
+                    break;
+                }
+                case render::RenderBackend::Vulkan: {
+                    render::SpirvShaderDesc vsRefl{};
+                    vsRefl.PushConstants.push_back(render::SpirvPushConstantRange{
+                        .Name = "gPush",
+                        .Offset = 0,
+                        .Size = 16,
+                    });
+                    render::SpirvShaderDesc psRefl{};
+                    psRefl.ResourceBindings.push_back(render::SpirvResourceBinding{
+                        .Name = "gTexture",
+                        .Kind = render::SpirvResourceKind::SeparateImage,
+                        .Set = 1,
+                        .Binding = 0,
+                        .HlslRegister = 0,
+                        .HlslSpace = 1,
+                        .ArraySize = 1,
+                        .ImageInfo = render::SpirvImageInfo{
+                            .Dim = render::SpirvImageDim::Dim2D,
+                        },
+                        .ReadOnly = true});
+                    psRefl.ResourceBindings.push_back(render::SpirvResourceBinding{
+                        .Name = "gSampler",
+                        .Kind = render::SpirvResourceKind::SeparateSampler,
+                        .Set = 1,
+                        .Binding = 1,
+                        .HlslRegister = 1,
+                        .HlslSpace = 1,
+                        .ArraySize = 1,
+                        .ImageInfo = std::nullopt,
+                        .ReadOnly = true});
+                    vsDesc.Source = GetImGuiVertexShaderSPIRV();
+                    vsDesc.Category = render::ShaderBlobCategory::SPIRV;
+                    vsDesc.Reflection = vsRefl;
+                    psDesc.Source = GetImGuiPixelShaderSPIRV();
+                    psDesc.Category = render::ShaderBlobCategory::SPIRV;
+                    psDesc.Reflection = psRefl;
+                    break;
+                }
+                default:
+                    RADRAY_ERR_LOG("ImGuiRenderer does not support render backend {}", device->GetBackend());
+                    return nullptr;
             }
-            case render::RenderBackend::Vulkan: {
-                render::SpirvShaderDesc vsRefl{};
-                vsRefl.PushConstants.push_back(render::SpirvPushConstantRange{
-                    .Name = "gPush",
-                    .Offset = 0,
-                    .Size = 16,
-                });
-                render::SpirvShaderDesc psRefl{};
-                psRefl.ResourceBindings.push_back(render::SpirvResourceBinding{
-                    .Name = "gTexture",
-                    .Kind = render::SpirvResourceKind::SeparateImage,
-                    .Set = 1,
-                    .Binding = 0,
-                    .HlslRegister = 0,
-                    .HlslSpace = 1,
-                    .ArraySize = 1,
-                    .ImageInfo = render::SpirvImageInfo{
-                        .Dim = render::SpirvImageDim::Dim2D,
-                    },
-                    .ReadOnly = true});
-                psRefl.ResourceBindings.push_back(render::SpirvResourceBinding{
-                    .Name = "gSampler",
-                    .Kind = render::SpirvResourceKind::SeparateSampler,
-                    .Set = 1,
-                    .Binding = 1,
-                    .HlslRegister = 1,
-                    .HlslSpace = 1,
-                    .ArraySize = 1,
-                    .ImageInfo = std::nullopt,
-                    .ReadOnly = true});
-                vsDesc.Source = GetImGuiVertexShaderSPIRV();
-                vsDesc.Category = render::ShaderBlobCategory::SPIRV;
-                vsDesc.Reflection = vsRefl;
-                psDesc.Source = GetImGuiPixelShaderSPIRV();
-                psDesc.Category = render::ShaderBlobCategory::SPIRV;
-                psDesc.Reflection = psRefl;
-                break;
-            }
-            default:
-                RADRAY_ERR_LOG("ImGuiRenderer does not support render backend {}", device->GetBackend());
-                return nullptr;
+            vs = gpu->CreateShader(vsDesc);
+            ps = gpu->CreateShader(psDesc);
         }
-        vs = gpu->CreateShader(vsDesc);
-        ps = gpu->CreateShader(psDesc);
-    }
-    {
-        GpuShaderHandle shaders[] = {vs, ps};
-        render::SamplerDescriptor samplerDesc{};
-        samplerDesc.AddressS = render::AddressMode::ClampToEdge;
-        samplerDesc.AddressT = render::AddressMode::ClampToEdge;
-        samplerDesc.AddressR = render::AddressMode::ClampToEdge;
-        samplerDesc.MinFilter = render::FilterMode::Linear;
-        samplerDesc.MagFilter = render::FilterMode::Linear;
-        samplerDesc.MipmapFilter = render::FilterMode::Linear;
-        samplerDesc.LodMin = 0.0f;
-        samplerDesc.LodMax = std::numeric_limits<float>::max();
-        samplerDesc.Compare = std::nullopt;
-        samplerDesc.AnisotropyClamp = 1;
-        const render::StaticSamplerDescriptor staticSamplers[] = {
-            render::StaticSamplerDescriptor{
-                .Name = "gSampler",
-                .Set = render::DescriptorSetIndex{1},
-                .Binding = 1,
-                .Stages = render::ShaderStage::Pixel,
-                .Desc = samplerDesc,
-            },
-        };
-        GpuRootSignatureDescriptor rsDesc{};
-        rsDesc.Shaders = shaders;
-        rsDesc.StaticSamplers = staticSamplers;
-        rs = gpu->CreateRootSignature(rsDesc);
-    }
-    {
-        const render::VertexElement vertexElements[] = {
-            render::VertexElement{
-                .Offset = offsetof(ImDrawVert, pos),
-                .Semantic = "POSITION",
-                .SemanticIndex = 0,
-                .Format = render::VertexFormat::FLOAT32X2,
-                .Location = 0,
-            },
-            render::VertexElement{
-                .Offset = offsetof(ImDrawVert, uv),
-                .Semantic = "TEXCOORD",
-                .SemanticIndex = 0,
-                .Format = render::VertexFormat::FLOAT32X2,
-                .Location = 1,
-            },
-            render::VertexElement{
-                .Offset = offsetof(ImDrawVert, col),
-                .Semantic = "COLOR",
-                .SemanticIndex = 0,
-                .Format = render::VertexFormat::UNORM8X4,
-                .Location = 2,
-            },
-        };
-        const render::VertexBufferLayout vertexLayouts[] = {
-            render::VertexBufferLayout{
-                .ArrayStride = sizeof(ImDrawVert),
-                .StepMode = render::VertexStepMode::Vertex,
-                .Elements = vertexElements,
-            },
-        };
-        render::BlendState blend{};
-        blend.Color.Src = render::BlendFactor::SrcAlpha;
-        blend.Color.Dst = render::BlendFactor::OneMinusSrcAlpha;
-        blend.Color.Op = render::BlendOperation::Add;
-        blend.Alpha.Src = render::BlendFactor::One;
-        blend.Alpha.Dst = render::BlendFactor::OneMinusSrcAlpha;
-        blend.Alpha.Op = render::BlendOperation::Add;
-        const render::ColorTargetState colorTargets[] = {
-            render::ColorTargetState{
-                .Format = backBufferFormat,
-                .Blend = blend,
-                .WriteMask = render::ColorWrite::All,
-            },
-        };
-        render::PrimitiveState primitive{};
-        primitive.Topology = render::PrimitiveTopology::TriangleList;
-        primitive.FaceClockwise = render::FrontFace::CW;
-        primitive.Cull = render::CullMode::None;
-        primitive.Poly = render::PolygonMode::Fill;
-        primitive.StripIndexFormat = std::nullopt;
-        primitive.UnclippedDepth = false;
-        primitive.Conservative = false;
-        render::MultiSampleState multiSample{};
-        multiSample.Count = 1;
-        multiSample.Mask = 0xFFFFFFFF;
-        multiSample.AlphaToCoverageEnable = false;
-        GpuGraphicsPipelineStateDescriptor psoDesc{};
-        psoDesc.RootSig = rs;
-        psoDesc.VS = GpuShaderEntry{
-            .Target = vs,
-            .EntryPoint = "VSMain",
-        };
-        psoDesc.PS = GpuShaderEntry{
-            .Target = ps,
-            .EntryPoint = "PSMain",
-        };
-        psoDesc.VertexLayouts = vertexLayouts;
-        psoDesc.Primitive = primitive;
-        psoDesc.DepthStencil = std::nullopt;
-        psoDesc.MultiSample = multiSample;
-        psoDesc.ColorTargets = colorTargets;
-        pso = gpu->CreateGraphicsPipelineState(psoDesc);
-    }
-    } catch (const GpuSystemException& ex) {
+        {
+            GpuShaderHandle shaders[] = {vs, ps};
+            render::SamplerDescriptor samplerDesc{};
+            samplerDesc.AddressS = render::AddressMode::ClampToEdge;
+            samplerDesc.AddressT = render::AddressMode::ClampToEdge;
+            samplerDesc.AddressR = render::AddressMode::ClampToEdge;
+            samplerDesc.MinFilter = render::FilterMode::Linear;
+            samplerDesc.MagFilter = render::FilterMode::Linear;
+            samplerDesc.MipmapFilter = render::FilterMode::Linear;
+            samplerDesc.LodMin = 0.0f;
+            samplerDesc.LodMax = std::numeric_limits<float>::max();
+            samplerDesc.Compare = std::nullopt;
+            samplerDesc.AnisotropyClamp = 1;
+            const render::StaticSamplerDescriptor staticSamplers[] = {
+                render::StaticSamplerDescriptor{
+                    .Name = "gSampler",
+                    .Set = render::DescriptorSetIndex{1},
+                    .Binding = 1,
+                    .Stages = render::ShaderStage::Pixel,
+                    .Desc = samplerDesc,
+                },
+            };
+            GpuRootSignatureDescriptor rsDesc{};
+            rsDesc.Shaders = shaders;
+            rsDesc.StaticSamplers = staticSamplers;
+            rs = gpu->CreateRootSignature(rsDesc);
+        }
+        {
+            const render::VertexElement vertexElements[] = {
+                render::VertexElement{
+                    .Offset = offsetof(ImDrawVert, pos),
+                    .Semantic = "POSITION",
+                    .SemanticIndex = 0,
+                    .Format = render::VertexFormat::FLOAT32X2,
+                    .Location = 0,
+                },
+                render::VertexElement{
+                    .Offset = offsetof(ImDrawVert, uv),
+                    .Semantic = "TEXCOORD",
+                    .SemanticIndex = 0,
+                    .Format = render::VertexFormat::FLOAT32X2,
+                    .Location = 1,
+                },
+                render::VertexElement{
+                    .Offset = offsetof(ImDrawVert, col),
+                    .Semantic = "COLOR",
+                    .SemanticIndex = 0,
+                    .Format = render::VertexFormat::UNORM8X4,
+                    .Location = 2,
+                },
+            };
+            const render::VertexBufferLayout vertexLayouts[] = {
+                render::VertexBufferLayout{
+                    .ArrayStride = sizeof(ImDrawVert),
+                    .StepMode = render::VertexStepMode::Vertex,
+                    .Elements = vertexElements,
+                },
+            };
+            render::BlendState blend{};
+            blend.Color.Src = render::BlendFactor::SrcAlpha;
+            blend.Color.Dst = render::BlendFactor::OneMinusSrcAlpha;
+            blend.Color.Op = render::BlendOperation::Add;
+            blend.Alpha.Src = render::BlendFactor::One;
+            blend.Alpha.Dst = render::BlendFactor::OneMinusSrcAlpha;
+            blend.Alpha.Op = render::BlendOperation::Add;
+            const render::ColorTargetState colorTargets[] = {
+                render::ColorTargetState{
+                    .Format = backBufferFormat,
+                    .Blend = blend,
+                    .WriteMask = render::ColorWrite::All,
+                },
+            };
+            render::PrimitiveState primitive{};
+            primitive.Topology = render::PrimitiveTopology::TriangleList;
+            primitive.FaceClockwise = render::FrontFace::CW;
+            primitive.Cull = render::CullMode::None;
+            primitive.Poly = render::PolygonMode::Fill;
+            primitive.StripIndexFormat = std::nullopt;
+            primitive.UnclippedDepth = false;
+            primitive.Conservative = false;
+            render::MultiSampleState multiSample{};
+            multiSample.Count = 1;
+            multiSample.Mask = 0xFFFFFFFF;
+            multiSample.AlphaToCoverageEnable = false;
+            GpuGraphicsPipelineStateDescriptor psoDesc{};
+            psoDesc.RootSig = rs;
+            psoDesc.VS = GpuShaderEntry{
+                .Target = vs,
+                .EntryPoint = "VSMain",
+            };
+            psoDesc.PS = GpuShaderEntry{
+                .Target = ps,
+                .EntryPoint = "PSMain",
+            };
+            psoDesc.VertexLayouts = vertexLayouts;
+            psoDesc.Primitive = primitive;
+            psoDesc.DepthStencil = std::nullopt;
+            psoDesc.MultiSample = multiSample;
+            psoDesc.ColorTargets = colorTargets;
+            pso = gpu->CreateGraphicsPipelineState(psoDesc);
+        }
+
+        auto renderer = make_unique<ImGuiRenderer>(app, mainWnd);
+        renderer->_vs = vs;
+        renderer->_ps = ps;
+        renderer->_rs = rs;
+        renderer->_pso = pso;
+        return renderer;
+    } catch (const std::exception& ex) {
         RADRAY_ERR_LOG("ImGuiRenderer GPU resource creation failed: {}", ex.what());
         destroyHandle(pso);
         destroyHandle(rs);
         destroyHandle(ps);
         destroyHandle(vs);
         return nullptr;
+    } catch (...) {
+        RADRAY_ERR_LOG("ImGuiRenderer GPU resource creation failed");
+        destroyHandle(pso);
+        destroyHandle(rs);
+        destroyHandle(ps);
+        destroyHandle(vs);
+        return nullptr;
     }
-    auto renderer = make_unique<ImGuiRenderer>(app, mainWnd);
-    renderer->_vs = vs;
-    renderer->_ps = ps;
-    renderer->_rs = rs;
-    renderer->_pso = pso;
-    return renderer;
 }
 
 void ImGuiRenderer::CreateWindow(ImGuiViewport* viewport) {
@@ -594,8 +617,12 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
     snapshot.TotalVtxCount = drawData->TotalVtxCount;
     RADRAY_ASSERT(drawData->CmdListsCount == drawData->CmdLists.Size);
     snapshot.DrawLists.reserve(static_cast<size_t>(drawData->CmdListsCount));
-
     RADRAY_ASSERT(_renderer != nullptr);
+    if (snapshot.TotalVtxCount > 0 && snapshot.TotalIdxCount > 0) {
+        UsePreparedResource(window, mailboxSlot, _renderer->_pso);
+        UsePreparedResource(window, mailboxSlot, _renderer->_rs);
+    }
+
     RADRAY_ASSERT(_app != nullptr);
     RADRAY_ASSERT(_app->_gpu != nullptr);
     render::Device* device = _app->_gpu->GetDevice();
@@ -679,6 +706,7 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
                 RADRAY_ASSERT(binding->View.NativeHandle != nullptr);
                 RADRAY_ASSERT(binding->DescriptorSet.IsValid());
                 RADRAY_ASSERT(binding->DescriptorSet.NativeHandle != nullptr);
+                RADRAY_ASSERT(!binding->PendingDestroy);
             }
 
             const uint32_t width = static_cast<uint32_t>(tex->Width);
@@ -687,6 +715,7 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
             const uint64_t uploadRowPitch = Align(tightRowPitch, textureRowAlignment);
             ImGuiTextureUploadSnapshot& upload = snapshot.TextureUploads.emplace_back();
             upload.Binding = binding;
+            UsePreparedResource(window, mailboxSlot, upload.Binding->Texture);
             upload.Width = width;
             upload.Height = height;
             upload.RowPitch = uploadRowPitch;
@@ -748,10 +777,16 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
             } else {
                 RADRAY_ASSERT(srcCmd.UserCallback == nullptr);
                 dstCmd.Kind = ImGuiRenderCommandKind::DrawIndexed;
+                if (srcCmd.ElemCount > 0) {
+                    const ImTextureID texId = srcCmd.GetTexID();
+                    RADRAY_ASSERT(texId != ImTextureID_Invalid);
+                    auto* binding = reinterpret_cast<ImGuiTextureBinding*>(texId);
+                    RADRAY_ASSERT(binding != nullptr);
+                    UsePreparedTextureBinding(window, mailboxSlot, binding);
+                }
             }
         }
     }
-
     this->ProcessPendingTextureDestroys();
 }
 
@@ -1079,8 +1114,8 @@ void ImGuiSystem::OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTas
     RADRAY_ASSERT(window != nullptr);
     RADRAY_ASSERT(window->_app == _app);
     RADRAY_ASSERT(mailboxSlot < window->_mailboxes.size());
-    RADRAY_ASSERT(_app->_gpu != nullptr);
     RADRAY_ASSERT(task.IsValid());
+    RADRAY_UNUSED(task);
 
     auto dataIt = std::find_if(
         _viewportRendererData.begin(),
@@ -1097,43 +1132,7 @@ void ImGuiSystem::OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTas
     RADRAY_ASSERT(mailboxSlot < data->Mailboxes.size());
     RADRAY_ASSERT(mailboxSlot < data->UploadedMailboxes.size());
 
-    GpuRuntime* gpu = _app->_gpu.get();
-    auto markHandle = [gpu, &task](GpuResourceHandle handle) {
-        if (handle.IsValid()) {
-            gpu->MarkResourceUsed(handle, task);
-        }
-    };
-    auto markBinding = [&markHandle](ImGuiTextureBinding* binding) {
-        if (binding == nullptr) {
-            return;
-        }
-        markHandle(binding->DescriptorSet);
-        markHandle(binding->View);
-        markHandle(binding->Texture);
-    };
-
     ImGuiRenderSnapshot& snapshot = data->Mailboxes[mailboxSlot];
-    if (snapshot.Valid) {
-        for (const ImGuiTextureUploadSnapshot& upload : snapshot.TextureUploads) {
-            if (upload.Binding != nullptr) {
-                markHandle(upload.Binding->Texture);
-            }
-        }
-
-        if (snapshot.TotalVtxCount > 0 && snapshot.TotalIdxCount > 0) {
-            markHandle(_renderer->_pso);
-            markHandle(_renderer->_rs);
-            for (const ImGuiDrawListSnapshot& drawList : snapshot.DrawLists) {
-                for (const ImGuiRenderCommandSnapshot& cmd : drawList.Commands) {
-                    if (cmd.Kind != ImGuiRenderCommandKind::DrawIndexed || cmd.TexID == ImTextureID_Invalid) {
-                        continue;
-                    }
-                    markBinding(reinterpret_cast<ImGuiTextureBinding*>(cmd.TexID));
-                }
-            }
-        }
-    }
-
     snapshot.Clear();
     data->UploadedMailboxes[mailboxSlot].Clear();
     this->ProcessPendingTextureDestroys();
