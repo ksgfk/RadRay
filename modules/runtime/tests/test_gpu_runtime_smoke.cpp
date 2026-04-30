@@ -17,11 +17,7 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#define private public
-#define protected public
 #include <radray/runtime/gpu_system.h>
-#undef protected
-#undef private
 #include <radray/window/native_window.h>
 
 using namespace radray;

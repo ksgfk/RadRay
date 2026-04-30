@@ -7,10 +7,12 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <variant>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/render/common.h>
+#include <radray/sparse_set.h>
 
 // gpu_system 语义约定
 //
@@ -105,7 +107,6 @@ class GpuTask;
 class GpuSurface;
 class GpuFrameContext;
 class GpuAsyncContext;
-class GpuResourceRegistry;
 class RenderGraph;
 
 class GpuSystemException : public std::runtime_error {
@@ -227,6 +228,193 @@ struct GpuSurfaceDescriptor {
     render::TextureFormat Format{render::TextureFormat::UNKNOWN};
     render::PresentMode PresentMode{render::PresentMode::FIFO};
     uint32_t QueueSlot{0};
+};
+
+class GpuResourceRegistry {
+public:
+    enum class Kind {
+        Unknown,
+        Buffer,
+        Texture,
+        TextureView,
+        Sampler,
+        Shader,
+        RootSignature,
+        DescriptorSet,
+        GraphicsPipelineState,
+        ComputePipelineState,
+        AccelerationStructure,
+        AccelerationStructureView,
+        RayTracingPipelineState,
+        ShaderBindingTable,
+        BindlessArray
+    };
+
+    enum class State {
+        Alive,
+        PendingDestroy
+    };
+
+    struct ParentResourceRef {
+        GpuResourceRegistry* Registry{nullptr};
+        GpuResourceHandle Handle{};
+        void* NativeHandle{nullptr};
+    };
+
+    explicit GpuResourceRegistry(render::Device* device) noexcept;
+    ~GpuResourceRegistry() noexcept;
+
+    GpuBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
+    GpuTextureHandle CreateTexture(const render::TextureDescriptor& desc);
+    GpuTextureViewHandle CreateTextureView(const GpuTextureViewDescriptor& desc, const ParentResourceRef& parent);
+    GpuSamplerHandle CreateSampler(const render::SamplerDescriptor& desc);
+    GpuShaderHandle CreateShader(const render::ShaderDescriptor& desc);
+    GpuRootSignatureHandle CreateRootSignature(const GpuRootSignatureDescriptor& desc);
+    GpuDescriptorSetHandle CreateDescriptorSet(const GpuDescriptorSetDescriptor& desc);
+    GpuGraphicsPipelineStateHandle CreateGraphicsPipelineState(const GpuGraphicsPipelineStateDescriptor& desc);
+    GpuComputePipelineStateHandle CreateComputePipelineState(const GpuComputePipelineStateDescriptor& desc);
+    GpuAccelerationStructureHandle CreateAccelerationStructure(const render::AccelerationStructureDescriptor& desc);
+    GpuAccelerationStructureViewHandle CreateAccelerationStructureView(const GpuAccelerationStructureViewDescriptor& desc);
+    GpuRayTracingPipelineStateHandle CreateRayTracingPipelineState(const GpuRayTracingPipelineStateDescriptor& desc);
+    GpuShaderBindingTableHandle CreateShaderBindingTable(const GpuShaderBindingTableDescriptor& desc);
+    GpuBindlessArrayHandle CreateBindlessArray(const render::BindlessArrayDescriptor& desc);
+
+    render::Texture* FindAliveTexture(const GpuTextureHandle& handle) noexcept;
+    const render::Texture* FindAliveTexture(const GpuTextureHandle& handle) const noexcept;
+
+    bool Contains(const GpuResourceHandle& handle) const noexcept;
+    bool IsPendingDestroy(const GpuResourceHandle& handle) const noexcept;
+    Kind GetKind(const GpuResourceHandle& handle) const noexcept;
+    void MarkPendingDestroy(const GpuResourceHandle& handle);
+
+    void AddChildRef(const GpuResourceHandle& handle);
+    void ReleaseChildRef(const GpuResourceHandle& handle) noexcept;
+
+    bool TryDestroyImmediately(const GpuResourceHandle& handle) noexcept;
+    bool TryRetire(const GpuResourceHandle& handle) noexcept;
+    void Clear() noexcept;
+
+private:
+    struct ParentRef {
+        GpuResourceRegistry* Registry{nullptr};
+        GpuResourceHandle Handle{};
+
+        ParentRef() noexcept = default;
+        ParentRef(GpuResourceRegistry* registry, GpuResourceHandle handle) noexcept;
+    };
+
+    struct BufferRecord {
+        unique_ptr<render::Buffer> Resource{};
+    };
+
+    struct TextureRecord {
+        unique_ptr<render::Texture> Resource{};
+    };
+
+    struct TextureViewRecord {
+        unique_ptr<render::TextureView> Resource{};
+    };
+
+    struct SamplerRecord {
+        unique_ptr<render::Sampler> Resource{};
+    };
+
+    struct ShaderRecord {
+        unique_ptr<render::Shader> Resource{};
+    };
+
+    struct RootSignatureRecord {
+        unique_ptr<render::RootSignature> Resource{};
+    };
+
+    struct DescriptorSetRecord {
+        unique_ptr<render::DescriptorSet> Resource{};
+    };
+
+    struct GraphicsPipelineStateRecord {
+        unique_ptr<render::GraphicsPipelineState> Resource{};
+    };
+
+    struct ComputePipelineStateRecord {
+        unique_ptr<render::ComputePipelineState> Resource{};
+    };
+
+    struct AccelerationStructureRecord {
+        unique_ptr<render::AccelerationStructure> Resource{};
+    };
+
+    struct AccelerationStructureViewRecord {
+        unique_ptr<render::AccelerationStructureView> Resource{};
+    };
+
+    struct RayTracingPipelineStateRecord {
+        unique_ptr<render::RayTracingPipelineState> Resource{};
+    };
+
+    struct ShaderBindingTableRecord {
+        unique_ptr<render::ShaderBindingTable> Resource{};
+    };
+
+    struct BindlessArrayRecord {
+        unique_ptr<render::BindlessArray> Resource{};
+    };
+
+    class ResourceRecord {
+    public:
+        using Payload = std::variant<
+            BufferRecord,
+            TextureRecord,
+            TextureViewRecord,
+            SamplerRecord,
+            ShaderRecord,
+            RootSignatureRecord,
+            DescriptorSetRecord,
+            GraphicsPipelineStateRecord,
+            ComputePipelineStateRecord,
+            AccelerationStructureRecord,
+            AccelerationStructureViewRecord,
+            RayTracingPipelineStateRecord,
+            ShaderBindingTableRecord,
+            BindlessArrayRecord>;
+
+        Payload Data;
+        SparseSetHandle RecordHandle{SparseSetHandle::Invalid()};
+        void* NativeHandle{nullptr};
+        State State{State::Alive};
+        uint32_t ChildRefCount{0};
+        vector<ParentRef> ParentRefs{};
+
+        template <typename Record>
+        ResourceRecord(Record record, void* nativeHandle, vector<ParentRef> parentRefs = {}) noexcept;
+
+        Kind GetKind() const noexcept;
+    };
+
+    static SparseSetHandle ToRecordHandle(const GpuResourceHandle& handle) noexcept;
+
+    template <typename Handle, typename Record>
+    Handle AddRecord(Record resourceRecord, void* nativeHandle, vector<ParentRef> parentRefs = {});
+
+    template <typename Record, typename Native>
+    Native* FindAliveAs(const GpuResourceHandle& handle) noexcept;
+
+    template <typename Record, typename Native>
+    const Native* FindAliveAs(const GpuResourceHandle& handle) const noexcept;
+
+    render::Shader* FindAliveShader(const GpuShaderHandle& handle) noexcept;
+    render::RootSignature* FindAliveRootSignature(const GpuRootSignatureHandle& handle) noexcept;
+    render::AccelerationStructure* FindAliveAccelerationStructure(const GpuAccelerationStructureHandle& handle) noexcept;
+    render::RayTracingPipelineState* FindAliveRayTracingPipelineState(const GpuRayTracingPipelineStateHandle& handle) noexcept;
+
+    render::ShaderEntry MakeNativeShaderEntry(const GpuShaderEntry& entry, vector<ParentRef>& parentRefs);
+    render::RayTracingShaderEntry MakeNativeRayTracingShaderEntry(const GpuRayTracingShaderEntry& entry, vector<ParentRef>& parentRefs);
+
+    const ResourceRecord* FindRecord(const GpuResourceHandle& handle) const noexcept;
+    ResourceRecord* FindRecord(const GpuResourceHandle& handle) noexcept;
+    void EraseRecord(const GpuResourceHandle& handle) noexcept;
+
+    render::Device* _device{nullptr};
+    SparseSet<ResourceRecord> _records{};
 };
 
 class GpuTask {

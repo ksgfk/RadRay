@@ -10,11 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/render/common.h>
-#define private public
-#define protected public
 #include <radray/runtime/gpu_system.h>
-#undef protected
-#undef private
 #ifdef RADRAY_ENABLE_IMGUI
 #include <radray/runtime/imgui_system.h>
 #endif
