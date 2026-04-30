@@ -1,8 +1,6 @@
 #pragma once
 
-#include <stdexcept>
 
-#include <radray/basic_corotinue.h>
 #include <radray/vertex_data.h>
 #include <radray/render/common.h>
 

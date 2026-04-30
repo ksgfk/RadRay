@@ -7,7 +7,7 @@ target_link_libraries(radraycore PUBLIC
     fmt::fmt
     Eigen3::Eigen
     Pal::Sigslot
-    STDEXEC::stdexec
+    # STDEXEC::stdexec
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-override>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog

@@ -116,12 +116,6 @@
             "Tag": "v1.92.7-docking"
         },
         {
-            "Name": "stdexec",
-            "Type": "git",
-            "Git": "https://github.com/NVIDIA/stdexec.git",
-            "Tag": "gtc-2026"
-        },
-        {
             "Name": "googletest",
             "Type": "git",
             "Git": "https://github.com/google/googletest.git",

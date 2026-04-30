@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 
 SHADERS = [
     ("VertexShaderDXIL", "VSMain", "vs_6_0", "dxil"),

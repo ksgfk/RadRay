@@ -12,8 +12,8 @@ TODO
   * cmake --preset win-x64-release
 
 * generate compile_commands.json on win
-  * .\win_gen_compile_commands.ps1 -BuildDir .\build_debug -Configuration Debug
-  * .\win_gen_compile_commands.ps1 -BuildDir .\build_release -Configuration Release
+  * python .\tools\win_gen_compile_commands.py --build-dir .\build_debug --configuration Debug
+  * python .\tools\win_gen_compile_commands.py --build-dir .\build_release --configuration Release
 
 ## dev env
 
