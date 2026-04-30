@@ -1,9 +1,11 @@
 #include <atomic>
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -47,6 +49,25 @@ std::vector<RenderBackend> GetEnabledRuntimeBackends() noexcept {
 #endif
     return backends;
 }
+
+class FakeFence final : public Fence {
+public:
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+
+    uint64_t GetCompletedValue() const noexcept override { return CompletedValue; }
+    uint64_t GetLastSignaledValue() const noexcept override { return LastSignaledValue; }
+
+    void Wait() noexcept override { CompletedValue = LastSignaledValue; }
+    void Wait(uint64_t value) noexcept override { CompletedValue = std::max(CompletedValue, value); }
+
+    void Signal(uint64_t value) noexcept { LastSignaledValue = std::max(LastSignaledValue, value); }
+
+public:
+    uint64_t CompletedValue{0};
+    uint64_t LastSignaledValue{0};
+};
 
 bool CreateRuntimeForBackend(RenderBackend backend, unique_ptr<GpuRuntime>& runtime, std::string& reason) {
     switch (backend) {
@@ -431,8 +452,8 @@ bool DrainRuntime(GpuRuntime& runtime, std::string& reason) {
         reason = "Runtime still has pending submissions after drain.";
         return false;
     }
-    if (!runtime._resourceRetirements.empty()) {
-        reason = "Runtime still has pending resource retirements after drain.";
+    if (runtime.HasPendingResourceDestroysForTest()) {
+        reason = "Runtime still has pending resource destroys after drain.";
         return false;
     }
     return true;
@@ -489,7 +510,7 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateRetiresPersistentResource
     const auto texture = runtime->CreateTexture(MakeTextureDesc());
     runtime->DestroyResourceImmediate(texture);
 
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 
     auto context = runtime->BeginAsync(QueueType::Direct);
@@ -497,7 +518,24 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceImmediateRetiresPersistentResource
     EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
 }
 
-TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterWaitsForTaskAndProcessTasks) {
+TEST_P(GpuRuntimeResourceTest, DestroyResourceWithoutLastUseReleasesChildlessResource) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    ASSERT_TRUE(runtime->IsResourceTrackedForTest(buffer));
+
+    runtime->DestroyResource(buffer);
+
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(buffer));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResource(buffer));
+}
+
+TEST_P(GpuRuntimeResourceTest, DestroyResourceDoesNotWaitForUnmarkedSubmission) {
     unique_ptr<GpuRuntime> runtime{};
     std::string reason{};
     if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
@@ -506,21 +544,21 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterWaitsForTaskAndProcessTasks) 
 
     const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
     auto task = SubmitNoOpAsync(*runtime);
-    runtime->DestroyResourceAfter(buffer, task);
-
-    ASSERT_EQ(runtime->_resourceRetirements.size(), 1u);
+    ASSERT_TRUE(task.IsValid());
     ASSERT_EQ(runtime->_pendings.size(), 1u);
 
-    task.Wait();
-    EXPECT_EQ(runtime->_resourceRetirements.size(), 1u);
+    runtime->DestroyResource(buffer);
+
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(buffer));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_EQ(runtime->_pendings.size(), 1u);
 
+    task.Wait();
     runtime->ProcessTasks();
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
     EXPECT_TRUE(runtime->_pendings.empty());
 }
 
-TEST_P(GpuRuntimeResourceTest, GpuTaskCopyCanWaitAndDriveDelayedDestroy) {
+TEST_P(GpuRuntimeResourceTest, DestroyResourceWaitsForMarkedLastUseAndProcessTasks) {
     unique_ptr<GpuRuntime> runtime{};
     std::string reason{};
     if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
@@ -528,7 +566,38 @@ TEST_P(GpuRuntimeResourceTest, GpuTaskCopyCanWaitAndDriveDelayedDestroy) {
     }
 
     const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
-    const GpuTask task = SubmitNoOpAsync(*runtime);
+    FakeFence fence{};
+    fence.Signal(1);
+    GpuTask task{runtime.get(), &fence, 1};
+    runtime->MarkResourceUsed(buffer, task);
+    runtime->DestroyResource(buffer);
+
+    ASSERT_TRUE(runtime->IsResourceTrackedForTest(buffer));
+    ASSERT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+    ASSERT_TRUE(runtime->HasPendingResourceDestroysForTest());
+
+    runtime->ProcessTasks();
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(buffer));
+    EXPECT_TRUE(runtime->HasPendingResourceDestroysForTest());
+
+    task.Wait();
+    runtime->ProcessTasks();
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(buffer));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
+    EXPECT_TRUE(runtime->_pendings.empty());
+}
+
+TEST_P(GpuRuntimeResourceTest, GpuTaskCopyCanWaitAndDriveMarkedDestroy) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    FakeFence fence{};
+    fence.Signal(1);
+    const GpuTask task{runtime.get(), &fence, 1};
     const GpuTask copied = task;
 
     EXPECT_TRUE(task.IsValid());
@@ -538,17 +607,43 @@ TEST_P(GpuRuntimeResourceTest, GpuTaskCopyCanWaitAndDriveDelayedDestroy) {
     EXPECT_EQ(task._signalValue, copied._signalValue);
     EXPECT_EQ(task.IsCompleted(), copied.IsCompleted());
 
-    runtime->DestroyResourceAfter(buffer, copied);
+    runtime->MarkResourceUsed(buffer, copied);
+    runtime->DestroyResource(buffer);
     copied.Wait();
     EXPECT_TRUE(task.IsCompleted());
     EXPECT_TRUE(copied.IsCompleted());
 
     runtime->ProcessTasks();
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_TRUE(runtime->_pendings.empty());
 }
 
-TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterRetiresChildBeforeParentWhenBothReady) {
+TEST_P(GpuRuntimeResourceTest, DestroyAndMarkResourceUsedRejectInvalidAndForeignInputsInDebug) {
+    unique_ptr<GpuRuntime> runtime{};
+    std::string reason{};
+    if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
+        GTEST_SKIP() << reason;
+    }
+
+    const auto buffer = runtime->CreateBuffer(MakeBufferDesc());
+    FakeFence fence{};
+    fence.Signal(1);
+    GpuTask task{runtime.get(), &fence, 1};
+
+    GpuBufferHandle invalidHandle{};
+    invalidHandle.Handle = 42;
+    invalidHandle.NativeHandle = reinterpret_cast<void*>(1);
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResource(invalidHandle));
+    EXPECT_GPU_GUARD_ASSERT(runtime->MarkResourceUsed(invalidHandle, task));
+
+    GpuRuntime foreignRuntime(shared_ptr<Device>{}, unique_ptr<InstanceVulkan>{});
+    GpuTask foreignTask{&foreignRuntime, &fence, 1};
+    EXPECT_GPU_GUARD_ASSERT(runtime->MarkResourceUsed(buffer, foreignTask));
+
+    runtime->DestroyResourceImmediate(buffer);
+}
+
+TEST_P(GpuRuntimeResourceTest, DestroyResourceRetiresChildBeforeParentWhenBothReady) {
     unique_ptr<GpuRuntime> runtime{};
     std::string reason{};
     if (!CreateRuntimeForBackend(GetParam(), runtime, reason)) {
@@ -557,16 +652,25 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterRetiresChildBeforeParentWhenB
 
     const auto texture = runtime->CreateTexture(MakeTextureDesc());
     const auto view = runtime->CreateTextureView(MakeTextureViewDesc(texture));
-    auto task = SubmitNoOpAsync(*runtime);
+    FakeFence fence{};
+    fence.Signal(1);
+    GpuTask task{runtime.get(), &fence, 1};
 
-    runtime->DestroyResourceAfter(texture, task);
-    runtime->DestroyResourceAfter(view, task);
+    runtime->MarkResourceUsed(texture, task);
+    runtime->MarkResourceUsed(view, task);
+    runtime->DestroyResource(texture);
+    runtime->DestroyResource(view);
+
+    runtime->ProcessTasks();
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(texture));
+    EXPECT_TRUE(runtime->IsResourcePendingDestroyForTest(view));
 
     task.Wait();
     runtime->ProcessTasks();
 
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
-    EXPECT_TRUE(runtime->_pendings.empty());
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(texture));
+    EXPECT_FALSE(runtime->IsResourceTrackedForTest(view));
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_GPU_GUARD_ASSERT(runtime->CreateTextureView(MakeTextureViewDesc(texture)));
 }
 
@@ -638,9 +742,10 @@ TEST_P(GpuRuntimeResourceTest, TransientViewScopeRulesAndImmediateDestroyRejects
     EXPECT_TRUE(persistentView.IsValid());
     EXPECT_GPU_GUARD_ASSERT(contextB->CreateTransientTextureView(MakeTextureViewDesc(transientTexture)));
     EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(transientTexture));
+    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResource(transientTexture));
 
     auto task = SubmitNoOpAsync(*runtime);
-    EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceAfter(transientTexture, task));
+    EXPECT_GPU_GUARD_ASSERT(runtime->MarkResourceUsed(transientTexture, task));
     task.Wait();
     runtime->ProcessTasks();
 }
@@ -658,7 +763,7 @@ TEST_P(GpuRuntimeResourceTest, UnsubmittedTransientViewBlocksImmediatePersistent
     ASSERT_TRUE(transientView.IsValid());
 
     EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
 
     context.reset();
     runtime->DestroyResourceImmediate(texture);
@@ -685,7 +790,7 @@ TEST_P(GpuRuntimeResourceTest, SubmittedTransientViewBlocksImmediatePersistentTe
     EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
     task.Wait();
 
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_EQ(runtime->_pendings.size(), 1u);
 
     runtime->ProcessTasks();
@@ -705,7 +810,7 @@ TEST_P(GpuRuntimeResourceTest, PersistentTextureImmediateDestroyRejectsLivePersi
     const auto view = runtime->CreateTextureView(MakeTextureViewDesc(texture));
 
     EXPECT_GPU_GUARD_ASSERT(runtime->DestroyResourceImmediate(texture));
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
 
     runtime->DestroyResourceImmediate(view);
     runtime->DestroyResourceImmediate(texture);
@@ -850,14 +955,15 @@ TEST_P(GpuRuntimeResourceTest, ConcurrentPersistentResourceCreateAndRetireRemain
                     }
 
                     auto task = SubmitNoOpAsync(*runtime);
-                    runtime->DestroyResourceAfter(buffer, task);
+                    runtime->MarkResourceUsed(buffer, task);
+                    runtime->DestroyResource(buffer);
                     task.Wait();
                     if (((workerIndex + iteration) & 1) == 0) {
                         runtime->ProcessTasks();
                     }
-                    runtime->DestroyResourceImmediate(view);
-                    runtime->DestroyResourceImmediate(texture);
-                    runtime->DestroyResourceImmediate(sampler);
+                    runtime->DestroyResource(view);
+                    runtime->DestroyResource(texture);
+                    runtime->DestroyResource(sampler);
                     runtime->ProcessTasks();
                 } catch (const std::exception& ex) {
                     RecordFailureOnce(
@@ -880,7 +986,7 @@ TEST_P(GpuRuntimeResourceTest, ConcurrentPersistentResourceCreateAndRetireRemain
 
     ASSERT_FALSE(failed.load()) << failure;
     ASSERT_TRUE(DrainRuntime(*runtime, reason)) << reason;
-    EXPECT_TRUE(runtime->_resourceRetirements.empty());
+    EXPECT_FALSE(runtime->HasPendingResourceDestroysForTest());
     EXPECT_TRUE(runtime->_pendings.empty());
 }
 
@@ -942,9 +1048,10 @@ TEST_P(GpuRuntimeResourceTest, TransientPersistentTextureViewsSurviveInterleaved
                 }
 
                 auto task = SubmitNoOpAsync(*runtime);
-                runtime->DestroyResourceAfter(buffer, task);
+                runtime->MarkResourceUsed(buffer, task);
+                runtime->DestroyResource(buffer);
                 task.Wait();
-                runtime->DestroyResourceImmediate(sampler);
+                runtime->DestroyResource(sampler);
                 runtime->ProcessTasks();
             } catch (const std::exception& ex) {
                 RecordFailureOnce(
@@ -971,7 +1078,7 @@ TEST_P(GpuRuntimeResourceTest, TransientPersistentTextureViewsSurviveInterleaved
 }
 
 #ifdef RADRAY_IS_DEBUG
-TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterTwiceDiesInDebug) {
+TEST_P(GpuRuntimeResourceTest, DestroyResourceTwiceDiesInDebug) {
     const RenderBackend backend = GetParam();
     std::string reason{};
     if (!CanCreateRuntimeForBackend(backend, reason)) {
@@ -986,9 +1093,8 @@ TEST_P(GpuRuntimeResourceTest, DestroyResourceAfterTwiceDiesInDebug) {
                 RADRAY_ABORT("{}", localReason);
             }
             const auto texture = runtime->CreateTexture(MakeTextureDesc());
-            auto task = SubmitNoOpAsync(*runtime);
-            runtime->DestroyResourceAfter(texture, task);
-            runtime->DestroyResourceAfter(texture, task);
+            runtime->DestroyResource(texture);
+            runtime->DestroyResource(texture);
         },
         "");
 }

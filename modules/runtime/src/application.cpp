@@ -286,6 +286,8 @@ void AppWindow::AbandonClaimedFrame(
 
     try {
         auto abandon = gpu->AbandonFrame(begin.Context.Release());
+        RADRAY_ASSERT(_app != nullptr);
+        _app->OnSubmit(this, request.MailboxSlot, abandon.Task);
         this->EndPrepareRenderTask(request, std::move(abandon.Task));
         if (abandon.Present.Status == render::SwapChainStatus::RequireRecreate) {
             std::unique_lock<std::mutex> stateLock{_stateMutex, std::defer_lock};
@@ -904,6 +906,7 @@ void Application::ScheduleFramesSingleThreaded() {
             throw;
         }
 
+        this->OnSubmit(window.get(), request->MailboxSlot, submit.Task);
         window->EndPrepareRenderTask(*request, std::move(submit.Task));
         if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
             window->_pendingRecreate = true;
@@ -1058,6 +1061,7 @@ void Application::RenderThreadImpl() {
                     throw;
                 }
 
+                this->OnSubmit(window.get(), request->MailboxSlot, submit.Task);
                 window->EndPrepareRenderTask(*request, std::move(submit.Task));
                 if (submit.Present.Status == render::SwapChainStatus::RequireRecreate) {
                     std::lock_guard<std::mutex> stateLock{window->_stateMutex};

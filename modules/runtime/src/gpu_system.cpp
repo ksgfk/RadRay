@@ -63,6 +63,10 @@ GpuResourceRegistry::Kind GpuResourceRegistry::ResourceRecord::GetKind() const n
         Data);
 }
 
+bool GpuResourceRegistry::LastUse::IsCompleted() const noexcept {
+    return Fence != nullptr && FenceValue != 0 && Fence->GetCompletedValue() >= FenceValue;
+}
+
 SparseSetHandle GpuResourceRegistry::ToRecordHandle(const GpuResourceHandle& handle) noexcept {
     return SparseSetHandle{handle.Handle, handle.Generation};
 }
@@ -521,15 +525,75 @@ bool GpuResourceRegistry::IsPendingDestroy(const GpuResourceHandle& handle) cons
     return record != nullptr && record->State == State::PendingDestroy;
 }
 
+bool GpuResourceRegistry::HasPendingDestroys() const noexcept {
+    for (const auto& record : _records.Values()) {
+        if (record.State == State::PendingDestroy) {
+            return true;
+        }
+    }
+    return false;
+}
+
 GpuResourceRegistry::Kind GpuResourceRegistry::GetKind(const GpuResourceHandle& handle) const noexcept {
     const auto* record = this->FindRecord(handle);
     return record != nullptr ? record->GetKind() : Kind::Unknown;
 }
 
+void GpuResourceRegistry::MarkUsed(const GpuResourceHandle& handle, render::Fence* fence, uint64_t fenceValue) {
+    auto* record = this->FindRecord(handle);
+    RADRAY_ASSERT(record != nullptr);
+    RADRAY_ASSERT(record->State == State::Alive || record->State == State::PendingDestroy);
+    RADRAY_ASSERT(fence != nullptr);
+    RADRAY_ASSERT(fenceValue != 0);
+
+    for (LastUse& lastUse : record->LastUses) {
+        if (lastUse.Fence == fence) {
+            lastUse.FenceValue = std::max(lastUse.FenceValue, fenceValue);
+            return;
+        }
+    }
+
+    record->LastUses.emplace_back(LastUse{
+        .Fence = fence,
+        .FenceValue = fenceValue,
+    });
+}
+
 void GpuResourceRegistry::MarkPendingDestroy(const GpuResourceHandle& handle) {
     auto* record = this->FindRecord(handle);
     RADRAY_ASSERT(record != nullptr);
+    RADRAY_ASSERT(record->State == State::Alive);
     record->State = State::PendingDestroy;
+}
+
+void GpuResourceRegistry::ProcessPendingDestroys() noexcept {
+    for (ResourceRecord& record : _records.Values()) {
+        std::erase_if(record.LastUses, [](const LastUse& lastUse) {
+            return lastUse.IsCompleted();
+        });
+    }
+
+    bool madeProgress = false;
+    do {
+        madeProgress = false;
+        vector<GpuResourceHandle> readyHandles{};
+        readyHandles.reserve(_records.Count());
+        for (const ResourceRecord& record : _records.Values()) {
+            if (record.State == State::PendingDestroy &&
+                record.ChildRefCount == 0 &&
+                record.LastUses.empty()) {
+                readyHandles.emplace_back(GpuResourceHandle{
+                    record.RecordHandle.Index,
+                    record.RecordHandle.Generation,
+                    record.NativeHandle});
+            }
+        }
+
+        for (const GpuResourceHandle& handle : readyHandles) {
+            this->EraseRecord(handle);
+            madeProgress = true;
+        }
+    } while (madeProgress);
 }
 
 void GpuResourceRegistry::AddChildRef(const GpuResourceHandle& handle) {
@@ -547,22 +611,6 @@ void GpuResourceRegistry::ReleaseChildRef(const GpuResourceHandle& handle) noexc
     if (record->ChildRefCount > 0) {
         --record->ChildRefCount;
     }
-}
-
-bool GpuResourceRegistry::TryRetire(const GpuResourceHandle& handle) noexcept {
-    auto* record = this->FindRecord(handle);
-    if (record == nullptr) {
-        return true;
-    }
-    if (record->State != State::PendingDestroy) {
-        return false;
-    }
-    if (record->ChildRefCount != 0) {
-        return false;
-    }
-
-    this->EraseRecord(handle);
-    return true;
 }
 
 bool GpuResourceRegistry::TryDestroyImmediately(const GpuResourceHandle& handle) noexcept {
@@ -823,7 +871,6 @@ render::Device* GpuRuntime::GetDevice() const {
 void GpuRuntime::Destroy() noexcept {
     std::lock_guard<std::mutex> lock{_runtimeMutex};
     _pendings.clear();
-    _resourceRetirements.clear();
     _resourceRegistry.reset();
     for (auto& fences : _queueFences) {
         fences.clear();
@@ -973,20 +1020,24 @@ void GpuRuntime::DestroyResourceImmediate(GpuResourceHandle handle) {
     RADRAY_ASSERT(destroyed);
 }
 
-void GpuRuntime::DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task) {
+void GpuRuntime::DestroyResource(GpuResourceHandle handle) {
     std::lock_guard<std::mutex> lock{_runtimeMutex};
     RADRAY_ASSERT(_resourceRegistry != nullptr);
     RADRAY_ASSERT(_resourceRegistry->Contains(handle));
     RADRAY_ASSERT(!_resourceRegistry->IsPendingDestroy(handle));
+
+    _resourceRegistry->MarkPendingDestroy(handle);
+    _resourceRegistry->ProcessPendingDestroys();
+}
+
+void GpuRuntime::MarkResourceUsed(GpuResourceHandle handle, const GpuTask& task) {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    RADRAY_ASSERT(_resourceRegistry != nullptr);
+    RADRAY_ASSERT(_resourceRegistry->Contains(handle));
     RADRAY_ASSERT(task.IsValid());
     RADRAY_ASSERT(task._runtime == this);
 
-    _resourceRegistry->MarkPendingDestroy(handle);
-    ResourceRetirement retirement{};
-    retirement.Handle = handle;
-    retirement.Fence = task._fence;
-    retirement.SignalValue = task._signalValue;
-    _resourceRetirements.emplace_back(std::move(retirement));
+    _resourceRegistry->MarkUsed(handle, task._fence, task._signalValue);
 }
 
 GpuRuntime::BeginFrameResult GpuRuntime::BeginFrame(GpuSurface* surface) {
@@ -1140,28 +1191,8 @@ void GpuRuntime::ProcessTasksUnlocked() {
         return pending._fence != nullptr && pending._fence->GetCompletedValue() >= pending._signalValue;
     });
 
-    if (_resourceRegistry == nullptr) {
-        _resourceRetirements.clear();
-    } else {
-        bool madeProgress = false;
-        do {
-            madeProgress = false;
-            std::erase_if(_resourceRetirements, [this, &madeProgress](const ResourceRetirement& retirement) {
-                if (!retirement.IsReady()) {
-                    return false;
-                }
-                const auto kind = _resourceRegistry->GetKind(retirement.Handle);
-                if (kind == GpuResourceRegistry::Kind::Unknown) {
-                    madeProgress = true;
-                    return true;
-                }
-                if (_resourceRegistry->TryRetire(retirement.Handle)) {
-                    madeProgress = true;
-                    return true;
-                }
-                return false;
-            });
-        } while (madeProgress);
+    if (_resourceRegistry != nullptr) {
+        _resourceRegistry->ProcessPendingDestroys();
     }
 }
 
@@ -1175,6 +1206,21 @@ void GpuRuntime::Wait(render::QueueType type, uint32_t queueSlot) {
     auto queue = queueOpt.Get();
     queue->Wait();
     this->ProcessTasksUnlocked();
+}
+
+bool GpuRuntime::IsResourceTrackedForTest(GpuResourceHandle handle) const {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    return _resourceRegistry != nullptr && _resourceRegistry->Contains(handle);
+}
+
+bool GpuRuntime::IsResourcePendingDestroyForTest(GpuResourceHandle handle) const {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    return _resourceRegistry != nullptr && _resourceRegistry->IsPendingDestroy(handle);
+}
+
+bool GpuRuntime::HasPendingResourceDestroysForTest() const {
+    std::lock_guard<std::mutex> lock{_runtimeMutex};
+    return _resourceRegistry != nullptr && _resourceRegistry->HasPendingDestroys();
 }
 
 render::Fence* GpuRuntime::GetQueueFenceUnlocked(render::QueueType type, uint32_t slot) {
@@ -1235,10 +1281,6 @@ GpuRuntime::BeginFrameResult GpuRuntime::AcquireSwapChainUnlocked(GpuSurface* su
             throw GpuSystemException("SwapChain::AcquireNext failed");
         }
     }
-}
-
-bool GpuRuntime::ResourceRetirement::IsReady() const noexcept {
-    return Fence != nullptr && SignalValue != 0 && Fence->GetCompletedValue() >= SignalValue;
 }
 
 Nullable<unique_ptr<GpuRuntime>> GpuRuntime::Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc) {

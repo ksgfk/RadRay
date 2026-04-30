@@ -94,6 +94,7 @@ public:
     GpuTextureViewHandle View{};
     GpuDescriptorSetHandle DescriptorSet{};
     render::TextureState State{render::TextureState::Undefined};
+    bool PendingDestroy{false};
 };
 
 class ImGuiViewportRendererData {
@@ -178,10 +179,14 @@ public:
     void PrepareRenderData(AppWindow* window, uint32_t mailboxSlot);
     void Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContext* context, render::CommandBuffer* cmd);
     void Render(AppWindow* window, uint32_t mailboxSlot, render::GraphicsCommandEncoder* encoder);
+    void OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTask& task) noexcept;
 
     static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
 
 public:
+    bool HasPendingTextureBindingReferences(ImGuiTextureBinding* binding) const noexcept;
+    void ProcessPendingTextureDestroys() noexcept;
+
     Application* _app;
     AppWindow* _mainWnd;
     unique_ptr<ImGuiContextRAII> _context;

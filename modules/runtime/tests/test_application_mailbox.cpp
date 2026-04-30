@@ -17,6 +17,7 @@ public:
     void OnUpdate() override {}
     void OnPrepareRender(AppWindow*, uint32_t) override {}
     void OnRender(AppWindow*, GpuFrameContext*, uint32_t) override {}
+    void OnSubmit(AppWindow*, uint32_t, const GpuTask&) noexcept override {}
 };
 
 enum class ThrowSite {
@@ -50,6 +51,7 @@ public:
 
     void OnPrepareRender(AppWindow*, uint32_t) override {}
     void OnRender(AppWindow*, GpuFrameContext*, uint32_t) override {}
+    void OnSubmit(AppWindow*, uint32_t, const GpuTask&) noexcept override {}
 
     bool InitializeCalled{false};
     bool UpdateCalled{false};

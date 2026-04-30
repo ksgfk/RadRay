@@ -31,7 +31,8 @@ public:
  * window 内部所有权链条：
  * - 主线程通过 AllocMailboxSlot() -> OnPrepareRender() -> PublishPreparedMailbox() 生成最新快照
  * - 主线程通过 TryQueueLatestPublished() 将最新快照绑定到当前 GpuSurface::GetNextFrameSlotIndex()
- * - 渲染阶段通过 TryClaimQueuedRenderRequest() 取得 request，并最终通过 EndPrepareRenderTask() 记录 GpuTask
+ * - 渲染阶段通过 TryClaimQueuedRenderRequest() 取得 request，并在提交成功后通过 OnSubmit() 标记资源 last-use，
+ *   最终通过 EndPrepareRenderTask() 记录 GpuTask
  * - mailbox 的 InRender 生命周期绑定到 GpuTask 完成，而不是绑定到 OnRender() 返回
  *
  * 多线程模式下，mailbox/flight/channel 状态只能通过这些成员函数访问；
@@ -167,7 +168,8 @@ public:
  * 渲染阶段所有权：
  * - 单线程模式下，渲染阶段由主线程执行。
  * - 多线程模式下，渲染阶段由 RenderThreadImpl() 执行。
- * - 渲染阶段负责 acquire-present 帧、调用 OnRender() 录制命令、提交 GPU，并把 GpuTask 写回 flight。
+ * - 渲染阶段负责 acquire-present 帧、调用 OnRender() 录制命令、提交 GPU、通知 OnSubmit()，
+ *   并把 GpuTask 写回 flight。
  * - 渲染阶段不修改 window 列表，不重建 surface，不调度主线程资源释放，也不切换线程模式。
  *
  * safe point 定义：
@@ -225,6 +227,8 @@ public:
      * 单线程模式由主线程调用，多线程模式由渲染线程调用；实现中不要修改窗口列表、重建 surface 或切换线程模式。
      */
     virtual void OnRender(AppWindow* window, GpuFrameContext* context, uint32_t mailboxSlot) = 0;
+    /** GPU 提交成功后、mailbox 进入 InRender 前调用；实现应在这里把本帧实际使用的资源标到 task。 */
+    virtual void OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTask& task) noexcept = 0;
 
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, std::optional<render::VulkanInstanceDescriptor> vkInsDesc);
     void CreateGpuRuntime(const render::DeviceDescriptor& deviceDesc, unique_ptr<render::InstanceVulkan> vkIns);

@@ -29,12 +29,14 @@
 //   interop 穿透能力，但不在该层统一资源具体类型。
 //   其中 Handle/Generation 是由 GpuRuntime 创建资源时分配的稳定 opaque id，调用方不应自行构造或修改；
 //   NativeHandle 是后端对象的 borrowed interop 指针，不转移所有权，也不保证跨后端统一具体类型。
-// - runtime 当前不负责 GPU 资源状态/usage 追踪；资源状态/barrier 以及
-//   DestroyResourceImmediate 的 last-use 正确性由更上层负责。
-// - 资源销毁入口统一为 DestroyResourceImmediate / DestroyResourceAfter，不按资源类型拆分 public API。
-//   DestroyResourceImmediate 立即物理销毁资源，要求当前不存在仍会访问它的 in-flight GPU work；
-//   对拥有 registry 子引用的资源还要求不存在仍存活的子对象。DestroyResourceAfter 则把物理释放延迟到
-//   指定 GpuTask 完成后由 ProcessTasks() 调度执行，且仍受 registry 子对象生命周期约束。
+// - runtime 当前不负责 GPU 资源状态/barrier 追踪；资源状态/barrier 正确性由更上层负责。
+//   但 runtime resource registry 会记录调用方通过 MarkResourceUsed() 提交的 last-use fence，
+//   并据此延迟 DestroyResource() 的物理释放。
+// - 资源销毁入口统一为 DestroyResource / DestroyResourceImmediate，不按资源类型拆分 public API。
+//   DestroyResource 会把资源标为 PendingDestroy；若资源没有未完成 last-use 且没有仍存活的子对象，
+//   会在同一轮 ProcessTasks()/DestroyResource() 中物理释放，否则由后续 ProcessTasks() 收口。
+//   DestroyResourceImmediate 立即物理销毁资源，只用于明确 GPU idle、测试或强制安全点；
+//   要求当前不存在仍会访问它的 in-flight GPU work，也不存在仍存活的 registry 子对象。
 // - GpuAsyncContext 可暴露临时资源创建入口；其语义是“从属于该 context 的提交生命周期”，
 //   而不是简单绑定到 C++ 对象析构时刻。
 // - DependsOn 只记录 GPU 侧依赖，不做 CPU 同步；依赖任务必须来自同一个 GpuRuntime。
@@ -284,14 +286,16 @@ public:
 
     bool Contains(const GpuResourceHandle& handle) const noexcept;
     bool IsPendingDestroy(const GpuResourceHandle& handle) const noexcept;
+    bool HasPendingDestroys() const noexcept;
     Kind GetKind(const GpuResourceHandle& handle) const noexcept;
+    void MarkUsed(const GpuResourceHandle& handle, render::Fence* fence, uint64_t fenceValue);
     void MarkPendingDestroy(const GpuResourceHandle& handle);
+    void ProcessPendingDestroys() noexcept;
 
     void AddChildRef(const GpuResourceHandle& handle);
     void ReleaseChildRef(const GpuResourceHandle& handle) noexcept;
 
     bool TryDestroyImmediately(const GpuResourceHandle& handle) noexcept;
-    bool TryRetire(const GpuResourceHandle& handle) noexcept;
     void Clear() noexcept;
 
 private:
@@ -359,6 +363,13 @@ private:
         unique_ptr<render::BindlessArray> Resource{};
     };
 
+    struct LastUse {
+        render::Fence* Fence{nullptr};
+        uint64_t FenceValue{0};
+
+        bool IsCompleted() const noexcept;
+    };
+
     class ResourceRecord {
     public:
         using Payload = std::variant<
@@ -382,6 +393,7 @@ private:
         void* NativeHandle{nullptr};
         State State{State::Alive};
         uint32_t ChildRefCount{0};
+        vector<LastUse> LastUses{};
         vector<ParentRef> ParentRefs{};
 
         template <typename Record>
@@ -602,7 +614,9 @@ public:
 
     void DestroyResourceImmediate(GpuResourceHandle handle);
 
-    void DestroyResourceAfter(GpuResourceHandle handle, const GpuTask& task);
+    void DestroyResource(GpuResourceHandle handle);
+
+    void MarkResourceUsed(GpuResourceHandle handle, const GpuTask& task);
 
     BeginFrameResult BeginFrame(GpuSurface* surface);
 
@@ -622,6 +636,10 @@ public:
 
     void Wait(render::QueueType type, uint32_t queueSlot = 0);
 
+    bool IsResourceTrackedForTest(GpuResourceHandle handle) const;
+    bool IsResourcePendingDestroyForTest(GpuResourceHandle handle) const;
+    bool HasPendingResourceDestroysForTest() const;
+
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::VulkanDeviceDescriptor& desc, render::VulkanInstanceDescriptor vkInsDesc);
 
     static Nullable<unique_ptr<GpuRuntime>> Create(const render::D3D12DeviceDescriptor& desc);
@@ -631,15 +649,6 @@ public:
     public:
         render::Fence* Fence{nullptr};
         uint64_t SignalValue{0};
-    };
-
-    class ResourceRetirement {
-    public:
-        GpuResourceHandle Handle{};
-        render::Fence* Fence{nullptr};
-        uint64_t SignalValue{0};
-
-        bool IsReady() const noexcept;
     };
 
     class Pending {
@@ -674,7 +683,6 @@ public:
     std::array<vector<unique_ptr<render::Fence>>, (size_t)render::QueueType::MAX_COUNT> _queueFences;
     vector<Pending> _pendings;
     unique_ptr<GpuResourceRegistry> _resourceRegistry;
-    vector<ResourceRetirement> _resourceRetirements;
 };
 
 }  // namespace radray

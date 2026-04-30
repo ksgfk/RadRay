@@ -408,6 +408,8 @@ public:
         }
     }
 
+    void OnSubmit(AppWindow*, uint32_t, const GpuTask&) noexcept override {}
+
     string GetFailure() const {
         std::lock_guard<std::mutex> lock{_messageMutex};
         return _failure;

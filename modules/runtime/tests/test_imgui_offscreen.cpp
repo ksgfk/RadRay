@@ -171,6 +171,7 @@ public:
     void OnUpdate() override {}
     void OnPrepareRender(AppWindow*, uint32_t) override {}
     void OnRender(AppWindow*, GpuFrameContext*, uint32_t) override {}
+    void OnSubmit(AppWindow*, uint32_t, const GpuTask&) noexcept override {}
 };
 
 class ImGuiOffscreenTest : public testing::TestWithParam<RenderBackend> {};

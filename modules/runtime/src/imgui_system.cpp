@@ -90,7 +90,7 @@ ImGuiRenderer::~ImGuiRenderer() noexcept {
         GpuRuntime* gpu = _app->_gpu.get();
         auto destroyHandle = [gpu](auto& handle) noexcept {
             if (handle.IsValid()) {
-                gpu->DestroyResourceImmediate(handle);
+                gpu->DestroyResource(handle);
                 handle.Invalidate();
             }
         };
@@ -123,7 +123,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(Application* app, AppW
     GpuGraphicsPipelineStateHandle pso{};
     auto destroyHandle = [gpu](auto& handle) noexcept {
         if (handle.IsValid()) {
-            gpu->DestroyResourceImmediate(handle);
+            gpu->DestroyResource(handle);
             handle.Invalidate();
         }
     };
@@ -481,18 +481,19 @@ void ImGuiSystem::DestroyTextureBinding(ImGuiTextureBinding* binding) noexcept {
     RADRAY_ASSERT(_app->_gpu != nullptr);
     GpuRuntime* gpu = _app->_gpu.get();
     if (binding->DescriptorSet.IsValid()) {
-        gpu->DestroyResourceImmediate(binding->DescriptorSet);
+        gpu->DestroyResource(binding->DescriptorSet);
         binding->DescriptorSet.Invalidate();
     }
     if (binding->View.IsValid()) {
-        gpu->DestroyResourceImmediate(binding->View);
+        gpu->DestroyResource(binding->View);
         binding->View.Invalidate();
     }
     if (binding->Texture.IsValid()) {
-        gpu->DestroyResourceImmediate(binding->Texture);
+        gpu->DestroyResource(binding->Texture);
         binding->Texture.Invalidate();
     }
     binding->State = render::TextureState::Undefined;
+    binding->PendingDestroy = false;
 }
 
 void ImGuiSystem::DestroyTextureBindings() noexcept {
@@ -501,6 +502,48 @@ void ImGuiSystem::DestroyTextureBindings() noexcept {
         this->DestroyTextureBinding(binding.get());
     }
     _renderer->_textureBindings.clear();
+}
+
+bool ImGuiSystem::HasPendingTextureBindingReferences(ImGuiTextureBinding* binding) const noexcept {
+    if (binding == nullptr) {
+        return false;
+    }
+
+    for (const unique_ptr<ImGuiViewportRendererData>& data : _viewportRendererData) {
+        if (data == nullptr) {
+            continue;
+        }
+        for (const ImGuiRenderSnapshot& snapshot : data->Mailboxes) {
+            for (const ImGuiTextureUploadSnapshot& upload : snapshot.TextureUploads) {
+                if (upload.Binding == binding) {
+                    return true;
+                }
+            }
+            for (const ImGuiDrawListSnapshot& drawList : snapshot.DrawLists) {
+                for (const ImGuiRenderCommandSnapshot& cmd : drawList.Commands) {
+                    if (cmd.TexID == reinterpret_cast<ImTextureID>(binding)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void ImGuiSystem::ProcessPendingTextureDestroys() noexcept {
+    if (_renderer == nullptr) {
+        return;
+    }
+
+    std::erase_if(_renderer->_textureBindings, [this](const unique_ptr<ImGuiTextureBinding>& item) {
+        ImGuiTextureBinding* binding = item.get();
+        if (binding == nullptr || !binding->PendingDestroy || this->HasPendingTextureBindingReferences(binding)) {
+            return false;
+        }
+        this->DestroyTextureBinding(binding);
+        return true;
+    });
 }
 
 void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
@@ -539,6 +582,7 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
     snapshot.Clear();
     data->UploadedMailboxes[mailboxSlot].Clear();
     if (drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
+        this->ProcessPendingTextureDestroys();
         return;
     }
 
@@ -565,22 +609,12 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
             }
             if (tex->Status == ImTextureStatus_WantDestroy) {
                 auto* binding = static_cast<ImGuiTextureBinding*>(tex->BackendUserData);
-                RADRAY_ASSERT(_renderer->_mainWnd != nullptr);
-                RADRAY_ASSERT(_renderer->_mainWnd->_surface != nullptr);
-                const auto mainSurfaceDesc = _renderer->_mainWnd->_surface->GetDesc();
-                RADRAY_ASSERT(mainSurfaceDesc.FlightFrameCount != 0);
-                if (binding != nullptr && tex->UnusedFrames >= static_cast<int>(mainSurfaceDesc.FlightFrameCount)) {
+                if (binding != nullptr) {
+                    binding->PendingDestroy = true;
                     tex->BackendUserData = nullptr;
                     tex->SetTexID(ImTextureID_Invalid);
-                    tex->SetStatus(ImTextureStatus_Destroyed);
-                    std::erase_if(_renderer->_textureBindings, [this, binding](const unique_ptr<ImGuiTextureBinding>& item) {
-                        if (item.get() == binding) {
-                            this->DestroyTextureBinding(item.get());
-                            return true;
-                        }
-                        return false;
-                    });
                 }
+                tex->SetStatus(ImTextureStatus_Destroyed);
                 continue;
             }
 
@@ -595,38 +629,43 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
             if (isCreate) {
                 RADRAY_ASSERT(binding == nullptr);
                 auto ownedBinding = make_unique<ImGuiTextureBinding>();
-                render::TextureDescriptor textureDesc{};
-                textureDesc.Dim = render::TextureDimension::Dim2D;
-                textureDesc.Width = static_cast<uint32_t>(tex->Width);
-                textureDesc.Height = static_cast<uint32_t>(tex->Height);
-                textureDesc.DepthOrArraySize = 1;
-                textureDesc.MipLevels = 1;
-                textureDesc.SampleCount = 1;
-                textureDesc.Format = render::TextureFormat::RGBA8_UNORM;
-                textureDesc.Memory = render::MemoryType::Device;
-                textureDesc.Usage = render::TextureUse::CopyDestination | render::TextureUse::Resource;
-                ownedBinding->Texture = _app->_gpu->CreateTexture(textureDesc);
-                RADRAY_ASSERT(ownedBinding->Texture.IsValid());
-                auto* texture = static_cast<render::Texture*>(ownedBinding->Texture.NativeHandle);
-                RADRAY_ASSERT(texture != nullptr);
+                try {
+                    render::TextureDescriptor textureDesc{};
+                    textureDesc.Dim = render::TextureDimension::Dim2D;
+                    textureDesc.Width = static_cast<uint32_t>(tex->Width);
+                    textureDesc.Height = static_cast<uint32_t>(tex->Height);
+                    textureDesc.DepthOrArraySize = 1;
+                    textureDesc.MipLevels = 1;
+                    textureDesc.SampleCount = 1;
+                    textureDesc.Format = render::TextureFormat::RGBA8_UNORM;
+                    textureDesc.Memory = render::MemoryType::Device;
+                    textureDesc.Usage = render::TextureUse::CopyDestination | render::TextureUse::Resource;
+                    ownedBinding->Texture = _app->_gpu->CreateTexture(textureDesc);
+                    RADRAY_ASSERT(ownedBinding->Texture.IsValid());
+                    auto* texture = static_cast<render::Texture*>(ownedBinding->Texture.NativeHandle);
+                    RADRAY_ASSERT(texture != nullptr);
 
-                GpuTextureViewDescriptor viewDesc{};
-                viewDesc.Target = ownedBinding->Texture;
-                viewDesc.Dim = render::TextureDimension::Dim2D;
-                viewDesc.Format = render::TextureFormat::RGBA8_UNORM;
-                viewDesc.Range = render::SubresourceRange{0, 1, 0, 1};
-                viewDesc.Usage = render::TextureViewUsage::Resource;
-                ownedBinding->View = _app->_gpu->CreateTextureView(viewDesc);
-                RADRAY_ASSERT(ownedBinding->View.IsValid());
-                auto* view = static_cast<render::TextureView*>(ownedBinding->View.NativeHandle);
-                RADRAY_ASSERT(view != nullptr);
+                    GpuTextureViewDescriptor viewDesc{};
+                    viewDesc.Target = ownedBinding->Texture;
+                    viewDesc.Dim = render::TextureDimension::Dim2D;
+                    viewDesc.Format = render::TextureFormat::RGBA8_UNORM;
+                    viewDesc.Range = render::SubresourceRange{0, 1, 0, 1};
+                    viewDesc.Usage = render::TextureViewUsage::Resource;
+                    ownedBinding->View = _app->_gpu->CreateTextureView(viewDesc);
+                    RADRAY_ASSERT(ownedBinding->View.IsValid());
+                    auto* view = static_cast<render::TextureView*>(ownedBinding->View.NativeHandle);
+                    RADRAY_ASSERT(view != nullptr);
 
-                ownedBinding->DescriptorSet = _app->_gpu->CreateDescriptorSet(_renderer->_rs, render::DescriptorSetIndex{1});
-                RADRAY_ASSERT(ownedBinding->DescriptorSet.IsValid());
-                auto* descriptorSet = static_cast<render::DescriptorSet*>(ownedBinding->DescriptorSet.NativeHandle);
-                RADRAY_ASSERT(descriptorSet != nullptr);
-                RADRAY_ASSERT(descriptorSet->WriteResource("gTexture", view));
-                ownedBinding->State = render::TextureState::Undefined;
+                    ownedBinding->DescriptorSet = _app->_gpu->CreateDescriptorSet(_renderer->_rs, render::DescriptorSetIndex{1});
+                    RADRAY_ASSERT(ownedBinding->DescriptorSet.IsValid());
+                    auto* descriptorSet = static_cast<render::DescriptorSet*>(ownedBinding->DescriptorSet.NativeHandle);
+                    RADRAY_ASSERT(descriptorSet != nullptr);
+                    RADRAY_ASSERT(descriptorSet->WriteResource("gTexture", view));
+                    ownedBinding->State = render::TextureState::Undefined;
+                } catch (...) {
+                    this->DestroyTextureBinding(ownedBinding.get());
+                    throw;
+                }
 
                 binding = ownedBinding.get();
                 _renderer->_textureBindings.push_back(std::move(ownedBinding));
@@ -712,6 +751,8 @@ void ImGuiSystem::PrepareRenderData(AppWindow* window, uint32_t mailboxSlot) {
             }
         }
     }
+
+    this->ProcessPendingTextureDestroys();
 }
 
 void ImGuiSystem::Upload(AppWindow* window, uint32_t mailboxSlot, GpuAsyncContext* context, render::CommandBuffer* cmd) {
@@ -1030,6 +1071,72 @@ void ImGuiSystem::Render(AppWindow* window, uint32_t mailboxSlot, render::Graphi
             encoder->DrawIndexed(drawCmd.ElemCount, 1, drawCmd.IdxOffset, static_cast<int32_t>(drawCmd.VtxOffset), 0);
         }
     }
+}
+
+void ImGuiSystem::OnSubmit(AppWindow* window, uint32_t mailboxSlot, const GpuTask& task) noexcept {
+    RADRAY_ASSERT(_app != nullptr);
+    RADRAY_ASSERT(_renderer != nullptr);
+    RADRAY_ASSERT(window != nullptr);
+    RADRAY_ASSERT(window->_app == _app);
+    RADRAY_ASSERT(mailboxSlot < window->_mailboxes.size());
+    RADRAY_ASSERT(_app->_gpu != nullptr);
+    RADRAY_ASSERT(task.IsValid());
+
+    auto dataIt = std::find_if(
+        _viewportRendererData.begin(),
+        _viewportRendererData.end(),
+        [window](const unique_ptr<ImGuiViewportRendererData>& data) {
+            RADRAY_ASSERT(data != nullptr);
+            return data->Window == window;
+        });
+    RADRAY_ASSERT(dataIt != _viewportRendererData.end());
+    ImGuiViewportRendererData* data = dataIt->get();
+    RADRAY_ASSERT(data != nullptr);
+    data->Mailboxes.resize(window->_mailboxes.size());
+    data->UploadedMailboxes.resize(window->_mailboxes.size());
+    RADRAY_ASSERT(mailboxSlot < data->Mailboxes.size());
+    RADRAY_ASSERT(mailboxSlot < data->UploadedMailboxes.size());
+
+    GpuRuntime* gpu = _app->_gpu.get();
+    auto markHandle = [gpu, &task](GpuResourceHandle handle) {
+        if (handle.IsValid()) {
+            gpu->MarkResourceUsed(handle, task);
+        }
+    };
+    auto markBinding = [&markHandle](ImGuiTextureBinding* binding) {
+        if (binding == nullptr) {
+            return;
+        }
+        markHandle(binding->DescriptorSet);
+        markHandle(binding->View);
+        markHandle(binding->Texture);
+    };
+
+    ImGuiRenderSnapshot& snapshot = data->Mailboxes[mailboxSlot];
+    if (snapshot.Valid) {
+        for (const ImGuiTextureUploadSnapshot& upload : snapshot.TextureUploads) {
+            if (upload.Binding != nullptr) {
+                markHandle(upload.Binding->Texture);
+            }
+        }
+
+        if (snapshot.TotalVtxCount > 0 && snapshot.TotalIdxCount > 0) {
+            markHandle(_renderer->_pso);
+            markHandle(_renderer->_rs);
+            for (const ImGuiDrawListSnapshot& drawList : snapshot.DrawLists) {
+                for (const ImGuiRenderCommandSnapshot& cmd : drawList.Commands) {
+                    if (cmd.Kind != ImGuiRenderCommandKind::DrawIndexed || cmd.TexID == ImTextureID_Invalid) {
+                        continue;
+                    }
+                    markBinding(reinterpret_cast<ImGuiTextureBinding*>(cmd.TexID));
+                }
+            }
+        }
+    }
+
+    snapshot.Clear();
+    data->UploadedMailboxes[mailboxSlot].Clear();
+    this->ProcessPendingTextureDestroys();
 }
 
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {
