@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+cmake/MsBuildCompileCommandsJson/* linguist-generated
+modules/render/src/d3d12shader.h linguist-generated
+modules/render/src/d3dcommon_adapter.h linguist-generated

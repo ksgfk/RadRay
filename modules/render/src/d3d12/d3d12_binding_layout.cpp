@@ -1,0 +1,423 @@
+#include <radray/render/backend/d3d12_impl.h>
+
+#include <algorithm>
+#include <tuple>
+#include <unordered_map>
+#include <utility>
+
+#include <radray/logger.h>
+#include <radray/render/shader/hlsl.h>
+
+namespace radray::render::d3d12 {
+
+namespace {
+
+struct ParameterRecord {
+    BindingParameterLayout Layout{};
+    D3D12BindingParameterInfo D3D12{};
+};
+
+constexpr bool _IsRwResourceType(ResourceBindType type) noexcept {
+    switch (type) {
+        case ResourceBindType::RWBuffer:
+        case ResourceBindType::RWTexelBuffer:
+        case ResourceBindType::RWTexture:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<ResourceBindType> _MapHlslResourceType(const HlslInputBindDesc& binding) noexcept {
+    switch (binding.Type) {
+        case HlslShaderInputType::CBUFFER:
+            return ResourceBindType::CBuffer;
+        case HlslShaderInputType::TBUFFER:
+        case HlslShaderInputType::STRUCTURED:
+        case HlslShaderInputType::BYTEADDRESS:
+            return ResourceBindType::Buffer;
+        case HlslShaderInputType::TEXTURE:
+            return IsBufferDimension(binding.Dimension) ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
+        case HlslShaderInputType::SAMPLER:
+            return ResourceBindType::Sampler;
+        case HlslShaderInputType::UAV_RWTYPED:
+            return IsBufferDimension(binding.Dimension) ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
+        case HlslShaderInputType::UAV_RWSTRUCTURED:
+        case HlslShaderInputType::UAV_APPEND_STRUCTURED:
+        case HlslShaderInputType::UAV_CONSUME_STRUCTURED:
+        case HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
+        case HlslShaderInputType::UAV_RWBYTEADDRESS:
+            return ResourceBindType::RWBuffer;
+        case HlslShaderInputType::RTACCELERATIONSTRUCTURE:
+            return ResourceBindType::AccelerationStructure;
+        case HlslShaderInputType::UAV_FEEDBACKTEXTURE:
+            return ResourceBindType::RWTexture;
+        case HlslShaderInputType::UNKNOWN:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<BindlessSlotType> _MapBindlessSlotType(
+    const HlslInputBindDesc& binding,
+    ResourceBindType type) noexcept {
+    switch (type) {
+        case ResourceBindType::Buffer:
+        case ResourceBindType::RWBuffer:
+            if (binding.Type == HlslShaderInputType::TEXTURE && IsBufferDimension(binding.Dimension)) {
+                return std::nullopt;
+            }
+            return BindlessSlotType::BufferOnly;
+        case ResourceBindType::Texture:
+            if (binding.Dimension == HlslSRVDimension::TEXTURE2D) {
+                return BindlessSlotType::Texture2DOnly;
+            }
+            return std::nullopt;
+        default:
+            return std::nullopt;
+    }
+}
+
+std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
+    const HlslInputBindDesc& binding) noexcept {
+    const bool hasVkAbi = binding.VkSet.has_value() || binding.VkBinding.has_value();
+    if (hasVkAbi && (!binding.VkSet.has_value() || !binding.VkBinding.has_value())) {
+        RADRAY_ERR_LOG("incomplete vk binding metadata for '{}'", binding.Name);
+        return std::nullopt;
+    }
+    if (binding.VkSet.has_value() && binding.VkSet.value() != binding.Space) {
+        RADRAY_ERR_LOG(
+            "binding abi conflict for '{}': vk set {} != d3d12 space {}",
+            binding.Name,
+            binding.VkSet.value(),
+            binding.Space);
+        return std::nullopt;
+    }
+    if (binding.VkBinding.has_value() && binding.VkBinding.value() != binding.BindPoint) {
+        RADRAY_ERR_LOG(
+            "binding abi conflict for '{}': vk binding {} != d3d12 register {}",
+            binding.Name,
+            binding.VkBinding.value(),
+            binding.BindPoint);
+        return std::nullopt;
+    }
+    return std::pair{DescriptorSetIndex{binding.VkSet.value_or(binding.Space)}, binding.VkBinding.value_or(binding.BindPoint)};
+}
+
+bool _IsHlslPushConstantCandidate(const HlslInputBindDesc& binding, const HlslShaderBufferDesc& cbuffer) noexcept {
+    return binding.Type == HlslShaderInputType::CBUFFER &&
+           binding.BindPoint == 0 &&
+           binding.Space == 0 &&
+           cbuffer.IsViewInHlsl;
+}
+
+bool _HasSameAbi(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
+    if (lhs.Kind != rhs.Kind) {
+        return false;
+    }
+    if (lhs.Kind == BindingParameterKind::PushConstant) {
+        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
+        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
+        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    }
+    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
+    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
+    return lhsAbi.Set == rhsAbi.Set &&
+           lhsAbi.Binding == rhsAbi.Binding &&
+           lhsAbi.Type == rhsAbi.Type;
+}
+
+bool _HasCompatiblePayload(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
+    if (lhs.Kind != rhs.Kind) {
+        return false;
+    }
+    if (lhs.Kind == BindingParameterKind::PushConstant) {
+        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
+        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
+        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    }
+    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
+    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
+    return lhsAbi.Set == rhsAbi.Set &&
+           lhsAbi.Binding == rhsAbi.Binding &&
+           lhsAbi.Type == rhsAbi.Type &&
+           lhsAbi.Count == rhsAbi.Count &&
+           lhsAbi.IsReadOnly == rhsAbi.IsReadOnly &&
+           lhsAbi.IsBindless == rhsAbi.IsBindless;
+}
+
+bool _PushConstantsOverlap(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
+    if (lhs.Kind != BindingParameterKind::PushConstant || rhs.Kind != BindingParameterKind::PushConstant) {
+        return false;
+    }
+    const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
+    const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
+    const uint32_t lhsEnd = lhsAbi.Offset + lhsAbi.Size;
+    const uint32_t rhsEnd = rhsAbi.Offset + rhsAbi.Size;
+    return lhsAbi.Offset < rhsEnd && rhsAbi.Offset < lhsEnd;
+}
+
+bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) noexcept {
+    for (auto& record : records) {
+        if (_HasSameAbi(record.Layout, incoming.Layout)) {
+            if (record.Layout.Name != incoming.Layout.Name) {
+                RADRAY_ERR_LOG(
+                    "binding abi conflict: parameter '{}' shares abi with '{}'",
+                    incoming.Layout.Name,
+                    record.Layout.Name);
+                return false;
+            }
+            if (!_HasCompatiblePayload(record.Layout, incoming.Layout)) {
+                RADRAY_ERR_LOG("binding payload conflict for parameter '{}'", incoming.Layout.Name);
+                return false;
+            }
+            if (record.Layout.Kind == BindingParameterKind::PushConstant &&
+                record.D3D12.IsAvailable &&
+                incoming.D3D12.IsAvailable &&
+                (record.D3D12.ShaderRegister != incoming.D3D12.ShaderRegister ||
+                 record.D3D12.RegisterSpace != incoming.D3D12.RegisterSpace)) {
+                RADRAY_ERR_LOG("d3d12 push constant register conflict for '{}'", incoming.Layout.Name);
+                return false;
+            }
+            record.Layout.Stages |= incoming.Layout.Stages;
+            if (!record.D3D12.IsAvailable && incoming.D3D12.IsAvailable) {
+                record.D3D12 = incoming.D3D12;
+            }
+            return true;
+        }
+        if (record.Layout.Name == incoming.Layout.Name) {
+            RADRAY_ERR_LOG("binding name conflict: '{}' maps to different abi", incoming.Layout.Name);
+            return false;
+        }
+        if (_PushConstantsOverlap(record.Layout, incoming.Layout)) {
+            RADRAY_ERR_LOG(
+                "push constant ranges overlap but are not identical: '{}' and '{}'",
+                record.Layout.Name,
+                incoming.Layout.Name);
+            return false;
+        }
+    }
+    records.push_back(std::move(incoming));
+    return true;
+}
+
+bool _AppendHlslBindings(
+    vector<ParameterRecord>& records,
+    const HlslShaderDesc& reflection,
+    ShaderStages stages) noexcept {
+    for (const auto& resource : reflection.BoundResources) {
+        auto bindTypeOpt = _MapHlslResourceType(resource);
+        if (!bindTypeOpt.has_value()) {
+            RADRAY_ERR_LOG("unsupported hlsl resource type for '{}'", resource.Name);
+            return false;
+        }
+
+        auto unifiedAbiOpt = _ResolveUnifiedBinding(resource);
+        if (!unifiedAbiOpt.has_value()) {
+            return false;
+        }
+        const auto [setIndex, bindingIndex] = unifiedAbiOpt.value();
+        const bool isBindless = resource.IsUnboundArray();
+
+        ParameterRecord record{};
+        record.Layout.Name = resource.Name;
+        record.Layout.Stages = stages;
+        record.D3D12.IsAvailable = true;
+        record.D3D12.SetIndex = setIndex;
+        record.D3D12.BindingIndex = bindingIndex;
+        record.D3D12.ShaderRegister = resource.BindPoint;
+        record.D3D12.RegisterSpace = resource.Space;
+        record.D3D12.Type = bindTypeOpt.value();
+        record.D3D12.IsBindless = isBindless;
+
+        if (resource.Type == HlslShaderInputType::CBUFFER) {
+            auto cbufferOpt = reflection.FindCBufferByName(resource.Name);
+            if (!cbufferOpt.HasValue()) {
+                RADRAY_ERR_LOG("cannot find cbuffer reflection for '{}'", resource.Name);
+                return false;
+            }
+            const auto* cbuffer = cbufferOpt.Get();
+            if (_IsHlslPushConstantCandidate(resource, *cbuffer)) {
+                record.Layout.Kind = BindingParameterKind::PushConstant;
+                record.Layout.Abi = PushConstantBindingAbi{
+                    .Offset = 0,
+                    .Size = cbuffer->Size,
+                };
+                record.D3D12.Kind = BindingParameterKind::PushConstant;
+                record.D3D12.PushConstantOffset = 0;
+                record.D3D12.PushConstantSize = cbuffer->Size;
+                if (!_MergeRecord(records, std::move(record))) {
+                    return false;
+                }
+                continue;
+            }
+        }
+
+        if (isBindless) {
+            auto bindlessSlotTypeOpt = _MapBindlessSlotType(resource, bindTypeOpt.value());
+            if (!bindlessSlotTypeOpt.has_value()) {
+                RADRAY_ERR_LOG(
+                    "unsupported bindless resource '{}' with type {} and dimension {}",
+                    resource.Name,
+                    bindTypeOpt.value(),
+                    static_cast<uint32_t>(resource.Dimension));
+                return false;
+            }
+            record.Layout.Kind = BindingParameterKind::Resource;
+            record.Layout.Abi = ResourceBindingAbi{
+                .Set = setIndex,
+                .Binding = bindingIndex,
+                .Type = bindTypeOpt.value(),
+                .Count = 0,
+                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
+                .IsBindless = true,
+            };
+            record.D3D12.Kind = BindingParameterKind::Resource;
+            record.D3D12.Count = 0;
+            record.D3D12.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
+            record.D3D12.BindlessSlotType = bindlessSlotTypeOpt.value();
+            if (!_MergeRecord(records, std::move(record))) {
+                return false;
+            }
+            continue;
+        }
+
+        record.Layout.Kind = bindTypeOpt.value() == ResourceBindType::Sampler
+                                 ? BindingParameterKind::Sampler
+                                 : BindingParameterKind::Resource;
+        record.Layout.Abi = ResourceBindingAbi{
+            .Set = setIndex,
+            .Binding = bindingIndex,
+            .Type = bindTypeOpt.value(),
+            .Count = resource.BindCount == 0 ? 1u : resource.BindCount,
+            .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
+            .IsBindless = false,
+        };
+        record.D3D12.Kind = record.Layout.Kind;
+        record.D3D12.Count = std::get<ResourceBindingAbi>(record.Layout.Abi).Count;
+        record.D3D12.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
+        if (!_MergeRecord(records, std::move(record))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
+    unordered_map<uint32_t, const ParameterRecord*> bindlessBySet{};
+    unordered_map<uint32_t, uint32_t> descriptorCountBySet{};
+    for (const auto& record : records) {
+        if (record.Layout.Kind == BindingParameterKind::PushConstant) {
+            continue;
+        }
+        const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
+        const uint32_t setIndex = abi.Set.Value;
+        descriptorCountBySet[setIndex] += 1;
+        if (!abi.IsBindless) {
+            continue;
+        }
+        if (record.Layout.Kind != BindingParameterKind::Resource) {
+            RADRAY_ERR_LOG("bindless parameter '{}' must be a resource", record.Layout.Name);
+            return false;
+        }
+        auto [it, inserted] = bindlessBySet.emplace(setIndex, &record);
+        if (!inserted) {
+            RADRAY_ERR_LOG(
+                "bindless set {} cannot contain more than one bindless parameter ('{}' and '{}')",
+                setIndex,
+                it->second->Layout.Name,
+                record.Layout.Name);
+            return false;
+        }
+    }
+    for (const auto& [setIndex, bindlessRecord] : bindlessBySet) {
+        RADRAY_UNUSED(bindlessRecord);
+        auto countIt = descriptorCountBySet.find(setIndex);
+        if (countIt != descriptorCountBySet.end() && countIt->second != 1) {
+            RADRAY_ERR_LOG(
+                "bindless set {} cannot contain ordinary descriptors together with bindless resources",
+                setIndex);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    const bool lhsPush = lhs.Layout.Kind == BindingParameterKind::PushConstant;
+    const bool rhsPush = rhs.Layout.Kind == BindingParameterKind::PushConstant;
+    if (lhsPush != rhsPush) {
+        return !lhsPush;
+    }
+    if (lhsPush) {
+        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Layout.Abi);
+        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Layout.Abi);
+        return std::tie(lhsAbi.Offset, lhsAbi.Size, lhs.Layout.Name) <
+               std::tie(rhsAbi.Offset, rhsAbi.Size, rhs.Layout.Name);
+    }
+    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
+    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
+    return std::tie(lhsAbi.Set, lhsAbi.Binding, lhs.Layout.Kind, lhs.Layout.Name) <
+           std::tie(rhsAbi.Set, rhsAbi.Binding, rhs.Layout.Kind, rhs.Layout.Name);
+}
+
+}  // namespace
+
+std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<Shader*> shaders) noexcept {
+    vector<ParameterRecord> records{};
+    records.reserve(shaders.size() * 4);
+
+    for (Shader* shader : shaders) {
+        if (shader == nullptr) {
+            RADRAY_ERR_LOG("root signature shader is null");
+            return std::nullopt;
+        }
+        const ShaderStages stages = shader->GetStages();
+        if (stages == ShaderStage::UNKNOWN) {
+            RADRAY_ERR_LOG("shader '{}' does not have stage metadata", static_cast<void*>(shader));
+            return std::nullopt;
+        }
+        auto reflectionOpt = shader->GetReflection();
+        if (!reflectionOpt.HasValue() || reflectionOpt.Get() == nullptr) {
+            RADRAY_ERR_LOG("shader '{}' does not have reflection metadata", static_cast<void*>(shader));
+            return std::nullopt;
+        }
+        const ShaderReflectionDesc& reflection = *reflectionOpt.Get();
+        const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection);
+        if (hlsl == nullptr) {
+            RADRAY_ERR_LOG("d3d12 merged binding layout requires hlsl reflection metadata");
+            return std::nullopt;
+        }
+        if (!_AppendHlslBindings(records, *hlsl, stages)) {
+            return std::nullopt;
+        }
+    }
+
+    if (!_ValidateBindlessSets(records)) {
+        return std::nullopt;
+    }
+
+    std::sort(records.begin(), records.end(), _ParameterLess);
+
+    D3D12MergedBindingLayout result{};
+    vector<BindingParameterLayout> layouts{};
+    layouts.reserve(records.size());
+    result.D3D12Parameters.reserve(records.size());
+    uint32_t maxSetPlusOne = 0;
+    for (uint32_t i = 0; i < records.size(); ++i) {
+        auto& record = records[i];
+        record.Layout.Id = BindingParameterId{i};
+        record.D3D12.Id = BindingParameterId{i};
+        layouts.push_back(record.Layout);
+        result.D3D12Parameters.push_back(record.D3D12);
+        if (record.Layout.Kind != BindingParameterKind::PushConstant) {
+            const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
+            maxSetPlusOne = std::max(maxSetPlusOne, abi.Set.Value + 1);
+        }
+    }
+    result.Layout = BindingLayout{std::move(layouts)};
+    result.SetCount = maxSetPlusOne;
+    return result;
+}
+
+}  // namespace radray::render::d3d12

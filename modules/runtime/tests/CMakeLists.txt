@@ -1,0 +1,2 @@
+# radray_add_test(test_render_graph_valid SOURCES test_render_graph_valid.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+# radray_add_test(test_application SOURCES test_application.cpp LINK_LIBS radraycore radrayrender radraywindow radrayruntime)

@@ -1,0 +1,229 @@
+#pragma once
+
+#ifdef RADRAY_ENABLE_IMGUI
+
+#include <cstddef>
+#include <functional>
+#include <span>
+#include <string_view>
+#include <optional>
+
+#include <imgui.h>
+#include <sigslot/signal.hpp>
+
+#include <radray/types.h>
+#include <radray/nullable.h>
+#include <radray/render/common.h>
+#include <radray/runtime/application.h>
+#include <radray/window/native_window.h>
+#include <radray/window/input.h>
+
+namespace radray {
+
+class ImGuiSystem;
+class ImGuiRenderer;
+
+struct ImGuiRendererDescriptor {
+    render::Device* Device;
+    render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
+    uint32_t FlightDataCount;
+};
+
+struct ImGuiSystemDescriptor {
+    AppWindow* MainWindow;
+    AppWindowSystem* WindowSystem{nullptr};
+    render::Device* Device;
+    render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
+    uint32_t FlightDataCount;
+    render::CommandQueue* DirectQueue{nullptr};
+    uint32_t BackBufferCount{3};
+    render::PresentMode PresentMode{render::PresentMode::FIFO};
+};
+
+class ImGuiContextRAII {
+public:
+    explicit ImGuiContextRAII(ImFontAtlas* sharedFontAtlas = nullptr);
+    ImGuiContextRAII(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII(ImGuiContextRAII&&) noexcept;
+    ImGuiContextRAII& operator=(const ImGuiContextRAII&) = delete;
+    ImGuiContextRAII& operator=(ImGuiContextRAII&&) noexcept;
+    ~ImGuiContextRAII() noexcept;
+
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+    ImGuiContext* Get() const noexcept;
+
+    void SetCurrent();
+
+    friend constexpr void swap(ImGuiContextRAII& a, ImGuiContextRAII& b) noexcept {
+        using std::swap;
+        swap(a._ctx, b._ctx);
+    }
+
+private:
+    ImGuiContext* _ctx{nullptr};
+};
+
+class ImGuiRenderer {
+public:
+    class ImGuiTexture;
+
+    struct DrawCmd {
+        ImVec4 ClipRect{};
+        ImGuiTexture* Texture{nullptr};
+        bool HasExternalTexture{false};
+        uint32_t VtxOffset{0};
+        uint32_t IdxOffset{0};
+        uint32_t ElemCount{0};
+        ImDrawCallback UserCallback{nullptr};
+    };
+
+    struct DrawList {
+        vector<DrawCmd> Cmd;
+        int32_t VtxBufferSize{0};
+        int32_t IdxBufferSize{0};
+    };
+
+    struct DrawData {
+        vector<DrawList> Cmds;
+        ImGuiID ViewportId{0};
+        ImVec2 DisplayPos{};
+        ImVec2 DisplaySize{};
+        ImVec2 FramebufferScale{};
+        uint32_t VtxOffset{0};
+        uint32_t IdxOffset{0};
+        int32_t TotalVtxCount{0};
+        int32_t TotalIdxCount{0};
+    };
+
+    class ImGuiTexture {
+    public:
+        ImGuiTexture(
+            unique_ptr<render::Texture> texture,
+            unique_ptr<render::TextureView> srv,
+            unique_ptr<render::DescriptorSet> descriptorSet) noexcept
+            : _texture(std::move(texture)),
+              _srv(std::move(srv)),
+              _descriptorSet(std::move(descriptorSet)) {}
+
+    public:
+        unique_ptr<render::Texture> _texture;
+        unique_ptr<render::TextureView> _srv;
+        unique_ptr<render::DescriptorSet> _descriptorSet;
+    };
+
+    struct UploadTexturePayload {
+        render::Texture* _dst{nullptr};
+        render::Buffer* _src{nullptr};
+        bool _isNew{false};
+    };
+
+    class Frame {
+    public:
+        Frame() noexcept = default;
+
+    public:
+        unique_ptr<render::Buffer> _vb;
+        unique_ptr<render::Buffer> _ib;
+        vector<DrawData> _drawData;
+        int32_t _vbSize{0};
+        int32_t _ibSize{0};
+
+        vector<UploadTexturePayload> _uploadTexReqs;
+        deque<unique_ptr<render::Buffer>> _tempBufs;
+        deque<unique_ptr<ImGuiTexture>> _waitForFreeTexs;
+    };
+
+    explicit ImGuiRenderer() noexcept;
+    ImGuiRenderer(const ImGuiRenderer&) = delete;
+    ImGuiRenderer(ImGuiRenderer&&) = delete;
+    ImGuiRenderer& operator=(const ImGuiRenderer&) = delete;
+    ImGuiRenderer& operator=(ImGuiRenderer&&) = delete;
+    ~ImGuiRenderer() noexcept;
+
+    uint32_t GetViewportDrawDataCount(uint32_t frameIndex) const noexcept;
+    std::optional<uint32_t> FindViewportDrawDataIndex(uint32_t frameIndex, ImGuiViewport* viewport) const noexcept;
+
+    void ExtractDrawData(uint32_t frameIndex);
+    void OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer);
+    void OnRenderViewport(uint32_t frameIndex, ImGuiViewport* viewport, render::GraphicsCommandEncoder* encoder);
+    void OnRenderComplete(uint32_t frameIndex);
+    void OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx);
+    void SetupRenderState(uint32_t frameIndex, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight);
+
+    static Nullable<unique_ptr<ImGuiRenderer>> Create(const ImGuiRendererDescriptor& desc) noexcept;
+
+public:
+    ImGuiSystem* _system;
+    render::Device* _device{nullptr};
+    unique_ptr<render::RootSignature> _rootSig;
+    unique_ptr<render::GraphicsPipelineState> _pso;
+    render::BindingParameterId _pushConstantId{0};
+    vector<unique_ptr<Frame>> _frames;
+    vector<unique_ptr<ImGuiTexture>> _aliveTexs;
+};
+
+class ImGuiSystem {
+public:
+    struct ViewportWindow {
+        ImGuiViewport* Viewport{nullptr};
+        AppWindow* Window{nullptr};
+        vector<sigslot::scoped_connection> Connections;
+
+        void AttachInput(ImGuiSystem* system);
+        NativeWindow* GetWindow() const noexcept;
+        render::SwapChain* GetSwapChain() const noexcept;
+        render::TextureView* GetCurrentBackBufferView(const render::SwapChainFrame& frame) const noexcept;
+    };
+
+    ImGuiSystem(
+        ImGuiContextRAII context,
+        NativeWindow* window);
+    ImGuiSystem(const ImGuiSystem&) = delete;
+    ImGuiSystem(ImGuiSystem&&) = delete;
+    ImGuiSystem& operator=(const ImGuiSystem&) = delete;
+    ImGuiSystem& operator=(ImGuiSystem&&) = delete;
+    ~ImGuiSystem() noexcept;
+
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+    bool BeginFrame(uint32_t frameIndex, float deltaTimeSeconds);
+    void EndFrame();
+
+    static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
+
+public:
+    ImGuiContextRAII _context;
+    NativeWindow* _window;
+    unique_ptr<ImGuiRenderer> _renderer;
+    vector<unique_ptr<ViewportWindow>> _viewportWindows;
+    AppWindowSystem* _windowSystem{nullptr};
+    render::CommandQueue* _directQueue{nullptr};
+    render::TextureFormat _renderTargetFormat{render::TextureFormat::UNKNOWN};
+    uint32_t _flightDataCount{0};
+    uint32_t _backBufferCount{0};
+    render::PresentMode _presentMode{render::PresentMode::FIFO};
+    uint32_t _activeFrameIndex{std::numeric_limits<uint32_t>::max()};
+    bool _frameActive{false};
+    bool _leftCtrl{false};
+    bool _rightCtrl{false};
+    bool _leftShift{false};
+    bool _rightShift{false};
+    bool _leftAlt{false};
+    bool _rightAlt{false};
+    bool _leftSuper{false};
+    bool _rightSuper{false};
+};
+
+ImGuiKey MapKeyboardToImGuiKey(KeyCode key) noexcept;
+int MapMouseButtonToImGui(MouseButton button) noexcept;
+
+std::span<const std::byte> GetImGuiHLSL() noexcept;
+std::span<const std::byte> GetImGuiVertexShaderDXIL() noexcept;
+std::span<const std::byte> GetImGuiPixelShaderDXIL() noexcept;
+std::span<const std::byte> GetImGuiVertexShaderSPIRV() noexcept;
+std::span<const std::byte> GetImGuiPixelShaderSPIRV() noexcept;
+
+}  // namespace radray
+
+#endif

@@ -1,0 +1,175 @@
+#include <radray/dynamic_library.h>
+
+#include <radray/logger.h>
+#include <radray/types.h>
+#include <radray/text_encoding.h>
+
+namespace radray {
+
+DynamicLibrary::DynamicLibrary(DynamicLibrary&& other) noexcept : _handle(other._handle) {
+    other._handle = nullptr;
+}
+
+DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
+    DynamicLibrary temp{std::move(other)};
+    swap(*this, temp);
+    return *this;
+}
+
+bool DynamicLibrary::IsValid() const noexcept {
+    return _handle != nullptr;
+}
+
+}  // namespace radray
+
+#ifdef RADRAY_PLATFORM_WINDOWS
+
+#include <radray/platform/win32_headers.h>
+
+namespace radray {
+
+static_assert(sizeof(HMODULE) == sizeof(void*), "size of HMODULE not equal ptr?");
+static_assert(sizeof(FARPROC) == sizeof(void*), "size of FARPROC not equal ptr?");
+
+static auto _Win32LastErrMessage() {
+    void* buffer = nullptr;
+    auto errCode = ::GetLastError();
+    ::FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        errCode,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)&buffer,
+        0, nullptr);
+    auto msg = fmt::format("{} (code = 0x{:x}).", static_cast<char*>(buffer), errCode);
+    ::LocalFree(buffer);
+    return msg;
+}
+
+DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
+    string name;
+    if (name_.ends_with(".dll")) {
+        name = string{name_};
+    } else {
+        name = string{name_} + ".dll";
+    }
+    auto nameW = ToWideChar(name);
+    if (nameW.has_value()) {
+        HMODULE m = ::LoadLibraryW(nameW->c_str());
+        if (m == nullptr) {
+            RADRAY_ERR_LOG("LoadLibraryW failed: {}", _Win32LastErrMessage());
+        } else {
+            _handle = m;
+        }
+    }
+}
+
+DynamicLibrary::~DynamicLibrary() noexcept {
+    Destroy();
+}
+
+void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
+    string name{name_};
+    auto symbol = ::GetProcAddress(std::bit_cast<HMODULE>(_handle), name.c_str());
+    if (symbol == nullptr) {
+        RADRAY_ERR_LOG("GetProcAddress failed: {}", _Win32LastErrMessage());
+    }
+    return std::bit_cast<void*>(symbol);
+}
+
+void DynamicLibrary::Destroy() noexcept {
+    if (_handle != nullptr) {
+        ::FreeLibrary(std::bit_cast<HMODULE>(_handle));
+        _handle = nullptr;
+    }
+}
+
+}  // namespace radray
+#else
+#include <dlfcn.h>
+
+#include <cstdlib>
+#include <climits>
+#include <string>
+
+#if defined(RADRAY_PLATFORM_APPLE)
+#include <mach-o/dyld.h>
+#elif defined(RADRAY_PLATFORM_LINUX)
+#include <unistd.h>
+#endif
+
+namespace radray {
+
+static string _GetExecutableDir() {
+    char buf[PATH_MAX];
+#if defined(RADRAY_PLATFORM_APPLE)
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) != 0) return {};
+#elif defined(RADRAY_PLATFORM_LINUX)
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len == -1) return {};
+    buf[len] = '\0';
+#endif
+    string path(buf);
+    auto pos = path.rfind('/');
+    if (pos != string::npos) {
+        return path.substr(0, pos);
+    }
+    return {};
+}
+
+DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
+    string name;
+#if defined(RADRAY_PLATFORM_APPLE)
+    if (name_.starts_with("lib") && name_.ends_with(".dylib")) {
+        name = string{name_};
+    } else {
+        name = "lib" + string{name_} + ".dylib";
+    }
+#elif defined(RADRAY_PLATFORM_LINUX)
+    if (name_.starts_with("lib") && name_.ends_with(".so")) {
+        name = string{name_};
+    } else {
+        name = "lib" + string{name_} + ".so";
+    }
+#else
+#error "unknown platform"
+#endif
+    auto exeDir = _GetExecutableDir();
+    if (!exeDir.empty()) {
+        auto fullPath = exeDir + "/" + name;
+        auto h = dlopen(fullPath.c_str(), RTLD_LAZY);
+        if (h != nullptr) {
+            _handle = h;
+            return;
+        }
+    }
+    auto h = dlopen(name.c_str(), RTLD_LAZY);
+    if (h == nullptr) {
+        RADRAY_ERR_LOG("dlopen failed: {}", dlerror());
+    }
+    _handle = h;
+}
+
+DynamicLibrary::~DynamicLibrary() noexcept {
+    Destroy();
+}
+
+void* DynamicLibrary::GetSymbol(std::string_view name_) const noexcept {
+    string name{name_};
+    auto symbol = dlsym(_handle, name.c_str());
+    if (symbol == nullptr) {
+        RADRAY_ERR_LOG("dlsym failed: {}", dlerror());
+    }
+    return symbol;
+}
+
+void DynamicLibrary::Destroy() noexcept {
+    if (_handle != nullptr) {
+        dlclose(_handle);
+        _handle = nullptr;
+    }
+}
+
+}  // namespace radray
+#endif
