@@ -1182,13 +1182,7 @@ void ImGuiRenderer::OnRenderComplete(uint32_t frameIndex) {
 
 void ImGuiRenderer::OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {
     (void)ctx;
-
-    for (unique_ptr<Frame>& frame : _frames) {
-        if (frame == nullptr) {
-            continue;
-        }
-        frame->_drawData.clear();
-    }
+    // Swapchain recreation can happen after ExtractDrawData; draw data is not swapchain-owned.
 }
 
 static void SetupRenderStateForFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePtr, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) {

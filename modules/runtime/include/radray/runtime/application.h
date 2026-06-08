@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <limits>
 #include <optional>
 
 #include <radray/nullable.h>
@@ -73,6 +75,8 @@ public:
     render::SwapChain* AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept;
     unique_ptr<render::SwapChain> ReleaseSwapChain() noexcept;
     void DetachSwapChain() noexcept;
+    render::SwapChainAcquireResult AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept;
+    render::SwapChainPresentResult PresentSwapChainFrame(render::SwapChainFrame&& frame) noexcept;
     render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept;
 
 public:
@@ -82,6 +86,7 @@ public:
     NativeEventPump* _pump;
     Nullable<unique_ptr<render::SwapChain>> _swapchain;
     vector<BackBufferView> _backBufferViews;
+    std::atomic_bool _requestRecreateSwapChain{false};
     bool _isMain{false};
 };
 
@@ -105,7 +110,7 @@ public:
     unique_ptr<NativeEventPump> _eventPump;
     vector<unique_ptr<AppWindow>> _windows;
     uint64_t _windowIdCounter{0};
-    std::optional<render::PresentMode> _presentModeOverride;
+    std::optional<render::PresentMode> _desiredPresentMode;
 };
 
 class AppRenderSystem {

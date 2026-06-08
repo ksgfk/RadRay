@@ -88,13 +88,17 @@ public:
             return false;
         }
 
+        AppWindow* appWindow = viewportWindow->Window;
         render::SwapChain* swapChain = viewportWindow->GetSwapChain();
         if (swapChain == nullptr) {
             return false;
         }
 
-        render::SwapChainAcquireResult acquire = ctx.IsInModalLoop ? swapChain->AcquireNext(0) : swapChain->AcquireNext();
-        if (acquire.Status == render::SwapChainStatus::RetryLater || acquire.Status == render::SwapChainStatus::RequireRecreate) {
+        render::SwapChainAcquireResult acquire = appWindow->AcquireNextSwapChainFrame(ctx);
+        if (acquire.Status == render::SwapChainStatus::RequireRecreate) {
+            return false;
+        }
+        if (acquire.Status == render::SwapChainStatus::RetryLater) {
             return false;
         }
         if (acquire.Status != render::SwapChainStatus::Success || !acquire.Frame.has_value()) {
@@ -186,7 +190,7 @@ public:
     }
 
     void PresentViewportWindow(ViewportRenderTarget& target) {
-        render::SwapChainPresentResult present = target.SwapChain->Present(std::move(target.SwapChainFrame));
+        render::SwapChainPresentResult present = target.ViewportWindow->Window->PresentSwapChainFrame(std::move(target.SwapChainFrame));
         if (present.Status == render::SwapChainStatus::RequireRecreate) {
             return;
         }

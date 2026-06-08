@@ -2,9 +2,10 @@
 
 #include <chrono>
 
-#include <thread>
 #include <atomic>
+#include <mutex>
 #include <semaphore>
+#include <thread>
 
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
 #define RADRAY_APP_IMPL_ENABLE_VBLANK_TICK
@@ -34,6 +35,34 @@ bool CompleteFlight(AppRenderSystem* renderSystem, uint32_t flightIndex) {
     renderSystem->_app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
     flight.WaitForDestroy.clear();
     return true;
+}
+
+bool NeedsRecreateSwapChain(AppWindowSystem* windowSystem, AppWindow* window) noexcept {
+    if (!window->_swapchain || window->_window->IsMinimized()) {
+        return false;
+    }
+
+    const Eigen::Vector2i windowSize = window->_window->GetSize();
+    if (windowSize.x() <= 0 || windowSize.y() <= 0) {
+        return false;
+    }
+
+    const render::SwapChainDescriptor desc = window->_swapchain->GetDesc();
+    const uint32_t width = static_cast<uint32_t>(windowSize.x());
+    const uint32_t height = static_cast<uint32_t>(windowSize.y());
+    if (windowSystem->_desiredPresentMode.has_value() && desc.PresentMode != windowSystem->_desiredPresentMode.value()) {
+        return true;
+    }
+    return desc.Width != width || desc.Height != height || window->_requestRecreateSwapChain.load(std::memory_order_acquire);
+}
+
+bool HasSwapChainToRecreate(AppWindowSystem* windowSystem) noexcept {
+    for (const auto& window : windowSystem->_windows) {
+        if (NeedsRecreateSwapChain(windowSystem, window.get())) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -472,32 +501,19 @@ public:
 
     int Run() {
         while (true) {
+            _hasModalLoopActivityDuringDispatch = false;
             _app->_windowSystem->_eventPump->DispatchEvents();
 
-            _writableSlotsSemaphore.acquire();
-
-            auto* renderSystem = _app->_renderSystem.get();
-            const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
-            auto& flight = renderSystem->_flight[flightIndex];
-            flight.WaitForDestroy.clear();
-            flight.FrameStartTime = std::chrono::steady_clock::now();
-
-            const auto now = std::chrono::steady_clock::now();
-            const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
-            _lastFrameTime = now;
-
-            _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
-            auto result = _app->Update(AppUpdateContext{
-                .FlightIndex = flightIndex,
-                .DeltaTime = deltaTime,
-                .LastFrameLatency = renderSystem->_lastFrameLatency});
-            _reqExit = result.ShouldExit;
             if (_reqExit) {
                 break;
             }
-
-            renderSystem->_nowFrameIndex++;
-            _readySlotsSemaphore.release();
+            if (_hasModalLoopActivityDuringDispatch) {
+                continue;
+            }
+            TickFrame(false, true);
+            if (_reqExit) {
+                break;
+            }
         }
 
         _writableSlotsSemaphore.release();
@@ -515,57 +531,146 @@ public:
 
     void RenderThread() {
         while (true) {
-            auto* renderSystem = _app->_renderSystem.get();
-            while (_retireFrameIndex < _renderFrameIndex) {
-                const uint64_t inFlightFrameCount = _renderFrameIndex - _retireFrameIndex;
-                const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
-                auto& flight = renderSystem->_flight[flightIndex];
-                if (flight.Signal.IsValid()) {
-                    if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
-                        if (inFlightFrameCount < renderSystem->_flightDataCount) {
-                            break;
-                        }
-                        flight.Signal.Fence->Wait(flight.Signal.Value);
-                    }
-                    CompleteFlight(renderSystem, flightIndex);
-                }
-                _retireFrameIndex++;
-                _writableSlotsSemaphore.release();
-            }
+            RetireRenderedFrames(false, true);
 
+            auto* renderSystem = _app->_renderSystem.get();
             _readySlotsSemaphore.acquire();
 
             if (_reqExit) {
-                while (_retireFrameIndex < _renderFrameIndex) {
-                    const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
-                    auto& flight = renderSystem->_flight[flightIndex];
-                    if (flight.Signal.IsValid()) {
-                        flight.Signal.Fence->Wait(flight.Signal.Value);
-                        CompleteFlight(renderSystem, flightIndex);
-                    }
-                    _retireFrameIndex++;
-                    _writableSlotsSemaphore.release();
-                }
+                RetireRenderedFrames(true, false);
                 break;
             }
 
             uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % renderSystem->_flightDataCount);
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
+            if (!runnerFrameData.IsInModalLoop && _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire)) {
+                _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
+                _renderFrameIndex++;
+                NotifyRenderFrameComplete(_renderFrameIndex);
+                continue;
+            }
+
             _app->Render(AppRenderContext{
                 .FlightIndex = flightIndex,
                 .DeltaTime = runnerFrameData.DeltaTime,
                 .LastFrameLatency = renderSystem->_lastFrameLatency,
-                .IsInModalLoop = false});
+                .IsInModalLoop = runnerFrameData.IsInModalLoop});
 
             _renderFrameIndex++;
+            NotifyRenderFrameComplete(_renderFrameIndex);
         }
     }
 
-    void OnModalLoopTick(NativeWindow* modalWindow) {
+    void OnModalLoopTick(NativeWindow*) {
+        _hasModalLoopActivityDuringDispatch = true;
+        if (_reqExit) {
+            return;
+        }
+
+        const uint64_t frameIndex = _app->_renderSystem->_nowFrameIndex;
+        _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
+        WaitRenderFrameComplete(frameIndex);
+        RetireRenderedFrames(false, false);
+        if (auto renderedFrameCount = TickFrame(true, false)) {
+            WaitRenderFrameComplete(renderedFrameCount.value());
+        }
+    }
+
+    void CheckRecreateSwapChains() {
+        auto* windowSystem = _app->_windowSystem.get();
+        if (!HasSwapChainToRecreate(windowSystem)) {
+            return;
+        }
+        WaitRenderThreadIdle();
+        windowSystem->CheckRecreateSwapChains();
+    }
+
+    std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
+        auto* renderSystem = _app->_renderSystem.get();
+        if (waitForWritableSlot) {
+            WaitRenderFrameComplete(renderSystem->_nowFrameIndex);
+            RetireRenderedFrames(false, false);
+            CheckRecreateSwapChains();
+            _writableSlotsSemaphore.acquire();
+        } else if (!_writableSlotsSemaphore.try_acquire()) {
+            return std::nullopt;
+        } else {
+            CheckRecreateSwapChains();
+        }
+
+        const uint64_t frameIndex = renderSystem->_nowFrameIndex;
+        const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % renderSystem->_flightDataCount);
+        auto& flight = renderSystem->_flight[flightIndex];
+        flight.WaitForDestroy.clear();
+        flight.FrameStartTime = std::chrono::steady_clock::now();
+
+        const auto now = std::chrono::steady_clock::now();
+        const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
+        _lastFrameTime = now;
+
+        _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
+        _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
+        auto result = _app->Update(AppUpdateContext{
+            .FlightIndex = flightIndex,
+            .DeltaTime = deltaTime,
+            .LastFrameLatency = renderSystem->_lastFrameLatency});
+        _reqExit = result.ShouldExit;
+        if (_reqExit) {
+            return std::nullopt;
+        }
+
+        CheckRecreateSwapChains();
+
+        renderSystem->_nowFrameIndex++;
+        _readySlotsSemaphore.release();
+        return frameIndex + 1;
+    }
+
+    void NotifyRenderFrameComplete(uint64_t renderedFrameCount) {
+        _renderedFrameCount.store(renderedFrameCount, std::memory_order_release);
+        _renderedFrameCount.notify_all();
+    }
+
+    void WaitRenderFrameComplete(uint64_t renderedFrameCount) {
+        uint64_t completed = _renderedFrameCount.load(std::memory_order_acquire);
+        while (completed < renderedFrameCount) {
+            _renderedFrameCount.wait(completed, std::memory_order_acquire);
+            completed = _renderedFrameCount.load(std::memory_order_acquire);
+        }
+    }
+
+    void WaitRenderThreadIdle() {
+        WaitRenderFrameComplete(_app->_renderSystem->_nowFrameIndex);
+        RetireRenderedFrames(true, false);
+    }
+
+    void RetireRenderedFrames(bool waitForPendingFrames, bool waitWhenFrameSlotsFull) {
+        std::lock_guard lock(_retireMutex);
+        auto* renderSystem = _app->_renderSystem.get();
+        const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
+        while (_retireFrameIndex < renderedFrameCount) {
+            const uint64_t inFlightFrameCount = renderedFrameCount - _retireFrameIndex;
+            const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
+            auto& flight = renderSystem->_flight[flightIndex];
+            if (flight.Signal.IsValid()) {
+                if (waitForPendingFrames) {
+                    flight.Signal.Fence->Wait(flight.Signal.Value);
+                } else if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
+                    if (!waitWhenFrameSlotsFull || inFlightFrameCount < renderSystem->_flightDataCount) {
+                        break;
+                    }
+                    flight.Signal.Fence->Wait(flight.Signal.Value);
+                }
+                CompleteFlight(renderSystem, flightIndex);
+            }
+            _retireFrameIndex++;
+            _writableSlotsSemaphore.release();
+        }
     }
 
     struct FrameData {
         std::chrono::duration<float> DeltaTime{};
+        bool IsInModalLoop{false};
     };
 
     Application* _app;
@@ -575,8 +680,12 @@ public:
     // 共享数据
     vector<FrameData> _runnerFrameDatas;
     std::atomic_bool _reqExit{false};
+    std::atomic<uint64_t> _discardNonModalFramesBefore{0};
+    std::atomic<uint64_t> _renderedFrameCount{0};
+    std::mutex _retireMutex;
     // 主线程独占
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
+    bool _hasModalLoopActivityDuringDispatch{false};
     // 渲染线程独占
     uint64_t _renderFrameIndex{0};
     uint64_t _retireFrameIndex{0};
@@ -612,11 +721,13 @@ render::SwapChain* AppWindow::AttachSwapChain(const render::SwapChainDescriptor&
     _swapchain = renderSystem->_device->CreateSwapChain(swapChainDesc).Unwrap();
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
+    _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Get();
 }
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
     _backBufferViews.clear();
+    _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Release();
 }
 
@@ -627,6 +738,31 @@ void AppWindow::DetachSwapChain() noexcept {
     }
     _backBufferViews.clear();
     _swapchain = nullptr;
+    _requestRecreateSwapChain.store(false, std::memory_order_release);
+}
+
+render::SwapChainAcquireResult AppWindow::AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept {
+    if (!_swapchain) {
+        return render::SwapChainAcquireResult{};
+    }
+    uint64_t timeoutMs = ctx.IsInModalLoop ? 0 : std::numeric_limits<uint64_t>::max();
+    render::SwapChainAcquireResult result = _swapchain->AcquireNext(timeoutMs);
+    if (result.Status == render::SwapChainStatus::RequireRecreate) {
+        _requestRecreateSwapChain.store(true, std::memory_order_release);
+    }
+    return result;
+}
+
+render::SwapChainPresentResult AppWindow::PresentSwapChainFrame(render::SwapChainFrame&& frame) noexcept {
+    if (!_swapchain) {
+        return render::SwapChainPresentResult{};
+    }
+
+    render::SwapChainPresentResult result = _swapchain->Present(std::move(frame));
+    if (result.Status == render::SwapChainStatus::RequireRecreate) {
+        _requestRecreateSwapChain.store(true, std::memory_order_release);
+    }
+    return result;
 }
 
 render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept {
@@ -687,41 +823,14 @@ void AppWindowSystem::DestroyWindow(AppWindow* window) noexcept {
 }
 
 void AppWindowSystem::CheckRecreateSwapChains() noexcept {
-    auto needsRecreate = [this](AppWindow* window) noexcept {
-        if (!window->_swapchain || window->_window->IsMinimized()) {
-            return false;
-        }
-
-        const Eigen::Vector2i windowSize = window->_window->GetSize();
-        if (windowSize.x() <= 0 || windowSize.y() <= 0) {
-            return false;
-        }
-
-        const render::SwapChainDescriptor desc = window->_swapchain->GetDesc();
-        const uint32_t width = static_cast<uint32_t>(windowSize.x());
-        const uint32_t height = static_cast<uint32_t>(windowSize.y());
-        if (_presentModeOverride.has_value() && desc.PresentMode != _presentModeOverride.value()) {
-            return true;
-        }
-        return desc.Width != width || desc.Height != height;
-    };
-
-    bool hasSwapChainToRecreate = false;
-    for (const auto& window : _windows) {
-        if (needsRecreate(window.get())) {
-            hasSwapChainToRecreate = true;
-            break;
-        }
-    }
-
-    if (!hasSwapChainToRecreate) {
+    if (!HasSwapChainToRecreate(this)) {
         return;
     }
 
-    _renderSystem->_mainQueue->Wait();
+    _renderSystem->WaitAndCleanupCompletedFlights();
 
     for (const auto& window : _windows) {
-        if (!needsRecreate(window.get())) {
+        if (!NeedsRecreateSwapChain(this, window.get())) {
             continue;
         }
 
@@ -733,7 +842,7 @@ void AppWindowSystem::CheckRecreateSwapChains() noexcept {
 
         window->_backBufferViews.clear();
 
-        const render::PresentMode presentMode = _presentModeOverride.value_or(desc.PresentMode);
+        const render::PresentMode presentMode = _desiredPresentMode.value_or(desc.PresentMode);
         const bool recreated = swapChain->Recreate(width, height, desc.Format, presentMode);
         const uint32_t backBufferCount = swapChain->GetBackBufferCount();
         window->_backBufferViews.resize(backBufferCount);
@@ -742,6 +851,7 @@ void AppWindowSystem::CheckRecreateSwapChains() noexcept {
             RADRAY_ERR_LOG("failed to recreate window swapchain: {}x{} -> {}x{}", desc.Width, desc.Height, width, height);
             continue;
         }
+        window->_requestRecreateSwapChain.store(false, std::memory_order_release);
 
         AppSwapChainRecreateContext ctx{
             .Window = window.get(),
@@ -751,7 +861,7 @@ void AppWindowSystem::CheckRecreateSwapChains() noexcept {
 }
 
 void AppWindowSystem::SetPresentMode(render::PresentMode presentMode) noexcept {
-    _presentModeOverride = presentMode;
+    _desiredPresentMode = presentMode;
 }
 
 AppRenderSystem::AppRenderSystem(Application* app, const AppRenderSystemDescriptor& desc)
