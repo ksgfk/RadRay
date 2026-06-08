@@ -2,11 +2,12 @@
 
 #include <chrono>
 
+#include <thread>
+#include <atomic>
+#include <semaphore>
+
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
 #define RADRAY_APP_IMPL_ENABLE_VBLANK_TICK
-
-#include <atomic>
-#include <thread>
 
 #include <radray/platform/win32_headers.h>
 
@@ -310,7 +311,7 @@ public:
 
 class SingleThreadRunner {
 public:
-    SingleThreadRunner(Application* app)
+    explicit SingleThreadRunner(Application* app)
         : _app(app),
           _modalLoopTickConnection(_app->_windowSystem->_eventPump->EventModalLoopTick().connect(&SingleThreadRunner::OnModalLoopTick, this)) {}
 
@@ -459,6 +460,129 @@ void Win32ModalLoopVBlankRenderer::OnVBlankRenderTick() {
 }
 #endif
 
+class ThreadedRunner {
+public:
+    explicit ThreadedRunner(Application* app)
+        : _app(app),
+          _modalLoopTickConnection(_app->_windowSystem->_eventPump->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this)),
+          _writableSlotsSemaphore(_app->_renderSystem->_flightDataCount),
+          _readySlotsSemaphore(0),
+          _runnerFrameDatas(_app->_renderSystem->_flightDataCount),
+          _renderThread(&ThreadedRunner::RenderThread, this) {}
+
+    int Run() {
+        while (true) {
+            _app->_windowSystem->_eventPump->DispatchEvents();
+
+            _writableSlotsSemaphore.acquire();
+
+            auto* renderSystem = _app->_renderSystem.get();
+            const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
+            auto& flight = renderSystem->_flight[flightIndex];
+            flight.WaitForDestroy.clear();
+            flight.FrameStartTime = std::chrono::steady_clock::now();
+
+            const auto now = std::chrono::steady_clock::now();
+            const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
+            _lastFrameTime = now;
+
+            _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
+            auto result = _app->Update(AppUpdateContext{
+                .FlightIndex = flightIndex,
+                .DeltaTime = deltaTime,
+                .LastFrameLatency = renderSystem->_lastFrameLatency});
+            _reqExit = result.ShouldExit;
+            if (_reqExit) {
+                break;
+            }
+
+            renderSystem->_nowFrameIndex++;
+            _readySlotsSemaphore.release();
+        }
+
+        _writableSlotsSemaphore.release();
+        _readySlotsSemaphore.release();
+
+        if (_renderThread.joinable()) {
+            _renderThread.join();
+        }
+
+        _modalLoopTickConnection.disconnect();
+
+        AppShutdownContext ctx{};
+        return _app->Shutdown(ctx);
+    }
+
+    void RenderThread() {
+        while (true) {
+            auto* renderSystem = _app->_renderSystem.get();
+            while (_retireFrameIndex < _renderFrameIndex) {
+                const uint64_t inFlightFrameCount = _renderFrameIndex - _retireFrameIndex;
+                const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
+                auto& flight = renderSystem->_flight[flightIndex];
+                if (flight.Signal.IsValid()) {
+                    if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
+                        if (inFlightFrameCount < renderSystem->_flightDataCount) {
+                            break;
+                        }
+                        flight.Signal.Fence->Wait(flight.Signal.Value);
+                    }
+                    CompleteFlight(renderSystem, flightIndex);
+                }
+                _retireFrameIndex++;
+                _writableSlotsSemaphore.release();
+            }
+
+            _readySlotsSemaphore.acquire();
+
+            if (_reqExit) {
+                while (_retireFrameIndex < _renderFrameIndex) {
+                    const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
+                    auto& flight = renderSystem->_flight[flightIndex];
+                    if (flight.Signal.IsValid()) {
+                        flight.Signal.Fence->Wait(flight.Signal.Value);
+                        CompleteFlight(renderSystem, flightIndex);
+                    }
+                    _retireFrameIndex++;
+                    _writableSlotsSemaphore.release();
+                }
+                break;
+            }
+
+            uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % renderSystem->_flightDataCount);
+            auto& runnerFrameData = _runnerFrameDatas[flightIndex];
+            _app->Render(AppRenderContext{
+                .FlightIndex = flightIndex,
+                .DeltaTime = runnerFrameData.DeltaTime,
+                .LastFrameLatency = renderSystem->_lastFrameLatency,
+                .IsInModalLoop = false});
+
+            _renderFrameIndex++;
+        }
+    }
+
+    void OnModalLoopTick(NativeWindow* modalWindow) {
+    }
+
+    struct FrameData {
+        std::chrono::duration<float> DeltaTime{};
+    };
+
+    Application* _app;
+    sigslot::scoped_connection _modalLoopTickConnection;
+    std::counting_semaphore<> _writableSlotsSemaphore;
+    std::counting_semaphore<> _readySlotsSemaphore;
+    // 共享数据
+    vector<FrameData> _runnerFrameDatas;
+    std::atomic_bool _reqExit{false};
+    // 主线程独占
+    std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
+    // 渲染线程独占
+    uint64_t _renderFrameIndex{0};
+    uint64_t _retireFrameIndex{0};
+    std::thread _renderThread;
+};
+
 AppWindow::AppWindow(
     AppWindowSystem* system,
     uint64_t id,
@@ -505,15 +629,14 @@ void AppWindow::DetachSwapChain() noexcept {
     _swapchain = nullptr;
 }
 
-render::TextureView* AppWindow::GetCurrentBackBufferView(const render::SwapChainFrame& frame) noexcept {
+render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept {
     const uint32_t index = frame.GetBackBufferIndex();
     render::Texture* backBuffer = frame.GetBackBuffer();
     auto* renderSystem = _system->_renderSystem;
-    const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
     BackBufferView& backBufferView = _backBufferViews[index];
     render::TextureView* view = backBufferView.View.get();
     if (view != nullptr && backBufferView.BackBuffer == backBuffer) {
-        backBufferView.FlightIndex = flightIndex;
+        backBufferView.FlightIndex = ownerFlightIndex;
         return view;
     }
     render::TextureDescriptor texDesc = backBuffer->GetDesc();
@@ -531,7 +654,7 @@ render::TextureView* AppWindow::GetCurrentBackBufferView(const render::SwapChain
     auto viewPtr = viewIns.get();
     backBufferView.View = std::move(viewIns);
     backBufferView.BackBuffer = backBuffer;
-    backBufferView.FlightIndex = flightIndex;
+    backBufferView.FlightIndex = ownerFlightIndex;
     return viewPtr;
 }
 
@@ -715,7 +838,11 @@ void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
 }
 
 int Application::StartLoop() {
-    return SingleThreadRunner{this}.Run();
+    if (_multithreaded) {
+        return ThreadedRunner{this}.Run();
+    } else {
+        return SingleThreadRunner{this}.Run();
+    }
 }
 
 }  // namespace radray

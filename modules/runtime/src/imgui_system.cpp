@@ -1255,8 +1255,8 @@ render::SwapChain* ImGuiSystem::ViewportWindow::GetSwapChain() const noexcept {
     return Window != nullptr ? Window->_swapchain.Get() : nullptr;
 }
 
-render::TextureView* ImGuiSystem::ViewportWindow::GetCurrentBackBufferView(const render::SwapChainFrame& frame) const noexcept {
-    return Window != nullptr ? Window->GetCurrentBackBufferView(frame) : nullptr;
+render::TextureView* ImGuiSystem::ViewportWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) const noexcept {
+    return Window != nullptr ? Window->GetOrCreateBackBufferView(frame, ownerFlightIndex) : nullptr;
 }
 
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {

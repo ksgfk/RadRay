@@ -73,7 +73,7 @@ public:
     render::SwapChain* AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept;
     unique_ptr<render::SwapChain> ReleaseSwapChain() noexcept;
     void DetachSwapChain() noexcept;
-    render::TextureView* GetCurrentBackBufferView(const render::SwapChainFrame& frame) noexcept;
+    render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept;
 
 public:
     AppWindowSystem* _system;
@@ -181,6 +181,7 @@ public:
 
     unique_ptr<AppWindowSystem> _windowSystem;
     unique_ptr<AppRenderSystem> _renderSystem;
+    bool _multithreaded{false};
 };
 
 }  // namespace radray

@@ -103,7 +103,7 @@ public:
         }
 
         render::SwapChainFrame frame = std::move(acquire.Frame.value());
-        render::TextureView* backBufferView = viewportWindow->GetCurrentBackBufferView(frame);
+        render::TextureView* backBufferView = viewportWindow->GetOrCreateBackBufferView(frame, ctx.FlightIndex);
         if (backBufferView == nullptr) {
             return false;
         }
@@ -312,7 +312,7 @@ public:
 
     void Init() {
         render::RenderBackend backend = render::RenderBackend::Vulkan;
-        bool enableValid = false;
+        bool enableValid = false, multithread = false;
         for (size_t i = 0; i < _args.size(); ++i) {
             if (_args[i] == "--backend" && i + 1 < _args.size()) {
                 const auto& backendStr = _args[i + 1];
@@ -325,7 +325,11 @@ public:
             if (_args[i] == "--valid-layer") {
                 enableValid = true;
             }
+            if (_args[i] == "--multithread") {
+                multithread = true;
+            }
         }
+        _multithreaded = multithread;
         if (backend == render::RenderBackend::Vulkan) {
             render::VulkanInstanceDescriptor insDesc{
                 .AppName = "Example ImGui App",
