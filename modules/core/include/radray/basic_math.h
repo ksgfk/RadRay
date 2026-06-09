@@ -160,6 +160,15 @@ Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Ei
 
 template <class T>
 requires(std::is_floating_point_v<T>)
+Eigen::Matrix<T, 4, 4> ComposeTransform(const Eigen::Vector<T, 3>& translation, const Eigen::Quaternion<T>& rotation, const Eigen::Vector<T, 3>& scale) noexcept {
+    Eigen::Matrix<T, 4, 4> m = Eigen::Matrix<T, 4, 4>::Identity();
+    m.template block<3, 3>(0, 0) = rotation.toRotationMatrix() * Eigen::Scaling(scale).toDenseMatrix();
+    m.template block<3, 1>(0, 3) = translation;
+    return m;
+}
+
+template <class T>
+requires(std::is_floating_point_v<T>)
 void DecomposeTransform(const Eigen::Matrix<T, 4, 4>& m, Eigen::Vector<T, 3>& translation, Eigen::Quaternion<T>& rotation, Eigen::Vector<T, 3>& scale) noexcept {
     Eigen::Affine3f aff(m);
     Eigen::Matrix3f rot, sc;
