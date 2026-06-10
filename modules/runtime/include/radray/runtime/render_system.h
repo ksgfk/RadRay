@@ -12,7 +12,10 @@
 namespace radray {
 
 class Application;
+class AppWindow;
 class AppWindowSystem;
+class AppFrameContext;
+class ResourceUploader;
 class StaticMesh;
 
 struct AppRenderSystemDescriptor {
@@ -20,6 +23,15 @@ struct AppRenderSystemDescriptor {
     uint32_t MainQueueIndex;
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
+};
+
+/// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
+/// 留在 runtime 的 per-flight FlightSlot 里，应用只拿到 backbuffer + view。
+/// 【不暴露同步对象】sync object 是提交细节，由 runtime 独占。
+struct AppFrameTarget {
+    AppWindow* Window{nullptr};
+    render::Texture* BackBuffer{nullptr};
+    render::TextureView* BackBufferView{nullptr};
 };
 
 class AppRenderSystem {
@@ -43,6 +55,18 @@ public:
     bool CompleteFlight(uint32_t flightIndex);
     void WaitAndCleanupCompletedFlights();
 
+    /// 一帧开头：取/建该 flight 的 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
+    /// 返回供应用在 Render 中使用的帧上下文。
+    AppFrameContext BeginFrameRecord(
+        uint32_t flightIndex,
+        std::chrono::duration<float> deltaTime,
+        std::chrono::duration<float> lastFrameLatency,
+        bool isInModalLoop);
+
+    /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
+    /// → 写 flight.Signal → Present 全部 target。ManualSubmit 下仅 End，跳过提交/呈现。
+    void EndFrameRecordAndSubmit(uint32_t flightIndex);
+
 public:
     struct QueueFrameTrack {
         render::CommandQueue* Queue{nullptr};
@@ -50,10 +74,31 @@ public:
         uint64_t NextFenceValue{1};
     };
 
-    struct FlightData {
-        FenceSignal Signal;
+    /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
+    /// 按所有权/阶段分三组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
+    ///  - 录制态：渲染线程（单线程模式即主线程）在 BeginFrameRecord→Render→
+    ///    EndFrameRecordAndSubmit 期间独占；
+    ///  - 计时态：游戏线程在帧开头写 FrameStartTime / 清 WaitForDestroy；
+    ///  - 提交态:Signal 由 EndFrameRecordAndSubmit 写、retire/CompleteFlight 读后清。
+    struct FlightSlot {
+        struct AcquiredTarget {
+            AppWindow* Window{nullptr};
+            render::SwapChainFrame Frame;
+        };
+
+        // —— 录制态（渲染线程独占）。CmdBuffer 池化复用，
+        //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
+        unique_ptr<render::CommandBuffer> CmdBuffer;
+        vector<AcquiredTarget> Targets;
+        bool ManualSubmit{false};
+        bool Recording{false};
+
+        // —— 计时态（游戏线程写）。
         std::chrono::steady_clock::time_point FrameStartTime{};
         vector<unique_ptr<render::RenderBase>> WaitForDestroy;
+
+        // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
+        FenceSignal Signal;
     };
 
     Application* _app;
@@ -65,8 +110,57 @@ public:
     QueueFrameTrack _mainQueueTrack;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};
-    vector<FlightData> _flight;
+    vector<FlightSlot> _flights;
     unique_ptr<class ResourceUploader> _uploader;
+};
+
+/// Render 回调的唯一入参，封装一帧录制 API。
+/// 生命周期仅限本次 Render 调用；runtime 在 BeginFrameRecord 构造并传入。
+class AppFrameContext {
+public:
+    AppFrameContext(
+        AppRenderSystem* renderSystem,
+        uint32_t flightIndex,
+        std::chrono::duration<float> deltaTime,
+        std::chrono::duration<float> lastFrameLatency,
+        bool isInModalLoop) noexcept
+        : _renderSystem(renderSystem),
+          _flightIndex(flightIndex),
+          _deltaTime(deltaTime),
+          _lastFrameLatency(lastFrameLatency),
+          _isInModalLoop(isInModalLoop) {}
+
+    uint32_t FlightIndex() const noexcept { return _flightIndex; }
+    std::chrono::duration<float> DeltaTime() const noexcept { return _deltaTime; }
+    std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
+    bool IsInModalLoop() const noexcept { return _isInModalLoop; }
+
+    /// runtime 已 Begin() 的主 command buffer，应用所有录制（含 backbuffer barrier）的落点。
+    render::CommandBuffer* GetCommandBuffer() const noexcept;
+
+    /// 按需获取窗口呈现目标。内部 AcquireNextSwapChainFrame：
+    /// RequireRecreate/RetryLater/Error/最小化 → nullopt（应用跳过该窗口）。
+    /// 成功时把 SwapChainFrame 收进本帧 FlightSlot，返回 backbuffer + view。
+    /// 【不录任何 barrier】backbuffer 初始翻转与 →Present 收尾全部由应用显式录。
+    std::optional<AppFrameTarget> AcquireWindow(AppWindow* window);
+
+    /// 绑定当前 flight 的上传器；EndFlight/CollectFlight 完全由 runtime 掌管。
+    ResourceUploader& GetUploader() const noexcept;
+
+    /// 逃生舱：直接拿底层对象自行处理（建资源、自定义 compute、readback、甚至自行 submit）。
+    render::Device* GetDevice() const noexcept;
+    render::CommandQueue* GetMainQueue() const noexcept;
+    AppRenderSystem* GetRenderSystem() const noexcept { return _renderSystem; }
+
+    /// 声明本帧应用自管提交，runtime 跳过 Submit/Present（仍 End cmd buffer 与回收 flight）。
+    void SetManualSubmit() noexcept;
+
+private:
+    AppRenderSystem* _renderSystem;
+    uint32_t _flightIndex;
+    std::chrono::duration<float> _deltaTime;
+    std::chrono::duration<float> _lastFrameLatency;
+    bool _isInModalLoop;
 };
 
 /// 描述一次 buffer 上传操作。

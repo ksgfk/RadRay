@@ -353,7 +353,7 @@ public:
     bool CheckFrameComplete(bool isInModalLoop) {
         auto* renderSystem = _app->_renderSystem.get();
         const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flight[flightIndex];
+        auto& flight = renderSystem->_flights[flightIndex];
         if (flight.Signal.IsValid()) {
             if (isInModalLoop) {
                 if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
@@ -373,7 +373,7 @@ public:
         }
         auto* renderSystem = _app->_renderSystem.get();
         const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flight[flightIndex];
+        auto& flight = renderSystem->_flights[flightIndex];
         flight.WaitForDestroy.clear();
         flight.FrameStartTime = std::chrono::steady_clock::now();
 
@@ -394,11 +394,14 @@ public:
 
         _app->_windowSystem->CheckRecreateSwapChains();
 
-        _app->Render(AppRenderContext{
-            .FlightIndex = flightIndex,
-            .DeltaTime = deltaTime,
-            .LastFrameLatency = renderSystem->_lastFrameLatency,
-            .IsInModalLoop = isInModalLoop});
+        auto* renderSystemPtr = renderSystem;
+        AppFrameContext frameCtx = renderSystemPtr->BeginFrameRecord(
+            flightIndex,
+            deltaTime,
+            renderSystemPtr->_lastFrameLatency,
+            isInModalLoop);
+        _app->Render(frameCtx);
+        renderSystemPtr->EndFrameRecordAndSubmit(flightIndex);
         renderSystem->_nowFrameIndex++;
     }
 
@@ -512,12 +515,13 @@ public:
                 NotifyRenderFrameComplete(_renderFrameIndex);
                 continue;
             }
-
-            _app->Render(AppRenderContext{
-                .FlightIndex = flightIndex,
-                .DeltaTime = runnerFrameData.DeltaTime,
-                .LastFrameLatency = renderSystem->_lastFrameLatency,
-                .IsInModalLoop = runnerFrameData.IsInModalLoop});
+            AppFrameContext frameCtx = renderSystem->BeginFrameRecord(
+                flightIndex,
+                runnerFrameData.DeltaTime,
+                renderSystem->_lastFrameLatency,
+                runnerFrameData.IsInModalLoop);
+            _app->Render(frameCtx);
+            renderSystem->EndFrameRecordAndSubmit(flightIndex);
 
             _renderFrameIndex++;
             NotifyRenderFrameComplete(_renderFrameIndex);
@@ -563,7 +567,7 @@ public:
 
         const uint64_t frameIndex = renderSystem->_nowFrameIndex;
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flight[flightIndex];
+        auto& flight = renderSystem->_flights[flightIndex];
         flight.WaitForDestroy.clear();
         flight.FrameStartTime = std::chrono::steady_clock::now();
 
@@ -614,7 +618,7 @@ public:
         while (_retireFrameIndex < renderedFrameCount) {
             const uint64_t inFlightFrameCount = renderedFrameCount - _retireFrameIndex;
             const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
-            auto& flight = renderSystem->_flight[flightIndex];
+            auto& flight = renderSystem->_flights[flightIndex];
             if (flight.Signal.IsValid()) {
                 if (waitForPendingFrames) {
                     flight.Signal.Fence->Wait(flight.Signal.Value);

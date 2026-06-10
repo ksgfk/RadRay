@@ -5,7 +5,6 @@
 #include <variant>
 #include <optional>
 #include <span>
-#include <vector>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -1409,7 +1408,7 @@ public:
     virtual QueueType GetQueueType() const noexcept = 0;
 };
 
-class CommandBuffer : public RenderBase, IDebugName {
+class CommandBuffer : public RenderBase, public IDebugName {
 public:
     virtual ~CommandBuffer() noexcept = default;
 

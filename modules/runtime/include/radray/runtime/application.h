@@ -9,6 +9,7 @@ namespace radray {
 class AppRenderSystem;
 class AppWindow;
 class AppWindowSystem;
+class AppFrameContext;
 struct AppRenderSystemDescriptor;
 struct AppWindowSystemDescriptor;
 
@@ -67,7 +68,7 @@ public:
 public:
     virtual AppUpdateResult Update(const AppUpdateContext& ctx) = 0;
     virtual int Shutdown(const AppShutdownContext& ctx) = 0;
-    virtual void Render(const AppRenderContext& ctx) = 0;
+    virtual void Render(AppFrameContext& ctx) = 0;
     virtual void OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) = 0;
     virtual void OnRenderComplete(const AppRenderCompleteContext& ctx) = 0;
 

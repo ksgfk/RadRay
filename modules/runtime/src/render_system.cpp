@@ -1,11 +1,13 @@
 #include <radray/runtime/render_system.h>
 
 #include <radray/basic_math.h>
+#include <radray/logger.h>
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/static_mesh.h>
+#include <radray/runtime/window_system.h>
 
 #include <algorithm>
 #include <cstring>
@@ -46,7 +48,7 @@ std::optional<uint64_t> GetSubresourceUploadSize(
 // ═══════════════════════════════════════════════════════════════
 
 bool AppRenderSystem::CompleteFlight(uint32_t flightIndex) {
-    auto& flight = _flight[flightIndex];
+    auto& flight = _flights[flightIndex];
     if (!flight.Signal.IsValid() || flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
         return false;
     }
@@ -68,7 +70,7 @@ AppRenderSystem::AppRenderSystem(Application* app, const AppRenderSystemDescript
     _mainQueueTrack.Queue = _mainQueue;
     _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
-    _flight.resize(_flightDataCount);
+    _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
 }
 
@@ -77,9 +79,146 @@ AppRenderSystem::~AppRenderSystem() noexcept = default;
 void AppRenderSystem::WaitAndCleanupCompletedFlights() {
     _mainQueue->Wait();
 
-    for (uint32_t flightIndex = 0; flightIndex < _flight.size(); ++flightIndex) {
+    for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         CompleteFlight(flightIndex);
     }
+}
+
+AppFrameContext AppRenderSystem::BeginFrameRecord(
+    uint32_t flightIndex,
+    std::chrono::duration<float> deltaTime,
+    std::chrono::duration<float> lastFrameLatency,
+    bool isInModalLoop) {
+    FlightSlot& record = _flights[flightIndex];
+    if (record.CmdBuffer == nullptr) {
+        record.CmdBuffer = _device->CreateCommandBuffer(_mainQueue).Unwrap();
+    }
+    record.Targets.clear();
+    record.ManualSubmit = false;
+    record.Recording = true;
+    record.CmdBuffer->Begin();
+    return AppFrameContext{this, flightIndex, deltaTime, lastFrameLatency, isInModalLoop};
+}
+
+void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
+    FlightSlot& record = _flights[flightIndex];
+    if (!record.Recording) {
+        return;
+    }
+    record.Recording = false;
+
+    // 闭合上传链路：本帧录制的 staging + AssetRef 绑定到该 flight。
+    _uploader->EndFlight(flightIndex);
+
+    record.CmdBuffer->End();
+
+    // ManualSubmit：应用已自行 submit/present，runtime 仅负责 End 与后续回收。
+    if (record.ManualSubmit) {
+        record.Targets.clear();
+        return;
+    }
+
+    // 聚合全部 target 的同步对象。
+    vector<render::SwapChainSyncObject*> waitToExecute;
+    vector<render::SwapChainSyncObject*> readyToPresent;
+    waitToExecute.reserve(record.Targets.size());
+    readyToPresent.reserve(record.Targets.size());
+    for (FlightSlot::AcquiredTarget& target : record.Targets) {
+        if (render::SwapChainSyncObject* syncObject = target.Frame.GetWaitToDraw()) {
+            waitToExecute.emplace_back(syncObject);
+        }
+        if (render::SwapChainSyncObject* syncObject = target.Frame.GetReadyToPresent()) {
+            readyToPresent.emplace_back(syncObject);
+        }
+    }
+
+    render::Fence* frameFence = _mainQueueTrack.Fence.get();
+    render::CommandBuffer* submitCmdBuffers[] = {record.CmdBuffer.get()};
+    render::Fence* signalFences[] = {frameFence};
+    uint64_t signalValues[] = {_mainQueueTrack.NextFenceValue++};
+    render::CommandQueueSubmitDescriptor submitDesc{
+        .CmdBuffers = std::span{submitCmdBuffers},
+        .SignalFences = std::span{signalFences},
+        .SignalValues = std::span{signalValues},
+        .WaitToExecute = std::span{waitToExecute},
+        .ReadyToPresent = std::span{readyToPresent}};
+    _mainQueue->Submit(submitDesc);
+    _flights[flightIndex].Signal = AppRenderSystem::FenceSignal{
+        .Fence = frameFence,
+        .Value = signalValues[0]};
+
+    // 逐个呈现。RequireRecreate 静默跳过，其余非 Success 记日志。
+    for (FlightSlot::AcquiredTarget& target : record.Targets) {
+        render::SwapChainPresentResult present =
+            target.Window->PresentSwapChainFrame(std::move(target.Frame));
+        if (present.Status == render::SwapChainStatus::RequireRecreate) {
+            continue;
+        }
+        if (present.Status != render::SwapChainStatus::Success) {
+            RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", present.Status, present.NativeStatusCode);
+        }
+    }
+    record.Targets.clear();
+}
+
+// ═════════════════════════════════════════════════════════════
+//  AppFrameContext
+// ═════════════════════════════════════════════════════════════
+
+render::CommandBuffer* AppFrameContext::GetCommandBuffer() const noexcept {
+    return _renderSystem->_flights[_flightIndex].CmdBuffer.get();
+}
+
+std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) {
+    if (window == nullptr) {
+        return std::nullopt;
+    }
+    const AppRenderContext renderCtx{
+        .FlightIndex = _flightIndex,
+        .DeltaTime = _deltaTime,
+        .LastFrameLatency = _lastFrameLatency,
+        .IsInModalLoop = _isInModalLoop};
+    render::SwapChainAcquireResult acquire = window->AcquireNextSwapChainFrame(renderCtx);
+    if (acquire.Status != render::SwapChainStatus::Success || !acquire.Frame.has_value()) {
+        if (acquire.Status != render::SwapChainStatus::RequireRecreate &&
+            acquire.Status != render::SwapChainStatus::RetryLater) {
+            RADRAY_ERR_LOG("failed to acquire swapchain frame: status={}, native={}", acquire.Status, acquire.NativeStatusCode);
+        }
+        return std::nullopt;
+    }
+
+    render::SwapChainFrame frame = std::move(acquire.Frame.value());
+    render::Texture* backBuffer = frame.GetBackBuffer();
+    render::TextureView* backBufferView = window->GetOrCreateBackBufferView(frame, _flightIndex);
+    if (backBufferView == nullptr) {
+        // 未能建立 view：丢弃该 frame（不提交）。
+        return std::nullopt;
+    }
+
+    AppRenderSystem::FlightSlot& record = _renderSystem->_flights[_flightIndex];
+    record.Targets.emplace_back(AppRenderSystem::FlightSlot::AcquiredTarget{
+        .Window = window,
+        .Frame = std::move(frame)});
+    return AppFrameTarget{
+        .Window = window,
+        .BackBuffer = backBuffer,
+        .BackBufferView = backBufferView};
+}
+
+ResourceUploader& AppFrameContext::GetUploader() const noexcept {
+    return *_renderSystem->_uploader;
+}
+
+render::Device* AppFrameContext::GetDevice() const noexcept {
+    return _renderSystem->_device;
+}
+
+render::CommandQueue* AppFrameContext::GetMainQueue() const noexcept {
+    return _renderSystem->_mainQueue;
+}
+
+void AppFrameContext::SetManualSubmit() noexcept {
+    _renderSystem->_flights[_flightIndex].ManualSubmit = true;
 }
 
 // ═══════════════════════════════════════════════════════════════
