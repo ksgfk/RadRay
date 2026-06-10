@@ -1,6 +1,5 @@
 #pragma once
 
-#include <radray/types.h>
 #include <radray/basic_math.h>
 
 namespace radray {

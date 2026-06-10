@@ -3,6 +3,8 @@
 #include <radray/runtime/imgui_system.h>
 
 #include <radray/logger.h>
+#include <radray/runtime/application.h>
+#include <radray/runtime/window_system.h>
 #include <radray/window/native_window.h>
 
 #include <fmt/format.h>

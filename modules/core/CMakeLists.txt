@@ -12,6 +12,7 @@ target_link_libraries(radraycore PUBLIC
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
+    $<$<PLATFORM_ID:Windows>:ole32>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>

@@ -6,6 +6,8 @@
 
 namespace radray {
 
+Scene::Scene() noexcept = default;
+
 Scene::~Scene() noexcept = default;
 
 void Scene::AddPrimitive(unique_ptr<PrimitiveSceneProxy> proxy) {
@@ -20,6 +22,14 @@ void Scene::RemovePrimitive(PrimitiveSceneProxy* proxy) {
     if (it != _primitives.end()) {
         _primitives.erase(it);
     }
+}
+
+std::span<const unique_ptr<PrimitiveSceneProxy>> Scene::GetPrimitives() const noexcept {
+    return {_primitives.data(), _primitives.size()};
+}
+
+size_t Scene::GetPrimitiveCount() const noexcept {
+    return _primitives.size();
 }
 
 }  // namespace radray

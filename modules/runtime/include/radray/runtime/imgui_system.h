@@ -3,9 +3,8 @@
 #ifdef RADRAY_ENABLE_IMGUI
 
 #include <cstddef>
-#include <functional>
+#include <limits>
 #include <span>
-#include <string_view>
 #include <optional>
 
 #include <imgui.h>
@@ -14,14 +13,17 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/render/common.h>
-#include <radray/runtime/application.h>
-#include <radray/window/native_window.h>
-#include <radray/window/input.h>
 
 namespace radray {
 
+class AppWindow;
+class AppWindowSystem;
 class ImGuiSystem;
 class ImGuiRenderer;
+class NativeWindow;
+enum class KeyCode;
+enum class MouseButton;
+struct AppSwapChainRecreateContext;
 
 struct ImGuiRendererDescriptor {
     render::Device* Device;

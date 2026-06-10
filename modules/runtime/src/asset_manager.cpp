@@ -6,9 +6,100 @@
 
 namespace radray {
 
+AssetRefAny::AssetRefAny() noexcept = default;
+
+AssetRefAny::AssetRefAny(std::nullptr_t) noexcept {}
+
+AssetRefAny::AssetRefAny(const AssetRefAny& other) noexcept
+    : _manager(other._manager), _handle(other._handle) {
+    if (_manager != nullptr && _handle.IsValid()) {
+        _manager->AddRef(_handle);
+    }
+}
+
+AssetRefAny::AssetRefAny(AssetRefAny&& other) noexcept
+    : _manager(other._manager), _handle(other._handle) {
+    other._manager = nullptr;
+    other._handle = AssetHandle::Invalid();
+}
+
+AssetRefAny& AssetRefAny::operator=(const AssetRefAny& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    if (other._manager != nullptr && other._handle.IsValid()) {
+        other._manager->AddRef(other._handle);
+    }
+    Reset();
+    _manager = other._manager;
+    _handle = other._handle;
+    return *this;
+}
+
+AssetRefAny& AssetRefAny::operator=(AssetRefAny&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    Reset();
+    _manager = other._manager;
+    _handle = other._handle;
+    other._manager = nullptr;
+    other._handle = AssetHandle::Invalid();
+    return *this;
+}
+
+AssetRefAny::~AssetRefAny() noexcept {
+    Reset();
+}
+
+Asset* AssetRefAny::Get() const noexcept {
+    if (_manager == nullptr || !_handle.IsValid()) {
+        return nullptr;
+    }
+    return _manager->Resolve(_handle).Get();
+}
+
+Asset* AssetRefAny::operator->() const noexcept {
+    return Get();
+}
+
+Asset& AssetRefAny::operator*() const noexcept {
+    return *Get();
+}
+
+bool AssetRefAny::IsValid() const noexcept {
+    return Get() != nullptr;
+}
+
+AssetRefAny::operator bool() const noexcept {
+    return IsValid();
+}
+
+AssetHandle AssetRefAny::GetHandle() const noexcept {
+    return _handle;
+}
+
+AssetTypeId AssetRefAny::GetTypeId() const noexcept {
+    if (_manager == nullptr || !_handle.IsValid()) {
+        return Guid::Empty();
+    }
+    return _manager->ResolveTypeId(_handle);
+}
+
+void AssetRefAny::Reset() noexcept {
+    if (_manager != nullptr && _handle.IsValid()) {
+        _manager->Release(_handle);
+    }
+    _manager = nullptr;
+    _handle = AssetHandle::Invalid();
+}
+
+AssetRefAny::AssetRefAny(AssetManager* manager, AssetHandle handle) noexcept
+    : _manager(manager), _handle(handle) {}
+
 AssetManager::~AssetManager() noexcept {
     // 强制回收所有 slot,无论引用计数。析构期不再有人持有 AssetRef。
-    for (auto& slot : _slots) {
+    for (auto& slot : _slots.Values()) {
         if (slot && slot->State != AssetState::Free && slot->Object) {
             slot->Object->OnUnload();
             slot->Object.reset();
@@ -17,18 +108,63 @@ AssetManager::~AssetManager() noexcept {
     }
 }
 
+AssetRefAny AssetManager::LoadAny(const AssetId& id, unique_ptr<Asset> object) {
+    if (!object) {
+        return {};
+    }
+
+    AssetHandle handle;
+    {
+        std::scoped_lock lk(_mutex);
+        if (_idIndex.find(id) != _idIndex.end()) {
+            return {};
+        }
+
+        handle = _slots.Emplace(make_unique<Slot>());
+        Slot* slot = _slots.Get(handle).get();
+        RADRAY_ASSERT(slot != nullptr && slot->State == AssetState::Free);
+        slot->Object = std::move(object);
+        slot->State = AssetState::Loading;
+        slot->StrongRefs.store(1, std::memory_order_relaxed);
+        _idIndex.emplace(id, handle);
+    }
+
+    try {
+        Slot* slot = _slots.Get(handle).get();
+        RADRAY_ASSERT(slot != nullptr && slot->Object);
+        Asset* asset = slot->Object.get();
+        asset->_id = id;
+        asset->OnLoad();
+    } catch (...) {
+        std::scoped_lock lk(_mutex);
+        Slot* slot = _slots.Get(handle).get();
+        RADRAY_ASSERT(slot != nullptr && slot->State == AssetState::Loading);
+        _idIndex.erase(id);
+        slot->Object.reset();
+        slot->State = AssetState::Free;
+        slot->StrongRefs.store(0, std::memory_order_relaxed);
+        _slots.Destroy(handle);
+        throw;
+    }
+
+    {
+        std::scoped_lock lk(_mutex);
+        Slot* slot = _slots.Get(handle).get();
+        RADRAY_ASSERT(slot != nullptr && slot->State == AssetState::Loading && slot->Object);
+        slot->State = AssetState::Loaded;
+    }
+    return AssetRefAny{this, handle};
+}
+
 void AssetManager::AddRef(AssetHandle handle) noexcept {
-    // 强引用钉住 slot,地址与 generation 必然有效,无需加锁。
-    RADRAY_ASSERT(handle.IsValid() && handle.Index < _slots.size());
-    Slot* slot = _slots[handle.Index].get();
-    RADRAY_ASSERT(slot != nullptr && slot->Generation == handle.Generation);
+    Slot* slot = _slots.Get(handle).get();
+    RADRAY_ASSERT(slot != nullptr);
     slot->StrongRefs.fetch_add(1, std::memory_order_relaxed);
 }
 
 void AssetManager::Release(AssetHandle handle) noexcept {
-    RADRAY_ASSERT(handle.IsValid() && handle.Index < _slots.size());
-    Slot* slot = _slots[handle.Index].get();
-    RADRAY_ASSERT(slot != nullptr && slot->Generation == handle.Generation);
+    Slot* slot = _slots.Get(handle).get();
+    RADRAY_ASSERT(slot != nullptr);
     int32_t prev = slot->StrongRefs.fetch_sub(1, std::memory_order_acq_rel);
     RADRAY_ASSERT(prev >= 1);
     if (prev == 1) {
@@ -39,20 +175,18 @@ void AssetManager::Release(AssetHandle handle) noexcept {
         if (slot->StrongRefs.load(std::memory_order_acquire) == 0 &&
             slot->State == AssetState::Loaded) {
             slot->State = AssetState::PendingRelease;
-            _pending.push_back(handle.Index);
+            _pending.push_back(handle);
         }
     }
 }
 
 Nullable<Asset*> AssetManager::Resolve(AssetHandle handle) const noexcept {
     // 调用方持有强引用,slot 不会被回收,可无锁读取。
-    if (!handle.IsValid() || handle.Index >= _slots.size()) {
+    const unique_ptr<Slot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr == nullptr) {
         return nullptr;
     }
-    const Slot* slot = _slots[handle.Index].get();
-    if (slot == nullptr || slot->Generation != handle.Generation) {
-        return nullptr;
-    }
+    const Slot* slot = slotPtr->get();
     if (slot->State == AssetState::Free || slot->State == AssetState::Failed) {
         return nullptr;
     }
@@ -60,17 +194,18 @@ Nullable<Asset*> AssetManager::Resolve(AssetHandle handle) const noexcept {
 }
 
 AssetTypeId AssetManager::ResolveTypeId(AssetHandle handle) const noexcept {
-    if (!handle.IsValid() || handle.Index >= _slots.size()) {
-        return AssetTypeId::Invalid();
+    const unique_ptr<Slot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr == nullptr) {
+        return Guid::Empty();
     }
-    const Slot* slot = _slots[handle.Index].get();
-    if (slot == nullptr || slot->Generation != handle.Generation) {
-        return AssetTypeId::Invalid();
-    }
+    const Slot* slot = slotPtr->get();
     if (slot->State == AssetState::Free || slot->State == AssetState::Failed) {
-        return AssetTypeId::Invalid();
+        return Guid::Empty();
     }
-    return slot->TypeId;
+    if (!slot->Object) {
+        return Guid::Empty();
+    }
+    return slot->Object->GetTypeId();
 }
 
 AssetHandle AssetManager::AcquireExistingLocked(const AssetId& id) noexcept {
@@ -78,64 +213,61 @@ AssetHandle AssetManager::AcquireExistingLocked(const AssetId& id) noexcept {
     if (it == _idIndex.end()) {
         return AssetHandle::Invalid();
     }
-    const uint32_t index = it->second;
-    Slot* slot = _slots[index].get();
+    const AssetHandle handle = it->second;
+    unique_ptr<Slot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr == nullptr) {
+        _idIndex.erase(it);
+        return AssetHandle::Invalid();
+    }
+    Slot* slot = slotPtr->get();
     RADRAY_ASSERT(slot != nullptr);
     if (slot->State == AssetState::Free) {
         // 不应出现:Free slot 不该残留在 id 索引里。
+        return AssetHandle::Invalid();
+    }
+    if (slot->State == AssetState::Loading || slot->State == AssetState::Failed || !slot->Object) {
         return AssetHandle::Invalid();
     }
     // +1 计数;若处于 PendingRelease 则复活。
     slot->StrongRefs.fetch_add(1, std::memory_order_relaxed);
     if (slot->State == AssetState::PendingRelease) {
         slot->State = AssetState::Loaded;
-        auto pit = std::find(_pending.begin(), _pending.end(), index);
+        auto pit = std::find(_pending.begin(), _pending.end(), handle);
         if (pit != _pending.end()) {
             _pending.erase(pit);
         }
     }
-    return AssetHandle{index, slot->Generation};
+    return handle;
 }
 
-AssetHandle AssetManager::InsertLocked(unique_ptr<Asset> object, const AssetId& id, AssetTypeId typeId) noexcept {
-    uint32_t index;
-    if (!_freeSlots.empty()) {
-        index = _freeSlots.back();
-        _freeSlots.pop_back();
-    } else {
-        index = static_cast<uint32_t>(_slots.size());
-        _slots.push_back(make_unique<Slot>());
-    }
-    Slot* slot = _slots[index].get();
-    slot->Object = std::move(object);
-    slot->TypeId = typeId;
-    slot->State = AssetState::Loaded;
-    slot->StrongRefs.store(1, std::memory_order_relaxed);
-    _idIndex.emplace(id, index);
-    ++_aliveCount;
-    return AssetHandle{index, slot->Generation};
+AssetRefAny AssetManager::LockAny(AssetHandle handle) noexcept {
+    std::scoped_lock lk(_mutex);
+    return AssetRefAny{this, LockLocked(handle)};
+}
+
+AssetRefAny AssetManager::GetAny(const AssetId& id) noexcept {
+    std::scoped_lock lk(_mutex);
+    return AssetRefAny{this, AcquireExistingLocked(id)};
 }
 
 AssetHandle AssetManager::LockLocked(AssetHandle handle) noexcept {
-    if (!handle.IsValid() || handle.Index >= _slots.size()) {
+    unique_ptr<Slot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr == nullptr) {
         return AssetHandle::Invalid();
     }
-    Slot* slot = _slots[handle.Index].get();
-    if (slot == nullptr || slot->Generation != handle.Generation) {
-        return AssetHandle::Invalid();
-    }
+    Slot* slot = slotPtr->get();
     if (slot->State == AssetState::Free || slot->State == AssetState::Failed) {
         return AssetHandle::Invalid();
     }
     slot->StrongRefs.fetch_add(1, std::memory_order_relaxed);
     if (slot->State == AssetState::PendingRelease) {
         slot->State = AssetState::Loaded;
-        auto pit = std::find(_pending.begin(), _pending.end(), handle.Index);
+        auto pit = std::find(_pending.begin(), _pending.end(), handle);
         if (pit != _pending.end()) {
             _pending.erase(pit);
         }
     }
-    return AssetHandle{handle.Index, slot->Generation};
+    return handle;
 }
 
 void AssetManager::CollectGarbage() {
@@ -143,8 +275,12 @@ void AssetManager::CollectGarbage() {
     vector<unique_ptr<Asset>> toDestroy;
     {
         std::scoped_lock lk(_mutex);
-        for (uint32_t index : _pending) {
-            Slot* slot = _slots[index].get();
+        for (AssetHandle handle : _pending) {
+            unique_ptr<Slot>* slotPtr = _slots.TryGet(handle);
+            if (slotPtr == nullptr) {
+                continue;
+            }
+            Slot* slot = slotPtr->get();
             if (slot == nullptr || slot->State != AssetState::PendingRelease) {
                 continue;  // 已被处理或复活
             }
@@ -162,12 +298,9 @@ void AssetManager::CollectGarbage() {
             }
             _idIndex.erase(slot->Object->GetAssetId());
             toDestroy.push_back(std::move(slot->Object));
-            ++slot->Generation;
             slot->State = AssetState::Free;
             slot->StrongRefs.store(0, std::memory_order_relaxed);
-            _freeSlots.push_back(index);
-            RADRAY_ASSERT(_aliveCount > 0);
-            --_aliveCount;
+            _slots.Destroy(handle);
         }
         _pending.clear();
     }
@@ -181,7 +314,7 @@ void AssetManager::CollectGarbage() {
 
 uint32_t AssetManager::GetAssetCount() const noexcept {
     std::scoped_lock lk(_mutex);
-    return _aliveCount;
+    return _slots.Count();
 }
 
 }  // namespace radray

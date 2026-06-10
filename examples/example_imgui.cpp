@@ -1,5 +1,8 @@
 #include <radray/runtime/application.h>
 #include <radray/runtime/imgui_system.h>
+#include <radray/runtime/render_system.h>
+#include <radray/runtime/window_system.h>
+#include <radray/render/common.h>
 
 #include <algorithm>
 #include <cstring>

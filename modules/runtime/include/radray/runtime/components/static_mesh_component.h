@@ -1,6 +1,5 @@
 #pragma once
 
-#include <radray/types.h>
 #include <radray/runtime/components/primitive_component.h>
 
 namespace radray {
