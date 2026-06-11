@@ -129,22 +129,12 @@ AssetRefAny AssetManager::LoadAny(const AssetId& id, unique_ptr<Asset> object) {
         _idIndex.emplace(id, handle);
     }
 
-    try {
+    // 资产已在构造函数完成初始化(不再有二段式 OnLoad)。
+    // 这里仅补充 AssetId 并置为 Loaded。
+    {
         Slot* slot = _slots.Get(handle).get();
         RADRAY_ASSERT(slot != nullptr && slot->Object);
-        Asset* asset = slot->Object.get();
-        asset->_id = id;
-        asset->OnLoad();
-    } catch (...) {
-        std::scoped_lock lk(_mutex);
-        Slot* slot = _slots.Get(handle).get();
-        RADRAY_ASSERT(slot != nullptr && slot->State == AssetState::Loading);
-        _idIndex.erase(id);
-        slot->Object.reset();
-        slot->State = AssetState::Free;
-        slot->StrongRefs.store(0, std::memory_order_relaxed);
-        _slots.Destroy(handle);
-        throw;
+        slot->Object->_id = id;
     }
 
     {

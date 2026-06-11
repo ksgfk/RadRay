@@ -10,6 +10,8 @@ class AppRenderSystem;
 class AppWindow;
 class AppWindowSystem;
 class AppFrameContext;
+class AssetManager;
+class World;
 struct AppRenderSystemDescriptor;
 struct AppWindowSystemDescriptor;
 
@@ -61,6 +63,14 @@ public:
     AppRenderSystem* InitRenderSystem(const AppRenderSystemDescriptor& desc);
     void ShutdownRenderSystem();
 
+    /// 引擎级资产仓库,进程内唯一、跨 World 共享。对应 UE5 挂在 UEngine 上的 UAssetManager。
+    AssetManager* InitAssetManager();
+    void ShutdownAssetManager();
+    /// 当前运行时世界容器。对应 UE5 由 FWorldContext 持有的当前 UWorld。
+    /// 当前为单 World;未来需要多 World 时再抽出独立的 WorldContext 层。
+    World* InitWorld();
+    void ShutdownWorld();
+
     void NotifyRenderComplete(const AppRenderCompleteContext& ctx);
 
     int StartLoop();
@@ -74,6 +84,8 @@ public:
 
     unique_ptr<AppWindowSystem> _windowSystem;
     unique_ptr<AppRenderSystem> _renderSystem;
+    unique_ptr<AssetManager> _assetManager;
+    unique_ptr<World> _world;
     bool _multithreaded{false};
 };
 

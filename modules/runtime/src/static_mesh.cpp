@@ -126,10 +126,8 @@ StaticMesh::StaticMesh() noexcept
 
 StaticMesh::~StaticMesh() noexcept = default;
 
-void StaticMesh::OnLoad() {
-}
-
 void StaticMesh::OnUnload() {
+    ClearRenderData();
     ClearCPUData();
 }
 

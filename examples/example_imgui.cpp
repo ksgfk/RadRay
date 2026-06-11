@@ -2,9 +2,17 @@
 #include <radray/runtime/imgui_system.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/window_system.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material.h>
+#include <radray/runtime/vertex_factory.h>
+#include <radray/runtime/static_mesh.h>
+#include <radray/runtime/game_framework/world.h>
+#include <radray/runtime/game_framework/actor.h>
+#include <radray/runtime/components/static_mesh_component.h>
+#include <radray/runtime/components/camera_component.h>
+#include <radray/runtime/renderer/scene.h>
+#include <radray/runtime/renderer/scene_renderer.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_compiler/dxc.h>
-#include <radray/render/shader_compiler/spvc.h>
 #include <radray/basic_math.h>
 #include <radray/triangle_mesh.h>
 #include <radray/file.h>
@@ -20,14 +28,6 @@
 #endif
 
 using namespace radray;
-
-// Push-constant payload shared by the sphere VS. Layout matches SceneConstants in sphere.hlsl:
-// two column-major float4x4 (Eigen is column-major, HLSL cbuffers pack matrices column-major),
-// 128 bytes total which fits Vulkan's guaranteed push-constant minimum.
-struct SphereConstantsGpu {
-    float MVP[16];
-    float Model[16];
-};
 
 class ExampleApp : public Application {
     struct FrameResource {
@@ -178,193 +178,81 @@ public:
         targetResource.BackBufferState = render::TextureState::Present;
     }
 
-    Nullable<unique_ptr<render::Shader>> CompileShader(
-        std::string_view source,
-        std::string_view entryPoint,
-        render::ShaderStage stage) {
-        const bool isSpirv = _device->GetBackend() == render::RenderBackend::Vulkan;
-        render::DxcCompileParams params{};
-        params.Code = source;
-        params.EntryPoint = entryPoint;
-        params.Stage = stage;
-        params.SM = render::HlslShaderModel::SM60;
-        params.IsOptimize = false;
-        params.IsSpirv = isSpirv;
-        auto outputOpt = _dxc->Compile(params);
-        if (!outputOpt.has_value()) {
-            RADRAY_ERR_LOG("failed to compile sphere shader entry '{}'", entryPoint);
-            return nullptr;
-        }
-        auto output = std::move(outputOpt.value());
-
-        render::ShaderReflectionDesc reflection{};
-        render::ShaderBlobCategory category{};
-        if (isSpirv) {
-#ifdef RADRAY_ENABLE_SPIRV_CROSS
-            auto reflOpt = render::ReflectSpirv(render::SpirvBytecodeView{
-                .Data = output.Data,
-                .EntryPointName = entryPoint,
-                .Stage = stage});
-            if (!reflOpt.has_value()) {
-                RADRAY_ERR_LOG("failed to reflect SPIR-V sphere shader '{}'", entryPoint);
-                return nullptr;
-            }
-            reflection = std::move(reflOpt.value());
-            category = render::ShaderBlobCategory::SPIRV;
-#else
-            RADRAY_ERR_LOG("SPIR-V Cross reflection is not enabled in this build");
-            return nullptr;
-#endif
-        } else {
-            auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
-            if (!reflOpt.has_value()) {
-                RADRAY_ERR_LOG("failed to reflect DXIL sphere shader '{}'", entryPoint);
-                return nullptr;
-            }
-            reflection = std::move(reflOpt.value());
-            category = render::ShaderBlobCategory::DXIL;
-        }
-
-        render::ShaderDescriptor shaderDesc{};
-        shaderDesc.Source = std::span<const byte>{output.Data.data(), output.Data.size()};
-        shaderDesc.Category = category;
-        shaderDesc.Stages = stage;
-        shaderDesc.Reflection = std::move(reflection);
-        return _device->CreateShader(shaderDesc);
-    }
-
-    void InitSphere() {
-        auto dxcOpt = render::CreateDxc();
-        if (!dxcOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create DXC; sphere will not be rendered");
-            return;
-        }
-        _dxc = dxcOpt.Release();
-
+    // Build the sphere StaticMesh asset (CPU + GPU), register it with the AssetManager,
+    // upload its GPU buffers via the framework's ResourceUploader, then spawn an Actor with
+    // a StaticMeshComponent so the World/Scene drives rendering. No hand-written GPU mesh.
+    void InitScene() {
+        // ── Load the Material asset (ctor compiles shaders + acquires a shared root signature) ──
         std::filesystem::path shaderPath = std::filesystem::path{RADRAY_EXAMPLE_ASSET_DIR} / "sphere.hlsl";
-        auto sourceOpt = ReadTextFile(shaderPath);
-        if (!sourceOpt.has_value()) {
-            RADRAY_ERR_LOG("failed to read sphere shader at {}", shaderPath.string());
-            return;
-        }
-        const string& source = sourceOpt.value();
-
-        auto vsOpt = CompileShader(source, "VSMain", render::ShaderStage::Vertex);
-        if (!vsOpt.HasValue()) {
-            return;
-        }
-        _sphereVS = vsOpt.Release();
-        auto psOpt = CompileShader(source, "PSMain", render::ShaderStage::Pixel);
-        if (!psOpt.HasValue()) {
-            return;
-        }
-        _spherePS = psOpt.Release();
-
-        render::Shader* shaders[] = {_sphereVS.get(), _spherePS.get()};
-        render::RootSignatureDescriptor rsDesc{};
-        rsDesc.Shaders = std::span<render::Shader*>{shaders};
-        auto rsOpt = _device->CreateRootSignature(rsDesc);
-        if (!rsOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere root signature");
-            return;
-        }
-        _sphereRootSig = rsOpt.Release();
-        auto sceneIdOpt = _sphereRootSig->FindParameterId("gScene");
-        if (!sceneIdOpt.has_value()) {
-            RADRAY_ERR_LOG("sphere root signature is missing gScene push constant");
-            return;
-        }
-        _sphereSceneParamId = sceneIdOpt.value();
-
-        // Build the sphere mesh: interleave position + normal into one vertex buffer.
-        TriangleMesh mesh{};
-        mesh.InitAsUVSphere(1.0f, 64);
-        const uint32_t vertexCount = static_cast<uint32_t>(mesh.Positions.size());
-        _sphereVertexStride = sizeof(float) * 6;
-        _sphereIndexCount = static_cast<uint32_t>(mesh.Indices.size());
-
-        vector<float> vertexData(static_cast<size_t>(vertexCount) * 6);
-        for (uint32_t i = 0; i < vertexCount; ++i) {
-            const Eigen::Vector3f& p = mesh.Positions[i];
-            const Eigen::Vector3f& n = mesh.Normals[i];
-            float* dst = vertexData.data() + static_cast<size_t>(i) * 6;
-            dst[0] = p.x();
-            dst[1] = p.y();
-            dst[2] = p.z();
-            dst[3] = n.x();
-            dst[4] = n.y();
-            dst[5] = n.z();
-        }
-        const uint64_t vbBytes = vertexData.size() * sizeof(float);
-        const uint64_t ibBytes = mesh.Indices.size() * sizeof(uint32_t);
-
-        // Upload-heap buffers keep the example simple: no staging copy or barriers needed,
-        // and the data is uploaded once at init.
-        render::BufferDescriptor vbDesc{
-            .Size = vbBytes,
-            .Memory = render::MemoryType::Upload,
-            .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite};
-        auto vbOpt = _device->CreateBuffer(vbDesc);
-        if (!vbOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere vertex buffer");
-            return;
-        }
-        _sphereVB = vbOpt.Release();
-        _sphereVB->SetDebugName("sphere_vb");
-        {
-            void* mapped = _sphereVB->Map(0, vbBytes);
-            std::memcpy(mapped, vertexData.data(), vbBytes);
-            _sphereVB->Unmap(0, vbBytes);
-        }
-
-        render::BufferDescriptor ibDesc{
-            .Size = ibBytes,
-            .Memory = render::MemoryType::Upload,
-            .Usage = render::BufferUse::Index | render::BufferUse::MapWrite};
-        auto ibOpt = _device->CreateBuffer(ibDesc);
-        if (!ibOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere index buffer");
-            return;
-        }
-        _sphereIB = ibOpt.Release();
-        _sphereIB->SetDebugName("sphere_ib");
-        {
-            void* mapped = _sphereIB->Map(0, ibBytes);
-            std::memcpy(mapped, mesh.Indices.data(), ibBytes);
-            _sphereIB->Unmap(0, ibBytes);
-        }
-
-        render::VertexElement vertexElems[] = {
-            {0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0},
-            {sizeof(float) * 3, "NORMAL", 0, render::VertexFormat::FLOAT32X3, 1}};
-        render::VertexBufferLayout vbLayout{
-            _sphereVertexStride,
-            render::VertexStepMode::Vertex,
-            vertexElems};
-
-        auto rtState = render::ColorTargetState::Default(BackBufferFormat);
-        auto depthState = render::DepthStencilState::Default();
-        depthState.Format = DepthFormat;
-
-        render::GraphicsPipelineStateDescriptor psoDesc{
-            _sphereRootSig.get(),
-            render::ShaderEntry{_sphereVS.get(), "VSMain"},
-            render::ShaderEntry{_spherePS.get(), "PSMain"},
-            std::span<const render::VertexBufferLayout>{&vbLayout, 1},
-            render::PrimitiveState::Default(),
-            depthState,
-            render::MultiSampleState::Default(),
-            std::span<const render::ColorTargetState>{&rtState, 1}};
+        MaterialDescriptor matDesc{};
+        matDesc.ShaderPath = shaderPath;
+        matDesc.ShaderName = "sphere";
+        matDesc.VsEntry = "VSMain";
+        matDesc.PsEntry = "PSMain";
         // Draw both faces: winding/NDC conventions differ between D3D12 and Vulkan, and the
         // depth buffer resolves occlusion regardless of cull mode.
-        psoDesc.Primitive.Cull = render::CullMode::None;
-
-        auto psoOpt = _device->CreateGraphicsPipelineState(psoDesc);
-        if (!psoOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere pipeline state");
+        matDesc.Primitive = render::PrimitiveState::Default();
+        matDesc.Primitive.Cull = render::CullMode::None;
+        matDesc.DepthStencil = render::DepthStencilState::Default();
+        matDesc.DepthStencil.Format = DepthFormat;
+        const AssetId matId = Guid::Parse("7f1d3b2a-0000-4000-8000-00000000b001");
+        AssetRef<Material> matRef = _assetManager->Load<Material>(matId, *_renderSystem, matDesc);
+        if (!matRef || !matRef->IsValid()) {
+            RADRAY_ERR_LOG("failed to load sphere Material asset");
             return;
         }
-        _spherePso = psoOpt.Release();
+        // Sanity-check that the material exposes the per-object constant slot the renderer expects.
+        if (!matRef->FindParameterId("gScene").has_value()) {
+            RADRAY_ERR_LOG("sphere material is missing gScene push constant");
+            return;
+        }
+
+        // ── Build CPU mesh data and wrap it in a StaticMesh asset (goes through AssetManager) ──
+        TriangleMesh tri{};
+        tri.InitAsUVSphere(1.0f, 64);
+        MeshResource meshResource{};
+        tri.ToSimpleMeshResource(&meshResource);
+        meshResource.Name = "sphere";
+        if (meshResource.Primitives.empty()) {
+            RADRAY_ERR_LOG("failed to build sphere mesh resource");
+            return;
+        }
+
+
+        // Register the StaticMesh asset. AssetManager owns the asset lifetime; the component
+        // (and its SceneProxy) keep an AssetRef so the asset stays alive while in use. The App
+        // holds no long-lived ref: meshRef/matRef are local to InitScene and released on return.
+        const AssetId meshId = Guid::Parse("7f1d3b2a-0000-4000-8000-00000000a001");
+        AssetRef<StaticMesh> meshRef = _assetManager->Load<StaticMesh>(meshId);
+        if (!meshRef) {
+            RADRAY_ERR_LOG("failed to load sphere StaticMesh asset");
+            return;
+        }
+        meshRef->SetMeshResource(std::move(meshResource));
+        if (!meshRef->IsValid()) {
+            RADRAY_ERR_LOG("sphere StaticMesh is invalid");
+            return;
+        }
+
+        // ── Spawn the Actor + StaticMeshComponent into the World ──
+        // GPU upload is now data-driven via the SceneProxy lifecycle: the proxy starts in
+        // Pending; the SceneRenderer's frame-top PrepareResources uploads its mesh and advances
+        // it to Ready, after which it draws. The component only hands over asset refs; no
+        // hand-written command buffer / submit / wait, and no render-command queue.
+        Actor* actor = _world->SpawnActor<Actor>();
+        _sphereMeshComp = actor->AddComponent<StaticMeshComponent>(meshRef, matRef);
+        actor->SetRootComponent(_sphereMeshComp);
+
+        // ── Spawn a camera Actor + CameraComponent ──
+        // The camera is an independent SceneComponent; SceneView is now derived from its
+        // world transform + projection params instead of hand-computed in RecordSphere.
+        Actor* cameraActor = _world->SpawnActor<Actor>();
+        _cameraComp = cameraActor->AddComponent<CameraComponent>();
+        cameraActor->SetRootComponent(_cameraComp);
+        // Sit at z=-3 looking toward +Z (origin), matching the previous LookAtLH setup.
+        _cameraComp->SetWorldLocation(Eigen::Vector3f{0.0f, 0.0f, -3.0f});
+        _cameraComp->SetPerspective(Radian(60.0f), 0.1f, 100.0f);
+
         _sphereReady = true;
     }
 
@@ -437,23 +325,11 @@ public:
         cmdBuffer->ResourceBarrier(std::span{&toDepthWrite, 1});
         frame.DepthState = render::TextureState::DepthWrite;
 
-        // Build MVP. Eigen is column-major, so the raw float[16] uploaded to the push
-        // constant matches HLSL's column-major matrix packing; mul(M, v) is then correct.
-        const float aspect = static_cast<float>(width) / static_cast<float>(height);
-        Eigen::Matrix4f model = Eigen::Matrix4f::Identity();
-        model.block<3, 3>(0, 0) =
-            Eigen::AngleAxisf(_sphereSpin, Eigen::Vector3f::UnitY()).toRotationMatrix();
-        const Eigen::Matrix4f view = LookAtLH<float>(
-            Eigen::Vector3f{0.0f, 0.0f, -3.0f},
-            Eigen::Vector3f{0.0f, 0.0f, 0.0f},
-            Eigen::Vector3f{0.0f, 1.0f, 0.0f});
-        const Eigen::Matrix4f proj =
-            PerspectiveLH<float>(Radian(60.0f), aspect, 0.1f, 100.0f);
-        const Eigen::Matrix4f mvp = proj * view * model;
-
-        SphereConstantsGpu sceneData{};
-        std::memcpy(sceneData.MVP, mvp.data(), sizeof(sceneData.MVP));
-        std::memcpy(sceneData.Model, model.data(), sizeof(sceneData.Model));
+        // Build the SceneView from the camera component (View/Proj/ViewProj + viewport).
+        SceneView sceneView{};
+        if (_cameraComp != nullptr) {
+            _cameraComp->FillSceneView(sceneView, width, height);
+        }
 
         render::ColorAttachment colorAttachment{
             .Target = colorView,
@@ -492,20 +368,15 @@ public:
         encoder->SetViewport(vp);
         encoder->SetScissor(Rect{0, 0, width, height});
 
-        encoder->BindRootSignature(_sphereRootSig.get());
-        encoder->BindGraphicsPipelineState(_spherePso.get());
-        render::VertexBufferView vbv{
-            .Target = _sphereVB.get(),
-            .Offset = 0,
-            .Size = static_cast<uint64_t>(_sphereVertexStride) * (_sphereVB->GetDesc().Size / _sphereVertexStride)};
-        encoder->BindVertexBuffer(std::span{&vbv, 1});
-        render::IndexBufferView ibv{
-            .Target = _sphereIB.get(),
-            .Offset = 0,
-            .Stride = sizeof(uint32_t)};
-        encoder->BindIndexBuffer(ibv);
-        encoder->PushConstants(_sphereSceneParamId, &sceneData, sizeof(sceneData));
-        encoder->DrawIndexed(_sphereIndexCount, 1, 0, 0, 0);
+        MeshPassProcessor::Config processorConfig{};
+        processorConfig.Cache = &_renderSystem->GetPSOCache();
+        processorConfig.RtFormats.ColorFormats = {BackBufferFormat};
+        processorConfig.RtFormats.DepthFormat = DepthFormat;
+        processorConfig.ObjectConstantsParam = "gScene";
+
+        // Let the SceneRenderer run InitViews (collect visible) -> BasePass (collect/sort/record).
+        // PSO/RootSignature binding, per-object constants and draw calls all happen inside.
+        _sceneRenderer.Render(encoder.get(), *_world->GetScene(), sceneView, processorConfig);
 
         cmdBuffer->EndRenderPass(std::move(encoder));
     }
@@ -529,6 +400,12 @@ public:
 
         Frame& frame = _frames[ctx.FlightIndex()];
         render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
+        // 帧顶资源准备:在任何 RenderPass 之前、以裸 CommandBuffer 让 SceneRenderer 遍历场景代理,
+        // 对 Pending 态代理经 ResourceUploader 上传 GPU 网格并推进到 Ready。copy 与本帧绘制同一
+        // 提交,同帧即就绪;未就绪的代理 InitViews 会跳过,“就绪后才绘制”。
+        if (_world != nullptr && _world->GetScene() != nullptr) {
+            _sceneRenderer.PrepareResources(cmdBuffer, *_world->GetScene(), ctx.GetUploader());
+        }
         cmdBuffer->ResetQueryPool(frame.TimestampPool.get(), 0, TimestampQueryCount);
         cmdBuffer->WriteTimestamp(render::QueryTimestampDescriptor{
             .Pool = frame.TimestampPool.get(),
@@ -704,20 +581,26 @@ public:
             .PresentMode = render::PresentMode::FIFO};
         _imguiSystem = ImGuiSystem::Create(imguiDesc).Unwrap();
 
-        InitSphere();
+        InitAssetManager();
+        InitWorld();
+        InitScene();
     }
 
     int Shutdown(const AppShutdownContext& ctx) override {
         (void)ctx;
         _renderSystem->WaitAndCleanupCompletedFlights();
         _frames.clear();
-        _spherePso.reset();
-        _sphereRootSig.reset();
-        _spherePS.reset();
-        _sphereVS.reset();
-        _sphereVB.reset();
-        _sphereIB.reset();
-        _dxc.reset();
+        // Tear down the World first: destroying actors removes SceneProxies, which drop the
+        // AssetRefs they hold on the mesh/material. ShutdownAssetManager then unloads every
+        // remaining asset (its dtor force-calls OnUnload regardless of refcount), freeing the
+        // GPU buffers before the device is destroyed.
+        _sphereMeshComp = nullptr;
+        ShutdownWorld();
+        // Cached PSOs reference shared shaders + root signatures owned by the render system.
+        // Clear the PSO cache before tearing the render system down (member dtor order already
+        // destroys _psoCache before the shader/root-signature caches, this is just explicit).
+        _renderSystem->GetPSOCache().Clear();
+        ShutdownAssetManager();
         _imguiSystem.reset();
         _mainWindow->DetachSwapChain();
         _mainWindow = nullptr;
@@ -734,11 +617,17 @@ public:
             return AppUpdateResult{shouldClose};
         }
 
-        // Advance the sphere spin (radians/sec) so the normals visibly rotate.
+        // Advance the sphere spin (radians/sec). Drive it through the component's transform
+        // so the change flows: SetRelativeRotation -> OnTransformChanged -> proxy world matrix.
         _sphereSpin += ctx.DeltaTime.count();
         if (_sphereSpin > 2.0f * std::numbers::pi_v<float>) {
             _sphereSpin -= 2.0f * std::numbers::pi_v<float>;
         }
+        if (_sphereMeshComp != nullptr) {
+            _sphereMeshComp->SetRelativeRotation(
+                Eigen::Quaternionf{Eigen::AngleAxisf(_sphereSpin, Eigen::Vector3f::UnitY())});
+        }
+        _world->Tick(ctx.DeltaTime.count());
 
         bool imguiSucc = _imguiSystem->BeginFrame(ctx.FlightIndex, ctx.DeltaTime.count());
         if (imguiSucc) {
@@ -811,19 +700,19 @@ public:
     float _gpuTimeMs{0.0f};
     bool _readbackNeedsBarrier{false};
 
-    // Sphere render resources (created once in Init).
-    shared_ptr<render::Dxc> _dxc;
-    unique_ptr<render::Shader> _sphereVS;
-    unique_ptr<render::Shader> _spherePS;
-    unique_ptr<render::RootSignature> _sphereRootSig;
-    unique_ptr<render::GraphicsPipelineState> _spherePso;
-    unique_ptr<render::Buffer> _sphereVB;
-    unique_ptr<render::Buffer> _sphereIB;
-    uint32_t _sphereIndexCount{0};
-    uint32_t _sphereVertexStride{0};
-    render::BindingParameterId _sphereSceneParamId{};
+    // Sphere scene state. Material (RootSignature + shaders) is an asset; PSOs live in the
+    // framework PSOCache; SceneRenderer drives collect/sort/record of draw commands.
+    SceneRenderer _sceneRenderer;
     bool _sphereReady{false};
     float _sphereSpin{0.0f};
+
+    // Scene framework: AssetManager and World now live on the Application base
+    // (engine-level shared asset repo + current world container). Kept here only:
+    // pointers into the World (non-owning) used every frame — the camera for the
+    // SceneView and the mesh component for the spin animation. Asset lifetime is
+    // owned by the AssetManager + component AssetRefs, so the App holds no ref.
+    StaticMeshComponent* _sphereMeshComp{nullptr};
+    CameraComponent* _cameraComp{nullptr};
 };
 
 int main(int argc, char* argv[]) {

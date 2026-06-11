@@ -12,6 +12,8 @@
 #include <radray/render/common.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/window_system.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/game_framework/world.h>
 
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
 #define RADRAY_APP_IMPL_ENABLE_VBLANK_TICK
@@ -700,6 +702,32 @@ void Application::ShutdownRenderSystem() {
         _windowSystem->_renderSystem = nullptr;
     }
     _renderSystem.reset();
+}
+
+AssetManager* Application::InitAssetManager() {
+    if (_assetManager) {
+        RADRAY_WARN_LOG("asset manager already initialized");
+        return _assetManager.get();
+    }
+    _assetManager = make_unique<AssetManager>();
+    return _assetManager.get();
+}
+
+void Application::ShutdownAssetManager() {
+    _assetManager.reset();
+}
+
+World* Application::InitWorld() {
+    if (_world) {
+        RADRAY_WARN_LOG("world already initialized");
+        return _world.get();
+    }
+    _world = make_unique<World>();
+    return _world.get();
+}
+
+void Application::ShutdownWorld() {
+    _world.reset();
 }
 
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {

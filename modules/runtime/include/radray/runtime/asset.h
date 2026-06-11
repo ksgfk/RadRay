@@ -56,6 +56,8 @@ enum class AssetState {
 ///   CPU/GPU 之分,具体资产(如 UStaticMesh)自己持有 CPU 源数据与渲染数据,
 ///   自己决定上传/丢弃/释放时机。本 Asset 同理:派生类自行持有并管理
 ///   CPU 源数据和 GPU 资源,基类只提供生命周期钩子。
+/// - 资产采用【构造函数一次性初始化】，不设二段式 OnLoad 钩子；Load<T>(id, args...) 直接
+///   转发构造参数。销毁前的资源释放仕 OnUnload 钩子。
 /// - Asset 本身不持有引用计数。计数由 AssetManager 的 slot 维护,Asset 不知道自己被谁引用。
 /// - GPU 资源"何时安全销毁"(是否需要等待渲染同步)是派生类与 render 层的实现细节,
 ///   不属于 AssetManager 的关注点。
@@ -67,10 +69,6 @@ public:
     Asset& operator=(const Asset&) = delete;
     Asset& operator=(Asset&&) = delete;
     virtual ~Asset() noexcept = default;
-
-    /// 资产被加载进 AssetManager 后调用一次(对应 UStaticMesh 加载完成)。
-    /// 派生类在此准备 CPU 源数据、按需上传 GPU 资源等。不带 CPU/GPU 语义。
-    virtual void OnLoad() = 0;
 
     /// 引用归零、CollectGarbage 即将销毁前调用一次(对应 BeginDestroy → ReleaseResources)。
     /// 派生类在此释放 GPU 资源、丢弃 CPU 数据等。调用发生在 CollectGarbage 的可控时机。

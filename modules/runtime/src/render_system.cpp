@@ -1,12 +1,17 @@
 #include <radray/runtime/render_system.h>
 
 #include <radray/basic_math.h>
+#include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
+#include <radray/render/shader_compiler/dxc.h>
+#include <radray/render/shader_compiler/spvc.h>
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/material.h>
 #include <radray/runtime/static_mesh.h>
+#include <radray/runtime/vertex_factory.h>
 #include <radray/runtime/window_system.h>
 
 #include <algorithm>
@@ -72,9 +77,136 @@ AppRenderSystem::AppRenderSystem(Application* app, const AppRenderSystemDescript
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
+    _psoCache = make_unique<PSOCache>(_device);
 }
 
 AppRenderSystem::~AppRenderSystem() noexcept = default;
+
+Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
+    const bool isSpirv = _device->GetBackend() == render::RenderBackend::Vulkan;
+    string key = fmt::format(
+        "{}|{}|{}|{}",
+        desc.Name,
+        desc.EntryPoint,
+        static_cast<uint32_t>(desc.Stage),
+        isSpirv ? "spirv" : "dxil");
+    if (auto it = _shaderCache.find(key); it != _shaderCache.end()) {
+        return it->second.get();
+    }
+
+    if (_dxc == nullptr) {
+        auto dxcOpt = render::CreateDxc();
+        if (!dxcOpt.HasValue()) {
+            RADRAY_ERR_LOG("AppRenderSystem: failed to create DXC compiler");
+            return nullptr;
+        }
+        _dxc = dxcOpt.Release();
+    }
+
+    render::DxcCompileParams params{};
+    params.Code = desc.Source;
+    params.EntryPoint = desc.EntryPoint;
+    params.Stage = desc.Stage;
+    params.SM = render::HlslShaderModel::SM60;
+    params.IsOptimize = false;
+    params.IsSpirv = isSpirv;
+    auto outputOpt = _dxc->Compile(params);
+    if (!outputOpt.has_value()) {
+        RADRAY_ERR_LOG("AppRenderSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
+        return nullptr;
+    }
+    auto output = std::move(outputOpt.value());
+
+    render::ShaderReflectionDesc reflection{};
+    render::ShaderBlobCategory category{};
+    if (isSpirv) {
+#ifdef RADRAY_ENABLE_SPIRV_CROSS
+        auto reflOpt = render::ReflectSpirv(render::SpirvBytecodeView{
+            .Data = output.Data,
+            .EntryPointName = desc.EntryPoint,
+            .Stage = desc.Stage});
+        if (!reflOpt.has_value()) {
+            RADRAY_ERR_LOG("AppRenderSystem: failed to reflect SPIR-V shader '{}'", desc.Name);
+            return nullptr;
+        }
+        reflection = std::move(reflOpt.value());
+        category = render::ShaderBlobCategory::SPIRV;
+#else
+        RADRAY_ERR_LOG("AppRenderSystem: SPIR-V Cross reflection is not enabled in this build");
+        return nullptr;
+#endif
+    } else {
+        auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
+        if (!reflOpt.has_value()) {
+            RADRAY_ERR_LOG("AppRenderSystem: failed to reflect DXIL shader '{}'", desc.Name);
+            return nullptr;
+        }
+        reflection = std::move(reflOpt.value());
+        category = render::ShaderBlobCategory::DXIL;
+    }
+
+    render::ShaderDescriptor shaderDesc{};
+    shaderDesc.Source = std::span<const byte>{output.Data.data(), output.Data.size()};
+    shaderDesc.Category = category;
+    shaderDesc.Stages = desc.Stage;
+    shaderDesc.Reflection = std::move(reflection);
+    auto shaderOpt = _device->CreateShader(shaderDesc);
+    if (!shaderOpt.HasValue()) {
+        RADRAY_ERR_LOG("AppRenderSystem: failed to create shader '{}'", desc.Name);
+        return nullptr;
+    }
+    render::Shader* raw = shaderOpt.Get();
+    _shaderCache.emplace(std::move(key), shaderOpt.Release());
+    return raw;
+}
+
+Nullable<render::Shader*> AppRenderSystem::GetOrCompileShaderFromFile(
+    const std::filesystem::path& path,
+    std::string_view entryPoint,
+    render::ShaderStage stage,
+    std::string_view name) {
+    auto sourceOpt = ReadTextFile(path);
+    if (!sourceOpt.has_value()) {
+        RADRAY_ERR_LOG("AppRenderSystem: failed to read shader file {}", path.string());
+        return nullptr;
+    }
+    string pathName = name.empty() ? path.string() : string{name};
+    ShaderCompileDescriptor desc{};
+    desc.Name = pathName;
+    desc.Source = sourceOpt.value();
+    desc.EntryPoint = entryPoint;
+    desc.Stage = stage;
+    return GetOrCompileShader(desc);
+}
+
+Nullable<render::RootSignature*> AppRenderSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
+    if (shaders.empty()) {
+        RADRAY_ERR_LOG("AppRenderSystem: cannot create root signature from empty shader set");
+        return nullptr;
+    }
+    // 按参与的 shader 集合作为身份:同一组 shader 决定同一绑定布局，故共享一个
+    // RootSignature。指针来自 shader 缓存(稳定且去重)，排序后拼 key 使顺序无关。
+    vector<render::Shader*> sorted{shaders.begin(), shaders.end()};
+    std::sort(sorted.begin(), sorted.end());
+    string key;
+    for (render::Shader* s : sorted) {
+        key += fmt::format("{:x}|", reinterpret_cast<uintptr_t>(s));
+    }
+    if (auto it = _rootSigCache.find(key); it != _rootSigCache.end()) {
+        return it->second.get();
+    }
+
+    render::RootSignatureDescriptor rsDesc{};
+    rsDesc.Shaders = shaders;
+    auto rsOpt = _device->CreateRootSignature(rsDesc);
+    if (!rsOpt.HasValue()) {
+        RADRAY_ERR_LOG("AppRenderSystem: failed to create root signature");
+        return nullptr;
+    }
+    render::RootSignature* raw = rsOpt.Get();
+    _rootSigCache.emplace(std::move(key), rsOpt.Release());
+    return raw;
+}
 
 void AppRenderSystem::WaitAndCleanupCompletedFlights() {
     _mainQueue->Wait();
@@ -161,9 +293,9 @@ void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     record.Targets.clear();
 }
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════
 //  AppFrameContext
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════
 
 render::CommandBuffer* AppFrameContext::GetCommandBuffer() const noexcept {
     return _renderSystem->_flights[_flightIndex].CmdBuffer.get();
@@ -551,6 +683,75 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMesh(
     }
 
     return result;
+}
+
+// ════════════════════════════════════════════════════════════
+//  PSOCache
+// ════════════════════════════════════════════════════════════
+
+namespace {
+
+string BuildPSOKey(
+    const Material& material,
+    const render::VertexBufferLayout& vertexLayout,
+    const PSOCache::RenderTargetFormats& rtFormats) {
+    // Material 身份用其 AssetId(同一资产同一 PSO 基线);叠加顶点签名与 RT 格式。
+    string key = fmt::format("mat={}|vs={}|ps={}|", material.GetAssetId().ToString(), material.GetVsEntry(), material.GetPsEntry());
+    key += VertexFactory::BuildSignature(vertexLayout);
+    key += "|rt=";
+    for (render::TextureFormat f : rtFormats.ColorFormats) {
+        key += fmt::format("{},", static_cast<uint32_t>(f));
+    }
+    key += fmt::format("|ds={}", static_cast<uint32_t>(rtFormats.DepthFormat));
+    return key;
+}
+
+}  // namespace
+
+render::GraphicsPipelineState* PSOCache::GetOrCreate(
+    const Material& material,
+    const render::VertexBufferLayout& vertexLayout,
+    const RenderTargetFormats& rtFormats) {
+    if (!material.IsValid()) {
+        RADRAY_ERR_LOG("PSOCache: material is not valid");
+        return nullptr;
+    }
+
+    string key = BuildPSOKey(material, vertexLayout, rtFormats);
+    if (auto it = _cache.find(key); it != _cache.end()) {
+        return it->second.get();
+    }
+
+    // 渲染状态从 material 取,RT 格式注入到 color/depth 状态里。
+    vector<render::ColorTargetState> colorTargets;
+    colorTargets.reserve(rtFormats.ColorFormats.size());
+    for (render::TextureFormat f : rtFormats.ColorFormats) {
+        render::ColorTargetState cts = render::ColorTargetState::Default(f);
+        cts.Blend = material.GetBlendState();
+        colorTargets.push_back(cts);
+    }
+
+    render::DepthStencilState depthState = material.GetDepthStencilState();
+    depthState.Format = rtFormats.DepthFormat;
+
+    render::GraphicsPipelineStateDescriptor psoDesc{
+        material.GetRootSignature(),
+        render::ShaderEntry{material.GetVS(), material.GetVsEntry()},
+        render::ShaderEntry{material.GetPS(), material.GetPsEntry()},
+        std::span<const render::VertexBufferLayout>{&vertexLayout, 1},
+        material.GetPrimitiveState(),
+        depthState,
+        render::MultiSampleState::Default(),
+        std::span<const render::ColorTargetState>{colorTargets.data(), colorTargets.size()}};
+
+    auto psoOpt = _device->CreateGraphicsPipelineState(psoDesc);
+    if (!psoOpt.HasValue()) {
+        RADRAY_ERR_LOG("PSOCache: failed to create graphics pipeline state");
+        return nullptr;
+    }
+    render::GraphicsPipelineState* raw = psoOpt.Get();
+    _cache.emplace(std::move(key), psoOpt.Release());
+    return raw;
 }
 
 }  // namespace radray

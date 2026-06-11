@@ -149,7 +149,7 @@ public:
 
     /// 按 id 接收一个已构造资产并加载,成功后返回类型擦除强引用。
     /// - 若 id 已存在(含 Loading/PendingRelease)或 object 为空,返回空引用。
-    /// - 成功路径会接管 object、调用 Asset::OnLoad、登记入 SparseSet。
+    /// - 成功路径会接管 object、补充 AssetId、登记入 SparseSet(资产已在构造时初始化)。
     AssetRefAny LoadAny(const AssetId& id, unique_ptr<Asset> object);
 
     /// 按 id 创建并加载新资产,成功后返回强引用。

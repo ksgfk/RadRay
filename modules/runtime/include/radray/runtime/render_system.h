@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <optional>
 #include <span>
 
@@ -8,6 +9,10 @@
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset_manager.h>
+
+namespace radray::render {
+class Dxc;
+}
 
 namespace radray {
 
@@ -17,12 +22,54 @@ class AppWindowSystem;
 class AppFrameContext;
 class ResourceUploader;
 class StaticMesh;
+class Material;
+
+/// 一次 shader 编译请求。Name 作为缓存身份(同一逻辑 shader 的不同入口共享 Name)。
+/// 对应 UE5 FShaderType + 编译环境的极简化:这里只承载 HLSL 源 + 入口 + 阶段。
+struct ShaderCompileDescriptor {
+    std::string_view Name{};
+    std::string_view Source{};
+    std::string_view EntryPoint{};
+    render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
+};
 
 struct AppRenderSystemDescriptor {
     render::Device* Device;
     uint32_t MainQueueIndex;
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
+};
+
+/// 图形 PSO 缓存。对应 UE5 中 Material×VertexFactory×RenderTarget 才确定一个
+/// 完整 shader 实例(PSO)的概念:同一 Material 用于不同顶点布局或不同 RT 格式时
+/// 需要不同 PSO,故按这三者组合做 key 缓存。
+///
+/// 渲染目标格式由调用方提供(BasePass 用 backbuffer + depth 格式)。
+class PSOCache {
+public:
+    explicit PSOCache(render::Device* device) noexcept : _device(device) {}
+    PSOCache(const PSOCache&) = delete;
+    PSOCache& operator=(const PSOCache&) = delete;
+    ~PSOCache() noexcept = default;
+
+    /// RT 格式描述:一组 color 格式 + 一个 depth 格式(UNKNOWN 表示无 depth)。
+    struct RenderTargetFormats {
+        vector<render::TextureFormat> ColorFormats{};
+        render::TextureFormat DepthFormat{render::TextureFormat::UNKNOWN};
+    };
+
+    /// 取或建 PSO。material 提供 shader/rootsig/渲染状态,vertexLayout 提供 input layout,
+    /// rtFormats 提供 RT 格式。命中缓存直接返回,返回的指针由 PSOCache 拥有。
+    render::GraphicsPipelineState* GetOrCreate(
+        const Material& material,
+        const render::VertexBufferLayout& vertexLayout,
+        const RenderTargetFormats& rtFormats);
+
+    void Clear() noexcept { _cache.clear(); }
+
+private:
+    render::Device* _device;
+    unordered_map<string, unique_ptr<render::GraphicsPipelineState>> _cache;
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -66,6 +113,28 @@ public:
     /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
     /// → 写 flight.Signal → Present 全部 target。ManualSubmit 下仅 End，跳过提交/呈现。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
+
+    /// 编译（含反射）并创建一个 Shader，按 Name|EntryPoint|Stage|Backend 缓存。
+    /// 命中缓存直接返回。返回的指针由 AppRenderSystem 拥有，调用方勿释放。
+    /// Vulkan 后端自动编译为 SPIR-V 并走 spirv-cross 反射，D3D12 走 DXIL。
+    /// 对应 UE5 FShaderMap 对 FShader 的缓存职责（最小化版，未引入独立 ShaderManager）。
+    Nullable<render::Shader*> GetOrCompileShader(const ShaderCompileDescriptor& desc);
+
+    /// 从磁盘读取 HLSL 文件并编译。Name 缺省用文件路径。
+    Nullable<render::Shader*> GetOrCompileShaderFromFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        render::ShaderStage stage,
+        std::string_view name = {});
+
+    /// 取或建 RootSignature。【按 binding layout 共享】: RootSignature 由参与的 shader
+    /// 反射出的绑定布局决定，同一组 shader 共享一个 RootSignature，不再每个
+    /// Material 独立创建。返回的指针由 AppRenderSystem 拥有。
+    /// 对应 UE5 中 RootSignature 按 shader 绑定布局去重共享的思路。
+    Nullable<render::RootSignature*> GetOrCreateRootSignature(std::span<render::Shader*> shaders);
+
+    /// 引擎级 PSO 缓存。按 (Material, 顶点签名, RT 格式) 组合缓存 GraphicsPipelineState。
+    PSOCache& GetPSOCache() noexcept { return *_psoCache; }
 
 public:
     struct QueueFrameTrack {
@@ -112,6 +181,13 @@ public:
     std::chrono::duration<float> _lastFrameLatency{};
     vector<FlightSlot> _flights;
     unique_ptr<class ResourceUploader> _uploader;
+
+    // —— Shader 编译与缓存(惰性创建 Dxc)。key = "Name|Entry|Stage|Backend"。
+    shared_ptr<render::Dxc> _dxc;
+    unordered_map<string, unique_ptr<render::Shader>> _shaderCache;
+    // —— RootSignature 缓存。按参与 shader 集合(决定绑定布局)去重共享。
+    unordered_map<string, unique_ptr<render::RootSignature>> _rootSigCache;
+    unique_ptr<PSOCache> _psoCache;
 };
 
 /// Render 回调的唯一入参，封装一帧录制 API。
