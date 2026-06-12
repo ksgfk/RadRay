@@ -328,6 +328,12 @@ if (RADRAY_BUILD_TESTS)
     radray_set_build_path(gtest)
     radray_optimize_flags_library(gtest_main)
     radray_set_build_path(gtest_main)
+    # Workaround for clang 21+ warning: implicit char8_t -> char32_t conversion
+    # https://github.com/google/googletest/issues/4762
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(gtest PRIVATE -Wno-character-conversion)
+        target_compile_options(gtest_main PRIVATE -Wno-character-conversion)
+    endif()
 endif()
 if (RADRAY_BUILD_BENCHMARKS)
     set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
