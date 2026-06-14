@@ -50,6 +50,12 @@
             "Tag": "v1.2.3"
         },
         {
+            "Name": "stdexec",
+            "Type": "git",
+            "Git": "https://github.com/NVIDIA/stdexec.git",
+            "Branch": "main"
+        },
+        {
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",

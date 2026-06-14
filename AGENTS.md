@@ -1,12 +1,5 @@
 # Repository Guidelines
 
-## The most important Scope Discipline
-- Do not silently expand a user's requested change into adjacent architecture, examples, tests, or backend API work.
-- If a fix appears to require work outside the explicit instruction, first explain the dependency and ask whether to include it.
-- If the user gives an architectural constraint, follow it even when a broader implementation seems convenient.
-- Prefer a narrow, incomplete-looking change plus a question over completing unrequested design gaps.
-- When unsure whether the user considered an edge case, ask before implementing extra behavior.
-
 ## Setup
 - Populate dependencies before configuring cmake:
   - `python tools/fetch_third_party.py restore`  → `third_party/`
@@ -31,6 +24,7 @@
 ## Coding Style & Naming Conventions
 - Language baseline: C++20 (`CMAKE_CXX_STANDARD 20`), C11 for C sources.
 - STL containers must use `radray` namespace aliases (e.g. `string`, `vector`, `unordered_map`) from `radray/types.h`.
+- Coroutines must use `radray` namespace aliases from `radray/coroutine.h` (e.g. `radray::task`), never `exec::task` / `stdexec::*` directly. The aliases wrap stdexec so the underlying library can be swapped without touching call sites.
 - Interface nullable pointers use `Nullable<T>`; raw pointers mean non-null.
 - DEBUG mode uses macro `RADRAY_IS_DEBUG` (NOT `NDEBUG` or `_DEBUG`).
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.

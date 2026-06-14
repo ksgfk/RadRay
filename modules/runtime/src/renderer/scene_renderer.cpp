@@ -82,25 +82,6 @@ void MeshPassProcessor::SortCommands(vector<MeshDrawCommand>& commands) {
         });
 }
 
-void SceneRenderer::PrepareResources(
-    render::CommandBuffer* cmdBuffer,
-    const Scene& scene,
-    ResourceUploader& uploader) {
-    if (cmdBuffer == nullptr) {
-        return;
-    }
-    // 数据驱动:遍历场景代理,仅对 Pending 态调用 UpdateResources(上传/构建)。
-    // 在 RenderPass 之前、裸 CommandBuffer 上录制 copy:与本帧绘制同一提交,同帧即就绪。
-    for (const unique_ptr<PrimitiveSceneProxy>& proxy : scene.GetPrimitives()) {
-        if (proxy == nullptr) {
-            continue;
-        }
-        if (proxy->GetResourceState() == PrimitiveSceneProxy::ResourceState::Pending) {
-            proxy->UpdateResources(cmdBuffer, uploader);
-        }
-    }
-}
-
 void SceneRenderer::InitViews(const Scene& scene, const SceneView& view) {
     // 最小化:不做视锥裁剪,收集全部可渲染代理。view 预留给后续裁剪/relevance。
     (void)view;

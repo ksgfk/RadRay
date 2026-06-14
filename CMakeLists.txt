@@ -50,6 +50,7 @@ unset(_radray_benchmarks_default)
 unset(_radray_release_cfg_index)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
+option(RADRAY_ENABLE_RTTI "Enable C++ RTTI for RadRay targets" OFF)
 cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay runtime" ON "RADRAY_BUILD_RENDER AND RADRAY_BUILD_WINDOW" OFF)
 cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADRAY_BUILD_RENDER AND WIN32" OFF)
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
@@ -159,11 +160,13 @@ radray_set_build_path(xxhash)
 
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
-# set(STDEXEC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# set(STDEXEC_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-# set(STDEXEC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-# set(STDEXEC_ENABLE_EXTRA_TYPE_CHECKING ON CACHE BOOL "" FORCE)
-# add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/stdexec)
+# stdexec is header-only. Its own CMakeLists fetches rapids-cmake over the network at
+# configure time, so we wire a manual INTERFACE target instead. C++20 coroutines + senders
+# are consumed through radray/coroutine.h (radray::task), never exec::/stdexec:: directly.
+add_library(stdexec INTERFACE)
+add_library(STDEXEC::stdexec ALIAS stdexec)
+target_include_directories(stdexec SYSTEM INTERFACE "${RADRAY_THIRDPARTY_ROOT}/stdexec/include")
+target_compile_features(stdexec INTERFACE cxx_std_20)
 
 if (RADRAY_ENABLE_MIMALLOC)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)

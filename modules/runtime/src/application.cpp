@@ -6,14 +6,16 @@
 #include <mutex>
 #include <optional>
 #include <semaphore>
+#include <span>
 #include <thread>
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/runtime/render_system.h>
-#include <radray/runtime/window_system.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/window_manager.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/game_framework/world.h>
+#include <radray/window/native_window.h>
 
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
 #define RADRAY_APP_IMPL_ENABLE_VBLANK_TICK
@@ -30,7 +32,78 @@
 
 namespace radray {
 
+AppSubsystem::AppSubsystem() noexcept = default;
+
+AppSubsystem::~AppSubsystem() noexcept = default;
+
+void AppSubsystem::OnInit(Application& app) {
+    (void)app;
+}
+
+void AppSubsystem::OnUpdate(Application& app, const AppUpdateContext& ctx) {
+    (void)app;
+    (void)ctx;
+}
+
+bool AppSubsystem::OnRender(Application& app, AppFrameContext& ctx) {
+    (void)app;
+    (void)ctx;
+    return false;
+}
+
+void AppSubsystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
+    (void)app;
+    (void)ctx;
+}
+
+void AppSubsystem::OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) {
+    (void)app;
+    (void)ctx;
+}
+
+void AppSubsystem::OnShutdown(Application& app) {
+    (void)app;
+}
+
+bool AppSubsystem::IsInitialized() const noexcept {
+    return _initialized;
+}
+
+void AppSubsystem::Init(Application& app) {
+    if (_initialized) {
+        return;
+    }
+    OnInit(app);
+    _initialized = true;
+}
+
+void AppSubsystem::Shutdown(Application& app) noexcept {
+    if (!_initialized) {
+        return;
+    }
+    OnShutdown(app);
+    _initialized = false;
+}
+
+Application::Application() noexcept = default;
+
 Application::~Application() noexcept = default;
+
+void Application::OnInit() {
+}
+
+void Application::OnUpdate(const AppUpdateContext& ctx) {
+    (void)ctx;
+}
+
+bool Application::OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target) {
+    (void)ctx;
+    (void)target;
+    return false;
+}
+
+void Application::OnShutdown() {
+}
 
 class SingleThreadRunner;
 
@@ -54,7 +127,11 @@ public:
     }
 
     static bool IsSupported(const Application* app) noexcept {
-        const render::RenderBackend backend = app->_renderSystem->_device->GetBackend();
+        const GpuSystem* gpuSystem = app->GetGpuSystem();
+        if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr) {
+            return false;
+        }
+        const render::RenderBackend backend = gpuSystem->GetDevice()->GetBackend();
         return backend == render::RenderBackend::D3D12 || backend == render::RenderBackend::Vulkan;
     }
 
@@ -192,18 +269,15 @@ public:
             return _modalHwnd;
         }
 
-        if (_app->_windowSystem == nullptr) {
+        const WindowManager* windowManager = _app->GetWindowManager();
+        if (windowManager == nullptr) {
             return nullptr;
         }
-        for (const auto& window : _app->_windowSystem->_windows) {
-            if (window->_isMain && window->_window != nullptr && window->_window->GetType() == NativeWindowType::Win32HWND) {
-                return static_cast<HWND>(window->_window->GetNativeHandler());
-            }
+        if (NativeWindow* window = windowManager->FindMainNativeWindow(NativeWindowType::Win32HWND)) {
+            return static_cast<HWND>(window->GetNativeHandler());
         }
-        for (const auto& window : _app->_windowSystem->_windows) {
-            if (window->_window != nullptr && window->_window->GetType() == NativeWindowType::Win32HWND) {
-                return static_cast<HWND>(window->_window->GetNativeHandler());
-            }
+        if (NativeWindow* window = windowManager->FindFirstNativeWindow(NativeWindowType::Win32HWND)) {
+            return static_cast<HWND>(window->GetNativeHandler());
         }
         return nullptr;
     }
@@ -307,7 +381,7 @@ class SingleThreadRunner {
 public:
     explicit SingleThreadRunner(Application* app)
         : _app(app),
-          _modalLoopTickConnection(_app->_windowSystem->_eventPump->EventModalLoopTick().connect(&SingleThreadRunner::OnModalLoopTick, this)) {}
+          _modalLoopTickConnection(_app->GetWindowManager()->EventModalLoopTick().connect(&SingleThreadRunner::OnModalLoopTick, this)) {}
 
     int Run() {
         while (true) {
@@ -317,7 +391,7 @@ public:
             CheckFrameComplete(false);
             _hasModalLoopActivityDuringDispatch = false;
             _isDispatchingEvents = true;
-            _app->_windowSystem->_eventPump->DispatchEvents();
+            _app->GetWindowManager()->DispatchEvents();
             _isDispatchingEvents = false;
             if (_reqExit) {
                 break;
@@ -353,58 +427,45 @@ public:
     }
 
     bool CheckFrameComplete(bool isInModalLoop) {
-        auto* renderSystem = _app->_renderSystem.get();
-        const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flights[flightIndex];
-        if (flight.Signal.IsValid()) {
-            if (isInModalLoop) {
-                if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
-                    return false;
-                }
-            } else {
-                flight.Signal.Fence->Wait(flight.Signal.Value);
-            }
-            renderSystem->CompleteFlight(flightIndex);
-        }
-        return true;
+        auto* gpuSystem = _app->GetGpuSystem();
+        const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
+        return gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop);
     }
 
     void TickFrame(bool isInModalLoop) {
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
-        auto* renderSystem = _app->_renderSystem.get();
-        const uint32_t flightIndex = static_cast<uint32_t>(renderSystem->_nowFrameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flights[flightIndex];
-        flight.WaitForDestroy.clear();
-        flight.FrameStartTime = std::chrono::steady_clock::now();
+        auto* gpuSystem = _app->GetGpuSystem();
+        const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
+        gpuSystem->BeginUpdateForFlight(flightIndex);
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
         _lastFrameTime = now;
 
-        _app->_windowSystem->CheckRecreateSwapChains();
+        _app->GetWindowManager()->CheckRecreateSwapChains();
+        gpuSystem->PumpFrameUploadScheduler();
 
         auto result = _app->Update(AppUpdateContext{
             .FlightIndex = flightIndex,
             .DeltaTime = deltaTime,
-            .LastFrameLatency = renderSystem->_lastFrameLatency});
+            .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
         _reqExit = result.ShouldExit;
         if (_reqExit) {
             return;
         }
 
-        _app->_windowSystem->CheckRecreateSwapChains();
+        _app->GetWindowManager()->CheckRecreateSwapChains();
 
-        auto* renderSystemPtr = renderSystem;
-        AppFrameContext frameCtx = renderSystemPtr->BeginFrameRecord(
+        AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
             deltaTime,
-            renderSystemPtr->_lastFrameLatency,
+            gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
         _app->Render(frameCtx);
-        renderSystemPtr->EndFrameRecordAndSubmit(flightIndex);
-        renderSystem->_nowFrameIndex++;
+        gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+        gpuSystem->AdvanceFrameIndex();
     }
 
     bool IsExitRequested() const noexcept {
@@ -461,16 +522,16 @@ class ThreadedRunner {
 public:
     explicit ThreadedRunner(Application* app)
         : _app(app),
-          _modalLoopTickConnection(_app->_windowSystem->_eventPump->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this)),
-          _writableSlotsSemaphore(_app->_renderSystem->_flightDataCount),
+          _modalLoopTickConnection(_app->GetWindowManager()->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this)),
+          _writableSlotsSemaphore(_app->GetGpuSystem()->GetFlightDataCount()),
           _readySlotsSemaphore(0),
-          _runnerFrameDatas(_app->_renderSystem->_flightDataCount),
+          _runnerFrameDatas(_app->GetGpuSystem()->GetFlightDataCount()),
           _renderThread(&ThreadedRunner::RenderThread, this) {}
 
     int Run() {
         while (true) {
             _hasModalLoopActivityDuringDispatch = false;
-            _app->_windowSystem->_eventPump->DispatchEvents();
+            _app->GetWindowManager()->DispatchEvents();
 
             if (_reqExit) {
                 break;
@@ -501,7 +562,7 @@ public:
         while (true) {
             RetireRenderedFrames(false, true);
 
-            auto* renderSystem = _app->_renderSystem.get();
+            auto* gpuSystem = _app->GetGpuSystem();
             _readySlotsSemaphore.acquire();
 
             if (_reqExit) {
@@ -509,7 +570,7 @@ public:
                 break;
             }
 
-            uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % renderSystem->_flightDataCount);
+            uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % gpuSystem->GetFlightDataCount());
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
             if (!runnerFrameData.IsInModalLoop && _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire)) {
                 _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
@@ -517,13 +578,13 @@ public:
                 NotifyRenderFrameComplete(_renderFrameIndex);
                 continue;
             }
-            AppFrameContext frameCtx = renderSystem->BeginFrameRecord(
+            AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
                 flightIndex,
                 runnerFrameData.DeltaTime,
-                renderSystem->_lastFrameLatency,
+                gpuSystem->GetLastFrameLatency(),
                 runnerFrameData.IsInModalLoop);
             _app->Render(frameCtx);
-            renderSystem->EndFrameRecordAndSubmit(flightIndex);
+            gpuSystem->EndFrameRecordAndSubmit(flightIndex);
 
             _renderFrameIndex++;
             NotifyRenderFrameComplete(_renderFrameIndex);
@@ -536,7 +597,7 @@ public:
             return;
         }
 
-        const uint64_t frameIndex = _app->_renderSystem->_nowFrameIndex;
+        const uint64_t frameIndex = _app->GetGpuSystem()->GetFrameIndex();
         _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
         WaitRenderFrameComplete(frameIndex);
         RetireRenderedFrames(false, false);
@@ -546,18 +607,18 @@ public:
     }
 
     void CheckRecreateSwapChains() {
-        auto* windowSystem = _app->_windowSystem.get();
-        if (!windowSystem->HasSwapChainToRecreate()) {
+        auto* windowManager = _app->GetWindowManager();
+        if (!windowManager->HasSwapChainToRecreate()) {
             return;
         }
         WaitRenderThreadIdle();
-        windowSystem->CheckRecreateSwapChains();
+        windowManager->CheckRecreateSwapChains();
     }
 
     std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
-        auto* renderSystem = _app->_renderSystem.get();
+        auto* gpuSystem = _app->GetGpuSystem();
         if (waitForWritableSlot) {
-            WaitRenderFrameComplete(renderSystem->_nowFrameIndex);
+            WaitRenderFrameComplete(gpuSystem->GetFrameIndex());
             RetireRenderedFrames(false, false);
             CheckRecreateSwapChains();
             _writableSlotsSemaphore.acquire();
@@ -567,11 +628,9 @@ public:
             CheckRecreateSwapChains();
         }
 
-        const uint64_t frameIndex = renderSystem->_nowFrameIndex;
-        const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % renderSystem->_flightDataCount);
-        auto& flight = renderSystem->_flights[flightIndex];
-        flight.WaitForDestroy.clear();
-        flight.FrameStartTime = std::chrono::steady_clock::now();
+        const uint64_t frameIndex = gpuSystem->GetFrameIndex();
+        const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
+        gpuSystem->BeginUpdateForFlight(flightIndex);
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
@@ -579,10 +638,11 @@ public:
 
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
         _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
+        gpuSystem->PumpFrameUploadScheduler();
         auto result = _app->Update(AppUpdateContext{
             .FlightIndex = flightIndex,
             .DeltaTime = deltaTime,
-            .LastFrameLatency = renderSystem->_lastFrameLatency});
+            .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
         _reqExit = result.ShouldExit;
         if (_reqExit) {
             return std::nullopt;
@@ -590,7 +650,7 @@ public:
 
         CheckRecreateSwapChains();
 
-        renderSystem->_nowFrameIndex++;
+        gpuSystem->AdvanceFrameIndex();
         _readySlotsSemaphore.release();
         return frameIndex + 1;
     }
@@ -609,28 +669,23 @@ public:
     }
 
     void WaitRenderThreadIdle() {
-        WaitRenderFrameComplete(_app->_renderSystem->_nowFrameIndex);
+        WaitRenderFrameComplete(_app->GetGpuSystem()->GetFrameIndex());
         RetireRenderedFrames(true, false);
     }
 
     void RetireRenderedFrames(bool waitForPendingFrames, bool waitWhenFrameSlotsFull) {
         std::lock_guard lock(_retireMutex);
-        auto* renderSystem = _app->_renderSystem.get();
+        auto* gpuSystem = _app->GetGpuSystem();
         const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
         while (_retireFrameIndex < renderedFrameCount) {
             const uint64_t inFlightFrameCount = renderedFrameCount - _retireFrameIndex;
-            const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % renderSystem->_flightDataCount);
-            auto& flight = renderSystem->_flights[flightIndex];
-            if (flight.Signal.IsValid()) {
-                if (waitForPendingFrames) {
-                    flight.Signal.Fence->Wait(flight.Signal.Value);
-                } else if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
-                    if (!waitWhenFrameSlotsFull || inFlightFrameCount < renderSystem->_flightDataCount) {
-                        break;
-                    }
-                    flight.Signal.Fence->Wait(flight.Signal.Value);
-                }
-                renderSystem->CompleteFlight(flightIndex);
+            const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
+            bool wait = waitForPendingFrames;
+            if (!wait && waitWhenFrameSlotsFull && inFlightFrameCount >= gpuSystem->GetFlightDataCount()) {
+                wait = true;
+            }
+            if (!gpuSystem->CompleteFlightIfReady(flightIndex, wait)) {
+                break;
             }
             _retireFrameIndex++;
             _writableSlotsSemaphore.release();
@@ -661,47 +716,45 @@ public:
     std::thread _renderThread;
 };
 
-AppWindowSystem* Application::InitWindowSystem(const AppWindowSystemDescriptor& desc) {
-    if (_windowSystem) {
-        RADRAY_WARN_LOG("window system already initialized");
-        return _windowSystem.get();
+WindowManager* Application::InitWindowManager(const WindowManagerDescriptor& desc) {
+    if (_windowManager) {
+        RADRAY_WARN_LOG("window manager already initialized");
+        return _windowManager.get();
     }
-    _windowSystem = make_unique<AppWindowSystem>(this, desc);
-    if (_renderSystem) {
-        _windowSystem->_renderSystem = _renderSystem.get();
-        _renderSystem->_windowSystem = _windowSystem.get();
+    _windowManager = make_unique<WindowManager>(this, desc);
+    if (_gpuSystem) {
+        _windowManager->SetGpuSystem(_gpuSystem.get());
+        _gpuSystem->SetWindowManager(_windowManager.get());
     }
-    return _windowSystem.get();
+    return _windowManager.get();
 }
 
-void Application::ShutdownWindowSystem() {
-    if (_renderSystem) {
-        _renderSystem->_windowSystem = nullptr;
+void Application::ShutdownWindowManager() {
+    if (_gpuSystem) {
+        _gpuSystem->SetWindowManager(nullptr);
     }
-    _windowSystem.reset();
+    _windowManager.reset();
 }
 
-AppRenderSystem* Application::InitRenderSystem(const AppRenderSystemDescriptor& desc) {
-    if (_renderSystem) {
-        RADRAY_WARN_LOG("render system already initialized");
-        return _renderSystem.get();
+GpuSystem* Application::InitGpuSystem(const GpuSystemDescriptor& desc) {
+    if (_gpuSystem) {
+        RADRAY_WARN_LOG("gpu system already initialized");
+        return _gpuSystem.get();
     }
-    _renderSystem = make_unique<AppRenderSystem>(this, desc);
-    if (_windowSystem) {
-        _renderSystem->_windowSystem = _windowSystem.get();
-        _windowSystem->_renderSystem = _renderSystem.get();
+    _gpuSystem = make_unique<GpuSystem>(this, desc);
+    if (_windowManager) {
+        _gpuSystem->SetWindowManager(_windowManager.get());
+        _windowManager->SetGpuSystem(_gpuSystem.get());
     }
-    return _renderSystem.get();
+    return _gpuSystem.get();
 }
 
-void Application::ShutdownRenderSystem() {
-    if (_windowSystem) {
-        for (const auto& window : _windowSystem->_windows) {
-            window->DetachSwapChain();
-        }
-        _windowSystem->_renderSystem = nullptr;
+void Application::ShutdownGpuSystem() {
+    if (_windowManager) {
+        _windowManager->DetachAllSwapChains();
+        _windowManager->SetGpuSystem(nullptr);
     }
-    _renderSystem.reset();
+    _gpuSystem.reset();
 }
 
 AssetManager* Application::InitAssetManager() {
@@ -730,22 +783,293 @@ void Application::ShutdownWorld() {
     _world.reset();
 }
 
+AppSubsystem* Application::RegisterSubsystem(RuntimeTypeId type, unique_ptr<AppSubsystem> subsystem) {
+    for (const unique_ptr<AppSubsystem>& existing : _subsystems) {
+        if (existing != nullptr && existing->_type == type) {
+            return existing.get();
+        }
+    }
+    if (subsystem == nullptr) {
+        return nullptr;
+    }
+
+    AppSubsystem* raw = subsystem.get();
+    const size_t index = _subsystems.size();
+    raw->_type = type;
+    _subsystems.emplace_back(std::move(subsystem));
+    if (_runtimeInitialized) {
+        InitSubsystemAt(index);
+    }
+    return raw;
+}
+
+AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) noexcept {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr && subsystem->_type == type) {
+            return subsystem.get();
+        }
+    }
+    return nullptr;
+}
+
+const AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) const noexcept {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr && subsystem->_type == type) {
+            return subsystem.get();
+        }
+    }
+    return nullptr;
+}
+
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
     OnRenderComplete(ctx);
 
-    if (_windowSystem == nullptr || _renderSystem == nullptr) {
+    if (_windowManager == nullptr || _gpuSystem == nullptr) {
         return;
     }
+    // backbuffer view 的回收是 WindowManager 的职责：该 flight 渲染完成后释放其持有的 view。
+    _windowManager->ReleaseBackBufferViewsForFlight(ctx.FlightIndex);
+}
 
-    for (const unique_ptr<AppWindow>& window : _windowSystem->_windows) {
-        for (AppWindow::BackBufferView& backBufferView : window->_backBufferViews) {
-            if (backBufferView.View == nullptr || backBufferView.FlightIndex != ctx.FlightIndex) {
-                continue;
-            }
-            backBufferView.View.reset();
-            backBufferView.BackBuffer = nullptr;
+// ════════════════════════════════════════════════════════════════
+//  固化的帧序 / 生命周期(框架驱动,非游戏 override 点)
+// ════════════════════════════════════════════════════════════════
+
+void Application::InitSubsystemAt(size_t index) {
+    if (index >= _subsystems.size()) {
+        return;
+    }
+    if (_subsystems[index] != nullptr) {
+        _subsystems[index]->Init(*this);
+    }
+}
+
+void Application::InitSubsystems() {
+    for (size_t i = 0; i < _subsystems.size(); ++i) {
+        InitSubsystemAt(i);
+    }
+}
+
+void Application::ShutdownSubsystems() noexcept {
+    for (size_t i = _subsystems.size(); i > 0; --i) {
+        const size_t index = i - 1;
+        if (_subsystems[index] != nullptr) {
+            _subsystems[index]->Shutdown(*this);
         }
     }
+    _subsystems.clear();
+}
+
+AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
+    // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
+    if (_assetManager != nullptr) {
+        _assetManager->Pump();
+    }
+    // 2) 游戏逻辑。
+    OnUpdate(ctx);
+    // 3) World Tick(组件解析当帧就绪的资产、建代理)。
+    if (_world != nullptr) {
+        _world->Tick(ctx.DeltaTime.count());
+    }
+    // 4) 注册子系统帧更新。UI、调试层等可在这里推进自己的游戏线程状态。
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr) {
+            subsystem->OnUpdate(*this, ctx);
+        }
+    }
+    return AppUpdateResult{ShouldExit()};
+}
+
+bool Application::ShouldExit() const noexcept {
+    return _windowManager != nullptr && _windowManager->ShouldExit();
+}
+
+void Application::RenderWindow(AppFrameContext& ctx, AppWindow* window) {
+    if (window == nullptr || window->GetSwapChain() == nullptr || window->IsMinimized()) {
+        return;
+    }
+    std::optional<AppFrameTarget> targetOpt = ctx.AcquireWindow(window);
+    if (!targetOpt.has_value()) {
+        return;
+    }
+    AppFrameTarget& target = targetOpt.value();
+    render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
+    const render::TextureStates beforeState = window->GetBackBufferState(target.BackBufferIndex);
+
+    render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
+        .Target = target.BackBuffer,
+        .Before = beforeState,
+        .After = render::TextureState::RenderTarget};
+    cmdBuffer->ResourceBarrier(std::span{&toRenderTarget, 1});
+
+    bool contentDrawn = RenderViewContent(ctx, target);
+    if (!contentDrawn) {
+        // 无内容:用一个 Clear-only render pass 把 backbuffer 翻到 RenderTarget 并清屏。
+        render::ColorAttachment colorAttachment{
+            .Target = target.BackBufferView,
+            .Load = render::LoadAction::Clear,
+            .Store = render::StoreAction::Store,
+            .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
+        render::RenderPassDescriptor renderPassDesc{
+            .ColorAttachments = std::span{&colorAttachment, 1},
+            .Name = window->IsMainWindow() ? "Main Window" : "Window"};
+        auto encoderOpt = cmdBuffer->BeginRenderPass(renderPassDesc);
+        if (encoderOpt.HasValue()) {
+            auto encoder = encoderOpt.Release();
+            cmdBuffer->EndRenderPass(std::move(encoder));
+        }
+    }
+
+    render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
+        .Target = target.BackBuffer,
+        .Before = render::TextureState::RenderTarget,
+        .After = render::TextureState::Present};
+    cmdBuffer->ResourceBarrier(std::span{&toPresent, 1});
+    window->SetBackBufferState(target.BackBufferIndex, render::TextureState::Present);
+}
+
+void Application::RenderWindows(AppFrameContext& ctx) {
+    if (_windowManager == nullptr) {
+        return;
+    }
+    const size_t windowCount = _windowManager->GetWindowCount();
+    for (size_t i = 0; i < windowCount; ++i) {
+        RenderWindow(ctx, _windowManager->GetWindow(i));
+    }
+}
+
+void Application::Render(AppFrameContext& ctx) {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr && subsystem->OnRender(*this, ctx)) {
+            return;
+        }
+    }
+    RenderWindows(ctx);
+}
+
+bool Application::RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& target) {
+    return OnRenderView(ctx, target);
+}
+
+void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr) {
+            subsystem->OnRenderComplete(*this, ctx);
+        }
+    }
+}
+
+void Application::OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr) {
+            subsystem->OnSwapChainRecreate(*this, ctx);
+        }
+    }
+}
+
+int Application::Shutdown(const AppShutdownContext& ctx) {
+    (void)ctx;
+    if (_gpuSystem != nullptr) {
+        _gpuSystem->WaitAndCleanupCompletedFlights();
+    }
+    // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
+    OnShutdown();
+    // 子系统可能持有窗口、renderer、GPU 临时资源；在 World / AssetManager 拆除前释放。
+    ShutdownSubsystems();
+    // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
+    ShutdownWorld();
+    // 缓存的 PSO 引用 GpuSystem 拥有的 shader / root signature,先清。
+    if (_gpuSystem != nullptr) {
+        _gpuSystem->GetPSOCache().Clear();
+    }
+    // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
+    ShutdownAssetManager();
+    if (_windowManager != nullptr) {
+        if (AppWindow* mainWindow = _windowManager->GetMainWindow()) {
+            mainWindow->DetachSwapChain();
+        }
+    }
+    ShutdownGpuSystem();
+    ShutdownWindowManager();
+    _device.reset();
+    _dxgiFactory.reset();
+    _runtimeInitialized = false;
+    return 0;
+}
+
+void Application::InitRuntime(const ApplicationRuntimeDescriptor& desc) {
+    _multithreaded = desc.Multithreaded;
+
+    // —— device / instance ——
+    if (desc.Backend == render::RenderBackend::Vulkan) {
+        render::VulkanInstanceDescriptor insDesc{
+            .AppName = desc.AppName,
+            .EngineName = desc.EngineName,
+            .IsEnableDebugLayer = desc.EnableValidation,
+            .IsEnableGpuBasedValid = false};
+        render::InstanceVulkan::InitEnv(insDesc).Unwrap();
+        render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
+        render::VulkanDeviceDescriptor deviceDesc{};
+        deviceDesc.Queues = std::span{&queueDesc, 1};
+        _device = render::Device::Create(deviceDesc).Unwrap();
+    } else if (desc.Backend == render::RenderBackend::D3D12) {
+        render::DXGIFactoryDescriptor dxgiDesc{};
+        dxgiDesc.IsEnableDebugLayer = desc.EnableValidation;
+        dxgiDesc.IsEnableGpuBasedValid = desc.EnableValidation;
+        _dxgiFactory = render::DXGIFactory::Create(dxgiDesc).Unwrap();
+        render::D3D12DeviceDescriptor deviceDesc{};
+        deviceDesc.Factory = _dxgiFactory.get();
+        _device = render::Device::Create(deviceDesc).Unwrap();
+    } else {
+        RADRAY_ABORT("unsupported render backend");
+    }
+
+    // —— window manager ——
+    WindowManagerDescriptor windowManagerDesc{};
+#ifdef RADRAY_PLATFORM_WINDOWS
+    windowManagerDesc.Type = NativeWindowType::Win32HWND;
+#endif
+    InitWindowManager(windowManagerDesc);
+
+    // —— gpu system ——
+    GpuSystemDescriptor gpuSysDesc{
+        .Device = _device.get(),
+        .MainQueueIndex = 0,
+        .BackBufferCount = desc.BackBufferCount,
+        .FlightDataCount = desc.FlightDataCount};
+    InitGpuSystem(gpuSysDesc);
+
+    // —— main window + swapchain ——
+#ifdef RADRAY_PLATFORM_WINDOWS
+    Win32WindowCreateDescriptor wndDesc{};
+    wndDesc.Title = desc.WindowTitle;
+    wndDesc.Width = desc.WindowWidth;
+    wndDesc.Height = desc.WindowHeight;
+    wndDesc.Resizable = true;
+    wndDesc.StartVisible = true;
+    AppWindow* mainWindow = _windowManager->CreateWindow(wndDesc, true);
+#else
+    RADRAY_ABORT("unsupported platform");
+#endif
+    render::SwapChainDescriptor swapchainDesc{};
+    swapchainDesc.Width = static_cast<uint32_t>(desc.WindowWidth);
+    swapchainDesc.Height = static_cast<uint32_t>(desc.WindowHeight);
+    swapchainDesc.Format = desc.BackBufferFormat;
+    swapchainDesc.PresentMode = desc.PresentMode;
+    mainWindow->AttachSwapChain(swapchainDesc);
+
+    // —— 引擎级资产仓库 + 当前 World ——
+    InitAssetManager();
+    InitWorld();
+
+    _runtimeInitialized = true;
+    InitSubsystems();
+}
+
+int Application::Run(const ApplicationRuntimeDescriptor& desc) {
+    InitRuntime(desc);
+    OnInit();
+    return StartLoop();
 }
 
 int Application::StartLoop() {

@@ -27,6 +27,11 @@ public:
 protected:
     void OnTransformChanged() override;
 
+    /// 重建 SceneProxy：移除旧代理(若有)、CreateSceneProxy 重建并注册。
+    /// 供资产异步就绪后由组件调用(如 StaticMeshComponent::TickComponent)。
+    /// 未注册或 CreateSceneProxy 返回 nullptr 时不做任何事。
+    void RecreateSceneProxy();
+
 private:
     Scene* GetScene() const noexcept;
 

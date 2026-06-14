@@ -1,42 +1,87 @@
 #include <radray/runtime/renderer/static_mesh_scene_proxy.h>
 
 #include <radray/logger.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/gpu_system.h>
 #include <radray/runtime/static_mesh.h>
-#include <radray/runtime/vertex_factory.h>
 
 namespace radray {
 
-StaticMeshSceneProxy::StaticMeshSceneProxy(AssetRef<StaticMesh> mesh, AssetRef<Material> material) noexcept
+namespace {
+
+struct StaticMeshVertexLayout {
+    vector<render::VertexElement> Elements;
+    uint64_t Stride{0};
+};
+
+render::VertexFormat ToVertexFormat(VertexDataType type, uint16_t componentCount) noexcept {
+    switch (type) {
+        case VertexDataType::FLOAT:
+            switch (componentCount) {
+                case 1: return render::VertexFormat::FLOAT32;
+                case 2: return render::VertexFormat::FLOAT32X2;
+                case 3: return render::VertexFormat::FLOAT32X3;
+                case 4: return render::VertexFormat::FLOAT32X4;
+                default: return render::VertexFormat::UNKNOWN;
+            }
+        case VertexDataType::UINT:
+            switch (componentCount) {
+                case 1: return render::VertexFormat::UINT32;
+                case 2: return render::VertexFormat::UINT32X2;
+                case 3: return render::VertexFormat::UINT32X3;
+                case 4: return render::VertexFormat::UINT32X4;
+                default: return render::VertexFormat::UNKNOWN;
+            }
+        case VertexDataType::SINT:
+            switch (componentCount) {
+                case 1: return render::VertexFormat::SINT32;
+                case 2: return render::VertexFormat::SINT32X2;
+                case 3: return render::VertexFormat::SINT32X3;
+                case 4: return render::VertexFormat::SINT32X4;
+                default: return render::VertexFormat::UNKNOWN;
+            }
+        default:
+            return render::VertexFormat::UNKNOWN;
+    }
+}
+
+StaticMeshVertexLayout BuildStaticMeshVertexLayout(const MeshPrimitive& primitive) {
+    StaticMeshVertexLayout layout{};
+    uint32_t location = 0;
+    for (const VertexBufferEntry& entry : primitive.VertexBuffers) {
+        render::VertexFormat fmt = ToVertexFormat(entry.Type, entry.ComponentCount);
+        if (fmt == render::VertexFormat::UNKNOWN) {
+            RADRAY_ERR_LOG("StaticMeshSceneProxy: unsupported vertex attribute '{}'", entry.Semantic);
+            layout.Elements.clear();
+            layout.Stride = 0;
+            return layout;
+        }
+        layout.Elements.emplace_back(render::VertexElement{
+            .Offset = entry.Offset,
+            .Semantic = entry.Semantic,
+            .SemanticIndex = entry.SemanticIndex,
+            .Format = fmt,
+            .Location = location++});
+        layout.Stride = entry.Stride;  // single interleaved buffer: stride is shared
+    }
+    return layout;
+}
+
+}  // namespace
+
+StaticMeshSceneProxy::StaticMeshSceneProxy(
+    StreamingAssetRef<StaticMesh> mesh,
+    StreamingAssetRef<Material> material) noexcept
     : _mesh(std::move(mesh)),
       _material(std::move(material)) {
-    // 不在此构建/上传:生命周期初态 Pending。渲染系统在帧顶 UpdateResources 上传并推进到 Ready。
+    // 资产在构造代理前已由 AssetManager 保证 GPU 就绪(StaticMesh 构造即完整),
+    // 故这里直接构建几何单元。
+    BuildGeometry();
 }
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
 bool StaticMeshSceneProxy::IsRenderable() const noexcept {
-    return GetResourceState() == ResourceState::Ready && !_batchElements.empty() && !_vertexElements.empty();
-}
-
-void StaticMeshSceneProxy::UpdateResources(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader) {
-    // 仅在 Pending 态被调用(SceneRenderer::PrepareResources 保证)。
-    StaticMesh* mesh = _mesh.Get();
-    if (mesh == nullptr) {
-        return;  // 资产丢失:保持 Pending,下帧再试(实际不应发生,代理持有 AssetRef)。
-    }
-    if (!mesh->HasRenderData()) {
-        // 共享去重:同一 StaticMesh 被多个代理引用时仅上传一次,后续代理走 HasRenderData 分支。
-        std::optional<render::RenderMesh> renderMeshOpt = uploader.UploadMesh(cmdBuffer, mesh, _mesh.AsAny());
-        if (!renderMeshOpt.has_value()) {
-            RADRAY_ERR_LOG("StaticMeshSceneProxy: failed to upload mesh '{}'", mesh->GetMeshResource().Name);
-            return;  // 保持 Pending,下帧再试。
-        }
-        mesh->SetRenderMesh(std::move(renderMeshOpt.value()));
-    }
-    // 此后 GPU 数据就绪且不变,一次构建几何即可。
-    BuildGeometry();
-    SetResourceState(ResourceState::Ready);
+    return !_batchElements.empty() && !_vertexElements.empty();
 }
 
 void StaticMeshSceneProxy::CollectBatchElements(vector<MeshBatchElement>& out) const {
@@ -57,7 +102,7 @@ void StaticMeshSceneProxy::BuildGeometry() noexcept {
 
     // 顶点布局:从第一个 primitive 推导(单交错缓冲)。
     if (!meshResource.Primitives.empty()) {
-        VertexFactory::Layout layout = VertexFactory::BuildLayout(meshResource.Primitives[0]);
+        StaticMeshVertexLayout layout = BuildStaticMeshVertexLayout(meshResource.Primitives[0]);
         _vertexElements = std::move(layout.Elements);
         _vertexLayout = render::VertexBufferLayout{
             layout.Stride,

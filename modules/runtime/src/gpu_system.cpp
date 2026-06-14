@@ -1,4 +1,4 @@
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/gpu_system.h>
 
 #include <radray/basic_math.h>
 #include <radray/file.h>
@@ -10,9 +10,7 @@
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/material.h>
-#include <radray/runtime/static_mesh.h>
-#include <radray/runtime/vertex_factory.h>
-#include <radray/runtime/window_system.h>
+#include <radray/runtime/window_manager.h>
 
 #include <algorithm>
 #include <cstring>
@@ -49,24 +47,404 @@ std::optional<uint64_t> GetSubresourceUploadSize(
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════
-//  AppRenderSystem
+//  FrameUploadScheduler
 // ═══════════════════════════════════════════════════════════════
 
-bool AppRenderSystem::CompleteFlight(uint32_t flightIndex) {
+void FrameUploadStopCallback::operator()() const noexcept {
+    if (Scheduler != nullptr && Record != nullptr) {
+        Scheduler->CancelRecord(Record);
+    }
+}
+
+FrameUploadScheduler::~FrameUploadScheduler() noexcept {
+    while (!_uploads.empty()) {
+        FrameUploadRecord* rec = _uploads.back().get();
+        if (rec == nullptr) {
+            _uploads.pop_back();
+            continue;
+        }
+        rec->Canceled = true;
+        ResumeRecord(rec);
+        if (IsUploadAlive(rec)) {
+            EraseUpload(rec);
+        }
+    }
+}
+
+task<FrameUploadScope> FrameUploadScheduler::BeginUpload() {
+    stop_token stop = co_await CurrentStopToken();
+    std::optional<FrameUploadScope> frame = co_await BeginFrameUploadAwaitable{this, stop};
+    if (!frame.has_value()) {
+        co_await StopCurrentTask();
+        co_return FrameUploadScope{};
+    }
+    co_return frame.value();
+}
+
+FrameUploadRecord* FrameUploadScheduler::RegisterUpload(stop_token stop, std::coroutine_handle<> continuation) {
+    auto rec = make_unique<FrameUploadRecord>();
+    rec->Scheduler = this;
+    rec->Continuation = continuation;
+    rec->Stop = stop;
+    rec->CurrentStage = FrameUploadStage::AwaitingFrame;
+    FrameUploadRecord* ptr = rec.get();
+    _uploads.emplace_back(std::move(rec));
+    if (stop.stop_requested()) {
+        ptr->Canceled = true;
+    } else if (stop.stop_possible()) {
+        ptr->StopCallback.emplace(stop, FrameUploadStopCallback{this, ptr});
+    }
+    return ptr;
+}
+
+bool FrameUploadScheduler::EraseUpload(FrameUploadRecord* record) noexcept {
+    for (size_t i = 0; i < _uploads.size(); ++i) {
+        if (_uploads[i].get() == record) {
+            _uploads[i]->StopCallback.reset();
+            _uploads.erase(_uploads.begin() + static_cast<ptrdiff_t>(i));
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FrameUploadScheduler::IsUploadAlive(FrameUploadRecord* record) const noexcept {
+    for (const auto& rec : _uploads) {
+        if (rec.get() == record) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void FrameUploadScheduler::ResumeRecord(FrameUploadRecord* record) {
+    if (record == nullptr) {
+        return;
+    }
+    std::coroutine_handle<> continuation = record->Continuation;
+    record->Continuation = {};
+    if (continuation) {
+        continuation.resume();
+    }
+}
+
+void FrameUploadScheduler::CancelRecord(FrameUploadRecord* record) noexcept {
+    if (record == nullptr) {
+        return;
+    }
+    record->Canceled = true;
+    ResumeRecord(record);
+}
+
+void FrameUploadScheduler::RunUploadPhase(
+    render::CommandBuffer* cmdBuffer,
+    ResourceUploader& uploader,
+    uint32_t flightIndex) {
+    vector<FrameUploadRecord*> pending;
+    for (auto& recPtr : _uploads) {
+        if (recPtr->CurrentStage == FrameUploadStage::AwaitingFrame) {
+            pending.push_back(recPtr.get());
+        }
+    }
+
+    for (FrameUploadRecord* rec : pending) {
+        if (rec->Canceled || rec->Stop.stop_requested()) {
+            rec->Canceled = true;
+            ResumeRecord(rec);
+            if (IsUploadAlive(rec)) {
+                EraseUpload(rec);
+            }
+            continue;
+        }
+
+        rec->Cmd = cmdBuffer;
+        rec->Uploader = &uploader;
+        rec->FlightIndex = flightIndex;
+        rec->CurrentStage = FrameUploadStage::InFrame;
+
+        ResumeRecord(rec);
+
+        if (!IsUploadAlive(rec)) {
+            continue;
+        }
+        if (rec->CurrentStage != FrameUploadStage::AwaitingFence) {
+            EraseUpload(rec);
+            continue;
+        }
+    }
+}
+
+void FrameUploadScheduler::NotifyFlightComplete(uint32_t flightIndex) {
+    for (auto& recPtr : _uploads) {
+        FrameUploadRecord* rec = recPtr.get();
+        if (rec->CurrentStage == FrameUploadStage::AwaitingFence && rec->FlightIndex == flightIndex) {
+            rec->CurrentStage = FrameUploadStage::FenceComplete;
+        }
+    }
+}
+
+void FrameUploadScheduler::PumpCompletedUploads() {
+    bool resumedAny = true;
+    while (resumedAny) {
+        resumedAny = false;
+        for (size_t i = 0; i < _uploads.size();) {
+            FrameUploadRecord* rec = _uploads[i].get();
+            if (rec->Stop.stop_requested()) {
+                rec->Canceled = true;
+            }
+            if (rec->Canceled || rec->CurrentStage == FrameUploadStage::FenceComplete) {
+                ResumeRecord(rec);
+                if (IsUploadAlive(rec)) {
+                    EraseUpload(rec);
+                }
+                resumedAny = true;
+                break;
+            }
+            ++i;
+        }
+    }
+}
+
+bool WaitFrameUploadGpuAwaitable::await_ready() noexcept {
+    if (_record == nullptr) {
+        return true;
+    }
+    if (_record->Stop.stop_requested()) {
+        _record->Canceled = true;
+    }
+    return _record->Canceled || _record->CurrentStage == FrameUploadStage::FenceComplete;
+}
+
+bool WaitFrameUploadGpuAwaitable::await_suspend(std::coroutine_handle<> h) noexcept {
+    if (_record == nullptr) {
+        return false;
+    }
+    if (_record->Stop.stop_requested()) {
+        _record->Canceled = true;
+        return false;
+    }
+    _record->Continuation = h;
+    _record->CurrentStage = FrameUploadStage::AwaitingFence;
+    return true;
+}
+
+bool WaitFrameUploadGpuAwaitable::await_resume() noexcept {
+    if (_record == nullptr) {
+        return false;
+    }
+    FrameUploadScheduler* scheduler = _record->Scheduler;
+    bool completed = !_record->Canceled && _record->CurrentStage == FrameUploadStage::FenceComplete;
+    if (scheduler != nullptr) {
+        scheduler->EraseUpload(_record);
+    }
+    _record = nullptr;
+    return completed;
+}
+
+render::CommandBuffer* FrameUploadScope::GetCommandBuffer() const noexcept {
+    return _record->Cmd;
+}
+
+ResourceUploader& FrameUploadScope::GetUploader() const noexcept {
+    return *_record->Uploader;
+}
+
+uint32_t FrameUploadScope::GetFlightIndex() const noexcept {
+    return _record->FlightIndex;
+}
+
+task<void> FrameUploadScope::WaitGpu() {
+    bool completed = co_await WaitFrameUploadGpuAwaitable{_record};
+    if (!completed) {
+        co_await StopCurrentTask();
+    }
+}
+
+bool BeginFrameUploadAwaitable::await_ready() const noexcept {
+    return _scheduler == nullptr || _stop.stop_requested();
+}
+
+bool BeginFrameUploadAwaitable::await_suspend(std::coroutine_handle<> h) {
+    if (_scheduler == nullptr || _stop.stop_requested()) {
+        return false;
+    }
+    _record = _scheduler->RegisterUpload(_stop, h);
+    return true;
+}
+
+std::optional<FrameUploadScope> BeginFrameUploadAwaitable::await_resume() noexcept {
+    if (_record == nullptr) {
+        return std::nullopt;
+    }
+    if (_record->Canceled || _record->Stop.stop_requested()) {
+        _record->Canceled = true;
+        FrameUploadScheduler* scheduler = _record->Scheduler;
+        if (scheduler != nullptr) {
+            scheduler->EraseUpload(_record);
+        }
+        _record = nullptr;
+        return std::nullopt;
+    }
+    return FrameUploadScope{_record};
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  GpuSystem
+// ═══════════════════════════════════════════════════════════════
+
+bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     auto& flight = _flights[flightIndex];
     if (!flight.Signal.IsValid() || flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
         return false;
     }
 
     _lastFrameLatency = std::chrono::steady_clock::now() - flight.FrameStartTime;
-    flight.Signal = AppRenderSystem::FenceSignal::Invalid();
+    flight.Signal = GpuSystem::FenceSignal::Invalid();
+    if (_frameProfiler != nullptr) {
+        _frameProfiler->Resolve(flightIndex);
+    }
     _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
     flight.WaitForDestroy.clear();
     _uploader->CollectFlight(flightIndex);
+    // 该 flight 的 fence 已完成:标记等在这个 flight 上的上传记录(供下次 scheduler pump 恢复加载协程)。
+    if (_frameUploadScheduler != nullptr) {
+        _frameUploadScheduler->NotifyFlightComplete(flightIndex);
+    }
     return true;
 }
 
-AppRenderSystem::AppRenderSystem(Application* app, const AppRenderSystemDescriptor& desc)
+bool GpuSystem::CompleteFlightIfReady(uint32_t flightIndex, bool wait) {
+    if (flightIndex >= _flights.size()) {
+        return false;
+    }
+
+    FlightSlot& flight = _flights[flightIndex];
+    if (!flight.Signal.IsValid()) {
+        return true;
+    }
+    if (wait) {
+        flight.Signal.Fence->Wait(flight.Signal.Value);
+    } else if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
+        return false;
+    }
+    return CompleteFlight(flightIndex);
+}
+
+void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
+    if (flightIndex >= _flights.size()) {
+        return;
+    }
+
+    FlightSlot& flight = _flights[flightIndex];
+    flight.WaitForDestroy.clear();
+    flight.FrameStartTime = std::chrono::steady_clock::now();
+}
+
+// ═════════════════════════════════════════════════════════════════
+//  GpuFrameProfiler
+// ═════════════════════════════════════════════════════════════════
+
+GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount)
+    : _queue(queue) {
+    // Vulkan 需要在 readback copy 前后显式 transition;D3D12 READBACK heap 始终处于 COPY_DEST。
+    _readbackNeedsBarrier = device->GetBackend() == render::RenderBackend::Vulkan;
+    _frames.resize(flightCount);
+    for (FrameTiming& frame : _frames) {
+        render::QueryPoolDescriptor poolDesc{
+            .Type = render::QueryType::Timestamp,
+            .Count = TimestampQueryCount,
+            .DebugName = "GpuFrameProfiler Timestamp Pool"};
+        frame.Pool = device->CreateQueryPool(poolDesc).Unwrap();
+
+        render::BufferDescriptor readbackDesc{
+            .Size = sizeof(uint64_t) * TimestampQueryCount,
+            .Memory = render::MemoryType::ReadBack,
+            .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead};
+        frame.Readback = device->CreateBuffer(readbackDesc).Unwrap();
+    }
+}
+
+GpuFrameProfiler::~GpuFrameProfiler() noexcept = default;
+
+void GpuFrameProfiler::BeginFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex) {
+    if (cmdBuffer == nullptr || flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    cmdBuffer->ResetQueryPool(frame.Pool.get(), 0, TimestampQueryCount);
+    cmdBuffer->WriteTimestamp(render::QueryTimestampDescriptor{
+        .Pool = frame.Pool.get(),
+        .Stage = render::QueryPipelineStage::Top,
+        .Index = 0});
+}
+
+void GpuFrameProfiler::EndFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex) {
+    if (cmdBuffer == nullptr || flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    cmdBuffer->WriteTimestamp(render::QueryTimestampDescriptor{
+        .Pool = frame.Pool.get(),
+        .Stage = render::QueryPipelineStage::Bottom,
+        .Index = 1});
+    if (_readbackNeedsBarrier) {
+        render::ResourceBarrierDescriptor toCopyDst = render::BarrierBufferDescriptor{
+            .Target = frame.Readback.get(),
+            .Before = render::BufferState::Common,
+            .After = render::BufferState::CopyDestination};
+        cmdBuffer->ResourceBarrier(std::span{&toCopyDst, 1});
+    }
+    cmdBuffer->ResolveQueryData(render::QueryResolveDescriptor{
+        .Pool = frame.Pool.get(),
+        .FirstIndex = 0,
+        .Count = TimestampQueryCount,
+        .Destination = frame.Readback.get(),
+        .DestinationOffset = 0});
+    if (_readbackNeedsBarrier) {
+        render::ResourceBarrierDescriptor toHostRead = render::BarrierBufferDescriptor{
+            .Target = frame.Readback.get(),
+            .Before = render::BufferState::CopyDestination,
+            .After = render::BufferState::HostRead};
+        cmdBuffer->ResourceBarrier(std::span{&toHostRead, 1});
+    }
+    frame.Pending = true;
+}
+
+void GpuFrameProfiler::Resolve(uint32_t flightIndex) {
+    if (flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    if (!frame.Pending) {
+        return;
+    }
+    frame.Pending = false;
+
+    const uint64_t mappedSize = sizeof(uint64_t) * TimestampQueryCount;
+    void* mapped = frame.Readback->Map(0, mappedSize);
+    if (mapped == nullptr) {
+        return;
+    }
+    uint64_t ticks[TimestampQueryCount]{};
+    std::memcpy(ticks, mapped, mappedSize);
+    frame.Readback->Unmap(0, mappedSize);
+
+    if (ticks[1] <= ticks[0]) {
+        return;
+    }
+    const render::TimestampQueryCalibration calibration = frame.Pool->GetTimestampCalibration(_queue);
+    if (calibration.TickPeriodNs <= 0.0) {
+        return;
+    }
+    const double elapsedNs = static_cast<double>(ticks[1] - ticks[0]) * calibration.TickPeriodNs;
+    _lastGpuTimeMs = static_cast<float>(elapsedNs / 1'000'000.0);
+}
+
+// ═════════════════════════════════════════════════════════════════
+//  GpuSystem
+// ═════════════════════════════════════════════════════════════════
+
+GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     : _app(app),
       _device(desc.Device),
       _mainQueue(desc.Device->GetCommandQueue(render::QueueType::Direct, desc.MainQueueIndex).Unwrap()),
@@ -77,12 +455,29 @@ AppRenderSystem::AppRenderSystem(Application* app, const AppRenderSystemDescript
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
+    _frameUploadScheduler = make_unique<FrameUploadScheduler>();
+    _rsCache = make_unique<RSCache>(_device);
     _psoCache = make_unique<PSOCache>(_device);
+    _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
 }
 
-AppRenderSystem::~AppRenderSystem() noexcept = default;
+GpuSystem::~GpuSystem() noexcept = default;
 
-Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
+float GpuSystem::GetLastGpuTimeMs() const noexcept {
+    return _frameProfiler != nullptr ? _frameProfiler->GetLastGpuTimeMs() : 0.0f;
+}
+
+uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
+    return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
+}
+
+void GpuSystem::PumpFrameUploadScheduler() {
+    if (_frameUploadScheduler != nullptr) {
+        _frameUploadScheduler->PumpCompletedUploads();
+    }
+}
+
+Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
     const bool isSpirv = _device->GetBackend() == render::RenderBackend::Vulkan;
     string key = fmt::format(
         "{}|{}|{}|{}",
@@ -97,7 +492,7 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompil
     if (_dxc == nullptr) {
         auto dxcOpt = render::CreateDxc();
         if (!dxcOpt.HasValue()) {
-            RADRAY_ERR_LOG("AppRenderSystem: failed to create DXC compiler");
+            RADRAY_ERR_LOG("GpuSystem: failed to create DXC compiler");
             return nullptr;
         }
         _dxc = dxcOpt.Release();
@@ -112,7 +507,7 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompil
     params.IsSpirv = isSpirv;
     auto outputOpt = _dxc->Compile(params);
     if (!outputOpt.has_value()) {
-        RADRAY_ERR_LOG("AppRenderSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
+        RADRAY_ERR_LOG("GpuSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
         return nullptr;
     }
     auto output = std::move(outputOpt.value());
@@ -126,19 +521,19 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompil
             .EntryPointName = desc.EntryPoint,
             .Stage = desc.Stage});
         if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("AppRenderSystem: failed to reflect SPIR-V shader '{}'", desc.Name);
+            RADRAY_ERR_LOG("GpuSystem: failed to reflect SPIR-V shader '{}'", desc.Name);
             return nullptr;
         }
         reflection = std::move(reflOpt.value());
         category = render::ShaderBlobCategory::SPIRV;
 #else
-        RADRAY_ERR_LOG("AppRenderSystem: SPIR-V Cross reflection is not enabled in this build");
+        RADRAY_ERR_LOG("GpuSystem: SPIR-V Cross reflection is not enabled in this build");
         return nullptr;
 #endif
     } else {
         auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
         if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("AppRenderSystem: failed to reflect DXIL shader '{}'", desc.Name);
+            RADRAY_ERR_LOG("GpuSystem: failed to reflect DXIL shader '{}'", desc.Name);
             return nullptr;
         }
         reflection = std::move(reflOpt.value());
@@ -152,7 +547,7 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompil
     shaderDesc.Reflection = std::move(reflection);
     auto shaderOpt = _device->CreateShader(shaderDesc);
     if (!shaderOpt.HasValue()) {
-        RADRAY_ERR_LOG("AppRenderSystem: failed to create shader '{}'", desc.Name);
+        RADRAY_ERR_LOG("GpuSystem: failed to create shader '{}'", desc.Name);
         return nullptr;
     }
     render::Shader* raw = shaderOpt.Get();
@@ -160,14 +555,14 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShader(const ShaderCompil
     return raw;
 }
 
-Nullable<render::Shader*> AppRenderSystem::GetOrCompileShaderFromFile(
+Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     const std::filesystem::path& path,
     std::string_view entryPoint,
     render::ShaderStage stage,
     std::string_view name) {
     auto sourceOpt = ReadTextFile(path);
     if (!sourceOpt.has_value()) {
-        RADRAY_ERR_LOG("AppRenderSystem: failed to read shader file {}", path.string());
+        RADRAY_ERR_LOG("GpuSystem: failed to read shader file {}", path.string());
         return nullptr;
     }
     string pathName = name.empty() ? path.string() : string{name};
@@ -179,36 +574,11 @@ Nullable<render::Shader*> AppRenderSystem::GetOrCompileShaderFromFile(
     return GetOrCompileShader(desc);
 }
 
-Nullable<render::RootSignature*> AppRenderSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
-    if (shaders.empty()) {
-        RADRAY_ERR_LOG("AppRenderSystem: cannot create root signature from empty shader set");
-        return nullptr;
-    }
-    // 按参与的 shader 集合作为身份:同一组 shader 决定同一绑定布局，故共享一个
-    // RootSignature。指针来自 shader 缓存(稳定且去重)，排序后拼 key 使顺序无关。
-    vector<render::Shader*> sorted{shaders.begin(), shaders.end()};
-    std::sort(sorted.begin(), sorted.end());
-    string key;
-    for (render::Shader* s : sorted) {
-        key += fmt::format("{:x}|", reinterpret_cast<uintptr_t>(s));
-    }
-    if (auto it = _rootSigCache.find(key); it != _rootSigCache.end()) {
-        return it->second.get();
-    }
-
-    render::RootSignatureDescriptor rsDesc{};
-    rsDesc.Shaders = shaders;
-    auto rsOpt = _device->CreateRootSignature(rsDesc);
-    if (!rsOpt.HasValue()) {
-        RADRAY_ERR_LOG("AppRenderSystem: failed to create root signature");
-        return nullptr;
-    }
-    render::RootSignature* raw = rsOpt.Get();
-    _rootSigCache.emplace(std::move(key), rsOpt.Release());
-    return raw;
+Nullable<render::RootSignature*> GpuSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
+    return _rsCache->GetOrCreate(shaders);
 }
 
-void AppRenderSystem::WaitAndCleanupCompletedFlights() {
+void GpuSystem::WaitAndCleanupCompletedFlights() {
     _mainQueue->Wait();
 
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
@@ -216,7 +586,7 @@ void AppRenderSystem::WaitAndCleanupCompletedFlights() {
     }
 }
 
-AppFrameContext AppRenderSystem::BeginFrameRecord(
+AppFrameContext GpuSystem::BeginFrameRecord(
     uint32_t flightIndex,
     std::chrono::duration<float> deltaTime,
     std::chrono::duration<float> lastFrameLatency,
@@ -229,10 +599,19 @@ AppFrameContext AppRenderSystem::BeginFrameRecord(
     record.ManualSubmit = false;
     record.Recording = true;
     record.CmdBuffer->Begin();
+    // 帧顶(任何 RenderPass 之前、裸 CommandBuffer):交付本帧 cmd/uploader/flight 给等在
+    // GPU 上传点的加载协程并 inline 恢复,让它们在本帧默认 cmdbuffer 上录制 copy。
+    // copy 与本帧绘制同一提交,fence 完成后由 CompleteFlight 推进加载协程。
+    if (_frameUploadScheduler != nullptr) {
+        _frameUploadScheduler->RunUploadPhase(record.CmdBuffer.get(), *_uploader, flightIndex);
+    }
+    if (_frameProfiler != nullptr) {
+        _frameProfiler->BeginFrame(record.CmdBuffer.get(), flightIndex);
+    }
     return AppFrameContext{this, flightIndex, deltaTime, lastFrameLatency, isInModalLoop};
 }
 
-void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
+void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     FlightSlot& record = _flights[flightIndex];
     if (!record.Recording) {
         return;
@@ -241,6 +620,11 @@ void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 
     // 闭合上传链路：本帧录制的 staging + AssetRef 绑定到该 flight。
     _uploader->EndFlight(flightIndex);
+
+    // 帧尾 GPU 耗时收尾:写 Bottom timestamp + resolve 到 readback(在 End 之前、后续 barrier 之后录制)。
+    if (_frameProfiler != nullptr) {
+        _frameProfiler->EndFrame(record.CmdBuffer.get(), flightIndex);
+    }
 
     record.CmdBuffer->End();
 
@@ -275,7 +659,7 @@ void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
         .WaitToExecute = std::span{waitToExecute},
         .ReadyToPresent = std::span{readyToPresent}};
     _mainQueue->Submit(submitDesc);
-    _flights[flightIndex].Signal = AppRenderSystem::FenceSignal{
+    _flights[flightIndex].Signal = GpuSystem::FenceSignal{
         .Fence = frameFence,
         .Value = signalValues[0]};
 
@@ -294,11 +678,43 @@ void AppRenderSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 }
 
 // ══════════════════════════════════════════════
+//  RSCache
+// ══════════════════════════════════════════════
+
+Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*> shaders) {
+    if (shaders.empty()) {
+        RADRAY_ERR_LOG("RSCache: cannot create root signature from empty shader set");
+        return nullptr;
+    }
+
+    vector<render::Shader*> sorted{shaders.begin(), shaders.end()};
+    std::sort(sorted.begin(), sorted.end());
+    string key;
+    for (render::Shader* shader : sorted) {
+        key += fmt::format("{:x}|", reinterpret_cast<uintptr_t>(shader));
+    }
+    if (auto it = _cache.find(key); it != _cache.end()) {
+        return it->second.get();
+    }
+
+    render::RootSignatureDescriptor rsDesc{};
+    rsDesc.Shaders = shaders;
+    auto rsOpt = _device->CreateRootSignature(rsDesc);
+    if (!rsOpt.HasValue()) {
+        RADRAY_ERR_LOG("RSCache: failed to create root signature");
+        return nullptr;
+    }
+    render::RootSignature* raw = rsOpt.Get();
+    _cache.emplace(std::move(key), rsOpt.Release());
+    return raw;
+}
+
+// ══════════════════════════════════════════════
 //  AppFrameContext
 // ══════════════════════════════════════════════
 
 render::CommandBuffer* AppFrameContext::GetCommandBuffer() const noexcept {
-    return _renderSystem->_flights[_flightIndex].CmdBuffer.get();
+    return _gpuSystem->_flights[_flightIndex].CmdBuffer.get();
 }
 
 std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) {
@@ -321,36 +737,38 @@ std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) 
 
     render::SwapChainFrame frame = std::move(acquire.Frame.value());
     render::Texture* backBuffer = frame.GetBackBuffer();
+    const uint32_t backBufferIndex = frame.GetBackBufferIndex();
     render::TextureView* backBufferView = window->GetOrCreateBackBufferView(frame, _flightIndex);
     if (backBufferView == nullptr) {
         // 未能建立 view：丢弃该 frame（不提交）。
         return std::nullopt;
     }
 
-    AppRenderSystem::FlightSlot& record = _renderSystem->_flights[_flightIndex];
-    record.Targets.emplace_back(AppRenderSystem::FlightSlot::AcquiredTarget{
+    GpuSystem::FlightSlot& record = _gpuSystem->_flights[_flightIndex];
+    record.Targets.emplace_back(GpuFlightAcquiredTarget{
         .Window = window,
         .Frame = std::move(frame)});
     return AppFrameTarget{
         .Window = window,
         .BackBuffer = backBuffer,
-        .BackBufferView = backBufferView};
+        .BackBufferView = backBufferView,
+        .BackBufferIndex = backBufferIndex};
 }
 
 ResourceUploader& AppFrameContext::GetUploader() const noexcept {
-    return *_renderSystem->_uploader;
+    return *_gpuSystem->_uploader;
 }
 
 render::Device* AppFrameContext::GetDevice() const noexcept {
-    return _renderSystem->_device;
+    return _gpuSystem->_device;
 }
 
 render::CommandQueue* AppFrameContext::GetMainQueue() const noexcept {
-    return _renderSystem->_mainQueue;
+    return _gpuSystem->_mainQueue;
 }
 
 void AppFrameContext::SetManualSubmit() noexcept {
-    _renderSystem->_flights[_flightIndex].ManualSubmit = true;
+    _gpuSystem->_flights[_flightIndex].ManualSubmit = true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -446,15 +864,14 @@ void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
 ResourceUploader::ResourceUploader(render::Device* device, uint32_t flightCount)
     : _device(device),
       _stagingPool(device, flightCount) {
-    _pendingRefs.resize(flightCount);
+    (void)flightCount;
 }
 
 ResourceUploader::~ResourceUploader() noexcept = default;
 
 void ResourceUploader::UploadBuffer(
     render::CommandBuffer* cmdBuffer,
-    const BufferUploadRequest& request,
-    AssetRefAny assetRef) {
+    const BufferUploadRequest& request) {
     if (request.SrcData.empty() || request.DstBuffer == nullptr) {
         return;
     }
@@ -494,17 +911,11 @@ void ResourceUploader::UploadBuffer(
         .Before = render::BufferState::CopyDestination,
         .After = request.After};
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
-
-    // 持有强引用
-    if (assetRef.IsValid()) {
-        _currentRefs.emplace_back(std::move(assetRef));
-    }
 }
 
 void ResourceUploader::UploadTexture(
     render::CommandBuffer* cmdBuffer,
-    const TextureUploadRequest& request,
-    AssetRefAny assetRef) {
+    const TextureUploadRequest& request) {
     if (request.SrcData.empty() || request.DstTexture == nullptr) {
         return;
     }
@@ -576,35 +987,19 @@ void ResourceUploader::UploadTexture(
         .Before = render::TextureState::CopyDestination,
         .After = request.After};
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
-
-    // 持有强引用
-    if (assetRef.IsValid()) {
-        _currentRefs.emplace_back(std::move(assetRef));
-    }
 }
 
 void ResourceUploader::EndFlight(uint32_t flightIndex) {
     _stagingPool.RetireToFlight(flightIndex);
-    auto& refs = _pendingRefs[flightIndex];
-    refs.insert(refs.end(),
-                std::make_move_iterator(_currentRefs.begin()),
-                std::make_move_iterator(_currentRefs.end()));
-    _currentRefs.clear();
 }
 
 void ResourceUploader::CollectFlight(uint32_t flightIndex) {
     _stagingPool.CollectFlight(flightIndex);
-    _pendingRefs[flightIndex].clear();
 }
 
-std::optional<render::RenderMesh> ResourceUploader::UploadMesh(
+std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
     render::CommandBuffer* cmdBuffer,
-    StaticMesh* mesh,
-    AssetRefAny assetRef) {
-    if (mesh == nullptr || !mesh->IsValid()) {
-        return std::nullopt;
-    }
-    const MeshResource& meshResource = mesh->GetMeshResource();
+    const MeshResource& meshResource) {
     if (meshResource.Primitives.empty()) {
         return std::nullopt;
     }
@@ -613,7 +1008,6 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMesh(
     vector<Nullable<render::Buffer*>> bufferByBin(meshResource.Bins.size());
 
     // 为每个 bin 创建 device-local buffer 并上传
-    bool assetRefPassed = false;
     for (size_t binIdx = 0; binIdx < meshResource.Bins.size(); ++binIdx) {
         const MeshBuffer& bin = meshResource.Bins[binIdx];
         auto data = bin.GetData();
@@ -633,21 +1027,12 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMesh(
         auto buf = bufOpt.Release();
         buf->SetDebugName(fmt::format("{}_{}", meshResource.Name, binIdx));
 
-        // 第一次上传时传递 assetRef，后续不重复传递
-        AssetRefAny ref = (!assetRefPassed && assetRef.IsValid())
-                              ? AssetRefAny{assetRef}
-                              : AssetRefAny{nullptr};
-        if (ref.IsValid()) {
-            assetRefPassed = true;
-        }
-
         UploadBuffer(cmdBuffer, BufferUploadRequest{
                                     .SrcData = data,
                                     .DstBuffer = buf.get(),
                                     .DstOffset = 0,
                                     .Before = render::BufferState::Common,
-                                    .After = render::BufferState::Vertex | render::BufferState::Index},
-                     std::move(ref));
+                                    .After = render::BufferState::Vertex | render::BufferState::Index});
 
         bufferByBin[binIdx] = buf.get();
         result._buffers.emplace_back(std::move(buf));
@@ -691,13 +1076,26 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMesh(
 
 namespace {
 
+string BuildVertexLayoutSignature(const render::VertexBufferLayout& layout) {
+    string sig = fmt::format("stride={};", layout.ArrayStride);
+    for (const render::VertexElement& e : layout.Elements) {
+        sig += fmt::format(
+            "[{}:{}@{}={}]",
+            e.Semantic,
+            e.SemanticIndex,
+            e.Offset,
+            static_cast<uint32_t>(e.Format));
+    }
+    return sig;
+}
+
 string BuildPSOKey(
     const Material& material,
     const render::VertexBufferLayout& vertexLayout,
     const PSOCache::RenderTargetFormats& rtFormats) {
     // Material 身份用其 AssetId(同一资产同一 PSO 基线);叠加顶点签名与 RT 格式。
     string key = fmt::format("mat={}|vs={}|ps={}|", material.GetAssetId().ToString(), material.GetVsEntry(), material.GetPsEntry());
-    key += VertexFactory::BuildSignature(vertexLayout);
+    key += BuildVertexLayoutSignature(vertexLayout);
     key += "|rt=";
     for (render::TextureFormat f : rtFormats.ColorFormats) {
         key += fmt::format("{},", static_cast<uint32_t>(f));

@@ -3,6 +3,9 @@
 #include <limits>
 #include <utility>
 
+#include <radray/render/common.h>
+#include <radray/runtime/gpu_system.h>
+
 namespace radray {
 namespace {
 
@@ -124,6 +127,13 @@ StaticMesh::StaticMesh() noexcept
       _boundsMax(Eigen::Vector3f::Zero()) {
 }
 
+StaticMesh::StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh) noexcept
+    : _meshResource(std::move(meshResource)),
+      _boundsMin(Eigen::Vector3f::Zero()),
+      _boundsMax(Eigen::Vector3f::Zero()),
+      _renderMesh(std::move(renderMesh)) {
+}
+
 StaticMesh::~StaticMesh() noexcept = default;
 
 void StaticMesh::OnUnload() {
@@ -132,7 +142,7 @@ void StaticMesh::OnUnload() {
 }
 
 AssetTypeId StaticMesh::GetTypeId() const noexcept {
-    return asset_type_id_v<StaticMesh>;
+    return runtime_type_id_v<StaticMesh>;
 }
 
 MeshResource& StaticMesh::GetMeshResource() noexcept {
@@ -197,6 +207,35 @@ void StaticMesh::ClearCPUData() noexcept {
     _sections.clear();
     _boundsMin = Eigen::Vector3f::Zero();
     _boundsMax = Eigen::Vector3f::Zero();
+}
+
+AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource) {
+    // 阶段(均为协程内部事务):
+    //  1) CPU 校验网格数据。
+    //  2) 两阶段 GPU 上传:co_await FrameUploadScheduler::BeginUpload 挂起至帧顶拿 cmd/uploader,
+    //     inline 录制 copy 进当前帧 cmdbuffer,再 co_await WaitGpu 跨帧等 fence。
+    //  3) 一次性构造 StaticMesh。
+    // CPU 校验:借一个临时 StaticMesh 复用现有校验逻辑。
+    {
+        StaticMesh probe;
+        probe.SetMeshResource(meshResource);
+        if (!probe.IsValid()) {
+            co_return AssetLoadResult::Failure("static mesh resource is invalid");
+        }
+    }
+
+    // GPU 上传:两阶段 await(无 callback)。BeginUpload 挂起至帧顶拿到 cmd/uploader,
+    // 在本协程里 inline 录制 copy,再 co_await WaitGpu 等该 flight 的 fence。
+    FrameUploadScope frame = co_await frameUploads.BeginUpload();
+    std::optional<render::RenderMesh> renderMesh =
+        frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), meshResource);
+    if (!renderMesh.has_value()) {
+        co_return AssetLoadResult::Failure("static mesh upload recording failed");
+    }
+    co_await frame.WaitGpu();
+
+    co_return AssetLoadResult::Success(
+        make_unique<StaticMesh>(std::move(meshResource), std::move(renderMesh.value())));
 }
 
 }  // namespace radray

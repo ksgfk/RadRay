@@ -5,8 +5,11 @@
 #include <radray/vertex_data.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/asset_manager.h>
 
 namespace radray {
+
+class FrameUploadScheduler;
 
 struct StaticMeshSection {
     StaticMeshSection() noexcept;
@@ -27,6 +30,9 @@ struct StaticMeshSection {
 class StaticMesh : public Asset {
 public:
     StaticMesh() noexcept;
+    /// 构造即完整:CPU 网格数据 + 已上传的 GPU 渲染数据一次性交付。
+    /// 由加载协程在 GPU 上传完成后调用。资产入库即处于可渲染状态,不再有二段式回填。
+    StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh) noexcept;
     ~StaticMesh() noexcept override;
 
     void OnUnload() override;
@@ -49,13 +55,11 @@ public:
 
     // ─── GPU 渲染数据 ───
     // 对应 UE5 的 FStaticMeshRenderData:持有上传后的 device-local 顶点/索引 buffer。
-    // 由 ResourceUploader::UploadMesh 产出后通过 SetRenderMesh 交给资产持有,
-    // 资产释放(OnUnload)时一并销毁。多个组件可共享同一份 GPU 数据。
+    // 加载协程上传完成后通过构造函数交给资产持有,资产释放(OnUnload)时一并销毁。
 
     bool HasRenderData() const noexcept { return _renderMesh.has_value(); }
     render::RenderMesh* GetRenderMesh() noexcept { return _renderMesh ? &_renderMesh.value() : nullptr; }
     const render::RenderMesh* GetRenderMesh() const noexcept { return _renderMesh ? &_renderMesh.value() : nullptr; }
-    void SetRenderMesh(render::RenderMesh renderMesh) { _renderMesh = std::move(renderMesh); }
     void ClearRenderData() noexcept { _renderMesh.reset(); }
 
 private:
@@ -67,8 +71,13 @@ private:
 };
 
 template <>
-struct AssetTypeTrait<StaticMesh> {
-    static constexpr AssetTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};
+struct RuntimeTypeTrait<StaticMesh> {
+    static constexpr RuntimeTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};
 };
+
+/// StaticMesh 的异步加载工厂。参数为已构建好的 CPU 网格数据(MeshResource);
+/// 协程内部完成 GPU 上传(跨帧),上传完成后一次性构造 StaticMesh。
+/// 加载阶段对 AssetManager 不可见(协程内部事务)。
+AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource);
 
 }  // namespace radray

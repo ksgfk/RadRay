@@ -6,24 +6,30 @@
 #include <limits>
 #include <span>
 #include <optional>
+#include <utility>
 
 #include <imgui.h>
 #include <sigslot/signal.hpp>
 
 #include <radray/types.h>
+#include <radray/runtime_type.h>
 #include <radray/nullable.h>
 #include <radray/render/common.h>
+#include <radray/runtime/application.h>
 
 namespace radray {
 
 class AppWindow;
-class AppWindowSystem;
+class WindowManager;
+class AppFrameContext;
+class Application;
 class ImGuiSystem;
 class ImGuiRenderer;
 class NativeWindow;
 enum class KeyCode;
 enum class MouseButton;
 struct AppSwapChainRecreateContext;
+struct AppFrameTarget;
 
 struct ImGuiRendererDescriptor {
     render::Device* Device;
@@ -33,7 +39,7 @@ struct ImGuiRendererDescriptor {
 
 struct ImGuiSystemDescriptor {
     AppWindow* MainWindow;
-    AppWindowSystem* WindowSystem{nullptr};
+    WindowManager* Windows{nullptr};
     render::Device* Device;
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
@@ -56,11 +62,7 @@ public:
     ImGuiContext* Get() const noexcept;
 
     void SetCurrent();
-
-    friend constexpr void swap(ImGuiContextRAII& a, ImGuiContextRAII& b) noexcept {
-        using std::swap;
-        swap(a._ctx, b._ctx);
-    }
+    void Swap(ImGuiContextRAII& other) noexcept;
 
 private:
     ImGuiContext* _ctx{nullptr};
@@ -108,23 +110,28 @@ public:
               _srv(std::move(srv)),
               _descriptorSet(std::move(descriptorSet)) {}
 
-    public:
+        render::Texture* GetTexture() const noexcept { return _texture.get(); }
+        render::DescriptorSet* GetDescriptorSet() const noexcept { return _descriptorSet.get(); }
+
+    private:
         unique_ptr<render::Texture> _texture;
         unique_ptr<render::TextureView> _srv;
         unique_ptr<render::DescriptorSet> _descriptorSet;
     };
 
     struct UploadTexturePayload {
-        render::Texture* _dst{nullptr};
-        render::Buffer* _src{nullptr};
-        bool _isNew{false};
+        render::Texture* Dst{nullptr};
+        render::Buffer* Src{nullptr};
+        bool IsNew{false};
     };
 
     class Frame {
     public:
         Frame() noexcept = default;
 
-    public:
+    private:
+        friend class ImGuiRenderer;
+
         unique_ptr<render::Buffer> _vb;
         unique_ptr<render::Buffer> _ib;
         vector<DrawData> _drawData;
@@ -152,10 +159,19 @@ public:
     void OnRenderComplete(uint32_t frameIndex);
     void OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx);
     void SetupRenderState(uint32_t frameIndex, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight);
+    render::Device* GetDevice() const noexcept { return _device; }
 
     static Nullable<unique_ptr<ImGuiRenderer>> Create(const ImGuiRendererDescriptor& desc) noexcept;
 
-public:
+private:
+    friend class ImGuiSystem;
+
+    void ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList);
+    void OnRenderBeginFrame(Frame& frame, render::CommandBuffer* cmdBuffer);
+    void OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder);
+    void OnRenderCompleteFrame(Frame& frame);
+    void SetupRenderStateForFrame(const Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) const;
+
     ImGuiSystem* _system;
     render::Device* _device{nullptr};
     unique_ptr<render::RootSignature> _rootSig;
@@ -165,7 +181,7 @@ public:
     vector<unique_ptr<ImGuiTexture>> _aliveTexs;
 };
 
-class ImGuiSystem {
+class ImGuiSystem : public AppSubsystem {
 public:
     struct ViewportWindow {
         ImGuiViewport* Viewport{nullptr};
@@ -178,6 +194,7 @@ public:
         render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) const noexcept;
     };
 
+    ImGuiSystem() noexcept = default;
     ImGuiSystem(
         ImGuiContextRAII context,
         NativeWindow* window);
@@ -189,17 +206,61 @@ public:
 
     bool IsValid() const noexcept;
     void Destroy() noexcept;
+    /// 显式开始一帧 ImGui 录制。返回 true 时调用方可直接调用 ImGui::* API,
+    /// 并必须在同一帧调用 End()。
+    bool Begin(const AppUpdateContext& ctx);
+    /// 结束当前 ImGui 录制帧并提取 draw data。
+    void End();
+
+    void OnInit(Application& app) override;
+    void OnUpdate(Application& app, const AppUpdateContext& ctx) override;
+    bool OnRender(Application& app, AppFrameContext& ctx) override;
+    void OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) override;
+    void OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) override;
+    void OnShutdown(Application& app) override;
+
     bool BeginFrame(uint32_t frameIndex, float deltaTimeSeconds);
     void EndFrame();
 
+    /// 游戏线程：EndFrame 后提取本帧全部 viewport 的绘制数据到 flight 槽位。
+    void ExtractDrawData(uint32_t frameIndex);
+
+    /// 渲染线程：遇到全部 ImGui viewport 窗口，逐个 acquire/barrier/开 RenderPass/画 UI/收尾 barrier。
+    /// 每个 viewport 都会先交给 Application::RenderViewContent 录制 UI 背后的应用内容。
+    void RenderViewports(Application& app, AppFrameContext& ctx);
+
+    /// 渲染线程：该 flight 渲染完成后释放本帧临时资源。
+    void NotifyRenderComplete(uint32_t frameIndex);
+
+    /// swapchain 重建通知转发给 renderer。
+    void HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx);
+
     static Nullable<unique_ptr<ImGuiSystem>> Create(const ImGuiSystemDescriptor& desc);
 
-public:
+private:
+    bool Initialize(const ImGuiSystemDescriptor& desc);
+
+    bool CreateViewportSwapChainTarget(ViewportWindow* viewportWindow, ImGuiViewport* viewport) noexcept;
+    void RequestViewportSwapChainCreate(ViewportWindow* viewportWindow) noexcept;
+#ifdef RADRAY_PLATFORM_WINDOWS
+    bool IsAnyImGuiWindowFocused() const noexcept;
+    void UpdateMouseState();
+#endif
+    void CreatePlatformWindow(ImGuiViewport* viewport);
+    void DestroyPlatformWindow(ImGuiViewport* viewport);
+    void InitRendererBackend();
+    void InitNativePlatform(AppWindow* mainAppWindow);
+
+    static void PlatformCreateWindowCallback(ImGuiViewport* viewport);
+    static void PlatformDestroyWindowCallback(ImGuiViewport* viewport);
+    static void RendererCreateWindowCallback(ImGuiViewport* viewport);
+    static void RendererDestroyWindowCallback(ImGuiViewport* viewport);
+
     ImGuiContextRAII _context;
     NativeWindow* _window;
     unique_ptr<ImGuiRenderer> _renderer;
     vector<unique_ptr<ViewportWindow>> _viewportWindows;
-    AppWindowSystem* _windowSystem{nullptr};
+    WindowManager* _windowManager{nullptr};
     render::CommandQueue* _directQueue{nullptr};
     render::TextureFormat _renderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t _flightDataCount{0};
@@ -215,6 +276,11 @@ public:
     bool _rightAlt{false};
     bool _leftSuper{false};
     bool _rightSuper{false};
+};
+
+template <>
+struct RuntimeTypeTrait<ImGuiSystem> {
+    static constexpr RuntimeTypeId value{0x31e624a6, 0x1f92, 0x4d9f, 0x9b, 0x68, 0x9b, 0x72, 0x25, 0x08, 0x5d, 0x9f};
 };
 
 ImGuiKey MapKeyboardToImGuiKey(KeyCode key) noexcept;

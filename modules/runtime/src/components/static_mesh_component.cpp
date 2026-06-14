@@ -4,9 +4,21 @@
 
 namespace radray {
 
-void StaticMeshComponent::SetStaticMesh(AssetRef<StaticMesh> mesh) noexcept {
-    _mesh = std::move(mesh);
-    // TODO: 如果已注册,重建 SceneProxy
+bool StaticMeshComponent::AreAssetsReady() const noexcept {
+    const bool meshReady = _mesh.IsReady();
+    const bool materialReady = _material.IsReady() || !_material.IsValid();
+    return meshReady && materialReady;
+}
+
+void StaticMeshComponent::TickComponent(float deltaTime) {
+    (void)deltaTime;
+    // 资产尚未交付为 proxy 时,持续尝试;两者就绪后建一次 proxy。
+    if (GetSceneProxy() != nullptr) {
+        return;
+    }
+    if (AreAssetsReady()) {
+        RecreateSceneProxy();
+    }
 }
 
 unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {

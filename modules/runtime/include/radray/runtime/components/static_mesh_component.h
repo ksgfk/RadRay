@@ -10,28 +10,29 @@ namespace radray {
 /// 引用 StaticMesh 资产的静态网格组件。
 /// 对应 UE5 的 UStaticMeshComponent。
 ///
-/// 组件只持有 AssetRef<StaticMesh> + AssetRef<Material>(资产走 AssetManager),不碰 GPU 资源;
-/// OnRegister 时通过 CreateSceneProxy 把资产引用 + 世界变换快照给渲染侧。GPU 上传由 Proxy
-/// 在渲染系统帧顶 UpdateResources 时数据驱动完成,组件不参与。
+/// 资产异步加载:组件持有 StreamingAssetRef,每帧 TickComponent 检查资产是否就绪；
+/// 两者就绪后创建并注册 SceneProxy(资产就绪后才建代理,代理一经创建即可绘制)。
+/// 组件不碰 GPU 资源。
 class StaticMeshComponent : public PrimitiveComponent {
 public:
     StaticMeshComponent() noexcept = default;
-    explicit StaticMeshComponent(AssetRef<StaticMesh> mesh) noexcept : _mesh(std::move(mesh)) {}
-    StaticMeshComponent(AssetRef<StaticMesh> mesh, AssetRef<Material> material) noexcept
-        : _mesh(std::move(mesh)), _material(std::move(material)) {}
     ~StaticMeshComponent() noexcept override = default;
 
-    void SetStaticMesh(AssetRef<StaticMesh> mesh) noexcept;
-    const AssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
+    /// 设置 streaming 资产引用(mesh 必需,material 可选)。组件会在两者均就绪后建代理。
+    void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) noexcept { _mesh = std::move(mesh); }
+    void SetMaterial(StreamingAssetRef<Material> material) noexcept { _material = std::move(material); }
 
-    void SetMaterial(AssetRef<Material> material) noexcept { _material = std::move(material); }
-    const AssetRef<Material>& GetMaterial() const noexcept { return _material; }
+    const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
+    const StreamingAssetRef<Material>& GetMaterial() const noexcept { return _material; }
 
+    void TickComponent(float deltaTime) override;
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
 
 private:
-    AssetRef<StaticMesh> _mesh;
-    AssetRef<Material> _material;
+    bool AreAssetsReady() const noexcept;
+
+    StreamingAssetRef<StaticMesh> _mesh;
+    StreamingAssetRef<Material> _material;
 };
 
 }  // namespace radray

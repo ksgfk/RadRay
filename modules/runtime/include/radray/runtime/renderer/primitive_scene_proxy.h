@@ -36,32 +36,12 @@ public:
     PrimitiveSceneProxy& operator=(PrimitiveSceneProxy&&) = delete;
     virtual ~PrimitiveSceneProxy() noexcept = default;
 
-    /// 代理的资源生命周期阶段。对应 UE5 FRenderResource 的初始化状态(最小化)。
-    /// 数据驱动:渲染系统每帧遍历代理,对 Pending 态调用 UpdateResources 准备 GPU 资源。
-    enum class ResourceState {
-        Pending,    ///< GPU 资源未就绪:需在帧顶 UpdateResources 上传/构建。代理新建时的初态。
-        Uploading,  ///< (预留)异步传输队列上传中,跨帧未就绪。当前单队列模式不进入此态。
-        Ready,      ///< 资源就绪:可参与可见性收集与绘制。
-    };
-
     /// 获取世界变换矩阵
     const Eigen::Matrix4f& GetWorldMatrix() const noexcept { return _worldMatrix; }
     void SetWorldMatrix(const Eigen::Matrix4f& matrix) noexcept { _worldMatrix = matrix; }
 
-    /// 当前资源生命周期阶段。
-    ResourceState GetResourceState() const noexcept { return _resourceState; }
-
-    /// 帧顶资源准备:在已 Begin、RenderPass 之前的裸 CommandBuffer 上录制资源初始化/
-    /// 上传(copy)命令,并推进生命周期状态。由 SceneRenderer::PrepareResources 仅在
-    /// Pending 态调用。默认实现:无 GPU 资源需求,直接标记 Ready。
-    /// 对应 UE5 渲染线程驱动的 FRenderResource::InitResource。
-    virtual void UpdateResources(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader) {
-        (void)cmdBuffer;
-        (void)uploader;
-        _resourceState = ResourceState::Ready;
-    }
-
     /// 是否可被渲染(GPU 数据就绪)。默认 false,派生类按需覆写。
+    /// 资产在构造代理前已由 AssetManager 保证 GPU 就绪,故代理构造即可渲染。
     virtual bool IsRenderable() const noexcept { return false; }
 
     /// 收集本代理的几何绘制单元。MeshPassProcessor 据此 + 材质 + GetWorldMatrix()
@@ -79,11 +59,7 @@ public:
     }
 
 protected:
-    void SetResourceState(ResourceState state) noexcept { _resourceState = state; }
-
-private:
     Eigen::Matrix4f _worldMatrix{Eigen::Matrix4f::Identity()};
-    ResourceState _resourceState{ResourceState::Pending};
 };
 
 }  // namespace radray

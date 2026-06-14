@@ -3,7 +3,7 @@
 #include <radray/basic_math.h>
 #include <radray/types.h>
 #include <radray/render/common.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/gpu_system.h>
 #include <radray/runtime/renderer/primitive_scene_proxy.h>
 
 namespace radray {
@@ -96,16 +96,6 @@ private:
 class SceneRenderer {
 public:
     SceneRenderer() noexcept = default;
-
-    /// 帧顶资源准备:遍历场景全部代理,对生命周期处于 Pending 的代理调用
-    /// UpdateResources,让其经 ResourceUploader 上传 GPU 资源并推进到 Ready。
-    /// 【须在 RenderPass 之前、以裸 CommandBuffer 调用】:buffer copy 上传不能在 render pass 内录制。
-    /// 数据驱动替代插命令队列:组件只设网格,渲染系统从 Proxy 读数据、处理上传,
-    /// 就绪后才参与绘制。对应 UE5 渲染线程驱动的 FRenderResource 初始化。
-    void PrepareResources(
-        render::CommandBuffer* cmdBuffer,
-        const Scene& scene,
-        ResourceUploader& uploader);
 
     /// 渲染一个 View 的场景。内部 = InitViews(收集可见图元)→ BasePass(构建/排序/录制)。
     /// encoder 须为已 Begin 的 RenderPass;processorConfig 提供 PSOCache 与 RT 格式;

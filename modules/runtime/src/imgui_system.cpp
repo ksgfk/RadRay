@@ -4,7 +4,8 @@
 
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
-#include <radray/runtime/window_system.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/window_manager.h>
 #include <radray/window/native_window.h>
 
 #include <fmt/format.h>
@@ -14,7 +15,6 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
-#include <ranges>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform/win32_headers.h>
@@ -46,12 +46,6 @@ static uint64_t GetAlignedTextureUploadPitch(render::Device* device, ImTextureDa
 static uint64_t GetAlignedTextureUploadSize(render::Device* device, ImTextureData* tex) noexcept {
     return GetAlignedTextureUploadPitch(device, tex) * static_cast<uint64_t>(tex->Height);
 }
-
-static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* frame, std::span<ImDrawData*> drawDataList);
-static void OnRenderBeginFrame(ImGuiRenderer::Frame* frame, render::CommandBuffer* cmdBuffer);
-static void OnRenderFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder);
-static void OnRenderCompleteFrame(ImGuiRenderer::Frame* frame);
-static void SetupRenderStateForFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight);
 
 static NativeWindow* GetPlatformWindow(ImGuiViewport* viewport) noexcept {
     if (viewport == nullptr || viewport->PlatformUserData == nullptr) {
@@ -97,18 +91,18 @@ static void DestroyViewportSwapChainTarget(ImGuiSystem::ViewportWindow* viewport
         return;
     }
     AppWindow* window = viewportWindow->Window;
-    if (window == nullptr || !window->_swapchain) {
+    if (window == nullptr || window->GetSwapChain() == nullptr) {
         return;
     }
 
     window->DetachSwapChain();
 }
 
-static bool CreateViewportSwapChainTarget(ImGuiSystem* system, ImGuiSystem::ViewportWindow* viewportWindow, ImGuiViewport* viewport) noexcept {
-    if (system == nullptr || viewportWindow == nullptr || viewport == nullptr || viewportWindow->GetWindow() == nullptr) {
+bool ImGuiSystem::CreateViewportSwapChainTarget(ViewportWindow* viewportWindow, ImGuiViewport* viewport) noexcept {
+    if (viewportWindow == nullptr || viewport == nullptr || viewportWindow->GetWindow() == nullptr) {
         return false;
     }
-    if (system->_renderer == nullptr || system->_renderer->_device == nullptr) {
+    if (_renderer == nullptr || _renderer->GetDevice() == nullptr) {
         return false;
     }
 
@@ -117,29 +111,25 @@ static bool CreateViewportSwapChainTarget(ImGuiSystem* system, ImGuiSystem::View
     render::SwapChainDescriptor desc{};
     desc.Width = GetViewportWidth(viewport);
     desc.Height = GetViewportHeight(viewport);
-    desc.Format = system->_renderTargetFormat;
-    desc.PresentMode = system->_presentMode;
+    desc.Format = _renderTargetFormat;
+    desc.PresentMode = _presentMode;
     viewportWindow->Window->AttachSwapChain(desc);
     return true;
 }
 
-static void RequestViewportSwapChainCreate(ImGuiSystem* system, ImGuiSystem::ViewportWindow* viewportWindow) noexcept {
-    if (system == nullptr || viewportWindow == nullptr || viewportWindow->Viewport == nullptr || viewportWindow->GetWindow() == nullptr) {
+void ImGuiSystem::RequestViewportSwapChainCreate(ViewportWindow* viewportWindow) noexcept {
+    if (viewportWindow == nullptr || viewportWindow->Viewport == nullptr || viewportWindow->GetWindow() == nullptr) {
         return;
     }
-    CreateViewportSwapChainTarget(system, viewportWindow, viewportWindow->Viewport);
+    CreateViewportSwapChainTarget(viewportWindow, viewportWindow->Viewport);
 }
 
 #ifdef RADRAY_PLATFORM_WINDOWS
-static bool IsAnyImGuiWindowFocused(const ImGuiSystem* system) noexcept {
-    if (system == nullptr) {
-        return false;
-    }
-
-    if (system->_window != nullptr && system->_window->IsFocused()) {
+bool ImGuiSystem::IsAnyImGuiWindowFocused() const noexcept {
+    if (_window != nullptr && _window->IsFocused()) {
         return true;
     }
-    for (const auto& viewportWindow : system->_viewportWindows) {
+    for (const auto& viewportWindow : _viewportWindows) {
         NativeWindow* window = viewportWindow->GetWindow();
         if (window != nullptr && window->IsFocused()) {
             return true;
@@ -148,14 +138,14 @@ static bool IsAnyImGuiWindowFocused(const ImGuiSystem* system) noexcept {
     return false;
 }
 
-static void UpdateMouseState(ImGuiSystem* system) {
-    if (system == nullptr || !system->_context.IsValid()) {
+void ImGuiSystem::UpdateMouseState() {
+    if (!_context.IsValid()) {
         return;
     }
 
-    system->_context.SetCurrent();
+    _context.SetCurrent();
     ImGuiIO& io = ImGui::GetIO();
-    if (!IsAnyImGuiWindowFocused(system)) {
+    if (!IsAnyImGuiWindowFocused()) {
         return;
     }
 
@@ -175,8 +165,8 @@ static void UpdateMouseState(ImGuiSystem* system) {
             }
         }
         io.AddMouseViewportEvent(hoveredViewportId);
-    } else if (system->_window != nullptr) {
-        Eigen::Vector2i mouseClientPos = system->_window->ScreenToClient(Eigen::Vector2i{mouseScreenPos.x, mouseScreenPos.y});
+    } else if (_window != nullptr) {
+        Eigen::Vector2i mouseClientPos = _window->ScreenToClient(Eigen::Vector2i{mouseScreenPos.x, mouseScreenPos.y});
         io.AddMousePosEvent(static_cast<float>(mouseClientPos.x()), static_cast<float>(mouseClientPos.y()));
     }
 }
@@ -214,14 +204,13 @@ static void ApplyViewportWindowFlags(ImGuiViewport* viewport, NativeWindow* wind
     window->SetInputPassthrough((viewport->Flags & ImGuiViewportFlags_NoInputs) != 0);
 }
 
-static void ImGuiNativePlatform_CreateWindow(ImGuiViewport* viewport) {
-    ImGuiSystem* system = GetBackendSystem();
-    if (system == nullptr || system->_windowSystem == nullptr) {
+void ImGuiSystem::CreatePlatformWindow(ImGuiViewport* viewport) {
+    if (viewport == nullptr || _windowManager == nullptr) {
         return;
     }
 
     Win32WindowCreateDescriptor desc = BuildViewportWindowDescriptor(viewport);
-    AppWindow* window = system->_windowSystem->CreateWindow(desc, false);
+    AppWindow* window = _windowManager->CreateWindow(desc, false);
     if (window == nullptr) {
         RADRAY_ERR_LOG("Failed to create ImGui viewport AppWindow");
         return;
@@ -236,16 +225,15 @@ static void ImGuiNativePlatform_CreateWindow(ImGuiViewport* viewport) {
     viewport->PlatformHandle = viewport->PlatformHandleRaw = nativeWindow->GetNativeHandler();
     viewport->PlatformRequestResize = false;
 
-    viewportWindow->AttachInput(system);
-    system->_viewportWindows.push_back(std::move(viewportWindow));
+    viewportWindow->AttachInput(this);
+    _viewportWindows.push_back(std::move(viewportWindow));
 }
 
-static void ImGuiNativePlatform_DestroyWindow(ImGuiViewport* viewport) {
+void ImGuiSystem::DestroyPlatformWindow(ImGuiViewport* viewport) {
     if (viewport == nullptr) {
         return;
     }
 
-    ImGuiSystem* system = GetBackendSystem();
     auto viewportWindow = static_cast<ImGuiSystem::ViewportWindow*>(viewport->PlatformUserData);
     viewport->PlatformUserData = nullptr;
     viewport->PlatformHandle = nullptr;
@@ -255,20 +243,32 @@ static void ImGuiNativePlatform_DestroyWindow(ImGuiViewport* viewport) {
         return;
     }
 
-    if (viewportWindow != nullptr && system != nullptr) {
+    if (viewportWindow != nullptr) {
         DestroyViewportSwapChainTarget(viewportWindow);
         AppWindow* appWindow = viewportWindow->Window;
         viewportWindow->Connections.clear();
         viewportWindow->Window = nullptr;
-        auto iter = std::ranges::find_if(system->_viewportWindows, [viewportWindow](const unique_ptr<ImGuiSystem::ViewportWindow>& item) {
+        auto iter = std::ranges::find_if(_viewportWindows, [viewportWindow](const unique_ptr<ImGuiSystem::ViewportWindow>& item) {
             return item.get() == viewportWindow;
         });
-        if (iter != system->_viewportWindows.end()) {
-            system->_viewportWindows.erase(iter);
+        if (iter != _viewportWindows.end()) {
+            _viewportWindows.erase(iter);
         }
-        if (appWindow != nullptr && system->_windowSystem != nullptr) {
-            system->_windowSystem->DestroyWindow(appWindow);
+        if (appWindow != nullptr && _windowManager != nullptr) {
+            _windowManager->DestroyWindow(appWindow);
         }
+    }
+}
+
+void ImGuiSystem::PlatformCreateWindowCallback(ImGuiViewport* viewport) {
+    if (ImGuiSystem* system = GetBackendSystem()) {
+        system->CreatePlatformWindow(viewport);
+    }
+}
+
+void ImGuiSystem::PlatformDestroyWindowCallback(ImGuiViewport* viewport) {
+    if (ImGuiSystem* system = GetBackendSystem()) {
+        system->DestroyPlatformWindow(viewport);
     }
 }
 
@@ -364,23 +364,23 @@ static ImVec2 ImGuiNativePlatform_GetWindowFramebufferScale(ImGuiViewport*) {
     return ImVec2{1.0f, 1.0f};
 }
 
-static void InitImGuiNativePlatform(ImGuiSystem* system, AppWindow* mainAppWindow) {
-    NativeWindow* mainWindow = mainAppWindow != nullptr ? mainAppWindow->_window.get() : nullptr;
+void ImGuiSystem::InitNativePlatform(AppWindow* mainAppWindow) {
+    NativeWindow* mainWindow = mainAppWindow != nullptr ? mainAppWindow->GetNativeWindow() : nullptr;
     if (mainWindow == nullptr) {
         return;
     }
 
     ImGuiIO& io = ImGui::GetIO();
     io.BackendPlatformName = "radray_imgui_native_platform";
-    io.BackendPlatformUserData = system;
+    io.BackendPlatformUserData = this;
     io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;
 #ifdef RADRAY_PLATFORM_WINDOWS
     io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport;
 #endif
 
     ImGuiPlatformIO& platformIO = ImGui::GetPlatformIO();
-    platformIO.Platform_CreateWindow = ImGuiNativePlatform_CreateWindow;
-    platformIO.Platform_DestroyWindow = ImGuiNativePlatform_DestroyWindow;
+    platformIO.Platform_CreateWindow = ImGuiSystem::PlatformCreateWindowCallback;
+    platformIO.Platform_DestroyWindow = ImGuiSystem::PlatformDestroyWindowCallback;
     platformIO.Platform_ShowWindow = ImGuiNativePlatform_ShowWindow;
     platformIO.Platform_SetWindowPos = ImGuiNativePlatform_SetWindowPos;
     platformIO.Platform_GetWindowPos = ImGuiNativePlatform_GetWindowPos;
@@ -401,8 +401,8 @@ static void InitImGuiNativePlatform(ImGuiSystem* system, AppWindow* mainAppWindo
     mainViewportWindow->Window = mainAppWindow;
     mainViewport->PlatformUserData = mainViewportWindow.get();
     mainViewport->PlatformHandle = mainViewport->PlatformHandleRaw = mainWindow->GetNativeHandler();
-    mainViewportWindow->AttachInput(system);
-    system->_viewportWindows.push_back(std::move(mainViewportWindow));
+    mainViewportWindow->AttachInput(this);
+    _viewportWindows.push_back(std::move(mainViewportWindow));
 
     platformIO.Monitors.resize(0);
     ImGuiPlatformMonitor monitor{};
@@ -427,7 +427,7 @@ static void ShutdownImGuiNativePlatform() {
     ImGui::GetPlatformIO().ClearPlatformHandlers();
 }
 
-static void ImGuiRenderer_CreateWindow(ImGuiViewport* viewport) {
+void ImGuiSystem::RendererCreateWindowCallback(ImGuiViewport* viewport) {
     if (viewport == nullptr) {
         return;
     }
@@ -438,10 +438,12 @@ static void ImGuiRenderer_CreateWindow(ImGuiViewport* viewport) {
     }
 
     viewport->RendererUserData = viewport->PlatformUserData;
-    RequestViewportSwapChainCreate(GetBackendSystem(), GetViewportWindow(viewport));
+    if (ImGuiSystem* system = GetBackendSystem()) {
+        system->RequestViewportSwapChainCreate(GetViewportWindow(viewport));
+    }
 }
 
-static void ImGuiRenderer_DestroyWindow(ImGuiViewport* viewport) {
+void ImGuiSystem::RendererDestroyWindowCallback(ImGuiViewport* viewport) {
     if (viewport == nullptr) {
         return;
     }
@@ -466,26 +468,26 @@ static void ImGuiRenderer_SwapBuffers(ImGuiViewport* viewport, void*) {
     (void)viewport;
 }
 
-static void InitImGuiRendererBackend(ImGuiRenderer* renderer) {
+void ImGuiSystem::InitRendererBackend() {
     ImGuiIO& io = ImGui::GetIO();
     RADRAY_ASSERT(io.BackendRendererUserData == nullptr);
-    RADRAY_ASSERT(renderer != nullptr);
+    RADRAY_ASSERT(_renderer != nullptr);
 
     io.BackendRendererName = "radray_imgui_renderer";
-    io.BackendRendererUserData = renderer;
+    io.BackendRendererUserData = _renderer.get();
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset |
                        ImGuiBackendFlags_RendererHasTextures |
                        ImGuiBackendFlags_RendererHasViewports;
 
     ImGuiPlatformIO& platformIO = ImGui::GetPlatformIO();
-    platformIO.Renderer_CreateWindow = ImGuiRenderer_CreateWindow;
-    platformIO.Renderer_DestroyWindow = ImGuiRenderer_DestroyWindow;
+    platformIO.Renderer_CreateWindow = ImGuiSystem::RendererCreateWindowCallback;
+    platformIO.Renderer_DestroyWindow = ImGuiSystem::RendererDestroyWindowCallback;
     platformIO.Renderer_SetWindowSize = ImGuiRenderer_SetWindowSize;
     platformIO.Renderer_RenderWindow = ImGuiRenderer_RenderWindow;
     platformIO.Renderer_SwapBuffers = ImGuiRenderer_SwapBuffers;
 
     ImGuiViewport* mainViewport = ImGui::GetMainViewport();
-    mainViewport->RendererUserData = renderer;
+    mainViewport->RendererUserData = _renderer.get();
 }
 
 static void ShutdownImGuiRendererBackend() {
@@ -510,7 +512,7 @@ ImGuiContextRAII::ImGuiContextRAII(ImGuiContextRAII&& other) noexcept
 
 ImGuiContextRAII& ImGuiContextRAII::operator=(ImGuiContextRAII&& other) noexcept {
     ImGuiContextRAII temp{std::move(other)};
-    swap(*this, temp);
+    Swap(temp);
     return *this;
 }
 
@@ -533,6 +535,11 @@ ImGuiContext* ImGuiContextRAII::Get() const noexcept { return _ctx; }
 
 void ImGuiContextRAII::SetCurrent() {
     ImGui::SetCurrentContext(_ctx);
+}
+
+void ImGuiContextRAII::Swap(ImGuiContextRAII& other) noexcept {
+    using std::swap;
+    swap(_ctx, other._ctx);
 }
 
 ImGuiRenderer::ImGuiRenderer() noexcept = default;
@@ -744,11 +751,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     return result;
 }
 
-static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePtr, std::span<ImDrawData*> drawDataList) {
-    if (renderer == nullptr || framePtr == nullptr) {
-        return;
-    }
-    auto& frame = *framePtr;
+void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList) {
     frame._tempBufs.clear();
     frame._waitForFreeTexs.clear();
     frame._drawData.clear();
@@ -804,7 +807,7 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
                     .Memory = render::MemoryType::Device,
                     .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
                     .Hints = render::ResourceHint::None};
-                auto texObjOpt = renderer->_device->CreateTexture(texDesc);
+                auto texObjOpt = _device->CreateTexture(texDesc);
                 if (!texObjOpt.HasValue()) {
                     continue;
                 }
@@ -817,14 +820,14 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
                     .Format = texDesc.Format,
                     .Range = render::SubresourceRange::AllSub(),
                     .Usage = render::TextureViewUsage::Resource};
-                auto srvOpt = renderer->_device->CreateTextureView(texViewDesc);
+                auto srvOpt = _device->CreateTextureView(texViewDesc);
                 if (!srvOpt.HasValue()) {
                     continue;
                 }
                 auto srv = srvOpt.Release();
                 srv->SetDebugName(fmt::format("imgui_tex_srv_{}", tex->UniqueID));
 
-                auto descSetOpt = renderer->_device->CreateDescriptorSet(renderer->_rootSig.get(), ImGuiTextureSetIndex);
+                auto descSetOpt = _device->CreateDescriptorSet(_rootSig.get(), ImGuiTextureSetIndex);
                 if (!descSetOpt.HasValue()) {
                     continue;
                 }
@@ -834,7 +837,7 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
                     continue;
                 }
 
-                auto& ptr = renderer->_aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(descSet)));
+                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(descSet)));
                 tex->SetTexID(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(ptr.get())));
                 tex->BackendUserData = ptr.get();
             }
@@ -847,14 +850,14 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
                 IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
 
                 const uint64_t uploadPitchSrc = static_cast<uint64_t>(tex->Width) * static_cast<uint64_t>(tex->BytesPerPixel);
-                const uint64_t uploadPitchDst = GetAlignedTextureUploadPitch(renderer->_device, tex);
-                const uint64_t uploadSize = GetAlignedTextureUploadSize(renderer->_device, tex);
+                const uint64_t uploadPitchDst = GetAlignedTextureUploadPitch(_device, tex);
+                const uint64_t uploadSize = GetAlignedTextureUploadSize(_device, tex);
                 render::BufferDescriptor uploadDesc{
                     .Size = uploadSize,
                     .Memory = render::MemoryType::Upload,
                     .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite,
                     .Hints = render::ResourceHint::None};
-                auto uploadBufferOpt = renderer->_device->CreateBuffer(uploadDesc);
+                auto uploadBufferOpt = _device->CreateBuffer(uploadDesc);
                 if (!uploadBufferOpt.HasValue()) {
                     continue;
                 }
@@ -868,20 +871,20 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
                 }
                 uploadBuffer->Unmap(0, uploadSize);
 
-                frame._uploadTexReqs.emplace_back(backendTex->_texture.get(), uploadBuffer.get(), tex->Status == ImTextureStatus_WantCreate);
+                frame._uploadTexReqs.emplace_back(backendTex->GetTexture(), uploadBuffer.get(), tex->Status == ImTextureStatus_WantCreate);
                 frame._tempBufs.emplace_back(std::move(uploadBuffer));
                 tex->SetStatus(ImTextureStatus_OK);
             }
 
-            if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= static_cast<int32_t>(renderer->_frames.size())) {
+            if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= static_cast<int32_t>(_frames.size())) {
                 auto* backendTex = static_cast<ImGuiRenderer::ImGuiTexture*>(tex->BackendUserData);
-                auto iter = std::ranges::find_if(renderer->_aliveTexs, [backendTex](const unique_ptr<ImGuiRenderer::ImGuiTexture>& item) {
+                auto iter = std::ranges::find_if(_aliveTexs, [backendTex](const unique_ptr<ImGuiRenderer::ImGuiTexture>& item) {
                     return item.get() == backendTex;
                 });
-                RADRAY_ASSERT(iter != renderer->_aliveTexs.end());
+                RADRAY_ASSERT(iter != _aliveTexs.end());
                 auto texIns = std::move(*iter);
-                *iter = std::move(renderer->_aliveTexs.back());
-                renderer->_aliveTexs.pop_back();
+                *iter = std::move(_aliveTexs.back());
+                _aliveTexs.pop_back();
                 frame._waitForFreeTexs.emplace_back(std::move(texIns));
                 tex->SetTexID(ImTextureID_Invalid);
                 tex->BackendUserData = nullptr;
@@ -901,7 +904,7 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
             .Memory = render::MemoryType::Upload,
             .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite,
             .Hints = render::ResourceHint::None};
-        auto vbOpt = renderer->_device->CreateBuffer(vbDesc);
+        auto vbOpt = _device->CreateBuffer(vbDesc);
         if (!vbOpt.HasValue()) {
             return;
         }
@@ -920,7 +923,7 @@ static void ExtractDrawDataToFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame
             .Memory = render::MemoryType::Upload,
             .Usage = render::BufferUse::Index | render::BufferUse::MapWrite,
             .Hints = render::ResourceHint::None};
-        auto ibOpt = renderer->_device->CreateBuffer(ibDesc);
+        auto ibOpt = _device->CreateBuffer(ibDesc);
         if (!ibOpt.HasValue()) {
             return;
         }
@@ -1017,7 +1020,7 @@ void ImGuiRenderer::ExtractDrawData(uint32_t frameIndex) {
         }
         drawDataList.push_back(viewport->DrawData);
     }
-    ExtractDrawDataToFrame(this, _frames[frameIndex].get(), drawDataList);
+    ExtractDrawDataToFrame(*_frames[frameIndex], drawDataList);
 }
 
 uint32_t ImGuiRenderer::GetViewportDrawDataCount(uint32_t frameIndex) const noexcept {
@@ -1041,11 +1044,7 @@ std::optional<uint32_t> ImGuiRenderer::FindViewportDrawDataIndex(uint32_t frameI
     return static_cast<uint32_t>(iter - drawDataList.begin());
 }
 
-static void OnRenderBeginFrame(ImGuiRenderer::Frame* framePtr, render::CommandBuffer* cmdBuffer) {
-    if (framePtr == nullptr) {
-        return;
-    }
-    auto& frame = *framePtr;
+void ImGuiRenderer::OnRenderBeginFrame(Frame& frame, render::CommandBuffer* cmdBuffer) {
     if (cmdBuffer == nullptr) {
         return;
     }
@@ -1057,20 +1056,20 @@ static void OnRenderBeginFrame(ImGuiRenderer::Frame* framePtr, render::CommandBu
     barriers.reserve(frame._uploadTexReqs.size());
     for (const auto& payload : frame._uploadTexReqs) {
         barriers.emplace_back(render::BarrierTextureDescriptor{
-            .Target = payload._dst,
-            .Before = payload._isNew ? render::TextureState::Undefined : render::TextureState::ShaderRead,
+            .Target = payload.Dst,
+            .Before = payload.IsNew ? render::TextureState::Undefined : render::TextureState::ShaderRead,
             .After = render::TextureState::CopyDestination});
     }
     cmdBuffer->ResourceBarrier(barriers);
 
     for (const auto& payload : frame._uploadTexReqs) {
-        cmdBuffer->CopyBufferToTexture(payload._dst, render::SubresourceRange{0, 1, 0, 1}, payload._src, 0);
+        cmdBuffer->CopyBufferToTexture(payload.Dst, render::SubresourceRange{0, 1, 0, 1}, payload.Src, 0);
     }
 
     barriers.clear();
     for (const auto& payload : frame._uploadTexReqs) {
         barriers.emplace_back(render::BarrierTextureDescriptor{
-            .Target = payload._dst,
+            .Target = payload.Dst,
             .Before = render::TextureState::CopyDestination,
             .After = render::TextureState::ShaderRead});
     }
@@ -1080,14 +1079,10 @@ static void OnRenderBeginFrame(ImGuiRenderer::Frame* framePtr, render::CommandBu
 
 void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer) {
     RADRAY_ASSERT(frameIndex < _frames.size());
-    OnRenderBeginFrame(_frames[frameIndex].get(), cmdBuffer);
+    OnRenderBeginFrame(*_frames[frameIndex], cmdBuffer);
 }
 
-static void OnRenderFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePtr, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder) {
-    if (renderer == nullptr || framePtr == nullptr) {
-        return;
-    }
-    auto& frame = *framePtr;
+void ImGuiRenderer::OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder) {
     if (drawDataIndex >= frame._drawData.size()) {
         return;
     }
@@ -1104,7 +1099,7 @@ static void OnRenderFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePt
 
     ImGuiPlatformIO& platIO = ImGui::GetPlatformIO();
 
-    SetupRenderStateForFrame(renderer, framePtr, drawDataIndex, encoder, fbWidth, fbHeight);
+    SetupRenderStateForFrame(frame, drawDataIndex, encoder, fbWidth, fbHeight);
 
     const ImVec2 clipOff = drawData.DisplayPos;
     const ImVec2 clipScale = drawData.FramebufferScale;
@@ -1114,7 +1109,7 @@ static void OnRenderFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePt
         for (const auto& cmd : drawList.Cmd) {
             if (cmd.UserCallback != nullptr) {
                 if (cmd.UserCallback == platIO.DrawCallback_ResetRenderState) {
-                    SetupRenderStateForFrame(renderer, framePtr, drawDataIndex, encoder, fbWidth, fbHeight);
+                    SetupRenderStateForFrame(frame, drawDataIndex, encoder, fbWidth, fbHeight);
                 }
                 continue;
             }
@@ -1143,7 +1138,7 @@ static void OnRenderFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePt
                 .Width = static_cast<uint32_t>(clipMax.x - clipMin.x),
                 .Height = static_cast<uint32_t>(clipMax.y - clipMin.y)};
             encoder->SetScissor(scissor);
-            encoder->BindDescriptorSet(ImGuiTextureSetIndex, cmd.Texture->_descriptorSet.get());
+            encoder->BindDescriptorSet(ImGuiTextureSetIndex, cmd.Texture->GetDescriptorSet());
             encoder->DrawIndexed(
                 cmd.ElemCount,
                 1,
@@ -1164,14 +1159,10 @@ void ImGuiRenderer::OnRenderViewport(uint32_t frameIndex, ImGuiViewport* viewpor
     if (!drawDataIndex.has_value()) {
         return;
     }
-    OnRenderFrame(this, _frames[frameIndex].get(), drawDataIndex.value(), encoder);
+    OnRenderFrame(*_frames[frameIndex], drawDataIndex.value(), encoder);
 }
 
-static void OnRenderCompleteFrame(ImGuiRenderer::Frame* framePtr) {
-    if (framePtr == nullptr) {
-        return;
-    }
-    auto& frame = *framePtr;
+void ImGuiRenderer::OnRenderCompleteFrame(Frame& frame) {
     frame._uploadTexReqs.clear();
     frame._tempBufs.clear();
     frame._waitForFreeTexs.clear();
@@ -1179,7 +1170,7 @@ static void OnRenderCompleteFrame(ImGuiRenderer::Frame* framePtr) {
 
 void ImGuiRenderer::OnRenderComplete(uint32_t frameIndex) {
     RADRAY_ASSERT(frameIndex < _frames.size());
-    OnRenderCompleteFrame(_frames[frameIndex].get());
+    OnRenderCompleteFrame(*_frames[frameIndex]);
 }
 
 void ImGuiRenderer::OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {
@@ -1187,18 +1178,17 @@ void ImGuiRenderer::OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) 
     // Swapchain recreation can happen after ExtractDrawData; draw data is not swapchain-owned.
 }
 
-static void SetupRenderStateForFrame(ImGuiRenderer* renderer, ImGuiRenderer::Frame* framePtr, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) {
-    if (renderer == nullptr || framePtr == nullptr || encoder == nullptr) {
+void ImGuiRenderer::SetupRenderStateForFrame(const Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) const {
+    if (encoder == nullptr) {
         return;
     }
-    const auto& frame = *framePtr;
     if (drawDataIndex >= frame._drawData.size()) {
         return;
     }
     const auto& drawData = frame._drawData[drawDataIndex];
 
-    encoder->BindRootSignature(renderer->_rootSig.get());
-    encoder->BindGraphicsPipelineState(renderer->_pso.get());
+    encoder->BindRootSignature(_rootSig.get());
+    encoder->BindGraphicsPipelineState(_pso.get());
     if (drawData.TotalVtxCount > 0) {
         render::VertexBufferView vbv{
             .Target = frame._vb.get(),
@@ -1220,7 +1210,7 @@ static void SetupRenderStateForFrame(ImGuiRenderer* renderer, ImGuiRenderer::Fra
         .Height = static_cast<float>(fbHeight),
         .MinDepth = 0.0f,
         .MaxDepth = 1.0f};
-    if (renderer->_device->GetBackend() == render::RenderBackend::Vulkan) {
+    if (_device->GetBackend() == render::RenderBackend::Vulkan) {
         vp.Y = static_cast<float>(fbHeight);
         vp.Height = -static_cast<float>(fbHeight);
     }
@@ -1235,20 +1225,20 @@ static void SetupRenderStateForFrame(ImGuiRenderer* renderer, ImGuiRenderer::Fra
     push.Scale[1] = 2.0f / (T - B);
     push.Translate[0] = (R + L) / (L - R);
     push.Translate[1] = (T + B) / (B - T);
-    encoder->PushConstants(renderer->_pushConstantId, &push, sizeof(push));
+    encoder->PushConstants(_pushConstantId, &push, sizeof(push));
 }
 
 void ImGuiRenderer::SetupRenderState(uint32_t frameIndex, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) {
     RADRAY_ASSERT(frameIndex < _frames.size());
-    SetupRenderStateForFrame(this, _frames[frameIndex].get(), drawDataIndex, encoder, fbWidth, fbHeight);
+    SetupRenderStateForFrame(*_frames[frameIndex], drawDataIndex, encoder, fbWidth, fbHeight);
 }
 
 NativeWindow* ImGuiSystem::ViewportWindow::GetWindow() const noexcept {
-    return Window != nullptr ? Window->_window.get() : nullptr;
+    return Window != nullptr ? Window->GetNativeWindow() : nullptr;
 }
 
 render::SwapChain* ImGuiSystem::ViewportWindow::GetSwapChain() const noexcept {
-    return Window != nullptr ? Window->_swapchain.Get() : nullptr;
+    return Window != nullptr ? Window->GetSwapChain() : nullptr;
 }
 
 render::TextureView* ImGuiSystem::ViewportWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) const noexcept {
@@ -1256,17 +1246,28 @@ render::TextureView* ImGuiSystem::ViewportWindow::GetOrCreateBackBufferView(cons
 }
 
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {
-    if (desc.MainWindow == nullptr || desc.WindowSystem == nullptr || desc.Device == nullptr || desc.DirectQueue == nullptr) {
-        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, WindowSystem, Device and DirectQueue");
+    auto system = make_unique<ImGuiSystem>();
+    if (!system->Initialize(desc)) {
         return nullptr;
+    }
+    return system;
+}
+
+bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
+    if (IsValid()) {
+        return true;
+    }
+    if (desc.MainWindow == nullptr || desc.Windows == nullptr || desc.Device == nullptr || desc.DirectQueue == nullptr) {
+        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device and DirectQueue");
+        return false;
     }
     if (desc.RenderTargetFormat == render::TextureFormat::UNKNOWN) {
         RADRAY_ERR_LOG("ImGuiSystemDescriptor RenderTargetFormat must be valid");
-        return nullptr;
+        return false;
     }
     if (desc.FlightDataCount == 0 || desc.BackBufferCount == 0) {
         RADRAY_ERR_LOG("ImGuiSystemDescriptor FlightDataCount and BackBufferCount must be greater than 0");
-        return nullptr;
+        return false;
     }
 
     IMGUI_CHECKVERSION();
@@ -1277,7 +1278,7 @@ Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescripto
                       ImGuiConfigFlags_DockingEnable |
                       ImGuiConfigFlags_ViewportsEnable;
     ImGui::StyleColorsDark();
-    NativeWindow* mainWindow = desc.MainWindow->_window.get();
+    NativeWindow* mainWindow = desc.MainWindow->GetNativeWindow();
     float mainScale = mainWindow->GetDpiScale();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0;
@@ -1290,22 +1291,23 @@ Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescripto
         desc.RenderTargetFormat,
         desc.FlightDataCount});
     if (!renderer.HasValue()) {
-        return nullptr;
+        return false;
     }
 
-    auto system = make_unique<ImGuiSystem>(std::move(imgui), mainWindow);
-    renderer->_system = system.get();
-    system->_renderer = renderer.Release();
-    system->_windowSystem = desc.WindowSystem;
-    system->_directQueue = desc.DirectQueue;
-    system->_renderTargetFormat = desc.RenderTargetFormat;
-    system->_flightDataCount = desc.FlightDataCount;
-    system->_backBufferCount = desc.BackBufferCount;
-    system->_presentMode = desc.PresentMode;
-    system->_context.SetCurrent();
-    InitImGuiRendererBackend(system->_renderer.get());
-    InitImGuiNativePlatform(system.get(), desc.MainWindow);
-    return system;
+    _context = std::move(imgui);
+    _window = mainWindow;
+    _renderer = renderer.Release();
+    _renderer->_system = this;
+    _windowManager = desc.Windows;
+    _directQueue = desc.DirectQueue;
+    _renderTargetFormat = desc.RenderTargetFormat;
+    _flightDataCount = desc.FlightDataCount;
+    _backBufferCount = desc.BackBufferCount;
+    _presentMode = desc.PresentMode;
+    _context.SetCurrent();
+    InitRendererBackend();
+    InitNativePlatform(desc.MainWindow);
+    return true;
 }
 
 ImGuiSystem::ImGuiSystem(
@@ -1335,7 +1337,7 @@ bool ImGuiSystem::BeginFrame(uint32_t frameIndex, float deltaTimeSeconds) {
     io.DeltaTime = std::isfinite(deltaTimeSeconds) && deltaTimeSeconds > 0.0f ? deltaTimeSeconds : (1.0f / 60.0f);
 
 #ifdef RADRAY_PLATFORM_WINDOWS
-    UpdateMouseState(this);
+    UpdateMouseState();
 #endif
 
     ImGui::NewFrame();
@@ -1366,6 +1368,179 @@ void ImGuiSystem::EndFrame() {
 
     _activeFrameIndex = std::numeric_limits<uint32_t>::max();
     _frameActive = false;
+}
+
+bool ImGuiSystem::Begin(const AppUpdateContext& ctx) {
+    return BeginFrame(ctx.FlightIndex, ctx.DeltaTime.count());
+}
+
+void ImGuiSystem::End() {
+    if (!_frameActive) {
+        EndFrame();
+        return;
+    }
+    const uint32_t frameIndex = _activeFrameIndex;
+    EndFrame();
+    ExtractDrawData(frameIndex);
+}
+
+void ImGuiSystem::OnInit(Application& app) {
+    if (IsValid()) {
+        return;
+    }
+    WindowManager* windowManager = app.GetWindowManager();
+    GpuSystem* gpuSystem = app.GetGpuSystem();
+    render::Device* device = app.GetDevice();
+    if (windowManager == nullptr || device == nullptr || gpuSystem == nullptr) {
+        RADRAY_ERR_LOG("ImGuiSystem requires Application runtime to be initialized");
+        return;
+    }
+    AppWindow* mainWindow = windowManager->GetMainWindow();
+    if (mainWindow == nullptr) {
+        RADRAY_ERR_LOG("ImGuiSystem requires Application runtime to be initialized");
+        return;
+    }
+
+    ImGuiSystemDescriptor desc{
+        .MainWindow = mainWindow,
+        .Windows = windowManager,
+        .Device = device,
+        .RenderTargetFormat = windowManager->GetMainBackBufferFormat(),
+        .FlightDataCount = gpuSystem->GetFlightDataCount(),
+        .DirectQueue = gpuSystem->GetMainQueue(),
+        .BackBufferCount = gpuSystem->GetBackBufferCount(),
+        .PresentMode = windowManager->GetMainPresentMode()};
+    if (!Initialize(desc)) {
+        RADRAY_ERR_LOG("failed to initialize ImGuiSystem subsystem");
+    }
+}
+
+void ImGuiSystem::OnUpdate(Application& app, const AppUpdateContext& ctx) {
+    (void)app;
+    (void)ctx;
+}
+
+bool ImGuiSystem::OnRender(Application& app, AppFrameContext& ctx) {
+    if (!IsValid()) {
+        return false;
+    }
+    RenderViewports(app, ctx);
+    return true;
+}
+
+void ImGuiSystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
+    (void)app;
+    NotifyRenderComplete(ctx.FlightIndex);
+}
+
+void ImGuiSystem::OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) {
+    (void)app;
+    HandleSwapChainRecreate(ctx);
+}
+
+void ImGuiSystem::OnShutdown(Application& app) {
+    (void)app;
+    Destroy();
+}
+
+void ImGuiSystem::ExtractDrawData(uint32_t frameIndex) {
+    if (_renderer != nullptr) {
+        _renderer->ExtractDrawData(frameIndex);
+    }
+}
+
+void ImGuiSystem::NotifyRenderComplete(uint32_t frameIndex) {
+    if (_renderer != nullptr) {
+        _renderer->OnRenderComplete(frameIndex);
+    }
+}
+
+void ImGuiSystem::HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {
+    if (_renderer != nullptr) {
+        _renderer->OnSwapChainRecreate(ctx);
+    }
+}
+
+void ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
+    if (_renderer == nullptr) {
+        return;
+    }
+
+    struct AcquiredViewport {
+        ViewportWindow* Window{nullptr};
+        AppFrameTarget Target;
+    };
+
+    // —— acquire 阶段：遇全部 viewport 窗口，跳过最小化 / 无 swapchain / acquire 失败的。
+    vector<AcquiredViewport> renderTargets;
+    renderTargets.reserve(_viewportWindows.size());
+    for (const unique_ptr<ViewportWindow>& viewportWindow : _viewportWindows) {
+        if (viewportWindow == nullptr || viewportWindow->Viewport == nullptr || viewportWindow->Window == nullptr) {
+            continue;
+        }
+        if ((viewportWindow->Viewport->Flags & ImGuiViewportFlags_IsMinimized) != 0) {
+            continue;
+        }
+        NativeWindow* nativeWindow = viewportWindow->GetWindow();
+        if (nativeWindow != nullptr && nativeWindow->IsMinimized()) {
+            continue;
+        }
+        if (viewportWindow->GetSwapChain() == nullptr) {
+            continue;
+        }
+        std::optional<AppFrameTarget> target = ctx.AcquireWindow(viewportWindow->Window);
+        if (!target.has_value()) {
+            continue;
+        }
+        renderTargets.emplace_back(AcquiredViewport{viewportWindow.get(), target.value()});
+    }
+    if (renderTargets.empty()) {
+        return;
+    }
+
+    render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
+    // 纹理上传(创建/更新 ImGui 字体等)：在任何 RenderPass 之前录制。
+    _renderer->OnRenderBegin(ctx.FlightIndex(), cmdBuffer);
+
+    ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+    for (AcquiredViewport& acquired : renderTargets) {
+        AppWindow* appWindow = acquired.Window->Window;
+        render::Texture* backBuffer = acquired.Target.BackBuffer;
+        const uint32_t backBufferIndex = acquired.Target.BackBufferIndex;
+        const render::TextureStates beforeState = appWindow->GetBackBufferState(backBufferIndex);
+
+        render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
+            .Target = backBuffer,
+            .Before = beforeState,
+            .After = render::TextureState::RenderTarget};
+        cmdBuffer->ResourceBarrier(std::span{&toRenderTarget, 1});
+
+        const bool isMainViewport = acquired.Window->Viewport == mainViewport;
+        const bool contentDrawn = app.RenderViewContent(ctx, acquired.Target);
+
+        render::ColorAttachment colorAttachment{
+            .Target = acquired.Target.BackBufferView,
+            .Load = contentDrawn ? render::LoadAction::Load : render::LoadAction::Clear,
+            .Store = render::StoreAction::Store,
+            .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
+        render::RenderPassDescriptor renderPassDesc{
+            .ColorAttachments = std::span{&colorAttachment, 1},
+            .Name = isMainViewport ? "Main ImGui Viewport" : "ImGui Viewport"};
+        auto encoderOpt = cmdBuffer->BeginRenderPass(renderPassDesc);
+        if (!encoderOpt.HasValue()) {
+            RADRAY_ABORT("failed to begin imgui render pass");
+        }
+        auto encoder = encoderOpt.Release();
+        _renderer->OnRenderViewport(ctx.FlightIndex(), acquired.Window->Viewport, encoder.get());
+        cmdBuffer->EndRenderPass(std::move(encoder));
+
+        render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
+            .Target = backBuffer,
+            .Before = render::TextureState::RenderTarget,
+            .After = render::TextureState::Present};
+        cmdBuffer->ResourceBarrier(std::span{&toPresent, 1});
+        appWindow->SetBackBufferState(backBufferIndex, render::TextureState::Present);
+    }
 }
 
 void ImGuiSystem::ViewportWindow::AttachInput(ImGuiSystem* system) {

@@ -33,6 +33,22 @@ void PrimitiveComponent::OnTransformChanged() {
     }
 }
 
+void PrimitiveComponent::RecreateSceneProxy() {
+    if (!IsRegistered()) {
+        return;
+    }
+    if (_sceneProxy) {
+        GetScene()->RemovePrimitive(_sceneProxy);
+        _sceneProxy = nullptr;
+    }
+    auto proxy = CreateSceneProxy();
+    if (proxy) {
+        proxy->SetWorldMatrix(GetWorldMatrix());
+        _sceneProxy = proxy.get();
+        GetScene()->AddPrimitive(std::move(proxy));
+    }
+}
+
 Scene* PrimitiveComponent::GetScene() const noexcept {
     return GetWorld().Get()->GetScene();
 }
