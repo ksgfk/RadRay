@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <radray/basic_math.h>
 #include <radray/types.h>
 #include <radray/render/common.h>
@@ -59,6 +61,11 @@ struct VisiblePrimitiveList {
     void Clear() noexcept { Primitives.clear(); }
 };
 
+/// 图元过滤谓词。对应 Unity 的 FilteringSettings:每个 pass 据此从【共享】可见集里挑
+/// 自己要画的子集。返回 true = 保留。空谓词 = 全画。
+/// 用谓词而非固定 enum:把"按什么过滤"的决定权留给 pass,runtime 不预设分类标准。
+using PrimitiveFilter = std::function<bool(const PrimitiveSceneProxy&)>;
+
 /// 网格 pass 处理器。对应 UE5 的 FMeshPassProcessor:
 /// 输入一份可见图元列表 + 一个 View,输出一组完全解析、可排序的 MeshDrawCommand。
 /// 负责:取代理几何 → 取材质 → 经 PSOCache 取 PSO → 填 per-object 常量 → 算 SortKey。
@@ -76,7 +83,12 @@ public:
     explicit MeshPassProcessor(const Config& config) noexcept : _config(config) {}
 
     /// 遍历可见图元列表,构建 MeshDrawCommand 列表(追加到 out)。
-    void BuildCommands(const VisiblePrimitiveList& visible, const SceneView& view, vector<MeshDrawCommand>& out) const;
+    /// filter 非空时,只为通过过滤的图元产出命令(对应 Unity DrawRenderers 的 FilteringSettings)。
+    void BuildCommands(
+        const VisiblePrimitiveList& visible,
+        const SceneView& view,
+        vector<MeshDrawCommand>& out,
+        const PrimitiveFilter& filter = {}) const;
 
     /// 按 SortKey 升序排序(PSO 分组在前以减少状态切换)。
     static void SortCommands(vector<MeshDrawCommand>& commands);
@@ -85,39 +97,34 @@ private:
     Config _config;
 };
 
-/// 场景渲染编排器。对应 UE5 的 FSceneRenderer(最小化:InitViews → 单一 BasePass)。
+/// 场景渲染器。对应 UE5 FSceneRenderer / Unity 的 cull + DrawRenderers(最小化)。
 ///
-/// 一帧流程(对应 UE5 FSceneRenderer::Render 的开头两段接缝):
-///  1. InitViews   ← 从 Scene 收集本 View 的可见图元(当前不裁剪,全收集)。
-///  2. BasePass    ← MeshPassProcessor 基于可见列表构建并排序 MeshDrawCommand,顺序录制。
+/// 职责拆成两个解耦的动作,对齐 Unity 模型:
+///  - Cull:从 Scene 收集本 View 的可见图元,产出一份【共享】可见集。一帧一次,各 pass 共享。
+///  - DrawRenderers:从外部传入的可见集里(按 filter)挑子集,构建/排序/录制 MeshDrawCommand。
 ///
-/// RenderPass 的 Begin/End、depth buffer、barrier、视口(含后端差异)由调用方(应用)
-/// 管理,使本类与具体窗口/帧资源解耦。后续扩展多 View/多 pass 时在此追加循环与处理器。
+/// RenderPass 的 Begin/End、depth buffer、barrier、视口(含后端差异)由调用方(pass)管理,
+/// 使本类与具体窗口/帧资源解耦。
 class SceneRenderer {
 public:
     SceneRenderer() noexcept = default;
 
-    /// 渲染一个 View 的场景。内部 = InitViews(收集可见图元)→ BasePass(构建/排序/录制)。
-    /// encoder 须为已 Begin 的 RenderPass;processorConfig 提供 PSOCache 与 RT 格式;
-    /// view 由相机产出(View/Proj/ViewProj + 视口)。
-    void Render(
+    /// Cull 接缝(对应 Unity context.Cull / UE5 InitViews)。
+    /// 当前【不做视锥裁剪】:收集场景全部可渲染代理到 out。view 预留给后续裁剪/relevance。
+    /// 无内部状态,故为静态:调用方持有 out 存储,一帧 cull 一次填 RenderContext.Visible。
+    static void Cull(const Scene& scene, const SceneView& view, VisiblePrimitiveList& out);
+
+    /// 从【共享】可见集挑子集并录制(对应 Unity context.DrawRenderers)。
+    /// encoder 须为已 Begin 的 RenderPass;visible 通常来自 RenderContext.Visible;
+    /// filter 空 = 全画,非空 = 只画通过过滤的图元。
+    void DrawRenderers(
         render::GraphicsCommandEncoder* encoder,
-        const Scene& scene,
+        const VisiblePrimitiveList& visible,
         const SceneView& view,
-        const MeshPassProcessor::Config& processorConfig);
+        const MeshPassProcessor::Config& processorConfig,
+        const PrimitiveFilter& filter = {});
 
 private:
-    /// InitViews 接缝:收集场景全部可渲染代理到 _visible(不做视锥裁剪)。
-    void InitViews(const Scene& scene, const SceneView& view);
-
-    /// 在已打开的 encoder 上录制 base pass(基于 _visible)。
-    void RenderBasePass(
-        render::GraphicsCommandEncoder* encoder,
-        const SceneView& view,
-        const MeshPassProcessor::Config& processorConfig);
-
-    // 本帧可见图元(InitViews 产出)。复用以避免每帧分配。
-    VisiblePrimitiveList _visible;
     // 复用的命令缓冲,避免每帧重新分配。
     vector<MeshDrawCommand> _drawCommands;
 };

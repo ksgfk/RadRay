@@ -62,6 +62,7 @@ struct GpuSystemDescriptor {
     uint32_t MainQueueIndex;
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
+    bool EnableFrameProfiler{true};
 };
 
 /// 一条等待 GpuSystem 上传阶段 / GPU fence 的协程记录。由 FrameUploadScheduler 管理。
@@ -387,7 +388,8 @@ public:
     std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
     void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
 
-    /// 上一帧 GPU 执行耗时(毫秒)。由内置 GpuFrameProfiler 在每帧 resolve 后更新。
+    /// 上一帧 GPU 执行耗时(毫秒)。启用 GpuSystemDescriptor::EnableFrameProfiler 后由
+    /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
     float GetLastGpuTimeMs() const noexcept;
 
 private:

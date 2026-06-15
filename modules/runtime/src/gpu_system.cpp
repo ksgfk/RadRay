@@ -458,7 +458,9 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
     _rsCache = make_unique<RSCache>(_device);
     _psoCache = make_unique<PSOCache>(_device);
-    _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
+    if (desc.EnableFrameProfiler) {
+        _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
+    }
 }
 
 GpuSystem::~GpuSystem() noexcept = default;

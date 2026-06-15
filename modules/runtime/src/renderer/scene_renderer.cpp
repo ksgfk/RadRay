@@ -13,7 +13,8 @@ namespace radray {
 void MeshPassProcessor::BuildCommands(
     const VisiblePrimitiveList& visible,
     const SceneView& view,
-    vector<MeshDrawCommand>& out) const {
+    vector<MeshDrawCommand>& out,
+    const PrimitiveFilter& filter) const {
     if (_config.Cache == nullptr) {
         RADRAY_ERR_LOG("MeshPassProcessor: PSOCache is null");
         return;
@@ -22,6 +23,10 @@ void MeshPassProcessor::BuildCommands(
     vector<MeshBatchElement> elements;
     for (const PrimitiveSceneProxy* proxy : visible.Primitives) {
         if (proxy == nullptr) {
+            continue;
+        }
+        // filter 非空:只为通过过滤的图元产出命令(对应 Unity FilteringSettings)。
+        if (filter && !filter(*proxy)) {
             continue;
         }
         Material* material = proxy->GetMaterial();
@@ -82,42 +87,30 @@ void MeshPassProcessor::SortCommands(vector<MeshDrawCommand>& commands) {
         });
 }
 
-void SceneRenderer::InitViews(const Scene& scene, const SceneView& view) {
+void SceneRenderer::Cull(const Scene& scene, const SceneView& view, VisiblePrimitiveList& out) {
     // 最小化:不做视锥裁剪,收集全部可渲染代理。view 预留给后续裁剪/relevance。
     (void)view;
-    _visible.Clear();
+    out.Clear();
     for (const unique_ptr<PrimitiveSceneProxy>& proxy : scene.GetPrimitives()) {
         if (proxy == nullptr || !proxy->IsRenderable()) {
             continue;
         }
-        _visible.Primitives.push_back(proxy.get());
+        out.Primitives.push_back(proxy.get());
     }
 }
 
-void SceneRenderer::Render(
+void SceneRenderer::DrawRenderers(
     render::GraphicsCommandEncoder* encoder,
-    const Scene& scene,
+    const VisiblePrimitiveList& visible,
     const SceneView& view,
-    const MeshPassProcessor::Config& processorConfig) {
+    const MeshPassProcessor::Config& processorConfig,
+    const PrimitiveFilter& filter) {
     if (encoder == nullptr) {
         return;
     }
-    // 1. InitViews:收集本 View 可见图元。
-    InitViews(scene, view);
-    if (_visible.Primitives.empty()) {
-        return;
-    }
-    // 2. BasePass:构建/排序/录制。
-    RenderBasePass(encoder, view, processorConfig);
-}
-
-void SceneRenderer::RenderBasePass(
-    render::GraphicsCommandEncoder* encoder,
-    const SceneView& view,
-    const MeshPassProcessor::Config& processorConfig) {
     _drawCommands.clear();
     MeshPassProcessor processor{processorConfig};
-    processor.BuildCommands(_visible, view, _drawCommands);
+    processor.BuildCommands(visible, view, _drawCommands, filter);
     if (_drawCommands.empty()) {
         return;
     }

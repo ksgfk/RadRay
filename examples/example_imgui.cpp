@@ -11,6 +11,10 @@
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/renderer/scene.h>
 #include <radray/runtime/renderer/scene_renderer.h>
+#include <radray/runtime/renderer/render_context.h>
+#include <radray/runtime/renderer/render_pass.h>
+#include <radray/runtime/renderer/render_pipeline.h>
+#include <radray/runtime/renderer/render_resource_pool.h>
 #include <radray/render/common.h>
 #include <radray/basic_math.h>
 #include <radray/triangle_mesh.h>
@@ -18,6 +22,7 @@
 
 #include <filesystem>
 #include <numbers>
+#include <span>
 #include <string_view>
 
 #ifndef RADRAY_EXAMPLE_ASSET_DIR
@@ -26,34 +31,142 @@
 
 using namespace radray;
 
-// 这个 example 现在是一个"纯游戏应用":只重写窄接口
-//   OnInit / OnUpdate / OnRenderView / OnShutdown,
-// 不再手写设备/窗口/GpuSystem 初始化、帧序、多 viewport acquire/present、
-// backbuffer barrier 状态追踪、GPU 计时这些通用流程——全部已收束到 runtime。
-// ImGui 是显式注册的应用子系统,应用按需 GetSubsystem<ImGuiSystem>() 提交 UI 绘制。
-//
-// 仍保留在 game 层的,只有 demo 自己的内容:球体 mesh/material/camera 的创建、
-// 旋转逻辑、monitor UI,以及"主 viewport 背后画什么"(场景渲染)所需的 per-flight
-// depth buffer(尺寸/格式由 demo 决定,故归 demo 自管)。
-class ExampleApp : public Application {
-    // 每条 flight 一个 depth buffer。runtime 在复用该 flight 槽位前会等其 fence,
-    // 故 resize 时重建上一份 depth 是安全的。
-    struct DepthResource {
-        unique_ptr<render::Texture> Tex;
-        unique_ptr<render::TextureView> View;
-        render::TextureStates State{render::TextureState::Undefined};
-        uint32_t Width{0};
-        uint32_t Height{0};
-    };
+// —— 一个 game 侧自定义的 RenderPass:画场景的不透明几何 ——
+// runtime 只提供 RenderPipeline/RenderPass/RenderContext/RenderResourcePool 这套"怎么组织
+// pass、怎么共享资源"的词汇表,不带任何具体 pass。具体"画什么"在 game 层:
+// 这里 ScenePass 从 ctx.Resources 共享池申请名为 "SceneDepth" 的 depth(下游 pass 可按名接力),
+// 从 ctx.Visible 共享可见集挑子集,自己 BeginRenderPass→录制→End,内部驱动 SceneRenderer。
+class ScenePass : public RenderPass {
+public:
+    ScenePass(
+        render::TextureFormat colorFormat,
+        render::TextureFormat depthFormat,
+        render::ColorClearValue clearColor)
+        : _colorFormat(colorFormat),
+          _depthFormat(depthFormat),
+          _clearColor(clearColor) {}
 
+    std::string_view GetName() const noexcept override { return "ScenePass"; }
+
+    // 在自己的 render pass(color Clear + depth Clear)里画场景不透明几何。
+    void Execute(RenderContext& ctx) override {
+        if (ctx.Width == 0 || ctx.Height == 0 || ctx.Scene == nullptr ||
+            ctx.CmdBuffer == nullptr || ctx.ColorTarget == nullptr ||
+            ctx.Resources == nullptr || ctx.Device == nullptr) {
+            return;
+        }
+
+        // 从共享池申请/复用本 flight 的 depth(尺寸变了池子自动重建)。名字 "SceneDepth"
+        // 是 producer/consumer 跨 pass 交接的句柄。
+        render::TextureDescriptor depthDesc{
+            .Dim = render::TextureDimension::Dim2D,
+            .Width = ctx.Width,
+            .Height = ctx.Height,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .SampleCount = 1,
+            .Format = _depthFormat,
+            .Memory = render::MemoryType::Device,
+            .Usage = render::TextureUse::DepthStencilWrite,
+            .Hints = render::ResourceHint::None};
+        if (ctx.Resources->Acquire("SceneDepth", ctx.FlightIndex, depthDesc, *ctx.Device) == nullptr) {
+            return;
+        }
+        // 迁到 DepthWrite:barrier 由池子按跟踪态发出。
+        ctx.Resources->Transition("SceneDepth", ctx.FlightIndex, render::TextureState::DepthWrite, *ctx.CmdBuffer);
+
+        render::TextureViewDescriptor depthViewDesc{
+            .Dim = render::TextureDimension::Dim2D,
+            .Format = _depthFormat,
+            .Range = render::SubresourceRange::AllSub(),
+            .Usage = render::TextureViewUsage::DepthWrite};
+        render::TextureView* depthView = ctx.Resources->GetView("SceneDepth", ctx.FlightIndex, depthViewDesc, *ctx.Device);
+        if (depthView == nullptr) {
+            return;
+        }
+
+        render::ColorAttachment colorAttachment{
+            .Target = ctx.ColorTarget,
+            .Load = render::LoadAction::Clear,
+            .Store = render::StoreAction::Store,
+            .ClearValue = _clearColor};
+        render::DepthStencilAttachment depthAttachment{
+            .Target = depthView,
+            .DepthLoad = render::LoadAction::Clear,
+            .DepthStore = render::StoreAction::Store,
+            .StencilLoad = render::LoadAction::DontCare,
+            .StencilStore = render::StoreAction::Discard,
+            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
+        render::RenderPassDescriptor passDesc{
+            .ColorAttachments = std::span{&colorAttachment, 1},
+            .DepthStencilAttachment = depthAttachment,
+            .Name = "Scene Pass"};
+        auto encoderOpt = ctx.CmdBuffer->BeginRenderPass(passDesc);
+        if (!encoderOpt.HasValue()) {
+            RADRAY_ERR_LOG("failed to begin scene render pass");
+            return;
+        }
+        auto encoder = encoderOpt.Release();
+
+        Viewport vp{
+            .X = 0.0f,
+            .Y = 0.0f,
+            .Width = static_cast<float>(ctx.Width),
+            .Height = static_cast<float>(ctx.Height),
+            .MinDepth = 0.0f,
+            .MaxDepth = 1.0f};
+        if (ctx.Device->GetBackend() == render::RenderBackend::Vulkan) {
+            vp.Y = static_cast<float>(ctx.Height);
+            vp.Height = -static_cast<float>(ctx.Height);
+        }
+        encoder->SetViewport(vp);
+        encoder->SetScissor(Rect{0, 0, ctx.Width, ctx.Height});
+
+        MeshPassProcessor::Config processorConfig{};
+        processorConfig.Cache = &ctx.Gpu->GetPSOCache();
+        processorConfig.RtFormats.ColorFormats = {_colorFormat};
+        processorConfig.RtFormats.DepthFormat = _depthFormat;
+        processorConfig.ObjectConstantsParam = "gScene";
+
+        // 从共享可见集挑子集。本 pass 画全部(filter 为空);将来 Opaque/Transparent 各传自己的 filter。
+        if (ctx.Visible != nullptr) {
+            _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig);
+        }
+
+        ctx.CmdBuffer->EndRenderPass(std::move(encoder));
+    }
+
+private:
+    SceneRenderer _sceneRenderer;
+    render::TextureFormat _colorFormat;
+    render::TextureFormat _depthFormat;
+    render::ColorClearValue _clearColor;
+};
+
+// 这个 example 是一个"纯游戏应用":只重写窄接口 OnInit / OnUpdate / OnRenderView / OnShutdown,
+// 不再手写设备/窗口/GpuSystem 初始化、帧序、多 viewport acquire/present、backbuffer barrier
+// 状态追踪、GPU 计时这些通用流程——全部已收束到 runtime。
+//
+// 渲染组织也走 runtime 的 RenderPipeline/RenderPass 词汇表:game 自己持有一个 RenderPipeline,
+// 装填自定义的 ScenePass,在 OnRenderView 里组装 RenderContext 并驱动管线。runtime 不带任何
+// 默认 pass、不强加渲染策略。
+//
+// ImGui 是显式注册的应用子系统,应用按需 GetSubsystem<ImGuiSystem>() 提交 UI 绘制。
+class ExampleApp : public Application {
 public:
     static constexpr render::TextureFormat BackBufferFormat = render::TextureFormat::BGRA8_UNORM;
     static constexpr render::TextureFormat DepthFormat = render::TextureFormat::D32_FLOAT;
 
     // ── 一次性初始化:运行时(device/window/gpu/imgui/asset/world)已就绪 ──
     void OnInit() override {
-        _depths.resize(GetGpuSystem()->GetFlightDataCount());
         InitScene();
+
+        // 装填渲染管线:一个 ScenePass。runtime 不做任何默认装填,全由 game 决定。
+        auto scenePass = make_unique<ScenePass>(
+            BackBufferFormat,
+            DepthFormat,
+            render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}});
+        _pipeline.AddPass(std::move(scenePass));
     }
 
     // 构建球体 StaticMesh + Material 资产、Spawn Actor + StaticMeshComponent,
@@ -114,8 +227,6 @@ public:
         cameraActor->SetRootComponent(_cameraComp);
         _cameraComp->SetWorldLocation(Eigen::Vector3f{0.0f, 0.0f, -3.0f});
         _cameraComp->SetPerspective(Radian(60.0f), 0.1f, 100.0f);
-
-        _sphereReady = true;
     }
 
     // ── 每帧游戏逻辑(World::Tick 之前)── 推进球体自旋,经组件 transform 流到代理 ──
@@ -183,155 +294,54 @@ public:
         ImGui::ShowDemoWindow();
     }
 
-    // ── viewport UI 背后的场景内容:把球体画进 backbuffer(ImGui 随后 Load 叠加)──
-    // demo 只绘制主 viewport；secondary ImGui platform viewport 保持 UI-only。
+    // ── viewport UI 背后的场景内容:组装 RenderContext,驱动渲染管线把场景画进 backbuffer ──
+    // demo 只绘制主 viewport；secondary ImGui platform viewport 保持 UI-only(返回 false 走框架 clear)。
     bool OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target) override {
-        if (!_sphereReady || !target.Window->IsMainWindow()) {
+        if (!target.Window->IsMainWindow()) {
             return false;
         }
         render::TextureDescriptor bbDesc = target.BackBuffer->GetDesc();
-        return RecordSphere(
-            ctx.GetCommandBuffer(),
-            _depths[ctx.FlightIndex()],
-            target.BackBufferView,
-            bbDesc.Width,
-            bbDesc.Height);
+
+        RenderContext rc{};
+        rc.FlightIndex = ctx.FlightIndex();
+        rc.CmdBuffer = ctx.GetCommandBuffer();
+        rc.Device = GetDevice();
+        rc.Gpu = GetGpuSystem();
+        rc.Scene = GetWorld()->GetScene();
+        rc.ColorTarget = target.BackBufferView;
+        rc.ColorFormat = bbDesc.Format;
+        rc.Width = bbDesc.Width;
+        rc.Height = bbDesc.Height;
+        if (_cameraComp != nullptr) {
+            _cameraComp->FillSceneView(rc.View, bbDesc.Width, bbDesc.Height);
+        }
+
+        // cull 一次,产出共享可见集,挂进 context 供各 pass 共享(对应 Unity context.Cull)。
+        if (rc.Scene != nullptr) {
+            SceneRenderer::Cull(*rc.Scene, rc.View, _visible);
+            rc.Visible = &_visible;
+        }
+        // 跨 pass 共享的瞬态资源池(depth 等在这里按名交接)。
+        rc.Resources = &_resourcePool;
+
+        _pipeline.Render(rc);
+        return true;
     }
 
-    // ── 关闭前清理(GPU 已 idle):释放 demo 自管的 per-flight depth + 置空 World 指针 ──
+    // —— 关闭前清理(GPU 已 idle):释放共享资源池 + 置空 World 指针 ——
     void OnShutdown() override {
-        _depths.clear();
+        _resourcePool.Clear();
         _sphereMeshComp = nullptr;
         _cameraComp = nullptr;
     }
 
 private:
-    // 确保该 flight 的 depth buffer 匹配给定尺寸;不匹配则重建。
-    render::TextureView* EnsureDepthBuffer(DepthResource& depth, uint32_t width, uint32_t height) {
-        if (depth.Tex != nullptr && depth.Width == width && depth.Height == height) {
-            return depth.View.get();
-        }
-        depth.View.reset();
-        depth.Tex.reset();
-        depth.State = render::TextureState::Undefined;
-
-        render::TextureDescriptor texDesc{
-            .Dim = render::TextureDimension::Dim2D,
-            .Width = width,
-            .Height = height,
-            .DepthOrArraySize = 1,
-            .MipLevels = 1,
-            .SampleCount = 1,
-            .Format = DepthFormat,
-            .Memory = render::MemoryType::Device,
-            .Usage = render::TextureUse::DepthStencilWrite,
-            .Hints = render::ResourceHint::None};
-        auto texOpt = GetDevice()->CreateTexture(texDesc);
-        if (!texOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere depth texture");
-            return nullptr;
-        }
-        depth.Tex = texOpt.Release();
-        depth.Tex->SetDebugName("sphere_depth");
-
-        render::TextureViewDescriptor viewDesc{
-            .Target = depth.Tex.get(),
-            .Dim = render::TextureDimension::Dim2D,
-            .Format = DepthFormat,
-            .Range = render::SubresourceRange::AllSub(),
-            .Usage = render::TextureViewUsage::DepthWrite};
-        auto viewOpt = GetDevice()->CreateTextureView(viewDesc);
-        if (!viewOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create sphere depth view");
-            depth.Tex.reset();
-            return nullptr;
-        }
-        depth.View = viewOpt.Release();
-        depth.Width = width;
-        depth.Height = height;
-        return depth.View.get();
-    }
-
-    // 在自己的 render pass(color Clear + depth)里画球体。返回 true 表示已向 colorView 写入。
-    bool RecordSphere(
-        render::CommandBuffer* cmdBuffer,
-        DepthResource& depth,
-        render::TextureView* colorView,
-        uint32_t width,
-        uint32_t height) {
-        if (!_sphereReady || width == 0 || height == 0) {
-            return false;
-        }
-        render::TextureView* depthView = EnsureDepthBuffer(depth, width, height);
-        if (depthView == nullptr) {
-            return false;
-        }
-
-        render::ResourceBarrierDescriptor toDepthWrite = render::BarrierTextureDescriptor{
-            .Target = depth.Tex.get(),
-            .Before = depth.State,
-            .After = render::TextureState::DepthWrite};
-        cmdBuffer->ResourceBarrier(std::span{&toDepthWrite, 1});
-        depth.State = render::TextureState::DepthWrite;
-
-        SceneView sceneView{};
-        if (_cameraComp != nullptr) {
-            _cameraComp->FillSceneView(sceneView, width, height);
-        }
-
-        render::ColorAttachment colorAttachment{
-            .Target = colorView,
-            .Load = render::LoadAction::Clear,
-            .Store = render::StoreAction::Store,
-            .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
-        render::DepthStencilAttachment depthAttachment{
-            .Target = depthView,
-            .DepthLoad = render::LoadAction::Clear,
-            .DepthStore = render::StoreAction::Store,
-            .StencilLoad = render::LoadAction::DontCare,
-            .StencilStore = render::StoreAction::Discard,
-            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-        render::RenderPassDescriptor passDesc{
-            .ColorAttachments = std::span{&colorAttachment, 1},
-            .DepthStencilAttachment = depthAttachment,
-            .Name = "Sphere Pass"};
-        auto encoderOpt = cmdBuffer->BeginRenderPass(passDesc);
-        if (!encoderOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to begin sphere render pass");
-            return false;
-        }
-        auto encoder = encoderOpt.Release();
-
-        Viewport vp{
-            .X = 0.0f,
-            .Y = 0.0f,
-            .Width = static_cast<float>(width),
-            .Height = static_cast<float>(height),
-            .MinDepth = 0.0f,
-            .MaxDepth = 1.0f};
-        if (GetDevice()->GetBackend() == render::RenderBackend::Vulkan) {
-            vp.Y = static_cast<float>(height);
-            vp.Height = -static_cast<float>(height);
-        }
-        encoder->SetViewport(vp);
-        encoder->SetScissor(Rect{0, 0, width, height});
-
-        MeshPassProcessor::Config processorConfig{};
-        processorConfig.Cache = &GetGpuSystem()->GetPSOCache();
-        processorConfig.RtFormats.ColorFormats = {BackBufferFormat};
-        processorConfig.RtFormats.DepthFormat = DepthFormat;
-        processorConfig.ObjectConstantsParam = "gScene";
-
-        _sceneRenderer.Render(encoder.get(), *GetWorld()->GetScene(), sceneView, processorConfig);
-
-        cmdBuffer->EndRenderPass(std::move(encoder));
-        return true;
-    }
+    // —— 渲染组织(game 侧持有)——
+    RenderPipeline _pipeline;
+    RenderResourcePool _resourcePool;       // 跨 pass 共享的瞬态资源(如 SceneDepth)。
+    VisiblePrimitiveList _visible;          // 本帧共享可见集(cull 一次,各 pass 读)。
 
     // —— demo 内容状态 ——
-    SceneRenderer _sceneRenderer;
-    vector<DepthResource> _depths;
-    bool _sphereReady{false};
     float _sphereSpin{0.0f};
     bool _showMonitor{true};
 
