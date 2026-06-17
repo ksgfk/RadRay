@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <filesystem>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -11,6 +12,7 @@
 namespace radray {
 
 class AssetManager;
+class FrameUploadScheduler;
 class StreamingAssetRefAny;
 template <class T>
 requires std::derived_from<T, Asset>
@@ -167,6 +169,10 @@ private:
     StreamingAssetRefAny _ref;
 };
 
+struct GltfAssetLoadOptions {
+    StreamingAssetRefAny DefaultMaterial{};
+};
+
 /// 资产仓库。用内部协程承接异步加载结果,单表空位模型,无引用计数,无 GC。
 ///
 /// - 单线程使用,不加锁(协程推进、表操作、run 钩子全在主/泵线程)。
@@ -225,6 +231,11 @@ public:
     void Pump();
 
     uint32_t GetAssetCount() const noexcept { return _slots.Count(); }
+
+    StreamingAssetRefAny LoadGltfAsset(
+        FrameUploadScheduler& frameUploads,
+        const std::filesystem::path& path,
+        const GltfAssetLoadOptions& options = {});
 
 private:
     friend class StreamingAssetRefAny;

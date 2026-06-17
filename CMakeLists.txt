@@ -288,6 +288,7 @@ if (RADRAY_ENABLE_LIBJPEG)
         CMAKE_ARGS
             "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>"
             "-DCMAKE_BUILD_TYPE=$<CONFIG>"
+            "-DWITH_CRT_DLL=ON"
             "-DENABLE_SHARED=OFF"
             "-DENABLE_STATIC=ON"
             "-DWITH_JPEG8=ON"
