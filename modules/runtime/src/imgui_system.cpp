@@ -1424,8 +1424,7 @@ bool ImGuiSystem::OnRender(Application& app, AppFrameContext& ctx) {
     if (!IsValid()) {
         return false;
     }
-    RenderViewports(app, ctx);
-    return true;
+    return RenderViewports(app, ctx);
 }
 
 void ImGuiSystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
@@ -1461,9 +1460,9 @@ void ImGuiSystem::HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx
     }
 }
 
-void ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
+bool ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
     if (_renderer == nullptr) {
-        return;
+        return false;
     }
 
     struct AcquiredViewport {
@@ -1495,7 +1494,7 @@ void ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
         renderTargets.emplace_back(AcquiredViewport{viewportWindow.get(), target.value()});
     }
     if (renderTargets.empty()) {
-        return;
+        return false;
     }
 
     render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
@@ -1541,6 +1540,7 @@ void ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
         cmdBuffer->ResourceBarrier(std::span{&toPresent, 1});
         appWindow->SetBackBufferState(backBufferIndex, render::TextureState::Present);
     }
+    return true;
 }
 
 void ImGuiSystem::ViewportWindow::AttachInput(ImGuiSystem* system) {
@@ -1657,7 +1657,7 @@ ImGuiSystem::~ImGuiSystem() noexcept {
 }
 
 bool ImGuiSystem::IsValid() const noexcept {
-    return _context.IsValid();
+    return _context.IsValid() && _renderer != nullptr;
 }
 
 void ImGuiSystem::Destroy() noexcept {

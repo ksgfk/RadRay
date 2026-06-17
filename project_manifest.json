@@ -74,6 +74,18 @@
             "Tag": "v1.6.58"
         },
         {
+            "Name": "libjpeg-turbo",
+            "Type": "git",
+            "Git": "https://github.com/libjpeg-turbo/libjpeg-turbo.git",
+            "Tag": "3.1.4.1"
+        },
+        {
+            "Name": "cgltf",
+            "Type": "git",
+            "Git": "https://github.com/jkuhlmann/cgltf.git",
+            "Tag": "v1.15"
+        },
+        {
             "Name": "freetype",
             "Type": "git",
             "Git": "https://github.com/freetype/freetype.git",

@@ -410,6 +410,7 @@ private:
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     shared_ptr<render::Dxc> _dxc;
     unordered_map<string, unique_ptr<render::Shader>> _shaderCache;
+    string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
     unique_ptr<RSCache> _rsCache;
     unique_ptr<PSOCache> _psoCache;
     unique_ptr<GpuFrameProfiler> _frameProfiler;

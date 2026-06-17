@@ -43,6 +43,12 @@ public:
     bool IsFlipY{false};
 };
 
+class JPEGLoadSettings {
+public:
+    std::optional<uint32_t> AddAlphaIfRGB;
+    bool IsFlipY{false};
+};
+
 struct PixelCompareResult {
     string ErrorReason{};
     size_t MismatchCount{0};
@@ -74,6 +80,8 @@ public:
     static size_t FormatSize(ImageFormat format) noexcept;
     static bool IsPNG(std::istream& stream);
     static std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
+    static bool IsJPEG(std::istream& stream);
+    static std::optional<ImageData> LoadJPEG(std::istream& stream, JPEGLoadSettings settings = JPEGLoadSettings{});
     bool WritePNG(PNGWriteSettings settings = PNGWriteSettings{}) const;
 
     static PixelCompareResult CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance) noexcept;

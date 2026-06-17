@@ -13,6 +13,11 @@
 #include <png.h>
 #endif
 
+#ifdef RADRAY_ENABLE_JPEG
+#include <csetjmp>
+#include <jpeglib.h>
+#endif
+
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/memory.h>
@@ -484,6 +489,179 @@ bool ImageData::WritePNG(PNGWriteSettings settings) const {
     RADRAY_UNUSED(settings);
     RADRAY_ERR_LOG("libpng support is not enabled");
     return false;
+}
+#endif
+
+#ifdef RADRAY_ENABLE_JPEG
+
+namespace {
+
+struct LibjpegErrorManager {
+    jpeg_error_mgr Pub;
+    jmp_buf Jump;
+    char Message[JMSG_LENGTH_MAX]{};
+};
+
+void LibjpegErrorExit(j_common_ptr cinfo) {
+    auto* error = reinterpret_cast<LibjpegErrorManager*>(cinfo->err);
+    (*cinfo->err->format_message)(cinfo, error->Message);
+    longjmp(error->Jump, 1);
+}
+
+bool ReadStreamToBytes(std::istream& stream, vector<byte>& out) {
+    if (!stream.good()) {
+        return false;
+    }
+    const auto original_state = stream.rdstate();
+    const std::istream::pos_type original_pos = stream.tellg();
+    const bool can_seek = original_pos != std::istream::pos_type(-1);
+    stream.clear();
+    if (can_seek) {
+        stream.seekg(0, std::ios::end);
+        const std::istream::pos_type end_pos = stream.tellg();
+        if (end_pos == std::istream::pos_type(-1) || end_pos < original_pos) {
+            stream.clear(original_state);
+            return false;
+        }
+        const auto size = static_cast<size_t>(end_pos - original_pos);
+        stream.seekg(original_pos);
+        out.resize(size);
+        if (size > 0) {
+            stream.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
+            if (static_cast<size_t>(stream.gcount()) != size) {
+                stream.clear(original_state);
+                return false;
+            }
+        }
+    } else {
+        std::array<char, 4096> buffer{};
+        while (stream.good()) {
+            stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize count = stream.gcount();
+            if (count > 0) {
+                const size_t old_size = out.size();
+                out.resize(old_size + static_cast<size_t>(count));
+                std::memcpy(out.data() + old_size, buffer.data(), static_cast<size_t>(count));
+            }
+        }
+    }
+    stream.clear(original_state);
+    if (can_seek) {
+        stream.seekg(original_pos);
+    }
+    return !out.empty();
+}
+
+}  // namespace
+
+bool ImageData::IsJPEG(std::istream& stream) {
+    if (!stream.good()) {
+        return false;
+    }
+    const auto original_state = stream.rdstate();
+    const std::istream::pos_type original_pos = stream.tellg();
+    const bool can_seek = original_pos != std::istream::pos_type(-1);
+    stream.clear();
+    std::array<unsigned char, 3> sig{};
+    stream.read(reinterpret_cast<char*>(sig.data()), static_cast<std::streamsize>(sig.size()));
+    const std::streamsize read_bytes = stream.gcount();
+    const bool is_jpeg = read_bytes >= 2 &&
+                         sig[0] == 0xFF &&
+                         sig[1] == 0xD8;
+    stream.clear();
+    if (can_seek) {
+        stream.seekg(original_pos);
+    } else {
+        stream.seekg(0, std::ios::beg);
+    }
+    stream.clear(original_state);
+    return is_jpeg;
+}
+
+std::optional<ImageData> ImageData::LoadJPEG(std::istream& stream, JPEGLoadSettings settings) {
+    vector<byte> encoded;
+    if (!ReadStreamToBytes(stream, encoded)) {
+        RADRAY_ERR_LOG("failed to read JPEG stream");
+        return std::nullopt;
+    }
+
+    jpeg_decompress_struct cinfo{};
+    LibjpegErrorManager jerr{};
+    cinfo.err = jpeg_std_error(&jerr.Pub);
+    jerr.Pub.error_exit = LibjpegErrorExit;
+
+    if (setjmp(jerr.Jump)) {
+        RADRAY_ERR_LOG("libjpeg error: {}", jerr.Message);
+        jpeg_destroy_decompress(&cinfo);
+        return std::nullopt;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(
+        &cinfo,
+        reinterpret_cast<const unsigned char*>(encoded.data()),
+        static_cast<unsigned long>(encoded.size()));
+    jpeg_read_header(&cinfo, TRUE);
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+
+    const uint32_t width = static_cast<uint32_t>(cinfo.output_width);
+    const uint32_t height = static_cast<uint32_t>(cinfo.output_height);
+    const uint32_t channels = static_cast<uint32_t>(cinfo.output_components);
+    if (width == 0 || height == 0 || channels != 3) {
+        RADRAY_ERR_LOG("unsupported JPEG output dimensions/channels: {}x{}x{}", width, height, channels);
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        return std::nullopt;
+    }
+
+    ImageData img;
+    img.Width = width;
+    img.Height = height;
+    img.Format = settings.AddAlphaIfRGB.has_value() ? ImageFormat::RGBA8_BYTE : ImageFormat::RGB8_BYTE;
+    img.Data = make_unique<byte[]>(img.GetSize());
+
+    vector<unsigned char> scanline(static_cast<size_t>(width) * channels);
+    const size_t dst_pixel_size = ImageData::FormatSize(img.Format);
+    while (cinfo.output_scanline < cinfo.output_height) {
+        const uint32_t src_y = static_cast<uint32_t>(cinfo.output_scanline);
+        unsigned char* row_ptr = scanline.data();
+        jpeg_read_scanlines(&cinfo, &row_ptr, 1);
+
+        const uint32_t dst_y = settings.IsFlipY ? (height - 1u - src_y) : src_y;
+        byte* dst = img.Data.get() + static_cast<size_t>(dst_y) * width * dst_pixel_size;
+        if (img.Format == ImageFormat::RGB8_BYTE) {
+            std::memcpy(dst, scanline.data(), scanline.size());
+        } else {
+            const byte alpha = static_cast<byte>(std::min(settings.AddAlphaIfRGB.value(), 0xFFu));
+            for (uint32_t x = 0; x < width; ++x) {
+                const size_t src_i = static_cast<size_t>(x) * 3u;
+                const size_t dst_i = static_cast<size_t>(x) * 4u;
+                dst[dst_i + 0] = static_cast<byte>(scanline[src_i + 0]);
+                dst[dst_i + 1] = static_cast<byte>(scanline[src_i + 1]);
+                dst[dst_i + 2] = static_cast<byte>(scanline[src_i + 2]);
+                dst[dst_i + 3] = alpha;
+            }
+        }
+    }
+
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    return std::make_optional(std::move(img));
+}
+
+#else
+bool ImageData::IsJPEG(std::istream& stream) {
+    RADRAY_UNUSED(stream);
+    RADRAY_ERR_LOG("libjpeg support is not enabled");
+    return false;
+}
+
+std::optional<ImageData> ImageData::LoadJPEG(std::istream& stream, JPEGLoadSettings settings) {
+    RADRAY_UNUSED(stream);
+    RADRAY_UNUSED(settings);
+    RADRAY_ERR_LOG("libjpeg support is not enabled");
+    return std::nullopt;
 }
 #endif
 

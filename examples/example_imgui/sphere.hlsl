@@ -1,10 +1,10 @@
-// Sphere normal visualization shader.
-// Compiled at runtime by example_imgui via DXC (DXIL for D3D12, SPIR-V for Vulkan).
-// The vk:: attributes are ignored by DXC when targeting DXIL, so one source serves both backends.
+#include "common.hlsl"
 
 struct VertexInput {
-    float3 Position : POSITION0;
-    float3 Normal : NORMAL0;
+    VK_LOCATION(0) float3 Position : POSITION0;
+    VK_LOCATION(1) float3 Normal : NORMAL0;
+    VK_LOCATION(2) float2 TexCoord : TEXCOORD0;
+    VK_LOCATION(3) float4 Tangent : TANGENT0;
 };
 
 struct VertexOutput {
@@ -17,7 +17,7 @@ struct SceneConstants {
     float4x4 Model;  // model rotation used to bring normals into world space
 };
 
-[[vk::push_constant]] ConstantBuffer<SceneConstants> gScene : register(b0, space0);
+VK_PUSH_CONSTANT ConstantBuffer<SceneConstants> gScene : register(b0, space0);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;

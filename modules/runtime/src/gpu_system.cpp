@@ -458,6 +458,9 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
     _rsCache = make_unique<RSCache>(_device);
     _psoCache = make_unique<PSOCache>(_device);
+    // shader 编译的默认 include 根目录:约定 shaderlib 随可执行文件部署在运行时目录下。
+    // 这样 shader 源码可直接 #include "common.hlsl" 等 shaderlib 头文件。
+    _shaderIncludeDir = (GetExecutableDirectory() / "shaderlib").generic_string();
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
     }
@@ -507,6 +510,15 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
     params.SM = render::HlslShaderModel::SM60;
     params.IsOptimize = false;
     params.IsSpirv = isSpirv;
+    std::string_view backendDefines[1] = {isSpirv ? "VULKAN=1" : "D3D12=1"};
+    params.Defines = std::span<std::string_view>{backendDefines, 1};
+    // 默认注入 <exe_dir>/shaderlib 作为 include 根目录，shader 可直接 #include "common.hlsl" 等。
+    // span 指向的存储须活到 Compile 返回，故放在同作用域的栈上。
+    std::string_view includeDirs[1];
+    if (!_shaderIncludeDir.empty()) {
+        includeDirs[0] = _shaderIncludeDir;
+        params.Includes = std::span<std::string_view>{includeDirs, 1};
+    }
     auto outputOpt = _dxc->Compile(params);
     if (!outputOpt.has_value()) {
         RADRAY_ERR_LOG("GpuSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);

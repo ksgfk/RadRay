@@ -51,6 +51,7 @@ struct AppSwapChainRecreateContext {
 
 struct AppRenderCompleteContext {
     uint32_t FlightIndex{0};
+    bool GpuWorkCompleted{true};
 };
 
 struct AppUpdateResult {
@@ -196,6 +197,9 @@ protected:
     /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、ShutdownWorld 之前)。
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
+
+    /// 某个 flight 的 GPU work 完成后回调。典型用途:回收应用自管的延迟销毁 GPU 资源。
+    virtual void OnRenderFrameComplete(const AppRenderCompleteContext& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。
     bool ShouldExit() const noexcept;

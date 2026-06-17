@@ -3152,6 +3152,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     }
     const bool hasRtExts =
+        desc.EnableRayTracing &&
         IsValidateExtensions(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, deviceExtsAvailable) &&
         IsValidateExtensions(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, deviceExtsAvailable) &&
         IsValidateExtensions(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, deviceExtsAvailable) &&
@@ -3173,14 +3174,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         cr.pNext = nullptr;
         AddToHeadVulkanStruct(deviceProperties2, cr);
     }
-    if (IsValidateExtensions(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, deviceExtsAvailable)) {
+    if (hasRtExts) {
         extProperties->accelerationStructure = VkPhysicalDeviceAccelerationStructurePropertiesKHR{};
         auto& asProp = extProperties->accelerationStructure.value();
         asProp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
         asProp.pNext = nullptr;
         AddToHeadVulkanStruct(deviceProperties2, asProp);
     }
-    if (IsValidateExtensions(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, deviceExtsAvailable)) {
+    if (hasRtExts) {
         extProperties->rayTracingPipeline = VkPhysicalDeviceRayTracingPipelinePropertiesKHR{};
         auto& rtProp = extProperties->rayTracingPipeline.value();
         rtProp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;

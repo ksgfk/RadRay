@@ -47,7 +47,12 @@ float3 to_world(Frame3 f, float3 v)
 
 float3 linear_to_srgb(float3 c)
 {
-    return select(c < (float3)0.0031308, c * 12.92, 1.055 * pow(c, (float3)(1.0 / 2.4)) - 0.055);
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, (float3)0.0), (float3)(1.0 / 2.4)) - 0.055;
+    return float3(
+        c.x < 0.0031308 ? lo.x : hi.x,
+        c.y < 0.0031308 ? lo.y : hi.y,
+        c.z < 0.0031308 ? lo.z : hi.z);
     // return pow(saturate(c), 1.0 / 2.2);
 }
 

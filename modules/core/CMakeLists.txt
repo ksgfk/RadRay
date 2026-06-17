@@ -13,10 +13,12 @@ target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
     $<$<PLATFORM_ID:Windows>:ole32>
-    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>)
+    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>
+    $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:jpeg-static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
-    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>)
+    $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>
+    $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:RADRAY_ENABLE_JPEG>)
 radray_default_compile_flags(radraycore)
 radray_optimize_flags_library(radraycore)
 radray_set_build_path(radraycore)

@@ -675,6 +675,7 @@ class VulkanDeviceDescriptor {
 public:
     std::optional<uint32_t> PhysicalDeviceIndex{};
     std::span<const VulkanCommandQueueDescriptor> Queues{};
+    bool EnableRayTracing{true};
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;

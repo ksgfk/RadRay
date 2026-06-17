@@ -48,6 +48,14 @@ radray_default_compile_flags(radrayruntime)
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
 
+# 将 shaderlib 复制到运行时输出目录。
+# 约定:GpuSystem 把 <exe_dir>/shaderlib 作为 shader 编译的默认 include 根目录,
+# 故 shaderlib 必须随可执行文件部署。静态库与可执行文件同在 RADRAY_BUILD_PATH/<Config>。
+add_custom_command(TARGET radrayruntime POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:radrayruntime>/shaderlib"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/shaderlib" "$<TARGET_FILE_DIR:radrayruntime>/shaderlib"
+    COMMENT "Copy shaderlib to radrayruntime output directory")
+
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)
 endif()

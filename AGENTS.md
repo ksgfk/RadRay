@@ -30,6 +30,10 @@
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.
 - Flag-style enums use `enum_flags.h` (`EnumFlags<T>`, `is_flags<T>`, `format_as`).
 
+## Shader Conventions
+- Treat `shaderlib/` as the HLSL include root. Include shared shader files as `#include "common.hlsl"` or `#include "bsdf.hlsl"`, not `#include "shaderlib/common.hlsl"`.
+- Reuse existing implementations in `shaderlib/` before adding shader-local helper functions.
+
 ## Test
 - Test sources go in `modules/<module>/tests/`.
 - Tests are registered in CMake with `radray_add_test` (plain gtest) or `radray_add_radray_gtest_case` (for tests needing `RADRAY_PROJECT_DIR`, `RADRAY_TEST_ENV_DIR`, etc.).

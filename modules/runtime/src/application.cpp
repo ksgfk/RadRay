@@ -105,6 +105,10 @@ bool Application::OnRenderView(AppFrameContext& ctx, const AppFrameTarget& targe
 void Application::OnShutdown() {
 }
 
+void Application::OnRenderFrameComplete(const AppRenderCompleteContext& ctx) {
+    (void)ctx;
+}
+
 class SingleThreadRunner;
 
 #if defined(RADRAY_APP_IMPL_ENABLE_VBLANK_TICK)
@@ -573,7 +577,9 @@ public:
             uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % gpuSystem->GetFlightDataCount());
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
             if (!runnerFrameData.IsInModalLoop && _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire)) {
-                _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
+                _app->NotifyRenderComplete(AppRenderCompleteContext{
+                    .FlightIndex = flightIndex,
+                    .GpuWorkCompleted = false});
                 _renderFrameIndex++;
                 NotifyRenderFrameComplete(_renderFrameIndex);
                 continue;
@@ -952,6 +958,8 @@ bool Application::RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& 
 }
 
 void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
+    OnRenderFrameComplete(ctx);
+
     for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
         if (subsystem != nullptr) {
             subsystem->OnRenderComplete(*this, ctx);
