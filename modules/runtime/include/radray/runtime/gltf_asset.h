@@ -3,15 +3,16 @@
 #include <filesystem>
 
 #include <radray/basic_math.h>
-#include <radray/image_data.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/image_asset.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/static_mesh.h>
 
 namespace radray {
 
 class Actor;
+class FrameUploadScheduler;
 class World;
 
 struct GltfNodeDesc {
@@ -38,7 +39,11 @@ struct GltfPrimitiveDesc {
 
 struct GltfImageDesc {
     string Name;
-    ImageData Image;
+    StreamingAssetRef<ImageAsset> Image;
+};
+
+struct GltfAssetLoadOptions {
+    StreamingAssetRefAny DefaultMaterial{};
 };
 
 class GltfAsset : public Asset {
@@ -87,5 +92,11 @@ template <>
 struct RuntimeTypeTrait<GltfAsset> {
     static constexpr RuntimeTypeId value{0xf4412d58, 0x716b, 0x4389, 0xb2, 0x7f, 0x0d, 0x39, 0x80, 0x74, 0x4d, 0x71};
 };
+
+StreamingAssetRef<GltfAsset> LoadGltfAsset(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    const std::filesystem::path& path,
+    const GltfAssetLoadOptions& options = {});
 
 }  // namespace radray

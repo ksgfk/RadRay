@@ -328,10 +328,11 @@ private:
 
         GltfAssetLoadOptions options{};
         options.DefaultMaterial = _viewerMaterial.AsAny();
-        _gltfAsset = GetAssetManager()->LoadGltfAsset(
+        _gltfAsset = LoadGltfAsset(
+            *GetAssetManager(),
             GetGpuSystem()->GetFrameUploadScheduler(),
             path,
-            options).CastTo<GltfAsset>();
+            options);
         if (!_gltfAsset.IsValid()) {
             _loadError = "failed to start glTF asset load";
             RADRAY_ERR_LOG("{}", _loadError);

@@ -18,6 +18,7 @@ struct SceneView {
     Eigen::Matrix4f ViewMatrix{Eigen::Matrix4f::Identity()};
     Eigen::Matrix4f ProjMatrix{Eigen::Matrix4f::Identity()};
     Eigen::Matrix4f ViewProjMatrix{Eigen::Matrix4f::Identity()};
+    Eigen::Vector3f EyePosition{Eigen::Vector3f::Zero()};
     uint32_t ViewportWidth{0};
     uint32_t ViewportHeight{0};
 };
@@ -47,10 +48,12 @@ struct MeshDrawCommand {
 };
 
 /// 框架标准的 per-object 常量。对应 UE5 FPrimitiveUniformShaderParameters 的最小子集。
-/// 布局与 shader 端 push-constant 约定一致:两个列主序 float4x4(128 字节)。
+/// 布局与 shader 端 push-constant 约定一致。
 struct ObjectConstants {
     float MVP[16];
     float Model[16];
+    float CameraPosition[4];
+    uint32_t Debug[4];
 };
 
 /// 一个 View 的可见图元列表。对应 UE5 InitViews 产出的 FViewInfo 可见集(最小化)。

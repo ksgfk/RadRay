@@ -51,6 +51,11 @@ void MeshPassProcessor::BuildCommands(
         ObjectConstants constants{};
         std::memcpy(constants.MVP, mvp.data(), sizeof(constants.MVP));
         std::memcpy(constants.Model, model.data(), sizeof(constants.Model));
+        constants.CameraPosition[0] = view.EyePosition.x();
+        constants.CameraPosition[1] = view.EyePosition.y();
+        constants.CameraPosition[2] = view.EyePosition.z();
+        constants.CameraPosition[3] = 1.0f;
+        constants.Debug[0] = 0;
 
         // PSO 指针高位作为分组键:同 PSO 命令相邻,减少状态切换。
         const uint64_t sortKey = reinterpret_cast<uintptr_t>(pso);

@@ -4,9 +4,7 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <span>
-#include <sstream>
 #include <string_view>
 
 #include <radray/logger.h>
@@ -32,6 +30,30 @@ struct GltfVertex {
     Eigen::Vector3f Normal{Eigen::Vector3f::UnitY()};
     Eigen::Vector2f TexCoord{Eigen::Vector2f::Zero()};
     Eigen::Vector4f Tangent{1.0f, 0.0f, 0.0f, 1.0f};
+    Eigen::Vector4f BaseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
+    Eigen::Vector4f EmissiveFactorAlphaCutoff{0.0f, 0.0f, 0.0f, 0.5f};
+    Eigen::Vector4f Principled0{0.0f, 0.5f, 0.5f, 0.0f};
+    Eigen::Vector4f Principled1{0.0f, 0.0f, 0.0f, 0.0f};
+    Eigen::Vector4f Principled2{0.0f, 0.0f, 0.0f, 1.5f};
+};
+
+struct GltfMaterialCpu {
+    string Name{"Default"};
+    Eigen::Vector4f BaseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
+    Eigen::Vector3f EmissiveFactor{0.0f, 0.0f, 0.0f};
+    float AlphaCutoff{0.5f};
+    float Metallic{0.0f};
+    float Roughness{0.5f};
+    float Specular{0.5f};
+    float SpecularTint{0.0f};
+    float Anisotropic{0.0f};
+    float Sheen{0.0f};
+    float SheenTint{0.0f};
+    float Flatness{0.0f};
+    float Clearcoat{0.0f};
+    float ClearcoatGloss{0.0f};
+    float SpecTrans{0.0f};
+    float Eta{1.5f};
 };
 
 struct GltfPrimitiveCpu {
@@ -49,6 +71,7 @@ struct ParsedGltf {
     vector<int> RootNodes;
     vector<GltfPrimitiveDesc> Primitives;
     vector<string> MaterialNames;
+    vector<GltfMaterialCpu> Materials;
     vector<GltfImageDesc> Images;
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
@@ -199,87 +222,6 @@ void GenerateFallbackTangents(vector<GltfVertex>& vertices, std::span<const uint
     }
 }
 
-ImageData MakeSolidImage(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-    ImageData img;
-    img.Width = 1;
-    img.Height = 1;
-    img.Format = ImageFormat::RGBA8_BYTE;
-    img.Data = make_unique<byte[]>(4);
-    img.Data[0] = static_cast<byte>(r);
-    img.Data[1] = static_cast<byte>(g);
-    img.Data[2] = static_cast<byte>(b);
-    img.Data[3] = static_cast<byte>(a);
-    return img;
-}
-
-ImageData ConvertToRGBA8(const ImageData& src) {
-    if (src.Format == ImageFormat::RGBA8_BYTE) {
-        return src;
-    }
-    if (src.Format == ImageFormat::RGB8_BYTE) {
-        return src.RGB8ToRGBA8(0xff);
-    }
-    if (src.Format == ImageFormat::R8_BYTE) {
-        ImageData out;
-        out.Width = src.Width;
-        out.Height = src.Height;
-        out.Format = ImageFormat::RGBA8_BYTE;
-        out.Data = make_unique<byte[]>(out.GetSize());
-        const size_t count = static_cast<size_t>(src.Width) * src.Height;
-        for (size_t i = 0; i < count; ++i) {
-            byte v = src.Data[i];
-            out.Data[i * 4 + 0] = v;
-            out.Data[i * 4 + 1] = v;
-            out.Data[i * 4 + 2] = v;
-            out.Data[i * 4 + 3] = byte{0xff};
-        }
-        return out;
-    }
-    return MakeSolidImage(255, 255, 255, 255);
-}
-
-std::optional<ImageData> LoadImageFromMemory(std::span<const byte> bytes) {
-    string storage;
-    storage.resize(bytes.size());
-    if (!bytes.empty()) {
-        std::memcpy(storage.data(), bytes.data(), bytes.size());
-    }
-    std::istringstream stream{storage, std::ios::binary};
-    if (ImageData::IsPNG(stream)) {
-        stream.clear();
-        stream.seekg(0, std::ios::beg);
-        return ImageData::LoadPNG(stream, PNGLoadSettings{.AddAlphaIfRGB = 0xffu});
-    }
-    stream.clear();
-    stream.seekg(0, std::ios::beg);
-    if (ImageData::IsJPEG(stream)) {
-        stream.clear();
-        stream.seekg(0, std::ios::beg);
-        return ImageData::LoadJPEG(stream, JPEGLoadSettings{.AddAlphaIfRGB = 0xffu});
-    }
-    return std::nullopt;
-}
-
-std::optional<ImageData> LoadImageFromFile(const std::filesystem::path& path) {
-    std::ifstream stream{path, std::ios::binary};
-    if (!stream.is_open()) {
-        return std::nullopt;
-    }
-    if (ImageData::IsPNG(stream)) {
-        stream.clear();
-        stream.seekg(0, std::ios::beg);
-        return ImageData::LoadPNG(stream, PNGLoadSettings{.AddAlphaIfRGB = 0xffu});
-    }
-    stream.clear();
-    stream.seekg(0, std::ios::beg);
-    if (ImageData::IsJPEG(stream)) {
-        stream.clear();
-        stream.seekg(0, std::ios::beg);
-        return ImageData::LoadJPEG(stream, JPEGLoadSettings{.AddAlphaIfRGB = 0xffu});
-    }
-    return std::nullopt;
-}
-
 std::optional<vector<byte>> DecodeBase64(std::string_view text) {
     auto value = [](char ch) -> int {
         if (ch >= 'A' && ch <= 'Z') return ch - 'A';
@@ -313,27 +255,144 @@ std::optional<vector<byte>> DecodeBase64(std::string_view text) {
     return out;
 }
 
-std::optional<ImageData> LoadCgltfImage(const cgltf_image& image, const std::filesystem::path& baseDir) {
+StreamingAssetRef<ImageAsset> LoadCgltfImage(
+    AssetManager& assetManager,
+    const std::filesystem::path& gltfPath,
+    const cgltf_image& image,
+    uint32_t imageIndex) {
+    const string name = image.name != nullptr ? image.name : fmt::format("Image {}", imageIndex);
+    const ImageAssetLoadOptions options{
+        .ConvertToRgba8 = true,
+        .FallbackImage = MakeSolidImage(255, 255, 255, 255)};
+
     if (image.buffer_view != nullptr && image.buffer_view->buffer != nullptr && image.buffer_view->buffer->data != nullptr) {
         const auto* bytes = static_cast<const byte*>(image.buffer_view->buffer->data) + image.buffer_view->offset;
-        return LoadImageFromMemory(std::span<const byte>{bytes, image.buffer_view->size});
+        vector<byte> encodedBytes(image.buffer_view->size);
+        if (!encodedBytes.empty()) {
+            std::memcpy(encodedBytes.data(), bytes, encodedBytes.size());
+        }
+        return LoadImageAssetFromMemory(
+            assetManager,
+            MakeDerivedAssetId(gltfPath, "image", imageIndex),
+            name,
+            std::move(encodedBytes),
+            options);
     }
     if (image.uri == nullptr || std::strlen(image.uri) == 0) {
-        return std::nullopt;
+        return LoadImageAssetFromMemory(
+            assetManager,
+            MakeDerivedAssetId(gltfPath, "image", imageIndex),
+            name,
+            {},
+            options);
     }
     std::string_view uri{image.uri};
     if (uri.starts_with("data:")) {
         const size_t comma = uri.find(',');
         if (comma == std::string_view::npos) {
-            return std::nullopt;
+            return LoadImageAssetFromMemory(
+                assetManager,
+                MakeDerivedAssetId(gltfPath, "image", imageIndex),
+                name,
+                {},
+                options);
         }
         auto decoded = DecodeBase64(uri.substr(comma + 1));
         if (!decoded.has_value()) {
-            return std::nullopt;
+            decoded = vector<byte>{};
         }
-        return LoadImageFromMemory(*decoded);
+        return LoadImageAssetFromMemory(
+            assetManager,
+            MakeDerivedAssetId(gltfPath, "image", imageIndex),
+            name,
+            std::move(decoded.value()),
+            options);
     }
-    return LoadImageFromFile(baseDir / std::filesystem::path{string{uri}});
+    const std::filesystem::path imagePath = gltfPath.parent_path() / std::filesystem::path{string{uri}};
+    return LoadImageAsset(assetManager, imagePath, options);
+}
+
+GltfMaterialCpu ConvertMaterial(const cgltf_material& src) {
+    GltfMaterialCpu out;
+    if (src.name != nullptr && src.name[0] != '\0') {
+        out.Name = src.name;
+    }
+    if (src.has_pbr_metallic_roughness) {
+        const cgltf_pbr_metallic_roughness& pbr = src.pbr_metallic_roughness;
+        out.BaseColorFactor = Eigen::Vector4f{
+            pbr.base_color_factor[0],
+            pbr.base_color_factor[1],
+            pbr.base_color_factor[2],
+            pbr.base_color_factor[3]};
+        out.Metallic = pbr.metallic_factor;
+        out.Roughness = pbr.roughness_factor;
+    } else if (src.has_pbr_specular_glossiness) {
+        const cgltf_pbr_specular_glossiness& pbr = src.pbr_specular_glossiness;
+        out.BaseColorFactor = Eigen::Vector4f{
+            pbr.diffuse_factor[0],
+            pbr.diffuse_factor[1],
+            pbr.diffuse_factor[2],
+            pbr.diffuse_factor[3]};
+        out.Roughness = 1.0f - pbr.glossiness_factor;
+        out.Metallic = 0.0f;
+    }
+    if (src.has_ior) {
+        out.Eta = src.ior.ior;
+    }
+    if (src.has_specular) {
+        out.Specular = src.specular.specular_factor;
+        out.SpecularTint = std::max({
+            src.specular.specular_color_factor[0],
+            src.specular.specular_color_factor[1],
+            src.specular.specular_color_factor[2]});
+    }
+    if (src.has_clearcoat) {
+        out.Clearcoat = src.clearcoat.clearcoat_factor;
+        out.ClearcoatGloss = 1.0f - src.clearcoat.clearcoat_roughness_factor;
+    }
+    if (src.has_sheen) {
+        out.Sheen = std::max({
+            src.sheen.sheen_color_factor[0],
+            src.sheen.sheen_color_factor[1],
+            src.sheen.sheen_color_factor[2]});
+        out.SheenTint = out.Sheen > 0.0f ? 1.0f : 0.0f;
+    }
+    if (src.has_transmission) {
+        out.SpecTrans = src.transmission.transmission_factor;
+    }
+    if (src.has_anisotropy) {
+        out.Anisotropic = src.anisotropy.anisotropy_strength;
+    }
+    out.EmissiveFactor = Eigen::Vector3f{src.emissive_factor[0], src.emissive_factor[1], src.emissive_factor[2]};
+    if (src.has_emissive_strength) {
+        out.EmissiveFactor *= src.emissive_strength.emissive_strength;
+    }
+    out.AlphaCutoff = src.alpha_cutoff;
+    return out;
+}
+
+void ApplyMaterialToVertex(GltfVertex& vertex, const GltfMaterialCpu& material) {
+    vertex.BaseColorFactor = material.BaseColorFactor;
+    vertex.EmissiveFactorAlphaCutoff = Eigen::Vector4f{
+        material.EmissiveFactor.x(),
+        material.EmissiveFactor.y(),
+        material.EmissiveFactor.z(),
+        material.AlphaCutoff};
+    vertex.Principled0 = Eigen::Vector4f{
+        material.Metallic,
+        material.Roughness,
+        material.Specular,
+        material.SpecularTint};
+    vertex.Principled1 = Eigen::Vector4f{
+        material.Anisotropic,
+        material.Sheen,
+        material.SheenTint,
+        material.Flatness};
+    vertex.Principled2 = Eigen::Vector4f{
+        material.Clearcoat,
+        material.ClearcoatGloss,
+        material.SpecTrans,
+        material.Eta};
 }
 
 void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
@@ -371,6 +430,7 @@ void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
 std::optional<GltfPrimitiveCpu> ConvertPrimitive(
     const cgltf_data* data,
     const cgltf_primitive& primitive,
+    std::span<const GltfMaterialCpu> materials,
     std::string_view name) {
     if (primitive.type != cgltf_primitive_type_triangles) {
         return std::nullopt;
@@ -387,9 +447,17 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
 
     GltfPrimitiveCpu out;
     out.Name = string{name};
+    if (primitive.material != nullptr) {
+        out.MaterialIndex = static_cast<uint32_t>(cgltf_material_index(data, primitive.material));
+    }
+    GltfMaterialCpu defaultMaterial{};
+    const GltfMaterialCpu& material = out.MaterialIndex < materials.size()
+        ? materials[out.MaterialIndex]
+        : defaultMaterial;
     out.Vertices.resize(positionAcc->count);
     for (cgltf_size i = 0; i < positionAcc->count; ++i) {
         GltfVertex vertex{};
+        ApplyMaterialToVertex(vertex, material);
         ReadVec3(positionAcc, i, vertex.Position);
         if (normalAcc != nullptr) {
             ReadVec3(normalAcc, i, vertex.Normal);
@@ -427,9 +495,6 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
     }
     if (tangentAcc == nullptr) {
         GenerateFallbackTangents(out.Vertices, out.Indices);
-    }
-    if (primitive.material != nullptr) {
-        out.MaterialIndex = static_cast<uint32_t>(cgltf_material_index(data, primitive.material));
     }
     return out;
 }
@@ -491,6 +556,46 @@ MeshResource MakeMeshResource(const GltfPrimitiveCpu& primitive) {
             .Type = VertexDataType::FLOAT,
             .ComponentCount = 4,
             .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Tangent)),
+            .Stride = sizeof(GltfVertex)},
+        VertexBufferEntry{
+            .Semantic = string{VertexSemantics::COLOR},
+            .SemanticIndex = 0,
+            .BufferIndex = 0,
+            .Type = VertexDataType::FLOAT,
+            .ComponentCount = 4,
+            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, BaseColorFactor)),
+            .Stride = sizeof(GltfVertex)},
+        VertexBufferEntry{
+            .Semantic = string{VertexSemantics::COLOR},
+            .SemanticIndex = 1,
+            .BufferIndex = 0,
+            .Type = VertexDataType::FLOAT,
+            .ComponentCount = 4,
+            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, EmissiveFactorAlphaCutoff)),
+            .Stride = sizeof(GltfVertex)},
+        VertexBufferEntry{
+            .Semantic = string{VertexSemantics::COLOR},
+            .SemanticIndex = 2,
+            .BufferIndex = 0,
+            .Type = VertexDataType::FLOAT,
+            .ComponentCount = 4,
+            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled0)),
+            .Stride = sizeof(GltfVertex)},
+        VertexBufferEntry{
+            .Semantic = string{VertexSemantics::COLOR},
+            .SemanticIndex = 3,
+            .BufferIndex = 0,
+            .Type = VertexDataType::FLOAT,
+            .ComponentCount = 4,
+            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled1)),
+            .Stride = sizeof(GltfVertex)},
+        VertexBufferEntry{
+            .Semantic = string{VertexSemantics::COLOR},
+            .SemanticIndex = 4,
+            .BufferIndex = 0,
+            .Type = VertexDataType::FLOAT,
+            .ComponentCount = 4,
+            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled2)),
             .Stride = sizeof(GltfVertex)},
     };
     meshPrimitive.IndexBuffer.BufferIndex = 1;
@@ -586,16 +691,19 @@ Actor* GltfAsset::ExportToScene(World& world) const {
     return rootActor;
 }
 
-StreamingAssetRefAny AssetManager::LoadGltfAsset(
+StreamingAssetRef<GltfAsset> LoadGltfAsset(
+    AssetManager& assetManager,
     FrameUploadScheduler& frameUploads,
     const std::filesystem::path& path,
     const GltfAssetLoadOptions& options) {
     const AssetId assetId = MakeDerivedAssetId(path, "gltf", 0);
-    FrameUploadScheduler* uploads = &frameUploads;
-    return Load(AssetLoadRequest{
+    return assetManager.Load<GltfAsset>(AssetLoadRequest{
         .Id = assetId,
-        .ExpectedTypeId = runtime_type_id_v<GltfAsset>,
-        .Task = [this, uploads, path, options]() -> AssetLoadTask {
+        .Task = [](
+            AssetManager& assetManager,
+            FrameUploadScheduler& frameUploads,
+            std::filesystem::path path,
+            GltfAssetLoadOptions options) -> AssetLoadTask {
             ParsedGltf parsed{};
 
             cgltf_options cgltfOptions{};
@@ -618,23 +726,27 @@ StreamingAssetRefAny AssetManager::LoadGltfAsset(
                 co_return AssetLoadResult::Failure(fmt::format("cgltf_validate failed: {}", static_cast<int>(parseResult)));
             }
 
-            const std::filesystem::path baseDir = path.parent_path();
             parsed.Images.reserve(data->images_count);
             for (cgltf_size i = 0; i < data->images_count; ++i) {
                 GltfImageDesc imageDesc{};
                 imageDesc.Name = data->images[i].name != nullptr ? data->images[i].name : fmt::format("Image {}", i);
-                auto image = LoadCgltfImage(data->images[i], baseDir);
-                imageDesc.Image = image.has_value() ? ConvertToRGBA8(*image) : MakeSolidImage(255, 255, 255, 255);
+                imageDesc.Image = LoadCgltfImage(assetManager, path, data->images[i], static_cast<uint32_t>(i));
                 parsed.Images.push_back(std::move(imageDesc));
             }
 
             parsed.MaterialNames.reserve(std::max<cgltf_size>(1, data->materials_count));
+            parsed.Materials.reserve(std::max<cgltf_size>(1, data->materials_count));
             for (cgltf_size i = 0; i < data->materials_count; ++i) {
-                const cgltf_material& material = data->materials[i];
-                parsed.MaterialNames.push_back(material.name != nullptr ? material.name : fmt::format("Material {}", i));
+                GltfMaterialCpu material = ConvertMaterial(data->materials[i]);
+                if (material.Name == "Default") {
+                    material.Name = fmt::format("Material {}", i);
+                }
+                parsed.MaterialNames.push_back(material.Name);
+                parsed.Materials.push_back(std::move(material));
             }
             if (parsed.MaterialNames.empty()) {
                 parsed.MaterialNames.push_back("Default");
+                parsed.Materials.push_back(GltfMaterialCpu{});
             }
 
             parsed.Nodes.resize(data->nodes_count);
@@ -665,16 +777,20 @@ StreamingAssetRefAny AssetManager::LoadGltfAsset(
                 }
                 for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p) {
                     const string primitiveName = fmt::format("{} / prim {}", parsed.Nodes[n].Name, p);
-                    std::optional<GltfPrimitiveCpu> primitive = ConvertPrimitive(data, node.mesh->primitives[p], primitiveName);
+                    std::optional<GltfPrimitiveCpu> primitive = ConvertPrimitive(
+                        data,
+                        node.mesh->primitives[p],
+                        parsed.Materials,
+                        primitiveName);
                     if (!primitive.has_value()) {
                         continue;
                     }
 
                     MeshResource meshResource = MakeMeshResource(primitive.value());
                     AssetId meshId = MakeDerivedAssetId(path, "mesh", primitiveIndex);
-                    StreamingAssetRef<StaticMesh> mesh = Load<StaticMesh>(AssetLoadRequest{
+                    StreamingAssetRef<StaticMesh> mesh = assetManager.Load<StaticMesh>(AssetLoadRequest{
                         .Id = meshId,
-                        .Task = LoadStaticMesh(*uploads, std::move(meshResource)),
+                        .Task = LoadStaticMesh(frameUploads, std::move(meshResource)),
                         .DebugName = primitiveName});
 
                     GltfPrimitiveDesc desc{};
@@ -726,7 +842,7 @@ StreamingAssetRefAny AssetManager::LoadGltfAsset(
                 asset->GetNodes().size());
 
             co_return AssetLoadResult::Success(std::move(asset));
-        }(),
+        }(assetManager, frameUploads, path, options),
         .DebugName = path.string()});
 }
 
