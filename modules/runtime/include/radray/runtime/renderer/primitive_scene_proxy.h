@@ -52,6 +52,18 @@ public:
     /// 本代理关联的材质(决定 shader/PSO/渲染状态)。默认无材质。
     virtual Material* GetMaterial() const noexcept { return nullptr; }
 
+    /// 本代理的 per-material descriptor set(已写入常量缓冲/贴图)。
+    /// 需要 GPU 设备首次懒构建;静态材质一次构建后缓存。
+    /// 返回 nullptr 表示无 per-material 绑定(录制时跳过)。
+    /// 对应 UE5 FPrimitiveSceneProxy 提供 FMaterialRenderProxy 的职责。
+    virtual render::DescriptorSet* GetMaterialDescriptorSet(render::Device* device) const {
+        (void)device;
+        return nullptr;
+    }
+
+    /// per-material set 索引(register space)。仅在 GetMaterialDescriptorSet 返回非空时有意义。
+    virtual render::DescriptorSetIndex GetMaterialSetIndex() const noexcept { return render::DescriptorSetIndex{1}; }
+
     /// 本代理几何对应的顶点布局(供 PSO input layout)。默认空布局。
     virtual const render::VertexBufferLayout& GetVertexLayout() const noexcept {
         static const render::VertexBufferLayout kEmpty{};

@@ -1,17 +1,11 @@
 // glTF viewer shader with a Mitsuba3-inspired Principled BRDF reflection path.
 // Transmission/transparent response is intentionally rendered black in this first viewer pass.
 #include "bsdf.hlsl"
-
 struct VertexInput {
     float3 Position : POSITION0;
     float3 Normal : NORMAL0;
     float2 TexCoord : TEXCOORD0;
     float4 Tangent : TANGENT0;
-    float4 BaseColorFactor : COLOR0;
-    float4 EmissiveFactorAlphaCutoff : COLOR1;
-    float4 Principled0 : COLOR2; // x metallic, y roughness, z specular, w specular tint
-    float4 Principled1 : COLOR3; // x anisotropic, y sheen, z sheen tint, w flatness
-    float4 Principled2 : COLOR4; // x clearcoat, y clearcoat gloss, z specular transmission, w eta
 };
 
 struct VertexOutput {
@@ -20,11 +14,6 @@ struct VertexOutput {
     float3 WorldNormal : NORMAL0;
     float4 WorldTangent : TANGENT0;
     float2 TexCoord : TEXCOORD0;
-    float4 BaseColorFactor : COLOR0;
-    float4 EmissiveFactorAlphaCutoff : COLOR1;
-    float4 Principled0 : COLOR2;
-    float4 Principled1 : COLOR3;
-    float4 Principled2 : COLOR4;
 };
 
 struct SceneConstants {
@@ -34,7 +23,17 @@ struct SceneConstants {
     uint4 Debug; // x: 0=principled, 1=normal, 2=uv, 3=white
 };
 
+// per-material 参数(set1=per-material)。字段布局与原来逐顶点插值的 5 个 float4 一致。
+struct MaterialConstants {
+    float4 BaseColorFactor;
+    float4 EmissiveFactorAlphaCutoff;
+    float4 Principled0; // x metallic, y roughness, z specular, w specular tint
+    float4 Principled1; // x anisotropic, y sheen, z sheen tint, w flatness
+    float4 Principled2; // x clearcoat, y clearcoat gloss, z specular transmission, w eta
+};
+
 VK_PUSH_CONSTANT ConstantBuffer<SceneConstants> gScene : register(b0, space0);
+VK_BINDING(0, 1) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space1);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;
@@ -43,11 +42,6 @@ VertexOutput VSMain(VertexInput input) {
     output.WorldNormal = mul(gScene.Model, float4(input.Normal, 0.0)).xyz;
     output.WorldTangent = float4(mul(gScene.Model, float4(input.Tangent.xyz, 0.0)).xyz, input.Tangent.w);
     output.TexCoord = input.TexCoord;
-    output.BaseColorFactor = input.BaseColorFactor;
-    output.EmissiveFactorAlphaCutoff = input.EmissiveFactorAlphaCutoff;
-    output.Principled0 = input.Principled0;
-    output.Principled1 = input.Principled1;
-    output.Principled2 = input.Principled2;
     return output;
 }
 
@@ -276,20 +270,20 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
         return float4(n * 0.5f + 0.5f, 1.0f);
     }
 
-    float4 base = saturate(input.BaseColorFactor);
-    float3 emissive = max(input.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx);
-    float metallic = saturate(input.Principled0.x);
-    float roughness = saturate(input.Principled0.y);
-    float specular = saturate(input.Principled0.z);
-    float specTint = saturate(input.Principled0.w);
-    float anisotropic = saturate(input.Principled1.x);
-    float sheen = saturate(input.Principled1.y);
-    float sheenTint = saturate(input.Principled1.z);
-    float flatness = saturate(input.Principled1.w);
-    float clearcoat = saturate(input.Principled2.x);
-    float clearcoatGloss = saturate(input.Principled2.y);
-    float specTrans = saturate(input.Principled2.z);
-    float eta = max(input.Principled2.w, 1.001f);
+    float4 base = saturate(gMaterial.BaseColorFactor);
+    float3 emissive = max(gMaterial.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx);
+    float metallic = saturate(gMaterial.Principled0.x);
+    float roughness = saturate(gMaterial.Principled0.y);
+    float specular = saturate(gMaterial.Principled0.z);
+    float specTint = saturate(gMaterial.Principled0.w);
+    float anisotropic = saturate(gMaterial.Principled1.x);
+    float sheen = saturate(gMaterial.Principled1.y);
+    float sheenTint = saturate(gMaterial.Principled1.z);
+    float flatness = saturate(gMaterial.Principled1.w);
+    float clearcoat = saturate(gMaterial.Principled2.x);
+    float clearcoatGloss = saturate(gMaterial.Principled2.y);
+    float specTrans = saturate(gMaterial.Principled2.z);
+    float eta = max(gMaterial.Principled2.w, 1.001f);
     roughness = max(roughness, 0.001f);
 
     float3 lightDirWorld = viewDirWorld;

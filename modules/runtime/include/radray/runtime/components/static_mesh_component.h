@@ -2,6 +2,7 @@
 
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/material_instance.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/components/primitive_component.h>
 
@@ -21,9 +22,12 @@ public:
     /// 设置 streaming 资产引用(mesh 必需,material 可选)。组件会在两者均就绪后建代理。
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) noexcept { _mesh = std::move(mesh); }
     void SetMaterial(StreamingAssetRef<Material> material) noexcept { _material = std::move(material); }
+    /// 设置 per-使用点材质参数(按名写入材质实例的 gMaterial cbuffer)。
+    void SetMaterialParams(vector<MaterialParameterAssignment> params) noexcept { _materialParams = std::move(params); }
 
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
     const StreamingAssetRef<Material>& GetMaterial() const noexcept { return _material; }
+    const vector<MaterialParameterAssignment>& GetMaterialParams() const noexcept { return _materialParams; }
 
     void TickComponent(float deltaTime) override;
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
@@ -33,6 +37,7 @@ private:
 
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<Material> _material;
+    vector<MaterialParameterAssignment> _materialParams;
 };
 
 }  // namespace radray

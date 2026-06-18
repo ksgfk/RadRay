@@ -41,6 +41,10 @@ struct ImageAssetLoadOptions {
 ImageData MakeSolidImage(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 ImageData ConvertToRGBA8(const ImageData& src);
 
+/// 解码 PNG/JPEG 编码字节为 ImageData。失败返回 nullopt。RGB 源自动补 alpha=0xff。
+/// 供不走 ImageAsset 的调用方(如 glTF 加载协程直接解码后上传 GPU)复用。
+std::optional<ImageData> DecodeImageBytes(std::span<const byte> encoded);
+
 StreamingAssetRef<ImageAsset> LoadImageAsset(
     AssetManager& assetManager,
     const std::filesystem::path& path,

@@ -30,11 +30,6 @@ struct GltfVertex {
     Eigen::Vector3f Normal{Eigen::Vector3f::UnitY()};
     Eigen::Vector2f TexCoord{Eigen::Vector2f::Zero()};
     Eigen::Vector4f Tangent{1.0f, 0.0f, 0.0f, 1.0f};
-    Eigen::Vector4f BaseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
-    Eigen::Vector4f EmissiveFactorAlphaCutoff{0.0f, 0.0f, 0.0f, 0.5f};
-    Eigen::Vector4f Principled0{0.0f, 0.5f, 0.5f, 0.0f};
-    Eigen::Vector4f Principled1{0.0f, 0.0f, 0.0f, 0.0f};
-    Eigen::Vector4f Principled2{0.0f, 0.0f, 0.0f, 1.5f};
 };
 
 struct GltfMaterialCpu {
@@ -61,6 +56,7 @@ struct GltfPrimitiveCpu {
     vector<GltfVertex> Vertices;
     vector<uint32_t> Indices;
     uint32_t MaterialIndex{0};
+    vector<MaterialParameterAssignment> MaterialParams;
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
@@ -371,28 +367,43 @@ GltfMaterialCpu ConvertMaterial(const cgltf_material& src) {
     return out;
 }
 
-void ApplyMaterialToVertex(GltfVertex& vertex, const GltfMaterialCpu& material) {
-    vertex.BaseColorFactor = material.BaseColorFactor;
-    vertex.EmissiveFactorAlphaCutoff = Eigen::Vector4f{
-        material.EmissiveFactor.x(),
-        material.EmissiveFactor.y(),
-        material.EmissiveFactor.z(),
-        material.AlphaCutoff};
-    vertex.Principled0 = Eigen::Vector4f{
-        material.Metallic,
-        material.Roughness,
-        material.Specular,
-        material.SpecularTint};
-    vertex.Principled1 = Eigen::Vector4f{
-        material.Anisotropic,
-        material.Sheen,
-        material.SheenTint,
-        material.Flatness};
-    vertex.Principled2 = Eigen::Vector4f{
-        material.Clearcoat,
-        material.ClearcoatGloss,
-        material.SpecTrans,
-        material.Eta};
+// 把 glTF 材质转成 per-使用点材质参数(按名写入 gMaterial cbuffer)。
+// 字段名与布局与原来烘进顶点的 5 个 float4 一一对应,保证颜色不变。
+vector<MaterialParameterAssignment> BuildMaterialParams(const GltfMaterialCpu& material) {
+    vector<MaterialParameterAssignment> params;
+    params.reserve(5);
+    params.push_back(MaterialParameterAssignment{
+        "BaseColorFactor",
+        material.BaseColorFactor});
+    params.push_back(MaterialParameterAssignment{
+        "EmissiveFactorAlphaCutoff",
+        Eigen::Vector4f{
+            material.EmissiveFactor.x(),
+            material.EmissiveFactor.y(),
+            material.EmissiveFactor.z(),
+            material.AlphaCutoff}});
+    params.push_back(MaterialParameterAssignment{
+        "Principled0",
+        Eigen::Vector4f{
+            material.Metallic,
+            material.Roughness,
+            material.Specular,
+            material.SpecularTint}});
+    params.push_back(MaterialParameterAssignment{
+        "Principled1",
+        Eigen::Vector4f{
+            material.Anisotropic,
+            material.Sheen,
+            material.SheenTint,
+            material.Flatness}});
+    params.push_back(MaterialParameterAssignment{
+        "Principled2",
+        Eigen::Vector4f{
+            material.Clearcoat,
+            material.ClearcoatGloss,
+            material.SpecTrans,
+            material.Eta}});
+    return params;
 }
 
 void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
@@ -454,10 +465,10 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
     const GltfMaterialCpu& material = out.MaterialIndex < materials.size()
         ? materials[out.MaterialIndex]
         : defaultMaterial;
+    out.MaterialParams = BuildMaterialParams(material);
     out.Vertices.resize(positionAcc->count);
     for (cgltf_size i = 0; i < positionAcc->count; ++i) {
         GltfVertex vertex{};
-        ApplyMaterialToVertex(vertex, material);
         ReadVec3(positionAcc, i, vertex.Position);
         if (normalAcc != nullptr) {
             ReadVec3(normalAcc, i, vertex.Normal);
@@ -557,46 +568,6 @@ MeshResource MakeMeshResource(const GltfPrimitiveCpu& primitive) {
             .ComponentCount = 4,
             .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Tangent)),
             .Stride = sizeof(GltfVertex)},
-        VertexBufferEntry{
-            .Semantic = string{VertexSemantics::COLOR},
-            .SemanticIndex = 0,
-            .BufferIndex = 0,
-            .Type = VertexDataType::FLOAT,
-            .ComponentCount = 4,
-            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, BaseColorFactor)),
-            .Stride = sizeof(GltfVertex)},
-        VertexBufferEntry{
-            .Semantic = string{VertexSemantics::COLOR},
-            .SemanticIndex = 1,
-            .BufferIndex = 0,
-            .Type = VertexDataType::FLOAT,
-            .ComponentCount = 4,
-            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, EmissiveFactorAlphaCutoff)),
-            .Stride = sizeof(GltfVertex)},
-        VertexBufferEntry{
-            .Semantic = string{VertexSemantics::COLOR},
-            .SemanticIndex = 2,
-            .BufferIndex = 0,
-            .Type = VertexDataType::FLOAT,
-            .ComponentCount = 4,
-            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled0)),
-            .Stride = sizeof(GltfVertex)},
-        VertexBufferEntry{
-            .Semantic = string{VertexSemantics::COLOR},
-            .SemanticIndex = 3,
-            .BufferIndex = 0,
-            .Type = VertexDataType::FLOAT,
-            .ComponentCount = 4,
-            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled1)),
-            .Stride = sizeof(GltfVertex)},
-        VertexBufferEntry{
-            .Semantic = string{VertexSemantics::COLOR},
-            .SemanticIndex = 4,
-            .BufferIndex = 0,
-            .Type = VertexDataType::FLOAT,
-            .ComponentCount = 4,
-            .Offset = static_cast<uint32_t>(offsetof(GltfVertex, Principled2)),
-            .Stride = sizeof(GltfVertex)},
     };
     meshPrimitive.IndexBuffer.BufferIndex = 1;
     meshPrimitive.IndexBuffer.IndexCount = static_cast<uint32_t>(primitive.Indices.size());
@@ -674,6 +645,7 @@ Actor* GltfAsset::ExportToScene(World& world) const {
         StaticMeshComponent* component = meshActor->AddComponent<StaticMeshComponent>();
         component->SetStaticMesh(primitive.Mesh);
         component->SetMaterial(primitive.Material);
+        component->SetMaterialParams(primitive.MaterialParams);
         meshActor->SetRootComponent(component);
         component->AttachTo(root);
 
@@ -799,6 +771,7 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                     desc.SourceMaterialIndex = primitive->MaterialIndex;
                     desc.Mesh = mesh;
                     desc.Material = options.DefaultMaterial.CastTo<Material>();
+                    desc.MaterialParams = std::move(primitive->MaterialParams);
                     desc.BoundsMin = primitive->BoundsMin;
                     desc.BoundsMax = primitive->BoundsMax;
                     desc.HasBounds = primitive->HasBounds;

@@ -1,0 +1,176 @@
+#include <radray/runtime/texture_asset.h>
+
+#include <algorithm>
+#include <cstring>
+
+#include <fmt/format.h>
+
+#include <radray/logger.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/image_asset.h>
+
+namespace radray {
+namespace {
+
+render::TextureFormat PickFormat(bool srgb) noexcept {
+    return srgb ? render::TextureFormat::RGBA8_UNORM_SRGB : render::TextureFormat::RGBA8_UNORM;
+}
+
+/// 在 upload phase 内从 RGBA8 CPU 像素建 device-local 贴图 + SRV,录制上传命令。
+/// 不等 fence(由调用方 co_await frame.WaitGpu())。失败返回 nullopt。
+struct UploadedTexture {
+    unique_ptr<render::Texture> Texture;
+    unique_ptr<render::TextureView> Srv;
+};
+
+std::optional<UploadedTexture> RecordTextureUpload(
+    const FrameUploadScope& frame,
+    const ImageData& rgba8,
+    bool srgb,
+    std::string_view debugName) {
+    render::Device* device = frame.GetUploader().GetDevice();
+    if (device == nullptr || rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
+        return std::nullopt;
+    }
+    const render::TextureFormat format = PickFormat(srgb);
+
+    render::TextureDescriptor texDesc{
+        .Dim = render::TextureDimension::Dim2D,
+        .Width = rgba8.Width,
+        .Height = rgba8.Height,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = format,
+        .Memory = render::MemoryType::Device,
+        .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
+        .Hints = render::ResourceHint::None};
+    auto texOpt = device->CreateTexture(texDesc);
+    if (!texOpt.HasValue()) {
+        RADRAY_ERR_LOG("TextureAsset: CreateTexture failed for '{}'", debugName);
+        return std::nullopt;
+    }
+    auto texture = texOpt.Release();
+    texture->SetDebugName(fmt::format("texasset_{}", debugName));
+
+    render::TextureViewDescriptor viewDesc{
+        .Target = texture.get(),
+        .Dim = render::TextureDimension::Dim2D,
+        .Format = format,
+        .Range = render::SubresourceRange::AllSub(),
+        .Usage = render::TextureViewUsage::Resource};
+    auto srvOpt = device->CreateTextureView(viewDesc);
+    if (!srvOpt.HasValue()) {
+        RADRAY_ERR_LOG("TextureAsset: CreateTextureView failed for '{}'", debugName);
+        return std::nullopt;
+    }
+    auto srv = srvOpt.Release();
+    srv->SetDebugName(fmt::format("texasset_srv_{}", debugName));
+
+    TextureUploadRequest request{};
+    request.SrcData = rgba8.GetSpan();
+    request.DstTexture = texture.get();
+    request.DstRange = render::SubresourceRange{0, 1, 0, 1};
+    request.SrcRowPitch = 0;  // 紧凑行距(width * 4)。
+    request.Before = render::TextureState::Undefined;
+    request.After = render::TextureState::ShaderRead;
+    frame.GetUploader().UploadTexture(frame.GetCommandBuffer(), request);
+
+    return UploadedTexture{std::move(texture), std::move(srv)};
+}
+
+AssetLoadTask LoadTextureFromImageTask(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    ImageData image,
+    TextureAssetLoadOptions options) {
+    // RGBA8 归一(GPU 仅支持 RGBA8 上传路径)。
+    ImageData rgba8 = ConvertToRGBA8(image);
+    if (rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
+        if (options.FallbackImage.Data != nullptr) {
+            rgba8 = ConvertToRGBA8(options.FallbackImage);
+        }
+    }
+    if (rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
+        co_return AssetLoadResult::Failure(fmt::format("texture '{}' has no valid pixels", name));
+    }
+
+    FrameUploadScope frame = co_await frameUploads.BeginUpload();
+    std::optional<UploadedTexture> uploaded = RecordTextureUpload(frame, rgba8, options.Srgb, name);
+    if (!uploaded.has_value()) {
+        co_return AssetLoadResult::Failure(fmt::format("texture '{}' upload recording failed", name));
+    }
+    co_await frame.WaitGpu();
+
+    co_return AssetLoadResult::Success(make_unique<TextureAsset>(
+        std::move(name),
+        std::move(uploaded->Texture),
+        std::move(uploaded->Srv)));
+}
+
+AssetLoadTask LoadTextureFromMemoryTask(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    vector<byte> encodedBytes,
+    TextureAssetLoadOptions options) {
+    std::optional<ImageData> decoded = DecodeImageBytes(encodedBytes);
+    ImageData image;
+    if (decoded.has_value()) {
+        image = std::move(decoded.value());
+    } else if (options.FallbackImage.Data != nullptr) {
+        image = options.FallbackImage;
+    } else {
+        co_return AssetLoadResult::Failure(fmt::format("texture '{}' decode failed", name));
+    }
+    // 复用 image 路径(其内部再做 RGBA8 归一与上传)。
+    co_return co_await LoadTextureFromImageTask(frameUploads, std::move(name), std::move(image), std::move(options));
+}
+
+}  // namespace
+
+TextureAsset::TextureAsset(
+    string name,
+    unique_ptr<render::Texture> texture,
+    unique_ptr<render::TextureView> srv) noexcept
+    : _name(std::move(name)), _texture(std::move(texture)), _srv(std::move(srv)) {
+}
+
+TextureAsset::~TextureAsset() noexcept = default;
+
+void TextureAsset::OnUnload() {
+    _name.clear();
+    _srv.reset();
+    _texture.reset();
+}
+
+AssetTypeId TextureAsset::GetTypeId() const noexcept {
+    return runtime_type_id_v<TextureAsset>;
+}
+
+StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    const AssetId& assetId,
+    string name,
+    ImageData image,
+    const TextureAssetLoadOptions& options) {
+    return assetManager.Load<TextureAsset>(AssetLoadRequest{
+        .Id = assetId,
+        .Task = LoadTextureFromImageTask(frameUploads, name, std::move(image), options),
+        .DebugName = std::move(name)});
+}
+
+StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    const AssetId& assetId,
+    string name,
+    vector<byte> encodedBytes,
+    const TextureAssetLoadOptions& options) {
+    return assetManager.Load<TextureAsset>(AssetLoadRequest{
+        .Id = assetId,
+        .Task = LoadTextureFromMemoryTask(frameUploads, name, std::move(encodedBytes), options),
+        .DebugName = std::move(name)});
+}
+
+}  // namespace radray

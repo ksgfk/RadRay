@@ -539,6 +539,9 @@ public:
     /// CompleteFlight 后：回收 staging buffer。
     void CollectFlight(uint32_t flightIndex);
 
+    /// 底层设备(供加载协程在 upload phase 内建 device 资源,如纹理)。
+    render::Device* GetDevice() const noexcept { return _device; }
+
 private:
     render::Device* _device;
     StagingBufferPool _stagingPool;

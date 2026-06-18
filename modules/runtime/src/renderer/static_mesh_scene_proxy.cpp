@@ -71,11 +71,19 @@ StaticMeshVertexLayout BuildStaticMeshVertexLayout(const MeshPrimitive& primitiv
 StaticMeshSceneProxy::StaticMeshSceneProxy(
     StreamingAssetRef<StaticMesh> mesh,
     StreamingAssetRef<Material> material) noexcept
+    : StaticMeshSceneProxy(std::move(mesh), std::move(material), {}) {}
+
+StaticMeshSceneProxy::StaticMeshSceneProxy(
+    StreamingAssetRef<StaticMesh> mesh,
+    StreamingAssetRef<Material> material,
+    vector<MaterialParameterAssignment> materialParams) noexcept
     : _mesh(std::move(mesh)),
-      _material(std::move(material)) {
+      _material(std::move(material)),
+      _materialParams(std::move(materialParams)) {
     // 资产在构造代理前已由 AssetManager 保证 GPU 就绪(StaticMesh 构造即完整),
-    // 故这里直接构建几何单元。
+    // 故这里直接构建几何单元与材质参数实例。GPU 侧材质代理延迟到首次索取。
     BuildGeometry();
+    BuildMaterialInstance();
 }
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
@@ -138,6 +146,41 @@ void StaticMeshSceneProxy::BuildGeometry() noexcept {
             makeElement(primIdx, 0, prim.IndexBuffer.IndexCount);
         }
     }
+}
+
+void StaticMeshSceneProxy::BuildMaterialInstance() noexcept {
+    Material* material = _material.Get();
+    if (material == nullptr || !material->IsValid()) {
+        return;
+    }
+    _materialInstance = MaterialInstance{material};
+    // 把 per-使用点材质参数按名写入实例存储(向量型)。
+    for (const MaterialParameterAssignment& param : _materialParams) {
+        _materialInstance.SetVector(param.Name, param.Value);
+    }
+}
+
+render::DescriptorSet* StaticMeshSceneProxy::GetMaterialDescriptorSet(render::Device* device) const {
+    if (device == nullptr || !_materialInstance.IsValid()) {
+        return nullptr;
+    }
+    // 静态材质:首次索取时一次性构建 GPU 代理并缓存;失败后不再重试。
+    if (!_materialProxyBuilt && !_materialProxyFailed) {
+        if (_materialRenderProxy.Build(device, _materialInstance)) {
+            _materialProxyBuilt = true;
+        } else {
+            _materialProxyFailed = true;
+        }
+    }
+    return _materialProxyBuilt ? _materialRenderProxy.GetDescriptorSet() : nullptr;
+}
+
+render::DescriptorSetIndex StaticMeshSceneProxy::GetMaterialSetIndex() const noexcept {
+    Material* material = _material.Get();
+    if (material != nullptr) {
+        return render::DescriptorSetIndex{material->GetMaterialSetIndex()};
+    }
+    return render::DescriptorSetIndex{1};
 }
 
 }  // namespace radray

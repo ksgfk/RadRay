@@ -25,7 +25,7 @@ unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {
     if (!_mesh || !_material) {
         return nullptr;
     }
-    return make_unique<StaticMeshSceneProxy>(_mesh, _material);
+    return make_unique<StaticMeshSceneProxy>(_mesh, _material, _materialParams);
 }
 
 }  // namespace radray

@@ -139,6 +139,17 @@ ImageData MakeSolidImage(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return img;
 }
 
+std::optional<ImageData> DecodeImageBytes(std::span<const byte> encoded) {
+    if (encoded.empty()) {
+        return std::nullopt;
+    }
+    string storage;
+    storage.resize(encoded.size());
+    std::memcpy(storage.data(), encoded.data(), encoded.size());
+    std::istringstream stream{storage, std::ios::binary};
+    return DecodeImageFromStream(stream);
+}
+
 ImageData ConvertToRGBA8(const ImageData& src) {
     if (src.Format == ImageFormat::RGBA8_BYTE) {
         return src;

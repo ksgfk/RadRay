@@ -39,6 +39,32 @@ Material::Material(GpuSystem& gpuSystem, const MaterialDescriptor& desc) noexcep
     _primitive = desc.Primitive;
     _depthStencil = desc.DepthStencil;
     _blend = desc.Blend;
+    _materialSetIndex = desc.MaterialSetIndex;
+
+    // 从 shader 反射抽取 per-material 参数布局。PS 通常承载材质 cbuffer;
+    // PS 反射缺失或该 set 无 cbuffer 时回退到 VS 反射。两者都没有则保持空布局。
+    auto buildLayout = [&](render::Shader* shader) -> std::optional<MaterialParameterLayout> {
+        if (shader == nullptr) {
+            return std::nullopt;
+        }
+        Nullable<const render::ShaderReflectionDesc*> refl = shader->GetReflection();
+        if (!refl.HasValue()) {
+            return std::nullopt;
+        }
+        return MaterialParameterLayout::CreateFromReflection(*refl.Get(), _materialSetIndex, desc.MaterialCBufferName);
+    };
+
+    std::optional<MaterialParameterLayout> layoutOpt = buildLayout(ps);
+    if (!layoutOpt.has_value() || !layoutOpt->HasConstantBuffer()) {
+        std::optional<MaterialParameterLayout> vsLayout = buildLayout(vs);
+        if (vsLayout.has_value() && vsLayout->HasConstantBuffer()) {
+            layoutOpt = std::move(vsLayout);
+        }
+    }
+    if (layoutOpt.has_value()) {
+        _paramLayout = std::move(layoutOpt.value());
+        _storageTemplate = _paramLayout.CreateStorageTemplate();
+    }
 }
 
 Material::~Material() noexcept = default;

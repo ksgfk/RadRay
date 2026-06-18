@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <functional>
 
 #include <radray/basic_math.h>
@@ -23,6 +24,13 @@ struct SceneView {
     uint32_t ViewportHeight{0};
 };
 
+/// 一条已解析的 per-material 绑定:set 索引 + descriptor set 句柄。
+/// 对应 UE5 FMeshDrawShaderBindings 的最小子集(当前仅 per-material 一个 set)。
+struct BoundDescriptorSet {
+    render::DescriptorSetIndex Set{};
+    render::DescriptorSet* Handle{nullptr};
+};
+
 /// 自包含、可直接录制的绘制命令。对应 UE5 的 FMeshDrawCommand:
 /// 几何 + PSO + RootSignature + per-draw 常量,全部解析完毕,录制时只需机械绑定。
 struct MeshDrawCommand {
@@ -41,6 +49,13 @@ struct MeshDrawCommand {
     // 当前最小化:单个 push-constant 槽位 + 一段 CPU 端常量数据(命令自持,录制时上传)。
     render::BindingParameterId PushConstantId{};
     vector<byte> PushConstantData{};
+
+    // —— per-material descriptor set ——
+    // 已构建好的频率绑定(set1=per-material)。录制时 BindDescriptorSet。
+    // 当前最多 1 个;用定长内联存储避免每命令堆分配。
+    static constexpr uint32_t MaxBoundSets = 2;
+    std::array<BoundDescriptorSet, MaxBoundSets> DescriptorSets{};
+    uint32_t DescriptorSetCount{0};
 
     // —— 排序键 ——
     // 对应 UE5 FMeshDrawCommandSortKey:高位 PSO 分组(减少状态切换),低位深度。
@@ -81,6 +96,8 @@ public:
         PSOCache::RenderTargetFormats RtFormats{};
         /// 材质 push-constant 槽位名(填 ObjectConstants 的目标)。
         std::string_view ObjectConstantsParam{"gScene"};
+        /// 用于懒构建 MaterialRenderProxy 的 GPU 设备。为空时跳过 per-material 绑定。
+        render::Device* Device{nullptr};
     };
 
     explicit MeshPassProcessor(const Config& config) noexcept : _config(config) {}

@@ -7,6 +7,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/image_asset.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/material_instance.h>
 #include <radray/runtime/static_mesh.h>
 
 namespace radray {
@@ -32,6 +33,8 @@ struct GltfPrimitiveDesc {
     uint32_t SourceMaterialIndex{0};
     StreamingAssetRef<StaticMesh> Mesh;
     StreamingAssetRef<Material> Material;
+    /// per-使用点材质参数(从 glTF 材质转换而来,按名写入 gMaterial cbuffer)。
+    vector<MaterialParameterAssignment> MaterialParams;
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};

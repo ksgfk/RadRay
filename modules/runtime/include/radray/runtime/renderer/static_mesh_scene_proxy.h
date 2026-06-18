@@ -4,6 +4,8 @@
 #include <radray/render/common.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/material_instance.h>
+#include <radray/runtime/material_render_proxy.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/renderer/primitive_scene_proxy.h>
 
@@ -18,6 +20,10 @@ namespace radray {
 class StaticMeshSceneProxy : public PrimitiveSceneProxy {
 public:
     StaticMeshSceneProxy(StreamingAssetRef<StaticMesh> mesh, StreamingAssetRef<Material> material) noexcept;
+    StaticMeshSceneProxy(
+        StreamingAssetRef<StaticMesh> mesh,
+        StreamingAssetRef<Material> material,
+        vector<MaterialParameterAssignment> materialParams) noexcept;
     ~StaticMeshSceneProxy() noexcept override;
 
     bool IsRenderable() const noexcept override;
@@ -27,11 +33,16 @@ public:
         return _vertexLayout;
     }
 
+    render::DescriptorSet* GetMaterialDescriptorSet(render::Device* device) const override;
+    render::DescriptorSetIndex GetMaterialSetIndex() const noexcept override;
+
     StaticMesh* GetStaticMesh() const noexcept { return _mesh.Get(); }
 
 private:
     /// 从已就绪的 RenderMesh + Sections 构建几何绘制单元与顶点布局。由构造函数调用一次。
     void BuildGeometry() noexcept;
+    /// 从 Material 创建 MaterialInstance 并写入 per-使用点材质参数。由构造函数调用一次。
+    void BuildMaterialInstance() noexcept;
 
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<Material> _material;
@@ -39,6 +50,13 @@ private:
     // 顶点布局的元素存储与其 span 视图;span 引用 _vertexElements,二者生命周期一致。
     vector<render::VertexElement> _vertexElements;
     render::VertexBufferLayout _vertexLayout;
+
+    // per-material 参数实例 + GPU 代理。静态材质:首次索取时懒构建 proxy 并缓存。
+    vector<MaterialParameterAssignment> _materialParams;
+    MaterialInstance _materialInstance;
+    mutable MaterialRenderProxy _materialRenderProxy;
+    mutable bool _materialProxyBuilt{false};
+    mutable bool _materialProxyFailed{false};
 };
 
 }  // namespace radray

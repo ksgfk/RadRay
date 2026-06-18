@@ -130,6 +130,7 @@ public:
         processorConfig.RtFormats.ColorFormats = {_colorFormat};
         processorConfig.RtFormats.DepthFormat = _depthFormat;
         processorConfig.ObjectConstantsParam = "gScene";
+        processorConfig.Device = ctx.Device;
 
         if (ctx.Visible != nullptr) {
             _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig);

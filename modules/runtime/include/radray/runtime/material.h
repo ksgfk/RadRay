@@ -4,9 +4,11 @@
 #include <optional>
 
 #include <radray/types.h>
+#include <radray/structured_buffer.h>
 #include <radray/render/common.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material_parameter_layout.h>
 
 namespace radray {
 
@@ -23,6 +25,11 @@ struct MaterialDescriptor {
     render::PrimitiveState Primitive{render::PrimitiveState::Default()};
     render::DepthStencilState DepthStencil{render::DepthStencilState::Default()};
     std::optional<render::BlendState> Blend{};
+    /// per-material 绑定频率所在的 descriptor set 索引(register space)。
+    /// 约定:set0=per-view,set1=per-material,push-constant=per-object。
+    uint32_t MaterialSetIndex{1};
+    /// per-material cbuffer 名字。为空时取该 set 上第一个 cbuffer。
+    string MaterialCBufferName{};
 };
 
 /// 图形材质资产。对应 UE5 的 UMaterial / FMaterial(最小化)。
@@ -59,6 +66,17 @@ public:
 
     std::optional<render::BindingParameterId> FindParameterId(std::string_view name) const noexcept;
 
+    /// per-material 参数布局(后端无关)。从 PS/VS 反射的 MaterialSetIndex set 抽取。
+    /// shader 没有 per-material cbuffer 时为一个空布局(HasConstantBuffer()==false)。
+    const MaterialParameterLayout& GetParameterLayout() const noexcept { return _paramLayout; }
+
+    /// per-material set 索引(register space)。
+    uint32_t GetMaterialSetIndex() const noexcept { return _materialSetIndex; }
+
+    /// 默认值存储模板。MaterialInstance 克隆它得到自己的参数副本。
+    /// 无 per-material cbuffer 时为 std::nullopt。
+    const std::optional<StructuredBufferStorage>& GetStorageTemplate() const noexcept { return _storageTemplate; }
+
 private:
     render::Shader* _vs{nullptr};
     render::Shader* _ps{nullptr};
@@ -68,6 +86,9 @@ private:
     render::PrimitiveState _primitive{render::PrimitiveState::Default()};
     render::DepthStencilState _depthStencil{render::DepthStencilState::Default()};
     std::optional<render::BlendState> _blend{};
+    uint32_t _materialSetIndex{1};
+    MaterialParameterLayout _paramLayout{};
+    std::optional<StructuredBufferStorage> _storageTemplate{};
 };
 
 template <>
