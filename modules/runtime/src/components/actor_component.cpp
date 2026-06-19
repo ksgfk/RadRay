@@ -4,6 +4,10 @@
 
 namespace radray {
 
+RuntimeTypeId ActorComponent::GetTypeId() const noexcept {
+    return runtime_type_id_v<ActorComponent>;
+}
+
 Nullable<World*> ActorComponent::GetWorld() const noexcept {
     if (_owner) {
         return _owner.Get()->GetWorld();

@@ -6,6 +6,10 @@
 
 namespace radray {
 
+RuntimeTypeId StaticMeshComponent::GetTypeId() const noexcept {
+    return runtime_type_id_v<StaticMeshComponent>;
+}
+
 bool StaticMeshComponent::AreAssetsReady() const noexcept {
     const bool meshReady = _mesh.IsReady();
     const bool materialReady = _material.IsReady() || !_material.IsValid();

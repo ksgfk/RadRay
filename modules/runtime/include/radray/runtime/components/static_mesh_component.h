@@ -8,6 +8,8 @@
 
 namespace radray {
 
+class StaticMeshComponent;
+
 /// 引用 StaticMesh 资产的静态网格组件。
 /// 对应 UE5 的 UStaticMeshComponent。
 ///
@@ -18,6 +20,8 @@ class StaticMeshComponent : public PrimitiveComponent {
 public:
     StaticMeshComponent() noexcept = default;
     ~StaticMeshComponent() noexcept override = default;
+
+    RuntimeTypeId GetTypeId() const noexcept override;
 
     /// 设置 streaming 资产引用(mesh 必需,material 可选)。组件会在两者均就绪后建代理。
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) noexcept { _mesh = std::move(mesh); }
@@ -42,6 +46,11 @@ private:
     StreamingAssetRef<Material> _material;
     vector<MaterialParameterAssignment> _materialParams;
     vector<MaterialTextureAssignment> _materialTextures;
+};
+
+template <>
+struct RuntimeTypeTrait<StaticMeshComponent> {
+    static constexpr RuntimeTypeId value{0xfb7d1ec1, 0x9e98, 0x4cb4, 0xa3, 0xc0, 0x61, 0x2d, 0x1b, 0x49, 0xe5, 0x37};
 };
 
 }  // namespace radray

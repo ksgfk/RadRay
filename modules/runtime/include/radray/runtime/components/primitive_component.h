@@ -6,6 +6,12 @@ namespace radray {
 
 class PrimitiveSceneProxy;
 class Scene;
+class PrimitiveComponent;
+
+template <>
+struct RuntimeTypeTrait<PrimitiveComponent> {
+    static constexpr RuntimeTypeId value{0x84b38cf1, 0x5e55, 0x4a71, 0xa8, 0xd6, 0x23, 0x12, 0x45, 0x2d, 0x6e, 0x91};
+};
 
 /// 可渲染的 SceneComponent。
 /// OnRegister 时创建 PrimitiveSceneProxy 并注册到 Scene。
@@ -15,6 +21,8 @@ class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
     ~PrimitiveComponent() noexcept override;
+
+    RuntimeTypeId GetTypeId() const noexcept override;
 
     void OnRegister() override;
     void OnUnregister() override;

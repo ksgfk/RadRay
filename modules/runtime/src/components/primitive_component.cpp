@@ -9,6 +9,10 @@ namespace radray {
 
 PrimitiveComponent::~PrimitiveComponent() noexcept = default;
 
+RuntimeTypeId PrimitiveComponent::GetTypeId() const noexcept {
+    return runtime_type_id_v<PrimitiveComponent>;
+}
+
 void PrimitiveComponent::OnRegister() {
     SceneComponent::OnRegister();
     auto proxy = CreateSceneProxy();

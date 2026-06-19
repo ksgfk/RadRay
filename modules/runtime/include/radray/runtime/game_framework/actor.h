@@ -5,11 +5,12 @@
 
 #include <radray/types.h>
 #include <radray/nullable.h>
+#include <radray/runtime_type.h>
+#include <radray/runtime/components/actor_component.h>
 
 namespace radray {
 
 class World;
-class ActorComponent;
 class SceneComponent;
 
 /// 场景中的实体。不直接持有 Transform —— 空间信息由 RootComponent 提供。
@@ -32,9 +33,26 @@ public:
     T* AddComponent(Args&&... args) {
         auto comp = make_unique<T>(std::forward<Args>(args)...);
         T* ptr = comp.get();
-        AddComponentInternal(std::move(comp));
+        AddComponent(std::move(comp));
         return ptr;
     }
+
+    ActorComponent* AddComponent(unique_ptr<ActorComponent> component);
+
+    template <class T>
+    requires std::derived_from<T, ActorComponent>
+    T* FindComponent() noexcept {
+        return static_cast<T*>(FindComponent(runtime_type_id_v<T>));
+    }
+
+    template <class T>
+    requires std::derived_from<T, ActorComponent>
+    const T* FindComponent() const noexcept {
+        return static_cast<const T*>(FindComponent(runtime_type_id_v<T>));
+    }
+
+    ActorComponent* FindComponent(RuntimeTypeId type) noexcept;
+    const ActorComponent* FindComponent(RuntimeTypeId type) const noexcept;
 
     void RemoveComponent(ActorComponent* component);
 
@@ -56,7 +74,6 @@ protected:
 private:
     friend class World;
 
-    void AddComponentInternal(unique_ptr<ActorComponent> component);
     void RegisterAllComponents();
     void UnregisterAllComponents();
 

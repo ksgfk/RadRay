@@ -8,6 +8,8 @@
 
 namespace radray {
 
+class SceneComponent;
+
 /// 有空间变换的组件。能形成父子 Attach 层级。
 /// 对应 UE5 的 USceneComponent。
 class SceneComponent : public ActorComponent {
@@ -16,6 +18,7 @@ public:
     ~SceneComponent() noexcept override;
 
     bool IsSceneComponent() const noexcept override { return true; }
+    RuntimeTypeId GetTypeId() const noexcept override;
 
     // ─── Transform ───
 
@@ -61,10 +64,14 @@ private:
     Eigen::Vector3f _relativeLocation{Eigen::Vector3f::Zero()};
     Eigen::Vector3f _relativeScale{Eigen::Vector3f::Ones()};
 
-
     // Attach 层级
     Nullable<SceneComponent*> _parent{nullptr};
     vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
+};
+
+template <>
+struct RuntimeTypeTrait<SceneComponent> {
+    static constexpr RuntimeTypeId value{0x2aab6ba6, 0xd4d6, 0x40c5, 0x99, 0xae, 0xc7, 0x32, 0x4d, 0x36, 0xe7, 0x5b};
 };
 
 }  // namespace radray

@@ -11,6 +11,40 @@ Actor::~Actor() noexcept {
     UnregisterAllComponents();
 }
 
+ActorComponent* Actor::FindComponent(RuntimeTypeId type) noexcept {
+    for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
+        if (component != nullptr && component->GetTypeId() == type) {
+            return component.get();
+        }
+    }
+    return nullptr;
+}
+
+const ActorComponent* Actor::FindComponent(RuntimeTypeId type) const noexcept {
+    for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
+        if (component != nullptr && component->GetTypeId() == type) {
+            return component.get();
+        }
+    }
+    return nullptr;
+}
+
+ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component) {
+    if (component == nullptr) {
+        return nullptr;
+    }
+
+    component->_owner = this;
+    ActorComponent* raw = component.get();
+    _ownedComponents.push_back(std::move(component));
+    // If already in world, register immediately
+    if (_world) {
+        raw->_registered = true;
+        raw->OnRegister();
+    }
+    return raw;
+}
+
 void Actor::RemoveComponent(ActorComponent* component) {
     if (component->_owner.Get() != this) {
         return;
@@ -48,17 +82,6 @@ void Actor::SetRootComponent(Nullable<SceneComponent*> component) noexcept {
 void Actor::Tick(float deltaTime) {
     for (auto& comp : _ownedComponents) {
         comp->TickComponent(deltaTime);
-    }
-}
-
-void Actor::AddComponentInternal(unique_ptr<ActorComponent> component) {
-    component->_owner = this;
-    ActorComponent* raw = component.get();
-    _ownedComponents.push_back(std::move(component));
-    // If already in world, register immediately
-    if (_world) {
-        raw->_registered = true;
-        raw->OnRegister();
     }
 }
 

@@ -8,6 +8,7 @@
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/components/camera_component.h>
+#include <radray/runtime/components/camera_control_component.h>
 #include <radray/runtime/components/scene_component.h>
 #include <radray/runtime/renderer/render_context.h>
 #include <radray/runtime/renderer/render_pass.h>
@@ -17,17 +18,10 @@
 #include <radray/runtime/renderer/scene_renderer.h>
 #include <radray/render/common.h>
 #include <radray/basic_math.h>
-#include <radray/camera_control.h>
 #include <radray/logger.h>
 #include <radray/types.h>
-#include <radray/window/native_window.h>
-
-#ifdef RADRAY_PLATFORM_WINDOWS
-#include <radray/platform/win32_headers.h>
-#endif
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -146,23 +140,6 @@ private:
     render::ColorClearValue _clearColor;
 };
 
-Eigen::Quaternionf MakeCameraRotation(const Eigen::Vector3f& forward) {
-    Eigen::Vector3f f = forward.squaredNorm() > 1e-8f ? forward.normalized() : Eigen::Vector3f{0.0f, 0.0f, 1.0f};
-    Eigen::Vector3f up = Eigen::Vector3f::UnitY();
-    if (std::abs(f.dot(up)) > 0.98f) {
-        up = Eigen::Vector3f::UnitZ();
-    }
-    Eigen::Vector3f right = up.cross(f).normalized();
-    Eigen::Vector3f cameraUp = f.cross(right).normalized();
-    Eigen::Matrix3f rotation = Eigen::Matrix3f::Identity();
-    rotation.col(0) = right;
-    rotation.col(1) = cameraUp;
-    rotation.col(2) = f;
-    Eigen::Quaternionf quat{rotation};
-    quat.normalize();
-    return quat;
-}
-
 }  // namespace
 
 class GltfViewerApp : public Application {
@@ -177,9 +154,8 @@ public:
     void OnInit() override {
         InitMaterial();
         InitPipeline();
-        ConfigureCameraControl();
-        AttachCameraInput();
         SpawnCamera();
+        ConfigureCameraControl();
         SetCameraFrame(Eigen::Vector3f::Zero(), 4.0f);
 
         _loadPath.resize(1024);
@@ -206,8 +182,6 @@ public:
                 imgui->End();
             }
         }
-        PollCameraInput();
-        ApplyCameraToComponent();
     }
 
     bool OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target) override {
@@ -242,9 +216,9 @@ public:
 
     void OnShutdown() override {
         DestroyExportedScene();
-        _inputConnections.clear();
         _resourcePool.Clear();
         _gltfAsset.Reset();
+        _cameraControlComp = nullptr;
         _cameraComp = nullptr;
         _viewerMaterial.Reset();
     }
@@ -258,7 +232,7 @@ private:
         matDesc.VsEntry = "VSMain";
         matDesc.PsEntry = "PSMain";
         matDesc.Primitive = render::PrimitiveState::Default();
-        matDesc.Primitive.Cull = render::CullMode::None;
+        matDesc.Primitive.Cull = render::CullMode::Back;
         matDesc.DepthStencil = render::DepthStencilState::Default();
         matDesc.DepthStencil.Format = DepthFormat;
         const AssetId matId = Guid::Parse("91f5f8e0-7cb3-41c5-8b19-a62253f19f2a");
@@ -284,42 +258,23 @@ private:
         _cameraComp = cameraActor->AddComponent<CameraComponent>();
         cameraActor->SetRootComponent(_cameraComp);
         _cameraComp->SetPerspective(Radian(60.0f), 0.01f, 10000.0f);
+        _cameraControlComp = cameraActor->AddComponent<CameraControlComponent>();
+        _cameraControlComp->SetCamera(_cameraComp);
+        _cameraControlComp->BindToMainWindow(*this);
     }
 
     void ConfigureCameraControl() {
-        _cameraControl.MinDistance = 0.05f;
-        _cameraControl.MaxDistance = 10000.0f;
-        _cameraControl.OrbitSensitivity = 0.003f;
-        _cameraControl.PanSensitivity = 0.003f;
-        _cameraControl.DollySensitivity = 0.15f;
-        _cameraControl.UseTrackball = false;
-        _cameraControl.InvertZoom = false;
-    }
-
-    void AttachCameraInput() {
-        WindowManager* windows = GetWindowManager();
-        AppWindow* mainWindow = windows != nullptr ? windows->GetMainWindow() : nullptr;
-        NativeWindow* nativeWindow = mainWindow != nullptr ? mainWindow->GetNativeWindow() : nullptr;
-        if (nativeWindow == nullptr) {
-            RADRAY_WARN_LOG("glTF viewer camera input disabled: no main window");
+        if (_cameraControlComp == nullptr) {
             return;
         }
-
-        _mainNativeWindow = nativeWindow;
-#ifndef RADRAY_PLATFORM_WINDOWS
-        _inputConnections.emplace_back(nativeWindow->EventTouch().connect([this](int x, int y, MouseButton button, Action action) {
-            OnCameraPointer(x, y, button, action);
-        }));
-#endif
-        _inputConnections.emplace_back(nativeWindow->EventMouseWheel().connect([this](int delta) {
-            OnCameraWheel(delta);
-        }));
-        _inputConnections.emplace_back(nativeWindow->EventMouseLeave().connect([this]() {
-            _cameraControl.IsOrbiting = false;
-            _cameraControl.IsPanning = false;
-            _cameraControl.IsDollying = false;
-            _cameraControl.WheelDelta = 0.0f;
-        }));
+        CameraControl& control = _cameraControlComp->GetControl();
+        control.MinDistance = 0.05f;
+        control.MaxDistance = 10000.0f;
+        control.OrbitSensitivity = 0.003f;
+        control.PanSensitivity = 0.003f;
+        control.DollySensitivity = 0.15f;
+        control.UseTrackball = false;
+        control.InvertZoom = false;
     }
 
     void LoadSceneFromPath(const std::filesystem::path& path) {
@@ -433,185 +388,9 @@ private:
     }
 
     void SetCameraFrame(const Eigen::Vector3f& center, float distance) {
-        _cameraControl.Reset();
-        _cameraControl.SetOrbitTarget(center);
-        distance = Clamp(distance, _cameraControl.MinDistance, _cameraControl.MaxDistance);
-        _cameraTarget = center;
-        _cameraDistance = distance;
-        _cameraYaw = 0.0f;
-        _cameraPitch = Radian(20.0f);
-        UpdateCameraTransform();
-        ApplyCameraToComponent();
-    }
-
-    bool IsUiBlockingCameraInput() const {
-        if (ImGui::GetCurrentContext() == nullptr) {
-            return false;
+        if (_cameraControlComp != nullptr) {
+            _cameraControlComp->SetFrame(center, distance, 0.0f, Radian(20.0f));
         }
-        const ImGuiIO& io = ImGui::GetIO();
-        return io.WantCaptureMouse ||
-               ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) ||
-               ImGui::IsAnyItemActive();
-    }
-
-    void ApplyCameraControl(const Eigen::Vector2f& mousePos, bool orbit, bool pan, bool inputBlocked) {
-        const Eigen::Vector2f delta = mousePos - _lastCameraPollMousePos;
-        _lastCameraPollMousePos = mousePos;
-        _cameraControl.CurrentMousePos = mousePos;
-        if (inputBlocked) {
-            _cameraControl.IsOrbiting = false;
-            _cameraControl.IsPanning = false;
-            _cameraControl.IsDollying = false;
-            _cameraControl.LastMousePos = mousePos;
-            return;
-        }
-
-        if (delta.squaredNorm() < 1e-6f) {
-            return;
-        }
-
-        if (orbit) {
-            _cameraYaw += delta.x() * _cameraControl.OrbitSensitivity;
-            _cameraPitch -= delta.y() * _cameraControl.OrbitSensitivity;
-            _cameraPitch = Clamp(_cameraPitch, Radian(-85.0f), Radian(85.0f));
-            UpdateCameraTransform();
-        } else if (pan) {
-            const Eigen::Vector3f right = _cameraRotation * Eigen::Vector3f::UnitX();
-            const Eigen::Vector3f up = _cameraRotation * Eigen::Vector3f::UnitY();
-            const float scale = _cameraDistance * _cameraControl.PanSensitivity * 0.5f;
-            const Eigen::Vector3f panVector = right * (delta.x() * scale) + up * (delta.y() * scale);
-            _cameraTarget += panVector;
-            _cameraControl.SetOrbitTarget(_cameraTarget);
-            UpdateCameraTransform();
-        }
-    }
-
-    void PollCameraInput() {
-#ifdef RADRAY_PLATFORM_WINDOWS
-        if (_mainNativeWindow == nullptr) {
-            _cameraPollAnyButtonDown = false;
-            _cameraInputCapturedByUi = false;
-            _cameraControl.IsOrbiting = false;
-            _cameraControl.IsPanning = false;
-            return;
-        }
-
-        POINT screenPos{};
-        if (::GetCursorPos(&screenPos) == 0) {
-            return;
-        }
-        const Eigen::Vector2i clientPos = _mainNativeWindow->ScreenToClient(Eigen::Vector2i{screenPos.x, screenPos.y});
-        const Eigen::Vector2i windowSize = _mainNativeWindow->GetSize();
-        const bool insideClient =
-            clientPos.x() >= 0 &&
-            clientPos.y() >= 0 &&
-            clientPos.x() < windowSize.x() &&
-            clientPos.y() < windowSize.y();
-
-        const bool leftDown = (::GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-        const bool rightDown = (::GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-        const bool middleDown = (::GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
-        const bool anyDown = leftDown || rightDown || middleDown;
-        const Eigen::Vector2f mousePos{static_cast<float>(clientPos.x()), static_cast<float>(clientPos.y())};
-        const bool uiBlockingCamera = IsUiBlockingCameraInput();
-
-        if (!anyDown) {
-            _cameraPollAnyButtonDown = false;
-            _cameraInputCapturedByUi = false;
-            _cameraControl.IsOrbiting = false;
-            _cameraControl.IsPanning = false;
-            _cameraControl.IsDollying = false;
-            _cameraControl.LastMousePos = mousePos;
-            _lastCameraPollMousePos = mousePos;
-            return;
-        }
-
-        if (!_cameraPollAnyButtonDown) {
-            _cameraPollAnyButtonDown = true;
-            _cameraInputCapturedByUi = !insideClient || uiBlockingCamera;
-            _cameraControl.LastMousePos = mousePos;
-            _lastCameraPollMousePos = mousePos;
-        }
-
-        const bool pan = rightDown || middleDown;
-        const bool orbit = leftDown && !pan;
-        ApplyCameraControl(mousePos, orbit, pan, _cameraInputCapturedByUi);
-#endif
-    }
-
-    void OnCameraPointer(int x, int y, MouseButton button, Action action) {
-        if (action == Action::UNKNOWN || button == MouseButton::UNKNOWN) {
-            return;
-        }
-
-        const Eigen::Vector2f mousePos{static_cast<float>(x), static_cast<float>(y)};
-        _cameraControl.CurrentMousePos = mousePos;
-
-        if (action == Action::PRESSED) {
-            if (IsUiBlockingCameraInput()) {
-                _cameraInputCapturedByUi = true;
-                _cameraControl.IsOrbiting = false;
-                _cameraControl.IsPanning = false;
-                _cameraControl.IsDollying = false;
-                _cameraControl.LastMousePos = mousePos;
-                return;
-            }
-            _cameraInputCapturedByUi = false;
-            _cameraControl.LastMousePos = mousePos;
-            if (button == MouseButton::BUTTON_LEFT) {
-                _cameraControl.IsOrbiting = true;
-            } else if (button == MouseButton::BUTTON_RIGHT || button == MouseButton::BUTTON_MIDDLE) {
-                _cameraControl.IsPanning = true;
-            }
-            return;
-        }
-
-        if (action == Action::RELEASED) {
-            if (button == MouseButton::BUTTON_LEFT) {
-                _cameraControl.IsOrbiting = false;
-            } else if (button == MouseButton::BUTTON_RIGHT || button == MouseButton::BUTTON_MIDDLE) {
-                _cameraControl.IsPanning = false;
-            }
-            _cameraControl.LastMousePos = mousePos;
-            if (!_cameraControl.IsOrbiting && !_cameraControl.IsPanning) {
-                _cameraInputCapturedByUi = false;
-            }
-            return;
-        }
-
-        if (action == Action::REPEATED && !_cameraInputCapturedByUi) {
-            ApplyCameraControl(mousePos, _cameraControl.IsOrbiting, _cameraControl.IsPanning, false);
-        }
-    }
-
-    void OnCameraWheel(int delta) {
-        if (IsUiBlockingCameraInput()) {
-            return;
-        }
-        const float wheel = static_cast<float>(delta) / 120.0f;
-        const float move = wheel * _cameraControl.DollySensitivity * _cameraDistance;
-        _cameraDistance = Clamp(_cameraDistance - move, _cameraControl.MinDistance, _cameraControl.MaxDistance);
-        UpdateCameraTransform();
-    }
-
-    void UpdateCameraTransform() {
-        const float cp = std::cos(_cameraPitch);
-        const Eigen::Vector3f dir{
-            std::sin(_cameraYaw) * cp,
-            std::sin(_cameraPitch),
-            std::cos(_cameraYaw) * cp};
-        _cameraPosition = _cameraTarget - dir * _cameraDistance;
-        _cameraRotation = MakeCameraRotation(_cameraTarget - _cameraPosition);
-        _cameraControl.SetOrbitTarget(_cameraTarget);
-        _cameraControl.UpdateDistance(_cameraPosition);
-    }
-
-    void ApplyCameraToComponent() {
-        if (_cameraComp == nullptr) {
-            return;
-        }
-        _cameraComp->SetWorldLocation(_cameraPosition);
-        _cameraComp->SetWorldRotation(_cameraRotation);
     }
 
     void DrawNodeTree(const GltfAsset& asset, int nodeIndex) {
@@ -726,19 +505,8 @@ private:
     std::filesystem::path _pendingLoadPath;
     int _selectedNode{-1};
 
-    CameraControl _cameraControl;
-    Eigen::Vector3f _cameraTarget{Eigen::Vector3f::Zero()};
-    float _cameraDistance{4.0f};
-    float _cameraYaw{0.0f};
-    float _cameraPitch{Radian(20.0f)};
-    Eigen::Vector3f _cameraPosition{0.0f, 0.0f, -4.0f};
-    Eigen::Quaternionf _cameraRotation{Eigen::Quaternionf::Identity()};
     CameraComponent* _cameraComp{nullptr};
-    NativeWindow* _mainNativeWindow{nullptr};
-    vector<sigslot::scoped_connection> _inputConnections;
-    bool _cameraInputCapturedByUi{false};
-    bool _cameraPollAnyButtonDown{false};
-    Eigen::Vector2f _lastCameraPollMousePos{Eigen::Vector2f::Zero()};
+    CameraControlComponent* _cameraControlComp{nullptr};
 };
 
 int main(int argc, char* argv[]) {

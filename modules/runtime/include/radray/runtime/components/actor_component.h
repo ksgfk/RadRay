@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/nullable.h>
+#include <radray/runtime_type.h>
 
 namespace radray {
 
@@ -30,6 +31,8 @@ public:
     /// 是否是 SceneComponent（有 Transform）
     virtual bool IsSceneComponent() const noexcept { return false; }
 
+    virtual RuntimeTypeId GetTypeId() const noexcept;
+
     Nullable<Actor*> GetOwner() const noexcept { return _owner; }
     Nullable<World*> GetWorld() const noexcept;
     bool IsRegistered() const noexcept { return _registered; }
@@ -39,6 +42,11 @@ private:
 
     Nullable<Actor*> _owner{nullptr};
     bool _registered{false};
+};
+
+template <>
+struct RuntimeTypeTrait<ActorComponent> {
+    static constexpr RuntimeTypeId value{0x9a5c2e10, 0x8ed4, 0x4f35, 0xa1, 0xd7, 0x17, 0x63, 0x92, 0x04, 0x2b, 0x8a};
 };
 
 }  // namespace radray
