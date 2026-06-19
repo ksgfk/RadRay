@@ -136,7 +136,12 @@ StaticMesh::StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh)
 
 StaticMesh::~StaticMesh() noexcept = default;
 
-void StaticMesh::OnUnload() {
+void StaticMesh::OnUnload(IRenderResourceRecycler& recycler) {
+    if (_renderMesh.has_value()) {
+        for (auto& buffer : _renderMesh->_buffers) {
+            recycler.RecycleRenderResource(std::move(buffer));
+        }
+    }
     ClearRenderData();
     ClearCPUData();
 }

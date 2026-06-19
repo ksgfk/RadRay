@@ -34,6 +34,12 @@ struct MaterialConstants {
 
 VK_PUSH_CONSTANT ConstantBuffer<SceneConstants> gScene : register(b0, space0);
 VK_BINDING(0, 1) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space1);
+VK_BINDING(1, 1) Texture2D<float4> gBaseColor : register(t0, space1);
+VK_BINDING(2, 1) Texture2D<float4> gNormalMap : register(t1, space1);
+VK_BINDING(3, 1) Texture2D<float4> gMetallicRoughness : register(t2, space1);
+VK_BINDING(4, 1) Texture2D<float4> gOcclusion : register(t3, space1);
+VK_BINDING(5, 1) Texture2D<float4> gEmissive : register(t4, space1);
+VK_BINDING(6, 1) SamplerState gMaterialSampler : register(s0, space1);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;
@@ -145,8 +151,7 @@ float3 principled_fresnel(float F_dielectric, float metallic, float spec_tint, f
 }
 
 float3 SampleTangentNormal(float2 uv) {
-    (void)uv;
-    return float3(0.0f, 0.0f, 1.0f);
+    return gNormalMap.Sample(gMaterialSampler, uv).xyz * 2.0f - 1.0f;
 }
 
 Frame3 MakeShadingFrame(float3 normal, float4 tangent) {
@@ -162,9 +167,15 @@ Frame3 MakeShadingFrame(float3 normal, float4 tangent) {
 
 float3 DecodeNormal(float2 uv, float3 n, float4 tangent) {
     float3 normal = normalize(n);
-    (void)uv;
-    (void)tangent;
-    return normal;
+    float3 t = tangent.xyz - normal * dot(normal, tangent.xyz);
+    float tangentLen2 = dot(t, t);
+    if (tangentLen2 <= 1e-8f) {
+        return normal;
+    }
+    t *= rsqrt(tangentLen2);
+    float3 b = normalize(cross(normal, t) * tangent.w);
+    float3 tangentNormal = normalize(SampleTangentNormal(uv));
+    return normalize(t * tangentNormal.x + b * tangentNormal.y + normal * tangentNormal.z);
 }
 
 float3 EvalPrincipledReflection(float3 wi, float3 wo, float3 base_color, float metallic, float roughness,
@@ -270,10 +281,13 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
         return float4(n * 0.5f + 0.5f, 1.0f);
     }
 
-    float4 base = saturate(gMaterial.BaseColorFactor);
-    float3 emissive = max(gMaterial.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx);
-    float metallic = saturate(gMaterial.Principled0.x);
-    float roughness = saturate(gMaterial.Principled0.y);
+    float4 base = saturate(gMaterial.BaseColorFactor * gBaseColor.Sample(gMaterialSampler, input.TexCoord));
+    float3 emissive = max(gMaterial.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx) *
+        gEmissive.Sample(gMaterialSampler, input.TexCoord).rgb;
+    float3 mr = gMetallicRoughness.Sample(gMaterialSampler, input.TexCoord).rgb;
+    float occlusion = gOcclusion.Sample(gMaterialSampler, input.TexCoord).r;
+    float metallic = saturate(gMaterial.Principled0.x * mr.b);
+    float roughness = saturate(gMaterial.Principled0.y * mr.g);
     float specular = saturate(gMaterial.Principled0.z);
     float specTint = saturate(gMaterial.Principled0.w);
     float anisotropic = saturate(gMaterial.Principled1.x);
@@ -304,7 +318,7 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
         clearcoat, clearcoatGloss,
         specTrans, eta);
 
-    float3 color = brdf * 3.0f + emissive;
+    float3 color = brdf * (3.0f * occlusion) + emissive;
     color = color / (color + 1.0f.xxx);
     color = linear_to_srgb(saturate(color));
     return float4(color, 1.0f);

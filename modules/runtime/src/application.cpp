@@ -752,10 +752,16 @@ GpuSystem* Application::InitGpuSystem(const GpuSystemDescriptor& desc) {
         _gpuSystem->SetWindowManager(_windowManager.get());
         _windowManager->SetGpuSystem(_gpuSystem.get());
     }
+    if (_assetManager) {
+        _assetManager->SetRenderResourceRecycler(_gpuSystem.get());
+    }
     return _gpuSystem.get();
 }
 
 void Application::ShutdownGpuSystem() {
+    if (_assetManager) {
+        _assetManager->SetRenderResourceRecycler(nullptr);
+    }
     if (_windowManager) {
         _windowManager->DetachAllSwapChains();
         _windowManager->SetGpuSystem(nullptr);
@@ -769,6 +775,9 @@ AssetManager* Application::InitAssetManager() {
         return _assetManager.get();
     }
     _assetManager = make_unique<AssetManager>();
+    if (_gpuSystem) {
+        _assetManager->SetRenderResourceRecycler(_gpuSystem.get());
+    }
     return _assetManager.get();
 }
 

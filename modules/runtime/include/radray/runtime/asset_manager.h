@@ -221,6 +221,9 @@ public:
     /// 应用层显式回收资产(唯一回收入口)。命中在飞 slot 则先取消、延迟到终态再回收。
     void Unload(const AssetId& id) noexcept;
 
+    /// 注入 GPU 资源回收器。未设置时退回立即析构,保持无 GPUSystem 测试场景的旧行为。
+    void SetRenderResourceRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
+
     /// 提交加载协程写入的 pending result。
     void Pump();
 
@@ -249,6 +252,7 @@ private:
     void OnLoadStopped(AssetHandle handle) noexcept;
     void FinalizeTerminalSlot(AssetHandle handle);
     void DestroySlot(AssetHandle handle) noexcept;
+    IRenderResourceRecycler& GetRecycler() noexcept;
 
     Nullable<Asset*> ResolveAsset(AssetHandle handle) const noexcept;
     AssetTypeId ResolveTypeId(AssetHandle handle) const noexcept;
@@ -260,6 +264,7 @@ private:
     SparseSet<unique_ptr<AssetSlot>> _slots;
     unordered_map<AssetId, AssetHandle> _idIndex;
     vector<AssetHandle> _activeLoads;
+    IRenderResourceRecycler* _recycler{nullptr};
 };
 
 template <class T>

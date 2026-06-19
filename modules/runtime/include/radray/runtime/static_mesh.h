@@ -35,7 +35,7 @@ public:
     StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh) noexcept;
     ~StaticMesh() noexcept override;
 
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     MeshResource& GetMeshResource() noexcept;

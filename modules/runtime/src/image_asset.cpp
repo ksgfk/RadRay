@@ -117,7 +117,8 @@ ImageAsset::ImageAsset(string name, ImageData image) noexcept
 
 ImageAsset::~ImageAsset() noexcept = default;
 
-void ImageAsset::OnUnload() {
+void ImageAsset::OnUnload(IRenderResourceRecycler& recycler) {
+    (void)recycler;
     _name.clear();
     _image = ImageData{};
 }

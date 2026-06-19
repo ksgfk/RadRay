@@ -27,7 +27,7 @@ public:
         unique_ptr<render::TextureView> srv) noexcept;
     ~TextureAsset() noexcept override;
 
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     bool IsValid() const noexcept { return _texture != nullptr && _srv != nullptr; }

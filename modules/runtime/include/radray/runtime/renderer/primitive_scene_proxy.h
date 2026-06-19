@@ -11,6 +11,7 @@ class CommandBuffer;
 namespace radray {
 
 class Material;
+class GpuSystem;
 class ResourceUploader;
 
 /// 渲染侧的一次几何绘制单元(仅几何)。RadRay 版的 UE5 FMeshBatchElement。
@@ -56,8 +57,8 @@ public:
     /// 需要 GPU 设备首次懒构建;静态材质一次构建后缓存。
     /// 返回 nullptr 表示无 per-material 绑定(录制时跳过)。
     /// 对应 UE5 FPrimitiveSceneProxy 提供 FMaterialRenderProxy 的职责。
-    virtual render::DescriptorSet* GetMaterialDescriptorSet(render::Device* device) const {
-        (void)device;
+    virtual render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem) const {
+        (void)gpuSystem;
         return nullptr;
     }
 

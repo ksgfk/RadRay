@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <coroutine>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
 
@@ -11,6 +13,7 @@
 #include <radray/coroutine.h>
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
+#include <radray/runtime/render_resource_recycler.h>
 
 namespace radray::render {
 class CommandBuffer;
@@ -108,7 +111,7 @@ struct GpuFenceSignal {
 struct GpuQueueFrameTrack {
     render::CommandQueue* Queue{nullptr};
     unique_ptr<render::Fence> Fence;
-    uint64_t NextFenceValue{1};
+    std::atomic<uint64_t> NextFenceValue{1};
 };
 
 struct GpuFlightAcquiredTarget {
@@ -321,7 +324,24 @@ private:
     float _lastGpuTimeMs{0.0f};
 };
 
-class GpuSystem {
+struct DeferredRenderDeleteEntry {
+    uint64_t TargetFenceValue{0};
+    unique_ptr<render::RenderBase> Object;
+};
+
+class DeferredRenderDeleteQueue {
+public:
+    void Push(uint64_t targetFenceValue, unique_ptr<render::RenderBase> obj) noexcept;
+    void Process(uint64_t completedFenceValue) noexcept;
+    void Flush() noexcept;
+    uint32_t Count() const noexcept;
+
+private:
+    mutable std::mutex _mutex;
+    vector<DeferredRenderDeleteEntry> _entries;
+};
+
+class GpuSystem : public IRenderResourceRecycler {
 public:
     using FenceSignal = GpuFenceSignal;
     using QueueFrameTrack = GpuQueueFrameTrack;
@@ -333,6 +353,10 @@ public:
     GpuSystem& operator=(const GpuSystem&) = delete;
     GpuSystem& operator=(GpuSystem&&) = delete;
     ~GpuSystem() noexcept;
+
+    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override;
+    void ProcessDeferredDeletes() noexcept;
+    void FlushAllDeferredDeletes() noexcept;
 
     bool CompleteFlight(uint32_t flightIndex);
     void WaitAndCleanupCompletedFlights();
@@ -414,6 +438,7 @@ private:
     unique_ptr<RSCache> _rsCache;
     unique_ptr<PSOCache> _psoCache;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
+    DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};
 };

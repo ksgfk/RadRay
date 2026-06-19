@@ -5,10 +5,10 @@
 #include <radray/basic_math.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/image_asset.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/material_instance.h>
 #include <radray/runtime/static_mesh.h>
+#include <radray/runtime/texture_asset.h>
 
 namespace radray {
 
@@ -35,14 +35,16 @@ struct GltfPrimitiveDesc {
     StreamingAssetRef<Material> Material;
     /// per-使用点材质参数(从 glTF 材质转换而来,按名写入 gMaterial cbuffer)。
     vector<MaterialParameterAssignment> MaterialParams;
+    /// per-使用点材质贴图(从 glTF 材质转换而来,按名绑定 shader 贴图槽)。
+    vector<MaterialTextureAssignment> MaterialTextures;
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
 };
 
-struct GltfImageDesc {
+struct GltfTextureDesc {
     string Name;
-    StreamingAssetRef<ImageAsset> Image;
+    StreamingAssetRef<TextureAsset> Texture;
 };
 
 struct GltfAssetLoadOptions {
@@ -58,13 +60,13 @@ public:
         vector<int> rootNodes,
         vector<GltfPrimitiveDesc> primitives,
         vector<string> materialNames,
-        vector<GltfImageDesc> images,
+        vector<GltfTextureDesc> textures,
         Eigen::Vector3f boundsMin,
         Eigen::Vector3f boundsMax,
         bool hasBounds) noexcept;
     ~GltfAsset() noexcept override;
 
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     Actor* ExportToScene(World& world) const;
@@ -74,7 +76,7 @@ public:
     const vector<int>& GetRootNodes() const noexcept { return _rootNodes; }
     const vector<GltfPrimitiveDesc>& GetPrimitives() const noexcept { return _primitives; }
     const vector<string>& GetMaterialNames() const noexcept { return _materialNames; }
-    const vector<GltfImageDesc>& GetImages() const noexcept { return _images; }
+    const vector<GltfTextureDesc>& GetTextures() const noexcept { return _textures; }
     const Eigen::Vector3f& GetBoundsMin() const noexcept { return _boundsMin; }
     const Eigen::Vector3f& GetBoundsMax() const noexcept { return _boundsMax; }
     bool HasBounds() const noexcept { return _hasBounds; }
@@ -85,7 +87,7 @@ private:
     vector<int> _rootNodes;
     vector<GltfPrimitiveDesc> _primitives;
     vector<string> _materialNames;
-    vector<GltfImageDesc> _images;
+    vector<GltfTextureDesc> _textures;
     Eigen::Vector3f _boundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f _boundsMax{Eigen::Vector3f::Zero()};
     bool _hasBounds{false};

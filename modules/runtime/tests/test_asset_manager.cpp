@@ -4,6 +4,7 @@
 
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_resource_recycler.h>
 
 using namespace radray;
 
@@ -13,7 +14,7 @@ namespace {
 class CpuAsset : public Asset {
 public:
     explicit CpuAsset(int value) noexcept : _value(value) {}
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
     int Value() const noexcept { return _value; }
 
@@ -25,12 +26,55 @@ private:
 class GpuAsset : public Asset {
 public:
     explicit GpuAsset(int value) noexcept : _value(value) {}
-    void OnUnload() override {}
+    void OnUnload(IRenderResourceRecycler& recycler) override { (void)recycler; }
     AssetTypeId GetTypeId() const noexcept override;
     int Value() const noexcept { return _value; }
 
 private:
     int _value;
+};
+
+class FakeRenderResource final : public render::RenderBase {
+public:
+    explicit FakeRenderResource(int* destroyCount) noexcept : _destroyCount(destroyCount) {}
+    ~FakeRenderResource() noexcept override {
+        if (_destroyCount != nullptr) {
+            ++*_destroyCount;
+        }
+    }
+
+    render::RenderObjectTags GetTag() const noexcept override { return render::RenderObjectTag::UNKNOWN; }
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+
+private:
+    int* _destroyCount;
+};
+
+class RecyclableAsset : public Asset {
+public:
+    explicit RecyclableAsset(int* destroyCount) noexcept
+        : _resource(make_unique<FakeRenderResource>(destroyCount)) {}
+
+    void OnUnload(IRenderResourceRecycler& recycler) override {
+        recycler.RecycleRenderResource(std::move(_resource));
+    }
+
+    AssetTypeId GetTypeId() const noexcept override;
+
+private:
+    unique_ptr<render::RenderBase> _resource;
+};
+
+class CountingRecycler final : public IRenderResourceRecycler {
+public:
+    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override {
+        ++RecycleCount;
+        Pending.emplace_back(std::move(obj));
+    }
+
+    uint32_t RecycleCount{0};
+    vector<unique_ptr<render::RenderBase>> Pending;
 };
 
 }  // namespace
@@ -47,13 +91,19 @@ struct RuntimeTypeTrait<GpuAsset> {
     static constexpr RuntimeTypeId value{0xcccccccc, 0xdddd, 0xeeee, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 };
 
+template <>
+struct RuntimeTypeTrait<RecyclableAsset> {
+    static constexpr RuntimeTypeId value{0x12345678, 0x9abc, 0x4def, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+};
+
 }  // namespace radray
 
 namespace {
 
-void CpuAsset::OnUnload() {}
+void CpuAsset::OnUnload(IRenderResourceRecycler& recycler) { (void)recycler; }
 AssetTypeId CpuAsset::GetTypeId() const noexcept { return runtime_type_id_v<CpuAsset>; }
 AssetTypeId GpuAsset::GetTypeId() const noexcept { return runtime_type_id_v<GpuAsset>; }
+AssetTypeId RecyclableAsset::GetTypeId() const noexcept { return runtime_type_id_v<RecyclableAsset>; }
 
 AssetId MakeId(uint32_t a) {
     return AssetId{a, 0x0000, 0x4000, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
@@ -238,6 +288,28 @@ TEST(AssetManagerTest, UnloadReadyAsset) {
     EXPECT_FALSE(t.IsValid());
     EXPECT_FALSE(t.IsReady());
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+TEST(AssetManagerTest, UnloadReadyAssetRecyclesRenderResource) {
+    CountingRecycler recycler;
+    AssetManager mgr;
+    mgr.SetRenderResourceRecycler(&recycler);
+
+    int destroyed = 0;
+    AssetId id = MakeId(10);
+    StreamingAssetRef<RecyclableAsset> ref = mgr.AddReady<RecyclableAsset>(
+        id,
+        make_unique<RecyclableAsset>(&destroyed));
+    ASSERT_TRUE(ref.IsReady());
+
+    mgr.Unload(id);
+    EXPECT_FALSE(ref.IsValid());
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+    EXPECT_EQ(recycler.RecycleCount, 1u);
+    EXPECT_EQ(destroyed, 0);
+
+    recycler.Pending.clear();
+    EXPECT_EQ(destroyed, 1);
 }
 
 // Unload:在加载中卸载会取消任务,终态后销毁 slot。

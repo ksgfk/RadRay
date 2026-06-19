@@ -806,7 +806,9 @@ std::optional<DxcOutput> Dxc::Compile(const DxcCompileParams& params) noexcept {
         args.emplace_back("-O3");
     } else {
         args.emplace_back("-Od");
-        args.emplace_back("-Zi");
+        if (!params.IsSpirv) {
+            args.emplace_back("-Zi");
+        }
     }
     {
         args.emplace_back("-T");

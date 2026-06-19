@@ -49,7 +49,7 @@ public:
     Material(GpuSystem& gpuSystem, const MaterialDescriptor& desc) noexcept;
     ~Material() noexcept override;
 
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     bool IsValid() const noexcept { return _rootSig != nullptr && _vs != nullptr && _ps != nullptr; }

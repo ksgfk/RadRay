@@ -69,7 +69,8 @@ Material::Material(GpuSystem& gpuSystem, const MaterialDescriptor& desc) noexcep
 
 Material::~Material() noexcept = default;
 
-void Material::OnUnload() {
+void Material::OnUnload(IRenderResourceRecycler& recycler) {
+    (void)recycler;
     // RootSignature 与 shader 均为非拥有(由 GpuSystem 缓存共享)，仅置空指针。
     _rootSig = nullptr;
     _vs = nullptr;

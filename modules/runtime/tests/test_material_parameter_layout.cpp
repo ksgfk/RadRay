@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <string_view>
 
@@ -51,11 +52,44 @@ float4 PSMain(VsOutput input) : SV_Target0 {
 }
 )";
 
+constexpr std::string_view kGltfViewerShapeShader = R"(
+struct MaterialConstants {
+    float4 BaseColorFactor;
+    float4 EmissiveFactorAlphaCutoff;
+    float4 Principled0;
+    float4 Principled1;
+    float4 Principled2;
+};
+
+[[vk::binding(0, 1)]] ConstantBuffer<MaterialConstants> gMaterial : register(b0, space1);
+[[vk::binding(1, 1)]] Texture2D<float4> gBaseColor : register(t0, space1);
+[[vk::binding(2, 1)]] Texture2D<float4> gNormalMap : register(t1, space1);
+[[vk::binding(3, 1)]] Texture2D<float4> gMetallicRoughness : register(t2, space1);
+[[vk::binding(4, 1)]] Texture2D<float4> gOcclusion : register(t3, space1);
+[[vk::binding(5, 1)]] Texture2D<float4> gEmissive : register(t4, space1);
+[[vk::binding(6, 1)]] SamplerState gMaterialSampler : register(s0, space1);
+
+struct VsOutput {
+    float4 Position : SV_Position;
+    float2 UV : TEXCOORD0;
+};
+
+float4 PSMain(VsOutput input) : SV_Target0 {
+    float4 base = gBaseColor.Sample(gMaterialSampler, input.UV) * gMaterial.BaseColorFactor;
+    float4 normal = gNormalMap.Sample(gMaterialSampler, input.UV);
+    float4 mr = gMetallicRoughness.Sample(gMaterialSampler, input.UV);
+    float4 occ = gOcclusion.Sample(gMaterialSampler, input.UV);
+    float4 emissive = gEmissive.Sample(gMaterialSampler, input.UV);
+    return base + normal + mr + occ + emissive + gMaterial.EmissiveFactorAlphaCutoff +
+           gMaterial.Principled0 + gMaterial.Principled1 + gMaterial.Principled2;
+}
+)";
+
 constexpr uint32_t kMaterialSetIndex = 1;
 
-std::optional<MaterialParameterLayout> BuildLayout(Dxc& dxc, bool spirv) {
+std::optional<MaterialParameterLayout> BuildLayoutFromShader(Dxc& dxc, std::string_view shader, bool spirv) {
     DxcCompileParams params{};
-    params.Code = kMaterialShader;
+    params.Code = shader;
     params.EntryPoint = "PSMain";
     params.Stage = ShaderStage::Pixel;
     params.SM = HlslShaderModel::SM60;
@@ -91,6 +125,10 @@ std::optional<MaterialParameterLayout> BuildLayout(Dxc& dxc, bool spirv) {
 #endif
     }
     return MaterialParameterLayout::CreateFromReflection(reflection, kMaterialSetIndex, "gMaterial");
+}
+
+std::optional<MaterialParameterLayout> BuildLayout(Dxc& dxc, bool spirv) {
+    return BuildLayoutFromShader(dxc, kMaterialShader, spirv);
 }
 
 const MaterialParameterLayout::Field* FindField(
@@ -209,5 +247,43 @@ TEST(MaterialParameterLayoutTest, HlslAndSpirvFieldOffsetsAgree) {
             }
         }
         EXPECT_TRUE(found) << "SPIR-V missing resource slot " << hs.Name;
+    }
+}
+
+TEST(MaterialParameterLayoutTest, GltfViewerResourceSlotsAgreeAcrossBackends) {
+    auto dxcOpt = CreateDxc();
+    ASSERT_TRUE(dxcOpt.HasValue());
+    shared_ptr<Dxc> dxc = dxcOpt.Release();
+
+    auto hlslOpt = BuildLayoutFromShader(*dxc, kGltfViewerShapeShader, /*spirv=*/false);
+    auto spirvOpt = BuildLayoutFromShader(*dxc, kGltfViewerShapeShader, /*spirv=*/true);
+    ASSERT_TRUE(hlslOpt.has_value());
+    ASSERT_TRUE(spirvOpt.has_value());
+    const MaterialParameterLayout& hlsl = hlslOpt.value();
+    const MaterialParameterLayout& spirv = spirvOpt.value();
+
+    const struct {
+        const char* Name;
+        MaterialParameterLayout::ResourceKind Kind;
+    } expectedSlots[] = {
+        {"gBaseColor", MaterialParameterLayout::ResourceKind::Texture},
+        {"gNormalMap", MaterialParameterLayout::ResourceKind::Texture},
+        {"gMetallicRoughness", MaterialParameterLayout::ResourceKind::Texture},
+        {"gOcclusion", MaterialParameterLayout::ResourceKind::Texture},
+        {"gEmissive", MaterialParameterLayout::ResourceKind::Texture},
+        {"gMaterialSampler", MaterialParameterLayout::ResourceKind::Sampler},
+    };
+
+    ASSERT_EQ(hlsl.GetResourceSlots().size(), std::size(expectedSlots));
+    ASSERT_EQ(spirv.GetResourceSlots().size(), std::size(expectedSlots));
+    for (const auto& expected : expectedSlots) {
+        const auto hasSlot = [&](const MaterialParameterLayout& layout) {
+            const auto slots = layout.GetResourceSlots();
+            return std::any_of(slots.begin(), slots.end(), [&](const auto& slot) {
+                return slot.Name == expected.Name && slot.Kind == expected.Kind;
+            });
+        };
+        EXPECT_TRUE(hasSlot(hlsl)) << "DXIL missing resource slot " << expected.Name;
+        EXPECT_TRUE(hasSlot(spirv)) << "SPIR-V missing resource slot " << expected.Name;
     }
 }

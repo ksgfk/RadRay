@@ -130,7 +130,7 @@ public:
         processorConfig.RtFormats.ColorFormats = {_colorFormat};
         processorConfig.RtFormats.DepthFormat = _depthFormat;
         processorConfig.ObjectConstantsParam = "gScene";
-        processorConfig.Device = ctx.Device;
+        processorConfig.Gpu = ctx.Gpu;
 
         if (ctx.Visible != nullptr) {
             _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig);
@@ -344,6 +344,13 @@ private:
     void UnloadCurrentScene() {
         DestroyExportedScene();
         if (_gltfAsset.IsValid()) {
+            if (GltfAsset* asset = _gltfAsset.Get()) {
+                for (const GltfTextureDesc& texture : asset->GetTextures()) {
+                    if (texture.Texture.IsValid()) {
+                        GetAssetManager()->Unload(texture.Texture.GetAssetId());
+                    }
+                }
+            }
             GetAssetManager()->Unload(_gltfAsset.GetAssetId());
             _gltfAsset.Reset();
         }
@@ -676,7 +683,7 @@ private:
                 const size_t componentCount = _rootActor != nullptr ? primitiveCount : 0;
                 ImGui::Text("Primitives: %zu", primitiveCount);
                 ImGui::Text("Materials: %zu", asset->GetMaterialNames().size());
-                ImGui::Text("Images: %zu", asset->GetImages().size());
+                ImGui::Text("Textures: %zu", asset->GetTextures().size());
                 ImGui::Text("Nodes: %zu", asset->GetNodes().size());
                 ImGui::Text("Actors: %zu", actorCount);
                 ImGui::Text("Components: %zu", componentCount);

@@ -74,11 +74,11 @@ void MeshPassProcessor::BuildCommands(
         // PSO 指针高位作为分组键:同 PSO 命令相邻,减少状态切换。
         const uint64_t sortKey = reinterpret_cast<uintptr_t>(pso);
 
-        // per-material descriptor set:需 GPU 设备首次懒构建;静态材质构建后缓存。
-        // Device 为空时跳过 per-material 绑定(退回纯 push-constant 路径)。
+        // per-material descriptor set:需 GPU 系统首次懒构建;静态材质构建后缓存。
+        // Gpu 为空时跳过 per-material 绑定(退回纯 push-constant 路径)。
         render::DescriptorSet* materialSet = nullptr;
-        if (_config.Device != nullptr) {
-            materialSet = proxy->GetMaterialDescriptorSet(_config.Device);
+        if (_config.Gpu != nullptr) {
+            materialSet = proxy->GetMaterialDescriptorSet(_config.Gpu);
         }
         const render::DescriptorSetIndex materialSetIndex = proxy->GetMaterialSetIndex();
 

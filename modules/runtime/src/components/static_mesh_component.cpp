@@ -1,5 +1,7 @@
 #include <radray/runtime/components/static_mesh_component.h>
 
+#include <algorithm>
+
 #include <radray/runtime/renderer/static_mesh_scene_proxy.h>
 
 namespace radray {
@@ -7,7 +9,10 @@ namespace radray {
 bool StaticMeshComponent::AreAssetsReady() const noexcept {
     const bool meshReady = _mesh.IsReady();
     const bool materialReady = _material.IsReady() || !_material.IsValid();
-    return meshReady && materialReady;
+    const bool texturesReady = std::all_of(_materialTextures.begin(), _materialTextures.end(), [](const auto& texture) {
+        return texture.Texture.IsReady();
+    });
+    return meshReady && materialReady && texturesReady;
 }
 
 void StaticMeshComponent::TickComponent(float deltaTime) {
@@ -25,7 +30,7 @@ unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {
     if (!_mesh || !_material) {
         return nullptr;
     }
-    return make_unique<StaticMeshSceneProxy>(_mesh, _material, _materialParams);
+    return make_unique<StaticMeshSceneProxy>(_mesh, _material, _materialParams, _materialTextures);
 }
 
 }  // namespace radray

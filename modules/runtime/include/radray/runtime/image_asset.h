@@ -14,7 +14,7 @@ public:
     ImageAsset(string name, ImageData image) noexcept;
     ~ImageAsset() noexcept override;
 
-    void OnUnload() override;
+    void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     bool IsValid() const noexcept { return _image.Data != nullptr && _image.Width != 0 && _image.Height != 0; }

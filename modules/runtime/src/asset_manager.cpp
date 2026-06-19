@@ -3,8 +3,20 @@
 #include <exception>
 
 #include <radray/logger.h>
+#include <radray/render/common.h>
 
 namespace radray {
+
+namespace {
+
+class ImmediateRenderResourceRecycler final : public IRenderResourceRecycler {
+public:
+    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override {
+        obj.reset();
+    }
+};
+
+}  // namespace
 
 // ════════════════════════════════════════════════════════════
 //  StreamingAssetRefAny
@@ -77,7 +89,7 @@ AssetManager::~AssetManager() noexcept {
 
     for (auto& slot : _slots.Values()) {
         if (slot && slot->State == AssetState::Ready && slot->Object) {
-            slot->Object->OnUnload();
+            slot->Object->OnUnload(GetRecycler());
             slot->Object.reset();
         }
     }
@@ -199,7 +211,7 @@ void AssetManager::Unload(const AssetId& id) noexcept {
         return;
     }
     if (slot->State == AssetState::Ready && slot->Object) {
-        slot->Object->OnUnload();
+        slot->Object->OnUnload(GetRecycler());
     }
     DestroySlot(handle);
 }
@@ -254,10 +266,18 @@ void AssetManager::FinalizeTerminalSlot(AssetHandle handle) {
     AssetSlot* slot = slotPtr->get();
     if (slot->PendingUnload) {
         if (slot->State == AssetState::Ready && slot->Object) {
-            slot->Object->OnUnload();
+            slot->Object->OnUnload(GetRecycler());
         }
         DestroySlot(handle);
     }
+}
+
+IRenderResourceRecycler& AssetManager::GetRecycler() noexcept {
+    if (_recycler != nullptr) {
+        return *_recycler;
+    }
+    static ImmediateRenderResourceRecycler immediate;
+    return immediate;
 }
 
 void AssetManager::Pump() {

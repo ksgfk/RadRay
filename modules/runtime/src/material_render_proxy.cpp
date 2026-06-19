@@ -11,10 +11,53 @@
 
 namespace radray {
 
-bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& instance) noexcept {
+MaterialRenderProxy::MaterialRenderProxy(MaterialRenderProxy&& other) noexcept
+    : _recycler(other._recycler),
+      _setIndex(other._setIndex),
+      _constantBuffer(std::move(other._constantBuffer)),
+      _sampler(std::move(other._sampler)),
+      _descriptorSet(std::move(other._descriptorSet)) {
+    other._recycler = nullptr;
+    other._setIndex = 1;
+}
+
+MaterialRenderProxy& MaterialRenderProxy::operator=(MaterialRenderProxy&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    ReleaseResources();
+    _recycler = other._recycler;
+    _setIndex = other._setIndex;
+    _constantBuffer = std::move(other._constantBuffer);
+    _sampler = std::move(other._sampler);
+    _descriptorSet = std::move(other._descriptorSet);
+    other._recycler = nullptr;
+    other._setIndex = 1;
+    return *this;
+}
+
+MaterialRenderProxy::~MaterialRenderProxy() noexcept {
+    ReleaseResources();
+}
+
+void MaterialRenderProxy::ReleaseResources() noexcept {
+    if (_recycler != nullptr) {
+        _recycler->RecycleRenderResource(std::move(_descriptorSet));
+        _recycler->RecycleRenderResource(std::move(_constantBuffer));
+        _recycler->RecycleRenderResource(std::move(_sampler));
+        return;
+    }
+    _descriptorSet.reset();
     _constantBuffer.reset();
     _sampler.reset();
-    _descriptorSet.reset();
+}
+
+bool MaterialRenderProxy::Build(
+    render::Device* device,
+    IRenderResourceRecycler* recycler,
+    const MaterialInstance& instance) noexcept {
+    ReleaseResources();
+    _recycler = recycler;
 
     if (device == nullptr || !instance.IsValid()) {
         return false;
@@ -54,7 +97,7 @@ bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& 
         auto bufOpt = device->CreateBuffer(bufDesc);
         if (!bufOpt.HasValue()) {
             RADRAY_ERR_LOG("MaterialRenderProxy: CreateBuffer(size={}) failed", bufferSize);
-            _descriptorSet.reset();
+            ReleaseResources();
             return false;
         }
         _constantBuffer = bufOpt.Release();
@@ -62,8 +105,7 @@ bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& 
         void* mapped = _constantBuffer->Map(0, bufferSize);
         if (mapped == nullptr) {
             RADRAY_ERR_LOG("MaterialRenderProxy: Map constant buffer failed");
-            _constantBuffer.reset();
-            _descriptorSet.reset();
+            ReleaseResources();
             return false;
         }
         std::memcpy(mapped, constData.data(), constData.size());
@@ -76,8 +118,7 @@ bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& 
         cbView.Usage = render::BufferViewUsage::CBuffer;
         if (!_descriptorSet->WriteResource(layout.GetConstantBufferName(), cbView)) {
             RADRAY_ERR_LOG("MaterialRenderProxy: WriteResource cbuffer '{}' failed", layout.GetConstantBufferName());
-            _constantBuffer.reset();
-            _descriptorSet.reset();
+            ReleaseResources();
             return false;
         }
     }
@@ -91,16 +132,12 @@ bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& 
             TextureAsset* tex = texRef.Get();
             if (tex == nullptr || !tex->IsValid()) {
                 RADRAY_ERR_LOG("MaterialRenderProxy: texture slot '{}' is unbound or not ready", slot.Name);
-                _constantBuffer.reset();
-                _sampler.reset();
-                _descriptorSet.reset();
+                ReleaseResources();
                 return false;
             }
             if (!_descriptorSet->WriteResource(slot.Name, tex->GetSrv())) {
                 RADRAY_ERR_LOG("MaterialRenderProxy: WriteResource texture '{}' failed", slot.Name);
-                _constantBuffer.reset();
-                _sampler.reset();
-                _descriptorSet.reset();
+                ReleaseResources();
                 return false;
             }
         } else {  // Sampler
@@ -119,17 +156,14 @@ bool MaterialRenderProxy::Build(render::Device* device, const MaterialInstance& 
                 auto sampOpt = device->CreateSampler(sampDesc);
                 if (!sampOpt.HasValue()) {
                     RADRAY_ERR_LOG("MaterialRenderProxy: CreateSampler failed");
-                    _constantBuffer.reset();
-                    _descriptorSet.reset();
+                    ReleaseResources();
                     return false;
                 }
                 _sampler = sampOpt.Release();
             }
             if (!_descriptorSet->WriteSampler(slot.Name, _sampler.get())) {
                 RADRAY_ERR_LOG("MaterialRenderProxy: WriteSampler '{}' failed", slot.Name);
-                _constantBuffer.reset();
-                _sampler.reset();
-                _descriptorSet.reset();
+                ReleaseResources();
                 return false;
             }
         }

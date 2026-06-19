@@ -137,10 +137,10 @@ TextureAsset::TextureAsset(
 
 TextureAsset::~TextureAsset() noexcept = default;
 
-void TextureAsset::OnUnload() {
+void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
     _name.clear();
-    _srv.reset();
-    _texture.reset();
+    recycler.RecycleRenderResource(std::move(_srv));
+    recycler.RecycleRenderResource(std::move(_texture));
 }
 
 AssetTypeId TextureAsset::GetTypeId() const noexcept {

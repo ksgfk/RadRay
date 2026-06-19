@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/runtime_type.h>
+#include <radray/runtime/render_resource_recycler.h>
 
 namespace radray {
 
@@ -31,7 +32,7 @@ public:
     virtual ~Asset() noexcept = default;
 
     /// 资产被回收(Unload)或 AssetManager 析构前调用一次。派生类在此释放 GPU 资源、丢弃 CPU 数据等。
-    virtual void OnUnload() = 0;
+    virtual void OnUnload(IRenderResourceRecycler& recycler) = 0;
 
     /// 返回资产自身的运行时类型 id。
     virtual AssetTypeId GetTypeId() const noexcept = 0;

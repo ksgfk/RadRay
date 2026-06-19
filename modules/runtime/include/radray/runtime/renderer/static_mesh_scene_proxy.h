@@ -11,6 +11,8 @@
 
 namespace radray {
 
+class GpuSystem;
+
 /// StaticMesh 的渲染侧代理。对应 UE5 的 FStaticMeshSceneProxy。
 ///
 /// 持有 StreamingAssetRef<StaticMesh> 与 StreamingAssetRef<Material>(非拥有弱句柄),把每个 section/primitive
@@ -24,6 +26,11 @@ public:
         StreamingAssetRef<StaticMesh> mesh,
         StreamingAssetRef<Material> material,
         vector<MaterialParameterAssignment> materialParams) noexcept;
+    StaticMeshSceneProxy(
+        StreamingAssetRef<StaticMesh> mesh,
+        StreamingAssetRef<Material> material,
+        vector<MaterialParameterAssignment> materialParams,
+        vector<MaterialTextureAssignment> materialTextures) noexcept;
     ~StaticMeshSceneProxy() noexcept override;
 
     bool IsRenderable() const noexcept override;
@@ -33,7 +40,7 @@ public:
         return _vertexLayout;
     }
 
-    render::DescriptorSet* GetMaterialDescriptorSet(render::Device* device) const override;
+    render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem) const override;
     render::DescriptorSetIndex GetMaterialSetIndex() const noexcept override;
 
     StaticMesh* GetStaticMesh() const noexcept { return _mesh.Get(); }
@@ -53,6 +60,7 @@ private:
 
     // per-material 参数实例 + GPU 代理。静态材质:首次索取时懒构建 proxy 并缓存。
     vector<MaterialParameterAssignment> _materialParams;
+    vector<MaterialTextureAssignment> _materialTextures;
     MaterialInstance _materialInstance;
     mutable MaterialRenderProxy _materialRenderProxy;
     mutable bool _materialProxyBuilt{false};

@@ -14,7 +14,6 @@
 #endif
 
 #ifdef RADRAY_ENABLE_JPEG
-#include <csetjmp>
 #include <jpeglib.h>
 #endif
 
@@ -496,16 +495,21 @@ bool ImageData::WritePNG(PNGWriteSettings settings) const {
 
 namespace {
 
+class LibjpegException : public std::runtime_error {
+public:
+    explicit LibjpegException(const char* msg) : std::runtime_error(msg) {}
+    ~LibjpegException() noexcept override = default;
+};
+
 struct LibjpegErrorManager {
     jpeg_error_mgr Pub;
-    jmp_buf Jump;
     char Message[JMSG_LENGTH_MAX]{};
 };
 
-void LibjpegErrorExit(j_common_ptr cinfo) {
+[[noreturn]] void LibjpegErrorExit(j_common_ptr cinfo) {
     auto* error = reinterpret_cast<LibjpegErrorManager*>(cinfo->err);
     (*cinfo->err->format_message)(cinfo, error->Message);
-    longjmp(error->Jump, 1);
+    throw LibjpegException(error->Message);
 }
 
 bool ReadStreamToBytes(std::istream& stream, vector<byte>& out) {
@@ -589,65 +593,64 @@ std::optional<ImageData> ImageData::LoadJPEG(std::istream& stream, JPEGLoadSetti
     LibjpegErrorManager jerr{};
     cinfo.err = jpeg_std_error(&jerr.Pub);
     jerr.Pub.error_exit = LibjpegErrorExit;
-
-    if (setjmp(jerr.Jump)) {
-        RADRAY_ERR_LOG("libjpeg error: {}", jerr.Message);
+    auto guard_jpeg = MakeScopeGuard([&]() {
         jpeg_destroy_decompress(&cinfo);
-        return std::nullopt;
-    }
+    });
 
-    jpeg_create_decompress(&cinfo);
-    jpeg_mem_src(
-        &cinfo,
-        reinterpret_cast<const unsigned char*>(encoded.data()),
-        static_cast<unsigned long>(encoded.size()));
-    jpeg_read_header(&cinfo, TRUE);
-    cinfo.out_color_space = JCS_RGB;
-    jpeg_start_decompress(&cinfo);
+    try {
+        jpeg_create_decompress(&cinfo);
+        jpeg_mem_src(
+            &cinfo,
+            reinterpret_cast<const unsigned char*>(encoded.data()),
+            static_cast<unsigned long>(encoded.size()));
+        jpeg_read_header(&cinfo, TRUE);
+        cinfo.out_color_space = JCS_RGB;
+        jpeg_start_decompress(&cinfo);
 
-    const uint32_t width = static_cast<uint32_t>(cinfo.output_width);
-    const uint32_t height = static_cast<uint32_t>(cinfo.output_height);
-    const uint32_t channels = static_cast<uint32_t>(cinfo.output_components);
-    if (width == 0 || height == 0 || channels != 3) {
-        RADRAY_ERR_LOG("unsupported JPEG output dimensions/channels: {}x{}x{}", width, height, channels);
-        jpeg_finish_decompress(&cinfo);
-        jpeg_destroy_decompress(&cinfo);
-        return std::nullopt;
-    }
+        const uint32_t width = static_cast<uint32_t>(cinfo.output_width);
+        const uint32_t height = static_cast<uint32_t>(cinfo.output_height);
+        const uint32_t channels = static_cast<uint32_t>(cinfo.output_components);
+        if (width == 0 || height == 0 || channels != 3) {
+            RADRAY_ERR_LOG("unsupported JPEG output dimensions/channels: {}x{}x{}", width, height, channels);
+            return std::nullopt;
+        }
 
-    ImageData img;
-    img.Width = width;
-    img.Height = height;
-    img.Format = settings.AddAlphaIfRGB.has_value() ? ImageFormat::RGBA8_BYTE : ImageFormat::RGB8_BYTE;
-    img.Data = make_unique<byte[]>(img.GetSize());
+        ImageData img;
+        img.Width = width;
+        img.Height = height;
+        img.Format = settings.AddAlphaIfRGB.has_value() ? ImageFormat::RGBA8_BYTE : ImageFormat::RGB8_BYTE;
+        img.Data = make_unique<byte[]>(img.GetSize());
 
-    vector<unsigned char> scanline(static_cast<size_t>(width) * channels);
-    const size_t dst_pixel_size = ImageData::FormatSize(img.Format);
-    while (cinfo.output_scanline < cinfo.output_height) {
-        const uint32_t src_y = static_cast<uint32_t>(cinfo.output_scanline);
-        unsigned char* row_ptr = scanline.data();
-        jpeg_read_scanlines(&cinfo, &row_ptr, 1);
+        vector<unsigned char> scanline(static_cast<size_t>(width) * channels);
+        const size_t dst_pixel_size = ImageData::FormatSize(img.Format);
+        while (cinfo.output_scanline < cinfo.output_height) {
+            const uint32_t src_y = static_cast<uint32_t>(cinfo.output_scanline);
+            unsigned char* row_ptr = scanline.data();
+            jpeg_read_scanlines(&cinfo, &row_ptr, 1);
 
-        const uint32_t dst_y = settings.IsFlipY ? (height - 1u - src_y) : src_y;
-        byte* dst = img.Data.get() + static_cast<size_t>(dst_y) * width * dst_pixel_size;
-        if (img.Format == ImageFormat::RGB8_BYTE) {
-            std::memcpy(dst, scanline.data(), scanline.size());
-        } else {
-            const byte alpha = static_cast<byte>(std::min(settings.AddAlphaIfRGB.value(), 0xFFu));
-            for (uint32_t x = 0; x < width; ++x) {
-                const size_t src_i = static_cast<size_t>(x) * 3u;
-                const size_t dst_i = static_cast<size_t>(x) * 4u;
-                dst[dst_i + 0] = static_cast<byte>(scanline[src_i + 0]);
-                dst[dst_i + 1] = static_cast<byte>(scanline[src_i + 1]);
-                dst[dst_i + 2] = static_cast<byte>(scanline[src_i + 2]);
-                dst[dst_i + 3] = alpha;
+            const uint32_t dst_y = settings.IsFlipY ? (height - 1u - src_y) : src_y;
+            byte* dst = img.Data.get() + static_cast<size_t>(dst_y) * width * dst_pixel_size;
+            if (img.Format == ImageFormat::RGB8_BYTE) {
+                std::memcpy(dst, scanline.data(), scanline.size());
+            } else {
+                const byte alpha = static_cast<byte>(std::min(settings.AddAlphaIfRGB.value(), 0xFFu));
+                for (uint32_t x = 0; x < width; ++x) {
+                    const size_t src_i = static_cast<size_t>(x) * 3u;
+                    const size_t dst_i = static_cast<size_t>(x) * 4u;
+                    dst[dst_i + 0] = static_cast<byte>(scanline[src_i + 0]);
+                    dst[dst_i + 1] = static_cast<byte>(scanline[src_i + 1]);
+                    dst[dst_i + 2] = static_cast<byte>(scanline[src_i + 2]);
+                    dst[dst_i + 3] = alpha;
+                }
             }
         }
-    }
 
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
-    return std::make_optional(std::move(img));
+        jpeg_finish_decompress(&cinfo);
+        return std::make_optional(std::move(img));
+    } catch (const LibjpegException& e) {
+        RADRAY_ERR_LOG("libjpeg error: {}", e.what());
+        return std::nullopt;
+    }
 }
 
 #else

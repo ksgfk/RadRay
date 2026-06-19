@@ -24,10 +24,13 @@ public:
     void SetMaterial(StreamingAssetRef<Material> material) noexcept { _material = std::move(material); }
     /// 设置 per-使用点材质参数(按名写入材质实例的 gMaterial cbuffer)。
     void SetMaterialParams(vector<MaterialParameterAssignment> params) noexcept { _materialParams = std::move(params); }
+    /// 设置 per-使用点材质贴图(按名绑定材质实例的 texture 槽)。
+    void SetMaterialTextures(vector<MaterialTextureAssignment> textures) noexcept { _materialTextures = std::move(textures); }
 
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
     const StreamingAssetRef<Material>& GetMaterial() const noexcept { return _material; }
     const vector<MaterialParameterAssignment>& GetMaterialParams() const noexcept { return _materialParams; }
+    const vector<MaterialTextureAssignment>& GetMaterialTextures() const noexcept { return _materialTextures; }
 
     void TickComponent(float deltaTime) override;
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
@@ -38,6 +41,7 @@ private:
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<Material> _material;
     vector<MaterialParameterAssignment> _materialParams;
+    vector<MaterialTextureAssignment> _materialTextures;
 };
 
 }  // namespace radray

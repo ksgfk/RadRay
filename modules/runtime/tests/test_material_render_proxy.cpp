@@ -109,7 +109,7 @@ TEST(MaterialInstanceTest, WritesPackIntoConstantDataAtReflectedOffsets) {
 TEST(MaterialRenderProxyTest, BuildWithNullDeviceFailsSafely) {
     MaterialRenderProxy proxy{};
     MaterialInstance emptyInstance{};
-    EXPECT_FALSE(proxy.Build(nullptr, emptyInstance));
+    EXPECT_FALSE(proxy.Build(nullptr, nullptr, emptyInstance));
     EXPECT_FALSE(proxy.IsBuilt());
     EXPECT_EQ(proxy.GetDescriptorSet(), nullptr);
 }

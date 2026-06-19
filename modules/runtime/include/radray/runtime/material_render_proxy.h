@@ -6,6 +6,7 @@
 #include <radray/nullable.h>
 #include <radray/render/common.h>
 #include <radray/runtime/material_instance.h>
+#include <radray/runtime/render_resource_recycler.h>
 
 namespace radray {
 
@@ -23,13 +24,13 @@ public:
     MaterialRenderProxy() = default;
     MaterialRenderProxy(const MaterialRenderProxy&) = delete;
     MaterialRenderProxy& operator=(const MaterialRenderProxy&) = delete;
-    MaterialRenderProxy(MaterialRenderProxy&&) noexcept = default;
-    MaterialRenderProxy& operator=(MaterialRenderProxy&&) noexcept = default;
-    ~MaterialRenderProxy() noexcept = default;
+    MaterialRenderProxy(MaterialRenderProxy&& other) noexcept;
+    MaterialRenderProxy& operator=(MaterialRenderProxy&& other) noexcept;
+    ~MaterialRenderProxy() noexcept;
 
     /// 一次性构建 GPU 资源。instance 必须有效且其 Material 持有效 RootSignature。
     /// 失败时保持 IsBuilt()==false。重复调用会重建。
-    bool Build(render::Device* device, const MaterialInstance& instance) noexcept;
+    bool Build(render::Device* device, IRenderResourceRecycler* recycler, const MaterialInstance& instance) noexcept;
 
     bool IsBuilt() const noexcept { return _descriptorSet != nullptr; }
 
@@ -40,6 +41,9 @@ public:
     render::DescriptorSetIndex GetSetIndex() const noexcept { return render::DescriptorSetIndex{_setIndex}; }
 
 private:
+    void ReleaseResources() noexcept;
+
+    IRenderResourceRecycler* _recycler{nullptr};
     uint32_t _setIndex{1};
     unique_ptr<render::Buffer> _constantBuffer{};
     unique_ptr<render::Sampler> _sampler{};

@@ -292,6 +292,35 @@ std::optional<FrameUploadScope> BeginFrameUploadAwaitable::await_resume() noexce
 //  GpuSystem
 // ═══════════════════════════════════════════════════════════════
 
+void DeferredRenderDeleteQueue::Push(uint64_t targetFenceValue, unique_ptr<render::RenderBase> obj) noexcept {
+    if (obj == nullptr) {
+        return;
+    }
+    std::lock_guard lock{_mutex};
+    _entries.emplace_back(DeferredRenderDeleteEntry{
+        .TargetFenceValue = targetFenceValue,
+        .Object = std::move(obj)});
+}
+
+void DeferredRenderDeleteQueue::Process(uint64_t completedFenceValue) noexcept {
+    std::lock_guard lock{_mutex};
+    std::erase_if(
+        _entries,
+        [completedFenceValue](const DeferredRenderDeleteEntry& entry) noexcept {
+            return entry.TargetFenceValue <= completedFenceValue;
+        });
+}
+
+void DeferredRenderDeleteQueue::Flush() noexcept {
+    std::lock_guard lock{_mutex};
+    _entries.clear();
+}
+
+uint32_t DeferredRenderDeleteQueue::Count() const noexcept {
+    std::lock_guard lock{_mutex};
+    return static_cast<uint32_t>(_entries.size());
+}
+
 bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     auto& flight = _flights[flightIndex];
     if (!flight.Signal.IsValid() || flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
@@ -310,6 +339,7 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     if (_frameUploadScheduler != nullptr) {
         _frameUploadScheduler->NotifyFlightComplete(flightIndex);
     }
+    ProcessDeferredDeletes();
     return true;
 }
 
@@ -466,7 +496,28 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     }
 }
 
-GpuSystem::~GpuSystem() noexcept = default;
+GpuSystem::~GpuSystem() noexcept {
+    FlushAllDeferredDeletes();
+}
+
+void GpuSystem::RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept {
+    if (obj == nullptr) {
+        return;
+    }
+    const uint64_t targetFenceValue = _mainQueueTrack.NextFenceValue.load(std::memory_order_acquire);
+    _deferredDeletes.Push(targetFenceValue, std::move(obj));
+}
+
+void GpuSystem::ProcessDeferredDeletes() noexcept {
+    if (_mainQueueTrack.Fence == nullptr) {
+        return;
+    }
+    _deferredDeletes.Process(_mainQueueTrack.Fence->GetCompletedValue());
+}
+
+void GpuSystem::FlushAllDeferredDeletes() noexcept {
+    _deferredDeletes.Flush();
+}
 
 float GpuSystem::GetLastGpuTimeMs() const noexcept {
     return _frameProfiler != nullptr ? _frameProfiler->GetLastGpuTimeMs() : 0.0f;
@@ -665,7 +716,7 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     render::Fence* frameFence = _mainQueueTrack.Fence.get();
     render::CommandBuffer* submitCmdBuffers[] = {record.CmdBuffer.get()};
     render::Fence* signalFences[] = {frameFence};
-    uint64_t signalValues[] = {_mainQueueTrack.NextFenceValue++};
+    uint64_t signalValues[] = {_mainQueueTrack.NextFenceValue.fetch_add(1, std::memory_order_acq_rel)};
     render::CommandQueueSubmitDescriptor submitDesc{
         .CmdBuffers = std::span{submitCmdBuffers},
         .SignalFences = std::span{signalFences},

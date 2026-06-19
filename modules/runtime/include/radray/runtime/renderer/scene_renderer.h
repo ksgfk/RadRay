@@ -96,8 +96,8 @@ public:
         PSOCache::RenderTargetFormats RtFormats{};
         /// 材质 push-constant 槽位名(填 ObjectConstants 的目标)。
         std::string_view ObjectConstantsParam{"gScene"};
-        /// 用于懒构建 MaterialRenderProxy 的 GPU 设备。为空时跳过 per-material 绑定。
-        render::Device* Device{nullptr};
+        /// 用于懒构建 MaterialRenderProxy 的 GPU 系统。为空时跳过 per-material 绑定。
+        GpuSystem* Gpu{nullptr};
     };
 
     explicit MeshPassProcessor(const Config& config) noexcept : _config(config) {}
