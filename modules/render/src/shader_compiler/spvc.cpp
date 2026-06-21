@@ -302,7 +302,15 @@ static void _ProcessResource(
         imgInfo.SampledType = _ReflectType(ctx, sampledType);
         binding.ImageInfo = imgInfo;
     }
-    if (kind == SpirvResourceKind::StorageBuffer || kind == SpirvResourceKind::StorageImage) {
+    if (kind == SpirvResourceKind::StorageBuffer) {
+        // HLSL StructuredBuffer 与 RWStructuredBuffer 都会被 DXC 编译成 SPIR-V 的 StorageBuffer。
+        // 区分只读/读写的 NonWritable/NonReadable 装饰由 DXC 标在 block 的结构体成员上, 而不是变量本身,
+        // 直接对变量 id 调用 get_decoration 永远取不到, 必须用 get_buffer_block_flags 合并成员装饰后再查询。
+        const spirv_cross::Bitset bufferFlags = compiler.get_buffer_block_flags(res.id);
+        binding.WriteOnly = bufferFlags.get(spv::DecorationNonReadable);
+        binding.ReadOnly = bufferFlags.get(spv::DecorationNonWritable);
+    } else if (kind == SpirvResourceKind::StorageImage) {
+        // StorageImage(RWTexture 等)的访问限定装饰直接标在变量上, 仍按变量 id 查询。
         auto access = compiler.get_decoration(res.id, spv::DecorationNonReadable);
         binding.WriteOnly = (access != 0);
         access = compiler.get_decoration(res.id, spv::DecorationNonWritable);
@@ -952,8 +960,10 @@ std::optional<MslShaderReflection> ReflectSpirvAsMsl(std::span<const SpirvAsMslR
                 _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, true, false, false, getDescSet(r));
             }
             for (const auto& r : resources.storage_buffers) {
-                bool ro = compiler.get_decoration(r.id, spv::DecorationNonWritable) != 0;
-                bool wo = compiler.get_decoration(r.id, spv::DecorationNonReadable) != 0;
+                // 同 VK 反射: StructuredBuffer 的 NonWritable/NonReadable 装饰在 block 成员上, 需用 get_buffer_block_flags 合并获取。
+                const spirv_cross::Bitset bufferFlags = compiler.get_buffer_block_flags(r.id);
+                bool ro = bufferFlags.get(spv::DecorationNonWritable);
+                bool wo = bufferFlags.get(spv::DecorationNonReadable);
                 _ProcessMslBinding(ctx, r, MslArgumentType::Buffer, mslStage, ro, wo, false, getDescSet(r));
             }
             for (const auto& r : resources.push_constant_buffers) {

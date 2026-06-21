@@ -47,6 +47,12 @@ struct RenderContext {
     render::TextureFormat ColorFormat{render::TextureFormat::UNKNOWN};
     uint32_t Width{0};
     uint32_t Height{0};
+
+    // Directional cascaded shadow state.
+    ShadowCascadeData Shadow{};
+
+    // Additional (spot/point) light shadow atlas state.
+    AdditionalShadowData AdditionalShadow{};
 };
 
 }  // namespace radray

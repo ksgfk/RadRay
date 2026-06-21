@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 
 #include <radray/logger.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/renderer/light_scene_proxy.h>
 #include <radray/runtime/renderer/primitive_scene_proxy.h>
 #include <radray/runtime/renderer/scene.h>
 
@@ -74,6 +76,9 @@ void MeshPassProcessor::BuildCommands(
         constants.CameraPosition[2] = view.EyePosition.z();
         constants.CameraPosition[3] = 1.0f;
         constants.Debug[0] = 0;
+        if (_config.ObjectConstantsOverride) {
+            _config.ObjectConstantsOverride(constants, *proxy, view);
+        }
 
         // PSO 指针高位作为分组键:同 PSO 命令相邻,减少状态切换。
         const uint64_t sortKey = reinterpret_cast<uintptr_t>(pso);
@@ -195,6 +200,195 @@ void SceneRenderer::DrawRenderers(
         encoder->BindIndexBuffer(cmd.Ibv);
         encoder->DrawIndexed(cmd.IndexCount, 1, cmd.FirstIndex, cmd.VertexOffset, 0);
     }
+}
+
+namespace {
+
+constexpr float kShadowNearPlane = 0.05f;
+constexpr float kMaxSpotFov = 2.96706f;  // ~170 deg, keeps perspective projection well-conditioned.
+
+SceneView MakePerspectiveSlice(
+    const Eigen::Vector3f& position,
+    const Eigen::Vector3f& forward,
+    const Eigen::Vector3f& up,
+    float fovY,
+    float nearZ,
+    float farZ,
+    uint32_t resolution) noexcept {
+    SceneView view{};
+    view.ViewMatrix = LookAtFrontLH(position, forward, up);
+    view.ProjMatrix = PerspectiveLH<float>(fovY, 1.0f, nearZ, farZ);
+    view.ViewProjMatrix = view.ProjMatrix * view.ViewMatrix;
+    view.EyePosition = position;
+    view.ViewportWidth = resolution;
+    view.ViewportHeight = resolution;
+    return view;
+}
+
+}  // namespace
+
+float AdditionalShadowKernelRadius(ShadowSoftMode mode) noexcept {
+    switch (mode) {
+        case ShadowSoftMode::Low:
+            return 1.5f;
+        case ShadowSoftMode::Medium:
+            return 2.5f;
+        default:
+            return 1.0f;
+    }
+}
+
+Eigen::Vector3f PointShadowFaceForward(uint32_t face) noexcept {
+    // Order matches shader cube_face_id: +X,-X,+Y,-Y,+Z,-Z.
+    switch (face) {
+        case 0: return Eigen::Vector3f{1.0f, 0.0f, 0.0f};
+        case 1: return Eigen::Vector3f{-1.0f, 0.0f, 0.0f};
+        case 2: return Eigen::Vector3f{0.0f, 1.0f, 0.0f};
+        case 3: return Eigen::Vector3f{0.0f, -1.0f, 0.0f};
+        case 4: return Eigen::Vector3f{0.0f, 0.0f, 1.0f};
+        default: return Eigen::Vector3f{0.0f, 0.0f, -1.0f};
+    }
+}
+
+Eigen::Vector3f PointShadowFaceUp(uint32_t face) noexcept {
+    // Up must not be parallel to forward; +Y/-Y use Z-axis up, the rest use +Y up.
+    switch (face) {
+        case 2: return Eigen::Vector3f{0.0f, 0.0f, -1.0f};
+        case 3: return Eigen::Vector3f{0.0f, 0.0f, 1.0f};
+        default: return Eigen::Vector3f{0.0f, 1.0f, 0.0f};
+    }
+}
+
+AdditionalShadowSlice BuildSpotShadowSlice(
+    const Eigen::Vector3f& position,
+    const Eigen::Vector3f& direction,
+    float outerAngle,
+    float range,
+    uint32_t resolution,
+    float depthBiasTexels,
+    float normalBiasTexels,
+    ShadowSoftMode softMode) noexcept {
+    Eigen::Vector3f forward = direction;
+    const float len = forward.norm();
+    forward = len > 1e-6f ? (forward / len).eval() : Eigen::Vector3f{0.0f, -1.0f, 0.0f};
+    const Eigen::Vector3f up = std::abs(forward.y()) > 0.99f
+        ? Eigen::Vector3f{0.0f, 0.0f, 1.0f}
+        : Eigen::Vector3f{0.0f, 1.0f, 0.0f};
+
+    const float safeRange = std::max(range, kShadowNearPlane + 0.1f);
+    const float halfAngle = std::clamp(outerAngle, 0.01f, kMaxSpotFov * 0.5f);
+    const float fovY = std::min(2.0f * halfAngle, kMaxSpotFov);
+    const float nearZ = std::min(kShadowNearPlane, safeRange * 0.5f);
+
+    AdditionalShadowSlice slice{};
+    slice.View = MakePerspectiveSlice(position, forward, up, fovY, nearZ, safeRange, resolution);
+    slice.LightDirectionForBias = -forward;
+
+    // texel world size at the far plane: frustum width / resolution. Mirrors the directional path so the
+    // same per-light bias values stay meaningful across light types.
+    const float texelWorldSize = (2.0f * std::tan(halfAngle) * safeRange) / static_cast<float>(std::max(resolution, 1u));
+    const float kernelRadius = AdditionalShadowKernelRadius(softMode);
+    slice.DepthBias = -std::max(depthBiasTexels, 0.0f) * texelWorldSize * kernelRadius;
+    slice.NormalBias = -std::max(normalBiasTexels, 0.0f) * texelWorldSize * kernelRadius;
+    return slice;
+}
+
+AdditionalShadowSlice BuildPointShadowFaceSlice(
+    const Eigen::Vector3f& position,
+    uint32_t face,
+    float range,
+    uint32_t resolution,
+    float depthBiasTexels,
+    ShadowSoftMode softMode) noexcept {
+    const Eigen::Vector3f forward = PointShadowFaceForward(face);
+    const Eigen::Vector3f up = PointShadowFaceUp(face);
+    const float safeRange = std::max(range, kShadowNearPlane + 0.1f);
+    const float fovY = 1.5707964f;  // 90 deg, each face covers one sixth of the sphere.
+    const float nearZ = std::min(kShadowNearPlane, safeRange * 0.5f);
+
+    AdditionalShadowSlice slice{};
+    slice.View = MakePerspectiveSlice(position, forward, up, fovY, nearZ, safeRange, resolution);
+    slice.LightDirectionForBias = -forward;
+
+    // 90 deg FOV → half angle 45 deg → tan = 1, frustum width at far = 2 * range.
+    const float texelWorldSize = (2.0f * safeRange) / static_cast<float>(std::max(resolution, 1u));
+    const float kernelRadius = AdditionalShadowKernelRadius(softMode);
+    slice.DepthBias = -std::max(depthBiasTexels, 0.0f) * texelWorldSize * kernelRadius;
+    // Point lights force normalBias=0 (matches URP/Built-in): the per-face forward is a poor normal proxy.
+    slice.NormalBias = 0.0f;
+    return slice;
+}
+
+bool BuildAdditionalShadows(
+    const Scene& scene,
+    uint32_t resolution,
+    ShadowSoftMode softMode,
+    AdditionalShadowData& out) {
+    out.Clear();
+    out.Resolution = std::max(resolution, 1u);
+    out.SoftMode = softMode;
+
+    uint32_t sliceCursor = 0;
+    for (const unique_ptr<LightSceneProxy>& light : scene.GetLights()) {
+        if (light == nullptr || !light->GetCastShadow()) {
+            continue;
+        }
+        const LightType type = light->GetLightType();
+        if (type != LightType::Spot && type != LightType::Point) {
+            continue;
+        }
+
+        const uint32_t needed = (type == LightType::Point) ? AdditionalShadowData::PointFaceCount : 1u;
+        if (sliceCursor + needed > AdditionalShadowData::MaxSlices) {
+            // Atlas full: skip the remaining casters (URP scales resolution down instead; minimal path drops them).
+            continue;
+        }
+
+        const Eigen::Vector3f position = light->GetPosition();
+        const float range = std::max(light->GetRange(), kShadowNearPlane + 0.1f);
+        const float depthBiasTexels = light->GetShadowDepthBias();
+        const float normalBiasTexels = light->GetShadowNormalBias();
+
+        AdditionalShadowLight record{};
+        record.Light = light.get();
+        record.FirstSlice = sliceCursor;
+        record.SliceCount = needed;
+        record.Position = position;
+        record.Range = range;
+
+        if (type == LightType::Spot) {
+            record.Kind = AdditionalShadowKind::Spot;
+            record.Direction = light->GetDirection();
+            out.Slices[sliceCursor] = BuildSpotShadowSlice(
+                position,
+                light->GetDirection(),
+                light->GetSpotOuterAngle(),
+                range,
+                out.Resolution,
+                depthBiasTexels,
+                normalBiasTexels,
+                softMode);
+        } else {
+            record.Kind = AdditionalShadowKind::Point;
+            record.Direction = Eigen::Vector3f{0.0f, -1.0f, 0.0f};
+            for (uint32_t face = 0; face < AdditionalShadowData::PointFaceCount; ++face) {
+                out.Slices[sliceCursor + face] = BuildPointShadowFaceSlice(
+                    position,
+                    face,
+                    range,
+                    out.Resolution,
+                    depthBiasTexels,
+                    softMode);
+            }
+        }
+
+        out.Lights.push_back(record);
+        sliceCursor += needed;
+    }
+
+    out.SliceCount = sliceCursor;
+    out.Enabled = sliceCursor > 0;
+    return out.Enabled;
 }
 
 }  // namespace radray

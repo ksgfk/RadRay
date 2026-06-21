@@ -12,6 +12,7 @@
 namespace radray {
 
 class Scene;
+class LightSceneProxy;
 
 /// 渲染一帧所用的视图参数。RadRay 版的 UE5 FSceneView(最小化)。
 /// 当前仅承载相机矩阵与视口尺寸;SceneRenderer 负责填充并驱动。
@@ -23,6 +24,119 @@ struct SceneView {
     uint32_t ViewportWidth{0};
     uint32_t ViewportHeight{0};
 };
+
+/// 单个方向光级联阴影的渲染参数。
+struct ShadowCascade {
+    SceneView View{};
+    float DepthBias{0.0f};
+    float NormalBias{0.0f};
+};
+
+/// 软阴影 PCF 档位。值与 shader 端 gShadowParam.Params.w 保持一致。
+enum class ShadowSoftMode : uint32_t {
+    Hard = 0,
+    Low = 1,
+    Medium = 2,
+};
+
+/// 一帧的方向光级联阴影数据。级联上限需与 SceneLightBuffer/Shader 中的常量保持一致。
+struct ShadowCascadeData {
+    static constexpr uint32_t MaxCascades = 4;
+
+    std::array<ShadowCascade, MaxCascades> Cascades{};
+    std::array<Eigen::Vector3f, MaxCascades> SphereCenters{};
+    std::array<float, MaxCascades> SphereRadiiSq{};
+    Eigen::Vector3f LightDirectionForBias{0.0f, -1.0f, 0.0f};
+    uint32_t CascadeCount{0};
+    bool Enabled{false};
+    ShadowSoftMode SoftMode{ShadowSoftMode::Medium};
+};
+
+/// 附加光(聚光/点光)阴影的一个 slice(对应图集 Texture2DArray 的一层)。
+/// 聚光占 1 个 slice;点光占 6 个 slice(立方体六面)。
+/// 对齐 URP AdditionalLightsShadowCasterPass 的「每光若干 slice」模型(最小化:用层图集代替 2D 装箱)。
+struct AdditionalShadowSlice {
+    SceneView View{};
+    /// caster 偏移用的「指向光源」方向。聚光为 -spotDir;点光面 k 为 -faceForward[k]。
+    Eigen::Vector3f LightDirectionForBias{0.0f, -1.0f, 0.0f};
+    float DepthBias{0.0f};
+    float NormalBias{0.0f};
+};
+
+/// 附加光阴影类型。值与 shader 端约定一致。
+enum class AdditionalShadowKind : uint32_t {
+    Spot = 0,
+    Point = 1,
+};
+
+/// 一盏投射阴影的附加光及其在图集中的 slice 范围。
+/// Light 指针用于 SceneLightBuffer 把每光映射到其 firstSlice(对应 URP 的 per-light 索引映射)。
+struct AdditionalShadowLight {
+    const LightSceneProxy* Light{nullptr};
+    AdditionalShadowKind Kind{AdditionalShadowKind::Spot};
+    uint32_t FirstSlice{0};
+    uint32_t SliceCount{0};
+    Eigen::Vector3f Position{Eigen::Vector3f::Zero()};
+    Eigen::Vector3f Direction{0.0f, -1.0f, 0.0f};
+    float Range{0.0f};
+};
+
+/// 一帧的附加光阴影数据。slice 上限需与 shader/SceneLightBuffer 中的常量一致。
+struct AdditionalShadowData {
+    static constexpr uint32_t MaxSlices = 16; // Must match RADRAY_MAX_ADD_SHADOW_SLICES / SceneLightBuffer.
+    static constexpr uint32_t PointFaceCount = 6;
+
+    std::array<AdditionalShadowSlice, MaxSlices> Slices{};
+    vector<AdditionalShadowLight> Lights{};
+    uint32_t SliceCount{0};
+    uint32_t Resolution{1024};
+    bool Enabled{false};
+    ShadowSoftMode SoftMode{ShadowSoftMode::Medium};
+
+    void Clear() noexcept {
+        Lights.clear();
+        SliceCount = 0;
+        Enabled = false;
+    }
+};
+
+/// 软阴影 PCF 核半径(纹素)。与方向光路径一致:Hard=1.0,Low=1.5,Medium=2.5。
+float AdditionalShadowKernelRadius(ShadowSoftMode mode) noexcept;
+
+/// 点光第 face 面(0..5 = +X,-X,+Y,-Y,+Z,-Z)的前向。与 shader cube_face_id 约定一致。
+Eigen::Vector3f PointShadowFaceForward(uint32_t face) noexcept;
+
+/// 点光第 face 面的 up 向量(用于构建 LookAt)。
+Eigen::Vector3f PointShadowFaceUp(uint32_t face) noexcept;
+
+/// 构建聚光的单个阴影 slice(透视投影,FOV=外锥全角,远平面=range)。
+AdditionalShadowSlice BuildSpotShadowSlice(
+    const Eigen::Vector3f& position,
+    const Eigen::Vector3f& direction,
+    float outerAngle,
+    float range,
+    uint32_t resolution,
+    float depthBiasTexels,
+    float normalBiasTexels,
+    ShadowSoftMode softMode) noexcept;
+
+/// 构建点光第 face 面的阴影 slice(透视 90° FOV,远平面=range)。
+/// 点光强制 normalBias=0(与 URP/Built-in 一致)。
+AdditionalShadowSlice BuildPointShadowFaceSlice(
+    const Eigen::Vector3f& position,
+    uint32_t face,
+    float range,
+    uint32_t resolution,
+    float depthBiasTexels,
+    ShadowSoftMode softMode) noexcept;
+
+/// 从场景收集全部投射阴影的附加光,分配图集 slice,填充 out。
+/// 放不下(超过 MaxSlices)的光被跳过。无投射光时 out.Enabled=false 返回 false。
+bool BuildAdditionalShadows(
+    const Scene& scene,
+    uint32_t resolution,
+    ShadowSoftMode softMode,
+    AdditionalShadowData& out);
 
 /// 一条已解析的 per-material 绑定:set 索引 + descriptor set 句柄。
 /// 对应 UE5 FMeshDrawShaderBindings 的最小子集(当前仅 per-material 一个 set)。
@@ -92,6 +206,8 @@ using PrimitiveFilter = std::function<bool(const PrimitiveSceneProxy&)>;
 class MeshPassProcessor {
 public:
     struct Config {
+        using ObjectConstantsCallback = std::function<void(ObjectConstants&, const PrimitiveSceneProxy&, const SceneView&)>;
+
         PSOCache* Cache{nullptr};
         PSOCache::RenderTargetFormats RtFormats{};
         /// 材质 push-constant 槽位名(填 ObjectConstants 的目标)。
@@ -102,6 +218,7 @@ public:
         render::DescriptorSet* ViewDescriptorSet{nullptr};
         render::DescriptorSetIndex ViewDescriptorSetIndex{0};
         PSOCache::GraphicsPipelineOverride PipelineOverride{};
+        ObjectConstantsCallback ObjectConstantsOverride{};
     };
 
     explicit MeshPassProcessor(const Config& config) noexcept : _config(config) {}

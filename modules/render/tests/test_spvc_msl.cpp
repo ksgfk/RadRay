@@ -56,6 +56,21 @@ float4 PSMain(PsInput input) : SV_Target0 {
 }
 )";
 
+constexpr std::string_view kStructuredBufferShader = R"(
+struct Light {
+    float4 Direction;
+    float4 Irradiance;
+};
+
+[[vk::binding(0, 0)]] StructuredBuffer<Light> gReadOnlyLights : register(t0, space0);
+[[vk::binding(1, 0)]] RWStructuredBuffer<Light> gReadWriteLights : register(u1, space0);
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    gReadWriteLights[tid.x] = gReadOnlyLights[tid.x];
+}
+)";
+
 std::optional<DxcOutput> CompileSpirv(
     Dxc& dxc,
     std::string_view source,
@@ -134,6 +149,46 @@ TEST(SpvcMslTest, AppliesExplicitArgumentBufferStartIndexToFragmentSource) {
     auto mslOpt = ConvertSpirvToMsl(spirvOpt->Data, "PSMain", ShaderStage::Pixel, option);
     ASSERT_TRUE(mslOpt.has_value());
     EXPECT_NE(mslOpt->MslSource.find("[[buffer(12)]]"), string::npos);
+}
+
+// Regression: HLSL StructuredBuffer (read-only) and RWStructuredBuffer both lower to a SPIR-V
+// StorageBuffer. DXC marks the read-only one with a NonWritable decoration on the *block member*,
+// not on the variable. ReflectSpirv must inspect get_buffer_block_flags (which merges member
+// decorations) so a read-only StructuredBuffer maps to ResourceBindType::Buffer instead of RWBuffer.
+TEST(SpvcMslTest, ReflectsReadOnlyStructuredBufferAsReadOnly) {
+    auto dxcOpt = CreateDxc();
+    ASSERT_TRUE(dxcOpt.HasValue());
+    shared_ptr<Dxc> dxc = dxcOpt.Release();
+
+    auto spirvOpt = CompileSpirv(*dxc, kStructuredBufferShader, "CSMain", ShaderStage::Compute);
+    ASSERT_TRUE(spirvOpt.has_value());
+
+    auto reflectionOpt = ReflectSpirv(SpirvBytecodeView{
+        .Data = spirvOpt->Data,
+        .EntryPointName = "CSMain",
+        .Stage = ShaderStage::Compute,
+    });
+    ASSERT_TRUE(reflectionOpt.has_value());
+
+    auto findBinding = [&](std::string_view name) -> const SpirvResourceBinding* {
+        auto it = std::find_if(
+            reflectionOpt->ResourceBindings.begin(),
+            reflectionOpt->ResourceBindings.end(),
+            [&](const SpirvResourceBinding& b) { return b.Name == name; });
+        return it == reflectionOpt->ResourceBindings.end() ? nullptr : &(*it);
+    };
+
+    const SpirvResourceBinding* readOnly = findBinding("gReadOnlyLights");
+    ASSERT_NE(readOnly, nullptr);
+    EXPECT_EQ(readOnly->Kind, SpirvResourceKind::StorageBuffer);
+    EXPECT_TRUE(readOnly->ReadOnly);
+    EXPECT_FALSE(readOnly->WriteOnly);
+
+    const SpirvResourceBinding* readWrite = findBinding("gReadWriteLights");
+    ASSERT_NE(readWrite, nullptr);
+    EXPECT_EQ(readWrite->Kind, SpirvResourceKind::StorageBuffer);
+    EXPECT_FALSE(readWrite->ReadOnly);
+    EXPECT_FALSE(readWrite->WriteOnly);
 }
 
 }  // namespace

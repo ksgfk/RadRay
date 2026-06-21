@@ -25,11 +25,21 @@ public:
     void SetDirection(const Eigen::Vector3f& direction) noexcept;
     void SetColor(const Eigen::Vector3f& color) noexcept;
     void SetIntensity(float intensity) noexcept;
+    void SetCastShadow(bool castShadow) noexcept;
+    void SetShadowBias(float depthBias, float normalBias) noexcept;
+    void SetRange(float range) noexcept;
+    void SetSpotAngles(float innerAngleRadians, float outerAngleRadians) noexcept;
 
     LightType GetLightType() const noexcept { return _type; }
     const Eigen::Vector3f& GetDirection() const noexcept { return _direction; }
     const Eigen::Vector3f& GetColor() const noexcept { return _color; }
     float GetIntensity() const noexcept { return _intensity; }
+    bool GetCastShadow() const noexcept { return _castShadow; }
+    float GetShadowDepthBias() const noexcept { return _shadowDepthBias; }
+    float GetShadowNormalBias() const noexcept { return _shadowNormalBias; }
+    float GetRange() const noexcept { return _range; }
+    float GetSpotInnerAngle() const noexcept { return _spotInnerAngle; }
+    float GetSpotOuterAngle() const noexcept { return _spotOuterAngle; }
 
     void OnRegister() override;
     void OnUnregister() override;
@@ -45,6 +55,12 @@ private:
     Eigen::Vector3f _direction{0.0f, -1.0f, 0.0f};
     Eigen::Vector3f _color{1.0f, 1.0f, 1.0f};
     float _intensity{1.0f};
+    bool _castShadow{true};
+    float _shadowDepthBias{1.0f};
+    float _shadowNormalBias{1.0f};
+    float _range{10.0f};
+    float _spotInnerAngle{0.5235988f};  // 30 deg
+    float _spotOuterAngle{0.6981317f};  // 40 deg
 
     /// non-owning, Scene holds the unique_ptr.
     LightSceneProxy* _sceneProxy{nullptr};

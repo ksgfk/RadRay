@@ -1,5 +1,7 @@
 #include <radray/runtime/components/light_component.h>
 
+#include <algorithm>
+
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/renderer/scene.h>
@@ -40,6 +42,40 @@ void LightComponent::SetIntensity(float intensity) noexcept {
     }
 }
 
+void LightComponent::SetCastShadow(bool castShadow) noexcept {
+    _castShadow = castShadow;
+    if (_sceneProxy != nullptr) {
+        _sceneProxy->SetCastShadow(castShadow);
+    }
+}
+
+void LightComponent::SetShadowBias(float depthBias, float normalBias) noexcept {
+    _shadowDepthBias = std::max(depthBias, 0.0f);
+    _shadowNormalBias = std::max(normalBias, 0.0f);
+    if (_sceneProxy != nullptr) {
+        _sceneProxy->SetShadowDepthBias(_shadowDepthBias);
+        _sceneProxy->SetShadowNormalBias(_shadowNormalBias);
+    }
+}
+
+void LightComponent::SetRange(float range) noexcept {
+    _range = std::max(range, 0.0f);
+    if (_sceneProxy != nullptr) {
+        _sceneProxy->SetRange(_range);
+    }
+}
+
+void LightComponent::SetSpotAngles(float innerAngleRadians, float outerAngleRadians) noexcept {
+    // Outer cone must not collapse below the inner cone; clamp both into a sane (0, ~89deg] range.
+    constexpr float kMaxHalfAngle = 1.5533431f;  // ~89 deg
+    _spotOuterAngle = std::clamp(outerAngleRadians, 0.001f, kMaxHalfAngle);
+    _spotInnerAngle = std::clamp(innerAngleRadians, 0.0f, _spotOuterAngle);
+    if (_sceneProxy != nullptr) {
+        _sceneProxy->SetSpotInnerAngle(_spotInnerAngle);
+        _sceneProxy->SetSpotOuterAngle(_spotOuterAngle);
+    }
+}
+
 void LightComponent::OnRegister() {
     SceneComponent::OnRegister();
 
@@ -76,6 +112,12 @@ void LightComponent::PushParametersToProxy() noexcept {
     _sceneProxy->SetDirection(_direction);
     _sceneProxy->SetColor(_color);
     _sceneProxy->SetIntensity(_intensity);
+    _sceneProxy->SetCastShadow(_castShadow);
+    _sceneProxy->SetShadowDepthBias(_shadowDepthBias);
+    _sceneProxy->SetShadowNormalBias(_shadowNormalBias);
+    _sceneProxy->SetRange(_range);
+    _sceneProxy->SetSpotInnerAngle(_spotInnerAngle);
+    _sceneProxy->SetSpotOuterAngle(_spotOuterAngle);
 }
 
 }  // namespace radray

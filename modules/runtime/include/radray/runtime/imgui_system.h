@@ -102,6 +102,9 @@ public:
 
     class ImGuiTexture {
     public:
+        // 标记外部纹理构造：描述符集按 flight 延迟创建
+        struct ExternalTag {};
+
         ImGuiTexture(
             unique_ptr<render::Texture> texture,
             unique_ptr<render::TextureView> srv,
@@ -110,13 +113,35 @@ public:
               _srv(std::move(srv)),
               _descriptorSet(std::move(descriptorSet)) {}
 
+        // 外部纹理：每个 flight 持有独立描述符集，避免在命令缓冲飞行中改写同一描述符集
+        explicit ImGuiTexture(ExternalTag) noexcept : _isExternal(true) {}
+
         render::Texture* GetTexture() const noexcept { return _texture.get(); }
-        render::DescriptorSet* GetDescriptorSet() const noexcept { return _descriptorSet.get(); }
+        // 普通纹理使用单一描述符集；外部纹理按当前 flight 取对应描述符集
+        render::DescriptorSet* GetDescriptorSet(uint32_t flightIndex) const noexcept {
+            if (_isExternal) {
+                return flightIndex < _externalSets.size() ? _externalSets[flightIndex].get() : nullptr;
+            }
+            return _descriptorSet.get();
+        }
+        render::DescriptorSet* GetExternalSet(uint32_t flightIndex) const noexcept {
+            return flightIndex < _externalSets.size() ? _externalSets[flightIndex].get() : nullptr;
+        }
+        void SetExternalSet(uint32_t flightIndex, unique_ptr<render::DescriptorSet> set) noexcept {
+            if (flightIndex >= _externalSets.size()) {
+                _externalSets.resize(static_cast<size_t>(flightIndex) + 1);
+            }
+            _externalSets[flightIndex] = std::move(set);
+        }
+        bool UpdateExternalResource(uint32_t flightIndex, render::TextureView* srv) noexcept;
+        bool IsExternal() const noexcept { return _isExternal; }
 
     private:
         unique_ptr<render::Texture> _texture;
         unique_ptr<render::TextureView> _srv;
         unique_ptr<render::DescriptorSet> _descriptorSet;
+        vector<unique_ptr<render::DescriptorSet>> _externalSets;
+        bool _isExternal{false};
     };
 
     struct UploadTexturePayload {
@@ -160,6 +185,7 @@ public:
     void OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx);
     void SetupRenderState(uint32_t frameIndex, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight);
     render::Device* GetDevice() const noexcept { return _device; }
+    ImTextureID CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv);
 
     static Nullable<unique_ptr<ImGuiRenderer>> Create(const ImGuiRendererDescriptor& desc) noexcept;
 
@@ -168,9 +194,10 @@ private:
 
     void ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList);
     void OnRenderBeginFrame(Frame& frame, render::CommandBuffer* cmdBuffer);
-    void OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder);
+    void OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder);
     void OnRenderCompleteFrame(Frame& frame);
     void SetupRenderStateForFrame(const Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) const;
+    bool OwnsTexture(const ImGuiTexture* texture) const noexcept;
 
     ImGuiSystem* _system;
     render::Device* _device{nullptr};
@@ -231,6 +258,11 @@ public:
 
     /// 渲染线程：该 flight 渲染完成后释放本帧临时资源。
     void NotifyRenderComplete(uint32_t frameIndex);
+
+    /// 创建或更新一张外部纹理（如离屏 RT）供 ImGui::Image 使用。
+    /// flightIndex 必须传入当前帧的 flight 序号：外部纹理按 flight 持有独立描述符集，
+    /// 避免在命令缓冲飞行中改写仍被引用的描述符集（VUID-vkUpdateDescriptorSets-None-03047）。
+    ImTextureID CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv);
 
     /// swapchain 重建通知转发给 renderer。
     void HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx);

@@ -102,6 +102,13 @@ float3 principled_fresnel(float F_dielectric, float metallic, float spec_tint, f
     return front_side ? F_front : (bsdf * F_dielectric).xxx;
 }
 
+// 与 Mitsuba3 src/bsdfs/principled.cpp 的 eval() 逐项对齐,参数方向约定必须严格一致:
+//   wi = 视线方向(指向相机)= Mitsuba si.wi   -> cos_theta_i = wi.z
+//   wo = 光源方向(指向光源)= Mitsuba eval 第二参 wo -> cos_theta_o = wo.z
+// 这与“wi 指向光源”的常见习惯相反!函数返回值已含出射侧余弦投影:
+//   - 漫反射/清漆/绢光乘 abs(cos_theta_o)（即 N·L_light）
+//   - 镜面反射只除 abs(cos_theta_i)（拆走了 1/(4 cos_i cos_o) 中的 cos_o）
+// 因此调用方无需(也不得)再乘 N·L；调换 wi/wo 会同时弄错高光归一化与终止线。
 float3 EvalPrincipledReflection(float3 wi, float3 wo, float3 base_color, float metallic, float roughness,
                                 float specular, float spec_tint, float anisotropic, float sheen,
                                 float sheen_tint, float flatness, float clearcoat, float clearcoat_gloss,

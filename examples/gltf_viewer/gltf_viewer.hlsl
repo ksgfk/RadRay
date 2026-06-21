@@ -2,6 +2,7 @@
 // Transmission/transparent response is intentionally rendered black in this first viewer pass.
 #include "principled.hlsl"
 #include "light.hlsl"
+#include "shadow.hlsl"
 struct VertexInput {
     float3 Position : POSITION0;
     float3 Normal : NORMAL0;
@@ -34,13 +35,19 @@ struct MaterialConstants {
 };
 
 struct LightInfo {
-    uint4 Counts; // x directional count, y point count
+    uint4 Counts; // x directional count, y point count, z spot count
 };
 
 VK_PUSH_CONSTANT ConstantBuffer<SceneConstants> gScene : register(b0, space0);
 VK_BINDING(0, 0) StructuredBuffer<DirectionalLightGpu> gDirectionalLights : register(t0, space0);
 VK_BINDING(1, 0) StructuredBuffer<PointLightGpu> gPointLights : register(t1, space0);
 VK_BINDING(2, 0) ConstantBuffer<LightInfo> gLightInfo : register(b1, space0);
+VK_BINDING(3, 0) ConstantBuffer<ShadowParam> gShadowParam : register(b2, space0);
+VK_BINDING(4, 0) Texture2DArray<float> gShadowMap : register(t2, space0);
+VK_BINDING(5, 0) SamplerComparisonState gShadowSampler : register(s0, space0);
+VK_BINDING(6, 0) StructuredBuffer<SpotLightGpu> gSpotLights : register(t3, space0);
+VK_BINDING(7, 0) ConstantBuffer<AdditionalShadowParam> gAdditionalShadowParam : register(b3, space0);
+VK_BINDING(8, 0) Texture2DArray<float> gAdditionalShadowMap : register(t4, space0);
 VK_BINDING(0, 1) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space1);
 VK_BINDING(1, 1) Texture2D<float4> gBaseColor : register(t0, space1);
 VK_BINDING(2, 1) Texture2D<float4> gNormalMap : register(t1, space1);
@@ -51,9 +58,19 @@ VK_BINDING(6, 1) SamplerState gMaterialSampler : register(s0, space1);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;
-    output.Position = mul(gScene.MVP, float4(input.Position, 1.0));
-    output.WorldPosition = mul(gScene.Model, float4(input.Position, 1.0)).xyz;
-    output.WorldNormal = mul(gScene.Model, float4(input.Normal, 0.0)).xyz;
+    float3 positionWS = mul(gScene.Model, float4(input.Position, 1.0)).xyz;
+    float3 normalWS = mul(gScene.Model, float4(input.Normal, 0.0)).xyz;
+    if (gScene.Debug.x == 6) {
+        float3 dirToLight = normalize(gScene.CameraPosition.xyz);
+        float depthBias = gScene.CameraPosition.w;
+        float normalBias = asfloat(gScene.Debug.y);
+        float3 biasedWS = apply_shadow_bias(positionWS, normalize(normalWS), dirToLight, depthBias, normalBias);
+        output.Position = apply_shadow_clamping(mul(gScene.MVP, float4(biasedWS, 1.0)));
+    } else {
+        output.Position = mul(gScene.MVP, float4(input.Position, 1.0));
+    }
+    output.WorldPosition = positionWS;
+    output.WorldNormal = normalWS;
     output.WorldTangent = float4(mul(gScene.Model, float4(input.Tangent.xyz, 0.0)).xyz, input.Tangent.w);
     output.TexCoord = input.TexCoord;
     return output;
@@ -110,6 +127,20 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
     if (gScene.Debug.x == 5) {
         return float4(n * 0.5f + 0.5f, 1.0f);
     }
+    if (gScene.Debug.x == 7) {
+        uint count = (uint)gShadowParam.Params.z;
+        uint cascadeIndex = compute_cascade_index(gShadowParam, input.WorldPosition, count);
+        float3 colors[4] = {
+            float3(1.00f, 0.20f, 0.16f),
+            float3(0.15f, 0.85f, 0.25f),
+            float3(0.20f, 0.45f, 1.00f),
+            float3(1.00f, 0.86f, 0.18f),
+        };
+        if (cascadeIndex >= count) {
+            return float4(0.18f, 0.18f, 0.18f, 1.0f);
+        }
+        return float4(colors[min(cascadeIndex, 3u)], 1.0f);
+    }
 
     float4 base = saturate(gMaterial.BaseColorFactor * gBaseColor.Sample(gMaterialSampler, input.TexCoord));
     float3 emissive = max(gMaterial.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx) *
@@ -130,10 +161,15 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
     float eta = max(gMaterial.Principled2.w, 1.001f);
     roughness = max(roughness, 0.001f);
 
+    // 方向命名严格遵循 Mitsuba3 principled BSDF 约定(见 principled.hlsl 顶部注释):
+    //   wi = 视线方向(指向相机)= Mitsuba 的 si.wi,对应 cos_theta_i
+    //   wo = 光源方向(指向光源)= Mitsuba eval() 第二参数 wo,对应 cos_theta_o
+    // 注意:这与“wi 指向光源”的常见教科书习惯相反,EvalPrincipledReflection 内部
+    // 的余弦投影(漫反射乘 cos_theta_o、镜面只除 cos_theta_i)依赖该约定,切勿调换。
     Frame3 frame = MakeShadingFrame(n, input.WorldTangent);
-    float3 wo = to_local(frame, viewDirWorld);
+    float3 wi = to_local(frame, viewDirWorld);
 
-    if (wo.z <= 0.0f) {
+    if (wi.z <= 0.0f) {
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
@@ -141,38 +177,67 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
     uint dirCount = gLightInfo.Counts.x;
     for (uint i = 0; i < dirCount; ++i) {
         DirectionalLightGpu L = gDirectionalLights[i];
-        float3 wiW = -normalize(L.Direction.xyz);
-        float3 wi = to_local(frame, wiW);
-        if (wi.z <= 0.0f) {
+        float3 woW = -normalize(L.Direction.xyz);
+        float3 wo = to_local(frame, woW);
+        if (wo.z <= 0.0f) {
             continue;
         }
         float3 Li = eval_directional_irradiance(L);
+        float shadow = 1.0f;
+        if (i == 0) {
+            shadow = sample_shadow_cascade(gShadowMap, gShadowSampler, gShadowParam, input.WorldPosition);
+        }
         Lo += EvalPrincipledReflection(
             normalize(wi), normalize(wo), saturate(base.rgb), metallic, roughness,
             specular, specTint,
             anisotropic, sheen,
             sheenTint, flatness,
             clearcoat, clearcoatGloss,
-            specTrans, eta) * Li;
+            specTrans, eta) * Li * shadow;
     }
 
     uint ptCount = gLightInfo.Counts.y;
     for (uint j = 0; j < ptCount; ++j) {
         PointLightGpu L = gPointLights[j];
         float3 dW = L.Position.xyz - input.WorldPosition;
-        float3 wiW = normalize(dW);
-        float3 wi = to_local(frame, wiW);
-        if (wi.z <= 0.0f) {
+        float3 woW = normalize(dW);
+        float3 wo = to_local(frame, woW);
+        if (wo.z <= 0.0f) {
             continue;
         }
         float3 Li = eval_point_irradiance(L, input.WorldPosition);
+        float shadow = sample_point_shadow(
+            gAdditionalShadowMap, gShadowSampler, gAdditionalShadowParam,
+            L.Intensity.w, L.Position.xyz, input.WorldPosition);
         Lo += EvalPrincipledReflection(
             normalize(wi), normalize(wo), saturate(base.rgb), metallic, roughness,
             specular, specTint,
             anisotropic, sheen,
             sheenTint, flatness,
             clearcoat, clearcoatGloss,
-            specTrans, eta) * Li;
+            specTrans, eta) * Li * shadow;
+    }
+
+    uint spotCount = gLightInfo.Counts.z;
+    for (uint k = 0; k < spotCount; ++k) {
+        SpotLightGpu L = gSpotLights[k];
+        float3 dW = L.Position.xyz - input.WorldPosition;
+        float3 woW = normalize(dW);
+        float3 wo = to_local(frame, woW);
+        if (wo.z <= 0.0f) {
+            continue;
+        }
+        float3 Li = eval_spot_irradiance(L, input.WorldPosition);
+        float shadow = sample_spot_shadow(
+            gAdditionalShadowMap, gShadowSampler, gAdditionalShadowParam,
+            L.Params.x, input.WorldPosition);
+        Lo += EvalPrincipledReflection(
+            normalize(wi), normalize(wo), saturate(base.rgb), metallic, roughness,
+            specular, specTint,
+            anisotropic, sheen,
+            sheenTint, flatness,
+            clearcoat, clearcoatGloss,
+            specTrans, eta) * Li * shadow;
     }
 
     float3 color = Lo * occlusion + emissive;

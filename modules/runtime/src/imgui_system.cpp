@@ -78,6 +78,13 @@ static bool IsSecondaryViewport(ImGuiViewport* viewport) noexcept {
     return viewport != nullptr && viewport->ID != ImGui::GetMainViewport()->ID;
 }
 
+static ImGuiRenderer::ImGuiTexture* TextureFromImTextureID(ImTextureID textureId) noexcept {
+    if (textureId == ImTextureID_Invalid) {
+        return nullptr;
+    }
+    return reinterpret_cast<ImGuiRenderer::ImGuiTexture*>(static_cast<uintptr_t>(textureId));
+}
+
 static uint32_t GetViewportWidth(ImGuiViewport* viewport) noexcept {
     return static_cast<uint32_t>(std::max(viewport != nullptr ? viewport->Size.x : 0.0f, 1.0f));
 }
@@ -751,6 +758,63 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     return result;
 }
 
+bool ImGuiRenderer::ImGuiTexture::UpdateExternalResource(uint32_t flightIndex, render::TextureView* srv) noexcept {
+    if (srv == nullptr) {
+        return false;
+    }
+    render::DescriptorSet* set = GetExternalSet(flightIndex);
+    if (set == nullptr) {
+        return false;
+    }
+    if (!set->WriteResource("gTexture", srv)) {
+        return false;
+    }
+    return true;
+}
+
+bool ImGuiRenderer::OwnsTexture(const ImGuiTexture* texture) const noexcept {
+    if (texture == nullptr) {
+        return false;
+    }
+    return std::ranges::any_of(_aliveTexs, [texture](const unique_ptr<ImGuiTexture>& item) {
+        return item.get() == texture;
+    });
+}
+
+ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv) {
+    if (_device == nullptr || _rootSig == nullptr || srv == nullptr) {
+        return ImTextureID_Invalid;
+    }
+
+    ImGuiTexture* texture = TextureFromImTextureID(textureId);
+    if (texture != nullptr && (!OwnsTexture(texture) || !texture->IsExternal())) {
+        texture = nullptr;
+    }
+
+    if (texture == nullptr) {
+        auto ptr = make_unique<ImGuiTexture>(ImGuiTexture::ExternalTag{});
+        texture = ptr.get();
+        _aliveTexs.emplace_back(std::move(ptr));
+    }
+
+    // 外部纹理按 flight 持有独立描述符集：当前 flight 的描述符集在上一轮提交后已随 fence 完成，
+    // 改写它不会触及仍在飞行中的其他 flight 命令缓冲（避免 VUID-vkUpdateDescriptorSets-None-03047）。
+    if (texture->GetExternalSet(flightIndex) == nullptr) {
+        auto descSetOpt = _device->CreateDescriptorSet(_rootSig.get(), ImGuiTextureSetIndex);
+        if (!descSetOpt.HasValue()) {
+            return ImTextureID_Invalid;
+        }
+        auto descSet = descSetOpt.Release();
+        descSet->SetDebugName(fmt::format("imgui_external_tex_set_{}", flightIndex));
+        texture->SetExternalSet(flightIndex, std::move(descSet));
+    }
+
+    if (!texture->UpdateExternalResource(flightIndex, srv)) {
+        return ImTextureID_Invalid;
+    }
+    return static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(texture));
+}
+
 void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList) {
     frame._tempBufs.clear();
     frame._waitForFreeTexs.clear();
@@ -998,7 +1062,13 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                     dstCmd.Texture = static_cast<ImGuiRenderer::ImGuiTexture*>(srcCmd.TexRef._TexData->BackendUserData);
                     dstCmd.HasExternalTexture = false;
                 } else if (srcCmd.TexRef._TexID != ImTextureID_Invalid) {
-                    dstCmd.HasExternalTexture = true;
+                    ImGuiTexture* texture = TextureFromImTextureID(srcCmd.TexRef._TexID);
+                    if (OwnsTexture(texture)) {
+                        dstCmd.Texture = texture;
+                        dstCmd.HasExternalTexture = false;
+                    } else {
+                        dstCmd.HasExternalTexture = true;
+                    }
                 }
             }
         }
@@ -1082,7 +1152,7 @@ void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cm
     OnRenderBeginFrame(*_frames[frameIndex], cmdBuffer);
 }
 
-void ImGuiRenderer::OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder) {
+void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder) {
     if (drawDataIndex >= frame._drawData.size()) {
         return;
     }
@@ -1115,10 +1185,13 @@ void ImGuiRenderer::OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::
             }
 
             if (cmd.HasExternalTexture) {
-                // TODO: External ImTexID needs a descriptor-aware API. A raw render::Texture* is not enough to bind here.
                 continue;
             }
             if (cmd.Texture == nullptr) {
+                continue;
+            }
+            render::DescriptorSet* texSet = cmd.Texture->GetDescriptorSet(frameIndex);
+            if (texSet == nullptr) {
                 continue;
             }
 
@@ -1138,7 +1211,7 @@ void ImGuiRenderer::OnRenderFrame(Frame& frame, uint32_t drawDataIndex, render::
                 .Width = static_cast<uint32_t>(clipMax.x - clipMin.x),
                 .Height = static_cast<uint32_t>(clipMax.y - clipMin.y)};
             encoder->SetScissor(scissor);
-            encoder->BindDescriptorSet(ImGuiTextureSetIndex, cmd.Texture->GetDescriptorSet());
+            encoder->BindDescriptorSet(ImGuiTextureSetIndex, texSet);
             encoder->DrawIndexed(
                 cmd.ElemCount,
                 1,
@@ -1159,7 +1232,7 @@ void ImGuiRenderer::OnRenderViewport(uint32_t frameIndex, ImGuiViewport* viewpor
     if (!drawDataIndex.has_value()) {
         return;
     }
-    OnRenderFrame(*_frames[frameIndex], drawDataIndex.value(), encoder);
+    OnRenderFrame(frameIndex, *_frames[frameIndex], drawDataIndex.value(), encoder);
 }
 
 void ImGuiRenderer::OnRenderCompleteFrame(Frame& frame) {
@@ -1452,6 +1525,13 @@ void ImGuiSystem::NotifyRenderComplete(uint32_t frameIndex) {
     if (_renderer != nullptr) {
         _renderer->OnRenderComplete(frameIndex);
     }
+}
+
+ImTextureID ImGuiSystem::CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv) {
+    if (_renderer == nullptr) {
+        return ImTextureID_Invalid;
+    }
+    return _renderer->CreateOrUpdateExternalTexture(textureId, flightIndex, srv);
 }
 
 void ImGuiSystem::HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {

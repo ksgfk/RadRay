@@ -63,6 +63,23 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 }
 )";
 
+constexpr std::string_view kReadOnlyStructuredShader = R"(
+struct Light {
+    float4 Direction;
+    float4 Irradiance;
+};
+
+// Non-bindless read-only StructuredBuffer bound via ReadOnlyStorage, mirroring SceneLightBuffer.
+[[vk::binding(0, 0)]] StructuredBuffer<Light> gLights : register(t0, space0);
+[[vk::binding(0, 1)]] RWStructuredBuffer<uint> gOut : register(u0, space1);
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    const Light l = gLights[0];
+    gOut[0] = (uint)(l.Direction.x + l.Irradiance.y);
+}
+)";
+
 constexpr std::string_view kBindlessBufferShader = R"(
 struct SelectData {
     uint Slot;
@@ -365,6 +382,129 @@ TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
 
     EXPECT_EQ(actual, expected)
         << fmt::format("Unexpected compute output on {}", _ctx.GetBackendName());
+    this->ExpectNoCapturedErrors();
+}
+
+// Regression for the Vulkan SceneLightBuffer failure: a non-bindless read-only StructuredBuffer
+// bound through DescriptorSet::WriteResource with BufferViewUsage::ReadOnlyStorage. The SPIR-V
+// reflection must classify it as ResourceBindType::Buffer (read-only), otherwise WriteResource
+// rejects the binding with a type mismatch (RWBuffer vs Buffer).
+TEST_P(ComputeBindingRuntimeTest, ReadOnlyStructuredBufferBindingWorks) {
+    struct LightCpu {
+        float Direction[4];
+        float Irradiance[4];
+    };
+    static_assert(sizeof(LightCpu) == 32);
+
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kReadOnlyStructuredShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    constexpr uint64_t kInputSize = sizeof(LightCpu);
+    constexpr uint64_t kOutputSize = sizeof(uint32_t);
+    constexpr uint32_t kExpectedValue = 11;  // Direction.x (4) + Irradiance.y (7)
+
+    BufferDescriptor inputBufferDesc{};
+    inputBufferDesc.Size = kInputSize;
+    inputBufferDesc.Memory = MemoryType::Device;
+    inputBufferDesc.Usage = BufferUse::CopyDestination | BufferUse::Resource;
+    auto inputBuffer = this->CreateBufferOrNull(inputBufferDesc, "Create read-only structured buffer");
+    ASSERT_NE(inputBuffer, nullptr);
+
+    LightCpu light{};
+    light.Direction[0] = 4.0f;
+    light.Irradiance[1] = 7.0f;
+    vector<byte> inputBytes(kInputSize, byte{0});
+    std::memcpy(inputBytes.data(), &light, sizeof(light));
+    ASSERT_TRUE(_ctx.UploadBufferData(inputBuffer.get(), inputBytes, BufferState::ShaderRead, &reason))
+        << fmt::format("Upload structured buffer failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    BufferDescriptor outputBufferDesc{};
+    outputBufferDesc.Size = kOutputSize;
+    outputBufferDesc.Memory = MemoryType::Device;
+    outputBufferDesc.Usage = BufferUse::CopySource | BufferUse::UnorderedAccess;
+    auto outputBuffer = this->CreateBufferOrNull(outputBufferDesc, "Create output buffer");
+    ASSERT_NE(outputBuffer, nullptr);
+
+    BufferDescriptor readbackBufferDesc{};
+    readbackBufferDesc.Size = kOutputSize;
+    readbackBufferDesc.Memory = MemoryType::ReadBack;
+    readbackBufferDesc.Usage = BufferUse::CopyDestination | BufferUse::MapRead;
+    auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create readback buffer");
+    ASSERT_NE(readbackBuffer, nullptr);
+
+    BufferBindingDescriptor inputViewDesc{};
+    inputViewDesc.Target = inputBuffer.get();
+    inputViewDesc.Range = BufferRange{0, kInputSize};
+    inputViewDesc.Stride = sizeof(LightCpu);
+    inputViewDesc.Usage = BufferViewUsage::ReadOnlyStorage;
+
+    BufferBindingDescriptor outputViewDesc{};
+    outputViewDesc.Target = outputBuffer.get();
+    outputViewDesc.Range = BufferRange{0, kOutputSize};
+    outputViewDesc.Stride = sizeof(uint32_t);
+    outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
+
+    _ctx.ClearCapturedErrors();
+    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    ASSERT_NE(set0, nullptr);
+    ASSERT_TRUE(set0->WriteResource("gLights", inputViewDesc))
+        << fmt::format("WriteResource gLights failed on {}:\n{}", _ctx.GetBackendName(), _ctx.JoinCapturedErrors());
+
+    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    ASSERT_NE(set1, nullptr);
+    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
+
+    auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
+    ASSERT_TRUE(cmdOpt.HasValue())
+        << fmt::format("CreateCommandBuffer failed on {}: {}", _ctx.GetBackendName(), reason);
+    auto cmd = cmdOpt.Release();
+
+    cmd->Begin();
+    vector<ResourceBarrierDescriptor> preDispatch{};
+    preDispatch.push_back(BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::Common,
+        .After = BufferState::UnorderedAccess,
+    });
+    cmd->ResourceBarrier(preDispatch);
+
+    auto encoderOpt = cmd->BeginComputePass();
+    ASSERT_TRUE(encoderOpt.HasValue())
+        << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
+    auto encoder = encoderOpt.Release();
+    encoder->BindRootSignature(program.RootSignatureObject.get());
+    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
+    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
+    encoder->Dispatch(1, 1, 1);
+    cmd->EndComputePass(std::move(encoder));
+
+    vector<ResourceBarrierDescriptor> preCopy{};
+    preCopy.push_back(BarrierBufferDescriptor{
+        .Target = outputBuffer.get(),
+        .Before = BufferState::UnorderedAccess,
+        .After = BufferState::CopySource,
+    });
+    _ctx.AppendReadbackPreCopyBarrier(preCopy, readbackBuffer.get());
+    cmd->ResourceBarrier(preCopy);
+    cmd->CopyBufferToBuffer(readbackBuffer.get(), 0, outputBuffer.get(), 0, kOutputSize);
+    vector<ResourceBarrierDescriptor> postCopy{};
+    _ctx.AppendReadbackPostCopyBarrier(postCopy, readbackBuffer.get());
+    if (!postCopy.empty()) {
+        cmd->ResourceBarrier(postCopy);
+    }
+    cmd->End();
+
+    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason))
+        << fmt::format("SubmitAndWait failed on {}: {}", _ctx.GetBackendName(), reason);
+
+    vector<uint32_t> actual = this->ReadBufferVectorOrEmpty<uint32_t>(readbackBuffer.get(), 1);
+    ASSERT_EQ(actual.size(), 1u);
+    EXPECT_EQ(actual[0], kExpectedValue)
+        << fmt::format("Unexpected read-only structured buffer output on {}", _ctx.GetBackendName());
     this->ExpectNoCapturedErrors();
 }
 
