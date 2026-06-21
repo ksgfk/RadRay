@@ -1169,18 +1169,102 @@ string BuildPSOKey(
     return key;
 }
 
+bool HasPipelineOverrideKeySuffix(const PSOCache::GraphicsPipelineOverride& pipelineOverride) noexcept {
+    return pipelineOverride.DepthStencil.has_value() ||
+        pipelineOverride.OverrideBlend ||
+        pipelineOverride.ColorWriteMask.has_value() ||
+        pipelineOverride.DisablePixelShader ||
+        !pipelineOverride.KeyTag.empty();
+}
+
+void AppendBlendComponentKey(string& key, const render::BlendComponent& blend) {
+    key += fmt::format(
+        "{}:{}:{}",
+        static_cast<int32_t>(blend.Src),
+        static_cast<int32_t>(blend.Dst),
+        static_cast<int32_t>(blend.Op));
+}
+
+void AppendStencilFaceKey(string& key, const render::StencilFaceState& stencil) {
+    key += fmt::format(
+        "{}:{}:{}:{}",
+        static_cast<int32_t>(stencil.Compare),
+        static_cast<int32_t>(stencil.FailOp),
+        static_cast<int32_t>(stencil.DepthFailOp),
+        static_cast<int32_t>(stencil.PassOp));
+}
+
+void AppendPipelineOverrideKey(string& key, const PSOCache::GraphicsPipelineOverride& pipelineOverride) {
+    if (!HasPipelineOverrideKeySuffix(pipelineOverride)) {
+        return;
+    }
+
+    key += fmt::format(
+        "|override={}|ps={}",
+        pipelineOverride.KeyTag,
+        pipelineOverride.DisablePixelShader ? 0 : 1);
+    if (pipelineOverride.DepthStencil.has_value()) {
+        const render::DepthStencilState& depth = pipelineOverride.DepthStencil.value();
+        key += fmt::format(
+            "|ds=1:{}:{}:{}:{}:{}:{}",
+            static_cast<int32_t>(depth.DepthCompare),
+            depth.DepthWriteEnable ? 1 : 0,
+            depth.DepthBias.Constant,
+            depth.DepthBias.SlopScale,
+            depth.DepthBias.Clamp,
+            depth.Stencil.has_value() ? 1 : 0);
+        if (depth.Stencil.has_value()) {
+            key += fmt::format(
+                ":{}:{}:",
+                depth.Stencil->ReadMask,
+                depth.Stencil->WriteMask);
+            AppendStencilFaceKey(key, depth.Stencil->Front);
+            key += ":";
+            AppendStencilFaceKey(key, depth.Stencil->Back);
+        }
+    } else {
+        key += "|ds=0";
+    }
+
+    if (pipelineOverride.OverrideBlend) {
+        key += "|blend=override:";
+        if (pipelineOverride.Blend.has_value()) {
+            AppendBlendComponentKey(key, pipelineOverride.Blend->Color);
+            key += ":";
+            AppendBlendComponentKey(key, pipelineOverride.Blend->Alpha);
+        } else {
+            key += "none";
+        }
+    } else {
+        key += "|blend=material";
+    }
+
+    if (pipelineOverride.ColorWriteMask.has_value()) {
+        key += fmt::format("|cw={}", static_cast<uint32_t>(pipelineOverride.ColorWriteMask->value()));
+    }
+}
+
 }  // namespace
 
 render::GraphicsPipelineState* PSOCache::GetOrCreate(
     const Material& material,
     const render::VertexBufferLayout& vertexLayout,
     const RenderTargetFormats& rtFormats) {
+    return GetOrCreate(material, vertexLayout, rtFormats, GraphicsPipelineOverride{});
+}
+
+render::GraphicsPipelineState* PSOCache::GetOrCreate(
+    const Material& material,
+    const render::VertexBufferLayout& vertexLayout,
+    const RenderTargetFormats& rtFormats,
+    const GraphicsPipelineOverride& pipelineOverride) {
     if (!material.IsValid()) {
         RADRAY_ERR_LOG("PSOCache: material is not valid");
         return nullptr;
     }
 
     string key = BuildPSOKey(material, vertexLayout, rtFormats);
+    AppendPipelineOverrideKey(key, pipelineOverride);
     if (auto it = _cache.find(key); it != _cache.end()) {
         return it->second.get();
     }
@@ -1190,17 +1274,24 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
     colorTargets.reserve(rtFormats.ColorFormats.size());
     for (render::TextureFormat f : rtFormats.ColorFormats) {
         render::ColorTargetState cts = render::ColorTargetState::Default(f);
-        cts.Blend = material.GetBlendState();
+        cts.Blend = pipelineOverride.OverrideBlend ? pipelineOverride.Blend : material.GetBlendState();
+        if (pipelineOverride.ColorWriteMask.has_value()) {
+            cts.WriteMask = pipelineOverride.ColorWriteMask.value();
+        }
         colorTargets.push_back(cts);
     }
 
-    render::DepthStencilState depthState = material.GetDepthStencilState();
+    render::DepthStencilState depthState = pipelineOverride.DepthStencil.has_value()
+        ? pipelineOverride.DepthStencil.value()
+        : material.GetDepthStencilState();
     depthState.Format = rtFormats.DepthFormat;
 
     render::GraphicsPipelineStateDescriptor psoDesc{
         material.GetRootSignature(),
         render::ShaderEntry{material.GetVS(), material.GetVsEntry()},
-        render::ShaderEntry{material.GetPS(), material.GetPsEntry()},
+        pipelineOverride.DisablePixelShader
+            ? std::optional<render::ShaderEntry>{}
+            : std::optional<render::ShaderEntry>{render::ShaderEntry{material.GetPS(), material.GetPsEntry()}},
         std::span<const render::VertexBufferLayout>{&vertexLayout, 1},
         material.GetPrimitiveState(),
         depthState,

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <span>
 #include <string_view>
+#include <utility>
 
 #include <radray/logger.h>
 #include <radray/basic_math.h>
@@ -97,6 +98,37 @@ uint64_t StableHash64(std::string_view text) noexcept {
         hash *= 1099511628211ull;
     }
     return hash;
+}
+
+// glTF 使用右手系(+Z 朝向观察者),RadRay 使用纯左手系(+Z 朝向屏幕内)。
+// 下列工具在导入期以反射 Z 轴 S = diag(1,1,-1) 完成 RH->LH 转换:
+// 保持模型上方向与左右朝向,仅翻转深度轴,避免渲染出现左右镜像。
+// 反射矩阵 diag(1,1,-1) 自逆且对称,故方向量(法线、切线)与点一样只翻转 Z。
+
+// 反射点/方向矢量的 Z 分量。
+Eigen::Vector3f ReflectZToLH(const Eigen::Vector3f& v) noexcept {
+    return Eigen::Vector3f{v.x(), v.y(), -v.z()};
+}
+
+// 切线 (xyz, w):xyz 反射 Z;w 存的是 TBN 手性符号,反射使叉乘反号(det = -1),
+// 需翻转 w 才能让副切线方向保持一致。
+Eigen::Vector4f ReflectTangentToLH(const Eigen::Vector4f& t) noexcept {
+    return Eigen::Vector4f{t.x(), t.y(), -t.z(), -t.w()};
+}
+
+// 旋转四元数:对旋转做反射共轭 S*R*S 等价于 (w,x,y,z) -> (w,-x,-y,z)。
+// 旋转轴是赝矢量,故在对角反射共轭下 x、y 反号而 z 不变。
+Eigen::Quaternionf ReflectRotationToLH(const Eigen::Quaternionf& q) noexcept {
+    return Eigen::Quaternionf{q.w(), -q.x(), -q.y(), q.z()};
+}
+
+// 反射(det = -1)会翻转三角形绕序:glTF 在右手系以 CCW 为正面,反射后变成 CW,
+// 恰好匹配 RadRay 默认的 FrontFace::CW + CullMode::Back。
+// 交换每个三角形的后两个索引以恢复正确绕序,否则正面会被背面剔除。
+void FlipTriangleWindingToLH(std::span<uint32_t> indices) noexcept {
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        std::swap(indices[i + 1], indices[i + 2]);
+    }
 }
 
 AssetId MakeDerivedAssetId(const std::filesystem::path& path, std::string_view tag, uint32_t index) {
@@ -588,13 +620,19 @@ void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
         }
         DecomposeTransform<float>(matrix, out.Translation, out.Rotation, out.Scale);
         out.Rotation.normalize();
-        return;
+    } else {
+        out.Translation = Eigen::Vector3f{translation[0], translation[1], translation[2]};
+        out.Rotation = Eigen::Quaternionf{rotation[3], rotation[0], rotation[1], rotation[2]};
+        out.Rotation.normalize();
+        out.Scale = Eigen::Vector3f{scale[0], scale[1], scale[2]};
     }
 
-    out.Translation = Eigen::Vector3f{translation[0], translation[1], translation[2]};
-    out.Rotation = Eigen::Quaternionf{rotation[3], rotation[0], rotation[1], rotation[2]};
+    // glTF(右手系)-> RadRay(左手系):对节点局部变换做 diag(1,1,-1) 反射共轭 M' = S*M*S。
+    // 因 S*S=I,共轭在 T*R*Scale 上逐项分解:平移翻转 Z;旋转按四元数共轭;
+    // 缩放在对角反射共轭下不变。这与顶点的 S 反射一致,使世界变换等价于 S * (原世界变换)。
+    out.Translation = ReflectZToLH(out.Translation);
+    out.Rotation = ReflectRotationToLH(out.Rotation);
     out.Rotation.normalize();
-    out.Scale = Eigen::Vector3f{scale[0], scale[1], scale[2]};
 }
 
 std::optional<GltfPrimitiveCpu> ConvertPrimitive(
@@ -646,6 +684,11 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
                 vertex.Tangent = Eigen::Vector4f{t.x(), t.y(), t.z(), vertex.Tangent.w()};
             }
         }
+        // glTF(右手系)-> RadRay(左手系):反射 Z 轴完成 RH->LH 转换,避免渲染镜像。
+        // 位置、法线只翻转 Z;切线额外翻转 w(TBN 手性)。
+        vertex.Position = ReflectZToLH(vertex.Position);
+        vertex.Normal = ReflectZToLH(vertex.Normal);
+        vertex.Tangent = ReflectTangentToLH(vertex.Tangent);
         out.Vertices[i] = vertex;
         UpdateBounds(out.BoundsMin, out.BoundsMax, out.HasBounds, vertex.Position);
     }
@@ -663,6 +706,8 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
             out.Indices[i] = i;
         }
     }
+    // 反射 Z(det = -1)会翻转三角形绕序,需交换后两个索引恢复正面。
+    FlipTriangleWindingToLH(out.Indices);
     if (tangentAcc == nullptr) {
         GenerateFallbackTangents(out.Vertices, out.Indices);
     }
@@ -807,6 +852,7 @@ Actor* GltfAsset::ExportToScene(World& world) const {
         component->SetMaterial(primitive.Material);
         component->SetMaterialParams(primitive.MaterialParams);
         component->SetMaterialTextures(primitive.MaterialTextures);
+        component->SetTransparent(primitive.IsTransparent);
         meshActor->SetRootComponent(component);
         component->AttachTo(root);
 
@@ -943,6 +989,9 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                         desc.MaterialTextures = materialTextures[primitive->MaterialIndex];
                     } else if (!materialTextures.empty()) {
                         desc.MaterialTextures = materialTextures.front();
+                    }
+                    if (primitive->MaterialIndex < parsed.Materials.size()) {
+                        desc.IsTransparent = parsed.Materials[primitive->MaterialIndex].AlphaMode == GltfMaterialCpu::Alpha::Blend;
                     }
                     desc.BoundsMin = primitive->BoundsMin;
                     desc.BoundsMax = primitive->BoundsMax;

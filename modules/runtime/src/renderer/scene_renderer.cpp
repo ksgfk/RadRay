@@ -36,7 +36,11 @@ void MeshPassProcessor::BuildCommands(
         }
         const render::VertexBufferLayout& layout = proxy->GetVertexLayout();
 
-        render::GraphicsPipelineState* pso = _config.Cache->GetOrCreate(*material, layout, _config.RtFormats);
+        render::GraphicsPipelineState* pso = _config.Cache->GetOrCreate(
+            *material,
+            layout,
+            _config.RtFormats,
+            _config.PipelineOverride);
         if (pso == nullptr) {
             continue;
         }
@@ -99,6 +103,11 @@ void MeshPassProcessor::BuildCommands(
             cmd.PushConstantId = paramOpt.value();
             cmd.PushConstantData.resize(pushSize);
             std::memcpy(cmd.PushConstantData.data(), &constants, pushSize);
+            if (_config.ViewDescriptorSet != nullptr) {
+                cmd.DescriptorSets[cmd.DescriptorSetCount++] = BoundDescriptorSet{
+                    _config.ViewDescriptorSetIndex,
+                    _config.ViewDescriptorSet};
+            }
             if (materialSet != nullptr) {
                 cmd.DescriptorSets[cmd.DescriptorSetCount++] = BoundDescriptorSet{materialSetIndex, materialSet};
             }

@@ -98,6 +98,10 @@ public:
         std::string_view ObjectConstantsParam{"gScene"};
         /// 用于懒构建 MaterialRenderProxy 的 GPU 系统。为空时跳过 per-material 绑定。
         GpuSystem* Gpu{nullptr};
+        /// Optional per-view descriptor set, e.g. space0 light buffers.
+        render::DescriptorSet* ViewDescriptorSet{nullptr};
+        render::DescriptorSetIndex ViewDescriptorSetIndex{0};
+        PSOCache::GraphicsPipelineOverride PipelineOverride{};
     };
 
     explicit MeshPassProcessor(const Config& config) noexcept : _config(config) {}

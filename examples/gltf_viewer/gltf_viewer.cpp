@@ -9,12 +9,14 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/camera_control_component.h>
+#include <radray/runtime/components/light_component.h>
 #include <radray/runtime/components/scene_component.h>
 #include <radray/runtime/renderer/render_context.h>
 #include <radray/runtime/renderer/render_pass.h>
 #include <radray/runtime/renderer/render_pipeline.h>
 #include <radray/runtime/renderer/render_resource_pool.h>
 #include <radray/runtime/renderer/scene.h>
+#include <radray/runtime/renderer/scene_light_buffer.h>
 #include <radray/runtime/renderer/scene_renderer.h>
 #include <radray/render/common.h>
 #include <radray/basic_math.h>
@@ -37,9 +39,131 @@ using namespace radray;
 
 namespace {
 
-class ScenePass : public RenderPass {
+constexpr std::string_view GltfViewerDepthName = "GltfViewerDepth";
+
+bool IsCommonRenderContextValid(const RenderContext& ctx) noexcept {
+    return ctx.Width != 0 && ctx.Height != 0 && ctx.Scene != nullptr &&
+        ctx.CmdBuffer != nullptr && ctx.Resources != nullptr &&
+        ctx.Device != nullptr && ctx.Gpu != nullptr;
+}
+
+render::TextureView* AcquireDepthView(RenderContext& ctx, render::TextureFormat depthFormat) {
+    render::TextureDescriptor depthDesc{
+        .Dim = render::TextureDimension::Dim2D,
+        .Width = ctx.Width,
+        .Height = ctx.Height,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = depthFormat,
+        .Memory = render::MemoryType::Device,
+        .Usage = render::TextureUse::DepthStencilWrite,
+        .Hints = render::ResourceHint::None};
+    if (ctx.Resources->Acquire(GltfViewerDepthName, ctx.FlightIndex, depthDesc, *ctx.Device) == nullptr) {
+        return nullptr;
+    }
+    ctx.Resources->Transition(GltfViewerDepthName, ctx.FlightIndex, render::TextureState::DepthWrite, *ctx.CmdBuffer);
+
+    render::TextureViewDescriptor depthViewDesc{
+        .Dim = render::TextureDimension::Dim2D,
+        .Format = depthFormat,
+        .Range = render::SubresourceRange::AllSub(),
+        .Usage = render::TextureViewUsage::DepthWrite};
+    return ctx.Resources->GetView(GltfViewerDepthName, ctx.FlightIndex, depthViewDesc, *ctx.Device);
+}
+
+void SetViewportAndScissor(render::GraphicsCommandEncoder* encoder, const RenderContext& ctx) {
+    Viewport vp{
+        .X = 0.0f,
+        .Y = 0.0f,
+        .Width = static_cast<float>(ctx.Width),
+        .Height = static_cast<float>(ctx.Height),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f};
+    if (ctx.Device->GetBackend() == render::RenderBackend::Vulkan) {
+        vp.Y = static_cast<float>(ctx.Height);
+        vp.Height = -static_cast<float>(ctx.Height);
+    }
+    encoder->SetViewport(vp);
+    encoder->SetScissor(Rect{0, 0, ctx.Width, ctx.Height});
+}
+
+bool OpaquePrimitiveFilter(const PrimitiveSceneProxy& primitive) noexcept {
+    // glTF 每个 primitive 只引用一个材质,透明(alphaMode=BLEND)与不透明天然按
+    // primitive 切分。不透明 pass(Pre-Z + Base)只画不透明部分,透明部分留给
+    // TransparentPass,避免玻璃写深度/遮挡后方几何。
+    return !primitive.IsTransparent();
+}
+
+bool TransparentPrimitiveFilter(const PrimitiveSceneProxy& primitive) noexcept {
+    return primitive.IsTransparent();
+}
+
+class PreZPass : public RenderPass {
 public:
-    ScenePass(
+    explicit PreZPass(render::TextureFormat depthFormat)
+        : _depthFormat(depthFormat) {}
+
+    std::string_view GetName() const noexcept override { return "GltfViewerPreZPass"; }
+
+    void Execute(RenderContext& ctx) override {
+        if (!IsCommonRenderContextValid(ctx)) {
+            return;
+        }
+
+        render::TextureView* depthView = AcquireDepthView(ctx, _depthFormat);
+        if (depthView == nullptr) {
+            return;
+        }
+
+        render::DepthStencilAttachment depthAttachment{
+            .Target = depthView,
+            .DepthLoad = render::LoadAction::Clear,
+            .DepthStore = render::StoreAction::Store,
+            .StencilLoad = render::LoadAction::DontCare,
+            .StencilStore = render::StoreAction::Discard,
+            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
+        render::RenderPassDescriptor passDesc{
+            .ColorAttachments = {},
+            .DepthStencilAttachment = depthAttachment,
+            .Name = "glTF Viewer Pre-Z"};
+        auto encoderOpt = ctx.CmdBuffer->BeginRenderPass(passDesc);
+        if (!encoderOpt.HasValue()) {
+            RADRAY_ERR_LOG("failed to begin glTF viewer Pre-Z pass");
+            return;
+        }
+        auto encoder = encoderOpt.Release();
+
+        SetViewportAndScissor(encoder.get(), ctx);
+
+        render::DepthStencilState depthState = render::DepthStencilState::Default();
+        depthState.DepthCompare = render::CompareFunction::Less;
+        depthState.DepthWriteEnable = true;
+
+        MeshPassProcessor::Config processorConfig{};
+        processorConfig.Cache = &ctx.Gpu->GetPSOCache();
+        processorConfig.RtFormats.DepthFormat = _depthFormat;
+        processorConfig.ObjectConstantsParam = "gScene";
+        processorConfig.Gpu = ctx.Gpu;
+        processorConfig.PipelineOverride.DepthStencil = depthState;
+        processorConfig.PipelineOverride.DisablePixelShader = true;
+        processorConfig.PipelineOverride.KeyTag = "prez";
+
+        if (ctx.Visible != nullptr) {
+            _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig, OpaquePrimitiveFilter);
+        }
+
+        ctx.CmdBuffer->EndRenderPass(std::move(encoder));
+    }
+
+private:
+    SceneRenderer _sceneRenderer;
+    render::TextureFormat _depthFormat;
+};
+
+class BasePass : public RenderPass {
+public:
+    BasePass(
         render::TextureFormat colorFormat,
         render::TextureFormat depthFormat,
         render::ColorClearValue clearColor)
@@ -47,37 +171,14 @@ public:
           _depthFormat(depthFormat),
           _clearColor(clearColor) {}
 
-    std::string_view GetName() const noexcept override { return "GltfViewerScenePass"; }
+    std::string_view GetName() const noexcept override { return "GltfViewerBasePass"; }
 
     void Execute(RenderContext& ctx) override {
-        if (ctx.Width == 0 || ctx.Height == 0 || ctx.Scene == nullptr ||
-            ctx.CmdBuffer == nullptr || ctx.ColorTarget == nullptr ||
-            ctx.Resources == nullptr || ctx.Device == nullptr || ctx.Gpu == nullptr) {
+        if (!IsCommonRenderContextValid(ctx) || ctx.ColorTarget == nullptr) {
             return;
         }
 
-        render::TextureDescriptor depthDesc{
-            .Dim = render::TextureDimension::Dim2D,
-            .Width = ctx.Width,
-            .Height = ctx.Height,
-            .DepthOrArraySize = 1,
-            .MipLevels = 1,
-            .SampleCount = 1,
-            .Format = _depthFormat,
-            .Memory = render::MemoryType::Device,
-            .Usage = render::TextureUse::DepthStencilWrite,
-            .Hints = render::ResourceHint::None};
-        if (ctx.Resources->Acquire("GltfViewerDepth", ctx.FlightIndex, depthDesc, *ctx.Device) == nullptr) {
-            return;
-        }
-        ctx.Resources->Transition("GltfViewerDepth", ctx.FlightIndex, render::TextureState::DepthWrite, *ctx.CmdBuffer);
-
-        render::TextureViewDescriptor depthViewDesc{
-            .Dim = render::TextureDimension::Dim2D,
-            .Format = _depthFormat,
-            .Range = render::SubresourceRange::AllSub(),
-            .Usage = render::TextureViewUsage::DepthWrite};
-        render::TextureView* depthView = ctx.Resources->GetView("GltfViewerDepth", ctx.FlightIndex, depthViewDesc, *ctx.Device);
+        render::TextureView* depthView = AcquireDepthView(ctx, _depthFormat);
         if (depthView == nullptr) {
             return;
         }
@@ -89,7 +190,7 @@ public:
             .ClearValue = _clearColor};
         render::DepthStencilAttachment depthAttachment{
             .Target = depthView,
-            .DepthLoad = render::LoadAction::Clear,
+            .DepthLoad = render::LoadAction::Load,
             .DepthStore = render::StoreAction::Store,
             .StencilLoad = render::LoadAction::DontCare,
             .StencilStore = render::StoreAction::Discard,
@@ -97,27 +198,19 @@ public:
         render::RenderPassDescriptor passDesc{
             .ColorAttachments = std::span{&colorAttachment, 1},
             .DepthStencilAttachment = depthAttachment,
-            .Name = "glTF Viewer Scene"};
+            .Name = "glTF Viewer Base"};
         auto encoderOpt = ctx.CmdBuffer->BeginRenderPass(passDesc);
         if (!encoderOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to begin glTF viewer scene pass");
+            RADRAY_ERR_LOG("failed to begin glTF viewer base pass");
             return;
         }
         auto encoder = encoderOpt.Release();
 
-        Viewport vp{
-            .X = 0.0f,
-            .Y = 0.0f,
-            .Width = static_cast<float>(ctx.Width),
-            .Height = static_cast<float>(ctx.Height),
-            .MinDepth = 0.0f,
-            .MaxDepth = 1.0f};
-        if (ctx.Device->GetBackend() == render::RenderBackend::Vulkan) {
-            vp.Y = static_cast<float>(ctx.Height);
-            vp.Height = -static_cast<float>(ctx.Height);
-        }
-        encoder->SetViewport(vp);
-        encoder->SetScissor(Rect{0, 0, ctx.Width, ctx.Height});
+        SetViewportAndScissor(encoder.get(), ctx);
+
+        render::DepthStencilState depthState = render::DepthStencilState::Default();
+        depthState.DepthCompare = render::CompareFunction::Equal;
+        depthState.DepthWriteEnable = false;
 
         MeshPassProcessor::Config processorConfig{};
         processorConfig.Cache = &ctx.Gpu->GetPSOCache();
@@ -125,9 +218,16 @@ public:
         processorConfig.RtFormats.DepthFormat = _depthFormat;
         processorConfig.ObjectConstantsParam = "gScene";
         processorConfig.Gpu = ctx.Gpu;
+        processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
+        processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
+        processorConfig.PipelineOverride.DepthStencil = depthState;
+        // 不透明物体不能写 backbuffer alpha:base-color alpha 对不透明渲染无意义,
+        // 若写入 BGRA8 backbuffer,Windows 合成器会把它当成窗口透明度,导致整模型透视。
+        processorConfig.PipelineOverride.ColorWriteMask = render::ColorWrite::Color;
+        processorConfig.PipelineOverride.KeyTag = "opaque";
 
         if (ctx.Visible != nullptr) {
-            _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig);
+            _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig, OpaquePrimitiveFilter);
         }
 
         ctx.CmdBuffer->EndRenderPass(std::move(encoder));
@@ -138,6 +238,95 @@ private:
     render::TextureFormat _colorFormat;
     render::TextureFormat _depthFormat;
     render::ColorClearValue _clearColor;
+};
+
+class TransparentPass : public RenderPass {
+public:
+    TransparentPass(
+        render::TextureFormat colorFormat,
+        render::TextureFormat depthFormat)
+        : _colorFormat(colorFormat),
+          _depthFormat(depthFormat) {}
+
+    std::string_view GetName() const noexcept override { return "GltfViewerTransparentPass"; }
+
+    void Execute(RenderContext& ctx) override {
+        if (!IsCommonRenderContextValid(ctx) || ctx.ColorTarget == nullptr) {
+            return;
+        }
+
+        render::TextureView* depthView = AcquireDepthView(ctx, _depthFormat);
+        if (depthView == nullptr) {
+            return;
+        }
+
+        render::ColorAttachment colorAttachment{
+            .Target = ctx.ColorTarget,
+            .Load = render::LoadAction::Load,
+            .Store = render::StoreAction::Store,
+            .ClearValue = {}};
+        render::DepthStencilAttachment depthAttachment{
+            .Target = depthView,
+            .DepthLoad = render::LoadAction::Load,
+            .DepthStore = render::StoreAction::Store,
+            .StencilLoad = render::LoadAction::DontCare,
+            .StencilStore = render::StoreAction::Discard,
+            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
+        render::RenderPassDescriptor passDesc{
+            .ColorAttachments = std::span{&colorAttachment, 1},
+            .DepthStencilAttachment = depthAttachment,
+            .Name = "glTF Viewer Transparent"};
+        auto encoderOpt = ctx.CmdBuffer->BeginRenderPass(passDesc);
+        if (!encoderOpt.HasValue()) {
+            RADRAY_ERR_LOG("failed to begin glTF viewer transparent pass");
+            return;
+        }
+        auto encoder = encoderOpt.Release();
+
+        SetViewportAndScissor(encoder.get(), ctx);
+
+        render::DepthStencilState depthState = render::DepthStencilState::Default();
+        depthState.DepthCompare = render::CompareFunction::LessEqual;
+        depthState.DepthWriteEnable = false;
+
+        render::BlendState alphaOverBlend{
+            .Color = {
+                .Src = render::BlendFactor::SrcAlpha,
+                .Dst = render::BlendFactor::OneMinusSrcAlpha,
+                .Op = render::BlendOperation::Add},
+            .Alpha = {
+                .Src = render::BlendFactor::One,
+                .Dst = render::BlendFactor::OneMinusSrcAlpha,
+                .Op = render::BlendOperation::Add}};
+
+        MeshPassProcessor::Config processorConfig{};
+        processorConfig.Cache = &ctx.Gpu->GetPSOCache();
+        processorConfig.RtFormats.ColorFormats = {_colorFormat};
+        processorConfig.RtFormats.DepthFormat = _depthFormat;
+        processorConfig.ObjectConstantsParam = "gScene";
+        processorConfig.Gpu = ctx.Gpu;
+        processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
+        processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
+        processorConfig.PipelineOverride.DepthStencil = depthState;
+        processorConfig.PipelineOverride.OverrideBlend = true;
+        processorConfig.PipelineOverride.Blend = alphaOverBlend;
+        // 只混合 RGB,不写 backbuffer alpha:否则 BGRA8 backbuffer 的 alpha 会被
+        // Windows 合成器当成窗口透明度,玻璃会把窗口戳透。
+        processorConfig.PipelineOverride.ColorWriteMask = render::ColorWrite::Color;
+        processorConfig.PipelineOverride.KeyTag = "transparent";
+
+        if (ctx.Visible != nullptr) {
+            // Transparent primitives are not depth-sorted in this run.
+            _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig, TransparentPrimitiveFilter);
+        }
+
+        ctx.CmdBuffer->EndRenderPass(std::move(encoder));
+    }
+
+private:
+    SceneRenderer _sceneRenderer;
+    render::TextureFormat _colorFormat;
+    render::TextureFormat _depthFormat;
 };
 
 }  // namespace
@@ -155,6 +344,7 @@ public:
         InitMaterial();
         InitPipeline();
         SpawnCamera();
+        SpawnDefaultLights();
         ConfigureCameraControl();
         SetCameraFrame(Eigen::Vector3f::Zero(), 4.0f);
 
@@ -209,6 +399,18 @@ public:
             rc.Visible = &_visible;
         }
         rc.Resources = &_resourcePool;
+        if (rc.Scene != nullptr && _viewerMaterial.IsReady()) {
+            Material* material = _viewerMaterial.Get();
+            if (material != nullptr && material->GetRootSignature() != nullptr) {
+                rc.ViewDescriptorSetIndex = render::DescriptorSetIndex{0};
+                rc.ViewDescriptorSet = _lightBuffer.Update(
+                    *GetDevice(),
+                    material->GetRootSignature(),
+                    rc.ViewDescriptorSetIndex,
+                    rc.FlightIndex,
+                    *rc.Scene);
+            }
+        }
 
         _pipeline.Render(rc);
         return true;
@@ -216,6 +418,7 @@ public:
 
     void OnShutdown() override {
         DestroyExportedScene();
+        _lightBuffer.Clear();
         _resourcePool.Clear();
         _gltfAsset.Reset();
         _cameraControlComp = nullptr;
@@ -246,11 +449,11 @@ private:
     }
 
     void InitPipeline() {
-        auto pass = make_unique<ScenePass>(
-            BackBufferFormat,
-            DepthFormat,
-            render::ColorClearValue{{0.06f, 0.07f, 0.08f, 1.0f}});
-        _pipeline.AddPass(std::move(pass));
+        const render::ColorClearValue clearColor{{0.06f, 0.07f, 0.08f, 1.0f}};
+        _pipeline.AddPass(make_unique<PreZPass>(DepthFormat));
+        _pipeline.AddPass(make_unique<BasePass>(BackBufferFormat, DepthFormat, clearColor));
+        // glTF 透明部分(alphaMode=BLEND)按 primitive 切分,在不透明 Base 之后做 alpha 混合。
+        _pipeline.AddPass(make_unique<TransparentPass>(BackBufferFormat, DepthFormat));
     }
 
     void SpawnCamera() {
@@ -261,6 +464,24 @@ private:
         _cameraControlComp = cameraActor->AddComponent<CameraControlComponent>();
         _cameraControlComp->SetCamera(_cameraComp);
         _cameraControlComp->BindToMainWindow(*this);
+    }
+
+    void SpawnDefaultLights() {
+        Actor* directionalActor = GetWorld()->SpawnActor<Actor>();
+        auto* directional = directionalActor->AddComponent<LightComponent>();
+        directionalActor->SetRootComponent(directional);
+        directional->SetLightType(LightType::Directional);
+        directional->SetDirection(Eigen::Vector3f{-0.3f, -1.0f, -0.3f}.normalized());
+        directional->SetColor(Eigen::Vector3f{1.0f, 1.0f, 1.0f});
+        directional->SetIntensity(3.0f);
+
+        Actor* pointActor = GetWorld()->SpawnActor<Actor>();
+        auto* point = pointActor->AddComponent<LightComponent>();
+        pointActor->SetRootComponent(point);
+        point->SetLightType(LightType::Point);
+        point->SetWorldLocation(Eigen::Vector3f{1.5f, 2.0f, 2.5f});
+        point->SetColor(Eigen::Vector3f{1.0f, 0.9f, 0.8f});
+        point->SetIntensity(50.0f);
     }
 
     void ConfigureCameraControl() {
@@ -492,6 +713,7 @@ private:
 
     RenderPipeline _pipeline;
     RenderResourcePool _resourcePool;
+    SceneLightBuffer _lightBuffer;
     VisiblePrimitiveList _visible;
 
     StreamingAssetRef<GltfAsset> _gltfAsset;

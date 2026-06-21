@@ -84,10 +84,24 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
     StreamingAssetRef<Material> material,
     vector<MaterialParameterAssignment> materialParams,
     vector<MaterialTextureAssignment> materialTextures) noexcept
+    : StaticMeshSceneProxy(
+          std::move(mesh),
+          std::move(material),
+          std::move(materialParams),
+          std::move(materialTextures),
+          false) {}
+
+StaticMeshSceneProxy::StaticMeshSceneProxy(
+    StreamingAssetRef<StaticMesh> mesh,
+    StreamingAssetRef<Material> material,
+    vector<MaterialParameterAssignment> materialParams,
+    vector<MaterialTextureAssignment> materialTextures,
+    bool isTransparent) noexcept
     : _mesh(std::move(mesh)),
       _material(std::move(material)),
       _materialParams(std::move(materialParams)),
-      _materialTextures(std::move(materialTextures)) {
+      _materialTextures(std::move(materialTextures)),
+      _isTransparent(isTransparent) {
     // 资产在构造代理前已由 AssetManager 保证 GPU 就绪(StaticMesh 构造即完整),
     // 故这里直接构建几何单元与材质参数实例。GPU 侧材质代理延迟到首次索取。
     BuildGeometry();

@@ -31,6 +31,8 @@ struct RenderContext {
     // —— 视图(相机产出)——
     const Scene* Scene{nullptr};
     SceneView View{};
+    render::DescriptorSet* ViewDescriptorSet{nullptr};
+    render::DescriptorSetIndex ViewDescriptorSetIndex{0};
 
     // —— 可见集(cull 一次的共享产物,对应 Unity RenderingData.cullResults)——
     // 由调用方 cull 一次填入,贯穿所有 pass;每个 pass 据此 + 自己的过滤条件挑子集。

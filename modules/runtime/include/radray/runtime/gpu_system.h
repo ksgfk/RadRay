@@ -274,12 +274,26 @@ public:
 
     using RenderTargetFormats = GpuRenderTargetFormats;
 
+    struct GraphicsPipelineOverride {
+        std::optional<render::DepthStencilState> DepthStencil{};
+        bool OverrideBlend{false};
+        std::optional<render::BlendState> Blend{};
+        std::optional<render::ColorWrites> ColorWriteMask{};
+        bool DisablePixelShader{false};
+        string KeyTag{};
+    };
+
     /// 取或建 PSO。material 提供 shader/rootsig/渲染状态,vertexLayout 提供 input layout,
     /// rtFormats 提供 RT 格式。命中缓存直接返回,返回的指针由 PSOCache 拥有。
     render::GraphicsPipelineState* GetOrCreate(
         const Material& material,
         const render::VertexBufferLayout& vertexLayout,
         const RenderTargetFormats& rtFormats);
+    render::GraphicsPipelineState* GetOrCreate(
+        const Material& material,
+        const render::VertexBufferLayout& vertexLayout,
+        const RenderTargetFormats& rtFormats,
+        const GraphicsPipelineOverride& pipelineOverride);
 
     void Clear() noexcept { _cache.clear(); }
 

@@ -40,6 +40,7 @@ struct GltfPrimitiveDesc {
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
+    bool IsTransparent{false};
 };
 
 struct GltfTextureDesc {

@@ -45,6 +45,9 @@ public:
     /// 资产在构造代理前已由 AssetManager 保证 GPU 就绪,故代理构造即可渲染。
     virtual bool IsRenderable() const noexcept { return false; }
 
+    /// 是否需要透明队列。默认不透明,具体资产导入器/组件可按材质语义标记。
+    virtual bool IsTransparent() const noexcept { return false; }
+
     /// 收集本代理的几何绘制单元。MeshPassProcessor 据此 + 材质 + GetWorldMatrix()
     /// 解析出完整 MeshDrawCommand。对应 UE5 FPrimitiveSceneProxy::DrawStaticElements。
     /// 追加而非清空 out,便于一次性收集全场景。

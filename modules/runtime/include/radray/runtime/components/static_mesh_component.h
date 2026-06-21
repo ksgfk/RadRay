@@ -30,11 +30,13 @@ public:
     void SetMaterialParams(vector<MaterialParameterAssignment> params) noexcept { _materialParams = std::move(params); }
     /// 设置 per-使用点材质贴图(按名绑定材质实例的 texture 槽)。
     void SetMaterialTextures(vector<MaterialTextureAssignment> textures) noexcept { _materialTextures = std::move(textures); }
+    void SetTransparent(bool transparent) noexcept { _transparent = transparent; }
 
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
     const StreamingAssetRef<Material>& GetMaterial() const noexcept { return _material; }
     const vector<MaterialParameterAssignment>& GetMaterialParams() const noexcept { return _materialParams; }
     const vector<MaterialTextureAssignment>& GetMaterialTextures() const noexcept { return _materialTextures; }
+    bool IsTransparent() const noexcept { return _transparent; }
 
     void TickComponent(float deltaTime) override;
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
@@ -46,6 +48,7 @@ private:
     StreamingAssetRef<Material> _material;
     vector<MaterialParameterAssignment> _materialParams;
     vector<MaterialTextureAssignment> _materialTextures;
+    bool _transparent{false};
 };
 
 template <>

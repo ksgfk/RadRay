@@ -31,9 +31,16 @@ public:
         StreamingAssetRef<Material> material,
         vector<MaterialParameterAssignment> materialParams,
         vector<MaterialTextureAssignment> materialTextures) noexcept;
+    StaticMeshSceneProxy(
+        StreamingAssetRef<StaticMesh> mesh,
+        StreamingAssetRef<Material> material,
+        vector<MaterialParameterAssignment> materialParams,
+        vector<MaterialTextureAssignment> materialTextures,
+        bool isTransparent) noexcept;
     ~StaticMeshSceneProxy() noexcept override;
 
     bool IsRenderable() const noexcept override;
+    bool IsTransparent() const noexcept override { return _isTransparent; }
     void CollectBatchElements(vector<MeshBatchElement>& out) const override;
     Material* GetMaterial() const noexcept override { return _material.Get(); }
     const render::VertexBufferLayout& GetVertexLayout() const noexcept override {
@@ -61,6 +68,7 @@ private:
     // per-material 参数实例 + GPU 代理。静态材质:首次索取时懒构建 proxy 并缓存。
     vector<MaterialParameterAssignment> _materialParams;
     vector<MaterialTextureAssignment> _materialTextures;
+    bool _isTransparent{false};
     MaterialInstance _materialInstance;
     mutable MaterialRenderProxy _materialRenderProxy;
     mutable bool _materialProxyBuilt{false};
