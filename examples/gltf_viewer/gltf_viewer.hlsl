@@ -60,15 +60,15 @@ VertexOutput VSMain(VertexInput input) {
     VertexOutput output;
     float3 positionWS = mul(gScene.Model, float4(input.Position, 1.0)).xyz;
     float3 normalWS = mul(gScene.Model, float4(input.Normal, 0.0)).xyz;
-    if (gScene.Debug.x == 6) {
-        float3 dirToLight = normalize(gScene.CameraPosition.xyz);
-        float depthBias = gScene.CameraPosition.w;
-        float normalBias = asfloat(gScene.Debug.y);
-        float3 biasedWS = apply_shadow_bias(positionWS, normalize(normalWS), dirToLight, depthBias, normalBias);
-        output.Position = apply_shadow_clamping(mul(gScene.MVP, float4(biasedWS, 1.0)));
-    } else {
-        output.Position = mul(gScene.MVP, float4(input.Position, 1.0));
-    }
+#ifdef SHADOW_CASTER
+    float3 dirToLight = normalize(gScene.CameraPosition.xyz);
+    float depthBias = gScene.CameraPosition.w;
+    float normalBias = asfloat(gScene.Debug.y);
+    float3 biasedWS = apply_shadow_bias(positionWS, normalize(normalWS), dirToLight, depthBias, normalBias);
+    output.Position = apply_shadow_clamping(mul(gScene.MVP, float4(biasedWS, 1.0)));
+#else
+    output.Position = mul(gScene.MVP, float4(input.Position, 1.0));
+#endif
     output.WorldPosition = positionWS;
     output.WorldNormal = normalWS;
     output.WorldTangent = float4(mul(gScene.Model, float4(input.Tangent.xyz, 0.0)).xyz, input.Tangent.w);
@@ -143,6 +143,9 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
     }
 
     float4 base = saturate(gMaterial.BaseColorFactor * gBaseColor.Sample(gMaterialSampler, input.TexCoord));
+#ifdef ALPHA_TEST
+    clip(base.a - gMaterial.EmissiveFactorAlphaCutoff.w);
+#endif
     float3 emissive = max(gMaterial.EmissiveFactorAlphaCutoff.rgb, 0.0f.xxx) *
         gEmissive.Sample(gMaterialSampler, input.TexCoord).rgb;
     float3 mr = gMetallicRoughness.Sample(gMaterialSampler, input.TexCoord).rgb;
@@ -244,4 +247,11 @@ float4 PSMain(VertexOutput input) : SV_Target0 {
     color = color / (color + 1.0f.xxx);
     color = linear_to_srgb(saturate(color));
     return float4(color, base.a);
+}
+
+void PSDepthOnlyMain(VertexOutput input) {
+#ifdef ALPHA_TEST
+    float4 base = saturate(gMaterial.BaseColorFactor * gBaseColor.Sample(gMaterialSampler, input.TexCoord));
+    clip(base.a - gMaterial.EmissiveFactorAlphaCutoff.w);
+#endif
 }

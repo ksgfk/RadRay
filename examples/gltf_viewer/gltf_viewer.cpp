@@ -372,16 +372,15 @@ public:
             processorConfig.RtFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
             processorConfig.ObjectConstantsParam = "gScene";
             processorConfig.Gpu = ctx.Gpu;
-            processorConfig.PipelineOverride.DepthStencil = depthState;
-            processorConfig.PipelineOverride.DisablePixelShader = true;
-            processorConfig.PipelineOverride.KeyTag = "shadow";
+            processorConfig.RenderState.DepthStencil = depthState;
+            processorConfig.WriteColor = false;
+            processorConfig.PassVariant.Add(shader_define::ShadowCaster);
             processorConfig.ObjectConstantsOverride = [&ctx, &cascade](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView& view) {
                 std::memcpy(constants.MVP, view.ViewProjMatrix.data(), sizeof(constants.MVP));
                 constants.CameraPosition[0] = ctx.Shadow.LightDirectionForBias.x();
                 constants.CameraPosition[1] = ctx.Shadow.LightDirectionForBias.y();
                 constants.CameraPosition[2] = ctx.Shadow.LightDirectionForBias.z();
                 constants.CameraPosition[3] = cascade.DepthBias;
-                constants.Debug[0] = 6;
                 std::memcpy(&constants.Debug[1], &cascade.NormalBias, sizeof(cascade.NormalBias));
             };
 
@@ -463,16 +462,15 @@ public:
             processorConfig.RtFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
             processorConfig.ObjectConstantsParam = "gScene";
             processorConfig.Gpu = ctx.Gpu;
-            processorConfig.PipelineOverride.DepthStencil = depthState;
-            processorConfig.PipelineOverride.DisablePixelShader = true;
-            processorConfig.PipelineOverride.KeyTag = "shadow";
+            processorConfig.RenderState.DepthStencil = depthState;
+            processorConfig.WriteColor = false;
+            processorConfig.PassVariant.Add(shader_define::ShadowCaster);
             processorConfig.ObjectConstantsOverride = [&slice](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView& view) {
                 std::memcpy(constants.MVP, view.ViewProjMatrix.data(), sizeof(constants.MVP));
                 constants.CameraPosition[0] = slice.LightDirectionForBias.x();
                 constants.CameraPosition[1] = slice.LightDirectionForBias.y();
                 constants.CameraPosition[2] = slice.LightDirectionForBias.z();
                 constants.CameraPosition[3] = slice.DepthBias;
-                constants.Debug[0] = 6;
                 std::memcpy(&constants.Debug[1], &slice.NormalBias, sizeof(slice.NormalBias));
             };
 
@@ -541,9 +539,8 @@ public:
         processorConfig.RtFormats.DepthFormat = _depthFormat;
         processorConfig.ObjectConstantsParam = "gScene";
         processorConfig.Gpu = ctx.Gpu;
-        processorConfig.PipelineOverride.DepthStencil = depthState;
-        processorConfig.PipelineOverride.DisablePixelShader = true;
-        processorConfig.PipelineOverride.KeyTag = "prez";
+        processorConfig.RenderState.DepthStencil = depthState;
+        processorConfig.WriteColor = false;
 
         if (ctx.Visible != nullptr) {
             _sceneRenderer.DrawRenderers(encoder.get(), *ctx.Visible, ctx.View, processorConfig, OpaquePrimitiveFilter);
@@ -618,11 +615,10 @@ public:
         processorConfig.Gpu = ctx.Gpu;
         processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
         processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
-        processorConfig.PipelineOverride.DepthStencil = depthState;
+        processorConfig.RenderState.DepthStencil = depthState;
         // 不透明物体不能写 backbuffer alpha:base-color alpha 对不透明渲染无意义,
         // 若写入 BGRA8 backbuffer,Windows 合成器会把它当成窗口透明度,导致整模型透视。
-        processorConfig.PipelineOverride.ColorWriteMask = render::ColorWrite::Color;
-        processorConfig.PipelineOverride.KeyTag = "opaque";
+        processorConfig.RenderState.ColorWriteMask = render::ColorWrite::Color;
         if (_showShadowCascadeOverlay != nullptr && *_showShadowCascadeOverlay) {
             processorConfig.ObjectConstantsOverride = [](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView&) {
                 constants.Debug[0] = 7;
@@ -711,13 +707,11 @@ public:
         processorConfig.Gpu = ctx.Gpu;
         processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
         processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
-        processorConfig.PipelineOverride.DepthStencil = depthState;
-        processorConfig.PipelineOverride.OverrideBlend = true;
-        processorConfig.PipelineOverride.Blend = alphaOverBlend;
+        processorConfig.RenderState.DepthStencil = depthState;
+        processorConfig.RenderState.Blend = alphaOverBlend;
         // 只混合 RGB,不写 backbuffer alpha:否则 BGRA8 backbuffer 的 alpha 会被
         // Windows 合成器当成窗口透明度,玻璃会把窗口戳透。
-        processorConfig.PipelineOverride.ColorWriteMask = render::ColorWrite::Color;
-        processorConfig.PipelineOverride.KeyTag = "transparent";
+        processorConfig.RenderState.ColorWriteMask = render::ColorWrite::Color;
 
         if (ctx.Visible != nullptr) {
             // Transparent primitives are not depth-sorted in this run.
@@ -857,7 +851,7 @@ public:
     }
 
 private:
-    void InitMaterial() {
+    MaterialDescriptor BuildViewerMaterialDescriptor() const {
         std::filesystem::path shaderPath = std::filesystem::path{RADRAY_GLTF_VIEWER_ASSET_DIR} / "gltf_viewer.hlsl";
         MaterialDescriptor matDesc{};
         matDesc.ShaderPath = shaderPath;
@@ -866,8 +860,11 @@ private:
         matDesc.PsEntry = "PSMain";
         matDesc.Primitive = render::PrimitiveState::Default();
         matDesc.Primitive.Cull = render::CullMode::Back;
-        matDesc.DepthStencil = render::DepthStencilState::Default();
-        matDesc.DepthStencil.Format = DepthFormat;
+        return matDesc;
+    }
+
+    void InitMaterial() {
+        MaterialDescriptor matDesc = BuildViewerMaterialDescriptor();
         const AssetId matId = Guid::Parse("91f5f8e0-7cb3-41c5-8b19-a62253f19f2a");
         _viewerMaterial = GetAssetManager()->Load<Material>(AssetLoadRequest{
             .Id = matId,
@@ -1188,6 +1185,8 @@ private:
 
         GltfAssetLoadOptions options{};
         options.DefaultMaterial = _viewerMaterial.AsAny();
+        options.Gpu = GetGpuSystem();
+        options.MaterialTemplate = BuildViewerMaterialDescriptor();
         _gltfAsset = LoadGltfAsset(
             *GetAssetManager(),
             GetGpuSystem()->GetFrameUploadScheduler(),

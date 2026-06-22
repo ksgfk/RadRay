@@ -217,7 +217,9 @@ public:
         /// Optional per-view descriptor set, e.g. space0 light buffers.
         render::DescriptorSet* ViewDescriptorSet{nullptr};
         render::DescriptorSetIndex ViewDescriptorSetIndex{0};
-        PSOCache::GraphicsPipelineOverride PipelineOverride{};
+        MeshPassRenderState RenderState{};
+        ShaderVariantKey PassVariant{};
+        bool WriteColor{true};
         ObjectConstantsCallback ObjectConstantsOverride{};
     };
 

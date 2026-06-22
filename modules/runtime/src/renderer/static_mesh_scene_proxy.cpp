@@ -84,24 +84,10 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
     StreamingAssetRef<Material> material,
     vector<MaterialParameterAssignment> materialParams,
     vector<MaterialTextureAssignment> materialTextures) noexcept
-    : StaticMeshSceneProxy(
-          std::move(mesh),
-          std::move(material),
-          std::move(materialParams),
-          std::move(materialTextures),
-          false) {}
-
-StaticMeshSceneProxy::StaticMeshSceneProxy(
-    StreamingAssetRef<StaticMesh> mesh,
-    StreamingAssetRef<Material> material,
-    vector<MaterialParameterAssignment> materialParams,
-    vector<MaterialTextureAssignment> materialTextures,
-    bool isTransparent) noexcept
     : _mesh(std::move(mesh)),
       _material(std::move(material)),
       _materialParams(std::move(materialParams)),
-      _materialTextures(std::move(materialTextures)),
-      _isTransparent(isTransparent) {
+      _materialTextures(std::move(materialTextures)) {
     // 资产在构造代理前已由 AssetManager 保证 GPU 就绪(StaticMesh 构造即完整),
     // 故这里直接构建几何单元与材质参数实例。GPU 侧材质代理延迟到首次索取。
     BuildGeometry();
@@ -112,6 +98,11 @@ StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
 bool StaticMeshSceneProxy::IsRenderable() const noexcept {
     return !_batchElements.empty() && !_vertexElements.empty();
+}
+
+bool StaticMeshSceneProxy::IsTransparent() const noexcept {
+    Material* material = _material.Get();
+    return material != nullptr && material->IsTransparent();
 }
 
 void StaticMeshSceneProxy::CollectBatchElements(vector<MeshBatchElement>& out) const {
@@ -185,19 +176,26 @@ void StaticMeshSceneProxy::BuildMaterialInstance() noexcept {
     }
 }
 
-render::DescriptorSet* StaticMeshSceneProxy::GetMaterialDescriptorSet(GpuSystem* gpuSystem) const {
-    if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr || !_materialInstance.IsValid()) {
+render::DescriptorSet* StaticMeshSceneProxy::GetMaterialDescriptorSet(GpuSystem* gpuSystem, render::RootSignature* rootSig) const {
+    if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr || rootSig == nullptr || !_materialInstance.IsValid()) {
         return nullptr;
     }
-    // 静态材质:首次索取时一次性构建 GPU 代理并缓存;失败后不再重试。
-    if (!_materialProxyBuilt && !_materialProxyFailed) {
-        if (_materialRenderProxy.Build(gpuSystem->GetDevice(), gpuSystem, _materialInstance)) {
-            _materialProxyBuilt = true;
-        } else {
-            _materialProxyFailed = true;
+    for (MaterialProxyCacheEntry& entry : _materialRenderProxies) {
+        if (entry.RootSig == rootSig) {
+            return entry.Built ? entry.Proxy.GetDescriptorSet() : nullptr;
         }
     }
-    return _materialProxyBuilt ? _materialRenderProxy.GetDescriptorSet() : nullptr;
+
+    MaterialProxyCacheEntry entry{};
+    entry.RootSig = rootSig;
+    if (entry.Proxy.Build(gpuSystem->GetDevice(), gpuSystem, _materialInstance, rootSig)) {
+        entry.Built = true;
+    } else {
+        entry.Failed = true;
+    }
+    render::DescriptorSet* result = entry.Built ? entry.Proxy.GetDescriptorSet() : nullptr;
+    _materialRenderProxies.push_back(std::move(entry));
+    return result;
 }
 
 render::DescriptorSetIndex StaticMeshSceneProxy::GetMaterialSetIndex() const noexcept {

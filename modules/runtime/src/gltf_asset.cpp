@@ -91,6 +91,18 @@ struct ParsedGltf {
     bool HasBounds{false};
 };
 
+MaterialBlendMode ToMaterialBlendMode(GltfMaterialCpu::Alpha alpha) noexcept {
+    switch (alpha) {
+        case GltfMaterialCpu::Alpha::Mask:
+            return MaterialBlendMode::Masked;
+        case GltfMaterialCpu::Alpha::Blend:
+            return MaterialBlendMode::Blend;
+        case GltfMaterialCpu::Alpha::Opaque:
+        default:
+            return MaterialBlendMode::Opaque;
+    }
+}
+
 uint64_t StableHash64(std::string_view text) noexcept {
     uint64_t hash = 1469598103934665603ull;
     for (unsigned char ch : text) {
@@ -852,7 +864,6 @@ Actor* GltfAsset::ExportToScene(World& world) const {
         component->SetMaterial(primitive.Material);
         component->SetMaterialParams(primitive.MaterialParams);
         component->SetMaterialTextures(primitive.MaterialTextures);
-        component->SetTransparent(primitive.IsTransparent);
         meshActor->SetRootComponent(component);
         component->AttachTo(root);
 
@@ -920,6 +931,28 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                 parsed.Materials.push_back(GltfMaterialCpu{});
             }
 
+            vector<StreamingAssetRef<Material>> materialAssets;
+            materialAssets.reserve(parsed.Materials.size());
+            for (size_t i = 0; i < parsed.Materials.size(); ++i) {
+                StreamingAssetRef<Material> materialRef = options.DefaultMaterial.CastTo<Material>();
+                if (options.Gpu != nullptr && !options.MaterialTemplate.ShaderPath.empty()) {
+                    const GltfMaterialCpu& material = parsed.Materials[i];
+                    MaterialDescriptor matDesc = options.MaterialTemplate;
+                    matDesc.ShaderName = options.MaterialTemplate.ShaderName.empty()
+                        ? material.Name
+                        : fmt::format("{}:{}", options.MaterialTemplate.ShaderName, material.Name);
+                    matDesc.BlendMode = ToMaterialBlendMode(material.AlphaMode);
+                    matDesc.TwoSided = material.DoubleSided;
+                    matDesc.AlphaCutoff = material.AlphaCutoff;
+                    const AssetId matId = MakeDerivedAssetId(path, "material", static_cast<uint32_t>(i));
+                    materialRef = assetManager.Load<Material>(AssetLoadRequest{
+                        .Id = matId,
+                        .Task = LoadMaterial(*options.Gpu, matDesc),
+                        .DebugName = material.Name});
+                }
+                materialAssets.push_back(materialRef);
+            }
+
             unordered_map<uint64_t, StreamingAssetRef<TextureAsset>> textureCache;
             vector<vector<MaterialTextureAssignment>> materialTextures;
             materialTextures.reserve(parsed.Materials.size());
@@ -983,15 +1016,18 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                     desc.NodeIndex = static_cast<int>(n);
                     desc.SourceMaterialIndex = primitive->MaterialIndex;
                     desc.Mesh = mesh;
-                    desc.Material = options.DefaultMaterial.CastTo<Material>();
+                    if (primitive->MaterialIndex < materialAssets.size()) {
+                        desc.Material = materialAssets[primitive->MaterialIndex];
+                    } else if (!materialAssets.empty()) {
+                        desc.Material = materialAssets.front();
+                    } else {
+                        desc.Material = options.DefaultMaterial.CastTo<Material>();
+                    }
                     desc.MaterialParams = std::move(primitive->MaterialParams);
                     if (primitive->MaterialIndex < materialTextures.size()) {
                         desc.MaterialTextures = materialTextures[primitive->MaterialIndex];
                     } else if (!materialTextures.empty()) {
                         desc.MaterialTextures = materialTextures.front();
-                    }
-                    if (primitive->MaterialIndex < parsed.Materials.size()) {
-                        desc.IsTransparent = parsed.Materials[primitive->MaterialIndex].AlphaMode == GltfMaterialCpu::Alpha::Blend;
                     }
                     desc.BoundsMin = primitive->BoundsMin;
                     desc.BoundsMax = primitive->BoundsMax;

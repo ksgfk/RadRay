@@ -1064,6 +1064,8 @@ struct StencilFaceState {
     StencilOperation FailOp{};
     StencilOperation DepthFailOp{};
     StencilOperation PassOp{};
+
+    friend bool operator==(const StencilFaceState&, const StencilFaceState&) = default;
 };
 
 struct StencilState {
@@ -1091,12 +1093,16 @@ struct StencilState {
             DefaultMask,
             DefaultMask};
     }
+
+    friend bool operator==(const StencilState&, const StencilState&) = default;
 };
 
 struct DepthBiasState {
     int32_t Constant{0};
     float SlopScale{0.0f};
     float Clamp{0.0f};
+
+    friend bool operator==(const DepthBiasState&, const DepthBiasState&) = default;
 };
 
 struct DepthStencilState {
@@ -1118,6 +1124,8 @@ struct DepthStencilState {
             std::nullopt,
             true};
     }
+
+    friend bool operator==(const DepthStencilState&, const DepthStencilState&) = default;
 };
 
 struct MultiSampleState {
@@ -1137,6 +1145,8 @@ struct BlendComponent {
     BlendFactor Src{};
     BlendFactor Dst{};
     BlendOperation Op{};
+
+    friend bool operator==(const BlendComponent&, const BlendComponent&) = default;
 };
 
 struct BlendState {
@@ -1152,6 +1162,8 @@ struct BlendState {
              BlendFactor::Zero,
              BlendOperation::Add}};
     }
+
+    friend bool operator==(const BlendState&, const BlendState&) = default;
 };
 
 struct ColorTargetState {

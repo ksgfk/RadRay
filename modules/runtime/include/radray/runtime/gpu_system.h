@@ -13,7 +13,9 @@
 #include <radray/coroutine.h>
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
+#include <radray/runtime/asset.h>
 #include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/shader_variant.h>
 
 namespace radray::render {
 class CommandBuffer;
@@ -58,6 +60,7 @@ struct ShaderCompileDescriptor {
     std::string_view Source{};
     std::string_view EntryPoint{};
     render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
+    std::span<const ShaderDefine> Defines{};
 };
 
 struct GpuSystemDescriptor {
@@ -87,6 +90,19 @@ struct FrameUploadRecord {
 struct GpuRenderTargetFormats {
     vector<render::TextureFormat> ColorFormats{};
     render::TextureFormat DepthFormat{render::TextureFormat::UNKNOWN};
+
+    friend bool operator==(const GpuRenderTargetFormats&, const GpuRenderTargetFormats&) = default;
+};
+
+/// 一个 mesh pass 的权威输出合并状态。Depth/Blend/ColorWrites 由 pass 提供,
+/// Material 只贡献材质语义与光栅化偏好。
+struct MeshPassRenderState {
+    render::DepthStencilState DepthStencil{render::DepthStencilState::Default()};
+    std::optional<render::BlendState> Blend{};
+    render::ColorWrites ColorWriteMask{render::ColorWrite::All};
+    uint32_t StencilRef{0};
+
+    friend bool operator==(const MeshPassRenderState&, const MeshPassRenderState&) = default;
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -274,32 +290,61 @@ public:
 
     using RenderTargetFormats = GpuRenderTargetFormats;
 
-    struct GraphicsPipelineOverride {
-        std::optional<render::DepthStencilState> DepthStencil{};
-        bool OverrideBlend{false};
-        std::optional<render::BlendState> Blend{};
-        std::optional<render::ColorWrites> ColorWriteMask{};
-        bool DisablePixelShader{false};
-        string KeyTag{};
+    struct VertexElementKey {
+        uint64_t Offset{0};
+        string Semantic{};
+        uint32_t SemanticIndex{0};
+        render::VertexFormat Format{render::VertexFormat::UNKNOWN};
+        uint32_t Location{0};
+
+        friend bool operator==(const VertexElementKey&, const VertexElementKey&) = default;
     };
 
-    /// 取或建 PSO。material 提供 shader/rootsig/渲染状态,vertexLayout 提供 input layout,
-    /// rtFormats 提供 RT 格式。命中缓存直接返回,返回的指针由 PSOCache 拥有。
-    render::GraphicsPipelineState* GetOrCreate(
-        const Material& material,
-        const render::VertexBufferLayout& vertexLayout,
-        const RenderTargetFormats& rtFormats);
+    struct VertexLayoutKey {
+        uint64_t ArrayStride{0};
+        render::VertexStepMode StepMode{};
+        vector<VertexElementKey> Elements{};
+
+        static VertexLayoutKey From(const render::VertexBufferLayout& layout);
+
+        friend bool operator==(const VertexLayoutKey&, const VertexLayoutKey&) = default;
+    };
+
+    struct GraphicsPsoKey {
+        AssetId Material{};
+        bool TwoSided{false};
+        render::DepthStencilState DepthStencil{};
+        std::optional<render::BlendState> Blend{};
+        render::ColorWrites ColorWriteMask{render::ColorWrite::All};
+        bool NeedPixelShader{true};
+        bool AlphaClipOnlyPixelShader{false};
+        ShaderVariantKey Variant{};
+        VertexLayoutKey Vertex{};
+        RenderTargetFormats RtFormats{};
+
+        friend bool operator==(const GraphicsPsoKey&, const GraphicsPsoKey&) = default;
+    };
+
+    struct GraphicsPsoKeyHash {
+        size_t operator()(const GraphicsPsoKey& key) const noexcept;
+    };
+
+    /// 取或建 PSO。material 提供 shader/root signature/光栅化语义,renderState 提供 pass 状态,
+    /// vertexLayout 提供 input layout,rtFormats 提供 RT 格式。命中缓存直接返回。
     render::GraphicsPipelineState* GetOrCreate(
         const Material& material,
         const render::VertexBufferLayout& vertexLayout,
         const RenderTargetFormats& rtFormats,
-        const GraphicsPipelineOverride& pipelineOverride);
+        const MeshPassRenderState& renderState,
+        const ShaderVariantKey& variant,
+        bool needPixelShader,
+        bool alphaClipOnlyPixelShader);
 
     void Clear() noexcept { _cache.clear(); }
 
 private:
     render::Device* _device;
-    unordered_map<string, unique_ptr<render::GraphicsPipelineState>> _cache;
+    unordered_map<GraphicsPsoKey, unique_ptr<render::GraphicsPipelineState>, GraphicsPsoKeyHash> _cache;
 };
 
 /// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
@@ -400,7 +445,8 @@ public:
         const std::filesystem::path& path,
         std::string_view entryPoint,
         render::ShaderStage stage,
-        std::string_view name = {});
+        std::string_view name = {},
+        std::span<const ShaderDefine> defines = {});
 
     /// 取或建 RootSignature。【按 binding layout 共享】: RootSignature 由参与的 shader
     /// 反射出的绑定布局决定，同一组 shader 共享一个 RootSignature，不再每个

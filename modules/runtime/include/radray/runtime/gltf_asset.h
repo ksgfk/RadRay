@@ -14,6 +14,7 @@ namespace radray {
 
 class Actor;
 class FrameUploadScheduler;
+class GpuSystem;
 class World;
 
 struct GltfNodeDesc {
@@ -40,7 +41,6 @@ struct GltfPrimitiveDesc {
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
-    bool IsTransparent{false};
 };
 
 struct GltfTextureDesc {
@@ -50,6 +50,8 @@ struct GltfTextureDesc {
 
 struct GltfAssetLoadOptions {
     StreamingAssetRefAny DefaultMaterial{};
+    GpuSystem* Gpu{nullptr};
+    MaterialDescriptor MaterialTemplate{};
 };
 
 class GltfAsset : public Asset {

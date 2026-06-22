@@ -28,9 +28,13 @@ public:
     MaterialRenderProxy& operator=(MaterialRenderProxy&& other) noexcept;
     ~MaterialRenderProxy() noexcept;
 
-    /// 一次性构建 GPU 资源。instance 必须有效且其 Material 持有效 RootSignature。
+    /// 一次性构建 GPU 资源。instance 必须有效,rootSig 必须匹配当前 shader set。
     /// 失败时保持 IsBuilt()==false。重复调用会重建。
-    bool Build(render::Device* device, IRenderResourceRecycler* recycler, const MaterialInstance& instance) noexcept;
+    bool Build(
+        render::Device* device,
+        IRenderResourceRecycler* recycler,
+        const MaterialInstance& instance,
+        render::RootSignature* rootSig = nullptr) noexcept;
 
     bool IsBuilt() const noexcept { return _descriptorSet != nullptr; }
 

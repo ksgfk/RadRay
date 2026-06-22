@@ -60,8 +60,9 @@ public:
     /// 需要 GPU 设备首次懒构建;静态材质一次构建后缓存。
     /// 返回 nullptr 表示无 per-material 绑定(录制时跳过)。
     /// 对应 UE5 FPrimitiveSceneProxy 提供 FMaterialRenderProxy 的职责。
-    virtual render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem) const {
+    virtual render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem, render::RootSignature* rootSig) const {
         (void)gpuSystem;
+        (void)rootSig;
         return nullptr;
     }
 

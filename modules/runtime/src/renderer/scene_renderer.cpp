@@ -38,15 +38,33 @@ void MeshPassProcessor::BuildCommands(
         }
         const render::VertexBufferLayout& layout = proxy->GetVertexLayout();
 
+        ShaderVariantKey variant = _config.PassVariant;
+        if (material->IsMasked()) {
+            variant.Add(shader_define::AlphaTest);
+        }
+        const bool needPixelShader = _config.WriteColor || material->IsMasked();
+        const bool alphaClipOnlyPixelShader = !_config.WriteColor && material->IsMasked();
+        const MaterialShaderSet* shaderSet = material->GetShaderSet(variant, needPixelShader, alphaClipOnlyPixelShader);
+        if (shaderSet == nullptr) {
+            continue;
+        }
+
         render::GraphicsPipelineState* pso = _config.Cache->GetOrCreate(
             *material,
             layout,
             _config.RtFormats,
-            _config.PipelineOverride);
+            _config.RenderState,
+            variant,
+            needPixelShader,
+            alphaClipOnlyPixelShader);
         if (pso == nullptr) {
             continue;
         }
-        auto paramOpt = material->FindParameterId(_config.ObjectConstantsParam);
+        render::RootSignature* rootSig = shaderSet->RootSig;
+        if (rootSig == nullptr) {
+            continue;
+        }
+        auto paramOpt = rootSig->FindParameterId(_config.ObjectConstantsParam);
         if (!paramOpt.has_value()) {
             RADRAY_ERR_LOG("MeshPassProcessor: material missing param '{}'", _config.ObjectConstantsParam);
             continue;
@@ -56,13 +74,10 @@ void MeshPassProcessor::BuildCommands(
         // 例如 example_imgui 的 sphere.hlsl 仅声明 MVP+Model(128)。
         // 按 root signature 反射出的实际尺寸裁剪,只推送 shader 需要的前缀,
         // 避免 "push constant size mismatch expected:128 actual:160"。
-        render::RootSignature* rootSig = material->GetRootSignature();
         uint32_t pushSize = static_cast<uint32_t>(sizeof(ObjectConstants));
-        if (rootSig != nullptr) {
-            auto rangeOpt = rootSig->FindPushConstantRange(paramOpt.value());
-            if (rangeOpt.HasValue()) {
-                pushSize = std::min(pushSize, rangeOpt.Get()->Size);
-            }
+        auto rangeOpt = rootSig->FindPushConstantRange(paramOpt.value());
+        if (rangeOpt.HasValue()) {
+            pushSize = std::min(pushSize, rangeOpt.Get()->Size);
         }
 
         // per-object 常量:MVP = ViewProj * Model,Model 为代理世界矩阵。
@@ -87,7 +102,7 @@ void MeshPassProcessor::BuildCommands(
         // Gpu 为空时跳过 per-material 绑定(退回纯 push-constant 路径)。
         render::DescriptorSet* materialSet = nullptr;
         if (_config.Gpu != nullptr) {
-            materialSet = proxy->GetMaterialDescriptorSet(_config.Gpu);
+            materialSet = proxy->GetMaterialDescriptorSet(_config.Gpu, shaderSet->RootSig);
         }
         const render::DescriptorSetIndex materialSetIndex = proxy->GetMaterialSetIndex();
 
@@ -104,7 +119,7 @@ void MeshPassProcessor::BuildCommands(
             cmd.FirstIndex = e.FirstIndex;
             cmd.VertexOffset = e.VertexOffset;
             cmd.Pso = pso;
-            cmd.RootSig = material->GetRootSignature();
+            cmd.RootSig = shaderSet->RootSig;
             cmd.PushConstantId = paramOpt.value();
             cmd.PushConstantData.resize(pushSize);
             std::memcpy(cmd.PushConstantData.data(), &constants, pushSize);

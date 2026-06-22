@@ -9,10 +9,23 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_parameter_layout.h>
+#include <radray/runtime/shader_variant.h>
 
 namespace radray {
 
 class GpuSystem;
+
+enum class MaterialBlendMode : uint32_t {
+    Opaque,
+    Masked,
+    Blend,
+};
+
+struct MaterialShaderSet {
+    render::Shader* VS{nullptr};
+    render::Shader* PS{nullptr};
+    render::RootSignature* RootSig{nullptr};
+};
 
 /// Material 初始化描述。承载一个图形材质所需的 shader 源与渲染状态。
 /// 对应 UE5 UMaterial 的最小化等价:一个 pass、一组 VS/PS、固定渲染状态。
@@ -22,9 +35,11 @@ struct MaterialDescriptor {
     string ShaderName{};
     string VsEntry{"VSMain"};
     string PsEntry{"PSMain"};
+    string DepthPsEntry{"PSDepthOnlyMain"};
+    MaterialBlendMode BlendMode{MaterialBlendMode::Opaque};
+    bool TwoSided{false};
+    float AlphaCutoff{0.5f};
     render::PrimitiveState Primitive{render::PrimitiveState::Default()};
-    render::DepthStencilState DepthStencil{render::DepthStencilState::Default()};
-    std::optional<render::BlendState> Blend{};
     /// per-material 绑定频率所在的 descriptor set 索引(register space)。
     /// 约定:set0=per-view,set1=per-material,push-constant=per-object。
     uint32_t MaterialSetIndex{1};
@@ -44,7 +59,7 @@ struct MaterialDescriptor {
 ///   组合缓存。
 class Material : public Asset {
 public:
-    /// 构造时立即初始化: 编译 VS/PS、取共享 RootSignature、填充渲染状态。
+    /// 构造时立即初始化: 编译默认 VS/PS、取共享 RootSignature、填充材质语义。
     /// 初始化失败时保持无效状态(IsValid() 返回 false)，不抛异常。
     Material(GpuSystem& gpuSystem, const MaterialDescriptor& desc) noexcept;
     ~Material() noexcept override;
@@ -52,17 +67,22 @@ public:
     void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
-    bool IsValid() const noexcept { return _rootSig != nullptr && _vs != nullptr && _ps != nullptr; }
+    bool IsValid() const noexcept { return _defaultShaders.RootSig != nullptr && _defaultShaders.VS != nullptr && _defaultShaders.PS != nullptr; }
 
-    render::Shader* GetVS() const noexcept { return _vs; }
-    render::Shader* GetPS() const noexcept { return _ps; }
+    render::Shader* GetVS() const noexcept { return _defaultShaders.VS; }
+    render::Shader* GetPS() const noexcept { return _defaultShaders.PS; }
     std::string_view GetVsEntry() const noexcept { return _vsEntry; }
     std::string_view GetPsEntry() const noexcept { return _psEntry; }
-    render::RootSignature* GetRootSignature() const noexcept { return _rootSig; }
+    std::string_view GetDepthPsEntry() const noexcept { return _depthPsEntry; }
+    render::RootSignature* GetRootSignature() const noexcept { return _defaultShaders.RootSig; }
 
+    MaterialBlendMode GetBlendMode() const noexcept { return _blendMode; }
+    bool IsTwoSided() const noexcept { return _twoSided; }
+    float GetAlphaCutoff() const noexcept { return _alphaCutoff; }
+    bool IsMasked() const noexcept { return _blendMode == MaterialBlendMode::Masked; }
+    bool IsTransparent() const noexcept { return _blendMode == MaterialBlendMode::Blend; }
     const render::PrimitiveState& GetPrimitiveState() const noexcept { return _primitive; }
-    const render::DepthStencilState& GetDepthStencilState() const noexcept { return _depthStencil; }
-    const std::optional<render::BlendState>& GetBlendState() const noexcept { return _blend; }
+    const MaterialShaderSet* GetShaderSet(const ShaderVariantKey& key, bool needPixelShader, bool alphaClipOnlyPixelShader = false) const;
 
     std::optional<render::BindingParameterId> FindParameterId(std::string_view name) const noexcept;
 
@@ -78,14 +98,21 @@ public:
     const std::optional<StructuredBufferStorage>& GetStorageTemplate() const noexcept { return _storageTemplate; }
 
 private:
-    render::Shader* _vs{nullptr};
-    render::Shader* _ps{nullptr};
+    MaterialShaderSet CompileShaderSet(const ShaderVariantKey& key, bool needPixelShader, bool alphaClipOnlyPixelShader) const;
+
+    GpuSystem* _gpuSystem{nullptr};
+    std::filesystem::path _shaderPath{};
+    string _shaderName{};
+    mutable unordered_map<ShaderVariantKey, MaterialShaderSet, ShaderVariantKeyHash> _variants;
+    mutable unordered_map<ShaderVariantKey, MaterialShaderSet, ShaderVariantKeyHash> _alphaClipVariants;
+    MaterialShaderSet _defaultShaders{};
     string _vsEntry{};
     string _psEntry{};
-    render::RootSignature* _rootSig{nullptr};  // 非拥有: 由 GpuSystem 按 layout 缓存共享。
+    string _depthPsEntry{};
+    MaterialBlendMode _blendMode{MaterialBlendMode::Opaque};
+    bool _twoSided{false};
+    float _alphaCutoff{0.5f};
     render::PrimitiveState _primitive{render::PrimitiveState::Default()};
-    render::DepthStencilState _depthStencil{render::DepthStencilState::Default()};
-    std::optional<render::BlendState> _blend{};
     uint32_t _materialSetIndex{1};
     MaterialParameterLayout _paramLayout{};
     std::optional<StructuredBufferStorage> _storageTemplate{};

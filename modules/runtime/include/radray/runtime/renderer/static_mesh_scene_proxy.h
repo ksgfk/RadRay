@@ -31,23 +31,17 @@ public:
         StreamingAssetRef<Material> material,
         vector<MaterialParameterAssignment> materialParams,
         vector<MaterialTextureAssignment> materialTextures) noexcept;
-    StaticMeshSceneProxy(
-        StreamingAssetRef<StaticMesh> mesh,
-        StreamingAssetRef<Material> material,
-        vector<MaterialParameterAssignment> materialParams,
-        vector<MaterialTextureAssignment> materialTextures,
-        bool isTransparent) noexcept;
     ~StaticMeshSceneProxy() noexcept override;
 
     bool IsRenderable() const noexcept override;
-    bool IsTransparent() const noexcept override { return _isTransparent; }
+    bool IsTransparent() const noexcept override;
     void CollectBatchElements(vector<MeshBatchElement>& out) const override;
     Material* GetMaterial() const noexcept override { return _material.Get(); }
     const render::VertexBufferLayout& GetVertexLayout() const noexcept override {
         return _vertexLayout;
     }
 
-    render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem) const override;
+    render::DescriptorSet* GetMaterialDescriptorSet(GpuSystem* gpuSystem, render::RootSignature* rootSig) const override;
     render::DescriptorSetIndex GetMaterialSetIndex() const noexcept override;
 
     StaticMesh* GetStaticMesh() const noexcept { return _mesh.Get(); }
@@ -68,11 +62,14 @@ private:
     // per-material 参数实例 + GPU 代理。静态材质:首次索取时懒构建 proxy 并缓存。
     vector<MaterialParameterAssignment> _materialParams;
     vector<MaterialTextureAssignment> _materialTextures;
-    bool _isTransparent{false};
     MaterialInstance _materialInstance;
-    mutable MaterialRenderProxy _materialRenderProxy;
-    mutable bool _materialProxyBuilt{false};
-    mutable bool _materialProxyFailed{false};
+    struct MaterialProxyCacheEntry {
+        render::RootSignature* RootSig{nullptr};
+        MaterialRenderProxy Proxy{};
+        bool Built{false};
+        bool Failed{false};
+    };
+    mutable vector<MaterialProxyCacheEntry> _materialRenderProxies;
 };
 
 }  // namespace radray

@@ -55,7 +55,8 @@ void MaterialRenderProxy::ReleaseResources() noexcept {
 bool MaterialRenderProxy::Build(
     render::Device* device,
     IRenderResourceRecycler* recycler,
-    const MaterialInstance& instance) noexcept {
+    const MaterialInstance& instance,
+    render::RootSignature* rootSig) noexcept {
     ReleaseResources();
     _recycler = recycler;
 
@@ -67,18 +68,28 @@ bool MaterialRenderProxy::Build(
         RADRAY_ERR_LOG("MaterialRenderProxy: material has no root signature");
         return false;
     }
+    if (rootSig == nullptr) {
+        rootSig = material->GetRootSignature();
+    }
     _setIndex = material->GetMaterialSetIndex();
 
     // 无 per-material 参数(无 cbuffer 且无贴图)时无需建 descriptor set。
     const MaterialParameterLayout& layout = material->GetParameterLayout();
     std::span<const byte> constData = instance.GetConstantData();
     const bool hasCBuffer = !constData.empty();
-    if (!hasCBuffer && layout.GetResourceSlots().empty()) {
+    const bool bindCBuffer = hasCBuffer && rootSig->FindParameterId(layout.GetConstantBufferName()).has_value();
+    vector<MaterialParameterLayout::ResourceSlot> boundSlots;
+    for (const auto& slot : layout.GetResourceSlots()) {
+        if (rootSig->FindParameterId(slot.Name).has_value()) {
+            boundSlots.push_back(slot);
+        }
+    }
+    if (!bindCBuffer && boundSlots.empty()) {
         return false;
     }
 
     // 1) per-material descriptor set。
-    auto setOpt = device->CreateDescriptorSet(material->GetRootSignature(), render::DescriptorSetIndex{_setIndex});
+    auto setOpt = device->CreateDescriptorSet(rootSig, render::DescriptorSetIndex{_setIndex});
     if (!setOpt.HasValue()) {
         RADRAY_ERR_LOG("MaterialRenderProxy: CreateDescriptorSet(set={}) failed", _setIndex);
         return false;
@@ -86,7 +97,7 @@ bool MaterialRenderProxy::Build(
     _descriptorSet = setOpt.Release();
 
     // 2) 常量缓冲(Upload 堆):按 CBuffer 对齐规整大小,Map 写入打包字节流。
-    if (hasCBuffer) {
+    if (bindCBuffer) {
         const uint32_t align = std::max<uint32_t>(device->GetDetail().CBufferAlignment, 1u);
         const uint64_t bufferSize = radray::Align(static_cast<uint64_t>(constData.size()), static_cast<uint64_t>(align));
         render::BufferDescriptor bufDesc{
@@ -126,7 +137,7 @@ bool MaterialRenderProxy::Build(
     // 3) 贴图 + 采样器:遍历参数布局声明的所有资源槽,逐一写入。
     //    D3D12 BindDescriptorSet 要求 set 被【完整写入】(IsFullyWritten),
     //    故每个声明的贴图/采样器槽都必须绑定;任一贴图无法解析则整体失败。
-    for (const auto& slot : layout.GetResourceSlots()) {
+    for (const auto& slot : boundSlots) {
         if (slot.Kind == MaterialParameterLayout::ResourceKind::Texture) {
             StreamingAssetRef<TextureAsset> texRef = instance.GetTexture(slot.Name).CastTo<TextureAsset>();
             TextureAsset* tex = texRef.Get();

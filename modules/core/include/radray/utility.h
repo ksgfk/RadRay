@@ -3,6 +3,7 @@
 #include <span>
 #include <concepts>
 #include <memory>
+#include <functional>
 
 #include <sigslot/signal.hpp>
 
@@ -22,6 +23,11 @@ requires std::is_same_v<typename std::unique_ptr<From>::deleter_type, std::defau
 }
 
 vector<uint32_t> ByteToDWORD(std::span<const uint8_t> bytes) noexcept;
+
+template <class T>
+constexpr void HashCombine(size_t& seed, const T& value) noexcept {
+    seed ^= std::hash<T>{}(value) + static_cast<size_t>(0x9e3779b97f4a7c15ull) + (seed << 6) + (seed >> 2);
+}
 
 [[noreturn]] inline void Unreachable() noexcept {
 #ifdef __cpp_lib_unreachable

@@ -7,6 +7,7 @@
 #include <radray/render/gpu_resource.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/render/shader_compiler/spvc.h>
+#include <radray/utility.h>
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/material.h>
@@ -18,6 +19,13 @@
 namespace radray {
 
 namespace {
+
+string BuildDefineString(const ShaderDefine& define) {
+    if (define.Value.empty()) {
+        return define.Name;
+    }
+    return fmt::format("{}={}", define.Name, define.Value);
+}
 
 std::optional<uint64_t> GetSubresourceUploadSize(
     const render::TextureDescriptor& desc,
@@ -535,12 +543,14 @@ void GpuSystem::PumpFrameUploadScheduler() {
 
 Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
     const bool isSpirv = _device->GetBackend() == render::RenderBackend::Vulkan;
+    ShaderVariantKey variant{desc.Defines};
     string key = fmt::format(
         "{}|{}|{}|{}",
         desc.Name,
         desc.EntryPoint,
         static_cast<uint32_t>(desc.Stage),
         isSpirv ? "spirv" : "dxil");
+    variant.AppendSignature(key);
     if (auto it = _shaderCache.find(key); it != _shaderCache.end()) {
         return it->second.get();
     }
@@ -561,8 +571,18 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
     params.SM = render::HlslShaderModel::SM60;
     params.IsOptimize = false;
     params.IsSpirv = isSpirv;
-    std::string_view backendDefines[1] = {isSpirv ? "VULKAN=1" : "D3D12=1"};
-    params.Defines = std::span<std::string_view>{backendDefines, 1};
+    vector<string> defineStorage;
+    vector<std::string_view> defineViews;
+    defineStorage.reserve(variant.Defines().size() + 1);
+    defineStorage.emplace_back(isSpirv ? "VULKAN=1" : "D3D12=1");
+    for (const ShaderDefine& define : variant.Defines()) {
+        defineStorage.emplace_back(BuildDefineString(define));
+    }
+    defineViews.reserve(defineStorage.size());
+    for (const string& define : defineStorage) {
+        defineViews.emplace_back(define);
+    }
+    params.Defines = defineViews;
     // 默认注入 <exe_dir>/shaderlib 作为 include 根目录，shader 可直接 #include "common.hlsl" 等。
     // span 指向的存储须活到 Compile 返回，故放在同作用域的栈上。
     std::string_view includeDirs[1];
@@ -624,7 +644,8 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     const std::filesystem::path& path,
     std::string_view entryPoint,
     render::ShaderStage stage,
-    std::string_view name) {
+    std::string_view name,
+    std::span<const ShaderDefine> defines) {
     auto sourceOpt = ReadTextFile(path);
     if (!sourceOpt.has_value()) {
         RADRAY_ERR_LOG("GpuSystem: failed to read shader file {}", path.string());
@@ -636,6 +657,7 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     desc.Source = sourceOpt.value();
     desc.EntryPoint = entryPoint;
     desc.Stage = stage;
+    desc.Defines = defines;
     return GetOrCompileShader(desc);
 }
 
@@ -1139,161 +1161,124 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
 //  PSOCache
 // ════════════════════════════════════════════════════════════
 
-namespace {
-
-string BuildVertexLayoutSignature(const render::VertexBufferLayout& layout) {
-    string sig = fmt::format("stride={};", layout.ArrayStride);
-    for (const render::VertexElement& e : layout.Elements) {
-        sig += fmt::format(
-            "[{}:{}@{}={}]",
-            e.Semantic,
-            e.SemanticIndex,
-            e.Offset,
-            static_cast<uint32_t>(e.Format));
+PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBufferLayout& layout) {
+    VertexLayoutKey key{};
+    key.ArrayStride = layout.ArrayStride;
+    key.StepMode = layout.StepMode;
+    key.Elements.reserve(layout.Elements.size());
+    for (const render::VertexElement& element : layout.Elements) {
+        key.Elements.emplace_back(VertexElementKey{
+            .Offset = element.Offset,
+            .Semantic = string{element.Semantic},
+            .SemanticIndex = element.SemanticIndex,
+            .Format = element.Format,
+            .Location = element.Location});
     }
-    return sig;
-}
-
-string BuildPSOKey(
-    const Material& material,
-    const render::VertexBufferLayout& vertexLayout,
-    const PSOCache::RenderTargetFormats& rtFormats) {
-    // Material 身份用其 AssetId(同一资产同一 PSO 基线);叠加顶点签名与 RT 格式。
-    string key = fmt::format("mat={}|vs={}|ps={}|", material.GetAssetId().ToString(), material.GetVsEntry(), material.GetPsEntry());
-    key += BuildVertexLayoutSignature(vertexLayout);
-    key += "|rt=";
-    for (render::TextureFormat f : rtFormats.ColorFormats) {
-        key += fmt::format("{},", static_cast<uint32_t>(f));
-    }
-    key += fmt::format("|ds={}", static_cast<uint32_t>(rtFormats.DepthFormat));
     return key;
 }
 
-bool HasPipelineOverrideKeySuffix(const PSOCache::GraphicsPipelineOverride& pipelineOverride) noexcept {
-    return pipelineOverride.DepthStencil.has_value() ||
-        pipelineOverride.OverrideBlend ||
-        pipelineOverride.ColorWriteMask.has_value() ||
-        pipelineOverride.DisablePixelShader ||
-        !pipelineOverride.KeyTag.empty();
-}
-
-void AppendBlendComponentKey(string& key, const render::BlendComponent& blend) {
-    key += fmt::format(
-        "{}:{}:{}",
-        static_cast<int32_t>(blend.Src),
-        static_cast<int32_t>(blend.Dst),
-        static_cast<int32_t>(blend.Op));
-}
-
-void AppendStencilFaceKey(string& key, const render::StencilFaceState& stencil) {
-    key += fmt::format(
-        "{}:{}:{}:{}",
-        static_cast<int32_t>(stencil.Compare),
-        static_cast<int32_t>(stencil.FailOp),
-        static_cast<int32_t>(stencil.DepthFailOp),
-        static_cast<int32_t>(stencil.PassOp));
-}
-
-void AppendPipelineOverrideKey(string& key, const PSOCache::GraphicsPipelineOverride& pipelineOverride) {
-    if (!HasPipelineOverrideKeySuffix(pipelineOverride)) {
-        return;
+size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
+    size_t seed = 0;
+    HashCombine(seed, key.Material);
+    HashCombine(seed, key.TwoSided);
+    HashCombine(seed, static_cast<int32_t>(key.DepthStencil.DepthCompare));
+    HashCombine(seed, key.DepthStencil.DepthWriteEnable);
+    HashCombine(seed, key.DepthStencil.DepthBias.Constant);
+    HashCombine(seed, key.DepthStencil.DepthBias.SlopScale);
+    HashCombine(seed, key.DepthStencil.DepthBias.Clamp);
+    HashCombine(seed, static_cast<uint32_t>(key.DepthStencil.Format));
+    HashCombine(seed, key.DepthStencil.Stencil.has_value());
+    HashCombine(seed, key.Blend.has_value());
+    if (key.Blend.has_value()) {
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Src));
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Dst));
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Op));
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Src));
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Dst));
+        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Op));
     }
-
-    key += fmt::format(
-        "|override={}|ps={}",
-        pipelineOverride.KeyTag,
-        pipelineOverride.DisablePixelShader ? 0 : 1);
-    if (pipelineOverride.DepthStencil.has_value()) {
-        const render::DepthStencilState& depth = pipelineOverride.DepthStencil.value();
-        key += fmt::format(
-            "|ds=1:{}:{}:{}:{}:{}:{}",
-            static_cast<int32_t>(depth.DepthCompare),
-            depth.DepthWriteEnable ? 1 : 0,
-            depth.DepthBias.Constant,
-            depth.DepthBias.SlopScale,
-            depth.DepthBias.Clamp,
-            depth.Stencil.has_value() ? 1 : 0);
-        if (depth.Stencil.has_value()) {
-            key += fmt::format(
-                ":{}:{}:",
-                depth.Stencil->ReadMask,
-                depth.Stencil->WriteMask);
-            AppendStencilFaceKey(key, depth.Stencil->Front);
-            key += ":";
-            AppendStencilFaceKey(key, depth.Stencil->Back);
-        }
-    } else {
-        key += "|ds=0";
+    HashCombine(seed, key.ColorWriteMask.value());
+    HashCombine(seed, key.NeedPixelShader);
+    HashCombine(seed, key.AlphaClipOnlyPixelShader);
+    HashCombine(seed, ShaderVariantKeyHash{}(key.Variant));
+    HashCombine(seed, key.Vertex.ArrayStride);
+    HashCombine(seed, static_cast<uint32_t>(key.Vertex.StepMode));
+    std::hash<std::string_view> hashString;
+    for (const VertexElementKey& element : key.Vertex.Elements) {
+        HashCombine(seed, element.Offset);
+        HashCombine(seed, hashString(std::string_view{element.Semantic}));
+        HashCombine(seed, element.SemanticIndex);
+        HashCombine(seed, static_cast<uint32_t>(element.Format));
+        HashCombine(seed, element.Location);
     }
-
-    if (pipelineOverride.OverrideBlend) {
-        key += "|blend=override:";
-        if (pipelineOverride.Blend.has_value()) {
-            AppendBlendComponentKey(key, pipelineOverride.Blend->Color);
-            key += ":";
-            AppendBlendComponentKey(key, pipelineOverride.Blend->Alpha);
-        } else {
-            key += "none";
-        }
-    } else {
-        key += "|blend=material";
+    for (render::TextureFormat format : key.RtFormats.ColorFormats) {
+        HashCombine(seed, static_cast<uint32_t>(format));
     }
-
-    if (pipelineOverride.ColorWriteMask.has_value()) {
-        key += fmt::format("|cw={}", static_cast<uint32_t>(pipelineOverride.ColorWriteMask->value()));
-    }
-}
-
-}  // namespace
-
-render::GraphicsPipelineState* PSOCache::GetOrCreate(
-    const Material& material,
-    const render::VertexBufferLayout& vertexLayout,
-    const RenderTargetFormats& rtFormats) {
-    return GetOrCreate(material, vertexLayout, rtFormats, GraphicsPipelineOverride{});
+    HashCombine(seed, static_cast<uint32_t>(key.RtFormats.DepthFormat));
+    return seed;
 }
 
 render::GraphicsPipelineState* PSOCache::GetOrCreate(
     const Material& material,
     const render::VertexBufferLayout& vertexLayout,
     const RenderTargetFormats& rtFormats,
-    const GraphicsPipelineOverride& pipelineOverride) {
+    const MeshPassRenderState& renderState,
+    const ShaderVariantKey& variant,
+    bool needPixelShader,
+    bool alphaClipOnlyPixelShader) {
     if (!material.IsValid()) {
         RADRAY_ERR_LOG("PSOCache: material is not valid");
         return nullptr;
     }
 
-    string key = BuildPSOKey(material, vertexLayout, rtFormats);
-    AppendPipelineOverrideKey(key, pipelineOverride);
+    render::DepthStencilState depthState = renderState.DepthStencil;
+    depthState.Format = rtFormats.DepthFormat;
+
+    GraphicsPsoKey key{
+        .Material = material.GetAssetId(),
+        .TwoSided = material.IsTwoSided(),
+        .DepthStencil = depthState,
+        .Blend = renderState.Blend,
+        .ColorWriteMask = renderState.ColorWriteMask,
+        .NeedPixelShader = needPixelShader,
+        .AlphaClipOnlyPixelShader = alphaClipOnlyPixelShader,
+        .Variant = variant,
+        .Vertex = VertexLayoutKey::From(vertexLayout),
+        .RtFormats = rtFormats};
     if (auto it = _cache.find(key); it != _cache.end()) {
         return it->second.get();
     }
 
-    // 渲染状态从 material 取,RT 格式注入到 color/depth 状态里。
+    const MaterialShaderSet* shaderSet = material.GetShaderSet(variant, needPixelShader, alphaClipOnlyPixelShader);
+    if (shaderSet == nullptr) {
+        RADRAY_ERR_LOG("PSOCache: failed to get shader set for material '{}'", material.GetAssetId());
+        return nullptr;
+    }
+
     vector<render::ColorTargetState> colorTargets;
     colorTargets.reserve(rtFormats.ColorFormats.size());
     for (render::TextureFormat f : rtFormats.ColorFormats) {
         render::ColorTargetState cts = render::ColorTargetState::Default(f);
-        cts.Blend = pipelineOverride.OverrideBlend ? pipelineOverride.Blend : material.GetBlendState();
-        if (pipelineOverride.ColorWriteMask.has_value()) {
-            cts.WriteMask = pipelineOverride.ColorWriteMask.value();
-        }
+        cts.Blend = renderState.Blend;
+        cts.WriteMask = renderState.ColorWriteMask;
         colorTargets.push_back(cts);
     }
 
-    render::DepthStencilState depthState = pipelineOverride.DepthStencil.has_value()
-        ? pipelineOverride.DepthStencil.value()
-        : material.GetDepthStencilState();
-    depthState.Format = rtFormats.DepthFormat;
+    render::PrimitiveState primitive = material.GetPrimitiveState();
+    if (material.IsTwoSided()) {
+        primitive.Cull = render::CullMode::None;
+    }
 
     render::GraphicsPipelineStateDescriptor psoDesc{
-        material.GetRootSignature(),
-        render::ShaderEntry{material.GetVS(), material.GetVsEntry()},
-        pipelineOverride.DisablePixelShader
+        shaderSet->RootSig,
+        render::ShaderEntry{shaderSet->VS, material.GetVsEntry()},
+        !needPixelShader || shaderSet->PS == nullptr
             ? std::optional<render::ShaderEntry>{}
-            : std::optional<render::ShaderEntry>{render::ShaderEntry{material.GetPS(), material.GetPsEntry()}},
+            : std::optional<render::ShaderEntry>{render::ShaderEntry{
+                  shaderSet->PS,
+                  alphaClipOnlyPixelShader ? material.GetDepthPsEntry() : material.GetPsEntry()}},
         std::span<const render::VertexBufferLayout>{&vertexLayout, 1},
-        material.GetPrimitiveState(),
+        primitive,
         depthState,
         render::MultiSampleState::Default(),
         std::span<const render::ColorTargetState>{colorTargets.data(), colorTargets.size()}};

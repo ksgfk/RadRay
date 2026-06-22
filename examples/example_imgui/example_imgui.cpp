@@ -182,8 +182,6 @@ public:
         matDesc.PsEntry = "PSMain";
         matDesc.Primitive = render::PrimitiveState::Default();
         matDesc.Primitive.Cull = render::CullMode::None;
-        matDesc.DepthStencil = render::DepthStencilState::Default();
-        matDesc.DepthStencil.Format = DepthFormat;
         const AssetId matId = Guid::Parse("7f1d3b2a-0000-4000-8000-00000000b001");
         StreamingAssetRef<Material> material = GetAssetManager()->Load<Material>(AssetLoadRequest{
             .Id = matId,
