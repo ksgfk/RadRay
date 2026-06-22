@@ -18,7 +18,7 @@ Material::Material(GpuSystem& gpuSystem, const MaterialDescriptor& desc) noexcep
     _primitive = desc.Primitive;
     _materialSetIndex = desc.MaterialSetIndex;
 
-    _defaultShaders = CompileShaderSet(ShaderVariantKey{}, true, false);
+    _defaultShaders = CompileShaderSet(ShaderVariantKey{}, PixelShaderMode::FullColor);
     if (_defaultShaders.VS == nullptr || _defaultShaders.PS == nullptr || _defaultShaders.RootSig == nullptr) {
         return;
     }
@@ -72,18 +72,18 @@ std::optional<render::BindingParameterId> Material::FindParameterId(std::string_
 
 const MaterialShaderSet* Material::GetShaderSet(
     const ShaderVariantKey& key,
-    bool needPixelShader,
-    bool alphaClipOnlyPixelShader) const {
+    PixelShaderMode psMode) const {
     if (_gpuSystem == nullptr) {
         return nullptr;
     }
-    auto& variants = alphaClipOnlyPixelShader ? _alphaClipVariants : _variants;
+    const bool needPixelShader = NeedsPixelShader(psMode);
+    auto& variants = IsAlphaClipOnly(psMode) ? _alphaClipVariants : _variants;
     auto it = variants.find(key);
     if (it == variants.end()) {
-        MaterialShaderSet set = CompileShaderSet(key, needPixelShader, alphaClipOnlyPixelShader);
+        MaterialShaderSet set = CompileShaderSet(key, psMode);
         it = variants.emplace(key, set).first;
     } else if (needPixelShader && it->second.PS == nullptr) {
-        it->second = CompileShaderSet(key, true, alphaClipOnlyPixelShader);
+        it->second = CompileShaderSet(key, psMode);
     }
     const MaterialShaderSet& set = it->second;
     if (set.VS == nullptr || set.RootSig == nullptr || (needPixelShader && set.PS == nullptr)) {
@@ -94,8 +94,7 @@ const MaterialShaderSet* Material::GetShaderSet(
 
 MaterialShaderSet Material::CompileShaderSet(
     const ShaderVariantKey& key,
-    bool needPixelShader,
-    bool alphaClipOnlyPixelShader) const {
+    PixelShaderMode psMode) const {
     if (_gpuSystem == nullptr) {
         return {};
     }
@@ -109,8 +108,8 @@ MaterialShaderSet Material::CompileShaderSet(
     }
 
     render::Shader* ps = nullptr;
-    if (needPixelShader) {
-        const string& psEntry = alphaClipOnlyPixelShader ? _depthPsEntry : _psEntry;
+    if (NeedsPixelShader(psMode)) {
+        const string& psEntry = IsAlphaClipOnly(psMode) ? _depthPsEntry : _psEntry;
         ps = _gpuSystem->GetOrCompileShaderFromFile(
                            _shaderPath, psEntry, render::ShaderStage::Pixel, _shaderName, key.Defines())
                  .Get();

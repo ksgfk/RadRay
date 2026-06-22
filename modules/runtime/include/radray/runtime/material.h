@@ -82,7 +82,7 @@ public:
     bool IsMasked() const noexcept { return _blendMode == MaterialBlendMode::Masked; }
     bool IsTransparent() const noexcept { return _blendMode == MaterialBlendMode::Blend; }
     const render::PrimitiveState& GetPrimitiveState() const noexcept { return _primitive; }
-    const MaterialShaderSet* GetShaderSet(const ShaderVariantKey& key, bool needPixelShader, bool alphaClipOnlyPixelShader = false) const;
+    const MaterialShaderSet* GetShaderSet(const ShaderVariantKey& key, PixelShaderMode psMode) const;
 
     std::optional<render::BindingParameterId> FindParameterId(std::string_view name) const noexcept;
 
@@ -98,7 +98,7 @@ public:
     const std::optional<StructuredBufferStorage>& GetStorageTemplate() const noexcept { return _storageTemplate; }
 
 private:
-    MaterialShaderSet CompileShaderSet(const ShaderVariantKey& key, bool needPixelShader, bool alphaClipOnlyPixelShader) const;
+    MaterialShaderSet CompileShaderSet(const ShaderVariantKey& key, PixelShaderMode psMode) const;
 
     GpuSystem* _gpuSystem{nullptr};
     std::filesystem::path _shaderPath{};

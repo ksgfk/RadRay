@@ -361,18 +361,13 @@ public:
 
             SetShadowViewportAndScissor(encoder.get(), *ctx.Device);
 
-            render::DepthStencilState depthState = render::DepthStencilState::Default();
-            depthState.DepthCompare = render::CompareFunction::LessEqual;
-            depthState.DepthWriteEnable = true;
-            depthState.DepthBias = render::DepthBiasState{ShadowRasterDepthBias, ShadowRasterSlopeBias, 0.0f};
-
             const ShadowCascade& cascade = ctx.Shadow.Cascades[i];
             MeshPassProcessor::Config processorConfig{};
             processorConfig.Cache = &ctx.Gpu->GetPSOCache();
             processorConfig.RtFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
             processorConfig.ObjectConstantsParam = "gScene";
             processorConfig.Gpu = ctx.Gpu;
-            processorConfig.RenderState.DepthStencil = depthState;
+            processorConfig.RenderState = MeshPassRenderState::Shadow(ShadowRasterDepthBias, ShadowRasterSlopeBias);
             processorConfig.WriteColor = false;
             processorConfig.PassVariant.Add(shader_define::ShadowCaster);
             processorConfig.ObjectConstantsOverride = [&ctx, &cascade](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView& view) {
@@ -445,11 +440,6 @@ public:
 
             SetResolutionViewportAndScissor(encoder.get(), *ctx.Device, shadow.Resolution);
 
-            render::DepthStencilState depthState = render::DepthStencilState::Default();
-            depthState.DepthCompare = render::CompareFunction::LessEqual;
-            depthState.DepthWriteEnable = true;
-            depthState.DepthBias = render::DepthBiasState{ShadowRasterDepthBias, ShadowRasterSlopeBias, 0.0f};
-
             if (i >= sliceCount) {
                 // No caster for this padding slice; the clear above already filled it with far depth.
                 ctx.CmdBuffer->EndRenderPass(std::move(encoder));
@@ -462,7 +452,7 @@ public:
             processorConfig.RtFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
             processorConfig.ObjectConstantsParam = "gScene";
             processorConfig.Gpu = ctx.Gpu;
-            processorConfig.RenderState.DepthStencil = depthState;
+            processorConfig.RenderState = MeshPassRenderState::Shadow(ShadowRasterDepthBias, ShadowRasterSlopeBias);
             processorConfig.WriteColor = false;
             processorConfig.PassVariant.Add(shader_define::ShadowCaster);
             processorConfig.ObjectConstantsOverride = [&slice](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView& view) {
@@ -530,16 +520,12 @@ public:
 
         SetViewportAndScissor(encoder.get(), ctx);
 
-        render::DepthStencilState depthState = render::DepthStencilState::Default();
-        depthState.DepthCompare = render::CompareFunction::Less;
-        depthState.DepthWriteEnable = true;
-
         MeshPassProcessor::Config processorConfig{};
         processorConfig.Cache = &ctx.Gpu->GetPSOCache();
         processorConfig.RtFormats.DepthFormat = _depthFormat;
         processorConfig.ObjectConstantsParam = "gScene";
         processorConfig.Gpu = ctx.Gpu;
-        processorConfig.RenderState.DepthStencil = depthState;
+        processorConfig.RenderState = MeshPassRenderState::PreZ();
         processorConfig.WriteColor = false;
 
         if (ctx.Visible != nullptr) {
@@ -603,10 +589,6 @@ public:
 
         SetViewportAndScissor(encoder.get(), ctx);
 
-        render::DepthStencilState depthState = render::DepthStencilState::Default();
-        depthState.DepthCompare = render::CompareFunction::Equal;
-        depthState.DepthWriteEnable = false;
-
         MeshPassProcessor::Config processorConfig{};
         processorConfig.Cache = &ctx.Gpu->GetPSOCache();
         processorConfig.RtFormats.ColorFormats = {_colorFormat};
@@ -615,10 +597,10 @@ public:
         processorConfig.Gpu = ctx.Gpu;
         processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
         processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
-        processorConfig.RenderState.DepthStencil = depthState;
         // 不透明物体不能写 backbuffer alpha:base-color alpha 对不透明渲染无意义,
         // 若写入 BGRA8 backbuffer,Windows 合成器会把它当成窗口透明度,导致整模型透视。
-        processorConfig.RenderState.ColorWriteMask = render::ColorWrite::Color;
+        // OpaqueBase 预设:depth Equal + 不写深度 + 只写 RGB(ColorWrite::Color)。
+        processorConfig.RenderState = MeshPassRenderState::OpaqueBase();
         if (_showShadowCascadeOverlay != nullptr && *_showShadowCascadeOverlay) {
             processorConfig.ObjectConstantsOverride = [](ObjectConstants& constants, const PrimitiveSceneProxy&, const SceneView&) {
                 constants.Debug[0] = 7;
@@ -685,20 +667,6 @@ public:
 
         SetViewportAndScissor(encoder.get(), ctx);
 
-        render::DepthStencilState depthState = render::DepthStencilState::Default();
-        depthState.DepthCompare = render::CompareFunction::LessEqual;
-        depthState.DepthWriteEnable = false;
-
-        render::BlendState alphaOverBlend{
-            .Color = {
-                .Src = render::BlendFactor::SrcAlpha,
-                .Dst = render::BlendFactor::OneMinusSrcAlpha,
-                .Op = render::BlendOperation::Add},
-            .Alpha = {
-                .Src = render::BlendFactor::One,
-                .Dst = render::BlendFactor::OneMinusSrcAlpha,
-                .Op = render::BlendOperation::Add}};
-
         MeshPassProcessor::Config processorConfig{};
         processorConfig.Cache = &ctx.Gpu->GetPSOCache();
         processorConfig.RtFormats.ColorFormats = {_colorFormat};
@@ -707,11 +675,10 @@ public:
         processorConfig.Gpu = ctx.Gpu;
         processorConfig.ViewDescriptorSet = ctx.ViewDescriptorSet;
         processorConfig.ViewDescriptorSetIndex = ctx.ViewDescriptorSetIndex;
-        processorConfig.RenderState.DepthStencil = depthState;
-        processorConfig.RenderState.Blend = alphaOverBlend;
+        // Transparent 预设:depth LessEqual + 不写深度 + src-alpha over 混合 + 只写 RGB。
         // 只混合 RGB,不写 backbuffer alpha:否则 BGRA8 backbuffer 的 alpha 会被
         // Windows 合成器当成窗口透明度,玻璃会把窗口戳透。
-        processorConfig.RenderState.ColorWriteMask = render::ColorWrite::Color;
+        processorConfig.RenderState = MeshPassRenderState::Transparent();
 
         if (ctx.Visible != nullptr) {
             // Transparent primitives are not depth-sorted in this run.

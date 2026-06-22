@@ -103,6 +103,63 @@ struct MeshPassRenderState {
     uint32_t StencilRef{0};
 
     friend bool operator==(const MeshPassRenderState&, const MeshPassRenderState&) = default;
+
+    // —— 标准 render state 预设(独立项 E)——
+    // 各 pass 不再手搓 DepthStencil/Blend/ColorWrite,改取下列预设之一。
+    // 注意:DepthStencil.Format 会被 PSOCache 按 RtFormats.DepthFormat 覆写,故预设里不关心 Format。
+
+    /// 深度预通道(Pre-Z):depth Less + 写深度,无混合。等价 DepthStencilState::Default()。
+    /// 配合 Config.WriteColor=false 使用(只写深度,不出 color)。
+    static MeshPassRenderState PreZ() noexcept {
+        MeshPassRenderState s{};
+        s.DepthStencil = render::DepthStencilState::Default();
+        s.DepthStencil.DepthCompare = render::CompareFunction::Less;
+        s.DepthStencil.DepthWriteEnable = true;
+        return s;
+    }
+
+    /// 阴影投射(depth-only):depth LessEqual + 写深度 + 光栅深度偏移。
+    /// 配合 Config.WriteColor=false 使用。
+    static MeshPassRenderState Shadow(
+        int32_t depthBias = 0,
+        float slopeScaledBias = 0.0f,
+        float depthBiasClamp = 0.0f) noexcept {
+        MeshPassRenderState s{};
+        s.DepthStencil = render::DepthStencilState::Default();
+        s.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
+        s.DepthStencil.DepthWriteEnable = true;
+        s.DepthStencil.DepthBias = render::DepthBiasState{depthBias, slopeScaledBias, depthBiasClamp};
+        return s;
+    }
+
+    /// 不透明基础通道(与 Pre-Z 配对):depth Equal + 不写深度,只写 RGB(不写 backbuffer alpha)。
+    static MeshPassRenderState OpaqueBase() noexcept {
+        MeshPassRenderState s{};
+        s.DepthStencil = render::DepthStencilState::Default();
+        s.DepthStencil.DepthCompare = render::CompareFunction::Equal;
+        s.DepthStencil.DepthWriteEnable = false;
+        s.ColorWriteMask = render::ColorWrite::Color;
+        return s;
+    }
+
+    /// 透明(alpha-over):depth LessEqual + 不写深度,src-alpha over 混合,只写 RGB。
+    static MeshPassRenderState Transparent() noexcept {
+        MeshPassRenderState s{};
+        s.DepthStencil = render::DepthStencilState::Default();
+        s.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
+        s.DepthStencil.DepthWriteEnable = false;
+        s.Blend = render::BlendState{
+            .Color = {
+                .Src = render::BlendFactor::SrcAlpha,
+                .Dst = render::BlendFactor::OneMinusSrcAlpha,
+                .Op = render::BlendOperation::Add},
+            .Alpha = {
+                .Src = render::BlendFactor::One,
+                .Dst = render::BlendFactor::OneMinusSrcAlpha,
+                .Op = render::BlendOperation::Add}};
+        s.ColorWriteMask = render::ColorWrite::Color;
+        return s;
+    }
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -269,11 +326,15 @@ public:
     /// 命中缓存直接返回，返回的指针由 RSCache 拥有。
     Nullable<render::RootSignature*> GetOrCreate(std::span<render::Shader*> shaders);
 
-    void Clear() noexcept { _cache.clear(); }
+    void Clear() noexcept {
+        _shaderSetCache.clear();
+        _layoutCache.clear();
+    }
 
 private:
     render::Device* _device;
-    unordered_map<string, unique_ptr<render::RootSignature>> _cache;
+    unordered_map<string, unique_ptr<render::RootSignature>> _layoutCache;
+    unordered_map<string, render::RootSignature*> _shaderSetCache;
 };
 
 /// 图形 PSO 缓存。对应 Material×VertexLayout×RenderTarget 才确定一个
@@ -312,12 +373,12 @@ public:
 
     struct GraphicsPsoKey {
         AssetId Material{};
+        render::RootSignature* RootSig{nullptr};
         bool TwoSided{false};
         render::DepthStencilState DepthStencil{};
         std::optional<render::BlendState> Blend{};
         render::ColorWrites ColorWriteMask{render::ColorWrite::All};
-        bool NeedPixelShader{true};
-        bool AlphaClipOnlyPixelShader{false};
+        PixelShaderMode PsMode{PixelShaderMode::FullColor};
         ShaderVariantKey Variant{};
         VertexLayoutKey Vertex{};
         RenderTargetFormats RtFormats{};
@@ -337,8 +398,7 @@ public:
         const RenderTargetFormats& rtFormats,
         const MeshPassRenderState& renderState,
         const ShaderVariantKey& variant,
-        bool needPixelShader,
-        bool alphaClipOnlyPixelShader);
+        PixelShaderMode psMode);
 
     void Clear() noexcept { _cache.clear(); }
 

@@ -287,3 +287,31 @@ TEST(MaterialParameterLayoutTest, GltfViewerResourceSlotsAgreeAcrossBackends) {
         EXPECT_TRUE(hasSlot(spirv)) << "SPIR-V missing resource slot " << expected.Name;
     }
 }
+
+// 阶段 3a / C1:布局签名是 per-material proxy 缓存的去重 key。
+// 同一材质不同变体的 per-material set 布局相同 → 签名相等(可跨 RootSig 复用);
+// 布局不同(字段/资源槽不同) → 签名不等。同一份 HLSL 同编 DXIL/SPIR-V 签名也一致。
+TEST(MaterialParameterLayoutTest, LayoutSignatureDedupsAcrossVariantsAndBackends) {
+    auto dxcOpt = CreateDxc();
+    ASSERT_TRUE(dxcOpt.HasValue());
+    shared_ptr<Dxc> dxc = dxcOpt.Release();
+
+    // 同一 shader 的两份独立编译(模拟同材质不同变体):布局签名必须相等。
+    auto a = BuildLayoutFromShader(*dxc, kGltfViewerShapeShader, /*spirv=*/false);
+    auto b = BuildLayoutFromShader(*dxc, kGltfViewerShapeShader, /*spirv=*/false);
+    ASSERT_TRUE(a.has_value());
+    ASSERT_TRUE(b.has_value());
+    EXPECT_EQ(a->GetLayoutSignature(), b->GetLayoutSignature());
+    EXPECT_FALSE(a->GetLayoutSignature().empty());
+
+    // 不同形状的材质(字段/资源槽不同) → 签名不等。
+    auto other = BuildLayoutFromShader(*dxc, kMaterialShader, /*spirv=*/false);
+    ASSERT_TRUE(other.has_value());
+    EXPECT_NE(a->GetLayoutSignature(), other->GetLayoutSignature());
+
+    // 跨后端(DXIL vs SPIR-V):同一 shader 抽出的布局签名一致 →
+    // descriptor set 可跨后端一致地去重。
+    auto spirv = BuildLayoutFromShader(*dxc, kGltfViewerShapeShader, /*spirv=*/true);
+    ASSERT_TRUE(spirv.has_value());
+    EXPECT_EQ(a->GetLayoutSignature(), spirv->GetLayoutSignature());
+}

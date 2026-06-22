@@ -13,6 +13,23 @@ MaterialInstance::MaterialInstance(Material* material) noexcept : _material(mate
     if (tmpl.has_value()) {
         _storage = tmpl;  // 值语义拷贝。
         _rootName = string{_material->GetParameterLayout().GetConstantBufferName()};
+        BuildFieldHandleCache();
+    }
+}
+
+void MaterialInstance::BuildFieldHandleCache() noexcept {
+    _fieldHandles.clear();
+    if (!_storage.has_value()) {
+        return;
+    }
+    StructuredBufferReadOnlyView root = _storage->GetVar(_rootName);
+    if (!root.IsValid()) {
+        RADRAY_ERR_LOG("MaterialInstance: storage template has no root cbuffer '{}'", _rootName);
+        return;
+    }
+    // 一次性解析根 cbuffer 的所有字段名 → 稳定 globalId,缓存供热路径复用。
+    for (const StructuredBufferVariable& member : root.GetType().GetMembers()) {
+        _fieldHandles.emplace(string{member.GetName()}, member.GetGlobalId());
     }
 }
 

@@ -66,6 +66,13 @@ public:
 
     Nullable<const Field*> FindField(std::string_view name) const noexcept;
 
+    /// 反射派生的布局签名:同一材质不同 shader 变体的 per-material set 布局完全相同
+    /// (同 shader 家族,同 space1 绑定),故签名相等即可跨变体/跨 RootSignature 复用
+    /// 已建好的 descriptor set。签名由反射(set 索引 + cbuffer 名/大小 + 资源槽名/种类,
+    /// 按名/种类排序)决定,不含原始 binding 号以保持跨后端稳定,与具体 RootSignature
+    /// 实例无关 —— 这正是缺陷3(per-RootSig proxy 复制)的解耦点。
+    string GetLayoutSignature() const noexcept;
+
     /// 依据字段表建一份 StructuredBufferStorage 模板:单个根结构(cbuffer),
     /// 字段按反射 offset 作为成员落位。值全为 0(默认)。无 cbuffer 时返回 nullopt。
     std::optional<StructuredBufferStorage> CreateStorageTemplate() const noexcept;

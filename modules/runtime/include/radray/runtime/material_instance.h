@@ -5,6 +5,7 @@
 #include <utility>
 
 #include <radray/types.h>
+#include <radray/hash.h>
 #include <radray/basic_math.h>
 #include <radray/structured_buffer.h>
 #include <radray/runtime/asset_manager.h>
@@ -80,26 +81,30 @@ public:
     std::span<const std::pair<string, StreamingAssetRefAny>> GetBoundTextures() const noexcept { return _textures; }
 
 private:
+    // 从存储模板解析出「字段名 → 稳定 globalId」句柄缓存。构造时一次性构建,
+    // 热路径写值复用句柄,避免每次按名线性扫描 GetMembers()。
+    void BuildFieldHandleCache() noexcept;
+
     template <class T>
     bool SetValueImpl(std::string_view name, const T& value) noexcept {
         if (!_storage.has_value()) {
+            RADRAY_ERR_LOG("MaterialInstance: set '{}' on instance without constant buffer", name);
             return false;
         }
-        StructuredBufferView root = _storage->GetVar(_rootName);
-        if (!root.IsValid()) {
+        auto it = _fieldHandles.find(name);
+        if (it == _fieldHandles.end()) {
+            RADRAY_ERR_LOG("MaterialInstance: unknown parameter field '{}'", name);
             return false;
         }
-        StructuredBufferView field = root.GetVar(name);
-        if (!field.IsValid()) {
-            return false;
-        }
-        field.SetValue(value);
-        return true;
+        // 复用缓存句柄直接寻址叶子字段,走 fail-fast 写入(未知/尺寸不符即报错)。
+        StructuredBufferView field{&_storage.value(), it->second};
+        return field.TrySetValue(value);
     }
 
     Material* _material{nullptr};
     std::optional<StructuredBufferStorage> _storage{};
     string _rootName{};  // 根 cbuffer 名,用于 GetVar 寻址。
+    unordered_map<string, StructuredBufferId, StringHash, StringEqual> _fieldHandles{};
     vector<std::pair<string, StreamingAssetRefAny>> _textures{};
 };
 

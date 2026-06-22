@@ -27,6 +27,76 @@ string BuildDefineString(const ShaderDefine& define) {
     return fmt::format("{}={}", define.Name, define.Value);
 }
 
+void AppendSamplerSignature(string& out, const render::SamplerDescriptor& desc) {
+    out += fmt::format(
+        "addr={},{},{};filter={},{},{};lod={:.9g},{:.9g};cmp={};aniso={};",
+        static_cast<uint32_t>(desc.AddressS),
+        static_cast<uint32_t>(desc.AddressT),
+        static_cast<uint32_t>(desc.AddressR),
+        static_cast<uint32_t>(desc.MinFilter),
+        static_cast<uint32_t>(desc.MagFilter),
+        static_cast<uint32_t>(desc.MipmapFilter),
+        desc.LodMin,
+        desc.LodMax,
+        desc.Compare.has_value() ? static_cast<int32_t>(desc.Compare.value()) : -1,
+        desc.AnisotropyClamp);
+}
+
+string BuildRootSignatureLayoutKey(const render::RootSignature& rootSig) {
+    string key;
+    for (const render::BindingParameterLayout& param : rootSig.GetBindingLayout().GetParameters()) {
+        key += fmt::format(
+            "P:{}:{}:{}:{}:",
+            param.Id.Value,
+            param.Name,
+            static_cast<uint32_t>(param.Kind),
+            param.Stages.value());
+        if (const auto* abi = std::get_if<render::ResourceBindingAbi>(&param.Abi)) {
+            key += fmt::format(
+                "R:{}:{}:{}:{}:{}:{};",
+                abi->Set.Value,
+                abi->Binding,
+                static_cast<uint32_t>(abi->Type),
+                abi->Count,
+                abi->IsReadOnly,
+                abi->IsBindless);
+        } else if (const auto* pushAbi = std::get_if<render::PushConstantBindingAbi>(&param.Abi)) {
+            key += fmt::format("C:{}:{};", pushAbi->Offset, pushAbi->Size);
+        }
+    }
+    for (const render::PushConstantRange& range : rootSig.GetPushConstantRanges()) {
+        key += fmt::format(
+            "PC:{}:{}:{}:{}:{};",
+            range.Id.Value,
+            range.Name,
+            range.Stages.value(),
+            range.Offset,
+            range.Size);
+    }
+    for (const render::BindlessSetLayout& bindless : rootSig.GetBindlessSetLayouts()) {
+        key += fmt::format(
+            "B:{}:{}:{}:{}:{}:{}:{};",
+            bindless.Id.Value,
+            bindless.Name,
+            bindless.Set.Value,
+            bindless.Binding,
+            static_cast<uint32_t>(bindless.Type),
+            static_cast<uint32_t>(bindless.SlotType),
+            bindless.Stages.value());
+    }
+    for (const render::StaticSamplerLayout& sampler : rootSig.GetStaticSamplerLayouts()) {
+        key += fmt::format(
+            "S:{}:{}:{}:{}:{}:",
+            sampler.Id.Value,
+            sampler.Name,
+            sampler.Set.Value,
+            sampler.Binding,
+            sampler.Stages.value());
+        AppendSamplerSignature(key, sampler.Desc);
+    }
+    return key;
+}
+
 std::optional<uint64_t> GetSubresourceUploadSize(
     const render::TextureDescriptor& desc,
     const render::SubresourceRange& range,
@@ -780,8 +850,8 @@ Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*>
     for (render::Shader* shader : sorted) {
         key += fmt::format("{:x}|", reinterpret_cast<uintptr_t>(shader));
     }
-    if (auto it = _cache.find(key); it != _cache.end()) {
-        return it->second.get();
+    if (auto it = _shaderSetCache.find(key); it != _shaderSetCache.end()) {
+        return it->second;
     }
 
     render::RootSignatureDescriptor rsDesc{};
@@ -791,8 +861,16 @@ Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*>
         RADRAY_ERR_LOG("RSCache: failed to create root signature");
         return nullptr;
     }
-    render::RootSignature* raw = rsOpt.Get();
-    _cache.emplace(std::move(key), rsOpt.Release());
+
+    const string layoutKey = BuildRootSignatureLayoutKey(*rsOpt.Get());
+    render::RootSignature* raw = nullptr;
+    if (auto layoutIt = _layoutCache.find(layoutKey); layoutIt != _layoutCache.end()) {
+        raw = layoutIt->second.get();
+    } else {
+        raw = rsOpt.Get();
+        _layoutCache.emplace(layoutKey, rsOpt.Release());
+    }
+    _shaderSetCache.emplace(std::move(key), raw);
     return raw;
 }
 
@@ -1180,6 +1258,7 @@ PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBu
 size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
     size_t seed = 0;
     HashCombine(seed, key.Material);
+    HashCombine(seed, reinterpret_cast<uintptr_t>(key.RootSig));
     HashCombine(seed, key.TwoSided);
     HashCombine(seed, static_cast<int32_t>(key.DepthStencil.DepthCompare));
     HashCombine(seed, key.DepthStencil.DepthWriteEnable);
@@ -1198,8 +1277,7 @@ size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const
         HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Op));
     }
     HashCombine(seed, key.ColorWriteMask.value());
-    HashCombine(seed, key.NeedPixelShader);
-    HashCombine(seed, key.AlphaClipOnlyPixelShader);
+    HashCombine(seed, static_cast<uint8_t>(key.PsMode));
     HashCombine(seed, ShaderVariantKeyHash{}(key.Variant));
     HashCombine(seed, key.Vertex.ArrayStride);
     HashCombine(seed, static_cast<uint32_t>(key.Vertex.StepMode));
@@ -1224,35 +1302,35 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
     const RenderTargetFormats& rtFormats,
     const MeshPassRenderState& renderState,
     const ShaderVariantKey& variant,
-    bool needPixelShader,
-    bool alphaClipOnlyPixelShader) {
+    PixelShaderMode psMode) {
     if (!material.IsValid()) {
         RADRAY_ERR_LOG("PSOCache: material is not valid");
         return nullptr;
     }
 
+    const bool needPixelShader = NeedsPixelShader(psMode);
     render::DepthStencilState depthState = renderState.DepthStencil;
     depthState.Format = rtFormats.DepthFormat;
 
+    const MaterialShaderSet* shaderSet = material.GetShaderSet(variant, psMode);
+    if (shaderSet == nullptr) {
+        RADRAY_ERR_LOG("PSOCache: failed to get shader set for material '{}'", material.GetAssetId());
+        return nullptr;
+    }
+
     GraphicsPsoKey key{
         .Material = material.GetAssetId(),
+        .RootSig = shaderSet->RootSig,
         .TwoSided = material.IsTwoSided(),
         .DepthStencil = depthState,
         .Blend = renderState.Blend,
         .ColorWriteMask = renderState.ColorWriteMask,
-        .NeedPixelShader = needPixelShader,
-        .AlphaClipOnlyPixelShader = alphaClipOnlyPixelShader,
+        .PsMode = psMode,
         .Variant = variant,
         .Vertex = VertexLayoutKey::From(vertexLayout),
         .RtFormats = rtFormats};
     if (auto it = _cache.find(key); it != _cache.end()) {
         return it->second.get();
-    }
-
-    const MaterialShaderSet* shaderSet = material.GetShaderSet(variant, needPixelShader, alphaClipOnlyPixelShader);
-    if (shaderSet == nullptr) {
-        RADRAY_ERR_LOG("PSOCache: failed to get shader set for material '{}'", material.GetAssetId());
-        return nullptr;
     }
 
     vector<render::ColorTargetState> colorTargets;
@@ -1276,7 +1354,7 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
             ? std::optional<render::ShaderEntry>{}
             : std::optional<render::ShaderEntry>{render::ShaderEntry{
                   shaderSet->PS,
-                  alphaClipOnlyPixelShader ? material.GetDepthPsEntry() : material.GetPsEntry()}},
+                  IsAlphaClipOnly(psMode) ? material.GetDepthPsEntry() : material.GetPsEntry()}},
         std::span<const render::VertexBufferLayout>{&vertexLayout, 1},
         primitive,
         depthState,

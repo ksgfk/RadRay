@@ -219,22 +219,67 @@ public:
         return ConstView{_storage, _globalId, _arrayIndex};
     }
 
+    // 按名写值(fail-fast):未知字段名 / 写入大小与反射字段不符 → 响亮失败返回 false,
+    // 绝不静默吞掉。name 在本 view 的成员里查不到即失败。
+    template <class T>
+    bool TrySetValue(std::string_view name, const T& value) noexcept
+    requires(!std::is_const_v<TStorage>)
+    {
+        if (!this->IsValid()) {
+            RADRAY_ERR_LOG("StructuredBufferView::TrySetValue on invalid view (field '{}')", name);
+            return false;
+        }
+        ViewType field = this->GetVar(name);
+        if (!field.IsValid()) {
+            RADRAY_ERR_LOG("StructuredBufferView::TrySetValue unknown field '{}'", name);
+            return false;
+        }
+        return field.TrySetValue(value);
+    }
+
+    // 直接写入本 view 指向的字段(fail-fast):写入字节数必须与反射字段字节数严格相等,
+    // 否则报错返回 false(覆盖写入尺寸截断/超写隐患)。
+    template <class T>
+    bool TrySetValue(const T& value) noexcept
+    requires(!std::is_const_v<TStorage>)
+    {
+        if (!this->IsValid()) {
+            RADRAY_ERR_LOG("StructuredBufferView::TrySetValue on invalid view");
+            return false;
+        }
+        const size_t fieldSize = this->GetType().GetSizeInBytes();
+        if constexpr (std::is_trivially_copyable_v<T>) {
+            std::span<const byte> bytes = std::as_bytes(std::span{&value, 1});
+            if (bytes.size() != fieldSize) {
+                RADRAY_ERR_LOG("StructuredBufferView::TrySetValue size mismatch field '{}': value={} field={}", this->GetSelf().GetName(), bytes.size(), fieldSize);
+                return false;
+            }
+            _storage->WriteData(this->GetGlobalOffset(), bytes);
+            return true;
+        } else if constexpr (radray::IsEigenMatrix<T>::value || radray::IsEigenVector<T>::value) {
+            using Scalar = typename T::Scalar;
+            constexpr size_t Count = size_t(T::RowsAtCompileTime) * size_t(T::ColsAtCompileTime);
+            std::span<const byte> bytes = std::as_bytes(std::span<const Scalar, Count>{value.data(), Count});
+            if (bytes.size() != fieldSize) {
+                RADRAY_ERR_LOG("StructuredBufferView::TrySetValue size mismatch field '{}': value={} field={}", this->GetSelf().GetName(), bytes.size(), fieldSize);
+                return false;
+            }
+            _storage->WriteData(this->GetGlobalOffset(), bytes);
+            return true;
+        } else {
+            static_assert(std::is_trivially_copyable_v<T>, "BasicStructuredBufferView::TrySetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
+            return false;
+        }
+    }
+
+    // 兼容旧接口:写值并在 DEBUG 下对失败(未知/尺寸不符)断言。新代码请用 TrySetValue。
     template <class T>
     void SetValue(const T& value) noexcept
     requires(!std::is_const_v<TStorage>)
     {
-        if (!this->IsValid()) {
-            return;
-        }
-        if constexpr (std::is_trivially_copyable_v<T>) {
-            _storage->WriteData(this->GetGlobalOffset(), std::as_bytes(std::span{&value, 1}));
-        } else if constexpr (radray::IsEigenMatrix<T>::value || radray::IsEigenVector<T>::value) {
-            using Scalar = typename T::Scalar;
-            constexpr size_t Count = size_t(T::RowsAtCompileTime) * size_t(T::ColsAtCompileTime);
-            _storage->WriteData(this->GetGlobalOffset(), std::as_bytes(std::span<const Scalar, Count>{value.data(), Count}));
-        } else {
-            static_assert(std::is_trivially_copyable_v<T>, "BasicStructuredBufferView::SetValue requires trivially copyable type or fixed-size Eigen matrix/vector");
-        }
+        bool ok = this->TrySetValue(value);
+        RADRAY_ASSERT(ok);
+        (void)ok;
     }
 
 private:

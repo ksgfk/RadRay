@@ -1032,7 +1032,7 @@ void Application::InitRuntime(const ApplicationRuntimeDescriptor& desc) {
     } else if (desc.Backend == render::RenderBackend::D3D12) {
         render::DXGIFactoryDescriptor dxgiDesc{};
         dxgiDesc.IsEnableDebugLayer = desc.EnableValidation;
-        dxgiDesc.IsEnableGpuBasedValid = desc.EnableValidation;
+        dxgiDesc.IsEnableGpuBasedValid = false;
         _dxgiFactory = render::DXGIFactory::Create(dxgiDesc).Unwrap();
         render::D3D12DeviceDescriptor deviceDesc{};
         deviceDesc.Factory = _dxgiFactory.get();

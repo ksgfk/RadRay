@@ -42,9 +42,8 @@ void MeshPassProcessor::BuildCommands(
         if (material->IsMasked()) {
             variant.Add(shader_define::AlphaTest);
         }
-        const bool needPixelShader = _config.WriteColor || material->IsMasked();
-        const bool alphaClipOnlyPixelShader = !_config.WriteColor && material->IsMasked();
-        const MaterialShaderSet* shaderSet = material->GetShaderSet(variant, needPixelShader, alphaClipOnlyPixelShader);
+        const PixelShaderMode psMode = ResolvePixelShaderMode(_config.WriteColor, material->IsMasked());
+        const MaterialShaderSet* shaderSet = material->GetShaderSet(variant, psMode);
         if (shaderSet == nullptr) {
             continue;
         }
@@ -55,8 +54,7 @@ void MeshPassProcessor::BuildCommands(
             _config.RtFormats,
             _config.RenderState,
             variant,
-            needPixelShader,
-            alphaClipOnlyPixelShader);
+            psMode);
         if (pso == nullptr) {
             continue;
         }
@@ -70,14 +68,23 @@ void MeshPassProcessor::BuildCommands(
             continue;
         }
 
-        // 该 shader 的 gScene push-constant 实际尺寸可能小于 ObjectConstants(160)。
-        // 例如 example_imgui 的 sphere.hlsl 仅声明 MVP+Model(128)。
-        // 按 root signature 反射出的实际尺寸裁剪,只推送 shader 需要的前缀,
-        // 避免 "push constant size mismatch expected:128 actual:160"。
+        // push-constant 尺寸以【反射】为权威源,不再拿 CPU struct 的 sizeof 去 min() 静默截断。
+        // 同一个 god-struct ObjectConstants(160)是各 shader gScene 的【超集】,
+        // 不同 shader 只声明其前缀(如 sphere.hlsl 仅 MVP+Model=128)。
+        // 反射给出该 shader 实际需要的字节数,只推这么多前缀即可。
+        // 反射缺失时回退到 CPU 缓冲全尺寸;反射要求超过 CPU 缓冲时【响亮失败】
+        // (原先的 min() 会静默推不足,导致 shader 读未初始化内存 / RHI 报混乱错误)。
         uint32_t pushSize = static_cast<uint32_t>(sizeof(ObjectConstants));
         auto rangeOpt = rootSig->FindPushConstantRange(paramOpt.value());
         if (rangeOpt.HasValue()) {
-            pushSize = std::min(pushSize, rangeOpt.Get()->Size);
+            const uint32_t reflectedSize = rangeOpt.Get()->Size;
+            if (reflectedSize > sizeof(ObjectConstants)) {
+                RADRAY_ERR_LOG(
+                    "MeshPassProcessor: push-constant '{}' reflected size {} exceeds ObjectConstants {}; skipping draw",
+                    _config.ObjectConstantsParam, reflectedSize, sizeof(ObjectConstants));
+                continue;
+            }
+            pushSize = reflectedSize;
         }
 
         // per-object 常量:MVP = ViewProj * Model,Model 为代理世界矩阵。

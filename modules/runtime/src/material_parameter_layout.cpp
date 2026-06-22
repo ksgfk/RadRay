@@ -237,6 +237,43 @@ Nullable<const MaterialParameterLayout::Field*> MaterialParameterLayout::FindFie
     return it == _fields.end() ? Nullable<const Field*>{} : Nullable<const Field*>{&(*it)};
 }
 
+string MaterialParameterLayout::GetLayoutSignature() const noexcept {
+    // 签名只由反射结果决定:set 索引 + cbuffer(名/大小) + 资源槽(名/种类)。
+    // 资源槽按 (名, 种类) 排序后拼接,使顺序无关的反射产生稳定签名。
+    // 故意不含原始 binding 号:DXC 对同一 shader 的 DXIL/SPIR-V 会给出不同 binding
+    // (DXIL 按 register 类型分名空间,SPIR-V 单一 binding 命名空间),而名/种类跨后端稳定;
+    // 同一后端内资源名唯一 → 名/种类 已足以唯一辨识布局(变体增删资源会改变名集,自然使签名不同)。
+    string sig;
+    sig += "set=";
+    sig += std::to_string(_setIndex);
+    sig += "|cb=";
+    if (_hasConstantBuffer) {
+        sig += _cbufferName;
+        sig += ':';
+        sig += std::to_string(_cbufferSize);
+    } else {
+        sig += "none";
+    }
+    vector<const ResourceSlot*> sorted;
+    sorted.reserve(_resourceSlots.size());
+    for (const ResourceSlot& slot : _resourceSlots) {
+        sorted.push_back(&slot);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const ResourceSlot* a, const ResourceSlot* b) {
+        if (a->Name != b->Name) {
+            return a->Name < b->Name;
+        }
+        return static_cast<uint32_t>(a->Kind) < static_cast<uint32_t>(b->Kind);
+    });
+    for (const ResourceSlot* slot : sorted) {
+        sig += "|r=";
+        sig += slot->Name;
+        sig += ':';
+        sig += (slot->Kind == ResourceKind::Texture) ? 't' : 's';
+    }
+    return sig;
+}
+
 std::optional<StructuredBufferStorage> MaterialParameterLayout::CreateStorageTemplate() const noexcept {
     if (!_hasConstantBuffer) {
         return std::nullopt;

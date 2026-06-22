@@ -168,11 +168,16 @@ void StaticMeshSceneProxy::BuildMaterialInstance() noexcept {
     }
     _materialInstance = MaterialInstance{material};
     // 把 per-使用点材质参数按名写入实例存储(向量型)。
+    // 写入走 fail-fast 路径:未知字段/尺寸不符会返回 false,这里响亮地警告而非静默吞掉。
     for (const MaterialParameterAssignment& param : _materialParams) {
-        _materialInstance.SetVector(param.Name, param.Value);
+        if (!_materialInstance.SetVector(param.Name, param.Value)) {
+            RADRAY_WARN_LOG("StaticMeshSceneProxy: material parameter '{}' not written (unknown field or size mismatch)", param.Name);
+        }
     }
     for (const MaterialTextureAssignment& texture : _materialTextures) {
-        _materialInstance.SetTexture(texture.Name, texture.Texture);
+        if (!_materialInstance.SetTexture(texture.Name, texture.Texture)) {
+            RADRAY_WARN_LOG("StaticMeshSceneProxy: material texture slot '{}' not bound (unknown slot)", texture.Name);
+        }
     }
 }
 
@@ -180,14 +185,18 @@ render::DescriptorSet* StaticMeshSceneProxy::GetMaterialDescriptorSet(GpuSystem*
     if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr || rootSig == nullptr || !_materialInstance.IsValid()) {
         return nullptr;
     }
+    // 缓存 key:per-material set 的反射布局签名。同一材质不同变体的 per-material set
+    // 布局相同 → 签名相同 → 复用已建好的 descriptor set。避免因 RootSig 指针不同而重建。
+    Material* material = _materialInstance.GetMaterial();
+    const string layoutSig = (material != nullptr) ? material->GetParameterLayout().GetLayoutSignature() : string{};
     for (MaterialProxyCacheEntry& entry : _materialRenderProxies) {
-        if (entry.RootSig == rootSig) {
+        if (entry.LayoutSignature == layoutSig) {
             return entry.Built ? entry.Proxy.GetDescriptorSet() : nullptr;
         }
     }
 
     MaterialProxyCacheEntry entry{};
-    entry.RootSig = rootSig;
+    entry.LayoutSignature = layoutSig;
     if (entry.Proxy.Build(gpuSystem->GetDevice(), gpuSystem, _materialInstance, rootSig)) {
         entry.Built = true;
     } else {
