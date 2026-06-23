@@ -39,6 +39,11 @@ class RSCache;
 class PSOCache;
 struct FrameUploadRecord;
 
+struct RootSignatureShader {
+    render::Shader* Shader{nullptr};
+    uint64_t StableId{0};
+};
+
 enum class FrameUploadStage {
     AwaitingFrame,
     InFrame,
@@ -246,7 +251,7 @@ private:
     FrameUploadRecord* _record{nullptr};
 };
 
-/// RootSignature 缓存。按参与 shader 集合(决定绑定布局)去重共享。
+/// RootSignature 缓存。按参与 shader 的稳定身份集合做快速命中，再按真实 binding layout 内容去重共享。
 class RSCache {
 public:
     explicit RSCache(render::Device* device) noexcept : _device(device) {}
@@ -254,9 +259,9 @@ public:
     RSCache& operator=(const RSCache&) = delete;
     ~RSCache() noexcept = default;
 
-    /// 取或建 RootSignature。指针来自 shader cache 的 shader 集合，排序后拼 key 使顺序无关。
+    /// 取或建 RootSignature。StableId 来自 GpuSystem 的 shader interning key，排序后拼 key 使顺序无关。
     /// 命中缓存直接返回，返回的指针由 RSCache 拥有。
-    Nullable<render::RootSignature*> GetOrCreate(std::span<render::Shader*> shaders);
+    Nullable<render::RootSignature*> GetOrCreate(std::span<const RootSignatureShader> shaders);
 
     void Clear() noexcept {
         _shaderSetCache.clear();
@@ -476,6 +481,12 @@ private:
     friend class Application;
 
     void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
+    std::optional<uint64_t> GetShaderStableId(render::Shader* shader) const noexcept;
+
+    struct CachedShader {
+        unique_ptr<render::Shader> Shader;
+        uint64_t StableId{0};
+    };
 
     Application* _app;
     WindowManager* _windowManager{nullptr};
@@ -488,7 +499,8 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     shared_ptr<render::Dxc> _dxc;
-    unordered_map<string, unique_ptr<render::Shader>> _shaderCache;
+    unordered_map<string, CachedShader> _shaderCache;
+    unordered_map<render::Shader*, uint64_t> _shaderStableIds;
     string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
     unique_ptr<RSCache> _rsCache;
     unique_ptr<PSOCache> _psoCache;

@@ -2,6 +2,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/file.h>
+#include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
 #include <radray/render/gpu_resource.h>
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 
 namespace radray {
 
@@ -25,6 +27,26 @@ string BuildDefineString(const ShaderDefine& define) {
         return define.Name;
     }
     return fmt::format("{}={}", define.Name, define.Value);
+}
+
+uint64_t BuildShaderStableId(std::string_view cacheKey) noexcept {
+    return HashData64(cacheKey.data(), cacheKey.size());
+}
+
+string BuildRootSignatureShaderSetKey(std::span<const RootSignatureShader> shaders) {
+    vector<uint64_t> sortedIds;
+    sortedIds.reserve(shaders.size());
+    for (const RootSignatureShader& shader : shaders) {
+        sortedIds.push_back(shader.StableId);
+    }
+    std::sort(sortedIds.begin(), sortedIds.end());
+
+    string key;
+    key.reserve(sortedIds.size() * 17);
+    for (uint64_t stableId : sortedIds) {
+        key += fmt::format("{:016x}|", stableId);
+    }
+    return key;
 }
 
 void AppendSamplerSignature(string& out, const render::SamplerDescriptor& desc) {
@@ -95,6 +117,87 @@ string BuildRootSignatureLayoutKey(const render::RootSignature& rootSig) {
         AppendSamplerSignature(key, sampler.Desc);
     }
     return key;
+}
+
+template <class T>
+void HashEnum(size_t& seed, T value) noexcept
+requires std::is_enum_v<T>
+{
+    HashCombine(seed, static_cast<std::underlying_type_t<T>>(value));
+}
+
+void HashString(size_t& seed, std::string_view value) noexcept {
+    HashCombine(seed, value.size());
+    if (!value.empty()) {
+        HashCombine(seed, HashData(value.data(), value.size()));
+    }
+}
+
+void HashBlendComponent(size_t& seed, const render::BlendComponent& value) noexcept {
+    HashEnum(seed, value.Src);
+    HashEnum(seed, value.Dst);
+    HashEnum(seed, value.Op);
+}
+
+void HashBlendState(size_t& seed, const render::BlendState& value) noexcept {
+    HashBlendComponent(seed, value.Color);
+    HashBlendComponent(seed, value.Alpha);
+}
+
+void HashStencilFaceState(size_t& seed, const render::StencilFaceState& value) noexcept {
+    HashEnum(seed, value.Compare);
+    HashEnum(seed, value.FailOp);
+    HashEnum(seed, value.DepthFailOp);
+    HashEnum(seed, value.PassOp);
+}
+
+void HashStencilState(size_t& seed, const render::StencilState& value) noexcept {
+    HashStencilFaceState(seed, value.Front);
+    HashStencilFaceState(seed, value.Back);
+    HashCombine(seed, value.ReadMask);
+    HashCombine(seed, value.WriteMask);
+}
+
+void HashDepthBiasState(size_t& seed, const render::DepthBiasState& value) noexcept {
+    HashCombine(seed, value.Constant);
+    HashCombine(seed, value.SlopScale);
+    HashCombine(seed, value.Clamp);
+}
+
+void HashDepthStencilState(size_t& seed, const render::DepthStencilState& value) noexcept {
+    HashEnum(seed, value.Format);
+    HashEnum(seed, value.DepthCompare);
+    HashDepthBiasState(seed, value.DepthBias);
+    HashCombine(seed, value.Stencil.has_value());
+    if (value.Stencil.has_value()) {
+        HashStencilState(seed, value.Stencil.value());
+    }
+    HashCombine(seed, value.DepthWriteEnable);
+}
+
+void HashVertexElementKey(size_t& seed, const PSOCache::VertexElementKey& value) noexcept {
+    HashCombine(seed, value.Offset);
+    HashString(seed, value.Semantic);
+    HashCombine(seed, value.SemanticIndex);
+    HashEnum(seed, value.Format);
+    HashCombine(seed, value.Location);
+}
+
+void HashVertexLayoutKey(size_t& seed, const PSOCache::VertexLayoutKey& value) noexcept {
+    HashCombine(seed, value.ArrayStride);
+    HashEnum(seed, value.StepMode);
+    HashCombine(seed, value.Elements.size());
+    for (const PSOCache::VertexElementKey& element : value.Elements) {
+        HashVertexElementKey(seed, element);
+    }
+}
+
+void HashRenderTargetFormats(size_t& seed, const GpuRenderTargetFormats& value) noexcept {
+    HashCombine(seed, value.ColorFormats.size());
+    for (render::TextureFormat format : value.ColorFormats) {
+        HashEnum(seed, format);
+    }
+    HashEnum(seed, value.DepthFormat);
 }
 
 std::optional<uint64_t> GetSubresourceUploadSize(
@@ -622,7 +725,7 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
         isSpirv ? "spirv" : "dxil");
     variant.AppendSignature(key);
     if (auto it = _shaderCache.find(key); it != _shaderCache.end()) {
-        return it->second.get();
+        return it->second.Shader.get();
     }
 
     if (_dxc == nullptr) {
@@ -706,7 +809,11 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
         return nullptr;
     }
     render::Shader* raw = shaderOpt.Get();
-    _shaderCache.emplace(std::move(key), shaderOpt.Release());
+    const uint64_t stableId = BuildShaderStableId(key);
+    _shaderStableIds.emplace(raw, stableId);
+    _shaderCache.emplace(std::move(key), CachedShader{
+                                             .Shader = shaderOpt.Release(),
+                                             .StableId = stableId});
     return raw;
 }
 
@@ -732,7 +839,34 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
 }
 
 Nullable<render::RootSignature*> GpuSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
-    return _rsCache->GetOrCreate(shaders);
+    vector<RootSignatureShader> cacheShaders;
+    cacheShaders.reserve(shaders.size());
+    for (render::Shader* shader : shaders) {
+        if (shader == nullptr) {
+            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from null shader");
+            return nullptr;
+        }
+        std::optional<uint64_t> stableId = GetShaderStableId(shader);
+        if (!stableId.has_value()) {
+            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from shader outside GpuSystem shader cache");
+            return nullptr;
+        }
+        cacheShaders.emplace_back(RootSignatureShader{
+            .Shader = shader,
+            .StableId = stableId.value()});
+    }
+    return _rsCache->GetOrCreate(cacheShaders);
+}
+
+std::optional<uint64_t> GpuSystem::GetShaderStableId(render::Shader* shader) const noexcept {
+    if (shader == nullptr) {
+        return std::nullopt;
+    }
+    auto it = _shaderStableIds.find(shader);
+    if (it == _shaderStableIds.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 void GpuSystem::WaitAndCleanupCompletedFlights() {
@@ -838,24 +972,29 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 //  RSCache
 // ══════════════════════════════════════════════
 
-Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*> shaders) {
+Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<const RootSignatureShader> shaders) {
     if (shaders.empty()) {
         RADRAY_ERR_LOG("RSCache: cannot create root signature from empty shader set");
         return nullptr;
     }
 
-    vector<render::Shader*> sorted{shaders.begin(), shaders.end()};
-    std::sort(sorted.begin(), sorted.end());
-    string key;
-    for (render::Shader* shader : sorted) {
-        key += fmt::format("{:x}|", reinterpret_cast<uintptr_t>(shader));
+    vector<render::Shader*> rawShaders;
+    rawShaders.reserve(shaders.size());
+    for (const RootSignatureShader& shader : shaders) {
+        if (shader.Shader == nullptr) {
+            RADRAY_ERR_LOG("RSCache: cannot create root signature from null shader");
+            return nullptr;
+        }
+        rawShaders.push_back(shader.Shader);
     }
+
+    string key = BuildRootSignatureShaderSetKey(shaders);
     if (auto it = _shaderSetCache.find(key); it != _shaderSetCache.end()) {
         return it->second;
     }
 
     render::RootSignatureDescriptor rsDesc{};
-    rsDesc.Shaders = shaders;
+    rsDesc.Shaders = rawShaders;
     auto rsOpt = _device->CreateRootSignature(rsDesc);
     if (!rsOpt.HasValue()) {
         RADRAY_ERR_LOG("RSCache: failed to create root signature");
@@ -1258,41 +1397,18 @@ PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBu
 size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
     size_t seed = 0;
     HashCombine(seed, key.Material);
-    HashCombine(seed, reinterpret_cast<uintptr_t>(key.RootSig));
+    HashCombine(seed, key.RootSig);
     HashCombine(seed, key.TwoSided);
-    HashCombine(seed, static_cast<int32_t>(key.DepthStencil.DepthCompare));
-    HashCombine(seed, key.DepthStencil.DepthWriteEnable);
-    HashCombine(seed, key.DepthStencil.DepthBias.Constant);
-    HashCombine(seed, key.DepthStencil.DepthBias.SlopScale);
-    HashCombine(seed, key.DepthStencil.DepthBias.Clamp);
-    HashCombine(seed, static_cast<uint32_t>(key.DepthStencil.Format));
-    HashCombine(seed, key.DepthStencil.Stencil.has_value());
+    HashDepthStencilState(seed, key.DepthStencil);
     HashCombine(seed, key.Blend.has_value());
     if (key.Blend.has_value()) {
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Src));
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Dst));
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Color.Op));
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Src));
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Dst));
-        HashCombine(seed, static_cast<int32_t>(key.Blend->Alpha.Op));
+        HashBlendState(seed, key.Blend.value());
     }
     HashCombine(seed, key.ColorWriteMask.value());
-    HashCombine(seed, static_cast<uint8_t>(key.PsMode));
+    HashEnum(seed, key.PsMode);
     HashCombine(seed, ShaderVariantKeyHash{}(key.Variant));
-    HashCombine(seed, key.Vertex.ArrayStride);
-    HashCombine(seed, static_cast<uint32_t>(key.Vertex.StepMode));
-    std::hash<std::string_view> hashString;
-    for (const VertexElementKey& element : key.Vertex.Elements) {
-        HashCombine(seed, element.Offset);
-        HashCombine(seed, hashString(std::string_view{element.Semantic}));
-        HashCombine(seed, element.SemanticIndex);
-        HashCombine(seed, static_cast<uint32_t>(element.Format));
-        HashCombine(seed, element.Location);
-    }
-    for (render::TextureFormat format : key.RtFormats.ColorFormats) {
-        HashCombine(seed, static_cast<uint32_t>(format));
-    }
-    HashCombine(seed, static_cast<uint32_t>(key.RtFormats.DepthFormat));
+    HashVertexLayoutKey(seed, key.Vertex);
+    HashRenderTargetFormats(seed, key.RtFormats);
     return seed;
 }
 

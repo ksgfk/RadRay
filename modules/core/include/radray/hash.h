@@ -28,5 +28,6 @@ struct StringEqual {
 };
 
 size_t HashData(const void* data, size_t size) noexcept;
+uint64_t HashData64(const void* data, size_t size) noexcept;
 
 }  // namespace radray

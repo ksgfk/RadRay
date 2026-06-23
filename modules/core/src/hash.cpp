@@ -14,4 +14,8 @@ size_t HashData(const void* data, size_t size) noexcept {
     }
 }
 
+uint64_t HashData64(const void* data, size_t size) noexcept {
+    return XXH64(data, size, 0);
+}
+
 }  // namespace radray
