@@ -69,8 +69,6 @@ public:
 
     bool IsValid() const noexcept { return _defaultShaders.RootSig != nullptr && _defaultShaders.VS != nullptr && _defaultShaders.PS != nullptr; }
 
-    render::Shader* GetVS() const noexcept { return _defaultShaders.VS; }
-    render::Shader* GetPS() const noexcept { return _defaultShaders.PS; }
     std::string_view GetVsEntry() const noexcept { return _vsEntry; }
     std::string_view GetPsEntry() const noexcept { return _psEntry; }
     std::string_view GetDepthPsEntry() const noexcept { return _depthPsEntry; }

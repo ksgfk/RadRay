@@ -1300,7 +1300,9 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
     const Material& material,
     const render::VertexBufferLayout& vertexLayout,
     const RenderTargetFormats& rtFormats,
-    const MeshPassRenderState& renderState,
+    const render::DepthStencilState& depthStencil,
+    const std::optional<render::BlendState>& blend,
+    render::ColorWrites colorWriteMask,
     const ShaderVariantKey& variant,
     PixelShaderMode psMode) {
     if (!material.IsValid()) {
@@ -1309,7 +1311,7 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
     }
 
     const bool needPixelShader = NeedsPixelShader(psMode);
-    render::DepthStencilState depthState = renderState.DepthStencil;
+    render::DepthStencilState depthState = depthStencil;
     depthState.Format = rtFormats.DepthFormat;
 
     const MaterialShaderSet* shaderSet = material.GetShaderSet(variant, psMode);
@@ -1323,8 +1325,8 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
         .RootSig = shaderSet->RootSig,
         .TwoSided = material.IsTwoSided(),
         .DepthStencil = depthState,
-        .Blend = renderState.Blend,
-        .ColorWriteMask = renderState.ColorWriteMask,
+        .Blend = blend,
+        .ColorWriteMask = colorWriteMask,
         .PsMode = psMode,
         .Variant = variant,
         .Vertex = VertexLayoutKey::From(vertexLayout),
@@ -1337,8 +1339,8 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(
     colorTargets.reserve(rtFormats.ColorFormats.size());
     for (render::TextureFormat f : rtFormats.ColorFormats) {
         render::ColorTargetState cts = render::ColorTargetState::Default(f);
-        cts.Blend = renderState.Blend;
-        cts.WriteMask = renderState.ColorWriteMask;
+        cts.Blend = blend;
+        cts.WriteMask = colorWriteMask;
         colorTargets.push_back(cts);
     }
 

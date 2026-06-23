@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/renderer/scene_renderer.h>
 #include <radray/runtime/shader_variant.h>
 
 using namespace radray;

@@ -52,7 +52,9 @@ void MeshPassProcessor::BuildCommands(
             *material,
             layout,
             _config.RtFormats,
-            _config.RenderState,
+            _config.RenderState.DepthStencil,
+            _config.RenderState.Blend,
+            _config.RenderState.ColorWriteMask,
             variant,
             psMode);
         if (pso == nullptr) {

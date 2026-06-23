@@ -94,74 +94,6 @@ struct GpuRenderTargetFormats {
     friend bool operator==(const GpuRenderTargetFormats&, const GpuRenderTargetFormats&) = default;
 };
 
-/// 一个 mesh pass 的权威输出合并状态。Depth/Blend/ColorWrites 由 pass 提供,
-/// Material 只贡献材质语义与光栅化偏好。
-struct MeshPassRenderState {
-    render::DepthStencilState DepthStencil{render::DepthStencilState::Default()};
-    std::optional<render::BlendState> Blend{};
-    render::ColorWrites ColorWriteMask{render::ColorWrite::All};
-    uint32_t StencilRef{0};
-
-    friend bool operator==(const MeshPassRenderState&, const MeshPassRenderState&) = default;
-
-    // —— 标准 render state 预设(独立项 E)——
-    // 各 pass 不再手搓 DepthStencil/Blend/ColorWrite,改取下列预设之一。
-    // 注意:DepthStencil.Format 会被 PSOCache 按 RtFormats.DepthFormat 覆写,故预设里不关心 Format。
-
-    /// 深度预通道(Pre-Z):depth Less + 写深度,无混合。等价 DepthStencilState::Default()。
-    /// 配合 Config.WriteColor=false 使用(只写深度,不出 color)。
-    static MeshPassRenderState PreZ() noexcept {
-        MeshPassRenderState s{};
-        s.DepthStencil = render::DepthStencilState::Default();
-        s.DepthStencil.DepthCompare = render::CompareFunction::Less;
-        s.DepthStencil.DepthWriteEnable = true;
-        return s;
-    }
-
-    /// 阴影投射(depth-only):depth LessEqual + 写深度 + 光栅深度偏移。
-    /// 配合 Config.WriteColor=false 使用。
-    static MeshPassRenderState Shadow(
-        int32_t depthBias = 0,
-        float slopeScaledBias = 0.0f,
-        float depthBiasClamp = 0.0f) noexcept {
-        MeshPassRenderState s{};
-        s.DepthStencil = render::DepthStencilState::Default();
-        s.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-        s.DepthStencil.DepthWriteEnable = true;
-        s.DepthStencil.DepthBias = render::DepthBiasState{depthBias, slopeScaledBias, depthBiasClamp};
-        return s;
-    }
-
-    /// 不透明基础通道(与 Pre-Z 配对):depth Equal + 不写深度,只写 RGB(不写 backbuffer alpha)。
-    static MeshPassRenderState OpaqueBase() noexcept {
-        MeshPassRenderState s{};
-        s.DepthStencil = render::DepthStencilState::Default();
-        s.DepthStencil.DepthCompare = render::CompareFunction::Equal;
-        s.DepthStencil.DepthWriteEnable = false;
-        s.ColorWriteMask = render::ColorWrite::Color;
-        return s;
-    }
-
-    /// 透明(alpha-over):depth LessEqual + 不写深度,src-alpha over 混合,只写 RGB。
-    static MeshPassRenderState Transparent() noexcept {
-        MeshPassRenderState s{};
-        s.DepthStencil = render::DepthStencilState::Default();
-        s.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-        s.DepthStencil.DepthWriteEnable = false;
-        s.Blend = render::BlendState{
-            .Color = {
-                .Src = render::BlendFactor::SrcAlpha,
-                .Dst = render::BlendFactor::OneMinusSrcAlpha,
-                .Op = render::BlendOperation::Add},
-            .Alpha = {
-                .Src = render::BlendFactor::One,
-                .Dst = render::BlendFactor::OneMinusSrcAlpha,
-                .Op = render::BlendOperation::Add}};
-        s.ColorWriteMask = render::ColorWrite::Color;
-        return s;
-    }
-};
-
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
 /// 留在 runtime 的 per-flight FlightSlot 里，应用只拿到 backbuffer + view。
 /// 【不暴露同步对象】sync object 是提交细节，由 runtime 独占。
@@ -390,13 +322,16 @@ public:
         size_t operator()(const GraphicsPsoKey& key) const noexcept;
     };
 
-    /// 取或建 PSO。material 提供 shader/root signature/光栅化语义,renderState 提供 pass 状态,
+    /// 取或建 PSO。material 提供 shader/root signature/光栅化语义;depthStencil/blend/colorWriteMask
+    /// 提供 pass 的输出合并状态(由调用方从 mesh pass 状态拆出,故 PSOCache 不依赖 renderer 层类型);
     /// vertexLayout 提供 input layout,rtFormats 提供 RT 格式。命中缓存直接返回。
     render::GraphicsPipelineState* GetOrCreate(
         const Material& material,
         const render::VertexBufferLayout& vertexLayout,
         const RenderTargetFormats& rtFormats,
-        const MeshPassRenderState& renderState,
+        const render::DepthStencilState& depthStencil,
+        const std::optional<render::BlendState>& blend,
+        render::ColorWrites colorWriteMask,
         const ShaderVariantKey& variant,
         PixelShaderMode psMode);
 
