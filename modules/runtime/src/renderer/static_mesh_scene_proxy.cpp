@@ -185,18 +185,16 @@ render::DescriptorSet* StaticMeshSceneProxy::GetMaterialDescriptorSet(GpuSystem*
     if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr || rootSig == nullptr || !_materialInstance.IsValid()) {
         return nullptr;
     }
-    // 缓存 key:per-material set 的反射布局签名。同一材质不同变体的 per-material set
-    // 布局相同 → 签名相同 → 复用已建好的 descriptor set。避免因 RootSig 指针不同而重建。
-    Material* material = _materialInstance.GetMaterial();
-    const string layoutSig = (material != nullptr) ? material->GetParameterLayout().GetLayoutSignature() : string{};
+    // Cache by RootSignature, not by material layout signature. VS-only depth variants
+    // often have no set1 bindings; caching that miss by layout would poison color passes.
     for (MaterialProxyCacheEntry& entry : _materialRenderProxies) {
-        if (entry.LayoutSignature == layoutSig) {
+        if (entry.RootSig == rootSig) {
             return entry.Built ? entry.Proxy.GetDescriptorSet() : nullptr;
         }
     }
 
     MaterialProxyCacheEntry entry{};
-    entry.LayoutSignature = layoutSig;
+    entry.RootSig = rootSig;
     if (entry.Proxy.Build(gpuSystem->GetDevice(), gpuSystem, _materialInstance, rootSig)) {
         entry.Built = true;
     } else {

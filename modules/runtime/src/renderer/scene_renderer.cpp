@@ -48,15 +48,42 @@ void MeshPassProcessor::BuildCommands(
             continue;
         }
 
-        render::GraphicsPipelineState* pso = _config.Cache->GetOrCreate(
-            *material,
-            layout,
-            _config.RtFormats,
-            _config.RenderState.DepthStencil,
-            _config.RenderState.Blend,
-            _config.RenderState.ColorWriteMask,
-            variant,
-            psMode);
+        render::DepthStencilState depthState = _config.RenderState.DepthStencil;
+        depthState.Format = _config.RtFormats.DepthFormat;
+
+        vector<render::ColorTargetState> colorTargets;
+        colorTargets.reserve(_config.RtFormats.ColorFormats.size());
+        for (render::TextureFormat format : _config.RtFormats.ColorFormats) {
+            render::ColorTargetState colorTarget = render::ColorTargetState::Default(format);
+            colorTarget.Blend = _config.RenderState.Blend;
+            colorTarget.WriteMask = _config.RenderState.ColorWriteMask;
+            colorTargets.push_back(colorTarget);
+        }
+
+        render::PrimitiveState primitive = material->GetPrimitiveState();
+        if (material->IsTwoSided()) {
+            primitive.Cull = render::CullMode::None;
+        }
+
+        std::optional<CompiledShaderEntry> psEntry;
+        if (NeedsPixelShader(psMode)) {
+            if (!shaderSet->PS.has_value()) {
+                continue;
+            }
+            psEntry = shaderSet->PS.value();
+        }
+
+        render::VertexBufferLayout vertexLayouts[] = {layout};
+        render::GraphicsPipelineState* pso = _config.Cache->GetOrCreate(PSOCache::GraphicsPsoDesc{
+            .RootSig = shaderSet->RootSig,
+            .RootLayout = shaderSet->RootLayout,
+            .VS = shaderSet->VS,
+            .PS = psEntry,
+            .VertexLayouts = std::span<const render::VertexBufferLayout>{vertexLayouts, 1},
+            .Primitive = primitive,
+            .DepthStencil = depthState,
+            .MultiSample = render::MultiSampleState::Default(),
+            .ColorTargets = std::span<const render::ColorTargetState>{colorTargets.data(), colorTargets.size()}});
         if (pso == nullptr) {
             continue;
         }

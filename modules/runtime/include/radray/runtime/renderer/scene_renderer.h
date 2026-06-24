@@ -212,7 +212,7 @@ struct MeshPassRenderState {
 
     // —— 标准 render state 预设(独立项 E)——
     // 各 pass 不再手搓 DepthStencil/Blend/ColorWrite,改取下列预设之一。
-    // 注意:DepthStencil.Format 会被 PSOCache 按 RtFormats.DepthFormat 覆写,故预设里不关心 Format。
+    // 注意:DepthStencil.Format 会由 MeshPassProcessor 按 RtFormats.DepthFormat 覆写,故预设里不关心 Format。
 
     /// 深度预通道(Pre-Z):depth Less + 写深度,无混合。等价 DepthStencilState::Default()。
     /// 配合 Config.WriteColor=false 使用(只写深度,不出 color)。
@@ -279,7 +279,7 @@ public:
         using ObjectConstantsCallback = std::function<void(ObjectConstants&, const PrimitiveSceneProxy&, const SceneView&)>;
 
         PSOCache* Cache{nullptr};
-        PSOCache::RenderTargetFormats RtFormats{};
+        GpuRenderTargetFormats RtFormats{};
         /// 材质 push-constant 槽位名(填 ObjectConstants 的目标)。
         std::string_view ObjectConstantsParam{"gScene"};
         /// 用于懒构建 MaterialRenderProxy 的 GPU 系统。为空时跳过 per-material 绑定。

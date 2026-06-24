@@ -549,6 +549,77 @@ static std::optional<_StaticSamplerSelectionVulkan> _SelectStaticSamplersVulkan(
     return result;
 }
 
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreviewVulkan(
+    const RootSignatureDescriptor& desc) noexcept {
+    auto mergedOpt = BuildMergedBindingLayoutVulkan(desc.Shaders);
+    if (!mergedOpt.has_value()) {
+        return std::nullopt;
+    }
+
+    auto merged = std::move(mergedOpt.value());
+    const auto allParameters = merged.Layout.GetParameters();
+    if (merged.Parameters.size() != allParameters.size()) {
+        RADRAY_ERR_LOG("internal error: merged parameter metadata size mismatch");
+        return std::nullopt;
+    }
+
+    auto staticSamplerSelectionOpt = _SelectStaticSamplersVulkan(
+        merged.Layout,
+        merged.Parameters,
+        desc.StaticSamplers);
+    if (!staticSamplerSelectionOpt.has_value()) {
+        return std::nullopt;
+    }
+    auto staticSamplerSelection = std::move(staticSamplerSelectionOpt.value());
+
+    RootSignatureLayoutPreview preview{};
+    preview.Layout = BindingLayout{std::move(staticSamplerSelection.PublicParameters)};
+    preview.DescriptorSetCount = merged.SetLayoutCount;
+    preview.StaticSamplerLayouts = std::move(staticSamplerSelection.StaticSamplers);
+
+    preview.BindlessSetLayouts.reserve(allParameters.size());
+    preview.PushConstantRanges.reserve(allParameters.size());
+    for (size_t i = 0; i < allParameters.size(); ++i) {
+        const auto& parameter = allParameters[i];
+        const auto& vkInfo = merged.Parameters[i];
+        if (parameter.Kind == BindingParameterKind::PushConstant) {
+            const auto& abi = std::get<PushConstantBindingAbi>(parameter.Abi);
+            if (abi.Size == 0 || (abi.Offset % 4) != 0 || (abi.Size % 4) != 0) {
+                RADRAY_ERR_LOG("vk push constant '{}' must be 4-byte aligned and non-empty", parameter.Name);
+                return std::nullopt;
+            }
+            preview.PushConstantRanges.push_back(PushConstantRange{
+                .Name = parameter.Name,
+                .Id = parameter.Id,
+                .Stages = parameter.Stages,
+                .Offset = abi.Offset,
+                .Size = abi.Size,
+            });
+            continue;
+        }
+
+        const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+        if (vkInfo.DescriptorType == VK_DESCRIPTOR_TYPE_MAX_ENUM) {
+            RADRAY_ERR_LOG("vk lowering metadata is unavailable for '{}'", parameter.Name);
+            return std::nullopt;
+        }
+        if (!abi.IsBindless) {
+            continue;
+        }
+        preview.BindlessSetLayouts.push_back(BindlessSetLayout{
+            .Name = parameter.Name,
+            .Id = parameter.Id,
+            .Set = abi.Set,
+            .Binding = abi.Binding,
+            .Type = abi.Type,
+            .SlotType = vkInfo.BindlessSlotType,
+            .Stages = parameter.Stages,
+        });
+    }
+
+    return preview;
+}
+
 static unique_ptr<DescriptorSetLayoutVulkan> _CreateDescriptorSetLayoutVulkan(
     DeviceVulkan* device,
     const vector<VkDescriptorSetLayoutBinding>& bindings,

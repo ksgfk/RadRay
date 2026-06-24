@@ -525,6 +525,82 @@ static std::optional<_StaticSamplerSelectionD3D12> _SelectStaticSamplersD3D12(
     return result;
 }
 
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreviewD3D12(
+    const RootSignatureDescriptor& desc) noexcept {
+    auto mergedOpt = BuildMergedBindingLayoutD3D12(desc.Shaders);
+    if (!mergedOpt.has_value()) {
+        return std::nullopt;
+    }
+
+    auto merged = std::move(mergedOpt.value());
+    const auto allParameters = merged.Layout.GetParameters();
+    if (merged.D3D12Parameters.size() != allParameters.size()) {
+        RADRAY_ERR_LOG("internal error: merged parameter metadata size mismatch");
+        return std::nullopt;
+    }
+
+    auto staticSamplerSelectionOpt = _SelectStaticSamplersD3D12(
+        merged.Layout,
+        merged.D3D12Parameters,
+        desc.StaticSamplers);
+    if (!staticSamplerSelectionOpt.has_value()) {
+        return std::nullopt;
+    }
+    auto staticSamplerSelection = std::move(staticSamplerSelectionOpt.value());
+
+    RootSignatureLayoutPreview preview{};
+    preview.Layout = BindingLayout{std::move(staticSamplerSelection.PublicParameters)};
+    preview.DescriptorSetCount = merged.SetCount;
+    preview.StaticSamplerLayouts = std::move(staticSamplerSelection.StaticSamplers);
+
+    preview.BindlessSetLayouts.reserve(allParameters.size());
+    preview.PushConstantRanges.reserve(allParameters.size());
+    for (size_t i = 0; i < allParameters.size(); ++i) {
+        const auto& parameter = allParameters[i];
+        if (parameter.Kind == BindingParameterKind::PushConstant) {
+            const auto& abi = std::get<PushConstantBindingAbi>(parameter.Abi);
+            const auto& d3d12 = merged.D3D12Parameters[i];
+            if (!d3d12.IsAvailable) {
+                RADRAY_ERR_LOG("d3d12 push constant metadata is unavailable for '{}'", parameter.Name);
+                return std::nullopt;
+            }
+            if (abi.Size == 0 || (abi.Offset % 4) != 0 || (abi.Size % 4) != 0) {
+                RADRAY_ERR_LOG("d3d12 push constant '{}' must be 4-byte aligned and non-empty", parameter.Name);
+                return std::nullopt;
+            }
+            preview.PushConstantRanges.push_back(PushConstantRange{
+                .Name = parameter.Name,
+                .Id = parameter.Id,
+                .Stages = parameter.Stages,
+                .Offset = abi.Offset,
+                .Size = abi.Size,
+            });
+            continue;
+        }
+
+        const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
+        if (!abi.IsBindless) {
+            continue;
+        }
+        const auto& d3d12 = merged.D3D12Parameters[i];
+        if (!d3d12.IsAvailable || !d3d12.IsBindless) {
+            RADRAY_ERR_LOG("d3d12 bindless lowering metadata is unavailable for '{}'", parameter.Name);
+            return std::nullopt;
+        }
+        preview.BindlessSetLayouts.push_back(BindlessSetLayout{
+            .Name = parameter.Name,
+            .Id = parameter.Id,
+            .Set = abi.Set,
+            .Binding = abi.Binding,
+            .Type = abi.Type,
+            .SlotType = d3d12.BindlessSlotType,
+            .Stages = parameter.Stages,
+        });
+    }
+
+    return preview;
+}
+
 static bool _BindDescriptorSetD3D12(
     CmdListD3D12* cmdList,
     RootSigD3D12* boundRootSig,

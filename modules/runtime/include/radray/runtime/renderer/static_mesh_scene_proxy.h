@@ -63,11 +63,10 @@ private:
     vector<MaterialParameterAssignment> _materialParams;
     vector<MaterialTextureAssignment> _materialTextures;
     MaterialInstance _materialInstance;
-    // 缓存 key 为 per-material set 的反射布局签名(而非 RootSig 指针):同一材质不同
-    // shader 变体的 per-material set 数据完全相同,签名相等即复用已建好的 descriptor set,
-    // 不再因别的 set 变化导致 RootSig 指针不同而被无谓重建(缺陷3)。
+    // Descriptor set 由具体 RootSignature 创建,后端绑定时也会校验归属。
+    // depth-only VS-only 变体可能没有 per-material set,不能把其失败结果复用到 BasePass。
     struct MaterialProxyCacheEntry {
-        string LayoutSignature{};
+        render::RootSignature* RootSig{nullptr};
         MaterialRenderProxy Proxy{};
         bool Built{false};
         bool Failed{false};

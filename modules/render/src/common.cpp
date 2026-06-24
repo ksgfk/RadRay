@@ -131,6 +131,34 @@ Nullable<const PushConstantRange*> RootSignature::FindPushConstantRange(BindingP
     return nullptr;
 }
 
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreview(
+    RenderBackend backend,
+    const RootSignatureDescriptor& desc) noexcept {
+    switch (backend) {
+        case RenderBackend::D3D12:
+#ifdef RADRAY_ENABLE_D3D12
+            return d3d12::BuildRootSignatureLayoutPreviewD3D12(desc);
+#else
+            RADRAY_ERR_LOG("D3D12 disable");
+            return std::nullopt;
+#endif
+        case RenderBackend::Vulkan:
+#ifdef RADRAY_ENABLE_VULKAN
+            return vulkan::BuildRootSignatureLayoutPreviewVulkan(desc);
+#else
+            RADRAY_ERR_LOG("Vulkan disable");
+            return std::nullopt;
+#endif
+        case RenderBackend::Metal:
+            RADRAY_ERR_LOG("Metal root signature layout preview is not implemented");
+            return std::nullopt;
+        case RenderBackend::MAX_COUNT:
+            break;
+    }
+    RADRAY_ERR_LOG("unknown render backend {}", static_cast<uint32_t>(backend));
+    return std::nullopt;
+}
+
 bool DescriptorSet::WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
     auto idOpt = ResolveParameterId(name);
     if (!idOpt.has_value()) {

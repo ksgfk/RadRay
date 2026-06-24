@@ -8,10 +8,8 @@
 #include <radray/render/gpu_resource.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/render/shader_compiler/spvc.h>
-#include <radray/utility.h>
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>
-#include <radray/runtime/material.h>
 #include <radray/runtime/window_manager.h>
 
 #include <algorithm>
@@ -29,176 +27,258 @@ string BuildDefineString(const ShaderDefine& define) {
     return fmt::format("{}={}", define.Name, define.Value);
 }
 
-uint64_t BuildShaderStableId(std::string_view cacheKey) noexcept {
-    return HashData64(cacheKey.data(), cacheKey.size());
-}
-
-string BuildRootSignatureShaderSetKey(std::span<const RootSignatureShader> shaders) {
-    vector<uint64_t> sortedIds;
-    sortedIds.reserve(shaders.size());
-    for (const RootSignatureShader& shader : shaders) {
-        sortedIds.push_back(shader.StableId);
+class HashKeyBuilder {
+public:
+    template <class T>
+    void AddPod(const T& value) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        AddBytes(&value, sizeof(T));
     }
-    std::sort(sortedIds.begin(), sortedIds.end());
 
-    string key;
-    key.reserve(sortedIds.size() * 17);
-    for (uint64_t stableId : sortedIds) {
-        key += fmt::format("{:016x}|", stableId);
+    template <class T>
+    void AddEnum(T value)
+    requires std::is_enum_v<T>
+    {
+        AddPod(static_cast<std::underlying_type_t<T>>(value));
     }
-    return key;
-}
 
-void AppendSamplerSignature(string& out, const render::SamplerDescriptor& desc) {
-    out += fmt::format(
-        "addr={},{},{};filter={},{},{};lod={:.9g},{:.9g};cmp={};aniso={};",
-        static_cast<uint32_t>(desc.AddressS),
-        static_cast<uint32_t>(desc.AddressT),
-        static_cast<uint32_t>(desc.AddressR),
-        static_cast<uint32_t>(desc.MinFilter),
-        static_cast<uint32_t>(desc.MagFilter),
-        static_cast<uint32_t>(desc.MipmapFilter),
-        desc.LodMin,
-        desc.LodMax,
-        desc.Compare.has_value() ? static_cast<int32_t>(desc.Compare.value()) : -1,
-        desc.AnisotropyClamp);
-}
+    void AddString(std::string_view value) {
+        AddSize(value.size());
+        AddBytes(value.data(), value.size());
+    }
 
-string BuildRootSignatureLayoutKey(const render::RootSignature& rootSig) {
-    string key;
-    for (const render::BindingParameterLayout& param : rootSig.GetBindingLayout().GetParameters()) {
-        key += fmt::format(
-            "P:{}:{}:{}:{}:",
-            param.Id.Value,
-            param.Name,
-            static_cast<uint32_t>(param.Kind),
-            param.Stages.value());
-        if (const auto* abi = std::get_if<render::ResourceBindingAbi>(&param.Abi)) {
-            key += fmt::format(
-                "R:{}:{}:{}:{}:{}:{};",
-                abi->Set.Value,
-                abi->Binding,
-                static_cast<uint32_t>(abi->Type),
-                abi->Count,
-                abi->IsReadOnly,
-                abi->IsBindless);
-        } else if (const auto* pushAbi = std::get_if<render::PushConstantBindingAbi>(&param.Abi)) {
-            key += fmt::format("C:{}:{};", pushAbi->Offset, pushAbi->Size);
+    void AddSize(size_t value) {
+        AddPod(static_cast<uint64_t>(value));
+    }
+
+    void AddBool(bool value) {
+        const uint8_t byte = value ? 1u : 0u;
+        AddPod(byte);
+    }
+
+    void AddFloat(float value) {
+        if (value == 0.0f) {
+            value = 0.0f;
+        }
+        AddPod(value);
+    }
+
+    void AddShaderDefine(const ShaderDefine& value) {
+        AddString(value.Name);
+        AddString(value.Value);
+    }
+
+    void AddBlendComponent(const render::BlendComponent& value) {
+        AddEnum(value.Src);
+        AddEnum(value.Dst);
+        AddEnum(value.Op);
+    }
+
+    void AddBlendState(const render::BlendState& value) {
+        AddBlendComponent(value.Color);
+        AddBlendComponent(value.Alpha);
+    }
+
+    void AddStencilFaceState(const render::StencilFaceState& value) {
+        AddEnum(value.Compare);
+        AddEnum(value.FailOp);
+        AddEnum(value.DepthFailOp);
+        AddEnum(value.PassOp);
+    }
+
+    void AddStencilState(const render::StencilState& value) {
+        AddStencilFaceState(value.Front);
+        AddStencilFaceState(value.Back);
+        AddPod(value.ReadMask);
+        AddPod(value.WriteMask);
+    }
+
+    void AddDepthBiasState(const render::DepthBiasState& value) {
+        AddPod(value.Constant);
+        AddFloat(value.SlopScale);
+        AddFloat(value.Clamp);
+    }
+
+    void AddDepthStencilState(const render::DepthStencilState& value) {
+        AddEnum(value.Format);
+        AddEnum(value.DepthCompare);
+        AddDepthBiasState(value.DepthBias);
+        AddBool(value.Stencil.has_value());
+        if (value.Stencil.has_value()) {
+            AddStencilState(value.Stencil.value());
+        }
+        AddBool(value.DepthWriteEnable);
+    }
+
+    void AddVertexElementKey(const PSOCache::VertexElementKey& value) {
+        AddPod(value.Offset);
+        AddString(value.Semantic);
+        AddPod(value.SemanticIndex);
+        AddEnum(value.Format);
+        AddPod(value.Location);
+    }
+
+    void AddVertexLayoutKey(const PSOCache::VertexLayoutKey& value) {
+        AddPod(value.ArrayStride);
+        AddEnum(value.StepMode);
+        AddSize(value.Elements.size());
+        for (const PSOCache::VertexElementKey& element : value.Elements) {
+            AddVertexElementKey(element);
         }
     }
-    for (const render::PushConstantRange& range : rootSig.GetPushConstantRanges()) {
-        key += fmt::format(
-            "PC:{}:{}:{}:{}:{};",
-            range.Id.Value,
-            range.Name,
-            range.Stages.value(),
-            range.Offset,
-            range.Size);
+
+    void AddShaderVariantKey(const ShaderVariantKey& value) {
+        AddSize(value.Defines().size());
+        for (const ShaderDefine& define : value.Defines()) {
+            AddShaderDefine(define);
+        }
     }
-    for (const render::BindlessSetLayout& bindless : rootSig.GetBindlessSetLayouts()) {
-        key += fmt::format(
-            "B:{}:{}:{}:{}:{}:{}:{};",
-            bindless.Id.Value,
-            bindless.Name,
-            bindless.Set.Value,
-            bindless.Binding,
-            static_cast<uint32_t>(bindless.Type),
-            static_cast<uint32_t>(bindless.SlotType),
-            bindless.Stages.value());
+
+    void AddShaderCompileKey(const ShaderCompileKey& value) {
+        AddString(value.Name);
+        AddString(value.EntryPoint);
+        AddEnum(value.Stage);
+        AddEnum(value.Backend);
+        AddShaderVariantKey(value.Variant);
     }
-    for (const render::StaticSamplerLayout& sampler : rootSig.GetStaticSamplerLayouts()) {
-        key += fmt::format(
-            "S:{}:{}:{}:{}:{}:",
-            sampler.Id.Value,
-            sampler.Name,
-            sampler.Set.Value,
-            sampler.Binding,
-            sampler.Stages.value());
-        AppendSamplerSignature(key, sampler.Desc);
+
+    void AddResourceBindingAbi(const render::ResourceBindingAbi& value) {
+        AddPod(value.Set.Value);
+        AddPod(value.Binding);
+        AddEnum(value.Type);
+        AddPod(value.Count);
+        AddBool(value.IsReadOnly);
+        AddBool(value.IsBindless);
     }
-    return key;
-}
 
-template <class T>
-void HashEnum(size_t& seed, T value) noexcept
-requires std::is_enum_v<T>
-{
-    HashCombine(seed, static_cast<std::underlying_type_t<T>>(value));
-}
-
-void HashString(size_t& seed, std::string_view value) noexcept {
-    HashCombine(seed, value.size());
-    if (!value.empty()) {
-        HashCombine(seed, HashData(value.data(), value.size()));
+    void AddPushConstantBindingAbi(const render::PushConstantBindingAbi& value) {
+        AddPod(value.Offset);
+        AddPod(value.Size);
     }
-}
 
-void HashBlendComponent(size_t& seed, const render::BlendComponent& value) noexcept {
-    HashEnum(seed, value.Src);
-    HashEnum(seed, value.Dst);
-    HashEnum(seed, value.Op);
-}
-
-void HashBlendState(size_t& seed, const render::BlendState& value) noexcept {
-    HashBlendComponent(seed, value.Color);
-    HashBlendComponent(seed, value.Alpha);
-}
-
-void HashStencilFaceState(size_t& seed, const render::StencilFaceState& value) noexcept {
-    HashEnum(seed, value.Compare);
-    HashEnum(seed, value.FailOp);
-    HashEnum(seed, value.DepthFailOp);
-    HashEnum(seed, value.PassOp);
-}
-
-void HashStencilState(size_t& seed, const render::StencilState& value) noexcept {
-    HashStencilFaceState(seed, value.Front);
-    HashStencilFaceState(seed, value.Back);
-    HashCombine(seed, value.ReadMask);
-    HashCombine(seed, value.WriteMask);
-}
-
-void HashDepthBiasState(size_t& seed, const render::DepthBiasState& value) noexcept {
-    HashCombine(seed, value.Constant);
-    HashCombine(seed, value.SlopScale);
-    HashCombine(seed, value.Clamp);
-}
-
-void HashDepthStencilState(size_t& seed, const render::DepthStencilState& value) noexcept {
-    HashEnum(seed, value.Format);
-    HashEnum(seed, value.DepthCompare);
-    HashDepthBiasState(seed, value.DepthBias);
-    HashCombine(seed, value.Stencil.has_value());
-    if (value.Stencil.has_value()) {
-        HashStencilState(seed, value.Stencil.value());
+    void AddBindingParameterLayout(const render::BindingParameterLayout& value) {
+        AddString(value.Name);
+        AddPod(value.Id.Value);
+        AddEnum(value.Kind);
+        AddPod(value.Stages.value());
+        AddPod(static_cast<uint32_t>(value.Abi.index()));
+        if (const auto* resource = std::get_if<render::ResourceBindingAbi>(&value.Abi)) {
+            AddResourceBindingAbi(*resource);
+        } else if (const auto* pushConstant = std::get_if<render::PushConstantBindingAbi>(&value.Abi)) {
+            AddPushConstantBindingAbi(*pushConstant);
+        }
     }
-    HashCombine(seed, value.DepthWriteEnable);
-}
 
-void HashVertexElementKey(size_t& seed, const PSOCache::VertexElementKey& value) noexcept {
-    HashCombine(seed, value.Offset);
-    HashString(seed, value.Semantic);
-    HashCombine(seed, value.SemanticIndex);
-    HashEnum(seed, value.Format);
-    HashCombine(seed, value.Location);
-}
-
-void HashVertexLayoutKey(size_t& seed, const PSOCache::VertexLayoutKey& value) noexcept {
-    HashCombine(seed, value.ArrayStride);
-    HashEnum(seed, value.StepMode);
-    HashCombine(seed, value.Elements.size());
-    for (const PSOCache::VertexElementKey& element : value.Elements) {
-        HashVertexElementKey(seed, element);
+    void AddPushConstantRange(const render::PushConstantRange& value) {
+        AddString(value.Name);
+        AddPod(value.Id.Value);
+        AddPod(value.Stages.value());
+        AddPod(value.Offset);
+        AddPod(value.Size);
     }
-}
 
-void HashRenderTargetFormats(size_t& seed, const GpuRenderTargetFormats& value) noexcept {
-    HashCombine(seed, value.ColorFormats.size());
-    for (render::TextureFormat format : value.ColorFormats) {
-        HashEnum(seed, format);
+    void AddBindlessSetLayout(const render::BindlessSetLayout& value) {
+        AddString(value.Name);
+        AddPod(value.Id.Value);
+        AddPod(value.Set.Value);
+        AddPod(value.Binding);
+        AddEnum(value.Type);
+        AddEnum(value.SlotType);
+        AddPod(value.Stages.value());
     }
-    HashEnum(seed, value.DepthFormat);
-}
+
+    void AddSamplerDescriptor(const render::SamplerDescriptor& value) {
+        AddEnum(value.AddressS);
+        AddEnum(value.AddressT);
+        AddEnum(value.AddressR);
+        AddEnum(value.MinFilter);
+        AddEnum(value.MagFilter);
+        AddEnum(value.MipmapFilter);
+        AddFloat(value.LodMin);
+        AddFloat(value.LodMax);
+        AddBool(value.Compare.has_value());
+        if (value.Compare.has_value()) {
+            AddEnum(value.Compare.value());
+        }
+        AddPod(value.AnisotropyClamp);
+    }
+
+    void AddStaticSamplerLayout(const render::StaticSamplerLayout& value) {
+        AddString(value.Name);
+        AddPod(value.Id.Value);
+        AddPod(value.Set.Value);
+        AddPod(value.Binding);
+        AddPod(value.Stages.value());
+        AddSamplerDescriptor(value.Desc);
+    }
+
+    void AddRootSignatureLayoutKey(const RootSignatureLayoutKey& value) {
+        AddPod(value.DescriptorSetCount);
+
+        AddSize(value.Parameters.size());
+        for (const render::BindingParameterLayout& parameter : value.Parameters) {
+            AddBindingParameterLayout(parameter);
+        }
+
+        AddSize(value.PushConstantRanges.size());
+        for (const render::PushConstantRange& range : value.PushConstantRanges) {
+            AddPushConstantRange(range);
+        }
+
+        AddSize(value.BindlessSetLayouts.size());
+        for (const render::BindlessSetLayout& bindless : value.BindlessSetLayouts) {
+            AddBindlessSetLayout(bindless);
+        }
+
+        AddSize(value.StaticSamplerLayouts.size());
+        for (const render::StaticSamplerLayout& sampler : value.StaticSamplerLayouts) {
+            AddStaticSamplerLayout(sampler);
+        }
+    }
+
+    void AddPrimitiveStateKey(const PSOCache::PrimitiveStateKey& value) {
+        AddEnum(value.Topology);
+        AddEnum(value.FaceClockwise);
+        AddEnum(value.Cull);
+        AddEnum(value.Poly);
+        AddBool(value.StripIndexFormat.has_value());
+        if (value.StripIndexFormat.has_value()) {
+            AddEnum(value.StripIndexFormat.value());
+        }
+        AddBool(value.UnclippedDepth);
+        AddBool(value.Conservative);
+    }
+
+    void AddMultiSampleStateKey(const PSOCache::MultiSampleStateKey& value) {
+        AddPod(value.Count);
+        AddPod(value.Mask);
+        AddBool(value.AlphaToCoverageEnable);
+    }
+
+    void AddColorTargetStateKey(const PSOCache::ColorTargetStateKey& value) {
+        AddEnum(value.Format);
+        AddBool(value.Blend.has_value());
+        if (value.Blend.has_value()) {
+            AddBlendState(value.Blend.value());
+        }
+        AddPod(value.WriteMask.value());
+    }
+
+    size_t Finish() const noexcept {
+        return HashData(_bytes.data(), _bytes.size());
+    }
+
+private:
+    void AddBytes(const void* data, size_t size) {
+        if (size == 0) {
+            return;
+        }
+        const auto* bytes = static_cast<const byte*>(data);
+        _bytes.insert(_bytes.end(), bytes, bytes + size);
+    }
+
+    vector<byte> _bytes;
+};
 
 std::optional<uint64_t> GetSubresourceUploadSize(
     const render::TextureDescriptor& desc,
@@ -714,25 +794,33 @@ void GpuSystem::PumpFrameUploadScheduler() {
     }
 }
 
-Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
-    const bool isSpirv = _device->GetBackend() == render::RenderBackend::Vulkan;
+size_t GpuSystem::ShaderCompileKeyHash::operator()(const ShaderCompileKey& key) const noexcept {
+    HashKeyBuilder hash;
+    hash.AddShaderCompileKey(key);
+    return hash.Finish();
+}
+
+std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc) {
     ShaderVariantKey variant{desc.Defines};
-    string key = fmt::format(
-        "{}|{}|{}|{}",
-        desc.Name,
-        desc.EntryPoint,
-        static_cast<uint32_t>(desc.Stage),
-        isSpirv ? "spirv" : "dxil");
-    variant.AppendSignature(key);
+    ShaderCompileKey key{
+        .Name = string{desc.Name},
+        .EntryPoint = string{desc.EntryPoint},
+        .Stage = desc.Stage,
+        .Backend = _device->GetBackend(),
+        .Variant = variant};
     if (auto it = _shaderCache.find(key); it != _shaderCache.end()) {
-        return it->second.Shader.get();
+        return CompiledShaderEntry{
+            .Target = it->second.get(),
+            .Key = key};
     }
+
+    const bool isSpirv = key.Backend == render::RenderBackend::Vulkan;
 
     if (_dxc == nullptr) {
         auto dxcOpt = render::CreateDxc();
         if (!dxcOpt.HasValue()) {
             RADRAY_ERR_LOG("GpuSystem: failed to create DXC compiler");
-            return nullptr;
+            return std::nullopt;
         }
         _dxc = dxcOpt.Release();
     }
@@ -766,7 +854,7 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
     auto outputOpt = _dxc->Compile(params);
     if (!outputOpt.has_value()) {
         RADRAY_ERR_LOG("GpuSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
-        return nullptr;
+        return std::nullopt;
     }
     auto output = std::move(outputOpt.value());
 
@@ -780,19 +868,19 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
             .Stage = desc.Stage});
         if (!reflOpt.has_value()) {
             RADRAY_ERR_LOG("GpuSystem: failed to reflect SPIR-V shader '{}'", desc.Name);
-            return nullptr;
+            return std::nullopt;
         }
         reflection = std::move(reflOpt.value());
         category = render::ShaderBlobCategory::SPIRV;
 #else
         RADRAY_ERR_LOG("GpuSystem: SPIR-V Cross reflection is not enabled in this build");
-        return nullptr;
+        return std::nullopt;
 #endif
     } else {
         auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
         if (!reflOpt.has_value()) {
             RADRAY_ERR_LOG("GpuSystem: failed to reflect DXIL shader '{}'", desc.Name);
-            return nullptr;
+            return std::nullopt;
         }
         reflection = std::move(reflOpt.value());
         category = render::ShaderBlobCategory::DXIL;
@@ -806,15 +894,26 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescr
     auto shaderOpt = _device->CreateShader(shaderDesc);
     if (!shaderOpt.HasValue()) {
         RADRAY_ERR_LOG("GpuSystem: failed to create shader '{}'", desc.Name);
-        return nullptr;
+        return std::nullopt;
     }
     render::Shader* raw = shaderOpt.Get();
-    const uint64_t stableId = BuildShaderStableId(key);
-    _shaderStableIds.emplace(raw, stableId);
-    _shaderCache.emplace(std::move(key), CachedShader{
-                                             .Shader = shaderOpt.Release(),
-                                             .StableId = stableId});
-    return raw;
+    _shaderCache.emplace(std::move(key), shaderOpt.Release());
+    return CompiledShaderEntry{
+        .Target = raw,
+        .Key = ShaderCompileKey{
+            .Name = string{desc.Name},
+            .EntryPoint = string{desc.EntryPoint},
+            .Stage = desc.Stage,
+            .Backend = _device->GetBackend(),
+            .Variant = ShaderVariantKey{desc.Defines}}};
+}
+
+Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
+    std::optional<CompiledShaderEntry> entry = GetOrCompileShaderEntry(desc);
+    if (!entry.has_value()) {
+        return nullptr;
+    }
+    return entry->Target;
 }
 
 Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
@@ -838,35 +937,45 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     return GetOrCompileShader(desc);
 }
 
+std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
+    const std::filesystem::path& path,
+    std::string_view entryPoint,
+    render::ShaderStage stage,
+    std::string_view name,
+    std::span<const ShaderDefine> defines) {
+    auto sourceOpt = ReadTextFile(path);
+    if (!sourceOpt.has_value()) {
+        RADRAY_ERR_LOG("GpuSystem: failed to read shader file {}", path.string());
+        return std::nullopt;
+    }
+    string pathName = name.empty() ? path.string() : string{name};
+    ShaderCompileDescriptor desc{};
+    desc.Name = pathName;
+    desc.Source = sourceOpt.value();
+    desc.EntryPoint = entryPoint;
+    desc.Stage = stage;
+    desc.Defines = defines;
+    return GetOrCompileShaderEntry(desc);
+}
+
 Nullable<render::RootSignature*> GpuSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
-    vector<RootSignatureShader> cacheShaders;
-    cacheShaders.reserve(shaders.size());
     for (render::Shader* shader : shaders) {
         if (shader == nullptr) {
             RADRAY_ERR_LOG("GpuSystem: cannot create root signature from null shader");
             return nullptr;
         }
-        std::optional<uint64_t> stableId = GetShaderStableId(shader);
-        if (!stableId.has_value()) {
-            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from shader outside GpuSystem shader cache");
-            return nullptr;
-        }
-        cacheShaders.emplace_back(RootSignatureShader{
-            .Shader = shader,
-            .StableId = stableId.value()});
     }
-    return _rsCache->GetOrCreate(cacheShaders);
+    return _rsCache->GetOrCreate(shaders);
 }
 
-std::optional<uint64_t> GpuSystem::GetShaderStableId(render::Shader* shader) const noexcept {
-    if (shader == nullptr) {
-        return std::nullopt;
+std::optional<RootSignatureEntry> GpuSystem::GetOrCreateRootSignatureEntry(std::span<render::Shader*> shaders) {
+    for (render::Shader* shader : shaders) {
+        if (shader == nullptr) {
+            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from null shader");
+            return std::nullopt;
+        }
     }
-    auto it = _shaderStableIds.find(shader);
-    if (it == _shaderStableIds.end()) {
-        return std::nullopt;
-    }
-    return it->second;
+    return _rsCache->GetOrCreateEntry(shaders);
 }
 
 void GpuSystem::WaitAndCleanupCompletedFlights() {
@@ -972,45 +1081,76 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 //  RSCache
 // ══════════════════════════════════════════════
 
-Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<const RootSignatureShader> shaders) {
+RootSignatureLayoutKey RootSignatureLayoutKey::From(
+    const render::RootSignatureLayoutPreview& preview) {
+    RootSignatureLayoutKey key{};
+    key.DescriptorSetCount = preview.DescriptorSetCount;
+
+    auto parameters = preview.Layout.GetParameters();
+    key.Parameters.reserve(parameters.size());
+    key.Parameters.assign(parameters.begin(), parameters.end());
+    key.PushConstantRanges = preview.PushConstantRanges;
+    key.BindlessSetLayouts = preview.BindlessSetLayouts;
+    key.StaticSamplerLayouts = preview.StaticSamplerLayouts;
+
+    return key;
+}
+
+size_t RSCache::RootSignatureLayoutKeyHash::operator()(const RootSignatureLayoutKey& key) const noexcept {
+    HashKeyBuilder hash;
+    hash.AddRootSignatureLayoutKey(key);
+    return hash.Finish();
+}
+
+std::optional<RootSignatureEntry> RSCache::GetOrCreateEntry(std::span<render::Shader*> shaders) {
     if (shaders.empty()) {
         RADRAY_ERR_LOG("RSCache: cannot create root signature from empty shader set");
-        return nullptr;
+        return std::nullopt;
     }
 
-    vector<render::Shader*> rawShaders;
-    rawShaders.reserve(shaders.size());
-    for (const RootSignatureShader& shader : shaders) {
-        if (shader.Shader == nullptr) {
+    for (render::Shader* shader : shaders) {
+        if (shader == nullptr) {
             RADRAY_ERR_LOG("RSCache: cannot create root signature from null shader");
-            return nullptr;
+            return std::nullopt;
         }
-        rawShaders.push_back(shader.Shader);
-    }
-
-    string key = BuildRootSignatureShaderSetKey(shaders);
-    if (auto it = _shaderSetCache.find(key); it != _shaderSetCache.end()) {
-        return it->second;
     }
 
     render::RootSignatureDescriptor rsDesc{};
-    rsDesc.Shaders = rawShaders;
+    rsDesc.Shaders = shaders;
+
+    auto previewOpt = render::BuildRootSignatureLayoutPreview(_device->GetBackend(), rsDesc);
+    if (!previewOpt.has_value()) {
+        RADRAY_ERR_LOG("RSCache: failed to build root signature layout preview");
+        return std::nullopt;
+    }
+
+    RootSignatureLayoutKey layoutKey = RootSignatureLayoutKey::From(previewOpt.value());
+    if (auto layoutIt = _layoutCache.find(layoutKey); layoutIt != _layoutCache.end()) {
+        return RootSignatureEntry{
+            .Target = layoutIt->second.get(),
+            .Layout = std::move(layoutKey)};
+    }
+
     auto rsOpt = _device->CreateRootSignature(rsDesc);
     if (!rsOpt.HasValue()) {
         RADRAY_ERR_LOG("RSCache: failed to create root signature");
-        return nullptr;
+        return std::nullopt;
     }
 
-    const string layoutKey = BuildRootSignatureLayoutKey(*rsOpt.Get());
-    render::RootSignature* raw = nullptr;
-    if (auto layoutIt = _layoutCache.find(layoutKey); layoutIt != _layoutCache.end()) {
-        raw = layoutIt->second.get();
-    } else {
-        raw = rsOpt.Get();
-        _layoutCache.emplace(layoutKey, rsOpt.Release());
+    render::RootSignature* raw = rsOpt.Get();
+    RootSignatureEntry entry{
+        .Target = raw,
+        .Layout = layoutKey};
+    _layoutCache.emplace(std::move(layoutKey), rsOpt.Release());
+    return entry;
+}
+
+Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*> shaders) {
+    std::optional<RootSignatureEntry> entry = GetOrCreateEntry(shaders);
+    if (!entry.has_value()) {
+        return nullptr;
     }
-    _shaderSetCache.emplace(std::move(key), raw);
-    return raw;
+    return entry->Target;
 }
 
 // ══════════════════════════════════════════════
@@ -1394,90 +1534,106 @@ PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBu
     return key;
 }
 
-size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
-    size_t seed = 0;
-    HashCombine(seed, key.Material);
-    HashCombine(seed, key.RootSig);
-    HashCombine(seed, key.TwoSided);
-    HashDepthStencilState(seed, key.DepthStencil);
-    HashCombine(seed, key.Blend.has_value());
-    if (key.Blend.has_value()) {
-        HashBlendState(seed, key.Blend.value());
-    }
-    HashCombine(seed, key.ColorWriteMask.value());
-    HashEnum(seed, key.PsMode);
-    HashCombine(seed, ShaderVariantKeyHash{}(key.Variant));
-    HashVertexLayoutKey(seed, key.Vertex);
-    HashRenderTargetFormats(seed, key.RtFormats);
-    return seed;
+PSOCache::PrimitiveStateKey PSOCache::PrimitiveStateKey::From(const render::PrimitiveState& value) noexcept {
+    return PrimitiveStateKey{
+        .Topology = value.Topology,
+        .FaceClockwise = value.FaceClockwise,
+        .Cull = value.Cull,
+        .Poly = value.Poly,
+        .StripIndexFormat = value.StripIndexFormat,
+        .UnclippedDepth = value.UnclippedDepth,
+        .Conservative = value.Conservative};
 }
 
-render::GraphicsPipelineState* PSOCache::GetOrCreate(
-    const Material& material,
-    const render::VertexBufferLayout& vertexLayout,
-    const RenderTargetFormats& rtFormats,
-    const render::DepthStencilState& depthStencil,
-    const std::optional<render::BlendState>& blend,
-    render::ColorWrites colorWriteMask,
-    const ShaderVariantKey& variant,
-    PixelShaderMode psMode) {
-    if (!material.IsValid()) {
-        RADRAY_ERR_LOG("PSOCache: material is not valid");
+PSOCache::MultiSampleStateKey PSOCache::MultiSampleStateKey::From(const render::MultiSampleState& value) noexcept {
+    return MultiSampleStateKey{
+        .Count = value.Count,
+        .Mask = value.Mask,
+        .AlphaToCoverageEnable = value.AlphaToCoverageEnable};
+}
+
+PSOCache::ColorTargetStateKey PSOCache::ColorTargetStateKey::From(const render::ColorTargetState& value) noexcept {
+    return ColorTargetStateKey{
+        .Format = value.Format,
+        .Blend = value.Blend,
+        .WriteMask = value.WriteMask};
+}
+
+size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
+    HashKeyBuilder hash;
+    hash.AddRootSignatureLayoutKey(key.RootLayout);
+    hash.AddShaderCompileKey(key.VS);
+    hash.AddBool(key.PS.has_value());
+    if (key.PS.has_value()) {
+        hash.AddShaderCompileKey(key.PS.value());
+    }
+    hash.AddSize(key.VertexLayouts.size());
+    for (const VertexLayoutKey& vertex : key.VertexLayouts) {
+        hash.AddVertexLayoutKey(vertex);
+    }
+    hash.AddPrimitiveStateKey(key.Primitive);
+    hash.AddBool(key.DepthStencil.has_value());
+    if (key.DepthStencil.has_value()) {
+        hash.AddDepthStencilState(key.DepthStencil.value());
+    }
+    hash.AddMultiSampleStateKey(key.MultiSample);
+    hash.AddSize(key.ColorTargets.size());
+    for (const ColorTargetStateKey& colorTarget : key.ColorTargets) {
+        hash.AddColorTargetStateKey(colorTarget);
+    }
+    return hash.Finish();
+}
+
+render::GraphicsPipelineState* PSOCache::GetOrCreate(const GraphicsPsoDesc& desc) {
+    if (desc.RootSig == nullptr) {
+        RADRAY_ERR_LOG("PSOCache: root signature is null");
+        return nullptr;
+    }
+    if (desc.VS.Target == nullptr) {
+        RADRAY_ERR_LOG("PSOCache: vertex shader is null");
+        return nullptr;
+    }
+    if (desc.PS.has_value() && desc.PS->Target == nullptr) {
+        RADRAY_ERR_LOG("PSOCache: pixel shader is null");
         return nullptr;
     }
 
-    const bool needPixelShader = NeedsPixelShader(psMode);
-    render::DepthStencilState depthState = depthStencil;
-    depthState.Format = rtFormats.DepthFormat;
+    vector<VertexLayoutKey> vertexLayouts;
+    vertexLayouts.reserve(desc.VertexLayouts.size());
+    for (const render::VertexBufferLayout& layout : desc.VertexLayouts) {
+        vertexLayouts.push_back(VertexLayoutKey::From(layout));
+    }
 
-    const MaterialShaderSet* shaderSet = material.GetShaderSet(variant, psMode);
-    if (shaderSet == nullptr) {
-        RADRAY_ERR_LOG("PSOCache: failed to get shader set for material '{}'", material.GetAssetId());
-        return nullptr;
+    vector<ColorTargetStateKey> colorTargets;
+    colorTargets.reserve(desc.ColorTargets.size());
+    for (const render::ColorTargetState& colorTarget : desc.ColorTargets) {
+        colorTargets.push_back(ColorTargetStateKey::From(colorTarget));
     }
 
     GraphicsPsoKey key{
-        .Material = material.GetAssetId(),
-        .RootSig = shaderSet->RootSig,
-        .TwoSided = material.IsTwoSided(),
-        .DepthStencil = depthState,
-        .Blend = blend,
-        .ColorWriteMask = colorWriteMask,
-        .PsMode = psMode,
-        .Variant = variant,
-        .Vertex = VertexLayoutKey::From(vertexLayout),
-        .RtFormats = rtFormats};
+        .RootLayout = desc.RootLayout,
+        .VS = desc.VS.Key,
+        .PS = desc.PS.has_value() ? std::optional<ShaderCompileKey>{desc.PS->Key} : std::nullopt,
+        .VertexLayouts = std::move(vertexLayouts),
+        .Primitive = PrimitiveStateKey::From(desc.Primitive),
+        .DepthStencil = desc.DepthStencil,
+        .MultiSample = MultiSampleStateKey::From(desc.MultiSample),
+        .ColorTargets = std::move(colorTargets)};
     if (auto it = _cache.find(key); it != _cache.end()) {
         return it->second.get();
     }
 
-    vector<render::ColorTargetState> colorTargets;
-    colorTargets.reserve(rtFormats.ColorFormats.size());
-    for (render::TextureFormat f : rtFormats.ColorFormats) {
-        render::ColorTargetState cts = render::ColorTargetState::Default(f);
-        cts.Blend = blend;
-        cts.WriteMask = colorWriteMask;
-        colorTargets.push_back(cts);
-    }
-
-    render::PrimitiveState primitive = material.GetPrimitiveState();
-    if (material.IsTwoSided()) {
-        primitive.Cull = render::CullMode::None;
-    }
-
     render::GraphicsPipelineStateDescriptor psoDesc{
-        shaderSet->RootSig,
-        render::ShaderEntry{shaderSet->VS, material.GetVsEntry()},
-        !needPixelShader || shaderSet->PS == nullptr
+        desc.RootSig,
+        render::ShaderEntry{desc.VS.Target, desc.VS.Key.EntryPoint},
+        !desc.PS.has_value()
             ? std::optional<render::ShaderEntry>{}
-            : std::optional<render::ShaderEntry>{render::ShaderEntry{
-                  shaderSet->PS,
-                  IsAlphaClipOnly(psMode) ? material.GetDepthPsEntry() : material.GetPsEntry()}},
-        std::span<const render::VertexBufferLayout>{&vertexLayout, 1},
-        primitive,
-        depthState,
-        render::MultiSampleState::Default(),
-        std::span<const render::ColorTargetState>{colorTargets.data(), colorTargets.size()}};
+            : std::optional<render::ShaderEntry>{render::ShaderEntry{desc.PS->Target, desc.PS->Key.EntryPoint}},
+        desc.VertexLayouts,
+        desc.Primitive,
+        desc.DepthStencil,
+        desc.MultiSample,
+        desc.ColorTargets};
 
     auto psoOpt = _device->CreateGraphicsPipelineState(psoDesc);
     if (!psoOpt.HasValue()) {

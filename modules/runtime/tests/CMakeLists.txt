@@ -6,6 +6,7 @@ radray_add_test(test_render_pipeline SOURCES test_render_pipeline.cpp LINK_LIBS 
 radray_add_test(test_additional_shadow SOURCES test_additional_shadow.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_render_state_presets SOURCES test_render_state_presets.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_pso_cache SOURCES test_pso_cache.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_shader_variant SOURCES test_shader_variant.cpp LINK_LIBS radraycore radrayruntime)
 if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPVCROSS)
     radray_add_test(test_material_parameter_layout SOURCES test_material_parameter_layout.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 endif()

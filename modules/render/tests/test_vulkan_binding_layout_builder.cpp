@@ -163,6 +163,50 @@ TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     EXPECT_EQ(merged->SetLayoutCount, 1u);
 }
 
+TEST(VulkanBindingLayoutBuilderTest, LayoutPreviewProjectsPublicRootSignatureLayout) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeSpirvShaderDesc(
+            {
+                MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 0),
+                MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 0, 1),
+            },
+            {
+                MakePushConstant("Globals", 0, 16),
+            })}};
+    vector<Shader*> shaders{&shader};
+    StaticSamplerDescriptor staticSampler{
+        .Name = "StaticLinear",
+        .Set = DescriptorSetIndex{0},
+        .Binding = 0,
+        .Stages = ShaderStage::UNKNOWN,
+        .Desc = SamplerDescriptor{}};
+
+    RootSignatureDescriptor desc{
+        .Shaders = shaders,
+        .StaticSamplers = std::span<const StaticSamplerDescriptor>{&staticSampler, 1}};
+    auto preview = vulkan::BuildRootSignatureLayoutPreviewVulkan(desc);
+    ASSERT_TRUE(preview.has_value());
+
+    auto parameters = preview->Layout.GetParameters();
+    ASSERT_EQ(parameters.size(), 2u);
+    EXPECT_EQ(parameters[0].Name, "Albedo");
+    EXPECT_EQ(parameters[0].Id, BindingParameterId{1});
+    EXPECT_EQ(parameters[1].Name, "Globals");
+    EXPECT_EQ(parameters[1].Id, BindingParameterId{2});
+    EXPECT_EQ(preview->DescriptorSetCount, 1u);
+
+    ASSERT_EQ(preview->StaticSamplerLayouts.size(), 1u);
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Name, "StaticLinear");
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Id, BindingParameterId{0});
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Set, DescriptorSetIndex{0});
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Binding, 0u);
+
+    ASSERT_EQ(preview->PushConstantRanges.size(), 1u);
+    EXPECT_EQ(preview->PushConstantRanges[0].Name, "Globals");
+    EXPECT_EQ(preview->PushConstantRanges[0].Size, 16u);
+}
+
 TEST(VulkanBindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
     FakeShader shader{ShaderStage::Vertex};
     vector<Shader*> shaders{&shader};

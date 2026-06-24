@@ -1487,6 +1487,8 @@ struct VulkanMergedBindingLayout {
 };
 
 std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::span<Shader*> shaders) noexcept;
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreviewVulkan(
+    const RootSignatureDescriptor& desc) noexcept;
 
 }  // namespace radray::render::vulkan
 

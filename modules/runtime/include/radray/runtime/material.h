@@ -9,6 +9,7 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_parameter_layout.h>
+#include <radray/runtime/shader_identity.h>
 #include <radray/runtime/shader_variant.h>
 
 namespace radray {
@@ -22,9 +23,10 @@ enum class MaterialBlendMode : uint32_t {
 };
 
 struct MaterialShaderSet {
-    render::Shader* VS{nullptr};
-    render::Shader* PS{nullptr};
+    CompiledShaderEntry VS{};
+    std::optional<CompiledShaderEntry> PS{};
     render::RootSignature* RootSig{nullptr};
+    RootSignatureLayoutKey RootLayout{};
 };
 
 /// Material 初始化描述。承载一个图形材质所需的 shader 源与渲染状态。
@@ -67,7 +69,10 @@ public:
     void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
-    bool IsValid() const noexcept { return _defaultShaders.RootSig != nullptr && _defaultShaders.VS != nullptr && _defaultShaders.PS != nullptr; }
+    bool IsValid() const noexcept {
+        return _defaultShaders.RootSig != nullptr && _defaultShaders.VS.Target != nullptr &&
+            _defaultShaders.PS.has_value() && _defaultShaders.PS->Target != nullptr;
+    }
 
     std::string_view GetVsEntry() const noexcept { return _vsEntry; }
     std::string_view GetPsEntry() const noexcept { return _psEntry; }

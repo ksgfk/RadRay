@@ -1179,6 +1179,8 @@ struct D3D12MergedBindingLayout {
 };
 
 std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<Shader*> shaders) noexcept;
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreviewD3D12(
+    const RootSignatureDescriptor& desc) noexcept;
 
 }  // namespace radray::render::d3d12
 

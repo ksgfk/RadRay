@@ -979,35 +979,35 @@ private:
         directional->SetLightType(LightType::Directional);
         directional->SetDirection(Eigen::Vector3f{-0.3f, -1.0f, -0.3f}.normalized());
         directional->SetColor(Eigen::Vector3f{0.8f, 0.6f, 1.0f});
-        directional->SetIntensity(15.0f);
+        directional->SetIntensity(30.0f);
         directional->SetCastShadow(true);
         directional->SetShadowBias(1.0f, 0.75f);
 
-        Actor* spotActor = GetWorld()->SpawnActor<Actor>();
-        auto* spot = spotActor->AddComponent<LightComponent>();
-        _spotLight = spot;
-        spotActor->SetRootComponent(spot);
-        spot->SetLightType(LightType::Spot);
-        spot->SetWorldLocation(Eigen::Vector3f{2.5f, 3.0f, 1.5f});
-        spot->SetDirection(Eigen::Vector3f{-0.6f, -1.0f, -0.35f}.normalized());
-        spot->SetColor(Eigen::Vector3f{1.0f, 0.95f, 0.85f});
-        spot->SetIntensity(120.0f);
-        spot->SetRange(20.0f);
-        spot->SetSpotAngles(Radian(22.0f), Radian(32.0f));
-        spot->SetCastShadow(true);
-        spot->SetShadowBias(1.0f, 1.0f);
+        // Actor* spotActor = GetWorld()->SpawnActor<Actor>();
+        // auto* spot = spotActor->AddComponent<LightComponent>();
+        // _spotLight = spot;
+        // spotActor->SetRootComponent(spot);
+        // spot->SetLightType(LightType::Spot);
+        // spot->SetWorldLocation(Eigen::Vector3f{2.5f, 3.0f, 1.5f});
+        // spot->SetDirection(Eigen::Vector3f{-0.6f, -1.0f, -0.35f}.normalized());
+        // spot->SetColor(Eigen::Vector3f{1.0f, 0.95f, 0.85f});
+        // spot->SetIntensity(120.0f);
+        // spot->SetRange(20.0f);
+        // spot->SetSpotAngles(Radian(22.0f), Radian(32.0f));
+        // spot->SetCastShadow(true);
+        // spot->SetShadowBias(1.0f, 1.0f);
 
-        Actor* pointActor = GetWorld()->SpawnActor<Actor>();
-        auto* point = pointActor->AddComponent<LightComponent>();
-        _pointLight = point;
-        pointActor->SetRootComponent(point);
-        point->SetLightType(LightType::Point);
-        point->SetWorldLocation(Eigen::Vector3f{-2.0f, 2.0f, -2.0f});
-        point->SetColor(Eigen::Vector3f{0.7f, 0.85f, 1.0f});
-        point->SetIntensity(60.0f);
-        point->SetRange(15.0f);
-        point->SetCastShadow(true);
-        point->SetShadowBias(1.5f, 0.0f);
+        // Actor* pointActor = GetWorld()->SpawnActor<Actor>();
+        // auto* point = pointActor->AddComponent<LightComponent>();
+        // _pointLight = point;
+        // pointActor->SetRootComponent(point);
+        // point->SetLightType(LightType::Point);
+        // point->SetWorldLocation(Eigen::Vector3f{-2.0f, 2.0f, -2.0f});
+        // point->SetColor(Eigen::Vector3f{0.7f, 0.85f, 1.0f});
+        // point->SetIntensity(60.0f);
+        // point->SetRange(15.0f);
+        // point->SetCastShadow(true);
+        // point->SetShadowBias(1.5f, 0.0f);
     }
 
     bool ComputeDirectionalCascades(const SceneView& camView, ShadowCascadeData& out) {

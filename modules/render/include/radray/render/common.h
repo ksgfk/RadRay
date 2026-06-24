@@ -954,11 +954,15 @@ struct ResourceBindingAbi {
     uint32_t Count{1};
     bool IsReadOnly{true};
     bool IsBindless{false};
+
+    friend bool operator==(const ResourceBindingAbi&, const ResourceBindingAbi&) noexcept = default;
 };
 
 struct PushConstantBindingAbi {
     uint32_t Offset{0};
     uint32_t Size{0};
+
+    friend bool operator==(const PushConstantBindingAbi&, const PushConstantBindingAbi&) noexcept = default;
 };
 
 struct BindingParameterLayout {
@@ -967,6 +971,8 @@ struct BindingParameterLayout {
     BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     std::variant<ResourceBindingAbi, PushConstantBindingAbi> Abi{};
+
+    friend bool operator==(const BindingParameterLayout&, const BindingParameterLayout&) noexcept = default;
 };
 
 class BindingLayout {
@@ -990,6 +996,8 @@ struct PushConstantRange {
     ShaderStages Stages{ShaderStage::UNKNOWN};
     uint32_t Offset{0};
     uint32_t Size{0};
+
+    friend bool operator==(const PushConstantRange&, const PushConstantRange&) noexcept = default;
 };
 
 struct BindlessSetLayout {
@@ -1000,6 +1008,8 @@ struct BindlessSetLayout {
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     BindlessSlotType SlotType{BindlessSlotType::Multiple};
     ShaderStages Stages{ShaderStage::UNKNOWN};
+
+    friend bool operator==(const BindlessSetLayout&, const BindlessSetLayout&) noexcept = default;
 };
 
 struct StaticSamplerDescriptor {
@@ -1008,6 +1018,8 @@ struct StaticSamplerDescriptor {
     uint32_t Binding{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     SamplerDescriptor Desc{};
+
+    friend bool operator==(const StaticSamplerDescriptor&, const StaticSamplerDescriptor&) noexcept = default;
 };
 
 struct StaticSamplerLayout {
@@ -1017,12 +1029,29 @@ struct StaticSamplerLayout {
     uint32_t Binding{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     SamplerDescriptor Desc{};
+
+    friend bool operator==(const StaticSamplerLayout&, const StaticSamplerLayout&) noexcept = default;
 };
 
 struct RootSignatureDescriptor {
     std::span<Shader*> Shaders{};
     std::span<const StaticSamplerDescriptor> StaticSamplers{};
 };
+
+/// CPU-side preview of the public layout produced by CreateRootSignature.
+/// This is built from shader reflection before allocating backend objects, so
+/// callers can content-address root signatures without first creating one.
+struct RootSignatureLayoutPreview {
+    BindingLayout Layout{};
+    uint32_t DescriptorSetCount{0};
+    vector<BindlessSetLayout> BindlessSetLayouts{};
+    vector<StaticSamplerLayout> StaticSamplerLayouts{};
+    vector<PushConstantRange> PushConstantRanges{};
+};
+
+std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreview(
+    RenderBackend backend,
+    const RootSignatureDescriptor& desc) noexcept;
 
 struct VertexElement {
     uint64_t Offset{0};

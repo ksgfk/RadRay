@@ -15,6 +15,7 @@
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/shader_identity.h>
 #include <radray/runtime/shader_variant.h>
 
 namespace radray::render {
@@ -30,7 +31,6 @@ class WindowManager;
 class AppFrameContext;
 class ResourceUploader;
 class StaticMesh;
-class Material;
 class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;
@@ -38,11 +38,6 @@ class WaitFrameUploadGpuAwaitable;
 class RSCache;
 class PSOCache;
 struct FrameUploadRecord;
-
-struct RootSignatureShader {
-    render::Shader* Shader{nullptr};
-    uint64_t StableId{0};
-};
 
 enum class FrameUploadStage {
     AwaitingFrame,
@@ -97,6 +92,11 @@ struct GpuRenderTargetFormats {
     render::TextureFormat DepthFormat{render::TextureFormat::UNKNOWN};
 
     friend bool operator==(const GpuRenderTargetFormats&, const GpuRenderTargetFormats&) = default;
+};
+
+struct RootSignatureEntry {
+    render::RootSignature* Target{nullptr};
+    RootSignatureLayoutKey Layout{};
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -251,7 +251,7 @@ private:
     FrameUploadRecord* _record{nullptr};
 };
 
-/// RootSignature 缓存。按参与 shader 的稳定身份集合做快速命中，再按真实 binding layout 内容去重共享。
+/// RootSignature 缓存。RootSignature 由 shader 反射合并出的 binding layout 纯内容寻址。
 class RSCache {
 public:
     explicit RSCache(render::Device* device) noexcept : _device(device) {}
@@ -259,34 +259,31 @@ public:
     RSCache& operator=(const RSCache&) = delete;
     ~RSCache() noexcept = default;
 
-    /// 取或建 RootSignature。StableId 来自 GpuSystem 的 shader interning key，排序后拼 key 使顺序无关。
-    /// 命中缓存直接返回，返回的指针由 RSCache 拥有。
-    Nullable<render::RootSignature*> GetOrCreate(std::span<const RootSignatureShader> shaders);
+    /// 取或建 RootSignature。命中缓存直接返回，返回的指针由 RSCache 拥有。
+    std::optional<RootSignatureEntry> GetOrCreateEntry(std::span<render::Shader*> shaders);
+    Nullable<render::RootSignature*> GetOrCreate(std::span<render::Shader*> shaders);
 
     void Clear() noexcept {
-        _shaderSetCache.clear();
         _layoutCache.clear();
     }
 
 private:
+    struct RootSignatureLayoutKeyHash {
+        size_t operator()(const RootSignatureLayoutKey& key) const noexcept;
+    };
+
     render::Device* _device;
-    unordered_map<string, unique_ptr<render::RootSignature>> _layoutCache;
-    unordered_map<string, render::RootSignature*> _shaderSetCache;
+    unordered_map<RootSignatureLayoutKey, unique_ptr<render::RootSignature>, RootSignatureLayoutKeyHash> _layoutCache;
 };
 
-/// 图形 PSO 缓存。对应 Material×VertexLayout×RenderTarget 才确定一个
-/// 完整 shader 实例(PSO)的概念:同一 Material 用于不同顶点布局或不同 RT 格式时
-/// 需要不同 PSO,故按这三者组合做 key 缓存。
-///
-/// 渲染目标格式由调用方提供(BasePass 用 backbuffer + depth 格式)。
+/// 图形 PSO 缓存。调用方提供已规范化的 shader/root-layout 身份与固定渲染状态;
+/// 缓存只按实际影响底层 GraphicsPipelineState 的最小状态组合共享。
 class PSOCache {
 public:
     explicit PSOCache(render::Device* device) noexcept : _device(device) {}
     PSOCache(const PSOCache&) = delete;
     PSOCache& operator=(const PSOCache&) = delete;
     ~PSOCache() noexcept = default;
-
-    using RenderTargetFormats = GpuRenderTargetFormats;
 
     struct VertexElementKey {
         uint64_t Offset{0};
@@ -308,17 +305,61 @@ public:
         friend bool operator==(const VertexLayoutKey&, const VertexLayoutKey&) = default;
     };
 
-    struct GraphicsPsoKey {
-        AssetId Material{};
+    struct GraphicsPsoDesc {
         render::RootSignature* RootSig{nullptr};
-        bool TwoSided{false};
-        render::DepthStencilState DepthStencil{};
+        RootSignatureLayoutKey RootLayout{};
+        CompiledShaderEntry VS{};
+        std::optional<CompiledShaderEntry> PS{};
+        std::span<const render::VertexBufferLayout> VertexLayouts{};
+        render::PrimitiveState Primitive{};
+        std::optional<render::DepthStencilState> DepthStencil{};
+        render::MultiSampleState MultiSample{render::MultiSampleState::Default()};
+        std::span<const render::ColorTargetState> ColorTargets{};
+    };
+
+    struct PrimitiveStateKey {
+        render::PrimitiveTopology Topology{};
+        render::FrontFace FaceClockwise{};
+        render::CullMode Cull{};
+        render::PolygonMode Poly{};
+        std::optional<render::IndexFormat> StripIndexFormat{};
+        bool UnclippedDepth{false};
+        bool Conservative{false};
+
+        static PrimitiveStateKey From(const render::PrimitiveState& value) noexcept;
+
+        friend bool operator==(const PrimitiveStateKey&, const PrimitiveStateKey&) = default;
+    };
+
+    struct MultiSampleStateKey {
+        uint32_t Count{0};
+        uint64_t Mask{0};
+        bool AlphaToCoverageEnable{false};
+
+        static MultiSampleStateKey From(const render::MultiSampleState& value) noexcept;
+
+        friend bool operator==(const MultiSampleStateKey&, const MultiSampleStateKey&) = default;
+    };
+
+    struct ColorTargetStateKey {
+        render::TextureFormat Format{render::TextureFormat::UNKNOWN};
         std::optional<render::BlendState> Blend{};
-        render::ColorWrites ColorWriteMask{render::ColorWrite::All};
-        PixelShaderMode PsMode{PixelShaderMode::FullColor};
-        ShaderVariantKey Variant{};
-        VertexLayoutKey Vertex{};
-        RenderTargetFormats RtFormats{};
+        render::ColorWrites WriteMask{};
+
+        static ColorTargetStateKey From(const render::ColorTargetState& value) noexcept;
+
+        friend bool operator==(const ColorTargetStateKey&, const ColorTargetStateKey&) = default;
+    };
+
+    struct GraphicsPsoKey {
+        RootSignatureLayoutKey RootLayout{};
+        ShaderCompileKey VS{};
+        std::optional<ShaderCompileKey> PS{};
+        vector<VertexLayoutKey> VertexLayouts{};
+        PrimitiveStateKey Primitive{};
+        std::optional<render::DepthStencilState> DepthStencil{};
+        MultiSampleStateKey MultiSample{};
+        vector<ColorTargetStateKey> ColorTargets{};
 
         friend bool operator==(const GraphicsPsoKey&, const GraphicsPsoKey&) = default;
     };
@@ -327,18 +368,9 @@ public:
         size_t operator()(const GraphicsPsoKey& key) const noexcept;
     };
 
-    /// 取或建 PSO。material 提供 shader/root signature/光栅化语义;depthStencil/blend/colorWriteMask
-    /// 提供 pass 的输出合并状态(由调用方从 mesh pass 状态拆出,故 PSOCache 不依赖 renderer 层类型);
-    /// vertexLayout 提供 input layout,rtFormats 提供 RT 格式。命中缓存直接返回。
-    render::GraphicsPipelineState* GetOrCreate(
-        const Material& material,
-        const render::VertexBufferLayout& vertexLayout,
-        const RenderTargetFormats& rtFormats,
-        const render::DepthStencilState& depthStencil,
-        const std::optional<render::BlendState>& blend,
-        render::ColorWrites colorWriteMask,
-        const ShaderVariantKey& variant,
-        PixelShaderMode psMode);
+    /// 取或建 PSO。desc 只应包含 shader/root-layout 身份、顶点输入、固定渲染状态、
+    /// RT/DS 格式和多重采样状态;材质资产身份、实例参数、descriptor set 等不参与。
+    render::GraphicsPipelineState* GetOrCreate(const GraphicsPsoDesc& desc);
 
     void Clear() noexcept { _cache.clear(); }
 
@@ -434,14 +466,21 @@ public:
     /// → 写 flight.Signal → Present 全部 target。ManualSubmit 下仅 End，跳过提交/呈现。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
-    /// 编译（含反射）并创建一个 Shader，按 Name|EntryPoint|Stage|Backend 缓存。
+    /// 编译（含反射）并创建一个 Shader，按 ShaderCompileKey 缓存。
     /// 命中缓存直接返回。返回的指针由 GpuSystem 拥有，调用方勿释放。
     /// Vulkan 后端自动编译为 SPIR-V 并走 spirv-cross 反射，D3D12 走 DXIL。
     /// 对应 UE5 FShaderMap 对 FShader 的缓存职责（最小化版，未引入独立 ShaderManager）。
     Nullable<render::Shader*> GetOrCompileShader(const ShaderCompileDescriptor& desc);
+    std::optional<CompiledShaderEntry> GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc);
 
     /// 从磁盘读取 HLSL 文件并编译。Name 缺省用文件路径。
     Nullable<render::Shader*> GetOrCompileShaderFromFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        render::ShaderStage stage,
+        std::string_view name = {},
+        std::span<const ShaderDefine> defines = {});
+    std::optional<CompiledShaderEntry> GetOrCompileShaderEntryFromFile(
         const std::filesystem::path& path,
         std::string_view entryPoint,
         render::ShaderStage stage,
@@ -453,10 +492,11 @@ public:
     /// Material 独立创建。返回的指针由 GpuSystem 的 RSCache 拥有。
     /// 对应 UE5 中 RootSignature 按 shader 绑定布局去重共享的思路。
     Nullable<render::RootSignature*> GetOrCreateRootSignature(std::span<render::Shader*> shaders);
+    std::optional<RootSignatureEntry> GetOrCreateRootSignatureEntry(std::span<render::Shader*> shaders);
 
     RSCache& GetRSCache() noexcept { return *_rsCache; }
 
-    /// 引擎级 PSO 缓存。按 (Material, 顶点签名, RT 格式) 组合缓存 GraphicsPipelineState。
+    /// 引擎级 PSO 缓存。按 shader/root-layout 身份、顶点签名和固定渲染状态组合缓存 GraphicsPipelineState。
     PSOCache& GetPSOCache() noexcept { return *_psoCache; }
 
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
@@ -481,11 +521,9 @@ private:
     friend class Application;
 
     void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
-    std::optional<uint64_t> GetShaderStableId(render::Shader* shader) const noexcept;
 
-    struct CachedShader {
-        unique_ptr<render::Shader> Shader;
-        uint64_t StableId{0};
+    struct ShaderCompileKeyHash {
+        size_t operator()(const ShaderCompileKey& key) const noexcept;
     };
 
     Application* _app;
@@ -499,8 +537,7 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     shared_ptr<render::Dxc> _dxc;
-    unordered_map<string, CachedShader> _shaderCache;
-    unordered_map<render::Shader*, uint64_t> _shaderStableIds;
+    unordered_map<ShaderCompileKey, unique_ptr<render::Shader>, ShaderCompileKeyHash> _shaderCache;
     string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
     unique_ptr<RSCache> _rsCache;
     unique_ptr<PSOCache> _psoCache;

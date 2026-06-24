@@ -147,6 +147,51 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     EXPECT_EQ(merged->SetCount, 1u);
 }
 
+TEST(D3D12BindingLayoutBuilderTest, LayoutPreviewProjectsPublicRootSignatureLayout) {
+    FakeShader shader{
+        ShaderStage::Pixel,
+        ShaderReflectionDesc{MakeHlslShaderDesc(
+            {
+                MakeHlslBinding("Linear", HlslShaderInputType::SAMPLER, 0),
+                MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 1),
+                MakeHlslBinding("Globals", HlslShaderInputType::CBUFFER, 0),
+            },
+            {
+                MakeCBuffer("Globals", 16, true),
+            })}};
+    vector<Shader*> shaders{&shader};
+    StaticSamplerDescriptor staticSampler{
+        .Name = "StaticLinear",
+        .Set = DescriptorSetIndex{0},
+        .Binding = 0,
+        .Stages = ShaderStage::UNKNOWN,
+        .Desc = SamplerDescriptor{}};
+
+    RootSignatureDescriptor desc{
+        .Shaders = shaders,
+        .StaticSamplers = std::span<const StaticSamplerDescriptor>{&staticSampler, 1}};
+    auto preview = d3d12::BuildRootSignatureLayoutPreviewD3D12(desc);
+    ASSERT_TRUE(preview.has_value());
+
+    auto parameters = preview->Layout.GetParameters();
+    ASSERT_EQ(parameters.size(), 2u);
+    EXPECT_EQ(parameters[0].Name, "Albedo");
+    EXPECT_EQ(parameters[0].Id, BindingParameterId{1});
+    EXPECT_EQ(parameters[1].Name, "Globals");
+    EXPECT_EQ(parameters[1].Id, BindingParameterId{2});
+    EXPECT_EQ(preview->DescriptorSetCount, 1u);
+
+    ASSERT_EQ(preview->StaticSamplerLayouts.size(), 1u);
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Name, "StaticLinear");
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Id, BindingParameterId{0});
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Set, DescriptorSetIndex{0});
+    EXPECT_EQ(preview->StaticSamplerLayouts[0].Binding, 0u);
+
+    ASSERT_EQ(preview->PushConstantRanges.size(), 1u);
+    EXPECT_EQ(preview->PushConstantRanges[0].Name, "Globals");
+    EXPECT_EQ(preview->PushConstantRanges[0].Size, 16u);
+}
+
 TEST(D3D12BindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
     FakeShader shader{ShaderStage::Vertex};
     vector<Shader*> shaders{&shader};

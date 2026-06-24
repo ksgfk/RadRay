@@ -2,9 +2,33 @@
 
 #include <algorithm>
 
-#include <radray/utility.h>
+#include <radray/hash.h>
 
 namespace radray {
+
+namespace {
+
+void AppendBytes(vector<byte>& buffer, const void* data, size_t size) {
+    if (size == 0) {
+        return;
+    }
+    const auto* bytes = static_cast<const byte*>(data);
+    buffer.insert(buffer.end(), bytes, bytes + size);
+}
+
+template <class T>
+void AppendPod(vector<byte>& buffer, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    AppendBytes(buffer, &value, sizeof(T));
+}
+
+void AppendString(vector<byte>& buffer, std::string_view value) {
+    const uint64_t size = value.size();
+    AppendPod(buffer, size);
+    AppendBytes(buffer, value.data(), value.size());
+}
+
+}  // namespace
 
 ShaderVariantKey::ShaderVariantKey(std::span<const ShaderDefine> defines)
     : _defines(defines.begin(), defines.end()) {
@@ -62,13 +86,14 @@ void ShaderVariantKey::Normalize() {
 }
 
 size_t ShaderVariantKeyHash::operator()(const ShaderVariantKey& key) const noexcept {
-    size_t seed = 0;
-    std::hash<std::string_view> hashString;
+    vector<byte> bytes;
+    const uint64_t defineCount = key.Defines().size();
+    AppendPod(bytes, defineCount);
     for (const ShaderDefine& define : key.Defines()) {
-        HashCombine(seed, hashString(std::string_view{define.Name}));
-        HashCombine(seed, hashString(std::string_view{define.Value}));
+        AppendString(bytes, define.Name);
+        AppendString(bytes, define.Value);
     }
-    return seed;
+    return HashData(bytes.data(), bytes.size());
 }
 
 }  // namespace radray
