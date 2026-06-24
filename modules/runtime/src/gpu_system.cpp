@@ -32,14 +32,33 @@ public:
     template <class T>
     void AddPod(const T& value) {
         static_assert(std::is_trivially_copyable_v<T>);
-        AddBytes(&value, sizeof(T));
+        AddPodFields(value);
+    }
+
+    template <class... Ts>
+    void AddPodFields(const Ts&... values) {
+        static_assert((std::is_trivially_copyable_v<Ts> && ...));
+        constexpr size_t totalSize = (sizeof(Ts) + ... + 0);
+        if constexpr (totalSize == 0) {
+            return;
+        } else {
+            const size_t offset = _bytes.size();
+            _bytes.resize(offset + totalSize);
+
+            byte* cursor = _bytes.data() + offset;
+            auto appendOne = [&]<class T>(const T& value) {
+                std::memcpy(cursor, &value, sizeof(T));
+                cursor += sizeof(T);
+            };
+            (appendOne(values), ...);
+        }
     }
 
     template <class T>
     void AddEnum(T value)
     requires std::is_enum_v<T>
     {
-        AddPod(static_cast<std::underlying_type_t<T>>(value));
+        AddPod(EnumBits(value));
     }
 
     void AddString(std::string_view value) {
@@ -52,15 +71,11 @@ public:
     }
 
     void AddBool(bool value) {
-        const uint8_t byte = value ? 1u : 0u;
-        AddPod(byte);
+        AddPod(BoolByte(value));
     }
 
     void AddFloat(float value) {
-        if (value == 0.0f) {
-            value = 0.0f;
-        }
-        AddPod(value);
+        AddPod(CanonicalFloat(value));
     }
 
     void AddShaderDefine(const ShaderDefine& value) {
@@ -69,9 +84,10 @@ public:
     }
 
     void AddBlendComponent(const render::BlendComponent& value) {
-        AddEnum(value.Src);
-        AddEnum(value.Dst);
-        AddEnum(value.Op);
+        AddPodFields(
+            EnumBits(value.Src),
+            EnumBits(value.Dst),
+            EnumBits(value.Op));
     }
 
     void AddBlendState(const render::BlendState& value) {
@@ -80,47 +96,51 @@ public:
     }
 
     void AddStencilFaceState(const render::StencilFaceState& value) {
-        AddEnum(value.Compare);
-        AddEnum(value.FailOp);
-        AddEnum(value.DepthFailOp);
-        AddEnum(value.PassOp);
+        AddPodFields(
+            EnumBits(value.Compare),
+            EnumBits(value.FailOp),
+            EnumBits(value.DepthFailOp),
+            EnumBits(value.PassOp));
     }
 
     void AddStencilState(const render::StencilState& value) {
         AddStencilFaceState(value.Front);
         AddStencilFaceState(value.Back);
-        AddPod(value.ReadMask);
-        AddPod(value.WriteMask);
+        AddPodFields(value.ReadMask, value.WriteMask);
     }
 
     void AddDepthBiasState(const render::DepthBiasState& value) {
-        AddPod(value.Constant);
-        AddFloat(value.SlopScale);
-        AddFloat(value.Clamp);
+        AddPodFields(
+            value.Constant,
+            CanonicalFloat(value.SlopScale),
+            CanonicalFloat(value.Clamp));
     }
 
     void AddDepthStencilState(const render::DepthStencilState& value) {
-        AddEnum(value.Format);
-        AddEnum(value.DepthCompare);
+        AddPodFields(
+            EnumBits(value.Format),
+            EnumBits(value.DepthCompare));
         AddDepthBiasState(value.DepthBias);
-        AddBool(value.Stencil.has_value());
+        AddPod(BoolByte(value.Stencil.has_value()));
         if (value.Stencil.has_value()) {
             AddStencilState(value.Stencil.value());
         }
-        AddBool(value.DepthWriteEnable);
+        AddPod(BoolByte(value.DepthWriteEnable));
     }
 
     void AddVertexElementKey(const PSOCache::VertexElementKey& value) {
-        AddPod(value.Offset);
+        AddPodFields(value.Offset);
         AddString(value.Semantic);
-        AddPod(value.SemanticIndex);
-        AddEnum(value.Format);
-        AddPod(value.Location);
+        AddPodFields(
+            value.SemanticIndex,
+            EnumBits(value.Format),
+            value.Location);
     }
 
     void AddVertexLayoutKey(const PSOCache::VertexLayoutKey& value) {
-        AddPod(value.ArrayStride);
-        AddEnum(value.StepMode);
+        AddPodFields(
+            value.ArrayStride,
+            EnumBits(value.StepMode));
         AddSize(value.Elements.size());
         for (const PSOCache::VertexElementKey& element : value.Elements) {
             AddVertexElementKey(element);
@@ -137,31 +157,33 @@ public:
     void AddShaderCompileKey(const ShaderCompileKey& value) {
         AddString(value.Name);
         AddString(value.EntryPoint);
-        AddEnum(value.Stage);
-        AddEnum(value.Backend);
+        AddPodFields(
+            EnumBits(value.Stage),
+            EnumBits(value.Backend));
         AddShaderVariantKey(value.Variant);
     }
 
     void AddResourceBindingAbi(const render::ResourceBindingAbi& value) {
-        AddPod(value.Set.Value);
-        AddPod(value.Binding);
-        AddEnum(value.Type);
-        AddPod(value.Count);
-        AddBool(value.IsReadOnly);
-        AddBool(value.IsBindless);
+        AddPodFields(
+            value.Set.Value,
+            value.Binding,
+            EnumBits(value.Type),
+            value.Count,
+            BoolByte(value.IsReadOnly),
+            BoolByte(value.IsBindless));
     }
 
     void AddPushConstantBindingAbi(const render::PushConstantBindingAbi& value) {
-        AddPod(value.Offset);
-        AddPod(value.Size);
+        AddPodFields(value.Offset, value.Size);
     }
 
     void AddBindingParameterLayout(const render::BindingParameterLayout& value) {
         AddString(value.Name);
-        AddPod(value.Id.Value);
-        AddEnum(value.Kind);
-        AddPod(value.Stages.value());
-        AddPod(static_cast<uint32_t>(value.Abi.index()));
+        AddPodFields(
+            value.Id.Value,
+            EnumBits(value.Kind),
+            value.Stages.value(),
+            static_cast<uint32_t>(value.Abi.index()));
         if (const auto* resource = std::get_if<render::ResourceBindingAbi>(&value.Abi)) {
             AddResourceBindingAbi(*resource);
         } else if (const auto* pushConstant = std::get_if<render::PushConstantBindingAbi>(&value.Abi)) {
@@ -171,32 +193,35 @@ public:
 
     void AddPushConstantRange(const render::PushConstantRange& value) {
         AddString(value.Name);
-        AddPod(value.Id.Value);
-        AddPod(value.Stages.value());
-        AddPod(value.Offset);
-        AddPod(value.Size);
+        AddPodFields(
+            value.Id.Value,
+            value.Stages.value(),
+            value.Offset,
+            value.Size);
     }
 
     void AddBindlessSetLayout(const render::BindlessSetLayout& value) {
         AddString(value.Name);
-        AddPod(value.Id.Value);
-        AddPod(value.Set.Value);
-        AddPod(value.Binding);
-        AddEnum(value.Type);
-        AddEnum(value.SlotType);
-        AddPod(value.Stages.value());
+        AddPodFields(
+            value.Id.Value,
+            value.Set.Value,
+            value.Binding,
+            EnumBits(value.Type),
+            EnumBits(value.SlotType),
+            value.Stages.value());
     }
 
     void AddSamplerDescriptor(const render::SamplerDescriptor& value) {
-        AddEnum(value.AddressS);
-        AddEnum(value.AddressT);
-        AddEnum(value.AddressR);
-        AddEnum(value.MinFilter);
-        AddEnum(value.MagFilter);
-        AddEnum(value.MipmapFilter);
-        AddFloat(value.LodMin);
-        AddFloat(value.LodMax);
-        AddBool(value.Compare.has_value());
+        AddPodFields(
+            EnumBits(value.AddressS),
+            EnumBits(value.AddressT),
+            EnumBits(value.AddressR),
+            EnumBits(value.MinFilter),
+            EnumBits(value.MagFilter),
+            EnumBits(value.MipmapFilter),
+            CanonicalFloat(value.LodMin),
+            CanonicalFloat(value.LodMax),
+            BoolByte(value.Compare.has_value()));
         if (value.Compare.has_value()) {
             AddEnum(value.Compare.value());
         }
@@ -205,15 +230,16 @@ public:
 
     void AddStaticSamplerLayout(const render::StaticSamplerLayout& value) {
         AddString(value.Name);
-        AddPod(value.Id.Value);
-        AddPod(value.Set.Value);
-        AddPod(value.Binding);
-        AddPod(value.Stages.value());
+        AddPodFields(
+            value.Id.Value,
+            value.Set.Value,
+            value.Binding,
+            value.Stages.value());
         AddSamplerDescriptor(value.Desc);
     }
 
     void AddRootSignatureLayoutKey(const RootSignatureLayoutKey& value) {
-        AddPod(value.DescriptorSetCount);
+        AddPodFields(value.DescriptorSetCount);
 
         AddSize(value.Parameters.size());
         for (const render::BindingParameterLayout& parameter : value.Parameters) {
@@ -236,28 +262,32 @@ public:
         }
     }
 
-    void AddPrimitiveStateKey(const PSOCache::PrimitiveStateKey& value) {
-        AddEnum(value.Topology);
-        AddEnum(value.FaceClockwise);
-        AddEnum(value.Cull);
-        AddEnum(value.Poly);
-        AddBool(value.StripIndexFormat.has_value());
+    void AddPrimitiveState(const render::PrimitiveState& value) {
+        AddPodFields(
+            EnumBits(value.Topology),
+            EnumBits(value.FaceClockwise),
+            EnumBits(value.Cull),
+            EnumBits(value.Poly),
+            BoolByte(value.StripIndexFormat.has_value()));
         if (value.StripIndexFormat.has_value()) {
             AddEnum(value.StripIndexFormat.value());
         }
-        AddBool(value.UnclippedDepth);
-        AddBool(value.Conservative);
+        AddPodFields(
+            BoolByte(value.UnclippedDepth),
+            BoolByte(value.Conservative));
     }
 
-    void AddMultiSampleStateKey(const PSOCache::MultiSampleStateKey& value) {
-        AddPod(value.Count);
-        AddPod(value.Mask);
-        AddBool(value.AlphaToCoverageEnable);
+    void AddMultiSampleState(const render::MultiSampleState& value) {
+        AddPodFields(
+            value.Count,
+            value.Mask,
+            BoolByte(value.AlphaToCoverageEnable));
     }
 
-    void AddColorTargetStateKey(const PSOCache::ColorTargetStateKey& value) {
-        AddEnum(value.Format);
-        AddBool(value.Blend.has_value());
+    void AddColorTargetState(const render::ColorTargetState& value) {
+        AddPodFields(
+            EnumBits(value.Format),
+            BoolByte(value.Blend.has_value()));
         if (value.Blend.has_value()) {
             AddBlendState(value.Blend.value());
         }
@@ -269,12 +299,28 @@ public:
     }
 
 private:
+    template <class T>
+    static constexpr std::underlying_type_t<T> EnumBits(T value) noexcept
+    requires std::is_enum_v<T>
+    {
+        return static_cast<std::underlying_type_t<T>>(value);
+    }
+
+    static constexpr uint8_t BoolByte(bool value) noexcept {
+        return value ? 1u : 0u;
+    }
+
+    static constexpr float CanonicalFloat(float value) noexcept {
+        return value == 0.0f ? 0.0f : value;
+    }
+
     void AddBytes(const void* data, size_t size) {
         if (size == 0) {
             return;
         }
-        const auto* bytes = static_cast<const byte*>(data);
-        _bytes.insert(_bytes.end(), bytes, bytes + size);
+        const size_t offset = _bytes.size();
+        _bytes.resize(offset + size);
+        std::memcpy(_bytes.data() + offset, data, size);
     }
 
     vector<byte> _bytes;
@@ -747,11 +793,11 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
-    _rsCache = make_unique<RSCache>(_device);
-    _psoCache = make_unique<PSOCache>(_device);
     // shader 编译的默认 include 根目录:约定 shaderlib 随可执行文件部署在运行时目录下。
     // 这样 shader 源码可直接 #include "common.hlsl" 等 shaderlib 头文件。
-    _shaderIncludeDir = (GetExecutableDirectory() / "shaderlib").generic_string();
+    _shaderCache = make_unique<ShaderCache>(_device, (GetExecutableDirectory() / "shaderlib").generic_string());
+    _rsCache = make_unique<RSCache>(_device);
+    _psoCache = make_unique<PSOCache>(_device);
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
     }
@@ -794,13 +840,16 @@ void GpuSystem::PumpFrameUploadScheduler() {
     }
 }
 
-size_t GpuSystem::ShaderCompileKeyHash::operator()(const ShaderCompileKey& key) const noexcept {
+ShaderCache::ShaderCache(render::Device* device, std::string_view shaderIncludeDir)
+    : _device(device), _shaderIncludeDir(shaderIncludeDir) {}
+
+size_t ShaderCache::ShaderCompileKeyHash::operator()(const ShaderCompileKey& key) const noexcept {
     HashKeyBuilder hash;
     hash.AddShaderCompileKey(key);
     return hash.Finish();
 }
 
-std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc) {
+std::optional<CompiledShaderEntry> ShaderCache::GetOrCompileEntry(const ShaderCompileDescriptor& desc) {
     ShaderVariantKey variant{desc.Defines};
     ShaderCompileKey key{
         .Name = string{desc.Name},
@@ -808,7 +857,7 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
         .Stage = desc.Stage,
         .Backend = _device->GetBackend(),
         .Variant = variant};
-    if (auto it = _shaderCache.find(key); it != _shaderCache.end()) {
+    if (auto it = _cache.find(key); it != _cache.end()) {
         return CompiledShaderEntry{
             .Target = it->second.get(),
             .Key = key};
@@ -819,7 +868,7 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
     if (_dxc == nullptr) {
         auto dxcOpt = render::CreateDxc();
         if (!dxcOpt.HasValue()) {
-            RADRAY_ERR_LOG("GpuSystem: failed to create DXC compiler");
+            RADRAY_ERR_LOG("ShaderCache: failed to create DXC compiler");
             return std::nullopt;
         }
         _dxc = dxcOpt.Release();
@@ -853,7 +902,7 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
     }
     auto outputOpt = _dxc->Compile(params);
     if (!outputOpt.has_value()) {
-        RADRAY_ERR_LOG("GpuSystem: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
+        RADRAY_ERR_LOG("ShaderCache: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
         return std::nullopt;
     }
     auto output = std::move(outputOpt.value());
@@ -867,19 +916,19 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
             .EntryPointName = desc.EntryPoint,
             .Stage = desc.Stage});
         if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("GpuSystem: failed to reflect SPIR-V shader '{}'", desc.Name);
+            RADRAY_ERR_LOG("ShaderCache: failed to reflect SPIR-V shader '{}'", desc.Name);
             return std::nullopt;
         }
         reflection = std::move(reflOpt.value());
         category = render::ShaderBlobCategory::SPIRV;
 #else
-        RADRAY_ERR_LOG("GpuSystem: SPIR-V Cross reflection is not enabled in this build");
+        RADRAY_ERR_LOG("ShaderCache: SPIR-V Cross reflection is not enabled in this build");
         return std::nullopt;
 #endif
     } else {
         auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
         if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("GpuSystem: failed to reflect DXIL shader '{}'", desc.Name);
+            RADRAY_ERR_LOG("ShaderCache: failed to reflect DXIL shader '{}'", desc.Name);
             return std::nullopt;
         }
         reflection = std::move(reflOpt.value());
@@ -893,11 +942,11 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
     shaderDesc.Reflection = std::move(reflection);
     auto shaderOpt = _device->CreateShader(shaderDesc);
     if (!shaderOpt.HasValue()) {
-        RADRAY_ERR_LOG("GpuSystem: failed to create shader '{}'", desc.Name);
+        RADRAY_ERR_LOG("ShaderCache: failed to create shader '{}'", desc.Name);
         return std::nullopt;
     }
     render::Shader* raw = shaderOpt.Get();
-    _shaderCache.emplace(std::move(key), shaderOpt.Release());
+    _cache.emplace(std::move(key), shaderOpt.Release());
     return CompiledShaderEntry{
         .Target = raw,
         .Key = ShaderCompileKey{
@@ -908,15 +957,15 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const Shad
             .Variant = ShaderVariantKey{desc.Defines}}};
 }
 
-Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
-    std::optional<CompiledShaderEntry> entry = GetOrCompileShaderEntry(desc);
+Nullable<render::Shader*> ShaderCache::GetOrCompile(const ShaderCompileDescriptor& desc) {
+    std::optional<CompiledShaderEntry> entry = GetOrCompileEntry(desc);
     if (!entry.has_value()) {
         return nullptr;
     }
     return entry->Target;
 }
 
-Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
+Nullable<render::Shader*> ShaderCache::GetOrCompileFromFile(
     const std::filesystem::path& path,
     std::string_view entryPoint,
     render::ShaderStage stage,
@@ -924,7 +973,7 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     std::span<const ShaderDefine> defines) {
     auto sourceOpt = ReadTextFile(path);
     if (!sourceOpt.has_value()) {
-        RADRAY_ERR_LOG("GpuSystem: failed to read shader file {}", path.string());
+        RADRAY_ERR_LOG("ShaderCache: failed to read shader file {}", path.string());
         return nullptr;
     }
     string pathName = name.empty() ? path.string() : string{name};
@@ -934,10 +983,10 @@ Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
     desc.EntryPoint = entryPoint;
     desc.Stage = stage;
     desc.Defines = defines;
-    return GetOrCompileShader(desc);
+    return GetOrCompile(desc);
 }
 
-std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
+std::optional<CompiledShaderEntry> ShaderCache::GetOrCompileEntryFromFile(
     const std::filesystem::path& path,
     std::string_view entryPoint,
     render::ShaderStage stage,
@@ -945,7 +994,7 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
     std::span<const ShaderDefine> defines) {
     auto sourceOpt = ReadTextFile(path);
     if (!sourceOpt.has_value()) {
-        RADRAY_ERR_LOG("GpuSystem: failed to read shader file {}", path.string());
+        RADRAY_ERR_LOG("ShaderCache: failed to read shader file {}", path.string());
         return std::nullopt;
     }
     string pathName = name.empty() ? path.string() : string{name};
@@ -955,7 +1004,33 @@ std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
     desc.EntryPoint = entryPoint;
     desc.Stage = stage;
     desc.Defines = defines;
-    return GetOrCompileShaderEntry(desc);
+    return GetOrCompileEntry(desc);
+}
+
+std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc) {
+    return _shaderCache->GetOrCompileEntry(desc);
+}
+
+Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
+    return _shaderCache->GetOrCompile(desc);
+}
+
+Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
+    const std::filesystem::path& path,
+    std::string_view entryPoint,
+    render::ShaderStage stage,
+    std::string_view name,
+    std::span<const ShaderDefine> defines) {
+    return _shaderCache->GetOrCompileFromFile(path, entryPoint, stage, name, defines);
+}
+
+std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
+    const std::filesystem::path& path,
+    std::string_view entryPoint,
+    render::ShaderStage stage,
+    std::string_view name,
+    std::span<const ShaderDefine> defines) {
+    return _shaderCache->GetOrCompileEntryFromFile(path, entryPoint, stage, name, defines);
 }
 
 Nullable<render::RootSignature*> GpuSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
@@ -1534,31 +1609,6 @@ PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBu
     return key;
 }
 
-PSOCache::PrimitiveStateKey PSOCache::PrimitiveStateKey::From(const render::PrimitiveState& value) noexcept {
-    return PrimitiveStateKey{
-        .Topology = value.Topology,
-        .FaceClockwise = value.FaceClockwise,
-        .Cull = value.Cull,
-        .Poly = value.Poly,
-        .StripIndexFormat = value.StripIndexFormat,
-        .UnclippedDepth = value.UnclippedDepth,
-        .Conservative = value.Conservative};
-}
-
-PSOCache::MultiSampleStateKey PSOCache::MultiSampleStateKey::From(const render::MultiSampleState& value) noexcept {
-    return MultiSampleStateKey{
-        .Count = value.Count,
-        .Mask = value.Mask,
-        .AlphaToCoverageEnable = value.AlphaToCoverageEnable};
-}
-
-PSOCache::ColorTargetStateKey PSOCache::ColorTargetStateKey::From(const render::ColorTargetState& value) noexcept {
-    return ColorTargetStateKey{
-        .Format = value.Format,
-        .Blend = value.Blend,
-        .WriteMask = value.WriteMask};
-}
-
 size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
     HashKeyBuilder hash;
     hash.AddRootSignatureLayoutKey(key.RootLayout);
@@ -1571,15 +1621,15 @@ size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const
     for (const VertexLayoutKey& vertex : key.VertexLayouts) {
         hash.AddVertexLayoutKey(vertex);
     }
-    hash.AddPrimitiveStateKey(key.Primitive);
+    hash.AddPrimitiveState(key.Primitive);
     hash.AddBool(key.DepthStencil.has_value());
     if (key.DepthStencil.has_value()) {
         hash.AddDepthStencilState(key.DepthStencil.value());
     }
-    hash.AddMultiSampleStateKey(key.MultiSample);
+    hash.AddMultiSampleState(key.MultiSample);
     hash.AddSize(key.ColorTargets.size());
-    for (const ColorTargetStateKey& colorTarget : key.ColorTargets) {
-        hash.AddColorTargetStateKey(colorTarget);
+    for (const render::ColorTargetState& colorTarget : key.ColorTargets) {
+        hash.AddColorTargetState(colorTarget);
     }
     return hash.Finish();
 }
@@ -1604,10 +1654,10 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(const GraphicsPsoDesc& desc
         vertexLayouts.push_back(VertexLayoutKey::From(layout));
     }
 
-    vector<ColorTargetStateKey> colorTargets;
+    vector<render::ColorTargetState> colorTargets;
     colorTargets.reserve(desc.ColorTargets.size());
     for (const render::ColorTargetState& colorTarget : desc.ColorTargets) {
-        colorTargets.push_back(ColorTargetStateKey::From(colorTarget));
+        colorTargets.push_back(colorTarget);
     }
 
     GraphicsPsoKey key{
@@ -1615,9 +1665,9 @@ render::GraphicsPipelineState* PSOCache::GetOrCreate(const GraphicsPsoDesc& desc
         .VS = desc.VS.Key,
         .PS = desc.PS.has_value() ? std::optional<ShaderCompileKey>{desc.PS->Key} : std::nullopt,
         .VertexLayouts = std::move(vertexLayouts),
-        .Primitive = PrimitiveStateKey::From(desc.Primitive),
+        .Primitive = desc.Primitive,
         .DepthStencil = desc.DepthStencil,
-        .MultiSample = MultiSampleStateKey::From(desc.MultiSample),
+        .MultiSample = desc.MultiSample,
         .ColorTargets = std::move(colorTargets)};
     if (auto it = _cache.find(key); it != _cache.end()) {
         return it->second.get();

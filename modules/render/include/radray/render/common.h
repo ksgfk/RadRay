@@ -1086,6 +1086,8 @@ struct PrimitiveState {
             true,
             false};
     }
+
+    friend bool operator==(const PrimitiveState&, const PrimitiveState&) = default;
 };
 
 struct StencilFaceState {
@@ -1168,6 +1170,8 @@ struct MultiSampleState {
             0xFFFFFFFF,
             false};
     }
+
+    friend bool operator==(const MultiSampleState&, const MultiSampleState&) = default;
 };
 
 struct BlendComponent {
@@ -1206,6 +1210,8 @@ struct ColorTargetState {
             std::nullopt,
             ColorWrite::All};
     }
+
+    friend bool operator==(const ColorTargetState&, const ColorTargetState&) = default;
 };
 
 struct ShaderEntry {

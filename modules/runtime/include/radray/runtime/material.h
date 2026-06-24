@@ -127,6 +127,6 @@ struct RuntimeTypeTrait<Material> {
 };
 
 /// Material 的加载工厂。纯 CPU(编译 shader + 取共享 RootSignature),无 GPU 上传阶段。
-AssetLoadTask LoadMaterial(GpuSystem& gpuSystem, MaterialDescriptor desc);
+AssetLoadTask LoadMaterial(GpuSystem& gpuSystem, const MaterialDescriptor& desc);
 
 }  // namespace radray

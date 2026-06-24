@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include <radray/types.h>
 #include <radray/coroutine.h>
@@ -35,6 +36,7 @@ class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;
 class WaitFrameUploadGpuAwaitable;
+class ShaderCache;
 class RSCache;
 class PSOCache;
 struct FrameUploadRecord;
@@ -251,6 +253,48 @@ private:
     FrameUploadRecord* _record{nullptr};
 };
 
+/// Shader 编译缓存。按 ShaderCompileKey 编译/反射并创建 Shader，命中缓存直接返回。
+/// Vulkan 后端自动编译为 SPIR-V 并走 spirv-cross 反射，D3D12 走 DXIL。
+class ShaderCache {
+public:
+    explicit ShaderCache(render::Device* device, std::string_view shaderIncludeDir = {});
+    ShaderCache(const ShaderCache&) = delete;
+    ShaderCache& operator=(const ShaderCache&) = delete;
+    ~ShaderCache() noexcept = default;
+
+    /// 返回的指针由 ShaderCache 拥有，调用方勿释放。
+    Nullable<render::Shader*> GetOrCompile(const ShaderCompileDescriptor& desc);
+    std::optional<CompiledShaderEntry> GetOrCompileEntry(const ShaderCompileDescriptor& desc);
+
+    /// 从磁盘读取 HLSL 文件并编译。Name 缺省用文件路径。
+    Nullable<render::Shader*> GetOrCompileFromFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        render::ShaderStage stage,
+        std::string_view name = {},
+        std::span<const ShaderDefine> defines = {});
+    std::optional<CompiledShaderEntry> GetOrCompileEntryFromFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        render::ShaderStage stage,
+        std::string_view name = {},
+        std::span<const ShaderDefine> defines = {});
+
+    void Clear() noexcept {
+        _cache.clear();
+    }
+
+private:
+    struct ShaderCompileKeyHash {
+        size_t operator()(const ShaderCompileKey& key) const noexcept;
+    };
+
+    render::Device* _device;
+    shared_ptr<render::Dxc> _dxc;
+    string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
+    unordered_map<ShaderCompileKey, unique_ptr<render::Shader>, ShaderCompileKeyHash> _cache;
+};
+
 /// RootSignature 缓存。RootSignature 由 shader 反射合并出的 binding layout 纯内容寻址。
 class RSCache {
 public:
@@ -317,49 +361,15 @@ public:
         std::span<const render::ColorTargetState> ColorTargets{};
     };
 
-    struct PrimitiveStateKey {
-        render::PrimitiveTopology Topology{};
-        render::FrontFace FaceClockwise{};
-        render::CullMode Cull{};
-        render::PolygonMode Poly{};
-        std::optional<render::IndexFormat> StripIndexFormat{};
-        bool UnclippedDepth{false};
-        bool Conservative{false};
-
-        static PrimitiveStateKey From(const render::PrimitiveState& value) noexcept;
-
-        friend bool operator==(const PrimitiveStateKey&, const PrimitiveStateKey&) = default;
-    };
-
-    struct MultiSampleStateKey {
-        uint32_t Count{0};
-        uint64_t Mask{0};
-        bool AlphaToCoverageEnable{false};
-
-        static MultiSampleStateKey From(const render::MultiSampleState& value) noexcept;
-
-        friend bool operator==(const MultiSampleStateKey&, const MultiSampleStateKey&) = default;
-    };
-
-    struct ColorTargetStateKey {
-        render::TextureFormat Format{render::TextureFormat::UNKNOWN};
-        std::optional<render::BlendState> Blend{};
-        render::ColorWrites WriteMask{};
-
-        static ColorTargetStateKey From(const render::ColorTargetState& value) noexcept;
-
-        friend bool operator==(const ColorTargetStateKey&, const ColorTargetStateKey&) = default;
-    };
-
     struct GraphicsPsoKey {
         RootSignatureLayoutKey RootLayout{};
         ShaderCompileKey VS{};
         std::optional<ShaderCompileKey> PS{};
         vector<VertexLayoutKey> VertexLayouts{};
-        PrimitiveStateKey Primitive{};
+        render::PrimitiveState Primitive{};
         std::optional<render::DepthStencilState> DepthStencil{};
-        MultiSampleStateKey MultiSample{};
-        vector<ColorTargetStateKey> ColorTargets{};
+        render::MultiSampleState MultiSample{};
+        vector<render::ColorTargetState> ColorTargets{};
 
         friend bool operator==(const GraphicsPsoKey&, const GraphicsPsoKey&) = default;
     };
@@ -467,9 +477,7 @@ public:
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
     /// 编译（含反射）并创建一个 Shader，按 ShaderCompileKey 缓存。
-    /// 命中缓存直接返回。返回的指针由 GpuSystem 拥有，调用方勿释放。
-    /// Vulkan 后端自动编译为 SPIR-V 并走 spirv-cross 反射，D3D12 走 DXIL。
-    /// 对应 UE5 FShaderMap 对 FShader 的缓存职责（最小化版，未引入独立 ShaderManager）。
+    /// 命中缓存直接返回。返回的指针由 GpuSystem 的 ShaderCache 拥有，调用方勿释放。
     Nullable<render::Shader*> GetOrCompileShader(const ShaderCompileDescriptor& desc);
     std::optional<CompiledShaderEntry> GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc);
 
@@ -494,6 +502,7 @@ public:
     Nullable<render::RootSignature*> GetOrCreateRootSignature(std::span<render::Shader*> shaders);
     std::optional<RootSignatureEntry> GetOrCreateRootSignatureEntry(std::span<render::Shader*> shaders);
 
+    ShaderCache& GetShaderCache() noexcept { return *_shaderCache; }
     RSCache& GetRSCache() noexcept { return *_rsCache; }
 
     /// 引擎级 PSO 缓存。按 shader/root-layout 身份、顶点签名和固定渲染状态组合缓存 GraphicsPipelineState。
@@ -522,10 +531,6 @@ private:
 
     void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
 
-    struct ShaderCompileKeyHash {
-        size_t operator()(const ShaderCompileKey& key) const noexcept;
-    };
-
     Application* _app;
     WindowManager* _windowManager{nullptr};
     render::Device* _device;
@@ -536,9 +541,7 @@ private:
     vector<FlightSlot> _flights;
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
-    shared_ptr<render::Dxc> _dxc;
-    unordered_map<ShaderCompileKey, unique_ptr<render::Shader>, ShaderCompileKeyHash> _shaderCache;
-    string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
+    unique_ptr<ShaderCache> _shaderCache;
     unique_ptr<RSCache> _rsCache;
     unique_ptr<PSOCache> _psoCache;
     unique_ptr<GpuFrameProfiler> _frameProfiler;

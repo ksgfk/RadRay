@@ -135,7 +135,7 @@ MaterialShaderSet Material::CompileShaderSet(
         .RootLayout = std::move(rootSig->Layout)};
 }
 
-AssetLoadTask LoadMaterial(GpuSystem& gpuSystem, MaterialDescriptor desc) {
+AssetLoadTask LoadMaterial(GpuSystem& gpuSystem, const MaterialDescriptor& desc) {
     // 纯 CPU 加载:构造 Material(编译 shader + 取共享 RootSignature)。无 GPU 上传。
     auto material = make_unique<Material>(gpuSystem, desc);
     if (!material->IsValid()) {
