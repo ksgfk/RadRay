@@ -5,10 +5,10 @@
 #include <radray/basic_math.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/material.h>
-#include <radray/runtime/material_instance.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
+#include <radray/runtime/render/material.h>
+#include <radray/runtime/render/material_assignment.h>
 
 namespace radray {
 
@@ -16,6 +16,14 @@ class Actor;
 class FrameUploadScheduler;
 class GpuSystem;
 class World;
+
+namespace render {
+class Device;
+}  // namespace render
+
+namespace srp {
+class Shader;
+}  // namespace srp
 
 struct GltfNodeDesc {
     string Name;
@@ -33,11 +41,14 @@ struct GltfPrimitiveDesc {
     int NodeIndex{-1};
     uint32_t SourceMaterialIndex{0};
     StreamingAssetRef<StaticMesh> Mesh;
-    StreamingAssetRef<Material> Material;
-    /// per-使用点材质参数(从 glTF 材质转换而来,按名写入 gMaterial cbuffer)。
+    /// per-使用点材质参数(从 glTF 材质转换而来，按名写入 gMaterial cbuffer)。
     vector<MaterialParameterAssignment> MaterialParams;
-    /// per-使用点材质贴图(从 glTF 材质转换而来,按名绑定 shader 贴图槽)。
+    /// per-使用点材质贴图(从 glTF 材质转换而来，按名绑定 shader 贴图槽)。
     vector<MaterialTextureAssignment> MaterialTextures;
+    /// 材质语义(从 glTF alphaMode/doubleSided/alphaCutoff 推导)。
+    srp::BlendMode Blend{srp::BlendMode::Opaque};
+    bool TwoSided{false};
+    float AlphaCutoff{0.5f};
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
@@ -49,9 +60,8 @@ struct GltfTextureDesc {
 };
 
 struct GltfAssetLoadOptions {
-    StreamingAssetRefAny DefaultMaterial{};
-    GpuSystem* Gpu{nullptr};
-    MaterialDescriptor MaterialTemplate{};
+    // 旧材质加载已移除;材质参数/贴图在加载时随 primitive 携带，
+    // 渲染依赖(shader/device/blend)在 ExportToScene 时注入。
 };
 
 class GltfAsset : public Asset {
@@ -72,7 +82,9 @@ public:
     void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
-    Actor* ExportToScene(World& world) const;
+    /// 导出为场景 Actor 树。渲染依赖(用于构建 StandardMaterial)由调用方注入：
+    /// shader = 各 StaticMeshComponent 的 srp::Shader;device = 材质 GPU 资源创建用设备。
+    Actor* ExportToScene(World& world, srp::Shader* shader, render::Device* device) const;
 
     const std::filesystem::path& GetPath() const noexcept { return _path; }
     const vector<GltfNodeDesc>& GetNodes() const noexcept { return _nodes; }

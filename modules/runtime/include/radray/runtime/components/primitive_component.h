@@ -1,11 +1,14 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/render/renderer.h>
 
 namespace radray {
 
-class PrimitiveSceneProxy;
+namespace srp {
 class Scene;
+}  // namespace srp
+
 class PrimitiveComponent;
 
 template <>
@@ -14,9 +17,11 @@ struct RuntimeTypeTrait<PrimitiveComponent> {
 };
 
 /// 可渲染的 SceneComponent。
-/// OnRegister 时创建 PrimitiveSceneProxy 并注册到 Scene。
+/// OnRegister 时构建 srp::Renderer 实体并注册到 srp::Scene。
 /// OnUnregister 时从 Scene 移除。
 /// 对应 UE5 的 UPrimitiveComponent。
+///
+/// 组件【拥有】其 srp::Renderer(unique_ptr),Scene 只借用裸指针。
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
@@ -27,24 +32,28 @@ public:
     void OnRegister() override;
     void OnUnregister() override;
 
-    /// 派生类实现：创建对应的 SceneProxy
-    virtual unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() { return nullptr; }
+    /// 派生类实现:构建本组件对应的 srp::Renderer(可多个,如多 section)。
+    virtual vector<unique_ptr<srp::Renderer>> BuildRenderers() { return {}; }
 
-    PrimitiveSceneProxy* GetSceneProxy() const noexcept { return _sceneProxy; }
+    /// 已构建且已注册到 Scene 的 renderer(借用视图)。
+    std::span<const unique_ptr<srp::Renderer>> GetRenderers() const noexcept { return _renderers; }
+    bool HasRenderers() const noexcept { return !_renderers.empty(); }
 
 protected:
     void OnTransformChanged() override;
 
-    /// 重建 SceneProxy：移除旧代理(若有)、CreateSceneProxy 重建并注册。
+    /// 重建 renderer:移除旧的、BuildRenderers 重建并注册。
     /// 供资产异步就绪后由组件调用(如 StaticMeshComponent::TickComponent)。
-    /// 未注册或 CreateSceneProxy 返回 nullptr 时不做任何事。
-    void RecreateSceneProxy();
+    /// 未注册时不做任何事。
+    void RecreateRenderers();
 
 private:
-    Scene* GetScene() const noexcept;
+    srp::Scene* GetScene() const noexcept;
+    void RegisterRenderers();
+    void UnregisterRenderers();
 
-    /// non-owning, Scene 持有 unique_ptr
-    PrimitiveSceneProxy* _sceneProxy{nullptr};
+    /// 组件拥有 renderer 实体;Scene 仅借用裸指针。
+    vector<unique_ptr<srp::Renderer>> _renderers;
 };
 
 }  // namespace radray

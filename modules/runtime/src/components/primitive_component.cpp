@@ -2,8 +2,8 @@
 
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
-#include <radray/runtime/renderer/scene.h>
-#include <radray/runtime/renderer/primitive_scene_proxy.h>
+#include <radray/runtime/render/scene.h>
+#include <radray/runtime/render/renderer.h>
 
 namespace radray {
 
@@ -15,45 +15,56 @@ RuntimeTypeId PrimitiveComponent::GetTypeId() const noexcept {
 
 void PrimitiveComponent::OnRegister() {
     SceneComponent::OnRegister();
-    auto proxy = CreateSceneProxy();
-    if (proxy) {
-        proxy->SetWorldMatrix(GetWorldMatrix());
-        _sceneProxy = proxy.get();
-        GetScene()->AddPrimitive(std::move(proxy));
-    }
+    _renderers = BuildRenderers();
+    RegisterRenderers();
 }
 
 void PrimitiveComponent::OnUnregister() {
-    if (_sceneProxy) {
-        GetScene()->RemovePrimitive(_sceneProxy);
-        _sceneProxy = nullptr;
-    }
+    UnregisterRenderers();
+    _renderers.clear();
     SceneComponent::OnUnregister();
 }
 
 void PrimitiveComponent::OnTransformChanged() {
-    if (_sceneProxy) {
-        _sceneProxy->SetWorldMatrix(GetWorldMatrix());
+    const Eigen::Matrix4f world = GetWorldMatrix();
+    for (auto& renderer : _renderers) {
+        renderer->SetWorldMatrix(world);
     }
 }
 
-void PrimitiveComponent::RecreateSceneProxy() {
+void PrimitiveComponent::RecreateRenderers() {
     if (!IsRegistered()) {
         return;
     }
-    if (_sceneProxy) {
-        GetScene()->RemovePrimitive(_sceneProxy);
-        _sceneProxy = nullptr;
+    UnregisterRenderers();
+    _renderers.clear();
+    _renderers = BuildRenderers();
+    RegisterRenderers();
+}
+
+void PrimitiveComponent::RegisterRenderers() {
+    if (_renderers.empty()) {
+        return;
     }
-    auto proxy = CreateSceneProxy();
-    if (proxy) {
-        proxy->SetWorldMatrix(GetWorldMatrix());
-        _sceneProxy = proxy.get();
-        GetScene()->AddPrimitive(std::move(proxy));
+    srp::Scene* scene = GetScene();
+    const Eigen::Matrix4f world = GetWorldMatrix();
+    for (auto& renderer : _renderers) {
+        renderer->SetWorldMatrix(world);
+        scene->AddRenderer(renderer.get());
     }
 }
 
-Scene* PrimitiveComponent::GetScene() const noexcept {
+void PrimitiveComponent::UnregisterRenderers() {
+    if (_renderers.empty()) {
+        return;
+    }
+    srp::Scene* scene = GetScene();
+    for (auto& renderer : _renderers) {
+        scene->RemoveRenderer(renderer.get());
+    }
+}
+
+srp::Scene* PrimitiveComponent::GetScene() const noexcept {
     return GetWorld().Get()->GetScene();
 }
 

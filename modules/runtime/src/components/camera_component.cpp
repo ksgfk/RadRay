@@ -1,6 +1,6 @@
 #include <radray/runtime/components/camera_component.h>
 
-#include <radray/runtime/renderer/scene_renderer.h>
+#include <radray/runtime/render/scene_view.h>
 
 namespace radray {
 
@@ -23,7 +23,7 @@ Eigen::Matrix4f CameraComponent::ComputeProjMatrix(float aspect) const noexcept 
     return PerspectiveLH<float>(_fovY, aspect, _nearZ, _farZ);
 }
 
-void CameraComponent::FillSceneView(SceneView& view, uint32_t width, uint32_t height) const noexcept {
+void CameraComponent::FillSceneView(srp::SceneView& view, uint32_t width, uint32_t height) const noexcept {
     const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     view.ViewMatrix = ComputeViewMatrix();
     view.ProjMatrix = ComputeProjMatrix(aspect);

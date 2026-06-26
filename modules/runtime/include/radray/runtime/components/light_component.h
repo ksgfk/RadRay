@@ -1,11 +1,14 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/renderer/light_scene_proxy.h>
+#include <radray/runtime/render/scene.h>
 
 namespace radray {
 
+namespace srp {
 class Scene;
+}  // namespace srp
+
 class LightComponent;
 
 template <>
@@ -13,7 +16,7 @@ struct RuntimeTypeTrait<LightComponent> {
     static constexpr RuntimeTypeId value{0x7e32d0c4, 0x9b0f, 0x43a2, 0x96, 0x91, 0x79, 0xdf, 0x3c, 0x31, 0x45, 0xb2};
 };
 
-/// Light source component registered into the render Scene as a LightSceneProxy.
+/// Light source component registered into the render srp::Scene as an srp::Light.
 class LightComponent : public SceneComponent {
 public:
     LightComponent() noexcept = default;
@@ -21,7 +24,7 @@ public:
 
     RuntimeTypeId GetTypeId() const noexcept override;
 
-    void SetLightType(LightType type) noexcept;
+    void SetLightType(srp::LightType type) noexcept;
     void SetDirection(const Eigen::Vector3f& direction) noexcept;
     void SetColor(const Eigen::Vector3f& color) noexcept;
     void SetIntensity(float intensity) noexcept;
@@ -30,7 +33,7 @@ public:
     void SetRange(float range) noexcept;
     void SetSpotAngles(float innerAngleRadians, float outerAngleRadians) noexcept;
 
-    LightType GetLightType() const noexcept { return _type; }
+    srp::LightType GetLightType() const noexcept { return _type; }
     const Eigen::Vector3f& GetDirection() const noexcept { return _direction; }
     const Eigen::Vector3f& GetColor() const noexcept { return _color; }
     float GetIntensity() const noexcept { return _intensity; }
@@ -48,10 +51,10 @@ protected:
     void OnTransformChanged() override;
 
 private:
-    Scene* GetScene() const noexcept;
-    void PushParametersToProxy() noexcept;
+    srp::Scene* GetScene() const noexcept;
+    void PushParametersToLight() noexcept;
 
-    LightType _type{LightType::Point};
+    srp::LightType _type{srp::LightType::Point};
     Eigen::Vector3f _direction{0.0f, -1.0f, 0.0f};
     Eigen::Vector3f _color{1.0f, 1.0f, 1.0f};
     float _intensity{1.0f};
@@ -62,8 +65,8 @@ private:
     float _spotInnerAngle{0.5235988f};  // 30 deg
     float _spotOuterAngle{0.6981317f};  // 40 deg
 
-    /// non-owning, Scene holds the unique_ptr.
-    LightSceneProxy* _sceneProxy{nullptr};
+    /// non-owning, Scene holds the unique_ptr (stable handle).
+    srp::Light* _light{nullptr};
 };
 
 }  // namespace radray

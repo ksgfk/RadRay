@@ -3,12 +3,12 @@
 #include <algorithm>
 
 #include <radray/runtime/game_framework/actor.h>
-#include <radray/runtime/renderer/scene.h>
+#include <radray/runtime/render/scene.h>
 
 namespace radray {
 
 World::World()
-    : _scene(make_unique<Scene>()) {}
+    : _scene(make_unique<srp::Scene>()) {}
 
 World::~World() noexcept {
     // Destroy all actors (triggers UnregisterAllComponents for each)

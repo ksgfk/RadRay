@@ -18,7 +18,6 @@
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/image_asset.h>
-#include <radray/runtime/renderer/primitive_scene_proxy.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/scope_guard.h>
 #include <radray/vertex_data.h>
@@ -91,15 +90,15 @@ struct ParsedGltf {
     bool HasBounds{false};
 };
 
-MaterialBlendMode ToMaterialBlendMode(GltfMaterialCpu::Alpha alpha) noexcept {
+srp::BlendMode ToSrpBlendMode(GltfMaterialCpu::Alpha alpha) noexcept {
     switch (alpha) {
         case GltfMaterialCpu::Alpha::Mask:
-            return MaterialBlendMode::Masked;
+            return srp::BlendMode::Masked;
         case GltfMaterialCpu::Alpha::Blend:
-            return MaterialBlendMode::Blend;
+            return srp::BlendMode::Transparent;
         case GltfMaterialCpu::Alpha::Opaque:
         default:
-            return MaterialBlendMode::Opaque;
+            return srp::BlendMode::Opaque;
     }
 }
 
@@ -849,7 +848,7 @@ AssetTypeId GltfAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<GltfAsset>;
 }
 
-Actor* GltfAsset::ExportToScene(World& world) const {
+Actor* GltfAsset::ExportToScene(World& world, srp::Shader* shader, render::Device* device) const {
     Actor* rootActor = world.SpawnActor<Actor>();
     SceneComponent* root = rootActor->AddComponent<SceneComponent>();
     rootActor->SetRootComponent(root);
@@ -861,9 +860,13 @@ Actor* GltfAsset::ExportToScene(World& world) const {
         Actor* meshActor = world.SpawnActor<Actor>();
         StaticMeshComponent* component = meshActor->AddComponent<StaticMeshComponent>();
         component->SetStaticMesh(primitive.Mesh);
-        component->SetMaterial(primitive.Material);
         component->SetMaterialParams(primitive.MaterialParams);
         component->SetMaterialTextures(primitive.MaterialTextures);
+        component->SetRenderShader(shader);
+        component->SetRenderDevice(device);
+        component->SetBlendMode(primitive.Blend);
+        component->SetTwoSided(primitive.TwoSided);
+        component->SetAlphaCutoff(primitive.AlphaCutoff);
         meshActor->SetRootComponent(component);
         component->AttachTo(root);
 
@@ -931,28 +934,6 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                 parsed.Materials.push_back(GltfMaterialCpu{});
             }
 
-            vector<StreamingAssetRef<Material>> materialAssets;
-            materialAssets.reserve(parsed.Materials.size());
-            for (size_t i = 0; i < parsed.Materials.size(); ++i) {
-                StreamingAssetRef<Material> materialRef = options.DefaultMaterial.CastTo<Material>();
-                if (options.Gpu != nullptr && !options.MaterialTemplate.ShaderPath.empty()) {
-                    const GltfMaterialCpu& material = parsed.Materials[i];
-                    MaterialDescriptor matDesc = options.MaterialTemplate;
-                    matDesc.ShaderName = options.MaterialTemplate.ShaderName.empty()
-                        ? material.Name
-                        : fmt::format("{}:{}", options.MaterialTemplate.ShaderName, material.Name);
-                    matDesc.BlendMode = ToMaterialBlendMode(material.AlphaMode);
-                    matDesc.TwoSided = material.DoubleSided;
-                    matDesc.AlphaCutoff = material.AlphaCutoff;
-                    const AssetId matId = MakeDerivedAssetId(path, "material", static_cast<uint32_t>(i));
-                    materialRef = assetManager.Load<Material>(AssetLoadRequest{
-                        .Id = matId,
-                        .Task = LoadMaterial(*options.Gpu, matDesc),
-                        .DebugName = material.Name});
-                }
-                materialAssets.push_back(materialRef);
-            }
-
             unordered_map<uint64_t, StreamingAssetRef<TextureAsset>> textureCache;
             vector<vector<MaterialTextureAssignment>> materialTextures;
             materialTextures.reserve(parsed.Materials.size());
@@ -1016,12 +997,14 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                     desc.NodeIndex = static_cast<int>(n);
                     desc.SourceMaterialIndex = primitive->MaterialIndex;
                     desc.Mesh = mesh;
-                    if (primitive->MaterialIndex < materialAssets.size()) {
-                        desc.Material = materialAssets[primitive->MaterialIndex];
-                    } else if (!materialAssets.empty()) {
-                        desc.Material = materialAssets.front();
-                    } else {
-                        desc.Material = options.DefaultMaterial.CastTo<Material>();
+                    {
+                        const size_t matIdx = primitive->MaterialIndex < parsed.Materials.size()
+                            ? primitive->MaterialIndex
+                            : 0;
+                        const GltfMaterialCpu& mat = parsed.Materials[matIdx];
+                        desc.Blend = ToSrpBlendMode(mat.AlphaMode);
+                        desc.TwoSided = mat.DoubleSided;
+                        desc.AlphaCutoff = mat.AlphaCutoff;
                     }
                     desc.MaterialParams = std::move(primitive->MaterialParams);
                     if (primitive->MaterialIndex < materialTextures.size()) {

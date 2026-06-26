@@ -8,7 +8,9 @@
 namespace radray {
 
 class Actor;
+namespace srp {
 class Scene;
+}
 
 /// 顶层容器。管理所有 Actor，持有唯一的 Scene。
 /// 对应 UE5 的 UWorld。
@@ -33,13 +35,13 @@ public:
     void DestroyActor(Actor* actor);
     void Tick(float deltaTime);
 
-    Scene* GetScene() const noexcept { return _scene.get(); }
+    srp::Scene* GetScene() const noexcept { return _scene.get(); }
     std::span<const unique_ptr<Actor>> GetActors() const noexcept { return _actors; }
 
 private:
     void AddActorInternal(unique_ptr<Actor> actor);
 
-    unique_ptr<Scene> _scene;
+    unique_ptr<srp::Scene> _scene;
     vector<unique_ptr<Actor>> _actors;
 };
 
