@@ -2,8 +2,11 @@
 
 #include <chrono>
 #include <concepts>
+#include <coroutine>
+#include <optional>
 #include <string_view>
 
+#include <radray/coroutine.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 #include <radray/render/common.h>
@@ -11,15 +14,18 @@
 namespace radray {
 
 class Application;
+class ApplicationScheduler;
+class SwitchToApplicationSchedulerAwaitable;
+struct ApplicationSchedulerRecord;
+struct ApplicationSchedulerStopCallback;
 class GpuSystem;
 class AppWindow;
 class WindowManager;
 class AppFrameContext;
 class AssetManager;
+class RenderSystem;
 class World;
 class AppSubsystem;
-struct GpuSystemDescriptor;
-struct WindowManagerDescriptor;
 struct AppFrameTarget;
 
 namespace render {
@@ -58,7 +64,65 @@ struct AppUpdateResult {
     bool ShouldExit;
 };
 
-/// 可注册到 Application 的运行时子系统。Application 只驱动这个窄接口,
+struct ApplicationSchedulerStopCallback {
+    ApplicationScheduler* Scheduler{nullptr};
+    ApplicationSchedulerRecord* Record{nullptr};
+
+    void operator()() const noexcept;
+};
+
+struct ApplicationSchedulerRecord {
+    using StopCallbackStorage = stop_token::template callback_type<ApplicationSchedulerStopCallback>;
+
+    ApplicationScheduler* Scheduler{nullptr};
+    std::coroutine_handle<> Continuation{};
+    stop_token Stop;
+    std::optional<StopCallbackStorage> StopCallback;
+    bool Canceled{false};
+};
+
+class SwitchToApplicationSchedulerAwaitable {
+public:
+    SwitchToApplicationSchedulerAwaitable(ApplicationScheduler* scheduler, stop_token stop) noexcept
+        : _scheduler(scheduler), _stop(stop) {}
+
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> continuation);
+    bool await_resume() noexcept;
+
+private:
+    ApplicationScheduler* _scheduler;
+    stop_token _stop;
+    ApplicationSchedulerRecord* _record{nullptr};
+};
+
+class ApplicationScheduler {
+public:
+    ApplicationScheduler() noexcept = default;
+    ApplicationScheduler(const ApplicationScheduler&) = delete;
+    ApplicationScheduler(ApplicationScheduler&&) = delete;
+    ApplicationScheduler& operator=(const ApplicationScheduler&) = delete;
+    ApplicationScheduler& operator=(ApplicationScheduler&&) = delete;
+    ~ApplicationScheduler() noexcept;
+
+    task<void> SwitchTo();
+    void Pump();
+    void CancelAll() noexcept;
+
+private:
+    friend class SwitchToApplicationSchedulerAwaitable;
+    friend struct ApplicationSchedulerStopCallback;
+
+    ApplicationSchedulerRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation);
+    bool Erase(ApplicationSchedulerRecord* record) noexcept;
+    bool IsAlive(ApplicationSchedulerRecord* record) const noexcept;
+    void ResumeRecord(ApplicationSchedulerRecord* record) noexcept;
+    void CancelRecord(ApplicationSchedulerRecord* record) noexcept;
+
+    vector<unique_ptr<ApplicationSchedulerRecord>> _records;
+};
+
+/// 启动前注册到 Application 的运行时子系统。Application 只驱动这个窄接口,
 /// 具体实现(例如 ImGuiSystem)由上层显式注册并按需 GetSubsystem<T>() 获取。
 class AppSubsystem {
 public:
@@ -76,22 +140,22 @@ public:
     virtual void OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx);
     virtual void OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx);
     virtual void OnShutdown(Application& app);
+    virtual RuntimeTypeId GetTypeId() const noexcept = 0;
 
     bool IsInitialized() const noexcept;
 
 private:
     friend class Application;
 
-    void Init(Application& app);
-    void Shutdown(Application& app) noexcept;
+    void Initialize(Application& app);
+    void Teardown(Application& app) noexcept;
 
-    RuntimeTypeId _type{Guid::Empty()};
     bool _initialized{false};
 };
 
 /// 一站式运行时启动描述。Application::Run(desc) 据此创建 device(+factory)、窗口系统、
 /// GpuSystem、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
-/// 可选能力(例如 ImGuiSystem)由上层通过 RegisterSubsystem<T>() 显式注册。
+/// 可选能力(例如 ImGuiSystem)由上层在 Run() 前通过 RegisterSubsystem<T>() 显式注册。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
     render::RenderBackend Backend{render::RenderBackend::Vulkan};
@@ -136,9 +200,9 @@ public:
     requires std::derived_from<T, AppSubsystem>
     const T* GetSubsystem() const noexcept;
 
-    /// 非模板注册入口。用于运行时工厂、插件、脚本绑定等不方便走模板的位置。
-    /// type 由调用方负责保持唯一；重复注册同 type 时返回已存在实例。
-    AppSubsystem* RegisterSubsystem(RuntimeTypeId type, unique_ptr<AppSubsystem> subsystem);
+    /// 非模板注册入口。用于类型擦除后的配置路径。只能在 Run() 前调用。
+    /// type 由 subsystem->GetTypeId() 提供；重复注册同 type 时返回已存在实例。
+    AppSubsystem* RegisterSubsystem(unique_ptr<AppSubsystem> subsystem);
     AppSubsystem* GetSubsystem(RuntimeTypeId type) noexcept;
     const AppSubsystem* GetSubsystem(RuntimeTypeId type) const noexcept;
 
@@ -148,23 +212,14 @@ public:
     const GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem.get(); }
     AssetManager* GetAssetManager() noexcept { return _assetManager.get(); }
     const AssetManager* GetAssetManager() const noexcept { return _assetManager.get(); }
+    RenderSystem* GetRenderSystem() noexcept { return _renderSystem.get(); }
+    const RenderSystem* GetRenderSystem() const noexcept { return _renderSystem.get(); }
+    ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
+    const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     World* GetWorld() noexcept { return _world.get(); }
     const World* GetWorld() const noexcept { return _world.get(); }
     render::Device* GetDevice() noexcept { return _device.get(); }
     const render::Device* GetDevice() const noexcept { return _device.get(); }
-
-    // —— 低层子系统(高级用法仍可单独调;Run 内部即用这些)——
-    WindowManager* InitWindowManager(const WindowManagerDescriptor& desc);
-    void ShutdownWindowManager();
-    GpuSystem* InitGpuSystem(const GpuSystemDescriptor& desc);
-    void ShutdownGpuSystem();
-
-    /// 引擎级资产仓库,进程内唯一、跨 World 共享。对应 UE5 挂在 UEngine 上的 UAssetManager。
-    AssetManager* InitAssetManager();
-    void ShutdownAssetManager();
-    /// 当前运行时世界容器。对应 UE5 由 FWorldContext 持有的当前 UWorld。
-    World* InitWorld();
-    void ShutdownWorld();
 
     // —— runner / 子系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
@@ -194,7 +249,7 @@ protected:
     /// false 则框架或子系统可选择 Clear。默认不画任何东西。
     virtual bool OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target);
 
-    /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、ShutdownWorld 之前)。
+    /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、World 拆除之前)。
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
@@ -205,10 +260,9 @@ protected:
     bool ShouldExit() const noexcept;
 
 private:
-    void InitRuntime(const ApplicationRuntimeDescriptor& desc);
-    void InitSubsystems();
-    void ShutdownSubsystems() noexcept;
-    void InitSubsystemAt(size_t index);
+    void InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
+    void InitializeSubsystems();
+    void TeardownSubsystems() noexcept;
 
     /// 没有子系统接管窗口渲染时的窗口直接渲染路径(acquire/barrier/可选 clear/present-barrier)。
     void RenderWindow(AppFrameContext& ctx, AppWindow* window);
@@ -216,19 +270,20 @@ private:
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;
+    unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<World> _world;
     vector<unique_ptr<AppSubsystem>> _subsystems;
     shared_ptr<render::Device> _device;
     unique_ptr<render::DXGIFactory> _dxgiFactory;
+    ApplicationScheduler _scheduler;
     bool _multithreaded{false};
-    bool _runtimeInitialized{false};
 };
 
 template <class T, class... Args>
 requires std::derived_from<T, AppSubsystem>
 T* Application::RegisterSubsystem(Args&&... args) {
-    return static_cast<T*>(RegisterSubsystem(runtime_type_id_v<T>, make_unique<T>(std::forward<Args>(args)...)));
+    return static_cast<T*>(RegisterSubsystem(make_unique<T>(std::forward<Args>(args)...)));
 }
 
 template <class T>

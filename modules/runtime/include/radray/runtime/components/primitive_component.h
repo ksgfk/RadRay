@@ -1,27 +1,14 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render/renderer.h>
 
 namespace radray {
 
-namespace srp {
+class PrimitiveSceneProxy;
 class Scene;
-}  // namespace srp
 
-class PrimitiveComponent;
-
-template <>
-struct RuntimeTypeTrait<PrimitiveComponent> {
-    static constexpr RuntimeTypeId value{0x84b38cf1, 0x5e55, 0x4a71, 0xa8, 0xd6, 0x23, 0x12, 0x45, 0x2d, 0x6e, 0x91};
-};
-
-/// 可渲染的 SceneComponent。
-/// OnRegister 时构建 srp::Renderer 实体并注册到 srp::Scene。
-/// OnUnregister 时从 Scene 移除。
-/// 对应 UE5 的 UPrimitiveComponent。
-///
-/// 组件【拥有】其 srp::Renderer(unique_ptr),Scene 只借用裸指针。
+/// Base class for components that have a render-side primitive representation.
+/// Corresponds to UE5's UPrimitiveComponent.
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
@@ -32,28 +19,26 @@ public:
     void OnRegister() override;
     void OnUnregister() override;
 
-    /// 派生类实现:构建本组件对应的 srp::Renderer(可多个,如多 section)。
-    virtual vector<unique_ptr<srp::Renderer>> BuildRenderers() { return {}; }
+    void MarkRenderStateDirty();
+    PrimitiveSceneProxy* GetSceneProxy() const noexcept { return _sceneProxy; }
 
-    /// 已构建且已注册到 Scene 的 renderer(借用视图)。
-    std::span<const unique_ptr<srp::Renderer>> GetRenderers() const noexcept { return _renderers; }
-    bool HasRenderers() const noexcept { return !_renderers.empty(); }
+    virtual unique_ptr<PrimitiveSceneProxy> CreateSceneProxy();
 
 protected:
     void OnTransformChanged() override;
 
-    /// 重建 renderer:移除旧的、BuildRenderers 重建并注册。
-    /// 供资产异步就绪后由组件调用(如 StaticMeshComponent::TickComponent)。
-    /// 未注册时不做任何事。
-    void RecreateRenderers();
-
 private:
-    srp::Scene* GetScene() const noexcept;
-    void RegisterRenderers();
-    void UnregisterRenderers();
+    Scene* GetScene() const noexcept;
+    void CreateRenderState();
+    void DestroyRenderState() noexcept;
 
-    /// 组件拥有 renderer 实体;Scene 仅借用裸指针。
-    vector<unique_ptr<srp::Renderer>> _renderers;
+    PrimitiveSceneProxy* _sceneProxy{nullptr};
+    bool _renderStateCreated{false};
+};
+
+template <>
+struct RuntimeTypeTrait<PrimitiveComponent> {
+    static constexpr RuntimeTypeId value{0xfb11f0d6, 0xc97b, 0x4f3f, 0x98, 0xe3, 0xf5, 0x16, 0x8c, 0xbf, 0x0f, 0x42};
 };
 
 }  // namespace radray

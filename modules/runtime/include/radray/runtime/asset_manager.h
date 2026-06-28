@@ -7,10 +7,12 @@
 #include <radray/sparse_set.h>
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/service_registry.h>
 
 namespace radray {
 
 class AssetManager;
+class GpuSystem;
 class StreamingAssetRefAny;
 template <class T>
 requires std::derived_from<T, Asset>
@@ -221,8 +223,8 @@ public:
     /// 应用层显式回收资产(唯一回收入口)。命中在飞 slot 则先取消、延迟到终态再回收。
     void Unload(const AssetId& id) noexcept;
 
-    /// 注入 GPU 资源回收器。未设置时退回立即析构,保持无 GPUSystem 测试场景的旧行为。
-    void SetRenderResourceRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
+    /// 注入 GPU 系统。未设置时 GPU 资源退回立即析构,保持无 GpuSystem 测试场景的旧行为。
+    void SetGpuSystem(GpuSystem* gpuSystem) noexcept { _gpuSystem = gpuSystem; }
 
     /// 提交加载协程写入的 pending result。
     void Pump();
@@ -260,11 +262,22 @@ private:
     AssetState ResolveState(AssetHandle handle) const noexcept;
     bool IsSlotAlive(AssetHandle handle) const noexcept;
 
+    GpuSystem* _gpuSystem{nullptr};
     TaskScope _loadScope;
     SparseSet<unique_ptr<AssetSlot>> _slots;
     unordered_map<AssetId, AssetHandle> _idIndex;
     vector<AssetHandle> _activeLoads;
-    IRenderResourceRecycler* _recycler{nullptr};
+};
+
+template <>
+struct RuntimeTypeTrait<AssetManager> {
+    static constexpr RuntimeTypeId value{0xd4f18ebe, 0xb5c4, 0x46c2, 0x8b, 0x7b, 0x2d, 0xde, 0x5c, 0x96, 0xe5, 0xcf};
+};
+
+/// 依赖声明(非侵入,类外特化):AssetManager 依赖 GpuSystem,由其提供 GPU 资源延迟回收。
+template <>
+struct ServiceTraits<AssetManager> {
+    static constexpr auto Inject = std::tuple{&AssetManager::SetGpuSystem};
 };
 
 template <class T>

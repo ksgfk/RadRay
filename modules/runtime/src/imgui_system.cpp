@@ -1515,6 +1515,10 @@ void ImGuiSystem::OnShutdown(Application& app) {
     Destroy();
 }
 
+RuntimeTypeId ImGuiSystem::GetTypeId() const noexcept {
+    return runtime_type_id_v<ImGuiSystem>;
+}
+
 void ImGuiSystem::ExtractDrawData(uint32_t frameIndex) {
     if (_renderer != nullptr) {
         _renderer->ExtractDrawData(frameIndex);

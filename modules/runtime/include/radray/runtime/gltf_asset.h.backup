@@ -7,8 +7,6 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
-#include <radray/runtime/render/material.h>
-#include <radray/runtime/render/material_assignment.h>
 
 namespace radray {
 
@@ -41,12 +39,12 @@ struct GltfPrimitiveDesc {
     int NodeIndex{-1};
     uint32_t SourceMaterialIndex{0};
     StreamingAssetRef<StaticMesh> Mesh;
-    /// per-使用点材质参数(从 glTF 材质转换而来，按名写入 gMaterial cbuffer)。
-    vector<MaterialParameterAssignment> MaterialParams;
-    /// per-使用点材质贴图(从 glTF 材质转换而来，按名绑定 shader 贴图槽)。
-    vector<MaterialTextureAssignment> MaterialTextures;
-    /// 材质语义(从 glTF alphaMode/doubleSided/alphaCutoff 推导)。
-    srp::BlendMode Blend{srp::BlendMode::Opaque};
+    // /// per-使用点材质参数(从 glTF 材质转换而来，按名写入 gMaterial cbuffer)。
+    // vector<MaterialParameterAssignment> MaterialParams;
+    // /// per-使用点材质贴图(从 glTF 材质转换而来，按名绑定 shader 贴图槽)。
+    // vector<MaterialTextureAssignment> MaterialTextures;
+    // /// 材质语义(从 glTF alphaMode/doubleSided/alphaCutoff 推导)。
+    // srp::BlendMode Blend{srp::BlendMode::Opaque};
     bool TwoSided{false};
     float AlphaCutoff{0.5f};
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};

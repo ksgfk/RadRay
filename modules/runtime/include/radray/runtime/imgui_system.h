@@ -245,6 +245,7 @@ public:
     void OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) override;
     void OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) override;
     void OnShutdown(Application& app) override;
+    RuntimeTypeId GetTypeId() const noexcept override;
 
     bool BeginFrame(uint32_t frameIndex, float deltaTimeSeconds);
     void EndFrame();

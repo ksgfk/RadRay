@@ -3,12 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <coroutine>
-#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
-#include <string_view>
 
 #include <radray/types.h>
 #include <radray/coroutine.h>
@@ -16,8 +14,7 @@
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/render_resource_recycler.h>
-#include <radray/runtime/shader_identity.h>
-#include <radray/runtime/shader_variant.h>
+#include <radray/runtime/service_registry.h>
 
 namespace radray::render {
 class CommandBuffer;
@@ -36,9 +33,6 @@ class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;
 class WaitFrameUploadGpuAwaitable;
-class ShaderCache;
-class RSCache;
-class PSOCache;
 struct FrameUploadRecord;
 
 enum class FrameUploadStage {
@@ -53,16 +47,6 @@ struct FrameUploadStopCallback {
     FrameUploadRecord* Record{nullptr};
 
     void operator()() const noexcept;
-};
-
-/// 一次 shader 编译请求。Name 作为缓存身份(同一逻辑 shader 的不同入口共享 Name)。
-/// 对应 UE5 FShaderType + 编译环境的极简化:这里只承载 HLSL 源 + 入口 + 阶段。
-struct ShaderCompileDescriptor {
-    std::string_view Name{};
-    std::string_view Source{};
-    std::string_view EntryPoint{};
-    render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
-    std::span<const ShaderDefine> Defines{};
 };
 
 struct GpuSystemDescriptor {
@@ -86,19 +70,6 @@ struct FrameUploadRecord {
     uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
     FrameUploadStage CurrentStage{FrameUploadStage::AwaitingFrame};
     bool Canceled{false};
-};
-
-/// 一次 PSO 所需的渲染目标格式:一组 color 格式 + 一个 depth 格式(UNKNOWN 表示无 depth)。
-struct GpuRenderTargetFormats {
-    vector<render::TextureFormat> ColorFormats{};
-    render::TextureFormat DepthFormat{render::TextureFormat::UNKNOWN};
-
-    friend bool operator==(const GpuRenderTargetFormats&, const GpuRenderTargetFormats&) = default;
-};
-
-struct RootSignatureEntry {
-    render::RootSignature* Target{nullptr};
-    RootSignatureLayoutKey Layout{};
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -253,142 +224,6 @@ private:
     FrameUploadRecord* _record{nullptr};
 };
 
-/// Shader 编译缓存。按 ShaderCompileKey 编译/反射并创建 Shader，命中缓存直接返回。
-/// Vulkan 后端自动编译为 SPIR-V 并走 spirv-cross 反射，D3D12 走 DXIL。
-class ShaderCache {
-public:
-    explicit ShaderCache(render::Device* device, std::string_view shaderIncludeDir = {});
-    ShaderCache(const ShaderCache&) = delete;
-    ShaderCache& operator=(const ShaderCache&) = delete;
-    ~ShaderCache() noexcept = default;
-
-    /// 返回的指针由 ShaderCache 拥有，调用方勿释放。
-    Nullable<render::Shader*> GetOrCompile(const ShaderCompileDescriptor& desc);
-    std::optional<CompiledShaderEntry> GetOrCompileEntry(const ShaderCompileDescriptor& desc);
-
-    /// 从磁盘读取 HLSL 文件并编译。Name 缺省用文件路径。
-    Nullable<render::Shader*> GetOrCompileFromFile(
-        const std::filesystem::path& path,
-        std::string_view entryPoint,
-        render::ShaderStage stage,
-        std::string_view name = {},
-        std::span<const ShaderDefine> defines = {});
-    std::optional<CompiledShaderEntry> GetOrCompileEntryFromFile(
-        const std::filesystem::path& path,
-        std::string_view entryPoint,
-        render::ShaderStage stage,
-        std::string_view name = {},
-        std::span<const ShaderDefine> defines = {});
-
-    void Clear() noexcept {
-        _cache.clear();
-    }
-
-private:
-    struct ShaderCompileKeyHash {
-        size_t operator()(const ShaderCompileKey& key) const noexcept;
-    };
-
-    render::Device* _device;
-    shared_ptr<render::Dxc> _dxc;
-    string _shaderIncludeDir;  // <exe_dir>/shaderlib，作为所有 shader 编译的默认 include 根目录
-    unordered_map<ShaderCompileKey, unique_ptr<render::Shader>, ShaderCompileKeyHash> _cache;
-};
-
-/// RootSignature 缓存。RootSignature 由 shader 反射合并出的 binding layout 纯内容寻址。
-class RSCache {
-public:
-    explicit RSCache(render::Device* device) noexcept : _device(device) {}
-    RSCache(const RSCache&) = delete;
-    RSCache& operator=(const RSCache&) = delete;
-    ~RSCache() noexcept = default;
-
-    /// 取或建 RootSignature。命中缓存直接返回，返回的指针由 RSCache 拥有。
-    std::optional<RootSignatureEntry> GetOrCreateEntry(std::span<render::Shader*> shaders);
-    Nullable<render::RootSignature*> GetOrCreate(std::span<render::Shader*> shaders);
-
-    void Clear() noexcept {
-        _layoutCache.clear();
-    }
-
-private:
-    struct RootSignatureLayoutKeyHash {
-        size_t operator()(const RootSignatureLayoutKey& key) const noexcept;
-    };
-
-    render::Device* _device;
-    unordered_map<RootSignatureLayoutKey, unique_ptr<render::RootSignature>, RootSignatureLayoutKeyHash> _layoutCache;
-};
-
-/// 图形 PSO 缓存。调用方提供已规范化的 shader/root-layout 身份与固定渲染状态;
-/// 缓存只按实际影响底层 GraphicsPipelineState 的最小状态组合共享。
-class PSOCache {
-public:
-    explicit PSOCache(render::Device* device) noexcept : _device(device) {}
-    PSOCache(const PSOCache&) = delete;
-    PSOCache& operator=(const PSOCache&) = delete;
-    ~PSOCache() noexcept = default;
-
-    struct VertexElementKey {
-        uint64_t Offset{0};
-        string Semantic{};
-        uint32_t SemanticIndex{0};
-        render::VertexFormat Format{render::VertexFormat::UNKNOWN};
-        uint32_t Location{0};
-
-        friend bool operator==(const VertexElementKey&, const VertexElementKey&) = default;
-    };
-
-    struct VertexLayoutKey {
-        uint64_t ArrayStride{0};
-        render::VertexStepMode StepMode{};
-        vector<VertexElementKey> Elements{};
-
-        static VertexLayoutKey From(const render::VertexBufferLayout& layout);
-
-        friend bool operator==(const VertexLayoutKey&, const VertexLayoutKey&) = default;
-    };
-
-    struct GraphicsPsoDesc {
-        render::RootSignature* RootSig{nullptr};
-        RootSignatureLayoutKey RootLayout{};
-        CompiledShaderEntry VS{};
-        std::optional<CompiledShaderEntry> PS{};
-        std::span<const render::VertexBufferLayout> VertexLayouts{};
-        render::PrimitiveState Primitive{};
-        std::optional<render::DepthStencilState> DepthStencil{};
-        render::MultiSampleState MultiSample{render::MultiSampleState::Default()};
-        std::span<const render::ColorTargetState> ColorTargets{};
-    };
-
-    struct GraphicsPsoKey {
-        RootSignatureLayoutKey RootLayout{};
-        ShaderCompileKey VS{};
-        std::optional<ShaderCompileKey> PS{};
-        vector<VertexLayoutKey> VertexLayouts{};
-        render::PrimitiveState Primitive{};
-        std::optional<render::DepthStencilState> DepthStencil{};
-        render::MultiSampleState MultiSample{};
-        vector<render::ColorTargetState> ColorTargets{};
-
-        friend bool operator==(const GraphicsPsoKey&, const GraphicsPsoKey&) = default;
-    };
-
-    struct GraphicsPsoKeyHash {
-        size_t operator()(const GraphicsPsoKey& key) const noexcept;
-    };
-
-    /// 取或建 PSO。desc 只应包含 shader/root-layout 身份、顶点输入、固定渲染状态、
-    /// RT/DS 格式和多重采样状态;材质资产身份、实例参数、descriptor set 等不参与。
-    render::GraphicsPipelineState* GetOrCreate(const GraphicsPsoDesc& desc);
-
-    void Clear() noexcept { _cache.clear(); }
-
-private:
-    render::Device* _device;
-    unordered_map<GraphicsPsoKey, unique_ptr<render::GraphicsPipelineState>, GraphicsPsoKeyHash> _cache;
-};
-
 /// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
 /// 由 GpuSystem 在 BeginFrameRecord/EndFrameRecordAndSubmit 自动包裹本帧录制,
 /// CompleteFlight 时 resolve。应用只读 GetLastGpuTimeMs()。后端 readback barrier 差异内部隐藏。
@@ -476,44 +311,14 @@ public:
     /// → 写 flight.Signal → Present 全部 target。ManualSubmit 下仅 End，跳过提交/呈现。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
-    /// 编译（含反射）并创建一个 Shader，按 ShaderCompileKey 缓存。
-    /// 命中缓存直接返回。返回的指针由 GpuSystem 的 ShaderCache 拥有，调用方勿释放。
-    Nullable<render::Shader*> GetOrCompileShader(const ShaderCompileDescriptor& desc);
-    std::optional<CompiledShaderEntry> GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc);
-
-    /// 从磁盘读取 HLSL 文件并编译。Name 缺省用文件路径。
-    Nullable<render::Shader*> GetOrCompileShaderFromFile(
-        const std::filesystem::path& path,
-        std::string_view entryPoint,
-        render::ShaderStage stage,
-        std::string_view name = {},
-        std::span<const ShaderDefine> defines = {});
-    std::optional<CompiledShaderEntry> GetOrCompileShaderEntryFromFile(
-        const std::filesystem::path& path,
-        std::string_view entryPoint,
-        render::ShaderStage stage,
-        std::string_view name = {},
-        std::span<const ShaderDefine> defines = {});
-
-    /// 取或建 RootSignature。【按 binding layout 共享】: RootSignature 由参与的 shader
-    /// 反射出的绑定布局决定，同一组 shader 共享一个 RootSignature，不再每个
-    /// Material 独立创建。返回的指针由 GpuSystem 的 RSCache 拥有。
-    /// 对应 UE5 中 RootSignature 按 shader 绑定布局去重共享的思路。
-    Nullable<render::RootSignature*> GetOrCreateRootSignature(std::span<render::Shader*> shaders);
-    std::optional<RootSignatureEntry> GetOrCreateRootSignatureEntry(std::span<render::Shader*> shaders);
-
-    ShaderCache& GetShaderCache() noexcept { return *_shaderCache; }
-    RSCache& GetRSCache() noexcept { return *_rsCache; }
-
-    /// 引擎级 PSO 缓存。按 shader/root-layout 身份、顶点签名和固定渲染状态组合缓存 GraphicsPipelineState。
-    PSOCache& GetPSOCache() noexcept { return *_psoCache; }
-
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
     void PumpFrameUploadScheduler();
 
     render::Device* GetDevice() const noexcept { return _device; }
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
+    /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
+    void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
     uint32_t GetBackBufferCount() const noexcept { return _backBufferCount; }
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
@@ -529,8 +334,6 @@ private:
     friend class AppFrameContext;
     friend class Application;
 
-    void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
-
     Application* _app;
     WindowManager* _windowManager{nullptr};
     render::Device* _device;
@@ -541,13 +344,21 @@ private:
     vector<FlightSlot> _flights;
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
-    unique_ptr<ShaderCache> _shaderCache;
-    unique_ptr<RSCache> _rsCache;
-    unique_ptr<PSOCache> _psoCache;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};
+};
+
+template <>
+struct RuntimeTypeTrait<GpuSystem> {
+    static constexpr RuntimeTypeId value{0xe7c701b1, 0xcab6, 0x4be7, 0x94, 0xec, 0xfd, 0x8c, 0x6f, 0xd4, 0xf4, 0x68};
+};
+
+/// 依赖声明(非侵入,类外特化):GpuSystem 需要 WindowManager,复用已有 public setter。
+template <>
+struct ServiceTraits<GpuSystem> {
+    static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
 };
 
 /// Render 回调的唯一入参，封装一帧录制 API。

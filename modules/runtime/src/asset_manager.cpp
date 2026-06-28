@@ -4,6 +4,7 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
+#include <radray/runtime/gpu_system.h>
 
 namespace radray {
 
@@ -273,8 +274,8 @@ void AssetManager::FinalizeTerminalSlot(AssetHandle handle) {
 }
 
 IRenderResourceRecycler& AssetManager::GetRecycler() noexcept {
-    if (_recycler != nullptr) {
-        return *_recycler;
+    if (_gpuSystem != nullptr) {
+        return *_gpuSystem;
     }
     static ImmediateRenderResourceRecycler immediate;
     return immediate;

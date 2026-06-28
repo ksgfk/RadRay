@@ -5,9 +5,6 @@
 
 namespace radray {
 
-namespace srp {
-struct SceneView;
-}
 class CameraComponent;
 
 /// 相机组件。独立的 SceneComponent,从自身世界变换反算 View 矩阵,
@@ -36,9 +33,6 @@ public:
 
     /// Proj 矩阵:左手透视。aspect = width / height。
     Eigen::Matrix4f ComputeProjMatrix(float aspect) const noexcept;
-
-    /// 按给定视口尺寸填充 SceneView(View/Proj/ViewProj + 视口)。
-    void FillSceneView(srp::SceneView& view, uint32_t width, uint32_t height) const noexcept;
 
 private:
     float _fovY{Radian(60.0f)};

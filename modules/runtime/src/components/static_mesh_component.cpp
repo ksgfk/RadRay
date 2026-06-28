@@ -1,95 +1,109 @@
 #include <radray/runtime/components/static_mesh_component.h>
 
-#include <algorithm>
-#include <cstring>
+#include <utility>
 
-#include <radray/runtime/texture_asset.h>
-#include <radray/runtime/render/standard_material.h>
-#include <radray/runtime/render/static_mesh_renderer.h>
+#include <radray/runtime/application.h>
+#include <radray/runtime/game_framework/world.h>
+#include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 
 namespace radray {
 
-StaticMeshComponent::~StaticMeshComponent() noexcept = default;
+StaticMeshComponent::~StaticMeshComponent() noexcept {
+    StopMeshRefreshTask();
+}
 
 RuntimeTypeId StaticMeshComponent::GetTypeId() const noexcept {
     return runtime_type_id_v<StaticMeshComponent>;
 }
 
-bool StaticMeshComponent::AreAssetsReady() const noexcept {
-    const bool meshReady = _mesh.IsReady();
-    const bool texturesReady = std::all_of(_materialTextures.begin(), _materialTextures.end(), [](const auto& texture) {
-        return texture.Texture.IsReady();
-    });
-    return meshReady && texturesReady;
+void StaticMeshComponent::OnRegister() {
+    PrimitiveComponent::OnRegister();
+    StartMeshRefreshTask();
 }
 
-void StaticMeshComponent::TickComponent(float deltaTime) {
-    (void)deltaTime;
-    // 资产尚未交付为 renderer 时持续尝试;就绪后构建一次。
-    if (HasRenderers()) {
+void StaticMeshComponent::OnUnregister() {
+    StopMeshRefreshTask();
+    PrimitiveComponent::OnUnregister();
+}
+
+void StaticMeshComponent::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) {
+    StopMeshRefreshTask();
+    _mesh = std::move(mesh);
+    MarkRenderStateDirty();
+    StartMeshRefreshTask();
+}
+
+unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {
+    StaticMesh* mesh = _mesh.Get();
+    if (mesh == nullptr || !mesh->HasRenderData()) {
+        return nullptr;
+    }
+
+    return make_unique<StaticMeshSceneProxy>(*this, _mesh);
+}
+
+void StaticMeshComponent::StopMeshRefreshTask() noexcept {
+    if (_meshRefreshScope == nullptr) {
         return;
     }
-    if (AreAssetsReady()) {
-        RecreateRenderers();
-    }
+
+    _meshRefreshScope->RequestStop();
+    _meshRefreshScope->WaitUntilEmpty();
+    _meshRefreshScope.reset();
 }
 
-vector<unique_ptr<srp::Renderer>> StaticMeshComponent::BuildRenderers() {
-    vector<unique_ptr<srp::Renderer>> result;
-    if (_shader == nullptr || _device == nullptr) {
-        return result;
-    }
-    StaticMesh* mesh = _mesh.Get();
-    if (mesh == nullptr || mesh->GetRenderMesh() == nullptr) {
-        return result;
+void StaticMeshComponent::StartMeshRefreshTask() {
+    if (!IsRegistered() || !_mesh.IsValid() || _mesh.IsCompleted() || _meshRefreshScope != nullptr) {
+        return;
     }
 
-    // 1) 打包 space1 cbuffer 字节(按提供顺序,gltf 已按 shader 已知布局排列)。
-    vector<byte> cbufferData;
-    cbufferData.reserve(_materialParams.size() * sizeof(Eigen::Vector4f));
-    for (const auto& param : _materialParams) {
-        const byte* src = reinterpret_cast<const byte*>(param.Value.data());
-        cbufferData.insert(cbufferData.end(), src, src + sizeof(Eigen::Vector4f));
-    }
+    _meshRefreshScope = make_unique<TaskScope>();
+    _meshRefreshScope->Spawn(WaitForMeshAndRefresh(_mesh));
+}
 
-    // 2) 解析贴图 SRV(类型擦除句柄 → TextureAsset → TextureView*)。
-    vector<std::pair<string, render::TextureView*>> textures;
-    textures.reserve(_materialTextures.size());
-    for (const auto& tex : _materialTextures) {
-        StreamingAssetRef<TextureAsset> ref = tex.Texture.CastTo<TextureAsset>();
-        TextureAsset* asset = ref.Get();
-        render::TextureView* srv = (asset != nullptr && asset->IsValid()) ? asset->GetSrv() : nullptr;
-        textures.emplace_back(tex.Name, srv);
-    }
+task<void> StaticMeshComponent::WaitForMeshAndRefresh(StreamingAssetRef<StaticMesh> mesh) {
+    stop_token stop = co_await CurrentStopToken();
 
-    // 3) 构建组件自有材质。
-    srp::StandardMaterial::Desc desc{};
-    desc.MaterialShader = _shader;
-    desc.Blend = _blend;
-    desc.TwoSided = _twoSided;
-    desc.Cutoff = _cutoff;
-    desc.CBufferData = std::move(cbufferData);
-    desc.Textures = std::move(textures);
-    _material = make_unique<srp::StandardMaterial>(_device, std::move(desc));
-
-    // 4) 每 section 一个 StaticMeshRenderer,引用同一材质。
-    const auto& sections = mesh->GetSections();
-    if (sections.empty()) {
-        return result;
-    }
-    result.reserve(sections.size());
-    for (const auto& section : sections) {
-        auto renderer = make_unique<srp::StaticMeshRenderer>(
-            mesh,
-            section.PrimitiveIndex,
-            section.FirstIndex,
-            section.IndexCount,
-            _material.get());
-        if (renderer->IsRenderable()) {
-            result.push_back(std::move(renderer));
+    while (!mesh.IsCompleted()) {
+        if (stop.stop_requested()) {
+            co_await StopCurrentTask();
         }
+
+        Nullable<World*> world = GetWorld();
+        if (!world) {
+            co_return;
+        }
+        Application* app = world.Get()->GetApplication();
+        if (app == nullptr) {
+            co_return;
+        }
+
+        co_await app->GetScheduler().SwitchTo();
     }
-    return result;
+
+    if (stop.stop_requested()) {
+        co_await StopCurrentTask();
+    }
+
+    Nullable<World*> world = GetWorld();
+    if (!world) {
+        co_return;
+    }
+    Application* app = world.Get()->GetApplication();
+    if (app == nullptr) {
+        co_return;
+    }
+
+    co_await app->GetScheduler().SwitchTo();
+
+    if (!IsRegistered() || !IsCurrentMesh(mesh) || !mesh.IsReady()) {
+        co_return;
+    }
+    MarkRenderStateDirty();
+}
+
+bool StaticMeshComponent::IsCurrentMesh(const StreamingAssetRef<StaticMesh>& mesh) const noexcept {
+    return _mesh.GetHandle() == mesh.GetHandle() && _mesh.GetAssetId() == mesh.GetAssetId();
 }
 
 }  // namespace radray

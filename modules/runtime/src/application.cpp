@@ -14,6 +14,8 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/render_system.h>
+#include <radray/runtime/service_registry.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/window/native_window.h>
 
@@ -31,6 +33,129 @@
 #endif
 
 namespace radray {
+
+void ApplicationSchedulerStopCallback::operator()() const noexcept {
+    if (Scheduler != nullptr && Record != nullptr) {
+        Scheduler->CancelRecord(Record);
+    }
+}
+
+bool SwitchToApplicationSchedulerAwaitable::await_ready() const noexcept {
+    return _scheduler == nullptr || _stop.stop_requested();
+}
+
+bool SwitchToApplicationSchedulerAwaitable::await_suspend(std::coroutine_handle<> continuation) {
+    if (_scheduler == nullptr || _stop.stop_requested()) {
+        return false;
+    }
+    _record = _scheduler->Enqueue(_stop, continuation);
+    return true;
+}
+
+bool SwitchToApplicationSchedulerAwaitable::await_resume() noexcept {
+    if (_record == nullptr) {
+        return !_stop.stop_requested();
+    }
+
+    ApplicationScheduler* scheduler = _record->Scheduler;
+    const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
+    if (scheduler != nullptr) {
+        scheduler->Erase(_record);
+    }
+    _record = nullptr;
+    return completed;
+}
+
+ApplicationScheduler::~ApplicationScheduler() noexcept {
+    CancelAll();
+}
+
+task<void> ApplicationScheduler::SwitchTo() {
+    stop_token stop = co_await CurrentStopToken();
+    bool completed = co_await SwitchToApplicationSchedulerAwaitable{this, stop};
+    if (!completed) {
+        co_await StopCurrentTask();
+    }
+}
+
+ApplicationSchedulerRecord* ApplicationScheduler::Enqueue(stop_token stop, std::coroutine_handle<> continuation) {
+    auto record = make_unique<ApplicationSchedulerRecord>();
+    record->Scheduler = this;
+    record->Continuation = continuation;
+    record->Stop = stop;
+    ApplicationSchedulerRecord* ptr = record.get();
+    _records.push_back(std::move(record));
+    if (stop.stop_requested()) {
+        ptr->Canceled = true;
+    } else if (stop.stop_possible()) {
+        ptr->StopCallback.emplace(stop, ApplicationSchedulerStopCallback{this, ptr});
+    }
+    return ptr;
+}
+
+bool ApplicationScheduler::Erase(ApplicationSchedulerRecord* record) noexcept {
+    for (size_t i = 0; i < _records.size(); ++i) {
+        if (_records[i].get() == record) {
+            _records[i]->StopCallback.reset();
+            _records.erase(_records.begin() + static_cast<ptrdiff_t>(i));
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ApplicationScheduler::IsAlive(ApplicationSchedulerRecord* record) const noexcept {
+    for (const unique_ptr<ApplicationSchedulerRecord>& candidate : _records) {
+        if (candidate.get() == record) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ApplicationScheduler::ResumeRecord(ApplicationSchedulerRecord* record) noexcept {
+    if (record == nullptr) {
+        return;
+    }
+    std::coroutine_handle<> continuation = record->Continuation;
+    record->Continuation = {};
+    if (continuation) {
+        continuation.resume();
+    }
+}
+
+void ApplicationScheduler::CancelRecord(ApplicationSchedulerRecord* record) noexcept {
+    if (record == nullptr) {
+        return;
+    }
+    record->Canceled = true;
+    ResumeRecord(record);
+}
+
+void ApplicationScheduler::Pump() {
+    const size_t recordCount = _records.size();
+    for (size_t i = 0; i < recordCount && !_records.empty(); ++i) {
+        ApplicationSchedulerRecord* record = _records.front().get();
+        if (record->Stop.stop_requested()) {
+            record->Canceled = true;
+        }
+        ResumeRecord(record);
+        if (IsAlive(record)) {
+            Erase(record);
+        }
+    }
+}
+
+void ApplicationScheduler::CancelAll() noexcept {
+    while (!_records.empty()) {
+        ApplicationSchedulerRecord* record = _records.back().get();
+        record->Canceled = true;
+        ResumeRecord(record);
+        if (IsAlive(record)) {
+            Erase(record);
+        }
+    }
+}
 
 AppSubsystem::AppSubsystem() noexcept = default;
 
@@ -69,7 +194,7 @@ bool AppSubsystem::IsInitialized() const noexcept {
     return _initialized;
 }
 
-void AppSubsystem::Init(Application& app) {
+void AppSubsystem::Initialize(Application& app) {
     if (_initialized) {
         return;
     }
@@ -77,7 +202,7 @@ void AppSubsystem::Init(Application& app) {
     _initialized = true;
 }
 
-void AppSubsystem::Shutdown(Application& app) noexcept {
+void AppSubsystem::Teardown(Application& app) noexcept {
     if (!_initialized) {
         return;
     }
@@ -722,105 +847,35 @@ public:
     std::thread _renderThread;
 };
 
-WindowManager* Application::InitWindowManager(const WindowManagerDescriptor& desc) {
-    if (_windowManager) {
-        RADRAY_WARN_LOG("window manager already initialized");
-        return _windowManager.get();
-    }
-    _windowManager = make_unique<WindowManager>(this, desc);
-    if (_gpuSystem) {
-        _windowManager->SetGpuSystem(_gpuSystem.get());
-        _gpuSystem->SetWindowManager(_windowManager.get());
-    }
-    return _windowManager.get();
-}
-
-void Application::ShutdownWindowManager() {
-    if (_gpuSystem) {
-        _gpuSystem->SetWindowManager(nullptr);
-    }
-    _windowManager.reset();
-}
-
-GpuSystem* Application::InitGpuSystem(const GpuSystemDescriptor& desc) {
-    if (_gpuSystem) {
-        RADRAY_WARN_LOG("gpu system already initialized");
-        return _gpuSystem.get();
-    }
-    _gpuSystem = make_unique<GpuSystem>(this, desc);
-    if (_windowManager) {
-        _gpuSystem->SetWindowManager(_windowManager.get());
-        _windowManager->SetGpuSystem(_gpuSystem.get());
-    }
-    if (_assetManager) {
-        _assetManager->SetRenderResourceRecycler(_gpuSystem.get());
-    }
-    return _gpuSystem.get();
-}
-
-void Application::ShutdownGpuSystem() {
-    if (_assetManager) {
-        _assetManager->SetRenderResourceRecycler(nullptr);
-    }
-    if (_windowManager) {
-        _windowManager->DetachAllSwapChains();
-        _windowManager->SetGpuSystem(nullptr);
-    }
-    _gpuSystem.reset();
-}
-
-AssetManager* Application::InitAssetManager() {
-    if (_assetManager) {
-        RADRAY_WARN_LOG("asset manager already initialized");
-        return _assetManager.get();
-    }
-    _assetManager = make_unique<AssetManager>();
-    if (_gpuSystem) {
-        _assetManager->SetRenderResourceRecycler(_gpuSystem.get());
-    }
-    return _assetManager.get();
-}
-
-void Application::ShutdownAssetManager() {
-    _assetManager.reset();
-}
-
-World* Application::InitWorld() {
-    if (_world) {
-        RADRAY_WARN_LOG("world already initialized");
-        return _world.get();
-    }
-    _world = make_unique<World>();
-    return _world.get();
-}
-
-void Application::ShutdownWorld() {
-    _world.reset();
-}
-
-AppSubsystem* Application::RegisterSubsystem(RuntimeTypeId type, unique_ptr<AppSubsystem> subsystem) {
-    for (const unique_ptr<AppSubsystem>& existing : _subsystems) {
-        if (existing != nullptr && existing->_type == type) {
-            return existing.get();
-        }
+AppSubsystem* Application::RegisterSubsystem(unique_ptr<AppSubsystem> subsystem) {
+    if (_windowManager != nullptr || _gpuSystem != nullptr || _renderSystem != nullptr || _assetManager != nullptr || _world != nullptr || _device != nullptr) {
+        RADRAY_ERR_LOG("Application: subsystems must be registered before Run()");
+        return nullptr;
     }
     if (subsystem == nullptr) {
         return nullptr;
     }
 
-    AppSubsystem* raw = subsystem.get();
-    const size_t index = _subsystems.size();
-    raw->_type = type;
-    _subsystems.emplace_back(std::move(subsystem));
-    if (_runtimeInitialized) {
-        InitSubsystemAt(index);
+    const RuntimeTypeId type = subsystem->GetTypeId();
+    if (type.IsEmpty()) {
+        RADRAY_ERR_LOG("Application: subsystem type id must not be empty");
+        return nullptr;
     }
+
+    for (const unique_ptr<AppSubsystem>& existing : _subsystems) {
+        if (existing != nullptr && existing->GetTypeId() == type) {
+            return existing.get();
+        }
+    }
+
+    AppSubsystem* raw = subsystem.get();
+    _subsystems.emplace_back(std::move(subsystem));
     return raw;
 }
 
 AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) noexcept {
     for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr && subsystem->_type == type) {
+        if (subsystem != nullptr && subsystem->GetTypeId() == type) {
             return subsystem.get();
         }
     }
@@ -829,7 +884,7 @@ AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) noexcept {
 
 const AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) const noexcept {
     for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr && subsystem->_type == type) {
+        if (subsystem != nullptr && subsystem->GetTypeId() == type) {
             return subsystem.get();
         }
     }
@@ -850,26 +905,19 @@ void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
 //  固化的帧序 / 生命周期(框架驱动,非游戏 override 点)
 // ════════════════════════════════════════════════════════════════
 
-void Application::InitSubsystemAt(size_t index) {
-    if (index >= _subsystems.size()) {
-        return;
-    }
-    if (_subsystems[index] != nullptr) {
-        _subsystems[index]->Init(*this);
-    }
-}
-
-void Application::InitSubsystems() {
-    for (size_t i = 0; i < _subsystems.size(); ++i) {
-        InitSubsystemAt(i);
+void Application::InitializeSubsystems() {
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr) {
+            subsystem->Initialize(*this);
+        }
     }
 }
 
-void Application::ShutdownSubsystems() noexcept {
+void Application::TeardownSubsystems() noexcept {
     for (size_t i = _subsystems.size(); i > 0; --i) {
         const size_t index = i - 1;
         if (_subsystems[index] != nullptr) {
-            _subsystems[index]->Shutdown(*this);
+            _subsystems[index]->Teardown(*this);
         }
     }
     _subsystems.clear();
@@ -880,6 +928,8 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
+    // Resume coroutines that need to continue on the application update thread.
+    _scheduler.Pump();
     // 2) 游戏逻辑。
     OnUpdate(ctx);
     // 3) World Tick(组件解析当帧就绪的资产、建代理)。
@@ -992,29 +1042,29 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     // 子系统可能持有窗口、renderer、GPU 临时资源；在 World / AssetManager 拆除前释放。
-    ShutdownSubsystems();
+    TeardownSubsystems();
+    _scheduler.CancelAll();
     // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
-    ShutdownWorld();
-    // 缓存的 PSO 引用 GpuSystem 拥有的 shader / root signature,先清。
-    if (_gpuSystem != nullptr) {
-        _gpuSystem->GetPSOCache().Clear();
-    }
+    _world.reset();
+    // RenderSystem owns Scene objects and must outlive World teardown.
+    _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
-    ShutdownAssetManager();
+    _assetManager.reset();
     if (_windowManager != nullptr) {
-        if (AppWindow* mainWindow = _windowManager->GetMainWindow()) {
-            mainWindow->DetachSwapChain();
-        }
+        _windowManager->DetachAllSwapChains();
+        _windowManager->SetGpuSystem(nullptr);
     }
-    ShutdownGpuSystem();
-    ShutdownWindowManager();
+    if (_gpuSystem != nullptr) {
+        _gpuSystem->SetWindowManager(nullptr);
+    }
+    _gpuSystem.reset();
+    _windowManager.reset();
     _device.reset();
     _dxgiFactory.reset();
-    _runtimeInitialized = false;
     return 0;
 }
 
-void Application::InitRuntime(const ApplicationRuntimeDescriptor& desc) {
+void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _multithreaded = desc.Multithreaded;
 
     // —— device / instance ——
@@ -1041,22 +1091,44 @@ void Application::InitRuntime(const ApplicationRuntimeDescriptor& desc) {
         RADRAY_ABORT("unsupported render backend");
     }
 
-    // —— window manager ——
+    // ════════════════════════════════════════════════════════════════
+    //  phase 1:实例化全部核心服务(构造函数只做平凡/自身初始化,不碰兄弟系统)。
+    //  顺序任意 —— 互相引用的装配推迟到 phase 2。
+    // ════════════════════════════════════════════════════════════════
     WindowManagerDescriptor windowManagerDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
     windowManagerDesc.Type = NativeWindowType::Win32HWND;
 #endif
-    InitWindowManager(windowManagerDesc);
+    _windowManager = make_unique<WindowManager>(this, windowManagerDesc);
 
-    // —— gpu system ——
     GpuSystemDescriptor gpuSysDesc{
         .Device = _device.get(),
         .MainQueueIndex = 0,
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};
-    InitGpuSystem(gpuSysDesc);
+    _gpuSystem = make_unique<GpuSystem>(this, gpuSysDesc);
+    _renderSystem = make_unique<RenderSystem>();
+    _assetManager = make_unique<AssetManager>();
+    _world = make_unique<World>(this);
 
-    // —— main window + swapchain ——
+    // ════════════════════════════════════════════════════════════════
+    //  phase 2:按 ServiceTraits 装配交叉引用。此刻全部实例已在,
+    //  WindowManager <-> GpuSystem 的环天然可解;AssetManager 拿到 GpuSystem 作回收器。
+    // ════════════════════════════════════════════════════════════════
+    ServiceRegistry registry;
+    registry.Add(_windowManager.get());
+    registry.Add(_gpuSystem.get());
+    registry.Add(_renderSystem.get());
+    registry.Add(_assetManager.get());
+    registry.Add(_world.get());
+    registry.Wire();
+
+    // ════════════════════════════════════════════════════════════════
+    //  phase 3:初始化数据。先跑各服务可选的 OnInitialize 钩子,
+    //  再创建主窗口 + swapchain(依赖 WindowManager 已装配 GpuSystem)。
+    // ════════════════════════════════════════════════════════════════
+    registry.Initialize();
+
 #ifdef RADRAY_PLATFORM_WINDOWS
     Win32WindowCreateDescriptor wndDesc{};
     wndDesc.Title = desc.WindowTitle;
@@ -1075,16 +1147,11 @@ void Application::InitRuntime(const ApplicationRuntimeDescriptor& desc) {
     swapchainDesc.PresentMode = desc.PresentMode;
     mainWindow->AttachSwapChain(swapchainDesc);
 
-    // —— 引擎级资产仓库 + 当前 World ——
-    InitAssetManager();
-    InitWorld();
-
-    _runtimeInitialized = true;
-    InitSubsystems();
+    InitializeSubsystems();
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
-    InitRuntime(desc);
+    InitializeRuntime(desc);
     OnInit();
     return StartLoop();
 }

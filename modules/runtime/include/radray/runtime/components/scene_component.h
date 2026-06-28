@@ -8,8 +8,6 @@
 
 namespace radray {
 
-class SceneComponent;
-
 /// 有空间变换的组件。能形成父子 Attach 层级。
 /// 对应 UE5 的 USceneComponent。
 class SceneComponent : public ActorComponent {
@@ -17,7 +15,7 @@ public:
     SceneComponent() noexcept = default;
     ~SceneComponent() noexcept override;
 
-    bool IsSceneComponent() const noexcept override { return true; }
+    bool IsSceneComponent() const noexcept final { return true; }
     RuntimeTypeId GetTypeId() const noexcept override;
 
     // ─── Transform ───

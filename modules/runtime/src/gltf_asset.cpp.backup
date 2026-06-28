@@ -13,7 +13,6 @@
 #include <radray/basic_math.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>

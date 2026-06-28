@@ -14,344 +14,8 @@
 
 #include <algorithm>
 #include <cstring>
-#include <type_traits>
 
 namespace radray {
-
-namespace {
-
-string BuildDefineString(const ShaderDefine& define) {
-    if (define.Value.empty()) {
-        return define.Name;
-    }
-    return fmt::format("{}={}", define.Name, define.Value);
-}
-
-class HashKeyBuilder {
-public:
-    template <class T>
-    void AddPod(const T& value) {
-        static_assert(std::is_trivially_copyable_v<T>);
-        AddPodFields(value);
-    }
-
-    template <class... Ts>
-    void AddPodFields(const Ts&... values) {
-        static_assert((std::is_trivially_copyable_v<Ts> && ...));
-        constexpr size_t totalSize = (sizeof(Ts) + ... + 0);
-        if constexpr (totalSize == 0) {
-            return;
-        } else {
-            const size_t offset = _bytes.size();
-            _bytes.resize(offset + totalSize);
-
-            byte* cursor = _bytes.data() + offset;
-            auto appendOne = [&]<class T>(const T& value) {
-                std::memcpy(cursor, &value, sizeof(T));
-                cursor += sizeof(T);
-            };
-            (appendOne(values), ...);
-        }
-    }
-
-    template <class T>
-    void AddEnum(T value)
-    requires std::is_enum_v<T>
-    {
-        AddPod(EnumBits(value));
-    }
-
-    void AddString(std::string_view value) {
-        AddSize(value.size());
-        AddBytes(value.data(), value.size());
-    }
-
-    void AddSize(size_t value) {
-        AddPod(static_cast<uint64_t>(value));
-    }
-
-    void AddBool(bool value) {
-        AddPod(BoolByte(value));
-    }
-
-    void AddFloat(float value) {
-        AddPod(CanonicalFloat(value));
-    }
-
-    void AddShaderDefine(const ShaderDefine& value) {
-        AddString(value.Name);
-        AddString(value.Value);
-    }
-
-    void AddBlendComponent(const render::BlendComponent& value) {
-        AddPodFields(
-            EnumBits(value.Src),
-            EnumBits(value.Dst),
-            EnumBits(value.Op));
-    }
-
-    void AddBlendState(const render::BlendState& value) {
-        AddBlendComponent(value.Color);
-        AddBlendComponent(value.Alpha);
-    }
-
-    void AddStencilFaceState(const render::StencilFaceState& value) {
-        AddPodFields(
-            EnumBits(value.Compare),
-            EnumBits(value.FailOp),
-            EnumBits(value.DepthFailOp),
-            EnumBits(value.PassOp));
-    }
-
-    void AddStencilState(const render::StencilState& value) {
-        AddStencilFaceState(value.Front);
-        AddStencilFaceState(value.Back);
-        AddPodFields(value.ReadMask, value.WriteMask);
-    }
-
-    void AddDepthBiasState(const render::DepthBiasState& value) {
-        AddPodFields(
-            value.Constant,
-            CanonicalFloat(value.SlopScale),
-            CanonicalFloat(value.Clamp));
-    }
-
-    void AddDepthStencilState(const render::DepthStencilState& value) {
-        AddPodFields(
-            EnumBits(value.Format),
-            EnumBits(value.DepthCompare));
-        AddDepthBiasState(value.DepthBias);
-        AddPod(BoolByte(value.Stencil.has_value()));
-        if (value.Stencil.has_value()) {
-            AddStencilState(value.Stencil.value());
-        }
-        AddPod(BoolByte(value.DepthWriteEnable));
-    }
-
-    void AddVertexElementKey(const PSOCache::VertexElementKey& value) {
-        AddPodFields(value.Offset);
-        AddString(value.Semantic);
-        AddPodFields(
-            value.SemanticIndex,
-            EnumBits(value.Format),
-            value.Location);
-    }
-
-    void AddVertexLayoutKey(const PSOCache::VertexLayoutKey& value) {
-        AddPodFields(
-            value.ArrayStride,
-            EnumBits(value.StepMode));
-        AddSize(value.Elements.size());
-        for (const PSOCache::VertexElementKey& element : value.Elements) {
-            AddVertexElementKey(element);
-        }
-    }
-
-    void AddShaderVariantKey(const ShaderVariantKey& value) {
-        AddSize(value.Defines().size());
-        for (const ShaderDefine& define : value.Defines()) {
-            AddShaderDefine(define);
-        }
-    }
-
-    void AddShaderCompileKey(const ShaderCompileKey& value) {
-        AddString(value.Name);
-        AddString(value.EntryPoint);
-        AddPodFields(
-            EnumBits(value.Stage),
-            EnumBits(value.Backend));
-        AddShaderVariantKey(value.Variant);
-    }
-
-    void AddResourceBindingAbi(const render::ResourceBindingAbi& value) {
-        AddPodFields(
-            value.Set.Value,
-            value.Binding,
-            EnumBits(value.Type),
-            value.Count,
-            BoolByte(value.IsReadOnly),
-            BoolByte(value.IsBindless));
-    }
-
-    void AddPushConstantBindingAbi(const render::PushConstantBindingAbi& value) {
-        AddPodFields(value.Offset, value.Size);
-    }
-
-    void AddBindingParameterLayout(const render::BindingParameterLayout& value) {
-        AddString(value.Name);
-        AddPodFields(
-            value.Id.Value,
-            EnumBits(value.Kind),
-            value.Stages.value(),
-            static_cast<uint32_t>(value.Abi.index()));
-        if (const auto* resource = std::get_if<render::ResourceBindingAbi>(&value.Abi)) {
-            AddResourceBindingAbi(*resource);
-        } else if (const auto* pushConstant = std::get_if<render::PushConstantBindingAbi>(&value.Abi)) {
-            AddPushConstantBindingAbi(*pushConstant);
-        }
-    }
-
-    void AddPushConstantRange(const render::PushConstantRange& value) {
-        AddString(value.Name);
-        AddPodFields(
-            value.Id.Value,
-            value.Stages.value(),
-            value.Offset,
-            value.Size);
-    }
-
-    void AddBindlessSetLayout(const render::BindlessSetLayout& value) {
-        AddString(value.Name);
-        AddPodFields(
-            value.Id.Value,
-            value.Set.Value,
-            value.Binding,
-            EnumBits(value.Type),
-            EnumBits(value.SlotType),
-            value.Stages.value());
-    }
-
-    void AddSamplerDescriptor(const render::SamplerDescriptor& value) {
-        AddPodFields(
-            EnumBits(value.AddressS),
-            EnumBits(value.AddressT),
-            EnumBits(value.AddressR),
-            EnumBits(value.MinFilter),
-            EnumBits(value.MagFilter),
-            EnumBits(value.MipmapFilter),
-            CanonicalFloat(value.LodMin),
-            CanonicalFloat(value.LodMax),
-            BoolByte(value.Compare.has_value()));
-        if (value.Compare.has_value()) {
-            AddEnum(value.Compare.value());
-        }
-        AddPod(value.AnisotropyClamp);
-    }
-
-    void AddStaticSamplerLayout(const render::StaticSamplerLayout& value) {
-        AddString(value.Name);
-        AddPodFields(
-            value.Id.Value,
-            value.Set.Value,
-            value.Binding,
-            value.Stages.value());
-        AddSamplerDescriptor(value.Desc);
-    }
-
-    void AddRootSignatureLayoutKey(const RootSignatureLayoutKey& value) {
-        AddPodFields(value.DescriptorSetCount);
-
-        AddSize(value.Parameters.size());
-        for (const render::BindingParameterLayout& parameter : value.Parameters) {
-            AddBindingParameterLayout(parameter);
-        }
-
-        AddSize(value.PushConstantRanges.size());
-        for (const render::PushConstantRange& range : value.PushConstantRanges) {
-            AddPushConstantRange(range);
-        }
-
-        AddSize(value.BindlessSetLayouts.size());
-        for (const render::BindlessSetLayout& bindless : value.BindlessSetLayouts) {
-            AddBindlessSetLayout(bindless);
-        }
-
-        AddSize(value.StaticSamplerLayouts.size());
-        for (const render::StaticSamplerLayout& sampler : value.StaticSamplerLayouts) {
-            AddStaticSamplerLayout(sampler);
-        }
-    }
-
-    void AddPrimitiveState(const render::PrimitiveState& value) {
-        AddPodFields(
-            EnumBits(value.Topology),
-            EnumBits(value.FaceClockwise),
-            EnumBits(value.Cull),
-            EnumBits(value.Poly),
-            BoolByte(value.StripIndexFormat.has_value()));
-        if (value.StripIndexFormat.has_value()) {
-            AddEnum(value.StripIndexFormat.value());
-        }
-        AddPodFields(
-            BoolByte(value.UnclippedDepth),
-            BoolByte(value.Conservative));
-    }
-
-    void AddMultiSampleState(const render::MultiSampleState& value) {
-        AddPodFields(
-            value.Count,
-            value.Mask,
-            BoolByte(value.AlphaToCoverageEnable));
-    }
-
-    void AddColorTargetState(const render::ColorTargetState& value) {
-        AddPodFields(
-            EnumBits(value.Format),
-            BoolByte(value.Blend.has_value()));
-        if (value.Blend.has_value()) {
-            AddBlendState(value.Blend.value());
-        }
-        AddPod(value.WriteMask.value());
-    }
-
-    size_t Finish() const noexcept {
-        return HashData(_bytes.data(), _bytes.size());
-    }
-
-private:
-    template <class T>
-    static constexpr std::underlying_type_t<T> EnumBits(T value) noexcept
-    requires std::is_enum_v<T>
-    {
-        return static_cast<std::underlying_type_t<T>>(value);
-    }
-
-    static constexpr uint8_t BoolByte(bool value) noexcept {
-        return value ? 1u : 0u;
-    }
-
-    static constexpr float CanonicalFloat(float value) noexcept {
-        return value == 0.0f ? 0.0f : value;
-    }
-
-    void AddBytes(const void* data, size_t size) {
-        if (size == 0) {
-            return;
-        }
-        const size_t offset = _bytes.size();
-        _bytes.resize(offset + size);
-        std::memcpy(_bytes.data() + offset, data, size);
-    }
-
-    vector<byte> _bytes;
-};
-
-std::optional<uint64_t> GetSubresourceUploadSize(
-    const render::TextureDescriptor& desc,
-    const render::SubresourceRange& range,
-    std::span<const byte> srcData,
-    uint64_t srcBaseRowPitch,
-    uint64_t dstRowPitch) noexcept {
-    const bool is3D = desc.Dim == render::TextureDimension::Dim3D;
-    const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(desc.Format);
-    const uint32_t mipLevel = range.BaseMipLevel;
-    const uint32_t mipWidth = std::max(desc.Width >> mipLevel, 1u);
-    const uint32_t mipHeight = std::max(desc.Height >> mipLevel, 1u);
-    const uint32_t mipDepth = is3D ? std::max(desc.DepthOrArraySize >> mipLevel, 1u) : 1u;
-    const uint64_t rowBytes = static_cast<uint64_t>(mipWidth) * bytesPerPixel;
-    if (srcBaseRowPitch < rowBytes) {
-        return std::nullopt;
-    }
-
-    const uint64_t rowCount = static_cast<uint64_t>(mipHeight) * mipDepth;
-    const uint64_t srcSize = rowCount == 0 ? 0 : (rowCount - 1) * srcBaseRowPitch + rowBytes;
-    if (srcSize > srcData.size()) {
-        return std::nullopt;
-    }
-    return dstRowPitch * rowCount;
-}
-
-}  // namespace
 
 // ═══════════════════════════════════════════════════════════════
 //  FrameUploadScheduler
@@ -793,11 +457,6 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
-    // shader 编译的默认 include 根目录:约定 shaderlib 随可执行文件部署在运行时目录下。
-    // 这样 shader 源码可直接 #include "common.hlsl" 等 shaderlib 头文件。
-    _shaderCache = make_unique<ShaderCache>(_device, (GetExecutableDirectory() / "shaderlib").generic_string());
-    _rsCache = make_unique<RSCache>(_device);
-    _psoCache = make_unique<PSOCache>(_device);
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
     }
@@ -838,219 +497,6 @@ void GpuSystem::PumpFrameUploadScheduler() {
     if (_frameUploadScheduler != nullptr) {
         _frameUploadScheduler->PumpCompletedUploads();
     }
-}
-
-ShaderCache::ShaderCache(render::Device* device, std::string_view shaderIncludeDir)
-    : _device(device), _shaderIncludeDir(shaderIncludeDir) {}
-
-size_t ShaderCache::ShaderCompileKeyHash::operator()(const ShaderCompileKey& key) const noexcept {
-    HashKeyBuilder hash;
-    hash.AddShaderCompileKey(key);
-    return hash.Finish();
-}
-
-std::optional<CompiledShaderEntry> ShaderCache::GetOrCompileEntry(const ShaderCompileDescriptor& desc) {
-    ShaderVariantKey variant{desc.Defines};
-    ShaderCompileKey key{
-        .Name = string{desc.Name},
-        .EntryPoint = string{desc.EntryPoint},
-        .Stage = desc.Stage,
-        .Backend = _device->GetBackend(),
-        .Variant = variant};
-    if (auto it = _cache.find(key); it != _cache.end()) {
-        return CompiledShaderEntry{
-            .Target = it->second.get(),
-            .Key = key};
-    }
-
-    const bool isSpirv = key.Backend == render::RenderBackend::Vulkan;
-
-    if (_dxc == nullptr) {
-        auto dxcOpt = render::CreateDxc();
-        if (!dxcOpt.HasValue()) {
-            RADRAY_ERR_LOG("ShaderCache: failed to create DXC compiler");
-            return std::nullopt;
-        }
-        _dxc = dxcOpt.Release();
-    }
-
-    render::DxcCompileParams params{};
-    params.Code = desc.Source;
-    params.EntryPoint = desc.EntryPoint;
-    params.Stage = desc.Stage;
-    params.SM = render::HlslShaderModel::SM60;
-    params.IsOptimize = false;
-    params.IsSpirv = isSpirv;
-    vector<string> defineStorage;
-    vector<std::string_view> defineViews;
-    defineStorage.reserve(variant.Defines().size() + 1);
-    defineStorage.emplace_back(isSpirv ? "VULKAN=1" : "D3D12=1");
-    for (const ShaderDefine& define : variant.Defines()) {
-        defineStorage.emplace_back(BuildDefineString(define));
-    }
-    defineViews.reserve(defineStorage.size());
-    for (const string& define : defineStorage) {
-        defineViews.emplace_back(define);
-    }
-    params.Defines = defineViews;
-    // 默认注入 <exe_dir>/shaderlib 作为 include 根目录，shader 可直接 #include "common.hlsl" 等。
-    // span 指向的存储须活到 Compile 返回，故放在同作用域的栈上。
-    std::string_view includeDirs[1];
-    if (!_shaderIncludeDir.empty()) {
-        includeDirs[0] = _shaderIncludeDir;
-        params.Includes = std::span<std::string_view>{includeDirs, 1};
-    }
-    auto outputOpt = _dxc->Compile(params);
-    if (!outputOpt.has_value()) {
-        RADRAY_ERR_LOG("ShaderCache: failed to compile shader '{}' entry '{}'", desc.Name, desc.EntryPoint);
-        return std::nullopt;
-    }
-    auto output = std::move(outputOpt.value());
-
-    render::ShaderReflectionDesc reflection{};
-    render::ShaderBlobCategory category{};
-    if (isSpirv) {
-#ifdef RADRAY_ENABLE_SPIRV_CROSS
-        auto reflOpt = render::ReflectSpirv(render::SpirvBytecodeView{
-            .Data = output.Data,
-            .EntryPointName = desc.EntryPoint,
-            .Stage = desc.Stage});
-        if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("ShaderCache: failed to reflect SPIR-V shader '{}'", desc.Name);
-            return std::nullopt;
-        }
-        reflection = std::move(reflOpt.value());
-        category = render::ShaderBlobCategory::SPIRV;
-#else
-        RADRAY_ERR_LOG("ShaderCache: SPIR-V Cross reflection is not enabled in this build");
-        return std::nullopt;
-#endif
-    } else {
-        auto reflOpt = _dxc->GetShaderDescFromOutput(output.Refl);
-        if (!reflOpt.has_value()) {
-            RADRAY_ERR_LOG("ShaderCache: failed to reflect DXIL shader '{}'", desc.Name);
-            return std::nullopt;
-        }
-        reflection = std::move(reflOpt.value());
-        category = render::ShaderBlobCategory::DXIL;
-    }
-
-    render::ShaderDescriptor shaderDesc{};
-    shaderDesc.Source = std::span<const byte>{output.Data.data(), output.Data.size()};
-    shaderDesc.Category = category;
-    shaderDesc.Stages = desc.Stage;
-    shaderDesc.Reflection = std::move(reflection);
-    auto shaderOpt = _device->CreateShader(shaderDesc);
-    if (!shaderOpt.HasValue()) {
-        RADRAY_ERR_LOG("ShaderCache: failed to create shader '{}'", desc.Name);
-        return std::nullopt;
-    }
-    render::Shader* raw = shaderOpt.Get();
-    _cache.emplace(std::move(key), shaderOpt.Release());
-    return CompiledShaderEntry{
-        .Target = raw,
-        .Key = ShaderCompileKey{
-            .Name = string{desc.Name},
-            .EntryPoint = string{desc.EntryPoint},
-            .Stage = desc.Stage,
-            .Backend = _device->GetBackend(),
-            .Variant = ShaderVariantKey{desc.Defines}}};
-}
-
-Nullable<render::Shader*> ShaderCache::GetOrCompile(const ShaderCompileDescriptor& desc) {
-    std::optional<CompiledShaderEntry> entry = GetOrCompileEntry(desc);
-    if (!entry.has_value()) {
-        return nullptr;
-    }
-    return entry->Target;
-}
-
-Nullable<render::Shader*> ShaderCache::GetOrCompileFromFile(
-    const std::filesystem::path& path,
-    std::string_view entryPoint,
-    render::ShaderStage stage,
-    std::string_view name,
-    std::span<const ShaderDefine> defines) {
-    auto sourceOpt = ReadTextFile(path);
-    if (!sourceOpt.has_value()) {
-        RADRAY_ERR_LOG("ShaderCache: failed to read shader file {}", path.string());
-        return nullptr;
-    }
-    string pathName = name.empty() ? path.string() : string{name};
-    ShaderCompileDescriptor desc{};
-    desc.Name = pathName;
-    desc.Source = sourceOpt.value();
-    desc.EntryPoint = entryPoint;
-    desc.Stage = stage;
-    desc.Defines = defines;
-    return GetOrCompile(desc);
-}
-
-std::optional<CompiledShaderEntry> ShaderCache::GetOrCompileEntryFromFile(
-    const std::filesystem::path& path,
-    std::string_view entryPoint,
-    render::ShaderStage stage,
-    std::string_view name,
-    std::span<const ShaderDefine> defines) {
-    auto sourceOpt = ReadTextFile(path);
-    if (!sourceOpt.has_value()) {
-        RADRAY_ERR_LOG("ShaderCache: failed to read shader file {}", path.string());
-        return std::nullopt;
-    }
-    string pathName = name.empty() ? path.string() : string{name};
-    ShaderCompileDescriptor desc{};
-    desc.Name = pathName;
-    desc.Source = sourceOpt.value();
-    desc.EntryPoint = entryPoint;
-    desc.Stage = stage;
-    desc.Defines = defines;
-    return GetOrCompileEntry(desc);
-}
-
-std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntry(const ShaderCompileDescriptor& desc) {
-    return _shaderCache->GetOrCompileEntry(desc);
-}
-
-Nullable<render::Shader*> GpuSystem::GetOrCompileShader(const ShaderCompileDescriptor& desc) {
-    return _shaderCache->GetOrCompile(desc);
-}
-
-Nullable<render::Shader*> GpuSystem::GetOrCompileShaderFromFile(
-    const std::filesystem::path& path,
-    std::string_view entryPoint,
-    render::ShaderStage stage,
-    std::string_view name,
-    std::span<const ShaderDefine> defines) {
-    return _shaderCache->GetOrCompileFromFile(path, entryPoint, stage, name, defines);
-}
-
-std::optional<CompiledShaderEntry> GpuSystem::GetOrCompileShaderEntryFromFile(
-    const std::filesystem::path& path,
-    std::string_view entryPoint,
-    render::ShaderStage stage,
-    std::string_view name,
-    std::span<const ShaderDefine> defines) {
-    return _shaderCache->GetOrCompileEntryFromFile(path, entryPoint, stage, name, defines);
-}
-
-Nullable<render::RootSignature*> GpuSystem::GetOrCreateRootSignature(std::span<render::Shader*> shaders) {
-    for (render::Shader* shader : shaders) {
-        if (shader == nullptr) {
-            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from null shader");
-            return nullptr;
-        }
-    }
-    return _rsCache->GetOrCreate(shaders);
-}
-
-std::optional<RootSignatureEntry> GpuSystem::GetOrCreateRootSignatureEntry(std::span<render::Shader*> shaders) {
-    for (render::Shader* shader : shaders) {
-        if (shader == nullptr) {
-            RADRAY_ERR_LOG("GpuSystem: cannot create root signature from null shader");
-            return std::nullopt;
-        }
-    }
-    return _rsCache->GetOrCreateEntry(shaders);
 }
 
 void GpuSystem::WaitAndCleanupCompletedFlights() {
@@ -1150,82 +596,6 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
         }
     }
     record.Targets.clear();
-}
-
-// ══════════════════════════════════════════════
-//  RSCache
-// ══════════════════════════════════════════════
-
-RootSignatureLayoutKey RootSignatureLayoutKey::From(
-    const render::RootSignatureLayoutPreview& preview) {
-    RootSignatureLayoutKey key{};
-    key.DescriptorSetCount = preview.DescriptorSetCount;
-
-    auto parameters = preview.Layout.GetParameters();
-    key.Parameters.reserve(parameters.size());
-    key.Parameters.assign(parameters.begin(), parameters.end());
-    key.PushConstantRanges = preview.PushConstantRanges;
-    key.BindlessSetLayouts = preview.BindlessSetLayouts;
-    key.StaticSamplerLayouts = preview.StaticSamplerLayouts;
-
-    return key;
-}
-
-size_t RSCache::RootSignatureLayoutKeyHash::operator()(const RootSignatureLayoutKey& key) const noexcept {
-    HashKeyBuilder hash;
-    hash.AddRootSignatureLayoutKey(key);
-    return hash.Finish();
-}
-
-std::optional<RootSignatureEntry> RSCache::GetOrCreateEntry(std::span<render::Shader*> shaders) {
-    if (shaders.empty()) {
-        RADRAY_ERR_LOG("RSCache: cannot create root signature from empty shader set");
-        return std::nullopt;
-    }
-
-    for (render::Shader* shader : shaders) {
-        if (shader == nullptr) {
-            RADRAY_ERR_LOG("RSCache: cannot create root signature from null shader");
-            return std::nullopt;
-        }
-    }
-
-    render::RootSignatureDescriptor rsDesc{};
-    rsDesc.Shaders = shaders;
-
-    auto previewOpt = render::BuildRootSignatureLayoutPreview(_device->GetBackend(), rsDesc);
-    if (!previewOpt.has_value()) {
-        RADRAY_ERR_LOG("RSCache: failed to build root signature layout preview");
-        return std::nullopt;
-    }
-
-    RootSignatureLayoutKey layoutKey = RootSignatureLayoutKey::From(previewOpt.value());
-    if (auto layoutIt = _layoutCache.find(layoutKey); layoutIt != _layoutCache.end()) {
-        return RootSignatureEntry{
-            .Target = layoutIt->second.get(),
-            .Layout = std::move(layoutKey)};
-    }
-
-    auto rsOpt = _device->CreateRootSignature(rsDesc);
-    if (!rsOpt.HasValue()) {
-        RADRAY_ERR_LOG("RSCache: failed to create root signature");
-        return std::nullopt;
-    }
-
-    render::RootSignature* raw = rsOpt.Get();
-    RootSignatureEntry entry{
-        .Target = raw,
-        .Layout = layoutKey};
-    _layoutCache.emplace(std::move(layoutKey), rsOpt.Release());
-    return entry;
-}
-
-Nullable<render::RootSignature*> RSCache::GetOrCreate(std::span<render::Shader*> shaders) {
-    std::optional<RootSignatureEntry> entry = GetOrCreateEntry(shaders);
-    if (!entry.has_value()) {
-        return nullptr;
-    }
-    return entry->Target;
 }
 
 // ══════════════════════════════════════════════
@@ -1432,6 +802,44 @@ void ResourceUploader::UploadBuffer(
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
 }
 
+// 计算单个 subresource 上传到 staging buffer 所需的字节数。
+// 上传 buffer 按目标行距(dstRowPitch, 已对齐到 TextureDataPitchAlignment)
+// 紧密堆叠每一行,共 mipHeight * mipDepth 行,这与两个后端 CopyBufferToTexture
+// 消费的布局一致(vk: alignedBytesPerRow * mipHeight * mipDepth;
+// d3d12: GetCopyableFootprints 的 totalBytes)。
+// 返回 nullopt 表示参数非法或源数据不足。
+static std::optional<uint64_t> GetSubresourceUploadSize(
+    const render::TextureDescriptor& desc,
+    const render::SubresourceRange& range,
+    std::span<const byte> srcData,
+    uint64_t srcRowPitch,
+    uint64_t dstRowPitch) noexcept {
+    const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(desc.Format);
+    if (bytesPerPixel == 0) {
+        return std::nullopt;
+    }
+    const bool is3D = desc.Dim == render::TextureDimension::Dim3D;
+    const uint32_t mipLevel = range.BaseMipLevel;
+    const uint32_t mipWidth = std::max(desc.Width >> mipLevel, 1u);
+    const uint32_t mipHeight = std::max(desc.Height >> mipLevel, 1u);
+    const uint32_t mipDepth = is3D ? std::max(desc.DepthOrArraySize >> mipLevel, 1u) : 1u;
+    const uint64_t tightRowPitch = static_cast<uint64_t>(mipWidth) * bytesPerPixel;
+    if (srcRowPitch < tightRowPitch || dstRowPitch < tightRowPitch) {
+        return std::nullopt;
+    }
+    const uint64_t totalRows = static_cast<uint64_t>(mipHeight) * mipDepth;
+    if (totalRows == 0) {
+        return std::nullopt;
+    }
+    // 源数据最小字节数:前面每行步进 srcRowPitch,最后一行只需 tightRowPitch。
+    const uint64_t requiredSrcSize = (totalRows - 1) * srcRowPitch + tightRowPitch;
+    if (srcData.size() < requiredSrcSize) {
+        return std::nullopt;
+    }
+    // 上传 buffer 字节数:每行按对齐后的 dstRowPitch 堆叠。
+    return dstRowPitch * totalRows;
+}
+
 void ResourceUploader::UploadTexture(
     render::CommandBuffer* cmdBuffer,
     const TextureUploadRequest& request) {
@@ -1587,112 +995,6 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
     }
 
     return result;
-}
-
-// ════════════════════════════════════════════════════════════
-//  PSOCache
-// ════════════════════════════════════════════════════════════
-
-PSOCache::VertexLayoutKey PSOCache::VertexLayoutKey::From(const render::VertexBufferLayout& layout) {
-    VertexLayoutKey key{};
-    key.ArrayStride = layout.ArrayStride;
-    key.StepMode = layout.StepMode;
-    key.Elements.reserve(layout.Elements.size());
-    for (const render::VertexElement& element : layout.Elements) {
-        key.Elements.emplace_back(VertexElementKey{
-            .Offset = element.Offset,
-            .Semantic = string{element.Semantic},
-            .SemanticIndex = element.SemanticIndex,
-            .Format = element.Format,
-            .Location = element.Location});
-    }
-    return key;
-}
-
-size_t PSOCache::GraphicsPsoKeyHash::operator()(const GraphicsPsoKey& key) const noexcept {
-    HashKeyBuilder hash;
-    hash.AddRootSignatureLayoutKey(key.RootLayout);
-    hash.AddShaderCompileKey(key.VS);
-    hash.AddBool(key.PS.has_value());
-    if (key.PS.has_value()) {
-        hash.AddShaderCompileKey(key.PS.value());
-    }
-    hash.AddSize(key.VertexLayouts.size());
-    for (const VertexLayoutKey& vertex : key.VertexLayouts) {
-        hash.AddVertexLayoutKey(vertex);
-    }
-    hash.AddPrimitiveState(key.Primitive);
-    hash.AddBool(key.DepthStencil.has_value());
-    if (key.DepthStencil.has_value()) {
-        hash.AddDepthStencilState(key.DepthStencil.value());
-    }
-    hash.AddMultiSampleState(key.MultiSample);
-    hash.AddSize(key.ColorTargets.size());
-    for (const render::ColorTargetState& colorTarget : key.ColorTargets) {
-        hash.AddColorTargetState(colorTarget);
-    }
-    return hash.Finish();
-}
-
-render::GraphicsPipelineState* PSOCache::GetOrCreate(const GraphicsPsoDesc& desc) {
-    if (desc.RootSig == nullptr) {
-        RADRAY_ERR_LOG("PSOCache: root signature is null");
-        return nullptr;
-    }
-    if (desc.VS.Target == nullptr) {
-        RADRAY_ERR_LOG("PSOCache: vertex shader is null");
-        return nullptr;
-    }
-    if (desc.PS.has_value() && desc.PS->Target == nullptr) {
-        RADRAY_ERR_LOG("PSOCache: pixel shader is null");
-        return nullptr;
-    }
-
-    vector<VertexLayoutKey> vertexLayouts;
-    vertexLayouts.reserve(desc.VertexLayouts.size());
-    for (const render::VertexBufferLayout& layout : desc.VertexLayouts) {
-        vertexLayouts.push_back(VertexLayoutKey::From(layout));
-    }
-
-    vector<render::ColorTargetState> colorTargets;
-    colorTargets.reserve(desc.ColorTargets.size());
-    for (const render::ColorTargetState& colorTarget : desc.ColorTargets) {
-        colorTargets.push_back(colorTarget);
-    }
-
-    GraphicsPsoKey key{
-        .RootLayout = desc.RootLayout,
-        .VS = desc.VS.Key,
-        .PS = desc.PS.has_value() ? std::optional<ShaderCompileKey>{desc.PS->Key} : std::nullopt,
-        .VertexLayouts = std::move(vertexLayouts),
-        .Primitive = desc.Primitive,
-        .DepthStencil = desc.DepthStencil,
-        .MultiSample = desc.MultiSample,
-        .ColorTargets = std::move(colorTargets)};
-    if (auto it = _cache.find(key); it != _cache.end()) {
-        return it->second.get();
-    }
-
-    render::GraphicsPipelineStateDescriptor psoDesc{
-        desc.RootSig,
-        render::ShaderEntry{desc.VS.Target, desc.VS.Key.EntryPoint},
-        !desc.PS.has_value()
-            ? std::optional<render::ShaderEntry>{}
-            : std::optional<render::ShaderEntry>{render::ShaderEntry{desc.PS->Target, desc.PS->Key.EntryPoint}},
-        desc.VertexLayouts,
-        desc.Primitive,
-        desc.DepthStencil,
-        desc.MultiSample,
-        desc.ColorTargets};
-
-    auto psoOpt = _device->CreateGraphicsPipelineState(psoDesc);
-    if (!psoOpt.HasValue()) {
-        RADRAY_ERR_LOG("PSOCache: failed to create graphics pipeline state");
-        return nullptr;
-    }
-    render::GraphicsPipelineState* raw = psoOpt.Get();
-    _cache.emplace(std::move(key), psoOpt.Release());
-    return raw;
 }
 
 }  // namespace radray

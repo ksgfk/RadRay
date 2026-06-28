@@ -66,17 +66,6 @@ private:
     unique_ptr<render::RenderBase> _resource;
 };
 
-class CountingRecycler final : public IRenderResourceRecycler {
-public:
-    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override {
-        ++RecycleCount;
-        Pending.emplace_back(std::move(obj));
-    }
-
-    uint32_t RecycleCount{0};
-    vector<unique_ptr<render::RenderBase>> Pending;
-};
-
 }  // namespace
 
 namespace radray {
@@ -290,10 +279,8 @@ TEST(AssetManagerTest, UnloadReadyAsset) {
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
 }
 
-TEST(AssetManagerTest, UnloadReadyAssetRecyclesRenderResource) {
-    CountingRecycler recycler;
+TEST(AssetManagerTest, UnloadReadyAssetDestroysRenderResourceWithoutGpuSystem) {
     AssetManager mgr;
-    mgr.SetRenderResourceRecycler(&recycler);
 
     int destroyed = 0;
     AssetId id = MakeId(10);
@@ -305,10 +292,6 @@ TEST(AssetManagerTest, UnloadReadyAssetRecyclesRenderResource) {
     mgr.Unload(id);
     EXPECT_FALSE(ref.IsValid());
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
-    EXPECT_EQ(recycler.RecycleCount, 1u);
-    EXPECT_EQ(destroyed, 0);
-
-    recycler.Pending.clear();
     EXPECT_EQ(destroyed, 1);
 }
 
