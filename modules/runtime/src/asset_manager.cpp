@@ -19,6 +19,43 @@ public:
 
 }  // namespace
 
+class AssetWaitAwaitable {
+public:
+    AssetWaitAwaitable(AssetManager* manager, StreamingAssetRefAny ref, stop_token stop) noexcept
+        : _manager(manager), _ref(std::move(ref)), _stop(stop) {}
+
+    bool await_ready() const noexcept {
+        return _manager == nullptr || _stop.stop_requested() || !_ref.IsValid() || _ref.IsCompleted();
+    }
+
+    bool await_suspend(std::coroutine_handle<> continuation) {
+        if (_manager == nullptr || _stop.stop_requested() || !_ref.IsValid() || _ref.IsCompleted()) {
+            return false;
+        }
+        _record = _manager->RegisterWait(_ref.GetHandle(), _stop, continuation);
+        return _record != nullptr;
+    }
+
+    bool await_resume() const noexcept {
+        if (_record == nullptr) {
+            return !_stop.stop_requested();
+        }
+
+        const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
+        if (_manager != nullptr) {
+            _manager->_waiters.Erase(_record);
+        }
+        _record = nullptr;
+        return completed;
+    }
+
+private:
+    AssetManager* _manager;
+    StreamingAssetRefAny _ref;
+    stop_token _stop;
+    mutable AssetWaitRecord* _record{nullptr};
+};
+
 // ════════════════════════════════════════════════════════════
 //  StreamingAssetRefAny
 // ════════════════════════════════════════════════════════════
@@ -125,6 +162,14 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
     _activeLoads.push_back(handle);
 
     return StreamingAssetRefAny{this, handle, request.Id};
+}
+
+task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
+    stop_token stop = co_await CurrentStopToken();
+    bool completed = co_await AssetWaitAwaitable{this, std::move(ref), stop};
+    if (!completed) {
+        co_await StopCurrentTask();
+    }
 }
 
 StreamingAssetRefAny AssetManager::AddReady(const AssetId& id, unique_ptr<Asset> object, AssetTypeId expectedTypeId) {
@@ -259,6 +304,30 @@ void AssetManager::OnLoadStopped(AssetHandle handle) noexcept {
     slotPtr->get()->State = AssetState::Canceled;
 }
 
+vector<AssetWaitRecord*> AssetManager::TakeWaiters(AssetHandle handle) noexcept {
+    vector<AssetWaitRecord*> waiters;
+    const size_t waiterCount = _waiters.Count();
+    for (size_t i = 0; i < waiterCount; ++i) {
+        AssetWaitRecord* waiter = _waiters.At(i);
+        if (waiter != nullptr && waiter->Handle == handle) {
+            waiters.push_back(waiter);
+        }
+    }
+    return waiters;
+}
+
+void AssetManager::ResumeWaiters(std::span<AssetWaitRecord* const> waiters) noexcept {
+    for (AssetWaitRecord* waiter : waiters) {
+        if (waiter == nullptr) {
+            continue;
+        }
+        if (!_waiters.IsAlive(waiter)) {
+            continue;
+        }
+        _waiters.ResumeRecord(waiter);
+    }
+}
+
 void AssetManager::FinalizeTerminalSlot(AssetHandle handle) {
     unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
     if (slotPtr == nullptr) {
@@ -271,6 +340,20 @@ void AssetManager::FinalizeTerminalSlot(AssetHandle handle) {
         }
         DestroySlot(handle);
     }
+}
+
+AssetWaitRecord* AssetManager::RegisterWait(
+    AssetHandle handle,
+    stop_token stop,
+    std::coroutine_handle<> continuation) {
+    unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr == nullptr || *slotPtr == nullptr || (*slotPtr)->State != AssetState::Loading) {
+        return nullptr;
+    }
+
+    AssetWaitRecord* record = _waiters.Enqueue(stop, continuation);
+    record->Handle = handle;
+    return record;
 }
 
 IRenderResourceRecycler& AssetManager::GetRecycler() noexcept {
@@ -303,7 +386,9 @@ void AssetManager::Pump() {
             OnLoadComplete(handle, std::move(slot->PendingResult.value()));
             slot->PendingResult.reset();
         }
+        vector<AssetWaitRecord*> waiters = TakeWaiters(handle);
         FinalizeTerminalSlot(handle);
+        ResumeWaiters(waiters);
 
         _activeLoads.erase(_activeLoads.begin() + static_cast<ptrdiff_t>(i));
     }

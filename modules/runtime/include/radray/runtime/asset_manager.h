@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -12,6 +13,7 @@
 namespace radray {
 
 class AssetManager;
+class AssetWaitAwaitable;
 class GpuSystem;
 class StreamingAssetRefAny;
 template <class T>
@@ -21,6 +23,10 @@ class StreamingAssetRef;
 /// 运行时弱句柄。POD,可自由拷贝/比较。指向 AssetManager 的 slot。
 /// 带 generation 检测悬垂:slot 回收复用后旧句柄解析即失效。【不可序列化】。
 using AssetHandle = SparseSetHandle;
+
+struct AssetWaitRecord : ManualCoroutineRecord {
+    AssetHandle Handle{AssetHandle::Invalid()};
+};
 
 /// 资产 slot 的生命周期状态。
 enum class AssetState {
@@ -192,6 +198,17 @@ public:
     requires std::derived_from<T, Asset>
     StreamingAssetRef<T> Load(AssetLoadRequest request);
 
+    /// 等待 streaming 引用离开 Loading 状态。等待者取消不会取消底层资产加载。
+    task<void> Wait(StreamingAssetRefAny ref);
+
+    template <class T>
+    requires std::derived_from<T, Asset>
+    task<void> Wait(StreamingAssetRef<T> ref);
+
+    template <class T>
+    requires std::derived_from<T, Asset>
+    task<StreamingAssetRef<T>> LoadAndWait(AssetLoadRequest request);
+
     /// 不启动 task，仅按 id 去重并登记一个 ready object。主要给测试/工具使用。
     StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object, AssetTypeId expectedTypeId = Guid::Empty());
 
@@ -232,6 +249,7 @@ public:
     uint32_t GetAssetCount() const noexcept { return _slots.Count(); }
 
 private:
+    friend class AssetWaitAwaitable;
     friend class StreamingAssetRefAny;
 
     struct AssetSlot {
@@ -252,9 +270,13 @@ private:
     void StoreLoadCanceled(AssetHandle handle) noexcept;
     void OnLoadComplete(AssetHandle handle, AssetLoadResult result) noexcept;
     void OnLoadStopped(AssetHandle handle) noexcept;
+    vector<AssetWaitRecord*> TakeWaiters(AssetHandle handle) noexcept;
+    void ResumeWaiters(std::span<AssetWaitRecord* const> waiters) noexcept;
     void FinalizeTerminalSlot(AssetHandle handle);
     void DestroySlot(AssetHandle handle) noexcept;
     IRenderResourceRecycler& GetRecycler() noexcept;
+
+    AssetWaitRecord* RegisterWait(AssetHandle handle, stop_token stop, std::coroutine_handle<> continuation);
 
     Nullable<Asset*> ResolveAsset(AssetHandle handle) const noexcept;
     AssetTypeId ResolveTypeId(AssetHandle handle) const noexcept;
@@ -264,6 +286,7 @@ private:
 
     GpuSystem* _gpuSystem{nullptr};
     TaskScope _loadScope;
+    ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     SparseSet<unique_ptr<AssetSlot>> _slots;
     unordered_map<AssetId, AssetHandle> _idIndex;
     vector<AssetHandle> _activeLoads;
@@ -316,6 +339,20 @@ requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::Load(AssetLoadRequest request) {
     request.ExpectedTypeId = runtime_type_id_v<T>;
     return Load(std::move(request)).template CastTo<T>();
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+task<void> AssetManager::Wait(StreamingAssetRef<T> ref) {
+    co_await Wait(ref.AsAny());
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+task<StreamingAssetRef<T>> AssetManager::LoadAndWait(AssetLoadRequest request) {
+    StreamingAssetRef<T> ref = Load<T>(std::move(request));
+    co_await Wait(ref.AsAny());
+    co_return ref;
 }
 
 template <class T>

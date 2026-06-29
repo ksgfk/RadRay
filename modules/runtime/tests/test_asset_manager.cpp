@@ -118,6 +118,29 @@ AssetLoadTask LoadGpuAsset(FrameUploadScheduler& frameUploads, int value) {
     co_return AssetLoadResult::Success(make_unique<GpuAsset>(value));
 }
 
+struct WaitProbe {
+    bool Completed{false};
+    bool Ready{false};
+    bool Faulted{false};
+    bool Canceled{false};
+};
+
+task<void> WaitForCpuAsset(AssetManager& mgr, StreamingAssetRef<CpuAsset> ref, WaitProbe& probe) {
+    co_await mgr.Wait(ref);
+    probe.Completed = ref.IsCompleted();
+    probe.Ready = ref.IsReady();
+    probe.Faulted = ref.IsFaulted();
+    probe.Canceled = ref.IsCanceled();
+}
+
+task<void> WaitForGpuAsset(AssetManager& mgr, StreamingAssetRef<GpuAsset> ref, WaitProbe& probe) {
+    co_await mgr.Wait(ref);
+    probe.Completed = ref.IsCompleted();
+    probe.Ready = ref.IsReady();
+    probe.Faulted = ref.IsFaulted();
+    probe.Canceled = ref.IsCanceled();
+}
+
 // CPU-only:Load 登记 → Pump 内联完成 → Ready → 直接访问 StreamingAssetRef。
 TEST(AssetManagerTest, CpuLoadReadyAfterPump) {
     AssetManager mgr;
@@ -135,6 +158,42 @@ TEST(AssetManagerTest, CpuLoadReadyAfterPump) {
     EXPECT_TRUE(ref.IsCompletedSuccessfully());
     ASSERT_TRUE(ref.IsReady());
     EXPECT_EQ(ref->Value(), 42);
+}
+
+TEST(AssetManagerTest, WaitCompletesAfterPumpCommitsReadyState) {
+    AssetManager mgr;
+    TaskScope scope;
+    WaitProbe probe;
+    AssetId id = MakeId(11);
+    StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(42)});
+
+    scope.Spawn(WaitForCpuAsset(mgr, ref, probe));
+    EXPECT_FALSE(probe.Completed);
+
+    mgr.Pump();
+    EXPECT_TRUE(probe.Completed);
+    EXPECT_TRUE(probe.Ready);
+    EXPECT_FALSE(probe.Faulted);
+    EXPECT_FALSE(probe.Canceled);
+}
+
+TEST(AssetManagerTest, WaitOnCompletedAssetReturnsInline) {
+    AssetManager mgr;
+    AssetId id = MakeId(12);
+    StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(24)});
+    mgr.Pump();
+    ASSERT_TRUE(ref.IsReady());
+
+    TaskScope scope;
+    WaitProbe probe;
+    scope.Spawn(WaitForCpuAsset(mgr, ref, probe));
+
+    EXPECT_TRUE(probe.Completed);
+    EXPECT_TRUE(probe.Ready);
 }
 
 // 去重:同 id 再次 Load 复用已就绪资产。
@@ -209,6 +268,33 @@ TEST(AssetManagerTest, GpuUploadCrossFrame) {
     mgr.Pump();
     EXPECT_TRUE(t.IsCompletedSuccessfully());
     EXPECT_EQ(t->Value(), 123);
+}
+
+TEST(AssetManagerTest, WaitCompletesAfterGpuLoadReachesTerminalState) {
+    FrameUploadScheduler frameUploads;
+    AssetManager mgr;
+    TaskScope scope;
+    WaitProbe probe;
+    AssetId id = MakeId(13);
+    StreamingAssetRef<GpuAsset> t = mgr.Load<GpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadGpuAsset(frameUploads, 456)});
+
+    scope.Spawn(WaitForGpuAsset(mgr, t, probe));
+    mgr.Pump();
+    EXPECT_FALSE(probe.Completed);
+
+    ResourceUploader uploader{nullptr, 1};
+    frameUploads.RunUploadPhase(nullptr, uploader, 0);
+    frameUploads.NotifyFlightComplete(0);
+    frameUploads.PumpCompletedUploads();
+    EXPECT_FALSE(probe.Completed);
+
+    mgr.Pump();
+    EXPECT_TRUE(probe.Completed);
+    EXPECT_TRUE(probe.Ready);
+    EXPECT_FALSE(probe.Faulted);
+    EXPECT_FALSE(probe.Canceled);
 }
 
 // Cancel:在 upload phase 前取消,不录制上传,恢复后提交 Canceled。

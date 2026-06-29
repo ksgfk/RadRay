@@ -34,12 +34,6 @@
 
 namespace radray {
 
-void ApplicationSchedulerStopCallback::operator()() const noexcept {
-    if (Scheduler != nullptr && Record != nullptr) {
-        Scheduler->CancelRecord(Record);
-    }
-}
-
 bool SwitchToApplicationSchedulerAwaitable::await_ready() const noexcept {
     return _scheduler == nullptr || _stop.stop_requested();
 }
@@ -57,10 +51,9 @@ bool SwitchToApplicationSchedulerAwaitable::await_resume() noexcept {
         return !_stop.stop_requested();
     }
 
-    ApplicationScheduler* scheduler = _record->Scheduler;
     const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
-    if (scheduler != nullptr) {
-        scheduler->Erase(_record);
+    if (_scheduler != nullptr) {
+        _scheduler->Erase(_record);
     }
     _record = nullptr;
     return completed;
@@ -79,63 +72,29 @@ task<void> ApplicationScheduler::SwitchTo() {
 }
 
 ApplicationSchedulerRecord* ApplicationScheduler::Enqueue(stop_token stop, std::coroutine_handle<> continuation) {
-    auto record = make_unique<ApplicationSchedulerRecord>();
-    record->Scheduler = this;
-    record->Continuation = continuation;
-    record->Stop = stop;
-    ApplicationSchedulerRecord* ptr = record.get();
-    _records.push_back(std::move(record));
-    if (stop.stop_requested()) {
-        ptr->Canceled = true;
-    } else if (stop.stop_possible()) {
-        ptr->StopCallback.emplace(stop, ApplicationSchedulerStopCallback{this, ptr});
-    }
-    return ptr;
+    return _records.Enqueue(stop, continuation);
 }
 
 bool ApplicationScheduler::Erase(ApplicationSchedulerRecord* record) noexcept {
-    for (size_t i = 0; i < _records.size(); ++i) {
-        if (_records[i].get() == record) {
-            _records[i]->StopCallback.reset();
-            _records.erase(_records.begin() + static_cast<ptrdiff_t>(i));
-            return true;
-        }
-    }
-    return false;
+    return _records.Erase(record);
 }
 
 bool ApplicationScheduler::IsAlive(ApplicationSchedulerRecord* record) const noexcept {
-    for (const unique_ptr<ApplicationSchedulerRecord>& candidate : _records) {
-        if (candidate.get() == record) {
-            return true;
-        }
-    }
-    return false;
+    return _records.IsAlive(record);
 }
 
 void ApplicationScheduler::ResumeRecord(ApplicationSchedulerRecord* record) noexcept {
-    if (record == nullptr) {
-        return;
-    }
-    std::coroutine_handle<> continuation = record->Continuation;
-    record->Continuation = {};
-    if (continuation) {
-        continuation.resume();
-    }
+    _records.ResumeRecord(record);
 }
 
 void ApplicationScheduler::CancelRecord(ApplicationSchedulerRecord* record) noexcept {
-    if (record == nullptr) {
-        return;
-    }
-    record->Canceled = true;
-    ResumeRecord(record);
+    _records.CancelRecord(record);
 }
 
 void ApplicationScheduler::Pump() {
-    const size_t recordCount = _records.size();
-    for (size_t i = 0; i < recordCount && !_records.empty(); ++i) {
-        ApplicationSchedulerRecord* record = _records.front().get();
+    const size_t recordCount = _records.Count();
+    for (size_t i = 0; i < recordCount && !_records.Empty(); ++i) {
+        ApplicationSchedulerRecord* record = _records.Front();
         if (record->Stop.stop_requested()) {
             record->Canceled = true;
         }
@@ -147,14 +106,7 @@ void ApplicationScheduler::Pump() {
 }
 
 void ApplicationScheduler::CancelAll() noexcept {
-    while (!_records.empty()) {
-        ApplicationSchedulerRecord* record = _records.back().get();
-        record->Canceled = true;
-        ResumeRecord(record);
-        if (IsAlive(record)) {
-            Erase(record);
-        }
-    }
+    _records.CancelAll();
 }
 
 AppSubsystem::AppSubsystem() noexcept = default;

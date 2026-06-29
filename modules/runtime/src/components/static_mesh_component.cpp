@@ -62,29 +62,6 @@ void StaticMeshComponent::StartMeshRefreshTask() {
 }
 
 task<void> StaticMeshComponent::WaitForMeshAndRefresh(StreamingAssetRef<StaticMesh> mesh) {
-    stop_token stop = co_await CurrentStopToken();
-
-    while (!mesh.IsCompleted()) {
-        if (stop.stop_requested()) {
-            co_await StopCurrentTask();
-        }
-
-        Nullable<World*> world = GetWorld();
-        if (!world) {
-            co_return;
-        }
-        Application* app = world.Get()->GetApplication();
-        if (app == nullptr) {
-            co_return;
-        }
-
-        co_await app->GetScheduler().SwitchTo();
-    }
-
-    if (stop.stop_requested()) {
-        co_await StopCurrentTask();
-    }
-
     Nullable<World*> world = GetWorld();
     if (!world) {
         co_return;
@@ -93,6 +70,13 @@ task<void> StaticMeshComponent::WaitForMeshAndRefresh(StreamingAssetRef<StaticMe
     if (app == nullptr) {
         co_return;
     }
+
+    AssetManager* assetManager = app->GetAssetManager();
+    if (assetManager == nullptr) {
+        co_return;
+    }
+
+    co_await assetManager->Wait(mesh);
 
     co_await app->GetScheduler().SwitchTo();
 

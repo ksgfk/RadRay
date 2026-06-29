@@ -21,26 +21,7 @@ namespace radray {
 //  FrameUploadScheduler
 // ═══════════════════════════════════════════════════════════════
 
-void FrameUploadStopCallback::operator()() const noexcept {
-    if (Scheduler != nullptr && Record != nullptr) {
-        Scheduler->CancelRecord(Record);
-    }
-}
-
-FrameUploadScheduler::~FrameUploadScheduler() noexcept {
-    while (!_uploads.empty()) {
-        FrameUploadRecord* rec = _uploads.back().get();
-        if (rec == nullptr) {
-            _uploads.pop_back();
-            continue;
-        }
-        rec->Canceled = true;
-        ResumeRecord(rec);
-        if (IsUploadAlive(rec)) {
-            EraseUpload(rec);
-        }
-    }
-}
+FrameUploadScheduler::~FrameUploadScheduler() noexcept = default;
 
 task<FrameUploadScope> FrameUploadScheduler::BeginUpload() {
     stop_token stop = co_await CurrentStopToken();
@@ -53,58 +34,28 @@ task<FrameUploadScope> FrameUploadScheduler::BeginUpload() {
 }
 
 FrameUploadRecord* FrameUploadScheduler::RegisterUpload(stop_token stop, std::coroutine_handle<> continuation) {
-    auto rec = make_unique<FrameUploadRecord>();
-    rec->Scheduler = this;
-    rec->Continuation = continuation;
-    rec->Stop = stop;
-    rec->CurrentStage = FrameUploadStage::AwaitingFrame;
-    FrameUploadRecord* ptr = rec.get();
-    _uploads.emplace_back(std::move(rec));
-    if (stop.stop_requested()) {
-        ptr->Canceled = true;
-    } else if (stop.stop_possible()) {
-        ptr->StopCallback.emplace(stop, FrameUploadStopCallback{this, ptr});
-    }
-    return ptr;
+    FrameUploadRecord* record = _uploads.Enqueue(stop, continuation);
+    record->Cmd = nullptr;
+    record->Uploader = nullptr;
+    record->FlightIndex = std::numeric_limits<uint32_t>::max();
+    record->CurrentStage = FrameUploadStage::AwaitingFrame;
+    return record;
 }
 
 bool FrameUploadScheduler::EraseUpload(FrameUploadRecord* record) noexcept {
-    for (size_t i = 0; i < _uploads.size(); ++i) {
-        if (_uploads[i].get() == record) {
-            _uploads[i]->StopCallback.reset();
-            _uploads.erase(_uploads.begin() + static_cast<ptrdiff_t>(i));
-            return true;
-        }
-    }
-    return false;
+    return _uploads.Erase(record);
 }
 
 bool FrameUploadScheduler::IsUploadAlive(FrameUploadRecord* record) const noexcept {
-    for (const auto& rec : _uploads) {
-        if (rec.get() == record) {
-            return true;
-        }
-    }
-    return false;
+    return _uploads.IsAlive(record);
 }
 
 void FrameUploadScheduler::ResumeRecord(FrameUploadRecord* record) {
-    if (record == nullptr) {
-        return;
-    }
-    std::coroutine_handle<> continuation = record->Continuation;
-    record->Continuation = {};
-    if (continuation) {
-        continuation.resume();
-    }
+    _uploads.ResumeRecord(record);
 }
 
 void FrameUploadScheduler::CancelRecord(FrameUploadRecord* record) noexcept {
-    if (record == nullptr) {
-        return;
-    }
-    record->Canceled = true;
-    ResumeRecord(record);
+    _uploads.CancelRecord(record);
 }
 
 void FrameUploadScheduler::RunUploadPhase(
@@ -112,9 +63,11 @@ void FrameUploadScheduler::RunUploadPhase(
     ResourceUploader& uploader,
     uint32_t flightIndex) {
     vector<FrameUploadRecord*> pending;
-    for (auto& recPtr : _uploads) {
-        if (recPtr->CurrentStage == FrameUploadStage::AwaitingFrame) {
-            pending.push_back(recPtr.get());
+    const size_t uploadCount = _uploads.Count();
+    for (size_t i = 0; i < uploadCount; ++i) {
+        FrameUploadRecord* record = _uploads.At(i);
+        if (record != nullptr && record->CurrentStage == FrameUploadStage::AwaitingFrame) {
+            pending.push_back(record);
         }
     }
 
@@ -146,8 +99,12 @@ void FrameUploadScheduler::RunUploadPhase(
 }
 
 void FrameUploadScheduler::NotifyFlightComplete(uint32_t flightIndex) {
-    for (auto& recPtr : _uploads) {
-        FrameUploadRecord* rec = recPtr.get();
+    const size_t uploadCount = _uploads.Count();
+    for (size_t i = 0; i < uploadCount; ++i) {
+        FrameUploadRecord* rec = _uploads.At(i);
+        if (rec == nullptr) {
+            continue;
+        }
         if (rec->CurrentStage == FrameUploadStage::AwaitingFence && rec->FlightIndex == flightIndex) {
             rec->CurrentStage = FrameUploadStage::FenceComplete;
         }
@@ -158,8 +115,8 @@ void FrameUploadScheduler::PumpCompletedUploads() {
     bool resumedAny = true;
     while (resumedAny) {
         resumedAny = false;
-        for (size_t i = 0; i < _uploads.size();) {
-            FrameUploadRecord* rec = _uploads[i].get();
+        for (size_t i = 0; i < _uploads.Count();) {
+            FrameUploadRecord* rec = _uploads.At(i);
             if (rec->Stop.stop_requested()) {
                 rec->Canceled = true;
             }
@@ -203,10 +160,9 @@ bool WaitFrameUploadGpuAwaitable::await_resume() noexcept {
     if (_record == nullptr) {
         return false;
     }
-    FrameUploadScheduler* scheduler = _record->Scheduler;
     bool completed = !_record->Canceled && _record->CurrentStage == FrameUploadStage::FenceComplete;
-    if (scheduler != nullptr) {
-        scheduler->EraseUpload(_record);
+    if (_scheduler != nullptr) {
+        _scheduler->EraseUpload(_record);
     }
     _record = nullptr;
     return completed;
@@ -225,7 +181,7 @@ uint32_t FrameUploadScope::GetFlightIndex() const noexcept {
 }
 
 task<void> FrameUploadScope::WaitGpu() {
-    bool completed = co_await WaitFrameUploadGpuAwaitable{_record};
+    bool completed = co_await WaitFrameUploadGpuAwaitable{_scheduler, _record};
     if (!completed) {
         co_await StopCurrentTask();
     }
@@ -249,14 +205,13 @@ std::optional<FrameUploadScope> BeginFrameUploadAwaitable::await_resume() noexce
     }
     if (_record->Canceled || _record->Stop.stop_requested()) {
         _record->Canceled = true;
-        FrameUploadScheduler* scheduler = _record->Scheduler;
-        if (scheduler != nullptr) {
-            scheduler->EraseUpload(_record);
+        if (_scheduler != nullptr) {
+            _scheduler->EraseUpload(_record);
         }
         _record = nullptr;
         return std::nullopt;
     }
-    return FrameUploadScope{_record};
+    return FrameUploadScope{_scheduler, _record};
 }
 
 // ═══════════════════════════════════════════════════════════════

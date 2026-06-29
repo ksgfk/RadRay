@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <concepts>
-#include <coroutine>
 #include <optional>
 #include <string_view>
 
@@ -17,7 +16,6 @@ class Application;
 class ApplicationScheduler;
 class SwitchToApplicationSchedulerAwaitable;
 struct ApplicationSchedulerRecord;
-struct ApplicationSchedulerStopCallback;
 class GpuSystem;
 class AppWindow;
 class WindowManager;
@@ -64,21 +62,7 @@ struct AppUpdateResult {
     bool ShouldExit;
 };
 
-struct ApplicationSchedulerStopCallback {
-    ApplicationScheduler* Scheduler{nullptr};
-    ApplicationSchedulerRecord* Record{nullptr};
-
-    void operator()() const noexcept;
-};
-
-struct ApplicationSchedulerRecord {
-    using StopCallbackStorage = stop_token::template callback_type<ApplicationSchedulerStopCallback>;
-
-    ApplicationScheduler* Scheduler{nullptr};
-    std::coroutine_handle<> Continuation{};
-    stop_token Stop;
-    std::optional<StopCallbackStorage> StopCallback;
-    bool Canceled{false};
+struct ApplicationSchedulerRecord : ManualCoroutineRecord {
 };
 
 class SwitchToApplicationSchedulerAwaitable {
@@ -111,7 +95,6 @@ public:
 
 private:
     friend class SwitchToApplicationSchedulerAwaitable;
-    friend struct ApplicationSchedulerStopCallback;
 
     ApplicationSchedulerRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation);
     bool Erase(ApplicationSchedulerRecord* record) noexcept;
@@ -119,7 +102,7 @@ private:
     void ResumeRecord(ApplicationSchedulerRecord* record) noexcept;
     void CancelRecord(ApplicationSchedulerRecord* record) noexcept;
 
-    vector<unique_ptr<ApplicationSchedulerRecord>> _records;
+    ManualCoroutineScheduler<ApplicationSchedulerRecord> _records;
 };
 
 /// 启动前注册到 Application 的运行时子系统。Application 只驱动这个窄接口,

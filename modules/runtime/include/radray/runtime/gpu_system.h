@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <coroutine>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -42,13 +41,6 @@ enum class FrameUploadStage {
     FenceComplete,
 };
 
-struct FrameUploadStopCallback {
-    FrameUploadScheduler* Scheduler{nullptr};
-    FrameUploadRecord* Record{nullptr};
-
-    void operator()() const noexcept;
-};
-
 struct GpuSystemDescriptor {
     render::Device* Device;
     uint32_t MainQueueIndex;
@@ -58,18 +50,11 @@ struct GpuSystemDescriptor {
 };
 
 /// 一条等待 GpuSystem 上传阶段 / GPU fence 的协程记录。由 FrameUploadScheduler 管理。
-struct FrameUploadRecord {
-    using StopCallbackStorage = stop_token::template callback_type<FrameUploadStopCallback>;
-
-    FrameUploadScheduler* Scheduler{nullptr};
-    std::coroutine_handle<> Continuation{};
-    stop_token Stop;
-    std::optional<StopCallbackStorage> StopCallback;
+struct FrameUploadRecord : ManualCoroutineRecord {
     render::CommandBuffer* Cmd{nullptr};
     ResourceUploader* Uploader{nullptr};
     uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
     FrameUploadStage CurrentStage{FrameUploadStage::AwaitingFrame};
-    bool Canceled{false};
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -154,13 +139,15 @@ struct StagingBufferAllocation {
 
 class WaitFrameUploadGpuAwaitable {
 public:
-    explicit WaitFrameUploadGpuAwaitable(FrameUploadRecord* record) noexcept : _record(record) {}
+    WaitFrameUploadGpuAwaitable(FrameUploadScheduler* scheduler, FrameUploadRecord* record) noexcept
+        : _scheduler(scheduler), _record(record) {}
 
     bool await_ready() noexcept;
     bool await_suspend(std::coroutine_handle<> h) noexcept;
     bool await_resume() noexcept;
 
 private:
+    FrameUploadScheduler* _scheduler;
     FrameUploadRecord* _record;
 };
 
@@ -176,7 +163,9 @@ public:
 
 private:
     friend class BeginFrameUploadAwaitable;
-    explicit FrameUploadScope(FrameUploadRecord* record) noexcept : _record(record) {}
+    FrameUploadScope(FrameUploadScheduler* scheduler, FrameUploadRecord* record) noexcept
+        : _scheduler(scheduler), _record(record) {}
+    FrameUploadScheduler* _scheduler{nullptr};
     FrameUploadRecord* _record{nullptr};
 };
 
@@ -199,13 +188,11 @@ public:
     bool EraseUpload(FrameUploadRecord* record) noexcept;
 
 private:
-    friend struct FrameUploadStopCallback;
-
     bool IsUploadAlive(FrameUploadRecord* record) const noexcept;
     void ResumeRecord(FrameUploadRecord* record);
     void CancelRecord(FrameUploadRecord* record) noexcept;
 
-    vector<unique_ptr<FrameUploadRecord>> _uploads;
+    ManualCoroutineScheduler<FrameUploadRecord> _uploads;
 };
 
 /// co_await FrameUploadScheduler::BeginUpload() 的 awaitable。恢复点在 GpuSystem 帧顶 upload phase。
