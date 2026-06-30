@@ -22,6 +22,7 @@ public:
     void MarkRenderStateDirty();
     PrimitiveSceneProxy* GetSceneProxy() const noexcept { return _sceneProxy; }
 
+    virtual bool ShouldCreateRenderState() const;
     virtual unique_ptr<PrimitiveSceneProxy> CreateSceneProxy();
 
 protected:

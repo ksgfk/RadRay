@@ -1,2 +1,4 @@
 radray_add_test(test_asset_manager SOURCES test_asset_manager.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_deferred_render_delete_queue SOURCES test_deferred_render_delete_queue.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_light_component SOURCES test_light_component.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_static_mesh_component SOURCES test_static_mesh_component.cpp LINK_LIBS radraycore radrayrender radrayruntime)

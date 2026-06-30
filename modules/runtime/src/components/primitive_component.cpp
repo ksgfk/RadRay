@@ -27,8 +27,16 @@ void PrimitiveComponent::MarkRenderStateDirty() {
         return;
     }
 
-    DestroyRenderState();
-    CreateRenderState();
+    if (_renderStateCreated) {
+        DestroyRenderState();
+    }
+    if (ShouldCreateRenderState()) {
+        CreateRenderState();
+    }
+}
+
+bool PrimitiveComponent::ShouldCreateRenderState() const {
+    return true;
 }
 
 unique_ptr<PrimitiveSceneProxy> PrimitiveComponent::CreateSceneProxy() {
@@ -48,7 +56,7 @@ Scene* PrimitiveComponent::GetScene() const noexcept {
 }
 
 void PrimitiveComponent::CreateRenderState() {
-    if (_renderStateCreated) {
+    if (_renderStateCreated || !ShouldCreateRenderState()) {
         return;
     }
 
@@ -56,7 +64,7 @@ void PrimitiveComponent::CreateRenderState() {
     if (scene != nullptr) {
         _sceneProxy = scene->AddPrimitive(this);
     }
-    _renderStateCreated = true;
+    _renderStateCreated = _sceneProxy != nullptr;
 }
 
 void PrimitiveComponent::DestroyRenderState() noexcept {

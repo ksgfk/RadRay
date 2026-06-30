@@ -16,12 +16,16 @@ public:
     RuntimeTypeId GetTypeId() const noexcept override;
     void OnRegister() override;
     void OnUnregister() override;
+    void TickComponent(float deltaTime) override;
 
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh);
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
+    bool ShouldCreateRenderState() const override;
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
 
 private:
+    bool HasRenderableMesh() const noexcept;
+    void CleanupCompletedMeshRefreshTask() noexcept;
     void StopMeshRefreshTask() noexcept;
     void StartMeshRefreshTask();
     task<void> WaitForMeshAndRefresh(StreamingAssetRef<StaticMesh> mesh);
@@ -29,6 +33,7 @@ private:
 
     StreamingAssetRef<StaticMesh> _mesh;
     unique_ptr<TaskScope> _meshRefreshScope;
+    bool _meshRefreshCompleted{false};
 };
 
 template <>
