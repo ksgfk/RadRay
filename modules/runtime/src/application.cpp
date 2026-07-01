@@ -122,10 +122,19 @@ void AppSubsystem::OnUpdate(Application& app, const AppUpdateContext& ctx) {
     (void)ctx;
 }
 
-bool AppSubsystem::OnRender(Application& app, AppFrameContext& ctx) {
-    (void)app;
+void AppSubsystem::OnRenderBegin(AppFrameContext& ctx) {
     (void)ctx;
+}
+
+bool AppSubsystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) {
+    (void)ctx;
+    (void)target;
+    (void)contentDrawn;
     return false;
+}
+
+void AppSubsystem::OnRenderEnd(AppFrameContext& ctx) {
+    (void)ctx;
 }
 
 void AppSubsystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
@@ -843,6 +852,17 @@ const AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) const noexcept
     return nullptr;
 }
 
+vector<AppSubsystem*> Application::GetSubsystems() noexcept {
+    vector<AppSubsystem*> subsystems;
+    subsystems.reserve(_subsystems.size());
+    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
+        if (subsystem != nullptr) {
+            subsystems.push_back(subsystem.get());
+        }
+    }
+    return subsystems;
+}
+
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
     OnRenderComplete(ctx);
 
@@ -901,67 +921,10 @@ bool Application::ShouldExit() const noexcept {
     return _windowManager != nullptr && _windowManager->ShouldExit();
 }
 
-void Application::RenderWindow(AppFrameContext& ctx, AppWindow* window) {
-    if (window == nullptr || window->GetSwapChain() == nullptr || window->IsMinimized()) {
-        return;
-    }
-    std::optional<AppFrameTarget> targetOpt = ctx.AcquireWindow(window);
-    if (!targetOpt.has_value()) {
-        return;
-    }
-    AppFrameTarget& target = targetOpt.value();
-    render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
-    const render::TextureStates beforeState = window->GetBackBufferState(target.BackBufferIndex);
-
-    render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
-        .Target = target.BackBuffer,
-        .Before = beforeState,
-        .After = render::TextureState::RenderTarget};
-    cmdBuffer->ResourceBarrier(std::span{&toRenderTarget, 1});
-
-    bool contentDrawn = RenderViewContent(ctx, target);
-    if (!contentDrawn) {
-        // 无内容:用一个 Clear-only render pass 把 backbuffer 翻到 RenderTarget 并清屏。
-        render::ColorAttachment colorAttachment{
-            .Target = target.BackBufferView,
-            .Load = render::LoadAction::Clear,
-            .Store = render::StoreAction::Store,
-            .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
-        render::RenderPassDescriptor renderPassDesc{
-            .ColorAttachments = std::span{&colorAttachment, 1},
-            .Name = window->IsMainWindow() ? "Main Window" : "Window"};
-        auto encoderOpt = cmdBuffer->BeginRenderPass(renderPassDesc);
-        if (encoderOpt.HasValue()) {
-            auto encoder = encoderOpt.Release();
-            cmdBuffer->EndRenderPass(std::move(encoder));
-        }
-    }
-
-    render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
-        .Target = target.BackBuffer,
-        .Before = render::TextureState::RenderTarget,
-        .After = render::TextureState::Present};
-    cmdBuffer->ResourceBarrier(std::span{&toPresent, 1});
-    window->SetBackBufferState(target.BackBufferIndex, render::TextureState::Present);
-}
-
-void Application::RenderWindows(AppFrameContext& ctx) {
-    if (_windowManager == nullptr) {
-        return;
-    }
-    const size_t windowCount = _windowManager->GetWindowCount();
-    for (size_t i = 0; i < windowCount; ++i) {
-        RenderWindow(ctx, _windowManager->GetWindow(i));
-    }
-}
-
 void Application::Render(AppFrameContext& ctx) {
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr && subsystem->OnRender(*this, ctx)) {
-            return;
-        }
+    if (_renderSystem != nullptr) {
+        _renderSystem->Render(ctx);
     }
-    RenderWindows(ctx);
 }
 
 bool Application::RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& target) {
@@ -1059,7 +1022,7 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};
     _gpuSystem = make_unique<GpuSystem>(this, gpuSysDesc);
-    _renderSystem = make_unique<RenderSystem>();
+    _renderSystem = make_unique<RenderSystem>(this);
     _assetManager = make_unique<AssetManager>();
     _world = make_unique<World>(this);
 

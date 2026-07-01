@@ -241,7 +241,9 @@ public:
 
     void OnInit(Application& app) override;
     void OnUpdate(Application& app, const AppUpdateContext& ctx) override;
-    bool OnRender(Application& app, AppFrameContext& ctx) override;
+    void OnRenderBegin(AppFrameContext& ctx) override;
+    bool OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) override;
+    void OnRenderEnd(AppFrameContext& ctx) override;
     void OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) override;
     void OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) override;
     void OnShutdown(Application& app) override;
@@ -252,10 +254,6 @@ public:
 
     /// 游戏线程：EndFrame 后提取本帧全部 viewport 的绘制数据到 flight 槽位。
     void ExtractDrawData(uint32_t frameIndex);
-
-    /// 渲染线程：遇到全部 ImGui viewport 窗口，逐个 acquire/barrier/开 RenderPass/画 UI/收尾 barrier。
-    /// 每个 viewport 都会先交给 Application::RenderViewContent 录制 UI 背后的应用内容。
-    bool RenderViewports(Application& app, AppFrameContext& ctx);
 
     /// 渲染线程：该 flight 渲染完成后释放本帧临时资源。
     void NotifyRenderComplete(uint32_t frameIndex);
@@ -273,6 +271,7 @@ public:
 private:
     bool Initialize(const ImGuiSystemDescriptor& desc);
 
+    ViewportWindow* FindViewportWindow(AppWindow* window) const noexcept;
     bool CreateViewportSwapChainTarget(ViewportWindow* viewportWindow, ImGuiViewport* viewport) noexcept;
     void RequestViewportSwapChainCreate(ViewportWindow* viewportWindow) noexcept;
 #ifdef RADRAY_PLATFORM_WINDOWS

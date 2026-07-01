@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <concepts>
-#include <optional>
 #include <string_view>
 
 #include <radray/coroutine.h>
@@ -118,8 +117,12 @@ public:
 
     virtual void OnInit(Application& app);
     virtual void OnUpdate(Application& app, const AppUpdateContext& ctx);
-    /// 返回 true 表示该子系统已经处理了本帧窗口 acquire/render/present 路径。
-    virtual bool OnRender(Application& app, AppFrameContext& ctx);
+    /// 每帧渲染开始前调用。用于上传/准备跨 target 的渲染资源。
+    virtual void OnRenderBegin(AppFrameContext& ctx);
+    /// 对当前 target 追加绘制。返回 true 表示该子系统向 target 写入了内容。
+    virtual bool OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn);
+    /// 每帧全部 target 渲染结束后调用。
+    virtual void OnRenderEnd(AppFrameContext& ctx);
     virtual void OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx);
     virtual void OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx);
     virtual void OnShutdown(Application& app);
@@ -188,6 +191,7 @@ public:
     AppSubsystem* RegisterSubsystem(unique_ptr<AppSubsystem> subsystem);
     AppSubsystem* GetSubsystem(RuntimeTypeId type) noexcept;
     const AppSubsystem* GetSubsystem(RuntimeTypeId type) const noexcept;
+    vector<AppSubsystem*> GetSubsystems() noexcept;
 
     WindowManager* GetWindowManager() noexcept { return _windowManager.get(); }
     const WindowManager* GetWindowManager() const noexcept { return _windowManager.get(); }
@@ -246,10 +250,6 @@ private:
     void InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void InitializeSubsystems();
     void TeardownSubsystems() noexcept;
-
-    /// 没有子系统接管窗口渲染时的窗口直接渲染路径(acquire/barrier/可选 clear/present-barrier)。
-    void RenderWindow(AppFrameContext& ctx, AppWindow* window);
-    void RenderWindows(AppFrameContext& ctx);
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;

@@ -1493,13 +1493,6 @@ void ImGuiSystem::OnUpdate(Application& app, const AppUpdateContext& ctx) {
     (void)ctx;
 }
 
-bool ImGuiSystem::OnRender(Application& app, AppFrameContext& ctx) {
-    if (!IsValid()) {
-        return false;
-    }
-    return RenderViewports(app, ctx);
-}
-
 void ImGuiSystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
     (void)app;
     NotifyRenderComplete(ctx.FlightIndex);
@@ -1544,87 +1537,55 @@ void ImGuiSystem::HandleSwapChainRecreate(const AppSwapChainRecreateContext& ctx
     }
 }
 
-bool ImGuiSystem::RenderViewports(Application& app, AppFrameContext& ctx) {
+ImGuiSystem::ViewportWindow* ImGuiSystem::FindViewportWindow(AppWindow* window) const noexcept {
+    if (window == nullptr) {
+        return nullptr;
+    }
+    for (const unique_ptr<ViewportWindow>& viewportWindow : _viewportWindows) {
+        if (viewportWindow != nullptr && viewportWindow->Window == window) {
+            return viewportWindow.get();
+        }
+    }
+    return nullptr;
+}
+
+void ImGuiSystem::OnRenderBegin(AppFrameContext& ctx) {
+    if (_renderer == nullptr) {
+        return;
+    }
+    _renderer->OnRenderBegin(ctx.FlightIndex(), ctx.GetCommandBuffer());
+}
+
+bool ImGuiSystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) {
     if (_renderer == nullptr) {
         return false;
     }
 
-    struct AcquiredViewport {
-        ViewportWindow* Window{nullptr};
-        AppFrameTarget Target;
-    };
-
-    // —— acquire 阶段：遇全部 viewport 窗口，跳过最小化 / 无 swapchain / acquire 失败的。
-    vector<AcquiredViewport> renderTargets;
-    renderTargets.reserve(_viewportWindows.size());
-    for (const unique_ptr<ViewportWindow>& viewportWindow : _viewportWindows) {
-        if (viewportWindow == nullptr || viewportWindow->Viewport == nullptr || viewportWindow->Window == nullptr) {
-            continue;
-        }
-        if ((viewportWindow->Viewport->Flags & ImGuiViewportFlags_IsMinimized) != 0) {
-            continue;
-        }
-        NativeWindow* nativeWindow = viewportWindow->GetWindow();
-        if (nativeWindow != nullptr && nativeWindow->IsMinimized()) {
-            continue;
-        }
-        if (viewportWindow->GetSwapChain() == nullptr) {
-            continue;
-        }
-        std::optional<AppFrameTarget> target = ctx.AcquireWindow(viewportWindow->Window);
-        if (!target.has_value()) {
-            continue;
-        }
-        renderTargets.emplace_back(AcquiredViewport{viewportWindow.get(), target.value()});
-    }
-    if (renderTargets.empty()) {
+    ViewportWindow* viewportWindow = FindViewportWindow(target.Window);
+    if (viewportWindow == nullptr || viewportWindow->Viewport == nullptr) {
         return false;
     }
 
-    render::CommandBuffer* cmdBuffer = ctx.GetCommandBuffer();
-    // 纹理上传(创建/更新 ImGui 字体等)：在任何 RenderPass 之前录制。
-    _renderer->OnRenderBegin(ctx.FlightIndex(), cmdBuffer);
-
-    ImGuiViewport* mainViewport = ImGui::GetMainViewport();
-    for (AcquiredViewport& acquired : renderTargets) {
-        AppWindow* appWindow = acquired.Window->Window;
-        render::Texture* backBuffer = acquired.Target.BackBuffer;
-        const uint32_t backBufferIndex = acquired.Target.BackBufferIndex;
-        const render::TextureStates beforeState = appWindow->GetBackBufferState(backBufferIndex);
-
-        render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
-            .Target = backBuffer,
-            .Before = beforeState,
-            .After = render::TextureState::RenderTarget};
-        cmdBuffer->ResourceBarrier(std::span{&toRenderTarget, 1});
-
-        const bool isMainViewport = acquired.Window->Viewport == mainViewport;
-        const bool contentDrawn = app.RenderViewContent(ctx, acquired.Target);
-
-        render::ColorAttachment colorAttachment{
-            .Target = acquired.Target.BackBufferView,
-            .Load = contentDrawn ? render::LoadAction::Load : render::LoadAction::Clear,
-            .Store = render::StoreAction::Store,
-            .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
-        render::RenderPassDescriptor renderPassDesc{
-            .ColorAttachments = std::span{&colorAttachment, 1},
-            .Name = isMainViewport ? "Main ImGui Viewport" : "ImGui Viewport"};
-        auto encoderOpt = cmdBuffer->BeginRenderPass(renderPassDesc);
-        if (!encoderOpt.HasValue()) {
-            RADRAY_ABORT("failed to begin imgui render pass");
-        }
-        auto encoder = encoderOpt.Release();
-        _renderer->OnRenderViewport(ctx.FlightIndex(), acquired.Window->Viewport, encoder.get());
-        cmdBuffer->EndRenderPass(std::move(encoder));
-
-        render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
-            .Target = backBuffer,
-            .Before = render::TextureState::RenderTarget,
-            .After = render::TextureState::Present};
-        cmdBuffer->ResourceBarrier(std::span{&toPresent, 1});
-        appWindow->SetBackBufferState(backBufferIndex, render::TextureState::Present);
+    render::ColorAttachment colorAttachment{
+        .Target = target.BackBufferView,
+        .Load = contentDrawn ? render::LoadAction::Load : render::LoadAction::Clear,
+        .Store = render::StoreAction::Store,
+        .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
+    render::RenderPassDescriptor renderPassDesc{
+        .ColorAttachments = std::span{&colorAttachment, 1},
+        .Name = viewportWindow->Window != nullptr && viewportWindow->Window->IsMainWindow() ? "Main ImGui Viewport" : "ImGui Viewport"};
+    auto encoderOpt = ctx.GetCommandBuffer()->BeginRenderPass(renderPassDesc);
+    if (!encoderOpt.HasValue()) {
+        RADRAY_ABORT("failed to begin imgui render pass");
     }
+    auto encoder = encoderOpt.Release();
+    _renderer->OnRenderViewport(ctx.FlightIndex(), viewportWindow->Viewport, encoder.get());
+    ctx.GetCommandBuffer()->EndRenderPass(std::move(encoder));
     return true;
+}
+
+void ImGuiSystem::OnRenderEnd(AppFrameContext& ctx) {
+    (void)ctx;
 }
 
 void ImGuiSystem::ViewportWindow::AttachInput(ImGuiSystem* system) {
