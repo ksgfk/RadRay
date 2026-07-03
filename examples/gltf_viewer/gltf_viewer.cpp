@@ -449,15 +449,14 @@ public:
         render::TextureView* shadowSrv = AcquireShadowArrayResourceView(_resourcePool, flight, *device);
         render::TextureView* additionalShadowSrv = AcquireAdditionalShadowArrayResourceView(_resourcePool, flight, *device);
 
-        // ── space0(per-view):从 UniversalForward 变体取 rootSig,构建灯光/阴影 descriptor set ──
+        // ── per-view:从 UniversalForward 变体取 binding layout,构建灯光/阴影参数表 ──
         const srp::ShaderVariant* fwd = _variantCache->Get(*_viewerShader, "UniversalForward", {});
-        render::RootSignature* rootSig = fwd != nullptr ? fwd->RootSig : nullptr;
-        render::DescriptorSet* lightSet = nullptr;
-        if (rootSig != nullptr) {
-            lightSet = _lightBuffer.Update(
+        render::ShaderBindingLayout* bindingLayout = fwd != nullptr ? fwd->BindingLayout : nullptr;
+        render::ShaderParameterTable* lightParameters = nullptr;
+        if (bindingLayout != nullptr) {
+            lightParameters = _lightBuffer.Update(
                 *device,
-                rootSig,
-                render::DescriptorSetIndex{0},
+                bindingLayout,
                 flight,
                 *scene,
                 _shadow,
@@ -696,8 +695,7 @@ public:
             desc.RenderState = srp::MeshPassRenderState::OpaqueBase();
             desc.RTFormats.ColorFormats = {BackBufferFormat};
             desc.RTFormats.DepthFormat = DepthFormat;
-            desc.ViewSetIndex = render::DescriptorSetIndex{0};
-            desc.ViewSetFn = [lightSet](const srp::SceneView&) { return lightSet; };
+            desc.ViewParameterTableFn = [lightParameters](const srp::SceneView&) { return lightParameters; };
             desc.PerObjectParamName = "gScene";
             desc.PerObjectByteSize = sizeof(SceneConstants);
             desc.PerObjectFn = [overlay](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView& v) {
@@ -759,8 +757,7 @@ public:
             desc.RenderState = srp::MeshPassRenderState::Transparent();
             desc.RTFormats.ColorFormats = {BackBufferFormat};
             desc.RTFormats.DepthFormat = DepthFormat;
-            desc.ViewSetIndex = render::DescriptorSetIndex{0};
-            desc.ViewSetFn = [lightSet](const srp::SceneView&) { return lightSet; };
+            desc.ViewParameterTableFn = [lightParameters](const srp::SceneView&) { return lightParameters; };
             desc.PerObjectParamName = "gScene";
             desc.PerObjectByteSize = sizeof(SceneConstants);
             desc.PerObjectFn = [](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView& v) {
@@ -791,9 +788,9 @@ public:
         DestroyExportedScene();
         _lightBuffer.Clear();
         _resourcePool.Clear();
-        _shadowPreviewSets.clear();
+        _shadowPreviewTables.clear();
         _shadowPreviewPso.reset();
-        _shadowPreviewRootSig = nullptr;
+        _shadowPreviewBindingLayout = nullptr;
         _shadowPreviewShader = nullptr;
         _shadowPreviewTexture = ImTextureID_Invalid;
         _gltfAsset.Reset();
@@ -808,8 +805,14 @@ public:
 
 private:
     bool EnsureShadowPreviewPipeline(render::Device& device, GpuSystem& gpu) {
-        if (_shadowPreviewPso != nullptr && _shadowPreviewRootSig != nullptr) {
+        if (_shadowPreviewPso != nullptr && _shadowPreviewBindingLayout != nullptr) {
             return true;
+        }
+
+        render::ShaderBindingLayoutCache* shaderBindingLayoutCache = gpu.GetShaderBindingLayoutCache();
+        if (shaderBindingLayoutCache == nullptr) {
+            RADRAY_ERR_LOG("shadow preview requires a shader binding layout cache");
+            return false;
         }
 
         ShaderCompileDescriptor shaderDesc{};
@@ -824,14 +827,16 @@ private:
         }
 
         render::Shader* shaders[] = {_shadowPreviewShader};
-        _shadowPreviewRootSig = gpu.GetOrCreateRootSignature(std::span<render::Shader*>{shaders}).Get();
-        if (_shadowPreviewRootSig == nullptr) {
-            RADRAY_ERR_LOG("failed to create shadow preview root signature");
+        render::ShaderBindingLayoutDescriptor layoutDesc{
+            .Shaders = std::span<render::Shader*>{shaders}};
+        _shadowPreviewBindingLayout = shaderBindingLayoutCache->GetOrCreate(layoutDesc).Get();
+        if (_shadowPreviewBindingLayout == nullptr) {
+            RADRAY_ERR_LOG("failed to create shadow preview binding layout");
             return false;
         }
 
         render::ComputePipelineStateDescriptor psoDesc{};
-        psoDesc.RootSig = _shadowPreviewRootSig;
+        psoDesc.BindingLayout = _shadowPreviewBindingLayout;
         psoDesc.CS = render::ShaderEntry{
             .Target = _shadowPreviewShader,
             .EntryPoint = "CSMain"};
@@ -845,33 +850,33 @@ private:
         return true;
     }
 
-    render::DescriptorSet* GetShadowPreviewDescriptorSet(
+    render::ShaderParameterTable* GetShadowPreviewParameterTable(
         render::Device& device,
         uint32_t flight,
         render::TextureView* shadowSrv,
         render::TextureView* atlasUav) {
-        if (_shadowPreviewRootSig == nullptr || shadowSrv == nullptr || atlasUav == nullptr) {
+        if (_shadowPreviewBindingLayout == nullptr || shadowSrv == nullptr || atlasUav == nullptr) {
             return nullptr;
         }
-        if (_shadowPreviewSets.size() <= flight) {
-            _shadowPreviewSets.resize(static_cast<size_t>(flight) + 1);
+        if (_shadowPreviewTables.size() <= flight) {
+            _shadowPreviewTables.resize(static_cast<size_t>(flight) + 1);
         }
 
-        unique_ptr<render::DescriptorSet>& set = _shadowPreviewSets[flight];
-        if (set == nullptr) {
-            auto setOpt = device.CreateDescriptorSet(_shadowPreviewRootSig, render::DescriptorSetIndex{0});
-            if (!setOpt.HasValue()) {
-                RADRAY_ERR_LOG("failed to create shadow preview descriptor set");
+        unique_ptr<render::ShaderParameterTable>& table = _shadowPreviewTables[flight];
+        if (table == nullptr) {
+            auto tableOpt = device.CreateShaderParameterTable(_shadowPreviewBindingLayout);
+            if (!tableOpt.HasValue()) {
+                RADRAY_ERR_LOG("failed to create shadow preview parameter table");
                 return nullptr;
             }
-            set = setOpt.Release();
-            set->SetDebugName("shadow_preview_set");
+            table = tableOpt.Release();
+            table->SetDebugName("shadow_preview_params");
         }
-        if (!set->WriteResource("gShadowMap", shadowSrv) || !set->WriteResource("gPreviewAtlas", atlasUav)) {
-            RADRAY_ERR_LOG("failed to update shadow preview descriptor set");
+        if (!table->SetResource("gShadowMap", shadowSrv) || !table->SetResource("gPreviewAtlas", atlasUav)) {
+            RADRAY_ERR_LOG("failed to update shadow preview parameter table");
             return nullptr;
         }
-        return set.get();
+        return table.get();
     }
 
     void RenderShadowPreviewAtlas(
@@ -890,8 +895,8 @@ private:
 
         render::TextureView* atlasUav = AcquireShadowPreviewAtlasUnorderedAccessView(pool, flight, device);
         render::TextureView* atlasSrv = AcquireShadowPreviewAtlasResourceView(pool, flight, device);
-        render::DescriptorSet* set = GetShadowPreviewDescriptorSet(device, flight, shadowSrv, atlasUav);
-        if (atlasUav == nullptr || atlasSrv == nullptr || set == nullptr) {
+        render::ShaderParameterTable* table = GetShadowPreviewParameterTable(device, flight, shadowSrv, atlasUav);
+        if (atlasUav == nullptr || atlasSrv == nullptr || table == nullptr) {
             return;
         }
 
@@ -902,9 +907,8 @@ private:
             return;
         }
         auto encoder = encoderOpt.Release();
-        encoder->BindRootSignature(_shadowPreviewRootSig);
         encoder->BindComputePipelineState(_shadowPreviewPso.get());
-        encoder->BindDescriptorSet(render::DescriptorSetIndex{0}, set);
+        encoder->BindShaderParameters(table);
         constexpr uint32_t groupSize = 8;
         encoder->Dispatch(
             (ShadowPreviewAtlasSize + groupSize - 1) / groupSize,
@@ -1424,9 +1428,9 @@ private:
     bool _shadowPreviewReady{false};
     ImTextureID _shadowPreviewTexture{ImTextureID_Invalid};
     render::Shader* _shadowPreviewShader{nullptr};
-    render::RootSignature* _shadowPreviewRootSig{nullptr};
+    render::ShaderBindingLayout* _shadowPreviewBindingLayout{nullptr};
     unique_ptr<render::ComputePipelineState> _shadowPreviewPso;
-    vector<unique_ptr<render::DescriptorSet>> _shadowPreviewSets;
+    vector<unique_ptr<render::ShaderParameterTable>> _shadowPreviewTables;
 
     // —— 资产 / 场景 ——
     StreamingAssetRef<GltfAsset> _gltfAsset;

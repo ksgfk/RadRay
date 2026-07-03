@@ -58,14 +58,14 @@ void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
 }
 
-BindingLayout::BindingLayout(vector<BindingParameterLayout> parameters) noexcept
+ShaderBindingLayout::ShaderBindingLayout(vector<ShaderParameterInfo> parameters) noexcept
     : _parameters(std::move(parameters)) {}
 
-std::span<const BindingParameterLayout> BindingLayout::GetParameters() const noexcept {
+std::span<const ShaderParameterInfo> ShaderBindingLayout::GetParameters() const noexcept {
     return _parameters;
 }
 
-std::optional<BindingParameterId> BindingLayout::FindParameterId(std::string_view name) const noexcept {
+std::optional<ShaderParameterId> ShaderBindingLayout::FindParameterId(std::string_view name) const noexcept {
     for (const auto& parameter : _parameters) {
         if (parameter.Name == name) {
             return parameter.Id;
@@ -74,7 +74,7 @@ std::optional<BindingParameterId> BindingLayout::FindParameterId(std::string_vie
     return std::nullopt;
 }
 
-Nullable<const BindingParameterLayout*> BindingLayout::FindParameter(BindingParameterId id) const noexcept {
+Nullable<const ShaderParameterInfo*> ShaderBindingLayout::FindParameter(ShaderParameterId id) const noexcept {
     for (const auto& parameter : _parameters) {
         if (parameter.Id == id) {
             return &parameter;
@@ -83,108 +83,56 @@ Nullable<const BindingParameterLayout*> BindingLayout::FindParameter(BindingPara
     return nullptr;
 }
 
-bool RootSignature::HasBindlessSet(DescriptorSetIndex set) const noexcept {
-    return FindBindlessSet(set).HasValue();
+void ShaderBindingLayout::SetParameters(vector<ShaderParameterInfo> parameters) noexcept {
+    _parameters = std::move(parameters);
 }
 
-Nullable<const BindlessSetLayout*> RootSignature::FindBindlessSet(DescriptorSetIndex set) const noexcept {
-    for (const auto& bindlessSet : GetBindlessSetLayouts()) {
-        if (bindlessSet.Set == set) {
-            return &bindlessSet;
-        }
-    }
-    return nullptr;
-}
-
-Nullable<const StaticSamplerLayout*> RootSignature::FindStaticSampler(BindingParameterId id) const noexcept {
-    for (const auto& staticSampler : GetStaticSamplerLayouts()) {
-        if (staticSampler.Id == id) {
-            return &staticSampler;
-        }
-    }
-    return nullptr;
-}
-
-Nullable<const StaticSamplerLayout*> RootSignature::FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept {
-    for (const auto& staticSampler : GetStaticSamplerLayouts()) {
-        if (staticSampler.Set == set && staticSampler.Binding == binding) {
-            return &staticSampler;
-        }
-    }
-    return nullptr;
-}
-
-std::optional<BindingParameterId> RootSignature::FindParameterId(std::string_view name) const noexcept {
-    return GetBindingLayout().FindParameterId(name);
-}
-
-Nullable<const BindingParameterLayout*> RootSignature::FindParameter(BindingParameterId id) const noexcept {
-    return GetBindingLayout().FindParameter(id);
-}
-
-Nullable<const PushConstantRange*> RootSignature::FindPushConstantRange(BindingParameterId id) const noexcept {
-    for (const auto& range : GetPushConstantRanges()) {
-        if (range.Id == id) {
-            return &range;
-        }
-    }
-    return nullptr;
-}
-
-std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreview(
-    RenderBackend backend,
-    const RootSignatureDescriptor& desc) noexcept {
-    switch (backend) {
-        case RenderBackend::D3D12:
-#ifdef RADRAY_ENABLE_D3D12
-            return d3d12::BuildRootSignatureLayoutPreviewD3D12(desc);
-#else
-            RADRAY_ERR_LOG("D3D12 disable");
-            return std::nullopt;
-#endif
-        case RenderBackend::Vulkan:
-#ifdef RADRAY_ENABLE_VULKAN
-            return vulkan::BuildRootSignatureLayoutPreviewVulkan(desc);
-#else
-            RADRAY_ERR_LOG("Vulkan disable");
-            return std::nullopt;
-#endif
-        case RenderBackend::Metal:
-            RADRAY_ERR_LOG("Metal root signature layout preview is not implemented");
-            return std::nullopt;
-        case RenderBackend::MAX_COUNT:
-            break;
-    }
-    RADRAY_ERR_LOG("unknown render backend {}", static_cast<uint32_t>(backend));
-    return std::nullopt;
-}
-
-bool DescriptorSet::WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
+bool ShaderParameterTable::SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
     auto idOpt = ResolveParameterId(name);
     if (!idOpt.has_value()) {
         return false;
     }
-    return this->WriteResource(idOpt.value(), view, arrayIndex);
+    return this->SetResource(idOpt.value(), view, arrayIndex);
 }
 
-bool DescriptorSet::WriteResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
+bool ShaderParameterTable::SetResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
     auto idOpt = ResolveParameterId(name);
     if (!idOpt.has_value()) {
         return false;
     }
-    return this->WriteResource(idOpt.value(), desc, arrayIndex);
+    return this->SetResource(idOpt.value(), desc, arrayIndex);
 }
 
-bool DescriptorSet::WriteSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex) noexcept {
+bool ShaderParameterTable::SetSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex) noexcept {
     auto idOpt = ResolveParameterId(name);
     if (!idOpt.has_value()) {
         return false;
     }
-    return this->WriteSampler(idOpt.value(), sampler, arrayIndex);
+    return this->SetSampler(idOpt.value(), sampler, arrayIndex);
 }
 
-std::optional<BindingParameterId> DescriptorSet::ResolveParameterId(std::string_view name) const noexcept {
-    return this->GetRootSignature()->FindParameterId(name);
+bool ShaderParameterTable::SetBytes(std::string_view name, const void* data, uint32_t size) noexcept {
+    auto idOpt = ResolveParameterId(name);
+    if (!idOpt.has_value()) {
+        return false;
+    }
+    return this->SetBytes(idOpt.value(), data, size);
+}
+
+bool ShaderParameterTable::SetBindlessArray(std::string_view name, BindlessArray* array) noexcept {
+    auto idOpt = ResolveParameterId(name);
+    if (!idOpt.has_value()) {
+        return false;
+    }
+    return this->SetBindlessArray(idOpt.value(), array);
+}
+
+std::optional<ShaderParameterId> ShaderParameterTable::ResolveParameterId(std::string_view name) const noexcept {
+    ShaderBindingLayout* layout = this->GetShaderBindingLayout();
+    if (layout == nullptr) {
+        return std::nullopt;
+    }
+    return layout->FindParameterId(name);
 }
 
 Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
@@ -664,7 +612,8 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::RayTracingCmdEncoder: return "RayTracingCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
-        case RenderObjectTag::RootSignature: return "RootSignature";
+        case RenderObjectTag::ShaderBindingLayout: return "ShaderBindingLayout";
+        case RenderObjectTag::ShaderParameterTable: return "ShaderParameterTable";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
         case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
@@ -678,7 +627,6 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::TextureView: return "TextureView";
         case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";
-        case RenderObjectTag::DescriptorSet: return "DescriptorSet";
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
         case RenderObjectTag::DXGIFactory: return "DXGIFactory";

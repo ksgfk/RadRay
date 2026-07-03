@@ -211,17 +211,16 @@ SceneLightBuffer::~SceneLightBuffer() noexcept {
     Clear();
 }
 
-render::DescriptorSet* SceneLightBuffer::Update(
+render::ShaderParameterTable* SceneLightBuffer::Update(
     render::Device& device,
-    render::RootSignature* rootSig,
-    render::DescriptorSetIndex viewSet,
+    render::ShaderBindingLayout* bindingLayout,
     uint32_t flightIndex,
     const srp::Scene& scene,
     const ShadowCascadeData& shadow,
     render::TextureView* shadowArraySrv,
     const AdditionalShadowData& additionalShadow,
     render::TextureView* additionalShadowArraySrv) {
-    if (rootSig == nullptr) {
+    if (bindingLayout == nullptr) {
         return nullptr;
     }
     if (flightIndex >= _flights.size()) {
@@ -306,7 +305,7 @@ render::DescriptorSet* SceneLightBuffer::Update(
     }
 
     FlightResources& resources = _flights[flightIndex];
-    if (!EnsureFlightResources(device, rootSig, viewSet, resources, flightIndex)) {
+    if (!EnsureFlightResources(device, bindingLayout, resources, flightIndex)) {
         return nullptr;
     }
 
@@ -364,16 +363,16 @@ render::DescriptorSet* SceneLightBuffer::Update(
         return nullptr;
     }
 
-    if (!WriteDescriptorSetResources(resources, shadowArraySrv, additionalShadowArraySrv)) {
+    if (!WriteParameterTableResources(resources, shadowArraySrv, additionalShadowArraySrv)) {
         return nullptr;
     }
 
-    return resources.DescriptorSet.get();
+    return resources.ParameterTable.get();
 }
 
 void SceneLightBuffer::Clear() noexcept {
     for (FlightResources& resources : _flights) {
-        resources.DescriptorSet.reset();
+        resources.ParameterTable.reset();
         resources.ShadowCmpSampler.reset();
         resources.AdditionalShadowBuffer.reset();
         resources.ShadowBuffer.reset();
@@ -381,20 +380,17 @@ void SceneLightBuffer::Clear() noexcept {
         resources.SpotBuffer.reset();
         resources.PointBuffer.reset();
         resources.DirectionalBuffer.reset();
-        resources.RootSig = nullptr;
-        resources.ViewSet = render::DescriptorSetIndex{0};
+        resources.BindingLayout = nullptr;
     }
 }
 
 bool SceneLightBuffer::EnsureFlightResources(
     render::Device& device,
-    render::RootSignature* rootSig,
-    render::DescriptorSetIndex viewSet,
+    render::ShaderBindingLayout* bindingLayout,
     FlightResources& resources,
     uint32_t flightIndex) {
-    if (resources.DescriptorSet != nullptr &&
-        resources.RootSig == rootSig &&
-        resources.ViewSet == viewSet &&
+    if (resources.ParameterTable != nullptr &&
+        resources.BindingLayout == bindingLayout &&
         resources.DirectionalBuffer != nullptr &&
         resources.PointBuffer != nullptr &&
         resources.SpotBuffer != nullptr &&
@@ -405,7 +401,7 @@ bool SceneLightBuffer::EnsureFlightResources(
         return true;
     }
 
-    resources.DescriptorSet.reset();
+    resources.ParameterTable.reset();
     resources.ShadowCmpSampler.reset();
     resources.AdditionalShadowBuffer.reset();
     resources.ShadowBuffer.reset();
@@ -413,8 +409,7 @@ bool SceneLightBuffer::EnsureFlightResources(
     resources.SpotBuffer.reset();
     resources.PointBuffer.reset();
     resources.DirectionalBuffer.reset();
-    resources.RootSig = rootSig;
-    resources.ViewSet = viewSet;
+    resources.BindingLayout = bindingLayout;
 
     auto createBuffer = [&device](uint64_t size, render::BufferUses usage, std::string_view name) -> unique_ptr<render::Buffer> {
         render::BufferDescriptor desc{
@@ -494,13 +489,13 @@ bool SceneLightBuffer::EnsureFlightResources(
     resources.ShadowCmpSampler = shadowSamplerOpt.Release();
     resources.ShadowCmpSampler->SetDebugName(fmt::format("scene_light_shadow_cmp_f{}", flightIndex));
 
-    auto setOpt = device.CreateDescriptorSet(rootSig, viewSet);
-    if (!setOpt.HasValue()) {
-        RADRAY_ERR_LOG("SceneLightBuffer: CreateDescriptorSet(set={}) failed", viewSet.Value);
+    auto tableOpt = device.CreateShaderParameterTable(bindingLayout);
+    if (!tableOpt.HasValue()) {
+        RADRAY_ERR_LOG("SceneLightBuffer: CreateShaderParameterTable failed");
         return false;
     }
-    resources.DescriptorSet = setOpt.Release();
-    resources.DescriptorSet->SetDebugName(fmt::format("scene_light_set_f{}", flightIndex));
+    resources.ParameterTable = tableOpt.Release();
+    resources.ParameterTable->SetDebugName(fmt::format("scene_light_params_f{}", flightIndex));
 
     return true;
 }
@@ -516,7 +511,7 @@ bool SceneLightBuffer::WriteBuffer(render::Buffer& buffer, const void* data, uin
     return true;
 }
 
-bool SceneLightBuffer::WriteDescriptorSetResources(
+bool SceneLightBuffer::WriteParameterTableResources(
     SceneLightBuffer::FlightResources& resources,
     render::TextureView* shadowArraySrv,
     render::TextureView* additionalShadowArraySrv) {
@@ -525,8 +520,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     directionalView.Range = render::BufferRange{0, DirectionalBufferSize};
     directionalView.Stride = sizeof(DirectionalLightGpu);
     directionalView.Usage = render::BufferViewUsage::ReadOnlyStorage;
-    if (!resources.DescriptorSet->WriteResource("gDirectionalLights", directionalView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gDirectionalLights failed");
+    if (!resources.ParameterTable->SetResource("gDirectionalLights", directionalView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gDirectionalLights failed");
         return false;
     }
 
@@ -535,8 +530,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     pointView.Range = render::BufferRange{0, PointBufferSize};
     pointView.Stride = sizeof(PointLightGpu);
     pointView.Usage = render::BufferViewUsage::ReadOnlyStorage;
-    if (!resources.DescriptorSet->WriteResource("gPointLights", pointView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gPointLights failed");
+    if (!resources.ParameterTable->SetResource("gPointLights", pointView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gPointLights failed");
         return false;
     }
 
@@ -545,8 +540,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     spotView.Range = render::BufferRange{0, SpotBufferSize};
     spotView.Stride = sizeof(SpotLightGpu);
     spotView.Usage = render::BufferViewUsage::ReadOnlyStorage;
-    if (!resources.DescriptorSet->WriteResource("gSpotLights", spotView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gSpotLights failed");
+    if (!resources.ParameterTable->SetResource("gSpotLights", spotView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gSpotLights failed");
         return false;
     }
 
@@ -554,8 +549,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     infoView.Target = resources.InfoBuffer.get();
     infoView.Range = render::BufferRange{0, sizeof(LightInfoGpu)};
     infoView.Usage = render::BufferViewUsage::CBuffer;
-    if (!resources.DescriptorSet->WriteResource("gLightInfo", infoView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gLightInfo failed");
+    if (!resources.ParameterTable->SetResource("gLightInfo", infoView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gLightInfo failed");
         return false;
     }
 
@@ -563,8 +558,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     shadowView.Target = resources.ShadowBuffer.get();
     shadowView.Range = render::BufferRange{0, sizeof(ShadowParamGpu)};
     shadowView.Usage = render::BufferViewUsage::CBuffer;
-    if (!resources.DescriptorSet->WriteResource("gShadowParam", shadowView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gShadowParam failed");
+    if (!resources.ParameterTable->SetResource("gShadowParam", shadowView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gShadowParam failed");
         return false;
     }
 
@@ -572,8 +567,8 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
     additionalShadowView.Target = resources.AdditionalShadowBuffer.get();
     additionalShadowView.Range = render::BufferRange{0, sizeof(AdditionalShadowParamGpu)};
     additionalShadowView.Usage = render::BufferViewUsage::CBuffer;
-    if (!resources.DescriptorSet->WriteResource("gAdditionalShadowParam", additionalShadowView)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gAdditionalShadowParam failed");
+    if (!resources.ParameterTable->SetResource("gAdditionalShadowParam", additionalShadowView)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gAdditionalShadowParam failed");
         return false;
     }
 
@@ -581,20 +576,20 @@ bool SceneLightBuffer::WriteDescriptorSetResources(
         RADRAY_ERR_LOG("SceneLightBuffer: shadow map array SRV is null");
         return false;
     }
-    if (!resources.DescriptorSet->WriteResource("gShadowMap", shadowArraySrv)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gShadowMap failed");
+    if (!resources.ParameterTable->SetResource("gShadowMap", shadowArraySrv)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gShadowMap failed");
         return false;
     }
     if (additionalShadowArraySrv == nullptr) {
         RADRAY_ERR_LOG("SceneLightBuffer: additional shadow map array SRV is null");
         return false;
     }
-    if (!resources.DescriptorSet->WriteResource("gAdditionalShadowMap", additionalShadowArraySrv)) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteResource gAdditionalShadowMap failed");
+    if (!resources.ParameterTable->SetResource("gAdditionalShadowMap", additionalShadowArraySrv)) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetResource gAdditionalShadowMap failed");
         return false;
     }
-    if (!resources.DescriptorSet->WriteSampler("gShadowSampler", resources.ShadowCmpSampler.get())) {
-        RADRAY_ERR_LOG("SceneLightBuffer: WriteSampler gShadowSampler failed");
+    if (!resources.ParameterTable->SetSampler("gShadowSampler", resources.ShadowCmpSampler.get())) {
+        RADRAY_ERR_LOG("SceneLightBuffer: SetSampler gShadowSampler failed");
         return false;
     }
 

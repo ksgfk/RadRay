@@ -27,7 +27,7 @@
 
 ```
 ShaderVariantCache : key = (ShaderId, LightModeId, KeywordSet)        → render::Shader*   (编译后的 VS/PS)
-RootSignatureCache : key = 合并反射出的 binding layout                 → render::RootSignature*
+ShaderBindingLayoutCache : key = 合并反射出的 binding layout                 → render::ShaderBindingLayout*
 PipelineStateCache : key = (variant, VertexLayout, RenderState, RTFormats) → render::GraphicsPipelineState*
 ```
 
@@ -121,7 +121,7 @@ void DrawRenderers(const CullingResults& vis,
         KeywordSet kw = pass.PassKeywords() | mat->MaterialKeywords();
         render::Shader* var = g_shaderVariantCache.Get(sh->Id(), draw.lightMode, kw);
         if (!var) continue;                                         // 第二层:交点不存在
-        render::RootSignature* rs = g_rsCache.Get(var);
+        render::ShaderBindingLayout* rs = g_rsCache.Get(var);
         render::GraphicsPipelineState* pso = g_psoCache.Get(
             var, r->GetVertexLayout(), pass.RenderState(*mat), pass.RTFormats());
         MeshDrawCommand cmd;
@@ -139,6 +139,8 @@ void DrawRenderers(const CullingResults& vis,
 ```
 
 `RenderPass` 退回它**不可剥夺的核心**:决定 LightMode、filter、render state、RT、space0、per-object 布局。它**完全不认识** MVP/相机/具体 shader,那些要么是 space0 里它自己建的,要么是变体缓存兜的。
+
+> 关键设计结论:pass 与 shader pass 之间必须定义 ABI。只要 shader 声明了 pass 要求的 `LightMode`,并遵守该 `LightMode` 对应的 descriptor/cbuffer/keyword/vertex input/output layout 约定,它就能被这个 pass 画;pass 不需要知道它是 Lit、Toon 还是其他材质模型。反过来,如果 shader 只挂了同名 `LightMode` 但不实现对应 ABI,那就是 shader 自己声明错误,结果应当是编译失败、校验失败或运行期跳过/error material,而不是让 pass 解析 material 内部细节。
 
 ---
 
@@ -196,7 +198,7 @@ public:
     bool       IsTwoSided() const;
     float      AlphaCutoff() const;
     // per-material descriptor set:用值填 space1,懒建 + 缓存(布局来自 Shader 反射)
-    render::DescriptorSet* GetDescriptorSet(render::RootSignature* rs) const;
+    render::DescriptorSet* GetDescriptorSet(render::ShaderBindingLayout* rs) const;
 };
 
 // ---- Shader:多 LightMode 代码容器 + keyword 轴(等价 .shader / ShaderGraph 产物)----
@@ -211,7 +213,7 @@ public:
 
 // ---- 三级缓存:不拥有内容,只去重 ----
 struct ShaderVariantCache { render::Shader* Get(ShaderId, LightModeId, const KeywordSet&); };
-struct RootSignatureCache { render::RootSignature* Get(render::Shader* variant); };
+struct ShaderBindingLayoutCache { render::ShaderBindingLayout* Get(render::Shader* variant); };
 struct PipelineStateCache  { render::GraphicsPipelineState* Get(render::Shader*, const render::VertexBufferLayout&, const MeshPassRenderState&, const RtFormatSet&); };
 ```
 
@@ -235,7 +237,7 @@ struct PipelineStateCache  { render::GraphicsPipelineState* Get(render::Shader*,
 
 本架构的三级缓存产物全部是现成的 `radray::render` 对象,底层一行不用动:
 - `ShaderVariantCache` → `render::Shader*`(已存在 `class Shader`,见 `render/common.h:565`)。
-- `RootSignatureCache` → `render::RootSignature*`(`common.h:567`),key 按合并程序反射,天然含 space0(pass)+ space1(material)+ push(pass)。
+- `ShaderBindingLayoutCache` → `render::ShaderBindingLayout*`(`common.h:567`),key 按合并程序反射,天然含 space0(pass)+ space1(material)+ push(pass)。
 - `PipelineStateCache` → `render::GraphicsPipelineState*`(`common.h:569`)。
 - 录制走 `render::CommandEncoder / GraphicsCommandEncoder`(`common.h:551-552`),descriptor set 用 `render::DescriptorSet`(`common.h:566`)。
 

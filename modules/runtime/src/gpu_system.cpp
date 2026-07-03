@@ -412,6 +412,7 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
+    _shaderBindingLayoutCache = _device->CreateShaderBindingLayoutCache().Unwrap();
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
     }

@@ -13,7 +13,7 @@ namespace radray::render::d3d12 {
 namespace {
 
 struct ParameterRecord {
-    BindingParameterLayout Layout{};
+    ShaderParameterInfo Parameter{};
     D3D12BindingParameterInfo D3D12{};
 };
 
@@ -78,7 +78,7 @@ std::optional<BindlessSlotType> _MapBindlessSlotType(
     }
 }
 
-std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
+std::optional<std::pair<uint32_t, uint32_t>> _ResolveUnifiedBinding(
     const HlslInputBindDesc& binding) noexcept {
     const bool hasVkAbi = binding.VkSet.has_value() || binding.VkBinding.has_value();
     if (hasVkAbi && (!binding.VkSet.has_value() || !binding.VkBinding.has_value())) {
@@ -101,7 +101,7 @@ std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
             binding.BindPoint);
         return std::nullopt;
     }
-    return std::pair{DescriptorSetIndex{binding.VkSet.value_or(binding.Space)}, binding.VkBinding.value_or(binding.BindPoint)};
+    return std::pair{binding.VkSet.value_or(binding.Space), binding.VkBinding.value_or(binding.BindPoint)};
 }
 
 bool _IsHlslPushConstantCandidate(const HlslInputBindDesc& binding, const HlslShaderBufferDesc& cbuffer) noexcept {
@@ -111,89 +111,82 @@ bool _IsHlslPushConstantCandidate(const HlslInputBindDesc& binding, const HlslSh
            cbuffer.IsViewInHlsl;
 }
 
-bool _HasSameAbi(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind != rhs.Kind) {
+bool _HasSameAbi(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind != rhs.Parameter.Kind) {
         return false;
     }
-    if (lhs.Kind == BindingParameterKind::PushConstant) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
-        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    if (lhs.Parameter.Kind == ShaderParameterKind::Constant) {
+        return lhs.D3D12.PushConstantOffset == rhs.D3D12.PushConstantOffset &&
+               lhs.D3D12.PushConstantSize == rhs.D3D12.PushConstantSize;
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.Set == rhsAbi.Set &&
-           lhsAbi.Binding == rhsAbi.Binding &&
-           lhsAbi.Type == rhsAbi.Type;
+    return lhs.D3D12.RegisterSpace == rhs.D3D12.RegisterSpace &&
+           lhs.D3D12.BindingIndex == rhs.D3D12.BindingIndex &&
+           lhs.D3D12.Type == rhs.D3D12.Type;
 }
 
-bool _HasCompatiblePayload(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind != rhs.Kind) {
+bool _HasCompatiblePayload(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind != rhs.Parameter.Kind) {
         return false;
     }
-    if (lhs.Kind == BindingParameterKind::PushConstant) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
-        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    if (lhs.Parameter.Kind == ShaderParameterKind::Constant) {
+        return lhs.D3D12.PushConstantOffset == rhs.D3D12.PushConstantOffset &&
+               lhs.D3D12.PushConstantSize == rhs.D3D12.PushConstantSize;
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.Set == rhsAbi.Set &&
-           lhsAbi.Binding == rhsAbi.Binding &&
-           lhsAbi.Type == rhsAbi.Type &&
-           lhsAbi.Count == rhsAbi.Count &&
-           lhsAbi.IsReadOnly == rhsAbi.IsReadOnly &&
-           lhsAbi.IsBindless == rhsAbi.IsBindless;
+    return lhs.D3D12.RegisterSpace == rhs.D3D12.RegisterSpace &&
+           lhs.D3D12.BindingIndex == rhs.D3D12.BindingIndex &&
+           lhs.D3D12.Type == rhs.D3D12.Type &&
+           lhs.D3D12.Count == rhs.D3D12.Count &&
+           lhs.D3D12.IsReadOnly == rhs.D3D12.IsReadOnly &&
+           lhs.D3D12.IsBindless == rhs.D3D12.IsBindless;
 }
 
-bool _PushConstantsOverlap(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind != BindingParameterKind::PushConstant || rhs.Kind != BindingParameterKind::PushConstant) {
+bool _PushConstantsOverlap(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind != ShaderParameterKind::Constant || rhs.Parameter.Kind != ShaderParameterKind::Constant) {
         return false;
     }
-    const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
-    const uint32_t lhsEnd = lhsAbi.Offset + lhsAbi.Size;
-    const uint32_t rhsEnd = rhsAbi.Offset + rhsAbi.Size;
-    return lhsAbi.Offset < rhsEnd && rhsAbi.Offset < lhsEnd;
+    const uint32_t lhsEnd = lhs.D3D12.PushConstantOffset + lhs.D3D12.PushConstantSize;
+    const uint32_t rhsEnd = rhs.D3D12.PushConstantOffset + rhs.D3D12.PushConstantSize;
+    return lhs.D3D12.PushConstantOffset < rhsEnd && rhs.D3D12.PushConstantOffset < lhsEnd;
 }
 
 bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) noexcept {
     for (auto& record : records) {
-        if (_HasSameAbi(record.Layout, incoming.Layout)) {
-            if (record.Layout.Name != incoming.Layout.Name) {
+        if (_HasSameAbi(record, incoming)) {
+            if (record.Parameter.Name != incoming.Parameter.Name) {
                 RADRAY_ERR_LOG(
                     "binding abi conflict: parameter '{}' shares abi with '{}'",
-                    incoming.Layout.Name,
-                    record.Layout.Name);
+                    incoming.Parameter.Name,
+                    record.Parameter.Name);
                 return false;
             }
-            if (!_HasCompatiblePayload(record.Layout, incoming.Layout)) {
-                RADRAY_ERR_LOG("binding payload conflict for parameter '{}'", incoming.Layout.Name);
+            if (!_HasCompatiblePayload(record, incoming)) {
+                RADRAY_ERR_LOG("binding payload conflict for parameter '{}'", incoming.Parameter.Name);
                 return false;
             }
-            if (record.Layout.Kind == BindingParameterKind::PushConstant &&
+            if (record.Parameter.Kind == ShaderParameterKind::Constant &&
                 record.D3D12.IsAvailable &&
                 incoming.D3D12.IsAvailable &&
                 (record.D3D12.ShaderRegister != incoming.D3D12.ShaderRegister ||
                  record.D3D12.RegisterSpace != incoming.D3D12.RegisterSpace)) {
-                RADRAY_ERR_LOG("d3d12 push constant register conflict for '{}'", incoming.Layout.Name);
+                RADRAY_ERR_LOG("d3d12 push constant register conflict for '{}'", incoming.Parameter.Name);
                 return false;
             }
-            record.Layout.Stages |= incoming.Layout.Stages;
+            record.Parameter.Stages |= incoming.Parameter.Stages;
+            record.D3D12.Stages |= incoming.D3D12.Stages;
             if (!record.D3D12.IsAvailable && incoming.D3D12.IsAvailable) {
                 record.D3D12 = incoming.D3D12;
             }
             return true;
         }
-        if (record.Layout.Name == incoming.Layout.Name) {
-            RADRAY_ERR_LOG("binding name conflict: '{}' maps to different abi", incoming.Layout.Name);
+        if (record.Parameter.Name == incoming.Parameter.Name) {
+            RADRAY_ERR_LOG("binding name conflict: '{}' maps to different abi", incoming.Parameter.Name);
             return false;
         }
-        if (_PushConstantsOverlap(record.Layout, incoming.Layout)) {
+        if (_PushConstantsOverlap(record, incoming)) {
             RADRAY_ERR_LOG(
                 "push constant ranges overlap but are not identical: '{}' and '{}'",
-                record.Layout.Name,
-                incoming.Layout.Name);
+                record.Parameter.Name,
+                incoming.Parameter.Name);
             return false;
         }
     }
@@ -216,19 +209,26 @@ bool _AppendHlslBindings(
         if (!unifiedAbiOpt.has_value()) {
             return false;
         }
-        const auto [setIndex, bindingIndex] = unifiedAbiOpt.value();
+        const auto [registerSpace, bindingIndex] = unifiedAbiOpt.value();
         const bool isBindless = resource.IsUnboundArray();
 
         ParameterRecord record{};
-        record.Layout.Name = resource.Name;
-        record.Layout.Stages = stages;
+        record.Parameter.Name = resource.Name;
+        record.Parameter.Stages = stages;
+        record.Parameter.Type = bindTypeOpt.value();
+        record.Parameter.Count = resource.BindCount == 0 ? 1u : resource.BindCount;
+        record.Parameter.IsReadOnly = !_IsRwResourceType(bindTypeOpt.value());
+        record.Parameter.IsBindless = isBindless;
+        record.D3D12.Name = resource.Name;
         record.D3D12.IsAvailable = true;
-        record.D3D12.SetIndex = setIndex;
         record.D3D12.BindingIndex = bindingIndex;
         record.D3D12.ShaderRegister = resource.BindPoint;
-        record.D3D12.RegisterSpace = resource.Space;
+        record.D3D12.RegisterSpace = registerSpace;
         record.D3D12.Type = bindTypeOpt.value();
+        record.D3D12.Count = record.Parameter.Count;
+        record.D3D12.IsReadOnly = record.Parameter.IsReadOnly;
         record.D3D12.IsBindless = isBindless;
+        record.D3D12.Stages = stages;
 
         if (resource.Type == HlslShaderInputType::CBUFFER) {
             auto cbufferOpt = reflection.FindCBufferByName(resource.Name);
@@ -238,12 +238,15 @@ bool _AppendHlslBindings(
             }
             const auto* cbuffer = cbufferOpt.Get();
             if (_IsHlslPushConstantCandidate(resource, *cbuffer)) {
-                record.Layout.Kind = BindingParameterKind::PushConstant;
-                record.Layout.Abi = PushConstantBindingAbi{
-                    .Offset = 0,
-                    .Size = cbuffer->Size,
-                };
-                record.D3D12.Kind = BindingParameterKind::PushConstant;
+                record.Parameter.Kind = ShaderParameterKind::Constant;
+                record.Parameter.Type = ResourceBindType::UNKNOWN;
+                record.Parameter.Count = 1;
+                record.Parameter.ByteSize = cbuffer->Size;
+                record.Parameter.IsReadOnly = true;
+                record.Parameter.IsBindless = false;
+                record.D3D12.Kind = ShaderParameterKind::Constant;
+                record.D3D12.Count = 0;
+                record.D3D12.IsBindless = false;
                 record.D3D12.PushConstantOffset = 0;
                 record.D3D12.PushConstantSize = cbuffer->Size;
                 if (!_MergeRecord(records, std::move(record))) {
@@ -263,18 +266,10 @@ bool _AppendHlslBindings(
                     static_cast<uint32_t>(resource.Dimension));
                 return false;
             }
-            record.Layout.Kind = BindingParameterKind::Resource;
-            record.Layout.Abi = ResourceBindingAbi{
-                .Set = setIndex,
-                .Binding = bindingIndex,
-                .Type = bindTypeOpt.value(),
-                .Count = 0,
-                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
-                .IsBindless = true,
-            };
-            record.D3D12.Kind = BindingParameterKind::Resource;
+            record.Parameter.Kind = ShaderParameterKind::BindlessArray;
+            record.Parameter.Count = 0;
+            record.D3D12.Kind = ShaderParameterKind::BindlessArray;
             record.D3D12.Count = 0;
-            record.D3D12.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
             record.D3D12.BindlessSlotType = bindlessSlotTypeOpt.value();
             if (!_MergeRecord(records, std::move(record))) {
                 return false;
@@ -282,20 +277,10 @@ bool _AppendHlslBindings(
             continue;
         }
 
-        record.Layout.Kind = bindTypeOpt.value() == ResourceBindType::Sampler
-                                 ? BindingParameterKind::Sampler
-                                 : BindingParameterKind::Resource;
-        record.Layout.Abi = ResourceBindingAbi{
-            .Set = setIndex,
-            .Binding = bindingIndex,
-            .Type = bindTypeOpt.value(),
-            .Count = resource.BindCount == 0 ? 1u : resource.BindCount,
-            .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
-            .IsBindless = false,
-        };
-        record.D3D12.Kind = record.Layout.Kind;
-        record.D3D12.Count = std::get<ResourceBindingAbi>(record.Layout.Abi).Count;
-        record.D3D12.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
+        record.Parameter.Kind = bindTypeOpt.value() == ResourceBindType::Sampler
+                                    ? ShaderParameterKind::Sampler
+                                    : ShaderParameterKind::Resource;
+        record.D3D12.Kind = record.Parameter.Kind;
         if (!_MergeRecord(records, std::move(record))) {
             return false;
         }
@@ -303,40 +288,39 @@ bool _AppendHlslBindings(
     return true;
 }
 
-bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
-    unordered_map<uint32_t, const ParameterRecord*> bindlessBySet{};
-    unordered_map<uint32_t, uint32_t> descriptorCountBySet{};
+bool _ValidateBindlessSpaces(const vector<ParameterRecord>& records) noexcept {
+    unordered_map<uint32_t, const ParameterRecord*> bindlessBySpace{};
+    unordered_map<uint32_t, uint32_t> descriptorCountBySpace{};
     for (const auto& record : records) {
-        if (record.Layout.Kind == BindingParameterKind::PushConstant) {
+        if (record.Parameter.Kind == ShaderParameterKind::Constant) {
             continue;
         }
-        const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
-        const uint32_t setIndex = abi.Set.Value;
-        descriptorCountBySet[setIndex] += 1;
-        if (!abi.IsBindless) {
+        const uint32_t registerSpace = record.D3D12.RegisterSpace;
+        descriptorCountBySpace[registerSpace] += 1;
+        if (!record.Parameter.IsBindless) {
             continue;
         }
-        if (record.Layout.Kind != BindingParameterKind::Resource) {
-            RADRAY_ERR_LOG("bindless parameter '{}' must be a resource", record.Layout.Name);
+        if (record.Parameter.Kind != ShaderParameterKind::BindlessArray) {
+            RADRAY_ERR_LOG("bindless parameter '{}' must be a bindless array", record.Parameter.Name);
             return false;
         }
-        auto [it, inserted] = bindlessBySet.emplace(setIndex, &record);
+        auto [it, inserted] = bindlessBySpace.emplace(registerSpace, &record);
         if (!inserted) {
             RADRAY_ERR_LOG(
-                "bindless set {} cannot contain more than one bindless parameter ('{}' and '{}')",
-                setIndex,
-                it->second->Layout.Name,
-                record.Layout.Name);
+                "bindless register space {} cannot contain more than one bindless parameter ('{}' and '{}')",
+                registerSpace,
+                it->second->Parameter.Name,
+                record.Parameter.Name);
             return false;
         }
     }
-    for (const auto& [setIndex, bindlessRecord] : bindlessBySet) {
+    for (const auto& [registerSpace, bindlessRecord] : bindlessBySpace) {
         RADRAY_UNUSED(bindlessRecord);
-        auto countIt = descriptorCountBySet.find(setIndex);
-        if (countIt != descriptorCountBySet.end() && countIt->second != 1) {
+        auto countIt = descriptorCountBySpace.find(registerSpace);
+        if (countIt != descriptorCountBySpace.end() && countIt->second != 1) {
             RADRAY_ERR_LOG(
-                "bindless set {} cannot contain ordinary descriptors together with bindless resources",
-                setIndex);
+                "bindless register space {} cannot contain ordinary descriptors together with bindless resources",
+                registerSpace);
             return false;
         }
     }
@@ -344,21 +328,17 @@ bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
 }
 
 bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
-    const bool lhsPush = lhs.Layout.Kind == BindingParameterKind::PushConstant;
-    const bool rhsPush = rhs.Layout.Kind == BindingParameterKind::PushConstant;
-    if (lhsPush != rhsPush) {
-        return !lhsPush;
+    const bool lhsConstant = lhs.Parameter.Kind == ShaderParameterKind::Constant;
+    const bool rhsConstant = rhs.Parameter.Kind == ShaderParameterKind::Constant;
+    if (lhsConstant != rhsConstant) {
+        return !lhsConstant;
     }
-    if (lhsPush) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Layout.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Layout.Abi);
-        return std::tie(lhsAbi.Offset, lhsAbi.Size, lhs.Layout.Name) <
-               std::tie(rhsAbi.Offset, rhsAbi.Size, rhs.Layout.Name);
+    if (lhsConstant) {
+        return std::tie(lhs.D3D12.PushConstantOffset, lhs.D3D12.PushConstantSize, lhs.Parameter.Name) <
+               std::tie(rhs.D3D12.PushConstantOffset, rhs.D3D12.PushConstantSize, rhs.Parameter.Name);
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
-    return std::tie(lhsAbi.Set, lhsAbi.Binding, lhs.Layout.Kind, lhs.Layout.Name) <
-           std::tie(rhsAbi.Set, rhsAbi.Binding, rhs.Layout.Kind, rhs.Layout.Name);
+    return std::tie(lhs.D3D12.RegisterSpace, lhs.D3D12.BindingIndex, lhs.Parameter.Kind, lhs.Parameter.Name) <
+           std::tie(rhs.D3D12.RegisterSpace, rhs.D3D12.BindingIndex, rhs.Parameter.Kind, rhs.Parameter.Name);
 }
 
 }  // namespace
@@ -393,30 +373,27 @@ std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<
         }
     }
 
-    if (!_ValidateBindlessSets(records)) {
+    if (!_ValidateBindlessSpaces(records)) {
         return std::nullopt;
     }
 
     std::sort(records.begin(), records.end(), _ParameterLess);
 
     D3D12MergedBindingLayout result{};
-    vector<BindingParameterLayout> layouts{};
-    layouts.reserve(records.size());
+    result.Parameters.reserve(records.size());
     result.D3D12Parameters.reserve(records.size());
-    uint32_t maxSetPlusOne = 0;
+    uint32_t maxRegisterSpacePlusOne = 0;
     for (uint32_t i = 0; i < records.size(); ++i) {
         auto& record = records[i];
-        record.Layout.Id = BindingParameterId{i};
-        record.D3D12.Id = BindingParameterId{i};
-        layouts.push_back(record.Layout);
+        record.Parameter.Id = ShaderParameterId{i};
+        record.D3D12.Id = ShaderParameterId{i};
+        result.Parameters.push_back(record.Parameter);
         result.D3D12Parameters.push_back(record.D3D12);
-        if (record.Layout.Kind != BindingParameterKind::PushConstant) {
-            const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
-            maxSetPlusOne = std::max(maxSetPlusOne, abi.Set.Value + 1);
+        if (record.Parameter.Kind != ShaderParameterKind::Constant) {
+            maxRegisterSpacePlusOne = std::max(maxRegisterSpacePlusOne, record.D3D12.RegisterSpace + 1);
         }
     }
-    result.Layout = BindingLayout{std::move(layouts)};
-    result.SetCount = maxSetPlusOne;
+    result.RegisterSpaceCount = maxRegisterSpacePlusOne;
     return result;
 }
 

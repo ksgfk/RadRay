@@ -56,7 +56,7 @@ private:
 struct ComputeProgram {
     vector<byte> Blob{};
     unique_ptr<Shader> ShaderObject{};
-    unique_ptr<RootSignature> RootSignatureObject{};
+    ShaderBindingLayout* BindingLayout{};
     unique_ptr<ComputePipelineState> PipelineObject{};
 };
 
@@ -75,6 +75,8 @@ public:
     shared_ptr<Device> GetDevice() const noexcept;
 
     Device* GetDevicePtr() const noexcept;
+
+    ShaderBindingLayoutCache* GetShaderBindingLayoutCache() const noexcept;
 
     CommandQueue* GetQueue() const noexcept;
 
@@ -96,9 +98,8 @@ public:
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc, string* reason) noexcept;
 
-    Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(
-        RootSignature* rootSig,
-        DescriptorSetIndex setIndex,
+    Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(
+        ShaderBindingLayout* layout,
         string* reason) noexcept;
 
     Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(
@@ -143,6 +144,7 @@ private:
     TestBackend _backend{TestBackend::D3D12};
     LogCollector _logs{};
     shared_ptr<Device> _device{};
+    unique_ptr<ShaderBindingLayoutCache> _shaderBindingLayoutCache{};
     shared_ptr<Dxc> _dxc{};
     CommandQueue* _queue{nullptr};
 };

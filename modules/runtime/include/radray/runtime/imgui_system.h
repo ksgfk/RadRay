@@ -33,6 +33,7 @@ struct AppFrameTarget;
 
 struct ImGuiRendererDescriptor {
     render::Device* Device;
+    render::ShaderBindingLayoutCache* BindingLayoutCache;
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
 };
@@ -41,6 +42,7 @@ struct ImGuiSystemDescriptor {
     AppWindow* MainWindow;
     WindowManager* Windows{nullptr};
     render::Device* Device;
+    render::ShaderBindingLayoutCache* BindingLayoutCache{nullptr};
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
     render::CommandQueue* DirectQueue{nullptr};
@@ -108,30 +110,30 @@ public:
         ImGuiTexture(
             unique_ptr<render::Texture> texture,
             unique_ptr<render::TextureView> srv,
-            unique_ptr<render::DescriptorSet> descriptorSet) noexcept
+            unique_ptr<render::ShaderParameterTable> parameterTable) noexcept
             : _texture(std::move(texture)),
               _srv(std::move(srv)),
-              _descriptorSet(std::move(descriptorSet)) {}
+              _parameterTable(std::move(parameterTable)) {}
 
         // 外部纹理：每个 flight 持有独立描述符集，避免在命令缓冲飞行中改写同一描述符集
         explicit ImGuiTexture(ExternalTag) noexcept : _isExternal(true) {}
 
         render::Texture* GetTexture() const noexcept { return _texture.get(); }
-        // 普通纹理使用单一描述符集；外部纹理按当前 flight 取对应描述符集
-        render::DescriptorSet* GetDescriptorSet(uint32_t flightIndex) const noexcept {
+        // 普通纹理使用单一参数表；外部纹理按当前 flight 取对应参数表。
+        render::ShaderParameterTable* GetParameterTable(uint32_t flightIndex) const noexcept {
             if (_isExternal) {
-                return flightIndex < _externalSets.size() ? _externalSets[flightIndex].get() : nullptr;
+                return flightIndex < _externalTables.size() ? _externalTables[flightIndex].get() : nullptr;
             }
-            return _descriptorSet.get();
+            return _parameterTable.get();
         }
-        render::DescriptorSet* GetExternalSet(uint32_t flightIndex) const noexcept {
-            return flightIndex < _externalSets.size() ? _externalSets[flightIndex].get() : nullptr;
+        render::ShaderParameterTable* GetExternalTable(uint32_t flightIndex) const noexcept {
+            return flightIndex < _externalTables.size() ? _externalTables[flightIndex].get() : nullptr;
         }
-        void SetExternalSet(uint32_t flightIndex, unique_ptr<render::DescriptorSet> set) noexcept {
-            if (flightIndex >= _externalSets.size()) {
-                _externalSets.resize(static_cast<size_t>(flightIndex) + 1);
+        void SetExternalTable(uint32_t flightIndex, unique_ptr<render::ShaderParameterTable> table) noexcept {
+            if (flightIndex >= _externalTables.size()) {
+                _externalTables.resize(static_cast<size_t>(flightIndex) + 1);
             }
-            _externalSets[flightIndex] = std::move(set);
+            _externalTables[flightIndex] = std::move(table);
         }
         bool UpdateExternalResource(uint32_t flightIndex, render::TextureView* srv) noexcept;
         bool IsExternal() const noexcept { return _isExternal; }
@@ -139,8 +141,8 @@ public:
     private:
         unique_ptr<render::Texture> _texture;
         unique_ptr<render::TextureView> _srv;
-        unique_ptr<render::DescriptorSet> _descriptorSet;
-        vector<unique_ptr<render::DescriptorSet>> _externalSets;
+        unique_ptr<render::ShaderParameterTable> _parameterTable;
+        vector<unique_ptr<render::ShaderParameterTable>> _externalTables;
         bool _isExternal{false};
     };
 
@@ -201,9 +203,9 @@ private:
 
     ImGuiSystem* _system;
     render::Device* _device{nullptr};
-    unique_ptr<render::RootSignature> _rootSig;
+    render::ShaderBindingLayout* _bindingLayout{nullptr};
     unique_ptr<render::GraphicsPipelineState> _pso;
-    render::BindingParameterId _pushConstantId{0};
+    render::ShaderParameterId _pushConstantId{0};
     vector<unique_ptr<Frame>> _frames;
     vector<unique_ptr<ImGuiTexture>> _aliveTexs;
 };
@@ -260,7 +262,7 @@ public:
 
     /// 创建或更新一张外部纹理（如离屏 RT）供 ImGui::Image 使用。
     /// flightIndex 必须传入当前帧的 flight 序号：外部纹理按 flight 持有独立描述符集，
-    /// 避免在命令缓冲飞行中改写仍被引用的描述符集（VUID-vkUpdateDescriptorSets-None-03047）。
+    /// 避免在命令缓冲飞行中改写仍被引用的参数表。
     ImTextureID CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv);
 
     /// swapchain 重建通知转发给 renderer。

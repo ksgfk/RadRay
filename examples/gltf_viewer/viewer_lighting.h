@@ -176,7 +176,7 @@ bool BuildAdditionalShadows(
     ShadowSoftMode softMode,
     AdditionalShadowData& out);
 
-// ── 灯光缓冲(space0):构建并写入 per-view descriptor set ──
+// ── 灯光缓冲:构建并写入 per-view shader parameter table ──
 
 class SceneLightBuffer {
 public:
@@ -194,10 +194,9 @@ public:
     SceneLightBuffer& operator=(SceneLightBuffer&&) = delete;
     ~SceneLightBuffer() noexcept;
 
-    render::DescriptorSet* Update(
+    render::ShaderParameterTable* Update(
         render::Device& device,
-        render::RootSignature* rootSig,
-        render::DescriptorSetIndex viewSet,
+        render::ShaderBindingLayout* bindingLayout,
         uint32_t flightIndex,
         const srp::Scene& scene,
         const ShadowCascadeData& shadow,
@@ -209,8 +208,7 @@ public:
 
 private:
     struct FlightResources {
-        render::RootSignature* RootSig{nullptr};
-        render::DescriptorSetIndex ViewSet{0};
+        render::ShaderBindingLayout* BindingLayout{nullptr};
         unique_ptr<render::Buffer> DirectionalBuffer;
         unique_ptr<render::Buffer> PointBuffer;
         unique_ptr<render::Buffer> SpotBuffer;
@@ -218,18 +216,17 @@ private:
         unique_ptr<render::Buffer> ShadowBuffer;
         unique_ptr<render::Buffer> AdditionalShadowBuffer;
         unique_ptr<render::Sampler> ShadowCmpSampler;
-        unique_ptr<render::DescriptorSet> DescriptorSet;
+        unique_ptr<render::ShaderParameterTable> ParameterTable;
     };
 
     bool EnsureFlightResources(
         render::Device& device,
-        render::RootSignature* rootSig,
-        render::DescriptorSetIndex viewSet,
+        render::ShaderBindingLayout* bindingLayout,
         FlightResources& resources,
         uint32_t flightIndex);
 
     static bool WriteBuffer(render::Buffer& buffer, const void* data, uint64_t size, std::string_view debugName);
-    static bool WriteDescriptorSetResources(
+    static bool WriteParameterTableResources(
         FlightResources& resources,
         render::TextureView* shadowArraySrv,
         render::TextureView* additionalShadowArraySrv);

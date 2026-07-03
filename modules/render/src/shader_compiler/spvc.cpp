@@ -396,7 +396,7 @@ static void _ReflectPushConstants(
         range.TypeIndex = _ReflectType(ctx, type);
         range.Size = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
         range.Offset = 0;
-        desc.PushConstants.push_back(std::move(range));
+        desc.ConstantRanges.push_back(std::move(range));
     }
 }
 

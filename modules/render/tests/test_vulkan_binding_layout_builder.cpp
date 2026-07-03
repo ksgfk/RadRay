@@ -88,7 +88,7 @@ SpirvShaderDesc MakeSpirvShaderDesc(
     std::initializer_list<SpirvPushConstantRange> pushConstants = {}) {
     SpirvShaderDesc desc{};
     desc.ResourceBindings.assign(bindings.begin(), bindings.end());
-    desc.PushConstants.assign(pushConstants.begin(), pushConstants.end());
+    desc.ConstantRanges.assign(pushConstants.begin(), pushConstants.end());
     return desc;
 }
 
@@ -97,12 +97,12 @@ SpirvShaderDesc MakeSpirvShaderDesc(
 TEST(VulkanBindingLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
     auto merged = vulkan::BuildMergedBindingLayoutVulkan({});
     ASSERT_TRUE(merged.has_value());
-    EXPECT_TRUE(merged->Layout.GetParameters().empty());
     EXPECT_TRUE(merged->Parameters.empty());
-    EXPECT_EQ(merged->SetLayoutCount, 0u);
+    EXPECT_TRUE(merged->VulkanParameters.empty());
+    EXPECT_EQ(merged->DescriptorSetCount, 0u);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
+TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeSpirvShaderDesc(
@@ -127,84 +127,35 @@ TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
 
-    auto parameters = merged->Layout.GetParameters();
+    auto parameters = merged->Parameters;
     ASSERT_EQ(parameters.size(), 3u);
 
     EXPECT_EQ(parameters[0].Name, "Linear");
-    EXPECT_EQ(parameters[0].Id, BindingParameterId{0});
-    EXPECT_EQ(parameters[0].Kind, BindingParameterKind::Sampler);
+    EXPECT_EQ(parameters[0].Id, ShaderParameterId{0});
+    EXPECT_EQ(parameters[0].Kind, ShaderParameterKind::Sampler);
 
     EXPECT_EQ(parameters[1].Name, "Albedo");
-    EXPECT_EQ(parameters[1].Id, BindingParameterId{1});
-    EXPECT_EQ(parameters[1].Kind, BindingParameterKind::Resource);
+    EXPECT_EQ(parameters[1].Id, ShaderParameterId{1});
+    EXPECT_EQ(parameters[1].Kind, ShaderParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Set, DescriptorSetIndex{0});
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Binding, 1u);
+    EXPECT_EQ(parameters[1].Type, ResourceBindType::Texture);
+    EXPECT_EQ(parameters[1].Count, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
-    EXPECT_EQ(parameters[2].Id, BindingParameterId{2});
-    EXPECT_EQ(parameters[2].Kind, BindingParameterKind::PushConstant);
+    EXPECT_EQ(parameters[2].Id, ShaderParameterId{2});
+    EXPECT_EQ(parameters[2].Kind, ShaderParameterKind::Constant);
     EXPECT_EQ(parameters[2].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<PushConstantBindingAbi>(parameters[2].Abi).Size, 16u);
+    EXPECT_EQ(parameters[2].ByteSize, 16u);
 
-    auto id = merged->Layout.FindParameterId("Albedo");
-    ASSERT_TRUE(id.has_value());
-    EXPECT_EQ(id.value(), BindingParameterId{1});
-
-    auto parameter = merged->Layout.FindParameter(id.value());
-    ASSERT_TRUE(parameter.HasValue());
-    EXPECT_EQ(parameter.Get()->Name, "Albedo");
-
-    ASSERT_EQ(merged->Parameters.size(), parameters.size());
-    EXPECT_EQ(merged->Parameters[0].Id, BindingParameterId{0});
-    EXPECT_EQ(merged->Parameters[0].DescriptorType, VK_DESCRIPTOR_TYPE_SAMPLER);
-    EXPECT_EQ(merged->Parameters[1].DescriptorType, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
-    EXPECT_EQ(merged->Parameters[2].Kind, BindingParameterKind::PushConstant);
-    EXPECT_EQ(merged->SetLayoutCount, 1u);
-}
-
-TEST(VulkanBindingLayoutBuilderTest, LayoutPreviewProjectsPublicRootSignatureLayout) {
-    FakeShader shader{
-        ShaderStage::Pixel,
-        ShaderReflectionDesc{MakeSpirvShaderDesc(
-            {
-                MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 0),
-                MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 0, 1),
-            },
-            {
-                MakePushConstant("Globals", 0, 16),
-            })}};
-    vector<Shader*> shaders{&shader};
-    StaticSamplerDescriptor staticSampler{
-        .Name = "StaticLinear",
-        .Set = DescriptorSetIndex{0},
-        .Binding = 0,
-        .Stages = ShaderStage::UNKNOWN,
-        .Desc = SamplerDescriptor{}};
-
-    RootSignatureDescriptor desc{
-        .Shaders = shaders,
-        .StaticSamplers = std::span<const StaticSamplerDescriptor>{&staticSampler, 1}};
-    auto preview = vulkan::BuildRootSignatureLayoutPreviewVulkan(desc);
-    ASSERT_TRUE(preview.has_value());
-
-    auto parameters = preview->Layout.GetParameters();
-    ASSERT_EQ(parameters.size(), 2u);
-    EXPECT_EQ(parameters[0].Name, "Albedo");
-    EXPECT_EQ(parameters[0].Id, BindingParameterId{1});
-    EXPECT_EQ(parameters[1].Name, "Globals");
-    EXPECT_EQ(parameters[1].Id, BindingParameterId{2});
-    EXPECT_EQ(preview->DescriptorSetCount, 1u);
-
-    ASSERT_EQ(preview->StaticSamplerLayouts.size(), 1u);
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Name, "StaticLinear");
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Id, BindingParameterId{0});
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Set, DescriptorSetIndex{0});
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Binding, 0u);
-
-    ASSERT_EQ(preview->PushConstantRanges.size(), 1u);
-    EXPECT_EQ(preview->PushConstantRanges[0].Name, "Globals");
-    EXPECT_EQ(preview->PushConstantRanges[0].Size, 16u);
+    ASSERT_EQ(merged->VulkanParameters.size(), parameters.size());
+    EXPECT_EQ(merged->VulkanParameters[0].Id, ShaderParameterId{0});
+    EXPECT_EQ(merged->VulkanParameters[0].DescriptorType, VK_DESCRIPTOR_TYPE_SAMPLER);
+    EXPECT_EQ(merged->VulkanParameters[1].SetIndex, 0u);
+    EXPECT_EQ(merged->VulkanParameters[1].BindingIndex, 1u);
+    EXPECT_EQ(merged->VulkanParameters[1].DescriptorType, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+    EXPECT_EQ(merged->VulkanParameters[2].Kind, ShaderParameterKind::Constant);
+    EXPECT_EQ(merged->VulkanParameters[2].Size, 16u);
+    EXPECT_EQ(merged->DescriptorSetCount, 1u);
 }
 
 TEST(VulkanBindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
@@ -262,15 +213,16 @@ TEST(VulkanBindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     vector<Shader*> shaders{&shader};
     auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
-    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
-    const auto& parameter = merged->Layout.GetParameters()[0];
-    const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
-    EXPECT_TRUE(abi.IsBindless);
-    EXPECT_EQ(abi.Count, 0u);
-    EXPECT_EQ(parameter.Kind, BindingParameterKind::Resource);
     ASSERT_EQ(merged->Parameters.size(), 1u);
-    EXPECT_TRUE(merged->Parameters[0].IsBindless);
-    EXPECT_EQ(merged->Parameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
+    const auto& parameter = merged->Parameters[0];
+    EXPECT_TRUE(parameter.IsBindless);
+    EXPECT_EQ(parameter.Count, 0u);
+    EXPECT_EQ(parameter.Kind, ShaderParameterKind::BindlessArray);
+    ASSERT_EQ(merged->VulkanParameters.size(), 1u);
+    EXPECT_TRUE(merged->VulkanParameters[0].IsBindless);
+    EXPECT_EQ(merged->VulkanParameters[0].SetIndex, 0u);
+    EXPECT_EQ(merged->VulkanParameters[0].BindingIndex, 0u);
+    EXPECT_EQ(merged->VulkanParameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
 }
 
 TEST(VulkanBindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
@@ -320,11 +272,10 @@ TEST(VulkanBindingLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
 
     auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
-    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
-    const auto& abi = std::get<ResourceBindingAbi>(merged->Layout.GetParameters()[0].Abi);
-    EXPECT_EQ(abi.Set, DescriptorSetIndex{1});
-    EXPECT_EQ(abi.Binding, 0u);
-    EXPECT_EQ(merged->SetLayoutCount, 2u);
+    ASSERT_EQ(merged->Parameters.size(), 1u);
+    EXPECT_EQ(merged->VulkanParameters[0].SetIndex, 1u);
+    EXPECT_EQ(merged->VulkanParameters[0].BindingIndex, 0u);
+    EXPECT_EQ(merged->DescriptorSetCount, 2u);
 }
 
 TEST(VulkanBindingLayoutBuilderTest, FailsWhenHlslRegisterMetadataConflictsWithVkBinding) {

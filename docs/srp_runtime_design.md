@@ -62,7 +62,7 @@ RenderPipeline.Render(context, cameras)                       // UniversalRender
 | `Material`(.mat) | — | `Material` | shader 引用 + 属性值(space1)+ keyword + 语义 |
 | `Shader`(.shader) | — | `Shader` | 每个 LightMode 一段 pass 源 + space1 布局 + keyword 轴 |
 | Shader 变体编译缓存 | (引擎内部) | `ShaderVariantCache` | key=(ShaderId, LightMode, KeywordSet) |
-| (PSO 由 RHI 缓存) | — | `RootSignatureCache` / `PipelineStateCache` | 见 §6 |
+| (PSO 由 RHI 缓存) | — | `ShaderBindingLayoutCache` / `PipelineStateCache` | 见 §6 |
 
 > 注意第 3 列右侧:**Material 实例从不进任何编译缓存的 key**。这是 SRP Batcher 可批的根,§6 详述。
 
@@ -225,7 +225,7 @@ RendererList RenderContext::CreateRendererList(const CullingResults& cull,
         KeywordSet kw = draw.passKeywords | mat->MaterialKeywords();
         render::Shader* var = ShaderVariantCache::Get(sh->Id(), tag, kw);   // key 不含 mat 实例
         if (!var) continue;
-        render::RootSignature* rs = RootSignatureCache::Get(var);
+        render::ShaderBindingLayout* rs = ShaderBindingLayoutCache::Get(var);
         render::GraphicsPipelineState* pso =
             PipelineStateCache::Get(var, r->GetVertexLayout(), ResolveState(stateOv, mat), draw.rtFormats);
         MeshDrawCommand cmd;
@@ -240,6 +240,72 @@ RendererList RenderContext::CreateRendererList(const CullingResults& cull,
     return RendererList{std::move(cmds)};
 }
 ```
+
+## 4b. RendererList 的 primitive 筛选条件:条件间 AND,条件内 OR
+
+Unity SRP/URP 的 `RendererList` 不是 pass 手动遍历 primitive 得到的列表,而是由三元组生成:
+
+```text
+CullingResults + DrawingSettings + FilteringSettings -> RendererList
+```
+
+其中 `CullingResults` 是候选集合,`FilteringSettings` 表达"哪些 renderer 可以进入本 pass",`DrawingSettings` 表达"用哪些 shader pass tag 绘制以及如何排序"。如果忽略 CPU cull,可以把 `CullingResults` 理解成"本 camera 当前可参与绘制的 renderer 集合";后续 primitive 是否进入某个 pass,由下面条件共同决定。
+
+总体关系:
+
+```text
+renderer in CullingResults
+AND material.renderQueue in RenderQueueRange
+AND GameObject layer matches LayerMask
+AND renderer.renderingLayerMask intersects FilteringSettings.renderingLayerMask
+AND renderer.sortingLayer in SortingLayerRange
+AND renderer batch layer intersects batchLayerMask
+AND motion-vector exclusion passes
+AND material shader has any requested ShaderTagId / LightMode pass
+```
+
+不同类别的条件之间是 **AND**。同一类别内部通常是 **OR** 或区间包含:
+
+- `LayerMask`:多个 bit 是 OR,对象在任意启用 layer 上就命中。
+- `renderingLayerMask`:多个 bit 是 OR,renderer 与 filter mask 有任意交集就命中。
+- `ShaderTagId` 列表:多个 tag 是 OR,shader 有任意一个匹配 pass 即命中;列表顺序同时表示优先级。
+- `RenderQueueRange` / `SortingLayerRange`:是闭区间包含,不是 OR。
+
+各条件含义:
+
+| 条件 | 来源 | 含义 | 关系 |
+|------|------|------|------|
+| `CullingResults` | `context.Cull(...)` | renderer list 的基础候选集合 | 外层前提 |
+| `RenderQueueRange` | `FilteringSettings.renderQueueRange` | 按 material render queue 区分 opaque/transparent/自定义 queue | AND |
+| `LayerMask` | `FilteringSettings.layerMask` | 按 GameObject layer 过滤 | AND;mask bit 内 OR |
+| `renderingLayerMask` | `FilteringSettings.renderingLayerMask` | SRP 额外 renderer layer,常用于 light/decal/rendering layer 功能 | AND;mask bit 内 OR |
+| `SortingLayerRange` | `FilteringSettings.sortingLayerRange` | 按 renderer sorting layer 范围过滤,常见于 2D/sprite 场景 | AND |
+| `batchLayerMask` | `FilteringSettings.batchLayerMask` | GPU driven / batch renderer 相关的批次层过滤;默认全通过 | AND;mask bit 内 OR |
+| `excludeObjectMotionVectors` | `RendererListDesc` / `FilteringSettings` 路径 | 排除需要 object motion vector 的 renderer,避免特定 pass 重复处理 | AND |
+| `ShaderTagId` / `LightMode` | `DrawingSettings.SetShaderPassName` | shader 必须有任意一个请求的 pass tag,否则不进入该 list | AND;tag 列表内 OR |
+
+不属于 primitive inclusion 的字段:
+
+- `SortingSettings` / `SortingCriteria`:只决定绘制顺序,不决定 renderer 是否进入 list。
+- `RenderStateBlock`:覆盖 depth/stencil/blend/raster state;一般不筛掉 renderer,但会影响 GPU 测试和最终像素写入。
+- `overrideMaterial`:改变"用什么 material 画",不改变"选中哪些 renderer"。
+- `perObjectData`:声明本 pass 需要哪些 per-object 数据,不是筛选条件。
+- `enableInstancing` / `mainLightIndex`:影响绘制路径或 shader 数据,不是 primitive 过滤条件。
+
+因此 `RendererList` 的筛选可以简化为:
+
+```text
+先用 FilteringSettings 做语义过滤:
+  queue AND layer AND renderingLayer AND sortingLayer AND batchLayer AND motionVectorRule
+
+再用 DrawingSettings 做 shader pass relevance:
+  shader has (tag0 OR tag1 OR tag2 ...)
+
+最后用 SortingSettings 排序:
+  opaque 通常前到后/状态优化,transparent 通常后到前
+```
+
+这也是为什么 SRP pass 只声明筛选规则,而不是保存 primitive 列表:同一个 `CullingResults` 会被不同 pass 用不同的 `FilteringSettings` 和 `ShaderTagId` 列表投影成不同的 `RendererList`。
 
 ---
 
@@ -266,7 +332,7 @@ public:
     BlendMode  GetBlendMode() const;                              // Opaque/Masked/Transparent
     bool       IsTwoSided() const;
     float      AlphaCutoff() const;
-    render::DescriptorSet* GetDescriptorSet(render::RootSignature*) const; // space1,值填进 CBUFFER,懒建+缓存
+    render::DescriptorSet* GetDescriptorSet(render::ShaderBindingLayout*) const; // space1,值填进 CBUFFER,懒建+缓存
 };
 
 // —— Shader:多 pass 代码容器(对应 .shader 的多 Pass{ Tags{ "LightMode"=... } })——
@@ -321,11 +387,11 @@ virtual PerObjectData RequiredPerObjectData() const { return PerObjectData::None
 
 ```
 ShaderVariantCache : key = (ShaderId, LightMode, KeywordSet)             → render::Shader*
-RootSignatureCache : key = 合并反射的 binding layout                       → render::RootSignature*
+ShaderBindingLayoutCache : key = 合并反射的 binding layout                       → render::ShaderBindingLayout*
 PipelineStateCache : key = (variant, VertexLayout, RenderState, RTFormats) → render::GraphicsPipelineState*
 ```
 
-- `render::Shader` / `render::RootSignature` / `render::GraphicsPipelineState` 全是现成 RHI 对象(`render/common.h:565/567/569`),底层不动。
+- `render::Shader` / `render::ShaderBindingLayout` / `render::GraphicsPipelineState` 全是现成 RHI 对象(`render/common.h:565/567/569`),底层不动。
 - **MaterialInstanceId 不进任何 key**。一万个用同一 Shader+同一 KeywordSet 的 Material 共享同一 variant/PSO,只各绑各的 space1 `DescriptorSet`。这正是 SRP Batcher:同 shader variant 的 draw 之间只换 per-material CBUFFER,不重建管线状态。
 - 懒编译:`ShaderVariantCache::Get` miss 时才编译该 `(shader, tag, keywords)` 组合。
 
@@ -380,7 +446,7 @@ private:
 - `SceneLightBuffer` 进 runtime → 改为 shadow/forward pass 各自按需建 space0。
 - 旧 `Material` 烤死 VS/PS → 改为 `Shader`(多 LightMode 源)+ `Material`(纯数据)两层。
 
-保留并复用:`radray::render` 全部 RHI 抽象(`Shader`/`RootSignature`/`DescriptorSet`/`GraphicsPipelineState`/`CommandEncoder`),以及 `PrimitiveSceneProxy` 的几何镜像思路(改名 `Renderer`,去掉 material 内容拥有)。
+保留并复用:`radray::render` 全部 RHI 抽象(`Shader`/`ShaderBindingLayout`/`ShaderParameterTable`/`GraphicsPipelineState`/`CommandEncoder`),以及 `PrimitiveSceneProxy` 的几何镜像思路(改名 `Renderer`,去掉 material 内容拥有)。
 
 ---
 

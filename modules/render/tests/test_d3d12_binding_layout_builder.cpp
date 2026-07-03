@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <radray/render/backend/d3d12_impl.h>
 
 namespace radray::render {
@@ -79,11 +81,11 @@ HlslShaderDesc MakeHlslShaderDesc(
 TEST(D3D12BindingLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
     auto merged = d3d12::BuildMergedBindingLayoutD3D12({});
     ASSERT_TRUE(merged.has_value());
-    EXPECT_TRUE(merged->Layout.GetParameters().empty());
+    EXPECT_TRUE(merged->Parameters.empty());
     EXPECT_TRUE(merged->D3D12Parameters.empty());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
+TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeHlslShaderDesc(
@@ -110,86 +112,34 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndSupportsLookup) {
     auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
     ASSERT_TRUE(merged.has_value());
 
-    auto parameters = merged->Layout.GetParameters();
+    auto parameters = merged->Parameters;
     ASSERT_EQ(parameters.size(), 3u);
 
     EXPECT_EQ(parameters[0].Name, "Linear");
-    EXPECT_EQ(parameters[0].Id, BindingParameterId{0});
-    EXPECT_EQ(parameters[0].Kind, BindingParameterKind::Sampler);
+    EXPECT_EQ(parameters[0].Id, ShaderParameterId{0});
+    EXPECT_EQ(parameters[0].Kind, ShaderParameterKind::Sampler);
 
     EXPECT_EQ(parameters[1].Name, "Albedo");
-    EXPECT_EQ(parameters[1].Id, BindingParameterId{1});
-    EXPECT_EQ(parameters[1].Kind, BindingParameterKind::Resource);
+    EXPECT_EQ(parameters[1].Id, ShaderParameterId{1});
+    EXPECT_EQ(parameters[1].Kind, ShaderParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Set, DescriptorSetIndex{0});
-    EXPECT_EQ(std::get<ResourceBindingAbi>(parameters[1].Abi).Binding, 1u);
+    EXPECT_EQ(parameters[1].Type, ResourceBindType::Texture);
+    EXPECT_EQ(parameters[1].Count, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
-    EXPECT_EQ(parameters[2].Id, BindingParameterId{2});
-    EXPECT_EQ(parameters[2].Kind, BindingParameterKind::PushConstant);
+    EXPECT_EQ(parameters[2].Id, ShaderParameterId{2});
+    EXPECT_EQ(parameters[2].Kind, ShaderParameterKind::Constant);
     EXPECT_EQ(parameters[2].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
-    EXPECT_EQ(std::get<PushConstantBindingAbi>(parameters[2].Abi).Size, 16u);
-
-    auto id = merged->Layout.FindParameterId("Albedo");
-    ASSERT_TRUE(id.has_value());
-    EXPECT_EQ(id.value(), BindingParameterId{1});
-
-    auto parameter = merged->Layout.FindParameter(id.value());
-    ASSERT_TRUE(parameter.HasValue());
-    EXPECT_EQ(parameter.Get()->Name, "Albedo");
+    EXPECT_EQ(parameters[2].ByteSize, 16u);
 
     ASSERT_EQ(merged->D3D12Parameters.size(), parameters.size());
-    EXPECT_EQ(merged->D3D12Parameters[1].Id, BindingParameterId{1});
-    EXPECT_EQ(merged->D3D12Parameters[1].SetIndex, DescriptorSetIndex{0});
+    EXPECT_EQ(merged->D3D12Parameters[1].Id, ShaderParameterId{1});
+    EXPECT_EQ(merged->D3D12Parameters[1].RegisterSpace, 0u);
     EXPECT_EQ(merged->D3D12Parameters[1].BindingIndex, 1u);
     EXPECT_EQ(merged->D3D12Parameters[1].ShaderRegister, 1u);
-    EXPECT_EQ(merged->D3D12Parameters[2].Kind, BindingParameterKind::PushConstant);
-    EXPECT_EQ(merged->SetCount, 1u);
-}
-
-TEST(D3D12BindingLayoutBuilderTest, LayoutPreviewProjectsPublicRootSignatureLayout) {
-    FakeShader shader{
-        ShaderStage::Pixel,
-        ShaderReflectionDesc{MakeHlslShaderDesc(
-            {
-                MakeHlslBinding("Linear", HlslShaderInputType::SAMPLER, 0),
-                MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 1),
-                MakeHlslBinding("Globals", HlslShaderInputType::CBUFFER, 0),
-            },
-            {
-                MakeCBuffer("Globals", 16, true),
-            })}};
-    vector<Shader*> shaders{&shader};
-    StaticSamplerDescriptor staticSampler{
-        .Name = "StaticLinear",
-        .Set = DescriptorSetIndex{0},
-        .Binding = 0,
-        .Stages = ShaderStage::UNKNOWN,
-        .Desc = SamplerDescriptor{}};
-
-    RootSignatureDescriptor desc{
-        .Shaders = shaders,
-        .StaticSamplers = std::span<const StaticSamplerDescriptor>{&staticSampler, 1}};
-    auto preview = d3d12::BuildRootSignatureLayoutPreviewD3D12(desc);
-    ASSERT_TRUE(preview.has_value());
-
-    auto parameters = preview->Layout.GetParameters();
-    ASSERT_EQ(parameters.size(), 2u);
-    EXPECT_EQ(parameters[0].Name, "Albedo");
-    EXPECT_EQ(parameters[0].Id, BindingParameterId{1});
-    EXPECT_EQ(parameters[1].Name, "Globals");
-    EXPECT_EQ(parameters[1].Id, BindingParameterId{2});
-    EXPECT_EQ(preview->DescriptorSetCount, 1u);
-
-    ASSERT_EQ(preview->StaticSamplerLayouts.size(), 1u);
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Name, "StaticLinear");
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Id, BindingParameterId{0});
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Set, DescriptorSetIndex{0});
-    EXPECT_EQ(preview->StaticSamplerLayouts[0].Binding, 0u);
-
-    ASSERT_EQ(preview->PushConstantRanges.size(), 1u);
-    EXPECT_EQ(preview->PushConstantRanges[0].Name, "Globals");
-    EXPECT_EQ(preview->PushConstantRanges[0].Size, 16u);
+    EXPECT_EQ(merged->D3D12Parameters[2].Kind, ShaderParameterKind::Constant);
+    EXPECT_EQ(merged->D3D12Parameters[2].PushConstantSize, 16u);
+    EXPECT_EQ(merged->RegisterSpaceCount, 1u);
 }
 
 TEST(D3D12BindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
@@ -247,15 +197,15 @@ TEST(D3D12BindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     vector<Shader*> shaders{&shader};
     auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
     ASSERT_TRUE(merged.has_value());
-    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
-    const auto& parameter = merged->Layout.GetParameters()[0];
-    const auto& abi = std::get<ResourceBindingAbi>(parameter.Abi);
-    EXPECT_TRUE(abi.IsBindless);
-    EXPECT_EQ(abi.Count, 0u);
-    EXPECT_EQ(abi.Set, DescriptorSetIndex{0});
-    EXPECT_EQ(parameter.Kind, BindingParameterKind::Resource);
+    ASSERT_EQ(merged->Parameters.size(), 1u);
+    const auto& parameter = merged->Parameters[0];
+    EXPECT_TRUE(parameter.IsBindless);
+    EXPECT_EQ(parameter.Count, 0u);
+    EXPECT_EQ(parameter.Kind, ShaderParameterKind::BindlessArray);
     ASSERT_EQ(merged->D3D12Parameters.size(), 1u);
     EXPECT_TRUE(merged->D3D12Parameters[0].IsBindless);
+    EXPECT_EQ(merged->D3D12Parameters[0].RegisterSpace, 0u);
+    EXPECT_EQ(merged->D3D12Parameters[0].BindingIndex, 0u);
     EXPECT_EQ(merged->D3D12Parameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
 }
 
@@ -291,11 +241,11 @@ TEST(D3D12BindingLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
 
     auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
     ASSERT_TRUE(merged.has_value());
-    ASSERT_EQ(merged->Layout.GetParameters().size(), 1u);
-    const auto& abi = std::get<ResourceBindingAbi>(merged->Layout.GetParameters()[0].Abi);
-    EXPECT_EQ(abi.Set, DescriptorSetIndex{1});
-    EXPECT_EQ(abi.Binding, 0u);
-    EXPECT_EQ(merged->SetCount, 2u);
+    ASSERT_EQ(merged->Parameters.size(), 1u);
+    EXPECT_EQ(merged->D3D12Parameters[0].RegisterSpace, 1u);
+    EXPECT_EQ(merged->D3D12Parameters[0].BindingIndex, 0u);
+    EXPECT_EQ(merged->D3D12Parameters[0].ShaderRegister, 0u);
+    EXPECT_EQ(merged->RegisterSpaceCount, 2u);
 }
 
 TEST(D3D12BindingLayoutBuilderTest, FailsWhenVkBindingMetadataConflictsWithRegisterSpace) {

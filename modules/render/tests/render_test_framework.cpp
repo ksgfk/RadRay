@@ -253,6 +253,13 @@ bool ComputeTestContext::Initialize(TestBackend backend, string* reason) noexcep
     if (!_CreateDeviceForBackend(backend, &_logs, _device, reason)) {
         return false;
     }
+    auto cacheOpt = _device->CreateShaderBindingLayoutCache();
+    if (!cacheOpt.HasValue()) {
+        _StoreReason(reason, fmt::format("CreateShaderBindingLayoutCache failed for {}", backend));
+        this->Reset();
+        return false;
+    }
+    _shaderBindingLayoutCache = cacheOpt.Release();
     auto queueOpt = _device->GetCommandQueue(QueueType::Direct, 0);
     if (!queueOpt.HasValue()) {
         _StoreReason(reason, fmt::format("No direct queue available for {}", backend));
@@ -269,6 +276,7 @@ void ComputeTestContext::Reset() noexcept {
     }
     ClearLogCallback();
     _queue = nullptr;
+    _shaderBindingLayoutCache.reset();
     _device.reset();
 #if defined(RADRAY_ENABLE_VULKAN) && defined(RADRAY_ENABLE_SPIRV_CROSS)
     if (_backend == TestBackend::Vulkan) {
@@ -293,6 +301,10 @@ shared_ptr<Device> ComputeTestContext::GetDevice() const noexcept {
 
 Device* ComputeTestContext::GetDevicePtr() const noexcept {
     return _device.get();
+}
+
+ShaderBindingLayoutCache* ComputeTestContext::GetShaderBindingLayoutCache() const noexcept {
+    return _shaderBindingLayoutCache.get();
 }
 
 CommandQueue* ComputeTestContext::GetQueue() const noexcept {
@@ -421,25 +433,23 @@ Nullable<unique_ptr<Sampler>> ComputeTestContext::CreateSampler(
     return samplerOpt;
 }
 
-Nullable<unique_ptr<DescriptorSet>> ComputeTestContext::CreateDescriptorSet(
-    RootSignature* rootSig,
-    DescriptorSetIndex setIndex,
+Nullable<unique_ptr<ShaderParameterTable>> ComputeTestContext::CreateShaderParameterTable(
+    ShaderBindingLayout* layout,
     string* reason) noexcept {
     if (_device == nullptr) {
         _StoreReason(reason, "device is not initialized");
         return nullptr;
     }
-    auto setOpt = _device->CreateDescriptorSet(rootSig, setIndex);
-    if (!setOpt.HasValue()) {
+    auto tableOpt = _device->CreateShaderParameterTable(layout);
+    if (!tableOpt.HasValue()) {
         _StoreReason(
             reason,
             fmt::format(
-                "CreateDescriptorSet failed on {} (set={})",
-                this->GetBackendName(),
-                setIndex.Value));
+                "CreateShaderParameterTable failed on {}",
+                this->GetBackendName()));
         return nullptr;
     }
-    return setOpt;
+    return tableOpt;
 }
 
 Nullable<unique_ptr<BindlessArray>> ComputeTestContext::CreateBindlessArray(
@@ -691,8 +701,8 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     bool enableUnbounded,
     string* reason,
     std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
-    if (_device == nullptr || _dxc == nullptr) {
-        _StoreReason(reason, "device or dxc is not initialized");
+    if (_device == nullptr || _dxc == nullptr || _shaderBindingLayoutCache == nullptr) {
+        _StoreReason(reason, "device, dxc or shader binding layout cache is not initialized");
         return std::nullopt;
     }
 
@@ -766,23 +776,23 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     program.ShaderObject = shaderOpt.Release();
 
     Shader* shaders[] = {program.ShaderObject.get()};
-    RootSignatureDescriptor rootSignatureDesc{};
-    rootSignatureDesc.Shaders = shaders;
-    rootSignatureDesc.StaticSamplers = staticSamplers;
-    auto rootSigOpt = _device->CreateRootSignature(rootSignatureDesc);
-    if (!rootSigOpt.HasValue()) {
+    ShaderBindingLayoutDescriptor layoutDesc{};
+    layoutDesc.Shaders = shaders;
+    layoutDesc.StaticSamplers = staticSamplers;
+    auto layoutOpt = _shaderBindingLayoutCache->GetOrCreate(layoutDesc);
+    if (!layoutOpt.HasValue()) {
         _StoreReason(
             reason,
             fmt::format(
-                "CreateRootSignature failed for {} compute shader '{}'",
+                "CreateShaderBindingLayout failed for {} compute shader '{}'",
                 this->GetBackendName(),
                 entryPoint));
         return std::nullopt;
     }
-    program.RootSignatureObject = rootSigOpt.Release();
+    program.BindingLayout = layoutOpt.Get();
 
     ComputePipelineStateDescriptor psoDesc{};
-    psoDesc.RootSig = program.RootSignatureObject.get();
+    psoDesc.BindingLayout = program.BindingLayout;
     psoDesc.CS = ShaderEntry{
         .Target = program.ShaderObject.get(),
         .EntryPoint = entryPoint,

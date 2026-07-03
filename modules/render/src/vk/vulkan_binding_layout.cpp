@@ -13,7 +13,7 @@ namespace radray::render::vulkan {
 namespace {
 
 struct ParameterRecord {
-    BindingParameterLayout Layout{};
+    ShaderParameterInfo Parameter{};
     VulkanBindingParameterInfo Vulkan{};
 };
 
@@ -73,7 +73,7 @@ std::optional<BindlessSlotType> _MapBindlessSlotType(
     }
 }
 
-std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
+std::optional<std::pair<uint32_t, uint32_t>> _ResolveUnifiedBinding(
     const SpirvResourceBinding& binding) noexcept {
     const bool hasHlslAbi = binding.HlslSpace.has_value() || binding.HlslRegister.has_value();
     if (hasHlslAbi && (!binding.HlslSpace.has_value() || !binding.HlslRegister.has_value())) {
@@ -96,102 +96,90 @@ std::optional<std::pair<DescriptorSetIndex, uint32_t>> _ResolveUnifiedBinding(
             binding.HlslRegister.value());
         return std::nullopt;
     }
-    return std::pair{DescriptorSetIndex{binding.Set}, binding.Binding};
+    return std::pair{binding.Set, binding.Binding};
 }
 
-bool _HasSameAbi(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind != rhs.Kind) {
+bool _HasSameAbi(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind != rhs.Parameter.Kind) {
         return false;
     }
-    if (lhs.Kind == BindingParameterKind::PushConstant) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
-        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    if (lhs.Parameter.Kind == ShaderParameterKind::Constant) {
+        return lhs.Vulkan.Offset == rhs.Vulkan.Offset && lhs.Vulkan.Size == rhs.Vulkan.Size;
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.Set == rhsAbi.Set &&
-           lhsAbi.Binding == rhsAbi.Binding &&
-           lhsAbi.Type == rhsAbi.Type;
+    return lhs.Vulkan.SetIndex == rhs.Vulkan.SetIndex &&
+           lhs.Vulkan.BindingIndex == rhs.Vulkan.BindingIndex &&
+           lhs.Vulkan.ResourceType == rhs.Vulkan.ResourceType;
 }
 
-bool _SharesBindingLocation(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind == BindingParameterKind::PushConstant || rhs.Kind == BindingParameterKind::PushConstant) {
+bool _SharesBindingLocation(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind == ShaderParameterKind::Constant || rhs.Parameter.Kind == ShaderParameterKind::Constant) {
         return false;
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Abi);
-    return lhsAbi.Set == rhsAbi.Set &&
-           lhsAbi.Binding == rhsAbi.Binding;
+    return lhs.Vulkan.SetIndex == rhs.Vulkan.SetIndex &&
+           lhs.Vulkan.BindingIndex == rhs.Vulkan.BindingIndex;
 }
 
 bool _HasCompatiblePayload(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
-    if (lhs.Layout.Kind != rhs.Layout.Kind) {
+    if (lhs.Parameter.Kind != rhs.Parameter.Kind) {
         return false;
     }
-    if (lhs.Layout.Kind == BindingParameterKind::PushConstant) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Layout.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Layout.Abi);
-        return lhsAbi.Offset == rhsAbi.Offset && lhsAbi.Size == rhsAbi.Size;
+    if (lhs.Parameter.Kind == ShaderParameterKind::Constant) {
+        return lhs.Vulkan.Offset == rhs.Vulkan.Offset && lhs.Vulkan.Size == rhs.Vulkan.Size;
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
-    return lhsAbi.Set == rhsAbi.Set &&
-           lhsAbi.Binding == rhsAbi.Binding &&
-           lhsAbi.Type == rhsAbi.Type &&
-           lhsAbi.Count == rhsAbi.Count &&
-           lhsAbi.IsReadOnly == rhsAbi.IsReadOnly &&
-           lhsAbi.IsBindless == rhsAbi.IsBindless &&
+    return lhs.Vulkan.SetIndex == rhs.Vulkan.SetIndex &&
+           lhs.Vulkan.BindingIndex == rhs.Vulkan.BindingIndex &&
+           lhs.Vulkan.ResourceType == rhs.Vulkan.ResourceType &&
+           lhs.Vulkan.DescriptorCount == rhs.Vulkan.DescriptorCount &&
+           lhs.Vulkan.IsReadOnly == rhs.Vulkan.IsReadOnly &&
+           lhs.Vulkan.IsBindless == rhs.Vulkan.IsBindless &&
            lhs.Vulkan.DescriptorType == rhs.Vulkan.DescriptorType;
 }
 
-bool _PushConstantsOverlap(const BindingParameterLayout& lhs, const BindingParameterLayout& rhs) noexcept {
-    if (lhs.Kind != BindingParameterKind::PushConstant || rhs.Kind != BindingParameterKind::PushConstant) {
+bool _PushConstantsOverlap(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
+    if (lhs.Parameter.Kind != ShaderParameterKind::Constant || rhs.Parameter.Kind != ShaderParameterKind::Constant) {
         return false;
     }
-    const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Abi);
-    const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Abi);
-    const uint32_t lhsEnd = lhsAbi.Offset + lhsAbi.Size;
-    const uint32_t rhsEnd = rhsAbi.Offset + rhsAbi.Size;
-    return lhsAbi.Offset < rhsEnd && rhsAbi.Offset < lhsEnd;
+    const uint32_t lhsEnd = lhs.Vulkan.Offset + lhs.Vulkan.Size;
+    const uint32_t rhsEnd = rhs.Vulkan.Offset + rhs.Vulkan.Size;
+    return lhs.Vulkan.Offset < rhsEnd && rhs.Vulkan.Offset < lhsEnd;
 }
 
 bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) noexcept {
     for (auto& record : records) {
-        if (_HasSameAbi(record.Layout, incoming.Layout)) {
-            if (record.Layout.Name != incoming.Layout.Name) {
+        if (_HasSameAbi(record, incoming)) {
+            if (record.Parameter.Name != incoming.Parameter.Name) {
                 RADRAY_ERR_LOG(
                     "binding abi conflict: parameter '{}' shares abi with '{}'",
-                    incoming.Layout.Name,
-                    record.Layout.Name);
+                    incoming.Parameter.Name,
+                    record.Parameter.Name);
                 return false;
             }
             if (!_HasCompatiblePayload(record, incoming)) {
-                RADRAY_ERR_LOG("binding payload conflict for parameter '{}'", incoming.Layout.Name);
+                RADRAY_ERR_LOG("binding payload conflict for parameter '{}'", incoming.Parameter.Name);
                 return false;
             }
-            record.Layout.Stages |= incoming.Layout.Stages;
+            record.Parameter.Stages |= incoming.Parameter.Stages;
             record.Vulkan.Stages |= incoming.Vulkan.Stages;
             return true;
         }
-        if (_SharesBindingLocation(record.Layout, incoming.Layout)) {
+        if (_SharesBindingLocation(record, incoming)) {
             RADRAY_ERR_LOG(
                 "vk binding location conflict: '{}' and '{}' share set={} binding={}",
-                record.Layout.Name,
-                incoming.Layout.Name,
-                std::get<ResourceBindingAbi>(incoming.Layout.Abi).Set.Value,
-                std::get<ResourceBindingAbi>(incoming.Layout.Abi).Binding);
+                record.Parameter.Name,
+                incoming.Parameter.Name,
+                incoming.Vulkan.SetIndex,
+                incoming.Vulkan.BindingIndex);
             return false;
         }
-        if (record.Layout.Name == incoming.Layout.Name) {
-            RADRAY_ERR_LOG("binding name conflict: '{}' maps to different abi", incoming.Layout.Name);
+        if (record.Parameter.Name == incoming.Parameter.Name) {
+            RADRAY_ERR_LOG("binding name conflict: '{}' maps to different abi", incoming.Parameter.Name);
             return false;
         }
-        if (_PushConstantsOverlap(record.Layout, incoming.Layout)) {
+        if (_PushConstantsOverlap(record, incoming)) {
             RADRAY_ERR_LOG(
                 "push constant ranges overlap but are not identical: '{}' and '{}'",
-                record.Layout.Name,
-                incoming.Layout.Name);
+                record.Parameter.Name,
+                incoming.Parameter.Name);
             return false;
         }
     }
@@ -217,12 +205,26 @@ bool _AppendSpirvBindings(
         const bool isBindless = resource.IsUnboundedArray;
 
         ParameterRecord record{};
-        record.Layout.Name = resource.Name;
-        record.Layout.Kind = bindTypeOpt.value() == ResourceBindType::Sampler
-                                 ? BindingParameterKind::Sampler
-                                 : BindingParameterKind::Resource;
-        record.Layout.Stages = stages;
+        record.Parameter.Name = resource.Name;
+        record.Parameter.Kind = bindTypeOpt.value() == ResourceBindType::Sampler
+                                    ? ShaderParameterKind::Sampler
+                                    : ShaderParameterKind::Resource;
+        record.Parameter.Stages = stages;
+        record.Parameter.Type = bindTypeOpt.value();
+        record.Parameter.Count = resource.ArraySize == 0 ? 1u : resource.ArraySize;
+        record.Parameter.IsReadOnly = !_IsRwResourceType(bindTypeOpt.value());
+        record.Parameter.IsBindless = isBindless;
+        record.Vulkan.Name = resource.Name;
+        record.Vulkan.Kind = record.Parameter.Kind;
+        record.Vulkan.Stages = stages;
+        record.Vulkan.SetIndex = setIndex;
+        record.Vulkan.BindingIndex = bindingIndex;
+        record.Vulkan.ResourceType = bindTypeOpt.value();
+        record.Vulkan.DescriptorCount = record.Parameter.Count;
+        record.Vulkan.IsReadOnly = record.Parameter.IsReadOnly;
         record.Vulkan.IsBindless = isBindless;
+        record.Vulkan.DescriptorType = MapType(bindTypeOpt.value());
+
         if (isBindless) {
             auto bindlessSlotTypeOpt = _MapBindlessSlotType(resource, bindTypeOpt.value());
             if (!bindlessSlotTypeOpt.has_value()) {
@@ -233,53 +235,30 @@ bool _AppendSpirvBindings(
                     resource.ImageInfo.has_value() ? static_cast<uint32_t>(resource.ImageInfo->Dim) : static_cast<uint32_t>(SpirvImageDim::UNKNOWN));
                 return false;
             }
-            record.Layout.Kind = BindingParameterKind::Resource;
-            record.Layout.Abi = ResourceBindingAbi{
-                .Set = setIndex,
-                .Binding = bindingIndex,
-                .Type = bindTypeOpt.value(),
-                .Count = 0,
-                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
-                .IsBindless = true,
-            };
+            record.Parameter.Kind = ShaderParameterKind::BindlessArray;
+            record.Parameter.Count = 0;
+            record.Vulkan.Kind = ShaderParameterKind::BindlessArray;
+            record.Vulkan.DescriptorCount = 0;
             record.Vulkan.BindlessSlotType = bindlessSlotTypeOpt.value();
-        } else {
-            record.Layout.Abi = ResourceBindingAbi{
-                .Set = setIndex,
-                .Binding = bindingIndex,
-                .Type = bindTypeOpt.value(),
-                .Count = resource.ArraySize == 0 ? 1u : resource.ArraySize,
-                .IsReadOnly = !_IsRwResourceType(bindTypeOpt.value()),
-                .IsBindless = false,
-            };
         }
-        record.Vulkan.Kind = record.Layout.Kind;
-        record.Vulkan.Stages = stages;
-        record.Vulkan.SetIndex = setIndex.Value;
-        record.Vulkan.BindingIndex = bindingIndex;
-        record.Vulkan.ResourceType = bindTypeOpt.value();
-        record.Vulkan.DescriptorCount = std::get<ResourceBindingAbi>(record.Layout.Abi).Count;
-        record.Vulkan.IsReadOnly = std::get<ResourceBindingAbi>(record.Layout.Abi).IsReadOnly;
-        record.Vulkan.DescriptorType = MapType(bindTypeOpt.value());
+
         if (!_MergeRecord(records, std::move(record))) {
             return false;
         }
     }
 
-    for (const auto& pushConstant : reflection.PushConstants) {
+    for (const auto& pushConstant : reflection.ConstantRanges) {
         if (pushConstant.Size == 0) {
             RADRAY_ERR_LOG("push constant '{}' must have non-zero size", pushConstant.Name);
             return false;
         }
         ParameterRecord record{};
-        record.Layout.Name = pushConstant.Name;
-        record.Layout.Kind = BindingParameterKind::PushConstant;
-        record.Layout.Stages = stages;
-        record.Layout.Abi = PushConstantBindingAbi{
-            .Offset = pushConstant.Offset,
-            .Size = pushConstant.Size,
-        };
-        record.Vulkan.Kind = BindingParameterKind::PushConstant;
+        record.Parameter.Name = pushConstant.Name;
+        record.Parameter.Kind = ShaderParameterKind::Constant;
+        record.Parameter.Stages = stages;
+        record.Parameter.ByteSize = pushConstant.Size;
+        record.Vulkan.Name = pushConstant.Name;
+        record.Vulkan.Kind = ShaderParameterKind::Constant;
         record.Vulkan.Stages = stages;
         record.Vulkan.Offset = pushConstant.Offset;
         record.Vulkan.Size = pushConstant.Size;
@@ -294,17 +273,16 @@ bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
     unordered_map<uint32_t, const ParameterRecord*> bindlessBySet{};
     unordered_map<uint32_t, uint32_t> descriptorCountBySet{};
     for (const auto& record : records) {
-        if (record.Layout.Kind == BindingParameterKind::PushConstant) {
+        if (record.Parameter.Kind == ShaderParameterKind::Constant) {
             continue;
         }
-        const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
-        const uint32_t setIndex = abi.Set.Value;
+        const uint32_t setIndex = record.Vulkan.SetIndex;
         descriptorCountBySet[setIndex] += 1;
-        if (!abi.IsBindless) {
+        if (!record.Parameter.IsBindless) {
             continue;
         }
-        if (record.Layout.Kind != BindingParameterKind::Resource) {
-            RADRAY_ERR_LOG("bindless parameter '{}' must be a resource", record.Layout.Name);
+        if (record.Parameter.Kind != ShaderParameterKind::BindlessArray) {
+            RADRAY_ERR_LOG("bindless parameter '{}' must be a bindless array", record.Parameter.Name);
             return false;
         }
         auto [it, inserted] = bindlessBySet.emplace(setIndex, &record);
@@ -312,8 +290,8 @@ bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
             RADRAY_ERR_LOG(
                 "bindless set {} cannot contain more than one bindless parameter ('{}' and '{}')",
                 setIndex,
-                it->second->Layout.Name,
-                record.Layout.Name);
+                it->second->Parameter.Name,
+                record.Parameter.Name);
             return false;
         }
     }
@@ -331,21 +309,17 @@ bool _ValidateBindlessSets(const vector<ParameterRecord>& records) noexcept {
 }
 
 bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
-    const bool lhsPush = lhs.Layout.Kind == BindingParameterKind::PushConstant;
-    const bool rhsPush = rhs.Layout.Kind == BindingParameterKind::PushConstant;
-    if (lhsPush != rhsPush) {
-        return !lhsPush;
+    const bool lhsConstant = lhs.Parameter.Kind == ShaderParameterKind::Constant;
+    const bool rhsConstant = rhs.Parameter.Kind == ShaderParameterKind::Constant;
+    if (lhsConstant != rhsConstant) {
+        return !lhsConstant;
     }
-    if (lhsPush) {
-        const auto& lhsAbi = std::get<PushConstantBindingAbi>(lhs.Layout.Abi);
-        const auto& rhsAbi = std::get<PushConstantBindingAbi>(rhs.Layout.Abi);
-        return std::tie(lhsAbi.Offset, lhsAbi.Size, lhs.Layout.Name) <
-               std::tie(rhsAbi.Offset, rhsAbi.Size, rhs.Layout.Name);
+    if (lhsConstant) {
+        return std::tie(lhs.Vulkan.Offset, lhs.Vulkan.Size, lhs.Parameter.Name) <
+               std::tie(rhs.Vulkan.Offset, rhs.Vulkan.Size, rhs.Parameter.Name);
     }
-    const auto& lhsAbi = std::get<ResourceBindingAbi>(lhs.Layout.Abi);
-    const auto& rhsAbi = std::get<ResourceBindingAbi>(rhs.Layout.Abi);
-    return std::tie(lhsAbi.Set, lhsAbi.Binding, lhs.Layout.Kind, lhs.Layout.Name) <
-           std::tie(rhsAbi.Set, rhsAbi.Binding, rhs.Layout.Kind, rhs.Layout.Name);
+    return std::tie(lhs.Vulkan.SetIndex, lhs.Vulkan.BindingIndex, lhs.Parameter.Kind, lhs.Parameter.Name) <
+           std::tie(rhs.Vulkan.SetIndex, rhs.Vulkan.BindingIndex, rhs.Parameter.Kind, rhs.Parameter.Name);
 }
 
 }  // namespace
@@ -386,23 +360,20 @@ std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::spa
     std::sort(records.begin(), records.end(), _ParameterLess);
 
     VulkanMergedBindingLayout result{};
-    vector<BindingParameterLayout> layouts{};
-    layouts.reserve(records.size());
     result.Parameters.reserve(records.size());
+    result.VulkanParameters.reserve(records.size());
     uint32_t maxSetPlusOne = 0;
     for (uint32_t i = 0; i < records.size(); ++i) {
         auto& record = records[i];
-        record.Layout.Id = BindingParameterId{i};
-        record.Vulkan.Id = BindingParameterId{i};
-        layouts.push_back(record.Layout);
-        result.Parameters.push_back(record.Vulkan);
-        if (record.Layout.Kind != BindingParameterKind::PushConstant) {
-            const auto& abi = std::get<ResourceBindingAbi>(record.Layout.Abi);
-            maxSetPlusOne = std::max(maxSetPlusOne, abi.Set.Value + 1);
+        record.Parameter.Id = ShaderParameterId{i};
+        record.Vulkan.Id = ShaderParameterId{i};
+        result.Parameters.push_back(record.Parameter);
+        result.VulkanParameters.push_back(record.Vulkan);
+        if (record.Parameter.Kind != ShaderParameterKind::Constant) {
+            maxSetPlusOne = std::max(maxSetPlusOne, record.Vulkan.SetIndex + 1);
         }
     }
-    result.Layout = BindingLayout{std::move(layouts)};
-    result.SetLayoutCount = maxSetPlusOne;
+    result.DescriptorSetCount = maxSetPlusOne;
     return result;
 }
 

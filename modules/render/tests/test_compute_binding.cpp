@@ -204,13 +204,12 @@ protected:
         return opt.Release();
     }
 
-    unique_ptr<DescriptorSet> CreateDescriptorSetOrNull(RootSignature* rootSig, DescriptorSetIndex setIndex) {
+    unique_ptr<ShaderParameterTable> CreateShaderParameterTableOrNull(ShaderBindingLayout* layout) {
         string reason{};
-        auto opt = _ctx.CreateDescriptorSet(rootSig, setIndex, &reason);
+        auto opt = _ctx.CreateShaderParameterTable(layout, &reason);
         if (!opt.HasValue()) {
             ADD_FAILURE() << fmt::format(
-                "CreateDescriptorSet(set={}) failed on {}: {}",
-                setIndex.Value,
+                "CreateShaderParameterTable failed on {}: {}",
                 _ctx.GetBackendName(),
                 reason);
             return nullptr;
@@ -314,17 +313,18 @@ TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gScale", scaleViewDesc));
+    ASSERT_TRUE(set0->SetResource("gScale", scaleViewDesc));
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set1->SetResource("gOut", outputViewDesc));
 
-    auto pushIdOpt = program.RootSignatureObject->FindParameterId("gPush");
+    auto pushIdOpt = program.BindingLayout->FindParameterId("gPush");
     ASSERT_TRUE(pushIdOpt.has_value());
     PushDataCpu pushData{.Addend = kAddend};
+    ASSERT_TRUE(set0->SetBytes(pushIdOpt.value(), &pushData, sizeof(pushData)));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -344,12 +344,9 @@ TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue())
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
-    encoder->PushConstants(pushIdOpt.value(), &pushData, sizeof(pushData));
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(set0.get());
+    encoder->BindShaderParameters(set1.get());
     encoder->Dispatch(static_cast<uint32_t>(kElementCount), 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -448,14 +445,14 @@ TEST_P(ComputeBindingRuntimeTest, ReadOnlyStructuredBufferBindingWorks) {
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
 
     _ctx.ClearCapturedErrors();
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gLights", inputViewDesc))
+    ASSERT_TRUE(set0->SetResource("gLights", inputViewDesc))
         << fmt::format("WriteResource gLights failed on {}:\n{}", _ctx.GetBackendName(), _ctx.JoinCapturedErrors());
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set1->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -474,11 +471,9 @@ TEST_P(ComputeBindingRuntimeTest, ReadOnlyStructuredBufferBindingWorks) {
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue())
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(set0.get());
+    encoder->BindShaderParameters(set1.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -557,10 +552,10 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorSetTexelBufferBindingWorks) {
     auto readbackBuffer = this->CreateBufferOrNull(readbackBufferDesc, "Create texel readback buffer");
     ASSERT_NE(readbackBuffer, nullptr);
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gInput", inputViewDesc));
-    ASSERT_TRUE(set0->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set0->SetResource("gInput", inputViewDesc));
+    ASSERT_TRUE(set0->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -579,10 +574,8 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorSetTexelBufferBindingWorks) {
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue())
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(set0.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -685,14 +678,14 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gTex", textureView.get()));
-    ASSERT_TRUE(set0->WriteSampler("gSamp", sampler.get()));
+    ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
+    ASSERT_TRUE(set0->SetSampler("gSamp", sampler.get()));
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set1->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -711,11 +704,9 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue())
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(set0.get());
+    encoder->BindShaderParameters(set1.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -763,9 +754,6 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
     const StaticSamplerDescriptor staticSamplers[] = {
         StaticSamplerDescriptor{
             .Name = "gSamp",
-            .Set = DescriptorSetIndex{0},
-            .Binding = 1,
-            .Stages = ShaderStage::UNKNOWN,
             .Desc = staticSamplerDesc,
         },
     };
@@ -774,10 +762,7 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
         << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
     auto program = std::move(programOpt.value());
 
-    ASSERT_EQ(program.RootSignatureObject->GetStaticSamplerCount(), 1u);
-    EXPECT_FALSE(program.RootSignatureObject->FindParameterId("gSamp").has_value());
-    auto staticSampler = program.RootSignatureObject->FindStaticSampler(DescriptorSetIndex{0}, 1);
-    ASSERT_TRUE(staticSampler.HasValue());
+    EXPECT_FALSE(program.BindingLayout->FindParameterId("gSamp").has_value());
 
     TextureDescriptor textureDesc{};
     textureDesc.Dim = TextureDimension::Dim2D;
@@ -832,18 +817,15 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
     outputViewDesc.Stride = sizeof(uint32_t);
     outputViewDesc.Usage = BufferViewUsage::ReadWriteStorage;
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gTex", textureView.get()));
-    EXPECT_FALSE(set0->WriteSampler(staticSampler.Get()->Id, runtimeSampler.get()));
-    const string staticWriteCaptured = _ctx.JoinCapturedErrors();
-    EXPECT_NE(staticWriteCaptured.find("static sampler"), string::npos)
-        << fmt::format("Expected static sampler write rejection on {}, log:\n{}", _ctx.GetBackendName(), staticWriteCaptured);
+    ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
+    EXPECT_FALSE(set0->SetSampler("gSamp", runtimeSampler.get()));
     _ctx.ClearCapturedErrors();
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set1->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -862,11 +844,9 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue())
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(set0.get());
+    encoder->BindShaderParameters(set1.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -897,7 +877,7 @@ TEST_P(ComputeBindingRuntimeTest, StaticSamplerBindingWorks) {
     this->ExpectNoCapturedErrors();
 }
 
-TEST_P(ComputeBindingRuntimeTest, CreateRootSignatureFailsWhenStaticSamplerBindingIsMissing) {
+TEST_P(ComputeBindingRuntimeTest, CreateShaderBindingLayoutFailsWhenStaticSamplerBindingIsMissing) {
     string reason{};
     SamplerDescriptor staticSamplerDesc{};
     staticSamplerDesc.AddressS = AddressMode::ClampToEdge;
@@ -914,9 +894,6 @@ TEST_P(ComputeBindingRuntimeTest, CreateRootSignatureFailsWhenStaticSamplerBindi
     const StaticSamplerDescriptor staticSamplers[] = {
         StaticSamplerDescriptor{
             .Name = "MissingSampler",
-            .Set = DescriptorSetIndex{0},
-            .Binding = 7,
-            .Stages = ShaderStage::UNKNOWN,
             .Desc = staticSamplerDesc,
         },
     };
@@ -927,8 +904,80 @@ TEST_P(ComputeBindingRuntimeTest, CreateRootSignatureFailsWhenStaticSamplerBindi
         << fmt::format("CreateComputeProgram unexpectedly succeeded on {}", _ctx.GetBackendName());
 
     const string captured = _ctx.JoinCapturedErrors();
-    EXPECT_NE(captured.find("does not match any shader sampler binding"), string::npos)
+    EXPECT_NE(captured.find("does not match any shader sampler parameter"), string::npos)
         << fmt::format("Expected missing static sampler binding error on {}, log:\n{}", _ctx.GetBackendName(), captured);
+}
+
+TEST_P(ComputeBindingRuntimeTest, ShaderBindingLayoutCacheHitRemoveClearAndStaticSamplerKey) {
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kTextureSamplerShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+    program.PipelineObject.reset();
+
+    ShaderBindingLayoutCache* cache = _ctx.GetShaderBindingLayoutCache();
+    ASSERT_NE(cache, nullptr);
+    EXPECT_EQ(cache->Count(), 1u);
+
+    Shader* shaders[] = {program.ShaderObject.get()};
+    ShaderBindingLayoutDescriptor noStaticDesc{};
+    noStaticDesc.Shaders = shaders;
+
+    ShaderBindingLayout* originalLayout = program.BindingLayout;
+    auto hitOpt = cache->GetOrCreate(noStaticDesc);
+    ASSERT_TRUE(hitOpt.HasValue());
+    EXPECT_EQ(hitOpt.Get(), originalLayout);
+    EXPECT_EQ(cache->Count(), 1u);
+
+    EXPECT_TRUE(cache->Remove(originalLayout));
+    program.BindingLayout = nullptr;
+    EXPECT_EQ(cache->Count(), 0u);
+
+    auto recreatedOpt = cache->GetOrCreate(noStaticDesc);
+    ASSERT_TRUE(recreatedOpt.HasValue());
+    ShaderBindingLayout* noStaticLayout = recreatedOpt.Get();
+    ASSERT_NE(noStaticLayout, nullptr);
+    EXPECT_EQ(cache->Count(), 1u);
+
+    SamplerDescriptor staticSamplerDesc{};
+    staticSamplerDesc.AddressS = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressT = AddressMode::ClampToEdge;
+    staticSamplerDesc.AddressR = AddressMode::ClampToEdge;
+    staticSamplerDesc.MinFilter = FilterMode::Nearest;
+    staticSamplerDesc.MagFilter = FilterMode::Nearest;
+    staticSamplerDesc.MipmapFilter = FilterMode::Nearest;
+    staticSamplerDesc.LodMin = 0.0f;
+    staticSamplerDesc.LodMax = 0.0f;
+    staticSamplerDesc.Compare = std::nullopt;
+    staticSamplerDesc.AnisotropyClamp = 1;
+
+    const StaticSamplerDescriptor staticSamplers[] = {
+        StaticSamplerDescriptor{
+            .Name = "gSamp",
+            .Desc = staticSamplerDesc,
+        },
+    };
+    ShaderBindingLayoutDescriptor staticDesc{};
+    staticDesc.Shaders = shaders;
+    staticDesc.StaticSamplers = staticSamplers;
+
+    auto staticLayoutOpt = cache->GetOrCreate(staticDesc);
+    ASSERT_TRUE(staticLayoutOpt.HasValue());
+    ShaderBindingLayout* staticLayout = staticLayoutOpt.Get();
+    ASSERT_NE(staticLayout, nullptr);
+    EXPECT_NE(staticLayout, noStaticLayout);
+    EXPECT_EQ(cache->Count(), 2u);
+    EXPECT_FALSE(staticLayout->FindParameterId("gSamp").has_value());
+
+    auto staticHitOpt = cache->GetOrCreate(staticDesc);
+    ASSERT_TRUE(staticHitOpt.HasValue());
+    EXPECT_EQ(staticHitOpt.Get(), staticLayout);
+    EXPECT_EQ(cache->Count(), 2u);
+
+    cache->Clear();
+    EXPECT_EQ(cache->Count(), 0u);
+    this->ExpectNoCapturedErrors();
 }
 
 TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
@@ -1022,13 +1071,17 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
     bindless->SetBuffer(0, inputView0);
     bindless->SetBuffer(1, inputView1);
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
-    ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gSelect", selectViewDesc));
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
+    ASSERT_TRUE(table->SetBindlessArray("gInputs", bindless.get()));
 
-    auto set2 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{2});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(set1, nullptr);
+    ASSERT_TRUE(set1->SetResource("gSelect", selectViewDesc));
+
+    auto set2 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set2, nullptr);
-    ASSERT_TRUE(set2->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set2->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -1046,12 +1099,10 @@ TEST_P(ComputeBindingRuntimeTest, BindlessBufferBindingWorks) {
 
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindBindlessArray(DescriptorSetIndex{0}, bindless.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{2}, set2.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(table.get());
+    encoder->BindShaderParameters(set1.get());
+    encoder->BindShaderParameters(set2.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -1209,14 +1260,18 @@ TEST_P(ComputeBindingRuntimeTest, BindlessTextureAndSamplerWorks) {
     bindless->SetTexture(0, textureView0.get(), nullptr);
     bindless->SetTexture(1, textureView1.get(), nullptr);
 
-    auto set1 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{1});
-    ASSERT_NE(set1, nullptr);
-    ASSERT_TRUE(set1->WriteResource("gSample", sampleViewDesc));
-    ASSERT_TRUE(set1->WriteSampler("gSamp", sampler.get()));
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
+    ASSERT_TRUE(table->SetBindlessArray("gTextures", bindless.get()));
 
-    auto set2 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{2});
+    auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(set1, nullptr);
+    ASSERT_TRUE(set1->SetResource("gSample", sampleViewDesc));
+    ASSERT_TRUE(set1->SetSampler("gSamp", sampler.get()));
+
+    auto set2 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set2, nullptr);
-    ASSERT_TRUE(set2->WriteResource("gOut", outputViewDesc));
+    ASSERT_TRUE(set2->SetResource("gOut", outputViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -1234,12 +1289,10 @@ TEST_P(ComputeBindingRuntimeTest, BindlessTextureAndSamplerWorks) {
 
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
-    encoder->BindBindlessArray(DescriptorSetIndex{0}, bindless.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set1.get());
-    encoder->BindDescriptorSet(DescriptorSetIndex{2}, set2.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+    encoder->BindShaderParameters(table.get());
+    encoder->BindShaderParameters(set1.get());
+    encoder->BindShaderParameters(set2.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
 
@@ -1287,24 +1340,15 @@ TEST_P(ComputeBindingRuntimeTest, BindBindlessArrayFailsWhenSetIsNotBindless) {
     auto bindless = this->CreateBindlessArrayOrNull(bindlessDesc);
     ASSERT_NE(bindless, nullptr);
 
-    auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
-    ASSERT_TRUE(cmdOpt.HasValue());
-    auto cmd = cmdOpt.Release();
-    cmd->Begin();
-    auto encoderOpt = cmd->BeginComputePass();
-    ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
 
     _ctx.ClearCapturedErrors();
-    encoder->BindBindlessArray(DescriptorSetIndex{0}, bindless.get());
-    cmd->EndComputePass(std::move(encoder));
-    cmd->End();
+    EXPECT_FALSE(table->SetBindlessArray("gScale", bindless.get()));
 
     const string captured = _ctx.JoinCapturedErrors();
-    EXPECT_NE(captured.find("not declared as a bindless set"), string::npos)
-        << fmt::format("Expected bindless set declaration error on {}, log:\n{}", _ctx.GetBackendName(), captured);
+    EXPECT_NE(captured.find("not bindless"), string::npos)
+        << fmt::format("Expected non-bindless parameter error on {}, log:\n{}", _ctx.GetBackendName(), captured);
 }
 
 TEST_P(ComputeBindingRuntimeTest, BindBindlessArrayFailsWhenSlotTypeMismatches) {
@@ -1324,18 +1368,20 @@ TEST_P(ComputeBindingRuntimeTest, BindBindlessArrayFailsWhenSlotTypeMismatches) 
     auto bindless = this->CreateBindlessArrayOrNull(bindlessDesc);
     ASSERT_NE(bindless, nullptr);
 
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
+    ASSERT_TRUE(table->SetBindlessArray("gTextures", bindless.get()));
+
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue());
     auto cmd = cmdOpt.Release();
     cmd->Begin();
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
 
     _ctx.ClearCapturedErrors();
-    encoder->BindBindlessArray(DescriptorSetIndex{0}, bindless.get());
+    encoder->BindShaderParameters(table.get());
     cmd->EndComputePass(std::move(encoder));
     cmd->End();
 
@@ -1344,7 +1390,7 @@ TEST_P(ComputeBindingRuntimeTest, BindBindlessArrayFailsWhenSlotTypeMismatches) 
         << fmt::format("Expected bindless slot type mismatch on {}, log:\n{}", _ctx.GetBackendName(), captured);
 }
 
-TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenSetIndexMismatch) {
+TEST_P(ComputeBindingRuntimeTest, BindShaderParameterTableAllowsPartialParameterUpdates) {
     string reason{};
     auto programOpt = _ctx.CreateComputeProgram(kMultiSetBufferShader, "CSMain", false, &reason);
     ASSERT_TRUE(programOpt.has_value())
@@ -1370,9 +1416,9 @@ TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenSetIndexMismatch) {
     scaleViewDesc.Range = BufferRange{0, cbufferSize};
     scaleViewDesc.Usage = BufferViewUsage::CBuffer;
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gScale", scaleViewDesc));
+    ASSERT_TRUE(set0->SetResource("gScale", scaleViewDesc));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -1381,18 +1427,16 @@ TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenSetIndexMismatch) {
     cmd->Begin();
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
 
     _ctx.ClearCapturedErrors();
-    encoder->BindDescriptorSet(DescriptorSetIndex{1}, set0.get());
+    encoder->BindShaderParameters(set0.get());
     cmd->EndComputePass(std::move(encoder));
     cmd->End();
 
     const string captured = _ctx.JoinCapturedErrors();
-    EXPECT_NE(captured.find("descriptor set index mismatch"), string::npos)
-        << fmt::format("Expected descriptor set mismatch error on {}, log:\n{}", _ctx.GetBackendName(), captured);
+    EXPECT_TRUE(captured.empty())
+        << fmt::format("Unexpected partial table bind error on {}, log:\n{}", _ctx.GetBackendName(), captured);
 }
 
 TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenRequiredBindingMissing) {
@@ -1434,9 +1478,9 @@ TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenRequiredBindingMissi
     auto textureView = this->CreateTextureViewOrNull(textureViewDesc, "Create texture SRV");
     ASSERT_NE(textureView, nullptr);
 
-    auto set0 = this->CreateDescriptorSetOrNull(program.RootSignatureObject.get(), DescriptorSetIndex{0});
+    auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
-    ASSERT_TRUE(set0->WriteResource("gTex", textureView.get()));
+    ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue())
@@ -1445,12 +1489,10 @@ TEST_P(ComputeBindingRuntimeTest, BindDescriptorSetFailsWhenRequiredBindingMissi
     cmd->Begin();
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
 
     _ctx.ClearCapturedErrors();
-    encoder->BindDescriptorSet(DescriptorSetIndex{0}, set0.get());
+    encoder->BindShaderParameters(set0.get());
     cmd->EndComputePass(std::move(encoder));
     cmd->End();
 
@@ -1466,7 +1508,7 @@ TEST_P(ComputeBindingRuntimeTest, PushConstantsFailsWhenSizeMismatch) {
         << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
     auto program = std::move(programOpt.value());
 
-    auto pushIdOpt = program.RootSignatureObject->FindParameterId("gPush");
+    auto pushIdOpt = program.BindingLayout->FindParameterId("gPush");
     ASSERT_TRUE(pushIdOpt.has_value());
 
     uint32_t wrongSizeData = 123;
@@ -1477,17 +1519,18 @@ TEST_P(ComputeBindingRuntimeTest, PushConstantsFailsWhenSizeMismatch) {
     cmd->Begin();
     auto encoderOpt = cmd->BeginComputePass();
     ASSERT_TRUE(encoderOpt.HasValue());
-    auto encoder = encoderOpt.Release();
-    encoder->BindRootSignature(program.RootSignatureObject.get());
-    encoder->BindComputePipelineState(program.PipelineObject.get());
+    auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
+
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
 
     _ctx.ClearCapturedErrors();
-    encoder->PushConstants(pushIdOpt.value(), &wrongSizeData, sizeof(wrongSizeData));
+    EXPECT_FALSE(table->SetBytes(pushIdOpt.value(), &wrongSizeData, sizeof(wrongSizeData)));
     cmd->EndComputePass(std::move(encoder));
     cmd->End();
 
     const string captured = _ctx.JoinCapturedErrors();
-    EXPECT_NE(captured.find("push constant size mismatch"), string::npos)
+    EXPECT_NE(captured.find("constant size mismatch"), string::npos)
         << fmt::format("Expected push constant size mismatch on {}, log:\n{}", _ctx.GetBackendName(), captured);
 }
 

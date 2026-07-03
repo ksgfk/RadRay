@@ -423,11 +423,12 @@ enum class ShaderBindingTableEntryType : uint8_t {
     Callable
 };
 
-enum class BindingParameterKind : int32_t {
+enum class ShaderParameterKind : int32_t {
     UNKNOWN,
     Resource,
     Sampler,
-    PushConstant
+    Constant,
+    BindlessArray
 };
 
 enum class SwapChainStatus : int32_t {
@@ -467,8 +468,9 @@ enum class RenderObjectTag : uint32_t {
     ComputeCmdEncoder = CmdEncoder | (CmdEncoder << 2),
     Fence = CmdEncoder << 3,
     Shader = Fence << 1,
-    RootSignature = Shader << 1,
-    PipelineState = RootSignature << 1,
+    ShaderBindingLayout = Shader << 1,
+    ShaderParameterTable = ShaderBindingLayout << 1,
+    PipelineState = ShaderParameterTable << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
     ComputePipelineState = PipelineState | (PipelineState << 2),
     SwapChain = PipelineState << 3,
@@ -478,8 +480,7 @@ enum class RenderObjectTag : uint32_t {
     ResourceView = Resource << 3,
     TextureView = ResourceView | (ResourceView << 1),
     AccelerationStructureView = ResourceView | (ResourceView << 2),
-    DescriptorSet = ResourceView << 3,
-    Sampler = DescriptorSet << 1,
+    Sampler = ResourceView << 3,
     BindlessArray = Sampler << 1,
     QueryPool = BindlessArray << 1,
     RayTracingCmdEncoder = QueryPool << 1,
@@ -563,8 +564,9 @@ class Texture;
 class TextureView;
 class AccelerationStructureView;
 class Shader;
-class DescriptorSet;
-class RootSignature;
+class ShaderBindingLayout;
+class ShaderParameterTable;
+class ShaderBindingLayoutCache;
 class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
@@ -925,133 +927,42 @@ struct ShaderDescriptor {
     std::optional<ShaderReflectionDesc> Reflection{};
 };
 
-struct BindingParameterId {
+struct ShaderParameterId {
     uint32_t Value{0};
 
-    constexpr BindingParameterId() noexcept = default;
-    constexpr BindingParameterId(uint32_t value) noexcept : Value(value) {}
+    constexpr ShaderParameterId() noexcept = default;
+    constexpr ShaderParameterId(uint32_t value) noexcept : Value(value) {}
 
     constexpr operator uint32_t() const noexcept { return Value; }
 
-    friend auto operator<=>(const BindingParameterId& lhs, const BindingParameterId& rhs) noexcept = default;
+    friend auto operator<=>(const ShaderParameterId& lhs, const ShaderParameterId& rhs) noexcept = default;
 };
 
-struct DescriptorSetIndex {
-    uint32_t Value{0};
-
-    constexpr DescriptorSetIndex() noexcept = default;
-    constexpr DescriptorSetIndex(uint32_t value) noexcept : Value(value) {}
-
-    constexpr operator uint32_t() const noexcept { return Value; }
-
-    friend auto operator<=>(const DescriptorSetIndex& lhs, const DescriptorSetIndex& rhs) noexcept = default;
-};
-
-struct ResourceBindingAbi {
-    DescriptorSetIndex Set{0};
-    uint32_t Binding{0};
+struct ShaderParameterInfo {
+    string Name{};
+    ShaderParameterId Id{0};
+    ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
     ResourceBindType Type{ResourceBindType::UNKNOWN};
     uint32_t Count{1};
+    uint32_t ByteSize{0};
     bool IsReadOnly{true};
     bool IsBindless{false};
 
-    friend bool operator==(const ResourceBindingAbi&, const ResourceBindingAbi&) noexcept = default;
-};
-
-struct PushConstantBindingAbi {
-    uint32_t Offset{0};
-    uint32_t Size{0};
-
-    friend bool operator==(const PushConstantBindingAbi&, const PushConstantBindingAbi&) noexcept = default;
-};
-
-struct BindingParameterLayout {
-    string Name{};
-    BindingParameterId Id{0};
-    BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::variant<ResourceBindingAbi, PushConstantBindingAbi> Abi{};
-
-    friend bool operator==(const BindingParameterLayout&, const BindingParameterLayout&) noexcept = default;
-};
-
-class BindingLayout {
-public:
-    BindingLayout() noexcept = default;
-    explicit BindingLayout(vector<BindingParameterLayout> parameters) noexcept;
-
-    std::span<const BindingParameterLayout> GetParameters() const noexcept;
-
-    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept;
-
-    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept;
-
-private:
-    vector<BindingParameterLayout> _parameters{};
-};
-
-struct PushConstantRange {
-    string Name{};
-    BindingParameterId Id{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    uint32_t Offset{0};
-    uint32_t Size{0};
-
-    friend bool operator==(const PushConstantRange&, const PushConstantRange&) noexcept = default;
-};
-
-struct BindlessSetLayout {
-    string Name{};
-    BindingParameterId Id{0};
-    DescriptorSetIndex Set{0};
-    uint32_t Binding{0};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    BindlessSlotType SlotType{BindlessSlotType::Multiple};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-
-    friend bool operator==(const BindlessSetLayout&, const BindlessSetLayout&) noexcept = default;
+    friend bool operator==(const ShaderParameterInfo&, const ShaderParameterInfo&) noexcept = default;
 };
 
 struct StaticSamplerDescriptor {
     string Name{};
-    DescriptorSetIndex Set{0};
-    uint32_t Binding{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
     SamplerDescriptor Desc{};
 
     friend bool operator==(const StaticSamplerDescriptor&, const StaticSamplerDescriptor&) noexcept = default;
 };
 
-struct StaticSamplerLayout {
-    string Name{};
-    BindingParameterId Id{0};
-    DescriptorSetIndex Set{0};
-    uint32_t Binding{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    SamplerDescriptor Desc{};
-
-    friend bool operator==(const StaticSamplerLayout&, const StaticSamplerLayout&) noexcept = default;
-};
-
-struct RootSignatureDescriptor {
+struct ShaderBindingLayoutDescriptor {
     std::span<Shader*> Shaders{};
     std::span<const StaticSamplerDescriptor> StaticSamplers{};
 };
-
-/// CPU-side preview of the public layout produced by CreateRootSignature.
-/// This is built from shader reflection before allocating backend objects, so
-/// callers can content-address root signatures without first creating one.
-struct RootSignatureLayoutPreview {
-    BindingLayout Layout{};
-    uint32_t DescriptorSetCount{0};
-    vector<BindlessSetLayout> BindlessSetLayouts{};
-    vector<StaticSamplerLayout> StaticSamplerLayouts{};
-    vector<PushConstantRange> PushConstantRanges{};
-};
-
-std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreview(
-    RenderBackend backend,
-    const RootSignatureDescriptor& desc) noexcept;
 
 struct VertexElement {
     uint64_t Offset{0};
@@ -1220,7 +1131,7 @@ struct ShaderEntry {
 };
 
 struct GraphicsPipelineStateDescriptor {
-    RootSignature* RootSig{nullptr};
+    ShaderBindingLayout* BindingLayout{nullptr};
     std::optional<ShaderEntry> VS{};
     std::optional<ShaderEntry> PS{};
     std::span<const VertexBufferLayout> VertexLayouts{};
@@ -1231,7 +1142,7 @@ struct GraphicsPipelineStateDescriptor {
 };
 
 struct ComputePipelineStateDescriptor {
-    RootSignature* RootSig{nullptr};
+    ShaderBindingLayout* BindingLayout{nullptr};
     ShaderEntry CS{};
 };
 
@@ -1310,7 +1221,7 @@ struct RayTracingHitGroupDescriptor {
 };
 
 struct RayTracingPipelineStateDescriptor {
-    RootSignature* RootSig{nullptr};
+    ShaderBindingLayout* BindingLayout{nullptr};
     std::span<const RayTracingShaderEntry> ShaderEntries{};
     std::span<const RayTracingHitGroupDescriptor> HitGroups{};
     uint32_t MaxRecursionDepth{1};
@@ -1420,9 +1331,9 @@ public:
 
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept = 0;
 
-    virtual Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, DescriptorSetIndex set) noexcept = 0;
+    virtual Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
@@ -1514,13 +1425,7 @@ public:
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
-    virtual void BindRootSignature(RootSignature* rootSig) noexcept = 0;
-
-    virtual void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept = 0;
-
-    virtual void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept = 0;
-
-    virtual void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept = 0;
+    virtual void BindShaderParameters(ShaderParameterTable* table) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1679,41 +1584,40 @@ public:
     virtual Nullable<const ShaderReflectionDesc*> GetReflection() const noexcept = 0;
 };
 
-class RootSignature : public RenderBase, public IDebugName {
+class ShaderBindingLayout : public RenderBase, public IDebugName {
 public:
-    virtual ~RootSignature() noexcept = default;
+    ShaderBindingLayout() noexcept = default;
+    explicit ShaderBindingLayout(vector<ShaderParameterInfo> parameters) noexcept;
+    virtual ~ShaderBindingLayout() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RootSignature; }
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderBindingLayout; }
 
-    virtual const BindingLayout& GetBindingLayout() const noexcept = 0;
+    std::span<const ShaderParameterInfo> GetParameters() const noexcept;
 
-    virtual uint32_t GetDescriptorSetCount() const noexcept = 0;
+    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept;
 
-    virtual std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept = 0;
+    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept;
 
-    virtual uint32_t GetBindlessSetCount() const noexcept = 0;
+protected:
+    void SetParameters(vector<ShaderParameterInfo> parameters) noexcept;
 
-    virtual std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept = 0;
+private:
+    vector<ShaderParameterInfo> _parameters{};
+};
 
-    virtual uint32_t GetStaticSamplerCount() const noexcept = 0;
+class ShaderBindingLayoutCache {
+public:
+    ShaderBindingLayoutCache() noexcept = default;
+    ShaderBindingLayoutCache(const ShaderBindingLayoutCache&) = delete;
+    ShaderBindingLayoutCache(ShaderBindingLayoutCache&&) = delete;
+    ShaderBindingLayoutCache& operator=(const ShaderBindingLayoutCache&) = delete;
+    ShaderBindingLayoutCache& operator=(ShaderBindingLayoutCache&&) = delete;
+    virtual ~ShaderBindingLayoutCache() noexcept = default;
 
-    virtual std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept = 0;
-
-    virtual std::span<const PushConstantRange> GetPushConstantRanges() const noexcept = 0;
-
-    bool HasBindlessSet(DescriptorSetIndex set) const noexcept;
-
-    Nullable<const BindlessSetLayout*> FindBindlessSet(DescriptorSetIndex set) const noexcept;
-
-    Nullable<const StaticSamplerLayout*> FindStaticSampler(BindingParameterId id) const noexcept;
-
-    Nullable<const StaticSamplerLayout*> FindStaticSampler(DescriptorSetIndex set, uint32_t binding) const noexcept;
-
-    std::optional<BindingParameterId> FindParameterId(std::string_view name) const noexcept;
-
-    Nullable<const BindingParameterLayout*> FindParameter(BindingParameterId id) const noexcept;
-
-    Nullable<const PushConstantRange*> FindPushConstantRange(BindingParameterId id) const noexcept;
+    virtual Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept = 0;
+    virtual bool Remove(ShaderBindingLayout* layout) noexcept = 0;
+    virtual void Clear() noexcept = 0;
+    virtual uint32_t Count() const noexcept = 0;
 };
 
 class PipelineState : public RenderBase, public IDebugName {
@@ -1768,30 +1672,36 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
 };
 
-class DescriptorSet : public RenderBase, public IDebugName {
+class ShaderParameterTable : public RenderBase, public IDebugName {
 public:
-    virtual ~DescriptorSet() noexcept = default;
+    virtual ~ShaderParameterTable() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorSet; }
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterTable; }
 
-    virtual RootSignature* GetRootSignature() const noexcept = 0;
+    virtual ShaderBindingLayout* GetShaderBindingLayout() const noexcept = 0;
 
-    virtual DescriptorSetIndex GetSetIndex() const noexcept = 0;
+    virtual bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual bool SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual bool SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual bool SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept = 0;
 
-    bool WriteResource(std::string_view name, ResourceView* view, uint32_t arrayIndex = 0) noexcept;
+    virtual bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept = 0;
 
-    bool WriteResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept;
+    bool SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex = 0) noexcept;
 
-    bool WriteSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex = 0) noexcept;
+    bool SetResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept;
+
+    bool SetSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex = 0) noexcept;
+
+    bool SetBytes(std::string_view name, const void* data, uint32_t size) noexcept;
+
+    bool SetBindlessArray(std::string_view name, BindlessArray* array) noexcept;
 
 private:
-    std::optional<BindingParameterId> ResolveParameterId(std::string_view name) const noexcept;
+    std::optional<ShaderParameterId> ResolveParameterId(std::string_view name) const noexcept;
 };
 
 class Sampler : public RenderBase, public IDebugName {

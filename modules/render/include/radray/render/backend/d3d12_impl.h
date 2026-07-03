@@ -8,6 +8,7 @@
 #include <radray/allocator.h>
 
 #include <radray/render/backend/d3d12_helper.h>
+#include <radray/render/common.h>
 
 namespace radray::render::d3d12 {
 
@@ -335,9 +336,9 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<RootSignature>> CreateRootSignature(const RootSignatureDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept override;
 
-    Nullable<unique_ptr<DescriptorSet>> CreateDescriptorSet(RootSignature* rootSig, DescriptorSetIndex set) noexcept override;
+    Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
@@ -359,6 +360,10 @@ public:
     void DestroyImpl() noexcept;
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
+
+    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ShaderBindingLayoutDescriptor& desc) noexcept;
+
+    Nullable<unique_ptr<DescriptorSetD3D12>> CreateDescriptorSetInternal(RootSigD3D12* rootSig, uint32_t registerSpace) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -513,15 +518,9 @@ public:
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 
-    void BindRootSignature(RootSignature* rootSig) noexcept override;
-
-    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
-
-    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
+    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
-
-    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -545,13 +544,7 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindRootSignature(RootSignature* rootSig) noexcept override;
-
-    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
-
-    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
-
-    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
+    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
@@ -573,13 +566,7 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindRootSignature(RootSignature* rootSig) noexcept override;
-
-    void BindDescriptorSet(DescriptorSetIndex setIndex, DescriptorSet* set) noexcept override;
-
-    void PushConstants(BindingParameterId id, const void* data, uint32_t size) noexcept override;
-
-    void BindBindlessArray(DescriptorSetIndex set, BindlessArray* array) noexcept override;
+    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
 
     void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
 
@@ -779,11 +766,10 @@ public:
     std::optional<ShaderReflectionDesc> _reflection{};
 };
 
-class RootSigD3D12 final : public RootSignature {
+class RootSigD3D12 final : public ShaderBindingLayout {
 public:
     struct DescriptorTableInfo {
-        DescriptorSetIndex SetIndex{0};
-        BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
+        ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
         uint32_t RegisterSpace{0};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t HeapOffset{0};
@@ -792,7 +778,6 @@ public:
     };
 
     struct DescriptorSetInfo {
-        DescriptorSetIndex SetIndex{0};
         uint32_t RegisterSpace{0};
         uint32_t ResourceRootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t SamplerRootParameterIndex{std::numeric_limits<uint32_t>::max()};
@@ -801,9 +786,9 @@ public:
     };
 
     struct ParameterBindingInfo {
-        BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
+        string Name{};
+        ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
         ResourceBindType Type{ResourceBindType::UNKNOWN};
-        DescriptorSetIndex SetIndex{0};
         uint32_t BindingIndex{0};
         uint32_t ShaderRegister{0};
         uint32_t RegisterSpace{0};
@@ -820,15 +805,41 @@ public:
     };
 
     struct BindlessSetInfo {
-        DescriptorSetIndex SetIndex{0};
-        BindingParameterId Id{0};
+        uint32_t RegisterSpace{0};
+        ShaderParameterId Id{0};
         uint32_t BindingIndex{0};
         uint32_t ShaderRegister{0};
-        uint32_t RegisterSpace{0};
         ResourceBindType Type{ResourceBindType::UNKNOWN};
         BindlessSlotType SlotType{BindlessSlotType::Multiple};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         ShaderStages Stages{ShaderStage::UNKNOWN};
+    };
+
+    struct BindlessBindingInfo {
+        string Name{};
+        ShaderParameterId Id{0};
+        uint32_t RegisterSpace{0};
+        uint32_t BindingIndex{0};
+        ResourceBindType Type{ResourceBindType::UNKNOWN};
+        BindlessSlotType SlotType{BindlessSlotType::Multiple};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+    };
+
+    struct StaticSamplerInfo {
+        string Name{};
+        ShaderParameterId Id{0};
+        uint32_t RegisterSpace{0};
+        uint32_t BindingIndex{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+        SamplerDescriptor Desc{};
+    };
+
+    struct ConstantInfo {
+        string Name{};
+        ShaderParameterId Id{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+        uint32_t Offset{0};
+        uint32_t Size{0};
     };
 
     RootSigD3D12(
@@ -842,27 +853,33 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    const BindingLayout& GetBindingLayout() const noexcept override { return _bindingLayout; }
+    uint32_t GetParameterCount() const noexcept { return static_cast<uint32_t>(_parameters.size()); }
 
-    uint32_t GetDescriptorSetCount() const noexcept override { return static_cast<uint32_t>(_descriptorSetLayouts.size()); }
+    uint32_t GetDescriptorSetCount() const noexcept { return static_cast<uint32_t>(_descriptorSetLayouts.size()); }
 
-    std::span<const BindingParameterLayout> GetDescriptorSetLayout(DescriptorSetIndex set) const noexcept override;
+    std::span<const ShaderParameterId> GetDescriptorSetLayout(uint32_t registerSpace) const noexcept;
 
-    uint32_t GetBindlessSetCount() const noexcept override { return static_cast<uint32_t>(_bindlessSetLayouts.size()); }
+    uint32_t GetBindlessSetCount() const noexcept { return static_cast<uint32_t>(_bindlessSetLayouts.size()); }
 
-    std::span<const BindlessSetLayout> GetBindlessSetLayouts() const noexcept override { return _bindlessSetLayouts; }
+    std::span<const BindlessBindingInfo> GetBindlessBindings() const noexcept { return _bindlessSetLayouts; }
 
-    uint32_t GetStaticSamplerCount() const noexcept override { return static_cast<uint32_t>(_staticSamplerLayouts.size()); }
+    uint32_t GetStaticSamplerCount() const noexcept { return static_cast<uint32_t>(_staticSamplerLayouts.size()); }
 
-    std::span<const StaticSamplerLayout> GetStaticSamplerLayouts() const noexcept override { return _staticSamplerLayouts; }
+    std::span<const StaticSamplerInfo> GetStaticSamplers() const noexcept { return _staticSamplerLayouts; }
 
-    std::span<const PushConstantRange> GetPushConstantRanges() const noexcept override { return _pushConstantRanges; }
+    std::span<const ConstantInfo> GetPushConstants() const noexcept { return _pushConstants; }
 
-    Nullable<const ParameterBindingInfo*> FindParameterInfo(BindingParameterId id) const noexcept;
+    void SetPublicParameters(vector<ShaderParameterInfo> parameters) noexcept { SetParameters(std::move(parameters)); }
 
-    Nullable<const DescriptorSetInfo*> FindDescriptorSetInfo(DescriptorSetIndex set) const noexcept;
+    bool HasBindlessSet(uint32_t registerSpace) const noexcept;
 
-    Nullable<const BindlessSetInfo*> FindBindlessSetInfo(DescriptorSetIndex set) const noexcept;
+    Nullable<const BindlessBindingInfo*> FindBindlessSet(uint32_t registerSpace) const noexcept;
+
+    Nullable<const ParameterBindingInfo*> FindParameterInfo(ShaderParameterId id) const noexcept;
+
+    Nullable<const DescriptorSetInfo*> FindDescriptorSetInfo(uint32_t registerSpace) const noexcept;
+
+    Nullable<const BindlessSetInfo*> FindBindlessSetInfo(uint32_t registerSpace) const noexcept;
 
     std::span<const DescriptorTableInfo> GetResourceTables() const noexcept { return _resourceTables; }
 
@@ -872,11 +889,10 @@ public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
     VersionedRootSignatureDescContainer _desc;
-    BindingLayout _bindingLayout{};
-    vector<vector<BindingParameterLayout>> _descriptorSetLayouts{};
-    vector<BindlessSetLayout> _bindlessSetLayouts{};
-    vector<StaticSamplerLayout> _staticSamplerLayouts{};
-    vector<PushConstantRange> _pushConstantRanges{};
+    vector<vector<ShaderParameterId>> _descriptorSetLayouts{};
+    vector<BindlessBindingInfo> _bindlessSetLayouts{};
+    vector<StaticSamplerInfo> _staticSamplerLayouts{};
+    vector<ConstantInfo> _pushConstants{};
     vector<ParameterBindingInfo> _parameters{};
     vector<DescriptorSetInfo> _descriptorSets{};
     vector<BindlessSetInfo> _bindlessSets{};
@@ -1034,15 +1050,50 @@ public:
     string _name;
 };
 
-class DescriptorSetD3D12 final : public DescriptorSet {
+class DescriptorSetD3D12 final : public IDebugName {
 public:
     DescriptorSetD3D12(
         DeviceD3D12* device,
         RootSigD3D12* rootSig,
-        DescriptorSetIndex setIndex,
+        uint32_t registerSpace,
         GpuDescriptorHeapViewRAII resHeapView,
         GpuDescriptorHeapViewRAII samplerHeapView) noexcept;
-    ~DescriptorSetD3D12() noexcept override = default;
+    ~DescriptorSetD3D12() noexcept = default;
+
+    bool IsValid() const noexcept;
+
+    void Destroy() noexcept;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    RootSigD3D12* GetRootSignature() const noexcept { return _rootSig; }
+
+    uint32_t GetRegisterSpace() const noexcept { return _registerSpace; }
+
+    bool WriteResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept;
+
+    bool WriteResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept;
+
+    bool WriteSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept;
+
+    bool IsFullyWritten() const noexcept;
+    bool HasAnyWrite() const noexcept;
+
+public:
+    DeviceD3D12* _device;
+    RootSigD3D12* _rootSig;
+    uint32_t _registerSpace{0};
+    GpuDescriptorHeapViewRAII _resHeapView;
+    GpuDescriptorHeapViewRAII _samplerHeapView;
+    vector<uint8_t> _resourceWritten;
+    vector<uint8_t> _samplerWritten;
+    string _name;
+};
+
+class ShaderParameterTableD3D12 final : public ShaderParameterTable {
+public:
+    ShaderParameterTableD3D12(DeviceD3D12* device, RootSigD3D12* rootSig) noexcept;
+    ~ShaderParameterTableD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
 
@@ -1050,26 +1101,32 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    RootSignature* GetRootSignature() const noexcept override { return _rootSig; }
+    ShaderBindingLayout* GetShaderBindingLayout() const noexcept override { return _rootSig; }
 
-    DescriptorSetIndex GetSetIndex() const noexcept override { return _setIndex; }
+    bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept override;
 
-    bool WriteResource(BindingParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept override;
+    bool SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
 
-    bool WriteResource(BindingParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept override;
+    bool SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
 
-    bool WriteSampler(BindingParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept override;
+    bool SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept override;
+
+    bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept override;
 
     bool IsFullyWritten() const noexcept;
+
+    Nullable<DescriptorSetD3D12*> GetDescriptorSet(uint32_t registerSpace) const noexcept;
+
+    std::span<const byte> GetConstantData(ShaderParameterId id) const noexcept;
+
+    BindlessArray* GetBindlessArray(uint32_t registerSpace) const noexcept;
 
 public:
     DeviceD3D12* _device;
     RootSigD3D12* _rootSig;
-    DescriptorSetIndex _setIndex{0};
-    GpuDescriptorHeapViewRAII _resHeapView;
-    GpuDescriptorHeapViewRAII _samplerHeapView;
-    vector<uint8_t> _resourceWritten;
-    vector<uint8_t> _samplerWritten;
+    vector<unique_ptr<DescriptorSetD3D12>> _sets;
+    vector<vector<byte>> _constantData;
+    vector<BindlessArray*> _bindlessArrays;
     string _name;
 };
 
@@ -1130,6 +1187,29 @@ public:
     string _name;
 };
 
+class ShaderBindingLayoutCacheD3D12 final : public ShaderBindingLayoutCache {
+public:
+    explicit ShaderBindingLayoutCacheD3D12(DeviceD3D12* device) noexcept;
+    ~ShaderBindingLayoutCacheD3D12() noexcept override;
+
+    Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept override;
+    bool Remove(ShaderBindingLayout* layout) noexcept override;
+    void Clear() noexcept override;
+    uint32_t Count() const noexcept override;
+
+private:
+    struct Entry {
+        vector<Shader*> Shaders;
+        vector<StaticSamplerDescriptor> StaticSamplers;
+        unique_ptr<RootSigD3D12> Layout;
+    };
+
+    bool Matches(const Entry& entry, const ShaderBindingLayoutDescriptor& desc) const noexcept;
+
+    DeviceD3D12* _device;
+    vector<Entry> _entries;
+};
+
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc);
@@ -1140,7 +1220,7 @@ constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3
 constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
-constexpr auto CastD3D12Object(RootSignature* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+constexpr auto CastD3D12Object(ShaderBindingLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<SamplerD3D12*>(v); }
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
@@ -1150,15 +1230,15 @@ constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return stati
 constexpr auto CastD3D12Object(AccelerationStructureView* v) noexcept { return static_cast<AccelerationStructureViewD3D12*>(v); }
 constexpr auto CastD3D12Object(RayTracingPipelineState* v) noexcept { return static_cast<RayTracingPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(ShaderBindingTable* v) noexcept { return static_cast<ShaderBindingTableD3D12*>(v); }
-constexpr auto CastD3D12Object(DescriptorSet* v) noexcept { return static_cast<DescriptorSetD3D12*>(v); }
+constexpr auto CastD3D12Object(ShaderParameterTable* v) noexcept { return static_cast<ShaderParameterTableD3D12*>(v); }
 constexpr auto CastD3D12Object(QueryPool* v) noexcept { return static_cast<QueryPoolD3D12*>(v); }
 constexpr auto CastD3D12Object(DXGIFactory* v) noexcept { return static_cast<DXGIFactoryImpl*>(v); }
 
 struct D3D12BindingParameterInfo {
-    BindingParameterId Id{0};
-    BindingParameterKind Kind{BindingParameterKind::UNKNOWN};
+    string Name{};
+    ShaderParameterId Id{0};
+    ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
     bool IsAvailable{false};
-    DescriptorSetIndex SetIndex{0};
     uint32_t BindingIndex{0};
     uint32_t ShaderRegister{0};
     uint32_t RegisterSpace{0};
@@ -1170,17 +1250,16 @@ struct D3D12BindingParameterInfo {
     BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
     uint32_t PushConstantOffset{0};
     uint32_t PushConstantSize{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
 struct D3D12MergedBindingLayout {
-    BindingLayout Layout{};
+    vector<ShaderParameterInfo> Parameters{};
     vector<D3D12BindingParameterInfo> D3D12Parameters{};
-    uint32_t SetCount{0};
+    uint32_t RegisterSpaceCount{0};
 };
 
 std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<Shader*> shaders) noexcept;
-std::optional<RootSignatureLayoutPreview> BuildRootSignatureLayoutPreviewD3D12(
-    const RootSignatureDescriptor& desc) noexcept;
 
 }  // namespace radray::render::d3d12
 

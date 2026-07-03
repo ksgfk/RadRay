@@ -302,6 +302,7 @@ public:
     void PumpFrameUploadScheduler();
 
     render::Device* GetDevice() const noexcept { return _device; }
+    render::ShaderBindingLayoutCache* GetShaderBindingLayoutCache() const noexcept { return _shaderBindingLayoutCache.get(); }
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
     /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
@@ -332,6 +333,7 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
+    unique_ptr<render::ShaderBindingLayoutCache> _shaderBindingLayoutCache;
     DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};

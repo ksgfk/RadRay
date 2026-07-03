@@ -28,11 +28,10 @@
 
 namespace radray {
 
-constexpr render::DescriptorSetIndex ImGuiTextureSetIndex{1};
 constexpr uint64_t ImGuiVertexBufferExtraCount = 5000;
 constexpr uint64_t ImGuiIndexBufferExtraCount = 10000;
 
-struct ImGuiPushConstants {
+struct ImGuiShaderConstants {
     float Scale[2]{};
     float Translate[2]{};
 };
@@ -555,7 +554,7 @@ ImGuiRenderer::~ImGuiRenderer() noexcept {
     _frames.clear();
     _aliveTexs.clear();
     _pso.reset();
-    _rootSig.reset();
+    _bindingLayout = nullptr;
     _device = nullptr;
 }
 
@@ -566,6 +565,10 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     }
     if (desc.Device == nullptr) {
         RADRAY_ERR_LOG("ImGuiRendererDescriptor Device must not be null");
+        return nullptr;
+    }
+    if (desc.BindingLayoutCache == nullptr) {
+        RADRAY_ERR_LOG("ImGuiRendererDescriptor BindingLayoutCache must not be null");
         return nullptr;
     }
     if (desc.RenderTargetFormat == render::TextureFormat::UNKNOWN) {
@@ -630,7 +633,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         shaderPS = shaderPSOpt.Release();
     } else if (backendType == render::RenderBackend::Vulkan) {
         render::SpirvShaderDesc reflVS{};
-        reflVS.PushConstants.push_back(render::SpirvPushConstantRange{
+        reflVS.ConstantRanges.push_back(render::SpirvPushConstantRange{
             .Name = "gPush",
             .Offset = 0,
             .Size = 16,
@@ -691,27 +694,24 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         std::nullopt,
         0};
     render::StaticSamplerDescriptor staticSampler{
-        "gSampler",
-        render::DescriptorSetIndex{1},
-        1,
-        render::ShaderStage::Pixel,
-        sampler};
+        .Name = "gSampler",
+        .Desc = sampler};
 
     render::Shader* shaders[] = {shaderVS.get(), shaderPS.get()};
-    render::RootSignatureDescriptor rsDesc{
+    render::ShaderBindingLayoutDescriptor layoutDesc{
         std::span<render::Shader*>{shaders},
         std::span<const render::StaticSamplerDescriptor>{&staticSampler, 1}};
 
-    auto rootSigOpt = desc.Device->CreateRootSignature(rsDesc);
-    if (!rootSigOpt.HasValue()) {
+    auto layoutOpt = desc.BindingLayoutCache->GetOrCreate(layoutDesc);
+    if (!layoutOpt.HasValue()) {
         return nullptr;
     }
-    auto pushConstantId = rootSigOpt.Get()->FindParameterId("gPush");
+    render::ShaderBindingLayout* bindingLayout = layoutOpt.Get();
+    auto pushConstantId = bindingLayout->FindParameterId("gPush");
     if (!pushConstantId.has_value()) {
-        RADRAY_ERR_LOG("ImGui renderer root signature is missing gPush");
+        RADRAY_ERR_LOG("ImGui renderer binding layout is missing gPush");
         return nullptr;
     }
-
     render::VertexElement vertexElems[] = {
         {offsetof(ImDrawVert, pos), "POSITION", 0, render::VertexFormat::FLOAT32X2, 0},
         {offsetof(ImDrawVert, uv), "TEXCOORD", 0, render::VertexFormat::FLOAT32X2, 1},
@@ -731,7 +731,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
          render::BlendOperation::Add}};
 
     render::GraphicsPipelineStateDescriptor psoDesc{
-        rootSigOpt.Get(),
+        bindingLayout,
         render::ShaderEntry{shaderVS.get(), "VSMain"},
         render::ShaderEntry{shaderPS.get(), "PSMain"},
         std::span<const render::VertexBufferLayout>{&vbLayout, 1},
@@ -748,7 +748,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
 
     auto result = make_unique<ImGuiRenderer>();
     result->_device = desc.Device;
-    result->_rootSig = rootSigOpt.Release();
+    result->_bindingLayout = bindingLayout;
     result->_pso = psoOpt.Release();
     result->_pushConstantId = pushConstantId.value();
     result->_frames.reserve(desc.FlightDataCount);
@@ -762,11 +762,11 @@ bool ImGuiRenderer::ImGuiTexture::UpdateExternalResource(uint32_t flightIndex, r
     if (srv == nullptr) {
         return false;
     }
-    render::DescriptorSet* set = GetExternalSet(flightIndex);
-    if (set == nullptr) {
+    render::ShaderParameterTable* table = GetExternalTable(flightIndex);
+    if (table == nullptr) {
         return false;
     }
-    if (!set->WriteResource("gTexture", srv)) {
+    if (!table->SetResource("gTexture", srv)) {
         return false;
     }
     return true;
@@ -782,7 +782,7 @@ bool ImGuiRenderer::OwnsTexture(const ImGuiTexture* texture) const noexcept {
 }
 
 ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, uint32_t flightIndex, render::TextureView* srv) {
-    if (_device == nullptr || _rootSig == nullptr || srv == nullptr) {
+    if (_device == nullptr || _bindingLayout == nullptr || srv == nullptr) {
         return ImTextureID_Invalid;
     }
 
@@ -797,16 +797,16 @@ ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, 
         _aliveTexs.emplace_back(std::move(ptr));
     }
 
-    // 外部纹理按 flight 持有独立描述符集：当前 flight 的描述符集在上一轮提交后已随 fence 完成，
-    // 改写它不会触及仍在飞行中的其他 flight 命令缓冲（避免 VUID-vkUpdateDescriptorSets-None-03047）。
-    if (texture->GetExternalSet(flightIndex) == nullptr) {
-        auto descSetOpt = _device->CreateDescriptorSet(_rootSig.get(), ImGuiTextureSetIndex);
-        if (!descSetOpt.HasValue()) {
+    // 外部纹理按 flight 持有独立参数表：当前 flight 的参数表在上一轮提交后已随 fence 完成，
+    // 改写它不会触及仍在飞行中的其他 flight 命令缓冲。
+    if (texture->GetExternalTable(flightIndex) == nullptr) {
+        auto tableOpt = _device->CreateShaderParameterTable(_bindingLayout);
+        if (!tableOpt.HasValue()) {
             return ImTextureID_Invalid;
         }
-        auto descSet = descSetOpt.Release();
-        descSet->SetDebugName(fmt::format("imgui_external_tex_set_{}", flightIndex));
-        texture->SetExternalSet(flightIndex, std::move(descSet));
+        auto table = tableOpt.Release();
+        table->SetDebugName(fmt::format("imgui_external_tex_table_{}", flightIndex));
+        texture->SetExternalTable(flightIndex, std::move(table));
     }
 
     if (!texture->UpdateExternalResource(flightIndex, srv)) {
@@ -891,17 +891,17 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                 auto srv = srvOpt.Release();
                 srv->SetDebugName(fmt::format("imgui_tex_srv_{}", tex->UniqueID));
 
-                auto descSetOpt = _device->CreateDescriptorSet(_rootSig.get(), ImGuiTextureSetIndex);
-                if (!descSetOpt.HasValue()) {
+                auto tableOpt = _device->CreateShaderParameterTable(_bindingLayout);
+                if (!tableOpt.HasValue()) {
                     continue;
                 }
-                auto descSet = descSetOpt.Release();
-                descSet->SetDebugName(fmt::format("imgui_tex_set_{}", tex->UniqueID));
-                if (!descSet->WriteResource("gTexture", srv.get())) {
+                auto table = tableOpt.Release();
+                table->SetDebugName(fmt::format("imgui_tex_table_{}", tex->UniqueID));
+                if (!table->SetResource("gTexture", srv.get())) {
                     continue;
                 }
 
-                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(descSet)));
+                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(table)));
                 tex->SetTexID(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(ptr.get())));
                 tex->BackendUserData = ptr.get();
             }
@@ -1171,6 +1171,16 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
 
     SetupRenderStateForFrame(frame, drawDataIndex, encoder, fbWidth, fbHeight);
 
+    const float L = drawData.DisplayPos.x;
+    const float R = drawData.DisplayPos.x + drawData.DisplaySize.x;
+    const float T = drawData.DisplayPos.y;
+    const float B = drawData.DisplayPos.y + drawData.DisplaySize.y;
+    ImGuiShaderConstants push{};
+    push.Scale[0] = 2.0f / (R - L);
+    push.Scale[1] = 2.0f / (T - B);
+    push.Translate[0] = (R + L) / (L - R);
+    push.Translate[1] = (T + B) / (B - T);
+
     const ImVec2 clipOff = drawData.DisplayPos;
     const ImVec2 clipScale = drawData.FramebufferScale;
     int32_t globalVtxOffset = static_cast<int32_t>(drawData.VtxOffset);
@@ -1190,8 +1200,8 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
             if (cmd.Texture == nullptr) {
                 continue;
             }
-            render::DescriptorSet* texSet = cmd.Texture->GetDescriptorSet(frameIndex);
-            if (texSet == nullptr) {
+            render::ShaderParameterTable* texTable = cmd.Texture->GetParameterTable(frameIndex);
+            if (texTable == nullptr) {
                 continue;
             }
 
@@ -1211,7 +1221,8 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
                 .Width = static_cast<uint32_t>(clipMax.x - clipMin.x),
                 .Height = static_cast<uint32_t>(clipMax.y - clipMin.y)};
             encoder->SetScissor(scissor);
-            encoder->BindDescriptorSet(ImGuiTextureSetIndex, texSet);
+            texTable->SetBytes(_pushConstantId, &push, sizeof(push));
+            encoder->BindShaderParameters(texTable);
             encoder->DrawIndexed(
                 cmd.ElemCount,
                 1,
@@ -1260,7 +1271,6 @@ void ImGuiRenderer::SetupRenderStateForFrame(const Frame& frame, uint32_t drawDa
     }
     const auto& drawData = frame._drawData[drawDataIndex];
 
-    encoder->BindRootSignature(_rootSig.get());
     encoder->BindGraphicsPipelineState(_pso.get());
     if (drawData.TotalVtxCount > 0) {
         render::VertexBufferView vbv{
@@ -1288,17 +1298,6 @@ void ImGuiRenderer::SetupRenderStateForFrame(const Frame& frame, uint32_t drawDa
         vp.Height = -static_cast<float>(fbHeight);
     }
     encoder->SetViewport(vp);
-
-    const float L = drawData.DisplayPos.x;
-    const float R = drawData.DisplayPos.x + drawData.DisplaySize.x;
-    const float T = drawData.DisplayPos.y;
-    const float B = drawData.DisplayPos.y + drawData.DisplaySize.y;
-    ImGuiPushConstants push{};
-    push.Scale[0] = 2.0f / (R - L);
-    push.Scale[1] = 2.0f / (T - B);
-    push.Translate[0] = (R + L) / (L - R);
-    push.Translate[1] = (T + B) / (B - T);
-    encoder->PushConstants(_pushConstantId, &push, sizeof(push));
 }
 
 void ImGuiRenderer::SetupRenderState(uint32_t frameIndex, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) {
@@ -1330,8 +1329,12 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     if (IsValid()) {
         return true;
     }
-    if (desc.MainWindow == nullptr || desc.Windows == nullptr || desc.Device == nullptr || desc.DirectQueue == nullptr) {
-        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device and DirectQueue");
+    if (desc.MainWindow == nullptr ||
+        desc.Windows == nullptr ||
+        desc.Device == nullptr ||
+        desc.BindingLayoutCache == nullptr ||
+        desc.DirectQueue == nullptr) {
+        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device, BindingLayoutCache and DirectQueue");
         return false;
     }
     if (desc.RenderTargetFormat == render::TextureFormat::UNKNOWN) {
@@ -1361,6 +1364,7 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     io.Fonts->AddFontDefault();
     auto renderer = ImGuiRenderer::Create(ImGuiRendererDescriptor{
         desc.Device,
+        desc.BindingLayoutCache,
         desc.RenderTargetFormat,
         desc.FlightDataCount});
     if (!renderer.HasValue()) {
@@ -1478,6 +1482,7 @@ void ImGuiSystem::OnInit(Application& app) {
         .MainWindow = mainWindow,
         .Windows = windowManager,
         .Device = device,
+        .BindingLayoutCache = gpuSystem->GetShaderBindingLayoutCache(),
         .RenderTargetFormat = windowManager->GetMainBackBufferFormat(),
         .FlightDataCount = gpuSystem->GetFlightDataCount(),
         .DirectQueue = gpuSystem->GetMainQueue(),

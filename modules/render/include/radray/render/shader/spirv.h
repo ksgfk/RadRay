@@ -121,7 +121,7 @@ public:
     vector<SpirvTypeInfo> Types;
     vector<SpirvVertexInput> VertexInputs;
     vector<SpirvResourceBinding> ResourceBindings;
-    vector<SpirvPushConstantRange> PushConstants;
+    vector<SpirvPushConstantRange> ConstantRanges;
     std::optional<SpirvComputeInfo> ComputeInfo;
 };
 
