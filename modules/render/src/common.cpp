@@ -58,35 +58,6 @@ void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
 }
 
-ShaderBindingLayout::ShaderBindingLayout(vector<ShaderParameterInfo> parameters) noexcept
-    : _parameters(std::move(parameters)) {}
-
-std::span<const ShaderParameterInfo> ShaderBindingLayout::GetParameters() const noexcept {
-    return _parameters;
-}
-
-std::optional<ShaderParameterId> ShaderBindingLayout::FindParameterId(std::string_view name) const noexcept {
-    for (const auto& parameter : _parameters) {
-        if (parameter.Name == name) {
-            return parameter.Id;
-        }
-    }
-    return std::nullopt;
-}
-
-Nullable<const ShaderParameterInfo*> ShaderBindingLayout::FindParameter(ShaderParameterId id) const noexcept {
-    for (const auto& parameter : _parameters) {
-        if (parameter.Id == id) {
-            return &parameter;
-        }
-    }
-    return nullptr;
-}
-
-void ShaderBindingLayout::SetParameters(vector<ShaderParameterInfo> parameters) noexcept {
-    _parameters = std::move(parameters);
-}
-
 bool ShaderParameterTable::SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
     auto idOpt = ResolveParameterId(name);
     if (!idOpt.has_value()) {

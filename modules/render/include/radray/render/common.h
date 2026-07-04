@@ -1586,37 +1586,29 @@ public:
 
 class ShaderBindingLayout : public RenderBase, public IDebugName {
 public:
-    ShaderBindingLayout() noexcept = default;
-    explicit ShaderBindingLayout(vector<ShaderParameterInfo> parameters) noexcept;
     virtual ~ShaderBindingLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderBindingLayout; }
 
-    std::span<const ShaderParameterInfo> GetParameters() const noexcept;
+    virtual vector<ShaderParameterInfo> GetParameters() const noexcept = 0;
 
-    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept;
+    virtual std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept = 0;
 
-    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept;
-
-protected:
-    void SetParameters(vector<ShaderParameterInfo> parameters) noexcept;
-
-private:
-    vector<ShaderParameterInfo> _parameters{};
+    virtual Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept = 0;
 };
 
-class ShaderBindingLayoutCache {
+class ShaderBindingLayoutCache : public RenderBase {
 public:
-    ShaderBindingLayoutCache() noexcept = default;
-    ShaderBindingLayoutCache(const ShaderBindingLayoutCache&) = delete;
-    ShaderBindingLayoutCache(ShaderBindingLayoutCache&&) = delete;
-    ShaderBindingLayoutCache& operator=(const ShaderBindingLayoutCache&) = delete;
-    ShaderBindingLayoutCache& operator=(ShaderBindingLayoutCache&&) = delete;
     virtual ~ShaderBindingLayoutCache() noexcept = default;
 
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
     virtual Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept = 0;
+
     virtual bool Remove(ShaderBindingLayout* layout) noexcept = 0;
+
     virtual void Clear() noexcept = 0;
+
     virtual uint32_t Count() const noexcept = 0;
 };
 

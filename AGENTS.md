@@ -37,7 +37,7 @@
 ## Test
 - Test sources go in `modules/<module>/tests/`.
 - Tests are registered in CMake with `radray_add_test` (plain gtest) or `radray_add_radray_gtest_case` (for tests needing `RADRAY_PROJECT_DIR`, `RADRAY_TEST_ENV_DIR`, etc.).
-- CTest test preset uses ClangCL: `ctest --preset win-x64 -R BuddyAllocatorTest --output-on-failure`
+- CTest test preset uses ClangCL: `ctest --preset win-x64 -R {test name} --output-on-failure`
 - **Critical**: `-R` matches the **gtest suite name** (the C++ class), NOT the cmake target name.
 - Do NOT run build and test concurrently.
 

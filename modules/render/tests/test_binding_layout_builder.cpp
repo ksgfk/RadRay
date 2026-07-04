@@ -11,13 +11,34 @@ namespace {
 class TestShaderBindingLayout final : public ShaderBindingLayout {
 public:
     explicit TestShaderBindingLayout(vector<ShaderParameterInfo> parameters) noexcept
-        : ShaderBindingLayout(std::move(parameters)) {}
+        : _shaderParameters(std::move(parameters)) {}
 
     bool IsValid() const noexcept override { return _valid; }
     void Destroy() noexcept override { _valid = false; }
     void SetDebugName(std::string_view name) noexcept override { _name = string{name}; }
 
+    vector<ShaderParameterInfo> GetParameters() const noexcept override { return _shaderParameters; }
+
+    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept override {
+        for (const auto& parameter : _shaderParameters) {
+            if (parameter.Name == name) {
+                return parameter.Id;
+            }
+        }
+        return std::nullopt;
+    }
+
+    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept override {
+        for (const auto& parameter : _shaderParameters) {
+            if (parameter.Id == id) {
+                return &parameter;
+            }
+        }
+        return nullptr;
+    }
+
 private:
+    vector<ShaderParameterInfo> _shaderParameters{};
     bool _valid{true};
     string _name{};
 };

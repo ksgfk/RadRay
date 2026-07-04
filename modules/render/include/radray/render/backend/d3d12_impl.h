@@ -32,7 +32,6 @@ class GraphicsPsoD3D12;
 class ComputePsoD3D12;
 class AccelerationStructureD3D12;
 class RayTracingPsoD3D12;
-class DescriptorSetD3D12;
 class SamplerD3D12;
 
 class DescriptorHeap {
@@ -362,8 +361,6 @@ public:
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
     Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ShaderBindingLayoutDescriptor& desc) noexcept;
-
-    Nullable<unique_ptr<DescriptorSetD3D12>> CreateDescriptorSetInternal(RootSigD3D12* rootSig, uint32_t registerSpace) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -768,83 +765,30 @@ public:
 
 class RootSigD3D12 final : public ShaderBindingLayout {
 public:
-    struct DescriptorTableInfo {
-        ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
+    /**
+     * RootSigD3D12 唯一的辅助结构. 每个 ShaderParameter 一条, 按 ShaderParameterId 索引 (Info.Id.Value == 下标).
+     * - Info: 对外暴露的参数信息, 同时作为 FindParameter 返回指针的稳定存储
+     * - RootParameterIndex: 指向 _rootParams; 静态采样器为 max()
+     * - RangeIndex: 指向 _ranges[RootParameterIndex] 的对应 range; 非 descriptor table 参数为 max()
+     * descriptor 数量/表内偏移/push constant 大小等一律从 _rootParams/_ranges 派生, 不再重复保存.
+     * register space 反查 (root parameter 下标/bindless set/descriptor 计数) 一律扫描本结构派生.
+     */
+    struct ParameterBinding {
+        ShaderParameterInfo Info{};
         uint32_t RegisterSpace{0};
-        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t HeapOffset{0};
-        uint32_t DescriptorCount{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-    };
-
-    struct DescriptorSetInfo {
-        uint32_t RegisterSpace{0};
-        uint32_t ResourceRootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t SamplerRootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t ResourceDescriptorCount{0};
-        uint32_t SamplerDescriptorCount{0};
-    };
-
-    struct ParameterBindingInfo {
-        string Name{};
-        ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        uint32_t BindingIndex{0};
-        uint32_t ShaderRegister{0};
-        uint32_t RegisterSpace{0};
-        uint32_t DescriptorCount{0};
-        bool IsReadOnly{true};
-        bool IsBindless{false};
         bool IsStaticSampler{false};
         BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t DescriptorHeapOffset{0};
-        uint32_t PushConstantOffset{0};
-        uint32_t PushConstantSize{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-    };
-
-    struct BindlessSetInfo {
-        uint32_t RegisterSpace{0};
-        ShaderParameterId Id{0};
-        uint32_t BindingIndex{0};
-        uint32_t ShaderRegister{0};
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        BindlessSlotType SlotType{BindlessSlotType::Multiple};
-        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-    };
-
-    struct BindlessBindingInfo {
-        string Name{};
-        ShaderParameterId Id{0};
-        uint32_t RegisterSpace{0};
-        uint32_t BindingIndex{0};
-        ResourceBindType Type{ResourceBindType::UNKNOWN};
-        BindlessSlotType SlotType{BindlessSlotType::Multiple};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-    };
-
-    struct StaticSamplerInfo {
-        string Name{};
-        ShaderParameterId Id{0};
-        uint32_t RegisterSpace{0};
-        uint32_t BindingIndex{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-        SamplerDescriptor Desc{};
-    };
-
-    struct ConstantInfo {
-        string Name{};
-        ShaderParameterId Id{0};
-        ShaderStages Stages{ShaderStage::UNKNOWN};
-        uint32_t Offset{0};
-        uint32_t Size{0};
+        uint32_t RangeIndex{std::numeric_limits<uint32_t>::max()};
     };
 
     RootSigD3D12(
         DeviceD3D12* device,
-        ComPtr<ID3D12RootSignature> rootSig) noexcept;
+        ComPtr<ID3D12RootSignature> rootSig,
+        vector<ParameterBinding> parameterBindings,
+        vector<D3D12_ROOT_PARAMETER1> rootParams,
+        vector<vector<D3D12_DESCRIPTOR_RANGE1>> ranges,
+        uint32_t registerSpaceCount) noexcept;
     ~RootSigD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -853,51 +797,40 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    uint32_t GetParameterCount() const noexcept { return static_cast<uint32_t>(_parameters.size()); }
+    vector<ShaderParameterInfo> GetParameters() const noexcept override;
 
-    uint32_t GetDescriptorSetCount() const noexcept { return static_cast<uint32_t>(_descriptorSetLayouts.size()); }
+    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept override;
 
-    std::span<const ShaderParameterId> GetDescriptorSetLayout(uint32_t registerSpace) const noexcept;
+    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept override;
 
-    uint32_t GetBindlessSetCount() const noexcept { return static_cast<uint32_t>(_bindlessSetLayouts.size()); }
-
-    std::span<const BindlessBindingInfo> GetBindlessBindings() const noexcept { return _bindlessSetLayouts; }
-
-    uint32_t GetStaticSamplerCount() const noexcept { return static_cast<uint32_t>(_staticSamplerLayouts.size()); }
-
-    std::span<const StaticSamplerInfo> GetStaticSamplers() const noexcept { return _staticSamplerLayouts; }
-
-    std::span<const ConstantInfo> GetPushConstants() const noexcept { return _pushConstants; }
-
-    void SetPublicParameters(vector<ShaderParameterInfo> parameters) noexcept { SetParameters(std::move(parameters)); }
+    Nullable<const ParameterBinding*> FindParameterBinding(ShaderParameterId id) const noexcept;
 
     bool HasBindlessSet(uint32_t registerSpace) const noexcept;
 
-    Nullable<const BindlessBindingInfo*> FindBindlessSet(uint32_t registerSpace) const noexcept;
+    Nullable<const ParameterBinding*> FindBindlessSet(uint32_t registerSpace) const noexcept;
 
-    Nullable<const ParameterBindingInfo*> FindParameterInfo(ShaderParameterId id) const noexcept;
+    uint32_t GetDescriptorCount(const ParameterBinding& binding) const noexcept;
 
-    Nullable<const DescriptorSetInfo*> FindDescriptorSetInfo(uint32_t registerSpace) const noexcept;
+    uint32_t GetDescriptorHeapOffset(const ParameterBinding& binding) const noexcept;
 
-    Nullable<const BindlessSetInfo*> FindBindlessSetInfo(uint32_t registerSpace) const noexcept;
+    uint32_t GetPushConstantSize(const ParameterBinding& binding) const noexcept;
 
-    std::span<const DescriptorTableInfo> GetResourceTables() const noexcept { return _resourceTables; }
+    uint32_t GetDescriptorSetResourceCount(uint32_t registerSpace) const noexcept;
 
-    std::span<const DescriptorTableInfo> GetSamplerTables() const noexcept { return _samplerTables; }
+    uint32_t GetDescriptorSetSamplerCount(uint32_t registerSpace) const noexcept;
+
+    std::optional<uint32_t> FindDescriptorTableRootParameter(uint32_t registerSpace, ShaderParameterKind kind) const noexcept;
 
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
-    VersionedRootSignatureDescContainer _desc;
-    vector<vector<ShaderParameterId>> _descriptorSetLayouts{};
-    vector<BindlessBindingInfo> _bindlessSetLayouts{};
-    vector<StaticSamplerInfo> _staticSamplerLayouts{};
-    vector<ConstantInfo> _pushConstants{};
-    vector<ParameterBindingInfo> _parameters{};
-    vector<DescriptorSetInfo> _descriptorSets{};
-    vector<BindlessSetInfo> _bindlessSets{};
-    vector<DescriptorTableInfo> _resourceTables{};
-    vector<DescriptorTableInfo> _samplerTables{};
+    // 唯一辅助结构, 按 ShaderParameterId 索引.
+    vector<ParameterBinding> _parameterBindings{};
+    // 创建 ID3D12RootSignature 时使用的 D3D12 结构, 作为 descriptor 数量/偏移/push constant 大小的唯一数据源.
+    // _ranges 必须指针稳定 (构造后不再修改), _rootParams 中 descriptor table 的 pDescriptorRanges 指向它.
+    vector<D3D12_ROOT_PARAMETER1> _rootParams{};
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> _ranges{};
+    uint32_t _registerSpaceCount{0};
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {
@@ -1050,48 +983,22 @@ public:
     string _name;
 };
 
-class DescriptorSetD3D12 final : public IDebugName {
-public:
-    DescriptorSetD3D12(
-        DeviceD3D12* device,
-        RootSigD3D12* rootSig,
-        uint32_t registerSpace,
-        GpuDescriptorHeapViewRAII resHeapView,
-        GpuDescriptorHeapViewRAII samplerHeapView) noexcept;
-    ~DescriptorSetD3D12() noexcept = default;
-
-    bool IsValid() const noexcept;
-
-    void Destroy() noexcept;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-    RootSigD3D12* GetRootSignature() const noexcept { return _rootSig; }
-
-    uint32_t GetRegisterSpace() const noexcept { return _registerSpace; }
-
-    bool WriteResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept;
-
-    bool WriteResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept;
-
-    bool WriteSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept;
-
-    bool IsFullyWritten() const noexcept;
-    bool HasAnyWrite() const noexcept;
-
-public:
-    DeviceD3D12* _device;
-    RootSigD3D12* _rootSig;
-    uint32_t _registerSpace{0};
-    GpuDescriptorHeapViewRAII _resHeapView;
-    GpuDescriptorHeapViewRAII _samplerHeapView;
-    vector<uint8_t> _resourceWritten;
-    vector<uint8_t> _samplerWritten;
-    string _name;
-};
-
 class ShaderParameterTableD3D12 final : public ShaderParameterTable {
 public:
+    /**
+     * 一个 register space 对应的 GPU descriptor heap 切片. 本质上只是对 DescriptorHeap 上某一段的引用,
+     * 加上写入标记, 因此内联在 ShaderParameterTableD3D12 中, 不再单独堆分配.
+     * 未使用 (无 resource/sampler descriptor) 的 space 对应的 slot 保持 heap view 无效即可.
+     */
+    struct DescriptorSetSlot {
+        GpuDescriptorHeapViewRAII ResHeapView;
+        GpuDescriptorHeapViewRAII SamplerHeapView;
+        vector<uint8_t> ResourceWritten;
+        vector<uint8_t> SamplerWritten;
+
+        bool HasStorage() const noexcept { return ResHeapView.IsValid() || SamplerHeapView.IsValid(); }
+    };
+
     ShaderParameterTableD3D12(DeviceD3D12* device, RootSigD3D12* rootSig) noexcept;
     ~ShaderParameterTableD3D12() noexcept override = default;
 
@@ -1115,7 +1022,13 @@ public:
 
     bool IsFullyWritten() const noexcept;
 
-    Nullable<DescriptorSetD3D12*> GetDescriptorSet(uint32_t registerSpace) const noexcept;
+    Nullable<DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) noexcept;
+    Nullable<const DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) const noexcept;
+
+    // 指定 space 的 slot 是否至少写入过一个 descriptor.
+    bool SlotHasAnyWrite(uint32_t registerSpace) const noexcept;
+    // 指定 space 的 slot 是否已按 root signature 布局写满.
+    bool SlotIsFullyWritten(uint32_t registerSpace) const noexcept;
 
     std::span<const byte> GetConstantData(ShaderParameterId id) const noexcept;
 
@@ -1124,7 +1037,7 @@ public:
 public:
     DeviceD3D12* _device;
     RootSigD3D12* _rootSig;
-    vector<unique_ptr<DescriptorSetD3D12>> _sets;
+    vector<DescriptorSetSlot> _sets;
     vector<vector<byte>> _constantData;
     vector<BindlessArray*> _bindlessArrays;
     string _name;
@@ -1191,6 +1104,9 @@ class ShaderBindingLayoutCacheD3D12 final : public ShaderBindingLayoutCache {
 public:
     explicit ShaderBindingLayoutCacheD3D12(DeviceD3D12* device) noexcept;
     ~ShaderBindingLayoutCacheD3D12() noexcept override;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
 
     Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept override;
     bool Remove(ShaderBindingLayout* layout) noexcept override;

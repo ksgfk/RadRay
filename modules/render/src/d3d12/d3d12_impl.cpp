@@ -396,7 +396,6 @@ static bool _WriteBufferBindingDescriptorD3D12(
 
 struct _StaticSamplerSelectionD3D12 {
     vector<ShaderParameterInfo> PublicParameters{};
-    vector<RootSigD3D12::StaticSamplerInfo> StaticSamplers{};
     vector<D3D12_STATIC_SAMPLER_DESC> RawStaticSamplers{};
     vector<uint8_t> IsStaticParameter{};
 };
@@ -435,7 +434,6 @@ static std::optional<_StaticSamplerSelectionD3D12> _SelectStaticSamplersD3D12(
     _StaticSamplerSelectionD3D12 result{};
     result.IsStaticParameter.resize(parameters.size(), 0);
     result.PublicParameters.reserve(parameters.size());
-    result.StaticSamplers.reserve(staticSamplers.size());
     result.RawStaticSamplers.reserve(staticSamplers.size());
 
     unordered_set<string> usedNames{};
@@ -486,15 +484,6 @@ static std::optional<_StaticSamplerSelectionD3D12> _SelectStaticSamplersD3D12(
         }
         result.IsStaticParameter[matchedIndex] = 1;
         const ShaderStages effectiveStages = parameter.Stages;
-        const string effectiveName = parameter.Name;
-        result.StaticSamplers.push_back(RootSigD3D12::StaticSamplerInfo{
-            .Name = effectiveName,
-            .Id = parameter.Id,
-            .RegisterSpace = d3d12.RegisterSpace,
-            .BindingIndex = d3d12.BindingIndex,
-            .Stages = effectiveStages,
-            .Desc = staticSampler.Desc,
-        });
         result.RawStaticSamplers.push_back(_ToD3D12StaticSamplerDesc(
             staticSampler.Desc,
             d3d12.ShaderRegister,
@@ -510,70 +499,59 @@ static std::optional<_StaticSamplerSelectionD3D12> _SelectStaticSamplersD3D12(
     return result;
 }
 
+// 将某个 register space 的 DescriptorSetSlot 绑定到 root signature 的 descriptor table.
+// 调用方需保证 gpu descriptor heaps 已经通过 SetDescriptorHeaps 设置好.
 static bool _BindDescriptorSetD3D12(
     CmdListD3D12* cmdList,
     RootSigD3D12* boundRootSig,
+    ShaderParameterTableD3D12* table,
     uint32_t registerSpace,
-    DescriptorSetD3D12* set,
     bool graphicsRoot) noexcept {
     if (boundRootSig == nullptr) {
         RADRAY_ERR_LOG("bind shader binding layout before binding shader parameters");
         return false;
     }
-    if (set == nullptr) {
-        RADRAY_ERR_LOG("descriptor set is null");
+    if (table == nullptr) {
+        RADRAY_ERR_LOG("shader parameter table is null");
         return false;
     }
-    if (set == nullptr || !set->IsValid()) {
-        RADRAY_ERR_LOG("descriptor set is invalid");
+    if (registerSpace >= boundRootSig->_registerSpaceCount) {
+        RADRAY_ERR_LOG("descriptor set {} is unavailable in root signature", registerSpace);
         return false;
     }
-    if (set->GetRootSignature() != boundRootSig) {
-        RADRAY_ERR_LOG("descriptor set belongs to a different root signature");
+    auto* slot = table->GetDescriptorSetSlot(registerSpace).Get();
+    if (slot == nullptr) {
+        RADRAY_ERR_LOG("descriptor set {} is unavailable", registerSpace);
         return false;
     }
-    if (set->GetRegisterSpace() != registerSpace) {
-        RADRAY_ERR_LOG(
-            "descriptor set index mismatch expected: {}, actual: {}",
-            registerSpace,
-            set->GetRegisterSpace());
-        return false;
-    }
-    if (!set->IsFullyWritten()) {
-        const auto params = boundRootSig->GetDescriptorSetLayout(registerSpace);
-        for (const auto& id : params) {
-            auto infoOpt = boundRootSig->FindParameterInfo(id);
-            if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+    if (!table->SlotIsFullyWritten(registerSpace)) {
+        // 遍历该 register space 下的非静态采样器/非 bindless descriptor table 参数, 报告缺失的参数名.
+        for (const auto& binding : boundRootSig->_parameterBindings) {
+            if (binding.IsStaticSampler || binding.Info.IsBindless || binding.RegisterSpace != registerSpace) {
                 continue;
             }
-            const auto* info = infoOpt.Get();
-            const auto& written = info->Kind == ShaderParameterKind::Sampler ? set->_samplerWritten : set->_resourceWritten;
+            if (binding.RootParameterIndex == std::numeric_limits<uint32_t>::max() ||
+                binding.RangeIndex == std::numeric_limits<uint32_t>::max()) {
+                continue;
+            }
+            const auto& written = binding.Info.Kind == ShaderParameterKind::Sampler ? slot->SamplerWritten : slot->ResourceWritten;
+            const uint32_t descriptorCount = boundRootSig->GetDescriptorCount(binding);
+            const uint32_t descriptorHeapOffset = boundRootSig->GetDescriptorHeapOffset(binding);
             bool complete = true;
-            for (uint32_t i = 0; i < info->DescriptorCount; ++i) {
-                const uint32_t index = info->DescriptorHeapOffset + i;
+            for (uint32_t i = 0; i < descriptorCount; ++i) {
+                const uint32_t index = descriptorHeapOffset + i;
                 if (index >= written.size() || !written[index]) {
                     complete = false;
                     break;
                 }
             }
             if (!complete) {
-                RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", info->Name);
+                RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", binding.Info.Name);
                 break;
             }
         }
         return false;
     }
-    auto setInfoOpt = boundRootSig->FindDescriptorSetInfo(registerSpace);
-    if (!setInfoOpt.HasValue() || setInfoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("descriptor set {} is unavailable in root signature", registerSpace);
-        return false;
-    }
-    const auto* setInfo = setInfoOpt.Get();
-
-    ID3D12DescriptorHeap* heaps[] = {
-        cmdList->_device->_gpuResHeap->GetNative(),
-        cmdList->_device->_gpuSamplerHeap->GetNative()};
-    cmdList->_cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
 
     auto bindTable = [&](uint32_t rootParameterIndex, D3D12_GPU_DESCRIPTOR_HANDLE handle) noexcept {
         if (graphicsRoot) {
@@ -583,27 +561,45 @@ static bool _BindDescriptorSetD3D12(
         }
     };
 
-    if (setInfo->ResourceDescriptorCount > 0) {
-        bindTable(setInfo->ResourceRootParameterIndex, set->_resHeapView.GetHeap()->HandleGpu(set->_resHeapView.GetStart()));
+    if (boundRootSig->GetDescriptorSetResourceCount(registerSpace) > 0) {
+        auto rootParameterIndex = boundRootSig->FindDescriptorTableRootParameter(registerSpace, ShaderParameterKind::Resource);
+        if (!rootParameterIndex.has_value()) {
+            RADRAY_ERR_LOG("resource descriptor table is unavailable for descriptor set {}", registerSpace);
+            return false;
+        }
+        if (!slot->ResHeapView.IsValid()) {
+            RADRAY_ERR_LOG("descriptor set {} has no resource descriptor heap slice", registerSpace);
+            return false;
+        }
+        bindTable(rootParameterIndex.value(), slot->ResHeapView.GetHeap()->HandleGpu(slot->ResHeapView.GetStart()));
     }
-    if (setInfo->SamplerDescriptorCount > 0) {
-        bindTable(setInfo->SamplerRootParameterIndex, set->_samplerHeapView.GetHeap()->HandleGpu(set->_samplerHeapView.GetStart()));
+    if (boundRootSig->GetDescriptorSetSamplerCount(registerSpace) > 0) {
+        auto rootParameterIndex = boundRootSig->FindDescriptorTableRootParameter(registerSpace, ShaderParameterKind::Sampler);
+        if (!rootParameterIndex.has_value()) {
+            RADRAY_ERR_LOG("sampler descriptor table is unavailable for descriptor set {}", registerSpace);
+            return false;
+        }
+        if (!slot->SamplerHeapView.IsValid()) {
+            RADRAY_ERR_LOG("descriptor set {} has no sampler descriptor heap slice", registerSpace);
+            return false;
+        }
+        bindTable(rootParameterIndex.value(), slot->SamplerHeapView.GetHeap()->HandleGpu(slot->SamplerHeapView.GetStart()));
     }
     return true;
 }
 
 static bool _BindlessArrayMatchesD3D12(
-    const RootSigD3D12::BindlessSetInfo& bindlessInfo,
+    const RootSigD3D12::ParameterBinding& binding,
     const BindlessArrayD3D12* array) noexcept {
     if (array == nullptr || !array->IsValid()) {
         RADRAY_ERR_LOG("bindless array is invalid");
         return false;
     }
-    if (array->_slotType != bindlessInfo.SlotType) {
+    if (array->_slotType != binding.BindlessSlotType) {
         RADRAY_ERR_LOG(
             "bindless array slot type mismatch for set {} expected: {}, actual: {}",
-            bindlessInfo.RegisterSpace,
-            static_cast<uint32_t>(bindlessInfo.SlotType),
+            binding.RegisterSpace,
+            static_cast<uint32_t>(binding.BindlessSlotType),
             static_cast<uint32_t>(array->_slotType));
         return false;
     }
@@ -613,10 +609,10 @@ static bool _BindlessArrayMatchesD3D12(
             continue;
         }
         bool isCompatible = false;
-        switch (bindlessInfo.Type) {
+        switch (binding.Info.Type) {
             case ResourceBindType::Buffer:
             case ResourceBindType::RWBuffer:
-                isCompatible = slotType == bindlessInfo.Type;
+                isCompatible = slotType == binding.Info.Type;
                 break;
             case ResourceBindType::Texture:
                 isCompatible = slotType == ResourceBindType::Texture;
@@ -629,8 +625,8 @@ static bool _BindlessArrayMatchesD3D12(
             RADRAY_ERR_LOG(
                 "bindless array slot {} type mismatch for set {} expected: {}, actual: {}",
                 i,
-                bindlessInfo.RegisterSpace,
-                bindlessInfo.Type,
+                binding.RegisterSpace,
+                binding.Info.Type,
                 slotType);
             return false;
         }
@@ -657,13 +653,13 @@ static bool _BindBindlessArrayD3D12(
         RADRAY_ERR_LOG("bindless array is invalid");
         return false;
     }
-    auto bindlessInfoOpt = boundRootSig->FindBindlessSetInfo(registerSpace);
-    if (!bindlessInfoOpt.HasValue() || bindlessInfoOpt.Get() == nullptr) {
+    auto bindingOpt = boundRootSig->FindBindlessSet(registerSpace);
+    if (!bindingOpt.HasValue() || bindingOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("set {} is not declared as a bindless set", registerSpace);
         return false;
     }
-    const auto* bindlessInfo = bindlessInfoOpt.Get();
-    if (!_BindlessArrayMatchesD3D12(*bindlessInfo, array)) {
+    const auto* binding = bindingOpt.Get();
+    if (!_BindlessArrayMatchesD3D12(*binding, array)) {
         return false;
     }
     if (!array->_resHeap.IsValid()) {
@@ -678,9 +674,9 @@ static bool _BindBindlessArrayD3D12(
 
     const auto handle = array->_resHeap.GetHeap()->HandleGpu(array->_resHeap.GetStart());
     if (graphicsRoot) {
-        cmdList->_cmdList->SetGraphicsRootDescriptorTable(bindlessInfo->RootParameterIndex, handle);
+        cmdList->_cmdList->SetGraphicsRootDescriptorTable(binding->RootParameterIndex, handle);
     } else {
-        cmdList->_cmdList->SetComputeRootDescriptorTable(bindlessInfo->RootParameterIndex, handle);
+        cmdList->_cmdList->SetComputeRootDescriptorTable(binding->RootParameterIndex, handle);
     }
     return true;
 }
@@ -700,28 +696,29 @@ static bool _PushConstantsD3D12(
         RADRAY_ERR_LOG("push constant data is null");
         return false;
     }
-    auto infoOpt = boundRootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+    auto bindingOpt = boundRootSig->FindParameterBinding(id);
+    if (!bindingOpt.HasValue() || bindingOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
         return false;
     }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Constant) {
+    const auto* binding = bindingOpt.Get();
+    if (binding->Info.Kind != ShaderParameterKind::Constant) {
         RADRAY_ERR_LOG("binding parameter id {} is not a push constant parameter", id.Value);
         return false;
     }
-    if (size != info->PushConstantSize) {
+    const uint32_t expectedSize = boundRootSig->GetPushConstantSize(*binding);
+    if (size != expectedSize) {
         RADRAY_ERR_LOG(
             "push constant size mismatch for binding parameter id {} expected: {}, actual: {}",
             id.Value,
-            info->PushConstantSize,
+            expectedSize,
             size);
         return false;
     }
     if (graphicsRoot) {
-        cmdList->_cmdList->SetGraphicsRoot32BitConstants(info->RootParameterIndex, size / 4, data, 0);
+        cmdList->_cmdList->SetGraphicsRoot32BitConstants(binding->RootParameterIndex, size / 4, data, 0);
     } else {
-        cmdList->_cmdList->SetComputeRoot32BitConstants(info->RootParameterIndex, size / 4, data, 0);
+        cmdList->_cmdList->SetComputeRoot32BitConstants(binding->RootParameterIndex, size / 4, data, 0);
     }
     return true;
 }
@@ -750,7 +747,13 @@ static bool _BindShaderParameterTableD3D12(
         boundRootSig = rootSig;
     }
 
-    for (uint32_t i = 0; i < rootSig->GetDescriptorSetCount(); ++i) {
+    // gpu descriptor heaps 每次绑定只需设置一次, 后续的 descriptor table / bindless 绑定都复用.
+    ID3D12DescriptorHeap* heaps[] = {
+        cmdList->_device->_gpuResHeap->GetNative(),
+        cmdList->_device->_gpuSamplerHeap->GetNative()};
+    cmdList->_cmdList->SetDescriptorHeaps((UINT)radray::ArrayLength(heaps), heaps);
+
+    for (uint32_t i = 0; i < rootSig->_registerSpaceCount; ++i) {
         const uint32_t registerSpace = i;
         if (rootSig->HasBindlessSet(registerSpace)) {
             BindlessArray* bindless = table->GetBindlessArray(registerSpace);
@@ -759,20 +762,22 @@ static bool _BindShaderParameterTableD3D12(
             }
             continue;
         }
-        DescriptorSetD3D12* set = table->GetDescriptorSet(registerSpace).Get();
-        if (set != nullptr &&
-            (set->IsFullyWritten() || set->HasAnyWrite()) &&
-            !_BindDescriptorSetD3D12(cmdList, rootSig, registerSpace, set, graphicsRoot)) {
+        // 只有写入过 descriptor 的 slot 才需要绑定; _BindDescriptorSetD3D12 内部会强制要求写满.
+        if (table->SlotHasAnyWrite(registerSpace) &&
+            !_BindDescriptorSetD3D12(cmdList, rootSig, table, registerSpace, graphicsRoot)) {
             return false;
         }
     }
 
-    for (const auto& range : rootSig->GetPushConstants()) {
-        std::span<const byte> data = table->GetConstantData(range.Id);
+    for (const auto& binding : rootSig->_parameterBindings) {
+        if (binding.Info.Kind != ShaderParameterKind::Constant) {
+            continue;
+        }
+        std::span<const byte> data = table->GetConstantData(binding.Info.Id);
         if (data.empty()) {
             continue;
         }
-        if (!_PushConstantsD3D12(cmdList, rootSig, range.Id, data.data(), static_cast<uint32_t>(data.size()), graphicsRoot)) {
+        if (!_PushConstantsD3D12(cmdList, rootSig, binding.Info.Id, data.data(), static_cast<uint32_t>(data.size()), graphicsRoot)) {
             return false;
         }
     }
@@ -1970,47 +1975,48 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
     auto staticSamplerSelection = std::move(staticSamplerSelectionOpt.value());
     const auto parameters = allParameters;
 
-    vector<RootSigD3D12::ParameterBindingInfo> parameterInfos(parameters.size());
-    vector<vector<ShaderParameterId>> descriptorSetLayouts(merged.RegisterSpaceCount);
-    vector<RootSigD3D12::BindlessBindingInfo> bindlessSetLayouts{};
-    vector<RootSigD3D12::StaticSamplerInfo> staticSamplerLayouts = std::move(staticSamplerSelection.StaticSamplers);
-    vector<RootSigD3D12::ConstantInfo> pushConstants{};
-    vector<RootSigD3D12::DescriptorSetInfo> descriptorSets(merged.RegisterSpaceCount);
-    for (uint32_t registerSpace = 0; registerSpace < merged.RegisterSpaceCount; ++registerSpace) {
-        descriptorSets[registerSpace].RegisterSpace = registerSpace;
+    struct DescriptorTableBuildState {
+        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+        uint32_t DescriptorCount{0};
+        ShaderStages Stages{ShaderStage::UNKNOWN};
+    };
+
+    // parameterBindings 按 ShaderParameterId 索引 (parameters[i].Id.Value == i), Info 直接拷贝公共参数信息.
+    vector<RootSigD3D12::ParameterBinding> parameterBindings(parameters.size());
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        parameterBindings[i].Info = parameters[i];
+        parameterBindings[i].RegisterSpace = merged.D3D12Parameters[i].RegisterSpace;
     }
-    vector<RootSigD3D12::BindlessSetInfo> bindlessSets{};
-    vector<RootSigD3D12::DescriptorTableInfo> resourceTables{};
-    vector<RootSigD3D12::DescriptorTableInfo> samplerTables{};
-    vector<vector<D3D12_DESCRIPTOR_RANGE1>> resourceRanges{};
-    vector<vector<D3D12_DESCRIPTOR_RANGE1>> samplerRanges{};
-    vector<vector<D3D12_DESCRIPTOR_RANGE1>> bindlessRanges{};
+    // rootParams 与 ranges 逐项对应 (同一个 root parameter 下标). ranges[k] 保存第 k 个 root parameter
+    // 的 descriptor range 列表; push constant 等非 descriptor table 参数对应的 ranges[k] 保持为空.
+    // 两者作为 descriptor 数量/表内偏移/push constant 大小的唯一数据源, 最终 move 进 RootSigD3D12 保存.
     vector<D3D12_ROOT_PARAMETER1> rootParams{};
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> ranges{};
     rootParams.reserve(parameters.size());
+    ranges.reserve(parameters.size());
+
+    auto appendRootParam = [&]() noexcept -> uint32_t {
+        const uint32_t index = static_cast<uint32_t>(rootParams.size());
+        rootParams.emplace_back();
+        ranges.emplace_back();
+        return index;
+    };
 
     auto appendTables = [&](ShaderParameterKind kind) noexcept -> bool {
-        auto& tables = kind == ShaderParameterKind::Sampler ? samplerTables : resourceTables;
-        auto& ranges = kind == ShaderParameterKind::Sampler ? samplerRanges : resourceRanges;
         uint32_t currentRegisterSpace = std::numeric_limits<uint32_t>::max();
-        size_t currentTableIndex = std::numeric_limits<size_t>::max();
+        uint32_t currentRootParamIndex = std::numeric_limits<uint32_t>::max();
+        DescriptorTableBuildState currentTable{};
+        vector<uint32_t> tableRootParamIndices{};
+        vector<ShaderStages> tableStages{};
         for (size_t i = 0; i < parameters.size(); ++i) {
             const auto& param = parameters[i];
             if (param.Kind != kind) {
                 continue;
             }
+            auto& binding = parameterBindings[i];
             if (staticSamplerSelection.IsStaticParameter[i]) {
-                const auto& d3d12 = merged.D3D12Parameters[i];
-                auto& info = parameterInfos[i];
-                info.Name = param.Name;
-                info.Kind = ShaderParameterKind::Sampler;
-                info.Type = param.Type;
-                info.RegisterSpace = d3d12.RegisterSpace;
-                info.BindingIndex = d3d12.BindingIndex;
-                info.ShaderRegister = d3d12.ShaderRegister;
-                info.DescriptorCount = param.Count;
-                info.IsReadOnly = param.IsReadOnly;
-                info.IsStaticSampler = true;
-                info.Stages = param.Stages;
+                // 静态采样器不占用 root parameter, 只标记. Info 已保存, Kind 一定是 Sampler.
+                binding.IsStaticSampler = true;
                 continue;
             }
             if (param.IsBindless) {
@@ -2022,35 +2028,17 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                 return false;
             }
             const uint32_t registerSpace = d3d12.RegisterSpace;
-            if (registerSpace >= descriptorSets.size()) {
+            if (registerSpace >= merged.RegisterSpaceCount) {
                 RADRAY_ERR_LOG("internal error: descriptor set {} is out of range", registerSpace);
                 return false;
             }
-            if (currentTableIndex == std::numeric_limits<size_t>::max() || currentRegisterSpace != registerSpace) {
+            if (currentRootParamIndex == std::numeric_limits<uint32_t>::max() || currentRegisterSpace != registerSpace) {
                 currentRegisterSpace = registerSpace;
-                currentTableIndex = tables.size();
-                RootSigD3D12::DescriptorTableInfo table{};
-                table.Kind = kind;
-                table.RegisterSpace = d3d12.RegisterSpace;
-                table.RootParameterIndex = static_cast<uint32_t>(rootParams.size());
-                table.HeapOffset = 0;
-                table.DescriptorCount = 0;
-                table.Stages = ShaderStage::UNKNOWN;
-                auto& setInfo = descriptorSets[registerSpace];
-                if ((setInfo.ResourceDescriptorCount > 0 || setInfo.SamplerDescriptorCount > 0) &&
-                    setInfo.RegisterSpace != d3d12.RegisterSpace) {
-                    RADRAY_ERR_LOG("d3d12 register space conflict for descriptor set {}", registerSpace);
-                    return false;
-                }
-                setInfo.RegisterSpace = d3d12.RegisterSpace;
-                if (kind == ShaderParameterKind::Sampler) {
-                    setInfo.SamplerRootParameterIndex = table.RootParameterIndex;
-                } else {
-                    setInfo.ResourceRootParameterIndex = table.RootParameterIndex;
-                }
-                tables.push_back(table);
-                ranges.emplace_back();
-                rootParams.emplace_back();
+                currentRootParamIndex = appendRootParam();
+                currentTable = DescriptorTableBuildState{};
+                currentTable.RootParameterIndex = currentRootParamIndex;
+                tableRootParamIndices.push_back(currentRootParamIndex);
+                tableStages.push_back(ShaderStage::UNKNOWN);
             }
 
             auto rangeType = _MapDescriptorRangeType(param.Type);
@@ -2059,9 +2047,9 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                 return false;
             }
 
-            auto& table = tables[currentTableIndex];
-            auto& rangeList = ranges[currentTableIndex];
-            const uint32_t localOffset = table.DescriptorCount;
+            auto& rangeList = ranges[currentRootParamIndex];
+            const uint32_t localOffset = currentTable.DescriptorCount;
+            const uint32_t rangeIndex = static_cast<uint32_t>(rangeList.size());
             rangeList.push_back(CD3DX12_DESCRIPTOR_RANGE1{
                 rangeType.value(),
                 param.Count,
@@ -2069,37 +2057,21 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                 d3d12.RegisterSpace,
                 D3D12_DESCRIPTOR_RANGE_FLAG_NONE,
                 localOffset});
-            table.DescriptorCount += param.Count;
-            table.Stages |= param.Stages;
+            currentTable.DescriptorCount += param.Count;
+            tableStages.back() |= param.Stages;
 
-            auto& info = parameterInfos[i];
-            info.Name = param.Name;
-            info.Kind = kind;
-            info.Type = param.Type;
-            info.RegisterSpace = registerSpace;
-            info.BindingIndex = d3d12.BindingIndex;
-            info.ShaderRegister = d3d12.ShaderRegister;
-            info.DescriptorCount = param.Count;
-            info.IsReadOnly = param.IsReadOnly;
-            info.RootParameterIndex = table.RootParameterIndex;
-            info.DescriptorHeapOffset = localOffset;
-            info.Stages = param.Stages;
-            descriptorSetLayouts[registerSpace].push_back(param.Id);
-            auto& setInfo = descriptorSets[registerSpace];
-            if (kind == ShaderParameterKind::Sampler) {
-                setInfo.SamplerDescriptorCount = table.DescriptorCount;
-            } else {
-                setInfo.ResourceDescriptorCount = table.DescriptorCount;
-            }
+            binding.RootParameterIndex = currentRootParamIndex;
+            binding.RangeIndex = rangeIndex;
         }
 
-        for (size_t i = 0; i < tables.size(); ++i) {
-            auto& rp = rootParams[tables[i].RootParameterIndex];
+        for (size_t t = 0; t < tableRootParamIndices.size(); ++t) {
+            const uint32_t rpIndex = tableRootParamIndices[t];
+            auto& rangeList = ranges[rpIndex];
             CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
-                rp,
-                static_cast<UINT>(ranges[i].size()),
-                ranges[i].empty() ? nullptr : ranges[i].data(),
-                MapShaderStages(tables[i].Stages));
+                rootParams[rpIndex],
+                static_cast<UINT>(rangeList.size()),
+                rangeList.empty() ? nullptr : rangeList.data(),
+                MapShaderStages(tableStages[t]));
         }
         return true;
     };
@@ -2120,8 +2092,12 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                 RADRAY_ERR_LOG("unsupported d3d12 bindless descriptor type for '{}'", param.Name);
                 return false;
             }
-            bindlessRanges.push_back(vector<D3D12_DESCRIPTOR_RANGE1>{});
-            auto& rangeList = bindlessRanges.back();
+            if (d3d12.RegisterSpace >= merged.RegisterSpaceCount) {
+                RADRAY_ERR_LOG("internal error: bindless descriptor set {} is out of range", d3d12.RegisterSpace);
+                return false;
+            }
+            const uint32_t rootParameterIndex = appendRootParam();
+            auto& rangeList = ranges[rootParameterIndex];
             rangeList.push_back(CD3DX12_DESCRIPTOR_RANGE1{
                 rangeType.value(),
                 UINT_MAX,
@@ -2129,48 +2105,16 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                 d3d12.RegisterSpace,
                 D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
                 0});
-
-            auto& rp = rootParams.emplace_back();
-            const uint32_t rootParameterIndex = static_cast<uint32_t>(rootParams.size() - 1);
             CD3DX12_ROOT_PARAMETER1::InitAsDescriptorTable(
-                rp,
+                rootParams[rootParameterIndex],
                 static_cast<UINT>(rangeList.size()),
                 rangeList.data(),
                 MapShaderStages(param.Stages));
 
-            auto& info = parameterInfos[i];
-            info.Name = param.Name;
-            info.Kind = ShaderParameterKind::BindlessArray;
-            info.Type = param.Type;
-            info.RegisterSpace = d3d12.RegisterSpace;
-            info.BindingIndex = d3d12.BindingIndex;
-            info.ShaderRegister = d3d12.ShaderRegister;
-            info.DescriptorCount = 0;
-            info.IsReadOnly = param.IsReadOnly;
-            info.IsBindless = true;
-            info.BindlessSlotType = d3d12.BindlessSlotType;
-            info.RootParameterIndex = rootParameterIndex;
-            info.Stages = param.Stages;
-
-            bindlessSetLayouts.push_back(RootSigD3D12::BindlessBindingInfo{
-                .Name = param.Name,
-                .Id = param.Id,
-                .RegisterSpace = d3d12.RegisterSpace,
-                .BindingIndex = d3d12.BindingIndex,
-                .Type = param.Type,
-                .SlotType = d3d12.BindlessSlotType,
-                .Stages = param.Stages,
-            });
-            bindlessSets.push_back(RootSigD3D12::BindlessSetInfo{
-                .RegisterSpace = d3d12.RegisterSpace,
-                .Id = param.Id,
-                .BindingIndex = d3d12.BindingIndex,
-                .ShaderRegister = d3d12.ShaderRegister,
-                .Type = param.Type,
-                .SlotType = d3d12.BindlessSlotType,
-                .RootParameterIndex = rootParameterIndex,
-                .Stages = param.Stages,
-            });
+            auto& binding = parameterBindings[i];
+            binding.BindlessSlotType = d3d12.BindlessSlotType;
+            binding.RootParameterIndex = rootParameterIndex;
+            binding.RangeIndex = 0;
         }
         return true;
     };
@@ -2195,31 +2139,15 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
             RADRAY_ERR_LOG("d3d12 push constant '{}' must be 4-byte aligned and non-empty", param.Name);
             return nullptr;
         }
-        auto& rp = rootParams.emplace_back();
-        const uint32_t rootParameterIndex = static_cast<uint32_t>(rootParams.size() - 1);
+        const uint32_t rootParameterIndex = appendRootParam();
         CD3DX12_ROOT_PARAMETER1::InitAsConstants(
-            rp,
+            rootParams[rootParameterIndex],
             d3d12.PushConstantSize / 4,
             d3d12.ShaderRegister,
             d3d12.RegisterSpace,
             MapShaderStages(param.Stages));
 
-        auto& info = parameterInfos[i];
-        info.Name = param.Name;
-        info.Kind = ShaderParameterKind::Constant;
-        info.RootParameterIndex = rootParameterIndex;
-        info.ShaderRegister = d3d12.ShaderRegister;
-        info.RegisterSpace = d3d12.RegisterSpace;
-        info.PushConstantOffset = d3d12.PushConstantOffset;
-        info.PushConstantSize = d3d12.PushConstantSize;
-        info.Stages = param.Stages;
-        pushConstants.push_back(RootSigD3D12::ConstantInfo{
-            .Name = param.Name,
-            .Id = param.Id,
-            .Stages = param.Stages,
-            .Offset = d3d12.PushConstantOffset,
-            .Size = d3d12.PushConstantSize,
-        });
+        parameterBindings[i].RootParameterIndex = rootParameterIndex;
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC versionDesc{};
     versionDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -2271,65 +2199,13 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
         return nullptr;
     }
 
-    auto result = make_unique<RootSigD3D12>(this, std::move(rootSig));
-    result->SetPublicParameters(std::move(staticSamplerSelection.PublicParameters));
-    result->_desc = VersionedRootSignatureDescContainer{versionDesc};
-    result->_descriptorSetLayouts = std::move(descriptorSetLayouts);
-    result->_bindlessSetLayouts = std::move(bindlessSetLayouts);
-    result->_staticSamplerLayouts = std::move(staticSamplerLayouts);
-    result->_pushConstants = std::move(pushConstants);
-    result->_parameters = std::move(parameterInfos);
-    result->_descriptorSets = std::move(descriptorSets);
-    result->_bindlessSets = std::move(bindlessSets);
-    result->_resourceTables = std::move(resourceTables);
-    result->_samplerTables = std::move(samplerTables);
-    return result;
-}
-
-Nullable<unique_ptr<DescriptorSetD3D12>> DeviceD3D12::CreateDescriptorSetInternal(RootSigD3D12* rootSig, uint32_t registerSpace) noexcept {
-    if (rootSig == nullptr) {
-        RADRAY_ERR_LOG("root signature is null");
-        return nullptr;
-    }
-    if (rootSig == nullptr || !rootSig->IsValid()) {
-        RADRAY_ERR_LOG("root signature is invalid");
-        return nullptr;
-    }
-    if (rootSig->HasBindlessSet(registerSpace)) {
-        RADRAY_ERR_LOG("descriptor set {} is declared as a bindless set", registerSpace);
-        return nullptr;
-    }
-    auto setInfoOpt = rootSig->FindDescriptorSetInfo(registerSpace);
-    if (!setInfoOpt.HasValue() || setInfoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("descriptor set {} is unavailable", registerSpace);
-        return nullptr;
-    }
-    const auto* setInfo = setInfoOpt.Get();
-
-    GpuDescriptorHeapViewRAII resHeapView{};
-    if (setInfo->ResourceDescriptorCount > 0) {
-        auto alloc = _gpuResHeap->Allocate(setInfo->ResourceDescriptorCount);
-        if (!alloc.has_value()) {
-            RADRAY_ERR_LOG("failed to allocate d3d12 resource descriptor heap slice");
-            return nullptr;
-        }
-        resHeapView = GpuDescriptorHeapViewRAII{_gpuResHeap.get(), alloc.value()};
-    }
-
-    GpuDescriptorHeapViewRAII samplerHeapView{};
-    if (setInfo->SamplerDescriptorCount > 0) {
-        auto alloc = _gpuSamplerHeap->Allocate(setInfo->SamplerDescriptorCount);
-        if (!alloc.has_value()) {
-            RADRAY_ERR_LOG("failed to allocate d3d12 sampler descriptor heap slice");
-            return nullptr;
-        }
-        samplerHeapView = GpuDescriptorHeapViewRAII{_gpuSamplerHeap.get(), alloc.value()};
-    }
-
-    auto result = make_unique<DescriptorSetD3D12>(this, rootSig, registerSpace, std::move(resHeapView), std::move(samplerHeapView));
-    result->_resourceWritten.resize(setInfo->ResourceDescriptorCount, 0);
-    result->_samplerWritten.resize(setInfo->SamplerDescriptorCount, 0);
-    return result;
+    return make_unique<RootSigD3D12>(
+        this,
+        std::move(rootSig),
+        std::move(parameterBindings),
+        std::move(rootParams),
+        std::move(ranges),
+        merged.RegisterSpaceCount);
 }
 
 Nullable<unique_ptr<ShaderBindingLayoutCache>> DeviceD3D12::CreateShaderBindingLayoutCache() noexcept {
@@ -2343,18 +2219,38 @@ Nullable<unique_ptr<ShaderParameterTable>> DeviceD3D12::CreateShaderParameterTab
         return nullptr;
     }
     auto table = make_unique<ShaderParameterTableD3D12>(this, rootSig);
-    table->_sets.resize(rootSig->GetDescriptorSetCount());
-    table->_constantData.resize(rootSig->GetParameterCount());
-    table->_bindlessArrays.resize(rootSig->GetDescriptorSetCount(), nullptr);
-    for (uint32_t registerSpace = 0; registerSpace < rootSig->GetDescriptorSetCount(); ++registerSpace) {
+    table->_sets.resize(rootSig->_registerSpaceCount);
+    table->_constantData.resize(static_cast<uint32_t>(rootSig->_parameterBindings.size()));
+    table->_bindlessArrays.resize(rootSig->_registerSpaceCount, nullptr);
+    // 为每个非 bindless 的 register space 分配 gpu descriptor heap 切片, 内联到 DescriptorSetSlot.
+    for (uint32_t registerSpace = 0; registerSpace < rootSig->_registerSpaceCount; ++registerSpace) {
         if (rootSig->HasBindlessSet(registerSpace)) {
             continue;
         }
-        auto descriptorSet = CreateDescriptorSetInternal(rootSig, registerSpace);
-        if (!descriptorSet.HasValue()) {
-            return nullptr;
+        const uint32_t resourceDescriptorCount = rootSig->GetDescriptorSetResourceCount(registerSpace);
+        const uint32_t samplerDescriptorCount = rootSig->GetDescriptorSetSamplerCount(registerSpace);
+        if (resourceDescriptorCount == 0 && samplerDescriptorCount == 0) {
+            continue;
         }
-        table->_sets[registerSpace] = descriptorSet.Release();
+        auto& slot = table->_sets[registerSpace];
+        if (resourceDescriptorCount > 0) {
+            auto alloc = _gpuResHeap->Allocate(resourceDescriptorCount);
+            if (!alloc.has_value()) {
+                RADRAY_ERR_LOG("failed to allocate d3d12 resource descriptor heap slice");
+                return nullptr;
+            }
+            slot.ResHeapView = GpuDescriptorHeapViewRAII{_gpuResHeap.get(), alloc.value()};
+            slot.ResourceWritten.resize(resourceDescriptorCount, 0);
+        }
+        if (samplerDescriptorCount > 0) {
+            auto alloc = _gpuSamplerHeap->Allocate(samplerDescriptorCount);
+            if (!alloc.has_value()) {
+                RADRAY_ERR_LOG("failed to allocate d3d12 sampler descriptor heap slice");
+                return nullptr;
+            }
+            slot.SamplerHeapView = GpuDescriptorHeapViewRAII{_gpuSamplerHeap.get(), alloc.value()};
+            slot.SamplerWritten.resize(samplerDescriptorCount, 0);
+        }
     }
     return unique_ptr<ShaderParameterTable>{table.release()};
 }
@@ -4235,9 +4131,17 @@ D3D12_SHADER_BYTECODE Dxil::ToByteCode() const noexcept {
 
 RootSigD3D12::RootSigD3D12(
     DeviceD3D12* device,
-    ComPtr<ID3D12RootSignature> rootSig) noexcept
+    ComPtr<ID3D12RootSignature> rootSig,
+    vector<ParameterBinding> parameterBindings,
+    vector<D3D12_ROOT_PARAMETER1> rootParams,
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> ranges,
+    uint32_t registerSpaceCount) noexcept
     : _device(device),
-      _rootSig(std::move(rootSig)) {}
+      _rootSig(std::move(rootSig)),
+      _parameterBindings(std::move(parameterBindings)),
+      _rootParams(std::move(rootParams)),
+      _ranges(std::move(ranges)),
+      _registerSpaceCount(registerSpaceCount) {}
 
 bool RootSigD3D12::IsValid() const noexcept {
     return _rootSig != nullptr;
@@ -4245,62 +4149,148 @@ bool RootSigD3D12::IsValid() const noexcept {
 
 void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
-    _descriptorSetLayouts.clear();
-    _bindlessSetLayouts.clear();
-    _staticSamplerLayouts.clear();
-    _pushConstants.clear();
-    _parameters.clear();
-    _descriptorSets.clear();
-    _bindlessSets.clear();
-    _resourceTables.clear();
-    _samplerTables.clear();
+    _parameterBindings.clear();
+    _rootParams.clear();
+    _ranges.clear();
+    _registerSpaceCount = 0;
 }
 
 void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _rootSig.Get());
 }
 
-Nullable<const RootSigD3D12::ParameterBindingInfo*> RootSigD3D12::FindParameterInfo(ShaderParameterId id) const noexcept {
-    if (id.Value >= _parameters.size()) {
-        return nullptr;
+vector<ShaderParameterInfo> RootSigD3D12::GetParameters() const noexcept {
+    // 排除静态采样器 (它们不作为可绑定的公共参数暴露), 其余从 _parameterBindings 的 Info 派生.
+    vector<ShaderParameterInfo> result{};
+    result.reserve(_parameterBindings.size());
+    for (const auto& binding : _parameterBindings) {
+        if (binding.IsStaticSampler) {
+            continue;
+        }
+        result.push_back(binding.Info);
     }
-    return &_parameters[id.Value];
+    return result;
 }
 
-std::span<const ShaderParameterId> RootSigD3D12::GetDescriptorSetLayout(uint32_t registerSpace) const noexcept {
-    if (registerSpace >= _descriptorSetLayouts.size()) {
-        return {};
+std::optional<ShaderParameterId> RootSigD3D12::FindParameterId(std::string_view name) const noexcept {
+    for (const auto& binding : _parameterBindings) {
+        if (binding.IsStaticSampler) {
+            continue;
+        }
+        if (binding.Info.Name == name) {
+            return binding.Info.Id;
+        }
     }
-    return _descriptorSetLayouts[registerSpace];
+    return std::nullopt;
+}
+
+Nullable<const ShaderParameterInfo*> RootSigD3D12::FindParameter(ShaderParameterId id) const noexcept {
+    if (id.Value >= _parameterBindings.size()) {
+        return nullptr;
+    }
+    const auto& binding = _parameterBindings[id.Value];
+    if (binding.IsStaticSampler) {
+        return nullptr;
+    }
+    return &binding.Info;
+}
+
+Nullable<const RootSigD3D12::ParameterBinding*> RootSigD3D12::FindParameterBinding(ShaderParameterId id) const noexcept {
+    if (id.Value >= _parameterBindings.size()) {
+        return nullptr;
+    }
+    return &_parameterBindings[id.Value];
 }
 
 bool RootSigD3D12::HasBindlessSet(uint32_t registerSpace) const noexcept {
     return FindBindlessSet(registerSpace).HasValue();
 }
 
-Nullable<const RootSigD3D12::BindlessBindingInfo*> RootSigD3D12::FindBindlessSet(uint32_t registerSpace) const noexcept {
-    for (const auto& bindlessSet : _bindlessSetLayouts) {
-        if (bindlessSet.RegisterSpace == registerSpace) {
-            return &bindlessSet;
+Nullable<const RootSigD3D12::ParameterBinding*> RootSigD3D12::FindBindlessSet(uint32_t registerSpace) const noexcept {
+    // 扫描 _parameterBindings 找到该 register space 的 bindless 参数.
+    for (const auto& binding : _parameterBindings) {
+        if (binding.Info.IsBindless && binding.RegisterSpace == registerSpace) {
+            return &binding;
         }
     }
     return nullptr;
 }
 
-Nullable<const RootSigD3D12::DescriptorSetInfo*> RootSigD3D12::FindDescriptorSetInfo(uint32_t registerSpace) const noexcept {
-    if (registerSpace >= _descriptorSets.size()) {
-        return nullptr;
+uint32_t RootSigD3D12::GetDescriptorCount(const ParameterBinding& binding) const noexcept {
+    // 从创建 root signature 时使用的 D3D12 range 数据派生 descriptor 数量.
+    if (binding.RootParameterIndex >= _ranges.size()) {
+        return 0;
     }
-    return &_descriptorSets[registerSpace];
+    const auto& rangeList = _ranges[binding.RootParameterIndex];
+    if (binding.RangeIndex >= rangeList.size()) {
+        return 0;
+    }
+    return rangeList[binding.RangeIndex].NumDescriptors;
 }
 
-Nullable<const RootSigD3D12::BindlessSetInfo*> RootSigD3D12::FindBindlessSetInfo(uint32_t registerSpace) const noexcept {
-    for (const auto& bindlessSet : _bindlessSets) {
-        if (bindlessSet.RegisterSpace == registerSpace) {
-            return &bindlessSet;
+uint32_t RootSigD3D12::GetDescriptorHeapOffset(const ParameterBinding& binding) const noexcept {
+    // range 的 OffsetInDescriptorsFromTableStart 即该参数在 descriptor table 内的偏移.
+    if (binding.RootParameterIndex >= _ranges.size()) {
+        return 0;
+    }
+    const auto& rangeList = _ranges[binding.RootParameterIndex];
+    if (binding.RangeIndex >= rangeList.size()) {
+        return 0;
+    }
+    return rangeList[binding.RangeIndex].OffsetInDescriptorsFromTableStart;
+}
+
+uint32_t RootSigD3D12::GetPushConstantSize(const ParameterBinding& binding) const noexcept {
+    // push constant 大小 = Num32BitValues * 4, 直接从 D3D12 root parameter 派生.
+    if (binding.Info.Kind != ShaderParameterKind::Constant || binding.RootParameterIndex >= _rootParams.size()) {
+        return 0;
+    }
+    const auto& rp = _rootParams[binding.RootParameterIndex];
+    if (rp.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+        return 0;
+    }
+    return rp.Constants.Num32BitValues * 4u;
+}
+
+uint32_t RootSigD3D12::GetDescriptorSetResourceCount(uint32_t registerSpace) const noexcept {
+    auto rootParameterIndex = FindDescriptorTableRootParameter(registerSpace, ShaderParameterKind::Resource);
+    if (!rootParameterIndex.has_value() || rootParameterIndex.value() >= _ranges.size()) {
+        return 0;
+    }
+    uint32_t total = 0;
+    for (const auto& range : _ranges[rootParameterIndex.value()]) {
+        total += range.NumDescriptors;
+    }
+    return total;
+}
+
+uint32_t RootSigD3D12::GetDescriptorSetSamplerCount(uint32_t registerSpace) const noexcept {
+    auto rootParameterIndex = FindDescriptorTableRootParameter(registerSpace, ShaderParameterKind::Sampler);
+    if (!rootParameterIndex.has_value() || rootParameterIndex.value() >= _ranges.size()) {
+        return 0;
+    }
+    uint32_t total = 0;
+    for (const auto& range : _ranges[rootParameterIndex.value()]) {
+        total += range.NumDescriptors;
+    }
+    return total;
+}
+
+std::optional<uint32_t> RootSigD3D12::FindDescriptorTableRootParameter(uint32_t registerSpace, ShaderParameterKind kind) const noexcept {
+    // 扫描 _parameterBindings 找到匹配 register space + kind 的 descriptor table root parameter.
+    // 同一 register space 内, 同类型参数共享一个 root parameter (构建时按 space 分组).
+    for (const auto& binding : _parameterBindings) {
+        if (binding.IsStaticSampler || binding.Info.IsBindless) {
+            continue;
+        }
+        if (binding.Info.Kind != kind || binding.RegisterSpace != registerSpace) {
+            continue;
+        }
+        if (binding.RootParameterIndex != std::numeric_limits<uint32_t>::max()) {
+            return binding.RootParameterIndex;
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 GraphicsPsoD3D12::GraphicsPsoD3D12(
@@ -4552,236 +4542,58 @@ ShaderBindingTableRegions ShaderBindingTableD3D12::GetRegions() const noexcept {
     return regions;
 }
 
-DescriptorSetD3D12::DescriptorSetD3D12(
-    DeviceD3D12* device,
+namespace {
+
+// 将 parameter 定位到其所属 register space 的 DescriptorSetSlot, 并做通用校验.
+// 返回的 slot 一定属于 binding->RegisterSpace, 且对应 kind 的 heap view 有效.
+struct SlotBindingContext {
+    const RootSigD3D12::ParameterBinding* Binding{nullptr};
+    ShaderParameterTableD3D12::DescriptorSetSlot* Slot{nullptr};
+    uint32_t HeapIndex{0};
+};
+
+std::optional<SlotBindingContext> _ResolveSlotWrite(
     RootSigD3D12* rootSig,
-    uint32_t registerSpace,
-    GpuDescriptorHeapViewRAII resHeapView,
-    GpuDescriptorHeapViewRAII samplerHeapView) noexcept
-    : _device(device),
-      _rootSig(rootSig),
-      _registerSpace(registerSpace),
-      _resHeapView(std::move(resHeapView)),
-      _samplerHeapView(std::move(samplerHeapView)) {}
-
-bool DescriptorSetD3D12::IsValid() const noexcept {
-    if (_device == nullptr || _rootSig == nullptr || !_rootSig->IsValid()) {
-        return false;
+    vector<ShaderParameterTableD3D12::DescriptorSetSlot>& sets,
+    ShaderParameterId id,
+    uint32_t arrayIndex,
+    ShaderParameterKind expectKind) noexcept {
+    if (rootSig == nullptr) {
+        RADRAY_ERR_LOG("shader parameter table has no binding layout");
+        return std::nullopt;
     }
-    auto setInfoOpt = _rootSig->FindDescriptorSetInfo(_registerSpace);
-    if (!setInfoOpt.HasValue() || setInfoOpt.Get() == nullptr) {
-        return false;
-    }
-    const auto* setInfo = setInfoOpt.Get();
-    if (setInfo->ResourceDescriptorCount > 0 && !_resHeapView.IsValid()) {
-        return false;
-    }
-    if (setInfo->SamplerDescriptorCount > 0 && !_samplerHeapView.IsValid()) {
-        return false;
-    }
-    return true;
-}
-
-void DescriptorSetD3D12::Destroy() noexcept {
-    _resHeapView.Destroy();
-    _samplerHeapView.Destroy();
-    _resourceWritten.clear();
-    _samplerWritten.clear();
-    _name.clear();
-    _registerSpace = 0;
-    _rootSig = nullptr;
-    _device = nullptr;
-}
-
-void DescriptorSetD3D12::SetDebugName(std::string_view name) noexcept {
-    _name = string(name);
-}
-
-bool DescriptorSetD3D12::WriteResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("descriptor set is invalid");
-        return false;
-    }
-    if (view == nullptr) {
-        RADRAY_ERR_LOG("resource view is null");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+    auto bindingOpt = rootSig->FindParameterBinding(id);
+    if (!bindingOpt.HasValue() || bindingOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
+        return std::nullopt;
     }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Resource) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
-        return false;
+    const auto* binding = bindingOpt.Get();
+    if (binding->IsStaticSampler) {
+        RADRAY_ERR_LOG("binding parameter id {} is a static sampler and cannot be written", id.Value);
+        return std::nullopt;
     }
-    if (info->RegisterSpace != _registerSpace) {
-        RADRAY_ERR_LOG(
-            "binding parameter id {} belongs to descriptor set {}, not {}",
-            id.Value,
-            info->RegisterSpace,
-            _registerSpace);
-        return false;
+    if (binding->Info.Kind != expectKind) {
+        RADRAY_ERR_LOG("binding parameter id {} kind mismatch", id.Value);
+        return std::nullopt;
     }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
-        return false;
+    const uint32_t registerSpace = binding->RegisterSpace;
+    if (registerSpace >= sets.size()) {
+        RADRAY_ERR_LOG("descriptor set {} is unavailable", registerSpace);
+        return std::nullopt;
     }
-    auto bindType = _GetResourceViewBindType(view);
-    if (!bindType.has_value() || bindType.value() != info->Type) {
-        RADRAY_ERR_LOG(
-            "resource type mismatch for binding parameter id {} expected: {}, actual: {}",
-            id.Value,
-            info->Type,
-            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
-        return false;
+    const uint32_t descriptorCount = rootSig->GetDescriptorCount(*binding);
+    if (arrayIndex >= descriptorCount) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", descriptorCount, arrayIndex);
+        return std::nullopt;
     }
-    if (!_resHeapView.IsValid()) {
-        RADRAY_ERR_LOG("descriptor set has no resource descriptor heap slice");
-        return false;
-    }
-    const uint32_t heapIndex = info->DescriptorHeapOffset + arrayIndex;
-    if (!_CopyResourceViewToGpuHeap(view, _resHeapView, heapIndex)) {
-        RADRAY_ERR_LOG("failed to copy resource descriptor for binding parameter id {}", id.Value);
-        return false;
-    }
-    if (heapIndex >= _resourceWritten.size()) {
-        RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", heapIndex);
-        return false;
-    }
-    _resourceWritten[heapIndex] = 1;
-    return true;
+    SlotBindingContext ctx{};
+    ctx.Binding = binding;
+    ctx.Slot = &sets[registerSpace];
+    ctx.HeapIndex = rootSig->GetDescriptorHeapOffset(*binding) + arrayIndex;
+    return ctx;
 }
 
-bool DescriptorSetD3D12::WriteResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("descriptor set is invalid");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
-    }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Resource) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
-        return false;
-    }
-    if (info->RegisterSpace != _registerSpace) {
-        RADRAY_ERR_LOG(
-            "binding parameter id {} belongs to descriptor set {}, not {}",
-            id.Value,
-            info->RegisterSpace,
-            _registerSpace);
-        return false;
-    }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
-        return false;
-    }
-    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
-    if (bindType != info->Type) {
-        RADRAY_ERR_LOG(
-            "buffer binding type mismatch for binding parameter id {} expected: {}, actual: {}",
-            id.Value,
-            info->Type,
-            bindType);
-        return false;
-    }
-    if (!_resHeapView.IsValid()) {
-        RADRAY_ERR_LOG("descriptor set has no resource descriptor heap slice");
-        return false;
-    }
-    const uint32_t heapIndex = info->DescriptorHeapOffset + arrayIndex;
-    if (!_WriteBufferBindingDescriptorD3D12(desc, _resHeapView, heapIndex)) {
-        RADRAY_ERR_LOG("failed to write buffer descriptor for binding parameter id {}", id.Value);
-        return false;
-    }
-    if (heapIndex >= _resourceWritten.size()) {
-        RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", heapIndex);
-        return false;
-    }
-    _resourceWritten[heapIndex] = 1;
-    return true;
-}
-
-bool DescriptorSetD3D12::WriteSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
-    if (!this->IsValid()) {
-        RADRAY_ERR_LOG("descriptor set is invalid");
-        return false;
-    }
-    if (sampler == nullptr) {
-        RADRAY_ERR_LOG("sampler is null");
-        return false;
-    }
-    auto infoOpt = _rootSig->FindParameterInfo(id);
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("binding parameter id {} is out of range", id.Value);
-        return false;
-    }
-    const auto* info = infoOpt.Get();
-    if (info->IsStaticSampler) {
-        RADRAY_ERR_LOG("binding parameter id {} is a static sampler and cannot be written through DescriptorSet", id.Value);
-        return false;
-    }
-    if (info->Kind != ShaderParameterKind::Sampler) {
-        RADRAY_ERR_LOG("binding parameter id {} is not a sampler parameter", id.Value);
-        return false;
-    }
-    if (info->RegisterSpace != _registerSpace) {
-        RADRAY_ERR_LOG(
-            "binding parameter id {} belongs to descriptor set {}, not {}",
-            id.Value,
-            info->RegisterSpace,
-            _registerSpace);
-        return false;
-    }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
-        return false;
-    }
-    if (!_samplerHeapView.IsValid()) {
-        RADRAY_ERR_LOG("descriptor set has no sampler descriptor heap slice");
-        return false;
-    }
-    const uint32_t heapIndex = info->DescriptorHeapOffset + arrayIndex;
-    if (heapIndex >= _samplerWritten.size()) {
-        RADRAY_ERR_LOG("internal error: sampler heap index {} is out of range", heapIndex);
-        return false;
-    }
-    auto* sam = CastD3D12Object(sampler);
-    sam->_samplerView.CopyTo(0, 1, _samplerHeapView, heapIndex);
-    _samplerWritten[heapIndex] = 1;
-    return true;
-}
-
-bool DescriptorSetD3D12::IsFullyWritten() const noexcept {
-    if (!this->IsValid()) {
-        return false;
-    }
-    for (const auto& id : _rootSig->GetDescriptorSetLayout(_registerSpace)) {
-        auto infoOpt = _rootSig->FindParameterInfo(id);
-        if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-            return false;
-        }
-        const auto& info = *infoOpt.Get();
-        const auto& written = info.Kind == ShaderParameterKind::Sampler ? _samplerWritten : _resourceWritten;
-        for (uint32_t j = 0; j < info.DescriptorCount; ++j) {
-            const uint32_t index = info.DescriptorHeapOffset + j;
-            if (index >= written.size() || !written[index]) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-bool DescriptorSetD3D12::HasAnyWrite() const noexcept {
-    return std::ranges::any_of(_resourceWritten, [](uint8_t v) noexcept { return v != 0; }) ||
-           std::ranges::any_of(_samplerWritten, [](uint8_t v) noexcept { return v != 0; });
-}
+}  // namespace
 
 ShaderParameterTableD3D12::ShaderParameterTableD3D12(DeviceD3D12* device, RootSigD3D12* rootSig) noexcept
     : _device(device), _rootSig(rootSig) {}
@@ -4791,12 +4603,7 @@ bool ShaderParameterTableD3D12::IsValid() const noexcept {
 }
 
 void ShaderParameterTableD3D12::Destroy() noexcept {
-    for (auto& set : _sets) {
-        if (set != nullptr) {
-            set->Destroy();
-        }
-    }
-    _sets.clear();
+    _sets.clear();  // GpuDescriptorHeapViewRAII 析构自动释放 descriptor heap 切片
     _constantData.clear();
     _bindlessArrays.clear();
     _name.clear();
@@ -4806,51 +4613,96 @@ void ShaderParameterTableD3D12::Destroy() noexcept {
 
 void ShaderParameterTableD3D12::SetDebugName(std::string_view name) noexcept {
     _name = string(name);
-    for (uint32_t i = 0; i < _sets.size(); ++i) {
-        if (_sets[i] != nullptr) {
-            _sets[i]->SetDebugName(fmt::format("{}_set{}", _name, i));
-        }
-    }
 }
 
 bool ShaderParameterTableD3D12::SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const RootSigD3D12::ParameterBindingInfo*>{};
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
+    if (view == nullptr) {
+        RADRAY_ERR_LOG("resource view is null");
         return false;
     }
-    const auto* info = infoOpt.Get();
-    if (info->IsBindless) {
-        RADRAY_ERR_LOG("shader parameter id {} is bindless and must be set with SetBindlessArray", id.Value);
+    auto ctxOpt = _ResolveSlotWrite(_rootSig, _sets, id, arrayIndex, ShaderParameterKind::Resource);
+    if (!ctxOpt.has_value()) {
         return false;
     }
-    DescriptorSetD3D12* set = GetDescriptorSet(info->RegisterSpace).Get();
-    return set != nullptr && set->WriteResource(id, view, arrayIndex);
+    const auto& ctx = ctxOpt.value();
+    auto bindType = _GetResourceViewBindType(view);
+    if (!bindType.has_value() || bindType.value() != ctx.Binding->Info.Type) {
+        RADRAY_ERR_LOG(
+            "resource type mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            ctx.Binding->Info.Type,
+            bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
+        return false;
+    }
+    if (!ctx.Slot->ResHeapView.IsValid()) {
+        RADRAY_ERR_LOG("descriptor set has no resource descriptor heap slice");
+        return false;
+    }
+    if (ctx.HeapIndex >= ctx.Slot->ResourceWritten.size()) {
+        RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", ctx.HeapIndex);
+        return false;
+    }
+    if (!_CopyResourceViewToGpuHeap(view, ctx.Slot->ResHeapView, ctx.HeapIndex)) {
+        RADRAY_ERR_LOG("failed to copy resource descriptor for binding parameter id {}", id.Value);
+        return false;
+    }
+    ctx.Slot->ResourceWritten[ctx.HeapIndex] = 1;
+    return true;
 }
 
 bool ShaderParameterTableD3D12::SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const RootSigD3D12::ParameterBindingInfo*>{};
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
+    auto ctxOpt = _ResolveSlotWrite(_rootSig, _sets, id, arrayIndex, ShaderParameterKind::Resource);
+    if (!ctxOpt.has_value()) {
         return false;
     }
-    const auto* info = infoOpt.Get();
-    if (info->IsBindless) {
-        RADRAY_ERR_LOG("shader parameter id {} is bindless and must be set with SetBindlessArray", id.Value);
+    const auto& ctx = ctxOpt.value();
+    const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
+    if (bindType != ctx.Binding->Info.Type) {
+        RADRAY_ERR_LOG(
+            "buffer binding type mismatch for binding parameter id {} expected: {}, actual: {}",
+            id.Value,
+            ctx.Binding->Info.Type,
+            bindType);
         return false;
     }
-    DescriptorSetD3D12* set = GetDescriptorSet(info->RegisterSpace).Get();
-    return set != nullptr && set->WriteResource(id, desc, arrayIndex);
+    if (!ctx.Slot->ResHeapView.IsValid()) {
+        RADRAY_ERR_LOG("descriptor set has no resource descriptor heap slice");
+        return false;
+    }
+    if (ctx.HeapIndex >= ctx.Slot->ResourceWritten.size()) {
+        RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", ctx.HeapIndex);
+        return false;
+    }
+    if (!_WriteBufferBindingDescriptorD3D12(desc, ctx.Slot->ResHeapView, ctx.HeapIndex)) {
+        RADRAY_ERR_LOG("failed to write buffer descriptor for binding parameter id {}", id.Value);
+        return false;
+    }
+    ctx.Slot->ResourceWritten[ctx.HeapIndex] = 1;
+    return true;
 }
 
 bool ShaderParameterTableD3D12::SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const RootSigD3D12::ParameterBindingInfo*>{};
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-        RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
+    if (sampler == nullptr) {
+        RADRAY_ERR_LOG("sampler is null");
         return false;
     }
-    DescriptorSetD3D12* set = GetDescriptorSet(infoOpt.Get()->RegisterSpace).Get();
-    return set != nullptr && set->WriteSampler(id, sampler, arrayIndex);
+    auto ctxOpt = _ResolveSlotWrite(_rootSig, _sets, id, arrayIndex, ShaderParameterKind::Sampler);
+    if (!ctxOpt.has_value()) {
+        return false;
+    }
+    const auto& ctx = ctxOpt.value();
+    if (!ctx.Slot->SamplerHeapView.IsValid()) {
+        RADRAY_ERR_LOG("descriptor set has no sampler descriptor heap slice");
+        return false;
+    }
+    if (ctx.HeapIndex >= ctx.Slot->SamplerWritten.size()) {
+        RADRAY_ERR_LOG("internal error: sampler heap index {} is out of range", ctx.HeapIndex);
+        return false;
+    }
+    auto* sam = CastD3D12Object(sampler);
+    sam->_samplerView.CopyTo(0, 1, ctx.Slot->SamplerHeapView, ctx.HeapIndex);
+    ctx.Slot->SamplerWritten[ctx.HeapIndex] = 1;
+    return true;
 }
 
 bool ShaderParameterTableD3D12::SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept {
@@ -4858,13 +4710,13 @@ bool ShaderParameterTableD3D12::SetBytes(ShaderParameterId id, const void* data,
         RADRAY_ERR_LOG("constant data for shader parameter id {} is empty", id.Value);
         return false;
     }
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const RootSigD3D12::ParameterBindingInfo*>{};
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+    auto bindingOpt = _rootSig != nullptr ? _rootSig->FindParameterBinding(id) : Nullable<const RootSigD3D12::ParameterBinding*>{};
+    if (!bindingOpt.HasValue() || bindingOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
-    const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Constant || size != info->PushConstantSize) {
+    const auto* binding = bindingOpt.Get();
+    if (binding->Info.Kind != ShaderParameterKind::Constant || size != _rootSig->GetPushConstantSize(*binding)) {
         RADRAY_ERR_LOG("constant size mismatch for shader parameter id {}", id.Value);
         return false;
     }
@@ -4878,42 +4730,89 @@ bool ShaderParameterTableD3D12::SetBytes(ShaderParameterId id, const void* data,
 }
 
 bool ShaderParameterTableD3D12::SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const RootSigD3D12::ParameterBindingInfo*>{};
-    if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
+    auto bindingOpt = _rootSig != nullptr ? _rootSig->FindParameterBinding(id) : Nullable<const RootSigD3D12::ParameterBinding*>{};
+    if (!bindingOpt.HasValue() || bindingOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
-    const auto* info = infoOpt.Get();
-    if (!info->IsBindless) {
+    const auto* binding = bindingOpt.Get();
+    if (!binding->Info.IsBindless) {
         RADRAY_ERR_LOG("shader parameter id {} is not bindless", id.Value);
         return false;
     }
-    if (info->RegisterSpace >= _bindlessArrays.size()) {
-        _bindlessArrays.resize(static_cast<size_t>(info->RegisterSpace) + 1, nullptr);
+    const uint32_t registerSpace = binding->RegisterSpace;
+    if (registerSpace >= _bindlessArrays.size()) {
+        _bindlessArrays.resize(static_cast<size_t>(registerSpace) + 1, nullptr);
     }
-    _bindlessArrays[info->RegisterSpace] = array;
+    _bindlessArrays[registerSpace] = array;
     return true;
 }
 
 bool ShaderParameterTableD3D12::IsFullyWritten() const noexcept {
-    for (const auto& set : _sets) {
-        if (set != nullptr && !set->IsFullyWritten()) {
+    for (uint32_t registerSpace = 0; registerSpace < _sets.size(); ++registerSpace) {
+        if (_sets[registerSpace].HasStorage() && !SlotIsFullyWritten(registerSpace)) {
             return false;
         }
     }
-    for (const auto& range : _rootSig->GetPushConstants()) {
-        if (range.Id.Value >= _constantData.size() || _constantData[range.Id.Value].empty()) {
+    for (const auto& binding : _rootSig->_parameterBindings) {
+        if (binding.Info.Kind != ShaderParameterKind::Constant) {
+            continue;
+        }
+        if (binding.Info.Id.Value >= _constantData.size() || _constantData[binding.Info.Id.Value].empty()) {
             return false;
         }
     }
     return true;
 }
 
-Nullable<DescriptorSetD3D12*> ShaderParameterTableD3D12::GetDescriptorSet(uint32_t registerSpace) const noexcept {
+Nullable<ShaderParameterTableD3D12::DescriptorSetSlot*> ShaderParameterTableD3D12::GetDescriptorSetSlot(uint32_t registerSpace) noexcept {
     if (registerSpace >= _sets.size()) {
         return nullptr;
     }
-    return _sets[registerSpace].get();
+    return &_sets[registerSpace];
+}
+
+Nullable<const ShaderParameterTableD3D12::DescriptorSetSlot*> ShaderParameterTableD3D12::GetDescriptorSetSlot(uint32_t registerSpace) const noexcept {
+    if (registerSpace >= _sets.size()) {
+        return nullptr;
+    }
+    return &_sets[registerSpace];
+}
+
+bool ShaderParameterTableD3D12::SlotHasAnyWrite(uint32_t registerSpace) const noexcept {
+    if (registerSpace >= _sets.size()) {
+        return false;
+    }
+    const auto& slot = _sets[registerSpace];
+    return std::ranges::any_of(slot.ResourceWritten, [](uint8_t v) noexcept { return v != 0; }) ||
+           std::ranges::any_of(slot.SamplerWritten, [](uint8_t v) noexcept { return v != 0; });
+}
+
+bool ShaderParameterTableD3D12::SlotIsFullyWritten(uint32_t registerSpace) const noexcept {
+    if (_rootSig == nullptr || registerSpace >= _sets.size()) {
+        return false;
+    }
+    const auto& slot = _sets[registerSpace];
+    // 遍历该 register space 下的非静态采样器/非 bindless descriptor table 参数, 检查是否全部写满.
+    for (const auto& binding : _rootSig->_parameterBindings) {
+        if (binding.IsStaticSampler || binding.Info.IsBindless || binding.RegisterSpace != registerSpace) {
+            continue;
+        }
+        if (binding.RootParameterIndex == std::numeric_limits<uint32_t>::max() ||
+            binding.RangeIndex == std::numeric_limits<uint32_t>::max()) {
+            continue;
+        }
+        const auto& written = binding.Info.Kind == ShaderParameterKind::Sampler ? slot.SamplerWritten : slot.ResourceWritten;
+        const uint32_t descriptorCount = _rootSig->GetDescriptorCount(binding);
+        const uint32_t descriptorHeapOffset = _rootSig->GetDescriptorHeapOffset(binding);
+        for (uint32_t j = 0; j < descriptorCount; ++j) {
+            const uint32_t index = descriptorHeapOffset + j;
+            if (index >= written.size() || !written[index]) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 std::span<const byte> ShaderParameterTableD3D12::GetConstantData(ShaderParameterId id) const noexcept {
@@ -5042,6 +4941,15 @@ ShaderBindingLayoutCacheD3D12::ShaderBindingLayoutCacheD3D12(DeviceD3D12* device
 
 ShaderBindingLayoutCacheD3D12::~ShaderBindingLayoutCacheD3D12() noexcept {
     Clear();
+}
+
+bool ShaderBindingLayoutCacheD3D12::IsValid() const noexcept {
+    return _device != nullptr;
+}
+
+void ShaderBindingLayoutCacheD3D12::Destroy() noexcept {
+    Clear();
+    _device = nullptr;
 }
 
 bool ShaderBindingLayoutCacheD3D12::Matches(const Entry& entry, const ShaderBindingLayoutDescriptor& desc) const noexcept {

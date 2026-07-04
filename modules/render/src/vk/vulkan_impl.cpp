@@ -450,9 +450,18 @@ static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceVi
     return std::nullopt;
 }
 
+// 构建期临时结构: 记录每个静态采样器参数的定位信息与采样器描述, 仅在 CreateRootSignatureInternal 内使用.
+struct _StaticSamplerBuildInfoVulkan {
+    ShaderParameterId Id{0};
+    uint32_t SetIndex{0};
+    uint32_t BindingIndex{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    SamplerDescriptor Desc{};
+};
+
 struct _StaticSamplerSelectionVulkan {
     vector<ShaderParameterInfo> PublicParameters{};
-    vector<PipelineLayoutVulkan::StaticSamplerInfo> StaticSamplers{};
+    vector<_StaticSamplerBuildInfoVulkan> StaticSamplers{};
     vector<uint8_t> IsStaticParameter{};
 };
 
@@ -520,14 +529,11 @@ static std::optional<_StaticSamplerSelectionVulkan> _SelectStaticSamplersVulkan(
             return std::nullopt;
         }
         result.IsStaticParameter[matchedIndex] = 1;
-        const ShaderStages effectiveStages = parameter.Stages;
-        const string effectiveName = parameter.Name;
-        result.StaticSamplers.push_back(PipelineLayoutVulkan::StaticSamplerInfo{
-            .Name = effectiveName,
+        result.StaticSamplers.push_back(_StaticSamplerBuildInfoVulkan{
             .Id = parameter.Id,
             .SetIndex = vkInfo.SetIndex,
             .BindingIndex = vkInfo.BindingIndex,
-            .Stages = effectiveStages,
+            .Stages = parameter.Stages,
             .Desc = staticSampler.Desc,
         });
     }
@@ -602,12 +608,19 @@ static bool _BindDescriptorSetVulkan(
         return false;
     }
     if (!set->IsFullyWritten()) {
-        const auto params = boundPipeLayout->GetDescriptorSetLayout(setIndex);
-        if (!params.empty()) {
-            auto infoOpt = boundPipeLayout->FindParameterInfo(params.front());
-            RADRAY_ERR_LOG(
-                "descriptor set is missing parameter '{}'",
-                infoOpt.HasValue() && infoOpt.Get() != nullptr ? infoOpt.Get()->Name : string{});
+        // 找到该 set 下第一个非静态采样器/非 bindless 参数作为缺失提示.
+        string missingName{};
+        for (const auto& binding : boundPipeLayout->GetParameterBindings()) {
+            if (binding.IsStaticSampler || binding.Info.IsBindless ||
+                binding.Info.Kind == ShaderParameterKind::Constant ||
+                binding.SetIndex != setIndex) {
+                continue;
+            }
+            missingName = binding.Info.Name;
+            break;
+        }
+        if (!missingName.empty()) {
+            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", missingName);
         } else {
             RADRAY_ERR_LOG("descriptor set is not fully written");
         }
@@ -626,17 +639,17 @@ static bool _BindDescriptorSetVulkan(
 }
 
 static bool _BindlessArrayMatchesVulkan(
-    const PipelineLayoutVulkan::BindlessSetInfo& bindlessInfo,
+    const PipelineLayoutVulkan::ParameterBinding& bindlessInfo,
     const BindlessArrayVulkan* array) noexcept {
     if (array == nullptr || !array->IsValid()) {
         RADRAY_ERR_LOG("bindless array is invalid");
         return false;
     }
-    if (array->_slotType != bindlessInfo.SlotType) {
+    if (array->_slotType != bindlessInfo.BindlessSlotType) {
         RADRAY_ERR_LOG(
             "bindless array slot type mismatch for set {} expected: {}, actual: {}",
             bindlessInfo.SetIndex,
-            static_cast<uint32_t>(bindlessInfo.SlotType),
+            static_cast<uint32_t>(bindlessInfo.BindlessSlotType),
             static_cast<uint32_t>(array->_slotType));
         return false;
     }
@@ -646,7 +659,7 @@ static bool _BindlessArrayMatchesVulkan(
             continue;
         }
         bool isCompatible = false;
-        switch (bindlessInfo.Type) {
+        switch (bindlessInfo.Info.Type) {
             case ResourceBindType::Buffer:
             case ResourceBindType::RWBuffer:
                 isCompatible = slotType == ResourceBindType::Buffer || slotType == ResourceBindType::RWBuffer;
@@ -663,7 +676,7 @@ static bool _BindlessArrayMatchesVulkan(
                 "bindless array slot {} type mismatch for set {} expected: {}, actual: {}",
                 i,
                 bindlessInfo.SetIndex,
-                bindlessInfo.Type,
+                bindlessInfo.Info.Type,
                 slotType);
             return false;
         }
@@ -849,7 +862,7 @@ static std::optional<VkDescriptorSet> _PrepareBindlessDescriptorSetVulkan(
     DeviceVulkan* device,
     BindlessArrayVulkan* array,
     DescriptorSetLayoutVulkan* layout,
-    const PipelineLayoutVulkan::BindlessSetInfo& bindlessInfo) noexcept {
+    const PipelineLayoutVulkan::ParameterBinding& bindlessInfo) noexcept {
     if (device == nullptr || array == nullptr || layout == nullptr) {
         return std::nullopt;
     }
@@ -936,7 +949,7 @@ static bool _BindBindlessArrayVulkan(
         RADRAY_ERR_LOG("bindless array is invalid");
         return false;
     }
-    auto bindlessInfoOpt = boundPipeLayout->FindBindlessSetInfo(setIndex);
+    auto bindlessInfoOpt = boundPipeLayout->FindBindlessSet(setIndex);
     if (!bindlessInfoOpt.HasValue() || bindlessInfoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("set {} is not declared as a bindless set", setIndex);
         return false;
@@ -988,7 +1001,7 @@ static bool _PushConstantsVulkan(
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Constant) {
+    if (info->Info.Kind != ShaderParameterKind::Constant) {
         RADRAY_ERR_LOG("binding parameter id {} is not a push constant parameter", id.Value);
         return false;
     }
@@ -1003,7 +1016,7 @@ static bool _PushConstantsVulkan(
     device->_ftb.vkCmdPushConstants(
         cmdBuffer->_cmdBuffer,
         boundPipeLayout->_layout,
-        MapType(info->Stages),
+        MapType(info->Info.Stages),
         info->PushConstantOffset,
         info->PushConstantSize,
         data);
@@ -1045,12 +1058,15 @@ static bool _BindShaderParameterTableVulkan(
         }
     }
 
-    for (const auto& range : layout->GetPushConstants()) {
-        std::span<const byte> data = table->GetConstantData(range.Id);
+    for (const auto& binding : layout->GetParameterBindings()) {
+        if (binding.Info.Kind != ShaderParameterKind::Constant) {
+            continue;
+        }
+        std::span<const byte> data = table->GetConstantData(binding.Info.Id);
         if (data.empty()) {
             continue;
         }
-        if (!_PushConstantsVulkan(device, cmdBuffer, layout, range.Id, data.data(), static_cast<uint32_t>(data.size()))) {
+        if (!_PushConstantsVulkan(device, cmdBuffer, layout, binding.Info.Id, data.data(), static_cast<uint32_t>(data.size()))) {
             return false;
         }
     }
@@ -1638,12 +1654,10 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
     auto staticSamplerSelection = std::move(staticSamplerSelectionOpt.value());
     const auto parameters = allParameters;
 
-    vector<PipelineLayoutVulkan::ParameterBindingInfo> parameterInfos(parameters.size());
-    vector<vector<ShaderParameterId>> descriptorSetLayouts(merged.DescriptorSetCount);
-    vector<PipelineLayoutVulkan::BindlessBindingInfo> bindlessSetLayouts{};
-    vector<PipelineLayoutVulkan::StaticSamplerInfo> staticSamplerLayouts = std::move(staticSamplerSelection.StaticSamplers);
-    vector<PipelineLayoutVulkan::ConstantInfo> pushConstants{};
-    vector<PipelineLayoutVulkan::BindlessSetInfo> bindlessSets{};
+    // parameterBindings 按 ShaderParameterId 索引 (parameters[i].Id.Value == i), Info 直接拷贝公共参数信息.
+    // 静态采样器不作为可绑定公共参数暴露 (由 GetParameters 过滤), 但仍占据一条 binding 以支持按 id 反查.
+    vector<PipelineLayoutVulkan::ParameterBinding> parameterBindings(parameters.size());
+    // 创建 VkDescriptorSetLayout 所需的原生数据 (仅构建期), 逐 set 收集.
     vector<vector<VkDescriptorSetLayoutBinding>> rawBindingsBySet(merged.DescriptorSetCount);
     vector<vector<DescriptorSetLayoutBindingVulkanContainer>> bindingContainersBySet(merged.DescriptorSetCount);
     vector<vector<VkDescriptorBindingFlags>> bindingFlagsBySet(merged.DescriptorSetCount);
@@ -1656,10 +1670,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
     for (size_t i = 0; i < parameters.size(); ++i) {
         const auto& parameter = parameters[i];
         const auto& vkInfo = merged.VulkanParameters[i];
-        auto& info = parameterInfos[i];
-        info.Name = parameter.Name;
-        info.Kind = parameter.Kind;
-        info.Stages = parameter.Stages;
+        auto& binding = parameterBindings[i];
+        binding.Info = parameter;
         if (parameter.Kind == ShaderParameterKind::Constant) {
             if (vkInfo.Size == 0 || (vkInfo.Offset % 4) != 0 || (vkInfo.Size % 4) != 0) {
                 RADRAY_ERR_LOG("vk push constant '{}' must be 4-byte aligned and non-empty", parameter.Name);
@@ -1677,15 +1689,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
                 .offset = vkInfo.Offset,
                 .size = vkInfo.Size,
             });
-            info.PushConstantOffset = vkInfo.Offset;
-            info.PushConstantSize = vkInfo.Size;
-            pushConstants.push_back(PipelineLayoutVulkan::ConstantInfo{
-                .Name = parameter.Name,
-                .Id = parameter.Id,
-                .Stages = parameter.Stages,
-                .Offset = vkInfo.Offset,
-                .Size = vkInfo.Size,
-            });
+            binding.PushConstantOffset = vkInfo.Offset;
+            binding.PushConstantSize = vkInfo.Size;
             continue;
         }
 
@@ -1693,22 +1698,18 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
             RADRAY_ERR_LOG("vk lowering metadata is unavailable for '{}'", parameter.Name);
             return nullptr;
         }
-        info.Type = parameter.Type;
-        info.SetIndex = vkInfo.SetIndex;
-        info.BindingIndex = vkInfo.BindingIndex;
-        info.DescriptorCount = parameter.Count;
-        info.IsReadOnly = parameter.IsReadOnly;
-        info.IsBindless = parameter.IsBindless;
-        info.BindlessSlotType = vkInfo.BindlessSlotType;
-        info.DescriptorType = vkInfo.DescriptorType;
+        binding.SetIndex = vkInfo.SetIndex;
+        binding.BindingIndex = vkInfo.BindingIndex;
+        binding.DescriptorType = vkInfo.DescriptorType;
+        binding.BindlessSlotType = vkInfo.BindlessSlotType;
         if (staticSamplerSelection.IsStaticParameter[i]) {
             auto staticSamplerIt = std::find_if(
-                staticSamplerLayouts.begin(),
-                staticSamplerLayouts.end(),
-                [&](const PipelineLayoutVulkan::StaticSamplerInfo& staticSampler) {
+                staticSamplerSelection.StaticSamplers.begin(),
+                staticSamplerSelection.StaticSamplers.end(),
+                [&](const _StaticSamplerBuildInfoVulkan& staticSampler) {
                     return staticSampler.Id == parameter.Id;
                 });
-            if (staticSamplerIt == staticSamplerLayouts.end()) {
+            if (staticSamplerIt == staticSamplerSelection.StaticSamplers.end()) {
                 RADRAY_ERR_LOG("internal error: static sampler metadata is unavailable for '{}'", parameter.Name);
                 return nullptr;
             }
@@ -1722,8 +1723,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
             immutableSamplers.emplace_back(static_cast<SamplerVulkan*>(samplerBase.release()));
             immutableSamplerHandles.push_back(vector<VkSampler>{immutableSamplers[0]->_sampler});
 
-            info.IsStaticSampler = true;
-            info.DescriptorWriteOffset = 0;
+            binding.IsStaticSampler = true;
+            binding.DescriptorWriteOffset = 0;
 
             VkDescriptorSetLayoutBinding rawBinding{};
             rawBinding.binding = vkInfo.BindingIndex;
@@ -1753,37 +1754,14 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
             parameter.Type,
             vector<unique_ptr<SamplerVulkan>>{},
             bindingFlags);
+        bindingFlagsBySet[vkInfo.SetIndex].push_back(bindingFlags);
         if (parameter.IsBindless) {
-            bindingFlagsBySet[vkInfo.SetIndex].push_back(bindingFlags);
-            bindlessSetLayouts.push_back(PipelineLayoutVulkan::BindlessBindingInfo{
-                .Name = parameter.Name,
-                .Id = parameter.Id,
-                .SetIndex = vkInfo.SetIndex,
-                .BindingIndex = vkInfo.BindingIndex,
-                .Type = parameter.Type,
-                .SlotType = vkInfo.BindlessSlotType,
-                .DescriptorType = vkInfo.DescriptorType,
-                .Stages = parameter.Stages,
-            });
-            bindlessSets.push_back(PipelineLayoutVulkan::BindlessSetInfo{
-                .SetIndex = vkInfo.SetIndex,
-                .Id = parameter.Id,
-                .BindingIndex = vkInfo.BindingIndex,
-                .Type = parameter.Type,
-                .SlotType = vkInfo.BindlessSlotType,
-                .DescriptorType = vkInfo.DescriptorType,
-                .Stages = parameter.Stages,
-            });
-            info.DescriptorWriteOffset = 0;
+            binding.DescriptorWriteOffset = 0;
         } else if (parameter.Kind == ShaderParameterKind::Sampler) {
-            descriptorSetLayouts[vkInfo.SetIndex].push_back(parameter.Id);
-            bindingFlagsBySet[vkInfo.SetIndex].push_back(0);
-            info.DescriptorWriteOffset = samplerCountsBySet[vkInfo.SetIndex];
+            binding.DescriptorWriteOffset = samplerCountsBySet[vkInfo.SetIndex];
             samplerCountsBySet[vkInfo.SetIndex] += parameter.Count;
         } else {
-            descriptorSetLayouts[vkInfo.SetIndex].push_back(parameter.Id);
-            bindingFlagsBySet[vkInfo.SetIndex].push_back(0);
-            info.DescriptorWriteOffset = resourceCountsBySet[vkInfo.SetIndex];
+            binding.DescriptorWriteOffset = resourceCountsBySet[vkInfo.SetIndex];
             resourceCountsBySet[vkInfo.SetIndex] += parameter.Count;
         }
     }
@@ -1820,16 +1798,12 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
         return nullptr;
     }
 
-    auto result = make_unique<PipelineLayoutVulkan>(this, layout);
-    result->SetPublicParameters(std::move(staticSamplerSelection.PublicParameters));
+    auto result = make_unique<PipelineLayoutVulkan>(
+        this,
+        layout,
+        std::move(parameterBindings),
+        merged.DescriptorSetCount);
     result->_ownedLayouts = std::move(ownedLayouts);
-    result->_descriptorSetLayouts = std::move(descriptorSetLayouts);
-    result->_bindlessSetLayouts = std::move(bindlessSetLayouts);
-    result->_staticSamplerLayouts = std::move(staticSamplerLayouts);
-    result->_pushConstants = std::move(pushConstants);
-    result->_parameters = std::move(parameterInfos);
-    result->_bindlessSets = std::move(bindlessSets);
-    result->_setLayoutCount = merged.DescriptorSetCount;
     return result;
 }
 
@@ -1863,15 +1837,15 @@ Nullable<unique_ptr<DescriptorSetVulkan>> DeviceVulkan::CreateDescriptorSetInter
 
     uint32_t resourceDescriptorCount = 0;
     uint32_t samplerDescriptorCount = 0;
-    for (const auto& id : layout->GetDescriptorSetLayout(setIndex)) {
-        auto infoOpt = layout->FindParameterInfo(id);
-        if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-            RADRAY_ERR_LOG("internal error: vk parameter metadata is unavailable");
-            return nullptr;
+    for (const auto& binding : layout->GetParameterBindings()) {
+        // 只统计该 set 下的非静态采样器/非 bindless/非 push constant 参数.
+        if (binding.IsStaticSampler || binding.Info.IsBindless ||
+            binding.Info.Kind == ShaderParameterKind::Constant ||
+            binding.SetIndex != setIndex) {
+            continue;
         }
-        const auto* info = infoOpt.Get();
-        const uint32_t count = info->DescriptorWriteOffset + info->DescriptorCount;
-        if (info->Kind == ShaderParameterKind::Sampler) {
+        const uint32_t count = binding.DescriptorWriteOffset + binding.Info.Count;
+        if (binding.Info.Kind == ShaderParameterKind::Sampler) {
             samplerDescriptorCount = std::max(samplerDescriptorCount, count);
         } else {
             resourceDescriptorCount = std::max(resourceDescriptorCount, count);
@@ -5587,9 +5561,13 @@ void BindlessDescAllocator::Destroy(Allocation allocation) noexcept {
 
 PipelineLayoutVulkan::PipelineLayoutVulkan(
     DeviceVulkan* device,
-    VkPipelineLayout layout) noexcept
+    VkPipelineLayout layout,
+    vector<ParameterBinding> parameterBindings,
+    uint32_t setLayoutCount) noexcept
     : _device(device),
-      _layout(layout) {}
+      _layout(layout),
+      _parameterBindings(std::move(parameterBindings)),
+      _setLayoutCount(setLayoutCount) {}
 
 PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
     this->DestroyImpl();
@@ -5615,12 +5593,7 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
 
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _ownedLayouts.clear();
-    _descriptorSetLayouts.clear();
-    _bindlessSetLayouts.clear();
-    _staticSamplerLayouts.clear();
-    _pushConstants.clear();
-    _parameters.clear();
-    _bindlessSets.clear();
+    _parameterBindings.clear();
     _setLayoutCount = 0;
     if (_layout != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
@@ -5628,40 +5601,61 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     }
 }
 
-Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*> PipelineLayoutVulkan::FindParameterInfo(ShaderParameterId id) const noexcept {
-    if (id.Value >= _parameters.size()) {
+vector<ShaderParameterInfo> PipelineLayoutVulkan::GetParameters() const noexcept {
+    // 排除静态采样器 (不作为可绑定的公共参数暴露), 其余从 _parameterBindings 的 Info 派生.
+    vector<ShaderParameterInfo> result{};
+    result.reserve(_parameterBindings.size());
+    for (const auto& binding : _parameterBindings) {
+        if (binding.IsStaticSampler) {
+            continue;
+        }
+        result.push_back(binding.Info);
+    }
+    return result;
+}
+
+std::optional<ShaderParameterId> PipelineLayoutVulkan::FindParameterId(std::string_view name) const noexcept {
+    for (const auto& binding : _parameterBindings) {
+        if (binding.IsStaticSampler) {
+            continue;
+        }
+        if (binding.Info.Name == name) {
+            return binding.Info.Id;
+        }
+    }
+    return std::nullopt;
+}
+
+Nullable<const ShaderParameterInfo*> PipelineLayoutVulkan::FindParameter(ShaderParameterId id) const noexcept {
+    if (id.Value >= _parameterBindings.size()) {
         return nullptr;
     }
-    return &_parameters[id.Value];
+    const auto& binding = _parameterBindings[id.Value];
+    if (binding.IsStaticSampler) {
+        return nullptr;
+    }
+    return &binding.Info;
+}
+
+Nullable<const PipelineLayoutVulkan::ParameterBinding*> PipelineLayoutVulkan::FindParameterInfo(ShaderParameterId id) const noexcept {
+    if (id.Value >= _parameterBindings.size()) {
+        return nullptr;
+    }
+    return &_parameterBindings[id.Value];
 }
 
 bool PipelineLayoutVulkan::HasBindlessSet(uint32_t setIndex) const noexcept {
     return FindBindlessSet(setIndex).HasValue();
 }
 
-Nullable<const PipelineLayoutVulkan::BindlessBindingInfo*> PipelineLayoutVulkan::FindBindlessSet(uint32_t setIndex) const noexcept {
-    for (const auto& bindlessSet : _bindlessSetLayouts) {
-        if (bindlessSet.SetIndex == setIndex) {
-            return &bindlessSet;
+Nullable<const PipelineLayoutVulkan::ParameterBinding*> PipelineLayoutVulkan::FindBindlessSet(uint32_t setIndex) const noexcept {
+    // 扫描 _parameterBindings 找到该 set 的 bindless 参数.
+    for (const auto& binding : _parameterBindings) {
+        if (binding.Info.IsBindless && binding.SetIndex == setIndex) {
+            return &binding;
         }
     }
     return nullptr;
-}
-
-Nullable<const PipelineLayoutVulkan::BindlessSetInfo*> PipelineLayoutVulkan::FindBindlessSetInfo(uint32_t setIndex) const noexcept {
-    for (const auto& bindlessSet : _bindlessSets) {
-        if (bindlessSet.SetIndex == setIndex) {
-            return &bindlessSet;
-        }
-    }
-    return nullptr;
-}
-
-std::span<const ShaderParameterId> PipelineLayoutVulkan::GetDescriptorSetLayout(uint32_t setIndex) const noexcept {
-    if (setIndex >= _descriptorSetLayouts.size()) {
-        return {};
-    }
-    return _descriptorSetLayouts[setIndex];
 }
 
 Nullable<DescriptorSetLayoutVulkan*> PipelineLayoutVulkan::GetSetLayout(uint32_t setIndex) const noexcept {
@@ -6131,7 +6125,7 @@ bool DescriptorSetVulkan::WriteResource(ShaderParameterId id, ResourceView* view
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Resource) {
+    if (info->Info.Kind != ShaderParameterKind::Resource) {
         RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
         return false;
     }
@@ -6143,16 +6137,16 @@ bool DescriptorSetVulkan::WriteResource(ShaderParameterId id, ResourceView* view
             _setIndex);
         return false;
     }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+    if (arrayIndex >= info->Info.Count) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->Info.Count, arrayIndex);
         return false;
     }
     auto bindType = _GetResourceViewBindTypeVulkan(view);
-    if (!bindType.has_value() || bindType.value() != info->Type) {
+    if (!bindType.has_value() || bindType.value() != info->Info.Type) {
         RADRAY_ERR_LOG(
             "resource type mismatch for binding parameter id {} expected: {}, actual: {}",
             id.Value,
-            info->Type,
+            info->Info.Type,
             bindType.has_value() ? bindType.value() : ResourceBindType::UNKNOWN);
         return false;
     }
@@ -6179,7 +6173,7 @@ bool DescriptorSetVulkan::WriteResource(ShaderParameterId id, const BufferBindin
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Resource) {
+    if (info->Info.Kind != ShaderParameterKind::Resource) {
         RADRAY_ERR_LOG("binding parameter id {} is not a resource parameter", id.Value);
         return false;
     }
@@ -6191,16 +6185,16 @@ bool DescriptorSetVulkan::WriteResource(ShaderParameterId id, const BufferBindin
             _setIndex);
         return false;
     }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+    if (arrayIndex >= info->Info.Count) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->Info.Count, arrayIndex);
         return false;
     }
     const auto bindType = BufferViewUsageToResourceBindType(desc.Usage);
-    if (bindType != info->Type) {
+    if (bindType != info->Info.Type) {
         RADRAY_ERR_LOG(
             "buffer binding type mismatch for binding parameter id {} expected: {}, actual: {}",
             id.Value,
-            info->Type,
+            info->Info.Type,
             bindType);
         return false;
     }
@@ -6235,7 +6229,7 @@ bool DescriptorSetVulkan::WriteSampler(ShaderParameterId id, Sampler* sampler, u
         RADRAY_ERR_LOG("binding parameter id {} is a static sampler and cannot be written through DescriptorSet", id.Value);
         return false;
     }
-    if (info->Kind != ShaderParameterKind::Sampler) {
+    if (info->Info.Kind != ShaderParameterKind::Sampler) {
         RADRAY_ERR_LOG("binding parameter id {} is not a sampler parameter", id.Value);
         return false;
     }
@@ -6247,8 +6241,8 @@ bool DescriptorSetVulkan::WriteSampler(ShaderParameterId id, Sampler* sampler, u
             _setIndex);
         return false;
     }
-    if (arrayIndex >= info->DescriptorCount) {
-        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->DescriptorCount, arrayIndex);
+    if (arrayIndex >= info->Info.Count) {
+        RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", info->Info.Count, arrayIndex);
         return false;
     }
     if (!SetSampler(info->BindingIndex, arrayIndex, sampler)) {
@@ -6421,15 +6415,16 @@ bool DescriptorSetVulkan::IsFullyWritten() const noexcept {
     if (!this->IsValid()) {
         return false;
     }
-    for (const auto& id : _rootSig->GetDescriptorSetLayout(_setIndex)) {
-        auto infoOpt = _rootSig->FindParameterInfo(id);
-        if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
-            return false;
+    // 遍历该 set 下的非静态采样器/非 bindless/非 push constant 参数, 检查是否全部写满.
+    for (const auto& binding : _rootSig->GetParameterBindings()) {
+        if (binding.IsStaticSampler || binding.Info.IsBindless ||
+            binding.Info.Kind == ShaderParameterKind::Constant ||
+            binding.SetIndex != _setIndex) {
+            continue;
         }
-        const auto& info = *infoOpt.Get();
-        const auto& written = info.Kind == ShaderParameterKind::Sampler ? _samplerWritten : _resourceWritten;
-        for (uint32_t j = 0; j < info.DescriptorCount; ++j) {
-            const uint32_t index = info.DescriptorWriteOffset + j;
+        const auto& written = binding.Info.Kind == ShaderParameterKind::Sampler ? _samplerWritten : _resourceWritten;
+        for (uint32_t j = 0; j < binding.Info.Count; ++j) {
+            const uint32_t index = binding.DescriptorWriteOffset + j;
             if (index >= written.size() || !written[index]) {
                 return false;
             }
@@ -6478,13 +6473,13 @@ void ShaderParameterTableVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 bool ShaderParameterTableVulkan::SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*>{};
+    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBinding*>{};
     if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->IsBindless) {
+    if (info->Info.IsBindless) {
         RADRAY_ERR_LOG("shader parameter id {} is bindless and must be set with SetBindlessArray", id.Value);
         return false;
     }
@@ -6493,13 +6488,13 @@ bool ShaderParameterTableVulkan::SetResource(ShaderParameterId id, ResourceView*
 }
 
 bool ShaderParameterTableVulkan::SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*>{};
+    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBinding*>{};
     if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->IsBindless) {
+    if (info->Info.IsBindless) {
         RADRAY_ERR_LOG("shader parameter id {} is bindless and must be set with SetBindlessArray", id.Value);
         return false;
     }
@@ -6508,7 +6503,7 @@ bool ShaderParameterTableVulkan::SetResource(ShaderParameterId id, const BufferB
 }
 
 bool ShaderParameterTableVulkan::SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*>{};
+    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBinding*>{};
     if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
@@ -6522,13 +6517,13 @@ bool ShaderParameterTableVulkan::SetBytes(ShaderParameterId id, const void* data
         RADRAY_ERR_LOG("constant data for shader parameter id {} is empty", id.Value);
         return false;
     }
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*>{};
+    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBinding*>{};
     if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (info->Kind != ShaderParameterKind::Constant || size != info->PushConstantSize) {
+    if (info->Info.Kind != ShaderParameterKind::Constant || size != info->PushConstantSize) {
         RADRAY_ERR_LOG("constant size mismatch for shader parameter id {}", id.Value);
         return false;
     }
@@ -6542,13 +6537,13 @@ bool ShaderParameterTableVulkan::SetBytes(ShaderParameterId id, const void* data
 }
 
 bool ShaderParameterTableVulkan::SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept {
-    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBindingInfo*>{};
+    auto infoOpt = _rootSig != nullptr ? _rootSig->FindParameterInfo(id) : Nullable<const PipelineLayoutVulkan::ParameterBinding*>{};
     if (!infoOpt.HasValue() || infoOpt.Get() == nullptr) {
         RADRAY_ERR_LOG("shader parameter id {} is out of range", id.Value);
         return false;
     }
     const auto* info = infoOpt.Get();
-    if (!info->IsBindless) {
+    if (!info->Info.IsBindless) {
         RADRAY_ERR_LOG("shader parameter id {} is not bindless", id.Value);
         return false;
     }
@@ -6565,8 +6560,11 @@ bool ShaderParameterTableVulkan::IsFullyWritten() const noexcept {
             return false;
         }
     }
-    for (const auto& range : _rootSig->GetPushConstants()) {
-        if (range.Id.Value >= _constantData.size() || _constantData[range.Id.Value].empty()) {
+    for (const auto& binding : _rootSig->GetParameterBindings()) {
+        if (binding.Info.Kind != ShaderParameterKind::Constant) {
+            continue;
+        }
+        if (binding.Info.Id.Value >= _constantData.size() || _constantData[binding.Info.Id.Value].empty()) {
             return false;
         }
     }
@@ -7000,6 +6998,15 @@ ShaderBindingLayoutCacheVulkan::ShaderBindingLayoutCacheVulkan(DeviceVulkan* dev
 
 ShaderBindingLayoutCacheVulkan::~ShaderBindingLayoutCacheVulkan() noexcept {
     Clear();
+}
+
+bool ShaderBindingLayoutCacheVulkan::IsValid() const noexcept {
+    return _device != nullptr;
+}
+
+void ShaderBindingLayoutCacheVulkan::Destroy() noexcept {
+    Clear();
+    _device = nullptr;
 }
 
 bool ShaderBindingLayoutCacheVulkan::Matches(const Entry& entry, const ShaderBindingLayoutDescriptor& desc) const noexcept {
