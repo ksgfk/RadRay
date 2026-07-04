@@ -307,6 +307,10 @@ ShaderBindingLayoutCache* ComputeTestContext::GetShaderBindingLayoutCache() cons
     return _shaderBindingLayoutCache.get();
 }
 
+Dxc* ComputeTestContext::GetDxc() const noexcept {
+    return _dxc.get();
+}
+
 CommandQueue* ComputeTestContext::GetQueue() const noexcept {
     return _queue;
 }

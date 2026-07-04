@@ -10,11 +10,18 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
+#include <radray/guid.h>
 
 #include <radray/render/shader/hlsl.h>
 #include <radray/render/shader/spirv.h>
 
 namespace radray::render {
+
+// PSO 缓存 POD key 的容量上限. 超限时 BuildKey 返回失败.
+inline constexpr uint32_t kMaxColorTargets = 8;
+inline constexpr uint32_t kMaxVertexBufferLayouts = 16;
+inline constexpr uint32_t kMaxVertexElementsPerLayout = 16;
+inline constexpr uint32_t kMaxSemanticLength = 32;
 
 enum class RenderBackend : int32_t {
     D3D12,
@@ -571,6 +578,8 @@ class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
 class RayTracingPipelineState;
+class GraphicsPipelineStateCache;
+class ComputePipelineStateCache;
 class ShaderBindingTable;
 class AccelerationStructure;
 class Sampler;
@@ -1333,6 +1342,8 @@ public:
 
     virtual Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept = 0;
 
+    virtual Nullable<unique_ptr<ShaderBindingLayout>> CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
@@ -1350,6 +1361,12 @@ public:
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept = 0;
+
+    // PSO 缓存工厂. 缓存与后端无关 (仅调用虚函数 CreateGraphics/ComputePipelineState),
+    // 因此在通用层提供统一实现, 无需各后端各自实现.
+    Nullable<unique_ptr<GraphicsPipelineStateCache>> CreateGraphicsPipelineStateCache() noexcept;
+
+    Nullable<unique_ptr<ComputePipelineStateCache>> CreateComputePipelineStateCache() noexcept;
 
     static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
 };
@@ -1582,6 +1599,14 @@ public:
     virtual ShaderStages GetStages() const noexcept = 0;
 
     virtual Nullable<const ShaderReflectionDesc*> GetReflection() const noexcept = 0;
+
+    // 缓存层分配的稳定身份. 未经缓存直接创建的 Shader 为 Guid::Empty(),
+    // 不能参与 PSO 缓存 key (BuildKey 会拒绝 Empty).
+    Guid GetGuid() const noexcept { return _guid; }
+    void SetGuid(Guid guid) noexcept { _guid = guid; }
+
+protected:
+    Guid _guid{};
 };
 
 class ShaderBindingLayout : public RenderBase, public IDebugName {
@@ -1595,6 +1620,13 @@ public:
     virtual std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept = 0;
 
     virtual Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept = 0;
+
+    // 缓存层分配的稳定身份. 由 ShaderBindingLayoutCache 在创建时赋值.
+    Guid GetGuid() const noexcept { return _guid; }
+    void SetGuid(Guid guid) noexcept { _guid = guid; }
+
+protected:
+    Guid _guid{};
 };
 
 class ShaderBindingLayoutCache : public RenderBase {
@@ -1617,6 +1649,39 @@ public:
     virtual ~PipelineState() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::PipelineState; }
+};
+
+// PSO 缓存: 相同 descriptor (经 POD key 归一化) 返回同一 PSO 对象.
+// key 从 desc 里的 ShaderBindingLayout/Shader 的缓存分配 Guid + 展平后的渲染状态构造,
+// 因此 desc 引用的 layout/shader 必须经由缓存分配身份, 否则 GetOrCreate 失败.
+class GraphicsPipelineStateCache : public RenderBase {
+public:
+    virtual ~GraphicsPipelineStateCache() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    virtual Nullable<GraphicsPipelineState*> GetOrCreate(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
+
+    virtual bool Remove(GraphicsPipelineState* pso) noexcept = 0;
+
+    virtual void Clear() noexcept = 0;
+
+    virtual uint32_t Count() const noexcept = 0;
+};
+
+class ComputePipelineStateCache : public RenderBase {
+public:
+    virtual ~ComputePipelineStateCache() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    virtual Nullable<ComputePipelineState*> GetOrCreate(const ComputePipelineStateDescriptor& desc) noexcept = 0;
+
+    virtual bool Remove(ComputePipelineState* pso) noexcept = 0;
+
+    virtual void Clear() noexcept = 0;
+
+    virtual uint32_t Count() const noexcept = 0;
 };
 
 class GraphicsPipelineState : public PipelineState {

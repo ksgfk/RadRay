@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 #include <fmt/format.h>
 
+#include <radray/guid.h>
+#include <radray/render/shader_variant_cache.h>
+#include <radray/render/shader_compiler/dxc.h>
+
 namespace radray::render::test {
 namespace {
 
@@ -60,6 +64,21 @@ constexpr std::string_view kTexelBufferShader = R"(
 [numthreads(1, 1, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID) {
     gOut[0] = gInput[0] + 7;
+}
+)";
+
+// keyword 驱动的 compute shader: 定义 FEATURE_SCALE 时行为不同.
+// 用于验证 ShaderVariantCache 对不同 keyword bitmask 编译出不同 Shader.
+constexpr std::string_view kVariantKeywordShader = R"(
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> gOut : register(u0, space0);
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+#ifdef FEATURE_SCALE
+    gOut[tid.x] = tid.x * 10;
+#else
+    gOut[tid.x] = tid.x;
+#endif
 }
 )";
 
@@ -1532,6 +1551,174 @@ TEST_P(ComputeBindingRuntimeTest, PushConstantsFailsWhenSizeMismatch) {
     const string captured = _ctx.JoinCapturedErrors();
     EXPECT_NE(captured.find("constant size mismatch"), string::npos)
         << fmt::format("Expected push constant size mismatch on {}, log:\n{}", _ctx.GetBackendName(), captured);
+}
+
+TEST_P(ComputeBindingRuntimeTest, ComputePipelineStateCacheHitAndMiss) {
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kTexelBufferShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    // 模拟 ShaderVariantCache 赋予的稳定身份 (框架的 CreateShader 不分配 Guid).
+    ASSERT_TRUE(program.ShaderObject->GetGuid().IsEmpty());
+    program.ShaderObject->SetGuid(Guid::NewGuid());
+    // 缓存分配的 layout 应已有身份.
+    ASSERT_FALSE(program.BindingLayout->GetGuid().IsEmpty());
+
+    auto cacheOpt = _ctx.GetDevicePtr()->CreateComputePipelineStateCache();
+    ASSERT_TRUE(cacheOpt.HasValue());
+    auto cache = cacheOpt.Release();
+
+    ComputePipelineStateDescriptor psoDesc{};
+    psoDesc.BindingLayout = program.BindingLayout;
+    psoDesc.CS = ShaderEntry{.Target = program.ShaderObject.get(), .EntryPoint = "CSMain"};
+
+    auto first = cache->GetOrCreate(psoDesc);
+    ASSERT_TRUE(first.HasValue()) << _ctx.JoinCapturedErrors();
+    EXPECT_EQ(cache->Count(), 1u);
+
+    // 相同 descriptor 应命中同一 PSO 对象.
+    auto second = cache->GetOrCreate(psoDesc);
+    ASSERT_TRUE(second.HasValue());
+    EXPECT_EQ(first.Get(), second.Get());
+    EXPECT_EQ(cache->Count(), 1u);
+
+    // Remove 后计数归零.
+    EXPECT_TRUE(cache->Remove(first.Get()));
+    EXPECT_EQ(cache->Count(), 0u);
+}
+
+TEST_P(ComputeBindingRuntimeTest, ComputePipelineStateCacheRejectsShaderWithoutIdentity) {
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kTexelBufferShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    auto cacheOpt = _ctx.GetDevicePtr()->CreateComputePipelineStateCache();
+    ASSERT_TRUE(cacheOpt.HasValue());
+    auto cache = cacheOpt.Release();
+
+    // Shader 未经缓存分配身份 (Guid Empty) -> BuildKey 拒绝.
+    ASSERT_TRUE(program.ShaderObject->GetGuid().IsEmpty());
+    ComputePipelineStateDescriptor psoDesc{};
+    psoDesc.BindingLayout = program.BindingLayout;
+    psoDesc.CS = ShaderEntry{.Target = program.ShaderObject.get(), .EntryPoint = "CSMain"};
+
+    _ctx.ClearCapturedErrors();
+    auto result = cache->GetOrCreate(psoDesc);
+    EXPECT_FALSE(result.HasValue());
+    EXPECT_EQ(cache->Count(), 0u);
+    const string captured = _ctx.JoinCapturedErrors();
+    EXPECT_NE(captured.find("no cache-assigned identity"), string::npos)
+        << fmt::format("Expected identity rejection on {}, log:\n{}", _ctx.GetBackendName(), captured);
+}
+
+TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheDistinguishesKeywords) {
+    auto cache = CreateShaderVariantCache(
+        _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache());
+    ASSERT_TRUE(cache.HasValue());
+    auto variantCache = cache.Release();
+
+    const Guid programId = Guid::NewGuid();
+    const ShaderVariantStageDesc stage{
+        .Source = kVariantKeywordShader,
+        .EntryPoint = "CSMain",
+        .Stage = ShaderStage::Compute,
+    };
+
+    ShaderVariantDescriptor descBase{};
+    descBase.ProgramId = programId;
+    descBase.PassIndex = 0;
+    descBase.KeywordBitmask = 0;
+    descBase.Stages = std::span{&stage, 1};
+    descBase.SM = HlslShaderModel::SM60;
+
+    _ctx.ClearCapturedErrors();
+    auto baseVariant = variantCache->GetOrCreate(descBase);
+    ASSERT_TRUE(baseVariant.HasValue()) << _ctx.JoinCapturedErrors();
+    ASSERT_NE(baseVariant.Get()->CS, nullptr);
+    EXPECT_NE(baseVariant.Get()->Layout, nullptr);
+    // 缓存创建的 shader 应被赋予稳定身份.
+    EXPECT_FALSE(baseVariant.Get()->CS->GetGuid().IsEmpty());
+    EXPECT_EQ(variantCache->Count(), 1u);
+
+    // 相同 key -> 命中同一变体.
+    auto baseAgain = variantCache->GetOrCreate(descBase);
+    ASSERT_TRUE(baseAgain.HasValue());
+    EXPECT_EQ(baseVariant.Get(), baseAgain.Get());
+    EXPECT_EQ(baseVariant.Get()->CS, baseAgain.Get()->CS);
+    EXPECT_EQ(variantCache->Count(), 1u);
+
+    // 不同 keyword bitmask + 对应 define -> 编译出不同 shader.
+    std::string_view defines[] = {"FEATURE_SCALE=1"};
+    ShaderVariantDescriptor descScaled = descBase;
+    descScaled.KeywordBitmask = 1;
+    descScaled.Defines = std::span{defines};
+
+    auto scaledVariant = variantCache->GetOrCreate(descScaled);
+    ASSERT_TRUE(scaledVariant.HasValue()) << _ctx.JoinCapturedErrors();
+    ASSERT_NE(scaledVariant.Get()->CS, nullptr);
+    EXPECT_EQ(variantCache->Count(), 2u);
+    // 不同变体是不同的 Shader 对象, 且身份不同.
+    EXPECT_NE(baseVariant.Get()->CS, scaledVariant.Get()->CS);
+    EXPECT_NE(baseVariant.Get()->CS->GetGuid(), scaledVariant.Get()->CS->GetGuid());
+
+    EXPECT_TRUE(_ctx.GetCapturedErrors().empty())
+        << fmt::format("Captured errors on {}:\n{}", _ctx.GetBackendName(), _ctx.JoinCapturedErrors());
+}
+
+TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheRejectsEmptyProgramId) {
+    auto cache = CreateShaderVariantCache(
+        _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache());
+    ASSERT_TRUE(cache.HasValue());
+    auto variantCache = cache.Release();
+
+    const ShaderVariantStageDesc stage{
+        .Source = kVariantKeywordShader,
+        .EntryPoint = "CSMain",
+        .Stage = ShaderStage::Compute,
+    };
+    ShaderVariantDescriptor desc{};
+    desc.ProgramId = Guid::Empty();  // 未分配身份
+    desc.Stages = std::span{&stage, 1};
+
+    _ctx.ClearCapturedErrors();
+    auto result = variantCache->GetOrCreate(desc);
+    EXPECT_FALSE(result.HasValue());
+    EXPECT_EQ(variantCache->Count(), 0u);
+    const string captured = _ctx.JoinCapturedErrors();
+    EXPECT_NE(captured.find("ProgramId is empty"), string::npos)
+        << fmt::format("Expected empty-id rejection on {}, log:\n{}", _ctx.GetBackendName(), captured);
+}
+
+TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheReportsCompileFailure) {
+    auto cache = CreateShaderVariantCache(
+        _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache());
+    ASSERT_TRUE(cache.HasValue());
+    auto variantCache = cache.Release();
+
+    constexpr std::string_view kBroken = R"(
+[numthreads(1,1,1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    this is not valid hlsl;
+}
+)";
+    const ShaderVariantStageDesc stage{
+        .Source = kBroken,
+        .EntryPoint = "CSMain",
+        .Stage = ShaderStage::Compute,
+    };
+    ShaderVariantDescriptor desc{};
+    desc.ProgramId = Guid::NewGuid();
+    desc.Stages = std::span{&stage, 1};
+
+    _ctx.ClearCapturedErrors();
+    auto result = variantCache->GetOrCreate(desc);
+    EXPECT_FALSE(result.HasValue());
+    EXPECT_EQ(variantCache->Count(), 0u);
+    _ctx.ClearCapturedErrors();
 }
 
 INSTANTIATE_TEST_SUITE_P(

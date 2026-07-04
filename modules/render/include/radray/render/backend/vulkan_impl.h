@@ -157,6 +157,8 @@ public:
 
     Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept override;
 
+    Nullable<unique_ptr<ShaderBindingLayout>> CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;

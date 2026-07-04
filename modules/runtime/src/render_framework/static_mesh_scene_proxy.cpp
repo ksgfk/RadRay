@@ -1,6 +1,7 @@
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 
 #include <radray/runtime/components/static_mesh_component.h>
+#include <radray/runtime/material_asset.h>
 
 namespace radray {
 namespace {
@@ -40,6 +41,33 @@ const render::RenderMesh* StaticMeshSceneProxy::GetRenderMesh() const noexcept {
         return nullptr;
     }
     return mesh->GetRenderMesh();
+}
+
+void StaticMeshSceneProxy::SetSectionMaterial(uint32_t sectionIndex, MaterialAsset* material) noexcept {
+    if (sectionIndex >= _sections.size()) {
+        return;
+    }
+    _sections[sectionIndex].Material = material;
+}
+
+MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noexcept {
+    if (sectionIndex >= _sections.size()) {
+        return MeshDrawArgs{};
+    }
+    const render::RenderMesh* mesh = GetRenderMesh();
+    if (mesh == nullptr) {
+        return MeshDrawArgs{};
+    }
+    const Section& sec = _sections[sectionIndex];
+    if (sec.PrimitiveIndex >= mesh->_drawDatas.size()) {
+        return MeshDrawArgs{};
+    }
+    MeshDrawArgs args{};
+    args.Geometry = &mesh->_drawDatas[sec.PrimitiveIndex];
+    args.FirstIndex = sec.FirstIndex;
+    args.IndexCount = sec.IndexCount;
+    args.VertexOffset = 0;
+    return args;
 }
 
 }  // namespace radray

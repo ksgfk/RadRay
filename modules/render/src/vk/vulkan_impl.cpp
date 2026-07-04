@@ -1862,6 +1862,15 @@ Nullable<unique_ptr<ShaderBindingLayoutCache>> DeviceVulkan::CreateShaderBinding
     return unique_ptr<ShaderBindingLayoutCache>{make_unique<ShaderBindingLayoutCacheVulkan>(this).release()};
 }
 
+Nullable<unique_ptr<ShaderBindingLayout>> DeviceVulkan::CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept {
+    auto layout = CreateRootSignatureInternal(desc);
+    if (!layout.HasValue()) {
+        return nullptr;
+    }
+    layout.Get()->SetGuid(Guid::NewGuid());
+    return unique_ptr<ShaderBindingLayout>{layout.Release()};
+}
+
 Nullable<unique_ptr<ShaderParameterTable>> DeviceVulkan::CreateShaderParameterTable(ShaderBindingLayout* layout_) noexcept {
     auto* layout = CastVkObject(layout_);
     if (layout == nullptr || !layout->IsValid()) {
@@ -7040,6 +7049,8 @@ Nullable<ShaderBindingLayout*> ShaderBindingLayoutCacheVulkan::GetOrCreate(const
     entry.Shaders.assign(desc.Shaders.begin(), desc.Shaders.end());
     entry.StaticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
     entry.Layout = layout.Release();
+    // 缓存赋予稳定身份: 相同 desc 命中已有条目复用其 Guid, 新建则分配新 Guid.
+    entry.Layout->SetGuid(Guid::NewGuid());
     ShaderBindingLayout* result = entry.Layout.get();
     _entries.push_back(std::move(entry));
     return result;

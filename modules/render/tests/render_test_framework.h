@@ -78,6 +78,8 @@ public:
 
     ShaderBindingLayoutCache* GetShaderBindingLayoutCache() const noexcept;
 
+    Dxc* GetDxc() const noexcept;
+
     CommandQueue* GetQueue() const noexcept;
 
     DeviceDetail GetDeviceDetail() const noexcept;

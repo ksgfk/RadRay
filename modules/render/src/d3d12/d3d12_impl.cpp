@@ -2212,6 +2212,15 @@ Nullable<unique_ptr<ShaderBindingLayoutCache>> DeviceD3D12::CreateShaderBindingL
     return unique_ptr<ShaderBindingLayoutCache>{make_unique<ShaderBindingLayoutCacheD3D12>(this).release()};
 }
 
+Nullable<unique_ptr<ShaderBindingLayout>> DeviceD3D12::CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept {
+    auto layout = CreateRootSignatureInternal(desc);
+    if (!layout.HasValue()) {
+        return nullptr;
+    }
+    layout.Get()->SetGuid(Guid::NewGuid());
+    return unique_ptr<ShaderBindingLayout>{layout.Release()};
+}
+
 Nullable<unique_ptr<ShaderParameterTable>> DeviceD3D12::CreateShaderParameterTable(ShaderBindingLayout* layout_) noexcept {
     auto* rootSig = CastD3D12Object(layout_);
     if (rootSig == nullptr || !rootSig->IsValid()) {
@@ -4983,6 +4992,8 @@ Nullable<ShaderBindingLayout*> ShaderBindingLayoutCacheD3D12::GetOrCreate(const 
     entry.Shaders.assign(desc.Shaders.begin(), desc.Shaders.end());
     entry.StaticSamplers.assign(desc.StaticSamplers.begin(), desc.StaticSamplers.end());
     entry.Layout = layout.Release();
+    // 缓存赋予稳定身份: 相同 desc 命中已有条目复用其 Guid, 新建则分配新 Guid.
+    entry.Layout->SetGuid(Guid::NewGuid());
     ShaderBindingLayout* result = entry.Layout.get();
     _entries.push_back(std::move(entry));
     return result;
