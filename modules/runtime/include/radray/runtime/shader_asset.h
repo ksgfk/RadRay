@@ -66,6 +66,8 @@ struct ShaderPassDesc {
     vector<render::ColorTargetState> ColorTargets{};
     // 顶点输入布局 (拥有式)。为空表示无顶点缓冲输入 (如全屏三角靠 SV_VertexID)。
     vector<OwningVertexBufferLayout> VertexLayouts{};
+    // shader 源里 #include 的搜索目录 (透传给 DXC 的 -I)。为空表示不额外加 include 根。
+    vector<string> IncludeDirs{};
 };
 
 /// shader 资产 (对应 Unity 的一个 .shader / Shader 对象)。

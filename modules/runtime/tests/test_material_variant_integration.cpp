@@ -6,6 +6,7 @@
 #include <radray/guid.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
 
@@ -57,12 +58,12 @@ protected:
         _variantCache = _cache.Release();
     }
 
-    static ShaderAsset MakeLitShader() {
+    static unique_ptr<ShaderAsset> MakeLitShader() {
         ShaderKeywordSet kw;
         kw.Add("_TINT");  // bit 0
         vector<ShaderPassDesc> passes;
         passes.push_back(ShaderPassDesc{.PassTag = "ForwardLit", .Source = string{kLitPassSource}});
-        return ShaderAsset{std::move(kw), std::move(passes)};
+        return std::make_unique<ShaderAsset>(std::move(kw), std::move(passes));
     }
 
     ComputeTestContext _ctx{};
@@ -71,11 +72,13 @@ protected:
 };
 
 TEST_P(MaterialVariantIntegrationTest, MaterialResolvesGraphicsVariant) {
-    ShaderAsset shader = MakeLitShader();
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(), MakeLitShader());
 
-    auto passIdx = shader.FindPassByTag("ForwardLit");
+    auto passIdx = shaderRef->FindPassByTag("ForwardLit");
     ASSERT_TRUE(passIdx.has_value());
+
+    MaterialAsset material{shaderRef};
 
     _ctx.ClearCapturedErrors();
     auto variant = material.ResolveVariant(*_variantCache, passIdx.value());
@@ -91,11 +94,12 @@ TEST_P(MaterialVariantIntegrationTest, MaterialResolvesGraphicsVariant) {
 }
 
 TEST_P(MaterialVariantIntegrationTest, KeywordChangesVariant) {
-    ShaderAsset shader = MakeLitShader();
-    const auto passIdx = shader.FindPassByTag("ForwardLit").value();
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(), MakeLitShader());
+    const auto passIdx = shaderRef->FindPassByTag("ForwardLit").value();
 
-    MaterialAsset base{&shader};
-    MaterialAsset tinted{&shader};
+    MaterialAsset base{shaderRef};
+    MaterialAsset tinted{shaderRef};
     tinted.EnableKeyword("_TINT");
 
     _ctx.ClearCapturedErrors();
@@ -118,10 +122,11 @@ TEST_P(MaterialVariantIntegrationTest, KeywordChangesVariant) {
 }
 
 TEST_P(MaterialVariantIntegrationTest, ApplyPropertiesWritesConstantBuffer) {
-    ShaderAsset shader = MakeLitShader();
-    const auto passIdx = shader.FindPassByTag("ForwardLit").value();
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(), MakeLitShader());
+    const auto passIdx = shaderRef->FindPassByTag("ForwardLit").value();
 
-    MaterialAsset material{&shader};
+    MaterialAsset material{shaderRef};
     material.SetVector("gMaterial", Eigen::Vector4f{0.25f, 0.5f, 0.75f, 1.0f});
     // 一个 shader 中不存在的 property, 应被 ApplyProperties 忽略 (不计入成功数)。
     material.SetFloat("_DoesNotExist", 3.14f);

@@ -35,16 +35,28 @@ MeshPassExecutor::MeshPassExecutor(
     render::Device* device,
     render::ShaderVariantCache* variantCache,
     render::GraphicsPipelineStateCache* psoCache,
-    std::string perObjectCBufferName) noexcept
+    std::string perObjectCBufferName,
+    uint32_t flightCount) noexcept
     : _device(device),
       _variantCache(variantCache),
       _psoCache(psoCache),
-      _perObjectName(std::move(perObjectCBufferName)),
-      _arena(device) {}
+      _perObjectName(std::move(perObjectCBufferName)) {
+    const uint32_t count = flightCount == 0 ? 1 : flightCount;
+    _flights.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        _flights.emplace_back(device);
+    }
+}
 
-void MeshPassExecutor::BeginFrame() noexcept {
-    _tables.clear();
-    _arena.Reset();
+void MeshPassExecutor::BeginFrame(uint32_t flightIndex) noexcept {
+    if (_flights.empty()) {
+        _currentFlight = 0;
+        return;
+    }
+    _currentFlight = flightIndex < _flights.size() ? flightIndex : 0;
+    FlightResources& fr = _flights[_currentFlight];
+    fr.Tables.clear();
+    fr.Arena.Reset();
 }
 
 void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept {
@@ -55,7 +67,7 @@ void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::s
 Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
     const DrawItem& item,
     const render::CompiledShaderVariant& variant) noexcept {
-    const ShaderAsset* shader = item.Material->GetShader();
+    const ShaderAsset* shader = item.Material->GetShader().Get();
     if (shader == nullptr) {
         return nullptr;
     }
@@ -117,13 +129,19 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         return false;
     }
 
+    if (_flights.empty()) {
+        RADRAY_ERR_LOG("MeshPassExecutor: no flight resources (BeginFrame not called?)");
+        return false;
+    }
+    FlightResources& fr = _flights[_currentFlight];
+
     // 4. 参数表 (每条 draw 独立)。
     auto tableOpt = _device->CreateShaderParameterTable(variant.Layout);
     if (!tableOpt.HasValue()) {
         RADRAY_ERR_LOG("MeshPassExecutor: failed to create shader parameter table");
         return false;
     }
-    render::ShaderParameterTable* table = _tables.emplace_back(tableOpt.Release()).get();
+    render::ShaderParameterTable* table = fr.Tables.emplace_back(tableOpt.Release()).get();
 
     // 4a. per-object 常量 (LocalToWorld)。cbuffer 名字未在 shader 声明时静默跳过。
     if (!_perObjectName.empty()) {
@@ -135,7 +153,7 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
             // 两者内存布局一致 (首 float4 = 第 0 列), 故直接拷贝, 无需转置。
             std::memcpy(c.ObjectToWorld, m.data(), sizeof(c.ObjectToWorld));
 
-            auto alloc = _arena.Allocate(sizeof(PerObjectConstants));
+            auto alloc = fr.Arena.Allocate(sizeof(PerObjectConstants));
             if (alloc.Target == nullptr || alloc.Mapped == nullptr) {
                 RADRAY_ERR_LOG("MeshPassExecutor: per-object cbuffer allocation failed");
                 return false;
@@ -153,7 +171,7 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
     if (!_viewName.empty() && !_viewData.empty()) {
         auto pid = table->GetShaderBindingLayout()->FindParameterId(_viewName);
         if (pid.has_value()) {
-            auto alloc = _arena.Allocate(_viewData.size());
+            auto alloc = fr.Arena.Allocate(_viewData.size());
             if (alloc.Target != nullptr && alloc.Mapped != nullptr) {
                 std::memcpy(alloc.Mapped, _viewData.data(), _viewData.size());
                 render::BufferBindingDescriptor bbd{};

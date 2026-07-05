@@ -34,6 +34,12 @@ public:
     /// Proj 矩阵:左手透视。aspect = width / height。
     Eigen::Matrix4f ComputeProjMatrix(float aspect) const noexcept;
 
+    /// ViewProj = Proj * View。aspect = width / height。
+    Eigen::Matrix4f ComputeViewProjMatrix(float aspect) const noexcept;
+
+    /// 相机世界位置 (等于 SceneComponent::GetWorldLocation)。
+    Eigen::Vector3f GetEyePosition() const noexcept;
+
 private:
     float _fovY{Radian(60.0f)};
     float _nearZ{0.1f};

@@ -1,42 +1,39 @@
+// gltf_viewer: 最小前向渲染示例。
+//
+// 演示 ForwardPipeline (点光源 + Principled BRDF) 渲染一个 UV 球:
+//   - 用 TriangleMesh 生成 UV 球, 异步上传为 StaticMesh (含 section + bounds)。
+//   - 一个 StaticMeshComponent + PBR 材质 (forward.hlsl)。
+//   - 一个 PointLightComponent 提供照明。
+//   - 一个相机 + CameraControlComponent 支持轨道操作。
+//
+// shader 编译设施 (Dxc / ShaderVariantCache / GraphicsPipelineStateCache) 与 shaderlib
+// include 根目录由 RenderSystem 持有; 材质 pass 通过 IncludeDirs 传入该根目录以解析 #include。
+
 #include <radray/runtime/application.h>
-#include <radray/runtime/imgui_system.h>
-#include <radray/runtime/gpu_system.h>
-#include <radray/runtime/window_manager.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/gltf_asset.h>
-#include <radray/runtime/shader_variant.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_system.h>
+#include <radray/runtime/static_mesh.h>
+#include <radray/runtime/material_asset.h>
+#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/window_manager.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>
+#include <radray/runtime/components/static_mesh_component.h>
+#include <radray/runtime/components/point_light_component.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/camera_control_component.h>
-#include <radray/runtime/components/light_component.h>
-#include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render/scene.h>
-#include <radray/runtime/render/scene_view.h>
-#include <radray/runtime/render/shader.h>
-#include <radray/runtime/render/shader_variant_cache.h>
-#include <radray/runtime/render/render_context.h>
-#include <radray/runtime/render/draw_objects_pass.h>
-#include <radray/runtime/render/render_resource_pool.h>
-#include <radray/runtime/render/cull.h>
-#include <radray/runtime/render/material.h>
-#include <radray/runtime/render/culling_results.h>
+#include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
+
 #include <radray/render/common.h>
 #include <radray/basic_math.h>
+#include <radray/triangle_mesh.h>
+#include <radray/vertex_data.h>
+#include <radray/file.h>
 #include <radray/logger.h>
-#include <radray/types.h>
 
-#include "viewer_lighting.h"
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <limits>
-#include <optional>
-#include <span>
 #include <string_view>
 
 #ifndef RADRAY_GLTF_VIEWER_ASSET_DIR
@@ -47,1407 +44,240 @@ using namespace radray;
 
 namespace {
 
-constexpr std::string_view GltfViewerDepthName = "GltfViewerDepth";
-constexpr std::string_view ShadowMapDepthName = "ShadowMapDepth";
-constexpr std::string_view AdditionalShadowMapDepthName = "AdditionalShadowMapDepth";
-constexpr std::string_view ShadowPreviewAtlasName = "ShadowMapPreviewAtlas";
-constexpr uint32_t MaxShadowCascades = gltfviewer::ShadowCascadeData::MaxCascades; // Must match SceneLightBuffer/Shader cascade constants.
-constexpr uint32_t ShadowMapResolution = 2048;
-constexpr uint32_t AdditionalShadowMapResolution = 1024;
-constexpr uint32_t MaxAdditionalShadowSlices = gltfviewer::AdditionalShadowData::MaxSlices; // Must match SceneLightBuffer/Shader slice constants.
-constexpr uint32_t ShadowPreviewCellSize = 256;
-constexpr uint32_t ShadowPreviewAtlasSize = ShadowPreviewCellSize * 2;
-constexpr float DefaultShadowMaxDistance = 50.0f;
-constexpr float DefaultShadowSplitLambda = 0.85f;
-constexpr int32_t ShadowRasterDepthBias = 0;
-constexpr float ShadowRasterSlopeBias = 0.0f;
-static_assert(MaxShadowCascades == gltfviewer::SceneLightBuffer::MaxShadowCascadesGpu);
-static_assert(MaxShadowCascades == 4);
-static_assert(MaxAdditionalShadowSlices == gltfviewer::SceneLightBuffer::MaxAdditionalShadowSlicesGpu);
+constexpr std::string_view kForwardPassTag = "UniversalForward";
+constexpr uint32_t kSphereSlices = 64;
+constexpr float kSphereRadius = 1.0f;
 
-/// per-object 常量,匹配 gltf_viewer.hlsl 的 SceneConstants(b0, space0, push constant)。
-/// float4x4 MVP; float4x4 Model; float4 CameraPosition; uint4 Debug —— 列主序,与 Eigen 一致。
-struct SceneConstants {
-    float MVP[16];
-    float Model[16];
-    float CameraPosition[4];
-    uint32_t Debug[4];
+// 与 forward.hlsl 的 MaterialConstants (push_constant) 逐字节对应。列主序无关 (全是 float4)。
+struct MaterialConstants {
+    float BaseColor[4];    // rgb 基础色
+    float Principled0[4];  // x metallic, y roughness, z specular, w specular tint
+    float Principled1[4];  // x anisotropic, y sheen, z sheen tint, w flatness
+    float Principled2[4];  // x clearcoat, y clearcoat gloss, z spec trans, w eta
 };
-static_assert(sizeof(SceneConstants) == 160);
 
-void WriteMatrix(float (&dst)[16], const Eigen::Matrix4f& m) noexcept {
-    // Eigen 默认列主序,HLSL ConstantBuffer 也按列主序读 → 直接 memcpy。
-    std::memcpy(dst, m.data(), sizeof(float) * 16);
-}
+// UV 球顶点交错布局: POSITION3f + NORMAL3f + TEXCOORD2f + TANGENT4f (ToSimpleMeshResource 顺序)。
+// 前向 shader 只消费前三个属性, TANGENT 仍在缓冲里 (stride 需完整计入)。
+constexpr uint64_t kVertexStride = sizeof(float) * (3 + 3 + 2 + 4);
 
-float ShadowSoftKernelRadius(gltfviewer::ShadowSoftMode mode) noexcept {
-    switch (mode) {
-    case gltfviewer::ShadowSoftMode::Low:
-        return 1.5f;
-    case gltfviewer::ShadowSoftMode::Medium:
-        return 2.5f;
-    default:
-        return 1.0f;
+// 计算 AABB。
+void ComputeBounds(const TriangleMesh& mesh, Eigen::Vector3f& outMin, Eigen::Vector3f& outMax) {
+    outMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    outMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    for (const Eigen::Vector3f& p : mesh.Positions) {
+        outMin = outMin.cwiseMin(p);
+        outMax = outMax.cwiseMax(p);
     }
 }
 
-constexpr std::string_view ShadowPreviewShaderSource = R"(
-#if defined(VULKAN)
-#define VK_BINDING(b, s) [[vk::binding(b, s)]]
-#define VK_IMAGE_FORMAT(fmt) [[vk::image_format(#fmt)]]
-#else
-#define VK_BINDING(b, s)
-#define VK_IMAGE_FORMAT(fmt)
-#endif
-
-static const uint ShadowMapSize = 2048;
-static const uint PreviewCellSize = 256;
-static const uint PreviewAtlasSize = PreviewCellSize * 2;
-
-VK_BINDING(0, 0) Texture2DArray<float> gShadowMap : register(t0, space0);
-VK_BINDING(1, 0) VK_IMAGE_FORMAT(rgba8) RWTexture2D<float4> gPreviewAtlas : register(u0, space0);
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID) {
-    if (dispatchThreadId.x >= PreviewAtlasSize || dispatchThreadId.y >= PreviewAtlasSize) {
-        return;
+// 自定义 StaticMesh 加载协程: 上传 GPU 数据后补全 section (覆盖整个 mesh) + bounds。
+// LoadStaticMesh 只上传几何, 不设置 section; 无 section 的 mesh 不会产生任何 draw。
+AssetLoadTask LoadSphereMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource, Eigen::Vector3f boundsMin, Eigen::Vector3f boundsMax) {
+    if (meshResource.Primitives.empty()) {
+        co_return AssetLoadResult::Failure("sphere mesh resource has no primitive");
     }
+    const uint32_t indexCount = meshResource.Primitives[0].IndexBuffer.IndexCount;
+    const uint32_t vertexCount = meshResource.Primitives[0].VertexCount;
 
-    const uint cascade = (dispatchThreadId.x / PreviewCellSize) + (dispatchThreadId.y / PreviewCellSize) * 2;
-    const uint2 local = uint2(dispatchThreadId.x % PreviewCellSize, dispatchThreadId.y % PreviewCellSize);
-    const uint2 src = min((local * ShadowMapSize) / PreviewCellSize, uint2(ShadowMapSize - 1, ShadowMapSize - 1));
-    const float depth = gShadowMap.Load(int4(src.x, src.y, cascade, 0));
-    const float value = saturate(1.0 - depth);
-    gPreviewAtlas[dispatchThreadId.xy] = float4(value, value, value, 1.0);
-}
-)";
-
-// ── 瞬态纹理 acquire 助手(吃 pool/flight/device/cmd,不再吃 RenderContext)──
-
-render::TextureView* AcquireDepthView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device,
-    render::CommandBuffer* cmd,
-    uint32_t width,
-    uint32_t height,
-    render::TextureFormat depthFormat) {
-    render::TextureDescriptor depthDesc{
-        .Dim = render::TextureDimension::Dim2D,
-        .Width = width,
-        .Height = height,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .SampleCount = 1,
-        .Format = depthFormat,
-        .Memory = render::MemoryType::Device,
-        .Usage = render::TextureUse::DepthStencilWrite,
-        .Hints = render::ResourceHint::None};
-    if (pool.Acquire(GltfViewerDepthName, flight, depthDesc, device) == nullptr) {
-        return nullptr;
+    FrameUploadScope frame = co_await frameUploads.BeginUpload();
+    std::optional<render::RenderMesh> renderMesh =
+        frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), meshResource);
+    if (!renderMesh.has_value()) {
+        co_return AssetLoadResult::Failure("sphere mesh upload recording failed");
     }
-    pool.Transition(GltfViewerDepthName, flight, render::TextureState::DepthWrite, *cmd);
+    co_await frame.WaitGpu();
 
-    render::TextureViewDescriptor depthViewDesc{
-        .Dim = render::TextureDimension::Dim2D,
-        .Format = depthFormat,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::DepthWrite};
-    return pool.GetView(GltfViewerDepthName, flight, depthViewDesc, device);
-}
-
-render::TextureDescriptor MakeShadowDepthDescriptor() {
-    return render::TextureDescriptor{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Width = ShadowMapResolution,
-        .Height = ShadowMapResolution,
-        .DepthOrArraySize = MaxShadowCascades,
-        .MipLevels = 1,
-        .SampleCount = 1,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Memory = render::MemoryType::Device,
-        .Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::Resource,
-        .Hints = render::ResourceHint::None};
-}
-
-render::TextureView* AcquireShadowSliceDepthView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device,
-    render::CommandBuffer* cmd,
-    uint32_t cascade) {
-    const render::TextureDescriptor shadowDesc = MakeShadowDepthDescriptor();
-    if (pool.Acquire(ShadowMapDepthName, flight, shadowDesc, device) == nullptr) {
-        return nullptr;
-    }
-    pool.Transition(ShadowMapDepthName, flight, render::TextureState::DepthWrite, *cmd);
-
-    render::TextureViewDescriptor depthViewDesc{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Range = render::SubresourceRange{cascade, 1, 0, 1},
-        .Usage = render::TextureViewUsage::DepthWrite};
-    return pool.GetView(ShadowMapDepthName, flight, depthViewDesc, device);
-}
-
-render::TextureView* AcquireShadowArrayResourceView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device) {
-    const render::TextureDescriptor shadowDesc = MakeShadowDepthDescriptor();
-    if (pool.Acquire(ShadowMapDepthName, flight, shadowDesc, device) == nullptr) {
-        return nullptr;
-    }
-
-    render::TextureViewDescriptor viewDesc{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::Resource};
-    return pool.GetView(ShadowMapDepthName, flight, viewDesc, device);
-}
-
-render::TextureDescriptor MakeAdditionalShadowDepthDescriptor() {
-    return render::TextureDescriptor{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Width = AdditionalShadowMapResolution,
-        .Height = AdditionalShadowMapResolution,
-        .DepthOrArraySize = MaxAdditionalShadowSlices,
-        .MipLevels = 1,
-        .SampleCount = 1,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Memory = render::MemoryType::Device,
-        .Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::Resource,
-        .Hints = render::ResourceHint::None};
-}
-
-render::TextureView* AcquireAdditionalShadowSliceDepthView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device,
-    render::CommandBuffer* cmd,
-    uint32_t slice) {
-    const render::TextureDescriptor shadowDesc = MakeAdditionalShadowDepthDescriptor();
-    if (pool.Acquire(AdditionalShadowMapDepthName, flight, shadowDesc, device) == nullptr) {
-        return nullptr;
-    }
-    pool.Transition(AdditionalShadowMapDepthName, flight, render::TextureState::DepthWrite, *cmd);
-
-    render::TextureViewDescriptor depthViewDesc{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Range = render::SubresourceRange{slice, 1, 0, 1},
-        .Usage = render::TextureViewUsage::DepthWrite};
-    return pool.GetView(AdditionalShadowMapDepthName, flight, depthViewDesc, device);
-}
-
-render::TextureView* AcquireAdditionalShadowArrayResourceView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device) {
-    const render::TextureDescriptor shadowDesc = MakeAdditionalShadowDepthDescriptor();
-    if (pool.Acquire(AdditionalShadowMapDepthName, flight, shadowDesc, device) == nullptr) {
-        return nullptr;
-    }
-
-    render::TextureViewDescriptor viewDesc{
-        .Dim = render::TextureDimension::Dim2DArray,
-        .Format = render::TextureFormat::D32_FLOAT,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::Resource};
-    return pool.GetView(AdditionalShadowMapDepthName, flight, viewDesc, device);
-}
-
-render::TextureDescriptor MakeShadowPreviewAtlasDescriptor() {
-    return render::TextureDescriptor{
-        .Dim = render::TextureDimension::Dim2D,
-        .Width = ShadowPreviewAtlasSize,
-        .Height = ShadowPreviewAtlasSize,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .SampleCount = 1,
-        .Format = render::TextureFormat::RGBA8_UNORM,
-        .Memory = render::MemoryType::Device,
-        .Usage = render::TextureUse::Resource | render::TextureUse::UnorderedAccess,
-        .Hints = render::ResourceHint::None};
-}
-
-render::TextureView* AcquireShadowPreviewAtlasResourceView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device) {
-    const render::TextureDescriptor desc = MakeShadowPreviewAtlasDescriptor();
-    if (pool.Acquire(ShadowPreviewAtlasName, flight, desc, device) == nullptr) {
-        return nullptr;
-    }
-
-    render::TextureViewDescriptor viewDesc{
-        .Dim = render::TextureDimension::Dim2D,
-        .Format = desc.Format,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::Resource};
-    return pool.GetView(ShadowPreviewAtlasName, flight, viewDesc, device);
-}
-
-render::TextureView* AcquireShadowPreviewAtlasUnorderedAccessView(
-    srp::RenderResourcePool& pool,
-    uint32_t flight,
-    render::Device& device) {
-    const render::TextureDescriptor desc = MakeShadowPreviewAtlasDescriptor();
-    if (pool.Acquire(ShadowPreviewAtlasName, flight, desc, device) == nullptr) {
-        return nullptr;
-    }
-
-    render::TextureViewDescriptor viewDesc{
-        .Dim = render::TextureDimension::Dim2D,
-        .Format = desc.Format,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::UnorderedAccess};
-    return pool.GetView(ShadowPreviewAtlasName, flight, viewDesc, device);
-}
-
-void SetViewportAndScissor(render::GraphicsCommandEncoder* encoder, render::Device& device, uint32_t width, uint32_t height) {
-    Viewport vp{
-        .X = 0.0f,
-        .Y = 0.0f,
-        .Width = static_cast<float>(width),
-        .Height = static_cast<float>(height),
-        .MinDepth = 0.0f,
-        .MaxDepth = 1.0f};
-    if (device.GetBackend() == render::RenderBackend::Vulkan) {
-        vp.Y = static_cast<float>(height);
-        vp.Height = -static_cast<float>(height);
-    }
-    encoder->SetViewport(vp);
-    encoder->SetScissor(Rect{0, 0, width, height});
-}
-
-void SetShadowViewportAndScissor(render::GraphicsCommandEncoder* encoder, render::Device& device) {
-    SetViewportAndScissor(encoder, device, ShadowMapResolution, ShadowMapResolution);
-}
-
-void SetResolutionViewportAndScissor(render::GraphicsCommandEncoder* encoder, render::Device& device, uint32_t resolution) {
-    SetViewportAndScissor(encoder, device, resolution, resolution);
+    auto mesh = make_unique<StaticMesh>(std::move(meshResource), std::move(renderMesh.value()));
+    vector<StaticMeshSection> sections;
+    sections.push_back(StaticMeshSection{
+        /*primitiveIndex*/ 0,
+        /*firstIndex*/ 0,
+        /*indexCount*/ indexCount,
+        /*minVertexIndex*/ 0,
+        /*maxVertexIndex*/ vertexCount > 0 ? vertexCount - 1 : 0});
+    mesh->SetSections(std::move(sections));
+    mesh->SetBounds(boundsMin, boundsMax);
+    co_return AssetLoadResult::Success(std::move(mesh));
 }
 
 }  // namespace
 
-// 这个 example 是一个"纯游戏应用":只重写窄接口 OnInit / OnUpdate / OnRenderView / OnShutdown。
-//
-// 渲染走新的 srp 框架。CSM 4 级联方向光阴影、附加(聚光/点光)阴影图集、debug 预览 compute、
-// alpha test、tone mapping 等 viewer 特性,作为 gltf_viewer 私有代码运行在最小的 srp 框架之上
-// (灯光/阴影 god-struct 迁出 runtime,落在 viewer_lighting + 本文件)。
-//
-// 各逻辑 pass 因目标 RT 不同(4 阴影 slice / N 附加 slice / pre-z / base / transparent),
-// 无法共用 RenderPipeline.RenderSingleCamera 的单 encoder;OnRenderView 逐 pass 手动
-// BeginRenderPass(其附件) → rc.SetEncoder → 配 DrawObjectsPass → pass.Execute → EndRenderPass。
 class GltfViewerApp : public Application {
 public:
     static constexpr render::TextureFormat BackBufferFormat = render::TextureFormat::BGRA8_UNORM;
-    static constexpr render::TextureFormat DepthFormat = render::TextureFormat::D32_FLOAT;
-
-    void SetInitialLoadPath(std::filesystem::path path) {
-        _initialLoadPath = std::move(path);
-    }
 
     void OnInit() override {
-        // ── srp::Shader:三个 LightMode pass,源文件均为 gltf_viewer.hlsl(保持不变)──
-        std::filesystem::path shaderPath = std::filesystem::path{RADRAY_GLTF_VIEWER_ASSET_DIR} / "gltf_viewer.hlsl";
-        const string shaderPathStr = shaderPath.string();
-        _viewerShader = make_unique<srp::Shader>(srp::ShaderId{0x6171F}, "gltf_viewer");
-        {
-            srp::ShaderPassSource pass{};
-            pass.ShaderPath = shaderPathStr;
-            pass.ShaderName = "gltf_viewer";
-            pass.VsEntry = "VSMain";
-            pass.PsEntry = "PSMain";
-            pass.Tags.Tags.emplace_back("LightMode", "UniversalForward");
-            _viewerShader->AddPass(std::move(pass));
+        if (!BuildShaderAndMaterial()) {
+            RADRAY_ERR_LOG("gltf_viewer: failed to build shader/material");
+            return;
         }
-        {
-            srp::ShaderPassSource pass{};
-            pass.ShaderPath = shaderPathStr;
-            pass.ShaderName = "gltf_viewer";
-            pass.VsEntry = "VSMain";
-            pass.PsEntry = "PSDepthOnlyMain";
-            pass.Tags.Tags.emplace_back("LightMode", "ShadowCaster");
-            _viewerShader->AddPass(std::move(pass));
-        }
-        {
-            srp::ShaderPassSource pass{};
-            pass.ShaderPath = shaderPathStr;
-            pass.ShaderName = "gltf_viewer";
-            pass.VsEntry = "VSMain";
-            pass.PsEntry = "PSDepthOnlyMain";
-            pass.Tags.Tags.emplace_back("LightMode", "DepthOnly");
-            _viewerShader->AddPass(std::move(pass));
-        }
-
-        _variantCache = make_unique<srp::ShaderVariantCache>(GetGpuSystem());
-
-        SpawnCamera();
-        SpawnDefaultLights();
-        ConfigureCameraControl();
-        SetCameraFrame(Eigen::Vector3f::Zero(), 4.0f);
-
-        _loadPath.resize(1024);
-        const std::filesystem::path defaultPath = _initialLoadPath.empty()
-            ? (std::filesystem::path{RADRAY_GLTF_VIEWER_ASSET_DIR} / "model.gltf")
-            : _initialLoadPath;
-        const string initial = defaultPath.string();
-        std::memcpy(_loadPath.data(), initial.c_str(), std::min(initial.size(), _loadPath.size() - 1));
-        if (!_initialLoadPath.empty()) {
-            _pendingLoadPath = _initialLoadPath;
-            _pendingLoad = true;
-        }
+        BuildSphere();
+        BuildLight();
+        BuildCamera();
     }
 
     void OnUpdate(const AppUpdateContext& ctx) override {
-        if (_pendingLoad) {
-            LoadSceneFromPath(_pendingLoadPath);
-            _pendingLoad = false;
-        }
-        TryExportReadyAsset();
-        if (ImGuiSystem* imgui = GetSubsystem<ImGuiSystem>()) {
-            if (imgui->Begin(ctx)) {
-                DrawUi(ctx);
-                imgui->End();
-            }
-        }
-    }
-
-    bool OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target) override {
-        if (!target.Window->IsMainWindow()) {
-            return false;
-        }
-        render::TextureDescriptor bbDesc = target.BackBuffer->GetDesc();
-        const uint32_t width = bbDesc.Width;
-        const uint32_t height = bbDesc.Height;
-        if (width == 0 || height == 0) {
-            return false;
-        }
-
-        const uint32_t flight = ctx.FlightIndex();
-        render::CommandBuffer* cmd = ctx.GetCommandBuffer();
-        render::Device* device = GetDevice();
-        srp::Scene* scene = GetWorld()->GetScene();
-        if (scene == nullptr || _cameraComp == nullptr || cmd == nullptr || device == nullptr) {
-            return false;
-        }
-
-        srp::SceneView view{};
-        _cameraComp->FillSceneView(view, width, height);
-        srp::CullingResults cull = srp::CullAll(*scene, view);
-
-        // ── 准备每帧阴影数据(方向光 CSM + 附加光图集)──
-        ComputeDirectionalCascades(view, _shadow);
-        _lastShadow = _shadow;
-        gltfviewer::BuildAdditionalShadows(*scene, AdditionalShadowMapResolution, _shadowSoftMode, _additionalShadow);
-        _lastAdditionalShadowSlices = _additionalShadow.SliceCount;
-        _lastAdditionalShadowLights = static_cast<uint32_t>(_additionalShadow.Lights.size());
-
-        render::TextureView* shadowSrv = AcquireShadowArrayResourceView(_resourcePool, flight, *device);
-        render::TextureView* additionalShadowSrv = AcquireAdditionalShadowArrayResourceView(_resourcePool, flight, *device);
-
-        // ── per-view:从 UniversalForward 变体取 binding layout,构建灯光/阴影参数表 ──
-        const srp::ShaderVariant* fwd = _variantCache->Get(*_viewerShader, "UniversalForward", {});
-        render::ShaderBindingLayout* bindingLayout = fwd != nullptr ? fwd->BindingLayout : nullptr;
-        render::ShaderParameterTable* lightParameters = nullptr;
-        if (bindingLayout != nullptr) {
-            lightParameters = _lightBuffer.Update(
-                *device,
-                bindingLayout,
-                flight,
-                *scene,
-                _shadow,
-                shadowSrv,
-                _additionalShadow,
-                additionalShadowSrv);
-        }
-
-        srp::RenderContext rc{GetGpuSystem(), _variantCache.get()};
-
-        // 逐 pass 通用流程:绑 encoder → 执行 → 解绑。BeginRenderPass / EndRenderPass 由各调用点管理。
-        auto runPass = [&](render::GraphicsCommandEncoder* enc, srp::DrawObjectsPass& pass) {
-            rc.SetEncoder(enc);
-            pass.Execute(rc, view, cull);
-            rc.SetEncoder(nullptr);
-        };
-
-        // ============ 1. 方向光级联阴影(per-cascade)============
-        {
-            const uint32_t cascadeCount = _shadow.Enabled
-                ? std::min<uint32_t>(_shadow.CascadeCount, MaxShadowCascades)
-                : 0u;
-            const uint32_t passes = std::max<uint32_t>(cascadeCount, 1u);
-            for (uint32_t i = 0; i < passes; ++i) {
-                render::TextureView* depthView = AcquireShadowSliceDepthView(_resourcePool, flight, *device, cmd, i);
-                if (depthView == nullptr) {
-                    return false;
-                }
-                render::DepthStencilAttachment depthAttachment{
-                    .Target = depthView,
-                    .DepthLoad = render::LoadAction::Clear,
-                    .DepthStore = render::StoreAction::Store,
-                    .StencilLoad = render::LoadAction::DontCare,
-                    .StencilStore = render::StoreAction::Discard,
-                    .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-                render::RenderPassDescriptor passDesc{
-                    .ColorAttachments = {},
-                    .DepthStencilAttachment = depthAttachment,
-                    .Name = "glTF Viewer Shadow Caster"};
-                auto encoderOpt = cmd->BeginRenderPass(passDesc);
-                if (!encoderOpt.HasValue()) {
-                    RADRAY_ERR_LOG("failed to begin glTF viewer shadow caster pass");
-                    return false;
-                }
-                auto encoder = encoderOpt.Release();
-                SetShadowViewportAndScissor(encoder.get(), *device);
-
-                if (cascadeCount > 0) {
-                    const gltfviewer::ShadowCascade& cascade = _shadow.Cascades[i];
-                    const Eigen::Vector3f lightDir = _shadow.LightDirectionForBias;
-                    srp::DrawObjectsPass::Desc desc{};
-                    desc.Event = srp::RenderPassEvent::BeforeRenderingShadows;
-                    desc.ShaderTags = {"ShadowCaster"};
-                    desc.Filtering.QueueRange = srp::RenderQueueRange::Opaque();
-                    desc.SortFlags = srp::SortingCriteria::FrontToBack;
-                    desc.PassKeywords.Add(shader_define::ShadowCaster);
-                    desc.RenderState = srp::MeshPassRenderState::Shadow(ShadowRasterDepthBias, ShadowRasterSlopeBias);
-                    desc.RTFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
-                    desc.PerObjectParamName = "gScene";
-                    desc.PerObjectByteSize = sizeof(SceneConstants);
-                    desc.PerObjectFn = [cascade, lightDir](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView&) {
-                        if (dst.size() < sizeof(SceneConstants)) {
-                            return;
-                        }
-                        SceneConstants sc{};
-                        WriteMatrix(sc.MVP, cascade.View.ViewProjMatrix);
-                        WriteMatrix(sc.Model, renderer.WorldMatrix());
-                        sc.CameraPosition[0] = lightDir.x();
-                        sc.CameraPosition[1] = lightDir.y();
-                        sc.CameraPosition[2] = lightDir.z();
-                        sc.CameraPosition[3] = cascade.DepthBias;
-                        std::memcpy(&sc.Debug[1], &cascade.NormalBias, sizeof(float));
-                        std::memcpy(dst.data(), &sc, sizeof(SceneConstants));
-                    };
-                    srp::DrawObjectsPass pass{std::move(desc)};
-                    runPass(encoder.get(), pass);
-                }
-
-                cmd->EndRenderPass(std::move(encoder));
-            }
-            _resourcePool.Transition(ShadowMapDepthName, flight, render::TextureState::ShaderRead, *cmd);
-        }
-
-        // ============ 2. 附加光(聚光/点光)阴影图集(per-slice)============
-        {
-            const uint32_t sliceCount = _additionalShadow.Enabled
-                ? std::min<uint32_t>(_additionalShadow.SliceCount, MaxAdditionalShadowSlices)
-                : 0u;
-            const uint32_t passes = std::max<uint32_t>(sliceCount, 1u);
-            for (uint32_t i = 0; i < passes; ++i) {
-                render::TextureView* depthView = AcquireAdditionalShadowSliceDepthView(_resourcePool, flight, *device, cmd, i);
-                if (depthView == nullptr) {
-                    return false;
-                }
-                render::DepthStencilAttachment depthAttachment{
-                    .Target = depthView,
-                    .DepthLoad = render::LoadAction::Clear,
-                    .DepthStore = render::StoreAction::Store,
-                    .StencilLoad = render::LoadAction::DontCare,
-                    .StencilStore = render::StoreAction::Discard,
-                    .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-                render::RenderPassDescriptor passDesc{
-                    .ColorAttachments = {},
-                    .DepthStencilAttachment = depthAttachment,
-                    .Name = "glTF Viewer Additional Shadow Caster"};
-                auto encoderOpt = cmd->BeginRenderPass(passDesc);
-                if (!encoderOpt.HasValue()) {
-                    RADRAY_ERR_LOG("failed to begin glTF viewer additional shadow caster pass");
-                    return false;
-                }
-                auto encoder = encoderOpt.Release();
-                SetResolutionViewportAndScissor(encoder.get(), *device, _additionalShadow.Resolution);
-
-                if (i < sliceCount) {
-                    const gltfviewer::AdditionalShadowSlice& slice = _additionalShadow.Slices[i];
-                    srp::DrawObjectsPass::Desc desc{};
-                    desc.Event = srp::RenderPassEvent::BeforeRenderingShadows;
-                    desc.ShaderTags = {"ShadowCaster"};
-                    desc.Filtering.QueueRange = srp::RenderQueueRange::Opaque();
-                    desc.SortFlags = srp::SortingCriteria::FrontToBack;
-                    desc.PassKeywords.Add(shader_define::ShadowCaster);
-                    desc.RenderState = srp::MeshPassRenderState::Shadow(ShadowRasterDepthBias, ShadowRasterSlopeBias);
-                    desc.RTFormats.DepthFormat = render::TextureFormat::D32_FLOAT;
-                    desc.PerObjectParamName = "gScene";
-                    desc.PerObjectByteSize = sizeof(SceneConstants);
-                    desc.PerObjectFn = [slice](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView&) {
-                        if (dst.size() < sizeof(SceneConstants)) {
-                            return;
-                        }
-                        SceneConstants sc{};
-                        WriteMatrix(sc.MVP, slice.View.ViewProjMatrix);
-                        WriteMatrix(sc.Model, renderer.WorldMatrix());
-                        sc.CameraPosition[0] = slice.LightDirectionForBias.x();
-                        sc.CameraPosition[1] = slice.LightDirectionForBias.y();
-                        sc.CameraPosition[2] = slice.LightDirectionForBias.z();
-                        sc.CameraPosition[3] = slice.DepthBias;
-                        std::memcpy(&sc.Debug[1], &slice.NormalBias, sizeof(float));
-                        std::memcpy(dst.data(), &sc, sizeof(SceneConstants));
-                    };
-                    srp::DrawObjectsPass pass{std::move(desc)};
-                    runPass(encoder.get(), pass);
-                }
-                // i >= sliceCount:padding slice,仅清除(上面的 Clear 已填远深度)。
-
-                cmd->EndRenderPass(std::move(encoder));
-            }
-            _resourcePool.Transition(AdditionalShadowMapDepthName, flight, render::TextureState::ShaderRead, *cmd);
-        }
-
-        // ============ 3. Pre-Z(只写深度)============
-        {
-            render::TextureView* depthView = AcquireDepthView(_resourcePool, flight, *device, cmd, width, height, DepthFormat);
-            if (depthView == nullptr) {
-                return false;
-            }
-            render::DepthStencilAttachment depthAttachment{
-                .Target = depthView,
-                .DepthLoad = render::LoadAction::Clear,
-                .DepthStore = render::StoreAction::Store,
-                .StencilLoad = render::LoadAction::DontCare,
-                .StencilStore = render::StoreAction::Discard,
-                .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-            render::RenderPassDescriptor passDesc{
-                .ColorAttachments = {},
-                .DepthStencilAttachment = depthAttachment,
-                .Name = "glTF Viewer Pre-Z"};
-            auto encoderOpt = cmd->BeginRenderPass(passDesc);
-            if (!encoderOpt.HasValue()) {
-                RADRAY_ERR_LOG("failed to begin glTF viewer Pre-Z pass");
-                return false;
-            }
-            auto encoder = encoderOpt.Release();
-            SetViewportAndScissor(encoder.get(), *device, width, height);
-
-            srp::DrawObjectsPass::Desc desc{};
-            desc.Event = srp::RenderPassEvent::BeforeRenderingPrePasses;
-            desc.ShaderTags = {"DepthOnly"};
-            desc.Filtering.QueueRange = srp::RenderQueueRange::Opaque();
-            desc.SortFlags = srp::SortingCriteria::FrontToBack;
-            desc.RenderState = srp::MeshPassRenderState::PreZ();
-            desc.RTFormats.DepthFormat = DepthFormat;
-            desc.PerObjectParamName = "gScene";
-            desc.PerObjectByteSize = sizeof(SceneConstants);
-            desc.PerObjectFn = [](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView& v) {
-                if (dst.size() < sizeof(SceneConstants)) {
-                    return;
-                }
-                SceneConstants sc{};
-                const Eigen::Matrix4f& model = renderer.WorldMatrix();
-                WriteMatrix(sc.MVP, v.ViewProjMatrix * model);
-                WriteMatrix(sc.Model, model);
-                std::memcpy(dst.data(), &sc, sizeof(SceneConstants));
-            };
-            srp::DrawObjectsPass pass{std::move(desc)};
-            runPass(encoder.get(), pass);
-
-            cmd->EndRenderPass(std::move(encoder));
-        }
-
-        // ============ 4. Base(不透明,OpaqueBase:depth Equal + 不写深度)============
-        {
-            render::TextureView* depthView = AcquireDepthView(_resourcePool, flight, *device, cmd, width, height, DepthFormat);
-            if (depthView == nullptr) {
-                return false;
-            }
-            render::ColorAttachment colorAttachment{
-                .Target = target.BackBufferView,
-                .Load = render::LoadAction::Clear,
-                .Store = render::StoreAction::Store,
-                .ClearValue = render::ColorClearValue{{0.06f, 0.07f, 0.08f, 1.0f}}};
-            render::DepthStencilAttachment depthAttachment{
-                .Target = depthView,
-                .DepthLoad = render::LoadAction::Load,
-                .DepthStore = render::StoreAction::Store,
-                .StencilLoad = render::LoadAction::DontCare,
-                .StencilStore = render::StoreAction::Discard,
-                .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-            render::RenderPassDescriptor passDesc{
-                .ColorAttachments = std::span{&colorAttachment, 1},
-                .DepthStencilAttachment = depthAttachment,
-                .Name = "glTF Viewer Base"};
-            auto encoderOpt = cmd->BeginRenderPass(passDesc);
-            if (!encoderOpt.HasValue()) {
-                RADRAY_ERR_LOG("failed to begin glTF viewer base pass");
-                return false;
-            }
-            auto encoder = encoderOpt.Release();
-            SetViewportAndScissor(encoder.get(), *device, width, height);
-
-            const uint32_t overlay = _showShadowCascadeOverlay ? 7u : 0u;
-            srp::DrawObjectsPass::Desc desc{};
-            desc.Event = srp::RenderPassEvent::BeforeRenderingOpaques;
-            desc.ShaderTags = {"UniversalForward"};
-            desc.Filtering.QueueRange = srp::RenderQueueRange::Opaque();
-            desc.SortFlags = srp::SortingCriteria::FrontToBack;
-            desc.RenderState = srp::MeshPassRenderState::OpaqueBase();
-            desc.RTFormats.ColorFormats = {BackBufferFormat};
-            desc.RTFormats.DepthFormat = DepthFormat;
-            desc.ViewParameterTableFn = [lightParameters](const srp::SceneView&) { return lightParameters; };
-            desc.PerObjectParamName = "gScene";
-            desc.PerObjectByteSize = sizeof(SceneConstants);
-            desc.PerObjectFn = [overlay](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView& v) {
-                if (dst.size() < sizeof(SceneConstants)) {
-                    return;
-                }
-                SceneConstants sc{};
-                const Eigen::Matrix4f& model = renderer.WorldMatrix();
-                WriteMatrix(sc.MVP, v.ViewProjMatrix * model);
-                WriteMatrix(sc.Model, model);
-                sc.CameraPosition[0] = v.EyePosition.x();
-                sc.CameraPosition[1] = v.EyePosition.y();
-                sc.CameraPosition[2] = v.EyePosition.z();
-                sc.CameraPosition[3] = 1.0f;
-                sc.Debug[0] = overlay;
-                std::memcpy(dst.data(), &sc, sizeof(SceneConstants));
-            };
-            srp::DrawObjectsPass pass{std::move(desc)};
-            runPass(encoder.get(), pass);
-
-            cmd->EndRenderPass(std::move(encoder));
-        }
-
-        // ============ 5. Transparent(alpha-over,depth LessEqual + 不写深度)============
-        {
-            render::TextureView* depthView = AcquireDepthView(_resourcePool, flight, *device, cmd, width, height, DepthFormat);
-            if (depthView == nullptr) {
-                return false;
-            }
-            render::ColorAttachment colorAttachment{
-                .Target = target.BackBufferView,
-                .Load = render::LoadAction::Load,
-                .Store = render::StoreAction::Store,
-                .ClearValue = {}};
-            render::DepthStencilAttachment depthAttachment{
-                .Target = depthView,
-                .DepthLoad = render::LoadAction::Load,
-                .DepthStore = render::StoreAction::Store,
-                .StencilLoad = render::LoadAction::DontCare,
-                .StencilStore = render::StoreAction::Discard,
-                .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-            render::RenderPassDescriptor passDesc{
-                .ColorAttachments = std::span{&colorAttachment, 1},
-                .DepthStencilAttachment = depthAttachment,
-                .Name = "glTF Viewer Transparent"};
-            auto encoderOpt = cmd->BeginRenderPass(passDesc);
-            if (!encoderOpt.HasValue()) {
-                RADRAY_ERR_LOG("failed to begin glTF viewer transparent pass");
-                return false;
-            }
-            auto encoder = encoderOpt.Release();
-            SetViewportAndScissor(encoder.get(), *device, width, height);
-
-            srp::DrawObjectsPass::Desc desc{};
-            desc.Event = srp::RenderPassEvent::BeforeRenderingTransparents;
-            desc.ShaderTags = {"UniversalForward"};
-            desc.Filtering.QueueRange = srp::RenderQueueRange::Transparent();
-            desc.SortFlags = srp::SortingCriteria::BackToFront;
-            desc.RenderState = srp::MeshPassRenderState::Transparent();
-            desc.RTFormats.ColorFormats = {BackBufferFormat};
-            desc.RTFormats.DepthFormat = DepthFormat;
-            desc.ViewParameterTableFn = [lightParameters](const srp::SceneView&) { return lightParameters; };
-            desc.PerObjectParamName = "gScene";
-            desc.PerObjectByteSize = sizeof(SceneConstants);
-            desc.PerObjectFn = [](std::span<byte> dst, const srp::Renderer& renderer, const srp::SceneView& v) {
-                if (dst.size() < sizeof(SceneConstants)) {
-                    return;
-                }
-                SceneConstants sc{};
-                const Eigen::Matrix4f& model = renderer.WorldMatrix();
-                WriteMatrix(sc.MVP, v.ViewProjMatrix * model);
-                WriteMatrix(sc.Model, model);
-                sc.CameraPosition[0] = v.EyePosition.x();
-                sc.CameraPosition[1] = v.EyePosition.y();
-                sc.CameraPosition[2] = v.EyePosition.z();
-                sc.CameraPosition[3] = 1.0f;
-                std::memcpy(dst.data(), &sc, sizeof(SceneConstants));
-            };
-            srp::DrawObjectsPass pass{std::move(desc)};
-            runPass(encoder.get(), pass);
-
-            cmd->EndRenderPass(std::move(encoder));
-        }
-
-        RenderShadowPreviewAtlas(_resourcePool, flight, *device, cmd, shadowSrv);
-        return true;
-    }
-
-    void OnShutdown() override {
-        DestroyExportedScene();
-        _lightBuffer.Clear();
-        _resourcePool.Clear();
-        _shadowPreviewTables.clear();
-        _shadowPreviewPso.reset();
-        _shadowPreviewBindingLayout = nullptr;
-        _shadowPreviewShader = nullptr;
-        _shadowPreviewTexture = ImTextureID_Invalid;
-        _gltfAsset.Reset();
-        _cameraControlComp = nullptr;
-        _cameraComp = nullptr;
-        _directionalLight = nullptr;
-        _spotLight = nullptr;
-        _pointLight = nullptr;
-        _variantCache.reset();
-        _viewerShader.reset();
+        (void)ctx;
+        TryAssignMaterial();
     }
 
 private:
-    bool EnsureShadowPreviewPipeline(render::Device& device, GpuSystem& gpu) {
-        if (_shadowPreviewPso != nullptr && _shadowPreviewBindingLayout != nullptr) {
-            return true;
+    // proxy 由 StaticMeshComponent 在 mesh 异步加载完成后才创建, 无组件级材质槽,
+    // 故每帧尝试, 直到 proxy 出现并把材质绑到 section 0。
+    void TryAssignMaterial() {
+        if (_materialAssigned || _meshComponent == nullptr || _material.Get() == nullptr) {
+            return;
         }
+        PrimitiveSceneProxy* proxy = _meshComponent->GetSceneProxy();
+        if (proxy == nullptr) {
+            return;
+        }
+        auto* smProxy = static_cast<StaticMeshSceneProxy*>(proxy);
+        if (smProxy->GetSectionCount() == 0) {
+            return;
+        }
+        for (uint32_t s = 0; s < smProxy->GetSectionCount(); ++s) {
+            smProxy->SetSectionMaterial(s, _material.Get());
+        }
+        _materialAssigned = true;
+        RADRAY_INFO_LOG("gltf_viewer: material assigned to {} section(s)", smProxy->GetSectionCount());
+    }
 
-        render::ShaderBindingLayoutCache* shaderBindingLayoutCache = gpu.GetShaderBindingLayoutCache();
-        if (shaderBindingLayoutCache == nullptr) {
-            RADRAY_ERR_LOG("shadow preview requires a shader binding layout cache");
+    bool BuildShaderAndMaterial() {
+        RenderSystem* renderSystem = GetRenderSystem();
+        if (renderSystem == nullptr) {
             return false;
         }
 
-        ShaderCompileDescriptor shaderDesc{};
-        shaderDesc.Name = "gltf_viewer_shadow_preview";
-        shaderDesc.Source = ShadowPreviewShaderSource;
-        shaderDesc.EntryPoint = "CSMain";
-        shaderDesc.Stage = render::ShaderStage::Compute;
-        _shadowPreviewShader = gpu.GetOrCompileShader(shaderDesc).Get();
-        if (_shadowPreviewShader == nullptr) {
-            RADRAY_ERR_LOG("failed to compile shadow preview shader");
+        // forward.hlsl 由 radray_example_files 部署到 assets/gltf_viewer (见 CMakeLists)。
+        const std::filesystem::path shaderPath =
+            std::filesystem::path{RADRAY_GLTF_VIEWER_ASSET_DIR} / "forward.hlsl";
+        std::optional<string> source = ReadTextFile(shaderPath);
+        if (!source.has_value()) {
+            RADRAY_ERR_LOG("gltf_viewer: cannot read shader {}", shaderPath.string());
             return false;
         }
 
-        render::Shader* shaders[] = {_shadowPreviewShader};
-        render::ShaderBindingLayoutDescriptor layoutDesc{
-            .Shaders = std::span<render::Shader*>{shaders}};
-        _shadowPreviewBindingLayout = shaderBindingLayoutCache->GetOrCreate(layoutDesc).Get();
-        if (_shadowPreviewBindingLayout == nullptr) {
-            RADRAY_ERR_LOG("failed to create shadow preview binding layout");
-            return false;
-        }
+        ShaderPassDesc pass{};
+        pass.PassTag = string{kForwardPassTag};
+        pass.Source = std::move(source.value());
+        pass.VertexEntry = "VSMain";
+        pass.PixelEntry = "PSMain";
+        pass.Primitive = render::PrimitiveState::Default();
+        pass.DepthStencil = render::DepthStencilState::Default();
+        pass.DepthStencil->Format = render::TextureFormat::D32_FLOAT;
+        pass.MultiSample = render::MultiSampleState::Default();
+        pass.ColorTargets.push_back(render::ColorTargetState::Default(BackBufferFormat));
+        // shaderlib include 根目录 (解析 #include "common.hlsl" 等)。
+        pass.IncludeDirs.push_back(renderSystem->GetShaderIncludeRoot());
 
-        render::ComputePipelineStateDescriptor psoDesc{};
-        psoDesc.BindingLayout = _shadowPreviewBindingLayout;
-        psoDesc.CS = render::ShaderEntry{
-            .Target = _shadowPreviewShader,
-            .EntryPoint = "CSMain"};
-        auto psoOpt = device.CreateComputePipelineState(psoDesc);
-        if (!psoOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to create shadow preview compute pipeline");
-            return false;
-        }
-        _shadowPreviewPso = psoOpt.Release();
-        _shadowPreviewPso->SetDebugName("Shadow preview atlas PSO");
+        // 顶点布局: 交错 POSITION/NORMAL/TEXCOORD/TANGENT, 单 buffer。
+        OwningVertexBufferLayout layout{};
+        layout.ArrayStride = kVertexStride;
+        layout.StepMode = render::VertexStepMode::Vertex;
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = 0,
+            .Semantic = "POSITION",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X3,
+            .Location = 0});
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = sizeof(float) * 3,
+            .Semantic = "NORMAL",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X3,
+            .Location = 1});
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = sizeof(float) * 6,
+            .Semantic = "TEXCOORD",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X2,
+            .Location = 2});
+        pass.VertexLayouts.push_back(std::move(layout));
+
+        vector<ShaderPassDesc> passes;
+        passes.push_back(std::move(pass));
+
+        AssetManager* assets = GetAssetManager();
+        _shader = assets->AddReady<ShaderAsset>(
+            Guid::NewGuid(),
+            make_unique<ShaderAsset>(ShaderKeywordSet{}, std::move(passes)));
+
+        _material = assets->AddReady<MaterialAsset>(
+            Guid::NewGuid(),
+            make_unique<MaterialAsset>(_shader));
+        _material->SetRenderQueue(RenderQueue::Geometry);
+
+        MaterialConstants mc{};
+        mc.BaseColor[0] = 0.82f;
+        mc.BaseColor[1] = 0.67f;
+        mc.BaseColor[2] = 0.34f;  // 金色调
+        mc.BaseColor[3] = 1.0f;
+        mc.Principled0[0] = 1.0f;    // metallic
+        mc.Principled0[1] = 0.35f;   // roughness
+        mc.Principled0[2] = 0.5f;    // specular
+        mc.Principled0[3] = 0.0f;    // specular tint
+        mc.Principled1[0] = 0.0f;    // anisotropic
+        mc.Principled1[1] = 0.0f;    // sheen
+        mc.Principled1[2] = 0.0f;    // sheen tint
+        mc.Principled1[3] = 0.0f;    // flatness
+        mc.Principled2[0] = 0.0f;    // clearcoat
+        mc.Principled2[1] = 1.0f;    // clearcoat gloss
+        mc.Principled2[2] = 0.0f;    // spec trans
+        mc.Principled2[3] = 1.5f;    // eta
+        _material->SetConstantBlock("gMaterial", &mc, sizeof(mc));
         return true;
     }
 
-    render::ShaderParameterTable* GetShadowPreviewParameterTable(
-        render::Device& device,
-        uint32_t flight,
-        render::TextureView* shadowSrv,
-        render::TextureView* atlasUav) {
-        if (_shadowPreviewBindingLayout == nullptr || shadowSrv == nullptr || atlasUav == nullptr) {
-            return nullptr;
-        }
-        if (_shadowPreviewTables.size() <= flight) {
-            _shadowPreviewTables.resize(static_cast<size_t>(flight) + 1);
-        }
+    void BuildSphere() {
+        TriangleMesh triangle;
+        triangle.InitAsUVSphere(kSphereRadius, kSphereSlices);
+        Eigen::Vector3f boundsMin, boundsMax;
+        ComputeBounds(triangle, boundsMin, boundsMax);
 
-        unique_ptr<render::ShaderParameterTable>& table = _shadowPreviewTables[flight];
-        if (table == nullptr) {
-            auto tableOpt = device.CreateShaderParameterTable(_shadowPreviewBindingLayout);
-            if (!tableOpt.HasValue()) {
-                RADRAY_ERR_LOG("failed to create shadow preview parameter table");
-                return nullptr;
-            }
-            table = tableOpt.Release();
-            table->SetDebugName("shadow_preview_params");
-        }
-        if (!table->SetResource("gShadowMap", shadowSrv) || !table->SetResource("gPreviewAtlas", atlasUav)) {
-            RADRAY_ERR_LOG("failed to update shadow preview parameter table");
-            return nullptr;
-        }
-        return table.get();
+        MeshResource meshResource;
+        triangle.ToSimpleMeshResource(&meshResource);
+
+        AssetManager* assets = GetAssetManager();
+        FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
+        StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
+            .Id = Guid::NewGuid(),
+            .Task = LoadSphereMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
+            .DebugName = "UVSphere"});
+
+        Actor* actor = GetWorld()->SpawnActor<Actor>();
+        _meshComponent = actor->AddComponent<StaticMeshComponent>();
+        actor->SetRootComponent(_meshComponent);
+        _meshComponent->SetStaticMesh(meshRef);
     }
 
-    void RenderShadowPreviewAtlas(
-        srp::RenderResourcePool& pool,
-        uint32_t flight,
-        render::Device& device,
-        render::CommandBuffer* cmd,
-        render::TextureView* shadowSrv) {
-        _shadowPreviewReady = false;
-        if (!_showShadowMapPreview || !_lastShadow.Enabled || shadowSrv == nullptr || cmd == nullptr) {
-            return;
-        }
-        if (!EnsureShadowPreviewPipeline(device, *GetGpuSystem())) {
-            return;
-        }
-
-        render::TextureView* atlasUav = AcquireShadowPreviewAtlasUnorderedAccessView(pool, flight, device);
-        render::TextureView* atlasSrv = AcquireShadowPreviewAtlasResourceView(pool, flight, device);
-        render::ShaderParameterTable* table = GetShadowPreviewParameterTable(device, flight, shadowSrv, atlasUav);
-        if (atlasUav == nullptr || atlasSrv == nullptr || table == nullptr) {
-            return;
-        }
-
-        pool.Transition(ShadowPreviewAtlasName, flight, render::TextureState::UnorderedAccess, *cmd);
-        auto encoderOpt = cmd->BeginComputePass();
-        if (!encoderOpt.HasValue()) {
-            RADRAY_ERR_LOG("failed to begin shadow preview compute pass");
-            return;
-        }
-        auto encoder = encoderOpt.Release();
-        encoder->BindComputePipelineState(_shadowPreviewPso.get());
-        encoder->BindShaderParameters(table);
-        constexpr uint32_t groupSize = 8;
-        encoder->Dispatch(
-            (ShadowPreviewAtlasSize + groupSize - 1) / groupSize,
-            (ShadowPreviewAtlasSize + groupSize - 1) / groupSize,
-            1);
-        cmd->EndComputePass(std::move(encoder));
-        pool.Transition(ShadowPreviewAtlasName, flight, render::TextureState::ShaderRead, *cmd);
-
-        if (ImGuiSystem* imgui = GetSubsystem<ImGuiSystem>()) {
-            ImTextureID updated = imgui->CreateOrUpdateExternalTexture(_shadowPreviewTexture, flight, atlasSrv);
-            if (updated != ImTextureID_Invalid) {
-                _shadowPreviewTexture = updated;
-                _shadowPreviewReady = true;
-            }
-        }
+    void BuildLight() {
+        Actor* actor = GetWorld()->SpawnActor<Actor>();
+        PointLightComponent* light = actor->AddComponent<PointLightComponent>();
+        actor->SetRootComponent(light);
+        light->SetWorldLocation(Eigen::Vector3f{3.0f, 4.0f, 3.0f});
+        light->SetLightColor(Eigen::Vector3f{1.0f, 0.95f, 0.9f});
+        light->SetIntensity(60.0f);
+        light->SetAttenuationRadius(50.0f);
     }
 
-    void SpawnCamera() {
-        Actor* cameraActor = GetWorld()->SpawnActor<Actor>();
-        _cameraComp = cameraActor->AddComponent<CameraComponent>();
-        cameraActor->SetRootComponent(_cameraComp);
-        _cameraComp->SetPerspective(Radian(60.0f), 0.01f, 10000.0f);
-        _cameraControlComp = cameraActor->AddComponent<CameraControlComponent>();
-        _cameraControlComp->SetCamera(_cameraComp);
-        _cameraControlComp->BindToMainWindow(*this);
+    void BuildCamera() {
+        Actor* actor = GetWorld()->SpawnActor<Actor>();
+        CameraComponent* camera = actor->AddComponent<CameraComponent>();
+        actor->SetRootComponent(camera);
+        camera->SetPerspective(Radian(50.0f), 0.05f, 500.0f);
+        camera->SetWorldLocation(Eigen::Vector3f{0.0f, 0.0f, 4.0f});
+
+        CameraControlComponent* control = actor->AddComponent<CameraControlComponent>();
+        control->SetCamera(camera);
+        control->SetFrame(Eigen::Vector3f::Zero(), 4.0f, 0.0f, 0.0f);
+        control->BindToMainWindow(*this);
     }
 
-    void SpawnDefaultLights() {
-        Actor* directionalActor = GetWorld()->SpawnActor<Actor>();
-        auto* directional = directionalActor->AddComponent<LightComponent>();
-        _directionalLight = directional;
-        directionalActor->SetRootComponent(directional);
-        directional->SetLightType(srp::LightType::Directional);
-        directional->SetDirection(Eigen::Vector3f{-0.3f, -1.0f, -0.3f}.normalized());
-        directional->SetColor(Eigen::Vector3f{0.8f, 0.6f, 1.0f});
-        directional->SetIntensity(30.0f);
-        directional->SetCastShadow(true);
-        directional->SetShadowBias(1.0f, 0.75f);
-
-        // Actor* spotActor = GetWorld()->SpawnActor<Actor>();
-        // auto* spot = spotActor->AddComponent<LightComponent>();
-        // _spotLight = spot;
-        // spotActor->SetRootComponent(spot);
-        // spot->SetLightType(srp::LightType::Spot);
-        // spot->SetWorldLocation(Eigen::Vector3f{2.5f, 3.0f, 1.5f});
-        // spot->SetDirection(Eigen::Vector3f{-0.6f, -1.0f, -0.35f}.normalized());
-        // spot->SetColor(Eigen::Vector3f{1.0f, 0.95f, 0.85f});
-        // spot->SetIntensity(120.0f);
-        // spot->SetRange(20.0f);
-        // spot->SetSpotAngles(Radian(22.0f), Radian(32.0f));
-        // spot->SetCastShadow(true);
-        // spot->SetShadowBias(1.0f, 1.0f);
-
-        // Actor* pointActor = GetWorld()->SpawnActor<Actor>();
-        // auto* point = pointActor->AddComponent<LightComponent>();
-        // _pointLight = point;
-        // pointActor->SetRootComponent(point);
-        // point->SetLightType(srp::LightType::Point);
-        // point->SetWorldLocation(Eigen::Vector3f{-2.0f, 2.0f, -2.0f});
-        // point->SetColor(Eigen::Vector3f{0.7f, 0.85f, 1.0f});
-        // point->SetIntensity(60.0f);
-        // point->SetRange(15.0f);
-        // point->SetCastShadow(true);
-        // point->SetShadowBias(1.5f, 0.0f);
-    }
-
-    bool ComputeDirectionalCascades(const srp::SceneView& camView, gltfviewer::ShadowCascadeData& out) {
-        out = gltfviewer::ShadowCascadeData{};
-        _lastShadowSplits.fill(0.0f);
-        srp::Scene* scene = GetWorld() != nullptr ? GetWorld()->GetScene() : nullptr;
-        if (scene == nullptr || _cameraComp == nullptr) {
-            return false;
-        }
-
-        Eigen::Vector3f lightDir{0.0f, -1.0f, 0.0f};
-        float depthBiasTexels = 0.0f;
-        float normalBiasTexels = 0.0f;
-        bool found = false;
-        for (const unique_ptr<srp::Light>& light : scene->Lights()) {
-            if (light == nullptr || light->Type != srp::LightType::Directional || !light->CastShadow) {
-                continue;
-            }
-            lightDir = light->Direction;
-            depthBiasTexels = light->ShadowDepthBias;
-            normalBiasTexels = light->ShadowNormalBias;
-            found = true;
-            break;
-        }
-        if (!found) {
-            return false;
-        }
-
-        const float lightDirLen = lightDir.norm();
-        if (lightDirLen > 1e-6f) {
-            lightDir /= lightDirLen;
-        } else {
-            lightDir = Eigen::Vector3f{0.0f, -1.0f, 0.0f};
-        }
-
-        const float cameraNear = std::max(_cameraComp->GetNearZ(), 0.001f);
-        const float cameraFar = std::max(_cameraComp->GetFarZ(), cameraNear + 0.1f);
-        const float shadowFar = std::max(std::min(cameraFar, cameraNear + _shadowMaxDistance), cameraNear + 0.1f);
-        const float aspect = camView.ViewportHeight != 0
-            ? static_cast<float>(camView.ViewportWidth) / static_cast<float>(camView.ViewportHeight)
-            : 1.0f;
-        const float tanHalfFovY = std::tan(_cameraComp->GetFovY() * 0.5f);
-
-        std::array<float, MaxShadowCascades + 1> splits{};
-        splits[0] = cameraNear;
-        const float farNearRatio = shadowFar / cameraNear;
-        for (uint32_t i = 1; i <= MaxShadowCascades; ++i) {
-            const float t = static_cast<float>(i) / static_cast<float>(MaxShadowCascades);
-            const float uniformSplit = cameraNear + (shadowFar - cameraNear) * t;
-            const float logSplit = cameraNear * std::pow(farNearRatio, t);
-            splits[i] = std::lerp(uniformSplit, logSplit, _shadowSplitLambda);
-        }
-        splits[MaxShadowCascades] = shadowFar;
-        _lastShadowSplits = splits;
-
-        const Eigen::Vector3f up = std::abs(lightDir.y()) > 0.99f
-            ? Eigen::Vector3f{0.0f, 0.0f, 1.0f}
-            : Eigen::Vector3f{0.0f, 1.0f, 0.0f};
-        const Eigen::Matrix4f invCamView = camView.ViewMatrix.inverse();
-
-        out.LightDirectionForBias = -lightDir;
-        out.SoftMode = _shadowSoftMode;
-        const float kernelRadius = ShadowSoftKernelRadius(out.SoftMode);
-        for (uint32_t cascadeIndex = 0; cascadeIndex < MaxShadowCascades; ++cascadeIndex) {
-            const float zNear = splits[cascadeIndex];
-            const float zFar = std::max(splits[cascadeIndex + 1], zNear + 0.01f);
-
-            std::array<Eigen::Vector3f, 8> corners{};
-            uint32_t cornerIndex = 0;
-            for (float z : {zNear, zFar}) {
-                const float halfY = tanHalfFovY * z;
-                const float halfX = halfY * aspect;
-                for (float ySign : {-1.0f, 1.0f}) {
-                    for (float xSign : {-1.0f, 1.0f}) {
-                        const Eigen::Vector4f world = invCamView * Eigen::Vector4f{xSign * halfX, ySign * halfY, z, 1.0f};
-                        corners[cornerIndex++] = world.head<3>() / world.w();
-                    }
-                }
-            }
-
-            Eigen::Vector3f center = Eigen::Vector3f::Zero();
-            for (const Eigen::Vector3f& corner : corners) {
-                center += corner;
-            }
-            center /= static_cast<float>(corners.size());
-
-            float radius = 0.0f;
-            for (const Eigen::Vector3f& corner : corners) {
-                radius = std::max(radius, (corner - center).norm());
-            }
-            radius = std::max(radius, 0.1f);
-
-            const float margin = std::max(radius * 0.05f, 0.05f);
-            const Eigen::Vector3f eye = center - lightDir * (radius + margin);
-            Eigen::Matrix4f viewM = LookAtFrontLH(eye, lightDir, up);
-            const Eigen::Vector4f lightCenter = viewM * Eigen::Vector4f{center.x(), center.y(), center.z(), 1.0f};
-            const float centerZ = lightCenter.z() / lightCenter.w();
-            const float nearZ = std::max(0.001f, centerZ - radius - margin);
-            const float farZ = std::max(nearZ + 0.1f, centerZ + radius + margin);
-            Eigen::Matrix4f projM = OrthoLH(-radius, radius, -radius, radius, nearZ, farZ);
-
-            gltfviewer::ShadowCascade& cascade = out.Cascades[cascadeIndex];
-            cascade.View = srp::SceneView{};
-            cascade.View.ViewMatrix = viewM;
-            cascade.View.ProjMatrix = projM;
-            cascade.View.ViewProjMatrix = projM * viewM;
-            cascade.View.EyePosition = eye;
-            cascade.View.ViewportWidth = ShadowMapResolution;
-            cascade.View.ViewportHeight = ShadowMapResolution;
-
-            const float texelWorldSize = (2.0f * radius) / static_cast<float>(ShadowMapResolution);
-            cascade.DepthBias = -std::max(depthBiasTexels, 0.0f) * texelWorldSize * kernelRadius;
-            cascade.NormalBias = -std::max(normalBiasTexels, 0.0f) * texelWorldSize * kernelRadius;
-
-            out.SphereCenters[cascadeIndex] = center;
-            out.SphereRadiiSq[cascadeIndex] = radius * radius;
-        }
-
-        out.CascadeCount = MaxShadowCascades;
-        out.Enabled = true;
-        return true;
-    }
-
-    void ConfigureCameraControl() {
-        if (_cameraControlComp == nullptr) {
-            return;
-        }
-        CameraControl& control = _cameraControlComp->GetControl();
-        control.MinDistance = 0.05f;
-        control.MaxDistance = 10000.0f;
-        control.OrbitSensitivity = 0.003f;
-        control.PanSensitivity = 0.003f;
-        control.DollySensitivity = 0.15f;
-        control.UseTrackball = false;
-        control.InvertZoom = false;
-    }
-
-    void LoadSceneFromPath(const std::filesystem::path& path) {
-        UnloadCurrentScene();
-        _loadError.clear();
-        _selectedNode = -1;
-
-        GltfAssetLoadOptions options{};
-        _gltfAsset = LoadGltfAsset(
-            *GetAssetManager(),
-            GetGpuSystem()->GetFrameUploadScheduler(),
-            path,
-            options);
-        if (!_gltfAsset.IsValid()) {
-            _loadError = "failed to start glTF asset load";
-            RADRAY_ERR_LOG("{}", _loadError);
-            return;
-        }
-    }
-
-    void UnloadCurrentScene() {
-        DestroyExportedScene();
-        if (_gltfAsset.IsValid()) {
-            if (GltfAsset* asset = _gltfAsset.Get()) {
-                for (const GltfTextureDesc& texture : asset->GetTextures()) {
-                    if (texture.Texture.IsValid()) {
-                        GetAssetManager()->Unload(texture.Texture.GetAssetId());
-                    }
-                }
-            }
-            GetAssetManager()->Unload(_gltfAsset.GetAssetId());
-            _gltfAsset.Reset();
-        }
-    }
-
-    static void CollectAttachedActors(SceneComponent* component, Actor* exclude, vector<Actor*>& out) {
-        if (component == nullptr) {
-            return;
-        }
-        for (SceneComponent* child : component->GetAttachChildren()) {
-            if (child == nullptr) {
-                continue;
-            }
-            CollectAttachedActors(child, exclude, out);
-            auto owner = child->GetOwner();
-            if (!owner || owner.Get() == exclude) {
-                continue;
-            }
-            Actor* actor = owner.Get();
-            if (std::find(out.begin(), out.end(), actor) == out.end()) {
-                out.push_back(actor);
-            }
-        }
-    }
-
-    void DestroyExportedScene() {
-        Actor* rootActor = _rootActor;
-        if (rootActor == nullptr) {
-            return;
-        }
-
-        vector<Actor*> childActors;
-        if (auto rootComponent = rootActor->GetRootComponent()) {
-            CollectAttachedActors(rootComponent.Get(), rootActor, childActors);
-        }
-
-        for (Actor* actor : childActors) {
-            if (actor == nullptr) {
-                continue;
-            }
-            auto actorWorld = actor->GetWorld();
-            if (actorWorld) {
-                actorWorld.Get()->DestroyActor(actor);
-            }
-        }
-
-        auto rootWorld = rootActor->GetWorld();
-        if (rootWorld) {
-            rootWorld.Get()->DestroyActor(rootActor);
-        }
-        _rootActor = nullptr;
-    }
-
-    void TryExportReadyAsset() {
-        if (!_gltfAsset.IsValid()) {
-            return;
-        }
-        if (_gltfAsset.IsFaulted()) {
-            if (_loadError.empty()) {
-                _loadError = "glTF asset load failed";
-            }
-            return;
-        }
-        if (_rootActor == nullptr && _gltfAsset.IsReady()) {
-            _rootActor = _gltfAsset->ExportToScene(*GetWorld(), _viewerShader.get(), GetDevice());
-            FrameCameraToAsset();
-        }
-    }
-
-    void FrameCameraToAsset() {
-        Eigen::Vector3f center{Eigen::Vector3f::Zero()};
-        float distance = 4.0f;
-        const GltfAsset* asset = _gltfAsset.Get();
-        if (asset != nullptr && asset->HasBounds()) {
-            center = (asset->GetBoundsMin() + asset->GetBoundsMax()) * 0.5f;
-            const float radius = std::max((asset->GetBoundsMax() - asset->GetBoundsMin()).norm() * 0.5f, 0.1f);
-            distance = radius * 2.8f;
-        }
-        SetCameraFrame(center, distance);
-    }
-
-    void SetCameraFrame(const Eigen::Vector3f& center, float distance) {
-        if (_cameraControlComp != nullptr) {
-            _cameraControlComp->SetFrame(center, distance, 0.0f, Radian(20.0f));
-        }
-    }
-
-    void DrawNodeTree(const GltfAsset& asset, int nodeIndex) {
-        const vector<GltfNodeDesc>& nodes = asset.GetNodes();
-        if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) {
-            return;
-        }
-        const GltfNodeDesc& node = nodes[static_cast<size_t>(nodeIndex)];
-        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-        if (node.Children.empty()) {
-            flags |= ImGuiTreeNodeFlags_Leaf;
-        }
-        if (_selectedNode == nodeIndex) {
-            flags |= ImGuiTreeNodeFlags_Selected;
-        }
-        bool open = ImGui::TreeNodeEx(
-            reinterpret_cast<void*>(static_cast<intptr_t>(nodeIndex)),
-            flags,
-            "%s%s",
-            node.Name.c_str(),
-            node.HasMesh ? "  [mesh]" : "");
-        if (ImGui::IsItemClicked()) {
-            _selectedNode = nodeIndex;
-        }
-        if (open) {
-            for (int child : node.Children) {
-                DrawNodeTree(asset, child);
-            }
-            ImGui::TreePop();
-        }
-    }
-
-    void DrawShadowDebugUi() {
-        if (!ImGui::CollapsingHeader("Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
-            return;
-        }
-
-        ImGui::Checkbox("Cascade overlay", &_showShadowCascadeOverlay);
-        ImGui::Checkbox("Shadow map preview", &_showShadowMapPreview);
-        const char* softModeNames[] = {"Hard (1 tap)", "Low (4 tap)", "Medium (5x5 Tent)"};
-        int softModeIndex = static_cast<int>(_shadowSoftMode);
-        if (ImGui::Combo("Soft quality", &softModeIndex, softModeNames, IM_ARRAYSIZE(softModeNames))) {
-            _shadowSoftMode = static_cast<gltfviewer::ShadowSoftMode>(softModeIndex);
-        }
-        if (_directionalLight != nullptr) {
-            float depthBias = _directionalLight->GetShadowDepthBias();
-            float normalBias = _directionalLight->GetShadowNormalBias();
-            bool changed = false;
-            changed |= ImGui::SliderFloat("Depth bias", &depthBias, 0.0f, 5.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Normal bias", &normalBias, 0.0f, 5.0f, "%.2f");
-            if (changed) {
-                _directionalLight->SetShadowBias(depthBias, normalBias);
-            }
-        }
-        ImGui::SliderFloat("Split lambda", &_shadowSplitLambda, 0.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat("Max distance", &_shadowMaxDistance, 5.0f, 200.0f, "%.1f");
-        ImGui::Text("Enabled: %s", _lastShadow.Enabled ? "yes" : "no");
-        ImGui::Text("Cascades: %u / %u", _lastShadow.CascadeCount, MaxShadowCascades);
-        ImGui::Text("Resolution: %u", ShadowMapResolution);
-        ImGui::Text(
-            "Additional (spot/point): %u lights, %u / %u slices @ %u",
-            _lastAdditionalShadowLights,
-            _lastAdditionalShadowSlices,
-            MaxAdditionalShadowSlices,
-            AdditionalShadowMapResolution);
-        if (_lastShadow.Enabled && _lastShadow.CascadeCount > 0) {
-            ImGui::Text("Cascade 0 end: %.3f", _lastShadowSplits[1]);
-        }
-        const Eigen::Vector3f& lightDir = _lastShadow.LightDirectionForBias;
-        ImGui::Text("Bias light dir: %.3f %.3f %.3f", lightDir.x(), lightDir.y(), lightDir.z());
-
-        if (_showShadowMapPreview) {
-            ImGui::Separator();
-            ImGui::Text("Shadow map atlas: 0 1 / 2 3");
-            if (_shadowPreviewTexture != ImTextureID_Invalid && _shadowPreviewReady) {
-                const float availableWidth = std::max(ImGui::GetContentRegionAvail().x, 120.0f);
-                const float previewSize = std::min(availableWidth, 384.0f);
-                ImGui::Image(ImTextureRef{_shadowPreviewTexture}, ImVec2{previewSize, previewSize});
-            } else {
-                ImGui::TextUnformatted("Shadow map preview unavailable");
-            }
-        }
-
-        static constexpr ImVec4 colors[] = {
-            ImVec4{1.00f, 0.20f, 0.16f, 1.0f},
-            ImVec4{0.15f, 0.85f, 0.25f, 1.0f},
-            ImVec4{0.20f, 0.45f, 1.00f, 1.0f},
-            ImVec4{1.00f, 0.86f, 0.18f, 1.0f}};
-
-        const uint32_t count = std::min<uint32_t>(_lastShadow.CascadeCount, MaxShadowCascades);
-        for (uint32_t i = 0; i < count; ++i) {
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::ColorButton("##cascade_color", colors[i], ImGuiColorEditFlags_NoTooltip, ImVec2{12.0f, 12.0f});
-            ImGui::SameLine();
-            const bool open = ImGui::TreeNodeEx("Cascade", ImGuiTreeNodeFlags_DefaultOpen, "Cascade %u", i);
-            if (open) {
-                const Eigen::Vector3f& center = _lastShadow.SphereCenters[i];
-                const float radius = std::sqrt(std::max(_lastShadow.SphereRadiiSq[i], 0.0f));
-                const gltfviewer::ShadowCascade& cascade = _lastShadow.Cascades[i];
-                ImGui::Text("Split: %.3f - %.3f", _lastShadowSplits[i], _lastShadowSplits[i + 1]);
-                ImGui::Text("Sphere center: %.3f %.3f %.3f", center.x(), center.y(), center.z());
-                ImGui::Text("Sphere radius: %.3f", radius);
-                ImGui::Text("Depth bias: %.6f", cascade.DepthBias);
-                ImGui::Text("Normal bias: %.6f", cascade.NormalBias);
-                ImGui::Text(
-                    "Eye: %.3f %.3f %.3f",
-                    cascade.View.EyePosition.x(),
-                    cascade.View.EyePosition.y(),
-                    cascade.View.EyePosition.z());
-                ImGui::TreePop();
-            }
-            ImGui::PopID();
-        }
-    }
-
-    void DrawUi(const AppUpdateContext& ctx) {
-        ImGui::SetNextWindowSize(ImVec2{380.0f, 560.0f}, ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("glTF Viewer")) {
-            ImGui::Text("Frame %.3f ms  GPU %.3f ms", ctx.DeltaTime.count() * 1000.0f, GetGpuSystem()->GetLastGpuTimeMs());
-            ImGui::InputText("Path", _loadPath.data(), _loadPath.size());
-            if (ImGui::Button("Load")) {
-                _pendingLoadPath = _loadPath.data();
-                _pendingLoad = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Unload")) {
-                UnloadCurrentScene();
-                _selectedNode = -1;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Frame")) {
-                FrameCameraToAsset();
-            }
-            if (!_loadError.empty()) {
-                ImGui::TextWrapped("Error: %s", _loadError.c_str());
-            }
-            ImGui::Separator();
-            DrawShadowDebugUi();
-            ImGui::Separator();
-            if (_gltfAsset.IsValid()) {
-                const char* state = "loading";
-                if (_gltfAsset.IsReady()) {
-                    state = "ready";
-                } else if (_gltfAsset.IsFaulted()) {
-                    state = "faulted";
-                } else if (_gltfAsset.IsCanceled()) {
-                    state = "canceled";
-                }
-                ImGui::Text("Asset: %s", state);
-            }
-            if (GltfAsset* asset = _gltfAsset.Get()) {
-                const size_t primitiveCount = asset->GetPrimitives().size();
-                const size_t actorCount = _rootActor != nullptr ? primitiveCount + 1 : 0;
-                const size_t componentCount = _rootActor != nullptr ? primitiveCount : 0;
-                ImGui::Text("Primitives: %zu", primitiveCount);
-                ImGui::Text("Materials: %zu", asset->GetMaterialNames().size());
-                ImGui::Text("Textures: %zu", asset->GetTextures().size());
-                ImGui::Text("Nodes: %zu", asset->GetNodes().size());
-                ImGui::Text("Actors: %zu", actorCount);
-                ImGui::Text("Components: %zu", componentCount);
-                if (ImGui::CollapsingHeader("Scene Nodes", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    for (int root : asset->GetRootNodes()) {
-                        DrawNodeTree(*asset, root);
-                    }
-                }
-                if (ImGui::CollapsingHeader("Materials")) {
-                    const vector<string>& materialNames = asset->GetMaterialNames();
-                    for (size_t i = 0; i < materialNames.size(); ++i) {
-                        ImGui::BulletText("%zu: %s", i, materialNames[i].c_str());
-                    }
-                }
-                if (_selectedNode >= 0 && _selectedNode < static_cast<int>(asset->GetNodes().size())) {
-                    const GltfNodeDesc& node = asset->GetNodes()[static_cast<size_t>(_selectedNode)];
-                    ImGui::Separator();
-                    ImGui::Text("Selected: %s", node.Name.c_str());
-                    ImGui::Text("Parent: %d", node.Parent);
-                    ImGui::Text("Children: %zu", node.Children.size());
-                    ImGui::Text("Has mesh: %s", node.HasMesh ? "yes" : "no");
-                }
-            }
-        }
-        ImGui::End();
-    }
-
-    // —— srp 渲染设施(game 侧持有)——
-    unique_ptr<srp::Shader> _viewerShader;
-    unique_ptr<srp::ShaderVariantCache> _variantCache;
-    srp::RenderResourcePool _resourcePool;
-    gltfviewer::SceneLightBuffer _lightBuffer;
-
-    // —— 阴影状态 ——
-    gltfviewer::ShadowCascadeData _shadow{};
-    gltfviewer::ShadowCascadeData _lastShadow{};
-    gltfviewer::AdditionalShadowData _additionalShadow{};
-    std::array<float, MaxShadowCascades + 1> _lastShadowSplits{};
-    uint32_t _lastAdditionalShadowSlices{0};
-    uint32_t _lastAdditionalShadowLights{0};
-    float _shadowMaxDistance{DefaultShadowMaxDistance};
-    float _shadowSplitLambda{DefaultShadowSplitLambda};
-    gltfviewer::ShadowSoftMode _shadowSoftMode{gltfviewer::ShadowSoftMode::Medium};
-    bool _showShadowCascadeOverlay{false};
-    bool _showShadowMapPreview{true};
-    bool _shadowPreviewReady{false};
-    ImTextureID _shadowPreviewTexture{ImTextureID_Invalid};
-    render::Shader* _shadowPreviewShader{nullptr};
-    render::ShaderBindingLayout* _shadowPreviewBindingLayout{nullptr};
-    unique_ptr<render::ComputePipelineState> _shadowPreviewPso;
-    vector<unique_ptr<render::ShaderParameterTable>> _shadowPreviewTables;
-
-    // —— 资产 / 场景 ——
-    StreamingAssetRef<GltfAsset> _gltfAsset;
-    Actor* _rootActor{nullptr};
-
-    vector<char> _loadPath;
-    string _loadError;
-    std::filesystem::path _initialLoadPath;
-    bool _pendingLoad{false};
-    std::filesystem::path _pendingLoadPath;
-    int _selectedNode{-1};
-
-    CameraComponent* _cameraComp{nullptr};
-    CameraControlComponent* _cameraControlComp{nullptr};
-    LightComponent* _directionalLight{nullptr};
-    LightComponent* _spotLight{nullptr};
-    LightComponent* _pointLight{nullptr};
+    StreamingAssetRef<ShaderAsset> _shader{};
+    StreamingAssetRef<MaterialAsset> _material{};
+    StaticMeshComponent* _meshComponent{nullptr};
+    bool _materialAssigned{false};
 };
 
 int main(int argc, char* argv[]) {
@@ -1461,29 +291,24 @@ int main(int argc, char* argv[]) {
     desc.BackBufferFormat = GltfViewerApp::BackBufferFormat;
     desc.PresentMode = render::PresentMode::FIFO;
 
-    std::optional<std::filesystem::path> loadPath;
     for (int i = 0; i < argc; ++i) {
         std::string_view arg{argv[i]};
         if (arg == "--backend" && i + 1 < argc) {
-            std::string_view backendStr{argv[++i]};
+            std::string_view backendStr{argv[i + 1]};
             if (backendStr == "vulkan") {
                 desc.Backend = render::RenderBackend::Vulkan;
             } else if (backendStr == "d3d12") {
                 desc.Backend = render::RenderBackend::D3D12;
             }
-        } else if (arg == "--valid-layer") {
+        }
+        if (arg == "--valid-layer") {
             desc.EnableValidation = true;
-        } else if (arg == "--multithread") {
+        }
+        if (arg == "--multithread") {
             desc.Multithreaded = true;
-        } else if (arg == "--load" && i + 1 < argc) {
-            loadPath = std::filesystem::path{argv[++i]};
         }
     }
 
     GltfViewerApp app{};
-    if (loadPath.has_value()) {
-        app.SetInitialLoadPath(loadPath.value());
-    }
-    app.RegisterSubsystem<ImGuiSystem>();
     return app.Run(desc);
 }

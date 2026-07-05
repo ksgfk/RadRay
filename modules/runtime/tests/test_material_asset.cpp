@@ -22,7 +22,7 @@ TEST(MaterialAssetTest, GetTypeIdAndProgramIndependence) {
     MaterialAsset m;
     EXPECT_EQ(m.GetTypeId(), runtime_type_id_v<MaterialAsset>);
     EXPECT_FALSE(m.GetTypeId().IsEmpty());
-    EXPECT_EQ(m.GetShader(), nullptr);
+    EXPECT_EQ(m.GetShader().Get(), nullptr);
 }
 
 TEST(MaterialAssetTest, SetAndGetFloat) {
@@ -112,7 +112,7 @@ TEST(MaterialAssetTest, DisableUnknownKeywordIsNoop) {
 
 TEST(MaterialAssetTest, EnabledKeywordsProjectThroughShader) {
     ShaderAsset shader = MakeShaderWithKeywords();
-    MaterialAsset m{&shader};
+    MaterialAsset m;
     m.EnableKeyword("_ALPHATEST");  // shader bit 2
     m.EnableKeyword("_NORMALMAP");  // shader bit 0
     m.EnableKeyword("_UNDECLARED"); // 不在 shader keyword 表, 应被投影忽略

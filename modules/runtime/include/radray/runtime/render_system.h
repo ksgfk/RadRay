@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <radray/runtime_type.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
@@ -10,6 +12,12 @@ namespace radray {
 class Application;
 class AppFrameContext;
 struct AppFrameTarget;
+
+namespace render {
+class Dxc;
+class ShaderVariantCache;
+class GraphicsPipelineStateCache;
+}  // namespace render
 
 /// Runtime-side renderer coordinator.
 ///
@@ -24,11 +32,22 @@ public:
     RenderSystem& operator=(RenderSystem&&) = delete;
     ~RenderSystem() noexcept;
 
+    /// 装配阶段调用 (ServiceRegistry::Initialize)。创建 shader 编译设施:
+    /// Dxc + ShaderVariantCache + GraphicsPipelineStateCache,并把 <exe>/shaderlib
+    /// 作为默认 include 根。同时实例化默认渲染管线 (ForwardPipeline)。
+    void OnInitialize();
+
     void Render(AppFrameContext& ctx);
 
     Scene* AllocateScene();
     void ReleaseScene(Scene* scene) noexcept;
     void ReleaseAllScenes() noexcept;
+
+    Application* GetApplication() const noexcept { return _app; }
+    render::ShaderVariantCache* GetShaderVariantCache() const noexcept { return _variantCache.get(); }
+    render::GraphicsPipelineStateCache* GetGraphicsPipelineStateCache() const noexcept { return _psoCache.get(); }
+    /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
+    const std::string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
 
 private:
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -36,6 +55,10 @@ private:
     Application* _app{nullptr};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
+    shared_ptr<render::Dxc> _dxc;
+    unique_ptr<render::ShaderVariantCache> _variantCache;
+    unique_ptr<render::GraphicsPipelineStateCache> _psoCache;
+    std::string _shaderIncludeRoot;
 };
 
 template <>

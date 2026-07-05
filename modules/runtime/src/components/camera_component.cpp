@@ -21,4 +21,12 @@ Eigen::Matrix4f CameraComponent::ComputeProjMatrix(float aspect) const noexcept 
     return PerspectiveLH<float>(_fovY, aspect, _nearZ, _farZ);
 }
 
+Eigen::Matrix4f CameraComponent::ComputeViewProjMatrix(float aspect) const noexcept {
+    return ComputeProjMatrix(aspect) * ComputeViewMatrix();
+}
+
+Eigen::Vector3f CameraComponent::GetEyePosition() const noexcept {
+    return GetWorldLocation();
+}
+
 }  // namespace radray

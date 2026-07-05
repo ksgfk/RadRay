@@ -1,22 +1,74 @@
 #include <radray/runtime/render_system.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <optional>
 #include <span>
 
+#include <radray/file.h>
+#include <radray/logger.h>
+#include <radray/render/common.h>
+#include <radray/render/shader_variant_cache.h>
+#include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_framework/forward_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
 
 RenderSystem::RenderSystem(Application* app) noexcept
-    : _app(app), _pipeline(make_unique<RenderPipeline>()) {
+    : _app(app) {
 }
 
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
+    _pipeline.reset();
+    _psoCache.reset();
+    _variantCache.reset();
+    _dxc.reset();
+}
+
+void RenderSystem::OnInitialize() {
+    GpuSystem* gpu = _app != nullptr ? _app->GetGpuSystem() : nullptr;
+    render::Device* device = _app != nullptr ? _app->GetDevice() : nullptr;
+    if (gpu == nullptr || device == nullptr) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: GpuSystem or Device is null");
+        return;
+    }
+
+#ifdef RADRAY_ENABLE_DXC
+    auto dxcOpt = render::CreateDxc();
+    if (!dxcOpt.HasValue()) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create Dxc");
+        return;
+    }
+    _dxc = dxcOpt.Release();
+
+    auto variantCacheOpt = render::CreateShaderVariantCache(
+        device, _dxc.get(), gpu->GetShaderBindingLayoutCache());
+    if (!variantCacheOpt.HasValue()) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create ShaderVariantCache");
+        return;
+    }
+    _variantCache = variantCacheOpt.Release();
+#else
+    RADRAY_ERR_LOG("RenderSystem::OnInitialize: DXC disabled; runtime shader compilation unavailable");
+    return;
+#endif
+
+    auto psoCacheOpt = device->CreateGraphicsPipelineStateCache();
+    if (!psoCacheOpt.HasValue()) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create GraphicsPipelineStateCache");
+        return;
+    }
+    _psoCache = psoCacheOpt.Release();
+
+    // shaderlib 随可执行文件部署 (见 modules/runtime/CMakeLists.txt POST_BUILD)。
+    _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
+
+    _pipeline = make_unique<ForwardPipeline>(this);
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {
@@ -43,6 +95,13 @@ void RenderSystem::Render(AppFrameContext& ctx) {
             .ContentDrawn = false});
     }
     if (targets.empty()) {
+        return;
+    }
+
+    if (_pipeline == nullptr) {
+        for (RenderPipelineTarget& target : targets) {
+            EnsurePresentState(ctx, target);
+        }
         return;
     }
 

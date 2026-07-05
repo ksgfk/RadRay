@@ -45,13 +45,16 @@ public:
         render::Device* device,
         render::ShaderVariantCache* variantCache,
         render::GraphicsPipelineStateCache* psoCache,
-        std::string perObjectCBufferName = "PerObject") noexcept;
+        std::string perObjectCBufferName = "PerObject",
+        uint32_t flightCount = 1) noexcept;
 
     MeshPassExecutor(const MeshPassExecutor&) = delete;
     MeshPassExecutor& operator=(const MeshPassExecutor&) = delete;
 
-    /// 回收上一帧分配的 table / arena。必须在上一帧命令提交完成后调用。
-    void BeginFrame() noexcept;
+    /// 开始录制指定 flight 的一帧: 回收 *该 flight* 上一轮分配的 table / arena。
+    /// 每个 flight 持有独立的 table / arena; 调用方保证同一 flightIndex 的上一轮命令
+    /// 已随 fence 完成 (双缓冲下即 N-2 帧), 故此处回收不会触及仍在飞行中的其他 flight。
+    void BeginFrame(uint32_t flightIndex = 0) noexcept;
 
     /// 设置一个 per-view 常量块 (可选)。传入的字节会在每次 draw 前写入名为
     /// viewCBufferName 的 cbuffer。传空 name 关闭该功能。
@@ -69,14 +72,23 @@ private:
         const DrawItem& item,
         const render::CompiledShaderVariant& variant) noexcept;
 
+    // 每个 flight 独立持有 cbuffer arena + 帧内参数表, 避免在 GPU 仍读取上一帧描述符时
+    // 就 Reset/clear 导致描述符堆槽位被覆盖 (D3D12 STATIC descriptor 校验错误)。
+    struct FlightResources {
+        render::CBufferArena Arena;
+        vector<unique_ptr<render::ShaderParameterTable>> Tables;  // 帧内存活
+
+        explicit FlightResources(render::Device* device) noexcept : Arena(device) {}
+    };
+
     render::Device* _device{nullptr};
     render::ShaderVariantCache* _variantCache{nullptr};
     render::GraphicsPipelineStateCache* _psoCache{nullptr};
     std::string _perObjectName;
     std::string _viewName;
     vector<byte> _viewData;
-    render::CBufferArena _arena;
-    vector<unique_ptr<render::ShaderParameterTable>> _tables;  // 帧内存活
+    vector<FlightResources> _flights;
+    uint32_t _currentFlight{0};
 };
 
 }  // namespace radray

@@ -41,6 +41,9 @@ struct ShaderVariantDescriptor {
     uint32_t PassIndex{0};
     uint64_t KeywordBitmask{0};
     std::span<std::string_view> Defines{};
+    // include 搜索目录 (原样喂给 DXC 的 -I). 用于解析 shader 源中的 #include.
+    // render 层不理解目录内容, 仅透传; 生命周期须覆盖 GetOrCreate 调用。
+    std::span<std::string_view> Includes{};
     std::span<const ShaderVariantStageDesc> Stages{};
     std::span<const StaticSamplerDescriptor> StaticSamplers{};
     HlslShaderModel SM{HlslShaderModel::SM60};

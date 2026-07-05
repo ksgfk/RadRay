@@ -351,6 +351,7 @@ private:
         params.Stage = stage.Stage;
         params.SM = desc.SM;
         params.Defines = desc.Defines;
+        params.Includes = desc.Includes;
         params.IsOptimize = desc.IsOptimize;
         params.IsSpirv = isSpirv;
         params.EnableUnbounded = false;

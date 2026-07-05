@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <radray/guid.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 
@@ -13,19 +15,22 @@ public:
     ~FakeProxy() noexcept override = default;
 };
 
-ShaderAsset MakeShader(std::string_view passTag) {
+StreamingAssetRef<ShaderAsset> MakeShaderRef(AssetManager& mgr, std::string_view passTag) {
     ShaderKeywordSet kw;
     vector<ShaderPassDesc> passes;
     passes.push_back(ShaderPassDesc{.PassTag = string{passTag}, .Source = ""});
-    return ShaderAsset{std::move(kw), std::move(passes)};
+    return mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(std::move(kw), std::move(passes)));
 }
 
-ShaderAsset MakeShaderTwoPasses(std::string_view tag0, std::string_view tag1) {
+StreamingAssetRef<ShaderAsset> MakeShaderRefTwoPasses(AssetManager& mgr,
+                                                      std::string_view tag0, std::string_view tag1) {
     ShaderKeywordSet kw;
     vector<ShaderPassDesc> passes;
     passes.push_back(ShaderPassDesc{.PassTag = string{tag0}, .Source = ""});
     passes.push_back(ShaderPassDesc{.PassTag = string{tag1}, .Source = ""});
-    return ShaderAsset{std::move(kw), std::move(passes)};
+    return mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(std::move(kw), std::move(passes)));
 }
 
 }  // namespace
@@ -33,8 +38,9 @@ ShaderAsset MakeShaderTwoPasses(std::string_view tag0, std::string_view tag1) {
 TEST(RenderQueueTest, AddPrimitiveRejectsNulls) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
+    MaterialAsset material{shaderRef};
 
     EXPECT_FALSE(list.AddPrimitive(nullptr, &proxy, "ForwardLit"));
     EXPECT_FALSE(list.AddPrimitive(&material, nullptr, "ForwardLit"));
@@ -52,8 +58,9 @@ TEST(RenderQueueTest, AddPrimitiveRejectsMaterialWithoutShader) {
 TEST(RenderQueueTest, PassTagFilteringDropsNonMatching) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
+    MaterialAsset material{shaderRef};
 
     // 匹配的 tag 加入。
     EXPECT_TRUE(list.AddPrimitive(&material, &proxy, "ForwardLit"));
@@ -66,8 +73,9 @@ TEST(RenderQueueTest, PassTagFilteringDropsNonMatching) {
 TEST(RenderQueueTest, PassIndexMatchesShaderPass) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShaderTwoPasses("Depth", "ForwardLit");
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRefTwoPasses(mgr, "Depth", "ForwardLit");
+    MaterialAsset material{shaderRef};
 
     ASSERT_TRUE(list.AddPrimitive(&material, &proxy, "ForwardLit"));
     ASSERT_EQ(list.Size(), 1u);
@@ -81,8 +89,9 @@ TEST(RenderQueueTest, PassIndexMatchesShaderPass) {
 TEST(RenderQueueTest, RenderQueueCopiedFromMaterial) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
+    MaterialAsset material{shaderRef};
     material.SetRenderQueue(RenderQueue::AlphaTest);
 
     ASSERT_TRUE(list.AddPrimitive(&material, &proxy, "ForwardLit"));
@@ -92,13 +101,14 @@ TEST(RenderQueueTest, RenderQueueCopiedFromMaterial) {
 TEST(RenderQueueTest, SortOpaqueByQueueThenMaterialThenDistance) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
 
-    MaterialAsset geoA{&shader};
+    MaterialAsset geoA{shaderRef};
     geoA.SetRenderQueue(RenderQueue::Geometry);
-    MaterialAsset geoB{&shader};
+    MaterialAsset geoB{shaderRef};
     geoB.SetRenderQueue(RenderQueue::Geometry);
-    MaterialAsset bg{&shader};
+    MaterialAsset bg{shaderRef};
     bg.SetRenderQueue(RenderQueue::Background);
 
     // 乱序加入。
@@ -137,9 +147,10 @@ TEST(RenderQueueTest, SortOpaqueByQueueThenMaterialThenDistance) {
 TEST(RenderQueueTest, SortTransparentBackToFront) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
 
-    MaterialAsset mat{&shader};
+    MaterialAsset mat{shaderRef};
     mat.SetRenderQueue(RenderQueue::Transparent);
 
     list.AddPrimitive(&mat, &proxy, "ForwardLit", 0, 1.0f);
@@ -158,11 +169,12 @@ TEST(RenderQueueTest, SortTransparentBackToFront) {
 TEST(RenderQueueTest, SortTransparentQueueTakesPrecedenceOverDistance) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
 
-    MaterialAsset trans{&shader};
+    MaterialAsset trans{shaderRef};
     trans.SetRenderQueue(RenderQueue::Transparent);  // 3000
-    MaterialAsset overlay{&shader};
+    MaterialAsset overlay{shaderRef};
     overlay.SetRenderQueue(RenderQueue::Overlay);  // 4000
 
     // overlay 更近, 但队列更大 -> 排在 transparent 之后。
@@ -179,8 +191,9 @@ TEST(RenderQueueTest, SortTransparentQueueTakesPrecedenceOverDistance) {
 TEST(RenderQueueTest, ClearEmptiesList) {
     DrawList list;
     FakeProxy proxy;
-    ShaderAsset shader = MakeShader("ForwardLit");
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
+    MaterialAsset material{shaderRef};
     list.AddPrimitive(&material, &proxy, "ForwardLit");
     EXPECT_FALSE(list.Empty());
     list.Clear();
@@ -189,8 +202,9 @@ TEST(RenderQueueTest, ClearEmptiesList) {
 }
 
 TEST(MaterialAssetTest, IsTransparentThreshold) {
-    ShaderAsset shader = MakeShader("ForwardLit");
-    MaterialAsset m{&shader};
+    AssetManager mgr;
+    auto shaderRef = MakeShaderRef(mgr, "ForwardLit");
+    MaterialAsset m{shaderRef};
     m.SetRenderQueue(RenderQueue::Geometry);
     EXPECT_FALSE(m.IsTransparent());
     m.SetRenderQueue(RenderQueue::GeometryLast);

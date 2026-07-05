@@ -749,6 +749,10 @@ std::optional<DxcOutput> Dxc::Compile(
     vector<std::string_view> args{};
     if (isSpirv) {
         args.emplace_back("-spirv");
+        // 定义 VULKAN 宏, 使 common.hlsl 的 VK_PUSH_CONSTANT / VK_BINDING / VK_LOCATION
+        // 宏展开为对应的 [[vk::...]] 属性 (否则 push constant 会被降级为普通 uniform)。
+        args.emplace_back("-D");
+        args.emplace_back("VULKAN=1");
         if (stage == ShaderStage::RayGen ||
             stage == ShaderStage::Miss ||
             stage == ShaderStage::ClosestHit ||
@@ -794,6 +798,9 @@ std::optional<DxcOutput> Dxc::Compile(const DxcCompileParams& params) noexcept {
     vector<std::string_view> args{};
     if (params.IsSpirv) {
         args.emplace_back("-spirv");
+        // 见上: 定义 VULKAN 宏使 common.hlsl 的 VK_* 宏正确展开。
+        args.emplace_back("-D");
+        args.emplace_back("VULKAN=1");
     }
     if (!params.EnableUnbounded) {
         args.emplace_back("-all_resources_bound");

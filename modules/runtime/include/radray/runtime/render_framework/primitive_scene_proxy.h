@@ -1,9 +1,13 @@
 #pragma once
 
+#include <cstdint>
+
 #include <radray/basic_math.h>
 #include <radray/render/gpu_resource.h>
 
 namespace radray {
+
+class MaterialAsset;
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 struct MeshDrawArgs {
@@ -34,6 +38,17 @@ public:
     /// 基类默认无几何 (Geometry=nullptr); 具体 proxy 覆写。
     virtual MeshDrawArgs GetDrawArgs(uint32_t /*sectionIndex*/) const noexcept {
         return MeshDrawArgs{};
+    }
+
+    /// section (sub-mesh) 数量。基类默认 0; 具体 proxy 覆写。
+    /// RTTI 被禁用 (/GR-), 故用虚接口而非 dynamic_cast 遍历 section。
+    virtual uint32_t GetSectionCount() const noexcept {
+        return 0;
+    }
+
+    /// 取指定 section 的材质 (非拥有)。基类默认 nullptr; 具体 proxy 覆写。
+    virtual MaterialAsset* GetSectionMaterial(uint32_t /*sectionIndex*/) const noexcept {
+        return nullptr;
     }
 };
 

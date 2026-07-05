@@ -8,6 +8,7 @@
 #include <radray/render/common.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_asset.h>
 
 namespace radray {
@@ -18,6 +19,7 @@ namespace radray {
 using MaterialPropertyValue = std::variant<
     float,
     Eigen::Vector4f,
+    vector<byte>,  // 原始常量块 (整块 push/root constant, 大小须与 shader cbuffer 完全一致)
     render::TextureView*,
     render::Sampler*>;
 
@@ -43,14 +45,14 @@ enum class RenderQueue : int32_t {
 class MaterialAsset : public Asset {
 public:
     MaterialAsset() noexcept = default;
-    explicit MaterialAsset(ShaderAsset* shader) noexcept;
+    explicit MaterialAsset(StreamingAssetRef<ShaderAsset> shader) noexcept;
     ~MaterialAsset() noexcept override;
 
     void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
-    ShaderAsset* GetShader() const noexcept { return _shader; }
-    void SetShader(ShaderAsset* shader) noexcept { _shader = shader; }
+    StreamingAssetRef<ShaderAsset> GetShader() const noexcept { return _shader; }
+    void SetShader(StreamingAssetRef<ShaderAsset> shader) noexcept { _shader = std::move(shader); }
 
     // ─── render queue ───
     int32_t GetRenderQueue() const noexcept { return _renderQueue; }
@@ -62,6 +64,9 @@ public:
     // ─── property ───
     void SetFloat(std::string_view name, float value) noexcept;
     void SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept;
+    /// 设置一整块常量数据 (对应一个 push/root constant cbuffer 块)。
+    /// size 须与 shader 中该 cbuffer 声明的字节数完全一致, 否则 ApplyProperties 时被忽略。
+    void SetConstantBlock(std::string_view name, const void* data, size_t size) noexcept;
     void SetTexture(std::string_view name, render::TextureView* view) noexcept;
     void SetSampler(std::string_view name, render::Sampler* sampler) noexcept;
 
@@ -92,7 +97,7 @@ public:
     uint32_t ApplyProperties(render::ShaderParameterTable& table) const noexcept;
 
 private:
-    ShaderAsset* _shader{nullptr};
+    StreamingAssetRef<ShaderAsset> _shader{};
     int32_t _renderQueue{static_cast<int32_t>(RenderQueue::Geometry)};
     unordered_map<string, MaterialPropertyValue> _properties;
     vector<string> _enabledKeywords;

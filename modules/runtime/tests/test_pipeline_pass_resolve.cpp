@@ -3,9 +3,11 @@
 #include <gtest/gtest.h>
 #include <fmt/format.h>
 
+#include <radray/guid.h>
 #include <radray/render/pipeline_state_cache.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
@@ -98,9 +100,11 @@ TEST_P(PipelinePassResolveTest, DrawListItemResolvesToPso) {
     kw.Add("_DOUBLE");
     vector<ShaderPassDesc> passes;
     passes.push_back(meshPass);
-    ShaderAsset shader{std::move(kw), std::move(passes)};
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(std::move(kw), std::move(passes)));
 
-    MaterialAsset material{&shader};
+    MaterialAsset material{shaderRef};
     FakeProxy proxy;
 
     DrawList list;
@@ -120,10 +124,12 @@ TEST_P(PipelinePassResolveTest, SameMaterialStateHitsPsoCache) {
     kw.Add("_DOUBLE");
     vector<ShaderPassDesc> passes;
     passes.push_back(meshPass);
-    ShaderAsset shader{std::move(kw), std::move(passes)};
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(std::move(kw), std::move(passes)));
 
-    MaterialAsset matA{&shader};
-    MaterialAsset matB{&shader};  // 相同 shader/state/keyword -> 应共享变体与 PSO
+    MaterialAsset matA{shaderRef};
+    MaterialAsset matB{shaderRef};  // 相同 shader/state/keyword -> 应共享变体与 PSO
     FakeProxy proxy;
 
     DrawList list;
@@ -147,10 +153,12 @@ TEST_P(PipelinePassResolveTest, DifferentKeywordProducesDifferentPso) {
     kw.Add("_DOUBLE");
     vector<ShaderPassDesc> passes;
     passes.push_back(meshPass);
-    ShaderAsset shader{std::move(kw), std::move(passes)};
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(std::move(kw), std::move(passes)));
 
-    MaterialAsset plain{&shader};
-    MaterialAsset doubled{&shader};
+    MaterialAsset plain{shaderRef};
+    MaterialAsset doubled{shaderRef};
     doubled.EnableKeyword("_DOUBLE");
     FakeProxy proxy;
 

@@ -16,7 +16,7 @@ bool DrawList::AddPrimitive(
     if (material == nullptr || proxy == nullptr) {
         return false;
     }
-    ShaderAsset* shader = material->GetShader();
+    ShaderAsset* shader = material->GetShader().Get();
     if (shader == nullptr) {
         return false;
     }

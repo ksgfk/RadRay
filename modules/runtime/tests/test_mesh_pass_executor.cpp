@@ -11,6 +11,7 @@
 #include <radray/render/pipeline_state_cache.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/render_framework/mesh_pass_executor.h>
@@ -191,8 +192,10 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     ShaderPassDesc meshPass = MakeMeshPass();
     vector<ShaderPassDesc> passes;
     passes.push_back(meshPass);
-    ShaderAsset shader{ShaderKeywordSet{}, std::move(passes)};
-    MaterialAsset material{&shader};
+    AssetManager mgr;
+    auto shaderRef = mgr.AddReady<ShaderAsset>(Guid::NewGuid(),
+        std::make_unique<ShaderAsset>(ShaderKeywordSet{}, std::move(passes)));
+    MaterialAsset material{shaderRef};
     material.SetVector("gMaterial", Eigen::Vector4f{1.0f, 1.0f, 1.0f, 1.0f});  // Tint = 白, 不改色
 
     // proxy (自带全屏三角几何)。

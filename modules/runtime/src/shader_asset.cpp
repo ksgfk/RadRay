@@ -115,11 +115,18 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
         },
     };
 
+    vector<std::string_view> includeViews;
+    includeViews.reserve(pass.IncludeDirs.size());
+    for (const string& dir : pass.IncludeDirs) {
+        includeViews.emplace_back(dir);
+    }
+
     render::ShaderVariantDescriptor desc{};
     desc.ProgramId = _programId;
     desc.PassIndex = passIndex;
     desc.KeywordBitmask = bitmask;
     desc.Defines = defineViews;
+    desc.Includes = includeViews;
     desc.Stages = stages;
     desc.SM = sm;
     desc.IsOptimize = false;

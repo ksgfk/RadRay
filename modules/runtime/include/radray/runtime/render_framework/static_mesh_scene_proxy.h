@@ -38,6 +38,10 @@ public:
     const StreamingAssetRef<StaticMesh>& GetStaticMeshRef() const noexcept { return _mesh; }
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _localToWorld; }
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
+    uint32_t GetSectionCount() const noexcept override { return static_cast<uint32_t>(_sections.size()); }
+    MaterialAsset* GetSectionMaterial(uint32_t sectionIndex) const noexcept override {
+        return sectionIndex < _sections.size() ? _sections[sectionIndex].Material : nullptr;
+    }
     const Eigen::Vector3f& GetLocalBoundsMin() const noexcept { return _localBoundsMin; }
     const Eigen::Vector3f& GetLocalBoundsMax() const noexcept { return _localBoundsMax; }
     std::span<const Section> GetSections() const noexcept { return _sections; }

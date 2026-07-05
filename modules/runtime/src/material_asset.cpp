@@ -6,8 +6,8 @@
 
 namespace radray {
 
-MaterialAsset::MaterialAsset(ShaderAsset* shader) noexcept
-    : _shader(shader) {}
+MaterialAsset::MaterialAsset(StreamingAssetRef<ShaderAsset> shader) noexcept
+    : _shader(std::move(shader)) {}
 
 MaterialAsset::~MaterialAsset() noexcept = default;
 
@@ -17,7 +17,7 @@ void MaterialAsset::OnUnload(IRenderResourceRecycler& /*recycler*/) {
     _properties.clear();
     _enabledKeywords.clear();
     _keywordIndex.clear();
-    _shader = nullptr;
+    _shader.Reset();
 }
 
 AssetTypeId MaterialAsset::GetTypeId() const noexcept {
@@ -30,6 +30,14 @@ void MaterialAsset::SetFloat(std::string_view name, float value) noexcept {
 
 void MaterialAsset::SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept {
     _properties[string{name}] = value;
+}
+
+void MaterialAsset::SetConstantBlock(std::string_view name, const void* data, size_t size) noexcept {
+    vector<byte> bytes(size);
+    if (data != nullptr && size > 0) {
+        std::memcpy(bytes.data(), data, size);
+    }
+    _properties[string{name}] = std::move(bytes);
 }
 
 void MaterialAsset::SetTexture(std::string_view name, render::TextureView* view) noexcept {
@@ -103,7 +111,7 @@ Nullable<const render::CompiledShaderVariant*> MaterialAsset::ResolveVariant(
     render::ShaderVariantCache& cache,
     uint32_t passIndex,
     render::HlslShaderModel sm) noexcept {
-    if (_shader == nullptr) {
+    if (_shader.Get() == nullptr) {
         RADRAY_ERR_LOG("MaterialAsset::ResolveVariant: no shader assigned");
         return nullptr;
     }
@@ -126,6 +134,8 @@ uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table) con
                 } else if constexpr (std::is_same_v<T, Eigen::Vector4f>) {
                     // Eigen::Vector4f 内存连续 (4 个 float)。
                     return table.SetBytes(name, v.data(), sizeof(float) * 4);
+                } else if constexpr (std::is_same_v<T, vector<byte>>) {
+                    return !v.empty() && table.SetBytes(name, v.data(), static_cast<uint32_t>(v.size()));
                 } else if constexpr (std::is_same_v<T, render::TextureView*>) {
                     return v != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(v));
                 } else if constexpr (std::is_same_v<T, render::Sampler*>) {
