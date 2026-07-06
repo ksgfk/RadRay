@@ -32,7 +32,6 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 
-#include <cstring>
 #include <filesystem>
 #include <string_view>
 

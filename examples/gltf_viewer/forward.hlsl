@@ -67,11 +67,12 @@ VertexOutput VSMain(VertexInput input) {
 }
 
 float4 PSMain(VertexOutput input) : SV_Target0 {
+    // 不翻转法线: 这是一个封闭、背面剔除的不透明反射球体, 可见半球的法线始终朝向相机。
+    // 若在此把背向相机的插值法线翻转到朝向相机 (双面材质技巧), 会在轮廓处 (dot(n,view) 过零)
+    // 让被翻转的一侧突然把光源方向 wo.z 变为正值, 从而在本应无光的背面轮廓上点亮一圈亮边 (高光毛刺)。
+    // 直接保留原法线, 让下方 wi.z<=0 / wo.z<=0 的掠射与背光判定把轮廓像素归零。
     float3 n = normalize(input.WorldNormal);
     float3 viewDirWorld = normalize(gView.CameraPosition.xyz - input.WorldPosition);
-    if (dot(n, viewDirWorld) < 0.0f) {
-        n = -n;
-    }
 
     float3 baseColor = saturate(gMaterial.BaseColor.rgb);
     float metallic = saturate(gMaterial.Principled0.x);

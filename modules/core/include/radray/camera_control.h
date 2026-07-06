@@ -28,8 +28,8 @@ public:
     float MinDistance{0.1f};
     float MaxDistance{1000.0f};
 
-    float OrbitSensitivity{1.0f};
-    float PanSensitivity{1.0f};
+    float OrbitSensitivity{0.005f};
+    float PanSensitivity{0.01f};
     float DollySensitivity{0.1f};
 
     bool UseTrackball{false};
