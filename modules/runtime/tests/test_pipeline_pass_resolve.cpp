@@ -108,7 +108,7 @@ TEST_P(PipelinePassResolveTest, DrawListItemResolvesToPso) {
     FakeProxy proxy;
 
     DrawList list;
-    ASSERT_TRUE(list.AddPrimitive(&material, &proxy, "ForwardLit", 0, 3.0f));
+    ASSERT_TRUE(list.AddPrimitive(material.CreateSnapshot(), &proxy, "ForwardLit", 0, 3.0f));
     ASSERT_EQ(list.Size(), 1u);
     list.SortOpaque();
 
@@ -133,8 +133,8 @@ TEST_P(PipelinePassResolveTest, SameMaterialStateHitsPsoCache) {
     FakeProxy proxy;
 
     DrawList list;
-    list.AddPrimitive(&matA, &proxy, "ForwardLit", 0, 1.0f);
-    list.AddPrimitive(&matB, &proxy, "ForwardLit", 0, 2.0f);
+    list.AddPrimitive(matA.CreateSnapshot(), &proxy, "ForwardLit", 0, 1.0f);
+    list.AddPrimitive(matB.CreateSnapshot(), &proxy, "ForwardLit", 0, 2.0f);
 
     _ctx.ClearCapturedErrors();
     auto psoA = ResolveDrawItemPso(list.Items()[0], meshPass);
@@ -163,8 +163,8 @@ TEST_P(PipelinePassResolveTest, DifferentKeywordProducesDifferentPso) {
     FakeProxy proxy;
 
     DrawList list;
-    list.AddPrimitive(&plain, &proxy, "ForwardLit");
-    list.AddPrimitive(&doubled, &proxy, "ForwardLit");
+    list.AddPrimitive(plain.CreateSnapshot(), &proxy, "ForwardLit");
+    list.AddPrimitive(doubled.CreateSnapshot(), &proxy, "ForwardLit");
 
     _ctx.ClearCapturedErrors();
     auto psoPlain = ResolveDrawItemPso(list.Items()[0], meshPass);

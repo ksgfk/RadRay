@@ -4,22 +4,20 @@
 #include <array>
 #include <cstring>
 #include <fstream>
-#include <filesystem>
 #include <span>
 #include <string_view>
 #include <utility>
 
 #include <radray/logger.h>
-#include <radray/basic_math.h>
-#include <radray/runtime/asset_manager.h>
+#include <radray/scope_guard.h>
+#include <radray/vertex_data.h>
 #include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/image_asset.h>
-#include <radray/runtime/texture_asset.h>
-#include <radray/scope_guard.h>
-#include <radray/vertex_data.h>
+#include <radray/runtime/material_asset.h>
 
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
@@ -27,6 +25,8 @@
 namespace radray {
 namespace {
 
+// 交错顶点布局: POSITION3f + NORMAL3f + TEXCOORD2f + TANGENT4f。
+// 与 gltf_standard.hlsl 的 VertexInput 及 ToSimpleMeshResource 顺序一致。
 struct GltfVertex {
     Eigen::Vector3f Position{Eigen::Vector3f::Zero()};
     Eigen::Vector3f Normal{Eigen::Vector3f::UnitY()};
@@ -34,72 +34,17 @@ struct GltfVertex {
     Eigen::Vector4f Tangent{1.0f, 0.0f, 0.0f, 1.0f};
 };
 
-struct GltfMaterialCpu {
-    enum class Alpha {
-        Opaque,
-        Mask,
-        Blend,
-    };
-
-    string Name{"Default"};
-    Eigen::Vector4f BaseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
-    Eigen::Vector3f EmissiveFactor{0.0f, 0.0f, 0.0f};
-    float AlphaCutoff{0.5f};
-    float Metallic{0.0f};
-    float Roughness{0.5f};
-    float Specular{0.5f};
-    float SpecularTint{0.0f};
-    float Anisotropic{0.0f};
-    float Sheen{0.0f};
-    float SheenTint{0.0f};
-    float Flatness{0.0f};
-    float Clearcoat{0.0f};
-    float ClearcoatGloss{0.0f};
-    float SpecTrans{0.0f};
-    float Eta{1.5f};
-    int BaseColorImage{-1};
-    int NormalImage{-1};
-    int MetallicRoughnessImage{-1};
-    int OcclusionImage{-1};
-    int EmissiveImage{-1};
-    Alpha AlphaMode{Alpha::Opaque};
-    bool DoubleSided{false};
-};
-
 struct GltfPrimitiveCpu {
     string Name;
     vector<GltfVertex> Vertices;
     vector<uint32_t> Indices;
     uint32_t MaterialIndex{0};
-    vector<MaterialParameterAssignment> MaterialParams;
     Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
     Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
     bool HasBounds{false};
 };
 
-struct ParsedGltf {
-    vector<GltfNodeDesc> Nodes;
-    vector<int> RootNodes;
-    vector<GltfPrimitiveDesc> Primitives;
-    vector<string> MaterialNames;
-    vector<GltfMaterialCpu> Materials;
-    vector<GltfTextureDesc> Textures;
-    Eigen::Vector3f BoundsMin{Eigen::Vector3f::Zero()};
-    Eigen::Vector3f BoundsMax{Eigen::Vector3f::Zero()};
-    bool HasBounds{false};
-};
-
-srp::BlendMode ToSrpBlendMode(GltfMaterialCpu::Alpha alpha) noexcept {
-    switch (alpha) {
-        case GltfMaterialCpu::Alpha::Mask:
-            return srp::BlendMode::Masked;
-        case GltfMaterialCpu::Alpha::Blend:
-            return srp::BlendMode::Transparent;
-        case GltfMaterialCpu::Alpha::Opaque:
-        default:
-            return srp::BlendMode::Opaque;
-    }
-}
+// ── 稳定 AssetId 派生 (同一 glTF 的同一子资源始终得到同一 Id, 便于缓存去重) ──
 
 uint64_t StableHash64(std::string_view text) noexcept {
     uint64_t hash = 1469598103934665603ull;
@@ -108,37 +53,6 @@ uint64_t StableHash64(std::string_view text) noexcept {
         hash *= 1099511628211ull;
     }
     return hash;
-}
-
-// glTF 使用右手系(+Z 朝向观察者),RadRay 使用纯左手系(+Z 朝向屏幕内)。
-// 下列工具在导入期以反射 Z 轴 S = diag(1,1,-1) 完成 RH->LH 转换:
-// 保持模型上方向与左右朝向,仅翻转深度轴,避免渲染出现左右镜像。
-// 反射矩阵 diag(1,1,-1) 自逆且对称,故方向量(法线、切线)与点一样只翻转 Z。
-
-// 反射点/方向矢量的 Z 分量。
-Eigen::Vector3f ReflectZToLH(const Eigen::Vector3f& v) noexcept {
-    return Eigen::Vector3f{v.x(), v.y(), -v.z()};
-}
-
-// 切线 (xyz, w):xyz 反射 Z;w 存的是 TBN 手性符号,反射使叉乘反号(det = -1),
-// 需翻转 w 才能让副切线方向保持一致。
-Eigen::Vector4f ReflectTangentToLH(const Eigen::Vector4f& t) noexcept {
-    return Eigen::Vector4f{t.x(), t.y(), -t.z(), -t.w()};
-}
-
-// 旋转四元数:对旋转做反射共轭 S*R*S 等价于 (w,x,y,z) -> (w,-x,-y,z)。
-// 旋转轴是赝矢量,故在对角反射共轭下 x、y 反号而 z 不变。
-Eigen::Quaternionf ReflectRotationToLH(const Eigen::Quaternionf& q) noexcept {
-    return Eigen::Quaternionf{q.w(), -q.x(), -q.y(), q.z()};
-}
-
-// 反射(det = -1)会翻转三角形绕序:glTF 在右手系以 CCW 为正面,反射后变成 CW,
-// 恰好匹配 RadRay 默认的 FrontFace::CW + CullMode::Back。
-// 交换每个三角形的后两个索引以恢复正确绕序,否则正面会被背面剔除。
-void FlipTriangleWindingToLH(std::span<uint32_t> indices) noexcept {
-    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-        std::swap(indices[i + 1], indices[i + 2]);
-    }
 }
 
 AssetId MakeDerivedAssetId(const std::filesystem::path& path, std::string_view tag, uint32_t index) {
@@ -154,6 +68,35 @@ AssetId MakeDerivedAssetId(const std::filesystem::path& path, std::string_view t
     bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3fu) | 0x80u);
     return AssetId{bytes};
 }
+
+// ── RH->LH 转换 ──
+// glTF 使用右手系 (+Z 朝向观察者), RadRay 使用左手系 (+Z 朝向屏幕内)。
+// 以反射矩阵 S = diag(1,1,-1) 完成 RH->LH: 只翻转 Z, 保持上/左右朝向, 避免镜像。
+// S 自逆且对称, 故方向量 (法线/切线) 与点一样只翻转 Z。
+
+Eigen::Vector3f ReflectZToLH(const Eigen::Vector3f& v) noexcept {
+    return Eigen::Vector3f{v.x(), v.y(), -v.z()};
+}
+
+// 切线 (xyz, w): xyz 反射 Z; w 是 TBN 手性符号, 反射使叉乘反号, 需翻转 w 保持副切线方向。
+Eigen::Vector4f ReflectTangentToLH(const Eigen::Vector4f& t) noexcept {
+    return Eigen::Vector4f{t.x(), t.y(), -t.z(), -t.w()};
+}
+
+// 旋转四元数: 反射共轭 S*R*S 等价于 (w,x,y,z) -> (w,-x,-y,z)。
+Eigen::Quaternionf ReflectRotationToLH(const Eigen::Quaternionf& q) noexcept {
+    return Eigen::Quaternionf{q.w(), -q.x(), -q.y(), q.z()};
+}
+
+// 反射 (det=-1) 翻转三角形绕序: glTF RH 下 CCW 为正面, 反射后变 CW,
+// 恰好匹配 RadRay 默认 FrontFace::CW + CullMode::Back。交换后两个索引恢复绕序。
+void FlipTriangleWindingToLH(std::span<uint32_t> indices) noexcept {
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        std::swap(indices[i + 1], indices[i + 2]);
+    }
+}
+
+// ── accessor 读取工具 ──
 
 void ReadVec2(const cgltf_accessor* accessor, cgltf_size index, Eigen::Vector2f& out) {
     cgltf_float values[4] = {};
@@ -214,6 +157,8 @@ void UpdateBoundsWithTransformedBox(
     }
 }
 
+// ── fallback 切线生成 (无 TANGENT 属性时) ──
+
 Eigen::Vector3f MakeFallbackTangent(const Eigen::Vector3f& normal) {
     const Eigen::Vector3f n = normal.squaredNorm() > 1e-8f ? normal.normalized() : Eigen::Vector3f::UnitY();
     Eigen::Vector3f t = std::abs(n.y()) < 0.95f ? Eigen::Vector3f::UnitY().cross(n) : Eigen::Vector3f::UnitX().cross(n);
@@ -234,7 +179,6 @@ void GenerateFallbackTangents(vector<GltfVertex>& vertices, std::span<const uint
         if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
             continue;
         }
-
         const Eigen::Vector3f p0 = vertices[i0].Position;
         const Eigen::Vector3f p1 = vertices[i1].Position;
         const Eigen::Vector3f p2 = vertices[i2].Position;
@@ -275,6 +219,8 @@ void GenerateFallbackTangents(vector<GltfVertex>& vertices, std::span<const uint
         vertex.Tangent = Eigen::Vector4f{t.x(), t.y(), t.z(), handedness};
     }
 }
+
+// ── 图像字节提取 (buffer_view / data URI / 外部文件) ──
 
 std::optional<vector<byte>> DecodeBase64(std::string_view text) {
     auto value = [](char ch) -> int {
@@ -360,8 +306,20 @@ int ImageIndexOf(const cgltf_data* data, const cgltf_texture_view& view) noexcep
     return static_cast<int>(index);
 }
 
-GltfMaterialCpu ConvertMaterial(const cgltf_data* data, const cgltf_material& src) {
-    GltfMaterialCpu out;
+// ── 材质转换 (cgltf -> 中性描述) ──
+// 贴图索引先记 image 索引; 加载纹理后再重映射到 GltfAsset 纹理表下标 (见 LoadGltfAsset)。
+
+GltfAlphaMode ToAlphaMode(cgltf_alpha_mode mode) noexcept {
+    switch (mode) {
+        case cgltf_alpha_mode_mask: return GltfAlphaMode::Mask;
+        case cgltf_alpha_mode_blend: return GltfAlphaMode::Blend;
+        case cgltf_alpha_mode_opaque:
+        default: return GltfAlphaMode::Opaque;
+    }
+}
+
+GltfMaterialDesc ConvertMaterial(const cgltf_data* data, const cgltf_material& src) {
+    GltfMaterialDesc out;
     if (src.name != nullptr && src.name[0] != '\0') {
         out.Name = src.name;
     }
@@ -372,23 +330,24 @@ GltfMaterialCpu ConvertMaterial(const cgltf_data* data, const cgltf_material& sr
             pbr.base_color_factor[1],
             pbr.base_color_factor[2],
             pbr.base_color_factor[3]};
-        out.Metallic = pbr.metallic_factor;
-        out.Roughness = pbr.roughness_factor;
-        out.BaseColorImage = ImageIndexOf(data, pbr.base_color_texture);
-        out.MetallicRoughnessImage = ImageIndexOf(data, pbr.metallic_roughness_texture);
+        out.MetallicFactor = pbr.metallic_factor;
+        out.RoughnessFactor = pbr.roughness_factor;
+        out.BaseColorTexture = ImageIndexOf(data, pbr.base_color_texture);
+        out.MetallicRoughnessTexture = ImageIndexOf(data, pbr.metallic_roughness_texture);
     } else if (src.has_pbr_specular_glossiness) {
+        // 退化处理: 用 diffuse 当 base color, glossiness 反推 roughness, metallic 归 0。
         const cgltf_pbr_specular_glossiness& pbr = src.pbr_specular_glossiness;
         out.BaseColorFactor = Eigen::Vector4f{
             pbr.diffuse_factor[0],
             pbr.diffuse_factor[1],
             pbr.diffuse_factor[2],
             pbr.diffuse_factor[3]};
-        out.Roughness = 1.0f - pbr.glossiness_factor;
-        out.Metallic = 0.0f;
+        out.RoughnessFactor = 1.0f - pbr.glossiness_factor;
+        out.MetallicFactor = 0.0f;
+        out.BaseColorTexture = ImageIndexOf(data, pbr.diffuse_texture);
     }
-    if (src.has_ior) {
-        out.Eta = src.ior.ior;
-    }
+
+    // KHR_materials_specular
     if (src.has_specular) {
         out.Specular = src.specular.specular_factor;
         out.SpecularTint = std::max({
@@ -396,10 +355,12 @@ GltfMaterialCpu ConvertMaterial(const cgltf_data* data, const cgltf_material& sr
             src.specular.specular_color_factor[1],
             src.specular.specular_color_factor[2]});
     }
+    // KHR_materials_clearcoat
     if (src.has_clearcoat) {
         out.Clearcoat = src.clearcoat.clearcoat_factor;
         out.ClearcoatGloss = 1.0f - src.clearcoat.clearcoat_roughness_factor;
     }
+    // KHR_materials_sheen
     if (src.has_sheen) {
         out.Sheen = std::max({
             src.sheen.sheen_color_factor[0],
@@ -407,258 +368,38 @@ GltfMaterialCpu ConvertMaterial(const cgltf_data* data, const cgltf_material& sr
             src.sheen.sheen_color_factor[2]});
         out.SheenTint = out.Sheen > 0.0f ? 1.0f : 0.0f;
     }
-    if (src.has_transmission) {
-        out.SpecTrans = src.transmission.transmission_factor;
-    }
-    if (src.has_anisotropy) {
-        out.Anisotropic = src.anisotropy.anisotropy_strength;
-    }
+
     out.EmissiveFactor = Eigen::Vector3f{src.emissive_factor[0], src.emissive_factor[1], src.emissive_factor[2]};
+    // KHR_materials_emissive_strength
     if (src.has_emissive_strength) {
-        out.EmissiveFactor *= src.emissive_strength.emissive_strength;
+        out.EmissiveStrength = src.emissive_strength.emissive_strength;
     }
+
+    out.NormalTexture = ImageIndexOf(data, src.normal_texture);
+    out.NormalScale = src.normal_texture.scale != 0.0f ? src.normal_texture.scale : 1.0f;
+    out.OcclusionTexture = ImageIndexOf(data, src.occlusion_texture);
+    out.OcclusionStrength = src.occlusion_texture.scale != 0.0f ? src.occlusion_texture.scale : 1.0f;
+    out.EmissiveTexture = ImageIndexOf(data, src.emissive_texture);
+
     out.AlphaCutoff = src.alpha_cutoff;
-    out.NormalImage = ImageIndexOf(data, src.normal_texture);
-    out.OcclusionImage = ImageIndexOf(data, src.occlusion_texture);
-    out.EmissiveImage = ImageIndexOf(data, src.emissive_texture);
+    out.AlphaMode = ToAlphaMode(src.alpha_mode);
     out.DoubleSided = src.double_sided != 0;
-    switch (src.alpha_mode) {
-        case cgltf_alpha_mode_mask:
-            out.AlphaMode = GltfMaterialCpu::Alpha::Mask;
-            break;
-        case cgltf_alpha_mode_blend:
-            out.AlphaMode = GltfMaterialCpu::Alpha::Blend;
-            break;
-        case cgltf_alpha_mode_opaque:
-        default:
-            out.AlphaMode = GltfMaterialCpu::Alpha::Opaque;
-            break;
-    }
     return out;
 }
 
-// 把 glTF 材质转成 per-使用点材质参数(按名写入 gMaterial cbuffer)。
-// 字段名与布局与原来烘进顶点的 5 个 float4 一一对应,保证颜色不变。
-vector<MaterialParameterAssignment> BuildMaterialParams(const GltfMaterialCpu& material) {
-    vector<MaterialParameterAssignment> params;
-    params.reserve(5);
-    params.push_back(MaterialParameterAssignment{
-        "BaseColorFactor",
-        material.BaseColorFactor});
-    params.push_back(MaterialParameterAssignment{
-        "EmissiveFactorAlphaCutoff",
-        Eigen::Vector4f{
-            material.EmissiveFactor.x(),
-            material.EmissiveFactor.y(),
-            material.EmissiveFactor.z(),
-            material.AlphaCutoff}});
-    params.push_back(MaterialParameterAssignment{
-        "Principled0",
-        Eigen::Vector4f{
-            material.Metallic,
-            material.Roughness,
-            material.Specular,
-            material.SpecularTint}});
-    params.push_back(MaterialParameterAssignment{
-        "Principled1",
-        Eigen::Vector4f{
-            material.Anisotropic,
-            material.Sheen,
-            material.SheenTint,
-            material.Flatness}});
-    params.push_back(MaterialParameterAssignment{
-        "Principled2",
-        Eigen::Vector4f{
-            material.Clearcoat,
-            material.ClearcoatGloss,
-            material.SpecTrans,
-            material.Eta}});
-    return params;
-}
-
-struct GltfTextureSlotDesc {
-    std::string_view Name;
-    int ImageIndex{-1};
-    bool Srgb{false};
-    uint8_t FallbackR{255};
-    uint8_t FallbackG{255};
-    uint8_t FallbackB{255};
-    uint8_t FallbackA{255};
-    std::string_view FallbackTag;
-};
-
-uint64_t MakeTextureKey(int imageIndex, bool srgb) noexcept {
-    const uint64_t imagePart = static_cast<uint64_t>(static_cast<uint32_t>(imageIndex));
-    return (imagePart << 1u) | (srgb ? 1ull : 0ull);
-}
-
-uint64_t MakeFallbackTextureKey(const GltfTextureSlotDesc& slot) {
-    return StableHash64(fmt::format(
-        "fallback:{}:{}:{}:{}:{}",
-        slot.Srgb ? 1 : 0,
-        slot.FallbackR,
-        slot.FallbackG,
-        slot.FallbackB,
-        slot.FallbackA)) |
-        (1ull << 63u);
-}
-
-string GltfImageName(const cgltf_data* data, int imageIndex) {
-    if (data != nullptr && imageIndex >= 0 && imageIndex < static_cast<int>(data->images_count)) {
-        const cgltf_image& image = data->images[static_cast<size_t>(imageIndex)];
-        if (image.name != nullptr && image.name[0] != '\0') {
-            return image.name;
-        }
-        if (image.uri != nullptr && image.uri[0] != '\0') {
-            return image.uri;
-        }
-    }
-    return fmt::format("Image {}", imageIndex);
-}
-
-StreamingAssetRef<TextureAsset> LoadGltfTexture(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const std::filesystem::path& path,
-    const cgltf_data* data,
-    const GltfTextureSlotDesc& slot,
-    unordered_map<uint64_t, StreamingAssetRef<TextureAsset>>& textureCache,
-    vector<GltfTextureDesc>& textures) {
-    const bool hasImage = data != nullptr && slot.ImageIndex >= 0 && slot.ImageIndex < static_cast<int>(data->images_count);
-    const uint64_t key = hasImage ? MakeTextureKey(slot.ImageIndex, slot.Srgb) : MakeFallbackTextureKey(slot);
-    auto cached = textureCache.find(key);
-    if (cached != textureCache.end()) {
-        return cached->second;
-    }
-
-    const string name = hasImage
-        ? fmt::format("{} ({})", GltfImageName(data, slot.ImageIndex), slot.Srgb ? "sRGB" : "linear")
-        : fmt::format("{} default", slot.FallbackTag);
-    TextureAssetLoadOptions options{
-        .Srgb = slot.Srgb,
-        .FallbackImage = MakeSolidImage(slot.FallbackR, slot.FallbackG, slot.FallbackB, slot.FallbackA)};
-
-    StreamingAssetRef<TextureAsset> texture;
-    if (hasImage) {
-        std::optional<vector<byte>> encoded = ExtractImageEncodedBytes(data->images[static_cast<size_t>(slot.ImageIndex)], path);
-        texture = LoadTextureAssetFromMemory(
-            assetManager,
-            frameUploads,
-            MakeDerivedAssetId(path, slot.Srgb ? "texture-srgb" : "texture-linear", static_cast<uint32_t>(slot.ImageIndex)),
-            name,
-            encoded.has_value() ? std::move(encoded.value()) : vector<byte>{},
-            options);
-    } else {
-        const string tag = fmt::format(
-            "texture-default-{}-{}-{}-{}-{}-{}",
-            slot.FallbackTag,
-            slot.Srgb ? 1 : 0,
-            slot.FallbackR,
-            slot.FallbackG,
-            slot.FallbackB,
-            slot.FallbackA);
-        texture = LoadTextureAssetFromImage(
-            assetManager,
-            frameUploads,
-            MakeDerivedAssetId(path, tag, 0),
-            name,
-            MakeSolidImage(slot.FallbackR, slot.FallbackG, slot.FallbackB, slot.FallbackA),
-            options);
-    }
-
-    textureCache.emplace(key, texture);
-    textures.push_back(GltfTextureDesc{
-        .Name = name,
-        .Texture = texture});
-    return texture;
-}
-
-vector<MaterialTextureAssignment> BuildMaterialTextures(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const std::filesystem::path& path,
-    const cgltf_data* data,
-    const GltfMaterialCpu& material,
-    unordered_map<uint64_t, StreamingAssetRef<TextureAsset>>& textureCache,
-    vector<GltfTextureDesc>& textures) {
-    const GltfTextureSlotDesc slots[] = {
-        {"gBaseColor", material.BaseColorImage, true, 255, 255, 255, 255, "gBaseColor"},
-        {"gNormalMap", material.NormalImage, false, 128, 128, 255, 255, "gNormalMap"},
-        {"gMetallicRoughness", material.MetallicRoughnessImage, false, 255, 255, 255, 255, "gMetallicRoughness"},
-        {"gOcclusion", material.OcclusionImage, false, 255, 255, 255, 255, "gOcclusion"},
-        {"gEmissive", material.EmissiveImage, true, 255, 255, 255, 255, "gEmissive"},
-    };
-
-    vector<MaterialTextureAssignment> assignments;
-    assignments.reserve(std::size(slots));
-    for (const GltfTextureSlotDesc& slot : slots) {
-        StreamingAssetRef<TextureAsset> texture = LoadGltfTexture(
-            assetManager,
-            frameUploads,
-            path,
-            data,
-            slot,
-            textureCache,
-            textures);
-        assignments.push_back(MaterialTextureAssignment{
-            string{slot.Name},
-            texture.AsAny()});
-    }
-    return assignments;
-}
-
-void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
-    cgltf_float translation[3] = {0.0f, 0.0f, 0.0f};
-    cgltf_float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    cgltf_float scale[3] = {1.0f, 1.0f, 1.0f};
-
-    if (node.has_translation) {
-        std::memcpy(translation, node.translation, sizeof(translation));
-    }
-    if (node.has_rotation) {
-        std::memcpy(rotation, node.rotation, sizeof(rotation));
-    }
-    if (node.has_scale) {
-        std::memcpy(scale, node.scale, sizeof(scale));
-    }
-    if (node.has_matrix) {
-        Eigen::Matrix4f matrix;
-        for (int col = 0; col < 4; ++col) {
-            for (int row = 0; row < 4; ++row) {
-                matrix(row, col) = node.matrix[col * 4 + row];
-            }
-        }
-        DecomposeTransform<float>(matrix, out.Translation, out.Rotation, out.Scale);
-        out.Rotation.normalize();
-    } else {
-        out.Translation = Eigen::Vector3f{translation[0], translation[1], translation[2]};
-        out.Rotation = Eigen::Quaternionf{rotation[3], rotation[0], rotation[1], rotation[2]};
-        out.Rotation.normalize();
-        out.Scale = Eigen::Vector3f{scale[0], scale[1], scale[2]};
-    }
-
-    // glTF(右手系)-> RadRay(左手系):对节点局部变换做 diag(1,1,-1) 反射共轭 M' = S*M*S。
-    // 因 S*S=I,共轭在 T*R*Scale 上逐项分解:平移翻转 Z;旋转按四元数共轭;
-    // 缩放在对角反射共轭下不变。这与顶点的 S 反射一致,使世界变换等价于 S * (原世界变换)。
-    out.Translation = ReflectZToLH(out.Translation);
-    out.Rotation = ReflectRotationToLH(out.Rotation);
-    out.Rotation.normalize();
-}
+// ── primitive 转换 ──
 
 std::optional<GltfPrimitiveCpu> ConvertPrimitive(
     const cgltf_data* data,
     const cgltf_primitive& primitive,
-    std::span<const GltfMaterialCpu> materials,
     std::string_view name) {
     if (primitive.type != cgltf_primitive_type_triangles) {
         return std::nullopt;
     }
-
     const cgltf_accessor* positionAcc = FindAccessor(primitive, cgltf_attribute_type_position, 0);
     if (positionAcc == nullptr || positionAcc->count == 0) {
         return std::nullopt;
     }
-
     const cgltf_accessor* normalAcc = FindAccessor(primitive, cgltf_attribute_type_normal, 0);
     const cgltf_accessor* tangentAcc = FindAccessor(primitive, cgltf_attribute_type_tangent, 0);
     const cgltf_accessor* texcoordAcc = FindAccessor(primitive, cgltf_attribute_type_texcoord, 0);
@@ -668,11 +409,6 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
     if (primitive.material != nullptr) {
         out.MaterialIndex = static_cast<uint32_t>(cgltf_material_index(data, primitive.material));
     }
-    GltfMaterialCpu defaultMaterial{};
-    const GltfMaterialCpu& material = out.MaterialIndex < materials.size()
-        ? materials[out.MaterialIndex]
-        : defaultMaterial;
-    out.MaterialParams = BuildMaterialParams(material);
     out.Vertices.resize(positionAcc->count);
     for (cgltf_size i = 0; i < positionAcc->count; ++i) {
         GltfVertex vertex{};
@@ -694,8 +430,7 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
                 vertex.Tangent = Eigen::Vector4f{t.x(), t.y(), t.z(), vertex.Tangent.w()};
             }
         }
-        // glTF(右手系)-> RadRay(左手系):反射 Z 轴完成 RH->LH 转换,避免渲染镜像。
-        // 位置、法线只翻转 Z;切线额外翻转 w(TBN 手性)。
+        // RH->LH: 位置/法线只翻转 Z; 切线额外翻转 w (TBN 手性)。
         vertex.Position = ReflectZToLH(vertex.Position);
         vertex.Normal = ReflectZToLH(vertex.Normal);
         vertex.Tangent = ReflectTangentToLH(vertex.Tangent);
@@ -716,7 +451,6 @@ std::optional<GltfPrimitiveCpu> ConvertPrimitive(
             out.Indices[i] = i;
         }
     }
-    // 反射 Z(det = -1)会翻转三角形绕序,需交换后两个索引恢复正面。
     FlipTriangleWindingToLH(out.Indices);
     if (tangentAcc == nullptr) {
         GenerateFallbackTangents(out.Vertices, out.Indices);
@@ -794,16 +528,120 @@ MeshResource MakeMeshResource(const GltfPrimitiveCpu& primitive) {
     return mesh;
 }
 
-Eigen::Matrix4f ComputeNodeWorldMatrix(const ParsedGltf& parsed, int nodeIndex) {
-    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(parsed.Nodes.size())) {
+// ── 节点变换 ──
+
+void DecomposeNodeTransform(const cgltf_node& node, GltfNodeDesc& out) {
+    cgltf_float translation[3] = {0.0f, 0.0f, 0.0f};
+    cgltf_float rotation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    cgltf_float scale[3] = {1.0f, 1.0f, 1.0f};
+
+    if (node.has_translation) {
+        std::memcpy(translation, node.translation, sizeof(translation));
+    }
+    if (node.has_rotation) {
+        std::memcpy(rotation, node.rotation, sizeof(rotation));
+    }
+    if (node.has_scale) {
+        std::memcpy(scale, node.scale, sizeof(scale));
+    }
+    if (node.has_matrix) {
+        Eigen::Matrix4f matrix;
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                matrix(row, col) = node.matrix[col * 4 + row];
+            }
+        }
+        DecomposeTransform<float>(matrix, out.Translation, out.Rotation, out.Scale);
+        out.Rotation.normalize();
+    } else {
+        out.Translation = Eigen::Vector3f{translation[0], translation[1], translation[2]};
+        out.Rotation = Eigen::Quaternionf{rotation[3], rotation[0], rotation[1], rotation[2]};
+        out.Rotation.normalize();
+        out.Scale = Eigen::Vector3f{scale[0], scale[1], scale[2]};
+    }
+
+    // RH->LH: 对节点局部变换做 diag(1,1,-1) 反射共轭。平移翻 Z, 旋转四元数共轭, 缩放不变。
+    out.Translation = ReflectZToLH(out.Translation);
+    out.Rotation = ReflectRotationToLH(out.Rotation);
+    out.Rotation.normalize();
+}
+
+Eigen::Matrix4f ComputeNodeWorldMatrix(const vector<GltfNodeDesc>& nodes, int nodeIndex) {
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size())) {
         return Eigen::Matrix4f::Identity();
     }
-    const GltfNodeDesc& node = parsed.Nodes[static_cast<size_t>(nodeIndex)];
+    const GltfNodeDesc& node = nodes[static_cast<size_t>(nodeIndex)];
     const Eigen::Matrix4f local = ComposeTransform<float>(node.Translation, node.Rotation, node.Scale);
     if (node.Parent < 0) {
         return local;
     }
-    return ComputeNodeWorldMatrix(parsed, node.Parent) * local;
+    return ComputeNodeWorldMatrix(nodes, node.Parent) * local;
+}
+
+// ── 纹理加载 (按 image 索引 + sRGB 缓存去重) ──
+
+struct TextureLoadKey {
+    int ImageIndex;
+    bool Srgb;
+    bool operator==(const TextureLoadKey&) const noexcept = default;
+};
+
+uint64_t MakeTextureCacheKey(int imageIndex, bool srgb) noexcept {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(imageIndex)) << 1u) | (srgb ? 1ull : 0ull);
+}
+
+string GltfImageName(const cgltf_data* data, int imageIndex) {
+    if (data != nullptr && imageIndex >= 0 && imageIndex < static_cast<int>(data->images_count)) {
+        const cgltf_image& image = data->images[static_cast<size_t>(imageIndex)];
+        if (image.name != nullptr && image.name[0] != '\0') {
+            return image.name;
+        }
+        if (image.uri != nullptr && image.uri[0] != '\0') {
+            return image.uri;
+        }
+    }
+    return fmt::format("Image {}", imageIndex);
+}
+
+// 加载 (imageIndex, sRGB) 组合的纹理, 返回其在 outTextures 中的下标 (缓存命中则复用)。
+// imageIndex < 0 返回 -1 (无贴图)。
+int AcquireTexture(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    const std::filesystem::path& path,
+    const cgltf_data* data,
+    int imageIndex,
+    bool srgb,
+    unordered_map<uint64_t, int>& cache,
+    vector<GltfTextureRef>& outTextures) {
+    if (imageIndex < 0 || data == nullptr || imageIndex >= static_cast<int>(data->images_count)) {
+        return -1;
+    }
+    const uint64_t key = MakeTextureCacheKey(imageIndex, srgb);
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        return it->second;
+    }
+
+    std::optional<vector<byte>> encoded = ExtractImageEncodedBytes(data->images[static_cast<size_t>(imageIndex)], path);
+    const string name = fmt::format("{} ({})", GltfImageName(data, imageIndex), srgb ? "sRGB" : "linear");
+    TextureAssetLoadOptions options{
+        .Srgb = srgb,
+        // 解码失败回退: sRGB 用白, linear 用中性灰 (法线贴图缺失时应为 (0.5,0.5,1) 但白也可接受为占位)。
+        .FallbackImage = MakeSolidImage(255, 255, 255, 255)};
+
+    StreamingAssetRef<TextureAsset> texture = LoadTextureAssetFromMemory(
+        assetManager,
+        frameUploads,
+        MakeDerivedAssetId(path, srgb ? "tex-srgb" : "tex-linear", static_cast<uint32_t>(imageIndex)),
+        name,
+        encoded.has_value() ? std::move(encoded.value()) : vector<byte>{},
+        options);
+
+    const int slot = static_cast<int>(outTextures.size());
+    outTextures.push_back(GltfTextureRef{texture, srgb});
+    cache.emplace(key, slot);
+    return slot;
 }
 
 }  // namespace
@@ -813,8 +651,8 @@ GltfAsset::GltfAsset(
     vector<GltfNodeDesc> nodes,
     vector<int> rootNodes,
     vector<GltfPrimitiveDesc> primitives,
-    vector<string> materialNames,
-    vector<GltfTextureDesc> textures,
+    vector<GltfMaterialDesc> materials,
+    vector<GltfTextureRef> textures,
     Eigen::Vector3f boundsMin,
     Eigen::Vector3f boundsMax,
     bool hasBounds) noexcept
@@ -822,7 +660,7 @@ GltfAsset::GltfAsset(
       _nodes(std::move(nodes)),
       _rootNodes(std::move(rootNodes)),
       _primitives(std::move(primitives)),
-      _materialNames(std::move(materialNames)),
+      _materials(std::move(materials)),
       _textures(std::move(textures)),
       _boundsMin(boundsMin),
       _boundsMax(boundsMax),
@@ -836,7 +674,7 @@ void GltfAsset::OnUnload(IRenderResourceRecycler& recycler) {
     _nodes.clear();
     _rootNodes.clear();
     _primitives.clear();
-    _materialNames.clear();
+    _materials.clear();
     _textures.clear();
     _boundsMin = Eigen::Vector3f::Zero();
     _boundsMax = Eigen::Vector3f::Zero();
@@ -847,28 +685,24 @@ AssetTypeId GltfAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<GltfAsset>;
 }
 
-Actor* GltfAsset::ExportToScene(World& world, srp::Shader* shader, render::Device* device) const {
+Actor* GltfAsset::SpawnScene(World& world, const GltfMaterialFactory& materialFactory) const {
     Actor* rootActor = world.SpawnActor<Actor>();
     SceneComponent* root = rootActor->AddComponent<SceneComponent>();
     rootActor->SetRootComponent(root);
 
+    // 每个有 mesh 的节点 spawn 一个 Actor, 挂 StaticMeshComponent, 用世界矩阵定位。
+    // 材质: 对该节点每个 primitive 调 materialFactory 得 MaterialAsset*, 填入 section 材质槽。
     for (const GltfPrimitiveDesc& primitive : _primitives) {
         if (primitive.NodeIndex < 0 || primitive.NodeIndex >= static_cast<int>(_nodes.size())) {
             continue;
         }
         Actor* meshActor = world.SpawnActor<Actor>();
         StaticMeshComponent* component = meshActor->AddComponent<StaticMeshComponent>();
-        component->SetStaticMesh(primitive.Mesh);
-        component->SetMaterialParams(primitive.MaterialParams);
-        component->SetMaterialTextures(primitive.MaterialTextures);
-        component->SetRenderShader(shader);
-        component->SetRenderDevice(device);
-        component->SetBlendMode(primitive.Blend);
-        component->SetTwoSided(primitive.TwoSided);
-        component->SetAlphaCutoff(primitive.AlphaCutoff);
         meshActor->SetRootComponent(component);
         component->AttachTo(root);
+        component->SetStaticMesh(primitive.Mesh);
 
+        // 世界矩阵分解为 T/R/S 写入相对变换 (root 在世界原点, 相对=世界)。
         const Eigen::Matrix4f& worldMatrix = _nodes[static_cast<size_t>(primitive.NodeIndex)].WorldMatrix;
         Eigen::Vector3f translation;
         Eigen::Quaternionf rotation;
@@ -877,7 +711,15 @@ Actor* GltfAsset::ExportToScene(World& world, srp::Shader* shader, render::Devic
         component->SetRelativeLocation(translation);
         component->SetRelativeRotation(rotation);
         component->SetRelativeScale(scale);
-        component->TickComponent(0.0f);
+
+        // 材质翻译 (shader-无关: 交给上层回调)。单 section 覆盖整个 primitive。
+        StreamingAssetRef<MaterialAsset> material{};
+        if (materialFactory) {
+            const uint32_t matIdx = primitive.MaterialIndex < _materials.size() ? primitive.MaterialIndex : 0;
+            const GltfMaterialDesc& desc = matIdx < _materials.size() ? _materials[matIdx] : GltfMaterialDesc{};
+            material = materialFactory(desc, std::span<const GltfTextureRef>{_textures});
+        }
+        component->SetMaterial(0, std::move(material));
     }
 
     return rootActor;
@@ -892,81 +734,84 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
     return assetManager.Load<GltfAsset>(AssetLoadRequest{
         .Id = assetId,
         .Task = [](
-            AssetManager& assetManager,
-            FrameUploadScheduler& frameUploads,
-            std::filesystem::path path,
-            GltfAssetLoadOptions options) -> AssetLoadTask {
-            ParsedGltf parsed{};
-
+                    AssetManager& assetManager,
+                    FrameUploadScheduler& frameUploads,
+                    std::filesystem::path path,
+                    GltfAssetLoadOptions options) -> AssetLoadTask {
+            (void)options;
             cgltf_options cgltfOptions{};
             cgltf_data* data = nullptr;
             cgltf_result parseResult = cgltf_parse_file(&cgltfOptions, path.string().c_str(), &data);
             if (parseResult != cgltf_result_success || data == nullptr) {
                 co_return AssetLoadResult::Failure(fmt::format("cgltf_parse_file failed: {}", static_cast<int>(parseResult)));
             }
-            auto guard = MakeScopeGuard([&]() {
-                cgltf_free(data);
-            });
+            auto guard = MakeScopeGuard([&]() { cgltf_free(data); });
 
             parseResult = cgltf_load_buffers(&cgltfOptions, data, path.string().c_str());
             if (parseResult != cgltf_result_success) {
                 co_return AssetLoadResult::Failure(fmt::format("cgltf_load_buffers failed: {}", static_cast<int>(parseResult)));
             }
-
             parseResult = cgltf_validate(data);
             if (parseResult != cgltf_result_success) {
                 co_return AssetLoadResult::Failure(fmt::format("cgltf_validate failed: {}", static_cast<int>(parseResult)));
             }
 
-            parsed.MaterialNames.reserve(std::max<cgltf_size>(1, data->materials_count));
-            parsed.Materials.reserve(std::max<cgltf_size>(1, data->materials_count));
+            // ── 材质 (中性描述; 贴图索引此时仍是 image 索引) ──
+            vector<GltfMaterialDesc> materials;
+            materials.reserve(std::max<cgltf_size>(1, data->materials_count));
             for (cgltf_size i = 0; i < data->materials_count; ++i) {
-                GltfMaterialCpu material = ConvertMaterial(data, data->materials[i]);
+                GltfMaterialDesc material = ConvertMaterial(data, data->materials[i]);
                 if (material.Name == "Default") {
                     material.Name = fmt::format("Material {}", i);
                 }
-                parsed.MaterialNames.push_back(material.Name);
-                parsed.Materials.push_back(std::move(material));
+                materials.push_back(std::move(material));
             }
-            if (parsed.MaterialNames.empty()) {
-                parsed.MaterialNames.push_back("Default");
-                parsed.Materials.push_back(GltfMaterialCpu{});
+            if (materials.empty()) {
+                materials.push_back(GltfMaterialDesc{});
             }
 
-            unordered_map<uint64_t, StreamingAssetRef<TextureAsset>> textureCache;
-            vector<vector<MaterialTextureAssignment>> materialTextures;
-            materialTextures.reserve(parsed.Materials.size());
-            for (const GltfMaterialCpu& material : parsed.Materials) {
-                materialTextures.push_back(BuildMaterialTextures(
-                    assetManager,
-                    frameUploads,
-                    path,
-                    data,
-                    material,
-                    textureCache,
-                    parsed.Textures));
+            // ── 纹理加载 + 把材质里的 image 索引重映射到纹理表下标 ──
+            vector<GltfTextureRef> textures;
+            unordered_map<uint64_t, int> textureCache;
+            for (GltfMaterialDesc& mat : materials) {
+                mat.BaseColorTexture = AcquireTexture(assetManager, frameUploads, path, data, mat.BaseColorTexture, true, textureCache, textures);
+                mat.MetallicRoughnessTexture = AcquireTexture(assetManager, frameUploads, path, data, mat.MetallicRoughnessTexture, false, textureCache, textures);
+                mat.NormalTexture = AcquireTexture(assetManager, frameUploads, path, data, mat.NormalTexture, false, textureCache, textures);
+                mat.OcclusionTexture = AcquireTexture(assetManager, frameUploads, path, data, mat.OcclusionTexture, false, textureCache, textures);
+                mat.EmissiveTexture = AcquireTexture(assetManager, frameUploads, path, data, mat.EmissiveTexture, true, textureCache, textures);
+            }
+            // 等所有纹理 GPU 上传完成: SpawnScene 时材质工厂需要 GetSrv() 非空 (同步捕获 TextureView*)。
+            for (const GltfTextureRef& tex : textures) {
+                co_await assetManager.Wait(tex.Texture.AsAny());
             }
 
-            parsed.Nodes.resize(data->nodes_count);
+            // ── 节点树 (RH->LH) + 世界矩阵 ──
+            vector<GltfNodeDesc> nodes;
+            vector<int> rootNodes;
+            nodes.resize(data->nodes_count);
             for (cgltf_size i = 0; i < data->nodes_count; ++i) {
                 const cgltf_node& node = data->nodes[i];
-                GltfNodeDesc& out = parsed.Nodes[i];
+                GltfNodeDesc& out = nodes[i];
                 out.Name = node.name != nullptr ? node.name : fmt::format("Node {}", i);
                 out.Parent = node.parent != nullptr ? static_cast<int>(cgltf_node_index(data, node.parent)) : -1;
                 out.HasMesh = node.mesh != nullptr;
                 DecomposeNodeTransform(node, out);
                 if (out.Parent < 0) {
-                    parsed.RootNodes.push_back(static_cast<int>(i));
+                    rootNodes.push_back(static_cast<int>(i));
                 }
                 for (cgltf_size c = 0; c < node.children_count; ++c) {
                     out.Children.push_back(static_cast<int>(cgltf_node_index(data, node.children[c])));
                 }
             }
-
-            for (size_t i = 0; i < parsed.Nodes.size(); ++i) {
-                parsed.Nodes[i].WorldMatrix = ComputeNodeWorldMatrix(parsed, static_cast<int>(i));
+            for (size_t i = 0; i < nodes.size(); ++i) {
+                nodes[i].WorldMatrix = ComputeNodeWorldMatrix(nodes, static_cast<int>(i));
             }
 
+            // ── primitive 几何上传 ──
+            vector<GltfPrimitiveDesc> primitives;
+            Eigen::Vector3f sceneMin = Eigen::Vector3f::Zero();
+            Eigen::Vector3f sceneMax = Eigen::Vector3f::Zero();
+            bool sceneHasBounds = false;
             uint32_t primitiveIndex = 0;
             for (cgltf_size n = 0; n < data->nodes_count; ++n) {
                 const cgltf_node& node = data->nodes[n];
@@ -974,82 +819,83 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                     continue;
                 }
                 for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p) {
-                    const string primitiveName = fmt::format("{} / prim {}", parsed.Nodes[n].Name, p);
-                    std::optional<GltfPrimitiveCpu> primitive = ConvertPrimitive(
-                        data,
-                        node.mesh->primitives[p],
-                        parsed.Materials,
-                        primitiveName);
+                    const string primitiveName = fmt::format("{} / prim {}", nodes[n].Name, p);
+                    std::optional<GltfPrimitiveCpu> primitive = ConvertPrimitive(data, node.mesh->primitives[p], primitiveName);
                     if (!primitive.has_value()) {
                         continue;
                     }
+                    const uint32_t indexCount = static_cast<uint32_t>(primitive->Indices.size());
+                    const uint32_t vertexCount = static_cast<uint32_t>(primitive->Vertices.size());
+                    const Eigen::Vector3f localMin = primitive->BoundsMin;
+                    const Eigen::Vector3f localMax = primitive->BoundsMax;
+                    const bool localHasBounds = primitive->HasBounds;
 
                     MeshResource meshResource = MakeMeshResource(primitive.value());
-                    AssetId meshId = MakeDerivedAssetId(path, "mesh", primitiveIndex);
+                    const AssetId meshId = MakeDerivedAssetId(path, "mesh", primitiveIndex);
+                    // 单 section 覆盖整个 primitive: LoadStaticMesh 不设 section/bounds, 用一个补齐 task 包装。
                     StreamingAssetRef<StaticMesh> mesh = assetManager.Load<StaticMesh>(AssetLoadRequest{
                         .Id = meshId,
-                        .Task = LoadStaticMesh(frameUploads, std::move(meshResource)),
+                        .Task = [](FrameUploadScheduler& uploads, MeshResource res, uint32_t idxCount, uint32_t vtxCount,
+                                   Eigen::Vector3f bMin, Eigen::Vector3f bMax) -> AssetLoadTask {
+                            FrameUploadScope frame = co_await uploads.BeginUpload();
+                            std::optional<render::RenderMesh> renderMesh =
+                                frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), res);
+                            if (!renderMesh.has_value()) {
+                                co_return AssetLoadResult::Failure("gltf mesh upload failed");
+                            }
+                            co_await frame.WaitGpu();
+                            auto sm = make_unique<StaticMesh>(std::move(res), std::move(renderMesh.value()));
+                            vector<StaticMeshSection> sections;
+                            sections.push_back(StaticMeshSection{
+                                /*primitiveIndex*/ 0,
+                                /*firstIndex*/ 0,
+                                /*indexCount*/ idxCount,
+                                /*minVertexIndex*/ 0,
+                                /*maxVertexIndex*/ vtxCount > 0 ? vtxCount - 1 : 0});
+                            sm->SetSections(std::move(sections));
+                            sm->SetBounds(bMin, bMax);
+                            co_return AssetLoadResult::Success(std::move(sm));
+                        }(frameUploads, std::move(meshResource), indexCount, vertexCount, localMin, localMax),
                         .DebugName = primitiveName});
 
                     GltfPrimitiveDesc desc{};
                     desc.Name = primitiveName;
                     desc.NodeIndex = static_cast<int>(n);
-                    desc.SourceMaterialIndex = primitive->MaterialIndex;
+                    desc.MaterialIndex = primitive->MaterialIndex;
                     desc.Mesh = mesh;
-                    {
-                        const size_t matIdx = primitive->MaterialIndex < parsed.Materials.size()
-                            ? primitive->MaterialIndex
-                            : 0;
-                        const GltfMaterialCpu& mat = parsed.Materials[matIdx];
-                        desc.Blend = ToSrpBlendMode(mat.AlphaMode);
-                        desc.TwoSided = mat.DoubleSided;
-                        desc.AlphaCutoff = mat.AlphaCutoff;
-                    }
-                    desc.MaterialParams = std::move(primitive->MaterialParams);
-                    if (primitive->MaterialIndex < materialTextures.size()) {
-                        desc.MaterialTextures = materialTextures[primitive->MaterialIndex];
-                    } else if (!materialTextures.empty()) {
-                        desc.MaterialTextures = materialTextures.front();
-                    }
-                    desc.BoundsMin = primitive->BoundsMin;
-                    desc.BoundsMax = primitive->BoundsMax;
-                    desc.HasBounds = primitive->HasBounds;
-                    parsed.Primitives.push_back(std::move(desc));
+                    desc.BoundsMin = localMin;
+                    desc.BoundsMax = localMax;
+                    desc.HasBounds = localHasBounds;
+                    primitives.push_back(std::move(desc));
 
-                    if (primitive->HasBounds) {
-                        const Eigen::Matrix4f& nodeWorld = parsed.Nodes[static_cast<size_t>(n)].WorldMatrix;
+                    if (localHasBounds) {
                         UpdateBoundsWithTransformedBox(
-                            parsed.BoundsMin,
-                            parsed.BoundsMax,
-                            parsed.HasBounds,
-                            primitive->BoundsMin,
-                            primitive->BoundsMax,
-                            nodeWorld);
+                            sceneMin, sceneMax, sceneHasBounds, localMin, localMax, nodes[n].WorldMatrix);
                     }
                     ++primitiveIndex;
                 }
             }
 
-            if (parsed.Primitives.empty()) {
+            if (primitives.empty()) {
                 co_return AssetLoadResult::Failure("glTF has no supported triangle primitives");
             }
 
             auto asset = make_unique<GltfAsset>(
                 path,
-                std::move(parsed.Nodes),
-                std::move(parsed.RootNodes),
-                std::move(parsed.Primitives),
-                std::move(parsed.MaterialNames),
-                std::move(parsed.Textures),
-                parsed.BoundsMin,
-                parsed.BoundsMax,
-                parsed.HasBounds);
+                std::move(nodes),
+                std::move(rootNodes),
+                std::move(primitives),
+                std::move(materials),
+                std::move(textures),
+                sceneMin,
+                sceneMax,
+                sceneHasBounds);
 
             RADRAY_INFO_LOG(
-                "glTF asset loaded '{}': primitives={}, materials={}, textures={}, nodes={}",
+                "glTF loaded '{}': primitives={}, materials={}, textures={}, nodes={}",
                 path.string(),
                 asset->GetPrimitives().size(),
-                asset->GetMaterialNames().size(),
+                asset->GetMaterials().size(),
                 asset->GetTextures().size(),
                 asset->GetNodes().size());
 

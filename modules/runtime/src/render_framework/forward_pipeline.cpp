@@ -205,7 +205,9 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
 
     // ── 构建 DrawList (全收, 无视锥裁剪) ──
     // RTTI 禁用 (/GR-), 通过 PrimitiveSceneProxy 的虚 section 接口收集, 不用 dynamic_cast。
-    DrawList drawList;
+    // 按 material->IsTransparent() 分成两个 list: 不透明先画 (写深度), 透明后画 (读深度做遮挡)。
+    DrawList opaqueList;
+    DrawList transparentList;
     for (const unique_ptr<PrimitiveSceneProxy>& proxy : scene->Primitives()) {
         if (proxy == nullptr) {
             continue;
@@ -217,14 +219,16 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
         const Eigen::Vector3f center = proxy->GetLocalToWorld().block<3, 1>(0, 3);
         const float viewDistance = (center - eye).norm();
         for (uint32_t s = 0; s < sectionCount; ++s) {
-            MaterialAsset* material = proxy->GetSectionMaterial(s);
-            if (material == nullptr) {
+            shared_ptr<const MaterialRenderSnapshot> snapshot = proxy->GetSectionSnapshot(s);
+            if (snapshot == nullptr) {
                 continue;
             }
-            drawList.AddPrimitive(material, proxy.get(), kForwardPassTag, s, viewDistance);
+            DrawList& target = snapshot->IsTransparent() ? transparentList : opaqueList;
+            target.AddPrimitive(std::move(snapshot), proxy.get(), kForwardPassTag, s, viewDistance);
         }
     }
-    drawList.SortOpaque();
+    opaqueList.SortOpaque();            // RenderQueue 升序 -> material 批处理 -> 近到远
+    transparentList.SortTransparent();  // RenderQueue 升序 -> 远到近 (back-to-front)
 
     // ── 深度目标 + 单 render pass ──
     DepthTarget* depth = AcquireDepthTarget(flight, width, height);
@@ -279,7 +283,10 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
     encoder->SetViewport(vp);
     encoder->SetScissor(Rect{0, 0, width, height});
 
-    _executor->Execute(encoder.get(), drawList);
+    // 同一 render pass、同一深度缓冲: 先不透明 (写深度), 再透明 (depth-write-off + alpha blend,
+    // 复用不透明已写入的深度做遮挡测试; back-to-front 保证半透明叠加顺序正确)。
+    _executor->Execute(encoder.get(), opaqueList);
+    _executor->Execute(encoder.get(), transparentList);
 
     cmd->EndRenderPass(std::move(encoder));
 }

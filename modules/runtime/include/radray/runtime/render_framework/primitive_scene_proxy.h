@@ -4,10 +4,12 @@
 
 #include <radray/basic_math.h>
 #include <radray/render/gpu_resource.h>
+#include <radray/types.h>
 
 namespace radray {
 
 class MaterialAsset;
+struct MaterialRenderSnapshot;
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 struct MeshDrawArgs {
@@ -46,8 +48,10 @@ public:
         return 0;
     }
 
-    /// 取指定 section 的材质 (非拥有)。基类默认 nullptr; 具体 proxy 覆写。
-    virtual MaterialAsset* GetSectionMaterial(uint32_t /*sectionIndex*/) const noexcept {
+    /// 取指定 section 的材质渲染快照 (只读值快照, 无锁跨线程发布)。
+    /// 基类默认空; 具体 proxy 覆写。render 线程据此构建 DrawList / 提交绘制,
+    /// 不再回查 game 线程的 MaterialAsset (避免竞争与 Unload 悬垂)。
+    virtual shared_ptr<const MaterialRenderSnapshot> GetSectionSnapshot(uint32_t /*sectionIndex*/) const noexcept {
         return nullptr;
     }
 };

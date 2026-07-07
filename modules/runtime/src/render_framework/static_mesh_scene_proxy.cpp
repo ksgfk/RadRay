@@ -31,6 +31,10 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(const StaticMeshComponent& component,
       _localBoundsMin(_mesh.Get() != nullptr ? _mesh->GetBoundsMin() : Eigen::Vector3f::Zero()),
       _localBoundsMax(_mesh.Get() != nullptr ? _mesh->GetBoundsMax() : Eigen::Vector3f::Zero()),
       _sections(_mesh.Get() != nullptr ? BuildSections(*_mesh.Get()) : vector<Section>{}) {
+    _sectionSnapshots.reserve(_sections.size());
+    for (size_t i = 0; i < _sections.size(); ++i) {
+        _sectionSnapshots.emplace_back(make_unique<AtomicSnapshot>());
+    }
 }
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
@@ -43,11 +47,13 @@ const render::RenderMesh* StaticMeshSceneProxy::GetRenderMesh() const noexcept {
     return mesh->GetRenderMesh();
 }
 
-void StaticMeshSceneProxy::SetSectionMaterial(uint32_t sectionIndex, MaterialAsset* material) noexcept {
-    if (sectionIndex >= _sections.size()) {
+void StaticMeshSceneProxy::SetSectionSnapshot(
+    uint32_t sectionIndex,
+    shared_ptr<const MaterialRenderSnapshot> snapshot) noexcept {
+    if (sectionIndex >= _sectionSnapshots.size()) {
         return;
     }
-    _sections[sectionIndex].Material = material;
+    _sectionSnapshots[sectionIndex]->store(std::move(snapshot), std::memory_order_release);
 }
 
 MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noexcept {

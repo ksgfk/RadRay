@@ -30,6 +30,10 @@ void StaticMeshComponent::OnUnregister() {
 void StaticMeshComponent::TickComponent(float deltaTime) {
     PrimitiveComponent::TickComponent(deltaTime);
     CleanupCompletedMeshRefreshTask();
+    // game 线程每帧从材质槽生成只读快照发布给 proxy (render 线程无锁读)。
+    if (auto* proxy = static_cast<StaticMeshSceneProxy*>(GetSceneProxy()); proxy != nullptr) {
+        RefreshMaterialSnapshots(*proxy);
+    }
 }
 
 void StaticMeshComponent::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) {
@@ -48,7 +52,39 @@ unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {
         return nullptr;
     }
 
-    return make_unique<StaticMeshSceneProxy>(*this, _mesh);
+    auto proxy = make_unique<StaticMeshSceneProxy>(*this, _mesh);
+    // proxy 每次 (重新) 创建都以组件材质槽为权威来源生成快照发布,
+    // 保证异步 mesh 加载 / MarkRenderStateDirty 重建后材质不丢。
+    RefreshMaterialSnapshots(*proxy);
+    return proxy;
+}
+
+void StaticMeshComponent::SetMaterial(uint32_t sectionIndex, StreamingAssetRef<MaterialAsset> material) noexcept {
+    if (sectionIndex >= _sectionMaterials.size()) {
+        _sectionMaterials.resize(sectionIndex + 1);
+    }
+    _sectionMaterials[sectionIndex] = std::move(material);
+    // proxy 已存在则立即发布快照; 否则等 CreateSceneProxy / 下一次 Tick 统一发布。
+    if (auto* proxy = static_cast<StaticMeshSceneProxy*>(GetSceneProxy()); proxy != nullptr) {
+        if (sectionIndex < proxy->GetSectionCount()) {
+            MaterialAsset* mat = _sectionMaterials[sectionIndex].Get();
+            proxy->SetSectionSnapshot(sectionIndex, mat != nullptr ? mat->CreateSnapshot() : nullptr);
+        }
+    }
+}
+
+StreamingAssetRef<MaterialAsset> StaticMeshComponent::GetMaterial(uint32_t sectionIndex) const noexcept {
+    return sectionIndex < _sectionMaterials.size() ? _sectionMaterials[sectionIndex] : StreamingAssetRef<MaterialAsset>{};
+}
+
+void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) const noexcept {
+    const uint32_t sectionCount = proxy.GetSectionCount();
+    const uint32_t slotCount = static_cast<uint32_t>(_sectionMaterials.size());
+    const uint32_t count = sectionCount < slotCount ? sectionCount : slotCount;
+    for (uint32_t s = 0; s < count; ++s) {
+        MaterialAsset* mat = _sectionMaterials[s].Get();
+        proxy.SetSectionSnapshot(s, mat != nullptr ? mat->CreateSnapshot() : nullptr);
+    }
 }
 
 bool StaticMeshComponent::HasRenderableMesh() const noexcept {

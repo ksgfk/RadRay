@@ -1,5 +1,6 @@
 #include <radray/runtime/material_asset.h>
 
+#include <cstring>
 #include <utility>
 
 #include <radray/logger.h>
@@ -42,6 +43,10 @@ void MaterialAsset::SetConstantBlock(std::string_view name, const void* data, si
 
 void MaterialAsset::SetTexture(std::string_view name, render::TextureView* view) noexcept {
     _properties[string{name}] = view;
+}
+
+void MaterialAsset::SetTexture(std::string_view name, StreamingAssetRef<TextureAsset> texture) noexcept {
+    _properties[string{name}] = std::move(texture);
 }
 
 void MaterialAsset::SetSampler(std::string_view name, render::Sampler* sampler) noexcept {
@@ -123,6 +128,98 @@ Nullable<const render::CompiledShaderVariant*> MaterialAsset::ResolveVariant(
     return _shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
 }
 
+shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot() const noexcept {
+    auto snapshot = make_shared<MaterialRenderSnapshot>();
+    snapshot->Shader = _shader;
+    snapshot->EnabledKeywords = _enabledKeywords;
+    snapshot->RenderQueue = _renderQueue;
+    for (const auto& [name, value] : _properties) {
+        std::visit(
+            [&](auto&& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, float>) {
+                    MaterialRenderSnapshot::ConstantEntry e{};
+                    e.Name = name;
+                    e.Bytes.resize(sizeof(float));
+                    std::memcpy(e.Bytes.data(), &v, sizeof(float));
+                    snapshot->Constants.emplace_back(std::move(e));
+                } else if constexpr (std::is_same_v<T, Eigen::Vector4f>) {
+                    MaterialRenderSnapshot::ConstantEntry e{};
+                    e.Name = name;
+                    e.Bytes.resize(sizeof(float) * 4);
+                    std::memcpy(e.Bytes.data(), v.data(), sizeof(float) * 4);
+                    snapshot->Constants.emplace_back(std::move(e));
+                } else if constexpr (std::is_same_v<T, vector<byte>>) {
+                    if (!v.empty()) {
+                        MaterialRenderSnapshot::ConstantEntry e{};
+                        e.Name = name;
+                        e.Bytes = v;
+                        snapshot->Constants.emplace_back(std::move(e));
+                    }
+                } else if constexpr (std::is_same_v<T, render::TextureView*>) {
+                    MaterialRenderSnapshot::TextureEntry e{};
+                    e.Name = name;
+                    e.RawView = v;
+                    snapshot->Textures.emplace_back(std::move(e));
+                } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
+                    MaterialRenderSnapshot::TextureEntry e{};
+                    e.Name = name;
+                    e.Texture = v;
+                    snapshot->Textures.emplace_back(std::move(e));
+                } else if constexpr (std::is_same_v<T, render::Sampler*>) {
+                    MaterialRenderSnapshot::SamplerEntry e{};
+                    e.Name = name;
+                    e.Sampler = v;
+                    snapshot->Samplers.emplace_back(std::move(e));
+                }
+            },
+            value);
+    }
+    return snapshot;
+}
+
+Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
+    render::ShaderVariantCache& cache,
+    uint32_t passIndex,
+    render::HlslShaderModel sm) const noexcept {
+    ShaderAsset* shader = Shader.Get();
+    if (shader == nullptr) {
+        RADRAY_ERR_LOG("MaterialRenderSnapshot::ResolveVariant: no shader assigned");
+        return nullptr;
+    }
+    vector<std::string_view> enabled;
+    enabled.reserve(EnabledKeywords.size());
+    for (const string& kw : EnabledKeywords) {
+        enabled.emplace_back(kw);
+    }
+    return shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
+}
+
+uint32_t MaterialRenderSnapshot::ApplyProperties(render::ShaderParameterTable& table) const noexcept {
+    uint32_t applied = 0;
+    for (const ConstantEntry& c : Constants) {
+        if (!c.Bytes.empty() && table.SetBytes(c.Name, c.Bytes.data(), static_cast<uint32_t>(c.Bytes.size()))) {
+            ++applied;
+        }
+    }
+    for (const TextureEntry& t : Textures) {
+        render::TextureView* srv = t.RawView;
+        if (srv == nullptr) {
+            TextureAsset* tex = t.Texture.Get();
+            srv = tex != nullptr ? tex->GetSrv() : nullptr;
+        }
+        if (srv != nullptr && table.SetResource(t.Name, static_cast<render::ResourceView*>(srv))) {
+            ++applied;
+        }
+    }
+    for (const SamplerEntry& s : Samplers) {
+        if (s.Sampler != nullptr && table.SetSampler(s.Name, s.Sampler)) {
+            ++applied;
+        }
+    }
+    return applied;
+}
+
 uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table) const noexcept {
     uint32_t applied = 0;
     for (const auto& [name, value] : _properties) {
@@ -138,6 +235,10 @@ uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table) con
                     return !v.empty() && table.SetBytes(name, v.data(), static_cast<uint32_t>(v.size()));
                 } else if constexpr (std::is_same_v<T, render::TextureView*>) {
                     return v != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(v));
+                } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
+                    TextureAsset* tex = v.Get();
+                    render::TextureView* srv = tex != nullptr ? tex->GetSrv() : nullptr;
+                    return srv != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(srv));
                 } else if constexpr (std::is_same_v<T, render::Sampler*>) {
                     return v != nullptr && table.SetSampler(name, v);
                 } else {

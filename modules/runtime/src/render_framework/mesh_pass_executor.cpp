@@ -67,7 +67,7 @@ void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::s
 Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
     const DrawItem& item,
     const render::CompiledShaderVariant& variant) noexcept {
-    const ShaderAsset* shader = item.Material->GetShader().Get();
+    const ShaderAsset* shader = item.Material->Shader.Get();
     if (shader == nullptr) {
         return nullptr;
     }

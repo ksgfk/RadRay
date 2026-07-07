@@ -240,9 +240,9 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     ASSERT_TRUE(rbOpt.HasValue()) << reason;
     auto rb = rbOpt.Release();
 
-    // draw list。
+    // draw list (提交材质渲染快照)。
     DrawList list;
-    ASSERT_TRUE(list.AddPrimitive(&material, &proxy, "ForwardLit", 0, 1.0f));
+    ASSERT_TRUE(list.AddPrimitive(material.CreateSnapshot(), &proxy, "ForwardLit", 0, 1.0f));
     list.SortOpaque();
 
     // executor (per-object cbuffer 变量名 gPerObject)。

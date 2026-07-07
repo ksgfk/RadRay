@@ -1,10 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <span>
 
 #include <radray/basic_math.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material_asset.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/types.h>
@@ -25,9 +27,6 @@ public:
         uint32_t IndexCount{0};
         uint32_t MinVertexIndex{0};
         uint32_t MaxVertexIndex{0};
-        // per-section 材质 (对应 UE5 FStaticMeshSection::MaterialIndex / Unity 的 submesh material)。
-        // 非拥有: 生命周期由 material 持有方管理。为空则该 section 不参与绘制。
-        MaterialAsset* Material{nullptr};
     };
 
     StaticMeshSceneProxy(const StaticMeshComponent& component, StreamingAssetRef<StaticMesh> mesh);
@@ -39,23 +38,31 @@ public:
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _localToWorld; }
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
     uint32_t GetSectionCount() const noexcept override { return static_cast<uint32_t>(_sections.size()); }
-    MaterialAsset* GetSectionMaterial(uint32_t sectionIndex) const noexcept override {
-        return sectionIndex < _sections.size() ? _sections[sectionIndex].Material : nullptr;
+    shared_ptr<const MaterialRenderSnapshot> GetSectionSnapshot(uint32_t sectionIndex) const noexcept override {
+        if (sectionIndex >= _sectionSnapshots.size()) {
+            return nullptr;
+        }
+        return _sectionSnapshots[sectionIndex]->load(std::memory_order_acquire);
     }
     const Eigen::Vector3f& GetLocalBoundsMin() const noexcept { return _localBoundsMin; }
     const Eigen::Vector3f& GetLocalBoundsMax() const noexcept { return _localBoundsMax; }
     std::span<const Section> GetSections() const noexcept { return _sections; }
     std::span<Section> GetSections() noexcept { return _sections; }
 
-    /// 设置指定 section 的材质。越界忽略。
-    void SetSectionMaterial(uint32_t sectionIndex, MaterialAsset* material) noexcept;
+    /// 发布指定 section 的材质快照 (game 线程写, render 线程无锁读)。越界忽略。
+    void SetSectionSnapshot(uint32_t sectionIndex, shared_ptr<const MaterialRenderSnapshot> snapshot) noexcept;
 
 private:
+    using AtomicSnapshot = std::atomic<shared_ptr<const MaterialRenderSnapshot>>;
+
     StreamingAssetRef<StaticMesh> _mesh;
     Eigen::Matrix4f _localToWorld;
     Eigen::Vector3f _localBoundsMin;
     Eigen::Vector3f _localBoundsMax;
     vector<Section> _sections;
+    // 与 _sections 平行的快照槽。atomic<shared_ptr> 不可移动, 故堆分配保证地址稳定,
+    // 用 unique_ptr 使外层 vector 可移动/可增长。
+    vector<unique_ptr<AtomicSnapshot>> _sectionSnapshots;
 };
 
 }  // namespace radray
