@@ -53,8 +53,11 @@ unique_ptr<PrimitiveSceneProxy> StaticMeshComponent::CreateSceneProxy() {
     }
 
     auto proxy = make_unique<StaticMeshSceneProxy>(*this, _mesh);
-    // proxy 每次 (重新) 创建都以组件材质槽为权威来源生成快照发布,
-    // 保证异步 mesh 加载 / MarkRenderStateDirty 重建后材质不丢。
+    // 新 proxy 的快照槽为空, 且 slot 可能因上一个 proxy 已非脏。强制全部置脏,
+    // 以组件材质槽为权威来源全量重发, 保证异步 mesh 加载 / MarkRenderStateDirty 重建后材质不丢。
+    for (MaterialSlot& slot : _sectionMaterials) {
+        slot.Dirty = true;
+    }
     RefreshMaterialSnapshots(*proxy);
     return proxy;
 }
@@ -63,27 +66,72 @@ void StaticMeshComponent::SetMaterial(uint32_t sectionIndex, StreamingAssetRef<M
     if (sectionIndex >= _sectionMaterials.size()) {
         _sectionMaterials.resize(sectionIndex + 1);
     }
-    _sectionMaterials[sectionIndex] = std::move(material);
-    // proxy 已存在则立即发布快照; 否则等 CreateSceneProxy / 下一次 Tick 统一发布。
-    if (auto* proxy = static_cast<StaticMeshSceneProxy*>(GetSceneProxy()); proxy != nullptr) {
-        if (sectionIndex < proxy->GetSectionCount()) {
-            MaterialAsset* mat = _sectionMaterials[sectionIndex].Get();
-            proxy->SetSectionSnapshot(sectionIndex, mat != nullptr ? mat->CreateSnapshot() : nullptr);
-        }
-    }
+    // 只写槽 + 置脏, 统一在下一次 RefreshMaterialSnapshots 重建并发布。
+    _sectionMaterials[sectionIndex].Material = std::move(material);
+    _sectionMaterials[sectionIndex].Dirty = true;
 }
 
 StreamingAssetRef<MaterialAsset> StaticMeshComponent::GetMaterial(uint32_t sectionIndex) const noexcept {
-    return sectionIndex < _sectionMaterials.size() ? _sectionMaterials[sectionIndex] : StreamingAssetRef<MaterialAsset>{};
+    return sectionIndex < _sectionMaterials.size() ? _sectionMaterials[sectionIndex].Material : StreamingAssetRef<MaterialAsset>{};
 }
 
-void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) const noexcept {
+void StaticMeshComponent::MarkMaterialDirty(uint32_t sectionIndex) noexcept {
+    if (sectionIndex < _sectionMaterials.size()) {
+        _sectionMaterials[sectionIndex].Dirty = true;
+    }
+}
+
+void StaticMeshComponent::SetPropertyBlock(uint32_t sectionIndex, shared_ptr<MaterialPropertyBlock> block) noexcept {
+    if (sectionIndex >= _sectionMaterials.size()) {
+        _sectionMaterials.resize(sectionIndex + 1);
+    }
+    _sectionMaterials[sectionIndex].PropertyBlock = std::move(block);
+    _sectionMaterials[sectionIndex].Dirty = true;
+}
+
+Nullable<MaterialPropertyBlock*> StaticMeshComponent::GetPropertyBlock(uint32_t sectionIndex) const noexcept {
+    if (sectionIndex >= _sectionMaterials.size()) {
+        return nullptr;
+    }
+    return _sectionMaterials[sectionIndex].PropertyBlock.get();
+}
+
+void StaticMeshComponent::ClearPropertyBlock(uint32_t sectionIndex) noexcept {
+    if (sectionIndex >= _sectionMaterials.size()) {
+        return;
+    }
+    if (_sectionMaterials[sectionIndex].PropertyBlock != nullptr) {
+        _sectionMaterials[sectionIndex].PropertyBlock.reset();
+        _sectionMaterials[sectionIndex].Dirty = true;
+    }
+}
+
+void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) noexcept {
     const uint32_t sectionCount = proxy.GetSectionCount();
     const uint32_t slotCount = static_cast<uint32_t>(_sectionMaterials.size());
     const uint32_t count = sectionCount < slotCount ? sectionCount : slotCount;
     for (uint32_t s = 0; s < count; ++s) {
-        MaterialAsset* mat = _sectionMaterials[s].Get();
-        proxy.SetSectionSnapshot(s, mat != nullptr ? mat->CreateSnapshot() : nullptr);
+        MaterialSlot& slot = _sectionMaterials[s];
+        MaterialAsset* mat = slot.Material.Get();
+        const AssetHandle handle = slot.Material.GetHandle();
+        const MaterialPropertyBlock* block = slot.PropertyBlock.get();
+        const uint64_t blockVersion = block != nullptr ? block->GetVersion() : 0;
+        // 脏判定: 显式置脏 / 解析指针变化 (Loading->Ready) / handle 变化 (换材质或 slot 回收复用)
+        //         / 覆盖 block 换了 / 覆盖 block 内部参数版本变了。
+        const bool needRebuild = slot.Dirty ||
+                                 mat != slot.LastPtr ||
+                                 handle != slot.LastHandle ||
+                                 block != slot.LastBlockPtr ||
+                                 blockVersion != slot.LastBlockVersion;
+        if (!needRebuild) {
+            continue;
+        }
+        proxy.SetSectionSnapshot(s, mat != nullptr ? mat->CreateSnapshot(block) : nullptr);
+        slot.LastPtr = mat;
+        slot.LastHandle = handle;
+        slot.LastBlockPtr = block;
+        slot.LastBlockVersion = blockVersion;
+        slot.Dirty = false;
     }
 }
 

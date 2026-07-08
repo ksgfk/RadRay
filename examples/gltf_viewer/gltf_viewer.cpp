@@ -162,9 +162,7 @@ public:
     }
 
     void OnShutdown() override {
-        // 采样器由 app 自管 (非 AssetManager 托管), 必须在 device 销毁前显式释放,
-        // 否则 vkDestroyDevice 报 VkSampler 泄漏。OnShutdown 早于 device 拆除。
-        _sampler.reset();
+        // 采样器现由 RenderSystem 的 SamplerCache 去重持有并统一释放, example 无需手动管理。
     }
 
 private:
@@ -328,25 +326,21 @@ private:
             /*withTangent*/ true, _opaqueShader, _transparentShader);
     }
 
-    // 共享 trilinear + repeat 采样器 (glTF 默认 wrap)。
+    // 共享 trilinear + repeat 采样器描述 (glTF 默认 wrap)。
+    // 只存 descriptor: 实际 sampler 由 SamplerCache 在绑定时去重创建并永生持有,
+    // 材质快照据此持稳定指针, 无需 example 手动管理 sampler 生命周期。
     void BuildSampler() {
-        render::SamplerDescriptor desc{};
-        desc.AddressS = render::AddressMode::Repeat;
-        desc.AddressT = render::AddressMode::Repeat;
-        desc.AddressR = render::AddressMode::Repeat;
-        desc.MinFilter = render::FilterMode::Linear;
-        desc.MagFilter = render::FilterMode::Linear;
-        desc.MipmapFilter = render::FilterMode::Linear;
-        desc.LodMin = 0.0f;
-        desc.LodMax = 32.0f;
-        desc.Compare = std::nullopt;
-        desc.AnisotropyClamp = 8;
-        Nullable<unique_ptr<render::Sampler>> sampler = GetDevice()->CreateSampler(desc);
-        if (!sampler.HasValue()) {
-            RADRAY_ERR_LOG("gltf_viewer: failed to create sampler");
-            return;
-        }
-        _sampler = sampler.Release();
+        _samplerDesc = render::SamplerDescriptor{};
+        _samplerDesc.AddressS = render::AddressMode::Repeat;
+        _samplerDesc.AddressT = render::AddressMode::Repeat;
+        _samplerDesc.AddressR = render::AddressMode::Repeat;
+        _samplerDesc.MinFilter = render::FilterMode::Linear;
+        _samplerDesc.MagFilter = render::FilterMode::Linear;
+        _samplerDesc.MipmapFilter = render::FilterMode::Linear;
+        _samplerDesc.LodMin = 0.0f;
+        _samplerDesc.LodMax = 32.0f;
+        _samplerDesc.Compare = std::nullopt;
+        _samplerDesc.AnisotropyClamp = 8;
     }
 
     // ─────────────────────────── 球演示 ───────────────────────────
@@ -513,9 +507,7 @@ private:
         bindTexture(desc.OcclusionTexture, kKwOcclusionMap, kTexOcclusion);
         bindTexture(desc.EmissiveTexture, kKwEmissiveMap, kTexEmissive);
 
-        if (_sampler != nullptr) {
-            mat->SetSampler(kSamplerName, _sampler.get());
-        }
+        mat->SetSampler(kSamplerName, _samplerDesc);
 
         // 常量块 (逐字段填 GltfMaterialConstants)。
         GltfMaterialConstants mc{};
@@ -616,7 +608,7 @@ private:
     StreamingAssetRef<ShaderAsset> _opaqueShader{};
     StreamingAssetRef<ShaderAsset> _transparentShader{};
     vector<StreamingAssetRef<MaterialAsset>> _materialRefs{};  // 保活材质资产
-    unique_ptr<render::Sampler> _sampler{};                    // 共享采样器
+    render::SamplerDescriptor _samplerDesc{};                  // 共享采样器描述 (实际 sampler 由 SamplerCache 去重永生)
     vector<SphereInstance> _spheres{};
 
     std::filesystem::path _gltfPath{};

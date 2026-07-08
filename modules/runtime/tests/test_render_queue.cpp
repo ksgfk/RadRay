@@ -2,6 +2,7 @@
 
 #include <radray/guid.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material_asset.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 

@@ -19,6 +19,8 @@ class ShaderVariantCache;
 class GraphicsPipelineStateCache;
 }  // namespace render
 
+class SamplerCache;
+
 /// Runtime-side renderer coordinator.
 ///
 /// This fills the role that UE's RendererModule plays for scene ownership in a
@@ -46,8 +48,9 @@ public:
     Application* GetApplication() const noexcept { return _app; }
     render::ShaderVariantCache* GetShaderVariantCache() const noexcept { return _variantCache.get(); }
     render::GraphicsPipelineStateCache* GetGraphicsPipelineStateCache() const noexcept { return _psoCache.get(); }
+    SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
-    const std::string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
+    const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
 
 private:
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -58,7 +61,8 @@ private:
     shared_ptr<render::Dxc> _dxc;
     unique_ptr<render::ShaderVariantCache> _variantCache;
     unique_ptr<render::GraphicsPipelineStateCache> _psoCache;
-    std::string _shaderIncludeRoot;
+    unique_ptr<SamplerCache> _samplerCache;
+    string _shaderIncludeRoot;
 };
 
 template <>

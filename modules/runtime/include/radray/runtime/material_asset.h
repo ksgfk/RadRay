@@ -11,87 +11,38 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/texture_asset.h>
+#include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/material_render_snapshot.h>
 
 namespace radray {
 
+class MaterialPropertyBlock;
+
+/// 通过资产引用绑定一个【非默认子 view】的纹理 property。
+/// Texture 提供 GPU 资源与 view 缓存所有权, SubView 描述与默认全量 SRV 的差异 (mip/array/format/dim)。
+/// 绑定时经 TextureAsset::GetOrCreateSrv(SubView) 换成缓存中稳定的 view 指针, 无悬垂风险。
+struct TextureSubViewRef {
+    StreamingAssetRef<TextureAsset> Texture{};
+    TextureSubViewDesc SubView{};
+};
+
 /// 一个材质属性的值 (对应 Unity Material 的 property)。
-/// - Float / Vector: 写入常量 (cbuffer, 通过 ShaderParameterTable::SetBytes)。
-/// - Texture (裸 TextureView*): 绑定资源 (非拥有指针, 生命周期由资源持有方管理)。
-/// - Texture (StreamingAssetRef<TextureAsset>): 通过资产引用绑定, 绑定时取 GetSrv();
-///   相比裸指针能安全跨线程/跨帧持有 (资产 generation 兜底悬垂)。
-/// - Sampler: 绑定资源 (非拥有指针, 生命周期由资源持有方管理)。
+/// - Float / Vector: 按【属性名】写入常量。绑定时 MaterialConstantBinder 用 shader 反射
+///   解析该名字是某 cbuffer 的【块名】(整块) 还是【块内字段名】(按偏移打包), 整块提交
+///   (push constant 或 CBV)。对齐 Unity 的 SetFloat("_Color") 语义。
+/// - Texture (StreamingAssetRef<TextureAsset>): 通过资产引用绑定默认全量 SRV, 绑定时取 GetSrv();
+///   能安全跨线程/跨帧持有 (资产 generation 兜底悬垂)。
+/// - Texture (TextureSubViewRef): 同一贴图的非默认子 view (mip/array/format 子集), 绑定时经
+///   TextureAsset::GetOrCreateSrv 去重取稳定 view 指针。同样零裸指针、不悬垂。
+/// - Sampler (SamplerDescriptor): 存状态描述值; 绑定时经 SamplerCache 去重取稳定 sampler 指针。
+///   相比裸指针能安全跨线程/跨帧持有 (缓存永生, 指针不悬垂)。
 using MaterialPropertyValue = std::variant<
     float,
     Eigen::Vector4f,
     vector<byte>,  // 原始常量块 (整块 push/root constant, 大小须与 shader cbuffer 完全一致)
-    render::TextureView*,
     StreamingAssetRef<TextureAsset>,
-    render::Sampler*>;
-
-/// 渲染队列排序值 (对应 Unity 的 Material.renderQueue)。
-/// 数值越小越先绘制; >= Transparent 的走 back-to-front 半透明排序。
-enum class RenderQueue : int32_t {
-    Background = 1000,
-    Geometry = 2000,
-    AlphaTest = 2450,
-    GeometryLast = 2500,  // 不透明与半透明的分界
-    Transparent = 3000,
-    Overlay = 4000,
-};
-
-class MaterialAsset;
-
-/// 材质的渲染侧【只读值快照】(对应 UE5 的 FMaterialRenderProxy 的最小化, 但走不可变快照而非
-/// enqueue-to-RT 模型)。
-///
-/// 设计要点:
-/// - game 线程在组件 Tick 时由 MaterialAsset::CreateSnapshot() 生成, 之后不可变;
-///   render 线程只读, 无锁无竞争 (通过 atomic<shared_ptr<const MaterialRenderSnapshot>> 发布)。
-/// - 冻结渲染所需的一切: shader 引用 (稳定 ProgramId + pass) + 启用 keyword + renderQueue
-///   + 常量字节块 + 纹理引用 (StreamingAssetRef) + 采样器裸指针。
-/// - shared_ptr 引用计数自动管理生命周期: DrawItem 持一份 shared_ptr, 快照存活期覆盖整个渲染,
-///   即便 MaterialAsset 在此期间被 Unload 也不悬垂。
-/// - ResolveVariant / ApplyProperties / IsTransparent 从快照自身求解, 不再回查 MaterialAsset。
-struct MaterialRenderSnapshot {
-    /// 一条常量块 property (对应一个 push/root constant cbuffer)。
-    struct ConstantEntry {
-        string Name;
-        vector<byte> Bytes;
-    };
-    /// 一条纹理 property。Texture 有效时绑定其 GetSrv(); 否则回退 RawView (可为空)。
-    struct TextureEntry {
-        string Name;
-        StreamingAssetRef<TextureAsset> Texture{};
-        render::TextureView* RawView{nullptr};
-    };
-    /// 一条采样器 property (非拥有; app 自管, 生命周期须覆盖渲染)。
-    struct SamplerEntry {
-        string Name;
-        render::Sampler* Sampler{nullptr};
-    };
-
-    /// shader 引用 (非拥有 streaming ref)。ResolveVariant 用它懒编译变体。
-    StreamingAssetRef<ShaderAsset> Shader{};
-    /// 启用的 keyword 名字 (投影用)。
-    vector<string> EnabledKeywords;
-    int32_t RenderQueue{static_cast<int32_t>(RenderQueue::Geometry)};
-    vector<ConstantEntry> Constants;
-    vector<TextureEntry> Textures;
-    vector<SamplerEntry> Samplers;
-
-    bool IsTransparent() const noexcept {
-        return RenderQueue >= static_cast<int32_t>(RenderQueue::Transparent);
-    }
-
-    /// 解析指定 pass 在快照 keyword 集下的变体。shader 空 / pass 越界 / 编译失败返回 nullptr。
-    Nullable<const render::CompiledShaderVariant*> ResolveVariant(
-        render::ShaderVariantCache& cache,
-        uint32_t passIndex,
-        render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
-
-    /// 把快照的 property 值写入 ShaderParameterTable。返回成功写入的 property 数。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table) const noexcept;
-};
+    TextureSubViewRef,
+    render::SamplerDescriptor>;
 
 /// 材质资产 (对应 Unity 的一个 Material)。
 ///
@@ -123,13 +74,18 @@ public:
     // ─── property ───
     void SetFloat(std::string_view name, float value) noexcept;
     void SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept;
-    /// 设置一整块常量数据 (对应一个 push/root constant cbuffer 块)。
-    /// size 须与 shader 中该 cbuffer 声明的字节数完全一致, 否则 ApplyProperties 时被忽略。
+    /// 设置一整块常量数据 (对应一个完整 cbuffer 块; Name 为块名)。
+    /// size 须与 shader 中该 cbuffer 声明的字节数一致 (超出被截断)。
+    /// 若只想设单个字段, 用 SetFloat / SetVector 并以字段名命名即可 (打包器按偏移写入)。
     void SetConstantBlock(std::string_view name, const void* data, size_t size) noexcept;
-    void SetTexture(std::string_view name, render::TextureView* view) noexcept;
-    /// 通过资产引用设置纹理 (推荐)。绑定时取 GetSrv(); 相比裸指针能安全跨线程/跨帧持有。
+    /// 通过资产引用设置纹理 (默认全量 SRV)。绑定时取 GetSrv(); 能安全跨线程/跨帧持有。
     void SetTexture(std::string_view name, StreamingAssetRef<TextureAsset> texture) noexcept;
-    void SetSampler(std::string_view name, render::Sampler* sampler) noexcept;
+    /// 通过资产引用 + 子 view 描述设置纹理 (同一贴图的非默认 view: mip/array/format 子集)。
+    /// 绑定时经 TextureAsset::GetOrCreateSrv(sub) 去重取稳定 view 指针; 同样零裸指针、不悬垂。
+    void SetTexture(std::string_view name, StreamingAssetRef<TextureAsset> texture, const TextureSubViewDesc& sub) noexcept;
+    /// 设置采样器 (存 descriptor 值)。绑定时经 SamplerCache 去重取稳定指针,
+    /// 相比裸指针能安全跨线程/跨帧持有。
+    void SetSampler(std::string_view name, const render::SamplerDescriptor& desc) noexcept;
 
     /// 查属性值。未设置返回 nullopt。
     std::optional<MaterialPropertyValue> GetProperty(std::string_view name) const noexcept;
@@ -153,13 +109,20 @@ public:
         uint32_t passIndex,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) noexcept;
 
-    /// 把 property 值写入给定的 ShaderParameterTable。
-    /// 返回成功写入的 property 数 (被 shader 接受的)。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table) const noexcept;
+    /// 把 property 值写入给定的 ShaderParameterTable。sampler 经 samplerCache 按 descriptor
+    /// 去重取稳定指针。返回成功写入的 property 数 (被 shader 接受的)。
+    uint32_t ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept;
 
-    /// 生成渲染侧只读值快照 (在 game 线程组件 Tick 时调用)。冻结当前 shader/keyword/
+    /// 生成渲染侧绘制决策快照 (由组件在 game 线程 Tick 时按需调用)。冻结当前 shader/keyword/
     /// renderQueue/常量/纹理/采样器, 供 render 线程无锁只读。
+    /// 注意: 本类是共享只读模板; 快照的所有权与生产决策归调用它的组件。
     shared_ptr<const MaterialRenderSnapshot> CreateSnapshot() const noexcept;
+
+    /// 生成叠加了 per-primitive 覆盖 (MaterialPropertyBlock) 的快照 (对应 Unity 的
+    /// Renderer.SetPropertyBlock)。覆盖值按名字盖在模板 property 之上 (同名替换、新名追加),
+    /// 共享 MaterialAsset 不被修改。overrides 为空 (nullptr / IsEmpty) 时等价于无参版本。
+    /// shader / keyword / renderQueue 仍取自模板 (PropertyBlock 不改变体)。
+    shared_ptr<const MaterialRenderSnapshot> CreateSnapshot(const MaterialPropertyBlock* overrides) const noexcept;
 
 private:
     StreamingAssetRef<ShaderAsset> _shader{};

@@ -4,6 +4,8 @@
 #include <utility>
 
 #include <radray/logger.h>
+#include <radray/runtime/render_framework/material_property_block.h>
+#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray {
 
@@ -13,8 +15,9 @@ MaterialAsset::MaterialAsset(StreamingAssetRef<ShaderAsset> shader) noexcept
 MaterialAsset::~MaterialAsset() noexcept = default;
 
 void MaterialAsset::OnUnload(IRenderResourceRecycler& /*recycler*/) {
-    // MaterialAsset 不拥有 GPU 资源 (texture/sampler 为非拥有指针,
-    // 变体/参数表由各自缓存持有)。仅清空 CPU 状态。
+    // MaterialAsset 不拥有 GPU 资源 (texture view / sampler 由各自缓存持有:
+    // texture view 归 TextureAsset, sampler 归 SamplerCache, 变体/参数表由各自缓存持有)。
+    // property 只存 asset 引用 + 描述值。仅清空 CPU 状态。
     _properties.clear();
     _enabledKeywords.clear();
     _keywordIndex.clear();
@@ -41,16 +44,16 @@ void MaterialAsset::SetConstantBlock(std::string_view name, const void* data, si
     _properties[string{name}] = std::move(bytes);
 }
 
-void MaterialAsset::SetTexture(std::string_view name, render::TextureView* view) noexcept {
-    _properties[string{name}] = view;
-}
-
 void MaterialAsset::SetTexture(std::string_view name, StreamingAssetRef<TextureAsset> texture) noexcept {
     _properties[string{name}] = std::move(texture);
 }
 
-void MaterialAsset::SetSampler(std::string_view name, render::Sampler* sampler) noexcept {
-    _properties[string{name}] = sampler;
+void MaterialAsset::SetTexture(std::string_view name, StreamingAssetRef<TextureAsset> texture, const TextureSubViewDesc& sub) noexcept {
+    _properties[string{name}] = TextureSubViewRef{std::move(texture), sub};
+}
+
+void MaterialAsset::SetSampler(std::string_view name, const render::SamplerDescriptor& desc) noexcept {
+    _properties[string{name}] = desc;
 }
 
 std::optional<MaterialPropertyValue> MaterialAsset::GetProperty(std::string_view name) const noexcept {
@@ -128,99 +131,91 @@ Nullable<const render::CompiledShaderVariant*> MaterialAsset::ResolveVariant(
     return _shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
 }
 
+namespace {
+
+// 把一个 (name, value) property 展开进快照的对应列表。
+// 常量 (float/vector/块) -> ConstantEntry (Name 可为块名或字段名, 绑定时由打包器解析)。
+void EmitProperty(MaterialRenderSnapshot& snapshot, const string& name, const MaterialPropertyValue& value) noexcept {
+    std::visit(
+        [&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, float>) {
+                MaterialRenderSnapshot::ConstantEntry e{};
+                e.Name = name;
+                e.Bytes.resize(sizeof(float));
+                std::memcpy(e.Bytes.data(), &v, sizeof(float));
+                snapshot.Constants.emplace_back(std::move(e));
+            } else if constexpr (std::is_same_v<T, Eigen::Vector4f>) {
+                MaterialRenderSnapshot::ConstantEntry e{};
+                e.Name = name;
+                e.Bytes.resize(sizeof(float) * 4);
+                std::memcpy(e.Bytes.data(), v.data(), sizeof(float) * 4);
+                snapshot.Constants.emplace_back(std::move(e));
+            } else if constexpr (std::is_same_v<T, vector<byte>>) {
+                if (!v.empty()) {
+                    MaterialRenderSnapshot::ConstantEntry e{};
+                    e.Name = name;
+                    e.Bytes = v;
+                    snapshot.Constants.emplace_back(std::move(e));
+                }
+            } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
+                MaterialRenderSnapshot::TextureEntry e{};
+                e.Name = name;
+                e.Texture = v;
+                snapshot.Textures.emplace_back(std::move(e));
+            } else if constexpr (std::is_same_v<T, TextureSubViewRef>) {
+                MaterialRenderSnapshot::TextureEntry e{};
+                e.Name = name;
+                e.Texture = v.Texture;
+                e.SubView = v.SubView;
+                snapshot.Textures.emplace_back(std::move(e));
+            } else if constexpr (std::is_same_v<T, render::SamplerDescriptor>) {
+                MaterialRenderSnapshot::SamplerEntry e{};
+                e.Name = name;
+                e.Desc = v;
+                snapshot.Samplers.emplace_back(std::move(e));
+            }
+        },
+        value);
+}
+
+}  // namespace
+
 shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot() const noexcept {
+    return CreateSnapshot(nullptr);
+}
+
+shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot(const MaterialPropertyBlock* overrides) const noexcept {
     auto snapshot = make_shared<MaterialRenderSnapshot>();
     snapshot->Shader = _shader;
     snapshot->EnabledKeywords = _enabledKeywords;
     snapshot->RenderQueue = _renderQueue;
+
+    if (overrides == nullptr || overrides->IsEmpty()) {
+        // 无覆盖: 直接铺模板 property。
+        for (const auto& [name, value] : _properties) {
+            EmitProperty(*snapshot, name, value);
+        }
+        return snapshot;
+    }
+
+    // 有覆盖: 合并模板 + 覆盖 (同名替换、新名追加)。一个名字被覆盖后类型可能改变
+    // (如常量变纹理), 故先按名字合并成统一 map, 再统一 emit, 而非分别 append。
+    unordered_map<string, const MaterialPropertyValue*> merged;
+    merged.reserve(_properties.size() + overrides->GetOverrides().size());
     for (const auto& [name, value] : _properties) {
-        std::visit(
-            [&](auto&& v) {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, float>) {
-                    MaterialRenderSnapshot::ConstantEntry e{};
-                    e.Name = name;
-                    e.Bytes.resize(sizeof(float));
-                    std::memcpy(e.Bytes.data(), &v, sizeof(float));
-                    snapshot->Constants.emplace_back(std::move(e));
-                } else if constexpr (std::is_same_v<T, Eigen::Vector4f>) {
-                    MaterialRenderSnapshot::ConstantEntry e{};
-                    e.Name = name;
-                    e.Bytes.resize(sizeof(float) * 4);
-                    std::memcpy(e.Bytes.data(), v.data(), sizeof(float) * 4);
-                    snapshot->Constants.emplace_back(std::move(e));
-                } else if constexpr (std::is_same_v<T, vector<byte>>) {
-                    if (!v.empty()) {
-                        MaterialRenderSnapshot::ConstantEntry e{};
-                        e.Name = name;
-                        e.Bytes = v;
-                        snapshot->Constants.emplace_back(std::move(e));
-                    }
-                } else if constexpr (std::is_same_v<T, render::TextureView*>) {
-                    MaterialRenderSnapshot::TextureEntry e{};
-                    e.Name = name;
-                    e.RawView = v;
-                    snapshot->Textures.emplace_back(std::move(e));
-                } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
-                    MaterialRenderSnapshot::TextureEntry e{};
-                    e.Name = name;
-                    e.Texture = v;
-                    snapshot->Textures.emplace_back(std::move(e));
-                } else if constexpr (std::is_same_v<T, render::Sampler*>) {
-                    MaterialRenderSnapshot::SamplerEntry e{};
-                    e.Name = name;
-                    e.Sampler = v;
-                    snapshot->Samplers.emplace_back(std::move(e));
-                }
-            },
-            value);
+        merged[name] = &value;
+    }
+    for (const auto& [name, value] : overrides->GetOverrides()) {
+        merged[name] = &value;  // 覆盖同名
+    }
+    for (const auto& [name, valuePtr] : merged) {
+        EmitProperty(*snapshot, name, *valuePtr);
     }
     return snapshot;
 }
 
-Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
-    render::ShaderVariantCache& cache,
-    uint32_t passIndex,
-    render::HlslShaderModel sm) const noexcept {
-    ShaderAsset* shader = Shader.Get();
-    if (shader == nullptr) {
-        RADRAY_ERR_LOG("MaterialRenderSnapshot::ResolveVariant: no shader assigned");
-        return nullptr;
-    }
-    vector<std::string_view> enabled;
-    enabled.reserve(EnabledKeywords.size());
-    for (const string& kw : EnabledKeywords) {
-        enabled.emplace_back(kw);
-    }
-    return shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
-}
-
-uint32_t MaterialRenderSnapshot::ApplyProperties(render::ShaderParameterTable& table) const noexcept {
-    uint32_t applied = 0;
-    for (const ConstantEntry& c : Constants) {
-        if (!c.Bytes.empty() && table.SetBytes(c.Name, c.Bytes.data(), static_cast<uint32_t>(c.Bytes.size()))) {
-            ++applied;
-        }
-    }
-    for (const TextureEntry& t : Textures) {
-        render::TextureView* srv = t.RawView;
-        if (srv == nullptr) {
-            TextureAsset* tex = t.Texture.Get();
-            srv = tex != nullptr ? tex->GetSrv() : nullptr;
-        }
-        if (srv != nullptr && table.SetResource(t.Name, static_cast<render::ResourceView*>(srv))) {
-            ++applied;
-        }
-    }
-    for (const SamplerEntry& s : Samplers) {
-        if (s.Sampler != nullptr && table.SetSampler(s.Name, s.Sampler)) {
-            ++applied;
-        }
-    }
-    return applied;
-}
-
-uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table) const noexcept {
+uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept {
     uint32_t applied = 0;
     for (const auto& [name, value] : _properties) {
         const bool ok = std::visit(
@@ -233,14 +228,17 @@ uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table) con
                     return table.SetBytes(name, v.data(), sizeof(float) * 4);
                 } else if constexpr (std::is_same_v<T, vector<byte>>) {
                     return !v.empty() && table.SetBytes(name, v.data(), static_cast<uint32_t>(v.size()));
-                } else if constexpr (std::is_same_v<T, render::TextureView*>) {
-                    return v != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(v));
                 } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
                     TextureAsset* tex = v.Get();
                     render::TextureView* srv = tex != nullptr ? tex->GetSrv() : nullptr;
                     return srv != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(srv));
-                } else if constexpr (std::is_same_v<T, render::Sampler*>) {
-                    return v != nullptr && table.SetSampler(name, v);
+                } else if constexpr (std::is_same_v<T, TextureSubViewRef>) {
+                    TextureAsset* tex = v.Texture.Get();
+                    render::TextureView* srv = tex != nullptr ? tex->GetOrCreateSrv(v.SubView) : nullptr;
+                    return srv != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(srv));
+                } else if constexpr (std::is_same_v<T, render::SamplerDescriptor>) {
+                    render::Sampler* sampler = samplerCache.GetOrCreate(v).Get();
+                    return sampler != nullptr && table.SetSampler(name, sampler);
                 } else {
                     return false;
                 }

@@ -9,12 +9,14 @@
 #include <radray/render/gpu_resource.h>
 #include <radray/render/pipeline_state_cache.h>
 #include <radray/render/shader_variant_cache.h>
+#include <radray/runtime/render_framework/material_constant_binder.h>
 #include <radray/types.h>
 
 namespace radray {
 
 class DrawList;
 struct DrawItem;
+class SamplerCache;
 
 /// 逐物体绘制执行器 (对应 Unity 的 ScriptableRenderContext.DrawRenderers /
 /// UE5 的 FMeshDrawCommand::SubmitDraw)。
@@ -24,14 +26,14 @@ struct DrawItem;
 ///     1. ResolveVariant  -> 编译好的变体 (VS/PS + binding layout)
 ///     2. 构造 GraphicsPipelineStateDescriptor (pass 固定状态 + 顶点布局) -> PSO 缓存
 ///     3. 分配 per-object cbuffer (CBufferArena), 写入 proxy 的 LocalToWorld
-///     4. material.ApplyProperties  -> push/root constant
+///     4. MaterialConstantBinder 按反射把材质常量字段打进所属 cbuffer 块 + 绑定纹理/采样器
 ///     5. encoder: BindPSO / BindVB / BindIB / BindShaderParameters / DrawIndexed
 ///
 /// 设计要点:
 /// - 每个 draw item 分配独立的 ShaderParameterTable (BindShaderParameters 立即录制,
 ///   复用同一 table 会让后一次 SetResource 覆盖前一次已引用的描述符)。
-/// - per-object / per-view 常量走真实 cbuffer (CBufferArena + SetResource CBuffer),
-///   与 material property 走的 push constant 互不冲突。
+/// - per-object / per-view 常量走真实 cbuffer (CBufferArena + SetResource CBuffer);
+///   材质常量由 MaterialConstantBinder 按块的绑定类型走 push constant 或 CBV, 系统块名被跳过。
 /// - 帧内分配的 table / arena buffer 需存活到命令提交完成; 调用方在 SubmitAndWait 后
 ///   再调用 BeginFrame 回收。
 class MeshPassExecutor {
@@ -45,6 +47,7 @@ public:
         render::Device* device,
         render::ShaderVariantCache* variantCache,
         render::GraphicsPipelineStateCache* psoCache,
+        SamplerCache* samplerCache,
         std::string perObjectCBufferName = "PerObject",
         uint32_t flightCount = 1) noexcept;
 
@@ -84,11 +87,16 @@ private:
     render::Device* _device{nullptr};
     render::ShaderVariantCache* _variantCache{nullptr};
     render::GraphicsPipelineStateCache* _psoCache{nullptr};
+    SamplerCache* _samplerCache{nullptr};
     std::string _perObjectName;
     std::string _viewName;
     vector<byte> _viewData;
     vector<FlightResources> _flights;
     uint32_t _currentFlight{0};
+    // 材质常量打包器: 用变体反射把散字段打进所属 cbuffer 块, 整块提交 (push constant / CBV)。
+    MaterialConstantBinder _constantBinder;
+    // 复用缓冲: 每 draw 收集快照常量供打包器消费, 避免每次分配。
+    vector<MaterialConstantValue> _constantScratch;
 };
 
 }  // namespace radray

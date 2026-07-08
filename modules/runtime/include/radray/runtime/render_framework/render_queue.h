@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include <radray/types.h>
-#include <radray/runtime/material_asset.h>
+#include <radray/runtime/render_framework/material_render_snapshot.h>
 
 namespace radray {
 

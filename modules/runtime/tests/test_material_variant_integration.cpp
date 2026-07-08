@@ -9,6 +9,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray::render::test {
 namespace {
@@ -140,7 +141,8 @@ TEST_P(MaterialVariantIntegrationTest, ApplyPropertiesWritesConstantBuffer) {
     ASSERT_TRUE(tableOpt.HasValue()) << fmt::format("CreateShaderParameterTable failed: {}", reason);
     auto table = tableOpt.Release();
 
-    const uint32_t applied = material.ApplyProperties(*table);
+    SamplerCache samplerCache{_ctx.GetDevicePtr()};
+    const uint32_t applied = material.ApplyProperties(*table, samplerCache);
     // 只有 gMaterial (cbuffer) 应被接受; _DoesNotExist 被忽略。
     EXPECT_EQ(applied, 1u);
 }

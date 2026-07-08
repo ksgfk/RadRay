@@ -10,7 +10,7 @@
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
-#include <radray/runtime/material_asset.h>
+#include <radray/runtime/render_framework/material_render_snapshot.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
@@ -39,6 +39,7 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
             _device,
             renderSystem->GetShaderVariantCache(),
             renderSystem->GetGraphicsPipelineStateCache(),
+            renderSystem->GetSamplerCache(),
             std::string{kPerObjectName},
             flightCount);
     }

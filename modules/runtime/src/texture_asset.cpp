@@ -103,6 +103,7 @@ AssetLoadTask LoadTextureFromImageTask(
     co_await frame.WaitGpu();
 
     co_return AssetLoadResult::Success(make_unique<TextureAsset>(
+        frame.GetUploader().GetDevice(),
         std::move(name),
         std::move(uploaded->Texture),
         std::move(uploaded->Srv)));
@@ -128,23 +129,71 @@ AssetLoadTask LoadTextureFromMemoryTask(
 
 }  // namespace
 
+TextureViewKey BuildTextureViewKey(const TextureSubViewDesc& desc) noexcept {
+    TextureViewKey key{};  // 清零, 保证 padding 恒为 0 (PodHasher/PodEqual 要求)
+    key.Dim = static_cast<int32_t>(desc.Dim);
+    key.Format = static_cast<int32_t>(desc.Format);
+    key.BaseArrayLayer = desc.Range.BaseArrayLayer;
+    key.ArrayLayerCount = desc.Range.ArrayLayerCount;
+    key.BaseMipLevel = desc.Range.BaseMipLevel;
+    key.MipLevelCount = desc.Range.MipLevelCount;
+    return key;
+}
+
 TextureAsset::TextureAsset(
+    render::Device* device,
     string name,
     unique_ptr<render::Texture> texture,
     unique_ptr<render::TextureView> srv) noexcept
-    : _name(std::move(name)), _texture(std::move(texture)), _srv(std::move(srv)) {
+    : _device(device), _name(std::move(name)), _texture(std::move(texture)), _srv(std::move(srv)) {
 }
 
 TextureAsset::~TextureAsset() noexcept = default;
 
 void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
     _name.clear();
+    for (auto& [key, view] : _viewCache) {
+        recycler.RecycleRenderResource(std::move(view));
+    }
+    _viewCache.clear();
     recycler.RecycleRenderResource(std::move(_srv));
     recycler.RecycleRenderResource(std::move(_texture));
 }
 
 AssetTypeId TextureAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<TextureAsset>;
+}
+
+render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
+    if (sub.IsDefault()) {
+        return _srv.get();
+    }
+    if (_device == nullptr || _texture == nullptr) {
+        return nullptr;
+    }
+    const TextureViewKey key = BuildTextureViewKey(sub);
+    if (auto it = _viewCache.find(key); it != _viewCache.end()) {
+        return it->second.get();
+    }
+    // Format::UNKNOWN 表示沿用底层贴图格式。
+    const render::TextureFormat format =
+        sub.Format == render::TextureFormat::UNKNOWN ? _texture->GetDesc().Format : sub.Format;
+    render::TextureViewDescriptor viewDesc{
+        .Target = _texture.get(),
+        .Dim = sub.Dim,
+        .Format = format,
+        .Range = sub.Range,
+        .Usage = render::TextureViewUsage::Resource};
+    auto viewOpt = _device->CreateTextureView(viewDesc);
+    if (!viewOpt.HasValue()) {
+        RADRAY_ERR_LOG("TextureAsset::GetOrCreateSrv: CreateTextureView failed for '{}'", _name);
+        return nullptr;
+    }
+    auto view = viewOpt.Release();
+    view->SetDebugName(fmt::format("texasset_subsrv_{}", _name));
+    render::TextureView* raw = view.get();
+    _viewCache.emplace(key, std::move(view));
+    return raw;
 }
 
 StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(

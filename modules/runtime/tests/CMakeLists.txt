@@ -4,6 +4,7 @@ radray_add_test(test_light_component SOURCES test_light_component.cpp LINK_LIBS 
 radray_add_test(test_static_mesh_component SOURCES test_static_mesh_component.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_shader_asset SOURCES test_shader_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_material_asset SOURCES test_material_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_material_property_block SOURCES test_material_property_block.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_render_queue SOURCES test_render_queue.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
 # 设备级集成测试: material -> variant -> parameter table 全链路。复用 render 测试框架
@@ -36,4 +37,24 @@ if (RADRAY_ENABLE_DXC AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADR
         NO_DISCOVER)
     target_include_directories(test_mesh_pass_executor PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
     radray_add_gtest_case(MeshPassExecutorTest TARGET test_mesh_pass_executor FILTER RenderBackends/MeshPassExecutorTest.*)
+
+    # TextureAsset view 缓存: 默认 SRV 直返, 非默认子 view 按 descriptor 去重。
+    radray_add_test(test_texture_view_cache
+        SOURCES
+            test_texture_view_cache.cpp
+            ${CMAKE_SOURCE_DIR}/modules/render/tests/render_test_framework.cpp
+        LINK_LIBS radraycore radrayrender radrayruntime
+        NO_DISCOVER)
+    target_include_directories(test_texture_view_cache PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
+    radray_add_gtest_case(TextureViewCacheTest TARGET test_texture_view_cache FILTER RenderBackends/TextureViewCacheTest.*)
+
+    # 材质常量按【字段名】打进真实 cbuffer (MaterialConstantBinder 反射打包): 字段名设色 -> 像素回读。
+    radray_add_test(test_material_cbuffer_field
+        SOURCES
+            test_material_cbuffer_field.cpp
+            ${CMAKE_SOURCE_DIR}/modules/render/tests/render_test_framework.cpp
+        LINK_LIBS radraycore radrayrender radrayruntime
+        NO_DISCOVER)
+    target_include_directories(test_material_cbuffer_field PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
+    radray_add_gtest_case(MaterialCBufferFieldTest TARGET test_material_cbuffer_field FILTER RenderBackends/MaterialCBufferFieldTest.*)
 endif()

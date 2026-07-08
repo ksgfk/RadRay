@@ -6,7 +6,7 @@
 #include <radray/basic_math.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/material_asset.h>
+#include <radray/runtime/render_framework/material_render_snapshot.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/types.h>

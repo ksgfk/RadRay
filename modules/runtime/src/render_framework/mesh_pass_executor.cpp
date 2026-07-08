@@ -4,10 +4,11 @@
 #include <utility>
 
 #include <radray/logger.h>
-#include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/render_framework/material_render_snapshot.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
+#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray {
 
@@ -35,11 +36,13 @@ MeshPassExecutor::MeshPassExecutor(
     render::Device* device,
     render::ShaderVariantCache* variantCache,
     render::GraphicsPipelineStateCache* psoCache,
+    SamplerCache* samplerCache,
     std::string perObjectCBufferName,
     uint32_t flightCount) noexcept
     : _device(device),
       _variantCache(variantCache),
       _psoCache(psoCache),
+      _samplerCache(samplerCache),
       _perObjectName(std::move(perObjectCBufferName)) {
     const uint32_t count = flightCount == 0 ? 1 : flightCount;
     _flights.reserve(count);
@@ -183,8 +186,20 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         }
     }
 
-    // 4c. material property (push/root constant + 纹理/采样器)。
-    item.Material->ApplyProperties(*table);
+    // 4c. material property。
+    //   - 常量: 交给 MaterialConstantBinder, 用变体反射把散字段打进所属 cbuffer 块 (整块提交)。
+    //     per-object / per-view 系统块名被跳过 (上面 4a/4b 已单独填充)。
+    //   - 纹理 / 采样器: 直接按名绑定。
+    if (item.Material != nullptr) {
+        item.Material->CollectConstants(_constantScratch);
+        if (!_constantScratch.empty()) {
+            std::string_view reserved[2] = {_perObjectName, _viewName};
+            _constantBinder.Bind(variant, *table, fr.Arena, _constantScratch, reserved);
+        }
+        if (_samplerCache != nullptr) {
+            item.Material->ApplyResources(*table, *_samplerCache);
+        }
+    }
 
     // 5. 录制 draw。
     encoder->BindGraphicsPipelineState(pso);

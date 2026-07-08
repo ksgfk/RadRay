@@ -17,6 +17,7 @@
 #include <radray/runtime/render_framework/mesh_pass_executor.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
+#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray::render::test {
 namespace {
@@ -170,11 +171,13 @@ protected:
                             _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache())
                             .Release();
         _psoCache = _ctx.GetDevicePtr()->CreateGraphicsPipelineStateCache().Release();
+        _samplerCache = make_unique<SamplerCache>(_ctx.GetDevicePtr());
     }
 
     ComputeTestContext _ctx{};
     unique_ptr<ShaderVariantCache> _variantCache{};
     unique_ptr<GraphicsPipelineStateCache> _psoCache{};
+    unique_ptr<SamplerCache> _samplerCache{};
 };
 
 TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
@@ -246,7 +249,7 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     list.SortOpaque();
 
     // executor (per-object cbuffer 变量名 gPerObject)。
-    MeshPassExecutor executor{_ctx.GetDevicePtr(), _variantCache.get(), _psoCache.get(), "gPerObject"};
+    MeshPassExecutor executor{_ctx.GetDevicePtr(), _variantCache.get(), _psoCache.get(), _samplerCache.get(), "gPerObject"};
     executor.BeginFrame();
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);

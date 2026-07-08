@@ -16,6 +16,17 @@ class AppFrameContext;
 class CameraComponent;
 class Scene;
 
+/// 渲染队列排序值 (对应 Unity 的 Material.renderQueue)。
+/// 数值越小越先绘制; >= Transparent 的走 back-to-front 半透明排序。
+enum class RenderQueue : int32_t {
+    Background = 1000,
+    Geometry = 2000,
+    AlphaTest = 2450,
+    GeometryLast = 2500,  // 不透明与半透明的分界
+    Transparent = 3000,
+    Overlay = 4000,
+};
+
 /// SRP-style injection point for logical rendering passes.
 enum class RenderPassEvent : int32_t {
     BeforeRendering = 0,

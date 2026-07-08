@@ -1,7 +1,6 @@
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 
 #include <radray/runtime/components/static_mesh_component.h>
-#include <radray/runtime/material_asset.h>
 
 namespace radray {
 namespace {
