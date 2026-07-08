@@ -8,12 +8,12 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
+#include <radray/render/sampler_cache.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/forward_pipeline.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/window_manager.h>
 
@@ -68,7 +68,7 @@ void RenderSystem::OnInitialize() {
     _psoCache = psoCacheOpt.Release();
 
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
-    _samplerCache = make_unique<SamplerCache>(device);
+    _samplerCache = make_unique<render::SamplerCache>(device);
 
     // shaderlib 随可执行文件部署 (见 modules/runtime/CMakeLists.txt POST_BUILD)。
     _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();

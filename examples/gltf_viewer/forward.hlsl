@@ -18,6 +18,7 @@
 #include "common.hlsl"
 #include "principled.hlsl"
 #include "light.hlsl"
+#include "point_shadow.hlsl"
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -37,8 +38,9 @@ struct VertexOutput {
 struct ViewConstants {
     float4x4 ViewProj;      // 世界 -> 裁剪
     float4 CameraPosition;  // xyz 相机世界位置
-    uint4 LightCounts;      // x = point light count
+    uint4 LightCounts;      // x = point light count, y = shadow point-light index+1 (0 = 无阴影)
     PointLightGpu PointLights[RR_MAX_POINT_LIGHTS];
+    PointShadowData PointShadow;  // 投影阴影点光源的立方体阴影数据
 };
 
 // per-object 常量 (b1, space1)。执行器写入 ObjectToWorld。
@@ -64,6 +66,10 @@ struct MaterialConstants {
 VK_PUSH_CONSTANT ConstantBuffer<MaterialConstants> gMaterial;
 VK_BINDING(0, 1) ConstantBuffer<ViewConstants> gView : register(b0, space1);
 VK_BINDING(1, 1) ConstantBuffer<PerObject> gPerObject : register(b1, space1);
+
+// 点光源立方体阴影图 + 比较采样器 (由 ForwardPipeline 作为管线级全局资源每 draw 绑定)。
+VK_BINDING(2, 1) TextureCube<float> gShadowCube : register(t0, space1);
+VK_BINDING(3, 1) SamplerComparisonState gShadowSampler : register(s0, space1);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;
@@ -125,6 +131,8 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
 
     float3 Lo = float3(0.0f, 0.0f, 0.0f);
     uint ptCount = min(gView.LightCounts.x, (uint)RR_MAX_POINT_LIGHTS);
+    // 投影阴影的点光源序号 (0 = 无阴影, 否则实际序号 = shadowIndex1 - 1)。
+    uint shadowIndex1 = gView.LightCounts.y;
     for (uint j = 0; j < ptCount; ++j) {
         PointLightGpu L = gView.PointLights[j];
         float3 woW = normalize(L.Position.xyz - input.WorldPosition);
@@ -133,6 +141,13 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             continue;
         }
         float3 Li = eval_point_irradiance(L, input.WorldPosition);
+        // 该光源投影阴影: 用 cube 阴影图采样可见度, 乘到辐照度上。
+        if (shadowIndex1 != 0u && (j + 1u) == shadowIndex1) {
+            float visibility = sample_point_shadow(
+                gShadowCube, gShadowSampler, gView.PointShadow,
+                input.WorldPosition, n);
+            Li *= visibility;
+        }
         Lo += EvalPrincipledReflection(
                   normalize(wi), normalize(wo), baseColor, metallic, roughness,
                   specular, specTint, anisotropic, sheen,

@@ -339,17 +339,6 @@ private:
     std::chrono::duration<float> _lastFrameLatency{};
 };
 
-template <>
-struct RuntimeTypeTrait<GpuSystem> {
-    static constexpr RuntimeTypeId value{0xe7c701b1, 0xcab6, 0x4be7, 0x94, 0xec, 0xfd, 0x8c, 0x6f, 0xd4, 0xf4, 0x68};
-};
-
-/// 依赖声明(非侵入,类外特化):GpuSystem 需要 WindowManager,复用已有 public setter。
-template <>
-struct ServiceTraits<GpuSystem> {
-    static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
-};
-
 /// Render 回调的唯一入参，封装一帧录制 API。
 /// 生命周期仅限本次 Render 调用；runtime 在 BeginFrameRecord 构造并传入。
 class AppFrameContext {
@@ -477,6 +466,18 @@ public:
 private:
     render::Device* _device;
     StagingBufferPool _stagingPool;
+};
+
+/// 依赖声明(非侵入,类外特化):GpuSystem 需要 WindowManager,复用已有 public setter。
+template <>
+struct ServiceTraits<GpuSystem> {
+    static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
+};
+
+template <>
+struct RuntimeTypeTrait<GpuSystem> {
+    static constexpr RuntimeTypeId value{0xe7c701b1, 0xcab6, 0x4be7, 0x94, 0xec, 0xfd, 0x8c, 0x6f, 0xd4, 0xf4, 0x68};
+    using Bases = std::tuple<IRenderResourceRecycler>;
 };
 
 }  // namespace radray

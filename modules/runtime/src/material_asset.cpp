@@ -5,7 +5,7 @@
 
 #include <radray/logger.h>
 #include <radray/runtime/render_framework/material_property_block.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray {
 
@@ -215,7 +215,7 @@ shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot(const Mat
     return snapshot;
 }
 
-uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept {
+uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
     uint32_t applied = 0;
     for (const auto& [name, value] : _properties) {
         const bool ok = std::visit(

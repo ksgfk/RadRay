@@ -12,7 +12,8 @@ struct ShadowParam {
     float4 Params; // x enable, y shadowmap size(px), z cascade count, w soft mode
 };
 
-// Additional (spot/point) light shadow atlas. Each spot uses 1 slice; each point uses 6 (cube faces).
+// Additional (spot) light shadow atlas. Each spot uses 1 slice.
+// (Point light cube shadows live in point_shadow.hlsl and use a TextureCube instead.)
 struct AdditionalShadowParam {
     float4x4 WorldToShadow[RADRAY_MAX_ADD_SHADOW_SLICES];
     float4 Params; // x enable, y atlas size(px), z slice count, w soft mode
@@ -190,19 +191,6 @@ float sample_shadow_cascade(
     return sample_shadow_tap(shadowMap, cmp, uvz.xy, slice, uvz.z);
 }
 
-// Select the cube face (0..5 = +X,-X,+Y,-Y,+Z,-Z) a direction projects onto.
-// Matches PointShadowFaceForward order on the CPU side.
-uint cube_face_id(float3 dir) {
-    float3 a = abs(dir);
-    if (a.x >= a.y && a.x >= a.z) {
-        return dir.x > 0.0f ? 0u : 1u;
-    }
-    if (a.y >= a.z) {
-        return dir.y > 0.0f ? 2u : 3u;
-    }
-    return dir.z > 0.0f ? 4u : 5u;
-}
-
 // Sample one slice of the additional-light shadow atlas with the configured PCF mode.
 float sample_additional_shadow_slice(
     Texture2DArray<float> shadowMap,
@@ -245,21 +233,6 @@ float sample_spot_shadow(
         return 1.0f;
     }
     return sample_additional_shadow_slice(shadowMap, cmp, sp, (uint)firstSlice, posW);
-}
-
-// Point light shadow: pick the cube face from the light->fragment direction, sample firstSlice+face.
-float sample_point_shadow(
-    Texture2DArray<float> shadowMap,
-    SamplerComparisonState cmp,
-    AdditionalShadowParam sp,
-    float firstSlice,
-    float3 lightPosW,
-    float3 posW) {
-    if (firstSlice < 0.0f) {
-        return 1.0f;
-    }
-    uint face = cube_face_id(posW - lightPosW);
-    return sample_additional_shadow_slice(shadowMap, cmp, sp, (uint)firstSlice + face, posW);
 }
 
 #endif

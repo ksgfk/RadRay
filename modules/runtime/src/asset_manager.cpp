@@ -4,7 +4,6 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/runtime/gpu_system.h>
 
 namespace radray {
 
@@ -59,6 +58,84 @@ private:
 // ════════════════════════════════════════════════════════════
 //  StreamingAssetRefAny
 // ════════════════════════════════════════════════════════════
+
+namespace {
+
+// 引用计数走共享控制块的原子变量,可在任意线程安全增减,不触碰 AssetManager / SparseSet。
+void AddRefControl(const shared_ptr<AssetRefControl>& control) noexcept {
+    if (control != nullptr) {
+        control->RefCount.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void ReleaseControl(const shared_ptr<AssetRefControl>& control) noexcept {
+    if (control != nullptr) {
+        control->RefCount.fetch_sub(1, std::memory_order_acq_rel);
+    }
+}
+
+}  // namespace
+
+StreamingAssetRefAny::StreamingAssetRefAny(
+    AssetManager* manager,
+    AssetHandle handle,
+    AssetId id,
+    shared_ptr<AssetRefControl> control) noexcept
+    : _manager(manager), _handle(handle), _id(id), _control(std::move(control)) {
+    AddRefControl(_control);
+}
+
+StreamingAssetRefAny::StreamingAssetRefAny(const StreamingAssetRefAny& other) noexcept
+    : _manager(other._manager), _handle(other._handle), _id(other._id), _control(other._control) {
+    AddRefControl(_control);
+}
+
+StreamingAssetRefAny::StreamingAssetRefAny(StreamingAssetRefAny&& other) noexcept
+    : _manager(other._manager), _handle(other._handle), _id(other._id), _control(std::move(other._control)) {
+    other._manager = nullptr;
+    other._handle = AssetHandle::Invalid();
+    other._id = AssetId{};
+}
+
+StreamingAssetRefAny& StreamingAssetRefAny::operator=(const StreamingAssetRefAny& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    AddRefControl(other._control);
+    ReleaseControl(_control);
+    _manager = other._manager;
+    _handle = other._handle;
+    _id = other._id;
+    _control = other._control;
+    return *this;
+}
+
+StreamingAssetRefAny& StreamingAssetRefAny::operator=(StreamingAssetRefAny&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    ReleaseControl(_control);
+    _manager = other._manager;
+    _handle = other._handle;
+    _id = other._id;
+    _control = std::move(other._control);
+    other._manager = nullptr;
+    other._handle = AssetHandle::Invalid();
+    other._id = AssetId{};
+    return *this;
+}
+
+StreamingAssetRefAny::~StreamingAssetRefAny() noexcept {
+    ReleaseControl(_control);
+}
+
+void StreamingAssetRefAny::Reset() noexcept {
+    ReleaseControl(_control);
+    _control.reset();
+    _manager = nullptr;
+    _handle = AssetHandle::Invalid();
+    _id = AssetId{};
+}
 
 Asset* StreamingAssetRefAny::Get() const noexcept {
     if (_manager == nullptr || !_handle.IsValid()) {
@@ -151,17 +228,24 @@ AssetHandle AssetManager::EmplaceLoadingSlot(const AssetId& id, AssetTypeId type
     return handle;
 }
 
+StreamingAssetRefAny AssetManager::MakeRef(AssetHandle handle, const AssetId& id) noexcept {
+    unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
+    shared_ptr<AssetRefControl> control =
+        (slotPtr != nullptr && *slotPtr != nullptr) ? slotPtr->get()->Control : nullptr;
+    return StreamingAssetRefAny{this, handle, id, std::move(control)};
+}
+
 StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
     AssetHandle existing = FindHandle(request.Id);
     if (existing.IsValid()) {
-        return StreamingAssetRefAny{this, existing, request.Id};
+        return MakeRef(existing, request.Id);
     }
 
     AssetHandle handle = EmplaceLoadingSlot(request.Id, request.ExpectedTypeId);
     _loadScope.Spawn(RunLoad(handle, std::move(request.Task)));
     _activeLoads.push_back(handle);
 
-    return StreamingAssetRefAny{this, handle, request.Id};
+    return MakeRef(handle, request.Id);
 }
 
 task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
@@ -175,11 +259,11 @@ task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
 StreamingAssetRefAny AssetManager::AddReady(const AssetId& id, unique_ptr<Asset> object, AssetTypeId expectedTypeId) {
     AssetHandle existing = FindHandle(id);
     if (existing.IsValid()) {
-        return StreamingAssetRefAny{this, existing, id};
+        return MakeRef(existing, id);
     }
     AssetHandle handle = EmplaceLoadingSlot(id, expectedTypeId);
     OnLoadComplete(handle, AssetLoadResult::Success(std::move(object)));
-    return StreamingAssetRefAny{this, handle, id};
+    return MakeRef(handle, id);
 }
 
 task<void> AssetManager::RunLoad(AssetHandle handle, AssetLoadTask loadTask) {
@@ -226,7 +310,7 @@ StreamingAssetRefAny AssetManager::Find(const AssetId& id) noexcept {
     if (!handle.IsValid()) {
         return StreamingAssetRefAny{};
     }
-    return StreamingAssetRefAny{this, handle, id};
+    return MakeRef(handle, id);
 }
 
 void AssetManager::Cancel(const StreamingAssetRefAny& ref) noexcept {
@@ -246,6 +330,45 @@ void AssetManager::Unload(const AssetId& id) noexcept {
     if (!handle.IsValid()) {
         return;
     }
+#ifdef RADRAY_IS_DEBUG
+    unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
+    if (slotPtr != nullptr && *slotPtr != nullptr) {
+        uint32_t refs = slotPtr->get()->Control->RefCount.load(std::memory_order_relaxed);
+        if (refs > 0) {
+            RADRAY_WARN_LOG(
+                "AssetManager: force Unload asset {} with {} live reference(s); existing StreamingAssetRef will silently become invalid",
+                id,
+                refs);
+        }
+    }
+#endif
+    UnloadSlot(handle);
+}
+
+uint32_t AssetManager::CollectUnreferenced() noexcept {
+    vector<AssetHandle> targets;
+    const size_t slotCount = _slots.Count();
+    std::span<const unique_ptr<AssetSlot>> values = _slots.Values();
+    for (size_t i = 0; i < slotCount; ++i) {
+        const AssetSlot* slot = values[i].get();
+        if (slot == nullptr || slot->PendingUnload ||
+            slot->Control->RefCount.load(std::memory_order_acquire) != 0) {
+            continue;
+        }
+        AssetHandle handle = FindHandle(slot->Id);
+        if (handle.IsValid()) {
+            targets.push_back(handle);
+        }
+    }
+    uint32_t collected = 0;
+    for (AssetHandle handle : targets) {
+        UnloadSlot(handle);
+        ++collected;
+    }
+    return collected;
+}
+
+void AssetManager::UnloadSlot(AssetHandle handle) noexcept {
     unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
     if (slotPtr == nullptr) {
         return;
@@ -357,8 +480,8 @@ AssetWaitRecord* AssetManager::RegisterWait(
 }
 
 IRenderResourceRecycler& AssetManager::GetRecycler() noexcept {
-    if (_gpuSystem != nullptr) {
-        return *_gpuSystem;
+    if (_recycler != nullptr) {
+        return *_recycler;
     }
     static ImmediateRenderResourceRecycler immediate;
     return immediate;

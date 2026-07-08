@@ -81,6 +81,7 @@ private:
 template <>
 struct RuntimeTypeTrait<StaticMeshComponent> {
     static constexpr RuntimeTypeId value{0xa1c3650a, 0xf8bb, 0x42ed, 0xba, 0xa2, 0x7d, 0xa6, 0x28, 0xf2, 0xa2, 0x19};
+    using Bases = std::tuple<PrimitiveComponent>;
 };
 
 }  // namespace radray

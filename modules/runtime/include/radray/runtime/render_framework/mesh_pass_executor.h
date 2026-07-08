@@ -16,7 +16,10 @@ namespace radray {
 
 class DrawList;
 struct DrawItem;
+
+namespace render {
 class SamplerCache;
+}  // namespace render
 
 /// 逐物体绘制执行器 (对应 Unity 的 ScriptableRenderContext.DrawRenderers /
 /// UE5 的 FMeshDrawCommand::SubmitDraw)。
@@ -47,7 +50,7 @@ public:
         render::Device* device,
         render::ShaderVariantCache* variantCache,
         render::GraphicsPipelineStateCache* psoCache,
-        SamplerCache* samplerCache,
+        render::SamplerCache* samplerCache,
         std::string perObjectCBufferName = "PerObject",
         uint32_t flightCount = 1) noexcept;
 
@@ -62,6 +65,13 @@ public:
     /// 设置一个 per-view 常量块 (可选)。传入的字节会在每次 draw 前写入名为
     /// viewCBufferName 的 cbuffer。传空 name 关闭该功能。
     void SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept;
+
+    /// 设置管线级 (per-pass) 的全局纹理 / 采样器。每次 draw 前按名字绑定 (名字未在 shader
+    /// 声明时静默跳过)。用于阴影图等由管线而非材质提供的资源。传 nullptr 清除。
+    /// 名字借用调用方存储, 需在 Execute 期间存活。
+    void SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept;
+    void SetGlobalSampler(std::string_view name, render::Sampler* sampler) noexcept;
+    void ClearGlobals() noexcept;
 
     /// 把已排序的 DrawList 提交进一个已 BeginRenderPass 的图形编码器。
     /// 返回成功提交的 draw 数。
@@ -87,10 +97,21 @@ private:
     render::Device* _device{nullptr};
     render::ShaderVariantCache* _variantCache{nullptr};
     render::GraphicsPipelineStateCache* _psoCache{nullptr};
-    SamplerCache* _samplerCache{nullptr};
+    render::SamplerCache* _samplerCache{nullptr};
     std::string _perObjectName;
     std::string _viewName;
     vector<byte> _viewData;
+    // 管线级全局纹理 / 采样器 (per-pass, 非 per-material)。名字借用调用方存储。
+    struct GlobalTexture {
+        std::string Name;
+        render::TextureView* View{nullptr};
+    };
+    struct GlobalSampler {
+        std::string Name;
+        render::Sampler* Sampler{nullptr};
+    };
+    vector<GlobalTexture> _globalTextures;
+    vector<GlobalSampler> _globalSamplers;
     vector<FlightResources> _flights;
     uint32_t _currentFlight{0};
     // 材质常量打包器: 用变体反射把散字段打进所属 cbuffer 块, 整块提交 (push constant / CBV)。

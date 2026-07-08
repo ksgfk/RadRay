@@ -4,11 +4,11 @@
 #include <utility>
 
 #include <radray/logger.h>
+#include <radray/render/sampler_cache.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/render_framework/material_render_snapshot.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray {
 
@@ -36,7 +36,7 @@ MeshPassExecutor::MeshPassExecutor(
     render::Device* device,
     render::ShaderVariantCache* variantCache,
     render::GraphicsPipelineStateCache* psoCache,
-    SamplerCache* samplerCache,
+    render::SamplerCache* samplerCache,
     std::string perObjectCBufferName,
     uint32_t flightCount) noexcept
     : _device(device),
@@ -65,6 +65,31 @@ void MeshPassExecutor::BeginFrame(uint32_t flightIndex) noexcept {
 void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept {
     _viewName.assign(viewCBufferName.begin(), viewCBufferName.end());
     _viewData.assign(data.begin(), data.end());
+}
+
+void MeshPassExecutor::SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept {
+    for (GlobalTexture& g : _globalTextures) {
+        if (g.Name == name) {
+            g.View = view;
+            return;
+        }
+    }
+    _globalTextures.push_back(GlobalTexture{std::string{name}, view});
+}
+
+void MeshPassExecutor::SetGlobalSampler(std::string_view name, render::Sampler* sampler) noexcept {
+    for (GlobalSampler& g : _globalSamplers) {
+        if (g.Name == name) {
+            g.Sampler = sampler;
+            return;
+        }
+    }
+    _globalSamplers.push_back(GlobalSampler{std::string{name}, sampler});
+}
+
+void MeshPassExecutor::ClearGlobals() noexcept {
+    _globalTextures.clear();
+    _globalSamplers.clear();
 }
 
 Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
@@ -198,6 +223,26 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         }
         if (_samplerCache != nullptr) {
             item.Material->ApplyResources(*table, *_samplerCache);
+        }
+    }
+
+    // 4d. 管线级全局纹理 / 采样器 (per-pass, 非 per-material)。名字未命中静默跳过。
+    for (const GlobalTexture& g : _globalTextures) {
+        if (g.View == nullptr) {
+            continue;
+        }
+        auto pid = table->GetShaderBindingLayout()->FindParameterId(g.Name);
+        if (pid.has_value()) {
+            table->SetResource(pid.value(), static_cast<render::ResourceView*>(g.View));
+        }
+    }
+    for (const GlobalSampler& g : _globalSamplers) {
+        if (g.Sampler == nullptr) {
+            continue;
+        }
+        auto pid = table->GetShaderBindingLayout()->FindParameterId(g.Name);
+        if (pid.has_value()) {
+            table->SetSampler(pid.value(), g.Sampler);
         }
     }
 

@@ -113,6 +113,7 @@ private:
 template <>
 struct RuntimeTypeTrait<ShaderAsset> {
     static constexpr RuntimeTypeId value{0x3f7c1a8e, 0x2d64, 0x4b91, 0xa5, 0x0e, 0x71, 0x3c, 0x9a, 0x28, 0x6d, 0xf4};
+    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray

@@ -126,15 +126,16 @@ private:
     std::optional<render::PresentMode> _desiredPresentMode;
 };
 
-template <>
-struct RuntimeTypeTrait<WindowManager> {
-    static constexpr RuntimeTypeId value{0x4cdaef6b, 0x5df0, 0x4c55, 0xa0, 0x8a, 0x8b, 0xe6, 0x54, 0xd6, 0x6c, 0x12};
-};
-
 /// 依赖声明(非侵入,类外特化):WindowManager 需要 GpuSystem,复用已有 public setter。
 template <>
 struct ServiceTraits<WindowManager> {
     static constexpr auto Inject = std::tuple{&WindowManager::SetGpuSystem};
+};
+
+template <>
+struct RuntimeTypeTrait<WindowManager> {
+    static constexpr RuntimeTypeId value{0x4cdaef6b, 0x5df0, 0x4c55, 0xa0, 0x8a, 0x8b, 0xe6, 0x54, 0xd6, 0x6c, 0x12};
+    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

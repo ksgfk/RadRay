@@ -9,6 +9,7 @@
 #include <radray/basic_math.h>
 #include <radray/render/gpu_resource.h>
 #include <radray/render/pipeline_state_cache.h>
+#include <radray/render/sampler_cache.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/asset_manager.h>
@@ -18,7 +19,6 @@
 #include <radray/runtime/render_framework/mesh_pass_executor.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
 
 namespace radray::render::test {
 namespace {

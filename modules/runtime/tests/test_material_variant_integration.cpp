@@ -9,7 +9,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray::render::test {
 namespace {

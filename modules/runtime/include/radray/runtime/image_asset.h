@@ -28,11 +28,6 @@ private:
     ImageData _image;
 };
 
-template <>
-struct RuntimeTypeTrait<ImageAsset> {
-    static constexpr RuntimeTypeId value{0x59d6a2e3, 0x5c8a, 0x49be, 0xb1, 0x32, 0x2f, 0x4d, 0x65, 0xb9, 0x1a, 0x07};
-};
-
 struct ImageAssetLoadOptions {
     bool ConvertToRgba8{true};
     ImageData FallbackImage{};
@@ -62,5 +57,11 @@ StreamingAssetRef<ImageAsset> LoadImageAssetFromMemory(
     string name,
     vector<byte> encodedBytes,
     const ImageAssetLoadOptions& options = {});
+
+template <>
+struct RuntimeTypeTrait<ImageAsset> {
+    static constexpr RuntimeTypeId value{0x59d6a2e3, 0x5c8a, 0x49be, 0xb1, 0x32, 0x2f, 0x4d, 0x65, 0xb9, 0x1a, 0x07};
+    using Bases = std::tuple<Asset>;
+};
 
 }  // namespace radray

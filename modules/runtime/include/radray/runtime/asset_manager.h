@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <optional>
 #include <span>
 
@@ -14,7 +15,6 @@ namespace radray {
 
 class AssetManager;
 class AssetWaitAwaitable;
-class GpuSystem;
 class StreamingAssetRefAny;
 template <class T>
 requires std::derived_from<T, Asset>
@@ -59,6 +59,13 @@ struct AssetLoadResult {
 
 using AssetLoadTask = task<AssetLoadResult>;
 
+/// 引用计数控制块。由 slot 与所有 StreamingAssetRef(Any) 共享(shared_ptr)。
+/// 计数用原子变量,构造/拷贝/析构可在任意线程发生;控制块生命周期独立于 slot,
+/// 即使 slot 被强制 Unload 释放,尚存的引用仍安全地减计数(只是解析为失效)。
+struct AssetRefControl {
+    std::atomic<uint32_t> RefCount{0};
+};
+
 /// AssetManager 的加载请求。具体 loader 的参数形状完全由调用方决定；
 /// AssetManager 只消费统一的 task<AssetLoadResult> 结果。ExpectedTypeId 通常由 Load<T> 填充。
 struct AssetLoadRequest {
@@ -68,12 +75,23 @@ struct AssetLoadRequest {
     string DebugName{};
 };
 
-/// 【类型擦除的 streaming 弱引用】。同时表达加载状态与 ready 后的资产访问。
+/// 【类型擦除的 streaming 引用】。同时表达加载状态与 ready 后的资产访问。
 /// Get() 仅在 Ready 且对象仍存活时返回基类 Asset*;Loading/Faulted/Canceled/Unload 均返回 nullptr。
+/// 构造/拷贝会对目标 slot 增加引用计数,析构/移动出/Reset 则减少;引用计数归零的资产
+/// 可由 AssetManager::CollectUnreferenced 统一回收。
+///
+/// 【线程安全】引用计数走共享的 AssetRefControl(原子),拷贝/移动/析构可在任意线程发生,
+/// 资源本身可跨线程使用。但状态查询与资产访问(Get/IsReady/Cancel/Reset...)以及 slot 表操作
+/// 只能在拥有 AssetManager 的线程(主/泵线程)进行。
 class StreamingAssetRefAny {
 public:
     StreamingAssetRefAny() noexcept = default;
     StreamingAssetRefAny(std::nullptr_t) noexcept {}
+    StreamingAssetRefAny(const StreamingAssetRefAny& other) noexcept;
+    StreamingAssetRefAny(StreamingAssetRefAny&& other) noexcept;
+    StreamingAssetRefAny& operator=(const StreamingAssetRefAny& other) noexcept;
+    StreamingAssetRefAny& operator=(StreamingAssetRefAny&& other) noexcept;
+    ~StreamingAssetRefAny() noexcept;
 
     Asset* Get() const noexcept;
     Asset* operator->() const noexcept { return Get(); }
@@ -104,11 +122,7 @@ public:
     requires std::derived_from<T, Asset>
     StreamingAssetRef<T> CastTo() const noexcept;
 
-    void Reset() noexcept {
-        _manager = nullptr;
-        _handle = AssetHandle::Invalid();
-        _id = AssetId{};
-    }
+    void Reset() noexcept;
 
 private:
     friend class AssetManager;
@@ -116,18 +130,18 @@ private:
     requires std::derived_from<U, Asset>
     friend class StreamingAssetRef;
 
-    StreamingAssetRefAny(AssetManager* manager, AssetHandle handle, AssetId id) noexcept
-        : _manager(manager), _handle(handle), _id(id) {}
+    StreamingAssetRefAny(AssetManager* manager, AssetHandle handle, AssetId id, shared_ptr<AssetRefControl> control) noexcept;
 
     AssetManager* _manager{nullptr};
     AssetHandle _handle{AssetHandle::Invalid()};
     AssetId _id{};
+    shared_ptr<AssetRefControl> _control{};
 };
 
-/// 类型安全 streaming 弱引用。本质是 manager + handle + 期望类型:
+/// 类型安全 streaming 引用。本质是 manager + handle + 期望类型:
 /// - Loading 时可查询状态,但 Get()/operator bool 仍为空。
 /// - Ready 且类型匹配时可直接访问资产。
-/// - 不参与引用计数;显式 Unload 后自动失效。
+/// - 参与引用计数(透过底层 StreamingAssetRefAny);显式 Unload 或引用归零回收后自动失效。
 template <class T>
 requires std::derived_from<T, Asset>
 class StreamingAssetRef {
@@ -175,12 +189,13 @@ private:
     StreamingAssetRefAny _ref;
 };
 
-/// 资产仓库。用内部协程承接异步加载结果,单表空位模型,无引用计数,无 GC。
+/// 资产仓库。用内部协程承接异步加载结果,单表空位模型,带引用计数。
 ///
 /// - 单线程使用,不加锁(协程推进、表操作、run 钩子全在主/泵线程)。
 /// - Load 只接受已经创建好的 AssetLoadTask,再包装为内部 task<void> 提交给 TaskScope。
 /// - slot 自己维护 per-load stop_source 与 pending result；TaskScope 只负责结构化生命周期。
-/// - 资产回收由应用层显式 Unload 控制(AssetManager 不做引用计数 / 不做 GC)。
+/// - 每个 slot 维护引用计数:StreamingAssetRef(Any) 构造/拷贝 +1,析构/Reset -1。
+/// - 资产回收有两条路径:应用层显式 Unload,或 CollectUnreferenced 统一回收所有引用归零的 slot。
 class AssetManager {
 public:
     AssetManager() noexcept = default;
@@ -237,11 +252,18 @@ public:
         Cancel(ref.AsAny());
     }
 
-    /// 应用层显式回收资产(唯一回收入口)。命中在飞 slot 则先取消、延迟到终态再回收。
+    /// 应用层显式强制回收资产。命中在飞 slot 则先取消、延迟到终态再回收。
+    /// 【无视引用计数】:仍存活的 StreamingAssetRef 会静默失效(generation 保护不崩溃,
+    /// 但 Get() 返回 nullptr)。DEBUG 下若回收时仍有引用会打 warning。
+    /// 关卡切换 / 热重载 / 编辑器手动删除等确需强制清空的场景使用;否则优先 CollectUnreferenced。
     void Unload(const AssetId& id) noexcept;
 
-    /// 注入 GPU 系统。未设置时 GPU 资源退回立即析构,保持无 GpuSystem 测试场景的旧行为。
-    void SetGpuSystem(GpuSystem* gpuSystem) noexcept { _gpuSystem = gpuSystem; }
+    /// 回收所有引用计数归零的资产 slot。命中在飞 slot 则先取消、延迟到终态再回收。
+    /// 返回实际回收(或标记延迟回收)的 slot 数量。
+    uint32_t CollectUnreferenced() noexcept;
+
+    /// 注入渲染资源回收器(非拥有)。未设置时 GPU 资源退回立即析构,保持无 GpuSystem 测试场景的旧行为。
+    void SetRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
 
     /// 提交加载协程写入的 pending result。
     void Pump();
@@ -259,6 +281,7 @@ private:
         unique_ptr<Asset> Object;
         stop_source Stop;
         std::optional<AssetLoadResult> PendingResult;
+        shared_ptr<AssetRefControl> Control{make_shared<AssetRefControl>()};
         bool PendingCanceled{false};
         bool PendingUnload{false};
     };
@@ -274,6 +297,8 @@ private:
     void ResumeWaiters(std::span<AssetWaitRecord* const> waiters) noexcept;
     void FinalizeTerminalSlot(AssetHandle handle);
     void DestroySlot(AssetHandle handle) noexcept;
+    void UnloadSlot(AssetHandle handle) noexcept;
+    StreamingAssetRefAny MakeRef(AssetHandle handle, const AssetId& id) noexcept;
     IRenderResourceRecycler& GetRecycler() noexcept;
 
     AssetWaitRecord* RegisterWait(AssetHandle handle, stop_token stop, std::coroutine_handle<> continuation);
@@ -284,23 +309,12 @@ private:
     AssetState ResolveState(AssetHandle handle) const noexcept;
     bool IsSlotAlive(AssetHandle handle) const noexcept;
 
-    GpuSystem* _gpuSystem{nullptr};
+    IRenderResourceRecycler* _recycler{nullptr};
     TaskScope _loadScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     SparseSet<unique_ptr<AssetSlot>> _slots;
     unordered_map<AssetId, AssetHandle> _idIndex;
     vector<AssetHandle> _activeLoads;
-};
-
-template <>
-struct RuntimeTypeTrait<AssetManager> {
-    static constexpr RuntimeTypeId value{0xd4f18ebe, 0xb5c4, 0x46c2, 0x8b, 0x7b, 0x2d, 0xde, 0x5c, 0x96, 0xe5, 0xcf};
-};
-
-/// 依赖声明(非侵入,类外特化):AssetManager 依赖 GpuSystem,由其提供 GPU 资源延迟回收。
-template <>
-struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetGpuSystem};
 };
 
 template <class T>
@@ -373,5 +387,18 @@ requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::Get(const AssetId& id) noexcept {
     return Find<T>(id);
 }
+
+/// 依赖声明(非侵入,类外特化):AssetManager 只需要 IRenderResourceRecycler 接口,
+/// 由 ServiceRegistry 通过 RuntimeTypeTrait 的 Bases 别名解析到具体实现(如 GpuSystem)。
+template <>
+struct ServiceTraits<AssetManager> {
+    static constexpr auto Inject = std::tuple{&AssetManager::SetRecycler};
+};
+
+template <>
+struct RuntimeTypeTrait<AssetManager> {
+    static constexpr RuntimeTypeId value{0xd4f18ebe, 0xb5c4, 0x46c2, 0x8b, 0x7b, 0x2d, 0xde, 0x5c, 0x96, 0xe5, 0xcf};
+    using Bases = std::tuple<>;
+};
 
 }  // namespace radray

@@ -45,6 +45,7 @@ private:
 template <>
 struct RuntimeTypeTrait<PointLightComponent> {
     static constexpr RuntimeTypeId value{0xd289eae9, 0xf0e6, 0x45cc, 0x9d, 0x55, 0xb8, 0xd1, 0x02, 0x2a, 0xa9, 0x6d};
+    using Bases = std::tuple<LightComponent>;
 };
 
 }  // namespace radray

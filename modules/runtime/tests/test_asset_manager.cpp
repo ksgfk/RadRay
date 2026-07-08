@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
@@ -73,16 +76,19 @@ namespace radray {
 template <>
 struct RuntimeTypeTrait<CpuAsset> {
     static constexpr RuntimeTypeId value{0x11111111, 0x2222, 0x3333, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
+    using Bases = std::tuple<Asset>;
 };
 
 template <>
 struct RuntimeTypeTrait<GpuAsset> {
     static constexpr RuntimeTypeId value{0xcccccccc, 0xdddd, 0xeeee, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    using Bases = std::tuple<Asset>;
 };
 
 template <>
 struct RuntimeTypeTrait<RecyclableAsset> {
     static constexpr RuntimeTypeId value{0x12345678, 0x9abc, 0x4def, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};
+    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray
@@ -379,6 +385,168 @@ TEST(AssetManagerTest, UnloadReadyAssetDestroysRenderResourceWithoutGpuSystem) {
     EXPECT_FALSE(ref.IsValid());
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
     EXPECT_EQ(destroyed, 1);
+}
+
+// CollectUnreferenced:仍有 ref 存活的资产不被回收。
+TEST(AssetManagerTest, CollectUnreferencedKeepsReferencedAsset) {
+    AssetManager mgr;
+    AssetId id = MakeId(20);
+    StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(11)});
+    mgr.Pump();
+    ASSERT_TRUE(ref.IsReady());
+
+    uint32_t collected = mgr.CollectUnreferenced();
+    EXPECT_EQ(collected, 0u);
+    EXPECT_TRUE(ref.IsValid());
+    EXPECT_EQ(mgr.GetAssetCount(), 1u);
+}
+
+// CollectUnreferenced:所有 ref 释放后资产被回收。
+TEST(AssetManagerTest, CollectUnreferencedReclaimsUnreferencedAsset) {
+    AssetManager mgr;
+    AssetId id = MakeId(21);
+    {
+        StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+            .Id = id,
+            .Task = LoadCpuAsset(22)});
+        mgr.Pump();
+        ASSERT_TRUE(ref.IsReady());
+    }  // ref 析构,refcount 归零
+
+    EXPECT_EQ(mgr.GetAssetCount(), 1u);  // 引用归零但尚未回收
+    uint32_t collected = mgr.CollectUnreferenced();
+    EXPECT_EQ(collected, 1u);
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+// CollectUnreferenced:回收会释放 GPU 资源。
+TEST(AssetManagerTest, CollectUnreferencedRecyclesRenderResource) {
+    AssetManager mgr;
+    int destroyed = 0;
+    AssetId id = MakeId(22);
+    {
+        StreamingAssetRef<RecyclableAsset> ref = mgr.AddReady<RecyclableAsset>(
+            id,
+            make_unique<RecyclableAsset>(&destroyed));
+        ASSERT_TRUE(ref.IsReady());
+    }
+
+    EXPECT_EQ(destroyed, 0);
+    uint32_t collected = mgr.CollectUnreferenced();
+    EXPECT_EQ(collected, 1u);
+    EXPECT_EQ(destroyed, 1);
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+// 引用计数:拷贝 ref 增加引用,单个析构不触发回收。
+TEST(AssetManagerTest, RefCountTracksCopies) {
+    AssetManager mgr;
+    AssetId id = MakeId(23);
+    StreamingAssetRef<CpuAsset> a = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(33)});
+    mgr.Pump();
+    ASSERT_TRUE(a.IsReady());
+
+    {
+        StreamingAssetRef<CpuAsset> b = a;  // 拷贝 +1
+        EXPECT_EQ(mgr.CollectUnreferenced(), 0u);
+        EXPECT_TRUE(b.IsReady());
+    }  // b 析构 -1,a 仍持有
+
+    EXPECT_EQ(mgr.CollectUnreferenced(), 0u);
+    EXPECT_TRUE(a.IsValid());
+
+    a.Reset();  // 最后一个 ref 释放
+    EXPECT_EQ(mgr.CollectUnreferenced(), 1u);
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+// Unload:强制回收无视引用计数,仍存活的引用静默失效(不崩溃)。
+TEST(AssetManagerTest, ForceUnloadInvalidatesLiveReferences) {
+    AssetManager mgr;
+    AssetId id = MakeId(25);
+    StreamingAssetRef<CpuAsset> a = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(55)});
+    mgr.Pump();
+    StreamingAssetRef<CpuAsset> b = a;  // 两个存活引用
+    ASSERT_TRUE(a.IsReady());
+    ASSERT_TRUE(b.IsReady());
+
+    mgr.Unload(id);  // 无视 refcount 强制回收(DEBUG 下打 warning)
+
+    EXPECT_FALSE(a.IsValid());
+    EXPECT_FALSE(b.IsValid());
+    EXPECT_EQ(a.Get(), nullptr);
+    EXPECT_EQ(b.Get(), nullptr);
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+
+    // 存活引用析构走 Release(旧 handle),因 generation 不匹配为 no-op,不崩溃。
+}
+
+// CollectUnreferenced:命中在飞 slot 会取消并延迟到终态回收。
+TEST(AssetManagerTest, CollectUnreferencedCancelsLoadingSlot) {
+    FrameUploadScheduler frameUploads;
+    AssetManager mgr;
+    AssetId id = MakeId(24);
+    {
+        StreamingAssetRef<GpuAsset> t = mgr.Load<GpuAsset>(AssetLoadRequest{
+            .Id = id,
+            .Task = LoadGpuAsset(frameUploads, 44)});
+        mgr.Pump();
+        ASSERT_FALSE(t.IsCompleted());
+    }  // ref 析构,refcount 归零,但 slot 仍在飞
+
+    uint32_t collected = mgr.CollectUnreferenced();
+    EXPECT_EQ(collected, 1u);  // 标记 PendingUnload
+    EXPECT_EQ(mgr.GetAssetCount(), 1u);  // 终态前不销毁
+
+    frameUploads.PumpCompletedUploads();
+    mgr.Pump();
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+// 线程安全:多个 worker 线程并发拷贝/析构引用,计数最终一致归零。
+TEST(AssetManagerTest, RefCountIsThreadSafeAcrossWorkers) {
+    AssetManager mgr;
+    AssetId id = MakeId(30);
+    StreamingAssetRef<CpuAsset> base = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(99)});
+    mgr.Pump();
+    ASSERT_TRUE(base.IsReady());
+
+    constexpr int kThreads = 8;
+    constexpr int kIters = 5000;
+    std::atomic<bool> start{false};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&]() {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            for (int i = 0; i < kIters; ++i) {
+                // 从主线程创建的引用拷贝(仅触碰共享控制块的原子,不碰 slot 表)。
+                StreamingAssetRef<CpuAsset> copy = base;
+                StreamingAssetRef<CpuAsset> moved = std::move(copy);
+                (void)moved;
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    // 所有 worker 引用已析构,只剩 base 一个:资产仍存活,回收不掉。
+    EXPECT_TRUE(base.IsValid());
+    EXPECT_EQ(mgr.CollectUnreferenced(), 0u);
+
+    base.Reset();
+    EXPECT_EQ(mgr.CollectUnreferenced(), 1u);
+    EXPECT_EQ(mgr.GetAssetCount(), 0u);
 }
 
 // Unload:在加载中卸载会取消任务,终态后销毁 slot。

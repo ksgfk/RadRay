@@ -51,6 +51,7 @@ private:
 template <>
 struct RuntimeTypeTrait<World> {
     static constexpr RuntimeTypeId value{0x95e6ee0d, 0xb66e, 0x4ab4, 0x9b, 0xba, 0xb6, 0x37, 0xf6, 0xee, 0xe3, 0x62};
+    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

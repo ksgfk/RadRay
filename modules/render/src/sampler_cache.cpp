@@ -1,10 +1,10 @@
-#include <radray/runtime/render_framework/sampler_cache.h>
+#include <radray/render/sampler_cache.h>
 
 #include <radray/logger.h>
 
-namespace radray {
+namespace radray::render {
 
-SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept {
+SamplerKey BuildSamplerKey(const SamplerDescriptor& desc) noexcept {
     SamplerKey key{};  // 清零, 保证 padding 恒为 0 (PodHasher/PodEqual 要求)
     key.AddressS = static_cast<int32_t>(desc.AddressS);
     key.AddressT = static_cast<int32_t>(desc.AddressT);
@@ -20,10 +20,10 @@ SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept {
     return key;
 }
 
-SamplerCache::SamplerCache(render::Device* device) noexcept
+SamplerCache::SamplerCache(Device* device) noexcept
     : _device(device) {}
 
-Nullable<render::Sampler*> SamplerCache::GetOrCreate(const render::SamplerDescriptor& desc) noexcept {
+Nullable<Sampler*> SamplerCache::GetOrCreate(const SamplerDescriptor& desc) noexcept {
     if (_device == nullptr) {
         return nullptr;
     }
@@ -36,9 +36,9 @@ Nullable<render::Sampler*> SamplerCache::GetOrCreate(const render::SamplerDescri
         RADRAY_ERR_LOG("SamplerCache::GetOrCreate: failed to create sampler");
         return nullptr;
     }
-    render::Sampler* raw = samplerOpt.Get();
+    Sampler* raw = samplerOpt.Get();
     _cache.emplace(key, samplerOpt.Release());
     return raw;
 }
 
-}  // namespace radray
+}  // namespace radray::render

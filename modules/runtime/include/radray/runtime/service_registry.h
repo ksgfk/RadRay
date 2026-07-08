@@ -24,9 +24,11 @@ namespace radray {
 //          static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
 //      };
 //      template <> struct ServiceTraits<AssetManager> {
-//          static constexpr auto Inject = std::tuple{&AssetManager::SetGpuSystem};
+//          static constexpr auto Inject = std::tuple{&AssetManager::SetRecycler};
 //      };
-//      // setter 形参是基类、要 resolve 的是派生具体类型时,用 As<Source>。
+//      // setter 形参是基类时,只要来源类型用 RuntimeTypeTrait<T>::Bases 声明了该基类,
+//      // Add 会自动登记基类别名,Resolve<Base> 即命中(指针偏移已在 typed 上下文修正)。
+//      // 若不想动 Bases,也可用 As<Source> 显式指定 resolve 的来源具体类型。
 //
 //      ServiceRegistry reg;          // 局部对象,无单例
 //      reg.Add(wm); reg.Add(gpu); reg.Add(asset);  // phase 1 实例已建,登记
@@ -78,6 +80,10 @@ public:
     ~ServiceRegistry() noexcept = default;
 
     /// phase 1:登记一个已实例化的服务(非拥有)。所有权仍在调用方。
+    ///
+    /// 若 RuntimeTypeTrait<T>::Bases 声明了基类,会一并为每个(直接与间接)基类的
+    /// RuntimeTypeId 登记一条 resolve-only 别名 —— 指针在此 typed 上下文用 static_cast
+    /// 完成偏移修正,故 Resolve<Base>() 拿到的指针在多继承下也正确。别名不参与 Wire/Initialize。
     template <class T>
     void Add(T* service) {
         if (service == nullptr) {
@@ -94,6 +100,7 @@ public:
             e.InitFn = nullptr;
         }
         _entries.emplace_back(e);
+        RegisterBases<T, runtime_type_bases_t<T>>(service);
     }
 
     /// 按具体类型取已登记服务。未登记返回 nullptr。
@@ -132,6 +139,32 @@ private:
         void (*WireFn)(ServiceRegistry&, void*){nullptr};
         void (*InitFn)(void*){nullptr};
     };
+
+    // 为 T 的直接基类逐一登记 resolve-only 别名,并递归到基类的基类。
+    // 用 tuple 指针做纯类型推导(不构造实例),故基类可以是抽象类型。
+    template <class T, class Tuple>
+    void RegisterBases(T* service) {
+        RegisterBasesImpl<T>(service, static_cast<Tuple*>(nullptr));
+    }
+
+    template <class T, class... Bases>
+    void RegisterBasesImpl(T* service, std::tuple<Bases...>*) {
+        (RegisterBaseAlias<T, Bases>(service), ...);
+    }
+
+    template <class T, class Base>
+    void RegisterBaseAlias(T* service) {
+        static_assert(std::is_base_of_v<Base, T>, "RuntimeTypeTrait<T>::Bases lists a type that is not a base of T.");
+        Entry e{};
+        e.Key = detail::ServiceTypeKey<Base>();
+        e.Ptr = static_cast<Base*>(service);  // typed 上下文,偏移在此修正
+        e.WireFn = &ServiceRegistry::NoWire;
+        e.InitFn = nullptr;
+        _entries.emplace_back(e);
+        RegisterBases<T, runtime_type_bases_t<Base>>(service);
+    }
+
+    static void NoWire(ServiceRegistry&, void*) {}
 
     template <class T>
     static void WireService(ServiceRegistry& reg, void* self) {

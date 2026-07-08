@@ -49,6 +49,7 @@ private:
 template <>
 struct RuntimeTypeTrait<CameraComponent> {
     static constexpr RuntimeTypeId value{0x98a4682f, 0x6b73, 0x4c6d, 0x8a, 0xbf, 0x44, 0x8e, 0x58, 0x1f, 0x7d, 0xf2};
+    using Bases = std::tuple<SceneComponent>;
 };
 
 }  // namespace radray

@@ -281,4 +281,10 @@ const T* Application::GetSubsystem() const noexcept {
     return static_cast<const T*>(GetSubsystem(runtime_type_id_v<T>));
 }
 
+template <>
+struct RuntimeTypeTrait<AppSubsystem> {
+    static constexpr RuntimeTypeId value{0xd124a773, 0xbe6f, 0x4202, 0x87, 0xa3, 0xc1, 0x3d, 0x44, 0x28, 0xab, 0xa1};
+    using Bases = std::tuple<>;
+};
+
 }  // namespace radray

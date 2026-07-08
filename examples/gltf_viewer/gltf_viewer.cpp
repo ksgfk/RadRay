@@ -47,6 +47,7 @@ using namespace radray;
 namespace {
 
 constexpr std::string_view kForwardPassTag = "UniversalForward";
+constexpr std::string_view kShadowPassTag = "ShadowCaster";
 constexpr uint32_t kSphereSlices = 64;
 constexpr float kSphereRadius = 1.0f;
 
@@ -148,6 +149,7 @@ public:
         BuildLight();
         if (_gltfPath.empty()) {
             BuildSpheres();
+            BuildGround();
             BuildCamera(Eigen::Vector3f::Zero(), 4.0f);
         } else {
             BuildGltfCamera();  // 相机先给默认取景, 待资产就绪后重新 frame。
@@ -242,6 +244,57 @@ private:
         return pass;
     }
 
+    // 构造 ShadowCaster pass (depth-only): 用 point_shadow_depth.hlsl, 无 color target,
+    // 深度写 + 正常深度测试。顶点布局与 forward pass 一致 (POSITION/NORMAL/TEXCOORD[/TANGENT])。
+    ShaderPassDesc MakeShadowCasterPass(const string& source, std::string_view shaderRoot, bool withTangent) {
+        ShaderPassDesc pass{};
+        pass.PassTag = string{kShadowPassTag};
+        pass.Source = source;
+        pass.VertexEntry = "VSMain";
+        pass.PixelEntry = "PSMain";
+        pass.Primitive = render::PrimitiveState::Default();
+        pass.MultiSample = render::MultiSampleState::Default();
+
+        render::DepthStencilState ds = render::DepthStencilState::Default();
+        ds.Format = render::TextureFormat::D32_FLOAT;
+        ds.DepthWriteEnable = true;
+        pass.DepthStencil = ds;
+        // depth-only: 无 color target。
+        pass.IncludeDirs.push_back(string{shaderRoot});
+
+        OwningVertexBufferLayout layout{};
+        layout.ArrayStride = kVertexStride;
+        layout.StepMode = render::VertexStepMode::Vertex;
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = 0,
+            .Semantic = "POSITION",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X3,
+            .Location = 0});
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = sizeof(float) * 3,
+            .Semantic = "NORMAL",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X3,
+            .Location = 1});
+        layout.Elements.push_back(render::VertexElement{
+            .Offset = sizeof(float) * 6,
+            .Semantic = "TEXCOORD",
+            .SemanticIndex = 0,
+            .Format = render::VertexFormat::FLOAT32X2,
+            .Location = 2});
+        if (withTangent) {
+            layout.Elements.push_back(render::VertexElement{
+                .Offset = sizeof(float) * 8,
+                .Semantic = "TANGENT",
+                .SemanticIndex = 0,
+                .Format = render::VertexFormat::FLOAT32X4,
+                .Location = 3});
+        }
+        pass.VertexLayouts.push_back(std::move(layout));
+        return pass;
+    }
+
     // forward.hlsl 的 keyword 表 (顺序即 bit 位)。
     ShaderKeywordSet MakeSphereKeywordSet() {
         ShaderKeywordSet kw{};
@@ -277,6 +330,7 @@ private:
     }
 
     // 建两个 ShaderAsset (opaque / transparent): 只差 PSO 固定状态, 共享同源 + 同 keyword 表。
+    // opaque shader 额外带 ShadowCaster pass (depth-only), 让不透明物体投射点光源阴影。
     bool BuildShaderPair(
         const string& source,
         std::string_view shaderRoot,
@@ -286,8 +340,14 @@ private:
         StreamingAssetRef<ShaderAsset>& outTransparent) {
         AssetManager* assets = GetAssetManager();
 
+        // shadow caster 深度 shader (所有不透明材质共用同一份源)。
+        std::optional<string> shadowSource = ReadShaderSource("point_shadow_depth.hlsl");
+
         vector<ShaderPassDesc> opaquePasses;
         opaquePasses.push_back(MakePass(source, shaderRoot, /*transparent*/ false, withTangent));
+        if (shadowSource.has_value()) {
+            opaquePasses.push_back(MakeShadowCasterPass(shadowSource.value(), shaderRoot, withTangent));
+        }
         outOpaque = assets->AddReady<ShaderAsset>(
             Guid::NewGuid(),
             make_unique<ShaderAsset>(keywords, std::move(opaquePasses)));
@@ -582,6 +642,41 @@ private:
         light->SetLightColor(Eigen::Vector3f{1.0f, 0.95f, 0.9f});
         light->SetIntensity(60.0f);
         light->SetAttenuationRadius(50.0f);
+    }
+
+    // 地面: 一块压扁的大 cube, 不透明漫反射, 接收 (并投射) 点光源阴影。
+    void BuildGround() {
+        TriangleMesh cube;
+        cube.InitAsCube(1.0f);
+        // 压扁 + 放大成地板: XZ 铺开, Y 方向很薄。
+        const Eigen::Vector3f scale{12.0f, 0.15f, 12.0f};
+        for (Eigen::Vector3f& p : cube.Positions) {
+            p = p.cwiseProduct(scale);
+        }
+        Eigen::Vector3f boundsMin, boundsMax;
+        ComputeBounds(cube, boundsMin, boundsMax);
+
+        MeshResource meshResource;
+        cube.ToSimpleMeshResource(&meshResource);
+
+        AssetManager* assets = GetAssetManager();
+        FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
+        StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
+            .Id = Guid::NewGuid(),
+            .Task = LoadSphereMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
+            .DebugName = "Ground"});
+
+        StreamingAssetRef<MaterialAsset> mat = CreateSphereMaterial(
+            /*transparent*/ false, RenderQueue::Geometry,
+            MakeSphereConstants(0.5f, 0.5f, 0.55f, 1.0f, /*metallic*/ 0.0f, /*roughness*/ 0.8f),
+            {});
+
+        Actor* actor = GetWorld()->SpawnActor<Actor>();
+        StaticMeshComponent* mesh = actor->AddComponent<StaticMeshComponent>();
+        actor->SetRootComponent(mesh);
+        mesh->SetStaticMesh(meshRef);
+        mesh->SetWorldLocation(Eigen::Vector3f{0.0f, -1.6f, 0.0f});
+        _spheres.push_back(SphereInstance{mesh, std::move(mat), false});
     }
 
     void BuildCamera(const Eigen::Vector3f& target, float distance) {

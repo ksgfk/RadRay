@@ -1,7 +1,7 @@
 #include <radray/runtime/render_framework/material_render_snapshot.h>
 
 #include <radray/logger.h>
-#include <radray/runtime/render_framework/sampler_cache.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray {
 
@@ -22,7 +22,7 @@ Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVa
     return shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
 }
 
-uint32_t MaterialRenderSnapshot::ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept {
+uint32_t MaterialRenderSnapshot::ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
     uint32_t applied = 0;
     for (const ConstantEntry& c : Constants) {
         if (!c.Bytes.empty() && table.SetBytes(c.Name, c.Bytes.data(), static_cast<uint32_t>(c.Bytes.size()))) {
@@ -46,7 +46,7 @@ void MaterialRenderSnapshot::CollectConstants(vector<MaterialConstantValue>& out
     }
 }
 
-uint32_t MaterialRenderSnapshot::ApplyResources(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept {
+uint32_t MaterialRenderSnapshot::ApplyResources(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
     uint32_t applied = 0;
     for (const TextureEntry& t : Textures) {
         TextureAsset* tex = t.Texture.Get();

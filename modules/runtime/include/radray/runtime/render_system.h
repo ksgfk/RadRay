@@ -17,9 +17,8 @@ namespace render {
 class Dxc;
 class ShaderVariantCache;
 class GraphicsPipelineStateCache;
-}  // namespace render
-
 class SamplerCache;
+}  // namespace render
 
 /// Runtime-side renderer coordinator.
 ///
@@ -48,7 +47,7 @@ public:
     Application* GetApplication() const noexcept { return _app; }
     render::ShaderVariantCache* GetShaderVariantCache() const noexcept { return _variantCache.get(); }
     render::GraphicsPipelineStateCache* GetGraphicsPipelineStateCache() const noexcept { return _psoCache.get(); }
-    SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
+    render::SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
 
@@ -61,13 +60,14 @@ private:
     shared_ptr<render::Dxc> _dxc;
     unique_ptr<render::ShaderVariantCache> _variantCache;
     unique_ptr<render::GraphicsPipelineStateCache> _psoCache;
-    unique_ptr<SamplerCache> _samplerCache;
+    unique_ptr<render::SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
 };
 
 template <>
 struct RuntimeTypeTrait<RenderSystem> {
     static constexpr RuntimeTypeId value{0x241d4e78, 0x8f4e, 0x4d1c, 0xa8, 0xb9, 0x55, 0x09, 0x61, 0x6a, 0x90, 0x24};
+    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

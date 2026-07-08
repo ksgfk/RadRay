@@ -13,7 +13,9 @@
 
 namespace radray {
 
+namespace render {
 class SamplerCache;
+}  // namespace render
 
 
 /// 组件产出的 per-section【绘制决策快照】(对应 UE5 的 FMaterialRenderProxy, 但走不可变快照
@@ -85,13 +87,13 @@ struct MaterialRenderSnapshot {
     /// 把快照的纹理 / 采样器 property 写入 ShaderParameterTable。sampler 经 samplerCache
     /// 按 descriptor 去重取稳定指针。返回成功写入的 property 数。
     /// 常量 (cbuffer 字段) 不在此处理: 由 MaterialConstantBinder 用变体反射打包。
-    uint32_t ApplyResources(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept;
+    uint32_t ApplyResources(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
 
     /// 把快照的 property 值写入 ShaderParameterTable。sampler 经 samplerCache 按 descriptor
     /// 去重取稳定指针。返回成功写入的 property 数。
     /// 注意: 常量走整块 SetBytes (仅当 Name 恰为块名且 size 匹配), 无字段级打包;
     /// 字段级打包需用 MaterialConstantBinder。本方法保留用于 headless 测试 / 兼容路径。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept;
+    uint32_t ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
 };
 
 }  // namespace radray

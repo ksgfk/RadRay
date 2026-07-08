@@ -70,14 +70,15 @@ private:
     std::optional<render::RenderMesh> _renderMesh;
 };
 
-template <>
-struct RuntimeTypeTrait<StaticMesh> {
-    static constexpr RuntimeTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};
-};
-
 /// StaticMesh 的异步加载工厂。参数为已构建好的 CPU 网格数据(MeshResource);
 /// 协程内部完成 GPU 上传(跨帧),上传完成后一次性构造 StaticMesh。
 /// 加载阶段对 AssetManager 不可见(协程内部事务)。
 AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource);
+
+template <>
+struct RuntimeTypeTrait<StaticMesh> {
+    static constexpr RuntimeTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};
+    using Bases = std::tuple<Asset>;
+};
 
 }  // namespace radray

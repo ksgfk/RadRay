@@ -312,11 +312,6 @@ private:
     bool _rightSuper{false};
 };
 
-template <>
-struct RuntimeTypeTrait<ImGuiSystem> {
-    static constexpr RuntimeTypeId value{0x31e624a6, 0x1f92, 0x4d9f, 0x9b, 0x68, 0x9b, 0x72, 0x25, 0x08, 0x5d, 0x9f};
-};
-
 ImGuiKey MapKeyboardToImGuiKey(KeyCode key) noexcept;
 int MapMouseButtonToImGui(MouseButton button) noexcept;
 
@@ -325,6 +320,12 @@ std::span<const std::byte> GetImGuiVertexShaderDXIL() noexcept;
 std::span<const std::byte> GetImGuiPixelShaderDXIL() noexcept;
 std::span<const std::byte> GetImGuiVertexShaderSPIRV() noexcept;
 std::span<const std::byte> GetImGuiPixelShaderSPIRV() noexcept;
+
+template <>
+struct RuntimeTypeTrait<ImGuiSystem> {
+    static constexpr RuntimeTypeId value{0x31e624a6, 0x1f92, 0x4d9f, 0x9b, 0x68, 0x9b, 0x72, 0x25, 0x08, 0x5d, 0x9f};
+    using Bases = std::tuple<AppSubsystem>;
+};
 
 }  // namespace radray
 

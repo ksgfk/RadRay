@@ -157,16 +157,17 @@ private:
     bool _hasBounds{false};
 };
 
-template <>
-struct RuntimeTypeTrait<GltfAsset> {
-    static constexpr RuntimeTypeId value{0xf4412d58, 0x716b, 0x4389, 0xb2, 0x7f, 0x0d, 0x39, 0x80, 0x74, 0x4d, 0x71};
-};
-
 /// 异步加载一个 glTF 文件 (协程)。几何 + 纹理在 GPU 上传完成后资产才 ready。
 StreamingAssetRef<GltfAsset> LoadGltfAsset(
     AssetManager& assetManager,
     FrameUploadScheduler& frameUploads,
     const std::filesystem::path& path,
     const GltfAssetLoadOptions& options = {});
+
+template <>
+struct RuntimeTypeTrait<GltfAsset> {
+    static constexpr RuntimeTypeId value{0xf4412d58, 0x716b, 0x4389, 0xb2, 0x7f, 0x0d, 0x39, 0x80, 0x74, 0x4d, 0x71};
+    using Bases = std::tuple<Asset>;
+};
 
 }  // namespace radray

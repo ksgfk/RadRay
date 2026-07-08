@@ -18,6 +18,10 @@ namespace radray {
 
 class MaterialPropertyBlock;
 
+namespace render {
+class SamplerCache;
+}  // namespace render
+
 /// 通过资产引用绑定一个【非默认子 view】的纹理 property。
 /// Texture 提供 GPU 资源与 view 缓存所有权, SubView 描述与默认全量 SRV 的差异 (mip/array/format/dim)。
 /// 绑定时经 TextureAsset::GetOrCreateSrv(SubView) 换成缓存中稳定的 view 指针, 无悬垂风险。
@@ -111,7 +115,7 @@ public:
 
     /// 把 property 值写入给定的 ShaderParameterTable。sampler 经 samplerCache 按 descriptor
     /// 去重取稳定指针。返回成功写入的 property 数 (被 shader 接受的)。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table, SamplerCache& samplerCache) const noexcept;
+    uint32_t ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
 
     /// 生成渲染侧绘制决策快照 (由组件在 game 线程 Tick 时按需调用)。冻结当前 shader/keyword/
     /// renderQueue/常量/纹理/采样器, 供 render 线程无锁只读。
@@ -135,6 +139,7 @@ private:
 template <>
 struct RuntimeTypeTrait<MaterialAsset> {
     static constexpr RuntimeTypeId value{0x8b1e4d2a, 0x9f37, 0x4c60, 0xb8, 0x14, 0x5a, 0x6d, 0x0e, 0x92, 0x3f, 0x71};
+    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray

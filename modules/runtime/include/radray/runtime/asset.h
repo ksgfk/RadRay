@@ -45,4 +45,10 @@ private:
     AssetId _id;
 };
 
+template <>
+struct RuntimeTypeTrait<Asset> {
+    static constexpr RuntimeTypeId value{0x8b445298, 0x4242, 0x4524, 0xb3, 0x7f, 0x37, 0x24, 0xc3, 0x5b, 0x3c, 0x94};
+    using Bases = std::tuple<>;
+};
+
 }  // namespace radray

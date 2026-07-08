@@ -97,11 +97,6 @@ private:
     unordered_map<TextureViewKey, unique_ptr<render::TextureView>, PodHasher<TextureViewKey>, PodEqual<TextureViewKey>> _viewCache;
 };
 
-template <>
-struct RuntimeTypeTrait<TextureAsset> {
-    static constexpr RuntimeTypeId value{0x7c3e9a14, 0x8b2d, 0x4f61, 0xa9, 0x05, 0x3e, 0x6c, 0x1d, 0x82, 0x4b, 0x90};
-};
-
 struct TextureAssetLoadOptions {
     /// true 时按 sRGB 解释纹理(GPU 采样时做 sRGB→linear)。base color / emissive 用 true;
     /// normal / metallic-roughness / occlusion 用 false。
@@ -128,5 +123,11 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
     string name,
     vector<byte> encodedBytes,
     const TextureAssetLoadOptions& options = {});
+
+template <>
+struct RuntimeTypeTrait<TextureAsset> {
+    static constexpr RuntimeTypeId value{0x7c3e9a14, 0x8b2d, 0x4f61, 0xa9, 0x05, 0x3e, 0x6c, 0x1d, 0x82, 0x4b, 0x90};
+    using Bases = std::tuple<Asset>;
+};
 
 }  // namespace radray

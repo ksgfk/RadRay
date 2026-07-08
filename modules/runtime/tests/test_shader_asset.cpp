@@ -58,8 +58,7 @@ TEST(ShaderKeywordSetTest, ProjectComputesBitmask) {
     kw.Add("B");  // bit 1
     kw.Add("C");  // bit 2
 
-    std::string_view none[] = {};
-    EXPECT_EQ(kw.Project(std::span<const std::string_view>{none, 0}), 0ull);
+    EXPECT_EQ(kw.Project(std::span<const std::string_view>{}), 0ull);
 
     std::string_view ac[] = {SV("A"), SV("C")};
     EXPECT_EQ(kw.Project(ac), 0b101ull);
